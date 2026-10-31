@@ -96,9 +96,10 @@ try {
           continue;
         }
         await page.goto(`${base}?preview=1&profile=moderation&view=chat`);
-        const shopEntry = page.getByRole('link', { name: /^Открыть магазин чата:/u }).first();
-        assert.match(await shopEntry.getAttribute('href'), /focus=storefront/u);
-        await shopEntry.click();
+        const settingsEntry = page.getByRole('link', { name: /^Открыть настройки:/u }).first();
+        assert.doesNotMatch(await settingsEntry.getAttribute('href'), /focus=storefront/u);
+        await settingsEntry.click();
+        await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
         await applyNativeVisualMode(page, {
           safeTop: 0,
           safeBottom: engineName === 'webkit' ? 34 : 24,
