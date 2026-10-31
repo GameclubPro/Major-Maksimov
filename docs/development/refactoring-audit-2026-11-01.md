@@ -1,6 +1,9 @@
 # Аудит перед безопасным рефакторингом — 1 ноября 2026
 
-Финальная редакция v2. Сверка и целевые локальные проверки: 01.11.2026 01:07 МСК.
+Аудит v2 с уточнениями критического review v3. Исполняемые результаты v2: 01.11.2026 01:07 МСК.
+[Оценка каждой микроцели и актуальная дельта 3096266b1](refactoring-plan-review-2026-11-01.md)
+содержит последующую сверку; исходные test receipts ниже сохраняют свой SHA, а не становятся
+результатами нового локального прогона.
 
 Основание: `6eda89cbce40ba5331a5325a63f9175fb9a4c18c`, полученный из `origin/main`.
 Рабочая копия изолирована; исходный `main` не изменялся. Исполняемый код, конфигурация,
@@ -207,11 +210,11 @@ seams уже выделены. Повторять соответствующие
 
 Следующие меньшие кандидаты подтверждены реализацией:
 
-| Участок                                                             | Почему подходит                                       | Проверка и ограничение                                                                                                |
-| ------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Private legacy 5943–6212: rules text/items/sanctions/plural helpers | Синхронный вход `ChatSettingsScreenResponse`, без I/O | Private service cases на строках 2328/2521/2972; сохранить текст, порядок и markup limit, Nest adapter отдельно       |
-| MAX client 6957–7350: reply/markup/text/attachments                 | Чистое построение payload внутри большого transport   | Existing MAX spec 650–1183 и 2802+; malformed/null/forwarded/unknown attachment corpus; final guard и HTTP не двигать |
-| Webhook service 3575–3859: membership projections                   | Можно изолировать parsing/IDs/projection values       | Existing webhook spec 2054/2296/3218/3617; preserve dedupe cross-bot и commit-before-cache                            |
+| Участок                                                             | Почему подходит                                             | Проверка и ограничение                                                                                                |
+| ------------------------------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Private legacy 5943–6212: rules text/items/sanctions/plural helpers | Синхронный вход `ChatSettingsScreenResponse`, без I/O       | Private service cases на строках 2328/2521/2972; сохранить текст, порядок и markup limit, Nest adapter отдельно       |
+| MAX client 6957–7350: reply/markup/text/attachments                 | Кандидат одного payload cluster; logging/transport остаются | Existing MAX spec 650–1183 и 2802+; malformed/null/forwarded/unknown attachment corpus; final guard и HTTP не двигать |
+| Webhook service 3575–3859: membership projections                   | Можно изолировать parsing/IDs/projection values             | Existing webhook spec 2054/2296/3218/3617; preserve dedupe cross-bot и commit-before-cache                            |
 
 Последний кандидат не полностью независим от времени: `resolveUpdateEventAt`, строка
 3829, читает часы при отсутствующей дате. Объединение нескольких вызовов в один timestamp
@@ -220,6 +223,11 @@ seams уже выделены. Повторять соответствующие
 
 Не включать в первую волну `processCallback` примерно на 1 912 строк,
 `ModerationService.handleUpdate` примерно на 1 572 строки и delete-intent lifecycle.
+Весь MAX диапазон 6957–7350 не является pure: keyboard helper уже выделен, а service
+сохраняет logger warnings; T05 выбирает один действительно чистый seam. Photo runtime policy
+в fullpath harness retired/always-off: real instance доказывает no-delete drain, active IMAGE
+проверяется через guarded message-duplicate path.
+
 Размер не делает доступной безопасную границу. Preparation deferral, failed handler,
 completion persistence failure, timeout/quarantine и unknown external effect различаются.
 
@@ -254,6 +262,9 @@ controller hooks: его длина не основание начинать о�
 module, а не монтирует компонент. Fixtures обходят App guard. Разрешённый preload может
 загрузить CSS, поэтому отсутствие любого settings chunk/CSS — слишком сильное требование.
 Общие composer/button/rules helpers нельзя удалять по имени `Broadcast`.
+Критическое уточнение v3: allowlist add/remove/schedule — immediate endpoints, не draft/save
+поля; их presentation extraction не меняет persistence mode. Daily-shop management на
+новом source отделён от connection recovery, подробности находятся в review v3.
 
 Уточнение второго прохода: `handoff=1` не означает retired route. Например,
 `focus=giveaway&handoff=1` прямо сохранён existing test. Флаг влияет на prefetch, retry
@@ -271,8 +282,9 @@ Existing direct-page/hook fixtures такой routing proof не заменяю�
 - [use-settings-draft](../../apps/miniapp/src/pages/settings/use-settings-draft.ts), строки
   90–149, уже защищает principal/entity scope и устаревшие async results. Required
   subscription, rules и save coordinator тоже уже выделены. Новый общий save hook не нужен.
-- [Channel dialog](../../apps/miniapp/src/pages/channel-dialog-page.tsx): pure helpers
-  147–667, presentation 668–1218, main component от 1237. Их можно переносить отдельно.
+- [Channel dialog](../../apps/miniapp/src/pages/channel-dialog-page.tsx): helpers и handlers
+  147–667, presentation 668–1218, main component от 1237. Не весь первый диапазон pure:
+  в нём есть JSX/MAX handlers; точный immutable cluster — 559–665. Переносить его отдельно.
   Query/terminal cancellation, optimistic rollback, attachment preparation и scroll/focus
   имеют разные lifecycle. Existing async-attachments browser case проверяет смену
   пользователя во время подготовки и должен сопровождать extraction.
@@ -300,8 +312,9 @@ paths и API Jest mappings; он также запрещает generated JS ря
 source aliases применяются только в serve, production продолжает использовать package
 exports. Создание ещё одного registry для этих же mappings не обосновано.
 
-Leaf apply-target block в `core.ts`, строки 928–1013, можно выделять с сохранением прежних
-root/settings exports и экземпляров schemas. Default `current`, coercion, dedupe, invalid
+Минимальный leaf mode+target в `core.ts`, строки 928–965, можно выделять с сохранением прежних
+root/settings exports и экземпляров schemas. Остаток 967–1013 включает дополнительные
+section/revision/summary dependencies и не является обязательной частью первого среза. Default `current`, coercion, dedupe, invalid
 inputs и форма validation issues — поведение. Большой `chatSettings` содержит refine/transform;
 его разрезание по полям намного рискованнее. Type-only root imports сами не раздувают runtime bundle.
 Mapping guard проверяет пути/outputs, но не runtime-equivalence перенесённой schema через
@@ -386,9 +399,13 @@ collectors, последовательно; аудит не даёт разре�
 ## E09: Measurement and scope
 
 Publisher — потенциально большой runtime-резерв, но пока без нового численного обещания.
-Текущий broadcast runtime сохраняет полные initial/repair/finalizer проходы, а recipient
+Текущий broadcast runtime сохраняет полные по cardinality initial/repair/finalizer проходы, а recipient
 admission фильтрует массив до bounded slice. Малый SEND quantum не доказывает малое чтение.
 Исторические synthetic результаты 50k требуют воспроизведения на выбранном SHA.
+Ширина occurrence/finalizer rows уже сокращена existing E4/D15 selects в
+`admin-managed-broadcast-projections.ts`; это выполненная работа с typed/native cases,
+не будущий выигрыш P02. Следующий кандидат обязан назвать ещё full-row reader, например
+initial automatic preparation, и его field-consumer matrix.
 
 Порядок: текущий профиль → узкий single-snapshot select → только затем отдельное решение
 о двухфазном чтении/continuation. `updatedAt` не сертификат полной неизменности;
@@ -490,7 +507,7 @@ CSRF/session recovery и shop unknown outcome сохраняют разные п
 после всех запусков штатно остановлены и временные stores удалены по результатам wrappers.
 Chromium launch прошёл; WebKit и вся mobile/browser matrix не запускались.
 
-План дополнительно прошёл независимое чтение backend, frontend/contracts и tooling/infra.
+При финализации v2 план дополнительно прошёл независимое чтение backend, frontend/contracts и tooling/infra.
 Проверены 70 уникальных ID (66 рабочих и 4 отложенных), ссылки на prerequisites и отсутствие
 циклов даже с условными рёбрами; 27 локальных ссылок/anchors разрешаются. Все четыре
 focused-рецепта поддерживаются CLI по dry-run: это проверка выбора команд, не новый test run.
