@@ -33,6 +33,7 @@ const scenarios = [
   'binding_storage_error',
   'setup_storage_error',
   'setup_storage_error_after_publications',
+  'setup_storage_error_after_publications_stall',
   'error',
   'unknown',
   'existing',
@@ -111,12 +112,12 @@ if(scenario==='server_restore') { const request={operationId:uuid,chatIds:['-123
 window.__karavanRequests=[]; window.__karavanOpened=[]; window.__karavanClosed=0; window.WebApp={openMaxLink:(url)=>{if(scenario==='bridge_error'&&!window.__bridgeRetry) throw new Error('Bridge unavailable');window.__karavanOpened.push(url)},close:()=>{window.__karavanClosed++}};
 if(scenario.includes('_storage_error')) {
   connected=true;marketplace.status='active';marketplace.name='Нет';
-  window.__storageReady=scenario.endsWith('_after_publications');
+  window.__storageReady=scenario.includes('_after_publications');
   const affectedKey=scenario==='binding_storage_error'?'karavan-binding:v1:777:-123':'karavan-setup:v1:777:-123';
   window.__nativeWrites=[];
   document.documentElement.dataset.maxClient='native';window.WebApp.initData='fixture-init-data';
   window.WebApp.DeviceStorage={
-    getItem:async(key)=>{if(key===affectedKey&&!window.__storageReady)throw {error:{code:'client.device_storage_get_key.request_timeout'}};return {value:null};},
+    getItem:async(key)=>{if(key===affectedKey&&!window.__storageReady){if(scenario.endsWith('_stall'))return new Promise(()=>{});throw {error:{code:'client.device_storage_get_key.request_timeout'}};}return {value:null};},
     setItem:async(key)=>{window.__nativeWrites.push(key);return {};},
     removeItem:async(key)=>{window.__nativeWrites.push(key);return {};},
   };
@@ -195,9 +196,9 @@ const api={request:async(path,init={})=>{
   if(scenario==='error' && reads++===0) throw new Error('Сеть недоступна');
   if(scenario==='loading') await new Promise(resolve=>setTimeout(resolve,800));
   if(scenario==='recovery_restored_unavailable'&&!sessionStorage.getItem('restored-allow-read')) throw new Error('Проверка временно недоступна');
-  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:scenario==='setup_storage_error_after_publications'&&!window.__storageReady?{operationId:uuid,state:'partial',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[]}}:['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
+  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:scenario.includes('_after_publications')&&!window.__storageReady?{operationId:uuid,state:'partial',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[]}}:['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
 },requestKeepalive:()=>{}};
-function Harness(){const [chatId,setChatId]=React.useState('-123');window.__switchKaravanChat=()=>setChatId('-456');return <StorefrontWorkspace key={chatId} open onClose={()=>{}} dirty={scenario.endsWith('_after_publications')} footer={<button onClick={()=>{window.__publicationSaves=(window.__publicationSaves??0)+1;}}>Сохранить ответ бота</button>}><Panel api={api} chatId={chatId} publications={<p>Настройки ответа бота</p>}/></StorefrontWorkspace>;}
+function Harness(){const [chatId,setChatId]=React.useState('-123');window.__switchKaravanChat=()=>setChatId('-456');return <StorefrontWorkspace key={chatId} open onClose={()=>{}} dirty={scenario.includes('_after_publications')} footer={<button onClick={()=>{window.__publicationSaves=(window.__publicationSaves??0)+1;}}>Сохранить ответ бота</button>}><Panel api={api} chatId={chatId} publications={<p>Настройки ответа бота</p>}/></StorefrontWorkspace>;}
 const queryClient=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
 window.__failStorage=()=>{window.__storageReady=false;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
 window.__switchKaravanActor=()=>{moduleActor='888';binding.generation=2;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
@@ -269,13 +270,25 @@ try {
           page.on('pageerror', (error) => errors.push(error.message));
           await page.goto(path + '?scenario=' + scenario + '&theme=' + theme);
           if (scenario.includes('_storage_error')) {
-            if (scenario.endsWith('_after_publications')) {
+            if (scenario.includes('_after_publications')) {
               await page.getByRole('button', { name: 'Настройки', exact: true }).click();
               await page.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
               await page
                 .getByRole('button', { name: 'Сохранить ответ бота', exact: true })
                 .waitFor();
               await page.evaluate(() => window.__failStorage());
+              if (scenario.endsWith('_stall')) {
+                await page
+                  .getByText('Проверяем сохранённое подключение', { exact: true })
+                  .waitFor();
+                assert.equal(
+                  await page
+                    .getByRole('button', { name: 'Сохранить ответ бота', exact: true })
+                    .count(),
+                  0,
+                  'A stalled read blocks the parent footer before its deadline',
+                );
+              }
             }
             await page
               .getByRole('button', { name: 'Повторить проверку подключения', exact: true })

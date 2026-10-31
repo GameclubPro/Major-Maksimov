@@ -84,11 +84,12 @@ export default function KaravanMarketplacePanel({
   );
   const recoveryFailed =
     bind.hydrationState.status === 'error' || setupHydration.status === 'error';
+  const recoveryReady = bind.hydrated && setupHydration.status === 'ready';
   useLayoutEffect(() => {
     // FLAG: The parent owns the publication save footer. Leave this page before
-    // paint when recovery fails, retaining its draft without an enabled save action.
-    if (recoveryFailed && workspace?.page === 'publications') workspace.navigate('home');
-  }, [recoveryFailed, workspace?.page, workspace?.navigate]);
+    // paint while recovery is unverified, retaining its draft without a save action.
+    if (!recoveryReady && workspace?.page === 'publications') workspace.navigate('home');
+  }, [recoveryReady, workspace?.page, workspace?.navigate]);
   useEffect(() => {
     if (bind.hydrated && bind.request && !query.isFetchedAfterMount && !query.isFetching)
       void query.refetch();
