@@ -1,8 +1,10 @@
 # MAXIM Reliability Refactor Plan, June 2026 Refresh
 
-This document is the current safety baseline for the reliability-first refactor.
-It should stay conservative: preserve public behavior, keep runtime deploys small,
-and make each extraction reviewable through focused tests.
+This is the historical June planning snapshot. Some implementation and dependency
+statuses below are superseded; for the source audit and prioritized next steps use the
+[1 November 2026 roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md).
+Applicable safety boundaries remain binding: preserve public behavior, keep runtime
+deploys small, and make each extraction reviewable through focused tests.
 
 ## Non-Negotiable Boundaries
 
