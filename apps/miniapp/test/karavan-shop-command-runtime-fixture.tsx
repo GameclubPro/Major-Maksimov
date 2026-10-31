@@ -111,6 +111,7 @@ function moduleFor(scope: ShopJournalScope): ShopModule {
 type HarnessActions = {
   tryImage(): Promise<string | null>;
   tryAppearance(): Promise<string | null>;
+  resume(): Promise<void>;
   changeOriginalInputs(): void;
   readOriginalJournal: typeof readOriginalJournal;
 };
@@ -186,6 +187,7 @@ function Owners() {
           }),
         ),
       tryAppearance: () => attempt(() => appearance.mutateAsync(appearanceCommand.current)),
+      resume: commands.resume,
       changeOriginalInputs() {
         imageCommand.current.input.fileName = 'changed-after-dispatch.jpg';
         imageCommand.current.input.dataBase64 = 'CQoLDA0ODxA=';
@@ -236,6 +238,7 @@ function Owners() {
           loading: commands.loading,
           busy: commands.busy,
           blocked: commands.blocked,
+          readOnly: commands.readOnly,
           stale: commands.stale,
           storageError: commands.storageError,
           journal: commands.journal,
@@ -251,6 +254,7 @@ function Owners() {
 
 function Fixture() {
   const [scope, setScope] = useState(originalScope);
+  const [readOnly, setReadOnly] = useState(false);
   const module = useMemo(() => moduleFor(scope), [scope]);
   const value = useMemo(() => ({ api, scope, module }), [scope, module]);
   return (
@@ -258,8 +262,11 @@ function Fixture() {
       <button type="button" onClick={() => setScope(otherScope)}>
         Открыть другой магазин
       </button>
+      <button type="button" onClick={() => setReadOnly((value) => !value)}>
+        {readOnly ? 'Разрешить изменения' : 'Заблокировать изменения'}
+      </button>
       <ShopContext.Provider value={value}>
-        <ShopCommandProvider api={api} scope={scope}>
+        <ShopCommandProvider api={api} scope={scope} readOnly={readOnly}>
           <SellerAccessProvider>
             <Owners />
           </SellerAccessProvider>

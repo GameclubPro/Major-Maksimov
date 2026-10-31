@@ -36,6 +36,7 @@ type Props = {
   chatId: string;
   module: ShopModule;
   busy: boolean;
+  readOnly?: boolean;
   open: () => void;
   chats: ReactNode;
   publications?: ReactNode;
@@ -302,6 +303,7 @@ export default function KaravanShopManager(props: Props) {
     >
       <ShopCommandProvider
         api={props.api}
+        readOnly={props.readOnly}
         scope={{
           actorMaxUserId: props.module.actorMaxUserId,
           chatId: props.chatId,
