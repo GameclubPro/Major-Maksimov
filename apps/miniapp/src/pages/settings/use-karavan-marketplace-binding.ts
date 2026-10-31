@@ -25,6 +25,8 @@ export function useKaravanMarketplaceBinding(
   const queryClient = useQueryClient();
   const storageKey = actorId ? `karavan-binding:v1:${actorId}:${chatId}` : null;
   const [request, setRequest] = useState<KaravanChatBindingInput | null>(null);
+  const liveRequest = useRef(request);
+  liveRequest.current = request;
   const [recovery, setRecovery] = useState<{
     key: string | null;
     state: KaravanBindingRecoveryState;
@@ -36,27 +38,29 @@ export function useKaravanMarketplaceBinding(
   const [error, setError] = useState<string | null>(null);
   const [rejected, setRejected] = useState(false);
   const [starting, setStarting] = useState(false);
-  const startingRef = useRef(false);
+  const startingRef = useRef<symbol | null>(null);
   const liveStorageKey = useRef(storageKey);
   liveStorageKey.current = storageKey;
   const hadUnknownOutcome = useRef(false);
   const requestStorageKey = useRef<string | null>(null);
   useEffect(() => {
-    if (!storageKey) return;
-    let active = true;
+    startingRef.current = null;
+    setStarting(false);
     requestStorageKey.current = null;
+    liveRequest.current = null;
     setRecovery({ key: storageKey, state: { status: 'loading' } });
     setRequest(null);
     setError(null);
     setRejected(false);
     hadUnknownOutcome.current = false;
-    startingRef.current = false;
-    setStarting(false);
+    if (!storageKey) return;
+    let active = true;
     void readKaravanBindingRecovery(storageKey)
       .then((state) => {
         if (!active) return;
         if (state.status === 'ready' && state.request) {
           requestStorageKey.current = storageKey;
+          liveRequest.current = state.request;
           setRequest(state.request);
           hadUnknownOutcome.current = true;
         }
@@ -68,30 +72,51 @@ export function useKaravanMarketplaceBinding(
       });
     return () => {
       active = false;
+      startingRef.current = null;
     };
   }, [storageKey, recoveryAttempt]);
   const mutation = useMutation({
-    mutationFn: (input: KaravanChatBindingInput) => changeKaravanChatBinding(api, chatId, input),
-    onSuccess: () => {
-      if (storageKey) removeMirroredItem(storageKey);
-      if (requestStorageKey.current !== storageKey) return;
+    mutationFn: (original: {
+      request: KaravanChatBindingInput;
+      storageKey: string;
+      chatId: string;
+    }) => changeKaravanChatBinding(api, original.chatId, original.request),
+    onSuccess: (_response, original) => {
+      // FLAG: Mutation callbacks can move to a later actor while the POST is in
+      // flight. Clear only the exact request still owned by its original scope.
+      if (
+        liveStorageKey.current !== original.storageKey ||
+        requestStorageKey.current !== original.storageKey ||
+        liveRequest.current !== original.request
+      )
+        return;
+      removeMirroredItem(original.storageKey);
+      requestStorageKey.current = null;
+      liveRequest.current = null;
       setRequest(null);
       setError(null);
       setRejected(false);
-      void queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', chatId] });
+      void queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', original.chatId] });
     },
-    onError: (cause) => {
-      if (requestStorageKey.current !== storageKey) return;
+    onError: (cause, original) => {
+      if (
+        liveStorageKey.current !== original.storageKey ||
+        requestStorageKey.current !== original.storageKey ||
+        liveRequest.current !== original.request
+      )
+        return;
       const bindingChanged =
         cause instanceof ApiRequestError &&
         cause.status === 409 &&
         cause.code === 'MARKETPLACE_BINDING_CHANGED';
       if (bindingChanged)
-        void queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', chatId] });
+        void queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', original.chatId] });
       if (bindingChanged && !hadUnknownOutcome.current) {
         // FLAG: Only a definitively rejected fresh request can be discarded. Never
         // replay a mutation; an earlier unknown outcome needs the independent fence below.
-        if (storageKey) removeMirroredItem(storageKey);
+        removeMirroredItem(original.storageKey);
+        requestStorageKey.current = null;
+        liveRequest.current = null;
         setRequest(null);
         setError(null);
         setRejected(false);
@@ -126,7 +151,11 @@ export function useKaravanMarketplaceBinding(
     // generation permanently fences the old write.
     // Show current state, not an invented command outcome. Equal/missing generations
     // retain uncertainty; never replay, reconnect or reopen a shop during reconciliation.
+    startingRef.current = null;
+    setStarting(false);
     if (storageKey) removeMirroredItem(storageKey);
+    requestStorageKey.current = null;
+    liveRequest.current = null;
     setRequest(null);
     setError(null);
     setRejected(false);
@@ -165,22 +194,29 @@ export function useKaravanMarketplaceBinding(
         commandId: crypto.randomUUID(),
       });
       const originalKey = storageKey;
-      startingRef.current = true;
+      const attempt = Symbol();
+      startingRef.current = attempt;
       setStarting(true);
       void (async () => {
         try {
           const { assertShopEntryWriteAvailable } = await import('./karavan-shop/command-journal');
           await assertShopEntryWriteAvailable(actorId, chatId, input.marketplaceId);
-          if (liveStorageKey.current !== originalKey || requestStorageKey.current) return;
+          if (
+            liveStorageKey.current !== originalKey ||
+            startingRef.current !== attempt ||
+            requestStorageKey.current
+          )
+            return;
           saveMirroredItem(originalKey, JSON.stringify(next));
           requestStorageKey.current = originalKey;
+          liveRequest.current = next;
           setRequest(next);
           setError(null);
           setRejected(false);
           hadUnknownOutcome.current = false;
-          mutation.mutate(next);
+          mutation.mutate({ request: next, storageKey: originalKey, chatId });
         } catch (cause) {
-          if (liveStorageKey.current === originalKey)
+          if (liveStorageKey.current === originalKey && startingRef.current === attempt)
             setError(
               describeUserFacingError(
                 cause,
@@ -188,16 +224,59 @@ export function useKaravanMarketplaceBinding(
               ),
             );
         } finally {
-          if (liveStorageKey.current === originalKey) {
-            startingRef.current = false;
+          if (liveStorageKey.current === originalKey && startingRef.current === attempt) {
+            startingRef.current = null;
             setStarting(false);
           }
         }
       })();
     },
     retry() {
-      if (hydrated && requestStorageKey.current === storageKey && request && !mutation.isPending)
-        mutation.mutate(request);
+      if (
+        !storageKey ||
+        !actorId ||
+        !hydrated ||
+        requestStorageKey.current !== storageKey ||
+        !request ||
+        mutation.isPending ||
+        startingRef.current
+      )
+        return;
+      const originalKey = storageKey;
+      const originalRequest = request;
+      const attempt = Symbol();
+      startingRef.current = attempt;
+      setStarting(true);
+      void (async () => {
+        try {
+          const { assertShopEntryWriteAvailable } = await import('./karavan-shop/command-journal');
+          await assertShopEntryWriteAvailable(actorId, chatId, originalRequest.marketplaceId);
+          if (
+            liveStorageKey.current !== originalKey ||
+            requestStorageKey.current !== originalKey ||
+            liveRequest.current !== originalRequest ||
+            startingRef.current !== attempt
+          )
+            return;
+          // FLAG: Retry only this original connection command after the daily
+          // journal fence. Failed checks retain its identity and unknown outcome.
+          setError(null);
+          mutation.mutate({ request: originalRequest, storageKey: originalKey, chatId });
+        } catch (cause) {
+          if (liveStorageKey.current === originalKey && startingRef.current === attempt)
+            setError(
+              describeUserFacingError(
+                cause,
+                'Не удалось проверить сохранённое действие. Повторите.',
+              ),
+            );
+        } finally {
+          if (liveStorageKey.current === originalKey && startingRef.current === attempt) {
+            startingRef.current = null;
+            setStarting(false);
+          }
+        }
+      })();
     },
     retryRecovery() {
       if (hydrationState.status !== 'error' || mutation.isPending) return;
@@ -205,9 +284,17 @@ export function useKaravanMarketplaceBinding(
       setRecoveryAttempt((attempt) => attempt + 1);
     },
     resetRejected() {
-      if (!hydrated || requestStorageKey.current !== storageKey || !rejected || mutation.isPending)
+      if (
+        !hydrated ||
+        requestStorageKey.current !== storageKey ||
+        !rejected ||
+        mutation.isPending ||
+        startingRef.current
+      )
         return;
       if (storageKey) removeMirroredItem(storageKey);
+      requestStorageKey.current = null;
+      liveRequest.current = null;
       setRequest(null);
       setError(null);
       setRejected(false);
