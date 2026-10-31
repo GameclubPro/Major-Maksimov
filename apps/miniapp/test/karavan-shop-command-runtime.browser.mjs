@@ -377,6 +377,85 @@ async function secondOwnerSameDocumentCheck(browser, name, base, url) {
   }
 }
 
+async function readOnlyCheck(browser, name, base, url) {
+  const harness = await newHarness(browser, name, base);
+  try {
+    const page = await harness.context.newPage();
+    await page.goto(url);
+    await settled(page);
+    await page.getByRole('button', { name: 'Заблокировать изменения', exact: true }).click();
+    await waitForState(page, (value) => value.readOnly && !value.loading && !value.busy);
+    await assertAllBlocked(page);
+    for (const action of ['tryImage', 'tryAppearance'])
+      assert.ok(await page.evaluate((key) => window.__shopCommandRuntimeHarness[key](), action));
+    assert.equal(
+      (await state(page)).journal,
+      null,
+      'a direct blocked hook cannot reserve a command',
+    );
+    assert.equal(harness.attempts.length, 0, 'read-only entry prevents direct hook dispatch');
+
+    await page.getByRole('button', { name: 'Разрешить изменения', exact: true }).click();
+    await waitForState(page, (value) => !value.readOnly && !value.blocked);
+    await page.getByRole('button', { name: 'Загрузить изображение', exact: true }).click();
+    await waitForState(page, (value) => !value.busy && value.journal?.pending?.dispatchCount === 1);
+    const original = harness.attempts[0];
+    assert.equal(harness.committed.size, 1, 'the lost response follows a server commit');
+    const pending = (await state(page)).journal;
+
+    await page.getByRole('button', { name: 'Заблокировать изменения', exact: true }).click();
+    await waitForState(page, (value) => value.readOnly);
+    await assertAllBlocked(page);
+    assert.equal(
+      await page
+        .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
+        .isDisabled(),
+      true,
+    );
+    await page.evaluate(() => window.__shopCommandRuntimeHarness.resume());
+    for (const action of ['tryImage', 'tryAppearance'])
+      assert.ok(await page.evaluate((key) => window.__shopCommandRuntimeHarness[key](), action));
+    assert.deepEqual(
+      await page.evaluate(() => window.__shopCommandRuntimeHarness.readOriginalJournal()),
+      pending,
+    );
+    assert.equal(
+      harness.attempts.length,
+      1,
+      'direct resume and hooks cannot dispatch while read-only',
+    );
+
+    await page.getByRole('button', { name: 'Разрешить изменения', exact: true }).click();
+    await waitForState(page, (value) => !value.readOnly);
+    await settleVisualFrame(page);
+    assert.equal(harness.attempts.length, 1, 'restoring access never resumes automatically');
+    await page
+      .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
+      .click();
+    await waitForState(page, (value) => !value.busy && value.journal?.pending === null);
+    await settleVisualFrame(page);
+    const confirmed = await state(page);
+    assert.equal(harness.attempts.length, 2);
+    assert.equal(harness.attempts[1].body, original.body);
+    assert.equal(harness.committed.size, 1, 'explicit resume returns the original server receipt');
+    assert.equal(confirmed.image.receipt.request.commandId, original.envelope.commandId);
+    assert.deepEqual(confirmed.callbacks, [
+      {
+        owner: 'runtime-image',
+        commandId: original.envelope.commandId,
+        chatId: '-123',
+      },
+    ]);
+    await assertNoShare(page);
+    assert.deepEqual(harness.errors, []);
+    console.log(
+      `Shop runtime ${name}/read-only: direct writes and resume blocked, original pending command retained and explicitly confirmed after recovery.`,
+    );
+  } finally {
+    await harness.context.close();
+  }
+}
+
 async function lateScopeCheck(browser, name, base, url) {
   const harness = await newHarness(browser, name, base, { hold: true });
   try {
@@ -426,6 +505,20 @@ async function lateScopeCheck(browser, name, base, url) {
 }
 
 export async function runShopCommandRuntimeChecks({ base, url }) {
+  const selected = process.env.KARAVAN_SHOP_RUNTIME_SCENARIOS?.split(',').filter(Boolean);
+  const known = [
+    'image',
+    'appearance_apply',
+    'invitation_create',
+    'storage-missing',
+    'storage-hung',
+    'second-owner',
+    'read-only',
+    'late-scope',
+  ];
+  if (selected?.some((scenario) => !known.includes(scenario)))
+    throw new Error('Unknown shop command runtime scenario');
+  const includes = (scenario) => !selected || selected.includes(scenario);
   for (const [name, engine] of [
     ['chromium', chromium],
     ['webkit', webkit],
@@ -433,11 +526,13 @@ export async function runShopCommandRuntimeChecks({ base, url }) {
     const browser = await engine.launch(captureBrowserLaunchOptions(name, base));
     try {
       for (const operation of ['image', 'appearance_apply', 'invitation_create'])
-        await lostResponseCheck(browser, name, base, url, operation);
+        if (includes(operation)) await lostResponseCheck(browser, name, base, url, operation);
       for (const storage of ['missing', 'hung'])
-        await storageFailureCheck(browser, name, base, url, storage);
-      await secondOwnerSameDocumentCheck(browser, name, base, url);
-      await lateScopeCheck(browser, name, base, url);
+        if (includes(`storage-${storage}`))
+          await storageFailureCheck(browser, name, base, url, storage);
+      if (includes('second-owner')) await secondOwnerSameDocumentCheck(browser, name, base, url);
+      if (includes('read-only')) await readOnlyCheck(browser, name, base, url);
+      if (includes('late-scope')) await lateScopeCheck(browser, name, base, url);
     } finally {
       await browser.close();
     }

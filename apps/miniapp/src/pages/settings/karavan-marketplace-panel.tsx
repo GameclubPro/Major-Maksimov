@@ -6,7 +6,7 @@ import {
 } from './storefront-workspace';
 import ShopPublicationsEntry from './karavan-shop/publications-entry';
 import KaravanShopManager from './karavan-shop/manager';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type KaravanMarketplaceSetup,
@@ -82,6 +82,13 @@ export default function KaravanMarketplacePanel({
     module?.actorMaxUserId,
     query.isSuccess && query.isFetchedAfterMount && !query.isFetching ? module?.binding : undefined,
   );
+  const recoveryFailed =
+    bind.hydrationState.status === 'error' || setupHydration.status === 'error';
+  useLayoutEffect(() => {
+    // FLAG: The parent owns the publication save footer. Leave this page before
+    // paint when recovery fails, retaining its draft without an enabled save action.
+    if (recoveryFailed && workspace?.page === 'publications') workspace.navigate('home');
+  }, [recoveryFailed, workspace?.page, workspace?.navigate]);
   useEffect(() => {
     if (bind.hydrated && bind.request && !query.isFetchedAfterMount && !query.isFetching)
       void query.refetch();
@@ -330,6 +337,50 @@ export default function KaravanMarketplacePanel({
     renderedManagerScope.current = null;
   const retainManager = renderedManagerScope.current === managerScope;
   if (ready && canEnter) renderedManagerScope.current = managerScope;
+  if (canEnter && recoveryFailed)
+    return (
+      <section className="karavan-module" aria-label="Магазин чата">
+        <div className="karavan-module__notice" role="alert">
+          <p>
+            {bind.recoveryError ||
+              (setupHydration.status === 'error'
+                ? shopSetupRecoveryMessage(setupHydration.reason)
+                : null)}
+          </p>
+          <p>Магазин доступен для просмотра. Для изменений повторите проверку.</p>
+          <button
+            type="button"
+            disabled={query.isFetching}
+            onClick={() => {
+              if (bind.hydrationState.status === 'error') {
+                bind.retryRecovery();
+                setSetupRecoveryAttempt((attempt) => attempt + 1);
+              } else {
+                void query.refetch().then(() => setSetupRecoveryAttempt((attempt) => attempt + 1));
+              }
+            }}
+          >
+            Повторить проверку подключения
+          </button>
+        </div>
+        <KaravanShopManager
+          key={managerScope}
+          api={api}
+          chatId={chatId}
+          module={module}
+          busy={busy}
+          readOnly
+          open={openShop}
+          chats={
+            <ul className="karavan-module__progress">
+              {module.bindings?.map((binding) => (
+                <li key={binding.id}>{binding.chatTitle || 'Чат'}</li>
+              ))}
+            </ul>
+          }
+        />
+      </section>
+    );
   if (bind.hydrationState.status === 'error')
     return (
       <section className="karavan-module" aria-label="Магазин чата">
@@ -448,6 +499,7 @@ export default function KaravanMarketplacePanel({
               chatId={chatId}
               module={module}
               busy={busy}
+              readOnly={!ready}
               open={openShop}
               publications={publications}
               chats={

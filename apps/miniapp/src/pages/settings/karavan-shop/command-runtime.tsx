@@ -45,7 +45,7 @@ export class ShopCommandRunRejectedError extends Error {
   }
 }
 
-function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
+function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: boolean) {
   const key = shopJournalKey(scope);
   const client = useQueryClient();
   const [journal, setJournal] = useState<ShopCommandJournal | null>(null);
@@ -56,6 +56,8 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
   const active = useRef({ key, epoch: 0 });
   const mounted = useRef(true);
   const working = useRef(false);
+  const writeBlocked = useRef(readOnly);
+  writeBlocked.current = readOnly;
   const channel = useRef<BroadcastChannel | null>(null);
   if (active.current.key !== key) active.current = { key, epoch: active.current.epoch + 1 };
   const matches = (identity: { key: string; epoch: number }) =>
@@ -131,7 +133,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
   }, [key, reload, scope.actorMaxUserId, scope.chatId, scope.marketplaceId]);
 
   const stale = Boolean(journal && journal.key !== key);
-  const blocked = loading || busy || storageError || stale || Boolean(journal?.pending);
+  const blocked = readOnly || loading || busy || storageError || stale || Boolean(journal?.pending);
   const perform = async (
     saved: ShopCommandJournal,
     identity: { key: string; epoch: number },
@@ -139,6 +141,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
     let claimed: ShopCommandJournal | null = null;
     let dispatched = false;
     try {
+      if (writeBlocked.current) throw new Error('Сначала повторите проверку подключения.');
       if (saved.key !== key || !matches(identity))
         throw new Error('Изменился магазин. Вернитесь к исходному чату.');
       claimed = await claimShopCommand(saved);
@@ -155,6 +158,9 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
         throw new Error('Сохранённое действие изменилось. Повторите загрузку.');
       const request = await restoreShopCommand(readback);
       if (!matches(identity)) throw new Error('Изменился магазин. Вернитесь к исходному чату.');
+      // FLAG: Recovery can fail while journal reads are in flight. Keep the exact
+      // pending command and block dispatch; already dispatched results still settle.
+      if (writeBlocked.current) throw new Error('Сначала повторите проверку подключения.');
       dispatched = true;
       const response = await dispatchShopRequest(api, request);
       const confirmed = await settleShopCommand(readback, response);
@@ -189,7 +195,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
     }
   };
   const run = async (command: ShopCommand, ui: ShopCommandUi) => {
-    if (!mounted.current || working.current || blocked)
+    if (!mounted.current || working.current || writeBlocked.current || blocked)
       throw new ShopCommandRunRejectedError(
         'not-started',
         new Error('Сначала продолжите сохранённое действие.'),
@@ -257,7 +263,15 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
     }
   };
   const resume = async () => {
-    if (working.current || loading || storageError || stale || !journal?.pending) return;
+    if (
+      writeBlocked.current ||
+      working.current ||
+      loading ||
+      storageError ||
+      stale ||
+      !journal?.pending
+    )
+      return;
     const identity = { ...active.current };
     working.current = true;
     setBusy(true);
@@ -272,18 +286,36 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope) {
       if (matches(identity)) setBusy(false);
     }
   };
-  return { key, journal, loading, busy, blocked, stale, storageError, error, reload, run, resume };
+  return {
+    key,
+    journal,
+    loading,
+    busy,
+    blocked,
+    readOnly,
+    stale,
+    storageError,
+    error,
+    reload,
+    run,
+    resume,
+  };
 }
 function scopeWithoutActor({ chatId, marketplaceId, expectedBindingGeneration }: ShopJournalScope) {
   return { chatId, marketplaceId, expectedBindingGeneration };
 }
 const ShopCommandContext = createContext<ReturnType<typeof useCommandState> | null>(null);
-type ProviderProps = { api: ApiTransport; scope: ShopJournalScope; children: ReactNode };
+type ProviderProps = {
+  api: ApiTransport;
+  scope: ShopJournalScope;
+  readOnly?: boolean;
+  children: ReactNode;
+};
 export function ShopCommandProvider(props: ProviderProps) {
   return <CommandScopeProvider key={shopJournalKey(props.scope)} {...props} />;
 }
-function CommandScopeProvider({ api, scope, children }: ProviderProps) {
-  const commands = useCommandState(api, scope);
+function CommandScopeProvider({ api, scope, readOnly = false, children }: ProviderProps) {
+  const commands = useCommandState(api, scope, readOnly);
   useStorefrontDirty('shop-command', Boolean(commands.journal?.pending) || commands.busy);
   return <ShopCommandContext.Provider value={commands}>{children}</ShopCommandContext.Provider>;
 }
@@ -332,7 +364,11 @@ export function ShopCommandRecovery() {
       {commands.error ? (
         <p>{describeUserFacingError(commands.error, 'Исход действия пока неизвестен.')}</p>
       ) : null}
-      <button type="button" disabled={commands.busy} onClick={() => void commands.resume()}>
+      <button
+        type="button"
+        disabled={commands.busy || commands.readOnly}
+        onClick={() => void commands.resume()}
+      >
         {commands.busy ? 'Продолжаем…' : 'Продолжить сохранённое действие'}
       </button>
       {workspace && workspace.page !== pending.ui.page ? (

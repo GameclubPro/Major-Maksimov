@@ -30,6 +30,9 @@ const scenarios = [
   'switch_chat',
   'bridge_error',
   'active',
+  'binding_storage_error',
+  'setup_storage_error',
+  'setup_storage_error_after_publications',
   'error',
   'unknown',
   'existing',
@@ -106,6 +109,18 @@ if(scenario.startsWith('recovery_restored_')) {
 if(scenario==='recovery_conflict_superseded') connected=true;
 if(scenario==='server_restore') { const request={operationId:uuid,chatIds:['-123','-456'],create:{name:'Сохранённый магазин',rules:{text:'Rules',allowedCategoryIds:['services'],allowedSubcategoryIds:[]}}}; operation={operationId:uuid,state:'partial',request,checkpoints:{marketplaceId:uuid,bindings:request.chatIds.map(chatId=>({chatId,state:'failed',bindingId:null,generation:null}))}}; }
 window.__karavanRequests=[]; window.__karavanOpened=[]; window.__karavanClosed=0; window.WebApp={openMaxLink:(url)=>{if(scenario==='bridge_error'&&!window.__bridgeRetry) throw new Error('Bridge unavailable');window.__karavanOpened.push(url)},close:()=>{window.__karavanClosed++}};
+if(scenario.includes('_storage_error')) {
+  connected=true;marketplace.status='active';marketplace.name='Нет';
+  window.__storageReady=scenario.endsWith('_after_publications');
+  const affectedKey=scenario==='binding_storage_error'?'karavan-binding:v1:777:-123':'karavan-setup:v1:777:-123';
+  window.__nativeWrites=[];
+  document.documentElement.dataset.maxClient='native';window.WebApp.initData='fixture-init-data';
+  window.WebApp.DeviceStorage={
+    getItem:async(key)=>{if(key===affectedKey&&!window.__storageReady)throw {error:{code:'client.device_storage_get_key.request_timeout'}};return {value:null};},
+    setItem:async(key)=>{window.__nativeWrites.push(key);return {};},
+    removeItem:async(key)=>{window.__nativeWrites.push(key);return {};},
+  };
+}
 const draftKey='karavan-setup-draft:v2:777:-123:create';
 const savedDraft={mode:'new',existingId:null,name:'Сохранённый ввод',rules:'Правила',categories:['services'],subcategories:['services.repair'],initialized:true,admissionPolicy:'applications',chatIds:['-123']};
 const journalKey='karavan-setup:v1:777:-123';
@@ -146,6 +161,7 @@ const api={request:async(path,init={})=>{
   window.__karavanRequests.push({path,body:init.body?JSON.parse(init.body):null});
   if(path.endsWith('/manage')) {
     const {command}=JSON.parse(init.body);
+    if(command.operation==='catalog') return {operation:'catalog',data:{items:[],nextCursor:null}};
     if(command.operation!=='detail') throw new Error('Unexpected management operation '+command.operation);
     const detail = {operation:'detail',data:{marketplace,rules:{id:uuid,text:'Правила магазина',allowedCategoryIds:['services'],allowedSubcategoryIds:['services.repair'],categoryOrder:['services'],version:1,effectiveAt:new Date().toISOString(),createdAt:new Date().toISOString(),requiresAcceptance:true},scheduledRules:null,permissions:['manage_marketplace','bind_chat','review_listing'],counts:{listings:scenario==='draft_empty'?0:12,readyListings:scenario==='draft_empty'?0:12,pendingApplications:scenario==='draft_empty'?0:3,chats:2},bindings:[binding]}};
     return marketplaceManagementResponseSchema.parse(detail);
@@ -179,10 +195,11 @@ const api={request:async(path,init={})=>{
   if(scenario==='error' && reads++===0) throw new Error('Сеть недоступна');
   if(scenario==='loading') await new Promise(resolve=>setTimeout(resolve,800));
   if(scenario==='recovery_restored_unavailable'&&!sessionStorage.getItem('restored-allow-read')) throw new Error('Проверка временно недоступна');
-  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
+  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:scenario==='setup_storage_error_after_publications'&&!window.__storageReady?{operationId:uuid,state:'partial',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[]}}:['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
 },requestKeepalive:()=>{}};
-function Harness(){const [chatId,setChatId]=React.useState('-123');window.__switchKaravanChat=()=>setChatId('-456');return <StorefrontWorkspace key={chatId} open onClose={()=>{}}><Panel api={api} chatId={chatId} publications={<></>}/></StorefrontWorkspace>;}
+function Harness(){const [chatId,setChatId]=React.useState('-123');window.__switchKaravanChat=()=>setChatId('-456');return <StorefrontWorkspace key={chatId} open onClose={()=>{}} dirty={scenario.endsWith('_after_publications')} footer={<button onClick={()=>{window.__publicationSaves=(window.__publicationSaves??0)+1;}}>Сохранить ответ бота</button>}><Panel api={api} chatId={chatId} publications={<p>Настройки ответа бота</p>}/></StorefrontWorkspace>;}
 const queryClient=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
+window.__failStorage=()=>{window.__storageReady=false;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
 window.__switchKaravanActor=()=>{moduleActor='888';binding.generation=2;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
 if(scenario==='recovery_restored_cached') {
   const snapshot=await api.request('/chats/-123/karavan-marketplace');
@@ -251,6 +268,98 @@ try {
           const errors = [];
           page.on('pageerror', (error) => errors.push(error.message));
           await page.goto(path + '?scenario=' + scenario + '&theme=' + theme);
+          if (scenario.includes('_storage_error')) {
+            if (scenario.endsWith('_after_publications')) {
+              await page.getByRole('button', { name: 'Настройки', exact: true }).click();
+              await page.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+              await page
+                .getByRole('button', { name: 'Сохранить ответ бота', exact: true })
+                .waitFor();
+              await page.evaluate(() => window.__failStorage());
+            }
+            await page
+              .getByRole('button', { name: 'Повторить проверку подключения', exact: true })
+              .waitFor();
+            await page
+              .getByRole('button', { name: 'Товары и услуги', exact: true })
+              .waitFor({ timeout: 3000 });
+            await page.getByRole('heading', { name: 'Нет', exact: true }).waitFor();
+            await page
+              .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
+              .click();
+            assert.equal(await page.evaluate(() => window.__karavanOpened.length), 1);
+            await page.getByRole('button', { name: 'Настройки', exact: true }).click();
+            assert.equal(
+              await page
+                .getByRole('button', { name: 'Приостановить магазин', exact: true })
+                .isDisabled(),
+              true,
+            );
+            assert.equal(
+              await page.getByRole('radio', { name: 'По приглашению', exact: true }).isDisabled(),
+              true,
+            );
+            assert.equal(
+              await page.getByRole('button', { name: 'Объявления в чате', exact: true }).count(),
+              0,
+            );
+            assert.equal(
+              await page.getByRole('button', { name: 'Сохранить ответ бота', exact: true }).count(),
+              0,
+            );
+            assert.equal(await page.evaluate(() => window.__publicationSaves ?? 0), 0);
+            assert.deepEqual(await page.evaluate(() => window.__nativeWrites), []);
+            await geometry(page, scenario + '-read-only');
+            await page.screenshot({
+              path: output + '/' + width + '-' + theme + '-' + scenario + '-read-only.png',
+              fullPage: true,
+            });
+            assert.equal(
+              await page.evaluate(
+                () =>
+                  window.__karavanRequests.filter(
+                    (item) => item.body && !['detail'].includes(item.body.command?.operation),
+                  ).length,
+              ),
+              0,
+            );
+            await page.evaluate(() => {
+              window.__storageReady = true;
+            });
+            await page
+              .getByRole('button', { name: 'Повторить проверку подключения', exact: true })
+              .click();
+            await page.waitForFunction(
+              () =>
+                ![...document.querySelectorAll('button')].some(
+                  (el) => el.textContent.trim() === 'Повторить проверку подключения',
+                ),
+            );
+            await page.getByRole('radio', { name: 'По приглашению', exact: true }).waitFor();
+            await page.waitForFunction(
+              () =>
+                !document.querySelector('input[type="radio"]')?.disabled &&
+                !document.querySelector('input[type="radio"]')?.closest('fieldset')?.disabled,
+            );
+            assert.equal(
+              await page.evaluate(
+                () =>
+                  window.__karavanRequests.filter(
+                    (item) => item.body && !['detail'].includes(item.body.command?.operation),
+                  ).length,
+              ),
+              0,
+              'rereading storage must not replay any mutation',
+            );
+            assert.deepEqual(errors, []);
+            await geometry(page, scenario);
+            await page.screenshot({
+              path: output + '/' + width + '-' + theme + '-' + scenario + '.png',
+              fullPage: true,
+            });
+            console.log(`${width}/${theme}/${scenario}: passed`);
+            continue;
+          }
           if (scenario === 'legacy_multichat') {
             await page.getByRole('textbox', { name: 'Название магазина', exact: true }).waitFor();
             assert.equal(
