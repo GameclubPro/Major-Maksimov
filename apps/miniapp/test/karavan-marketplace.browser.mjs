@@ -279,7 +279,7 @@ try {
               await page.evaluate(() => window.__failStorage());
               if (scenario.endsWith('_stall')) {
                 await page
-                  .getByText('Проверяем сохранённое подключение', { exact: true })
+                  .getByRole('status', { name: 'Проверяем сохранённое подключение', exact: true })
                   .waitFor();
                 assert.equal(
                   await page
