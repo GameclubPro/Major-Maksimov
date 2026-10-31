@@ -65,6 +65,8 @@ export default function KaravanMarketplacePanel({
   const [checkingShopCommand, setCheckingShopCommand] = useState(false);
   const returningFromShop = useRef(false);
   const module = query.data?.enabled ? query.data : null;
+  const viewLabel =
+    module?.marketplace?.format === 'storefront' ? 'Посмотреть витрину' : 'Посмотреть магазин чата';
   const storageKey = module ? `karavan-setup:v1:${module.actorMaxUserId}:${chatId}` : null;
   const canEnter = Boolean(
     module?.marketplace &&
@@ -366,7 +368,7 @@ export default function KaravanMarketplacePanel({
         </button>
         {canEnter && active && module.buyerUrl ? (
           <button type="button" onClick={openShop}>
-            Посмотреть магазин чата
+            {viewLabel}
           </button>
         ) : null}
       </section>
@@ -397,7 +399,7 @@ export default function KaravanMarketplacePanel({
         </button>
         {canEnter && active && module.buyerUrl ? (
           <button type="button" onClick={openShop}>
-            Посмотреть магазин чата
+            {viewLabel}
           </button>
         ) : null}
       </section>
@@ -443,23 +445,24 @@ export default function KaravanMarketplacePanel({
         ) : null}
         <div hidden={!ready}>
           <StorefrontScreen page="publications">
-            {module.publicationChoices.map((choice) => (
-              <div key={choice.id} className="karavan-module__actions">
-                <p>Выберите витрину для ответа бота на $ в этом чате.</p>
-                {choice.stores.map((store) => (
-                  <button
-                    type="button"
-                    key={store.id}
-                    disabled={publicationChoice.isPending}
-                    onClick={() =>
-                      publicationChoice.mutate({ choiceId: choice.id, storeId: store.id })
-                    }
-                  >
-                    {store.name}
-                  </button>
-                ))}
-              </div>
-            ))}
+            {marketplace?.format !== 'storefront' &&
+              module.publicationChoices.map((choice) => (
+                <div key={choice.id} className="karavan-module__actions">
+                  <p>Выберите витрину для ответа бота на $ в этом чате.</p>
+                  {choice.stores.map((store) => (
+                    <button
+                      type="button"
+                      key={store.id}
+                      disabled={publicationChoice.isPending}
+                      onClick={() =>
+                        publicationChoice.mutate({ choiceId: choice.id, storeId: store.id })
+                      }
+                    >
+                      {store.name}
+                    </button>
+                  ))}
+                </div>
+              ))}
           </StorefrontScreen>
         </div>
         {canEnter && setupIntent ? connectionState : null}
@@ -676,7 +679,7 @@ export default function KaravanMarketplacePanel({
                 ) : null}
                 {active && module.buyerUrl ? (
                   <button type="button" onClick={openShop}>
-                    Посмотреть магазин чата
+                    {viewLabel}
                   </button>
                 ) : null}
                 <button type="button" onClick={() => void query.refetch()}>
@@ -696,6 +699,7 @@ export default function KaravanMarketplacePanel({
                 chatId={chatId}
                 chatTitle={module.currentChatTitle ?? ''}
                 actorId={module.actorMaxUserId}
+                sellerBotUrl={module.sellerBotUrl}
                 intent={setupIntent ?? { kind: 'create' }}
                 onCancel={setupIntent ? () => setSetupIntent(null) : undefined}
                 onSubmit={start}

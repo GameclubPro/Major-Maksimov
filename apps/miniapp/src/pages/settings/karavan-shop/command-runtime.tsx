@@ -412,6 +412,8 @@ function commandLabel(command: ShopCommand, ui: ShopCommandUi): string {
       return command.input.status === 'active' ? 'Открыть магазин' : 'Приостановить магазин';
     case 'settings':
       return 'Сохранить настройки';
+    case 'format_update':
+      return 'Изменить формат магазина';
     default:
       return 'Изменить магазин';
   }

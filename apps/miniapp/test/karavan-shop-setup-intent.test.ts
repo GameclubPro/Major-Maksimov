@@ -54,6 +54,40 @@ test('restoring a legacy draft cannot widen ordinary creation to multiple chats'
   );
 });
 
+test('format selection and the exact administrative storefront survive draft recovery', () => {
+  const storefront = { ...draft, format: 'storefront', administrationStoreId: marketplaceId };
+  assert.deepEqual(
+    restoreShopSetupDraft(JSON.stringify(storefront), '-123', { kind: 'create' }),
+    storefront,
+  );
+  const unchosen = { ...draft, format: null, administrationStoreId: null };
+  assert.deepEqual(
+    restoreShopSetupDraft(JSON.stringify(unchosen), '-123', { kind: 'create' }),
+    unchosen,
+  );
+  assert.equal(
+    restoreShopSetupDraft(JSON.stringify({ ...storefront, format: 'personal' }), '-123', {
+      kind: 'create',
+    }),
+    null,
+  );
+  assert.equal(
+    restoreShopSetupDraft(
+      JSON.stringify({ ...storefront, administrationStoreId: 'arbitrary-link' }),
+      '-123',
+      { kind: 'create' },
+    ),
+    null,
+  );
+  assert.equal(
+    Object.hasOwn(
+      restoreShopSetupDraft(JSON.stringify(draft), '-123', { kind: 'create' })!,
+      'format',
+    ),
+    false,
+  );
+});
+
 test('adding chats restores only the fixed existing marketplace, never creation or replacement', () => {
   const existing = {
     ...draft,
@@ -112,6 +146,8 @@ test('renaming preserves acceptance while changes to rules or connections requir
     { admissionPolicy: 'invitation' as const },
     { existingId: marketplaceId },
     { chatIds: ['-123', '-456'] },
+    { format: 'storefront' as const },
+    { administrationStoreId: marketplaceId },
   ])
     assert.equal(shopSetupChangeRequiresAcceptance(patch), true);
 });

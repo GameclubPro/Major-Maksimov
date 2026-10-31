@@ -152,4 +152,64 @@ describe('Karavan module destination permissions', () => {
     await expect(invokeModule()).rejects.toThrow('denied');
     expect(resolver.shouldUseScopedRelay).not.toHaveBeenCalled();
   });
+  it('previews one fixed administration storefront only while it is available to buyers', async () => {
+    const { state, invokeModule, resolver } = fixture();
+    const storeId = randomUUID();
+    state.marketplace = {
+      ...state.marketplace!,
+      status: 'active',
+      format: 'storefront',
+      administrationStoreId: storeId,
+      formatRevision: 1,
+    };
+    state.access = { reason: 'allowed', canRecover: false };
+    state.administrationStore = {
+      id: storeId,
+      slug: 'administration',
+      name: 'Соседи',
+      status: 'ACTIVE',
+      editRevision: 1,
+    };
+    state.buyerUrl = 'https://max.ru/test_bot?startapp=m_synthetic__s_administration';
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'administration_storefront' },
+    });
+    state.administrationStore.status = 'BLOCKED';
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+    state.administrationStore.status = 'ACTIVE';
+    state.buyerUrl = null;
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+    resolver.shouldUseScopedRelay.mockResolvedValue(false);
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'connection' },
+    });
+  });
+  it('issues administration management handoff only for the verified fixed storefront', async () => {
+    const { state, invoke, handoffs } = fixture();
+    state.permissions = ['manage_marketplace'];
+    state.access = { reason: 'allowed', canRecover: false };
+    await expect(invoke('storefront')).rejects.toThrow('Общая витрина');
+    const storeId = randomUUID();
+    state.marketplace = {
+      ...state.marketplace!,
+      format: 'storefront',
+      administrationStoreId: storeId,
+      formatRevision: 1,
+    };
+    state.administrationStore = {
+      id: storeId,
+      slug: 'administration',
+      name: 'Соседи',
+      status: 'DRAFT',
+      editRevision: 1,
+    };
+    await expect(invoke('storefront')).resolves.toHaveProperty('url');
+    state.administrationStore.id = randomUUID();
+    await expect(invoke('storefront')).rejects.toThrow('Общая витрина');
+    expect(handoffs.issue).toHaveBeenCalledTimes(1);
+  });
 });
