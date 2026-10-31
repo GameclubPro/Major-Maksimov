@@ -1,5 +1,7 @@
 # Аудит перед безопасным рефакторингом — 1 ноября 2026
 
+Финальная редакция v2. Сверка и целевые локальные проверки: 01.11.2026 01:07 МСК.
+
 Основание: `6eda89cbce40ba5331a5325a63f9175fb9a4c18c`, полученный из `origin/main`.
 Рабочая копия изолирована; исходный `main` не изменялся. Исполняемый код, конфигурация,
 схема БД и production в рамках этого аудита не менялись.
@@ -20,7 +22,7 @@
 публичные scripts, CI, Compose и защитные проверки выпуска. Backend, frontend/contracts
 и tooling/infra дополнительно проверены тремя независимыми агентами только чтением.
 
-Это глубокий статический аудит с проверкой ключевых связей, а не построчная верификация
+Это глубокий статический аудит с целевыми исполняемыми проверками, а не построчная верификация
 всех файлов и не доказательство корректности каждого сценария. Импортный граф не заменяет
 Nest DI graph, вызовы, SQL и динамическую загрузку. Число тестовых файлов не является
 покрытием, а условно пропущенный тест не является native-доказательством.
@@ -98,10 +100,48 @@ Karavan panel — 11. Это сигнал конфликтности, не ча�
 `message-duplicate`; Karavan и reports имеют свои selections. Их нельзя ошибочно
 объявлять отсутствующими только потому, что их нет в основном списке 123 файлов.
 
-Вывод ограничен конфигурацией: для восьми не найден обязательный CI-запуск native-части.
-Отчёты реальных CI runs в этом аудите не проверялись. Перед исправлением нужно подтвердить
-назначение каждого случая и фактические executed/skipped cases; запуск всей suite без env
-этот пробел не закрывает. Скан по env также не обещает найти все косвенно подключённые stores.
+Вывод о выборе восьми ограничен конфигурацией; теперь он дополнен чтением реальных CI
+reports и локальным запуском. Все восемь прошли на изолированных PostgreSQL 16/Redis 7:
+140 passed, zero skipped, Jest 27,568 с. Это 140 **всех** cases выбранных файлов, включая
+unit-части смешанных suites, а не 140 отдельных native races. Native-части исполнились.
+Локальный успех не добавляет их в CI selections. Скан по env также не находит автоматически
+все косвенно подключённые stores.
+
+### Проверенные CI receipts
+
+Точный source SHA `6eda89cbc` имеет успешные Required и CodeQL, проверенные публичным
+`scripts/ci/assert-green.mjs`. В [run 41241075497](https://github.com/GameclubPro/Major-Maksimov/actions/runs/41241075497)
+на нём API, PostgreSQL Races, Contracts и Lastik **skipped** по miniapp scope. Required
+завершился 1 ноября в 00:07:08 МСК. Это успех выбранного графа, не полный backend прогон.
+
+Последний проверенный main run с native selections —
+[41228618922](https://github.com/GameclubPro/Major-Maksimov/actions/runs/41228618922),
+SHA `8464cc86362f3771c7b781ead3813d22ace04cc5`, итоговая попытка 2.
+API/contracts/Lastik/CI/agent sources между ним и `6eda89cbc` не изменились. Это полезное
+историческое свидетельство для тех же inputs, но не exact-SHA native run нового коммита.
+
+| Фаза                             | Passed                              | Skipped                                         | Источник                                   |
+| -------------------------------- | ----------------------------------- | ----------------------------------------------- | ------------------------------------------ |
+| Восемь native shards             | 123 уникальные suites / 2 749 cases | 0 cases                                         | JSON; множество равно explicit native lane |
+| API base                         | 863 suites / 21 723 cases           | 171 suites / 3 990 cases                        | CI log                                     |
+| API Redis selection              | 38 suites / 1 413 cases             | 7 suites / 113 cases                            | CI log                                     |
+| Compatibility statistics/Karavan | 20 suites / 368 cases               | По этой фазе не заявляется zero-skip сверх лога | CI log                                     |
+| Compatibility reports            | 3 suites / 61 cases                 | То же ограничение                               | CI log                                     |
+
+Фазы пересекаются: суммы не являются числом уникальных tests. Redis selection законно
+находит и PostgreSQL suites с пропущенными PG cases; требование «zero skips везде» неверно.
+`PASS` смешанной suite без нужного env не доказывает её native cases. Compatibility/Redis
+имеют логи, но не сохранённые per-case JSON artifacts.
+
+Сохранён отрицательный результат: [первый shard 2/8](https://github.com/GameclubPro/Major-Maksimov/actions/runs/41228618922/job/124617971066)
+выдал JSON `success:true`, 460 passed, затем job получил `cancelled` с annotation
+`The job has exceeded the maximum execution time of 10m0s`. Первый Required упал.
+Повтор на том же SHA прошёл; Jest 526,458 → 289,802 с. Причина разброса не установлена.
+В артефактах сохранились одинаковые имена разных попыток. Доказательство требует цепочки
+SHA → run → attempt → job → phase → report и конечного job/Required status.
+
+Следовательно, расширение native lane требует оценки полного job budget с setup/upload/
+cleanup reserve, а не увеличения timeout или молчаливого исключения старых cases.
 
 ## E02: Deployment guards
 
@@ -139,7 +179,10 @@ negative fixtures. Безопасный перенос checker сохраняе�
   его зелёные tests не доказывают правильность provider wiring.
 - [Native fullpath support](../../apps/api/src/webhook/webhook-multibot-fullpath.spec-support.ts),
   строки 616–624, вручную соединяет constructors и передаёт `{ } as never` для части
-  guards. Настоящие stores полезны, но не превращают такой harness в полный production graph.
+  guards: PhotoDuplicateRuntimePolicyService, CommercialOcrDeleteGuardService и
+  ProfanityDeleteGuardService. Другие guards, в том числе duplicate, stopwords, limits,
+  closed-chat, state и subscription, действительно строятся. Настоящие stores полезны,
+  но не превращают harness в полный production graph для трёх отсутствующих feature paths.
 - [Runtime graph test](../../apps/api/src/runtime/runtime-role-graph.spec.ts), строка 32,
   компилирует реальные providers всех service profiles с заменёнными транспортами.
   Он не запускает lifecycle/workers. Эти два вида проверки дополняют друг друга.
@@ -207,7 +250,21 @@ controller hooks: его длина не основание начинать о�
 Это кандидат на удаление после доказательства недостижимости, а не доказанный dead code.
 Нужны все route/dynamic/fixture callers и реальный App browser case: handoff работает,
 защищённые settings/publishing requests отсутствуют, обычные rules/giveaway/polls/shop
-сохраняются. Общие composer/button/rules helpers нельзя удалять по имени `Broadcast`.
+сохраняются. Единственные найденные runtime mounts — App:622/630; preload загружает
+module, а не монтирует компонент. Fixtures обходят App guard. Разрешённый preload может
+загрузить CSS, поэтому отсутствие любого settings chunk/CSS — слишком сильное требование.
+Общие composer/button/rules helpers нельзя удалять по имени `Broadcast`.
+
+Уточнение второго прохода: `handoff=1` не означает retired route. Например,
+`focus=giveaway&handoff=1` прямо сохранён existing test. Флаг влияет на prefetch, retry
+и header; chat settings:3739–3743 вручную refetch-ит broadcast handoff при error retry
+даже такого обычного маршрута. Этот путь достижим и не входит автоматически в dead-code
+removal. Его возможное исправление требует отдельного reproduction/expected result.
+
+Preview transport обрабатывает `ApiTransport.request` in-process; наблюдатель HTTP
+requests без instrumented transport может ложно подтвердить «запросов нет». U02 требует
+реального App с HTTP session mocks либо явного счётчика transport, включая ошибки/retry.
+Existing direct-page/hook fixtures такой routing proof не заменяют.
 
 ### Владение состоянием
 
@@ -247,6 +304,13 @@ Leaf apply-target block в `core.ts`, строки 928–1013, можно выд
 root/settings exports и экземпляров schemas. Default `current`, coercion, dedupe, invalid
 inputs и форма validation issues — поведение. Большой `chatSettings` содержит refine/transform;
 его разрезание по полям намного рискованнее. Type-only root imports сами не раздувают runtime bundle.
+Mapping guard проверяет пути/outputs, но не runtime-equivalence перенесённой schema через
+built package exports. Для выбранного leaf нужен также built import/parser/identity check.
+
+Miniapp tsconfig включает только `src`, contracts — `src/**/*.ts`. Их зелёный typecheck
+не означает типовую проверку tests/fixtures: tsx/Vitest их транспилируют. В выбранном
+browser harness нужны typed/schema-parsed builders и отдельная узкая fixture typecheck,
+если именно на ней строится доказательство контракта. Массовая миграция fixtures не нужна.
 
 `tsconfig.base.json` включает `strict`; ESLint при этом разрешает explicit `any`.
 Важнее типизировать реальные затрагиваемые doubles/ports, чем включить запрет сразу для
@@ -263,6 +327,13 @@ Prisma в lockfile уже **7.9.0**, TypeScript **5.9.3**. Пункт старо
 [connection admission adapter](../../apps/api/src/prisma/connection-admission-pool.ts) нельзя
 заменять обычным пулом ради уменьшения связности.
 
+В `config/prisma-drift-baseline.json` закреплены 37 diff operations: 6 Prisma-unrepresentable,
+30 schema-alignment debt и 1 missing-migration debt. Зелёная drift check означает соответствие
+reviewed baseline, не отсутствие долга. Последний пункт — ещё не выполненная вторая фаза
+удаления `chat_settings.delete_spammers_require_approval`. Нельзя применять весь предложенный
+Prisma diff, убирать INCLUDE indexes/defaults или делать DROP ради нулевого drift.
+Сначала нужны writers/defaults/triggers/reader map выбранного домена и совместимый release.
+
 ## E07: Agent workflow and tooling
 
 Уже реализованы context navigation, impact planner, JSON verify/focused, staged snapshot,
@@ -274,7 +345,10 @@ compatibility group; точный SHA, Required и CodeQL остаются об�
 Подтверждённые локальные улучшения:
 
 1. `focused.mjs`, строки 53–80, поддерживает определённые test families и разбирает native
-   membership из длинной npm shell-строки. Lastik tests/stores, API `test/*.node.ts` и
+   membership из длинной npm shell-строки. Классификация native сейчас — объединение
+   этого membership и AST-чтений canonical store-env в выбранном файле; inventory-only
+   замена сломает mixed suites вне списка 123. Транзитивные helper-only зависимости требуют
+   явных metadata, AST source scan не обещает их полноту. Lastik tests/stores, API `test/*.node.ts` и
    browser scripts пока явно не поддерживаются. Это безопасное ограничение; добавлять
    adapters по одному, через публичные wrappers и с проверкой forwarded arguments/env.
 2. Карта «фича → entrypoint → state owner → callers → focused/native/browser evidence»
@@ -327,6 +401,71 @@ admission фильтрует массив до bounded slice. Малый SEND qu
 контекстные файлы/байты, количество затронутых доменов, случайные store skips и длительность
 проверок. Время и частота отказов фиксируются наблюдением, без выдуманных процентов экономии.
 
+## E10: Authority and persisted protocols
+
+Второй проход отдельно проверил цепочку подпись/session → profile/lifecycle → actor/entity
+authority → versioned operation/receipt → final effect/rollback reader. Её нельзя свести к
+единому generic auth/retry helper.
+
+| Граница                                              | Подтверждённое свойство                                                                                                                              | Что не доказывает соседняя зелёная проверка                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| InitDataGuard:48–90                                  | Invalid signature не восстанавливается cookie; expired recovery требует того же userId и launchBotId; origin/CSRF относятся и к mutation tunnel      | Auth suite с in-memory Redis не является настоящим Redis session proof                                |
+| MiniappProfileGuard:49                               | Principal учитывает актуальный bot lifecycle/profile; test-only guard omission не разрешён в runtime                                                 | Валидная подпись сама не выдаёт actor/entity права                                                    |
+| NetworkSettingsService:171; AdminSettingsService:706 | Перед read skip flags выполнена entity authority; skipAdminCheck всё ещё сохраняет managed read access                                               | Нельзя объявить все skip flags полным обходом авторизации                                             |
+| Network settings reader v3, lease, receipt           | Unknown reader остаётся unsettled; settings и receipt co-commit; потерянный lease не пишет; exact remote operation reconciled до revision comparison | Native network tests подменяют MAX access checks; это SQL/protocol proof, не end-to-end authorization |
+| Karavan authority/proxy                              | Witness связывает principal/command/payload; response loss и malformed/408/5xx сохраняют unknown и исходный command ID                               | Major native cases не доказывают совместимость с текущей live provider version                        |
+| Statistics exchange v3                               | Partial page не отзывает отсутствующих; known denial блокирует late proof; fallback только при явно unsupported capability                           | Malformed/auth error нельзя превратить в старый protocol fallback                                     |
+
+Existing native network cases защищают receipt rollback, lease loss, old-writer trigger и
+same-timestamp normalization. Floors находятся также в `assert-managed-network-foundation-source.mjs`
+и `assert-network-settings-v2-source.mjs`: второй намеренно проверяет v3. Их нужно искать
+помимо большого shell-файла. Domain port не должен скрыть DB triggers и receipt order.
+
+### Воспроизведение malformed signed user
+
+В `init-data.service.ts:69–78` JSON приводится к Record без runtime object check, затем
+identifier превращается в String. Локальный вызов настоящего service с синтетическим
+корректным HMAC показал:
+
+| Signed `user`                                        | Наблюдение                             |
+| ---------------------------------------------------- | -------------------------------------- |
+| `null`                                               | Необработанный TypeError при чтении id |
+| `{ "id": {} }`                                       | userId становится `[object Object]`    |
+| `{ "id": ["42"] }`                                   | userId становится `42`                 |
+| Строковый/числовой id `42`, совместимый user_id `42` | Сохраняется ожидаемый principal `42`   |
+
+Подпись проверяется **до** decode; это не демонстрация unsigned bypass и не production
+инцидент. Подтверждено отсутствие shape boundary и неправильная классификация null.
+Перед отдельным исправлением S02 нужно закрепить допустимые ID/object формы и machine
+error, сохранив подтверждённые valid cases, rotation, freshness и recovery. Произвольный
+запрет всех строковых IDs сломал бы existing compatibility.
+
+## E11: Coverage and remaining decisions
+
+| Область                         | Глубина текущей проверки                                              | Остаточный gate для реализации                                                        |
+| ------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Auth/session/profile            | Код, callers, focused unit/lifecycle и malformed reproduction         | Typed payload requirement; native session evidence при изменении Redis semantics      |
+| Allowlist/network settings      | Код, SQL/trigger/readers, focused native                              | Настоящая permission boundary отдельно от mocked MAX access                           |
+| Private rules/DI                | Existing focused corpus и graph/provider compilation                  | Before/after переноса; lifecycle/эффекты graph test не запускает                      |
+| Karavan/statistics              | Код и выбранные native consumer cases                                 | Версии consumer/provider pair при protocol change; live provider не проверялся        |
+| Settings/dialog/launch          | Callers, selected pure/source tests, browser harnesses                | Новый real-App retirement matrix, включая mixed handoff/error retry                   |
+| Contracts                       | Exports/resolver/source/default анализ, public build в API checks     | Built-leaf identity и выбранные fixture types при C02                                 |
+| Moderation/duplicates/OCR/photo | Архитектура, selected guards/harness, CI/native selection evidence    | Domain regression matrix и native sandbox proof для затронутого пути                  |
+| Publisher/VK/giveaways/polls    | Entry/domain references, callers, размеры и существующие проверки     | Свои focused/race cases перед конкретным переносом; новый throughput baseline не снят |
+| Lastik/Safety Desk              | Структура, атомарные границы, existing test contracts и CI selections | Своё focused/native выполнение до их изменения; этот аудит его не заявляет            |
+| Infra/releases/stores/edge      | Скрипты, floors, manifests, CI identity и docs                        | VPS identity/strict smokes/reader gates при будущем release; live host не проверялся  |
+
+Launch query principal, late bridge data, очистка старого QueryClient, non-replayable body,
+CSRF/session recovery и shop unknown outcome сохраняют разные права на повтор. Для UI
+важны topmost focus/native Back, warm CSS, timezone и content-only schedule preservation.
+Общий TimeField намеренно поддерживает legacy half-hour и Publisher exact-minute режимы,
+включая Asia/Kathmandu. Общие broadcast helpers нельзя удалять по имени.
+
+Нет основания считать исследованными каждую из 203 моделей, каждый внешний API scenario
+или производственную нагрузку. Решение, для которого нужная evidence отсутствует,
+остаётся explicit gate выбранной микроцели. Это ограничение доказательства, не повод
+раздувать ранний runtime этап или обещать полный security/performance audit.
+
 ## Выполненные проверки этого аудита
 
 - Node 24.16.0; изолированный `npm ci --no-audit --no-fund` завершился успешно.
@@ -335,7 +474,29 @@ admission фильтрует массив до bounded slice. Малый SEND qu
 - `npm audit --omit=dev --json` на дату аудита сообщил ноль известных advisories в выбранном
   production dependency scope. Это ответ advisory registry, не полный security audit.
 
-Документационные проверки фиксируются в результате коммита плана. Полный runtime suite,
-native integrations, browser flows, exact-SHA CI, deploy и production acceptance в рамках
-этого статического аудита не выполнялись. Для последующего изменения они выбираются
-по его фактическому scope; нынешние ранние проверки не заменяют соответствующие gates.
+В финализации дополнительно проверено:
+
+| Локальный запуск на checkout b12556ea0, runtime source совпадает с 6eda89cbc | Результат                                                                       | Ограничение                                                                                         |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Восемь CI-gap candidates, PostgreSQL/Redis, public store wrapper             | 8 suites / 140 passed / 0 skipped; Jest 27,568 с                                | Первый запуск сообщил forced worker exit                                                            |
+| Только из-за этого warning — public open-handles diagnostic того же набора   | 140 passed / 0 skipped; Jest 39,842 с; штатный exit                             | Warning не повторился в runInBand; причина worker warning не установлена, исправление не заявляется |
+| Auth/private rules/DI/network/Karavan/statistics выбранные границы           | 11 suites / 296 passed / 0 skipped; Jest 26,337 с                               | SQL tests и DI graphs имеют описанные выше doubles/lifecycle limits                                 |
+| 14 miniapp focused files: auth/transport/routes/drafts/journal/time/schedule | 124 passed / 0 skipped                                                          | Часть tests — source assertions; tests не typechecked production tsconfig                           |
+| Settings draft browser entrypoint                                            | Успешно; включает hook harness и импортирует real settings/stop-words scenarios | Direct-page cases не подтверждают App retirement guard                                              |
+| Async dialog attachments browser entrypoint                                  | Успешно в Chromium                                                              | Fixture transport и browser shim не являются настоящим MAX WebView                                  |
+
+Суммарно это 436 различных API cases и 124 miniapp cases в указанных выбранных файлах;
+повторные 140 диагностического запуска второй раз не суммируются. PostgreSQL/Redis
+после всех запусков штатно остановлены и временные stores удалены по результатам wrappers.
+Chromium launch прошёл; WebKit и вся mobile/browser matrix не запускались.
+
+План дополнительно прошёл независимое чтение backend, frontend/contracts и tooling/infra.
+Проверены 70 уникальных ID (66 рабочих и 4 отложенных), ссылки на prerequisites и отсутствие
+циклов даже с условными рёбрами; 27 локальных ссылок/anchors разрешаются. Все четыре
+focused-рецепта поддерживаются CLI по dry-run: это проверка выбора команд, не новый test run.
+Повторный fetch перед финализацией сохранил `origin/main` на изученном `6eda89cbc`.
+
+Полный runtime suite, новый общий benchmark, live MAX/провайдеры, VPS, deploy и production
+acceptance не выполнялись. Для будущего изменения нужны его собственные before/after,
+exact-SHA CI и delivery gates. Финальная проверка документации принадлежит commit helper;
+нынешняя выборочная evidence не является reusable QA attestation.
