@@ -19,6 +19,7 @@ type ResolvedBlockedWordTrieNode = {
 };
 
 type ResolvedBlockedWordIndex = {
+  identities: ReadonlySet<string>;
   maxPrefilterTokenLength: number;
   prefilterRoot: ResolvedBlockedWordTrieNode;
   words: readonly ResolvedBlockedWord[];
@@ -89,7 +90,7 @@ const BLOCKED_WORD_LATIN_INFLECTION_SUFFIXES = [
 const BLOCKED_WORD_CYRILLIC_MIN_ROOT_LENGTH = 4;
 const BLOCKED_WORD_LATIN_MIN_ROOT_LENGTH = 4;
 const BLOCKED_WORD_ARTICLE_CODE_PATTERN =
-  /(?<![\p{L}\p{N}])(?:[A-Z0-9]{2,}(?:[-_/][A-Z0-9]{2,})+|[A-Z]{2,}\d[A-Z0-9_-]*|[A-Z0-9_-]*\d[A-Z]{2,}[A-Z0-9_-]*)(?![\p{L}\p{N}])/gu;
+  /(?<![\p{L}\p{N}])(?:[A-Z0-9]{2,}(?:[-_/][A-Z0-9]{2,})+|[A-Z]{2,}\d[A-Z0-9_-]*|[A-Z0-9_-]*\d[A-Z]{2,}[A-Z0-9_-]*)(?![\p{L}\p{N}])/giu;
 
 export function normalizeLegacyStopWordIdentity(value: string): string | null {
   const candidate = normalizeMessageLimitsBlockedWordCandidate(value);
@@ -123,7 +124,10 @@ export class MessageLimitsBlockedWordDetector {
     }
 
     const normalizedText = this.normalizeMessageLimitsBlockedWordText(
-      this.stripMessageLimitsBlockedWordIgnoredTokens(stripUrlsFromText(text)),
+      this.stripMessageLimitsBlockedWordIgnoredTokens(
+        stripUrlsFromText(text),
+        blockedWordIndex.identities,
+      ),
     );
     if (!normalizedText) {
       return [];
@@ -276,6 +280,7 @@ export class MessageLimitsBlockedWordDetector {
     }
 
     const resolved = {
+      identities: new Set(words.map((word) => word.blockedWord)),
       maxPrefilterTokenLength,
       prefilterRoot,
       words,
@@ -446,8 +451,15 @@ export class MessageLimitsBlockedWordDetector {
     return normalizeLegacyStopWordIdentity(value);
   }
 
-  private stripMessageLimitsBlockedWordIgnoredTokens(value: string): string {
-    return value.replace(BLOCKED_WORD_ARTICLE_CODE_PATTERN, ' ');
+  private stripMessageLimitsBlockedWordIgnoredTokens(
+    value: string,
+    identities: ReadonlySet<string>,
+  ): string {
+    return value.replace(BLOCKED_WORD_ARTICLE_CODE_PATTERN, (token) => {
+      // FLAG: Product codes suppress partial hits, but an explicitly configured whole word wins in every case.
+      const identity = normalizeLegacyStopWordIdentity(token);
+      return identity && identities.has(identity) ? token : ' ';
+    });
   }
 }
 
