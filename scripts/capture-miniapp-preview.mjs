@@ -4564,7 +4564,6 @@ async function assertFavoriteCategoryIndicatorsContained(page, scenario) {
         const settingsUrl =
           settings instanceof HTMLAnchorElement ? new URL(settings.href) : null;
         const entityType = identityUrl?.pathname.match(/\/(chat|channel)\/[^/]+\/settings$/u)?.[1];
-        const opensChatShop = entityType === 'chat';
         if (
           !(identity instanceof HTMLAnchorElement) ||
           !(row instanceof HTMLElement) ||
@@ -4580,11 +4579,11 @@ async function assertFavoriteCategoryIndicatorsContained(page, scenario) {
           !entityType ||
           settingsUrl?.origin !== identityUrl?.origin ||
           settingsUrl?.pathname !== identityUrl?.pathname ||
-          (opensChatShop && settingsUrl?.searchParams.get('focus') !== 'storefront') ||
-          settings.textContent?.trim() !== (opensChatShop ? 'Магазин' : 'Настройки') ||
+          settingsUrl?.searchParams.get('focus') === 'storefront' ||
+          settings.textContent?.trim() !== 'Настройки' ||
           !settings
             .getAttribute('aria-label')
-            ?.startsWith(opensChatShop ? 'Открыть магазин чата: ' : 'Открыть настройки: ') ||
+            ?.startsWith('Открыть настройки: ') ||
           !statistics.textContent?.includes('Статистика')
         ) {
           return [

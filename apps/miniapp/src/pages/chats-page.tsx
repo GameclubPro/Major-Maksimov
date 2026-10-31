@@ -1352,14 +1352,6 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
       location.search,
       location.hash,
     );
-    const shopRoute =
-      activeTab === 'chat'
-        ? preserveManagedEntityRouteContext(
-            `${buildManagedEntitySettingsRoute(activeTab, entity.id)}?focus=storefront`,
-            location.search,
-            location.hash,
-          )
-        : settingsRoute;
     const statsPreference = readEntityStatsPreference(entity.id);
     const statisticsRoute = preserveManagedEntityRouteContext(
       buildManagedEntityStatisticsRoute(activeTab, entity.id, statsPreference),
@@ -1508,15 +1500,15 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
             </button>
             <div className="chat-card__row-actions">
               <Link
-                to={shopRoute}
+                to={settingsRoute}
                 className="chat-card__action chat-card__action--settings"
                 state={routeState}
                 data-action="settings"
-                aria-label={`${activeTab === 'chat' ? 'Открыть магазин чата' : 'Открыть настройки'}: ${title}`}
+                aria-label={`Открыть настройки: ${title}`}
                 onClick={(event) => {
                   rememberEntity(activeTab, entity);
                   prefetchEntitySettings(activeTab, entity.id);
-                  handleEntityNavigation(event, entity, index, 'settings', shopRoute);
+                  handleEntityNavigation(event, entity, index, 'settings', settingsRoute);
                 }}
                 onPointerEnter={(event) => {
                   if (shouldPrefetchFromPointerEvent(event)) {
@@ -1529,20 +1521,8 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
                   }
                 }}
               >
-                {activeTab === 'chat' ? (
-                  <svg viewBox="0 0 24 24" fill="none" aria-hidden focusable="false">
-                    <path
-                      d="M4 10v10h16V10M3 10l2-6h14l2 6M3 10c0 3 4.5 3 4.5 0 0 3 4.5 3 4.5 0 0 3 4.5 3 4.5 0 0 3 4.5 3 4.5 0M9 20v-6h6v6"
-                      stroke="currentColor"
-                      strokeWidth="1.6"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : (
-                  <SettingsGlyph aria-hidden focusable="false" />
-                )}
-                <span>{activeTab === 'chat' ? 'Магазин' : 'Настройки'}</span>
+                <SettingsGlyph aria-hidden focusable="false" />
+                <span>Настройки</span>
               </Link>
               <Link
                 to={statisticsRoute}
