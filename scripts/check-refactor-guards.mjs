@@ -57,7 +57,7 @@ const guardedFiles = [
   },
   {
     path: 'apps/api/src/moderation/private-control.service.legacy.ts',
-    maxLines: 9518,
+    maxLines: 9273,
     targetLines: 9000,
     reason:
       'PrivateControlService retains callback and session orchestration; settings search, summaries, value formatting and callback rows now live in pure rendering modules and must not return here.',
