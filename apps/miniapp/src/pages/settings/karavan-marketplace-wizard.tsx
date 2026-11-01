@@ -13,6 +13,7 @@ import {
 } from '../../lib/api/karavan-marketplace-client';
 import { saveMirroredItem } from '../../lib/native-storage';
 import { describeUserFacingError } from '../../lib/user-facing-error';
+import { openMaxBotLink } from '../../lib/max-bridge';
 import {
   StorefrontActions,
   useStorefrontBack,
@@ -27,6 +28,7 @@ import {
   type ShopSetupIntent,
 } from './karavan-shop/setup-intent';
 import { readShopDraftRecovery } from './karavan-shop/setup-recovery';
+import { ShopFormatPicker, shopFormatLabel } from './karavan-shop/format-picker';
 
 const defaultRules =
   'Продавец отвечает за описание, актуальность предложений и выполнение договорённостей. Размещение витрин — после проверки администратора. Запрещены товары и услуги, нарушающие закон и правила MAX.';
@@ -38,6 +40,7 @@ export default function KaravanMarketplaceWizard({
   intent,
   onSubmit,
   onCancel,
+  sellerBotUrl,
 }: {
   api: ApiTransport;
   chatId: string;
@@ -46,6 +49,7 @@ export default function KaravanMarketplaceWizard({
   intent: ShopSetupIntent;
   onSubmit: (input: KaravanMarketplaceSetup) => void;
   onCancel?: () => void;
+  sellerBotUrl?: string;
 }) {
   const storageKey = shopSetupDraftKey(actorId, chatId, intent);
   const creating = intent.kind === 'create';
@@ -53,6 +57,8 @@ export default function KaravanMarketplaceWizard({
   const freshDraft = (): ShopSetupDraft => ({
     mode: creating ? 'new' : 'existing',
     existingId: intent.kind === 'add_chats' ? intent.marketplaceId : null,
+    format: creating ? null : 'community',
+    administrationStoreId: null,
     name: chatTitle.slice(0, 120),
     rules: defaultRules,
     categories: [],
@@ -73,11 +79,16 @@ export default function KaravanMarketplaceWizard({
   const [visibleChats, setVisibleChats] = useState(20);
   const [notice, setNotice] = useState<string | null>(null);
   const [accepted, setAccepted] = useState(false);
+  const creatingStore = creating && draft.format === 'storefront' && !draft.administrationStoreId;
   const options = useQuery({
     queryKey: ['karavan-setup-options', actorId, chatId],
     queryFn: ({ signal }) => getKaravanMarketplaceSetupOptions(api, chatId, signal),
     retry: false,
   });
+  const administrationSupported =
+    Array.isArray(options.data?.administrationStores) &&
+    typeof options.data?.sellerTermsAccepted === 'boolean';
+  const administrationUnavailable = Boolean(options.data && !administrationSupported);
   const available = useInfiniteQuery({
     queryKey: ['karavan-available', actorId, chatId],
     enabled: choosingMarketplace,
@@ -103,7 +114,7 @@ export default function KaravanMarketplaceWizard({
   };
   const preview = useQuery({
     queryKey: ['karavan-setup-preview', actorId, chatId, previewInput],
-    enabled: hydrated && (creating || !!previewInput.marketplaceId),
+    enabled: hydrated && (creating ? !!draft.format : !!previewInput.marketplaceId),
     queryFn: () => previewKaravanMarketplace(api, chatId, previewInput),
     retry: false,
     refetchOnWindowFocus: false,
@@ -129,7 +140,13 @@ export default function KaravanMarketplaceWizard({
           setDraftRecoveryError(true);
           return;
         }
-        if (state.draft) setDraft(state.draft);
+        // FLAG: Existing drafts predate the format choice and remain community shops.
+        // Only a newly started draft asks for a format; recovery cannot change its intent.
+        if (state.draft)
+          setDraft({
+            ...state.draft,
+            format: state.draft.format === undefined ? 'community' : state.draft.format,
+          });
         setHydrated(true);
       })
       .catch(() => {
@@ -167,7 +184,15 @@ export default function KaravanMarketplaceWizard({
   const workspace = useStorefrontWorkspace();
   useStorefrontBack(back, !!onCancel && workspace?.page !== 'publications');
   async function submit() {
-    if (!preview.data || !accepted || submitting.current) return;
+    if (
+      !preview.data ||
+      !accepted ||
+      submitting.current ||
+      (creating && !draft.format) ||
+      (creating && draft.format === 'storefront' && !administrationSupported) ||
+      (creatingStore && options.data?.sellerTermsAccepted !== true)
+    )
+      return;
     setNotice(null);
     if (!restoreShopSetupDraft(JSON.stringify(draft), chatId, intent)) {
       setNotice('Настройки не соответствуют выбранному действию. Откройте его заново.');
@@ -223,6 +248,10 @@ export default function KaravanMarketplaceWizard({
           ? {
               create: {
                 name: draft.name,
+                format: draft.format ?? 'community',
+                ...(draft.format === 'storefront'
+                  ? { administrationStoreId: draft.administrationStoreId ?? null }
+                  : {}),
                 admissionPolicy: draft.admissionPolicy,
                 rules: {
                   text: draft.rules,
@@ -322,9 +351,45 @@ export default function KaravanMarketplaceWizard({
         Проверяем сохранённые настройки…
       </div>
     );
+  if (creating && !draft.format)
+    return (
+      <div className="karavan-module__wizard karavan-shop-format-intro">
+        <div>
+          <span className="karavan-shop-format-intro__eyebrow">Магазин вашего чата</span>
+          <h3>Каким будет ваш магазин?</h3>
+        </div>
+        <ShopFormatPicker
+          value={null}
+          onChange={(format) => change({ format })}
+          storefrontDisabled={administrationUnavailable}
+        />
+        {administrationUnavailable ? (
+          <div role="status">
+            <p>Настройка витрины пока недоступна.</p>
+            <button type="button" onClick={() => void options.refetch()}>
+              Проверить снова
+            </button>
+          </div>
+        ) : null}
+        {onCancel ? (
+          <StorefrontActions page={workspace?.page === 'chats' ? 'chats' : 'home'}>
+            <button type="button" onClick={back}>
+              Отмена
+            </button>
+          </StorefrontActions>
+        ) : null}
+      </div>
+    );
   return (
     <div className="karavan-module__wizard">
-      {creating ? <p>Витрины продавцов вашего чата в одном магазине.</p> : null}
+      {creating && draft.format ? (
+        <div className="karavan-shop-format-summary">
+          <strong>{shopFormatLabel(draft.format)}</strong>
+          <button type="button" disabled={checking} onClick={() => change({ format: null })}>
+            Изменить формат
+          </button>
+        </div>
+      ) : null}
       {notice ? (
         <p role="alert" className="karavan-module__notice">
           {notice}
@@ -375,7 +440,9 @@ export default function KaravanMarketplaceWizard({
         {creating ? (
           <>
             <label className="karavan-module__field">
-              <span>Название магазина</span>
+              <span>
+                {draft.format === 'storefront' ? 'Название витрины' : 'Название магазина'}
+              </span>
               <input
                 value={draft.name}
                 maxLength={120}
@@ -392,34 +459,84 @@ export default function KaravanMarketplaceWizard({
                 </button>
               </div>
             ) : null}
-            <details className="karavan-module__setup-rules">
-              <summary>
-                Продавцы:{' '}
-                {draft.admissionPolicy === 'applications' ? 'все желающие' : 'по приглашению'}
-              </summary>
+            {draft.format === 'storefront' && administrationUnavailable ? (
+              <div role="status">
+                <p>Настройка витрины пока недоступна.</p>
+                <button type="button" onClick={() => void options.refetch()}>
+                  Проверить снова
+                </button>
+              </div>
+            ) : draft.format === 'storefront' ? (
               <fieldset className="karavan-module__choices">
-                <legend>Кто может подать заявку</legend>
+                <legend>Витрина администрации</legend>
                 <label>
                   <input
                     type="radio"
-                    name="karavan-admission"
-                    checked={draft.admissionPolicy === 'applications'}
-                    onChange={() => change({ admissionPolicy: 'applications' })}
+                    name="administration-store"
+                    checked={!draft.administrationStoreId}
+                    onChange={() => change({ administrationStoreId: null })}
                   />
-                  Все желающие
+                  Создать новую витрину
                 </label>
-                <label>
-                  <input
-                    type="radio"
-                    name="karavan-admission"
-                    checked={draft.admissionPolicy === 'invitation'}
-                    onChange={() => change({ admissionPolicy: 'invitation' })}
-                  />
-                  По приглашению
-                </label>
+                {options.data?.administrationStores?.map((store) => (
+                  <label key={store.id}>
+                    <input
+                      type="radio"
+                      name="administration-store"
+                      checked={draft.administrationStoreId === store.id}
+                      onChange={() => change({ administrationStoreId: store.id })}
+                    />
+                    {store.name}
+                  </label>
+                ))}
               </fieldset>
-            </details>
-            <p>Витрины появляются после вашего одобрения.</p>
+            ) : (
+              <details className="karavan-module__setup-rules">
+                <summary>
+                  Продавцы:{' '}
+                  {draft.admissionPolicy === 'applications' ? 'все желающие' : 'по приглашению'}
+                </summary>
+                <fieldset className="karavan-module__choices">
+                  <legend>Кто может подать заявку</legend>
+                  <label>
+                    <input
+                      type="radio"
+                      name="karavan-admission"
+                      checked={draft.admissionPolicy === 'applications'}
+                      onChange={() => change({ admissionPolicy: 'applications' })}
+                    />
+                    Все желающие
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="karavan-admission"
+                      checked={draft.admissionPolicy === 'invitation'}
+                      onChange={() => change({ admissionPolicy: 'invitation' })}
+                    />
+                    По приглашению
+                  </label>
+                </fieldset>
+              </details>
+            )}
+            {creatingStore &&
+            administrationSupported &&
+            options.data?.sellerTermsAccepted === false ? (
+              <div className="karavan-module__notice" role="status">
+                <p>Примите условия продавца в Караване, чтобы создать витрину.</p>
+                {sellerBotUrl ? (
+                  <button type="button" onClick={() => openMaxBotLink(sellerBotUrl)}>
+                    Открыть Караван
+                  </button>
+                ) : null}
+                <button type="button" onClick={() => void options.refetch()}>
+                  Проверить снова
+                </button>
+              </div>
+            ) : null}
+            {draft.format === 'community' ? (
+              <p>Витрины появляются после вашего одобрения.</p>
+            ) : null}
             <details ref={rulesDetails} className="karavan-module__setup-rules">
               <summary>Категории и правила</summary>
               {options.data ? (
@@ -485,7 +602,9 @@ export default function KaravanMarketplaceWizard({
                 </fieldset>
               ) : null}
               <label className="karavan-module__field">
-                <span>Правила для продавцов</span>
+                <span>
+                  {draft.format === 'storefront' ? 'Правила размещения' : 'Правила для продавцов'}
+                </span>
                 <textarea
                   rows={5}
                   maxLength={12000}
@@ -635,7 +754,9 @@ export default function KaravanMarketplaceWizard({
                   checked={accepted}
                   onChange={(event) => setAccepted(event.target.checked)}
                 />
-                Подтверждаю выбранные чаты и правила магазина
+                {draft.format === 'storefront'
+                  ? 'Подтверждаю подключение витрины и правила размещения'
+                  : 'Подтверждаю выбранные чаты и правила магазина'}
               </label>
             </fieldset>
           </>
@@ -653,6 +774,8 @@ export default function KaravanMarketplaceWizard({
               preview.isError ||
               (!creating && (!previewInput.marketplaceId || !target)) ||
               (creating && !options.data) ||
+              (creating && draft.format === 'storefront' && !administrationSupported) ||
+              (creatingStore && options.data?.sellerTermsAccepted !== true) ||
               (intent.kind === 'add_chats' && draft.chatIds.length < 2)
             }
             onClick={() => void submit()}
@@ -660,7 +783,9 @@ export default function KaravanMarketplaceWizard({
             {checking || preview.isFetching
               ? 'Проверяем…'
               : creating
-                ? 'Создать магазин'
+                ? draft.format === 'storefront'
+                  ? 'Создать витрину чата'
+                  : 'Создать магазин'
                 : intent.kind === 'add_chats'
                   ? 'Подключить чаты'
                   : intent.kind === 'replace'

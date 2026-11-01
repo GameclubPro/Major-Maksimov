@@ -1,0 +1,406 @@
+{
+  "schemaVersion": 1,
+  "creates": [
+    {
+      "id": "legacy-omitted-format",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": []
+        }
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": [],
+          "categoryOrder": []
+        },
+        "networkId": null,
+        "description": null,
+        "admissionPolicy": "applications"
+      },
+      "canonical": "{\"admissionPolicy\":\"applications\",\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"description\":null,\"name\":\"Магазин чата\",\"networkId\":null,\"rules\":{\"allowedCategoryIds\":[\"services\"],\"allowedSubcategoryIds\":[],\"categoryOrder\":[],\"text\":\"Правила магазина\"}}",
+      "hash": "16eb04df019060d40bb6ac9c96b06571735c7a5c566a8a1d5a9b5066925b81b2"
+    },
+    {
+      "id": "community",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": []
+        },
+        "format": "community",
+        "administrationStoreId": null
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": [],
+          "categoryOrder": []
+        },
+        "networkId": null,
+        "description": null,
+        "admissionPolicy": "applications",
+        "format": "community",
+        "administrationStoreId": null
+      },
+      "canonical": "{\"administrationStoreId\":null,\"admissionPolicy\":\"applications\",\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"description\":null,\"format\":\"community\",\"name\":\"Магазин чата\",\"networkId\":null,\"rules\":{\"allowedCategoryIds\":[\"services\"],\"allowedSubcategoryIds\":[],\"categoryOrder\":[],\"text\":\"Правила магазина\"}}",
+      "hash": "c0c1d823921939e4106819143ae15415b14af8924ca1cfce4c53b4287959b261"
+    },
+    {
+      "id": "storefront",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": []
+        },
+        "format": "storefront",
+        "administrationStoreId": null
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "name": "Магазин чата",
+        "rules": {
+          "text": "Правила магазина",
+          "allowedCategoryIds": ["services"],
+          "allowedSubcategoryIds": [],
+          "categoryOrder": []
+        },
+        "networkId": null,
+        "description": null,
+        "admissionPolicy": "applications",
+        "format": "storefront",
+        "administrationStoreId": null
+      },
+      "canonical": "{\"administrationStoreId\":null,\"admissionPolicy\":\"applications\",\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"description\":null,\"format\":\"storefront\",\"name\":\"Магазин чата\",\"networkId\":null,\"rules\":{\"allowedCategoryIds\":[\"services\"],\"allowedSubcategoryIds\":[],\"categoryOrder\":[],\"text\":\"Правила магазина\"}}",
+      "hash": "53b3806dbd1e954ef65bb7a3ed819d335742ebdbedbe01dc46cbbf5f2da0f6b0"
+    }
+  ],
+  "commands": [
+    {
+      "id": "administration_store",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "administration_store"
+        }
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "administration_store"
+        }
+      },
+      "canonical": "{\"chatId\":\"-9007199254740993\",\"command\":{\"operation\":\"administration_store\"},\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"expectedBindingGeneration\":7,\"marketplaceId\":\"22222222-2222-4222-8222-222222222222\"}",
+      "hash": "b52657e8803f5fa40be99a718ee6778c3a5a796c0a421e24814af93228162278"
+    },
+    {
+      "id": "format_preview",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "format_preview",
+          "input": {
+            "expectedRevision": 7,
+            "format": "community"
+          }
+        }
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "format_preview",
+          "input": {
+            "expectedRevision": 7,
+            "format": "community"
+          }
+        }
+      },
+      "canonical": "{\"chatId\":\"-9007199254740993\",\"command\":{\"input\":{\"expectedRevision\":7,\"format\":\"community\"},\"operation\":\"format_preview\"},\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"expectedBindingGeneration\":7,\"marketplaceId\":\"22222222-2222-4222-8222-222222222222\"}",
+      "hash": "a452a9bce71d28a344e5da17c1608c2a2ff7ad177096819af40daf24893af595"
+    },
+    {
+      "id": "format_update",
+      "input": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "format_update",
+          "input": {
+            "commandId": "11111111-1111-4111-8111-111111111111",
+            "expectedRevision": 7,
+            "format": "community",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "parsed": {
+        "commandId": "11111111-1111-4111-8111-111111111111",
+        "chatId": "-9007199254740993",
+        "marketplaceId": "22222222-2222-4222-8222-222222222222",
+        "expectedBindingGeneration": 7,
+        "command": {
+          "operation": "format_update",
+          "input": {
+            "commandId": "11111111-1111-4111-8111-111111111111",
+            "expectedRevision": 7,
+            "format": "community",
+            "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "canonical": "{\"chatId\":\"-9007199254740993\",\"command\":{\"input\":{\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"expectedRevision\":7,\"fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"format\":\"community\"},\"operation\":\"format_update\"},\"commandId\":\"11111111-1111-4111-8111-111111111111\",\"expectedBindingGeneration\":7,\"marketplaceId\":\"22222222-2222-4222-8222-222222222222\"}",
+      "hash": "a05c0b905c9ce59f33bbd31aff4af4b2fc610f43b49cef7b9b84ef50a37e15e1"
+    }
+  ],
+  "responses": [
+    {
+      "id": "direct-administration-module",
+      "schema": "module",
+      "value": {
+        "marketplace": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "networkId": "33333333-3333-4333-8333-333333333333",
+          "publicSlug": "chat-shop",
+          "name": "Магазин чата",
+          "description": null,
+          "kind": "chat",
+          "format": "storefront",
+          "administrationStoreId": "44444444-4444-4444-8444-444444444444",
+          "formatRevision": 3,
+          "status": "active",
+          "admissionPolicy": "applications",
+          "logoImageUrl": null,
+          "coverImageUrl": null,
+          "editRevision": 7,
+          "policyRevision": 1,
+          "orderRevision": 1,
+          "visibilityRevision": 1
+        },
+        "binding": {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "chatId": "-9007199254740993",
+          "chatTitle": "Чат",
+          "state": "verified",
+          "generation": 7,
+          "revision": 1,
+          "verifiedAt": "2026-11-01T00:00:00.000Z"
+        },
+        "permissions": ["manage_marketplace"],
+        "counts": {
+          "listings": 1,
+          "readyListings": 1,
+          "approvedListings": 1,
+          "pendingApplications": 0,
+          "chats": 1
+        },
+        "canManage": true,
+        "access": {
+          "reason": "allowed",
+          "canRecover": false
+        },
+        "administrationStore": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "slug": "chat-store",
+          "name": "Витрина чата",
+          "status": "ACTIVE",
+          "editRevision": 2
+        },
+        "buyerUrl": "https://max.ru/fixture_buyer?startapp=m_chat-shop__s_chat-store",
+        "previewUrl": null
+      }
+    },
+    {
+      "id": "blocked-administration-module",
+      "schema": "module",
+      "value": {
+        "marketplace": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "networkId": "33333333-3333-4333-8333-333333333333",
+          "publicSlug": "chat-shop",
+          "name": "Магазин чата",
+          "description": null,
+          "kind": "chat",
+          "format": "storefront",
+          "administrationStoreId": "44444444-4444-4444-8444-444444444444",
+          "formatRevision": 3,
+          "status": "active",
+          "admissionPolicy": "applications",
+          "logoImageUrl": null,
+          "coverImageUrl": null,
+          "editRevision": 7,
+          "policyRevision": 1,
+          "orderRevision": 1,
+          "visibilityRevision": 1
+        },
+        "binding": {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "chatId": "-9007199254740993",
+          "chatTitle": "Чат",
+          "state": "verified",
+          "generation": 7,
+          "revision": 1,
+          "verifiedAt": "2026-11-01T00:00:00.000Z"
+        },
+        "permissions": ["manage_marketplace"],
+        "counts": {
+          "listings": 1,
+          "readyListings": 0,
+          "approvedListings": 1,
+          "pendingApplications": 0,
+          "chats": 1
+        },
+        "canManage": true,
+        "access": {
+          "reason": "allowed",
+          "canRecover": false
+        },
+        "administrationStore": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "slug": "chat-store",
+          "name": "Витрина чата",
+          "status": "BLOCKED",
+          "editRevision": 2
+        },
+        "buyerUrl": null,
+        "previewUrl": null
+      }
+    },
+    {
+      "id": "direct-administration-publication",
+      "schema": "resolve",
+      "value": {
+        "status": "published",
+        "marketplace": {
+          "id": "22222222-2222-4222-8222-222222222222",
+          "networkId": "33333333-3333-4333-8333-333333333333",
+          "publicSlug": "chat-shop",
+          "name": "Магазин чата",
+          "description": null,
+          "kind": "chat",
+          "format": "storefront",
+          "administrationStoreId": "44444444-4444-4444-8444-444444444444",
+          "formatRevision": 3,
+          "status": "active",
+          "admissionPolicy": "applications",
+          "logoImageUrl": null,
+          "coverImageUrl": null,
+          "editRevision": 7,
+          "policyRevision": 1,
+          "orderRevision": 1,
+          "visibilityRevision": 1
+        },
+        "binding": {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "generation": 7
+        },
+        "stores": [
+          {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "slug": "chat-store",
+            "name": "Витрина чата",
+            "url": "https://max.ru/fixture_buyer?startapp=m_chat-shop__s_chat-store",
+            "inviteUrl": "https://max.ru/fixture_buyer?startapp=m_chat-shop__s_chat-store"
+          }
+        ]
+      }
+    },
+    {
+      "id": "administration-management",
+      "schema": "management",
+      "value": {
+        "operation": "administration_store",
+        "data": {
+          "store": {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "slug": "chat-store",
+            "name": "Витрина чата",
+            "status": "ACTIVE",
+            "editRevision": 2
+          },
+          "buyerUrl": "https://max.ru/fixture_buyer?startapp=m_chat-shop__s_chat-store",
+          "sellerUrl": null,
+          "permissions": [
+            "manage_store",
+            "manage_products",
+            "manage_orders",
+            "manage_conversations"
+          ]
+        }
+      }
+    },
+    {
+      "id": "format-impact",
+      "schema": "management",
+      "value": {
+        "operation": "format_preview",
+        "data": {
+          "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "expectedRevision": 7,
+          "format": "community",
+          "administrationStoreId": null,
+          "affectedStores": 2,
+          "affectedChats": 1,
+          "pendingApplications": 1
+        }
+      }
+    },
+    {
+      "id": "format-updated-paused",
+      "schema": "management",
+      "value": {
+        "operation": "format_update",
+        "data": {
+          "marketplace": {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "networkId": "33333333-3333-4333-8333-333333333333",
+            "publicSlug": "chat-shop",
+            "name": "Магазин чата",
+            "description": null,
+            "kind": "chat",
+            "format": "community",
+            "administrationStoreId": null,
+            "formatRevision": 4,
+            "status": "paused",
+            "admissionPolicy": "applications",
+            "logoImageUrl": null,
+            "coverImageUrl": null,
+            "editRevision": 8,
+            "policyRevision": 1,
+            "orderRevision": 1,
+            "visibilityRevision": 1
+          }
+        }
+      }
+    }
+  ]
+}

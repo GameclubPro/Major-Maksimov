@@ -333,6 +333,133 @@
   body[data-miniapp-profile='moderation'] .karavan-shop__menu {
     gap: 0;
   }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format-intro {
+    gap: 24px;
+    padding-block: 8px;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format-intro__eyebrow {
+    display: block;
+    margin-bottom: 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-module .karavan-shop-format-intro h3 {
+    max-width: 280px;
+    font-size: clamp(28px, 7vw, 34px);
+    line-height: 1.12;
+    letter-spacing: -0.045em;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format {
+    --shop-format-card-shadow: 0 8px 24px color-mix(in srgb, var(--text-primary) 4%, transparent);
+    --shop-format-icon-surface: color-mix(in srgb, var(--karavan-brand) 11%, var(--color-surface));
+    --shop-format-destination-text: color-mix(
+      in srgb,
+      var(--karavan-brand) 70%,
+      var(--text-primary)
+    );
+    display: grid;
+    gap: 14px;
+    min-width: 0;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__option {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 18px;
+    gap: 12px;
+    align-items: start;
+    min-width: 0;
+    width: 100%;
+    padding: 20px 16px;
+    border: 1px solid var(--color-border);
+    border-radius: 20px;
+    background: var(--color-surface);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    box-shadow: var(--shop-format-card-shadow);
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__option[aria-pressed='true'] {
+    border-color: var(--karavan-brand);
+    background: var(--shop-selected-surface);
+    box-shadow: inset 0 0 0 1px var(--karavan-brand);
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    color: var(--karavan-brand);
+    border-radius: 14px;
+    background: var(--shop-format-icon-surface);
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__icon svg {
+    width: 23px;
+    height: 23px;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__copy {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__copy strong {
+    color: var(--text-primary);
+    font-size: 16px;
+    line-height: 1.3;
+    font-weight: 750;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__copy small {
+    color: var(--shop-format-destination-text);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format__radio {
+    width: 18px;
+    height: 18px;
+    margin-top: 3px;
+    border: 1px solid var(--color-border);
+    border-radius: 50%;
+  }
+  body[data-miniapp-profile='moderation']
+    .karavan-shop-format__option[aria-pressed='true']
+    .karavan-shop-format__radio {
+    border: 5px solid var(--karavan-brand);
+    background: var(--color-surface);
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format-summary {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop__format-label {
+    color: var(--shop-hero-muted);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop__management-actions {
+    display: grid;
+    min-width: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format-settings,
+  body[data-miniapp-profile='moderation'] .karavan-shop__format-impact {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+  }
+  body[data-miniapp-profile='moderation'] .karavan-shop-format-settings {
+    padding-block: 18px;
+    border-block: 1px solid var(--color-border);
+  }
   body[data-miniapp-profile='moderation']
     .karavan-module
     .karavan-shop__menu

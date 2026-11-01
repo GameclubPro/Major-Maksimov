@@ -8,7 +8,7 @@ import {
 } from './assert-karavan-marketplace-source.mjs';
 const root = resolve(import.meta.dirname, '../..');
 const read = (path) => readFileSync(resolve(root, path), 'utf8');
-test('current source retains scoped publication and monotonic enrollment readers', () => {
+test('current source retains scoped publication, format epochs, fixed targets and enrollment readers', () => {
   assert.doesNotThrow(() => assertKaravanMarketplaceSource('a'.repeat(40), read));
 });
 for (const [path, markers] of KARAVAN_MARKETPLACE_SOURCE_CHECKS)
@@ -19,7 +19,10 @@ for (const [path, markers] of KARAVAN_MARKETPLACE_SOURCE_CHECKS)
           assertKaravanMarketplaceSource('a'.repeat(40), (sourcePath) =>
             sourcePath === path ? read(path).replaceAll(marker, 'missing_guard') : read(sourcePath),
           ),
-        /lacks permanent Karavan/u,
+        (error) =>
+          error instanceof Error &&
+          error.message.includes('lacks permanent Karavan') &&
+          error.message.endsWith(path),
       );
     });
 for (const file of [

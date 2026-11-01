@@ -17,6 +17,7 @@ import {
   karavanPublicationChoiceSavedSchema,
   karavanMarketplaceResolveSchema,
   karavanMarketplaceResolveResultSchema,
+  karavanShopFormatSchema,
   type KaravanMarketplaceResolveResult,
 } from '@maxim/contracts/karavan-marketplace';
 import type { MaxActionJob } from '../../max/max-client.service';
@@ -35,6 +36,8 @@ export const karavanScopedPublicationSchema = z
     botId: z.string(),
     marketplaceId: z.string().uuid(),
     bindingGeneration: z.number().int().positive(),
+    format: karavanShopFormatSchema.optional(),
+    formatRevision: z.number().int().positive().optional(),
     storeId: z.string().uuid().nullable(),
     url: z.string().url(),
     sourceFingerprint: z.string().length(64),
@@ -161,11 +164,21 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
       result.marketplace.kind !== 'chat'
     )
       throw new ConflictException('Магазин недоступен.');
+    const format = result.marketplace.format ?? 'community';
+    const formatRevision = result.marketplace.formatRevision ?? 1;
+    // FLAG: A shared administration storefront never falls back to a catalog or a personal choice.
+    if (format === 'storefront' && result.status !== 'published') {
+      if (result.status === 'choose_store')
+        throw new ConflictException('Общая витрина не подтверждена.');
+      return { result, publication: null, sourceFingerprint: issued.sourceFingerprint };
+    }
     if (result.status === 'choose_store')
       return { result, publication: null, sourceFingerprint: issued.sourceFingerprint };
     const store = result.status === 'published' ? result.stores[0] : null;
     if (result.status === 'published' && (result.stores.length !== 1 || !store))
       throw new ConflictException('Витрина не определена.');
+    if (format === 'storefront' && result.marketplace.administrationStoreId !== store?.id)
+      throw new ConflictException('Общая витрина изменилась.');
     const url = this.buyerUrl(result.marketplace.publicSlug, store?.slug);
     if (store && store.url !== url)
       throw new ConflictException('Адрес витрины не соответствует магазину.');
@@ -173,6 +186,8 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
       ...input,
       marketplaceId: result.marketplace.id,
       bindingGeneration: result.binding.generation,
+      format,
+      formatRevision,
       storeId: store?.id ?? null,
       url,
       sourceFingerprint: issued.sourceFingerprint,
@@ -181,8 +196,10 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
       expected &&
       (expected.marketplaceId !== publication.marketplaceId ||
         expected.bindingGeneration !== publication.bindingGeneration ||
-        (expected.storeId !== null &&
-          (expected.storeId !== publication.storeId || expected.url !== publication.url)))
+        (expected.format ?? 'community') !== format ||
+        (expected.formatRevision ?? 1) !== formatRevision ||
+        expected.storeId !== publication.storeId ||
+        expected.url !== publication.url)
     )
       throw new ConflictException('Привязка или витрина изменились.');
     return { result, publication, sourceFingerprint: issued.sourceFingerprint };
@@ -363,7 +380,11 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
     if (!result.publication) throw new ConflictException('Чат отключён от магазина.');
     // FLAG: The persisted button target is immutable: revalidation cannot silently retarget a queued send.
     const buttons = job.options?.buttons?.flat() ?? [];
-    if (!buttons.some((button) => 'url' in button && button.url === publication.url))
+    if (
+      !buttons.some((button) => 'url' in button && button.url === publication.url) ||
+      (publication.format === 'storefront' &&
+        (buttons.length !== 1 || !('url' in buttons[0]) || buttons[0].url !== publication.url))
+    )
       throw new ConflictException('Кнопка магазина изменилась.');
   }
 }

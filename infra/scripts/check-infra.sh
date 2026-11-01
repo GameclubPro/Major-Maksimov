@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+infra_test_args=()
+case "${MAXIM_INFRA_TEST_SHARD-}" in
+  '') ;;
+  1/2|2/2) infra_test_args+=("--test-shard=${MAXIM_INFRA_TEST_SHARD}") ;;
+  *) echo "Invalid MAXIM_INFRA_TEST_SHARD; expected 1/2 or 2/2." >&2; exit 2 ;;
+esac
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -44,4 +51,4 @@ if [[ -n "${MAXIM_TEST_POSTGRES_URL:-}" ]]; then
 fi
 
 # FLAG: Each test file may create nested native/CLI processes; bound file workers too.
-node --test --test-concurrency=2 infra/scripts/*.test.mjs
+node --test --test-concurrency=2 "${infra_test_args[@]}" infra/scripts/*.test.mjs

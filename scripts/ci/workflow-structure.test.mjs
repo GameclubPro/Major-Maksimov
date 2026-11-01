@@ -9,6 +9,44 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+function assertBoundedHttpsAptPolicy(run) {
+  for (const path of [
+    '/etc/apt/apt-mirrors.txt',
+    '/etc/apt/sources.list',
+    '/etc/apt/sources.list.d/ubuntu.sources',
+  ])
+    assert.ok(run.includes(path), `Missing Ubuntu apt source: ${path}`);
+  for (const policy of [
+    'Acquire::Languages "none";',
+    'Acquire::http::Timeout "15";',
+    'Acquire::https::Timeout "15";',
+    'Acquire::Retries "1";',
+    'APT::Update::Error-Mode "any";',
+  ])
+    assert.ok(run.includes(policy), `Missing bounded apt policy: ${policy}`);
+  const expression = run.match(/sudo sed -i -E '([^']+)'/u)?.[1];
+  assert.ok(expression, 'Expected a literal, reviewable apt source rewrite');
+  const input = [
+    'http://azure.archive.ubuntu.com/ubuntu/',
+    'https://azure.archive.ubuntu.com/ubuntu/',
+    'deb http://archive.ubuntu.com/ubuntu noble main',
+    'URIs: http://security.ubuntu.com/ubuntu/',
+    'URIs: https://archive.ubuntu.com/ubuntu/',
+    'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
+    'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
+  ].join('\n');
+  const expected = [
+    'https://archive.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    'deb https://archive.ubuntu.com/ubuntu noble main',
+    'URIs: https://security.ubuntu.com/ubuntu/',
+    'URIs: https://archive.ubuntu.com/ubuntu/',
+    'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
+    'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
+  ].join('\n');
+  assert.equal(execFileSync('sed', ['-E', expression], { input, encoding: 'utf8' }), expected);
+}
+
 test('browser setup avoids slow HTTP mirror retries in both browser lanes', () => {
   const jobs = parse(workflow).jobs;
   for (const id of ['miniapp', 'admin']) {
@@ -18,32 +56,59 @@ test('browser setup avoids slow HTTP mirror retries in both browser lanes', () =
     const setup = steps[index];
     assert.equal(setup.if, undefined);
     assert.equal(setup['continue-on-error'], undefined);
-    assert.match(setup.run, /Acquire::Languages "none"/u);
-    assert.match(setup.run, /APT::Update::Error-Mode "any"/u);
+    assertBoundedHttpsAptPolicy(setup.run);
     assert.equal(steps[index + 1].run, 'npx playwright install --with-deps chromium');
     assert.equal(steps[index + 1]['timeout-minutes'], 3);
-    const expression = setup.run.match(/sudo sed -i -E '([^']+)'/u)?.[1];
-    assert.ok(expression, 'Expected a literal, reviewable apt source rewrite');
-    const input = [
-      'http://azure.archive.ubuntu.com/ubuntu/',
-      'https://azure.archive.ubuntu.com/ubuntu/',
-      'deb http://archive.ubuntu.com/ubuntu noble main',
-      'URIs: http://security.ubuntu.com/ubuntu/',
-      'URIs: https://archive.ubuntu.com/ubuntu/',
-      'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
-      'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
-    ].join('\n');
-    const expected = [
-      'https://archive.ubuntu.com/ubuntu/',
-      'https://archive.ubuntu.com/ubuntu/',
-      'deb https://archive.ubuntu.com/ubuntu noble main',
-      'URIs: https://security.ubuntu.com/ubuntu/',
-      'URIs: https://archive.ubuntu.com/ubuntu/',
-      'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
-      'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
-    ].join('\n');
-    assert.equal(execFileSync('sed', ['-E', expression], { input, encoding: 'utf8' }), expected);
   }
+});
+
+test('owned Redis setup bounds HTTPS apt installation in every workflow caller', () => {
+  const jobs = parse(workflow).jobs;
+  const callers = [
+    [
+      'static',
+      'Prepare private Redis infrastructure fixtures',
+      "matrix.part == 'infra'",
+      'npm run check:infra',
+    ],
+    [
+      'postgres-races',
+      'Install owned Redis process for crash and RDB restore acceptance',
+      undefined,
+      'npm ci --no-audit',
+    ],
+  ];
+  for (const [id, name, condition, nextRun] of callers) {
+    const steps = jobs[id].steps;
+    const setup = steps.find((step) => step.name === name);
+    assert.ok(setup, `${id} must install its owned Redis process`);
+    assert.equal(setup.if, condition);
+    assert.equal(setup['continue-on-error'], undefined);
+    assert.equal(setup['timeout-minutes'], 3);
+    assertBoundedHttpsAptPolicy(setup.run);
+    assert.match(setup.run, /if ! command -v redis-server >\/dev\/null; then/u);
+    const update = setup.run.indexOf('sudo apt-get update');
+    const install = setup.run.indexOf(
+      'sudo apt-get install -y --no-install-recommends redis-server',
+    );
+    assert.ok(update > setup.run.indexOf('APT::Update::Error-Mode'), 'Prepare apt before update');
+    assert.ok(install > update, 'Install Redis after the bounded apt update');
+    assert.ok(steps.indexOf(setup) < steps.findIndex((step) => step.run === nextRun));
+  }
+  const explicitAptCallers = [];
+  for (const file of readdirSync(resolve(root, '.github/workflows')).filter((file) =>
+    /\.ya?ml$/u.test(file),
+  )) {
+    const parsed = parse(readFileSync(resolve(root, '.github/workflows', file), 'utf8'));
+    for (const [id, job] of Object.entries(parsed.jobs))
+      for (const step of job.steps ?? [])
+        if (typeof step.run === 'string' && /\bapt-get\b/u.test(step.run))
+          explicitAptCallers.push(`${file}:${id}:${step.name}`);
+  }
+  assert.deepEqual(
+    explicitAptCallers.sort(),
+    callers.map(([id, name]) => `ci.yml:${id}:${name}`).sort(),
+  );
 });
 
 function jobBody(id, nextId) {
@@ -53,6 +118,44 @@ function jobBody(id, nextId) {
   assert.notEqual(end, -1, `Missing CI job following ${id}: ${nextId}`);
   return workflow.slice(start, end);
 }
+
+test('chat shop formats run the full mobile matrix in a blocking miniapp shard', () => {
+  const config = parse(workflow);
+  const miniapp = config.jobs.miniapp;
+  assert.equal(miniapp['timeout-minutes'], 15);
+  assert.equal(miniapp['continue-on-error'], undefined);
+  assert.deepEqual(miniapp.strategy, { 'fail-fast': false, matrix: { shard: ['1/2', '2/2'] } });
+  const run = 'node apps/miniapp/test/karavan-shop-formats.browser.mjs';
+  const selected = miniapp.steps.filter((step) => step.run === run);
+  assert.equal(selected.length, 1, 'Shop formats must run once without a shell or profile filter');
+  const browser = selected[0];
+  assert.equal(browser.if, "matrix.shard == '2/2'");
+  assert.equal(browser['continue-on-error'], undefined);
+  assert.ok(statSync(resolve(root, 'apps/miniapp/test/karavan-shop-formats.browser.mjs')).isFile());
+  for (const env of [config.env, miniapp.env, browser.env])
+    for (const key of ['SHOP_FORMAT_ENGINE', 'SHOP_FORMAT_THEME', 'SHOP_FORMAT_ONLY_CHOICE'])
+      assert.equal(env?.[key], undefined, `CI cannot narrow the full shop format matrix: ${key}`);
+  const webkit = miniapp.steps.find(
+    (step) => step.run === 'npx playwright install --with-deps webkit',
+  );
+  assert.ok(webkit, 'The shop format matrix needs the WebKit browser and host dependencies');
+  assert.equal(webkit.if, browser.if);
+  assert.equal(webkit['continue-on-error'], undefined);
+  assert.equal(webkit['timeout-minutes'], 3);
+  const contracts = miniapp.steps.find((step) => step.name === 'Build browser contracts');
+  assert.equal(contracts.run, 'npm run build --workspace @maxim/contracts');
+  assert.equal(contracts.if, browser.if);
+  assert.ok(
+    miniapp.steps.indexOf(webkit) >
+      miniapp.steps.findIndex((step) => step.name === 'Use HTTPS for browser dependencies'),
+  );
+  assert.ok(miniapp.steps.indexOf(webkit) < miniapp.steps.indexOf(browser));
+  assert.ok(miniapp.steps.indexOf(contracts) < miniapp.steps.indexOf(browser));
+  assert.ok(
+    config.jobs.required.needs.includes('miniapp'),
+    'Required must retain both miniapp shards',
+  );
+});
 
 test('keeps the functional API lane separate from the median commercial benchmark', () => {
   const api = jobBody('api', 'postgres-races');
@@ -73,10 +176,28 @@ test('requires duplicate, interval, Publisher, OCR, retention and workstation Re
   assert.match(api, /MAXIM_TEST_REDIS_URL: redis:\/\/127\.0\.0\.1:6379/u);
   assert.match(
     api,
-    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
+    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
   );
   assert.doesNotMatch(api, /continue-on-error|^ {6,}(?:- )?if:/mu);
   assert.equal(parse(workflow).jobs.api.if, "needs.impact.outputs.api == 'true'");
+});
+
+test('selects Publisher auto-reply native Redis suites without widening their filenames', () => {
+  const steps = parse(workflow).jobs.api.steps;
+  const step = steps.find((value) => value.env?.MAXIM_TEST_REDIS_URL);
+  const pattern = step?.run.match(/^npm test --workspace @maxim\/api -- '([^']+)'$/u)?.[1];
+  assert.ok(pattern, 'Expected the public Redis test command');
+  const selection = new RegExp(pattern, 'u');
+  for (const family of ['backlog-quota', 'flood-gate']) {
+    const path = resolve(
+      root,
+      `apps/api/src/publisher/publisher-auto-reply-${family}.redis-integration.spec.ts`,
+    );
+    assert.ok(statSync(path).isFile(), `Missing native Publisher test file: ${family}`);
+    assert.ok(selection.test(path), `Missing native Publisher suite: ${family}`);
+    assert.equal(selection.test(`${path}.disabled`), false);
+    assert.equal(selection.test(path.replace('.redis-integration', '')), false);
+  }
 });
 
 test('requires traffic revision and activation checks against local PostgreSQL', () => {

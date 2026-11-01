@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
@@ -70,7 +72,8 @@ test('Static gives core and infrastructure independent bounded jobs without drop
   assert.deepEqual(job.strategy, {
     'fail-fast': false,
     matrix: {
-      part: '${{ fromJSON(needs.impact.outputs.plan).mode == \'full\' && fromJSON(\'["core","infra"]\') || fromJSON(\'["core"]\') }}',
+      include:
+        '${{ fromJSON(needs.impact.outputs.plan).mode == \'full\' && fromJSON(\'[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]\') || fromJSON(\'[{"part":"core"}]\') }}',
     },
   });
   assert.equal(job['timeout-minutes'], 12);
@@ -83,7 +86,8 @@ test('CI core and standalone infrastructure select the full inventory exactly on
   assert.match(infra, /^set -euo pipefail$/mu);
   const commands = infra.split(/\r?\n/u).filter((line) => /^node --test(?: |$)/u.test(line));
   assert.equal(commands.length, 1, 'Expected one standalone infrastructure test invocation');
-  const infraGlobs = parseTestGlobs(commands[0]);
+  assert.equal(commands[0], testPrefix + '"${infra_test_args[@]}" infra/scripts/*.test.mjs');
+  const infraGlobs = parseTestGlobs(commands[0].replace(' "${infra_test_args[@]}"', ''));
   assert.deepEqual(infraGlobs, ['infra/scripts/*.test.mjs']);
   const full = expandTestGlobs(parseTestGlobs(scripts['test:agent-tools']));
   const core = expandTestGlobs(parseTestGlobs(scripts['test:agent-tools:core']));
@@ -96,6 +100,82 @@ test('CI core and standalone infrastructure select the full inventory exactly on
   );
   assert.deepEqual([...core, ...infrastructure].sort(), full);
   assert.ok(core.includes('scripts/ci/static-coverage.test.mjs'), 'This guard must run in CI');
+});
+
+test('infrastructure shard selection fails closed before preflight and preserves Node partitions', () => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'maxim-infra-shard-'));
+  try {
+    const script = resolve(root, 'infra/scripts/check-infra.sh');
+    for (const shard of ['0/2', '3/2', '1/3', '1', '1/2 extra', '../1/2']) {
+      const invalid = spawnSync('/bin/bash', [script], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: directory, MAXIM_INFRA_TEST_SHARD: shard },
+        timeout: 1000,
+      });
+      assert.equal(
+        invalid.status,
+        2,
+        `Reject unsupported shard before external commands: ${shard}`,
+      );
+      assert.match(invalid.stderr, /Invalid MAXIM_INFRA_TEST_SHARD/u);
+      assert.doesNotMatch(invalid.stderr, /command not found/u);
+    }
+    const files = Array.from({ length: 8 }, (_, index) => `fixture-${index}.test.mjs`);
+    for (const file of files)
+      writeFileSync(resolve(directory, file), `console.log('SHARD_FIXTURE:${file}');\n`);
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const selected = (shard) => {
+      const run = spawnSync(
+        process.execPath,
+        [
+          '--test',
+          '--test-concurrency=2',
+          '--test-reporter=tap',
+          ...(shard ? [`--test-shard=${shard}`] : []),
+          ...files,
+        ],
+        {
+          cwd: directory,
+          encoding: 'utf8',
+          env,
+          timeout: 10000,
+        },
+      );
+      assert.equal(run.status, 0, run.stderr);
+      return [...run.stdout.matchAll(/SHARD_FIXTURE:(fixture-\d\.test\.mjs)/gu)]
+        .map((match) => match[1])
+        .sort();
+    };
+    const full = selected();
+    const first = selected('1/2');
+    const second = selected('2/2');
+    assert.deepEqual(full, files);
+    assert.equal(first.length, 4);
+    assert.equal(second.length, 4);
+    assert.deepEqual(
+      first.filter((file) => second.includes(file)),
+      [],
+    );
+    assert.deepEqual([...first, ...second].sort(), full);
+    const infra = read('infra/scripts/check-infra.sh');
+    assert.match(infra, /infra_test_args=\(\)/u);
+    assert.match(
+      infra,
+      /1\/2\|2\/2\) infra_test_args\+=\("--test-shard=\$\{MAXIM_INFRA_TEST_SHARD\}"\)/u,
+    );
+    assert.ok(
+      infra.indexOf('Invalid MAXIM_INFRA_TEST_SHARD') <
+        infra.indexOf('generate-deploy-impact-bash.mjs'),
+    );
+    const steps = parse(workflow).jobs.static.steps;
+    assert.equal(
+      steps.find((step) => step.run === 'npm run check:infra').env.MAXIM_INFRA_TEST_SHARD,
+      '${{ matrix.shard }}',
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('local selection covers core tooling and adds the complete selected infrastructure once', () => {
@@ -159,7 +239,10 @@ test('Static runs mandatory ShellCheck once through the infrastructure owner', (
 
 test('Static keeps its budget, core checks and infrastructure coverage for full plans', () => {
   const job = jobBody('static');
-  assert.match(job, /^ {4}name: Static \(\$\{\{ matrix\.part \}\}\)$/mu);
+  assert.match(
+    job,
+    /^ {4}name: Static \(\$\{\{ matrix\.part \}\}\$\{\{ matrix\.shard && format\(' \{0\}', matrix\.shard\) \|\| '' \}\}\)$/mu,
+  );
   assert.deepEqual(
     [...job.matchAll(/^ {4}timeout-minutes: (.+)$/gmu)].map((entry) => entry[1]),
     ['12'],

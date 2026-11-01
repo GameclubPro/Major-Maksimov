@@ -19,6 +19,7 @@ postgres('Private Karavan publication choice persistence', () => {
     sourceMessageId: string;
   };
   let generation: number;
+  let format: 'storefront' | undefined;
   const marketplaceId = randomUUID();
   const storeId = randomUUID();
   const otherStoreId = randomUUID();
@@ -50,6 +51,7 @@ postgres('Private Karavan publication choice persistence', () => {
   beforeEach(() => {
     originalFetch = global.fetch;
     generation = 1;
+    format = undefined;
     input = {
       actorMaxUserId: '777',
       chatId: `-${Date.now()}${Math.floor(Math.random() * 1000)}`,
@@ -69,7 +71,7 @@ postgres('Private Karavan publication choice persistence', () => {
         request.authority.expectedBindingGeneration !== generation
       )
         return new Response('{}', { status: 409 });
-      const selected = request.payload.storeId;
+      const selected = format === 'storefront' ? storeId : request.payload.storeId;
       return new Response(
         JSON.stringify({
           status: selected ? 'published' : 'choose_store',
@@ -80,6 +82,7 @@ postgres('Private Karavan publication choice persistence', () => {
             name: 'Соседи',
             description: null,
             kind: 'chat',
+            ...(format ? { format, administrationStoreId: storeId, formatRevision: 2 } : {}),
             status: 'active',
             admissionPolicy: 'applications',
             logoImageUrl: null,
@@ -205,6 +208,28 @@ postgres('Private Karavan publication choice persistence', () => {
       (await resolver.resolve({ ...input, subjectMaxUserId: '888', sourceMessageId: 'forward' }))
         .publication,
     ).toBeNull();
+  });
+  it('uses the common administration storefront instead of a previously saved personal choice', async () => {
+    const choice = await prompt();
+    await resolver.saveChoice({
+      actorMaxUserId: input.actorMaxUserId,
+      choiceId: choice.id,
+      storeId: otherStoreId,
+    });
+    format = 'storefront';
+    resolver = makeResolver();
+    const publication = (await resolver.resolve({ ...input, sourceMessageId: 'official-store' }))
+      .publication;
+    expect(publication).toMatchObject({ storeId, format: 'storefront', formatRevision: 2 });
+    const previous = await db.karavanMarketplacePublicationChoice.findUnique({
+      where: {
+        actorMaxUserId_chatId: { actorMaxUserId: input.actorMaxUserId, chatId: input.chatId },
+      },
+    });
+    expect(previous?.selectedStoreId).toBe(otherStoreId);
+    expect((await resolver.listChoices({ actorMaxUserId: input.actorMaxUserId })).choices).toEqual(
+      [],
+    );
   });
   it('rejects changed source and fences a newer prompt during remote selection', async () => {
     const choice = await prompt();

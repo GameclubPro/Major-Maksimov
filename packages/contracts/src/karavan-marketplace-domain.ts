@@ -1,6 +1,6 @@
 // Versioned Karavan domain wire schemas; no shared database or runtime dependency.
 import { z } from 'zod';
-import { karavanMarketplaceCategories } from './karavan-marketplace.js';
+import { karavanMarketplaceCategories, karavanShopFormatSchema } from './karavan-marketplace.js';
 const catalogTaxonomyCategoryIdSchema = z.enum(karavanMarketplaceCategories.map(([id]) => id));
 const catalogTaxonomySubcategoryIdSchema = z
   .string()
@@ -111,6 +111,9 @@ export const marketplaceSummarySchema = /* @__PURE__ */ (() =>
     name: z.string().min(1).max(120),
     description: z.string().max(2000).nullable(),
     kind: z.enum(['chat', 'legacy']),
+    format: karavanShopFormatSchema.optional(),
+    administrationStoreId: id.nullable().optional(),
+    formatRevision: revision.optional(),
     status: marketplaceStatusSchema,
     admissionPolicy: z.enum(['applications', 'invitation']),
     logoImageUrl: z.string().url().nullable(),

@@ -99,6 +99,9 @@ function StorefrontTextField({
 export function SettingsStorefrontTextEditor(props: Props) {
   const publication = useStorefrontPublicationPreview();
   const network = props.scope === 'network';
+  const administration =
+    publication?.mode === 'administration_storefront' ||
+    (publication?.mode === 'unavailable' && publication.format === 'storefront');
   const available = !network && !!publication && publication.mode !== 'unavailable';
   const [variant, setVariant] = useState<'storefront' | 'directory'>('storefront');
   const [resetVersion, setResetVersion] = useState(0);
@@ -116,7 +119,15 @@ export function SettingsStorefrontTextEditor(props: Props) {
         ? 'Разные значения'
         : 'Загрузка…';
   };
-  const paths = Object.keys(KARAVAN_STOREFRONT_TEXT_DEFAULTS) as KaravanStorefrontTextField[];
+  const paths = (
+    Object.keys(KARAVAN_STOREFRONT_TEXT_DEFAULTS) as KaravanStorefrontTextField[]
+  ).filter(
+    (field) =>
+      network ||
+      !administration ||
+      field === 'karavanStorefrontMessageText' ||
+      field === 'karavanStorefrontOpenButtonText',
+  );
   const hasCustomText = paths.some((field) => {
     const value = state(field);
     return value.kind === 'mixed' || (value.kind === 'common' && Boolean(value.value));
@@ -127,7 +138,7 @@ export function SettingsStorefrontTextEditor(props: Props) {
     if (hasFieldErrors) setEditing(true);
   }, [hasFieldErrors]);
   const previewButtons =
-    variant === 'storefront'
+    administration || variant === 'storefront'
       ? [preview('karavanStorefrontOpenButtonText')]
       : publication?.mode === 'chat_marketplace'
         ? [preview('karavanStorefrontCatalogButtonText')]
@@ -150,7 +161,11 @@ export function SettingsStorefrontTextEditor(props: Props) {
     />
   );
   const shownButtons =
-    available && publication?.mode === 'chat_marketplace' ? buttonFields.slice(0, 2) : buttonFields;
+    !network && administration
+      ? buttonFields.slice(0, 1)
+      : available && publication?.mode === 'chat_marketplace'
+        ? buttonFields.slice(0, 2)
+        : buttonFields;
   return (
     <section className="settings-storefront-editor" aria-label="Текст и пример ответа">
       {!network && !available ? (
@@ -163,30 +178,34 @@ export function SettingsStorefrontTextEditor(props: Props) {
       {available ? (
         <div className="settings-storefront-editor__preview" aria-label="Пример переписки с ботом">
           <h3>Пример ответа</h3>
-          <div
-            className="settings-storefront-editor__modes"
-            role="group"
-            aria-label="Сценарий примера"
-          >
-            {(
-              [
-                ['storefront', 'Есть витрина'],
-                ['directory', 'Нет витрины'],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                className="settings-storefront-editor__mode"
-                key={value}
-                type="button"
-                aria-pressed={variant === value}
-                onClick={() => setVariant(value)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          {!administration ? (
+            <div
+              className="settings-storefront-editor__modes"
+              role="group"
+              aria-label="Сценарий примера"
+            >
+              {(
+                [
+                  ['storefront', 'Есть витрина'],
+                  ['directory', 'Нет витрины'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  className="settings-storefront-editor__mode"
+                  key={value}
+                  type="button"
+                  aria-pressed={variant === value}
+                  onClick={() => setVariant(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="settings-storefront-editor__message settings-storefront-editor__message--request">
-            <span className="settings-storefront-editor__sender">Продавец</span>
+            <span className="settings-storefront-editor__sender">
+              {administration ? 'Администратор' : 'Продавец'}
+            </span>
             <p>$ Ремонт стиральных машин</p>
           </div>
           <div className="settings-storefront-editor__message">
@@ -218,7 +237,9 @@ export function SettingsStorefrontTextEditor(props: Props) {
                 field === 'karavanStorefrontCatalogButtonText' &&
                   publication?.mode === 'chat_marketplace'
                   ? 'Кнопка магазина чата'
-                  : label,
+                  : field === 'karavanStorefrontOpenButtonText' && administration
+                    ? 'Кнопка витрины чата'
+                    : label,
               ),
             )}
           </div>

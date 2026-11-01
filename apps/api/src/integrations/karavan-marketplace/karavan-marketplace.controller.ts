@@ -60,20 +60,31 @@ export class KaravanMarketplaceController {
     // FLAG: Use the relay's durable enrollment decision; a lost binding never previews legacy buttons.
     const scoped = await this.resolver.shouldUseScopedRelay(chatId);
     const publicationPreview: KaravanPublicationPreview = !scoped
-      ? { mode: 'catalog' }
+      ? module.marketplace?.format === 'storefront'
+        ? { mode: 'unavailable', reason: 'connection' }
+        : { mode: 'catalog' }
       : !module.marketplace || module.binding?.state !== 'verified'
         ? { mode: 'unavailable', reason: 'connection' }
         : module.access?.reason !== 'allowed'
           ? { mode: 'unavailable', reason: 'verification' }
           : module.marketplace.status !== 'active'
             ? { mode: 'unavailable', reason: 'closed' }
-            : { mode: 'chat_marketplace' };
+            : module.marketplace.format === 'storefront'
+              ? module.administrationStore?.id === module.marketplace.administrationStoreId &&
+                module.administrationStore?.status === 'ACTIVE' &&
+                !!module.buyerUrl
+                ? { mode: 'administration_storefront' }
+                : { mode: 'unavailable', reason: 'closed' }
+              : { mode: 'chat_marketplace' };
     return {
       enabled: true as const,
       actorMaxUserId: user.userId,
       sellerBotUrl: `https://max.ru/${this.config.getOrThrow<string>('KARAVAN_SELLER_BOT_USERNAME')}`,
       ...module,
-      publicationPreview,
+      publicationPreview:
+        publicationPreview.mode === 'unavailable' && module.marketplace?.format
+          ? { ...publicationPreview, format: module.marketplace.format }
+          : publicationPreview,
       publicationChoices: (await this.resolver.listChoices({ actorMaxUserId: user.userId, chatId }))
         .choices,
       setupOperation: await this.proxy.activeSetup(user.userId, chatId),
@@ -270,6 +281,14 @@ export class KaravanMarketplaceController {
       module.binding?.state !== 'verified'
     )
       throw new ForbiddenException('Управление этим магазином недоступно.');
+    if (
+      input.destination === 'storefront' &&
+      (module.marketplace.format !== 'storefront' ||
+        module.access?.reason !== 'allowed' ||
+        !module.administrationStore ||
+        module.administrationStore.id !== module.marketplace.administrationStoreId)
+    )
+      throw new ForbiddenException('Общая витрина не подтверждена.');
     if (
       (input.destination === 'view' && module.marketplace.status !== 'active') ||
       (input.destination === 'preview' &&

@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 // FLAG: Enrollment and queued scoped SENDs outlive feature flags. An older
 // dispatcher must never interpret their metadata as permission for a legacy send.
+// Format epochs and fixed administration targets remain publication authority after a format change.
 export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
   [
     'apps/api/src/max/max-action-dispatch.service.ts',
@@ -38,6 +39,18 @@ export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
       "if (result.status === 'choose_store')",
       'previous.bindingGeneration === binding.generation',
       'choice.bindingGeneration',
+      'format: karavanShopFormatSchema.optional(),',
+      'formatRevision: z.number().int().positive().optional(),',
+      '      format,\n      formatRevision,',
+      "if (format === 'storefront' && result.status !== 'published')",
+      'result.marketplace.administrationStoreId !== store?.id',
+      "(expected.format ?? 'community') !== format",
+      '(expected.formatRevision ?? 1) !== formatRevision',
+      'expected.storeId !== publication.storeId',
+      'expected.url !== publication.url',
+      "publication.format === 'storefront' &&",
+      'buttons.length !== 1',
+      'buttons[0].url !== publication.url',
     ],
   ],
   [
@@ -46,7 +59,11 @@ export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
   ],
   [
     'packages/contracts/src/karavan-marketplace.ts',
-    ["'cancelled'", 'karavanPublicationChoiceSaveSchema'],
+    [
+      "'cancelled'",
+      'karavanPublicationChoiceSaveSchema',
+      '  format: karavanShopFormatSchema.optional(),\n  administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),\n  formatRevision: z.number().int().positive().optional(),',
+    ],
   ],
   [
     'apps/api/src/integrations/karavan-marketplace/karavan-marketplace-proxy.service.ts',

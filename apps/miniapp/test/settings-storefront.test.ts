@@ -136,3 +136,54 @@ test('unknown and unavailable modes never invent a bot response', () => {
     assert.ok(html.includes('role="status"'));
   }
 });
+
+test('an administrative storefront has one fixed button and no seller or catalog scenario', () => {
+  const html = renderToStaticMarkup(
+    createElement(
+      StorefrontPublicationPreviewContext.Provider,
+      { value: { mode: 'administration_storefront' } },
+      createElement(SettingsStorefrontTextEditor, {
+        draft: {
+          karavanStorefrontMessageText: 'Товары нашего чата',
+          karavanStorefrontOpenButtonText: 'В нашу витрину',
+          karavanStorefrontCatalogButtonText: 'Чужие витрины',
+          karavanStorefrontCreateButtonText: 'Создать свою витрину',
+        },
+        onChange: () => undefined,
+      }),
+    ),
+  );
+  assert.equal(
+    (html.match(/class="settings-storefront-editor__preview-button"/gu) ?? []).length,
+    1,
+  );
+  assert.ok(html.includes('<span>В нашу витрину</span>'));
+  assert.ok(html.includes('Кнопка витрины чата'));
+  assert.ok(html.includes('Администратор'));
+  assert.ok(!html.includes('Сценарий примера'));
+  assert.ok(!html.includes('id="karavanStorefrontCatalogButtonText"'));
+  assert.ok(!html.includes('id="karavanStorefrontCreateButtonText"'));
+  assert.ok(!html.includes('Чужие витрины'));
+});
+
+test('a closed administrative storefront keeps only its own button settings without inventing a response', () => {
+  const html = renderToStaticMarkup(
+    createElement(
+      StorefrontPublicationPreviewContext.Provider,
+      { value: { mode: 'unavailable', reason: 'closed', format: 'storefront' } },
+      createElement(SettingsStorefrontTextEditor, {
+        draft: {
+          karavanStorefrontMessageText: '',
+          karavanStorefrontOpenButtonText: '',
+          karavanStorefrontCatalogButtonText: '',
+          karavanStorefrontCreateButtonText: '',
+        },
+        onChange: () => undefined,
+      }),
+    ),
+  );
+  assert.ok(!html.includes('settings-storefront-editor__preview-buttons'));
+  assert.ok(html.includes('id="karavanStorefrontOpenButtonText"'));
+  assert.ok(!html.includes('id="karavanStorefrontCatalogButtonText"'));
+  assert.ok(!html.includes('id="karavanStorefrontCreateButtonText"'));
+});

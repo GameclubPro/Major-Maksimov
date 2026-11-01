@@ -10,6 +10,8 @@ export const shopSetupDraftSchema = z
   .object({
     mode: z.enum(['new', 'existing']),
     existingId: z.string().uuid().nullable(),
+    format: z.enum(['storefront', 'community']).nullable().optional(),
+    administrationStoreId: z.string().uuid().nullable().optional(),
     name: z.string().max(120),
     rules: z.string().max(12000),
     categories: z.array(z.string().max(100)).max(40),

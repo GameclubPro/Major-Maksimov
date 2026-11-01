@@ -11,6 +11,10 @@ import {
 } from './karavan-marketplace-design.js';
 import { z } from 'zod';
 import {
+  karavanAdministrationStoreSchema,
+  karavanShopFormatSchema,
+} from './karavan-marketplace.js';
+import {
   marketplaceDetailResponseSchema,
   marketplaceListingQuerySchema,
   marketplaceListingListResponseSchema,
@@ -33,6 +37,7 @@ import {
   marketplacePageQuerySchema,
   marketplaceStatusRequestSchema,
   marketplaceRulesCancelRequestSchema,
+  marketplaceSummarySchema,
 } from './karavan-marketplace-domain.js';
 import {
   marketplaceContentQuerySchema,
@@ -41,9 +46,53 @@ import {
   marketplaceContentRestrictionResponseSchema,
 } from './karavan-marketplace-content.js';
 
+export const marketplaceFormatPreviewRequestSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    format: karavanShopFormatSchema,
+    administrationStoreId: z.string().uuid().nullable().optional(),
+  })
+  .strict();
+export const marketplaceFormatImpactSchema = z.object({
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  expectedRevision: z.number().int().positive(),
+  format: karavanShopFormatSchema,
+  administrationStoreId: z.string().uuid().nullable(),
+  affectedStores: z.number().int().nonnegative(),
+  affectedChats: z.number().int().nonnegative(),
+  pendingApplications: z.number().int().nonnegative(),
+});
+export const marketplaceFormatUpdateRequestSchema = marketplaceFormatPreviewRequestSchema
+  .extend({
+    commandId: z.string().regex(/^[A-Za-z0-9._:-]{8,120}$/u),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+  })
+  .strict();
+export const marketplaceAdministrationStoreResponseSchema = z.object({
+  store: karavanAdministrationStoreSchema.nullable(),
+  buyerUrl: z.string().url().nullable(),
+  sellerUrl: z.string().url().nullable(),
+  permissions: z.array(
+    z.enum(['manage_store', 'manage_products', 'manage_orders', 'manage_conversations']),
+  ),
+});
+
 // Bounded domain operations. Paths, actor identity and permissions are never supplied by the browser.
 export const marketplaceManagementOperationSchema = /* @__PURE__ */ (() =>
   z.discriminatedUnion('operation', [
+    z.object({ operation: z.literal('administration_store') }).strict(),
+    z
+      .object({
+        operation: z.literal('format_preview'),
+        input: marketplaceFormatPreviewRequestSchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal('format_update'),
+        input: marketplaceFormatUpdateRequestSchema,
+      })
+      .strict(),
     z.object({ operation: z.literal('appearance') }).strict(),
     z
       .object({ operation: z.literal('appearance_apply'), input: marketplaceAppearanceSaveSchema })
@@ -147,6 +196,15 @@ export const marketplaceManagementRequestSchema = /* @__PURE__ */ (() =>
     ))();
 export const marketplaceManagementResponseSchema = /* @__PURE__ */ (() =>
   z.discriminatedUnion('operation', [
+    z.object({
+      operation: z.literal('administration_store'),
+      data: marketplaceAdministrationStoreResponseSchema,
+    }),
+    z.object({ operation: z.literal('format_preview'), data: marketplaceFormatImpactSchema }),
+    z.object({
+      operation: z.literal('format_update'),
+      data: z.object({ marketplace: marketplaceSummarySchema }),
+    }),
     z.object({ operation: z.literal('appearance'), data: marketplaceAppearanceResponseSchema }),
     z.object({
       operation: z.literal('appearance_apply'),
