@@ -1990,6 +1990,7 @@ model CommercialReviewSample {
   independentLabel String? @map("independent_label")
   qualityMetadata Json? @map("quality_metadata")
   llmShadow      Json? @map("llm_shadow")
+  llmEnforcement Json? @map("llm_enforcement")
   independentReviewCount Int @default(0) @map("independent_review_count")
   reviewState    String @default("UNREVIEWED") @map("review_state")
   reviewPriority Int      @default(50) @map("review_priority")

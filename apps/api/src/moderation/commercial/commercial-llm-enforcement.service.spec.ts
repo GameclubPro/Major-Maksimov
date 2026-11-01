@@ -9,6 +9,12 @@ import {
 import { createCommercialLlmRedis } from './commercial-llm-shadow.lease';
 import { prepareCommercialLlmOffer } from './commercial-llm-enforcement.protocol';
 import { withCanonicalWebhookOrigin } from '../webhook-effect-origin-context';
+import { CommercialAiObservationService } from './commercial-ai-observation.service';
+import {
+  buildCommercialAiObservationContext,
+  CommercialAiObservationGate,
+} from './commercial-ai-runtime-observation';
+import { commercialLlmRequestSchema } from './commercial-llm-enforcement.protocol';
 
 const settings = {
   commercialAdsFilterEnabled: true,
@@ -45,6 +51,105 @@ describe('commercial AI eligibility accounting', () => {
     jest.restoreAllMocks();
     jest.useRealTimers();
   });
+  it.each(['resolve', 'reject'] as const)(
+    'admits another source while optional evidence remains pending and later %ss',
+    async (settlement) => {
+      const now = Date.parse('2026-11-01T15:00:00.000Z');
+      jest.useFakeTimers({ now, doNotFake: ['setImmediate'] });
+      const logs = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      let finish!: () => void;
+      const pending = new Promise<'written'>((resolve, reject) => {
+        finish = () =>
+          settlement === 'resolve' ? resolve('written') : reject(new Error('evidence unavailable'));
+      });
+      const events: string[] = [];
+      const writer = new CommercialAiObservationService({} as never);
+      const seed = jest.spyOn(writer, 'seed').mockImplementation((value) => {
+        events.push(`seed:${value.request.source.messageId}`);
+        expect(value.request.submittedAtMs).toBe(now);
+        return pending;
+      });
+      jest.spyOn(writer, 'update').mockResolvedValue('missing');
+      const gate = new CommercialAiObservationGate();
+      const service = new CommercialLlmEnforcementService(
+        new ConfigService({ COMMERCIAL_LLM_ENFORCEMENT_ENABLED: true }),
+        writer,
+        gate,
+      );
+      const redis = createCommercialLlmRedis('redis://127.0.0.1:1');
+      const mailbox = new CommercialLlmEnforcementMailbox(redis);
+      const submit = jest
+        .spyOn(mailbox, 'offerDetailed')
+        .mockImplementation(async (offer, beforeAdmission) => {
+          const request = commercialLlmRequestSchema.parse({
+            ...offer,
+            worker: '00000000-0000-4000-8000-000000000001',
+            submittedAtMs: now,
+          });
+          await beforeAdmission?.(request);
+          events.push(`accepted:${offer.source.messageId}`);
+          return 'accepted';
+        });
+      jest.spyOn(service, 'mailbox').mockResolvedValue(mailbox);
+      async function offer(messageId: string) {
+        const source = { ...input(now), messageId };
+        const observation = buildCommercialAiObservationContext(
+          {
+            ...source,
+            source: 'TEXT',
+            score: 0,
+            actionBand: 'ALLOW',
+            decisionFingerprint: 'synthetic',
+            detectorVersion: 'synthetic',
+            messageDisposition: 'KEEP',
+            requiredPolicyCohorts: [],
+          },
+          [],
+        );
+        await withCanonicalWebhookOrigin(
+          {
+            webhookEvent: { id: `receipt-${messageId}`, botId: 'bot' },
+            activeBotId: 'bot',
+            update: {
+              updateId: messageId,
+              botId: 'bot',
+              type: 'message_created',
+              eventTimestampSource: 'payload',
+              raw: { timestamp: now },
+              message: {
+                chatId: 'chat',
+                messageId,
+                senderId: 'user',
+                text: source.text,
+                createdAt: source.eventAt,
+              },
+            },
+          },
+          async () => {
+            service.offer({ ...source, observation });
+          },
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      try {
+        await offer('first');
+        await offer('second');
+        expect(submit).toHaveBeenCalledTimes(2);
+        expect(seed).toHaveBeenCalledTimes(2);
+        expect(events).toEqual(['seed:first', 'accepted:first', 'seed:second', 'accepted:second']);
+        expect(Date.now()).toBe(now);
+        expect(gate.snapshot().unsettled).toBe(2);
+        expect(JSON.stringify(logs.mock.calls)).not.toContain('producer_busy');
+      } finally {
+        finish();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        service.onModuleDestroy();
+        redis.disconnect();
+      }
+      expect(submit).toHaveBeenCalledTimes(2);
+      expect(gate.snapshot().unsettled).toBe(0);
+    },
+  );
   it('separates disabled/missing-origin inputs from eligible busy and accepted sources', async () => {
     let now = Date.now();
     jest.spyOn(Date, 'now').mockImplementation(() => now);
@@ -259,6 +364,69 @@ describe('commercial AI eligibility accounting', () => {
     const output = JSON.stringify(logs.mock.calls);
     for (const privateValue of ['private-chat', 'private-message', 'private-user', source.text])
       expect(output).not.toContain(privateValue);
+    service.onModuleDestroy();
+  });
+
+  it('binds the original candidate and pre-routing detector decision at the focused AI boundary', () => {
+    const source = input(Date.now());
+    const service = new CommercialLlmEnforcementService(
+      new ConfigService({ COMMERCIAL_LLM_ENFORCEMENT_ENABLED: true }),
+    );
+    const submit = jest.spyOn(service, 'offer').mockImplementation(() => undefined);
+    const candidate = {
+      ...source,
+      source: 'TEXT' as const,
+      score: 0,
+      actionBand: 'ALLOW',
+      decisionFingerprint: 'synthetic',
+      detectorVersion: 'synthetic',
+      detectorSourceSha256: 'a'.repeat(64),
+      messageDisposition: 'KEEP' as const,
+      requiredPolicyCohorts: [],
+    };
+    const violations = [
+      {
+        ruleCode: 'COMMERCIAL_AD',
+        score: 0.8,
+        reason: 'synthetic',
+        metadata: { actionable: true, messageDisposition: 'DELETE', actionBand: 'DELETE' },
+      },
+    ];
+    expect(
+      service.evaluate(
+        violations,
+        {
+          updateId: 'update',
+          type: 'message_created',
+          eventTimestampSource: 'payload',
+          message: {
+            chatId: source.chatId,
+            messageId: source.messageId,
+            senderId: source.userId,
+            text: source.text,
+            createdAt: source.eventAt,
+          },
+        },
+        settings,
+        false,
+        candidate,
+      ),
+    ).toEqual([]);
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({
+          candidate,
+          activeAuthority: 'AI_DELETE_ONLY',
+          detectorBaseline: expect.objectContaining({
+            decision: expect.objectContaining({ hasDetection: true, deleteEligible: true }),
+          }),
+          actualSynchronousDecision: {
+            semantics: 'actual_post_routing_v1',
+            decision: expect.objectContaining({ hasDetection: false, deleteEligible: false }),
+          },
+        }),
+      }),
+    );
     service.onModuleDestroy();
   });
 

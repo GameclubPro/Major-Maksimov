@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger, type OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, Optional, type OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type Redis from 'ioredis';
 import { BackgroundRuntimeGovernorService } from '../../system/background-runtime-governor.service';
@@ -24,6 +24,8 @@ import {
 } from './commercial-llm-pool.client';
 import { CommercialLlmPoolServer } from './commercial-llm-pool-server';
 import { COMMERCIAL_LLM_POOL_ADMISSION_KEYS } from './commercial-llm-pool-admission.mailbox';
+import { CommercialAiObservationService } from './commercial-ai-observation.service';
+import { CommercialAiObservationGate } from './commercial-ai-runtime-observation';
 
 @Injectable()
 export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -54,6 +56,9 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
     private readonly admission: CommercialLlmEnforcementService,
     private readonly governor: BackgroundRuntimeGovernorService,
     private readonly intents: ModerationDeleteIntentService,
+    @Optional() private readonly observations?: CommercialAiObservationService,
+    @Optional()
+    private readonly observationGate: CommercialAiObservationGate = new CommercialAiObservationGate(),
   ) {}
 
   onModuleInit(): void {
@@ -145,6 +150,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
       outcomes: { ...this.outcomes },
       pendingDiscardBasis: 'redis_namespace_cumulative',
       pendingDiscards,
+      evidenceWrites: this.observationGate.snapshot(),
       ...(this.admission.poolPolicy()
         ? {
             poolDiagnostics: {
@@ -330,6 +336,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
       },
       this.intents,
       () => this.mayRun(),
+      this.observations ? { writer: this.observations, gate: this.observationGate } : undefined,
     );
     const work = processor
       .run(this.worker, this.controller.signal)

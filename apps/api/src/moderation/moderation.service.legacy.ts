@@ -2395,17 +2395,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           violations: detection.violations,
         })
       ).filter((violation) => violation.ruleCode !== 'TOPIC_FILTER_MISMATCH');
-      const violations =
-        this.commercialAi?.evaluate(
-          detectedViolations,
-          update,
-          settings,
-          !!reportCommand ||
-            latestSenderChatAdminCheck.isAdmin ||
-            this.isKnownRuntimeBotUserId(senderId),
-        ) ?? detectedViolations;
-      // FLAG: Quality capture observes the actual decision before duplicate/other-rule
-      // exits. It never chooses a sanction; callbacks retain this immutable source revision.
+      // FLAG: Capture precedes competing-rule exits; this immutable revision grants no sanction.
       let commercialQualityObservation: ReturnType<typeof buildCommercialTextQualityObservation> =
         null;
       if (
@@ -2424,7 +2414,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             text,
             settings,
             messageCreatedAt: extractCommercialOcrSourceCreatedAt(update.raw),
-            violation: violations.find((violation) => violation.ruleCode === 'COMMERCIAL_AD'),
+            violation: detectedViolations.find((item) => item.ruleCode === 'COMMERCIAL_AD'),
             activeAiEnforcement: this.commercialAi?.enabled() === true,
             commercialCampaignContext,
           });
@@ -2441,6 +2431,16 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           );
         }
       }
+      const violations =
+        this.commercialAi?.evaluate(
+          detectedViolations,
+          update,
+          settings,
+          !!reportCommand ||
+            latestSenderChatAdminCheck.isAdmin ||
+            this.isKnownRuntimeBotUserId(senderId),
+          commercialQualityObservation,
+        ) ?? detectedViolations;
       const hasCompetingViolation = violations.length > 0;
       const duplicateEligibility = resolveDuplicateRuleEligibility(violations, detection);
       const latestManualReleaseAt =

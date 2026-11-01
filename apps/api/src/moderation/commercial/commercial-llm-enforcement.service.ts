@@ -1,6 +1,12 @@
 import type { MaxUpdate } from '@maxim/contracts';
 import type { CommercialDeleteSettings } from './commercial-delete-binding';
-import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  Optional,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import type Redis from 'ioredis';
@@ -13,6 +19,16 @@ import {
 } from './commercial-llm-enforcement.mailbox';
 import { resolveCommercialAiTriage } from './commercial-ai-triage';
 import { CommercialLlmPoolAdmissionMailbox } from './commercial-llm-pool-admission.mailbox';
+import {
+  CommercialAiObservationService,
+  commercialAiObservationInputSha256,
+} from './commercial-ai-observation.service';
+import {
+  buildCommercialAiObservationContext,
+  CommercialAiObservationGate,
+  type CommercialAiObservationContext,
+} from './commercial-ai-runtime-observation';
+import type { Candidate } from './commercial-review.service';
 import {
   buildCommercialLlmOffer,
   prepareCommercialLlmOffer,
@@ -74,7 +90,12 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
   private timer: NodeJS.Timeout | null = null;
   private readonly observationStartedAtMs = Date.now();
   private readonly windows = new Map<number, ReturnType<typeof admissionWindow>>();
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() private readonly observations?: CommercialAiObservationService,
+    @Optional()
+    private readonly observationGate: CommercialAiObservationGate = new CommercialAiObservationGate(),
+  ) {}
 
   onModuleInit(): void {
     if (!this.enabled()) return;
@@ -142,6 +163,7 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
     update: MaxUpdate,
     settings: CommercialDeleteSettings,
     protectedAuthor: boolean,
+    candidate?: Candidate | null,
   ): RuleViolation[] {
     const enabled = this.enabled();
     const routed = routeCommercialAiViolations(violations, enabled);
@@ -176,6 +198,8 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
         eventAt: message.createdAt,
         settings,
         triage: resolveCommercialAiTriage({ text: message.text, violations }),
+        observation:
+          enabled && candidate ? buildCommercialAiObservationContext(candidate, violations) : null,
       });
     return routed;
   }
@@ -200,6 +224,7 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
   offer(
     input: Parameters<typeof buildCommercialLlmOffer>[0] & {
       triage?: ReturnType<typeof resolveCommercialAiTriage>;
+      observation?: CommercialAiObservationContext | null;
     },
   ): void {
     if (!this.enabled()) return;
@@ -261,8 +286,41 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
     }
     this.offering = true;
     void this.mailbox()
-      .then((mailbox) => mailbox.offerDetailed(offer))
+      .then((mailbox) =>
+        mailbox.offerDetailed(
+          offer,
+          input.observation && this.observations
+            ? (request) => {
+                // FLAG: Start the exact preselected snapshot before admission, but never
+                // hold producer capacity for optional SQL. A missed update stays a gap.
+                void this.observationGate.run(() =>
+                  this.observations!.seed({
+                    ...input.observation!,
+                    request,
+                  }),
+                );
+                return Promise.resolve();
+              }
+            : undefined,
+        ),
+      )
       .then((outcome) => {
+        if (input.observation && this.observations)
+          void this.observationGate.run(() =>
+            this.observations!.update({
+              source: offer.source,
+              inputSha256: commercialAiObservationInputSha256(offer.excerpt),
+              admission: {
+                state: outcome === 'accepted' ? 'ACCEPTED' : 'REJECTED',
+                reason:
+                  outcome === 'accepted'
+                    ? null
+                    : outcome === 'source_expired' || outcome === 'source_stale'
+                      ? 'STALE_SOURCE'
+                      : 'NOT_ADMITTED',
+              },
+            }),
+          );
         const accepted = outcome === 'accepted';
         this.counts[accepted ? 'accepted' : 'skipped'] += 1;
         window[accepted ? 'accepted' : 'skipped'] += 1;
@@ -281,6 +339,8 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
         );
       })
       .catch(() => {
+        // FLAG: A lost Redis reply cannot prove rejection. The seeded admission
+        // remains unobserved unless its exact runner later establishes acceptance.
         this.counts.unavailable += 1;
         window.unavailable += 1;
         this.logger.warn(
@@ -327,6 +387,7 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
         schemaVersion: 3,
         ...this.observationIdentity(),
         ...this.counts,
+        evidenceWrites: this.observationGate.snapshot(),
         inFlight:
           this.counts.eligible -
           this.counts.accepted -

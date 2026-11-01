@@ -1,4 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { commercialAiQualityEnvelopeSchema } from '@maxim/contracts/commercial-ai-quality';
+import {
+  CommercialAiObservationService,
+  commercialAiObservationEvidenceHash,
+} from './commercial-ai-observation.service';
+import {
+  CommercialAiObservationGate,
+  buildCommercialAiObservationContext,
+} from './commercial-ai-runtime-observation';
+import { buildCommercialTextQualityObservation } from './commercial-quality-observation';
 import { ConfigService } from '@nestjs/config';
 import {
   createMultibotHarness,
@@ -138,7 +148,7 @@ jest.setTimeout(60_000);
       );
       await h.dispose();
     });
-    async function fixture(pool = false) {
+    async function fixture(pool = false, observe = false) {
       config.set('COMMERCIAL_LLM_POOL_ENABLED', pool);
       config.set('COMMERCIAL_LLM_POOL_WORKERS_ENABLED', pool);
       const activeMailbox = pool ? new CommercialLlmPoolAdmissionMailbox(h.redis) : mailbox;
@@ -151,10 +161,30 @@ jest.setTimeout(60_000);
         where: { chatId: chatId! },
       });
       const now = Date.now(),
-        messageId = randomUUID(),
         userId = `ai-user-${randomUUID()}`,
         botId = h.bots[0]!.id;
       const text = 'Мастерская принимает заказы на ремонт. Работаем по договору, запись на замер.';
+      let messageId = randomUUID();
+      let candidate = null as ReturnType<typeof buildCommercialTextQualityObservation>;
+      if (observe) {
+        for (let index = 0; index < 1000 && !candidate; index += 1) {
+          messageId = randomUUID();
+          candidate = buildCommercialTextQualityObservation({
+            secret: 'private-native-observation-key-1234567890',
+            chatId: chatId!,
+            userId,
+            messageId,
+            text,
+            settings,
+            messageCreatedAt: new Date(now).toISOString(),
+            violation: undefined,
+            activeAiEnforcement: true,
+          });
+        }
+        if (!candidate) throw new Error('No selected synthetic source');
+      }
+      const writer = new CommercialAiObservationService(h.prisma as never);
+      const gate = new CommercialAiObservationGate();
       const message = {
         sender: { user_id: userId, is_bot: false },
         recipient: { chat_id: chatId!, chat_type: 'chat' },
@@ -186,12 +216,27 @@ jest.setTimeout(60_000);
       const worker = randomUUID();
       await activeMailbox.heartbeat(worker);
       await activeMailbox.advertise(worker);
-      expect(await activeMailbox.offer(offer)).toBe(true);
+      expect(
+        await activeMailbox.offerDetailed(
+          offer,
+          observe
+            ? async (request) => {
+                expect(
+                  await writer.seed({
+                    ...buildCommercialAiObservationContext(candidate!, []),
+                    request,
+                  }),
+                ).toBe('written');
+              }
+            : undefined,
+        ),
+      ).toBe('accepted');
       const processor = new CommercialLlmEnforcementProcessor(
         activeMailbox,
         { classify: async () => (pool ? poolPositive : positive) },
         { ensureIntent: (input) => h.intents.ensureIntent(input, { enqueue: false }) },
         async () => true,
+        observe ? { writer, gate } : undefined,
       );
       expect(await processor.run(worker, new AbortController().signal)).toMatchObject({
         outcome: 'delete_registered',
@@ -199,8 +244,63 @@ jest.setTimeout(60_000);
       const intent = await h.prisma.moderationDeleteIntent.findUniqueOrThrow({
         where: { chatId_messageId: { chatId: chatId!, messageId } },
       });
-      return { chatId: chatId!, messageId, userId, botId, message, offer, intent, activeMailbox };
+      const until = Date.now() + 3000;
+      while (observe && gate.snapshot().unsettled > 0 && Date.now() < until)
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      expect(gate.snapshot().unsettled).toBe(0);
+      return {
+        chatId: chatId!,
+        messageId,
+        userId,
+        botId,
+        message,
+        offer,
+        intent,
+        activeMailbox,
+        writer,
+        gate,
+      };
     }
+    it.each([false, true])(
+      'binds actual mailbox input/result/own registration on native stores (pool=%s)',
+      async (pool) => {
+        const source = await fixture(pool, true);
+        const row = await h.prisma.commercialReviewSample.findUniqueOrThrow({
+          where: { evidenceHash: commercialAiObservationEvidenceHash(source.offer.source) },
+        });
+        const envelope = commercialAiQualityEnvelopeSchema.parse(row.llmEnforcement);
+        expect(envelope.attempts).toHaveLength(1);
+        expect(envelope.attempts[0]).toMatchObject({
+          admission: { state: 'ACCEPTED', reason: null },
+          analysis: {
+            state: 'COMPLETE',
+            classificationOrigin: 'MODEL',
+            policyDeleteEligible: true,
+            result: { classification: 'COMMERCIAL' },
+          },
+          registration: { state: 'REGISTERED' },
+          execution: { state: 'PENDING', receiptSha256: null },
+        });
+        const reasons = await h.prisma.moderationDeleteIntentReason.findMany({
+          where: { intentId: source.intent.id },
+        });
+        expect(reasons).toHaveLength(1);
+        expect(reasons[0]!.metadata).toMatchObject({
+          commercialLlmSource: source.offer.source,
+          commercialAiObservation: {
+            evidenceHash: row.evidenceHash,
+            inputSha256: envelope.attempts[0]!.inputSha256,
+          },
+        });
+        expect((await h.intents.attemptIntent(source.intent.id)).confirmed).toBe(true);
+        const after = await h.prisma.commercialReviewSample.findUniqueOrThrow({
+          where: { id: row.id },
+        });
+        // The private DB-only receipt projector owns effect observation; runtime does not invent it.
+        expect(after.llmEnforcement).toEqual(row.llmEnforcement);
+        expect(after.expiresAt).toEqual(row.expiresAt);
+      },
+    );
     it('persists exact original provenance, enforces fresh source and only deletes without sanctions', async () => {
       const s = await fixture();
       const origins = await h.prisma.$queryRaw<{ event: string; bot: string; at: Date }[]>`

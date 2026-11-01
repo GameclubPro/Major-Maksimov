@@ -128,11 +128,59 @@ const completed = (value = result()) => ({
 });
 
 describe('bounded commercial AI quality observation contracts', () => {
+  it('retains the actual pool protocol version and rejects an unsupported version', () => {
+    expect(
+      commercialAiQualityResultSchema.parse(result({ protocolVersion: 2 })).protocolVersion,
+    ).toBe(2);
+    expect(commercialAiQualityResultSchema.parse(result()).protocolVersion).toBeUndefined();
+    for (const protocolVersion of [1, 3, '2'])
+      expect(
+        commercialAiQualityResultSchema.safeParse({ ...result(), protocolVersion }).success,
+      ).toBe(false);
+  });
+
+  it('retains the supported legacy workstation protocol without confusing it with pool v2', () => {
+    const legacy = result({ protocolVersion: 1 });
+    delete legacy.pool;
+    expect(commercialAiQualityResultSchema.parse(legacy).protocolVersion).toBe(1);
+    for (const protocolVersion of [0, 3, '1'])
+      expect(
+        commercialAiQualityResultSchema.safeParse({ ...legacy, protocolVersion }).success,
+      ).toBe(false);
+  });
+
   it('preserves actual synchronous KEEP and the separate detector baseline DELETE', () => {
     const parsed = commercialAiQualityEnvelopeSchema.parse(envelope());
     expect(parsed.attempts[0]?.actualSynchronousDecision.decision?.messageDisposition).toBe('KEEP');
     expect(parsed.attempts[0]?.detectorBaseline?.decision.messageDisposition).toBe('DELETE');
     expect(parsed.attempts[0]?.analysis.result).toBeNull();
+  });
+
+  it('preserves actual admission clocks within the supported five-second MAX event lead', () => {
+    for (const lead of [0, 1, 5_000]) {
+      const original = attempt({
+        submittedAtMs: timestamp,
+        eventAtMs: timestamp + lead,
+        deadlineAtMs: timestamp + lead + 60_000,
+      });
+      const parsed = commercialAiQualityAttemptSchema.parse(original);
+      expect(parsed.submittedAtMs).toBe(timestamp);
+      expect(parsed.eventAtMs).toBe(timestamp + lead);
+      expect(parsed.deadlineAtMs).toBe(timestamp + lead + 60_000);
+    }
+    expect(
+      commercialAiQualityAttemptSchema.safeParse(
+        attempt({
+          submittedAtMs: timestamp,
+          eventAtMs: timestamp + 5_001,
+          deadlineAtMs: timestamp + 65_001,
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      commercialAiQualityAttemptSchema.safeParse(attempt({ submittedAtMs: timestamp + 60_000 }))
+        .success,
+    ).toBe(false);
   });
 
   it('keeps technical/missing outcomes separate from real model UNSURE', () => {

@@ -93,6 +93,11 @@ describe('commercial quality capture ordering', () => {
       update,
       settings,
       false,
+      expect.objectContaining({
+        messageId: message.messageId,
+        source: 'TEXT',
+        sourceExcerptComplete: true,
+      }),
     );
     expect(commercialAi.evaluate.mock.results[0]!.value).toEqual([]);
     expect(commercialAi.enabled).toHaveBeenCalled();

@@ -40,6 +40,7 @@ export type CommercialLlmDecision = {
 };
 
 export type CommercialLlmObservationResult = CommercialLlmDecision & {
+  protocolVersion?: 1 | 2;
   modelAlias: string;
   modelSha256: string;
   promptSha256: string;

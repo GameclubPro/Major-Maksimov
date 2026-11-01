@@ -580,6 +580,8 @@ export class CommercialReviewService {
     }
     const rows = await this.prisma.commercialReviewSample.findMany({
       where: {
+        // FLAG: Dedicated AI attempts are private diagnostics, not additional human-frame samples.
+        llmEnforcement: { equals: Prisma.DbNull },
         expiresAt: { gt: new Date() },
         AND: [
           ...(status === 'PENDING'
@@ -669,6 +671,8 @@ export class CommercialReviewService {
     // FLAG: Export must not bypass blindness for an actor who has not supplied their own review.
     const rows = await this.prisma.commercialReviewSample.findMany({
       where: {
+        // FLAG: Dedicated AI attempts are private diagnostics, not additional human-frame samples.
+        llmEnforcement: { equals: Prisma.DbNull },
         expiresAt: { gt: new Date() },
         observedAt: { gte: new Date(since), lt: new Date(until) },
         ratings: { some: { reviewerKey: viewer.key } },
@@ -805,7 +809,13 @@ export class CommercialReviewService {
             }
           : {}),
       },
-      select: { id: true, source: true, observedAt: true, qualityMetadata: true },
+      select: {
+        id: true,
+        source: true,
+        observedAt: true,
+        qualityMetadata: true,
+        llmEnforcement: true,
+      },
       orderBy: [{ observedAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
     });
@@ -835,6 +845,7 @@ export class CommercialReviewService {
       items: page.flatMap((row) => {
         const quality = metadata(row.qualityMetadata);
         if (
+          row.llmEnforcement != null ||
           quality?.randomEvaluationIncluded !== true ||
           (row.source !== 'TEXT' && row.source !== 'OCR')
         )

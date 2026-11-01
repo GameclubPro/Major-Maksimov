@@ -94,6 +94,48 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     await service.labelItem(row.id, 'one', keep(row));
     return current();
   }
+  it('keeps dedicated AI diagnostic rows out of human queue, export and random frame', async () => {
+    const original = await current();
+    await prisma.commercialReviewSample.update({
+      where: { id: original.id },
+      data: {
+        qualityMetadata: {
+          ...(original.qualityMetadata as Prisma.JsonObject),
+          randomEvaluationIncluded: true,
+          evaluationSamplingProbability: 0.1,
+        },
+      },
+    });
+    const duplicate = await prisma.commercialReviewSample.create({
+      data: {
+        chatId,
+        userId: original.userId,
+        messageId: original.messageId,
+        source: 'TEXT',
+        evidenceHash: createHash('sha256').update(randomUUID()).digest('hex'),
+        score: original.score,
+        evidence: original.evidence!,
+        qualityMetadata: original.qualityMetadata!,
+        llmEnforcement: { schemaVersion: 1, captureState: 'INVALID', coverageIncomplete: true },
+        expiresAt: original.expiresAt,
+      },
+    });
+    const queue = await service.getQueue({ status: 'ALL', limit: 100 }, 'native-reviewer');
+    expect(queue.items.some((item) => item.id === original.id)).toBe(true);
+    expect(queue.items.some((item) => item.id === duplicate.id)).toBe(false);
+    const window = {
+      since: new Date(Date.now() - 60_000).toISOString(),
+      until: new Date(Date.now() + 60_000).toISOString(),
+      limit: 500,
+    };
+    const frame = await service.exportSamplingFrame(window, 'native-reviewer');
+    expect(
+      frame.items.filter((item) => item.logicalMessageKey === candidate.logicalMessageKey),
+    ).toHaveLength(1);
+    await service.labelItem(duplicate.id, 'native-reviewer', keep(duplicate));
+    const exported = await service.exportIndependentEvidence(window, 'native-reviewer');
+    expect(exported.items.some((item) => item.sample.id === duplicate.id)).toBe(false);
+  });
   it('serializes simultaneous first votes, and a fresh second vote resolves without overwriting historical evidence', async () => {
     const row = await current();
     await prisma.commercialReviewSample.update({
