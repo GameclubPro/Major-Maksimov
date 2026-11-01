@@ -4,6 +4,10 @@ The program preserves public API responses, callback payloads, queue envelopes, 
 authorization and the order of side effects. Runtime slices use reviewed commits, exact-SHA
 CI, scoped deployment and rollback-compatible observation windows.
 
+For the source assessment and prioritized future microgoals as of 1 November 2026, see
+the [safe refactoring roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md)
+and its linked audit. The release observations below retain their original scope and dates.
+
 ## Starting evidence
 
 The API/UI baseline is `e4c960ad46369a68409b656efe7632f62adeec18`. Both required GitHub
