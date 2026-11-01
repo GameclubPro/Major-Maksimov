@@ -17,6 +17,7 @@ import type { MarketplaceManagementResponse } from '@maxim/contracts/karavan-mar
 import '../src/pages/settings-page';
 import '../src/styles/moderation-workspace.css';
 const params = new URLSearchParams(location.search);
+const scenario = params.get('scenario') ?? '';
 const providerResponse = (window as Window & { __shopProviderModule?: unknown })
   .__shopProviderModule;
 const providerModule = providerResponse
@@ -28,6 +29,9 @@ document.body.dataset.miniappProfile = 'moderation';
 document.body.classList.add('settings-home-page-open');
 const id = 'a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';
 const second = 'bb669048-0279-4a35-987c-60f94593163e';
+const administrationStoreId = 'cc669048-0279-4a35-987c-60f94593163e';
+let formatConnected = !scenario.startsWith('format_setup');
+let sellerTermsAccepted = scenario !== 'format_setup_terms';
 const market: NonNullable<KaravanMarketplaceModule['marketplace']> =
   providerModule?.marketplace ?? {
     id,
@@ -51,6 +55,24 @@ const market: NonNullable<KaravanMarketplaceModule['marketplace']> =
     orderRevision: 1,
     visibilityRevision: 1,
   };
+if (scenario.startsWith('format_storefront')) {
+  market.format = 'storefront';
+  market.administrationStoreId = administrationStoreId;
+  market.formatRevision = 1;
+  if (['format_storefront_closed', 'format_storefront_ready'].includes(scenario))
+    market.status = 'draft';
+}
+let administrationStore: KaravanMarketplaceModule['administrationStore'] =
+  providerModule?.administrationStore ?? {
+    id: administrationStoreId,
+    slug: 'administration-store',
+    name: 'Витрина администрации соседей',
+    status: scenario === 'format_storefront_closed' ? 'DRAFT' : 'ACTIVE',
+    editRevision: 1,
+  };
+const formatReceipts = new Map<string, { marketplace: typeof market }>();
+let lostFormatResponse = false;
+let handoffFailed = false;
 const rules = {
   id: second,
   text: 'Правила магазина',
@@ -88,6 +110,13 @@ const counts = providerModule?.counts ?? {
   pendingApplications: ['draft', 'draft_empty'].includes(params.get('scenario') ?? '') ? 0 : 1,
   chats: 1,
 };
+if (scenario === 'format_storefront_ready')
+  Object.assign(counts, {
+    listings: 0,
+    readyListings: 1,
+    approvedListings: 0,
+    pendingApplications: 2,
+  });
 const detailCounts =
   (window as Window & { __shopProviderDetailCounts?: typeof counts }).__shopProviderDetailCounts ??
   counts;
@@ -162,10 +191,14 @@ const state = window as Window & {
   __loseShopManage?: () => Promise<void>;
   __shopNextFailure?: { operation: string; status: number; code?: string; message?: string };
   __shopReactRoot?: Root;
+  __acceptShopSellerTerms?: () => void;
 };
 state.__shopRequests = [];
 state.__shopOpened = [];
 state.__shopPublished = appearance;
+state.__acceptShopSellerTerms = () => {
+  sellerTermsAccepted = true;
+};
 state.__shopMarket = market;
 state.__shopSaves = [];
 state.__shopClipboard = [];
@@ -217,18 +250,58 @@ const api = {
         chats: body.chatIds.map((chatId: string) => ({
           chatId,
           title: 'Соседи',
-          binding: params.get('scenario') === 'unbound' ? null : binding,
-          marketplace: params.get('scenario') === 'unbound' ? null : market,
+          binding: params.get('scenario') === 'unbound' || !formatConnected ? null : binding,
+          marketplace: params.get('scenario') === 'unbound' || !formatConnected ? null : market,
         })),
       };
-    if (path.endsWith('/handoffs'))
+    if (path.endsWith('/handoffs')) {
+      if (scenario === 'format_storefront_handoff_error' && !handoffFailed) {
+        handoffFailed = true;
+        throw new Error('Offline');
+      }
       return {
-        url: 'https://max.ru/synthetic_buyer_bot?startapp=mh_' + 'x'.repeat(43),
+        url:
+          `https://max.ru/${body.destination === 'storefront' ? 'synthetic_seller_bot' : 'synthetic_buyer_bot'}?startapp=mh_` +
+          'x'.repeat(43),
         expiresAt: new Date(Date.now() + 120000).toISOString(),
       };
+    }
+    if (path.endsWith('/setup')) {
+      formatConnected = true;
+      market.status = 'draft';
+      market.format = body.create.format;
+      market.administrationStoreId =
+        body.create.format === 'storefront'
+          ? (body.create.administrationStoreId ?? administrationStoreId)
+          : null;
+      market.formatRevision = 1;
+      if (administrationStore) administrationStore = { ...administrationStore, status: 'DRAFT' };
+      return {
+        operationId: body.operationId,
+        state: 'complete',
+        request: body,
+        checkpoints: {
+          marketplaceId: market.id,
+          bindings: [
+            {
+              chatId: fixtureChatId,
+              state: 'connected',
+              bindingId: binding.id,
+              generation: binding.generation,
+            },
+          ],
+        },
+      };
+    }
     if (path.endsWith('/setup-options'))
       return {
         chatTitle: 'Соседи',
+        ...(scenario === 'format_setup_legacy'
+          ? {}
+          : {
+              sellerTermsAccepted,
+              administrationStores: administrationStore ? [administrationStore] : [],
+            }),
         categories: [
           {
             id: 'services',
@@ -258,7 +331,34 @@ const api = {
         );
       }
       let data;
-      if (operation === 'detail') {
+      if (operation === 'format_preview') {
+        data = {
+          fingerprint: 'a'.repeat(64),
+          expectedRevision: input.expectedRevision,
+          format: input.format,
+          administrationStoreId: input.administrationStoreId ?? null,
+          affectedStores: 2,
+          affectedChats: 1,
+          pendingApplications: 1,
+        };
+      } else if (operation === 'format_update') {
+        const receipt = formatReceipts.get(input.commandId);
+        if (receipt) return { operation, data: receipt };
+        if (market.status === 'active') market.status = 'paused';
+        market.format = input.format;
+        market.administrationStoreId =
+          input.format === 'storefront'
+            ? (input.administrationStoreId ?? administrationStoreId)
+            : null;
+        market.editRevision++;
+        market.formatRevision = (market.formatRevision ?? 0) + 1;
+        data = { marketplace: structuredClone(market) };
+        formatReceipts.set(input.commandId, data);
+        if (scenario === 'format_switch_unknown' && !lostFormatResponse) {
+          lostFormatResponse = true;
+          throw new Error('Ответ потерян');
+        }
+      } else if (operation === 'detail') {
         if (params.get('scenario') === 'detail_error' && detailReads++ === 0)
           throw new Error('Offline');
         data = {
@@ -526,20 +626,40 @@ const api = {
         enabled: true,
         actorMaxUserId: '777',
         sellerBotUrl: 'https://max.ru/synthetic_seller_bot',
-        marketplace: params.get('scenario') === 'unbound' ? null : market,
-        binding: params.get('scenario') === 'unbound' ? null : binding,
+        marketplace: params.get('scenario') === 'unbound' || !formatConnected ? null : market,
+        binding: params.get('scenario') === 'unbound' || !formatConnected ? null : binding,
+        administrationStore: market.format === 'storefront' ? administrationStore : null,
         currentChatTitle: 'Соседи',
         permissions,
         counts,
         canManage: true,
-        buyerUrl: 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
+        buyerUrl:
+          market.format === 'storefront'
+            ? market.status === 'active' && administrationStore?.status === 'ACTIVE'
+              ? 'https://max.ru/synthetic_buyer_bot?startapp=store_administration-store'
+              : null
+            : 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
         previewUrl: 'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop',
-        bindings: params.get('scenario') === 'unbound' ? [] : [binding],
-        publicationChoices: [],
+        bindings: params.get('scenario') === 'unbound' || !formatConnected ? [] : [binding],
+        publicationChoices:
+          scenario === 'format_storefront'
+            ? [
+                {
+                  id: second,
+                  marketplaceId: market.id,
+                  marketplaceName: market.name,
+                  chatId: fixtureChatId,
+                  expiresAt: new Date(Date.now() + 900000).toISOString(),
+                  stores: [{ id: second, name: 'Личная витрина из прошлого формата' }],
+                },
+              ]
+            : [],
         publicationPreview:
           market.status === 'active'
-            ? { mode: 'chat_marketplace' }
-            : { mode: 'unavailable', reason: 'closed' },
+            ? market.format === 'storefront'
+              ? { mode: 'administration_storefront' }
+              : { mode: 'chat_marketplace' }
+            : { mode: 'unavailable', reason: 'closed', format: market.format ?? 'community' },
         setupOperation: null,
       };
     throw new Error('Unexpected request: ' + path);
