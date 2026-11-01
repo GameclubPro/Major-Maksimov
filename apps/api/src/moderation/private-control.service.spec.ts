@@ -7,6 +7,7 @@ import {
 import {
   channelSettingsSchema,
   chatSettingsSchema,
+  chatSettingsScreenResponseSchema,
   MAX_BOT_SPEECH_TEXT_LENGTH,
   MAX_CHAT_RULES_TEXT_LENGTH,
   type ChatRules,
@@ -14,6 +15,7 @@ import {
   type ManagedGiveawayWinner,
   type MaxUpdate,
 } from '@maxim/contracts';
+import type { AdminService } from '../admin/admin.service';
 import {
   USER_AGREEMENT_SHORT_NOTICE,
   USER_AGREEMENT_START_NOTICE,
@@ -2568,6 +2570,149 @@ describe('PrivateControlService', () => {
     );
     expect(String(updatePayload?.text ?? '')).toContain('Пожалуйста, не флудите и не спамьте.');
     expect(String(updatePayload?.text ?? '')).not.toContain('За повторные нарушения бот может');
+  });
+
+  describe('private rules autofill generation boundaries', () => {
+    type SettingsScreen = Awaited<ReturnType<AdminService['getChatSettingsScreen']>>;
+
+    function createSettingsScreen(
+      settings: SettingsScreen['settings'],
+      channelTitle?: string,
+    ): SettingsScreen {
+      return chatSettingsScreenResponseSchema.parse({
+        settings,
+        rules: createRules({ text: 'Сохранённые правила.' }),
+        header: {
+          id: '-70000000000001',
+          title: 'Тестовый чат 1',
+          entityType: 'chat',
+          link: null,
+          participantsCount: null,
+        },
+        requiredSubscriptionChannels:
+          channelTitle === undefined
+            ? []
+            : [
+                {
+                  id: 'channel-1',
+                  title: channelTitle,
+                  entityType: 'channel',
+                  link: null,
+                  participantsCount: null,
+                },
+              ],
+        domains: [],
+      });
+    }
+
+    async function prepareAutofill(screen: SettingsScreen) {
+      const getChatSettingsScreen: jest.MockedFunction<AdminService['getChatSettingsScreen']> =
+        jest.fn();
+      getChatSettingsScreen.mockResolvedValue(screen);
+      const harness = createHarness({
+        settings: screen.settings,
+        rules: screen.rules,
+        adminService: { getChatSettingsScreen },
+      });
+
+      await harness.service.handleUpdate(
+        createPrivateCallbackUpdate(`pc2|chat_select|${harness.chats[0].id}`),
+      );
+      await harness.service.handleUpdate(createPrivateCallbackUpdate('pc2|open_rules'));
+      getChatSettingsScreen.mockClear();
+      harness.adminSettingsService.updateRules.mockClear();
+      harness.adminService.publishRules.mockClear();
+      harness.maxClient.sendMessage.mockClear();
+      harness.maxClient.answerCallback.mockClear();
+
+      return { ...harness, getChatSettingsScreen };
+    }
+
+    it('rejects private rules autofill with no items from a malformed settings response', async () => {
+      const screen = createSettingsScreen(chatSettingsSchema.parse({}));
+      // Valid link policies always yield an item; only this malformed upstream fixture omits it.
+      Reflect.deleteProperty(screen.settings, 'linkPolicy');
+      const { service, adminSettingsService, adminService, maxClient, getChatSettingsScreen } =
+        await prepareAutofill(screen);
+
+      await service.handleUpdate(createPrivateCallbackUpdate('pc2|rules_autofill'));
+
+      expect(getChatSettingsScreen).toHaveBeenCalledTimes(1);
+      expect(adminSettingsService.updateRules).not.toHaveBeenCalled();
+      expect(adminService.publishRules).not.toHaveBeenCalled();
+      expect(getLastSentText(maxClient)).toBe(
+        'Нет активных настроек, из которых можно собрать правила.',
+      );
+    });
+
+    it('rejects an oversized first private rules item from a malformed settings response', async () => {
+      const screen = createSettingsScreen(
+        chatSettingsSchema.parse({
+          requiredSubscriptionEnabled: true,
+          requiredSubscriptionChannelIds: ['channel-1'],
+          antiSpamEnabled: true,
+        }),
+        'Я'.repeat(MAX_CHAT_RULES_TEXT_LENGTH),
+      );
+      // Missing upstream policy makes subscription the first item, before a later short spam rule.
+      Reflect.deleteProperty(screen.settings, 'linkPolicy');
+      const { service, adminSettingsService, adminService, maxClient, getChatSettingsScreen } =
+        await prepareAutofill(screen);
+
+      await service.handleUpdate(createPrivateCallbackUpdate('pc2|rules_autofill'));
+
+      expect(getChatSettingsScreen).toHaveBeenCalledTimes(1);
+      expect(adminSettingsService.updateRules).not.toHaveBeenCalled();
+      expect(adminService.publishRules).not.toHaveBeenCalled();
+      expect(getLastSentText(maxClient)).toBe(
+        'Не удалось собрать короткий текст правил из текущих настроек.',
+      );
+    });
+
+    it.each([false, true])(
+      'keeps exactly 4000 UTF-16 units in private rules autofill (trailing item: %s)',
+      async (antiSpamEnabled) => {
+        const prefix =
+          'Правила чата:\n\n1. Ссылки бот проверяет, но не удаляет автоматически.\n2. Чтобы писать в чат, сначала подпишитесь на: ';
+        const suffix = '.';
+        const emoji = '😀';
+        const title =
+          emoji +
+          'Я'.repeat(MAX_CHAT_RULES_TEXT_LENGTH - prefix.length - suffix.length - emoji.length);
+        const expectedText = `${prefix}${title}${suffix}`;
+        const screen = createSettingsScreen(
+          chatSettingsSchema.parse({
+            requiredSubscriptionEnabled: true,
+            requiredSubscriptionChannelIds: ['channel-1'],
+            antiSpamEnabled,
+          }),
+          title,
+        );
+        const { service, chats, adminSettingsService, adminService, getChatSettingsScreen } =
+          await prepareAutofill(screen);
+
+        await service.handleUpdate(createPrivateCallbackUpdate('pc2|rules_autofill'));
+
+        expect(expectedText).toHaveLength(MAX_CHAT_RULES_TEXT_LENGTH);
+        expect(Array.from(expectedText)).toHaveLength(MAX_CHAT_RULES_TEXT_LENGTH - 1);
+        expect(getChatSettingsScreen).toHaveBeenCalledTimes(1);
+        expect(adminSettingsService.updateRules).toHaveBeenCalledTimes(1);
+        expect(adminSettingsService.updateRules).toHaveBeenCalledWith(
+          chats[0].id,
+          expect.objectContaining({ userId: 'user-1' }),
+          expect.objectContaining({
+            text: expectedText,
+            textFormat: 'plain',
+            autoTextEnabled: true,
+          }),
+          'private_bot',
+        );
+        expect(getChatSettingsScreen.mock.invocationCallOrder[0]).toBeLessThan(
+          adminSettingsService.updateRules.mock.invocationCallOrder[0],
+        );
+        expect(adminService.publishRules).not.toHaveBeenCalled();
+      },
+    );
   });
 
   it('hands off chat rules from miniapp into private bot rules flow', async () => {
