@@ -15,6 +15,7 @@ const integration = databaseUrl ? describe : describe.skip;
 integration('fixed moderator assignment with PostgreSQL', () => {
   let db: PrismaClient;
   let service: MaxFixedModeratorAssignmentService;
+  let config: ConfigService;
   let chatId: string;
   const actor = `fixed-admin-${randomUUID()}`;
   const epoch = new Date(Date.now() - 1000);
@@ -47,15 +48,18 @@ integration('fixed moderator assignment with PostgreSQL', () => {
     db = new PrismaClient({
       adapter: createPrismaAdapter(databaseUrl, { max: 5, statement_timeout: 10000 }),
     });
+    config = new ConfigService();
     service = new MaxFixedModeratorAssignmentService(
       db as never,
       {
         getBotById: (id: string) =>
           ['working-bot', 'other-bot'].includes(id) ? { id, state: 'active' } : null,
       } as never,
+      config,
     );
   });
   beforeEach(async () => {
+    config.set('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', false);
     chatId = `fixed-${randomUUID()}`;
     await db.chat.create({
       data: {
@@ -169,6 +173,49 @@ integration('fixed moderator assignment with PostgreSQL', () => {
       (await db.chat.findUniqueOrThrow({ where: { id: chatId } })).fixedModeratorBotId,
     ).toBeNull();
   });
+
+  it.each([
+    { commercialAiDeleteOnly: true, profanityBan: false, allowed: true },
+    { commercialAiDeleteOnly: false, profanityBan: false, allowed: false },
+    { commercialAiDeleteOnly: true, profanityBan: true, allowed: false },
+  ])(
+    'uses effective duties through assignment commit: %j',
+    async ({ commercialAiDeleteOnly, profanityBan, allowed }) => {
+      config.set('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', commercialAiDeleteOnly);
+      await db.chatSettings.create({
+        data: {
+          chatId,
+          commercialAdsFilterEnabled: true,
+          textFiltersBanEnabled: true,
+          russianProfanityFilterEnabled: profanityBan,
+          profanityBanEnabled: profanityBan,
+        },
+      });
+      await db.chatBotMembership.updateMany({
+        where: { chatId },
+        data: buildBotAccessSnapshotPersistence(
+          {
+            isAdmin: true,
+            isOwner: false,
+            permissionsKnown: true,
+            permissions: ['read_all_messages', 'write'],
+          },
+          { source: 'seed', now: epoch },
+        ),
+      });
+      const assignment = service.assign(input('other-bot'));
+      if (allowed) await expect(assignment).resolves.toMatchObject({ botId: 'other-bot' });
+      else await expect(assignment).rejects.toThrow('не хватает прав');
+      expect(await db.chat.findUniqueOrThrow({ where: { id: chatId } })).toMatchObject({
+        fixedModeratorBotId: allowed ? 'other-bot' : null,
+        routingVersion: allowed ? 5 : 4,
+      });
+      expect(await db.chatSettings.findUniqueOrThrow({ where: { chatId } })).toMatchObject({
+        textFiltersBanEnabled: true,
+        profanityBanEnabled: profanityBan,
+      });
+    },
+  );
 
   it('rejects settings enabled after a preflight against a former moderator', async () => {
     await db.chatSettings.create({ data: { chatId } });

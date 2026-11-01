@@ -1,5 +1,6 @@
 import { readFixedModeratorSettingsPurposes } from './fixed-moderator-capabilities';
-import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma, type ChatEntityType } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MaxBotRegistryService } from './max-bot-registry.service';
@@ -49,6 +50,7 @@ export class MaxFixedModeratorAssignmentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly registry: MaxBotRegistryService,
+    @Optional() private readonly config?: ConfigService,
   ) {}
 
   async assign(input: FixedModeratorAssignmentInput) {
@@ -157,7 +159,12 @@ export class MaxFixedModeratorAssignmentService {
       `);
         const required = new Set([
           ...requiredFixedModeratorPurposes(state),
-          ...(await readFixedModeratorSettingsPurposes(tx, input.chatId, input.entityType)),
+          ...(await readFixedModeratorSettingsPurposes(
+            tx,
+            input.chatId,
+            input.entityType,
+            this.config?.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED') === true,
+          )),
         ]);
         const proof = executionRouteProof(state, input.botId);
         if (

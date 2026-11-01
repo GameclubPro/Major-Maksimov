@@ -977,6 +977,7 @@ export async function saveChatSettings(params: {
   resolveBotAssignmentData: () => Promise<ResolvedBotAssignmentData> | ResolvedBotAssignmentData;
   assertRequiredSubscriptionSettings: (settings: ChatSettings) => Promise<ChatSettings | void>;
   reportsAvailable?: (chatId: string) => boolean;
+  commercialAiDeleteOnly?: boolean;
   assertBotCapabilities: (
     requirements: readonly ChatSettingsBotCapabilityRequirement[],
   ) => Promise<void>;
@@ -1217,6 +1218,7 @@ export async function saveChatSettings(params: {
     params.reportsAvailable?.(params.chatId) ?? false,
   );
   const capabilityRequirements = resolveChatSettingsBotCapabilityRequirements({
+    commercialAiDeleteOnly: params.commercialAiDeleteOnly,
     current: {
       ...DEFAULT_CHAT_SETTINGS,
       ...(currentSettings ?? {}),

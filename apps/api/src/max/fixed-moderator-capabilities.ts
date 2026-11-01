@@ -14,6 +14,7 @@ export async function readFixedModeratorSettingsPurposes(
   db: Pick<Prisma.TransactionClient, 'chatSettings' | 'channelSettings'>,
   chatId: string,
   entityType: 'CHAT' | 'CHANNEL',
+  commercialAiDeleteOnly = false,
 ): Promise<MaxExecutionPurpose[]> {
   if (entityType === 'CHANNEL') {
     const settings = await db.channelSettings.findUnique({
@@ -40,8 +41,9 @@ export async function readFixedModeratorSettingsPurposes(
     ...stored,
     stopWordsPolicy: stored ? (readStopWordsPolicy(stored) ?? undefined) : undefined,
   });
-  return currentChatSettingsBotCapabilityRequirements(settings).map((requirement) =>
-    requirement.permission === 'add_remove_members' ? 'moderate_member' : 'send_message',
+  return currentChatSettingsBotCapabilityRequirements(settings, commercialAiDeleteOnly).map(
+    (requirement) =>
+      requirement.permission === 'add_remove_members' ? 'moderate_member' : 'send_message',
   );
 }
 

@@ -732,11 +732,75 @@ function inspectBackgroundClient() {
   return inspectReleaseApiClient('api-moderation-background').Id;
 }
 
-function checkClient() {
-  inspectBackgroundClient();
-  inspectContainer();
-  const response = JSON.parse(
-    run(
+const clientSmokeFailureStages = {
+  ENVIRONMENT_INVALID: 'environment',
+  REDIS_UNAVAILABLE: 'redis',
+  ADMISSION_BLOCKED: 'admission',
+  LEASE_LOST: 'ownership',
+  LEASE_RELEASE_UNAVAILABLE: 'ownership',
+  DEADLINE_EXCEEDED: 'ownership',
+  MODEL_TIMEOUT: 'classification',
+  MODEL_ABORTED: 'classification',
+  MODEL_HTTP_ERROR: 'classification',
+  MODEL_INVALID_RESPONSE: 'classification',
+  MODEL_RESPONSE_TOO_LARGE: 'classification',
+  MODEL_UNAVAILABLE: 'classification',
+  UNEXPECTED_CLASSIFICATION: 'classification',
+};
+
+export function validateCommercialLlmClientSmokeFailure(value) {
+  const withAdmission = value?.code === 'ADMISSION_BLOCKED';
+  if (
+    !hasExactKeys(value, [
+      'schemaVersion',
+      'ok',
+      'stage',
+      'code',
+      ...(withAdmission ? ['admission'] : []),
+    ]) ||
+    value.schemaVersion !== 1 ||
+    value.ok !== false ||
+    typeof value.code !== 'string' ||
+    !Object.hasOwn(clientSmokeFailureStages, value.code) ||
+    value.stage !== clientSmokeFailureStages[value.code]
+  )
+    throw new Error('commercial_llm_client_smoke_diagnostic_refused');
+  const result = { schemaVersion: 1, ok: false, stage: value.stage, code: value.code };
+  if (withAdmission) {
+    const observation = value.admission;
+    if (
+      !hasExactKeys(observation, ['observedAt', 'leaseState', 'cooldownState']) ||
+      typeof observation.observedAt !== 'string' ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(observation.observedAt) ||
+      !Number.isFinite(Date.parse(observation.observedAt)) ||
+      !['MISSING', 'HELD_EXPIRING', 'HELD_PERSISTENT', 'INVALID', 'UNAVAILABLE'].includes(
+        observation.leaseState,
+      ) ||
+      !['MISSING', 'ACTIVE', 'INVALID', 'UNAVAILABLE'].includes(observation.cooldownState)
+    )
+      throw new Error('commercial_llm_client_smoke_diagnostic_refused');
+    result.admission = {
+      observedAt: observation.observedAt,
+      leaseState: observation.leaseState,
+      cooldownState: observation.cooldownState,
+    };
+  }
+  return result;
+}
+
+class CommercialLlmClientSmokeFailure extends Error {
+  constructor(diagnostic) {
+    super(`commercial_llm_client_smoke_failed:${diagnostic.stage}:${diagnostic.code}`);
+    this.diagnostic = diagnostic;
+  }
+}
+
+export function executeCommercialLlmClientSmoke(execImpl = execFileSync) {
+  const maximumBytes = 16384;
+  const failure = (code) => ({ schemaVersion: 1, ok: false, stage: 'process', code });
+  let output;
+  try {
+    output = execImpl(
       'docker',
       [
         ...composeArgs,
@@ -746,10 +810,58 @@ function checkClient() {
         'node',
         'apps/api/dist/apps/api/src/scripts/commercial-llm-shadow-smoke.js',
       ],
-      { timeout: 140000, maxBuffer: 16384 },
-    ),
-  );
-  emit('check_client', validateCommercialLlmClientSmokeResponse(response));
+      {
+        timeout: 140000,
+        maxBuffer: maximumBytes,
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+  } catch (error) {
+    // FLAG: Child stderr may include connection strings or source-bearing exceptions. Decode
+    // only a bounded exact JSON diagnostic; never forward command, buffers or arbitrary errors.
+    let diagnostic;
+    const candidates = ['ETIMEDOUT', 'ENOBUFS'].includes(error?.code)
+      ? []
+      : [error?.stdout, error?.stderr];
+    for (const candidate of candidates) {
+      if (
+        !(typeof candidate === 'string' || Buffer.isBuffer(candidate)) ||
+        Buffer.byteLength(candidate) > maximumBytes
+      )
+        continue;
+      try {
+        diagnostic = validateCommercialLlmClientSmokeFailure(JSON.parse(candidate.toString()));
+        break;
+      } catch {
+        /* FLAG: Unstructured legacy errors and arbitrary output remain private. */
+      }
+    }
+    throw new CommercialLlmClientSmokeFailure(
+      diagnostic ?? failure(error?.code === 'ETIMEDOUT' ? 'PROCESS_TIMEOUT' : 'PROCESS_FAILED'),
+    );
+  }
+  try {
+    if (
+      !(typeof output === 'string' || Buffer.isBuffer(output)) ||
+      Buffer.byteLength(output) > maximumBytes
+    )
+      throw new Error('invalid_output');
+    return validateCommercialLlmClientSmokeResponse(JSON.parse(output.toString()));
+  } catch {
+    throw new CommercialLlmClientSmokeFailure(failure('INVALID_OUTPUT'));
+  }
+}
+
+function checkClient() {
+  inspectBackgroundClient();
+  inspectContainer();
+  try {
+    emit('check_client', executeCommercialLlmClientSmoke());
+  } catch (error) {
+    if (error instanceof CommercialLlmClientSmokeFailure) emit('check_client', error.diagnostic);
+    throw error;
+  }
 }
 
 export function commercialLlmWorkstationBridgeCommand(nodeId) {

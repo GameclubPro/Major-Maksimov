@@ -8213,6 +8213,8 @@ export class AdminService implements OnModuleDestroy {
   ): Promise<ApplySettingsToAllChatsResult> {
     await this.assertManagedEntityAdminAccess(sourceChatId, user.userId, 'chat');
     return applySettingsToAllChatsValue({
+      commercialAiDeleteOnly:
+        this.configService.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED') === true,
       prisma: this.prisma,
       chatContextCache: this.chatContextCache,
       sourceChatId,

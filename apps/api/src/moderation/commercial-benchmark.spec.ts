@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { isCommercialMessageDeleteEligible } from './commercial/commercial-action-policy';
 
 import type { ChatSettings } from '../prisma/prisma-client';
 import type { CommercialCampaignContext } from './commercial-campaign.util';
@@ -503,7 +504,13 @@ describe('commercial deterministic benchmark', () => {
       falsePositives.push(item.label);
       const metadata = readMetadata(violation);
       const actionBand = String(metadata.actionBand ?? 'UNKNOWN');
-      if (actionBand === 'DELETE' || actionBand === 'DELETE_AND_ESCALATE') {
+      if (
+        isCommercialMessageDeleteEligible(
+          actionBand,
+          metadata.actionable === true,
+          metadata.messageDisposition,
+        )
+      ) {
         deleteFalsePositives.push(item.label);
       }
       for (const signal of readStringArray(metadata.matchedSignals)) {
