@@ -1,4 +1,17 @@
 import { z } from 'zod';
+import {
+  commercialReviewSemanticAnnotationRequestSchema,
+  commercialReviewSemanticAnnotationSchema,
+} from './commercial-review-semantics.js';
+export {
+  commercialReviewSemanticCohortSchema,
+  commercialReviewSemanticAnnotationRequestSchema,
+  commercialReviewSemanticAnnotationSchema,
+  resolveCommercialLabelAuthority,
+  resolveCommercialSemanticReview,
+  type CommercialReviewSemanticCohort,
+  type CommercialReviewSemanticAnnotationRequest,
+} from './commercial-review-semantics.js';
 export {
   commercialAiPoolDiagnosticsSchema,
   safetyDeskCommercialAiPoolResponseSchema,
@@ -126,8 +139,9 @@ export const commercialReviewOwnReviewSchema = z.object({
   expectedDisposition: commercialReviewDispositionSchema.nullable(),
   reason: z.string().max(500),
   reviewedAt: z.string().datetime(),
-  kind: z.enum(['INDEPENDENT', 'ADJUDICATION']),
+  kind: z.enum(['INDEPENDENT', 'ADJUDICATION', 'SEMANTIC_ADJUDICATION']),
   evidenceKind: z.enum(['TEXT', 'CAPTION_ONLY', 'PRIVATE_SOURCE_IMAGE']),
+  semanticAnnotation: commercialReviewSemanticAnnotationSchema.nullable().optional(),
 });
 export const commercialReviewItemSchema = z
   .object({
@@ -155,6 +169,7 @@ export const commercialReviewItemSchema = z
     canReview: z.boolean(),
     canAdjudicate: z.boolean(),
     imageEvidenceAvailable: z.boolean(),
+    semanticAnnotationAllowed: z.boolean().default(false),
     sourceExcerptComplete: z.boolean().nullable(),
     evidenceMetadata: commercialReviewEvidenceMetadataSchema.nullable(),
     observedAt: z.string().datetime(),
@@ -202,6 +217,7 @@ export const commercialReviewDecisionRequestSchema = z
     label: commercialReviewLabelSchema,
     expectedDisposition: commercialReviewDispositionSchema.nullable().optional(),
     reason: z.string().trim().max(500).default(''),
+    semanticAnnotation: commercialReviewSemanticAnnotationRequestSchema.optional(),
   })
   .strict()
   .superRefine((review, context) => {

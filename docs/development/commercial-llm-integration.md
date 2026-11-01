@@ -157,3 +157,58 @@ API deployment flow; abort/expiry contains an in-flight observation. Do not dele
 queues, Redis namespaces, other projects' containers or retained model artifacts to roll back.
 Old API images ignore the additive nullable column. No rollback may bypass existing reader
 floors or the protected deploy lock.
+
+## Independent semantic review and AI export
+
+The closed Safety Desk collects a version-1 semantic annotation with each new complete-text
+review. The finite categories are `BUYER_REQUEST`, `PERSONAL_SALE`, `QUOTED_DISCUSSION`,
+`NEGATED_OFFER`, `SERVICE_ANNOUNCEMENT`, `NONCOMMERCIAL_HELP`, `MIXED_CONTENT`,
+`COMMERCIAL_OFFER` and `INSUFFICIENT_CONTEXT`. Categories describe the shown text; they do
+not grant deletion authority. Requests contain only `{version: 1, cohorts: [...]}`.
+The server binds each immutable vote to the source snapshot and the exact sanitized excerpt.
+The browser cannot supply hashes or reviewer identity. Previous votes, model results and
+execution cohorts remain hidden until the reviewer saves their own vote.
+
+Two independently bound annotations must agree, or a third distinct reviewer adjudicates.
+Semantic disagreement is tracked separately from label/disposition agreement and appears in
+the pending queue. In particular, two agreed KEEP votes still trigger the existing durable
+false-deletion stop for the experimental policy; semantic disagreement cannot delay that stop.
+A semantic-only third opinion is stored as `SEMANTIC_ADJUDICATION`, including its actual
+label/disposition (even UNSURE), while the agreed independent pair retains label authority.
+No pre-save response compares that opinion to a hidden label. Every participant still needs
+valid independent identity, source coverage and timestamps. Genuine label disagreement retains
+its ordinary adjudication path. Old stop readers skip the new kind when selecting the final
+label, preserving the two-vote KEEP stop even when execution confirmation arrives later;
+old strict review projections reject the unknown kind instead of assigning it label authority.
+Old unannotated votes remain missing evidence. Caption-only or incomplete sources cannot
+receive a complete-text annotation.
+
+Use the owner-guarded `GET /api/v1/safety-desk/commercial/review/ai-export` with explicit
+`since`/`until` (at most fourteen days), optional `cursor` and `limit` (default/max 50).
+The ordinary human export remains available. AI export includes only the caller's reviewed,
+unexpired human samples and rechecks their exact revision before joining observations.
+Dedicated AI rows are diagnostics and cannot receive human ratings or enter the human frame.
+The writer stores `human_review_evidence_hash`; the join selects at most two rows by that exact
+indexed key before expiry or JSON validation. Multiple generations remain INVALID, including
+an expired generation alongside an active one. Absent/expired observations stay null;
+malformed/oversized/mismatched evidence stays INVALID. Historical receipts and failures are
+exported as observed. Neither path renews source authority or infers a missing KEEP result.
+
+The AI quality reporter derives protected semantic cohorts exclusively from the independently
+resolved, source-bound human annotations, never execution `requiredPolicyCohorts`. Missing,
+conflicting or mismatched annotations block evidence sufficiency. Statistical thresholds,
+separation of labels/permissions/effects and the frozen holdout protocol remain mandatory.
+Synthetic local/native fixtures demonstrate the data path; they do not certify model accuracy.
+
+The additive nullable migrations require no backfill. The linkage index and the combined
+adjudicator uniqueness index each have their own concurrent migration. A single atomic ALTER
+widens the finite rating-kind CHECK with NOT VALID, avoiding a retained-history validation scan;
+new writes still reject unknown kinds. The original adjudicator index remains installed.
+Old readers can ignore the new columns; rollback must retain all previously installed
+execution reader floors and keep these evidence columns. New phone campaign evidence uses
+`commercial-campaign:v1:phone-v2:*` so false URL/identifier memberships from the previous parser
+cannot influence it. Other campaign histories are preserved; old phone keys expire by their
+normal 36-hour TTL without cleanup. Quality comparisons bind the new detector source identity;
+old and new source snapshots are not interchangeable. The second-stage process cache version
+advances with this change. Commercial OCR and the experimental intent policy require their
+existing independent promotion gates.

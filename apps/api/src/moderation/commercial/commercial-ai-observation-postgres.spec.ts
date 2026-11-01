@@ -1,13 +1,21 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES,
   commercialAiQualityEnvelopeSchema,
   commercialAiQualityResultSchema,
+  commercialAiReviewExportResponseSchema,
   type CommercialAiQualityAttempt,
   type CommercialAiQualityResult,
 } from '@maxim/contracts/commercial-ai-quality';
-import { createPrismaClient, type PrismaClient, type Prisma } from '../../prisma/prisma-client';
+import { commercialReviewSemanticAnnotationSchema } from '@maxim/contracts/safety-desk';
+import { createPrismaClient, Prisma, type PrismaClient } from '../../prisma/prisma-client';
 import type { PrismaService } from '../../prisma/prisma.service';
+import {
+  analyzeCommercialAiQualityEvidence,
+  commercialAiQualityDigest,
+  commercialAiQualityEvidenceSchema,
+  commercialAiQualityExpectedIdentity,
+} from '../../scripts/commercial-ai-quality-report';
 import {
   CommercialAiObservationService,
   COMMERCIAL_AI_OBSERVATION_TTL_MS,
@@ -156,6 +164,35 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       });
     const envelope = async (input: CommercialAiObservationSeed) =>
       commercialAiQualityEnvelopeSchema.parse((await row(input)).llmEnforcement);
+    const humanRow = (input: CommercialAiObservationSeed) =>
+      prisma.commercialReviewSample.findFirstOrThrow({
+        where: {
+          chatId,
+          messageId: input.candidate.messageId,
+          llmEnforcement: { equals: Prisma.DbNull },
+        },
+        include: { ratings: true },
+      });
+    const exportWindow = () => ({
+      since: new Date(Date.now() - 60_000).toISOString(),
+      until: new Date(Date.now() + 60_000).toISOString(),
+      limit: 50,
+    });
+    async function reviewedObservation(input: CommercialAiObservationSeed) {
+      await review.recordCandidate(input.candidate);
+      expect(await writer.seed(input)).toBe('written');
+      expect(await writer.update({ ...binding(input), analysis: analysis(input) })).toBe('written');
+      for (const actor of ['synthetic-one', 'synthetic-two']) {
+        const human = await humanRow(input);
+        await review.labelItem(human.id, actor, {
+          expectedUpdatedAt: human.updatedAt.toISOString(),
+          label: 'NOT_COMMERCIAL',
+          expectedDisposition: 'KEEP',
+          semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+        });
+      }
+      return humanRow(input);
+    }
     const binding = (input: CommercialAiObservationSeed) => ({
       source: input.request.source,
       inputSha256: commercialAiObservationInputSha256(input.request.excerpt),
@@ -353,8 +390,9 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       ).toBe('conflict');
     });
 
-    it('preserves ratings, review etags, original evidence and separate shadow observations', async () => {
+    it('preserves human ratings and etags while enriching separate AI and shadow observations', async () => {
       const input = seed();
+      await review.recordCandidate(input.candidate);
       await writer.seed(input);
       await prisma.commercialReviewSample.update({
         where: { id: (await row(input)).id },
@@ -365,18 +403,23 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
         await writer.update({ ...binding(input), admission: { state: 'ACCEPTED', reason: null } }),
       ).toBe('written');
       expect((await row(input)).updatedAt).toEqual(before.updatedAt);
+      const human = await humanRow(input);
       await Promise.all([
         writer.update({ ...binding(input), analysis: analysis(input) }),
-        review.labelItem(before.id, 'synthetic-reviewer', {
-          expectedUpdatedAt: before.updatedAt.toISOString(),
+        review.labelItem(human.id, 'synthetic-reviewer', {
+          expectedUpdatedAt: human.updatedAt.toISOString(),
           label: 'NOT_COMMERCIAL',
           expectedDisposition: 'KEEP',
           reason: 'Синтетический пример',
         }),
       ]);
       const after = await row(input);
-      expect(after.ratings).toHaveLength(1);
-      expect(after.independentReviewCount).toBe(1);
+      expect(after.ratings).toHaveLength(0);
+      expect(after.independentReviewCount).toBe(0);
+      expect(after.updatedAt).toEqual(before.updatedAt);
+      const reviewed = await humanRow(input);
+      expect(reviewed.ratings).toHaveLength(1);
+      expect(reviewed.independentReviewCount).toBe(1);
       expect(after.qualityMetadata).toEqual(before.qualityMetadata);
       expect(after.llmShadow).toEqual(before.llmShadow);
       expect(after.observedAt).toEqual(before.observedAt);
@@ -384,6 +427,238 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       expect((after.evidence as Prisma.JsonObject).excerpt).toEqual(
         (before.evidence as Prisma.JsonObject).excerpt,
       );
+    });
+
+    it.each(['AGREED', 'COMMERCIAL', 'UNSURE'] as const)(
+      'carries exact source-bound human semantics through AI export to the reporter cohort gate after %s blind review',
+      async (thirdLabel) => {
+        const text = 'Посоветуйте мастера по ремонту холодильника.';
+        let input = seed({ text });
+        // FLAG: Use actual sampler inclusion; do not fabricate an evaluation-frame flag.
+        for (let index = 0; !input.candidate.randomEvaluationIncluded && index < 1000; index += 1) {
+          input = seed({ text, messageId: `synthetic-evaluation-${index}` });
+        }
+        expect(input.candidate.randomEvaluationIncluded).toBe(true);
+        await review.recordCandidate(input.candidate);
+        expect(await writer.seed(input)).toBe('written');
+        expect(await writer.update({ ...binding(input), analysis: analysis(input) })).toBe(
+          'written',
+        );
+        let human = await humanRow(input);
+        const observed = await row(input);
+        expect(observed.humanReviewEvidenceHash).toBe(human.evidenceHash);
+        const blindQueue = await review.getQueue({ status: 'ALL' }, 'synthetic-two');
+        expect(blindQueue.items.find((item) => item.id === human.id)).toMatchObject({
+          decisionVisible: false,
+          evidenceMetadata: null,
+          ownReview: null,
+        });
+        expect(blindQueue.items.some((item) => item.id === observed.id)).toBe(false);
+        await expect(
+          review.labelItem(observed.id, 'synthetic-one', {
+            expectedUpdatedAt: observed.updatedAt.toISOString(),
+            label: 'NOT_COMMERCIAL',
+            expectedDisposition: 'KEEP',
+          }),
+        ).rejects.toMatchObject({ status: 404 });
+        await review.labelItem(human.id, 'synthetic-one', {
+          expectedUpdatedAt: human.updatedAt.toISOString(),
+          label: 'NOT_COMMERCIAL',
+          expectedDisposition: 'KEEP',
+          semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+        });
+        expect(
+          (await review.exportAiIndependentEvidence(exportWindow(), 'synthetic-two')).items,
+        ).toEqual([]);
+        human = await humanRow(input);
+        await review.labelItem(human.id, 'synthetic-two', {
+          expectedUpdatedAt: human.updatedAt.toISOString(),
+          label: 'NOT_COMMERCIAL',
+          expectedDisposition: 'KEEP',
+          semanticAnnotation: {
+            version: 1,
+            cohorts: [thirdLabel === 'AGREED' ? 'BUYER_REQUEST' : 'NONCOMMERCIAL_HELP'],
+          },
+        });
+        if (thirdLabel !== 'AGREED') {
+          human = await humanRow(input);
+          const blindThird = (
+            await review.getQueue({ status: 'PENDING' }, 'synthetic-three')
+          ).items.find((item) => item.id === human.id);
+          expect(blindThird).toMatchObject({
+            canAdjudicate: true,
+            decisionVisible: false,
+            label: null,
+            ownReview: null,
+          });
+          expect(
+            (await review.exportAiIndependentEvidence(exportWindow(), 'synthetic-three')).items,
+          ).toEqual([]);
+          const adjudicated = await review.adjudicateItem(human.id, 'synthetic-three', {
+            expectedUpdatedAt: human.updatedAt.toISOString(),
+            label: thirdLabel,
+            expectedDisposition: thirdLabel === 'UNSURE' ? null : 'DELETE',
+            semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+          });
+          expect(adjudicated).toMatchObject({
+            label: 'NOT_COMMERCIAL',
+            ownReview: {
+              label: thirdLabel,
+              expectedDisposition: thirdLabel === 'UNSURE' ? null : 'DELETE',
+              kind: 'SEMANTIC_ADJUDICATION',
+            },
+          });
+          expect((await humanRow(input)).semanticReviewState).toBe('RESOLVED');
+          expect(
+            (await review.getQueue({ status: 'PENDING' }, 'synthetic-four')).items.some(
+              (item) => item.id === human.id,
+            ),
+          ).toBe(false);
+        }
+        const exported = commercialAiReviewExportResponseSchema.parse(
+          await review.exportAiIndependentEvidence(
+            exportWindow(),
+            thirdLabel === 'AGREED' ? 'synthetic-one' : 'synthetic-three',
+          ),
+        );
+        expect(exported.items).toHaveLength(1);
+        const item = exported.items[0]!;
+        expect(item.eligibleForIndependentCorpus).toBe(true);
+        expect(item.sample.label).toBe('NOT_COMMERCIAL');
+        expect(item.sample.id).toBe(human.id);
+        expect(item.sample.llmEnforcement).toEqual(await envelope(input));
+        const expectedAnnotation = {
+          version: 1,
+          cohorts: ['BUYER_REQUEST'],
+          sourceSnapshotSha256: input.candidate.sourceSnapshotSha256,
+          excerptSha256: createHash('sha256').update(item.sample.excerpt, 'utf8').digest('hex'),
+        };
+        const expectedAnnotations =
+          thirdLabel === 'AGREED'
+            ? [expectedAnnotation, expectedAnnotation]
+            : [
+                expectedAnnotation,
+                { ...expectedAnnotation, cohorts: ['NONCOMMERCIAL_HELP'] },
+                expectedAnnotation,
+              ];
+        const orderedAnnotations = (values: readonly unknown[]) =>
+          values
+            .map((value) => commercialReviewSemanticAnnotationSchema.parse(value))
+            .sort((left, right) => left.cohorts.join(',').localeCompare(right.cohorts.join(',')));
+        expect(orderedAnnotations(item.ratings.map((rating) => rating.semanticAnnotation))).toEqual(
+          orderedAnnotations(expectedAnnotations),
+        );
+        expect(
+          orderedAnnotations(
+            (await humanRow(input)).ratings.map((rating) => rating.semanticAnnotation),
+          ),
+        ).toEqual(orderedAnnotations(expectedAnnotations));
+        if (thirdLabel !== 'AGREED') {
+          expect(
+            item.ratings.find((rating) => rating.kind === 'SEMANTIC_ADJUDICATION'),
+          ).toMatchObject({
+            label: thirdLabel,
+            expectedDisposition: thirdLabel === 'UNSURE' ? null : 'DELETE',
+          });
+        }
+        expect((await row(input)).ratings).toHaveLength(0);
+        expect(item.sample.requiredPolicyCohorts).toEqual([]);
+        // FLAG: Only the reporter's synthetic clock advances past the recorded effect deadline.
+        // Persisted timestamps, source facts and the global clock remain unchanged.
+        const evaluatedAtMs = Math.max(Date.now(), input.request.source.deadlineAtMs + 1);
+        const manifest = {
+          ...commercialAiQualityExpectedIdentity('confirm-positive'),
+          policyFrozenAt: new Date(evaluatedAtMs - 2 * 86400_000).toISOString(),
+          developmentFrameSha256: commercialAiQualityDigest([]),
+          holdoutFrameSha256: commercialAiQualityDigest([]),
+          requiredProtectedCohorts: ['BUYER_REQUEST'],
+        };
+        const report = analyzeCommercialAiQualityEvidence(
+          commercialAiQualityEvidenceSchema.parse({
+            schemaVersion: 'commercial-ai-quality-evidence/v1',
+            mode: 'INDEPENDENT_REVIEW',
+            evaluatedAt: new Date(evaluatedAtMs).toISOString(),
+            holdout: [{ cursor: null, response: exported }],
+            manifest,
+            manifestSha256: commercialAiQualityDigest(manifest),
+          }),
+          { now: evaluatedAtMs },
+        );
+        expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+          { cohort: 'BUYER_REQUEST', protectedUnits: 1, unsafePermissions: 0, criteriaPass: false },
+        ]);
+        expect(report.provenanceErrors).not.toContain(
+          'source_bound_semantic_review_missing_or_invalid',
+        );
+        expect(report.provenanceErrors).not.toContain('required_protected_cohort_evidence_missing');
+        expect(report.provenanceErrors).not.toContain('independent_human_review_evidence_missing');
+        expect(
+          report.independentClassification.finalClassificationCountsByDeclaredHumanLabel,
+        ).toEqual({
+          COMMERCIAL: {},
+          NOT_COMMERCIAL: { NOT_COMMERCIAL: 1 },
+        });
+        expect(report.independentPolicyQuality.criteriaPass).toBe(false);
+        expect(report.promotionAuthorized).toBe(false);
+      },
+    );
+
+    it.each(['CORRUPT', 'EXPIRED', 'AMBIGUOUS_EXPIRED'] as const)(
+      'retains the human review but reports the exact AI linkage gap: %s',
+      async (gap) => {
+        const input = seed({ text: 'Посоветуйте мастера по ремонту холодильника.' });
+        const human = await reviewedObservation(input);
+        const observed = await row(input);
+        if (gap === 'CORRUPT') {
+          await prisma.commercialReviewSample.update({
+            where: { id: observed.id },
+            data: { llmEnforcement: { schemaVersion: 1, captureState: 'OBSERVED', attempts: [] } },
+          });
+        } else if (gap === 'EXPIRED') {
+          await prisma.commercialReviewSample.update({
+            where: { id: observed.id },
+            data: { expiresAt: new Date(0) },
+          });
+        } else {
+          await prisma.commercialReviewSample.create({
+            data: {
+              chatId,
+              userId: observed.userId,
+              messageId: observed.messageId,
+              source: observed.source,
+              evidenceHash: createHash('sha256').update(randomUUID()).digest('hex'),
+              humanReviewEvidenceHash: human.evidenceHash,
+              score: observed.score,
+              evidence: observed.evidence as Prisma.InputJsonValue,
+              qualityMetadata: observed.qualityMetadata as Prisma.InputJsonValue,
+              llmEnforcement: observed.llmEnforcement as Prisma.InputJsonValue,
+              expiresAt: new Date(0),
+            },
+          });
+        }
+        const exported = await review.exportAiIndependentEvidence(exportWindow(), 'synthetic-one');
+        expect(exported.items).toHaveLength(1);
+        expect(exported.items[0]?.sample.id).toBe(human.id);
+        expect(exported.items[0]?.eligibleForIndependentCorpus).toBe(true);
+        expect(exported.items[0]?.sample.llmEnforcement).toEqual(
+          gap === 'EXPIRED'
+            ? null
+            : { schemaVersion: 1, captureState: 'INVALID', coverageIncomplete: true },
+        );
+      },
+    );
+
+    it('does not export expired human evidence even when its linked AI observation remains retained', async () => {
+      const input = seed({ text: 'Посоветуйте мастера по ремонту холодильника.' });
+      const human = await reviewedObservation(input);
+      await prisma.commercialReviewSample.update({
+        where: { id: human.id },
+        data: { expiresAt: new Date(0) },
+      });
+      expect((await row(input)).expiresAt.getTime()).toBeGreaterThan(Date.now());
+      expect(
+        (await review.exportAiIndependentEvidence(exportWindow(), 'synthetic-one')).items,
+      ).toEqual([]);
     });
 
     it('retains durable registration/receipt facts across later weaker observations', async () => {
@@ -604,6 +879,19 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       expect(plan.map((line) => line['QUERY PLAN']).join('\n')).toContain(
         'commercial_review_samples_evidence_hash_key',
       );
+      const linkagePlan = await prisma.$queryRaw<{ 'QUERY PLAN': string }[]>(Prisma.sql`
+        EXPLAIN (COSTS OFF)
+        WITH linked AS MATERIALIZED (
+          SELECT id, evidence, quality_metadata, llm_enforcement
+          FROM commercial_review_samples
+          WHERE human_review_evidence_hash = ${(await row(input)).humanReviewEvidenceHash}
+          ORDER BY observed_at DESC, id DESC LIMIT 2
+        ) SELECT evidence ->> 'excerpt' FROM linked
+      `);
+      const linkagePlanText = linkagePlan.map((line) => line['QUERY PLAN']).join('\n');
+      expect(linkagePlanText).toContain('commercial_review_samples_human_evidence_idx');
+      expect(linkagePlanText).toContain('Limit');
+      expect(linkagePlanText).not.toContain('Seq Scan on commercial_review_samples');
       expect(
         await writer.update({ ...binding(input), admission: { state: 'ACCEPTED', reason: null } }),
       ).toBe('written');

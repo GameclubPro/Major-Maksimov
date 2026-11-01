@@ -9,6 +9,7 @@ describe('SafetyDeskController night-mode runtime pagination', () => {
       labelItem: jest.fn().mockReturnValue({}),
       adjudicateItem: jest.fn().mockReturnValue({}),
       exportIndependentEvidence: jest.fn().mockReturnValue({}),
+      exportAiIndependentEvidence: jest.fn().mockReturnValue({}),
       exportSamplingFrame: jest.fn().mockReturnValue({}),
     };
     const controller = new SafetyDeskController({} as never, commercial as never);
@@ -32,6 +33,8 @@ describe('SafetyDeskController night-mode runtime pagination', () => {
     };
     controller.exportCommercialReview(window, 'trusted-owner');
     expect(commercial.exportIndependentEvidence).toHaveBeenCalledWith(window, 'trusted-owner');
+    controller.exportCommercialAiReview(window, 'trusted-owner');
+    expect(commercial.exportAiIndependentEvidence).toHaveBeenCalledWith(window, 'trusted-owner');
     controller.exportCommercialSamplingFrame(window, 'trusted-owner');
     expect(commercial.exportSamplingFrame).toHaveBeenCalledWith(window, 'trusted-owner');
   });

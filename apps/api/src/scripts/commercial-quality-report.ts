@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import type {
-  CommercialReviewExportResponse,
-  CommercialReviewSamplingFrameResponse,
+import {
+  resolveCommercialLabelAuthority,
+  type CommercialReviewExportResponse,
+  type CommercialReviewSamplingFrameResponse,
 } from '@maxim/contracts/safety-desk';
 import { COMMERCIAL_INTENT_QUALITY_DECISION_VERSION } from '../moderation/commercial/commercial-policy-cohorts';
 import { fingerprintCommercialTextSettingsProfile } from '../moderation/commercial/commercial-text-runtime-policy.service';
@@ -424,16 +425,15 @@ function sourceKeys(row: ExportItem): string[] {
   ].filter((key): key is string => Boolean(key));
 }
 function finalRating(row: ExportItem) {
-  return (
-    row.ratings.find((rating) => rating.kind === 'ADJUDICATION') ??
-    row.ratings.find((rating) => rating.kind === 'INDEPENDENT')
-  );
+  return resolveCommercialLabelAuthority(row.ratings).finalRating;
 }
 function independentEvidence(row: ExportItem): boolean {
   const quality = row.sample.evidenceMetadata;
   const independent = row.ratings.filter((rating) => rating.kind === 'INDEPENDENT');
-  const adjudication = row.ratings.filter((rating) => rating.kind === 'ADJUDICATION');
-  const final = finalRating(row);
+  const adjudication = row.ratings.filter(
+    (rating) => rating.kind === 'ADJUDICATION' || rating.kind === 'SEMANTIC_ADJUDICATION',
+  );
+  const { finalRating: final, labelRatings } = resolveCommercialLabelAuthority(row.ratings);
   if (
     !row.eligibleForIndependentCorpus ||
     row.sample.reviewState !== 'RESOLVED' ||
@@ -452,6 +452,10 @@ function independentEvidence(row: ExportItem): boolean {
     !final.expectedDisposition
   )
     return false;
+  // FLAG: A semantic adjudicator's own uncertainty cannot replace two agreed label votes.
+  // Every stored review still has to pass the source, timestamp and actor evidence checks.
+  if (labelRatings.some((rating) => rating.label === 'UNSURE' || !rating.expectedDisposition))
+    return false;
   if (
     !adjudication.length &&
     (independent[0]!.label !== independent[1]!.label ||
@@ -461,7 +465,6 @@ function independentEvidence(row: ExportItem): boolean {
   if (row.sample.label !== final.label) return false;
   return row.ratings.every(
     (rating) =>
-      rating.label !== 'UNSURE' &&
       Date.parse(rating.reviewedAt) >= Date.parse(quality.messageCreatedAt!) &&
       (row.sample.source === 'TEXT'
         ? rating.evidenceKind === 'TEXT' && quality.sourceExcerptComplete === true

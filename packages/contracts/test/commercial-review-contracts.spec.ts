@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { commercialAiReviewExportQuerySchema } from '@maxim/contracts/commercial-ai-quality';
 import {
   commercialReviewDecisionRequestSchema,
+  commercialReviewOwnReviewSchema,
+  resolveCommercialLabelAuthority,
+  resolveCommercialSemanticReview,
   commercialReviewItemSchema,
   commercialReviewEvidenceMetadataSchema,
   commercialReviewDecisionSnapshotSchema,
@@ -42,6 +46,188 @@ const blind = {
 };
 
 describe('independent commercial review contracts', () => {
+  it.each([
+    ['COMMERCIAL', 'DELETE'],
+    ['UNSURE', null],
+  ] as const)(
+    'preserves agreed label authority and the semantic adjudicator’s actual %s response',
+    (label, expectedDisposition) => {
+      const first = {
+        reviewerKey: 'first',
+        kind: 'INDEPENDENT',
+        label: 'NOT_COMMERCIAL',
+        expectedDisposition: 'KEEP',
+      };
+      const second = { ...first, reviewerKey: 'second' };
+      const third = {
+        reviewerKey: 'third',
+        kind: 'SEMANTIC_ADJUDICATION',
+        label,
+        expectedDisposition,
+      };
+      const ratings = [first, second, third];
+      const original = structuredClone(ratings);
+      const authority = resolveCommercialLabelAuthority(ratings);
+      expect(authority.finalRating).toBe(first);
+      expect(authority.labelRatings).toEqual([first, second]);
+      expect(ratings).toEqual(original);
+      expect(ratings[2]).toBe(third);
+      expect(
+        commercialReviewOwnReviewSchema.safeParse({
+          ...third,
+          reason: 'Собственная независимая оценка',
+          reviewedAt: date,
+          evidenceKind: 'TEXT',
+        }).success,
+      ).toBe(true);
+    },
+  );
+  it('keeps genuine label adjudication authoritative and its contributors complete', () => {
+    const first = {
+      reviewerKey: 'first',
+      kind: 'INDEPENDENT',
+      label: 'NOT_COMMERCIAL',
+      expectedDisposition: 'KEEP',
+    };
+    const second = { ...first, reviewerKey: 'second', label: 'UNSURE', expectedDisposition: null };
+    const third = {
+      ...first,
+      reviewerKey: 'third',
+      kind: 'ADJUDICATION',
+      label: 'COMMERCIAL',
+      expectedDisposition: 'DELETE',
+    };
+    const ratings = [first, second, third];
+    expect(resolveCommercialLabelAuthority(ratings)).toEqual({
+      finalRating: third,
+      labelRatings: ratings,
+    });
+    expect(resolveCommercialLabelAuthority(ratings).finalRating).toBe(third);
+    expect(resolveCommercialLabelAuthority([first, second]).finalRating).toBe(first);
+    expect(
+      resolveCommercialLabelAuthority([first, second, { ...third, kind: 'SEMANTIC_ADJUDICATION' }]),
+    ).toEqual({ finalRating: null, labelRatings: [] });
+  });
+  it('refuses malformed, duplicate and unsupported label provenance', () => {
+    const first = {
+      reviewerKey: 'first',
+      kind: 'INDEPENDENT',
+      label: 'NOT_COMMERCIAL',
+      expectedDisposition: 'KEEP',
+    };
+    const second = { ...first, reviewerKey: 'second' };
+    const third = { ...first, reviewerKey: 'third', kind: 'ADJUDICATION' };
+    for (const ratings of [
+      [],
+      [first, { ...second, reviewerKey: first.reviewerKey }],
+      [first, second, { ...third, reviewerKey: first.reviewerKey }],
+      [first, second, { ...third, reviewerKey: '' }],
+      [first, second, { ...third, kind: 'OTHER' }],
+      [first, second, { ...third, label: 'UNKNOWN' }],
+      [first, second, { ...third, expectedDisposition: 'DELETE' }],
+      [first, second, { ...third, label: 'UNSURE' }],
+      [first, second, { ...third, expectedDisposition: 'UNKNOWN' }],
+      [first, third],
+      [first, second, { ...first, reviewerKey: 'third' }],
+      [first, second, third, { ...third, reviewerKey: 'fourth' }],
+      [first, second, third, { ...third, reviewerKey: 'fourth', kind: 'SEMANTIC_ADJUDICATION' }],
+    ])
+      expect(resolveCommercialLabelAuthority(ratings)).toEqual({
+        finalRating: null,
+        labelRatings: [],
+      });
+  });
+  it('accepts independent semantic categories but refuses client-supplied source proofs', () => {
+    const request = {
+      expectedUpdatedAt: date,
+      label: 'NOT_COMMERCIAL',
+      expectedDisposition: 'KEEP',
+      semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+    };
+    expect(commercialReviewDecisionRequestSchema.safeParse(request).success).toBe(true);
+    for (const annotation of [
+      { version: 1, cohorts: ['unreviewed-free-text'] },
+      { version: 1, cohorts: [] },
+      { version: 2, cohorts: ['BUYER_REQUEST'] },
+      { version: 1, cohorts: ['BUYER_REQUEST', 'BUYER_REQUEST'] },
+      { version: 1, cohorts: ['BUYER_REQUEST'], sourceSnapshotSha256: 'a'.repeat(64) },
+      { version: 1, cohorts: ['BUYER_REQUEST'], excerptSha256: 'b'.repeat(64) },
+    ])
+      expect(
+        commercialReviewDecisionRequestSchema.safeParse({
+          ...request,
+          semanticAnnotation: annotation,
+        }).success,
+      ).toBe(false);
+  });
+  it('resolves only two independent source-bound semantic votes or a distinct adjudicator', () => {
+    const binding = { sourceSnapshotSha256: 'a'.repeat(64), excerptSha256: 'b'.repeat(64) };
+    const vote = (reviewerKey: string, cohorts = ['BUYER_REQUEST']) => ({
+      reviewerKey,
+      kind: 'INDEPENDENT',
+      semanticAnnotation: { version: 1, cohorts, ...binding },
+    });
+    const first = vote('first');
+    expect(
+      resolveCommercialSemanticReview(
+        [first, vote('second'), { ...vote('third'), kind: 'OTHER' }],
+        binding,
+      ).state,
+    ).toBe('MISSING');
+    const second = vote('second');
+    expect(resolveCommercialSemanticReview([first, second], binding)).toEqual({
+      state: 'RESOLVED',
+      cohorts: ['BUYER_REQUEST'],
+    });
+    expect(resolveCommercialSemanticReview([first], binding).state).toBe('MISSING');
+    expect(resolveCommercialSemanticReview([first, vote('first')], binding).state).toBe('MISSING');
+    expect(
+      resolveCommercialSemanticReview([first, { ...second, semanticAnnotation: null }], binding)
+        .state,
+    ).toBe('MISSING');
+    expect(
+      resolveCommercialSemanticReview([first, second], {
+        ...binding,
+        excerptSha256: 'c'.repeat(64),
+      }).state,
+    ).toBe('MISSING');
+    const differing = vote('second', ['PERSONAL_SALE']);
+    expect(resolveCommercialSemanticReview([first, differing], binding).state).toBe('DISAGREEMENT');
+    const third = { ...vote('third', ['PERSONAL_SALE']), kind: 'ADJUDICATION' };
+    expect(resolveCommercialSemanticReview([first, differing, third], binding)).toEqual({
+      state: 'RESOLVED',
+      cohorts: ['PERSONAL_SALE'],
+    });
+    expect(
+      resolveCommercialSemanticReview(
+        [first, differing, { ...third, kind: 'SEMANTIC_ADJUDICATION' }],
+        binding,
+      ),
+    ).toEqual({ state: 'RESOLVED', cohorts: ['PERSONAL_SALE'] });
+    expect(
+      resolveCommercialSemanticReview(
+        [
+          first,
+          differing,
+          third,
+          { ...third, reviewerKey: 'fourth', kind: 'SEMANTIC_ADJUDICATION' },
+        ],
+        binding,
+      ).state,
+    ).toBe('MISSING');
+    expect(
+      resolveCommercialSemanticReview(
+        [first, differing, { ...third, reviewerKey: 'first' }],
+        binding,
+      ).state,
+    ).toBe('MISSING');
+    expect(
+      resolveCommercialSemanticReview(
+        [first, differing, third, { ...third, reviewerKey: 'fourth' }],
+        binding,
+      ).state,
+    ).toBe('MISSING');
+  });
   it('requires server-redacted evidence before the reviewer has saved a label', () => {
     expect(commercialReviewItemSchema.safeParse(blind).success).toBe(true);
     for (const exposed of [
@@ -110,6 +296,13 @@ describe('independent commercial review contracts', () => {
         detectorSourceSha256: 'not-a-digest',
       }).success,
     ).toBe(false);
+  });
+  it('defaults the private AI export to a bounded fifty-item page', () => {
+    const window = { since: '2026-11-01T00:00:00.000Z', until: '2026-11-02T00:00:00.000Z' };
+    expect(commercialAiReviewExportQuerySchema.parse(window).limit).toBe(50);
+    expect(commercialAiReviewExportQuerySchema.safeParse({ ...window, limit: 51 }).success).toBe(
+      false,
+    );
   });
   it('bounds export windows to retention and keeps the sampling frame free of labels and decisions', () => {
     expect(

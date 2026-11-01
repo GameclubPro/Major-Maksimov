@@ -1991,8 +1991,10 @@ model CommercialReviewSample {
   qualityMetadata Json? @map("quality_metadata")
   llmShadow      Json? @map("llm_shadow")
   llmEnforcement Json? @map("llm_enforcement")
+  humanReviewEvidenceHash String? @map("human_review_evidence_hash")
   independentReviewCount Int @default(0) @map("independent_review_count")
   reviewState    String @default("UNREVIEWED") @map("review_state")
+  semanticReviewState String? @map("semantic_review_state")
   reviewPriority Int      @default(50) @map("review_priority")
   observedAt     DateTime @default(now()) @map("observed_at")
   expiresAt      DateTime @map("expires_at")
@@ -2006,6 +2008,7 @@ model CommercialReviewSample {
   @@index([reviewPriority(sort: Desc), observedAt(sort: Desc), id(sort: Desc)], map: "commercial_review_samples_all_queue_idx")
   @@index([expiresAt, id], map: "commercial_review_samples_expiry_idx")
   @@index([observedAt(sort: Desc), id(sort: Desc)], map: "commercial_review_samples_blind_queue_idx")
+  @@index([humanReviewEvidenceHash, observedAt(sort: Desc), id(sort: Desc)], map: "commercial_review_samples_human_evidence_idx")
   @@map("commercial_review_samples")
 }
 
@@ -2018,6 +2021,7 @@ model CommercialReviewRating {
   expectedDisposition String? @map("expected_disposition")
   evidenceKind String @map("evidence_kind")
   sourceEvidenceDigest String? @map("source_evidence_digest")
+  semanticAnnotation Json? @map("semantic_annotation")
   reason String
   createdAt DateTime @default(now()) @map("created_at")
 

@@ -431,10 +431,14 @@ export function splitCommercialAssertions(rawLoweredText: string): string[] {
   return inspectCommercialAssertions(rawLoweredText).assertions;
 }
 
-function inspectCommercialAssertions(rawLoweredText: string): {
+export type CommercialAssertionInspection = Readonly<{
   assertions: string[];
   complete: boolean;
-} {
+}>;
+
+export function inspectCommercialAssertions(
+  rawLoweredText: string,
+): CommercialAssertionInspection {
   const boundedText = rawLoweredText
     .slice(0, MAX_LOCAL_CONTEXT_LENGTH)
     .replace(CLOSING_QUOTE_ASSERTION_BOUNDARY, '$1$2\n')

@@ -388,6 +388,101 @@ describe('CommercialReviewService independent quality boundary', () => {
       action: 'SAFETY_DESK_COMMERCIAL_INDEPENDENT_LABEL',
     });
   });
+  it('binds semantic evidence server-side to the complete shown text in the append-only vote', async () => {
+    const { service, prisma } = createService();
+    const result = await service.labelItem('sample-1', 'owner-one', {
+      ...request,
+      semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+    });
+    const bound = {
+      version: 1,
+      cohorts: ['BUYER_REQUEST'],
+      sourceSnapshotSha256: quality.sourceSnapshotSha256,
+      excerptSha256: createHash('sha256').update('Услуги ремонта').digest('hex'),
+    };
+    expect(result.ownReview?.semanticAnnotation).toEqual(bound);
+    expect(prisma.commercialReviewRating.create.mock.calls[0]![0].data.semanticAnnotation).toEqual(
+      bound,
+    );
+    expect(prisma.auditLog.create.mock.calls[0]![0].data.payload.semanticAnnotation).toEqual(bound);
+    const incomplete = createService([
+      createRow({ qualityMetadata: { ...quality, sourceExcerptComplete: false } }),
+    ]);
+    await expect(
+      incomplete.service.labelItem('sample-1', 'owner-one', {
+        ...request,
+        label: 'UNSURE',
+        expectedDisposition: null,
+        semanticAnnotation: { version: 1, cohorts: ['INSUFFICIENT_CONTEXT'] },
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(incomplete.prisma.commercialReviewRating.create).not.toHaveBeenCalled();
+  });
+  it.each([
+    { label: 'COMMERCIAL', expectedDisposition: 'DELETE' },
+    { label: 'UNSURE', expectedDisposition: null },
+  ])(
+    'stores the actual blind semantic adjudication %p without revealing or replacing the agreed label',
+    async (actual) => {
+      const bound = {
+        version: 1,
+        sourceSnapshotSha256: quality.sourceSnapshotSha256,
+        excerptSha256: createHash('sha256').update('Услуги ремонта').digest('hex'),
+      };
+      const row = createRow({
+        reviewState: 'RESOLVED',
+        independentLabel: 'NOT_COMMERCIAL',
+        ratings: [
+          rating('owner-one', { semanticAnnotation: { ...bound, cohorts: ['BUYER_REQUEST'] } }),
+          rating('owner-two', { semanticAnnotation: { ...bound, cohorts: ['PERSONAL_SALE'] } }),
+        ],
+      });
+      const { service, prisma } = createService([row]);
+      const blind = (await service.getQueue({ status: 'ALL' }, 'owner-three')).items[0]!;
+      expect(blind).toMatchObject({
+        reviewState: 'RESOLVED',
+        canAdjudicate: true,
+        ownReview: null,
+        decisionVisible: false,
+      });
+      const saved = await service.adjudicateItem('sample-1', 'owner-three', {
+        ...request,
+        ...actual,
+        semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
+      });
+      expect(saved).toMatchObject({
+        reviewState: 'RESOLVED',
+        label: 'NOT_COMMERCIAL',
+        ownReview: actual,
+      });
+      expect(prisma.commercialReviewRating.create).toHaveBeenCalledTimes(1);
+      expect(prisma.commercialReviewRating.create.mock.calls[0]![0].data).toMatchObject({
+        ...actual,
+        kind: 'SEMANTIC_ADJUDICATION',
+      });
+      expect(prisma.commercialReviewSample.updateMany.mock.calls[0]![0].data.independentLabel).toBe(
+        'NOT_COMMERCIAL',
+      );
+    },
+  );
+  it('bounds AI export and refuses changed human revisions before joining observations', async () => {
+    const window = {
+      since: '2026-10-01T00:00:00.000Z',
+      until: '2026-10-02T00:00:00.000Z',
+      limit: 50,
+    };
+    const { service, prisma } = createService([createRow({ ratings: [rating()] })]);
+    await expect(
+      service.exportAiIndependentEvidence({ ...window, limit: 51 }, 'owner-one'),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(prisma.commercialReviewSample.findMany).not.toHaveBeenCalled();
+    prisma.commercialReviewSample.findUnique.mockResolvedValueOnce(
+      createRow({ updatedAt: new Date(updatedAt.getTime() + 1) }),
+    );
+    await expect(service.exportAiIndependentEvidence(window, 'owner-one')).rejects.toMatchObject({
+      status: 409,
+    });
+  });
   it('rejects a second vote or self-adjudication by the same trusted actor', async () => {
     const { service } = createService([
       createRow({ ratings: [rating()], independentReviewCount: 1, reviewState: 'AWAITING_SECOND' }),

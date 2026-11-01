@@ -3,6 +3,8 @@ import type {
   CommercialReviewItem,
   CommercialReviewLabel,
   CommercialReviewQueueResponse,
+  CommercialReviewSemanticAnnotationRequest,
+  CommercialReviewSemanticCohort,
 } from '@maxim/contracts/safety-desk';
 import { safetyDeskApiClient } from './safety-desk-api-client';
 import { readErrorMessage } from './safety-desk-model';
@@ -24,6 +26,17 @@ const stateNames: Record<CommercialReviewItem['reviewState'], string> = {
   DISAGREEMENT: 'Ожидает третьего проверяющего',
   RESOLVED: 'Независимая проверка завершена',
 };
+const semanticCohortNames: Record<CommercialReviewSemanticCohort, string> = {
+  BUYER_REQUEST: 'Поиск товара, услуги или исполнителя',
+  PERSONAL_SALE: 'Продажа личной вещи',
+  QUOTED_DISCUSSION: 'Цитата или обсуждение чужого предложения',
+  NEGATED_OFFER: 'Отрицание предложения или отказ от него',
+  SERVICE_ANNOUNCEMENT: 'Информационное объявление об услуге',
+  NONCOMMERCIAL_HELP: 'Помощь без оплаты',
+  MIXED_CONTENT: 'Несколько разных типов содержания',
+  COMMERCIAL_OFFER: 'Предложение товара или платной услуги',
+  INSUFFICIENT_CONTEXT: 'Не хватает контекста для категории',
+};
 function executionName(item: CommercialReviewItem): string {
   const outcome = item.evidenceMetadata?.executionOutcome;
   return outcome === 'CONFIRMED_DELETE'
@@ -44,8 +57,6 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
   const [status, setStatus] = useState<'PENDING' | 'REVIEWED' | 'ALL'>('PENDING');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [reason, setReason] = useState('');
-  const [expectedDisposition, setExpectedDisposition] = useState<'KEEP' | 'DELETE'>('DELETE');
   const [notice, setNotice] = useState('');
   const mutationBusy = useRef(false);
   const selected = queue?.items.find((item) => item.id === selectedId) ?? queue?.items[0];
@@ -96,7 +107,12 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
     };
   }, [accessCode]);
 
-  async function label(value: CommercialReviewLabel) {
+  async function label(
+    value: CommercialReviewLabel,
+    reason: string,
+    expectedDisposition: 'KEEP' | 'DELETE',
+    semanticAnnotation?: CommercialReviewSemanticAnnotationRequest,
+  ) {
     if (!selected || mutationBusy.current) return;
     mutationBusy.current = true;
     setBusy(true);
@@ -110,6 +126,7 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
         reason,
         accessCode,
         value === 'UNSURE' ? null : value === 'NOT_COMMERCIAL' ? 'KEEP' : expectedDisposition,
+        semanticAnnotation,
       );
       setQueue((current) =>
         current
@@ -122,7 +139,6 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
             }
           : current,
       );
-      setReason('');
       setNotice(`Сохранено: ${labelNames[saved.ownReview!.label]}`);
     } catch (error) {
       setNotice(readErrorMessage(error));
@@ -193,8 +209,6 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
               disabled={busy}
               onClick={() => {
                 setSelectedId(item.id);
-                setReason('');
-                setExpectedDisposition('DELETE');
               }}
             >
               <strong>{item.chatTitle}</strong>
@@ -212,13 +226,10 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
         </div>
         {selected && (
           <CommercialReviewDetail
+            key={`${selected.id}:${selected.updatedAt}`}
             item={selected}
-            reason={reason}
             busy={busy || loading}
-            onReasonChange={setReason}
             onLabel={label}
-            expectedDisposition={expectedDisposition}
-            onExpectedDispositionChange={setExpectedDisposition}
           />
         )}
       </div>
@@ -244,24 +255,29 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
   );
 }
 
-function CommercialReviewDetail({
+export function CommercialReviewDetail({
   item,
-  reason,
   busy,
-  onReasonChange,
   onLabel,
-  expectedDisposition,
-  onExpectedDispositionChange,
 }: {
   item: CommercialReviewItem;
-  reason: string;
   busy: boolean;
-  onReasonChange: (value: string) => void;
-  onLabel: (label: CommercialReviewLabel) => Promise<void>;
-  expectedDisposition: 'KEEP' | 'DELETE';
-  onExpectedDispositionChange: (value: 'KEEP' | 'DELETE') => void;
+  onLabel: (
+    label: CommercialReviewLabel,
+    reason: string,
+    expectedDisposition: 'KEEP' | 'DELETE',
+    semanticAnnotation?: CommercialReviewSemanticAnnotationRequest,
+  ) => Promise<void>;
 }) {
+  const [reason, setReason] = useState('');
+  const [expectedDisposition, setExpectedDisposition] = useState<'KEEP' | 'DELETE'>('DELETE');
+  const [semanticCohorts, setSemanticCohorts] = useState<CommercialReviewSemanticCohort[]>([]);
   const canAct = item.canReview || item.canAdjudicate;
+  const canAnnotate =
+    canAct &&
+    item.source === 'TEXT' &&
+    item.sourceExcerptComplete === true &&
+    item.semanticAnnotationAllowed === true;
   return (
     <article className="review-card commercial-review__detail" aria-label="Оценка образца">
       <header className="review-card__header">
@@ -352,7 +368,7 @@ function CommercialReviewDetail({
           maxLength={500}
           value={reason}
           disabled={busy || !canAct}
-          onChange={(event) => onReasonChange(event.target.value)}
+          onChange={(event) => setReason(event.target.value)}
         />
       </label>
       {item.source === 'TEXT' && canAct && (
@@ -361,17 +377,43 @@ function CommercialReviewDetail({
           <select
             value={expectedDisposition}
             disabled={busy}
-            onChange={(event) =>
-              onExpectedDispositionChange(event.target.value as 'KEEP' | 'DELETE')
-            }
+            onChange={(event) => setExpectedDisposition(event.target.value as 'KEEP' | 'DELETE')}
           >
             <option value="DELETE">Удалить коммерческое предложение</option>
             <option value="KEEP">Сохранить коммерческое упоминание</option>
           </select>
         </label>
       )}
+      {canAnnotate && (
+        <fieldset className="commercial-review__semantics" disabled={busy}>
+          <legend>Что содержится в сообщении</legend>
+          <p>Отметьте подходящие категории. Можно выбрать несколько.</p>
+          {(Object.keys(semanticCohortNames) as CommercialReviewSemanticCohort[]).map((cohort) => (
+            <label key={cohort}>
+              <input
+                type="checkbox"
+                name="semanticCohort"
+                value={cohort}
+                checked={semanticCohorts.includes(cohort)}
+                onChange={(event) =>
+                  setSemanticCohorts((current) =>
+                    event.target.checked
+                      ? [...current, cohort]
+                      : current.filter((value) => value !== cohort),
+                  )
+                }
+              />
+              {semanticCohortNames[cohort]}
+            </label>
+          ))}
+        </fieldset>
+      )}
       {item.canAdjudicate && (
-        <p>Третья независимая оценка разрешит разногласие. Предыдущие оценки скрыты.</p>
+        <p>
+          {item.reviewState === 'RESOLVED'
+            ? 'Самостоятельно оцените сообщение и уточните категории. Согласованное решение первых двух проверяющих сохранится.'
+            : 'Третья независимая оценка разрешит разногласие. Предыдущие оценки скрыты.'}
+        </p>
       )}
       <footer className="review-actions">
         {(Object.keys(labelNames) as CommercialReviewLabel[]).map((value) => (
@@ -382,10 +424,20 @@ function CommercialReviewDetail({
             disabled={
               busy ||
               !canAct ||
+              (canAnnotate && semanticCohorts.length === 0) ||
               ((item.source === 'OCR' || item.sourceExcerptComplete === false) &&
                 value !== 'UNSURE')
             }
-            onClick={() => void onLabel(value)}
+            onClick={() =>
+              void onLabel(
+                value,
+                reason,
+                expectedDisposition,
+                canAnnotate && semanticCohorts.length
+                  ? { version: 1, cohorts: semanticCohorts }
+                  : undefined,
+              )
+            }
           >
             {busy ? 'Сохранение…' : labelNames[value]}
           </button>

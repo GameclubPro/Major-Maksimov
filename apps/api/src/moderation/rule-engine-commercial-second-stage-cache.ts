@@ -7,7 +7,7 @@ import type {
   CommercialSignalState,
 } from './commercial/commercial.types';
 
-export const COMMERCIAL_SECOND_STAGE_VERSION = '2026-service-private-v5';
+export const COMMERCIAL_SECOND_STAGE_VERSION = '2026-service-private-v6';
 
 export type CommercialSecondStageDecision = {
   adjustedConfidenceScore: number;

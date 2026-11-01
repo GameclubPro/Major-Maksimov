@@ -1,6 +1,8 @@
 import type { ChatSettings } from '../../prisma/prisma-client';
 import { createRuleDetectionContext } from '../rule-engine-detection-context';
 import { CommercialAdDetector } from './commercial-ad.detector';
+import { extractCommercialCampaignPhones } from '../commercial-campaign.util';
+import { sanitizeCommercialCorpusText } from '../../scripts/commercial-corpus-sanitization.util';
 import {
   hasCommercialPhoneLikeText,
   normalizeCommercialPhoneConfusables,
@@ -194,5 +196,96 @@ describe('commercial phone matching', () => {
     'Маркировка 8 999 123 45 67 относится к партии',
   ])('does not feed a formatted identifier tail into contact evidence: %s', (text) => {
     expect(detect(text)?.matchedSignals ?? []).not.toContain('contact:phone');
+  });
+
+  it.each([
+    'https://example.test/item/79000001042',
+    'https://example.test/?order=+79000001042',
+    'example.test/item/79000001042',
+    'max://profile/79000001042',
+    'urn:invoice:79000001042',
+    'ftp://files.example.test/79000001042',
+    '79000001042@example.test',
+    'item+79000001042@example.test',
+    'item79000001042',
+    '79000001042item',
+    'Заказ +79000001042 уже выдан',
+    'Маркировка +1 (415) 555-2671 относится к партии',
+    'Артикул 79000001042',
+    'SKU +79000001042',
+    'Код телефона +79000001042',
+    'Объем +1234567 м³',
+    'Цена +79000001042 рублей',
+    'Масса +7 900 000 10 42 кг',
+    '79000001042 м²',
+    '79000001042 MB',
+    'MΩ: +79000001042',
+    'MΩ: Телефон +79000001042',
+    'Телефон 79000001042 кг',
+    'Телефон +79000001042 руб.',
+    'Заказ ( +79000001042 ) уже выдан',
+    'Объем ( +1234567 ) м³',
+    'Цена\u2060 +79000001042 рублей',
+    'Заказ +79000001042\u2060 кг',
+    'Ток нА +79000001042',
+    'Ток нА: +79000001042',
+    'Телефон +79000001042 В',
+    'Длительность +79000001042 с',
+    '+1234567,5 м³',
+    '+1234567,51234567890 м³',
+  ])('excludes non-contact boundary evidence: %s', (text) => {
+    expect(parseCommercialPhones(text)).toEqual([]);
+    expect(hasCommercialPhoneLikeText(text)).toBe(false);
+    expect(extractCommercialCampaignPhones(text)).toEqual([]);
+    expect(replaceCommercialPhoneLikeText(text)).toBe(text);
+    expect(detect(text)?.matchedSignals ?? []).not.toContain('contact:phone');
+  });
+
+  it('preserves original phone spans and campaign contacts beside excluded URL and email values', () => {
+    const text =
+      '📦 https://example.test/79000001042, 79000001043@example.test. Звоните +7 900 000 10 44';
+    const contacts = parseCommercialPhones(text);
+    expect(contacts).toEqual([
+      {
+        start: text.indexOf('+7 900 000 10 44'),
+        end: text.length,
+        normalizedNumber: '79000001044',
+      },
+    ]);
+    expect(extractCommercialCampaignPhones(text)).toEqual(['79000001044']);
+    expect(replaceCommercialPhoneLikeText(text)).toBe(
+      '📦 https://example.test/79000001042, 79000001043@example.test. Звоните [phone]',
+    );
+  });
+
+  it.each(['Заказ +79000001042 уже выдан', 'Объем +1234567 м³'])(
+    'keeps conservative privacy masking independent of contact qualification: %s',
+    (text) => {
+      expect(parseCommercialPhones(text)).toEqual([]);
+      expect(sanitizeCommercialCorpusText(text)).toContain('[phone]');
+    },
+  );
+
+  it.each([
+    'tel:+79000001042',
+    'sms:+79000001042',
+    'callto:+79000001042',
+    'Телефон для заказов +79000001042',
+    'Для заказа телефон +79000001042',
+    'Заказ выдан. Телефон +79000001042',
+    'Телефон +79000001042. Заказ принят',
+    'Телефон +79000001042\nЧасы работы с 9 до 18',
+    'Телефон +79000001042\nАртикул товара 123',
+    'Комиссия агентам 250000₽ в цене. +7 900 000 10 42',
+    'Телефон +7 900 000 10 42, заказ в личку, доставка',
+    'ПЕРЕВОД на +7 900 000 10 42, Тбанк',
+    'Звоните на +7 900 000 10 42',
+    'Для связи с +7 900 000 10 42',
+    'Телефон +7 900 000 10 42 в WhatsApp',
+    'Телефон +7 900 000 10 42 с 9 до 18',
+  ])('preserves explicit phone contacts: %s', (text) => {
+    expect(parseCommercialPhones(text).map((contact) => contact.normalizedNumber)).toEqual([
+      '79000001042',
+    ]);
   });
 });

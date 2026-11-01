@@ -106,6 +106,126 @@ function bundle(rows: Item[]): CommercialQualityEvidenceBundle {
 }
 
 describe('independent commercial paired report', () => {
+  it.each([
+    { label: 'COMMERCIAL' as const, expectedDisposition: 'DELETE' as const },
+    { label: 'UNSURE' as const, expectedDisposition: null },
+  ])('keeps agreed KEEP authority after a semantic adjudicator records $label', (third) => {
+    const baseline = item('protected', 'KEEP', true, false);
+    const row = item('protected', 'KEEP', true, false);
+    row.ratings.push({
+      ...row.ratings[0]!,
+      ...third,
+      reviewerKey: 'c',
+      kind: 'SEMANTIC_ADJUDICATION',
+    });
+    const report = analyzeCommercialQualityEvidence(bundle([row]));
+    const baselineReport = analyzeCommercialQualityEvidence(bundle([baseline]));
+    expect(report.inputSha256).not.toBe(baselineReport.inputSha256);
+    expect({ ...report, inputSha256: baselineReport.inputSha256 }).toEqual(baselineReport);
+    expect(report.coverage).toMatchObject({ independentReviewedRows: 1, uncertainRows: 0 });
+    expect(report.profiles[0]).toMatchObject({
+      independentProtectedUnits: 1,
+      independentOfferUnits: 0,
+      falseDeletionPermissions: { baselineErrors: 1, candidateErrors: 0 },
+    });
+  });
+
+  it.each([
+    { label: 'COMMERCIAL' as const, expectedDisposition: 'DELETE' as const },
+    { label: 'NOT_COMMERCIAL' as const, expectedDisposition: 'KEEP' as const },
+  ])('retains adjudication authority for a real label disagreement resolved as $label', (third) => {
+    const row = item('disagreement', 'DELETE', true, true);
+    row.ratings[0]!.label = 'NOT_COMMERCIAL';
+    row.ratings[0]!.expectedDisposition = 'KEEP';
+    row.ratings.push({
+      ...row.ratings[1]!,
+      ...third,
+      reviewerKey: 'c',
+      kind: 'ADJUDICATION',
+    });
+    row.sample.label = third.label;
+    const report = analyzeCommercialQualityEvidence(bundle([row]));
+    expect(report.coverage.independentReviewedRows).toBe(1);
+    expect(report.profiles[0]).toMatchObject({
+      independentProtectedUnits: third.expectedDisposition === 'KEEP' ? 1 : 0,
+      independentOfferUnits: third.expectedDisposition === 'DELETE' ? 1 : 0,
+    });
+  });
+
+  it('retains uncertainty exclusion when the actual label disagreement is unresolved', () => {
+    const row = item('unsure-disagreement', 'KEEP', false, false);
+    row.ratings[1]!.label = 'COMMERCIAL';
+    row.ratings[1]!.expectedDisposition = 'DELETE';
+    row.ratings.push({
+      ...row.ratings[0]!,
+      reviewerKey: 'c',
+      kind: 'ADJUDICATION',
+      label: 'UNSURE',
+      expectedDisposition: null,
+    });
+    row.sample.label = 'UNSURE';
+    const report = analyzeCommercialQualityEvidence(bundle([row]));
+    expect(report.coverage).toMatchObject({ independentReviewedRows: 0, uncertainRows: 1 });
+    expect(report.profiles[0]).toMatchObject({
+      independentProtectedUnits: 0,
+      independentOfferUnits: 0,
+    });
+  });
+
+  it.each([
+    { reviewedAt: '2026-09-11T00:00:00.000Z' },
+    { evidenceKind: 'CAPTION_ONLY' as const },
+    { reviewerKey: 'a' },
+  ])('validates every semantic adjudicator source, time and identity: %o', (invalid) => {
+    const row = item('invalid-third', 'KEEP', false, false);
+    row.ratings.push({
+      ...row.ratings[0]!,
+      reviewerKey: 'c',
+      kind: 'SEMANTIC_ADJUDICATION',
+      label: 'UNSURE',
+      expectedDisposition: null,
+      ...invalid,
+    });
+    const report = analyzeCommercialQualityEvidence(bundle([row]));
+    expect(report.coverage.independentReviewedRows).toBe(0);
+    expect(report.profiles[0]!.independentProtectedUnits).toBe(0);
+  });
+
+  it('preserves the evaluation clock bound for semantic adjudication', () => {
+    const row = item('late-third', 'KEEP', false, false);
+    row.ratings.push({
+      ...row.ratings[0]!,
+      reviewerKey: 'c',
+      kind: 'SEMANTIC_ADJUDICATION',
+      label: 'UNSURE',
+      expectedDisposition: null,
+      reviewedAt: '2026-09-22T00:00:00.000Z',
+    });
+    expect(analyzeCommercialQualityEvidence(bundle([row])).provenanceErrors).toContain(
+      'source_or_review_after_evaluation',
+    );
+  });
+
+  it('validates the original-image digest on semantic adjudication as well as the label votes', () => {
+    const row = item('image-third', 'KEEP', false, false);
+    row.sample.source = 'OCR';
+    row.ratings.forEach((rating) => {
+      rating.evidenceKind = 'PRIVATE_SOURCE_IMAGE';
+      rating.sourceEvidenceDigest = row.sample.evidenceMetadata!.sourceSnapshotSha256!;
+    });
+    row.ratings.push({
+      ...row.ratings[0]!,
+      reviewerKey: 'c',
+      kind: 'SEMANTIC_ADJUDICATION',
+      label: 'UNSURE',
+      expectedDisposition: null,
+      sourceEvidenceDigest: 'wrong-source-digest',
+    });
+    expect(analyzeCommercialQualityEvidence(bundle([row])).coverage.independentReviewedRows).toBe(
+      0,
+    );
+  });
+
   it('keeps raw denominators, WARN deletion semantics, paired corrections and uncertainty', () => {
     const rows = [
       item('p', 'KEEP', true, false),

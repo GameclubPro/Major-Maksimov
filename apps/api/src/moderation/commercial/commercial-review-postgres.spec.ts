@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { Pool } from 'pg';
 import { createPrismaClient, Prisma, type PrismaClient } from '../../prisma/prisma-client';
 import { CommercialReviewService, type Candidate } from './commercial-review.service';
 import { COMMERCIAL_INTENT_QUALITY_DECISION_VERSION } from './commercial-policy-cohorts';
@@ -8,6 +9,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
 (databaseUrl ? describe : describe.skip)('independent commercial review PostgreSQL races', () => {
   let prisma: PrismaClient;
   let service: CommercialReviewService;
+  let constraints: Pool;
   const chatId = `commercial-review-${randomUUID()}`;
   const stopSource = createHash('sha256').update(chatId).digest('hex');
   const candidate: Candidate = {
@@ -45,6 +47,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     )
       throw new Error('Review races require a disposable local race_test database');
     prisma = createPrismaClient(databaseUrl, { max: 8 });
+    constraints = new Pool({ connectionString: databaseUrl, max: 1 });
     await prisma.$connect();
     await prisma.chat.create({
       data: { id: chatId, title: 'Independent commercial review races' },
@@ -66,6 +69,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       where: { detectorSourceSha256: stopSource },
     });
     await prisma.$disconnect();
+    await constraints.end();
   });
   async function current() {
     return prisma.commercialReviewSample.findFirstOrThrow({
@@ -73,6 +77,31 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       include: { ratings: true },
     });
   }
+  const insertRating = (sampleId: string, kind: string) =>
+    constraints.query(
+      `INSERT INTO commercial_review_ratings
+      (id, sample_id, reviewer_key, kind, label, expected_disposition, evidence_kind, reason)
+      VALUES ($1, $2, $3, $4, 'NOT_COMMERCIAL', 'KEEP', 'TEXT', 'Synthetic constraint case')`,
+      [randomUUID(), sampleId, createHash('sha256').update(randomUUID()).digest('hex'), kind],
+    );
+  it('keeps unknown review kinds rejected by the migrated PostgreSQL constraint', async () => {
+    const row = await current();
+    await expect(insertRating(row.id, 'UNKNOWN_KIND')).rejects.toMatchObject({ code: '23514' });
+    expect((await current()).ratings).toHaveLength(0);
+  });
+  it.each([
+    ['ADJUDICATION', 'SEMANTIC_ADJUDICATION'],
+    ['SEMANTIC_ADJUDICATION', 'ADJUDICATION'],
+    ['SEMANTIC_ADJUDICATION', 'SEMANTIC_ADJUDICATION'],
+  ])(
+    'enforces one combined adjudication slot in PostgreSQL: %s followed by %s',
+    async (firstKind, nextKind) => {
+      const row = await current();
+      await insertRating(row.id, firstKind);
+      await expect(insertRating(row.id, nextKind)).rejects.toMatchObject({ code: '23505' });
+      expect((await current()).ratings).toHaveLength(1);
+    },
+  );
   const keep = (row: { updatedAt: Date }) => ({
     expectedUpdatedAt: row.updatedAt.toISOString(),
     label: 'NOT_COMMERCIAL',
@@ -132,7 +161,14 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     expect(
       frame.items.filter((item) => item.logicalMessageKey === candidate.logicalMessageKey),
     ).toHaveLength(1);
-    await service.labelItem(duplicate.id, 'native-reviewer', keep(duplicate));
+    await expect(
+      service.labelItem(duplicate.id, 'native-reviewer', keep(duplicate)),
+    ).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(await prisma.commercialReviewRating.count({ where: { sampleId: duplicate.id } })).toBe(
+      0,
+    );
     const exported = await service.exportIndependentEvidence(window, 'native-reviewer');
     expect(exported.items.some((item) => item.sample.id === duplicate.id)).toBe(false);
   });
@@ -354,6 +390,169 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     expect(after.independentReviewCount).toBe(2);
     expect(after.reviewState).toBe('RESOLVED');
   });
+  it.each([
+    {
+      version: 1,
+      cohorts: ['PERSONAL_SALE'],
+      sourceSnapshotSha256: 'f'.repeat(64),
+      excerptSha256: 'f'.repeat(64),
+    },
+    { version: 1, cohorts: ['PERSONAL_SALE', 'PERSONAL_SALE'] },
+    { version: 1, cohorts: ['UNTRUSTED_CATEGORY'] },
+  ])(
+    'rejects client source bindings and invalid semantic annotations without persisting a vote: %j',
+    async (semanticAnnotation) => {
+      const before = await current();
+      await expect(
+        service.labelItem(before.id, 'one', {
+          ...keep(before),
+          semanticAnnotation,
+        }),
+      ).rejects.toMatchObject({ status: 400 });
+      const after = await current();
+      expect(after.updatedAt).toEqual(before.updatedAt);
+      expect(after.ratings).toHaveLength(0);
+      expect(await prisma.auditLog.count({ where: { chatId } })).toBe(0);
+    },
+  );
+  it.each([
+    ['COMMERCIAL', 'DELETE', 'RECEIPT_FIRST'],
+    ['COMMERCIAL', 'DELETE', 'ADJUDICATION_FIRST'],
+    ['UNSURE', null, 'RECEIPT_FIRST'],
+    ['UNSURE', null, 'ADJUDICATION_FIRST'],
+  ] as const)(
+    'retains agreed KEEP authority after a blind %s/%s semantic adjudication: %s',
+    async (thirdLabel, thirdDisposition, order) => {
+      await prisma.commercialReviewSample.deleteMany({ where: { chatId } });
+      await service.recordCandidate(experimental);
+      let row = await current();
+      await service.labelItem(row.id, 'one', {
+        ...keep(row),
+        semanticAnnotation: { version: 1, cohorts: ['PERSONAL_SALE'] },
+      });
+      if (order === 'RECEIPT_FIRST') {
+        await service.recordCandidate({ ...experimental, executionOutcome: 'CONFIRMED_DELETE' });
+      }
+      row = await current();
+      await service.labelItem(row.id, 'two', {
+        ...keep(row),
+        semanticAnnotation: { version: 1, cohorts: ['NONCOMMERCIAL_HELP'] },
+      });
+      row = await current();
+      expect(row.reviewState).toBe('RESOLVED');
+      expect(row.independentLabel).toBe('NOT_COMMERCIAL');
+      expect(row.semanticReviewState).toBe('DISAGREEMENT');
+      expect(row.ratings.map((rating) => rating.expectedDisposition)).toEqual(['KEEP', 'KEEP']);
+      const pending = await service.getQueue({ status: 'PENDING' }, 'three');
+      expect(pending.items.find((item) => item.id === row.id)).toMatchObject({
+        canAdjudicate: true,
+        decisionVisible: false,
+        ownReview: null,
+        evidenceMetadata: null,
+      });
+      const stop = await prisma.commercialQualityPolicyStop.findUnique({
+        where: {
+          detectorSourceSha256_decisionVersion: {
+            detectorSourceSha256: stopSource,
+            decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION,
+          },
+        },
+      });
+      expect(stop !== null).toBe(order === 'RECEIPT_FIRST');
+      await expect(
+        service.adjudicateItem(row.id, 'one', {
+          ...keep(row),
+          semanticAnnotation: { version: 1, cohorts: ['PERSONAL_SALE'] },
+        }),
+      ).rejects.toMatchObject({ status: 409 });
+      const adjudicated = await service.adjudicateItem(row.id, 'three', {
+        ...keep(row),
+        label: thirdLabel,
+        expectedDisposition: thirdDisposition,
+        semanticAnnotation: { version: 1, cohorts: ['PERSONAL_SALE'] },
+      });
+      expect(adjudicated).toMatchObject({
+        label: 'NOT_COMMERCIAL',
+        reviewState: 'RESOLVED',
+        ownReview: {
+          label: thirdLabel,
+          expectedDisposition: thirdDisposition,
+          kind: 'SEMANTIC_ADJUDICATION',
+        },
+      });
+      const after = await current();
+      expect(after.ratings).toHaveLength(3);
+      expect(after.reviewState).toBe('RESOLVED');
+      expect(after.independentLabel).toBe('NOT_COMMERCIAL');
+      expect(after.semanticReviewState).toBe('RESOLVED');
+      const legacyFinal =
+        after.ratings.find((rating) => rating.kind === 'ADJUDICATION') ??
+        after.ratings.find((rating) => rating.kind === 'INDEPENDENT');
+      expect(legacyFinal).toMatchObject({ label: 'NOT_COMMERCIAL', expectedDisposition: 'KEEP' });
+      expect(
+        after.ratings
+          .filter((rating) => rating.kind === 'INDEPENDENT')
+          .every(
+            (rating) => rating.label === 'NOT_COMMERCIAL' && rating.expectedDisposition === 'KEEP',
+          ),
+      ).toBe(true);
+      expect(after.ratings.find((rating) => rating.kind === 'SEMANTIC_ADJUDICATION')).toMatchObject(
+        {
+          label: thirdLabel,
+          expectedDisposition: thirdDisposition,
+        },
+      );
+      expect(
+        await prisma.auditLog.count({
+          where: { chatId, actorUserId: 'three', action: 'SAFETY_DESK_COMMERCIAL_ADJUDICATION' },
+        }),
+      ).toBe(1);
+      expect(
+        after.ratings.find((rating) => rating.kind === 'SEMANTIC_ADJUDICATION')?.semanticAnnotation,
+      ).toMatchObject({
+        version: 1,
+        cohorts: ['PERSONAL_SALE'],
+        sourceSnapshotSha256: candidate.sourceSnapshotSha256,
+        excerptSha256: createHash('sha256').update(candidate.text, 'utf8').digest('hex'),
+      });
+      expect(
+        (await service.getQueue({ status: 'PENDING' }, 'four')).items.some(
+          (item) => item.id === row.id,
+        ),
+      ).toBe(false);
+      if (order === 'ADJUDICATION_FIRST') {
+        expect(
+          await prisma.commercialQualityPolicyStop.count({
+            where: { detectorSourceSha256: stopSource },
+          }),
+        ).toBe(0);
+        await service.recordCandidate({ ...experimental, executionOutcome: 'CONFIRMED_DELETE' });
+      }
+      const confirmedStop = await prisma.commercialQualityPolicyStop.findUniqueOrThrow({
+        where: {
+          detectorSourceSha256_decisionVersion: {
+            detectorSourceSha256: stopSource,
+            decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION,
+          },
+        },
+      });
+      expect((await current()).independentLabel).toBe('NOT_COMMERCIAL');
+      if (stop) expect(confirmedStop.stoppedAt).toEqual(stop.stoppedAt);
+      await service.recordCandidate({ ...experimental, executionOutcome: 'CONFIRMED_DELETE' });
+      expect(
+        (
+          await prisma.commercialQualityPolicyStop.findUniqueOrThrow({
+            where: {
+              detectorSourceSha256_decisionVersion: {
+                detectorSourceSha256: stopSource,
+                decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION,
+              },
+            },
+          })
+        ).stoppedAt,
+      ).toEqual(confirmedStop.stoppedAt);
+    },
+  );
   it.each(['REVIEW_FIRST', 'RECEIPT_FIRST'] as const)(
     'durably stops a confirmed false deletion regardless of arrival order: %s',
     async (order) => {

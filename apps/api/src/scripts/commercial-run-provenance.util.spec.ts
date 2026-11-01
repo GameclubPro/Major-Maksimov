@@ -41,7 +41,7 @@ describe('commercial run provenance', () => {
           sourceSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
           decisionVersion: 'commercial-deterministic-v5',
           patternPolicyVersion: 'commercial-patterns-v2',
-          classifierVersion: '2026-service-private-v5',
+          classifierVersion: '2026-service-private-v6',
         }),
         auditTool: {
           digestKind: 'SOURCE_FILES',

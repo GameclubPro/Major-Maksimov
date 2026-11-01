@@ -14,6 +14,7 @@ const detectorSupportFiles = [
   'apps/api/src/common/url-text.util.ts',
   'packages/contracts/src/url-text.ts',
   'apps/api/src/moderation/commercial-campaign.util.ts',
+  'apps/api/src/moderation/duplicate-semantic-text.ts',
   'apps/api/src/moderation/rule-engine-commercial-second-stage-cache.ts',
   'apps/api/src/moderation/rule-engine-commercial-thresholds.ts',
   'apps/api/src/moderation/rule-engine-detection-context.ts',
@@ -33,6 +34,9 @@ const preprocessSourceFiles = [
   'apps/api/src/moderation/photo-duplicate/photo-image-format.ts',
 ];
 const auditToolDependencyFiles = [
+  'packages/contracts/src/safety-desk.ts',
+  'packages/contracts/src/commercial-ai-quality.ts',
+  'packages/contracts/src/commercial-review-semantics.ts',
   'apps/api/src/moderation/commercial-ocr/commercial-ocr-settings-profile.ts',
   'scripts/generate-commercial-ocr-detector-source.mjs',
 ];

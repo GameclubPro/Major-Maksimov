@@ -298,7 +298,9 @@ export function buildCommercialCampaignSenderNearTextChatsKey(
 }
 
 export function buildCommercialCampaignPhoneChatsKey(phone: string): string {
-  return `${COMMERCIAL_CAMPAIGN_KEY_PREFIX}:phone:${hashCampaignKeyPart(phone)}:chats`;
+  // FLAG: New phone evidence must not inherit old URL/identifier memberships (36h TTL).
+  // Keep unrelated sender/link histories and let the old phone namespace expire naturally.
+  return `${COMMERCIAL_CAMPAIGN_KEY_PREFIX}:phone-v2:${hashCampaignKeyPart(phone)}:chats`;
 }
 
 export function buildCommercialCampaignLinkChatsKey(link: string): string {

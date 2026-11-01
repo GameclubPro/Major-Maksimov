@@ -58,7 +58,11 @@ function result(
   };
 }
 function row(id: string, at: string, expected: 'KEEP' | 'DELETE' = 'KEEP') {
-  const excerpt = 'SYNTHETIC PRIVATE SENTINEL ASCII A / Кириллица / 🚀 / Cafe\u0301\r\n';
+  const statement =
+    expected === 'KEEP'
+      ? 'Хочу заказать уборку, посоветуйте мастера.'
+      : 'Оказываю услуги уборки, принимаю заказы, пишите.';
+  const excerpt = `${statement} SYNTHETIC PRIVATE SENTINEL ASCII A / Кириллица / 🚀 / Cafe\u0301\r\n`;
   const decision = {
     hasDetection: false,
     actionable: false,
@@ -155,6 +159,12 @@ function row(id: string, at: string, expected: 'KEEP' | 'DELETE' = 'KEEP') {
     sourceEvidenceDigest: null,
     reason: '',
     reviewedAt: id.startsWith('dev') ? '2026-09-09T00:00:00.000Z' : '2026-09-21T00:00:00.000Z',
+    semanticAnnotation: {
+      version: 1,
+      cohorts: [expected === 'KEEP' ? 'BUYER_REQUEST' : 'COMMERCIAL_OFFER'],
+      sourceSnapshotSha256: metadata.sourceSnapshotSha256,
+      excerptSha256: inputDigest(excerpt),
+    },
   }));
   const sample = commercialAiReviewItemSchema.parse({
     id,
@@ -165,7 +175,7 @@ function row(id: string, at: string, expected: 'KEEP' | 'DELETE' = 'KEEP') {
     score: 0,
     actionBand: 'ALLOW',
     messageDisposition: 'KEEP',
-    requiredPolicyCohorts: ['synthetic-protected'],
+    requiredPolicyCohorts: [],
     detectorVersion: 'synthetic',
     decisionFingerprint: sha(id),
     reviewPriority: 50,
@@ -250,7 +260,7 @@ function bundle(): CommercialAiQualityEvidence {
     policyFrozenAt: '2026-09-10T00:00:00.000Z',
     developmentFrameSha256: sha(developmentFrame),
     holdoutFrameSha256: sha(holdoutFrame),
-    requiredProtectedCohorts: ['synthetic-protected'],
+    requiredProtectedCohorts: ['BUYER_REQUEST'],
   };
   return commercialAiQualityEvidenceSchema.parse({
     schemaVersion: 'commercial-ai-quality-evidence/v1',
@@ -343,6 +353,153 @@ describe('AI evidence report, without manufacturing independent truth', () => {
     expect(JSON.stringify(report)).not.toContain('PRIVATE SENTINEL');
     expect(report.humanTruthEstablishedByTool).toBe(false);
   });
+  it('counts independently reviewed semantic cohorts with no execution policy cohort', () => {
+    const input = bundle();
+    expect(input.holdout[0]!.response.items[0]!.sample.requiredPolicyCohorts).toEqual([]);
+    const report = analyze(input);
+    expect(report.provenanceErrors).toEqual([]);
+    expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+      { cohort: 'BUYER_REQUEST', protectedUnits: 1, unsafePermissions: 0, criteriaPass: false },
+    ]);
+    expect(report.promotionAuthorized).toBe(false);
+  });
+  it.each(['legacy', 'missing', 'snapshot', 'excerpt', 'disagreement'] as const)(
+    'never substitutes execution cohorts for %s human semantic evidence',
+    (gap) => {
+      const input = bundle();
+      const item = input.holdout[0]!.response.items[0]!;
+      item.sample.requiredPolicyCohorts = ['BUYER_REQUEST'];
+      if (gap === 'legacy') item.ratings.forEach((rating) => delete rating.semanticAnnotation);
+      if (gap === 'missing') item.ratings[1]!.semanticAnnotation = null;
+      if (gap === 'snapshot')
+        item.ratings[1]!.semanticAnnotation!.sourceSnapshotSha256 = sha('another-source');
+      if (gap === 'excerpt')
+        item.ratings[1]!.semanticAnnotation!.excerptSha256 = sha('another-excerpt');
+      if (gap === 'disagreement') item.ratings[1]!.semanticAnnotation!.cohorts = ['PERSONAL_SALE'];
+      const report = analyze(input);
+      expect(report.evidenceSufficient).toBe(false);
+      expect(report.provenanceErrors).toContain('required_protected_cohort_evidence_missing');
+      expect(report.provenanceErrors).toContain(
+        gap === 'disagreement'
+          ? 'semantic_review_disagreement'
+          : 'source_bound_semantic_review_missing_or_invalid',
+      );
+      expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+        { cohort: 'BUYER_REQUEST', protectedUnits: 0, criteriaPass: false },
+      ]);
+      expect(report.effects.confirmedDelete).toBe(0);
+      expect(report.promotionAuthorized).toBe(false);
+    },
+  );
+  it('accepts a distinct source-bound adjudicator for disputed semantic cohorts', () => {
+    const input = bundle();
+    const item = input.holdout[0]!.response.items[0]!;
+    item.ratings[1]!.semanticAnnotation!.cohorts = ['PERSONAL_SALE'];
+    item.ratings.push({
+      ...structuredClone(item.ratings[0]!),
+      reviewerKey: sha('synthetic-adjudicator'),
+      kind: 'ADJUDICATION',
+    });
+    const report = analyze(input);
+    expect(report.provenanceErrors).toEqual([]);
+    expect(report.evidenceSufficient).toBe(true);
+    expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+      { cohort: 'BUYER_REQUEST', protectedUnits: 1, unsafePermissions: 0 },
+    ]);
+    expect(report.promotionAuthorized).toBe(false);
+  });
+  it.each([
+    ['COMMERCIAL', 'DELETE'],
+    ['UNSURE', null],
+  ] as const)(
+    'keeps agreed KEEP authority with an actual %s semantic adjudication',
+    (label, expectedDisposition) => {
+      const input = bundle();
+      const item = input.holdout[0]!.response.items[0]!;
+      item.ratings[1]!.semanticAnnotation!.cohorts = ['PERSONAL_SALE'];
+      const third = {
+        ...structuredClone(item.ratings[0]!),
+        reviewerKey: sha('synthetic-semantic-adjudicator'),
+        kind: 'SEMANTIC_ADJUDICATION' as const,
+        label,
+        expectedDisposition,
+      };
+      item.ratings.push(third);
+      const report = analyze(input);
+      expect(report.provenanceErrors).toEqual([]);
+      expect(report.evidenceSufficient).toBe(true);
+      expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+        { cohort: 'BUYER_REQUEST', protectedUnits: 1, unsafePermissions: 0 },
+      ]);
+      expect(report.independentClassification).toEqual(analyze(bundle()).independentClassification);
+      expect(item.ratings[2]).toBe(third);
+      expect(third).toMatchObject({ label, expectedDisposition });
+      expect(report.promotionAuthorized).toBe(false);
+    },
+  );
+  it.each(['time', 'source'] as const)(
+    'still checks every semantic adjudicator’s %s provenance when the pair already agrees',
+    (gap) => {
+      const input = bundle();
+      const item = input.holdout[0]!.response.items[0]!;
+      item.ratings[1]!.semanticAnnotation!.cohorts = ['PERSONAL_SALE'];
+      const third = {
+        ...structuredClone(item.ratings[0]!),
+        reviewerKey: sha('synthetic-semantic-adjudicator'),
+        kind: 'SEMANTIC_ADJUDICATION' as const,
+        label: 'UNSURE' as const,
+        expectedDisposition: null,
+      };
+      if (gap === 'time') third.reviewedAt = '2026-09-01T00:00:00.000Z';
+      else third.semanticAnnotation!.sourceSnapshotSha256 = sha('another-source');
+      item.ratings.push(third);
+      const report = analyze(input);
+      expect(report.evidenceSufficient).toBe(false);
+      expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+        { cohort: 'BUYER_REQUEST', protectedUnits: 0 },
+      ]);
+      expect(report.promotionAuthorized).toBe(false);
+    },
+  );
+  it('refuses semantic-only label authority when the independent label pair disagrees', () => {
+    const input = bundle();
+    const item = input.holdout[0]!.response.items[0]!;
+    item.ratings[1]!.label = 'COMMERCIAL';
+    item.ratings[1]!.expectedDisposition = 'DELETE';
+    item.ratings[1]!.semanticAnnotation!.cohorts = ['PERSONAL_SALE'];
+    item.ratings.push({
+      ...structuredClone(item.ratings[0]!),
+      reviewerKey: sha('synthetic-semantic-adjudicator'),
+      kind: 'SEMANTIC_ADJUDICATION',
+    });
+    const report = analyze(input);
+    expect(report.evidenceSufficient).toBe(false);
+    expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+      { cohort: 'BUYER_REQUEST', protectedUnits: 0 },
+    ]);
+    expect(report.promotionAuthorized).toBe(false);
+  });
+  it.each(['reviewer', 'source'] as const)(
+    'refuses an adjudicator with a borrowed %s identity',
+    (mismatch) => {
+      const input = bundle();
+      const item = input.holdout[0]!.response.items[0]!;
+      const adjudication = {
+        ...structuredClone(item.ratings[0]!),
+        reviewerKey: sha('synthetic-adjudicator'),
+        kind: 'ADJUDICATION' as const,
+      };
+      if (mismatch === 'reviewer') adjudication.reviewerKey = item.ratings[0]!.reviewerKey;
+      if (mismatch === 'source')
+        adjudication.semanticAnnotation!.sourceSnapshotSha256 = sha('another-source');
+      item.ratings.push(adjudication);
+      const report = analyze(input);
+      expect(report.evidenceSufficient).toBe(false);
+      expect(report.independentPolicyQuality.requiredProtectedCohorts).toMatchObject([
+        { protectedUnits: 0, criteriaPass: false },
+      ]);
+    },
+  );
   it('accepts historical base exports while reporting their missing detailed AI observation', () => {
     const input = bundle();
     for (const page of [...input.development, ...input.holdout]) {
