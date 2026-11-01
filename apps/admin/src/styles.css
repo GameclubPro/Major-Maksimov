@@ -1866,6 +1866,14 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
 }
+.commercial-review__semantics {
+  min-width: 0;
+}
+.commercial-review__semantics label {
+  flex-direction: row;
+  align-items: flex-start;
+  font-size: 13px;
+}
 .commercial-review__detail textarea {
   min-height: 85px;
   resize: vertical;

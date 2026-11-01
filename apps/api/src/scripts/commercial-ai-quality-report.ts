@@ -11,6 +11,8 @@ import {
 import {
   commercialReviewEvidenceMetadataSchema,
   commercialReviewSamplingFrameResponseSchema,
+  resolveCommercialLabelAuthority,
+  resolveCommercialSemanticReview,
 } from '@maxim/contracts/safety-desk';
 import {
   commercialLlmPoolEnforcementIdentity,
@@ -203,10 +205,7 @@ function selectedAttempt(capture: CommercialAiQualityCapture) {
 }
 
 function finalRating(row: Item) {
-  return (
-    row.ratings.find((rating) => rating.kind === 'ADJUDICATION') ??
-    row.ratings.find((rating) => rating.kind === 'INDEPENDENT')
-  );
+  return resolveCommercialLabelAuthority(row.ratings).finalRating;
 }
 function groupKeys(row: Item): string[] {
   const metadata = row.sample.evidenceMetadata;
@@ -221,8 +220,10 @@ function groupKeys(row: Item): string[] {
 function independent(row: Item): boolean {
   const metadata = row.sample.evidenceMetadata;
   const reviewers = row.ratings.filter((rating) => rating.kind === 'INDEPENDENT');
-  const adjudicators = row.ratings.filter((rating) => rating.kind === 'ADJUDICATION');
-  const final = finalRating(row);
+  const adjudicators = row.ratings.filter(
+    (rating) => rating.kind === 'ADJUDICATION' || rating.kind === 'SEMANTIC_ADJUDICATION',
+  );
+  const { finalRating: final, labelRatings } = resolveCommercialLabelAuthority(row.ratings);
   return (
     row.sample.source === 'TEXT' &&
     row.eligibleForIndependentCorpus &&
@@ -247,13 +248,30 @@ function independent(row: Item): boolean {
         (rating) =>
           rating.label === final.label && rating.expectedDisposition === final.expectedDisposition,
       )) &&
+    labelRatings.every(
+      (rating) => rating.label !== 'UNSURE' && rating.expectedDisposition !== null,
+    ) &&
     row.ratings.every(
       (rating) =>
-        rating.label !== 'UNSURE' &&
         rating.evidenceKind === 'TEXT' &&
         Date.parse(rating.reviewedAt) >= Date.parse(metadata.messageCreatedAt!),
     )
   );
+}
+
+function semanticReview(row: Item) {
+  const metadata = row.sample.evidenceMetadata;
+  if (
+    row.sample.source !== 'TEXT' ||
+    !row.sample.sourceExcerptComplete ||
+    metadata?.sourceExcerptComplete !== true ||
+    !metadata.sourceSnapshotSha256
+  )
+    return { state: 'MISSING' as const, cohorts: [] };
+  return resolveCommercialSemanticReview(row.ratings, {
+    sourceSnapshotSha256: metadata.sourceSnapshotSha256,
+    excerptSha256: createHash('sha256').update(row.sample.excerpt, 'utf8').digest('hex'),
+  });
 }
 
 function readPages(pages: CommercialAiQualityEvidence['holdout'], name: string, errors: string[]) {
@@ -541,6 +559,11 @@ export function analyzeCommercialAiQualityEvidence(
   const allRows = [...development, ...holdout].filter((row) => row.sample.source === 'TEXT');
   if (allRows.some((row) => !independent(row)))
     errors.push('independent_human_review_evidence_missing');
+  const semanticReviews = new Map(allRows.map((row) => [row, semanticReview(row)]));
+  if ([...semanticReviews.values()].some((review) => review.state === 'MISSING'))
+    errors.push('source_bound_semantic_review_missing_or_invalid');
+  if ([...semanticReviews.values()].some((review) => review.state === 'DISAGREEMENT'))
+    errors.push('semantic_review_disagreement');
   if (
     development.some((row) =>
       row.ratings.some((rating) => Date.parse(rating.reviewedAt) > frozenAt),
@@ -661,12 +684,16 @@ export function analyzeCommercialAiQualityEvidence(
   const recallLower95 = commercialWilson95(cleaned, offerUnits.length)?.lower ?? null;
   const requiredProtectedCohorts = (manifest?.requiredProtectedCohorts ?? []).map((cohort) => {
     const grouped = new Map<string, boolean>();
-    for (const row of holdout.filter(
-      (row) =>
+    for (const row of holdout.filter((row) => {
+      const review = semanticReviews.get(row);
+      // FLAG: Source-bound blind human semantics define quality cohorts; execution policy does not.
+      return (
         independent(row) &&
         finalRating(row)?.expectedDisposition === 'KEEP' &&
-        row.sample.requiredPolicyCohorts.includes(cohort),
-    )) {
+        review?.state === 'RESOLVED' &&
+        review.cohorts.some((resolvedCohort) => resolvedCohort === cohort)
+      );
+    })) {
       const capture = captureFromItem(row);
       const allowed =
         !!manifest &&

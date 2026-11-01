@@ -19,7 +19,7 @@ import {
   hasResidualCommercialContactCandidate,
   sanitizeCommercialCorpusText,
 } from '../../scripts/commercial-corpus-sanitization.util';
-import type { Candidate } from './commercial-review.service';
+import { commercialReviewEvidenceHash, type Candidate } from './commercial-review.service';
 import { fingerprintCommercialDeleteText } from './commercial-delete-binding';
 import {
   commercialLlmMayDelete,
@@ -214,6 +214,7 @@ function prepareSeed(input: CommercialAiObservationSeed) {
     score: candidate.score,
     campaignGroupingComplete: candidate.campaignGroupingComplete,
     evidenceHash,
+    humanReviewEvidenceHash: commercialReviewEvidenceHash(candidate),
     inputSha256,
     sourceBinding,
     attempt,
@@ -369,10 +370,11 @@ export class CommercialAiObservationService {
         const inserted = await tx.$executeRaw`
           INSERT INTO commercial_review_samples
             (id,chat_id,user_id,message_id,source,evidence_hash,score,evidence,quality_metadata,
-             llm_enforcement,review_priority,observed_at,expires_at,updated_at)
+             llm_enforcement,human_review_evidence_hash,review_priority,observed_at,expires_at,updated_at)
           VALUES (${randomUUID()},${seed.source.chatId},${seed.source.userId},${seed.source.messageId},
             'TEXT',${seed.evidenceHash},${seed.score / 100},${JSON.stringify(seed.evidence)}::jsonb,
             ${JSON.stringify(seed.qualityMetadata)}::jsonb,${JSON.stringify(envelope)}::jsonb,
+            ${seed.humanReviewEvidenceHash},
             ${seed.evidence.reviewPriority},${now},${new Date(now.getTime() + COMMERCIAL_AI_OBSERVATION_TTL_MS)},${now})
           ON CONFLICT (evidence_hash) DO NOTHING`;
         if (inserted === 1) return 'written';

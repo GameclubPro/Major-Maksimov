@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { commercialReviewExportResponseSchema, commercialReviewItemSchema } from './safety-desk.js';
+import {
+  commercialReviewExportQuerySchema,
+  commercialReviewExportResponseSchema,
+  commercialReviewItemSchema,
+} from './safety-desk.js';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const token = z.string().regex(/^[a-z0-9_.:-]{1,120}$/iu);
@@ -412,3 +416,7 @@ export const commercialAiReviewExportResponseSchema = commercialReviewExportResp
 export type CommercialAiReviewExportResponse = z.infer<
   typeof commercialAiReviewExportResponseSchema
 >;
+
+export const commercialAiReviewExportQuerySchema = commercialReviewExportQuerySchema.safeExtend({
+  limit: z.coerce.number().int().min(1).max(50).default(50),
+});

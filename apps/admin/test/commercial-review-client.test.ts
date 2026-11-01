@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { commercialReviewItemSchema } from '@maxim/contracts/safety-desk';
+import {
+  commercialReviewItemSchema,
+  type CommercialReviewSemanticAnnotationRequest,
+} from '@maxim/contracts/safety-desk';
 import { SafetyDeskApiClient } from '../src/safety-desk-api-client';
 import { createAdminApiTransport } from '../src/admin-request';
 
@@ -34,6 +37,49 @@ const item = commercialReviewItemSchema.parse({
   observedAt: '2026-10-01T10:00:00.000Z',
   expiresAt: '2026-10-15T10:00:00.000Z',
   updatedAt: '2026-10-01T10:00:00.000Z',
+});
+
+test('independent and adjudication requests carry only the optional human category selection', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const client = new SafetyDeskApiClient(
+    createAdminApiTransport(async (url, init) => {
+      calls.push({ url: String(url), init });
+      return Response.json(item);
+    }),
+  );
+  const semanticAnnotation: CommercialReviewSemanticAnnotationRequest = {
+    version: 1,
+    cohorts: ['BUYER_REQUEST', 'MIXED_CONTENT'],
+  };
+  await client.labelCommercialReview(
+    item,
+    'NOT_COMMERCIAL',
+    'Нужен мастер',
+    'private-code',
+    'KEEP',
+    semanticAnnotation,
+  );
+  await client.adjudicateCommercialReview(
+    item,
+    'NOT_COMMERCIAL',
+    'Нужен мастер',
+    'private-code',
+    'KEEP',
+    semanticAnnotation,
+  );
+  for (const call of calls) {
+    assert.deepEqual(JSON.parse(String(call.init?.body)), {
+      expectedUpdatedAt: item.updatedAt,
+      label: 'NOT_COMMERCIAL',
+      expectedDisposition: 'KEEP',
+      reason: 'Нужен мастер',
+      semanticAnnotation,
+    });
+    assert.equal(call.init?.credentials, 'same-origin');
+    assert.equal(call.url.includes('private-code'), false);
+  }
+  assert.equal(calls[0]?.url, '/api/v1/safety-desk/commercial/review/sample%2F1/label');
+  assert.equal(calls[1]?.url, '/api/v1/safety-desk/commercial/review/sample%2F1/adjudicate');
 });
 
 test('commercial owner feedback sends the server revision through the closed transport', async () => {

@@ -215,4 +215,54 @@ describe('commercial intent quality experimental policy', () => {
       ).toBeNull();
     }
   });
+
+  describe('bounded assertion coverage', () => {
+    const editorial = [
+      'Исследование о рекламе приводит пример',
+      '«Я продаю цемент по 500 руб., доставка, телефон [phone]»',
+      'Это цитата, не предложение',
+    ];
+    const buyer = 'Хотела бы заказать уборку квартиры';
+    const offer = 'Принимаю заказы на пряники, пишите [phone]';
+    const source = (count: number, withEditorial: boolean): string => {
+      const assertions = [buyer, ...(withEditorial ? editorial : [])];
+      while (assertions.length < count - 1) assertions.push('Соседи обсуждают погоду');
+      return [...assertions, offer].join('. ');
+    };
+
+    it.each([63, 64, 65, 66])(
+      'uses the original scan coverage for %i assertions, including grouped editorial quotes',
+      (count) => {
+        for (const withEditorial of [false, true]) {
+          const text = source(count, withEditorial);
+          const quality = resolveCommercialIntentQualityContext(text.toLowerCase());
+          expect(quality.fullyInspected).toBe(count <= 64);
+          if (count <= 64) expect(quality.independentOfferTexts).not.toHaveLength(0);
+        }
+      },
+    );
+
+    it.each([65, 66])(
+      'keeps an independent tail offer at assertion %i review-only after quote grouping',
+      (count) => {
+        const text = source(count, true);
+        for (const profile of PROFILES) {
+          const detector = new CommercialAdDetector();
+          const input = inputFor(text, profile);
+          const baseline = detector.detect(input);
+          const candidate = detector.detectExperimental(input);
+          expect(candidate).toMatchObject({
+            actionBand: 'REVIEW_ONLY',
+            messageDisposition: 'KEEP',
+            actionable: false,
+            recordable: false,
+          });
+          expect(candidate?.suppressionReasons).toContain('quality-context-incomplete');
+          expect(detector.detect(input)).toEqual(baseline);
+          expect(detector.detectExperimental(input)).toEqual(candidate);
+          expect(new CommercialAdDetector().detectExperimental(input)).toEqual(candidate);
+        }
+      },
+    );
+  });
 });

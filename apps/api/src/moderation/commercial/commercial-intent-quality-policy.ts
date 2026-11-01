@@ -1,6 +1,6 @@
 import {
   MAX_LOCAL_CONTEXT_LENGTH,
-  splitCommercialAssertions,
+  inspectCommercialAssertions,
   resolveCommercialLocalContext,
 } from './commercial-local-context';
 import {
@@ -80,8 +80,10 @@ export type CommercialIntentQualityContext = Readonly<{
 export function resolveCommercialIntentQualityContext(
   text: string,
 ): CommercialIntentQualityContext {
-  const assertions = splitCommercialAssertions(text.replace(CONTRAST_BOUNDARY, '\n'));
-  const fullyInspected = text.length <= MAX_LOCAL_CONTEXT_LENGTH && assertions.length < 64;
+  const inspection = inspectCommercialAssertions(text.replace(CONTRAST_BOUNDARY, '\n'));
+  const { assertions } = inspection;
+  // FLAG: Quote grouping cannot restore truncated coverage or invalidate a complete 64-item scan.
+  const fullyInspected = text.length <= MAX_LOCAL_CONTEXT_LENGTH && inspection.complete;
   const independentOfferTexts: string[] = [];
   const ownedOrderOfferTexts: string[] = [];
   const protectionReasons = new Set<string>();

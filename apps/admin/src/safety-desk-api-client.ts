@@ -16,6 +16,7 @@ import {
   type CommercialReviewQueueResponse,
   type CommercialReviewItem,
   type CommercialReviewLabel,
+  type CommercialReviewSemanticAnnotationRequest,
   type SafetyDeskRetentionRuntimeResponse,
   type SafetyDeskRetentionPreviewResponse,
   type SafetyDeskRetryRetentionRequest,
@@ -66,6 +67,7 @@ export class SafetyDeskApiClient {
       : label === 'NOT_COMMERCIAL'
         ? 'KEEP'
         : null,
+    semanticAnnotation?: CommercialReviewSemanticAnnotationRequest,
   ): Promise<CommercialReviewItem> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/commercial/review/${encodeURIComponent(item.id)}/label`,
@@ -73,7 +75,13 @@ export class SafetyDeskApiClient {
       commercialReviewItemSchema,
       {
         method: 'POST',
-        body: { expectedUpdatedAt: item.updatedAt, label, expectedDisposition, reason },
+        body: {
+          expectedUpdatedAt: item.updatedAt,
+          label,
+          expectedDisposition,
+          reason,
+          ...(semanticAnnotation ? { semanticAnnotation } : {}),
+        },
       },
     );
   }
@@ -84,6 +92,7 @@ export class SafetyDeskApiClient {
     reason: string,
     accessCode: string,
     expectedDisposition: 'KEEP' | 'DELETE' | null,
+    semanticAnnotation?: CommercialReviewSemanticAnnotationRequest,
   ): Promise<CommercialReviewItem> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/commercial/review/${encodeURIComponent(item.id)}/adjudicate`,
@@ -91,7 +100,13 @@ export class SafetyDeskApiClient {
       commercialReviewItemSchema,
       {
         method: 'POST',
-        body: { expectedUpdatedAt: item.updatedAt, label, expectedDisposition, reason },
+        body: {
+          expectedUpdatedAt: item.updatedAt,
+          label,
+          expectedDisposition,
+          reason,
+          ...(semanticAnnotation ? { semanticAnnotation } : {}),
+        },
       },
     );
   }

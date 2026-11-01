@@ -646,6 +646,7 @@ try {
       canAdjudicate: false,
       imageEvidenceAvailable: false,
       sourceExcerptComplete: true,
+      semanticAnnotationAllowed: true,
       evidenceMetadata: null,
       id: 'commercial-1',
       chatId: 'chat-3',
@@ -667,6 +668,7 @@ try {
       expiresAt: date,
       updatedAt: date,
     };
+    const completeSample = { ...state.commercialItem };
     await openRetention(page);
     await openPreview(page);
     await page.getByRole('button', { name: 'Коммерческий фильтр', exact: true }).click();
@@ -678,17 +680,68 @@ try {
         exact: true,
       })
       .waitFor();
+    assert.equal(await page.getByRole('checkbox').count(), 9);
+    assert.equal(await page.getByRole('checkbox', { checked: true }).count(), 0);
+    assert.equal(
+      await page.getByRole('button', { name: 'Не реклама', exact: true }).isDisabled(),
+      true,
+    );
+    await page.getByLabel('Поиск товара, услуги или исполнителя', { exact: true }).check();
+    await page.getByLabel('Комментарий к оценке').fill('Черновик предыдущей ревизии');
+    await page.getByLabel('Ожидаемое решение при оценке «Реклама»').selectOption('KEEP');
+    const revisedAt = '2026-10-01T10:01:00.000Z';
+    state.commercialItem = { ...state.commercialItem, updatedAt: revisedAt };
+    await page.getByRole('button', { name: 'Обновить', exact: true }).last().click();
+    await page.getByText('Очередь обновлена', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('checkbox', { checked: true }).count(), 0);
+    assert.equal(await page.getByLabel('Комментарий к оценке').inputValue(), '');
+    assert.equal(
+      await page.getByLabel('Ожидаемое решение при оценке «Реклама»').inputValue(),
+      'DELETE',
+    );
+    await page.getByLabel('Продажа личной вещи', { exact: true }).check();
+    await page.getByLabel('Комментарий к оценке').fill('Черновик другого образца');
+    state.commercialItem = {
+      ...state.commercialItem,
+      id: 'commercial-2',
+      chatTitle: 'Другой образец коммерческого фильтра',
+    };
+    await page.getByRole('button', { name: 'Обновить', exact: true }).last().click();
+    await page.getByRole('heading', { name: 'Другой образец коммерческого фильтра' }).waitFor();
+    assert.equal(await page.getByRole('checkbox', { checked: true }).count(), 0);
+    assert.equal(await page.getByLabel('Комментарий к оценке').inputValue(), '');
+    await page.getByLabel('Поиск товара, услуги или исполнителя', { exact: true }).check();
     await page.getByLabel('Комментарий к оценке').fill('Проверено после объединения');
     await page.getByRole('button', { name: 'Не реклама', exact: true }).click();
     await page.getByText('Сохранено: Не реклама', { exact: true }).waitFor();
     assert.deepEqual(state.commercialPosts, [
       {
-        expectedUpdatedAt: date,
+        expectedUpdatedAt: revisedAt,
         label: 'NOT_COMMERCIAL',
         expectedDisposition: 'KEEP',
         reason: 'Проверено после объединения',
+        semanticAnnotation: { version: 1, cohorts: ['BUYER_REQUEST'] },
       },
     ]);
+    state.commercialItem = {
+      ...completeSample,
+      id: 'commercial-legacy-source',
+      chatTitle: 'Старый образец без привязки источника',
+      semanticAnnotationAllowed: false,
+    };
+    await page.getByRole('button', { name: 'Обновить', exact: true }).last().click();
+    await page
+      .getByRole('heading', { name: 'Старый образец без привязки источника', exact: true })
+      .waitFor();
+    assert.equal(await page.getByRole('checkbox').count(), 0);
+    await page.getByRole('button', { name: 'Не реклама', exact: true }).click();
+    await page.getByText('Сохранено: Не реклама', { exact: true }).waitFor();
+    assert.deepEqual(state.commercialPosts[1], {
+      expectedUpdatedAt: date,
+      label: 'NOT_COMMERCIAL',
+      expectedDisposition: 'KEEP',
+      reason: '',
+    });
     assert.equal(state.posts.length, 0);
     await openRetention(page);
     await openPreview(page);

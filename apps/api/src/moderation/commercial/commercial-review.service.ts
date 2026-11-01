@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
   commercialReviewDecisionRequestSchema,
+  commercialReviewSemanticAnnotationSchema,
+  resolveCommercialSemanticReview,
+  resolveCommercialLabelAuthority,
   commercialReviewDecisionSnapshotSchema,
   commercialReviewEvidenceMetadataSchema,
   commercialReviewExportQuerySchema,
@@ -29,6 +32,15 @@ import {
   hasResidualCommercialContactCandidate,
 } from '../../scripts/commercial-corpus-sanitization.util';
 import { COMMERCIAL_INTENT_QUALITY_DECISION_VERSION } from './commercial-policy-cohorts';
+import {
+  COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES,
+  commercialAiReviewExportQuerySchema,
+  type CommercialAiReviewExportResponse,
+} from '@maxim/contracts/commercial-ai-quality';
+import {
+  projectCommercialAiReviewedExport,
+  type CommercialAiReviewedExportRow,
+} from './commercial-ai-reviewed-export';
 
 const REVIEW_TTL_DAYS = 14;
 export type Candidate = {
@@ -293,6 +305,35 @@ function mergeMetadata(
   };
 }
 
+function semanticBinding(row: Pick<ReviewRow, 'source' | 'qualityMetadata' | 'evidence'>) {
+  const evidence = object(row.evidence);
+  const quality = metadata(row.qualityMetadata) ?? metadata(evidence.evidenceMetadata);
+  if (
+    row.source !== 'TEXT' ||
+    quality?.sourceExcerptComplete !== true ||
+    !quality.sourceSnapshotSha256 ||
+    typeof evidence.excerpt !== 'string'
+  )
+    return null;
+  return {
+    sourceSnapshotSha256: quality.sourceSnapshotSha256,
+    excerptSha256: createHash('sha256')
+      .update(redact(evidence.excerpt, 2500), 'utf8')
+      .digest('hex'),
+  };
+}
+function semanticDisagreement(row: ReviewRow): boolean {
+  const binding = semanticBinding(row);
+  return (
+    binding !== null &&
+    resolveCommercialSemanticReview(row.ratings, binding).state === 'DISAGREEMENT'
+  );
+}
+function annotation(value: unknown) {
+  const parsed = commercialReviewSemanticAnnotationSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function confirmedFalseDeletionStop(
   row: Pick<ReviewRow, 'source' | 'evidence' | 'reviewState' | 'independentLabel' | 'ratings'>,
   quality: CommercialReviewEvidenceMetadata | null,
@@ -309,7 +350,7 @@ function confirmedFalseDeletionStop(
   )
     return null;
   const independent = row.ratings.filter((rating) => rating.kind === 'INDEPENDENT');
-  const final = row.ratings.find((rating) => rating.kind === 'ADJUDICATION') ?? independent[0];
+  const { finalRating: final } = resolveCommercialLabelAuthority(row.ratings);
   if (
     independent.length !== 2 ||
     final?.label !== row.independentLabel ||
@@ -588,7 +629,11 @@ export class CommercialReviewService {
             ? [
                 {
                   ratings: { none: { reviewerKey: viewer.key } },
-                  OR: [{ independentReviewCount: { lt: 2 } }, { reviewState: 'DISAGREEMENT' }],
+                  OR: [
+                    { independentReviewCount: { lt: 2 } },
+                    { reviewState: 'DISAGREEMENT' },
+                    { semanticReviewState: 'DISAGREEMENT' },
+                  ],
                 },
               ]
             : status === 'REVIEWED'
@@ -710,8 +755,7 @@ export class CommercialReviewService {
         if (!sample || !sample.decisionVisible) return [];
         const quality = sample.evidenceMetadata;
         const independent = row.ratings.filter((rating) => rating.kind === 'INDEPENDENT');
-        const final =
-          row.ratings.find((rating) => rating.kind === 'ADJUDICATION') ?? independent[0];
+        const { finalRating: final, labelRatings } = resolveCommercialLabelAuthority(row.ratings);
         const adjudication = row.ratings.filter((rating) => rating.kind === 'ADJUDICATION');
         const independentAgreement =
           independent.length === 2 &&
@@ -732,7 +776,8 @@ export class CommercialReviewService {
           final?.label === row.independentLabel &&
           final?.label !== 'UNSURE' &&
           final?.expectedDisposition != null &&
-          row.ratings.every((rating) => covered(rating) && rating.expectedDisposition !== null) &&
+          row.ratings.every(covered) &&
+          labelRatings.every((rating) => rating.expectedDisposition !== null) &&
           quality?.campaignGroupingComplete === true &&
           quality?.samplingProbability != null &&
           quality.samplingProbability > 0 &&
@@ -756,14 +801,68 @@ export class CommercialReviewService {
               expectedDisposition: rating.expectedDisposition as 'KEEP' | 'DELETE' | null,
               reason: redact(rating.reason, 500),
               reviewedAt: rating.createdAt.toISOString(),
-              kind: rating.kind as 'INDEPENDENT' | 'ADJUDICATION',
+              kind: rating.kind as 'INDEPENDENT' | 'ADJUDICATION' | 'SEMANTIC_ADJUDICATION',
               evidenceKind: rating.evidenceKind as 'TEXT' | 'CAPTION_ONLY' | 'PRIVATE_SOURCE_IMAGE',
               sourceEvidenceDigest: digest(rating.sourceEvidenceDigest ?? undefined),
+              semanticAnnotation: annotation(rating.semanticAnnotation),
             })),
           },
         ];
       }),
     };
+  }
+
+  async exportAiIndependentEvidence(
+    query: unknown,
+    actor: string | null,
+  ): Promise<CommercialAiReviewExportResponse> {
+    const parsed = commercialAiReviewExportQuerySchema.safeParse(query);
+    if (!parsed.success) throw new BadRequestException('Укажите окно экспорта ИИ и лимит до 50.');
+    const exported = await this.exportIndependentEvidence(parsed.data, actor);
+    const items: CommercialAiReviewExportResponse['items'] = [];
+    for (const item of exported.items) {
+      // FLAG: Re-read the exact human revision; a stale page cannot join a newer source/review.
+      const human = await this.prisma.commercialReviewSample.findUnique({
+        where: { id: item.sample.id },
+        select: { evidenceHash: true, updatedAt: true, expiresAt: true },
+      });
+      if (
+        !human ||
+        human.expiresAt <= new Date() ||
+        human.updatedAt.toISOString() !== item.sample.updatedAt
+      )
+        throw new ConflictException('Материал изменился. Повторите экспорт.');
+      // FLAG: Limit an indexed exact linkage seek BEFORE expiry/JSON eligibility checks.
+      // Multiple retained generations remain ambiguous, including an expired generation.
+      const linked = await this.prisma.$queryRaw<CommercialAiReviewedExportRow[]>(Prisma.sql`
+        WITH linked AS MATERIALIZED (
+          SELECT id, human_review_evidence_hash, source, evidence_hash, expires_at,
+            evidence, quality_metadata, llm_enforcement
+          FROM commercial_review_samples
+          WHERE human_review_evidence_hash = ${human.evidenceHash}
+          ORDER BY observed_at DESC, id DESC LIMIT 2
+        ) SELECT human_review_evidence_hash AS "humanReviewEvidenceHash", source,
+          evidence_hash AS "evidenceHash", expires_at AS "expiresAt",
+          CASE WHEN octet_length(evidence ->> 'excerpt') <= 10000
+            THEN evidence ->> 'excerpt' ELSE NULL END AS excerpt,
+          CASE WHEN octet_length(quality_metadata::text) <= 32768
+            THEN quality_metadata ELSE NULL END AS "qualityMetadata",
+          CASE WHEN octet_length(llm_enforcement::text) <= ${COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES}
+            THEN llm_enforcement ELSE NULL END AS "llmEnforcement",
+          COALESCE(octet_length(evidence ->> 'excerpt') > 10000, false)
+            OR COALESCE(octet_length(quality_metadata::text) > 32768, false)
+            OR COALESCE(octet_length(llm_enforcement::text) > ${COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES}, false)
+            AS "payloadOversized"
+        FROM linked`);
+      items.push({
+        ...item,
+        sample: {
+          ...item.sample,
+          llmEnforcement: projectCommercialAiReviewedExport(item, human.evidenceHash, linked),
+        },
+      });
+    }
+    return { ...exported, items };
   }
 
   async exportSamplingFrame(
@@ -880,7 +979,12 @@ export class CommercialReviewService {
       where: { id },
       include: { chat: { select: { title: true } }, ratings: true },
     });
-    if (!current || current.expiresAt <= new Date() || !this.mapItem(current, viewer.key))
+    if (
+      !current ||
+      current.llmEnforcement != null ||
+      current.expiresAt <= new Date() ||
+      !this.mapItem(current, viewer.key)
+    )
       throw new NotFoundException('Материал недоступен.');
     const expected = new Date(parsed.data.expectedUpdatedAt);
     if (current.updatedAt.getTime() !== expected.getTime())
@@ -893,9 +997,9 @@ export class CommercialReviewService {
     const independent = ratings.filter((rating) => rating.kind === 'INDEPENDENT');
     if (kind === 'ADJUDICATION') {
       if (
-        current.reviewState !== 'DISAGREEMENT' ||
+        (current.reviewState !== 'DISAGREEMENT' && !semanticDisagreement(current)) ||
         independent.length !== 2 ||
-        ratings.some((rating) => rating.kind === 'ADJUDICATION')
+        ratings.some((rating) => ['ADJUDICATION', 'SEMANTIC_ADJUDICATION'].includes(rating.kind))
       )
         throw new ConflictException('Материал не ожидает разрешения разногласия.');
     } else if (independent.length >= 2)
@@ -915,6 +1019,22 @@ export class CommercialReviewService {
       );
     if (quality && parsed.data.label !== 'UNSURE' && parsed.data.expectedDisposition == null)
       throw new BadRequestException('Укажите ожидаемое решение: сохранить или удалить.');
+    const binding = semanticBinding(current);
+    if (parsed.data.semanticAnnotation && !binding)
+      throw new BadRequestException(
+        'Для смысловой разметки нужен полный текст с подтверждённым источником.',
+      );
+    const semanticAnnotation =
+      parsed.data.semanticAnnotation && binding
+        ? { ...parsed.data.semanticAnnotation, ...binding }
+        : null;
+    // FLAG: Never compare a blind third opinion with hidden agreed labels: that creates an oracle.
+    // Semantic-only votes retain the actor's actual opinion but cannot reopen the agreed label pair.
+    // Their distinct kind also preserves old late-receipt KEEP-stop readers during rollback.
+    const semanticOnly = kind === 'ADJUDICATION' && current.reviewState === 'RESOLVED';
+    if (semanticOnly && !semanticAnnotation)
+      throw new BadRequestException('Уточните смысловые категории сообщения.');
+    const storedKind = semanticOnly ? 'SEMANTIC_ADJUDICATION' : kind;
     const reviewedAt = new Date(Math.max(Date.now(), expected.getTime() + 1));
     const expectedDisposition = parsed.data.expectedDisposition ?? null;
     const reason = redact(parsed.data.reason, 500);
@@ -927,7 +1047,14 @@ export class CommercialReviewService {
         : independent.length === 1
           ? 'DISAGREEMENT'
           : 'AWAITING_SECOND';
-    const finalLabel = state === 'RESOLVED' ? parsed.data.label : null;
+    const finalLabel =
+      state === 'RESOLVED' ? (semanticOnly ? current.independentLabel : parsed.data.label) : null;
+    const semanticReviewState = binding
+      ? resolveCommercialSemanticReview(
+          [...ratings, { kind: storedKind, reviewerKey: viewer.key, semanticAnnotation }],
+          binding,
+        ).state
+      : 'MISSING';
     let rating: ReviewRating;
     try {
       rating = await this.prisma.$transaction(async (tx) => {
@@ -935,6 +1062,7 @@ export class CommercialReviewService {
           where: { id, updatedAt: expected, expiresAt: { gt: reviewedAt } },
           data: {
             reviewState: state,
+            semanticReviewState,
             independentReviewCount: kind === 'INDEPENDENT' ? independent.length + 1 : 2,
             independentLabel: finalLabel,
             updatedAt: reviewedAt,
@@ -946,10 +1074,11 @@ export class CommercialReviewService {
           data: {
             sampleId: id,
             reviewerKey: viewer.key,
-            kind,
+            kind: storedKind,
             label: parsed.data.label,
             expectedDisposition,
             evidenceKind: current.source === 'OCR' ? 'CAPTION_ONLY' : 'TEXT',
+            ...(semanticAnnotation ? { semanticAnnotation } : {}),
             reason,
             createdAt: reviewedAt,
           },
@@ -980,6 +1109,8 @@ export class CommercialReviewService {
               expectedDisposition,
               reason,
               reviewState: state,
+              reviewKind: storedKind,
+              semanticAnnotation,
             },
           },
         });
@@ -994,6 +1125,7 @@ export class CommercialReviewService {
       {
         ...current,
         reviewState: state,
+        semanticReviewState,
         independentReviewCount: kind === 'INDEPENDENT' ? independent.length + 1 : 2,
         independentLabel: finalLabel,
         updatedAt: reviewedAt,
@@ -1033,14 +1165,22 @@ export class CommercialReviewService {
             reviewedAt: own.createdAt.toISOString(),
             kind: own.kind,
             evidenceKind: own.evidenceKind,
+            semanticAnnotation: annotation(own.semanticAnnotation),
           }
         : null,
       reviewState: row.reviewState,
       independentReviewCount: independentCount,
       decisionVisible: visible,
       canReview: canAct && independentCount < 2,
-      canAdjudicate: canAct && row.reviewState === 'DISAGREEMENT' && independentCount === 2,
+      canAdjudicate:
+        canAct &&
+        independentCount === 2 &&
+        !row.ratings.some((rating) =>
+          ['ADJUDICATION', 'SEMANTIC_ADJUDICATION'].includes(rating.kind),
+        ) &&
+        (row.reviewState === 'DISAGREEMENT' || semanticDisagreement(row)),
       imageEvidenceAvailable: false,
+      semanticAnnotationAllowed: semanticBinding(row) !== null,
       sourceExcerptComplete:
         metadata(row.qualityMetadata)?.sourceExcerptComplete ??
         metadata(evidence.evidenceMetadata)?.sourceExcerptComplete ??

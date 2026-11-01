@@ -64,6 +64,16 @@ export class SafetyDeskController {
     return this.commercialReview.exportIndependentEvidence(query, remoteUser ?? null);
   }
 
+  @Get('commercial/review/ai-export')
+  exportCommercialAiReview(
+    @Query() query: unknown,
+    @Headers('x-remote-user') remoteUser: string | undefined,
+  ) {
+    if (!this.commercialReview)
+      throw new ServiceUnavailableException('Экспорт временно недоступен.');
+    return this.commercialReview.exportAiIndependentEvidence(query, remoteUser ?? null);
+  }
+
   @Get('commercial/review/frame')
   exportCommercialSamplingFrame(
     @Query() query: unknown,
