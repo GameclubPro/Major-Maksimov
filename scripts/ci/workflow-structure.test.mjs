@@ -176,10 +176,28 @@ test('requires duplicate, interval, Publisher, OCR, retention and workstation Re
   assert.match(api, /MAXIM_TEST_REDIS_URL: redis:\/\/127\.0\.0\.1:6379/u);
   assert.match(
     api,
-    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
+    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
   );
   assert.doesNotMatch(api, /continue-on-error|^ {6,}(?:- )?if:/mu);
   assert.equal(parse(workflow).jobs.api.if, "needs.impact.outputs.api == 'true'");
+});
+
+test('selects Publisher auto-reply native Redis suites without widening their filenames', () => {
+  const steps = parse(workflow).jobs.api.steps;
+  const step = steps.find((value) => value.env?.MAXIM_TEST_REDIS_URL);
+  const pattern = step?.run.match(/^npm test --workspace @maxim\/api -- '([^']+)'$/u)?.[1];
+  assert.ok(pattern, 'Expected the public Redis test command');
+  const selection = new RegExp(pattern, 'u');
+  for (const family of ['backlog-quota', 'flood-gate']) {
+    const path = resolve(
+      root,
+      `apps/api/src/publisher/publisher-auto-reply-${family}.redis-integration.spec.ts`,
+    );
+    assert.ok(statSync(path).isFile(), `Missing native Publisher test file: ${family}`);
+    assert.ok(selection.test(path), `Missing native Publisher suite: ${family}`);
+    assert.equal(selection.test(`${path}.disabled`), false);
+    assert.equal(selection.test(path.replace('.redis-integration', '')), false);
+  }
 });
 
 test('requires traffic revision and activation checks against local PostgreSQL', () => {
