@@ -31,7 +31,8 @@ function hasNativeStorageRuntime(): boolean {
   }
 
   const bridge = resolveBridge();
-  if (!bridge) {
+  // FLAG: MAX web exposes these SDK methods without native storage support.
+  if (!bridge || bridge.platform === 'web') {
     return false;
   }
 

@@ -11,6 +11,25 @@ function detect(value: string, text: string, matchMode: StopWordsRule['matchMode
 }
 
 describe('StopWordsMatcher', () => {
+  it.each(['EXACT', 'MASKED'] as const)('ignores Cyrillic, Latin and Greek case in %s', (mode) => {
+    for (const [value, text] of [
+      ['КАЗИНО', 'КаЗиНо'],
+      ['ДоХоД бЕз ВлОжЕнИй', 'ДОХОД БЕЗ ВЛОЖЕНИЙ'],
+      ['CASINO', 'casino'],
+      ['ΟΣ', 'ος'],
+      ['οσ', 'ΟΣ'],
+    ]) {
+      expect(detect(value, text, mode)).toEqual([
+        expect.objectContaining({
+          value,
+          fragment: text,
+          matchKind: 'exact',
+          start: 0,
+          end: text.length,
+        }),
+      ]);
+    }
+  });
   it.each(['EXACT', 'MASKED'] as const)(
     'preserves Unicode line and paragraph boundaries in %s',
     (mode) => {

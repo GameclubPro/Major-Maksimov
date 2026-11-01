@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { StopWordsMatcher } from '../src/stop-words-matcher.js';
 import {
   normalizeStopWordsDomain,
   stopWordsPolicySchema,
@@ -108,5 +109,55 @@ describe('stop-word policy contract', () => {
     expect(stopWordsStateSchema.safeParse({ ...response, storageStatus: 'unknown' }).success).toBe(
       false,
     );
+  });
+});
+
+describe('stop-word case matching', () => {
+  it.each(['EXACT', 'MASKED'] as const)('ignores rule and message case in %s mode', (matchMode) => {
+    const matcher = new StopWordsMatcher();
+    for (const variants of [
+      ['казино', 'КАЗИНО', 'КаЗиНо'],
+      ['доход без вложений', 'ДОХОД БЕЗ ВЛОЖЕНИЙ', 'ДоХоД БеЗ вЛоЖеНиЙ'],
+      ['casino', 'CASINO', 'CaSiNo'],
+      ['ος', 'ΟΣ', 'οσ'],
+    ]) {
+      for (const value of variants) {
+        const policy = stopWordsPolicySchema.parse({
+          enabled: true,
+          rules: [
+            { id: 'case-rule', kind: value.includes(' ') ? 'PHRASE' : 'WORD', value, matchMode },
+          ],
+        });
+        for (const fragment of variants) {
+          const text = `🙂 «${fragment}»!`;
+          const start = text.indexOf(fragment);
+          expect(matcher.detect({ policy, text })).toEqual([
+            {
+              ruleId: 'case-rule',
+              value,
+              kind: policy.rules[0].kind,
+              matchKind: 'exact',
+              fragment,
+              start,
+              end: start + fragment.length,
+            },
+          ]);
+          expect(matcher.detect({ policy, text: `анти${fragment}шка` })).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it('keeps existing policies with both sigma spellings valid and each rule identifiable', () => {
+    const policy = stopWordsPolicySchema.parse({
+      enabled: true,
+      rules: [
+        { id: 'final-sigma', kind: 'WORD', value: 'ος' },
+        { id: 'sigma', kind: 'WORD', value: 'οσ' },
+      ],
+    });
+    expect(
+      new StopWordsMatcher().detect({ policy, text: 'ΟΣ' }).map((match) => match.ruleId),
+    ).toEqual(['final-sigma', 'sigma']);
   });
 });

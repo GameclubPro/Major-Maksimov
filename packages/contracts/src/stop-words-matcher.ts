@@ -51,6 +51,11 @@ function escapePattern(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+function foldFinalSigma(value: string): string {
+  // FLAG: Fold only for matching; changing stored rule identity could invalidate existing lists.
+  return value.replace(/ς/gu, 'σ');
+}
+
 function tokenPattern(token: string, masked: boolean): string {
   if (!masked) return escapePattern(token);
   const characters = [...token].map((char) =>
@@ -67,7 +72,7 @@ function tokenPattern(token: string, masked: boolean): string {
 }
 
 function compileRule(rule: StopWordsRule): CompiledRule {
-  const normalizedValue = normalizeStopWordsValue(rule.value);
+  const normalizedValue = foldFinalSigma(normalizeStopWordsValue(rule.value));
   return {
     rule,
     normalizedValue,
@@ -173,7 +178,7 @@ function normalizeText(text: string): TextView {
     const excluded = range && segment.index >= range.start && segment.index < range.end;
     const normalized = excluded
       ? '\0'
-      : segment.segment.normalize('NFKC').toLowerCase().replace(/ё/gu, 'е');
+      : foldFinalSigma(segment.segment.normalize('NFKC').toLowerCase().replace(/ё/gu, 'е'));
     view.text += normalized;
     for (let index = 0; index < normalized.length; index += 1) {
       view.starts.push(segment.index);
@@ -239,7 +244,7 @@ export class StopWordsMatcher {
           const end = matchingView.ends[match.index + match[0].length - 1] ?? start;
           if (!hasSourceBoundary(text, start, end, true)) continue;
           const exact =
-            normalizeStopWordsValue(text.slice(start, end)) === normalizedValue &&
+            foldFinalSigma(normalizeStopWordsValue(text.slice(start, end))) === normalizedValue &&
             hasSourceBoundary(text, start, end);
           matches.push({
             ruleId: rule.id,

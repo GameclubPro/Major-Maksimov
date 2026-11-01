@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   hydrateMirroredItem,
+  isNativeDeviceStorageAvailable,
   readLocalMirrorItem,
+  readNativeStorageItemState,
   removeLocalMirrorItem,
+  removeNativeStorageItem,
   writeLocalMirrorItem,
+  writeNativeStorageItem,
 } from '../src/lib/native-storage';
 import { waitForNativeStorageRuntime } from '../src/lib/native-storage-runtime';
 
@@ -74,6 +78,101 @@ test('local mirror tolerates missing or restricted localStorage', () => {
   assert.doesNotThrow(() => writeLocalMirrorItem('maxim:test', '1'));
   restoreWindow();
 });
+
+for (const bridgeLocation of ['MAX', 'WebApp'] as const) {
+  for (const nativeFailure of ['reject', 'stall'] as const) {
+    test(`MAX web skips unsupported ${nativeFailure} storage at ${bridgeLocation} and preserves its local mirror`, async () => {
+      const key = 'maxim:web-mirror';
+      const values = new Map([[key, 'original-local-value']]);
+      const calls: string[] = [];
+      installWindow({
+        getItem: (scope: string) => values.get(scope) ?? null,
+        setItem: (scope: string, value: string) => values.set(scope, value),
+      } as Storage);
+      installDocument(new EventTarget(), { maxClient: 'native' });
+      const unsupported = (method: string): Promise<never> => {
+        calls.push(method);
+        return nativeFailure === 'reject'
+          ? Promise.reject({ error: { code: 'unsupported' } })
+          : new Promise(() => {});
+      };
+      const storage = {
+        getItem: () => unsupported('getItem'),
+        setItem: () => unsupported('setItem'),
+        removeItem: () => unsupported('removeItem'),
+      } satisfies NonNullable<NonNullable<Window['WebApp']>['DeviceStorage']>;
+      const bridge = {
+        platform: 'web',
+        initData: 'auth_date=1&hash=test',
+        DeviceStorage: storage,
+        SecureStorage: storage,
+      } satisfies NonNullable<Window['WebApp']>;
+      if (bridgeLocation === 'MAX') window.MAX = { WebApp: bridge };
+      else window.WebApp = bridge;
+
+      try {
+        assert.equal(isNativeDeviceStorageAvailable(), false);
+        for (const area of ['device', 'secure'] as const) {
+          assert.deepEqual(await readNativeStorageItemState(key, area), {
+            status: 'unavailable',
+          });
+          assert.deepEqual(await readNativeStorageItemState('missing', area), {
+            status: 'unavailable',
+          });
+          await writeNativeStorageItem(key, 'new-native-value', area);
+          await removeNativeStorageItem(key, area);
+        }
+        assert.equal(await hydrateMirroredItem(key), 'original-local-value');
+        assert.equal(await hydrateMirroredItem('missing'), null);
+        assert.deepEqual([...values], [[key, 'original-local-value']]);
+        assert.deepEqual(calls, []);
+      } finally {
+        restoreDocument();
+        restoreWindow();
+      }
+    });
+  }
+}
+
+for (const platform of ['ios', 'android', 'desktop'] as const) {
+  test(`${platform} storage retains found, missing and ambiguous rejection results`, async () => {
+    installWindow({ getItem: () => null } as unknown as Storage);
+    installDocument(new EventTarget(), { maxClient: 'native' });
+    const storage = (area: 'device' | 'secure') =>
+      ({
+        getItem: async (key: string) => {
+          if (key === 'not-found-error')
+            throw { error: { code: `client.${area}_storage_get_key.not_found` } };
+          if (key === 'read-error') throw new Error('Native storage failed');
+          return { key, value: key === 'existing' ? 'original-native-value' : null };
+        },
+      }) satisfies NonNullable<NonNullable<Window['WebApp']>['DeviceStorage']>;
+    window.WebApp = {
+      platform,
+      initData: 'auth_date=1&hash=test',
+      DeviceStorage: storage('device'),
+      SecureStorage: storage('secure'),
+    };
+
+    try {
+      assert.equal(isNativeDeviceStorageAvailable(), true);
+      for (const area of ['device', 'secure'] as const) {
+        assert.deepEqual(await readNativeStorageItemState('existing', area), {
+          status: 'found',
+          value: 'original-native-value',
+        });
+        assert.deepEqual(await readNativeStorageItemState('missing', area), {
+          status: 'missing',
+        });
+        for (const key of ['not-found-error', 'read-error'])
+          assert.deepEqual(await readNativeStorageItemState(key, area), { status: 'error' });
+      }
+    } finally {
+      restoreDocument();
+      restoreWindow();
+    }
+  });
+}
 
 test('late MAX Bridge discovery can recover a native-only mirrored value', async () => {
   const values = new Map<string, string>();

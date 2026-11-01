@@ -61,11 +61,25 @@ export default function KaravanMarketplacePanel({
   const [created, setCreated] = useState(false);
   const [retryOpen, setRetryOpen] = useState(false);
   const startingSetup = useRef(false);
+  const submittedSetup = useRef<{ key: string; operationId: string } | null>(null);
   const [checkingShopCommand, setCheckingShopCommand] = useState(false);
   const returningFromShop = useRef(false);
-  const renderedManagerScope = useRef<string | null>(null);
   const module = query.data?.enabled ? query.data : null;
   const storageKey = module ? `karavan-setup:v1:${module.actorMaxUserId}:${chatId}` : null;
+  const canEnter = Boolean(
+    module?.marketplace &&
+    module.permissions.length > 0 &&
+    module.binding?.chatId === chatId &&
+    module.binding.state === 'verified' &&
+    (!module.access || module.access.reason === 'allowed'),
+  );
+  const managingCurrentShop = canEnter && !setupIntent && workspace?.page !== 'chats';
+  const requestedRecoveryScope = useRef<string | null>(null);
+  // FLAG: Daily management has its own durable command journal and server generation
+  // checks. Load connection recovery only for connection actions, retaining that
+  // scope once requested so navigation cannot interrupt an in-flight command.
+  if (storageKey && !managingCurrentShop) requestedRecoveryScope.current = storageKey;
+  const recoveryRequested = Boolean(storageKey && requestedRecoveryScope.current === storageKey);
   const liveStorageKey = useRef(storageKey);
   liveStorageKey.current = storageKey;
   const [setupRecovery, setSetupRecovery] = useState<{
@@ -79,15 +93,13 @@ export default function KaravanMarketplacePanel({
   const bind = useKaravanMarketplaceBinding(
     api,
     chatId,
-    module?.actorMaxUserId,
+    recoveryRequested ? module?.actorMaxUserId : undefined,
     query.isSuccess && query.isFetchedAfterMount && !query.isFetching ? module?.binding : undefined,
   );
-  const recoveryFailed =
-    bind.hydrationState.status === 'error' || setupHydration.status === 'error';
-  const recoveryReady = bind.hydrated && setupHydration.status === 'ready';
+  const recoveryReady = managingCurrentShop || (bind.hydrated && setupHydration.status === 'ready');
   useLayoutEffect(() => {
     // FLAG: The parent owns the publication save footer. Leave this page before
-    // paint while recovery is unverified, retaining its draft without a save action.
+    // paint when current management access is unverified, retaining its draft.
     if (!recoveryReady && workspace?.page === 'publications') workspace.navigate('home');
   }, [recoveryReady, workspace?.page, workspace?.navigate]);
   useEffect(() => {
@@ -112,7 +124,7 @@ export default function KaravanMarketplacePanel({
   });
 
   useEffect(() => {
-    if (!storageKey) return;
+    if (!storageKey || !recoveryRequested) return;
     let active = true;
     setSetupRecovery({ key: storageKey, state: { status: 'loading' } });
     setSaved(null);
@@ -149,11 +161,19 @@ export default function KaravanMarketplacePanel({
     return () => {
       active = false;
     };
-  }, [storageKey, api, chatId, module?.setupOperation, setupRecoveryAttempt]);
+  }, [storageKey, api, chatId, module?.setupOperation, setupRecoveryAttempt, recoveryRequested]);
 
   const setup = useMutation({
     mutationFn: (input: KaravanMarketplaceSetup) => setupKaravanMarketplace(api, chatId, input),
     onSuccess: (state) => {
+      // FLAG: A late setup response belongs only to the actor/chat and operation
+      // that submitted it. Keep the original journal when that scope has changed.
+      if (
+        liveStorageKey.current !== storageKey ||
+        submittedSetup.current?.key !== storageKey ||
+        submittedSetup.current.operationId !== state.operationId
+      )
+        return;
       setOperation(state);
       setSaved(state.request);
       if (storageKey) saveMirroredItem(storageKey, JSON.stringify(state.request));
@@ -173,7 +193,13 @@ export default function KaravanMarketplacePanel({
         void queryClient.invalidateQueries({ queryKey });
       }
     },
-    onError: (error) => {
+    onError: (error, request) => {
+      if (
+        liveStorageKey.current !== storageKey ||
+        submittedSetup.current?.key !== storageKey ||
+        submittedSetup.current.operationId !== request.operationId
+      )
+        return;
       setNotice(
         describeUserFacingError(
           error,
@@ -273,6 +299,7 @@ export default function KaravanMarketplacePanel({
             state: { status: 'ready', request, operation: null },
           });
         saveMirroredItem(originalKey, JSON.stringify(request));
+        submittedSetup.current = { key: originalKey, operationId: request.operationId };
         setSaved(request);
         setCreated(false);
         setNotice(null);
@@ -323,67 +350,14 @@ export default function KaravanMarketplacePanel({
     );
   const marketplace = module.marketplace;
   const active = marketplace?.status === 'active';
-  const canOpen = module.permissions.length > 0;
   const busy = bind.isPending || checkingShopCommand;
-  const ready = hydrated && bind.hydrated;
-  const canEnter =
-    canOpen &&
-    module.binding?.chatId === chatId &&
-    module.binding?.state === 'verified' &&
-    (!module.access || module.access.reason === 'allowed');
-  // FLAG: Internal recovery may hide this same management scope without discarding
-  // its edits. Actor/chat/marketplace/generation changes and recovery errors close it.
+  const ready = managingCurrentShop || (hydrated && bind.hydrated);
+  // FLAG: Connection recovery must keep authorized daily editors mounted. Their
+  // command journal and server checks remain independent of connection reads.
   const managerScope = `${module.actorMaxUserId}:${chatId}:${marketplace?.id}:${module.binding?.generation}`;
-  if (!canEnter || bind.hydrationState.status === 'error' || setupHydration.status === 'error')
-    renderedManagerScope.current = null;
-  const retainManager = renderedManagerScope.current === managerScope;
-  if (ready && canEnter) renderedManagerScope.current = managerScope;
-  if (canEnter && recoveryFailed)
-    return (
-      <section className="karavan-module" aria-label="Магазин чата">
-        <div className="karavan-module__notice" role="alert">
-          <p>
-            {bind.recoveryError ||
-              (setupHydration.status === 'error'
-                ? shopSetupRecoveryMessage(setupHydration.reason)
-                : null)}
-          </p>
-          <p>Магазин доступен для просмотра. Для изменений повторите проверку.</p>
-          <button
-            type="button"
-            disabled={query.isFetching}
-            onClick={() => {
-              if (bind.hydrationState.status === 'error') {
-                bind.retryRecovery();
-                setSetupRecoveryAttempt((attempt) => attempt + 1);
-              } else {
-                void query.refetch().then(() => setSetupRecoveryAttempt((attempt) => attempt + 1));
-              }
-            }}
-          >
-            Повторить проверку подключения
-          </button>
-        </div>
-        <KaravanShopManager
-          key={managerScope}
-          api={api}
-          chatId={chatId}
-          module={module}
-          busy={busy}
-          readOnly
-          open={openShop}
-          chats={
-            <ul className="karavan-module__progress">
-              {module.bindings?.map((binding) => (
-                <li key={binding.id}>{binding.chatTitle || 'Чат'}</li>
-              ))}
-            </ul>
-          }
-        />
-      </section>
-    );
+  let connectionState: ReactNode = null;
   if (bind.hydrationState.status === 'error')
-    return (
+    connectionState = (
       <section className="karavan-module" aria-label="Магазин чата">
         {marketplace ? <h3>{marketplace.name}</h3> : null}
         <p role="alert">{bind.recoveryError}</p>
@@ -397,8 +371,8 @@ export default function KaravanMarketplacePanel({
         ) : null}
       </section>
     );
-  if (setupHydration.status === 'error')
-    return (
+  else if (setupHydration.status === 'error')
+    connectionState = (
       <section className="karavan-module" aria-label="Магазин чата">
         {marketplace ? <h3>{marketplace.name}</h3> : null}
         <p role="alert">{notice || shopSetupRecoveryMessage(setupHydration.reason)}</p>
@@ -428,12 +402,13 @@ export default function KaravanMarketplacePanel({
         ) : null}
       </section>
     );
-  if (!ready && !retainManager)
-    return (
+  else if (!ready)
+    connectionState = (
       <div className="karavan-module" role="status">
-        <Spinner size="sm" label="Проверяем сохранённое подключение" />
+        <Spinner size="sm" label="Проверяем действия с подключением" />
       </div>
     );
+  if (!canEnter && connectionState) return connectionState;
   const startBinding = (action: 'unbind_chat' | 'recover_chat') => {
     if (!marketplace || !module.binding || saved) return;
     setDisconnectConfirm(false);
@@ -443,18 +418,20 @@ export default function KaravanMarketplacePanel({
       expectedBindingGeneration: module.binding.generation,
     });
   };
+  const showingSubmittedSetup =
+    saved &&
+    submittedSetup.current?.key === storageKey &&
+    submittedSetup.current.operationId === saved.operationId;
   const managerVisible =
-    ready && canEnter && !setupIntent && !bind.request && (pendingManagerOpen || !saved);
+    (managingCurrentShop && (!showingSubmittedSetup || pendingManagerOpen)) ||
+    (canEnter &&
+      !setupIntent &&
+      (!!connectionState || (ready && !bind.request && (pendingManagerOpen || !saved))));
   return (
     <StorefrontPublicationPreviewContext.Provider value={module.publicationPreview ?? null}>
       <section className="karavan-module" aria-label="Магазин чата">
-        {!ready ? (
-          <div role="status">
-            <Spinner size="sm" label="Проверяем сохранённое подключение" />
-          </div>
-        ) : null}
         {created && workspace?.page === 'home' ? <p role="status">Магазин создан.</p> : null}
-        {notice || bind.error ? (
+        {(!connectionState || managingCurrentShop) && (notice || bind.error) ? (
           <p className="karavan-module__notice" role="alert">
             {notice || bind.error}
           </p>
@@ -485,6 +462,7 @@ export default function KaravanMarketplacePanel({
             ))}
           </StorefrontScreen>
         </div>
+        {canEnter && setupIntent ? connectionState : null}
         {marketplace && canEnter ? (
           <div hidden={!managerVisible}>
             {pendingManagerOpen && saved ? (
@@ -500,70 +478,71 @@ export default function KaravanMarketplacePanel({
               chatId={chatId}
               module={module}
               busy={busy}
-              readOnly={!ready}
               open={openShop}
               publications={publications}
               chats={
-                <>
-                  <ul className="karavan-module__progress">
-                    {module.bindings?.map((binding) => (
-                      <li key={binding.id}>
-                        <span>{binding.chatTitle || 'Чат'}</span>
-                        <strong>
-                          {binding.state === 'verified'
-                            ? 'Подключён'
-                            : binding.state === 'disconnected'
-                              ? 'Отключён'
-                              : 'Нужна проверка'}
-                        </strong>
-                      </li>
-                    ))}
-                  </ul>
-                  <button
-                    type="button"
-                    disabled={busy || !ready || !!saved}
-                    onClick={() =>
-                      setSetupIntent({ kind: 'add_chats', marketplaceId: marketplace.id })
-                    }
-                  >
-                    Подключить чаты
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy || !ready || !!saved}
-                    onClick={() =>
-                      setSetupIntent({ kind: 'replace', previousMarketplaceId: marketplace.id })
-                    }
-                  >
-                    Выбрать другой магазин
-                  </button>
-                  {disconnectConfirm ? (
-                    <div className="karavan-module__actions">
-                      <p>
-                        Этот чат перестанет открывать магазин. Если он последний, просмотр
-                        приостановится. Витрины и заказы сохранятся.
-                      </p>
-                      <button
-                        type="button"
-                        disabled={busy || !ready || !!saved}
-                        onClick={() => startBinding('unbind_chat')}
-                      >
-                        Подтвердить отключение
-                      </button>
-                      <button type="button" onClick={() => setDisconnectConfirm(false)}>
-                        Отмена
-                      </button>
-                    </div>
-                  ) : (
+                connectionState ?? (
+                  <>
+                    <ul className="karavan-module__progress">
+                      {module.bindings?.map((binding) => (
+                        <li key={binding.id}>
+                          <span>{binding.chatTitle || 'Чат'}</span>
+                          <strong>
+                            {binding.state === 'verified'
+                              ? 'Подключён'
+                              : binding.state === 'disconnected'
+                                ? 'Отключён'
+                                : 'Нужна проверка'}
+                          </strong>
+                        </li>
+                      ))}
+                    </ul>
                     <button
                       type="button"
                       disabled={busy || !ready || !!saved}
-                      onClick={() => setDisconnectConfirm(true)}
+                      onClick={() =>
+                        setSetupIntent({ kind: 'add_chats', marketplaceId: marketplace.id })
+                      }
                     >
-                      Отключить этот чат
+                      Подключить чаты
                     </button>
-                  )}
-                </>
+                    <button
+                      type="button"
+                      disabled={busy || !ready || !!saved}
+                      onClick={() =>
+                        setSetupIntent({ kind: 'replace', previousMarketplaceId: marketplace.id })
+                      }
+                    >
+                      Выбрать другой магазин
+                    </button>
+                    {disconnectConfirm ? (
+                      <div className="karavan-module__actions">
+                        <p>
+                          Этот чат перестанет открывать магазин. Если он последний, просмотр
+                          приостановится. Витрины и заказы сохранятся.
+                        </p>
+                        <button
+                          type="button"
+                          disabled={busy || !ready || !!saved}
+                          onClick={() => startBinding('unbind_chat')}
+                        >
+                          Подтвердить отключение
+                        </button>
+                        <button type="button" onClick={() => setDisconnectConfirm(false)}>
+                          Отмена
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy || !ready || !!saved}
+                        onClick={() => setDisconnectConfirm(true)}
+                      >
+                        Отключить этот чат
+                      </button>
+                    )}
+                  </>
+                )
               }
             />
           </div>
