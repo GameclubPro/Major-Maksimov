@@ -130,7 +130,7 @@ jobs:
       - name: Check duplicate, interval and Publisher pause flows with Redis
         env:
           MAXIM_TEST_REDIS_URL: redis://127.0.0.1:6379
-        run: npm test --workspace @maxim/api -- 'message-duplicate|photo-duplicate-history.redis|rule-engine-media-cooldown.redis|traffic-protection.redis|publisher-dispatch-health.redis|chat-context-cache.redis|publisher-refresh-operation.redis|publisher-access-refresh.redis|publisher-auto-reply-(backlog-quota|flood-gate)\.redis-integration\.spec\.ts$|commercial-ocr-admission.redis|marketplace-publisher-access.redis|statistics-access-demand.redis-integration|retention-priority-admission.redis-integration|message-retention-admission.redis-integration|commercial-llm-workstation'
+        run: npm test --workspace @maxim/api -- 'message-duplicate|photo-duplicate-history.redis|rule-engine-media-cooldown.redis|traffic-protection.redis|publisher-dispatch-health.redis|chat-context-cache.redis|publisher-refresh-operation.redis|publisher-access-refresh.redis|commercial-ocr-admission.redis|marketplace-publisher-access.redis|statistics-access-demand.redis-integration|retention-priority-admission.redis-integration|message-retention-admission.redis-integration|commercial-llm-workstation'
 
   postgres-races:
     name: PostgreSQL Races (${{ matrix.shard }})
