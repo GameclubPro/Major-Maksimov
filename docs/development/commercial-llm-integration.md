@@ -1,5 +1,28 @@
 # Commercial advertisement LLM integration
 
+## Current scope
+
+The shadow design below describes the initial observation mode. The implementation
+also supports guarded asynchronous `DELETE_ONLY` enforcement and the three-node
+pool. In active enforcement, synchronous `COMMERCIAL_AD` results are removed before
+AI admission; a missing, expired or refused AI result does not restore baseline
+enforcement. A model result alone never grants an effect: current source, policy,
+rights, immunity, deadline and exact durable DELETE proof still apply.
+
+The pool's `confirm-positive` policy requires an immediate available 9B consultation
+after a positive or uncertain 4B result. A negative 4B result completes without that
+consultation. `direct-4b` is a separate supported policy, not the default or an
+automatic capacity fallback. Commercial image analysis is retired; image stop-list
+OCR is independent.
+
+Use the [pool runbook](../operations/runbooks/commercial-ai-pool.md),
+[runtime runbook](../operations/runbooks/commercial-llm-shadow.md),
+[quality evidence procedure](../operations/runbooks/commercial-ai-quality-evidence.md)
+and [current audit and plan](../operations/plans/2026-11-01-commercial-ai-reliability.md)
+for the maintained execution, acceptance and improvement boundaries. Shadow-only
+statements, admission budgets and rollback behavior below apply to that initial
+consumer, not to active enforcement or the pool.
+
 ## Objective and authority
 
 Qwen3.5-9B Q5_K_M supplies a second semantic opinion on Russian commercial
