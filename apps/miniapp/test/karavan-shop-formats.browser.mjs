@@ -55,18 +55,29 @@ try {
               ? route.continue()
               : route.abort(),
           );
+          await context.addInitScript(() => {
+            const run = new URLSearchParams(location.search).get('scenarioRun');
+            const marker = 'maxim:shop-format-fixture:scenario-run';
+            // Reset before a new scenario boots; real reloads must retain drafts and commands.
+            if (run && sessionStorage.getItem(marker) !== run) {
+              localStorage.clear();
+              sessionStorage.clear();
+              sessionStorage.setItem(marker, run);
+            }
+          });
           const page = await context.newPage();
           page.setDefaultTimeout(12000);
           const errors = [];
           page.on('pageerror', (error) => errors.push(error.message));
           const home = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
+          let scenarioRun = 0;
           const begin = async (scenario) => {
-            await page.goto(`${url}?theme=${theme}&scenario=${scenario}`);
-            await page.evaluate(() => {
-              localStorage.clear();
-              sessionStorage.clear();
+            const params = new URLSearchParams({
+              theme,
+              scenario,
+              scenarioRun: String(++scenarioRun),
             });
-            await page.reload();
+            await page.goto(`${url}?${params}`);
             await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
             await home.waitFor();
             return home;
