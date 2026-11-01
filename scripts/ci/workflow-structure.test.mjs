@@ -54,6 +54,44 @@ function jobBody(id, nextId) {
   return workflow.slice(start, end);
 }
 
+test('chat shop formats run the full mobile matrix in a blocking miniapp shard', () => {
+  const config = parse(workflow);
+  const miniapp = config.jobs.miniapp;
+  assert.equal(miniapp['timeout-minutes'], 15);
+  assert.equal(miniapp['continue-on-error'], undefined);
+  assert.deepEqual(miniapp.strategy, { 'fail-fast': false, matrix: { shard: ['1/2', '2/2'] } });
+  const run = 'node apps/miniapp/test/karavan-shop-formats.browser.mjs';
+  const selected = miniapp.steps.filter((step) => step.run === run);
+  assert.equal(selected.length, 1, 'Shop formats must run once without a shell or profile filter');
+  const browser = selected[0];
+  assert.equal(browser.if, "matrix.shard == '2/2'");
+  assert.equal(browser['continue-on-error'], undefined);
+  assert.ok(statSync(resolve(root, 'apps/miniapp/test/karavan-shop-formats.browser.mjs')).isFile());
+  for (const env of [config.env, miniapp.env, browser.env])
+    for (const key of ['SHOP_FORMAT_ENGINE', 'SHOP_FORMAT_THEME', 'SHOP_FORMAT_ONLY_CHOICE'])
+      assert.equal(env?.[key], undefined, `CI cannot narrow the full shop format matrix: ${key}`);
+  const webkit = miniapp.steps.find(
+    (step) => step.run === 'npx playwright install --with-deps webkit',
+  );
+  assert.ok(webkit, 'The shop format matrix needs the WebKit browser and host dependencies');
+  assert.equal(webkit.if, browser.if);
+  assert.equal(webkit['continue-on-error'], undefined);
+  assert.equal(webkit['timeout-minutes'], 3);
+  const contracts = miniapp.steps.find((step) => step.name === 'Build browser contracts');
+  assert.equal(contracts.run, 'npm run build --workspace @maxim/contracts');
+  assert.equal(contracts.if, browser.if);
+  assert.ok(
+    miniapp.steps.indexOf(webkit) >
+      miniapp.steps.findIndex((step) => step.name === 'Use HTTPS for browser dependencies'),
+  );
+  assert.ok(miniapp.steps.indexOf(webkit) < miniapp.steps.indexOf(browser));
+  assert.ok(miniapp.steps.indexOf(contracts) < miniapp.steps.indexOf(browser));
+  assert.ok(
+    config.jobs.required.needs.includes('miniapp'),
+    'Required must retain both miniapp shards',
+  );
+});
+
 test('keeps the functional API lane separate from the median commercial benchmark', () => {
   const api = jobBody('api', 'postgres-races');
   const benchmark = jobBody('commercial-benchmark', 'miniapp');

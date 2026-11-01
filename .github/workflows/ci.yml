@@ -297,6 +297,10 @@ jobs:
           printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
       - run: npx playwright install --with-deps chromium
         timeout-minutes: 3
+      - name: Install WebKit for chat shop mobile formats
+        if: matrix.shard == '2/2'
+        run: npx playwright install --with-deps webkit
+        timeout-minutes: 3
       - run: npm run check:miniapp
         if: matrix.shard == '1/2'
       - run: npm run build:miniapp:production
@@ -306,6 +310,9 @@ jobs:
       - name: Build browser contracts
         if: matrix.shard == '2/2'
         run: npm run build --workspace @maxim/contracts
+      - name: Chat shop formats, viewing and command recovery on Android and iOS
+        if: matrix.shard == '2/2'
+        run: node apps/miniapp/test/karavan-shop-formats.browser.mjs
       - name: Saved catalogs and selected settings access on mobile
         if: matrix.shard == '1/2'
         run: node apps/miniapp/test/personal-access-entry.browser.mjs
