@@ -10,6 +10,7 @@ import { SharedChatSettingsSection } from '../src/pages/settings/shared-chat-set
 import { createChatSettingsFieldAdapter } from '../src/features/network-settings/settings-field-bindings';
 import { chatSettingsSchema } from '@maxim/contracts/settings';
 import {
+  karavanMarketplaceCategories,
   karavanMarketplaceModuleSchema,
   type KaravanMarketplaceModule,
 } from '@maxim/contracts/karavan-marketplace';
@@ -84,6 +85,17 @@ const rules = {
   createdAt: new Date().toISOString(),
   requiresAcceptance: true,
 };
+if (scenario === 'daily_full_categories') {
+  rules.allowedCategoryIds = ['real_estate'];
+  rules.allowedSubcategoryIds = [];
+  rules.categoryOrder = [];
+}
+if (scenario === 'daily_category_legacy_order') rules.categoryOrder = [];
+if (scenario === 'daily_property_legacy') {
+  rules.allowedCategoryIds.push('real_estate');
+  rules.allowedSubcategoryIds.push('real_estate.room');
+  rules.categoryOrder.push('real_estate');
+}
 const binding = providerModule?.binding ?? {
   id: second,
   chatId: '-123',
@@ -302,21 +314,35 @@ const api = {
               sellerTermsAccepted,
               administrationStores: administrationStore ? [administrationStore] : [],
             }),
-        categories: [
-          {
-            id: 'services',
-            label: 'Услуги',
-            subcategories: [
-              { id: 'services.repair', label: 'Ремонт' },
-              { id: 'services.beauty', label: 'Красота' },
+        categories: ['daily_full_categories', 'format_setup_full_categories'].includes(scenario)
+          ? karavanMarketplaceCategories.map(([categoryId, label]) => ({
+              id: categoryId,
+              label,
+              subcategories:
+                categoryId === 'real_estate'
+                  ? [
+                      { id: 'real_estate.apartment', label: 'Квартиры' },
+                      { id: 'real_estate.room', label: 'Комнаты' },
+                      { id: 'real_estate.house', label: 'Дома' },
+                      { id: 'real_estate.land', label: 'Участки' },
+                    ]
+                  : [{ id: `${categoryId}.example`, label: `Направление: ${label}` }],
+            }))
+          : [
+              {
+                id: 'services',
+                label: 'Услуги',
+                subcategories: [
+                  { id: 'services.repair', label: 'Ремонт' },
+                  { id: 'services.beauty', label: 'Красота' },
+                ],
+              },
+              {
+                id: 'grocery',
+                label: 'Продукты',
+                subcategories: [{ id: 'grocery.bread', label: 'Хлеб' }],
+              },
             ],
-          },
-          {
-            id: 'grocery',
-            label: 'Продукты',
-            subcategories: [{ id: 'grocery.bread', label: 'Хлеб' }],
-          },
-        ],
       };
     if (path.endsWith('/manage')) {
       const { operation, input } = body.command;
@@ -598,8 +624,12 @@ const api = {
         data = {
           fingerprint: 'a'.repeat(64),
           calculatedAt: new Date().toISOString(),
-          hiddenOffers: params.get('scenario') === 'daily_safe_categories' ? 0 : 1,
-          affectedStores: params.get('scenario') === 'daily_safe_categories' ? 0 : 1,
+          hiddenOffers: ['daily_safe_categories', 'daily_property_legacy'].includes(scenario)
+            ? 0
+            : 1,
+          affectedStores: ['daily_safe_categories', 'daily_property_legacy'].includes(scenario)
+            ? 0
+            : 1,
           emptiedStores: 0,
           affectedChats: 1,
           stores: [],

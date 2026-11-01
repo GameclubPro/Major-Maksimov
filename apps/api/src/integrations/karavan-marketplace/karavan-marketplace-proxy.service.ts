@@ -1,4 +1,7 @@
-import { throwKnownKaravanManagementError } from './karavan-marketplace-management-errors';
+import {
+  KaravanManagementRejected,
+  throwKnownKaravanManagementError,
+} from './karavan-marketplace-management-errors';
 import {
   marketplaceManagementRequestSchema,
   marketplaceManagementResponseSchema,
@@ -28,6 +31,7 @@ import {
   karavanMarketplaceReviewSchema,
   karavanMarketplacePreviewInputSchema,
   karavanMarketplacePreviewSchema,
+  type KaravanMarketplaceAuthorityRequest,
   type KaravanMarketplaceAuthorityScope,
   type KaravanMarketplaceModule,
   type KaravanMarketplaceOperation,
@@ -52,6 +56,11 @@ export class KaravanCommandUnavailable extends ServiceUnavailableException {
           ? 'Результат пока не подтверждён. Повторите проверку этого подключения.'
           : 'Не удалось выполнить действие. Обновите состояние магазина.',
     });
+  }
+}
+class KaravanCreateNotDispatched extends Error {
+  constructor(cause: unknown) {
+    super('Marketplace creation was not dispatched.', { cause });
   }
 }
 
@@ -86,10 +95,18 @@ export class KaravanMarketplaceProxyService {
     principal: KaravanPrincipal,
     response: z.ZodType<T>,
   ): Promise<T> {
-    const authority = await this.authority.issue(
-      { ...scope, payloadHash: karavanHash(payload) },
-      principal,
-    );
+    let authority: KaravanMarketplaceAuthorityRequest;
+    try {
+      authority = await this.authority.issue(
+        { ...scope, payloadHash: karavanHash(payload) },
+        principal,
+      );
+    } catch (error) {
+      // FLAG: This call cannot have created a marketplace before authority succeeds.
+      // Setup still preserves any unknown outcome from an earlier dispatch.
+      if (scope.action === 'create_marketplace') throw new KaravanCreateNotDispatched(error);
+      throw error;
+    }
     let result: Response;
     try {
       result = await fetch(
@@ -111,7 +128,9 @@ export class KaravanMarketplaceProxyService {
     }
     if (
       !result.ok &&
-      (path === '/manage' || /^\/[a-f0-9-]+\/bindings(?:\/action)?$/u.test(path))
+      (path === '/create' ||
+        path === '/manage' ||
+        /^\/[a-f0-9-]+\/bindings(?:\/action)?$/u.test(path))
     )
       await throwKnownKaravanManagementError(result);
     if (!result.ok) {
@@ -452,8 +471,9 @@ export class KaravanMarketplaceProxyService {
         } catch (error) {
           await checkpoint(
             leased.state !== 'unknown' &&
-              error instanceof KaravanCommandUnavailable &&
-              error.outcome === 'rejected'
+              (error instanceof KaravanCreateNotDispatched ||
+                error instanceof KaravanManagementRejected ||
+                (error instanceof KaravanCommandUnavailable && error.outcome === 'rejected'))
               ? 'rejected'
               : 'unknown',
           );

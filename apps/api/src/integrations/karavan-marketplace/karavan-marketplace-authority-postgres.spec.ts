@@ -866,6 +866,142 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     );
   });
 
+  it('rejects an initial create without retaining an intent when Major denies before dispatch', async () => {
+    const input = {
+      operationId: randomUUID(),
+      chatIds: [chatId],
+      create: {
+        name: 'Synthetic',
+        rules: { text: 'Rules', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+      },
+    };
+    const proxy = new KaravanMarketplaceProxyService(
+      db as PrismaService,
+      service,
+      new ConfigService({
+        KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.invalid',
+        KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
+      }),
+    );
+    max.getChatMemberAccess.mockResolvedValue({
+      isAdmin: false,
+      isOwner: false,
+      explicitNonPrivilegeEvidence: true,
+      userId: actorMaxUserId,
+      isBot: false,
+    });
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('Unexpected dispatch'));
+
+    const result = await proxy.setup(actorMaxUserId, input, principal);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.state).toBe('rejected');
+    expect(result.checkpoints.marketplaceId).toBeNull();
+    expect(await proxy.activeSetup(actorMaxUserId, chatId)).toBeNull();
+    expect(
+      await db.karavanMarketplaceConnectionOperation.findUniqueOrThrow({
+        where: { id: input.operationId },
+        select: { activeScopeKey: true, leaseId: true },
+      }),
+    ).toEqual({ activeScopeKey: null, leaseId: null });
+  });
+
+  it('keeps an unknown create fenced when Major denies before a later dispatch', async () => {
+    const input = {
+      operationId: randomUUID(),
+      chatIds: [chatId],
+      create: {
+        name: 'Synthetic',
+        rules: { text: 'Rules', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+      },
+    };
+    const proxy = new KaravanMarketplaceProxyService(
+      db as PrismaService,
+      service,
+      new ConfigService({
+        KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.invalid',
+        KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
+      }),
+    );
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Response lost'));
+    expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
+    max.getChatMemberAccess.mockResolvedValue({
+      isAdmin: false,
+      isOwner: false,
+      explicitNonPrivilegeEvidence: true,
+      userId: actorMaxUserId,
+      isBot: false,
+    });
+    const collect = jest.spyOn(service, 'collect');
+    // FLAG: Expire the original proof so the retry checks the new exact MAX denial.
+    await db.karavanMarketplaceAuthorityGrant.updateMany({
+      where: { chatId },
+      data: { expiresAt: new Date(Date.now() - 1) },
+    });
+
+    expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
+
+    expect(collect).toHaveBeenCalledWith(chatId, actorMaxUserId);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await proxy.activeSetup(actorMaxUserId, chatId)).toMatchObject({
+      operationId: input.operationId,
+      state: 'unknown',
+    });
+    await expect(proxy.cancelSetup(input.operationId, actorMaxUserId, chatId)).rejects.toThrow(
+      'Сначала проверьте',
+    );
+  });
+
+  it.each([
+    ['rejects a first safe provider create conflict', false, 'rejected'],
+    ['keeps an unknown create after a later safe provider conflict', true, 'unknown'],
+  ] as const)('%s', async (_name, priorUnknown, state) => {
+    const input = {
+      operationId: randomUUID(),
+      chatIds: [chatId],
+      create: {
+        name: 'Synthetic',
+        rules: { text: 'Rules', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+      },
+    };
+    const proxy = new KaravanMarketplaceProxyService(
+      db as PrismaService,
+      service,
+      new ConfigService({
+        KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.invalid',
+        KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
+      }),
+    );
+    const fetchMock = jest.spyOn(globalThis, 'fetch');
+    if (priorUnknown) {
+      fetchMock.mockRejectedValueOnce(new Error('Response lost'));
+      expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
+    }
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'MARKETPLACE_FORMAT_LIMIT', message: 'private diagnostics' }),
+        { status: 409 },
+      ),
+    );
+
+    expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe(state);
+
+    expect(fetchMock).toHaveBeenCalledTimes(priorUnknown ? 2 : 1);
+    if (priorUnknown) {
+      expect(await proxy.activeSetup(actorMaxUserId, chatId)).toMatchObject({
+        operationId: input.operationId,
+        state: 'unknown',
+      });
+      await expect(proxy.cancelSetup(input.operationId, actorMaxUserId, chatId)).rejects.toThrow(
+        'Сначала проверьте',
+      );
+    } else {
+      expect(await proxy.activeSetup(actorMaxUserId, chatId)).toBeNull();
+    }
+  });
+
   it('reconciles unknown create with the same command and durable create→bind checkpoints', async () => {
     const marketplaceId = randomUUID();
     const marketplace = {
