@@ -29,6 +29,8 @@ import { ProfanityDeleteGuardService } from './profanity/profanity-delete-guard.
 import { CommercialDeleteGuardService } from './commercial/commercial-delete-guard.service';
 import { CommercialTextRuntimePolicyModule } from './commercial/commercial-text-runtime-policy.module';
 import { CommercialReviewService } from './commercial/commercial-review.service';
+import { CommercialAiObservationService } from './commercial/commercial-ai-observation.service';
+import { CommercialAiObservationGate } from './commercial/commercial-ai-runtime-observation';
 import { CommercialLlmShadowRunnerService } from './commercial/commercial-llm-shadow-runner.service';
 import { CommercialLlmEnforcementService } from './commercial/commercial-llm-enforcement.service';
 import { CommercialLlmEnforcementRunnerService } from './commercial/commercial-llm-enforcement-runner.service';
@@ -76,6 +78,8 @@ const actionRoleProviders = roleRunsAction(getAppRole())
     ProfanityDeleteGuardService,
     CommercialDeleteGuardService,
     CommercialReviewService,
+    CommercialAiObservationService,
+    CommercialAiObservationGate,
     CommercialLlmShadowRunnerService,
     CommercialLlmEnforcementService,
     CommercialLlmEnforcementRunnerService,

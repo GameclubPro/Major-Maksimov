@@ -168,10 +168,13 @@ export class CommercialLlmEnforcementMailbox {
     return (await this.offerDetailed(offer)) === 'accepted';
   }
 
-  async offerDetailed(offer: {
-    source: CommercialLlmSource;
-    excerpt: string;
-  }): Promise<CommercialLlmAdmissionResult> {
+  async offerDetailed(
+    offer: {
+      source: CommercialLlmSource;
+      excerpt: string;
+    },
+    beforeAdmission?: (request: CommercialLlmRequest) => Promise<void>,
+  ): Promise<CommercialLlmAdmissionResult> {
     if (!commercialLlmSourceCurrent(offer.source)) return 'source_expired';
     const [worker, pendingRaw] = await this.redis.mget(this.keys.ready, this.keys.slot);
     const pending = pendingRaw ? parseRequest(pendingRaw) : null;
@@ -184,6 +187,10 @@ export class CommercialLlmEnforcementMailbox {
       worker: worker ?? '00000000-0000-4000-8000-000000000000',
       submittedAtMs: Date.now(),
     });
+    if (beforeAdmission)
+      await Promise.resolve()
+        .then(() => beforeAdmission(request))
+        .catch(() => undefined);
     // FLAG: A chat awaiting 9B may admit another message's primary, never a duplicate message
     // or concurrent same-chat primary. Model limits and original source clocks remain independent.
     // FLAG: Append at most one distinct-chat burst tail behind an exact validated head,

@@ -144,19 +144,26 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
     );
   }
 
-  override async offerDetailed(offer: {
-    source: CommercialLlmSource;
-    excerpt: string;
-  }): Promise<CommercialLlmAdmissionResult> {
+  override async offerDetailed(
+    offer: {
+      source: CommercialLlmSource;
+      excerpt: string;
+    },
+    beforeAdmission?: (request: CommercialLlmRequest) => Promise<void>,
+  ): Promise<CommercialLlmAdmissionResult> {
     if (offer.source.version !== 2 || !commercialLlmSourceCurrent(offer.source))
       return 'source_expired';
     const worker = await this.redis.get(this.keys.ready);
-    if (!worker) return 'not_ready';
     const request = commercialLlmRequestSchema.parse({
       ...offer,
-      worker,
+      worker: worker ?? '00000000-0000-4000-8000-000000000000',
       submittedAtMs: Date.now(),
     });
+    if (beforeAdmission)
+      await Promise.resolve()
+        .then(() => beforeAdmission(request))
+        .catch(() => undefined);
+    if (!worker) return 'not_ready';
     const raw = JSON.stringify(request);
     return (await this.redis.eval(
       `${prune}

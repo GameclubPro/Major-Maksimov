@@ -25,6 +25,7 @@ const reason = z.enum([
 export const commercialAiQualityResultSchema = z
   .object({
     classification,
+    protocolVersion: z.union([z.literal(1), z.literal(2)]).optional(),
     reasonCodes: z.array(reason).min(1).max(3),
     modelAlias: token,
     modelSha256: digest,
@@ -83,7 +84,8 @@ export const commercialAiQualityResultSchema = z
       new Set(value.reasonCodes).size !== value.reasonCodes.length ||
       value.reasonCodes.some((code) => !allowed.includes(code)) ||
       (!value.runtimeImageSha256 && !value.runtimeArtifactSha256) ||
-      (value.pool !== undefined && value.cascade !== undefined)
+      (value.pool !== undefined && value.cascade !== undefined) ||
+      (value.pool !== undefined && value.protocolVersion === 1)
     )
       context.addIssue({ code: 'custom', message: 'Invalid bounded classifier observation.' });
     const pool = value.pool;
@@ -325,7 +327,9 @@ export const commercialAiQualityAttemptSchema = z
     if (
       value.deadlineAtMs <= value.eventAtMs ||
       value.deadlineAtMs - value.eventAtMs > 60_000 ||
-      value.submittedAtMs < value.eventAtMs ||
+      // FLAG: Actual admission permits the original trusted MAX event clock to lead by 5s.
+      // Preserve both clocks rather than rewriting valid source provenance for this observation.
+      value.submittedAtMs < value.eventAtMs - 5_000 ||
       value.submittedAtMs >= value.deadlineAtMs ||
       (value.analysis.state !== 'NOT_STARTED' && value.admission.state !== 'ACCEPTED') ||
       (value.analysis.observedAt !== null &&

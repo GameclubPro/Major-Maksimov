@@ -7,6 +7,12 @@ failures are distinct outcomes. The deterministic quality report cannot certify 
 
 ## Collection without human reviewers
 
+For retained source-bound runtime attempts and exact own deletion proofs, use the
+[private diagnostic collector](commercial-ai-diagnostic-collection.md). It keeps
+blind source text separate, preserves gaps and duplicate capture denominators,
+and requires no human ratings. Its database receipt sidecar remains distinct from
+manifest-bound independent effect certification.
+
 Use the existing bounded commercial audit collector described in
 [the collection runbook](commercial-quality-rollout.md). Freeze the exact source
 revision, requested and observed UTC windows, candidate limit, source/file hashes,
@@ -56,8 +62,13 @@ identities or source identifiers appear in its aggregate output.
 in the dedicated `@maxim/contracts/commercial-ai-quality` export contract. Ordinary
 Safety Desk queue items keep their lightweight contract. AI evidence is hidden
 before the independent rating. Its absence means not observed. The
-schema and reporter alone do not install a durable production observation writer;
-exports lacking the field retain an explicit evidence gap. Existing synchronous
+schema and reporter alone do not install a durable production observation writer.
+The source-bound runtime writer starts the exact preselected snapshot before
+admission, without waiting for its database commit or delaying producer capacity.
+Results update only that exact existing attempt; updates preceding a delayed seed,
+expired and historical observations retain explicit gaps rather than backfilled
+classifications. Exports lacking the field retain an
+explicit evidence gap. Existing synchronous
 capture for AI mode uses a distinct asynchronous identity and no completed
 classification. It must not be interpreted as a deterministic KEEP or model result.
 

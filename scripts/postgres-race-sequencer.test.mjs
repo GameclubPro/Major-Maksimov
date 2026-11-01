@@ -62,19 +62,19 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 126 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 126);
-  assert.equal(new Set(nativePaths).size, 126);
+test('all 128 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 128);
+  assert.equal(new Set(nativePaths).size, 128);
   const tests = makeTests();
   const baseline = await partitions(DefaultSequencer, tests);
   const selected = await partitions(SelectedSequencer, tests);
   const flat = selected.flat();
-  assert.equal(flat.length, 126);
-  assert.equal(new Set(flat).size, 126, 'No suite object may appear in two lanes');
+  assert.equal(flat.length, 128);
+  assert.equal(new Set(flat).size, 128, 'No suite object may appear in two lanes');
   assert.deepEqual(new Set(flat), new Set(tests), 'Keep every original native suite object');
   assert.deepEqual(
     selected.map((lane) => lane.length),
-    [16, 16, 16, 16, 16, 16, 15, 15],
+    [16, 16, 16, 16, 16, 16, 16, 16],
   );
   const previous = owners(baseline);
   const actual = owners(selected);
