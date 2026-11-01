@@ -8,6 +8,7 @@ import {
   createCommercialLlmRedis,
 } from '../moderation/commercial/commercial-llm-shadow.lease';
 import { COMMERCIAL_LLM_CASCADE_VERSION } from '../moderation/commercial/commercial-llm-workstation.protocol';
+import { CommercialLlmCpuLeaseScope } from '../moderation/commercial/commercial-llm-cpu-lease-scope';
 
 // FLAG: Two closed synthetic inputs, the ordinary global lease, no database/MAX client or effects.
 export async function commercialLlmCascadeSmoke(expectPrimary: boolean) {
@@ -20,6 +21,7 @@ export async function commercialLlmCascadeSmoke(expectPrimary: boolean) {
   const redis = createCommercialLlmRedis(process.env.REDIS_URL);
   const lease = new CommercialLlmShadowLease(redis);
   let token: string | null = null;
+  let scope: CommercialLlmCpuLeaseScope | null = null;
   try {
     await redis.connect();
     const admissionDeadline = Date.now() + 30_000;
@@ -28,11 +30,14 @@ export async function commercialLlmCascadeSmoke(expectPrimary: boolean) {
       if (!token) await pause(250);
     }
     if (!token) throw new Error('cascade_smoke_not_admitted');
+    scope = new CommercialLlmCpuLeaseScope(lease, token);
     const signal = AbortSignal.timeout(80_000);
     const valid = async () => !signal.aborted && !!token && (await lease.owns(token));
     const client = new CommercialLlmCascadeClient(
       new CommercialLlmWorkstationMailbox(redis),
-      new CommercialLlmClient({ endpoint: 'http://gemma-commercial-shadow:8080' }),
+      scope.classifier(
+        new CommercialLlmClient({ endpoint: 'http://gemma-commercial-shadow:8080' }),
+      ),
       commercialLlmHostHasHeadroom,
       () => false,
     );
@@ -81,7 +86,8 @@ export async function commercialLlmCascadeSmoke(expectPrimary: boolean) {
       cases,
     };
   } finally {
-    if (token) await lease.release(token).catch(() => undefined);
+    if (scope) await scope.finish();
+    else if (token) await lease.release(token).catch(() => undefined);
     redis.disconnect();
   }
 }

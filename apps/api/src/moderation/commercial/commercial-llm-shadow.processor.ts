@@ -10,6 +10,7 @@ import {
 } from './commercial-llm.protocol';
 import type { CommercialLlmShadowLease } from './commercial-llm-shadow.lease';
 import type { CommercialLlmShadowStore } from './commercial-llm-shadow.store';
+import { CommercialLlmCpuLeaseScope } from './commercial-llm-cpu-lease-scope';
 
 export async function commercialLlmHostHasHeadroom(): Promise<boolean> {
   try {
@@ -25,7 +26,7 @@ export class CommercialLlmShadowProcessor {
   constructor(
     private readonly store: CommercialLlmShadowStore,
     private readonly lease: CommercialLlmShadowLease,
-    private readonly client: CommercialLlmClassifier,
+    private readonly createClient: (scope: CommercialLlmCpuLeaseScope) => CommercialLlmClassifier,
     private readonly governor: Pick<BackgroundRuntimeGovernorService, 'decide'>,
     private readonly hasHeadroom = commercialLlmHostHasHeadroom,
   ) {}
@@ -40,6 +41,7 @@ export class CommercialLlmShadowProcessor {
       return { outcome: 'pressure_paused' };
     const token = await this.lease.acquire();
     if (!token) return { outcome: 'not_admitted' };
+    const scope = new CommercialLlmCpuLeaseScope(this.lease, token);
     const lostLease = new AbortController();
     const workSignal = AbortSignal.any([
       ...(signal ? [signal] : []),
@@ -71,7 +73,11 @@ export class CommercialLlmShadowProcessor {
       let observation: Prisma.InputJsonObject;
       let route: string | undefined;
       try {
-        const result = await this.client.classify(candidate.excerpt, workSignal, valid);
+        const result = await this.createClient(scope).classify(
+          candidate.excerpt,
+          workSignal,
+          valid,
+        );
         route = result.cascade?.route;
         observation = { status: 'COMPLETE', ...result };
       } catch {
@@ -104,8 +110,7 @@ export class CommercialLlmShadowProcessor {
       };
     } finally {
       clearInterval(monitor);
-      // Lease expiry contains Redis failure; release can never delete another owner's token.
-      await this.lease.release(token).catch(() => undefined);
+      await scope.finish();
     }
   }
 }

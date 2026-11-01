@@ -223,6 +223,16 @@ jest.setTimeout(60_000);
         (await h.prisma.moderationDeleteIntent.findUniqueOrThrow({ where: { id: s.intent.id } }))
           .status,
       ).toBe('SUCCEEDED');
+      const events = await h.prisma.moderationEvent.findMany({
+        where: { chatId: s.chatId, messageId: s.messageId },
+        select: { ruleCode: true, metadata: true },
+      });
+      expect(events).toEqual([
+        {
+          ruleCode: 'COMMERCIAL_LLM_DELETE',
+          metadata: expect.objectContaining({ moderationDeleteVerified: true }),
+        },
+      ]);
     });
     it('refuses a changed exact message and does not revive its inference', async () => {
       const s = await fixture();
@@ -302,6 +312,22 @@ jest.setTimeout(60_000);
         { enqueue: false },
       );
       expect((await h.intents.attemptIntent(s.intent.id)).confirmed).toBe(true);
+      const events = await h.prisma.moderationEvent.findMany({
+        where: { chatId: s.chatId, messageId: s.messageId },
+        select: { ruleCode: true },
+      });
+      expect(events).toEqual([{ ruleCode: 'MESSAGE_TOO_LONG_DELETE' }]);
+      const aiReason = await h.prisma.moderationDeleteIntentReason.findFirstOrThrow({
+        where: { intentId: s.intent.id, ruleCode: 'COMMERCIAL_LLM_DELETE' },
+      });
+      expect(aiReason.moderationEventId).toBeNull();
+      expect(aiReason.metadata).not.toHaveProperty('moderationDeleteVerified');
+      await h.intents.attemptIntent(s.intent.id);
+      expect(
+        await h.prisma.moderationEvent.count({
+          where: { chatId: s.chatId, ruleCode: 'COMMERCIAL_LLM_DELETE' },
+        }),
+      ).toBe(0);
     });
     it('an unknown DELETE stays fenced on retry rather than repeating the remote action', async () => {
       const s = await fixture();

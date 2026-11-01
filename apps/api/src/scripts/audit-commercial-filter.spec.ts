@@ -27,6 +27,7 @@ import {
   resolveCorpusSanitizedBaseline,
   retainNewestAuditSample,
   sanitizeAuditText,
+  serializeAuditRecord,
   serializeAuditCorpusRecord,
   type AuditJsonlStreamTarget,
   type AuditRecord,
@@ -664,6 +665,19 @@ describe('sanitizeAuditText', () => {
 });
 
 describe('audit export privacy', () => {
+  it('refuses residual contact data before any audit or corpus output', () => {
+    const text = 'Телефон +1🟢234🟢567🟢890🟢123🟢456';
+    const record = buildAuditRecord({ sanitizedText: text });
+    for (const output of [
+      () => sanitizeAuditText(text),
+      () => serializeAuditRecord(record),
+      () => serializeAuditCorpusRecord(record),
+      () => formatAuditSampleLines(record),
+    ]) {
+      expect(output).toThrow('Commercial audit text privacy is unverified');
+    }
+  });
+
   it('prints only sanitized text and pseudonymous event metadata in samples', () => {
     const record = buildAuditRecord();
     const output = formatAuditSampleLines(record).join('\n');

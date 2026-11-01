@@ -34,7 +34,10 @@ import {
   withCommercialAuditRunLock,
   type CommercialAuditRunLock,
 } from './commercial-audit-run-lock.util';
-import { sanitizeCommercialCorpusText } from './commercial-corpus-sanitization.util';
+import {
+  isCommercialCorpusTextSanitized,
+  sanitizeCommercialCorpusText,
+} from './commercial-corpus-sanitization.util';
 import {
   isCommercialMessageDeleteEligible,
   resolveCommercialMessageDisposition,
@@ -1393,6 +1396,7 @@ export function deriveAuditEventFingerprint(
 }
 
 export function serializeAuditRecord(record: AuditRecord): Record<string, unknown> {
+  assertAuditTextSafe(record.sanitizedText);
   return {
     category: record.category,
     policyCategory: record.policyCategory,
@@ -1422,6 +1426,7 @@ export function serializeAuditRecord(record: AuditRecord): Record<string, unknow
 }
 
 export function serializeAuditCorpusRecord(record: AuditRecord): Record<string, unknown> {
+  assertAuditTextSafe(record.sanitizedText);
   if (!record.sanitizedBaseline) {
     throw new Error('Corpus export record is missing its sanitized baseline');
   }
@@ -1837,7 +1842,15 @@ function pickAuditCorpusSettings(settings: ChatSettings): AuditCorpusSettings {
 }
 
 export function sanitizeAuditText(value: string): string {
-  return sanitizeCommercialCorpusText(value, { preserveLayout: true });
+  const sanitized = sanitizeCommercialCorpusText(value, { preserveLayout: true });
+  assertAuditTextSafe(sanitized);
+  return sanitized;
+}
+
+function assertAuditTextSafe(value: string): void {
+  // FLAG: Idempotent masking alone cannot prove privacy; refuse the whole export on uncertainty.
+  if (!isCommercialCorpusTextSanitized(value))
+    throw new Error('Commercial audit text privacy is unverified');
 }
 
 export function isCommercialEnforcementAction(actionBand: string | null): boolean {
@@ -1885,6 +1898,7 @@ export async function resolveCorpusSanitizedBaseline(params: {
 }
 
 export function formatAuditSampleLines(record: AuditRecord): string[] {
+  assertAuditTextSafe(record.sanitizedText);
   return [
     [
       `- ${record.createdAt.toISOString()}`,

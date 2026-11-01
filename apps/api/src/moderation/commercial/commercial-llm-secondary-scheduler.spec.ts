@@ -1,6 +1,7 @@
 import { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
 import type { CommercialLlmSecondaryState } from './commercial-llm-secondary-scheduler';
 import type { CommercialLlmShadowLease } from './commercial-llm-shadow.lease';
+import type { CommercialLlmHttpClassifier } from './commercial-llm.client';
 import type {
   CommercialLlmClassifier,
   CommercialLlmObservationResult,
@@ -60,13 +61,29 @@ describe('commercial confirmation scheduler', () => {
       ReturnType<CommercialLlmShadowLease['release']>,
       Parameters<CommercialLlmShadowLease['release']>
     >(),
-  } satisfies Pick<CommercialLlmShadowLease, 'acquire' | 'owns' | 'release'>;
+    retainUntilReleased: jest.fn<
+      ReturnType<CommercialLlmShadowLease['retainUntilReleased']>,
+      Parameters<CommercialLlmShadowLease['retainUntilReleased']>
+    >(),
+  } satisfies Pick<
+    CommercialLlmShadowLease,
+    'acquire' | 'owns' | 'release' | 'retainUntilReleased'
+  >;
   const client = {
     classify: jest.fn<
       ReturnType<CommercialLlmClassifier['classify']>,
       Parameters<CommercialLlmClassifier['classify']>
     >(),
   } satisfies CommercialLlmClassifier;
+  const httpClient: CommercialLlmHttpClassifier = {
+    classifyWithLifecycle: async (excerpt, signal, lifecycle) => {
+      await lifecycle.beforeDispatch();
+      lifecycle.dispatched();
+      const value = await client.classify(excerpt, signal);
+      lifecycle.completed();
+      return value;
+    },
+  };
   const observe = jest.fn<void, [CommercialLlmSecondaryState, number]>();
 
   beforeEach(() => {
@@ -79,6 +96,7 @@ describe('commercial confirmation scheduler', () => {
       return owner;
     });
     lease.owns.mockReset().mockImplementation(async (token) => owner === token);
+    lease.retainUntilReleased.mockReset().mockImplementation(async (token) => owner === token);
     lease.release.mockReset().mockImplementation(async (token) => {
       if (owner === token) owner = null;
     });
@@ -91,7 +109,7 @@ describe('commercial confirmation scheduler', () => {
   it('admits one waiter and preserves its turn before a later arrival', async () => {
     const firstResult = deferred<CommercialLlmObservationResult>();
     client.classify.mockImplementationOnce(() => firstResult.promise);
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
     const deadline = Date.now() + 20_000;
     const first = scheduler.classifyWithin('first', deadline);
     await jest.advanceTimersByTimeAsync(0);
@@ -117,7 +135,7 @@ describe('commercial confirmation scheduler', () => {
 
   it('does not start after a queue wait consumes the six-second inference reserve', async () => {
     lease.acquire.mockResolvedValueOnce(null);
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
     const work = scheduler.classifyWithin('waiting', Date.now() + 6_050);
     const rejected = expect(work).rejects.toMatchObject({ kind: 'ABORTED' });
     await jest.advanceTimersByTimeAsync(100);
@@ -133,7 +151,7 @@ describe('commercial confirmation scheduler', () => {
       owner = 'slow-acquire';
       return owner;
     });
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
     await expect(
       scheduler.classifyWithin('slow admission', Date.now() + 6_050),
     ).rejects.toMatchObject({ kind: 'ABORTED' });
@@ -147,7 +165,7 @@ describe('commercial confirmation scheduler', () => {
       jest.setSystemTime(Date.now() + 100);
       return true;
     });
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
     await expect(
       scheduler.classifyWithin('slow owner check', Date.now() + 6_050),
     ).rejects.toMatchObject({ kind: 'ABORTED' });
@@ -158,7 +176,7 @@ describe('commercial confirmation scheduler', () => {
 
   it('prevents a negative audit from taking the lease before an existing confirmation waiter', async () => {
     lease.acquire.mockResolvedValueOnce(null);
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
     const waiting = scheduler.classifyWithin('actionable confirmation', Date.now() + 20_000);
     await jest.advanceTimersByTimeAsync(0);
     expect(observe).toHaveBeenCalledWith('waiting', 0);
@@ -178,7 +196,7 @@ describe('commercial confirmation scheduler', () => {
     'clears its waiting slot when %s authority changes',
     async (guard) => {
       lease.acquire.mockResolvedValueOnce(null);
-      const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+      const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
       const controller = new AbortController();
       let current = true;
       const deadline = Date.now() + 20_000;
@@ -207,7 +225,7 @@ describe('commercial confirmation scheduler', () => {
     async (guard) => {
       const completion = deferred<CommercialLlmObservationResult>();
       client.classify.mockReturnValueOnce(completion.promise);
-      const scheduler = new CommercialLlmSecondaryScheduler(lease, client, observe);
+      const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient, observe);
       const controller = new AbortController();
       let current = true;
       const deadline = Date.now() + 20_000;
@@ -224,8 +242,6 @@ describe('commercial confirmation scheduler', () => {
       if (guard === 'source') current = false;
       if (guard === 'lease') owner = 'another-owner';
       if (guard === 'deadline') jest.setSystemTime(deadline);
-      const valid = client.classify.mock.calls[0]![2]!;
-      await expect(valid()).resolves.toBe(false);
       completion.resolve(result);
       await rejected;
       expect(lease.release).toHaveBeenCalledWith('lease-1');
@@ -235,7 +251,7 @@ describe('commercial confirmation scheduler', () => {
 
   it('does not call the model after losing the acquired model lease', async () => {
     lease.owns.mockResolvedValue(false);
-    const scheduler = new CommercialLlmSecondaryScheduler(lease, client);
+    const scheduler = new CommercialLlmSecondaryScheduler(lease, httpClient);
     await expect(
       scheduler.classifyWithin('stale owner', Date.now() + 20_000),
     ).rejects.toMatchObject({ kind: 'ABORTED' });

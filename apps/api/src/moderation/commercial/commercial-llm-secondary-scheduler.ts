@@ -1,8 +1,8 @@
 import { setTimeout as pause } from 'node:timers/promises';
-import { CommercialLlmError } from './commercial-llm.client';
-import type { CommercialLlmClassifier } from './commercial-llm.protocol';
+import { CommercialLlmError, type CommercialLlmHttpClassifier } from './commercial-llm.client';
 import type { CommercialLlmShadowLease } from './commercial-llm-shadow.lease';
 import { CommercialLlmBudgetedSecondary } from './commercial-llm-budgeted-secondary';
+import { CommercialLlmCpuLeaseScope } from './commercial-llm-cpu-lease-scope';
 
 export type CommercialLlmSecondaryState =
   | 'waiting'
@@ -15,8 +15,11 @@ export class CommercialLlmSecondaryScheduler {
   private waiting = false;
 
   constructor(
-    private readonly lease: Pick<CommercialLlmShadowLease, 'acquire' | 'owns' | 'release'>,
-    private readonly client: CommercialLlmClassifier,
+    private readonly lease: Pick<
+      CommercialLlmShadowLease,
+      'acquire' | 'owns' | 'retainUntilReleased' | 'release'
+    >,
+    private readonly client: CommercialLlmHttpClassifier,
     private readonly observe: (state: CommercialLlmSecondaryState, waitMs: number) => void = () =>
       undefined,
   ) {}
@@ -47,6 +50,7 @@ export class CommercialLlmSecondaryScheduler {
       throw new CommercialLlmError('BUSY');
     }
     let token = await this.lease.acquire();
+    let scope: CommercialLlmCpuLeaseScope | null = null;
     let queued = false;
     if (!token) {
       if (this.waiting) {
@@ -77,6 +81,7 @@ export class CommercialLlmSecondaryScheduler {
         throw new CommercialLlmError('ABORTED');
       }
       const ownedToken = token;
+      scope = new CommercialLlmCpuLeaseScope(this.lease, ownedToken);
       const valid = async () => (await current()) && (await this.lease.owns(ownedToken));
       if (!(await valid())) throw new CommercialLlmError('ABORTED');
       if (deadlineAtMs - Date.now() < 6_000) {
@@ -84,12 +89,15 @@ export class CommercialLlmSecondaryScheduler {
         throw new CommercialLlmError('ABORTED');
       }
       observe('started', Date.now() - startedAt);
-      const result = await this.client.classify(excerpt, signal, valid);
+      const result = await scope
+        .classifier(this.client, () => deadlineAtMs - Date.now() >= 6_000)
+        .classify(excerpt, signal, valid);
       if (!(await valid())) throw new CommercialLlmError('ABORTED');
       return result;
     } finally {
       if (queued) this.waiting = false;
-      if (token) await this.lease.release(token).catch(() => undefined);
+      if (scope) await scope.finish();
+      else if (token) await this.lease.release(token).catch(() => undefined);
     }
   }
 }

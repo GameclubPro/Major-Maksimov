@@ -21,10 +21,20 @@ async function waitForWorkstationReady(redis, key, matchesIdentity, signal, time
 }
 
 async function runWorkstationSmoke(
-  { redis, lease, client, hasHeadroom, heartbeatKey, matchesIdentity, cascadeVersion },
+  {
+    redis,
+    lease,
+    createCpuScope,
+    createClient,
+    hasHeadroom,
+    heartbeatKey,
+    matchesIdentity,
+    cascadeVersion,
+  },
   expectPrimary,
 ) {
   let token = null;
+  let cpuScope = null;
   try {
     await redis.connect();
     const admissionDeadline = performance.now() + 30_000;
@@ -33,6 +43,8 @@ async function runWorkstationSmoke(
       if (!token) await pause(250);
     }
     if (!token) throw new Error('cascade_smoke_not_admitted');
+    cpuScope = createCpuScope(token);
+    const client = createClient(cpuScope);
     const signal = AbortSignal.timeout(80_000);
     const valid = async () => !signal.aborted && !!token && (await lease.owns(token));
     const cases = [];
@@ -74,7 +86,8 @@ async function runWorkstationSmoke(
     }
     return { ok: true, casesPassed: 2, casesTotal: 2, expectPrimary, cascadeVersion, cases };
   } finally {
-    if (token) await lease.release(token).catch(() => undefined);
+    if (cpuScope) await cpuScope.finish();
+    else if (token) await lease.release(token).catch(() => undefined);
     redis.disconnect();
   }
 }
@@ -91,6 +104,7 @@ async function main() {
     throw new Error('cascade_smoke_role_refused');
   const base = './apps/api/dist/apps/api/src/moderation/commercial/';
   const { CommercialLlmClient } = require(base + 'commercial-llm.client.js');
+  const { CommercialLlmCpuLeaseScope } = require(base + 'commercial-llm-cpu-lease-scope.js');
   const { CommercialLlmCascadeClient } = require(base + 'commercial-llm-cascade.client.js');
   const { CommercialLlmWorkstationMailbox } = require(
     base + 'commercial-llm-workstation.mailbox.js',
@@ -105,16 +119,21 @@ async function main() {
     commercialLlmWorkstationIdentityMatches,
   } = require(base + 'commercial-llm-workstation.protocol.js');
   const redis = createCommercialLlmRedis(process.env.REDIS_URL);
+  const lease = new CommercialLlmShadowLease(redis);
   const result = await runWorkstationSmoke(
     {
       redis,
-      lease: new CommercialLlmShadowLease(redis),
-      client: new CommercialLlmCascadeClient(
-        new CommercialLlmWorkstationMailbox(redis),
-        new CommercialLlmClient({ endpoint: 'http://gemma-commercial-shadow:8080' }),
-        commercialLlmHostHasHeadroom,
-        () => false,
-      ),
+      lease,
+      createCpuScope: (token) => new CommercialLlmCpuLeaseScope(lease, token),
+      createClient: (scope) =>
+        new CommercialLlmCascadeClient(
+          new CommercialLlmWorkstationMailbox(redis),
+          scope.classifier(
+            new CommercialLlmClient({ endpoint: 'http://gemma-commercial-shadow:8080' }),
+          ),
+          commercialLlmHostHasHeadroom,
+          () => false,
+        ),
       hasHeadroom: commercialLlmHostHasHeadroom,
       heartbeatKey: COMMERCIAL_LLM_WORKSTATION_KEYS.heartbeat,
       matchesIdentity: commercialLlmWorkstationIdentityMatches,

@@ -75,23 +75,27 @@ export class CommercialLlmShadowRunnerService implements OnModuleInit, OnModuleD
         this.config.getOrThrow<string>('DATABASE_URL'),
         COMMERCIAL_LLM_PRISMA_POOL,
       );
+      const redis = this.redis;
       const processor = new CommercialLlmShadowProcessor(
         new CommercialLlmShadowStore(this.prisma),
-        new CommercialLlmShadowLease(this.redis),
-        new CommercialLlmCascadeClient(
-          new CommercialLlmWorkstationMailbox(this.redis),
-          new CommercialLlmClient({
-            endpoint: this.config.getOrThrow<string>('COMMERCIAL_LLM_ENDPOINT'),
-            timeoutMs: 60_000,
-          }),
-          async () => {
-            const decision = await this.governor.decide({
-              component: 'commercial-llm-shadow',
-              sourceTag: 'commercial-llm-shadow',
-            });
-            return decision.action === 'run' && (await commercialLlmHostHasHeadroom());
-          },
-        ),
+        new CommercialLlmShadowLease(redis),
+        (scope) =>
+          new CommercialLlmCascadeClient(
+            new CommercialLlmWorkstationMailbox(redis),
+            scope.classifier(
+              new CommercialLlmClient({
+                endpoint: this.config.getOrThrow<string>('COMMERCIAL_LLM_ENDPOINT'),
+                timeoutMs: 60_000,
+              }),
+            ),
+            async () => {
+              const decision = await this.governor.decide({
+                component: 'commercial-llm-shadow',
+                sourceTag: 'commercial-llm-shadow',
+              });
+              return decision.action === 'run' && (await commercialLlmHostHasHeadroom());
+            },
+          ),
         this.governor,
       );
       const result = await processor.run(this.controller.signal);

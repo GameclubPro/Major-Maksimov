@@ -2,6 +2,10 @@
 
 Automatic corpus labels are regression evidence. They do not establish independent accuracy, safe deletion, or sanction quality. Preserve historical labels and report newly exposed mismatches; do not rewrite them to make release checks pass.
 
+Active AI has a separate [bounded evidence report and routing simulator](operations/runbooks/commercial-ai-quality-evidence.md).
+Its diagnostic AI references cannot supply independent human labels, authorize
+promotion or establish actual deletion from a model response.
+
 Cleanup eligibility is the canonical `isCommercialMessageDeleteEligible` policy. `WARN` includes message cleanup. Explicit `KEEP`, an invalid disposition, and `actionable=false` cannot authorize cleanup. Detection false-positive rate and cleanup false-positive rate are separate measurements. Benchmark evidence now uses `commercial-detector-benchmark/v2` and reports both.
 
 ## Independent corpus checks
@@ -91,7 +95,18 @@ Job identity excludes event time and action eligibility so mirrored deliveries c
 
 Fixed `source.*` counters distinguish ready source checks, missing/unavailable/failed/invalid receipts, terminal semantic owners, identity or creation-time mismatch, unavailable/absent/invalid exact reads, ineligible authors, and changed sources. These are counts of checks or terminal outcomes, not a deduplicated count of participants or messages; source checks may repeat on retries. They contain no message identifiers, OCR text, or contact data.
 
-OCR review observations use only the existing visible caption, or an empty metadata-only excerpt. They never persist recognized OCR text or critical/contact signatures. Pending observations are KEEP; a DELETE sample requires the actual fresh confirmed deletion path. Review feedback does not independently certify a native OCR behavior identity. The active commercial OCR `baseline` is a separate strict deterministic authority under the chat’s commercial-filter opt-in. It retains two high-confidence passes, critical evidence confidence, Cyrillic evidence, safe-context vetoes, high-risk offer requirements, exact unchanged message/photo identity, current author/admin/immunity checks, and the absolute deadline. It deletes only eligible messages and never applies OCR-driven participant sanctions.
+Commercial image analysis is retired and its rollout stays `off`; new image jobs
+do not schedule commercial OCR. The retained baseline and certified readers exist
+for compatible draining and rollback. Their historical review observations use
+only the visible caption or an empty metadata-only excerpt, never recognized OCR
+text or critical/contact signatures. Pending observations are KEEP; a DELETE
+sample requires the actual fresh confirmed deletion path. Review feedback does
+not independently certify a native OCR behavior identity. Retained baseline guards
+preserve two high-confidence passes, critical evidence confidence, Cyrillic
+evidence, safe-context vetoes, high-risk offer requirements, exact unchanged source
+identity, current author/admin/immunity checks and the original absolute deadline.
+They provide no authority to reactivate commercial image analysis or apply
+OCR-driven participant sanctions.
 
 Delete binding v5 records an explicit authority union. `BASELINE` binds the current release behavior digest, the verified live sandbox native digest, and the exact settings fingerprint; it has no certificate, control revision, or control expiry. The worker must attest complete matching live native artifacts inside the no-network sandbox, and the dispatch guard compares the image-owned expected identity and fresh settings with that binding. A changed authority, source, native release, settings, or expired deadline cancels pending deletion.
 

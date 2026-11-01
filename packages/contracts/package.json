@@ -131,6 +131,10 @@
       "types": "./dist/safety-desk.d.ts",
       "default": "./dist/safety-desk.js"
     },
+    "./commercial-ai-quality": {
+      "types": "./dist/commercial-ai-quality.d.ts",
+      "default": "./dist/commercial-ai-quality.js"
+    },
     "./support-requests": {
       "types": "./dist/support-requests.d.ts",
       "default": "./dist/support-requests.js"

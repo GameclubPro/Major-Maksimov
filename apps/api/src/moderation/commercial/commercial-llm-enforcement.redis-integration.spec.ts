@@ -28,7 +28,7 @@ import {
 import { CommercialLlmEnforcementProcessor } from './commercial-llm-enforcement.processor';
 import { CommercialLlmBudgetedSecondary } from './commercial-llm-budgeted-secondary';
 import { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
-import { CommercialLlmError } from './commercial-llm.client';
+import { CommercialLlmError, type CommercialLlmHttpClassifier } from './commercial-llm.client';
 import { CommercialLlmCascadeClient } from './commercial-llm-cascade.client';
 import {
   buildCommercialLlmOffer,
@@ -87,6 +87,15 @@ const positive: CommercialLlmObservationResult = {
 };
 const text =
   'Мастерская принимает заказы на ремонт квартир. Работаем по договору, запись на замер.';
+const httpClient = (client: CommercialLlmClassifier): CommercialLlmHttpClassifier => ({
+  classifyWithLifecycle: async (excerpt, signal, lifecycle) => {
+    await lifecycle.beforeDispatch();
+    lifecycle.dispatched();
+    const value = await client.classify(excerpt, signal);
+    lifecycle.completed();
+    return value;
+  },
+});
 const origin = (eventAtMs: number, bot = 'bot') => ({
   sourceWebhookEventId: randomUUID(),
   sourceReceivingBotId: bot,
@@ -880,7 +889,7 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
       } satisfies CommercialLlmClassifier;
       const scheduler = new CommercialLlmSecondaryScheduler(
         new CommercialLlmShadowLease(redis),
-        client,
+        httpClient(client),
       );
       const controller = new AbortController();
       const confirm = async (
@@ -1105,9 +1114,12 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
           ReturnType<CommercialLlmClassifier['classify']>,
           Parameters<CommercialLlmClassifier['classify']>
         >();
-        const secondary = new CommercialLlmBudgetedSecondary(new CommercialLlmShadowLease(redis), {
-          classify: classifySecondary,
-        });
+        const secondary = new CommercialLlmBudgetedSecondary(
+          new CommercialLlmShadowLease(redis),
+          httpClient({
+            classify: classifySecondary,
+          }),
+        );
         const cascade = new CommercialLlmCascadeClient(
           {
             classify: async () => ({
@@ -1150,9 +1162,12 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
       >();
       const cascade = new CommercialLlmCascadeClient(
         { classify: async () => ({ outcome: 'COMPLETE', result: positive }) },
-        new CommercialLlmBudgetedSecondary(new CommercialLlmShadowLease(redis), {
-          classify: classifySecondary,
-        }),
+        new CommercialLlmBudgetedSecondary(
+          new CommercialLlmShadowLease(redis),
+          httpClient({
+            classify: classifySecondary,
+          }),
+        ),
         async () => true,
         () => false,
       );
@@ -1170,16 +1185,19 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
       expect(await redis.exists(keys.slot)).toBe(0);
       expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBe(serverOwner);
     });
-    it('retains the server cooldown after success and releases only its own lease after failure', async () => {
+    it('retains the cooldown after success and persistently fences a dispatched unknown failure', async () => {
       const classify = jest
         .fn<
           ReturnType<CommercialLlmClassifier['classify']>,
           Parameters<CommercialLlmClassifier['classify']>
         >()
         .mockResolvedValue(positive);
-      const secondary = new CommercialLlmBudgetedSecondary(new CommercialLlmShadowLease(redis), {
-        classify,
-      });
+      const secondary = new CommercialLlmBudgetedSecondary(
+        new CommercialLlmShadowLease(redis),
+        httpClient({
+          classify,
+        }),
+      );
       await expect(secondary.classify(text)).resolves.toBe(positive);
       expect(await redis.exists(COMMERCIAL_LLM_LEASE_KEY)).toBe(0);
       expect(await redis.pttl(COMMERCIAL_LLM_COOLDOWN_KEY)).toBeGreaterThan(9_000);
@@ -1190,27 +1208,35 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
         throw new Error('offline');
       });
       await expect(secondary.classify(text)).rejects.toThrow('offline');
-      expect(await redis.exists(COMMERCIAL_LLM_LEASE_KEY)).toBe(0);
-      expect(await redis.pttl(COMMERCIAL_LLM_COOLDOWN_KEY)).toBeGreaterThan(9_000);
+      expect(await redis.pttl(COMMERCIAL_LLM_LEASE_KEY)).toBe(-1);
+      await redis.del(COMMERCIAL_LLM_COOLDOWN_KEY);
+      await expect(secondary.classify(text)).rejects.toMatchObject({ kind: 'BUSY' });
+      expect(classify).toHaveBeenCalledTimes(2);
     });
     it('rejects a result after source revocation or lease replacement, preserving a successor', async () => {
       const successor = randomUUID();
-      const secondary = new CommercialLlmBudgetedSecondary(new CommercialLlmShadowLease(redis), {
-        classify: async () => {
-          await redis.set(COMMERCIAL_LLM_LEASE_KEY, successor, 'PX', 120_000);
-          return positive;
-        },
-      });
+      const secondary = new CommercialLlmBudgetedSecondary(
+        new CommercialLlmShadowLease(redis),
+        httpClient({
+          classify: async () => {
+            await redis.set(COMMERCIAL_LLM_LEASE_KEY, successor, 'PX', 120_000);
+            return positive;
+          },
+        }),
+      );
       await expect(secondary.classify(text)).rejects.toMatchObject({ kind: 'ABORTED' });
       expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBe(successor);
       await redis.del(COMMERCIAL_LLM_LEASE_KEY, COMMERCIAL_LLM_COOLDOWN_KEY);
       let current = true;
-      const revoked = new CommercialLlmBudgetedSecondary(new CommercialLlmShadowLease(redis), {
-        classify: async () => {
-          current = false;
-          return positive;
-        },
-      });
+      const revoked = new CommercialLlmBudgetedSecondary(
+        new CommercialLlmShadowLease(redis),
+        httpClient({
+          classify: async () => {
+            current = false;
+            return positive;
+          },
+        }),
+      );
       await expect(revoked.classify(text, undefined, async () => current)).rejects.toMatchObject({
         kind: 'ABORTED',
       });
