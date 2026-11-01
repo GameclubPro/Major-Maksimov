@@ -276,6 +276,18 @@ try {
           const errors = [];
           page.on('pageerror', (error) => errors.push(error.message));
           await page.goto(path + '?scenario=' + scenario + '&theme=' + theme);
+          if (
+            [
+              'setup',
+              'setup_simple',
+              'setup_actor_switch',
+              'legacy_multichat',
+              'unknown',
+              'partial',
+              'partial_bound',
+            ].includes(scenario)
+          )
+            await page.getByRole('button', { name: /^Магазин участников/ }).click();
           if (scenario.includes('_storage_error')) {
             await page
               .getByRole('heading', { name: 'Нет', exact: true })
@@ -490,6 +502,7 @@ try {
             if (scenario !== 'draft_wrong_intent')
               assert.deepEqual(await page.evaluate(() => window.__nativeWrites), []);
             await page.getByRole('button', { name: 'Начать без черновика', exact: true }).click();
+            await page.getByRole('button', { name: /^Магазин участников/ }).click();
             await page.getByRole('textbox', { name: 'Название магазина', exact: true }).waitFor();
             assert.equal(
               await page

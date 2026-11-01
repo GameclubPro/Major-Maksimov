@@ -4,6 +4,14 @@ export const karavanMarketplaceCommandIdSchema = z.string().regex(/^[A-Za-z0-9._
 export const karavanMarketplaceChatIdSchema = z.string().regex(/^-?\d{1,24}$/u);
 export const karavanMarketplaceActorIdSchema = z.string().regex(/^\d{1,24}$/u);
 export const karavanMarketplaceIdSchema = z.string().uuid();
+export const karavanShopFormatSchema = z.enum(['storefront', 'community']);
+export const karavanAdministrationStoreSchema = z.object({
+  id: karavanMarketplaceIdSchema,
+  slug: z.string().min(1).max(100),
+  name: z.string().min(1).max(120),
+  status: z.enum(['DRAFT', 'ACTIVE', 'PAUSED', 'ARCHIVED', 'BLOCKED']),
+  editRevision: z.number().int().positive(),
+});
 export const karavanMarketplaceActionSchema = z.enum([
   'manage_shop',
   'create_marketplace',
@@ -109,6 +117,7 @@ export const karavanMarketplaceHandoffDestinationSchema = z.enum([
   'categories',
   'view',
   'preview',
+  'storefront',
 ]);
 export type KaravanMarketplaceHandoffDestination = z.infer<
   typeof karavanMarketplaceHandoffDestinationSchema
@@ -177,6 +186,9 @@ export const karavanMarketplaceSummarySchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(2000).nullable(),
   kind: z.enum(['chat', 'legacy']),
+  format: karavanShopFormatSchema.optional(),
+  administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),
+  formatRevision: z.number().int().positive().optional(),
   status: z.enum(['draft', 'active', 'paused', 'archived']),
   admissionPolicy: z.enum(['applications', 'invitation']),
   logoImageUrl: z.string().url().nullable(),
@@ -198,9 +210,11 @@ export const karavanMarketplaceBindingSchema = z.object({
 export const karavanPublicationPreviewSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('catalog') }),
   z.object({ mode: z.literal('chat_marketplace') }),
+  z.object({ mode: z.literal('administration_storefront') }),
   z.object({
     mode: z.literal('unavailable'),
     reason: z.enum(['closed', 'connection', 'verification']),
+    format: karavanShopFormatSchema.optional(),
   }),
 ]);
 export type KaravanPublicationPreview = z.infer<typeof karavanPublicationPreviewSchema>;
@@ -245,6 +259,7 @@ export const karavanMarketplaceModuleSchema = z.object({
   buyerUrl: z.string().url().nullable().optional(),
   previewUrl: z.string().url().nullable().optional(),
   publicationPreview: karavanPublicationPreviewSchema.optional(),
+  administrationStore: karavanAdministrationStoreSchema.nullable().optional(),
   bindings: z.array(karavanMarketplaceBindingSchema).max(48).optional(),
 });
 export type KaravanMarketplaceModule = z.infer<typeof karavanMarketplaceModuleSchema>;
@@ -275,6 +290,9 @@ export const karavanMarketplaceCreateSchema = z
     name: z.string().trim().min(1).max(120),
     description: z.string().trim().max(2000).nullable().optional().default(null),
     admissionPolicy: z.enum(['applications', 'invitation']).optional().default('applications'),
+    // FLAG: Omitted format fields stay omitted so persisted pre-format command hashes remain valid.
+    format: karavanShopFormatSchema.optional(),
+    administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),
     rules: z.object({
       text: z.string().trim().min(1).max(12000),
       allowedCategoryIds: z.array(categoryIdSchema).min(1).max(40),
@@ -332,6 +350,8 @@ export const karavanMarketplaceSetupSchema = z
 export type KaravanMarketplaceSetup = z.infer<typeof karavanMarketplaceSetupSchema>;
 export const karavanMarketplaceSetupOptionsSchema = z.object({
   chatTitle: z.string().max(300),
+  administrationStores: z.array(karavanAdministrationStoreSchema).max(50).optional(),
+  sellerTermsAccepted: z.boolean().optional(),
   categories: z
     .array(
       z.object({

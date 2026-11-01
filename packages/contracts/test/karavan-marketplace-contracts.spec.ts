@@ -7,7 +7,12 @@ import {
   karavanMarketplaceCreateSchema,
   karavanMarketplaceHandoffIssueSchema,
   karavanMarketplaceSetupSchema,
+  karavanPublicationPreviewSchema,
 } from '../src/karavan-marketplace.js';
+import {
+  marketplaceManagementRequestSchema,
+  marketplaceManagementResponseSchema,
+} from '../src/karavan-marketplace-management.js';
 
 describe('Karavan command boundary', () => {
   const scope = {
@@ -65,12 +70,79 @@ describe('Karavan command boundary', () => {
     ).toBe(false);
   });
 
+  it('keeps pre-format create hashes unchanged and signs an explicitly selected fixed storefront', () => {
+    const input = {
+      commandId: 'operation:create',
+      name: 'Соседи',
+      rules: { text: 'Правила', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+    };
+    const previous = karavanMarketplaceCreateSchema.parse(input);
+    expect(previous).not.toHaveProperty('format');
+    expect(previous).not.toHaveProperty('administrationStoreId');
+    const next = karavanMarketplaceCreateSchema.parse({
+      ...input,
+      format: 'storefront',
+      administrationStoreId: 'f07ca391-24bb-4f3b-b64e-e49ed0fdbed6',
+    });
+    expect(next.format).toBe('storefront');
+    expect(canonicalKaravanMarketplaceJson(next)).not.toBe(
+      canonicalKaravanMarketplaceJson(previous),
+    );
+    expect(
+      karavanMarketplaceCreateSchema.safeParse({ ...input, format: 'admins_only' }).success,
+    ).toBe(false);
+    expect(karavanPublicationPreviewSchema.parse({ mode: 'administration_storefront' })).toEqual({
+      mode: 'administration_storefront',
+    });
+  });
+
+  it('binds format changes to the reviewed fingerprint and original command identity', () => {
+    const commandId = 'operation:format';
+    const input = {
+      commandId,
+      chatId: '-123',
+      marketplaceId: 'f07ca391-24bb-4f3b-b64e-e49ed0fdbed6',
+      expectedBindingGeneration: 2,
+      command: {
+        operation: 'format_update',
+        input: {
+          commandId,
+          expectedRevision: 3,
+          format: 'storefront',
+          fingerprint: 'a'.repeat(64),
+        },
+      },
+    };
+    expect(marketplaceManagementRequestSchema.parse(input).command.operation).toBe('format_update');
+    expect(
+      marketplaceManagementRequestSchema.safeParse({ ...input, commandId: 'operation:another' })
+        .success,
+    ).toBe(false);
+    const withoutReview = structuredClone(input);
+    Reflect.deleteProperty(withoutReview.command.input, 'fingerprint');
+    expect(marketplaceManagementRequestSchema.safeParse(withoutReview).success).toBe(false);
+    expect(
+      marketplaceManagementResponseSchema.safeParse({
+        operation: 'format_preview',
+        data: {
+          fingerprint: 'a'.repeat(64),
+          expectedRevision: 3,
+          format: 'storefront',
+          administrationStoreId: null,
+          affectedStores: 1,
+          affectedChats: 2,
+          pendingApplications: 0,
+        },
+      }).success,
+    ).toBe(true);
+  });
+
   it('accepts explicit buyer destinations without allowing a caller-supplied return URL', () => {
     const input = {
       commandId: 'operation:preview',
       marketplaceId: 'f07ca391-24bb-4f3b-b64e-e49ed0fdbed6',
     };
-    for (const destination of ['view', 'preview']) {
+    for (const destination of ['view', 'preview', 'storefront']) {
       expect(
         karavanMarketplaceHandoffIssueSchema.parse({ ...input, destination }).destination,
       ).toBe(destination);

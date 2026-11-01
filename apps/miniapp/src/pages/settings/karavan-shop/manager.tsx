@@ -18,9 +18,11 @@ import {
   MutationFailure,
   type ShopModule,
 } from './runtime';
-import { AddOwnOfferAction, SellerAccessAction, SellerAccessProvider } from './seller-access';
+import { SellerAccessAction, SellerAccessProvider } from './seller-access';
 import { shopNextAction } from './shop-journey';
 import { ShopCommandProvider, ShopCommandRecovery } from './command-runtime';
+import { useAdministrationStorefrontLink } from './storefront-management';
+import { shopFormatLabel } from './format-picker';
 const Catalog = lazy(() => import('./catalog'));
 const Applications = lazy(() => import('./applications'));
 const Appearance = lazy(() => import('./appearance'));
@@ -49,6 +51,9 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
     setStatusConfirm(false),
   );
   const market = module.marketplace!;
+  const administration = market.format === 'storefront';
+  const storefront = useAdministrationStorefrontLink(administration);
+  const canView = market.status === 'active' && Boolean(module.buyerUrl);
   const canManage = module.permissions.includes('manage_marketplace');
   const canReview = module.permissions.includes('review_listing');
   const closed = ['draft', 'paused'].includes(market.status);
@@ -61,6 +66,11 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
     needsReadiness && detail.isSuccess && !detail.isFetching ? detail.data.counts : module.counts;
   const readyListings = readiness.readyListings;
   const approvedListings = readiness.approvedListings;
+  const administrationReady =
+    !administration ||
+    (storefront.knownStore &&
+      module.administrationStore?.status === 'ACTIVE' &&
+      (readyListings ?? 0) > 0);
   const readinessKnown =
     !closed ||
     (readyListings !== undefined && (readyListings > 0 || approvedListings !== undefined));
@@ -70,13 +80,13 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
     readyListings,
     approvedListings,
     canManage,
-    canReview,
+    canReview: !administration && canReview,
   });
   const menu = entries.filter((item) =>
     item.id === 'applications'
-      ? module.permissions.includes('review_listing')
+      ? !administration && module.permissions.includes('review_listing')
       : item.id === 'catalog'
-        ? canReview || module.permissions.includes('arrange_listings')
+        ? !administration && (canReview || module.permissions.includes('arrange_listings'))
         : canManage || module.permissions.includes('bind_chat') || !!publications,
   );
   const changeStatus = () => {
@@ -84,7 +94,8 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
       !canManage ||
       busy ||
       mutation.blocked ||
-      (closed && (!readinessKnown || (readyListings === 0 && !statusConfirm)))
+      (closed && (!readinessKnown || (readyListings === 0 && !statusConfirm))) ||
+      (closed && !administrationReady)
     )
       return;
     void mutation
@@ -119,7 +130,9 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
     <section aria-label="Доступность магазина">
       <h3>Доступность магазина</h3>
       {readinessStatus}
-      {statusConfirm ? (
+      {administration && closed && !administrationReady && readinessKnown ? (
+        <p>Опубликуйте витрину с доступными товарами и услугами в Караване.</p>
+      ) : statusConfirm ? (
         <div className="karavan-shop__row">
           <p>
             {market.status === 'active'
@@ -167,13 +180,20 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
             <img className="karavan-shop__cover" src={market.coverImageUrl} alt="" />
           ) : null}
           <div className="karavan-module__identity">
+            <span className="karavan-shop__format-label">
+              {shopFormatLabel(administration ? 'storefront' : 'community')}
+            </span>
             {market.logoImageUrl ? (
               <img className="karavan-shop__logo" src={market.logoImageUrl} alt="" />
             ) : null}
-            <h3>{market.name}</h3>
+            <h3>
+              {administration ? (module.administrationStore?.name ?? market.name) : market.name}
+            </h3>
             <p>
               {market.status === 'active'
-                ? 'Открыт для покупателей'
+                ? administration && !canView
+                  ? 'Витрина пока недоступна покупателям'
+                  : 'Открыт для покупателей'
                 : market.status === 'draft'
                   ? 'Закрыт для покупателей'
                   : market.status === 'paused'
@@ -182,53 +202,119 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
               {module.counts.chats > 1 ? ` · Чаты: ${module.counts.chats}` : ''}
             </p>
           </div>
-          {next === 'invite' ? (
-            <>
-              <AddOwnOfferAction primary />
-              <SellerAccessAction />
-            </>
-          ) : null}
-          {next === 'review' ? (
+          {canView ? (
             <button
               type="button"
               className="karavan-module__primary"
+              disabled={busy}
+              onClick={open}
+            >
+              {administration ? 'Посмотреть витрину' : 'Посмотреть магазин чата'}
+            </button>
+          ) : null}
+          {administration &&
+          market.status !== 'archived' &&
+          !canView &&
+          (!administrationReady || next !== 'open') ? (
+            <button
+              type="button"
+              className="karavan-module__primary"
+              disabled={busy || storefront.disabled}
+              onClick={() => void storefront.open()}
+            >
+              {storefront.opening ? 'Открываем витрину…' : 'Добавить товары и услуги'}
+            </button>
+          ) : null}
+          {!administration && next === 'invite' ? (
+            <>
+              <button
+                type="button"
+                className={canView ? undefined : 'karavan-module__primary'}
+                onClick={() => workspace?.navigate('catalog')}
+              >
+                Добавить первые товары
+              </button>
+              <SellerAccessAction />
+            </>
+          ) : null}
+          {!administration && next === 'review' ? (
+            <button
+              type="button"
+              className={canView ? undefined : 'karavan-module__primary'}
               onClick={() => workspace?.navigate('applications')}
             >
               Проверить заявки · {module.counts.pendingApplications}
             </button>
           ) : null}
-          {next === 'sellers' ? (
+          {!administration && next === 'sellers' ? (
             <button
               type="button"
-              className="karavan-module__primary"
+              className={canView ? undefined : 'karavan-module__primary'}
               onClick={() => workspace?.navigate('catalog')}
             >
               Проверить товары и услуги
             </button>
           ) : null}
-          {next === 'open' ? (
+          {next === 'open' && administrationReady ? (
             <button
               type="button"
-              className="karavan-module__primary"
+              className={canView ? undefined : 'karavan-module__primary'}
               disabled={busy || mutation.blocked || !readinessKnown}
               onClick={changeStatus}
             >
               {market.status === 'paused' ? 'Возобновить магазин' : 'Открыть для покупателей'}
             </button>
           ) : null}
-          {market.status === 'active' && module.buyerUrl ? (
-            <button
-              type="button"
-              className={next ? undefined : 'karavan-module__primary'}
-              disabled={busy}
-              onClick={open}
-            >
-              Посмотреть магазин чата
-            </button>
-          ) : null}
         </div>
         {readinessStatus}
+        {administration ? (
+          <div id="karavan-shop-storefront-management">
+            {!storefront.knownStore ? (
+              <p role="status">Витрина пока недоступна. Проверьте её в настройках.</p>
+            ) : null}
+            {storefront.error ? (
+              <div className="karavan-module__notice" role="alert">
+                <p>{storefront.error}</p>
+                <button
+                  type="button"
+                  disabled={storefront.disabled}
+                  onClick={() => void storefront.open()}
+                >
+                  Повторить переход
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="karavan-shop__menu">
+          {administration && canManage ? (
+            <fieldset
+              className="karavan-shop__management-actions"
+              aria-label="Управление витриной"
+              disabled={busy || storefront.disabled}
+            >
+              <SettingsSectionToggle
+                title="Товары и услуги"
+                icon="storefront"
+                tone="sky"
+                open={false}
+                controls="karavan-shop-storefront-management"
+                onClick={() => {
+                  if (!busy) void storefront.open();
+                }}
+              />
+              <SettingsSectionToggle
+                title="Оформление"
+                icon="spark"
+                tone="sky"
+                open={false}
+                controls="karavan-shop-storefront-management"
+                onClick={() => {
+                  if (!busy) void storefront.open();
+                }}
+              />
+            </fieldset>
+          ) : null}
           {menu.map((item) => (
             <SettingsSectionToggle
               key={item.id}
@@ -245,7 +331,9 @@ function Workspace({ module, busy, open, chats, publications }: Props) {
       <MutationFailure mutation={mutation} />
       {[
         ...menu,
-        ...(canManage ? [{ id: 'appearance' as const }, { id: 'categories' as const }] : []),
+        ...(canManage && !administration
+          ? [{ id: 'appearance' as const }, { id: 'categories' as const }]
+          : []),
         ...(module.permissions.includes('bind_chat') ? [{ id: 'chats' as const }] : []),
         ...(publications ? [{ id: 'publications' as const }] : []),
       ].map((entry) => (

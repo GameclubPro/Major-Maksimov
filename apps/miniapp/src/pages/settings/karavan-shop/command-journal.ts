@@ -134,8 +134,10 @@ export function isShopWriteOperation(operation: ShopCommand['operation']): boole
     case 'rules_update':
     case 'settings':
     case 'status':
+    case 'format_update':
       return true;
     case 'appearance':
+    case 'administration_store':
     case 'pins':
     case 'catalog':
     case 'invitations':
@@ -144,6 +146,7 @@ export function isShopWriteOperation(operation: ShopCommand['operation']): boole
     case 'applications':
     case 'content':
     case 'rules_preview':
+    case 'format_preview':
       return false;
     default: {
       const exhaustive: never = operation;
