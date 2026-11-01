@@ -43,15 +43,15 @@ jobs:
         run: node scripts/ci/impact.mjs plan
 
   static:
-    name: Static (${{ matrix.part }})
+    name: Static (${{ matrix.part }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     needs: impact
     runs-on: ubuntu-latest
     timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
-        part: ${{ fromJSON(needs.impact.outputs.plan).mode == 'full' && fromJSON('["core","infra"]') || fromJSON('["core"]') }}
-    # FLAG: Full plans require both bounded parts through needs.static in Required.
+        include: ${{ fromJSON(needs.impact.outputs.plan).mode == 'full' && fromJSON('[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]') || fromJSON('[{"part":"core"}]') }}
+    # FLAG: Full plans require core and both infrastructure shards through needs.static in Required.
     # Keep their test inventories disjoint and preserve the per-job time budget.
     # FLAG: Public test commands bound file concurrency. Native/WASM fixtures keep
     # Node's default runtime pools, independently of that process concurrency limit.
@@ -76,13 +76,22 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - name: Prepare private Redis infrastructure fixtures
         if: matrix.part == 'infra'
+        timeout-minutes: 3
         run: |
           if ! command -v redis-server >/dev/null; then
+            for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [[ -f "$apt_source_file" ]]; then
+                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+              fi
+            done
+            printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends redis-server
           fi
       - run: npm run check:infra
         if: matrix.part == 'infra'
+        env:
+          MAXIM_INFRA_TEST_SHARD: ${{ matrix.shard }}
 
   contracts:
     name: Contracts
@@ -179,8 +188,15 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - name: Install owned Redis process for crash and RDB restore acceptance
+        timeout-minutes: 3
         run: |
           if ! command -v redis-server >/dev/null; then
+            for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+              if [[ -f "$apt_source_file" ]]; then
+                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+              fi
+            done
+            printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends redis-server
           fi

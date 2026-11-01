@@ -9,6 +9,44 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+function assertBoundedHttpsAptPolicy(run) {
+  for (const path of [
+    '/etc/apt/apt-mirrors.txt',
+    '/etc/apt/sources.list',
+    '/etc/apt/sources.list.d/ubuntu.sources',
+  ])
+    assert.ok(run.includes(path), `Missing Ubuntu apt source: ${path}`);
+  for (const policy of [
+    'Acquire::Languages "none";',
+    'Acquire::http::Timeout "15";',
+    'Acquire::https::Timeout "15";',
+    'Acquire::Retries "1";',
+    'APT::Update::Error-Mode "any";',
+  ])
+    assert.ok(run.includes(policy), `Missing bounded apt policy: ${policy}`);
+  const expression = run.match(/sudo sed -i -E '([^']+)'/u)?.[1];
+  assert.ok(expression, 'Expected a literal, reviewable apt source rewrite');
+  const input = [
+    'http://azure.archive.ubuntu.com/ubuntu/',
+    'https://azure.archive.ubuntu.com/ubuntu/',
+    'deb http://archive.ubuntu.com/ubuntu noble main',
+    'URIs: http://security.ubuntu.com/ubuntu/',
+    'URIs: https://archive.ubuntu.com/ubuntu/',
+    'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
+    'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
+  ].join('\n');
+  const expected = [
+    'https://archive.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    'deb https://archive.ubuntu.com/ubuntu noble main',
+    'URIs: https://security.ubuntu.com/ubuntu/',
+    'URIs: https://archive.ubuntu.com/ubuntu/',
+    'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
+    'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
+  ].join('\n');
+  assert.equal(execFileSync('sed', ['-E', expression], { input, encoding: 'utf8' }), expected);
+}
+
 test('browser setup avoids slow HTTP mirror retries in both browser lanes', () => {
   const jobs = parse(workflow).jobs;
   for (const id of ['miniapp', 'admin']) {
@@ -18,32 +56,59 @@ test('browser setup avoids slow HTTP mirror retries in both browser lanes', () =
     const setup = steps[index];
     assert.equal(setup.if, undefined);
     assert.equal(setup['continue-on-error'], undefined);
-    assert.match(setup.run, /Acquire::Languages "none"/u);
-    assert.match(setup.run, /APT::Update::Error-Mode "any"/u);
+    assertBoundedHttpsAptPolicy(setup.run);
     assert.equal(steps[index + 1].run, 'npx playwright install --with-deps chromium');
     assert.equal(steps[index + 1]['timeout-minutes'], 3);
-    const expression = setup.run.match(/sudo sed -i -E '([^']+)'/u)?.[1];
-    assert.ok(expression, 'Expected a literal, reviewable apt source rewrite');
-    const input = [
-      'http://azure.archive.ubuntu.com/ubuntu/',
-      'https://azure.archive.ubuntu.com/ubuntu/',
-      'deb http://archive.ubuntu.com/ubuntu noble main',
-      'URIs: http://security.ubuntu.com/ubuntu/',
-      'URIs: https://archive.ubuntu.com/ubuntu/',
-      'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
-      'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
-    ].join('\n');
-    const expected = [
-      'https://archive.ubuntu.com/ubuntu/',
-      'https://archive.ubuntu.com/ubuntu/',
-      'deb https://archive.ubuntu.com/ubuntu noble main',
-      'URIs: https://security.ubuntu.com/ubuntu/',
-      'URIs: https://archive.ubuntu.com/ubuntu/',
-      'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
-      'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
-    ].join('\n');
-    assert.equal(execFileSync('sed', ['-E', expression], { input, encoding: 'utf8' }), expected);
   }
+});
+
+test('owned Redis setup bounds HTTPS apt installation in every workflow caller', () => {
+  const jobs = parse(workflow).jobs;
+  const callers = [
+    [
+      'static',
+      'Prepare private Redis infrastructure fixtures',
+      "matrix.part == 'infra'",
+      'npm run check:infra',
+    ],
+    [
+      'postgres-races',
+      'Install owned Redis process for crash and RDB restore acceptance',
+      undefined,
+      'npm ci --no-audit',
+    ],
+  ];
+  for (const [id, name, condition, nextRun] of callers) {
+    const steps = jobs[id].steps;
+    const setup = steps.find((step) => step.name === name);
+    assert.ok(setup, `${id} must install its owned Redis process`);
+    assert.equal(setup.if, condition);
+    assert.equal(setup['continue-on-error'], undefined);
+    assert.equal(setup['timeout-minutes'], 3);
+    assertBoundedHttpsAptPolicy(setup.run);
+    assert.match(setup.run, /if ! command -v redis-server >\/dev\/null; then/u);
+    const update = setup.run.indexOf('sudo apt-get update');
+    const install = setup.run.indexOf(
+      'sudo apt-get install -y --no-install-recommends redis-server',
+    );
+    assert.ok(update > setup.run.indexOf('APT::Update::Error-Mode'), 'Prepare apt before update');
+    assert.ok(install > update, 'Install Redis after the bounded apt update');
+    assert.ok(steps.indexOf(setup) < steps.findIndex((step) => step.run === nextRun));
+  }
+  const explicitAptCallers = [];
+  for (const file of readdirSync(resolve(root, '.github/workflows')).filter((file) =>
+    /\.ya?ml$/u.test(file),
+  )) {
+    const parsed = parse(readFileSync(resolve(root, '.github/workflows', file), 'utf8'));
+    for (const [id, job] of Object.entries(parsed.jobs))
+      for (const step of job.steps ?? [])
+        if (typeof step.run === 'string' && /\bapt-get\b/u.test(step.run))
+          explicitAptCallers.push(`${file}:${id}:${step.name}`);
+  }
+  assert.deepEqual(
+    explicitAptCallers.sort(),
+    callers.map(([id, name]) => `ci.yml:${id}:${name}`).sort(),
+  );
 });
 
 function jobBody(id, nextId) {
