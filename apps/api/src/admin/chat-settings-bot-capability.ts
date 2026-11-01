@@ -243,10 +243,17 @@ function transitionedBoolean(params: {
   );
 }
 
+// FLAG: Retained legacy sanctions have no effects in AI delete-only mode. Never
+// rewrite stored policy or waive another rule's current capability requirements.
+function inactiveCommercialFeature(key: keyof ChatSettings, commercialAiDeleteOnly?: boolean) {
+  return commercialAiDeleteOnly === true && key.startsWith('textFilters');
+}
+
 export function resolveChatSettingsBotCapabilityRequirements(params: {
   current: ChatSettings;
   next: ChatSettings;
   requestedSettings: unknown;
+  commercialAiDeleteOnly?: boolean;
 }): ChatSettingsBotCapabilityRequirement[] {
   const writeFeatureKeys = new Set<string>();
   const memberManagementFeatureKeys = new Set<string>();
@@ -291,6 +298,7 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
 
   for (const [key, parentActive] of WRITE_SUBFEATURES) {
     if (
+      !inactiveCommercialFeature(key, params.commercialAiDeleteOnly) &&
       parentActive(params.next) &&
       transitionedBoolean({ ...params, key, from: false, to: true })
     ) {
@@ -307,6 +315,7 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
   }
   for (const [key, parentActive] of MEMBER_MANAGEMENT_SUBFEATURES) {
     if (
+      inactiveCommercialFeature(key, params.commercialAiDeleteOnly) ||
       !parentActive(params.next) ||
       !transitionedBoolean({ ...params, key, from: false, to: true })
     ) {
@@ -342,7 +351,7 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
   );
   addActivatedParentMemberRequirements(
     !params.current.commercialAdsFilterEnabled && params.next.commercialAdsFilterEnabled,
-    params.next.textFiltersBanEnabled,
+    params.commercialAiDeleteOnly !== true && params.next.textFiltersBanEnabled,
     ['commercialAdsFilterEnabled'],
   );
   addActivatedParentMemberRequirements(
@@ -387,6 +396,7 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
 /** Current duties, including inherited defaults, when choosing a different moderator. */
 export function currentChatSettingsBotCapabilityRequirements(
   settings: ChatSettings,
+  commercialAiDeleteOnly = false,
 ): ChatSettingsBotCapabilityRequirement[] {
   const write = new Set<string>();
   const member = new Set<string>();
@@ -396,10 +406,20 @@ export function currentChatSettingsBotCapabilityRequirements(
   for (const key of ['messageLimitsBlockedWords', 'messageLimitsBlockedDomains'] as const)
     if (settings[key].length > 0) write.add(key);
   for (const [key, active] of WRITE_SUBFEATURES)
-    if (active(settings) && settings[key]) write.add(key);
+    if (
+      !inactiveCommercialFeature(key, commercialAiDeleteOnly) &&
+      active(settings) &&
+      settings[key]
+    )
+      write.add(key);
   for (const key of MEMBER_MANAGEMENT_ENABLE_KEYS) if (settings[key]) member.add(key);
   for (const [key, active] of MEMBER_MANAGEMENT_SUBFEATURES)
-    if (active(settings) && settings[key]) member.add(key);
+    if (
+      !inactiveCommercialFeature(key, commercialAiDeleteOnly) &&
+      active(settings) &&
+      settings[key]
+    )
+      member.add(key);
   if (settings.stopWordsPolicy?.enabled) {
     write.add('stopWordsPolicy');
     if (

@@ -107,7 +107,12 @@ export class ManagedModeratorService {
     const legacy = { ...state, fixedModeratorBotId: null };
     const required = [
       ...requiredFixedModeratorPurposes(legacy),
-      ...(await readFixedModeratorSettingsPurposes(this.prisma, chatId, state.entityType!)),
+      ...(await readFixedModeratorSettingsPurposes(
+        this.prisma,
+        chatId,
+        state.entityType!,
+        this.config.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED') === true,
+      )),
     ];
     const currentId = state.fixedModeratorBotId ?? state.primaryBotId;
     const current = currentId ? this.registry.getBotById(currentId) : null;

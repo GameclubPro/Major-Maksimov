@@ -28,6 +28,8 @@ import {
   reconcileCommercialLlmGeneration,
   validateCommercialLlmSyntheticResponse,
   validateCommercialLlmClientSmokeResponse,
+  validateCommercialLlmClientSmokeFailure,
+  executeCommercialLlmClientSmoke,
 } from './commercial-llm-runtime.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
@@ -1350,4 +1352,131 @@ test('production-prompt smoke forwards only exact synthetic case results and bou
       /commercial_llm_client_smoke_refused/u,
     );
   }
+});
+
+test('client smoke preserves bounded structured admission refusal without forwarding private errors', () => {
+  const diagnostic = {
+    schemaVersion: 1,
+    ok: false,
+    stage: 'admission',
+    code: 'ADMISSION_BLOCKED',
+    admission: {
+      observedAt: '2026-11-01T10:13:28.248Z',
+      leaseState: 'HELD_PERSISTENT',
+      cooldownState: 'MISSING',
+    },
+  };
+  assert.deepEqual(validateCommercialLlmClientSmokeFailure(diagnostic), diagnostic);
+  for (const buffer of ['stdout', 'stderr']) {
+    assert.throws(
+      () =>
+        executeCommercialLlmClientSmoke((file, args, options) => {
+          assert.equal(file, 'docker');
+          assert.equal(
+            args.at(-1),
+            'apps/api/dist/apps/api/src/scripts/commercial-llm-shadow-smoke.js',
+          );
+          assert.equal(options.timeout, 140000);
+          assert.equal(options.maxBuffer, 16384);
+          throw Object.assign(new Error('redis://secret arbitrary source'), {
+            status: 1,
+            stdout: 'private model output',
+            stderr: 'private connection exception',
+            [buffer]: Buffer.from(JSON.stringify(diagnostic)),
+          });
+        }),
+      (error) => {
+        assert.equal(
+          error.message,
+          'commercial_llm_client_smoke_failed:admission:ADMISSION_BLOCKED',
+        );
+        assert.deepEqual(error.diagnostic, diagnostic);
+        assert.equal(JSON.stringify(error).includes('secret'), false);
+        return true;
+      },
+    );
+  }
+  for (const invalid of [
+    { ...diagnostic, token: 'private' },
+    { ...diagnostic, code: '__proto__' },
+    { ...diagnostic, code: {} },
+    { ...diagnostic, stage: 'process' },
+    { ...diagnostic, admission: { ...diagnostic.admission, token: 'private' } },
+    { ...diagnostic, admission: { ...diagnostic.admission, leaseState: 'private-token' } },
+    { ...diagnostic, admission: { ...diagnostic.admission, observedAt: 'invalid' } },
+    { ...diagnostic, admission: undefined },
+  ])
+    assert.throws(() => validateCommercialLlmClientSmokeFailure(invalid));
+});
+
+test('client smoke fails closed on legacy unstructured errors, timeout, overflow and invalid success', () => {
+  const safe = (operation, code) =>
+    assert.throws(operation, (error) => {
+      assert.deepEqual(error.diagnostic, { schemaVersion: 1, ok: false, stage: 'process', code });
+      assert.equal(error.message.includes('private'), false);
+      return true;
+    });
+  for (const [errorCode, code] of [
+    [undefined, 'PROCESS_FAILED'],
+    ['ETIMEDOUT', 'PROCESS_TIMEOUT'],
+    ['ENOBUFS', 'PROCESS_FAILED'],
+  ])
+    safe(
+      () =>
+        executeCommercialLlmClientSmoke(() => {
+          throw Object.assign(new Error('private source'), {
+            code: errorCode,
+            stdout: 'private prompt',
+            stderr: 'private token',
+          });
+        }),
+      code,
+    );
+  safe(() => executeCommercialLlmClientSmoke(() => 'private output'), 'INVALID_OUTPUT');
+  safe(() => executeCommercialLlmClientSmoke(() => 'x'.repeat(16385)), 'INVALID_OUTPUT');
+  safe(
+    () =>
+      executeCommercialLlmClientSmoke(() => {
+        throw Object.assign(new Error('private error'), {
+          stdout: 'x'.repeat(16385),
+          stderr: 'private error',
+        });
+      }),
+    'PROCESS_FAILED',
+  );
+  for (const [code, stage] of Object.entries({
+    REDIS_UNAVAILABLE: 'redis',
+    MODEL_TIMEOUT: 'classification',
+    MODEL_INVALID_RESPONSE: 'classification',
+    UNEXPECTED_CLASSIFICATION: 'classification',
+    LEASE_LOST: 'ownership',
+    LEASE_RELEASE_UNAVAILABLE: 'ownership',
+  }))
+    assert.deepEqual(
+      validateCommercialLlmClientSmokeFailure({
+        schemaVersion: 1,
+        ok: false,
+        stage,
+        code,
+      }),
+      { schemaVersion: 1, ok: false, stage, code },
+    );
+});
+
+test('client smoke execution keeps the existing successful result shape', () => {
+  const success = {
+    ok: true,
+    casesPassed: 2,
+    casesTotal: 2,
+    modelSha256: pin.modelSha256,
+    promptSha256: pin.smokePromptSha256,
+    cases: [
+      { name: 'commercial-service', classification: 'COMMERCIAL', durationMs: 10 },
+      { name: 'personal-used-item', classification: 'NOT_COMMERCIAL', durationMs: 20 },
+    ],
+  };
+  assert.deepEqual(
+    executeCommercialLlmClientSmoke(() => JSON.stringify(success)),
+    success,
+  );
 });

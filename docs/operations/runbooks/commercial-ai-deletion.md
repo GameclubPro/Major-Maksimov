@@ -134,6 +134,14 @@ uncertain rights and expiry reject AI authority. That rejection permits another
 independently verified reason to progress. Final SQL/transport deadline fences
 remain active. Exact absence is settlement, not an AI deletion or sanction.
 
+After the remote source read, AI enablement, exact current settings, proof and the
+original deadline are checked again before consuming participant protection. An
+expired or revoked AI reason cannot spend the daily allowance. The final dispatch
+check remains independent and does not repeat remote reads or grant consumption.
+AI delete-only settings require message rights; retained inactive commercial
+warning/mute/ban settings do not require member-management rights. Other enabled
+rules keep their own requirements, including ordinary and bulk settings writes.
+
 ## Delivery and rollback
 
 Use `MAXIM_COMMERCIAL_LLM_ENFORCEMENT=true` (or `false`) on the normal exact-green
@@ -178,6 +186,16 @@ each producer/runner generation without exposing its worker lease. Read producer
 counters as deltas from the same process and schema; differing first/last sample windows do not form one
 complete fleet denominator. The original offered counter included disabled chats
 and cannot establish eligible coverage.
+
+Pool pending payloads retain their original three-second TTL. Two fixed bounded
+metadata keys keep only the exact worker, payload digest and original expiry so
+natural Redis expiry is counted once even after dispatcher interruption. Atomic
+take/discard/promotion settles the matching marker; status reconciles elapsed
+markers without deleting payloads or acquiring execution authority. A separate
+exact-worker capability advertisement enables tracking only for upgraded
+consumers. Mixed-version admissions can remain untracked; cumulative discard
+counts do not retrospectively close those coverage gaps. Metadata never renews a
+source, model lease or effect deadline and never enables replay.
 
 `commercial-ai-admission-window` closes nonempty minutes selected by
 `selectionBasis=offers_or_evaluate_calls` once their offered admissions have settled.

@@ -2,9 +2,12 @@
 
 The quality policy `commercial-intent-quality-v1` is experimental. Routine deployment
 ships observation, independent review and source-read retries; it does not promote
-the new text deletions. The released deterministic policy and the strict OCR
-baseline remain separate authorities. Automatic corpus labels and synthetic tests
-are regression evidence, not measured accuracy.
+the new text deletions. The released deterministic policy and its experimental
+candidate remain separate from active asynchronous AI enforcement. Commercial
+photo analysis is retired: new jobs disable its purpose and the commercial
+rollout stays off; the explicit image stop-list still uses OCR. Retained commercial OCR baseline/certified guards support compatible drain
+and rollback, not active image advertising analysis. Automatic corpus labels and
+synthetic tests are regression evidence, not measured accuracy.
 
 ## Collection and review
 

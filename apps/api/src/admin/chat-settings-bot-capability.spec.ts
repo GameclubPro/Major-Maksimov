@@ -15,6 +15,43 @@ function resolveRequirements(
 }
 
 describe('resolveChatSettingsBotCapabilityRequirements', () => {
+  it('requires only message rights for AI deletion despite retained legacy sanctions', () => {
+    const current = chatSettingsSchema.parse({
+      commercialAdsFilterEnabled: false,
+      textFiltersBanEnabled: true,
+    });
+    const requestedSettings = { commercialAdsFilterEnabled: true };
+    const params = {
+      current,
+      next: chatSettingsSchema.parse({ ...current, ...requestedSettings }),
+      requestedSettings,
+      commercialAiDeleteOnly: true,
+    };
+    expect(resolveChatSettingsBotCapabilityRequirements(params)).toEqual([
+      { permission: 'write', featureKeys: ['commercialAdsFilterEnabled'] },
+    ]);
+  });
+
+  it('preserves independent ban requirements when AI ignores legacy commercial sanctions', () => {
+    const current = chatSettingsSchema.parse({
+      commercialAdsFilterEnabled: true,
+      textFiltersBanEnabled: false,
+      russianProfanityFilterEnabled: true,
+      profanityBanEnabled: false,
+    });
+    const requestedSettings = { textFiltersBanEnabled: true, profanityBanEnabled: true };
+    const params = {
+      current,
+      next: chatSettingsSchema.parse({ ...current, ...requestedSettings }),
+      requestedSettings,
+      commercialAiDeleteOnly: true,
+    };
+    expect(resolveChatSettingsBotCapabilityRequirements(params)).toEqual([
+      { permission: 'write', featureKeys: ['profanityBanEnabled'] },
+      { permission: 'add_remove_members', featureKeys: ['profanityBanEnabled'] },
+    ]);
+  });
+
   it('requires deletion rights, not member-management rights, for traffic controls', () => {
     expect(
       resolveRequirements(

@@ -209,6 +209,7 @@ function createService(
     };
     domainAllowlistDetails?: Array<Record<string, unknown>>;
     photoDuplicateConfig?: Record<string, string>;
+    commercialAiEnabled?: boolean;
     messageDuplicateMode?: 'off' | 'shadow' | 'delete_only' | 'full';
     photoDuplicateDeleteIntentRollout?: 'off' | 'observed' | 'execute';
     managedBroadcasts?: Array<Record<string, unknown>>;
@@ -456,7 +457,11 @@ function createService(
     }),
   };
   const configService = {
-    get: jest.fn((key: string) => options.photoDuplicateConfig?.[key]),
+    get: jest.fn((key: string) =>
+      key === 'COMMERCIAL_LLM_ENFORCEMENT_ENABLED'
+        ? options.commercialAiEnabled
+        : options.photoDuplicateConfig?.[key],
+    ),
   };
   const photoDuplicateRuntimePolicy = {
     resolveEffectivePolicy: jest.fn(
@@ -505,6 +510,9 @@ function createService(
     undefined,
     { available: () => options.reportsAvailable ?? false } as never,
     options.retention as AdminMessageRetentionService | undefined,
+    undefined,
+    undefined,
+    configService as never,
   );
 
   return {
@@ -1212,6 +1220,28 @@ describe('AdminSettingsService chat rules', () => {
       expect.objectContaining({ antiSpamEnabled: true }),
     );
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables AI deletion without requiring the retained legacy ban permission', async () => {
+    const { legacyAdminService, prisma, service } = createService({
+      commercialAiEnabled: true,
+      currentSettings: createPersistedChatSettings({
+        commercialAdsFilterEnabled: false,
+        textFiltersBanEnabled: true,
+      }),
+    });
+    await service.updateSettings(
+      'chat-1',
+      user as never,
+      chatSettingsSchema.parse({ commercialAdsFilterEnabled: true, textFiltersBanEnabled: true }),
+    );
+    expect(legacyAdminService.assertChatSettingsBotCapabilities).toHaveBeenCalledWith('chat-1', [
+      { permission: 'write', featureKeys: ['commercialAdsFilterEnabled'] },
+    ]);
+    expect(findChatSettingsWritePayload(prisma)).toMatchObject({
+      commercialAdsFilterEnabled: true,
+      textFiltersBanEnabled: true,
+    });
   });
 
   it('tunnels an explicit force-live capability recheck only for a guarded transition', async () => {
@@ -2261,6 +2291,33 @@ describe('AdminSettingsService chat rules', () => {
     expect(legacyAdminService.resolveSettingsApplyBotAssignmentData).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.chat.upsert).not.toHaveBeenCalled();
+  });
+
+  it('uses AI deletion rights for every bulk target without rewriting retained sanctions', async () => {
+    const { legacyAdminService, prisma, service } = createService({
+      commercialAiEnabled: true,
+      applyTargetChats: [createChatSummary({ id: 'chat-1' })],
+    });
+    prisma.chatSettings.findMany.mockResolvedValue([
+      createPersistedChatSettings({
+        commercialAdsFilterEnabled: false,
+        textFiltersBanEnabled: true,
+      }),
+    ]);
+    await service.applySettingsToAllChats(
+      'chat-1',
+      user as never,
+      chatSettingsSchema.parse({ commercialAdsFilterEnabled: true, textFiltersBanEnabled: true }),
+      'miniapp',
+      ['commercialAdsFilterEnabled'],
+    );
+    expect(legacyAdminService.assertChatSettingsBotCapabilities).toHaveBeenCalledWith('chat-1', [
+      { permission: 'write', featureKeys: ['commercialAdsFilterEnabled'] },
+    ]);
+    expect(findChatSettingsWritePayload(prisma)).toMatchObject({
+      commercialAdsFilterEnabled: true,
+    });
+    expect(findChatSettingsWritePayload(prisma)).not.toHaveProperty('textFiltersBanEnabled');
   });
 
   it('awaits in-flight preflights and stops taking targets after the first blocker', async () => {

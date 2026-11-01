@@ -1,9 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import type { ChatSettings } from '@maxim/contracts';
 import { ManagedModeratorService } from './managed-moderator.service';
 import { publicModerator } from '../max/max-public-moderator';
 import { buildBotAccessSnapshotPersistence } from '../max/bot-access-snapshot.util';
 
-function fixture() {
+function fixture(
+  options: {
+    commercialAiDeleteOnly?: boolean;
+    memberManagement?: boolean;
+    settings?: Partial<ChatSettings>;
+  } = {},
+) {
   const bots = ['old', 'next'].map((id) => ({ id, state: 'active', contactId: null }));
   const epoch = new Date(Date.now() - 1000);
   const access = buildBotAccessSnapshotPersistence(
@@ -11,7 +18,11 @@ function fixture() {
       isAdmin: true,
       isOwner: false,
       permissionsKnown: true,
-      permissions: ['read_all_messages', 'write', 'add_remove_members'],
+      permissions: [
+        'read_all_messages',
+        'write',
+        ...(options.memberManagement === false ? [] : ['add_remove_members']),
+      ],
     },
     { source: 'seed', now: epoch },
   );
@@ -25,7 +36,7 @@ function fixture() {
   };
   const db = {
     managedModeratorAssignment: { findUnique: jest.fn().mockResolvedValue(null) },
-    chatSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+    chatSettings: { findUnique: jest.fn().mockResolvedValue(options.settings ?? null) },
     channelSettings: { findUnique: jest.fn().mockResolvedValue(null) },
   };
   const links = {
@@ -64,7 +75,12 @@ function fixture() {
     getBotById: (id: string) => bots.find((bot) => bot.id === id),
   };
   const config = {
-    get: (key: string) => (key === 'MAX_FIXED_MODERATOR_SELECTION_ENABLED' ? true : ''),
+    get: (key: string) =>
+      key === 'MAX_FIXED_MODERATOR_SELECTION_ENABLED'
+        ? true
+        : key === 'COMMERCIAL_LLM_ENFORCEMENT_ENABLED'
+          ? options.commercialAiDeleteOnly
+          : '',
   };
   const service = new ManagedModeratorService(
     db as never,
@@ -85,6 +101,42 @@ function fixture() {
 }
 
 describe('public moderator selection', () => {
+  it.each([true, false])(
+    'evaluates retained commercial sanctions against AI delete-only mode=%s',
+    async (commercialAiDeleteOnly) => {
+      const f = fixture({
+        commercialAiDeleteOnly,
+        memberManagement: false,
+        settings: { commercialAdsFilterEnabled: true, textFiltersBanEnabled: true },
+      });
+      const result = await f.service.choices(f.user, 'chat', '-123');
+      expect(result.candidates.every((bot) => bot.selectable)).toBe(commercialAiDeleteOnly);
+      expect(
+        result.candidates.every(
+          (bot) => bot.reason === (commercialAiDeleteOnly ? null : 'needs_permissions'),
+        ),
+      ).toBe(true);
+      expect(f.assignments.assign).not.toHaveBeenCalled();
+    },
+  );
+
+  it('retains independent profanity member-management duties in AI delete-only choices', async () => {
+    const f = fixture({
+      commercialAiDeleteOnly: true,
+      memberManagement: false,
+      settings: {
+        commercialAdsFilterEnabled: true,
+        textFiltersBanEnabled: true,
+        russianProfanityFilterEnabled: true,
+        profanityBanEnabled: true,
+      },
+    });
+    const result = await f.service.choices(f.user, 'chat', '-123');
+    expect(
+      result.candidates.every((bot) => !bot.selectable && bot.reason === 'needs_permissions'),
+    ).toBe(true);
+  });
+
   it('can authorize through a healthy connected bot when the current token times out', async () => {
     const f = fixture();
     f.max.getChatMembersAccess.mockRejectedValueOnce(

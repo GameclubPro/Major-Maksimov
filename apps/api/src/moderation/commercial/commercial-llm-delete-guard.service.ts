@@ -22,6 +22,7 @@ import {
   commercialLlmSourceCurrent,
   commercialLlmSourceKey,
   COMMERCIAL_LLM_DELETE_RULE_CODE,
+  type CommercialLlmSource,
 } from './commercial-llm-enforcement.protocol';
 
 export class CommercialLlmGuardRejectedError extends Error {
@@ -125,12 +126,7 @@ export class CommercialLlmDeleteGuardService {
       !commercialLlmSourceCurrent(source)
     )
       reject();
-    const settings = await this.settings(params.chatId, params.subjectUserId!);
-    if (
-      fingerprintCommercialDeleteSettings(settings) !== source.settingsSha256 ||
-      !(await this.admission.hasProof(source))
-    )
-      reject();
+    await this.currentSettings(source);
     const options = {
       botId: params.botId,
       bypassCache: true,
@@ -169,6 +165,9 @@ export class CommercialLlmDeleteGuardService {
       fingerprintCommercialDeleteText(message.text) !== source.sourceSha256
     )
       reject();
+    // FLAG: Remote source/access reads can outlive AI authority. Revalidate before
+    // spending the logical message's daily protection; final dispatch checks still apply.
+    const settings = await this.currentSettings(source);
     if (
       (await this.immunity.consumeForMessage({
         chatId: params.chatId,
@@ -182,14 +181,7 @@ export class CommercialLlmDeleteGuardService {
     // FLAG: Recheck after all remote work. A cached model answer cannot override a changed
     // policy, expiry, immune author or missing proof at the actual DELETE attempt.
     return prepareDeleteAuthority(async () => {
-      const finalSettings = await this.settings(params.chatId, params.subjectUserId!);
-      if (
-        !this.admission.enabled() ||
-        fingerprintCommercialDeleteSettings(finalSettings) !== source.settingsSha256 ||
-        !(await this.admission.hasProof(source)) ||
-        !commercialLlmSourceCurrent(source)
-      )
-        reject();
+      await this.currentSettings(source);
       return {
         deadlineAtMs: source.deadlineAtMs,
         reasonKeys: selected
@@ -197,6 +189,19 @@ export class CommercialLlmDeleteGuardService {
           .map((reason) => reason.reasonKey),
       };
     });
+  }
+
+  private async currentSettings(source: CommercialLlmSource) {
+    if (!this.admission.enabled() || !commercialLlmSourceCurrent(source)) reject();
+    const settings = await this.settings(source.chatId, source.userId);
+    if (
+      fingerprintCommercialDeleteSettings(settings) !== source.settingsSha256 ||
+      !(await this.admission.hasProof(source)) ||
+      !this.admission.enabled() ||
+      !commercialLlmSourceCurrent(source)
+    )
+      reject();
+    return settings;
   }
 
   private async settings(chatId: string, userId: string) {

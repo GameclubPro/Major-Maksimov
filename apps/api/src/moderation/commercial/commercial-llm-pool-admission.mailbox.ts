@@ -5,6 +5,7 @@ import {
   CommercialLlmEnforcementMailbox,
   COMMERCIAL_LLM_ENFORCEMENT_KEYS,
   type CommercialLlmAdmissionResult,
+  type CommercialLlmPendingDiscardReason,
 } from './commercial-llm-enforcement.mailbox';
 import {
   commercialLlmRequestSchema,
@@ -22,6 +23,11 @@ export const COMMERCIAL_LLM_POOL_ADMISSION_KEYS = Object.fromEntries(
   ]),
 ) as { [Key in keyof typeof COMMERCIAL_LLM_ENFORCEMENT_KEYS]: string };
 export const COMMERCIAL_LLM_POOL_ACTIVE_LIMIT = 3;
+export const COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS = {
+  ready: `${prefix}:pending-accounting-v1:ready`,
+  slot: `${prefix}:pending-accounting-v1:slot`,
+  slotNext: `${prefix}:pending-accounting-v1:slot-next`,
+} as const;
 const rawKey = (raw: string) => createHash('sha256').update(raw).digest('hex');
 const chatKey = (source: CommercialLlmSource) =>
   createHash('sha256').update(source.chatId).digest('hex');
@@ -31,13 +37,49 @@ const decode = `local function decode(raw)
   if ok and type(item) == 'table' and type(item.source) == 'table' then return item end
   return nil
 end
-local function promote(head, tail)
-  if redis.call('EXISTS', head) == 0 and redis.call('EXISTS', tail) == 1 then redis.call('RENAME', tail, head) end
+local function promote(head, tail, headMetadata, tailMetadata)
+  if redis.call('EXISTS', head) == 0 and redis.call('EXISTS', tail) == 1 then
+    redis.call('RENAME', tail, head)
+    if redis.call('EXISTS', tailMetadata) == 1 then redis.call('RENAME', tailMetadata, headMetadata)
+    else redis.call('DEL', headMetadata) end
+  end
+end
+`;
+// FLAG: Two fixed metadata keys retain only an observational digest, exact worker and original expiry.
+// Payloads still expire after three seconds. Only a capable advertised worker can accept tracked input;
+// old producers/consumers remain untracked during a mixed-version rollout, never inferred as expired.
+// Redis SHA1 here compares observational payloads only; execution ownership and proofs retain SHA256.
+const pendingAccounting = `${decode}
+local function pendingMarker(raw)
+  if not raw or #raw > 512 then return nil end
+  local ok, item = pcall(cjson.decode, raw)
+  if not ok or type(item) ~= 'table' or item.version ~= 1
+    or type(item.worker) ~= 'string' or #item.worker == 0 or #item.worker > 128
+    or type(item.rawSha1) ~= 'string' or #item.rawSha1 ~= 40 or not string.match(item.rawSha1, '^[a-f0-9]+$')
+    or type(item.expiresAtMs) ~= 'number' or item.expiresAtMs <= 0
+    or item.expiresAtMs > 9007199254740991 or item.expiresAtMs ~= math.floor(item.expiresAtMs) then return nil end
+  return item
+end
+local function settleExpired(slot, metadata, metrics, now)
+  if redis.call('TYPE', metadata).ok ~= 'string' or redis.call('STRLEN', metadata) > 512 then return end
+  local marker = pendingMarker(redis.call('GET', metadata))
+  if marker and marker.expiresAtMs <= now then
+    local raw = redis.call('GET', slot)
+    if not raw or redis.sha1hex(raw) ~= marker.rawSha1 then
+      redis.call('HINCRBY', metrics, 'pending_expired', 1)
+      redis.call('EXPIRE', metrics, 86400)
+      redis.call('DEL', metadata)
+    end
+  end
+end
+local function settlePending(head, tail, headMetadata, tailMetadata, metrics, now)
+  settleExpired(head, headMetadata, metrics, now)
+  settleExpired(tail, tailMetadata, metrics, now)
 end
 `;
 // FLAG: Every iteration is bounded by three active sources and two queued inputs.
 // Model slots are independent; source ownership remains held through consultation.
-const prune = `${decode}
+const prune = `${pendingAccounting}
 local function prune(active, primary, secondary, worker, now)
   if redis.call('HLEN', active) > 3 or redis.call('HLEN', primary) > 3 or redis.call('HLEN', secondary) > 3 then return false end
   local live = {}
@@ -82,13 +124,21 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
       local clock = redis.call('TIME'); local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
       if not prune(KEYS[3], KEYS[4], KEYS[5], ARGV[1], now) then return 0 end
+      settlePending(KEYS[6], KEYS[7], KEYS[9], KEYS[10], KEYS[8], now)
+      redis.call('SET', KEYS[11], ARGV[1], 'PX', 2500)
       redis.call('SET', KEYS[2], ARGV[1], 'PX', 2500); return 1`,
-        5,
+        11,
         this.keys.worker,
         this.keys.ready,
         this.keys.active,
         this.keys.primary,
         this.keys.secondary,
+        this.keys.slot,
+        this.keys.slotNext,
+        this.keys.metrics,
+        COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+        COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
+        COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.ready,
         worker,
       )) === 1
     );
@@ -116,21 +166,26 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       if tonumber(ARGV[4]) <= now then return 'source_expired' end
       if tonumber(ARGV[5]) < now - 10000 or tonumber(ARGV[5]) > now + 5000 then return 'source_stale' end
       if not prune(KEYS[5], KEYS[6], KEYS[7], ARGV[1], now) then return 'active_limit' end
+      settlePending(KEYS[3], KEYS[4], KEYS[8], KEYS[9], KEYS[10], now)
       if chatBusy(KEYS[5], KEYS[6], ARGV[6], ARGV[7], ARGV[8]) then return 'chat_busy' end
-      promote(KEYS[3], KEYS[4])
+      promote(KEYS[3], KEYS[4], KEYS[8], KEYS[9])
       for _, key in ipairs({KEYS[3], KEYS[4]}) do
         local queued = decode(redis.call('GET', key))
         if queued and queued.source.chatId == ARGV[7] then return 'chat_busy' end
       end
       local target = nil
-      if redis.call('EXISTS', KEYS[3]) == 0 then target = KEYS[3]
-      elseif redis.call('EXISTS', KEYS[4]) == 0 then target = KEYS[4] end
+      local metadata = nil
+      if redis.call('EXISTS', KEYS[3]) == 0 then target = KEYS[3]; metadata = KEYS[8]
+      elseif redis.call('EXISTS', KEYS[4]) == 0 then target = KEYS[4]; metadata = KEYS[9] end
       if not target then return 'buffer_full' end
       local expiry = math.min(tonumber(ARGV[4]), tonumber(ARGV[3]) + 3000)
       if expiry <= now then return 'source_expired' end
       redis.call('SET', target, ARGV[2], 'PX', expiry - now)
+      if redis.call('GET', KEYS[11]) == ARGV[1] then
+        redis.call('SET', metadata, cjson.encode({version=1, worker=ARGV[1], rawSha1=redis.sha1hex(ARGV[2]), expiresAtMs=expiry}))
+      else redis.call('DEL', metadata) end
       return 'accepted'`,
-      7,
+      11,
       this.keys.worker,
       this.keys.ready,
       this.keys.slot,
@@ -138,6 +193,10 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       this.keys.active,
       this.keys.primary,
       this.keys.secondary,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
+      this.keys.metrics,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.ready,
       worker,
       raw,
       request.submittedAtMs,
@@ -153,12 +212,17 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
     worker: string,
   ): Promise<{ request: CommercialLlmRequest; raw: string } | null> {
     const raw = await this.redis.eval(
-      `${decode}if redis.call('GET', KEYS[3]) ~= ARGV[1] then return nil end
-      promote(KEYS[1], KEYS[2]); return redis.call('GET', KEYS[1])`,
-      3,
+      `${pendingAccounting}if redis.call('GET', KEYS[3]) ~= ARGV[1] then return nil end
+      local clock = redis.call('TIME'); local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+      settlePending(KEYS[1], KEYS[2], KEYS[4], KEYS[5], KEYS[6], now)
+      promote(KEYS[1], KEYS[2], KEYS[4], KEYS[5]); return redis.call('GET', KEYS[1])`,
+      6,
       this.keys.slot,
       this.keys.slotNext,
       this.keys.worker,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
+      this.keys.metrics,
       worker,
     );
     if (typeof raw !== 'string') return null;
@@ -181,13 +245,15 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
     if (reason || !request) {
       await this.redis.eval(
         `${decode}if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
-        redis.call('DEL', KEYS[1]); promote(KEYS[1], KEYS[2]); redis.call('HINCRBY', KEYS[4], ARGV[3], 1)
+        redis.call('DEL', KEYS[1], KEYS[5]); promote(KEYS[1], KEYS[2], KEYS[5], KEYS[6]); redis.call('HINCRBY', KEYS[4], ARGV[3], 1)
         redis.call('EXPIRE', KEYS[4], 86400); return 1`,
-        4,
+        6,
         this.keys.slot,
         this.keys.slotNext,
         this.keys.worker,
         this.keys.metrics,
+        COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+        COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
         raw,
         worker,
         reason ?? 'invalid_pending',
@@ -199,7 +265,7 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
       local clock = redis.call('TIME'); local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
       if tonumber(ARGV[5]) <= now or now - tonumber(ARGV[4]) > 3000 or tonumber(ARGV[4]) > now + 1000 then
-        redis.call('DEL', KEYS[1]); promote(KEYS[1], KEYS[2]); redis.call('HINCRBY', KEYS[7], 'pending_expired', 1)
+        redis.call('DEL', KEYS[1], KEYS[9]); promote(KEYS[1], KEYS[2], KEYS[9], KEYS[10]); redis.call('HINCRBY', KEYS[7], 'pending_expired', 1)
         redis.call('EXPIRE', KEYS[7], 86400); return 0
       end
       if not prune(KEYS[4], KEYS[5], KEYS[6], ARGV[2], now) or redis.call('HLEN', KEYS[4]) >= 3 then return 0 end
@@ -219,8 +285,8 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       for _, key in ipairs({KEYS[4], KEYS[5]}) do
         if redis.call('PEXPIRETIME', key) < tonumber(ARGV[5]) then redis.call('PEXPIREAT', key, ARGV[5]) end
       end
-      redis.call('DEL', KEYS[1]); promote(KEYS[1], KEYS[2]); return 1`,
-      8,
+      redis.call('DEL', KEYS[1], KEYS[9]); promote(KEYS[1], KEYS[2], KEYS[9], KEYS[10]); return 1`,
+      10,
       this.keys.slot,
       this.keys.slotNext,
       this.keys.worker,
@@ -229,6 +295,8 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       this.keys.secondary,
       this.keys.metrics,
       POOL_DISPATCH_PENDING_KEY,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
       raw,
       worker,
       rawKey(raw),
@@ -240,6 +308,25 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       request.source.nonce,
     );
     return accepted === 1 ? { request, raw } : null;
+  }
+
+  override async readObservations(): Promise<
+    Partial<Record<CommercialLlmPendingDiscardReason, number>>
+  > {
+    // FLAG: Reconcile only bounded observational metadata after actual payload expiry/rotation.
+    // This readback never removes a payload, changes ownership or authorizes model/action replay.
+    await this.redis.eval(
+      `${pendingAccounting}
+      local clock = redis.call('TIME'); local now = clock[1] * 1000 + math.floor(clock[2] / 1000)
+      settlePending(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], now); return 1`,
+      5,
+      this.keys.slot,
+      this.keys.slotNext,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slot,
+      COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS.slotNext,
+      this.keys.metrics,
+    );
+    return super.readObservations();
   }
 
   override async releasePrimary(raw: string, worker: string): Promise<boolean> {

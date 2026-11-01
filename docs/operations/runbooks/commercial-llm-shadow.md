@@ -238,6 +238,24 @@ pass counts, model/prompt hashes and the two known synthetic case classification
 and durations. This is still not a representative accuracy
 evaluation.
 
+`check-client` failures emit a bounded JSON diagnostic with `schemaVersion: 1`,
+`ok: false`, a finite `stage` and `code`, then exit nonzero. `ADMISSION_BLOCKED`
+additionally reports an observation time and lease/cooldown states; the read-only
+projection uses only the two fixed admission keys and returns no ownership token.
+`HELD_PERSISTENT` identifies an existing physical CPU fence, even when model health
+is green. It does not establish the original failure time or permit recovery.
+Redis, ownership, model timeout/response and process failures remain distinct;
+arbitrary child stderr and model output are never forwarded. Older API images
+retain the existing successful result format, while unstructured failures become
+`PROCESS_FAILED` without exposing their exception text.
+
+The closed classifier smoke pins its own physical lease before HTTP. Only a
+complete validated response or a definite no-HTTP refusal permits its release.
+A timed-out or failed HTTP attempt retains the persistent fence and needs the
+same named CPU recovery procedure as pool work. Neither diagnostics nor an idle
+slot observation clears it. The existing inference and process time budgets are
+unchanged.
+
 Disable stages the flag as false for the next ordinary API deployment. Stopping
 the model releases its resources immediately and preserves weights, receipts,
 queues and the running API. A still-enabled client must fail open and shed its

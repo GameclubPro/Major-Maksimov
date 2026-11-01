@@ -6,6 +6,7 @@ import {
   CommercialLlmPoolAdmissionMailbox,
   COMMERCIAL_LLM_POOL_ADMISSION_KEYS as keys,
   COMMERCIAL_LLM_POOL_ACTIVE_LIMIT,
+  COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS as accountingKeys,
 } from './commercial-llm-pool-admission.mailbox';
 import {
   CommercialLlmEnforcementMailbox,
@@ -98,13 +99,23 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     mailbox = new CommercialLlmPoolAdmissionMailbox(redis);
   });
   beforeEach(async () => {
-    await redis.del(...Object.values(keys), ...Object.values(legacyKeys), ...proofKeys);
+    await redis.del(
+      ...Object.values(keys),
+      ...Object.values(accountingKeys),
+      ...Object.values(legacyKeys),
+      ...proofKeys,
+    );
     proofKeys.clear();
     worker = randomUUID();
   });
   afterEach(() => jest.restoreAllMocks());
   afterAll(async () => {
-    await redis.del(...Object.values(keys), ...Object.values(legacyKeys), ...proofKeys);
+    await redis.del(
+      ...Object.values(keys),
+      ...Object.values(accountingKeys),
+      ...Object.values(legacyKeys),
+      ...proofKeys,
+    );
     redis.disconnect();
   });
 
@@ -136,6 +147,17 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     const tailRaw = (await redis.get(keys.slotNext))!;
     const headExpiry = await redis.pexpiretime(keys.slot);
     const tailExpiry = await redis.pexpiretime(keys.slotNext);
+    const headMetadata = JSON.parse((await redis.get(accountingKeys.slot))!);
+    const tailMetadata = JSON.parse((await redis.get(accountingKeys.slotNext))!);
+    expect(headMetadata).toEqual({
+      version: 1,
+      worker,
+      rawSha1: createHash('sha1').update(headRaw).digest('hex'),
+      expiresAtMs: headExpiry,
+    });
+    expect(tailMetadata.expiresAtMs).toBe(tailExpiry);
+    expect(await redis.pttl(accountingKeys.slot)).toBe(-1);
+    expect(await redis.pttl(accountingKeys.slotNext)).toBe(-1);
     expect(headExpiry).toBe(JSON.parse(headRaw).submittedAtMs + COMMERCIAL_LLM_PENDING_MAX_AGE_MS);
     expect(tailExpiry).toBe(JSON.parse(tailRaw).submittedAtMs + COMMERCIAL_LLM_PENDING_MAX_AGE_MS);
     await mailbox.advertise(worker);
@@ -280,6 +302,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await mailbox.prove(old.raw, old.request.source)).toBe(false);
     expect(await mailbox.take(worker)).toBeNull();
     expect(await mailbox.readObservations()).toMatchObject({ foreign_worker: 1 });
+    expect(await redis.exists(accountingKeys.slot, accountingKeys.slotNext)).toBe(0);
     const successor = await activate(offer('old-active'));
     await mailbox.withdraw(oldWorker);
     await mailbox.finish(old.raw, oldWorker);
@@ -317,7 +340,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await redis.hlen(keys.active)).toBe(0);
   });
 
-  it('expires both original pending inputs after three seconds while retaining live active ownership', async () => {
+  it('accounts natural pending TTL expiry once across restarted concurrent pollers without replay or active revocation', async () => {
     const active = [
       await activate(offer('a')),
       await activate(offer('b')),
@@ -328,13 +351,137 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
       tail = offer('expires-tail');
     expect(await mailbox.offerDetailed(head)).toBe('accepted');
     expect(await mailbox.offerDetailed(tail)).toBe('accepted');
+    const headMarker = await redis.get(accountingKeys.slot);
+    const tailMarker = await redis.get(accountingKeys.slotNext);
+    expect(headMarker).not.toContain(head.excerpt);
+    expect(tailMarker).not.toContain(tail.excerpt);
+    expect(await mailbox.readObservations()).toEqual({});
     await pause(COMMERCIAL_LLM_PENDING_MAX_AGE_MS + 80);
     expect(await mailbox.heartbeat(worker)).toBe(true);
     expect(await redis.exists(keys.slot, keys.slotNext)).toBe(0);
-    expect(await mailbox.take(worker)).toBeNull();
+    const restarted = new CommercialLlmPoolAdmissionMailbox(redis);
+    const pollers = Array.from({ length: 8 }, () =>
+      new CommercialLlmPoolAdmissionMailbox(redis).readObservations(),
+    );
+    for (const observation of await Promise.all(pollers))
+      expect(observation).toEqual({ pending_expired: 2 });
+    expect(await restarted.take(worker)).toBeNull();
+    expect(await redis.exists(accountingKeys.slot, accountingKeys.slotNext)).toBe(0);
+    expect(await restarted.readObservations()).toEqual({ pending_expired: 2 });
     expect(await mailbox.hasProof(head.source)).toBe(false);
     expect(await mailbox.hasProof(tail.source)).toBe(false);
     for (const item of active) expect(await mailbox.owns(item.raw)).toBe(true);
+    expect(await redis.hlen(keys.active)).toBe(3);
+    expect(await redis.exists(keys.slot, keys.slotNext)).toBe(0);
+  });
+
+  it('accounts an expired head before refill and promotes the original tail metadata without renewing its deadline', async () => {
+    await ready();
+    expect(await mailbox.offerDetailed(offer('expired-head'))).toBe('accepted');
+    await pause(1000);
+    expect(await mailbox.offerDetailed(offer('live-tail'))).toBe('accepted');
+    const tailRaw = (await redis.get(keys.slotNext))!;
+    const tailMarker = await redis.get(accountingKeys.slotNext);
+    const tailExpiry = await redis.pexpiretime(keys.slotNext);
+    await pause(Math.max(0, await redis.pttl(keys.slot)) + 80);
+    await ready();
+    expect(await mailbox.offerDetailed(offer('replacement'))).toBe('accepted');
+    expect(await redis.get(keys.slot)).toBe(tailRaw);
+    expect(await redis.get(accountingKeys.slot)).toBe(tailMarker);
+    expect(await redis.pexpiretime(keys.slot)).toBe(tailExpiry);
+    expect(await mailbox.readObservations()).toEqual({ pending_expired: 1 });
+    const taken = await mailbox.take(worker);
+    expect(taken?.raw).toBe(tailRaw);
+    expect(await mailbox.readObservations()).toEqual({ pending_expired: 1 });
+    expect((await mailbox.take(worker))?.request.source.chatId).toBe('replacement');
+    expect(await redis.exists(accountingKeys.slot, accountingKeys.slotNext)).toBe(0);
+  });
+
+  it('counts a worker-generation discard once and never assigns its marker to the successor', async () => {
+    await ready();
+    expect(await mailbox.offerDetailed(offer('old-worker'))).toBe('accepted');
+    const originalMarker = await redis.get(accountingKeys.slot);
+    await redis.pexpire(keys.worker, 1);
+    await pause(10);
+    worker = randomUUID();
+    await ready();
+    expect(await redis.get(accountingKeys.slot)).toBe(originalMarker);
+    expect(await mailbox.readObservations()).toEqual({});
+    expect(await mailbox.take(worker)).toBeNull();
+    expect(await mailbox.readObservations()).toEqual({ foreign_worker: 1 });
+    expect(await redis.exists(accountingKeys.slot)).toBe(0);
+    const successor = await activate(offer('new-worker'));
+    expect(await mailbox.owns(successor.raw)).toBe(true);
+    expect(await mailbox.readObservations()).toEqual({ foreign_worker: 1 });
+  });
+
+  it('keeps old-worker admissions untracked rather than inventing expiry after their consumer removes the payload', async () => {
+    await ready();
+    await redis.del(accountingKeys.ready);
+    expect(await mailbox.offerDetailed(offer('old-consumer'))).toBe('accepted');
+    expect(await redis.exists(accountingKeys.slot, accountingKeys.slotNext)).toBe(0);
+    await redis.del(keys.slot);
+    expect(await mailbox.readObservations()).toEqual({});
+    expect(await mailbox.take(worker)).toBeNull();
+    expect(await mailbox.readObservations()).toEqual({});
+  });
+
+  it('accepts untracked old-producer input without manufacturing a historical expiry', async () => {
+    await ready();
+    const legacy = offer('old-producer');
+    const raw = JSON.stringify({ ...legacy, worker, submittedAtMs: Date.now() });
+    await redis.set(keys.slot, raw, 'PX', COMMERCIAL_LLM_PENDING_MAX_AGE_MS);
+    expect(await mailbox.readObservations()).toEqual({});
+    expect((await mailbox.take(worker))?.raw).toBe(raw);
+    expect(await mailbox.readObservations()).toEqual({});
+    expect(await redis.exists(accountingKeys.slot, accountingKeys.slotNext)).toBe(0);
+  });
+
+  it.each([
+    { name: 'malformed JSON', value: '{malformed' },
+    { name: 'oversized metadata', value: 'x'.repeat(513) },
+    { name: 'invalid fields', value: JSON.stringify({ version: 1, expiresAtMs: 0 }) },
+  ])('does not turn $name into a terminal count or source authority', async ({ value }) => {
+    await ready();
+    expect(await mailbox.offerDetailed(offer('preserved-source'))).toBe('accepted');
+    const raw = await redis.get(keys.slot);
+    await redis.set(accountingKeys.slot, value);
+    expect(await mailbox.readObservations()).toEqual({});
+    expect(await redis.get(keys.slot)).toBe(raw);
+    expect(await redis.hlen(keys.active)).toBe(0);
+    expect((await mailbox.take(worker))?.raw).toBe(raw);
+    expect(await mailbox.readObservations()).toEqual({});
+  });
+
+  it('ignores a malformed metadata Redis type without altering its pending source', async () => {
+    await ready();
+    expect(await mailbox.offerDetailed(offer('preserved-source'))).toBe('accepted');
+    const raw = await redis.get(keys.slot);
+    await redis.del(accountingKeys.slot);
+    await redis.hset(accountingKeys.slot, 'invalid', 'metadata');
+    expect(await mailbox.readObservations()).toEqual({});
+    expect(await redis.get(keys.slot)).toBe(raw);
+    expect((await mailbox.take(worker))?.raw).toBe(raw);
+    expect(await mailbox.readObservations()).toEqual({});
+  });
+
+  it('settles a tracked expired generation without deleting a later untracked occupant of the same slot', async () => {
+    await ready();
+    expect(await mailbox.offerDetailed(offer('older-tracked-source'))).toBe('accepted');
+    const marker = JSON.parse((await redis.get(accountingKeys.slot))!) as {
+      expiresAtMs: number;
+    };
+    await redis.set(
+      accountingKeys.slot,
+      JSON.stringify({ ...marker, expiresAtMs: Date.now() - 1 }),
+    );
+    const successor = offer('new-untracked-source');
+    const raw = JSON.stringify({ ...successor, worker, submittedAtMs: Date.now() });
+    await redis.set(keys.slot, raw, 'PX', COMMERCIAL_LLM_PENDING_MAX_AGE_MS);
+    expect(await mailbox.readObservations()).toEqual({ pending_expired: 1 });
+    expect(await redis.get(keys.slot)).toBe(raw);
+    expect((await mailbox.take(worker))?.raw).toBe(raw);
+    expect(await mailbox.readObservations()).toEqual({ pending_expired: 1 });
   });
 
   it('prunes an expired source and its role claims without revoking a different live source', async () => {

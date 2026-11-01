@@ -299,6 +299,7 @@ export class AdminSettingsService {
     const shouldReconcileNightModeTransitions =
       this.shouldReconcileNightModeTransitionsAfterUpdate(body);
     const settings = await saveChatSettings({
+      commercialAiDeleteOnly: this.commercialAiModerationMode() === 'DELETE_ONLY',
       prisma: this.prisma,
       chatContextCache: this.chatContextCache,
       chatId,
@@ -796,6 +797,7 @@ export class AdminSettingsService {
       settingKeys,
     );
     const result = await applySettingsToAllChatsValue({
+      commercialAiDeleteOnly: this.commercialAiModerationMode() === 'DELETE_ONLY',
       prisma: this.prisma,
       chatContextCache: this.chatContextCache,
       sourceChatId,

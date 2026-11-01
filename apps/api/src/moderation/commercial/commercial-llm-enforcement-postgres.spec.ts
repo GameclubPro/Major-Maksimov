@@ -15,6 +15,7 @@ import {
 import {
   CommercialLlmPoolAdmissionMailbox,
   COMMERCIAL_LLM_POOL_ADMISSION_KEYS,
+  COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS,
 } from './commercial-llm-pool-admission.mailbox';
 import { COMMERCIAL_LLM_POOL_PROFILES } from './commercial-llm-pool.protocol';
 import {
@@ -119,6 +120,7 @@ jest.setTimeout(60_000);
       await h.redis.del(
         ...Object.values(COMMERCIAL_LLM_ENFORCEMENT_KEYS),
         ...Object.values(COMMERCIAL_LLM_POOL_ADMISSION_KEYS),
+        ...Object.values(COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS),
         COMMERCIAL_LLM_LEASE_KEY,
         COMMERCIAL_LLM_COOLDOWN_KEY,
       );
@@ -129,6 +131,7 @@ jest.setTimeout(60_000);
       await h.redis.del(
         ...Object.values(COMMERCIAL_LLM_ENFORCEMENT_KEYS),
         ...Object.values(COMMERCIAL_LLM_POOL_ADMISSION_KEYS),
+        ...Object.values(COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS),
         COMMERCIAL_LLM_LEASE_KEY,
         COMMERCIAL_LLM_COOLDOWN_KEY,
         ...proofKeys,

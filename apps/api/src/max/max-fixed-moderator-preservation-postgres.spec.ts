@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ConfigService } from '@nestjs/config';
 import { createPrismaAdapter, Prisma, PrismaClient } from '../prisma/prisma-client';
 import { buildBotAccessSnapshotPersistence } from './bot-access-snapshot.util';
 import { FixedModeratorPreservationService } from './fixed-moderator-preservation.service';
@@ -8,6 +9,7 @@ const integration = databaseUrl ? describe : describe.skip;
 integration('initial fixed moderator preservation with PostgreSQL', () => {
   let db: PrismaClient;
   let service: FixedModeratorPreservationService;
+  let config: ConfigService;
   let chatId: string;
   let sendJobId: string;
   const receiptQueries: Array<{ query: string; params: string }> = [];
@@ -30,6 +32,7 @@ integration('initial fixed moderator preservation with PostgreSQL', () => {
       }
     });
     db = logged;
+    config = new ConfigService();
     service = new FixedModeratorPreservationService(
       db as never,
       {
@@ -37,9 +40,11 @@ integration('initial fixed moderator preservation with PostgreSQL', () => {
         getBotById: (id: string) =>
           ['working', 'peer'].includes(id) ? { id, state: 'active' } : null,
       } as never,
+      config,
     );
   });
   beforeEach(async () => {
+    config.set('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', false);
     chatId = `preserve-${randomUUID()}`;
     sendJobId = randomUUID();
     const access = buildBotAccessSnapshotPersistence(
@@ -135,6 +140,35 @@ integration('initial fixed moderator preservation with PostgreSQL', () => {
     expect(
       (await db.chat.findUniqueOrThrow({ where: { id: chatId } })).fixedModeratorBotId,
     ).toBeNull();
+  });
+
+  it('preserves a working delete-only moderator without activating retained commercial bans', async () => {
+    await db.chatSettings.create({
+      data: { chatId, commercialAdsFilterEnabled: true, textFiltersBanEnabled: true },
+    });
+    await db.chatBotMembership.updateMany({
+      where: { chatId },
+      data: buildBotAccessSnapshotPersistence(
+        {
+          isAdmin: true,
+          isOwner: false,
+          permissionsKnown: true,
+          permissions: ['read_all_messages', 'write'],
+        },
+        { source: 'seed', now: new Date(Date.now() - 1000) },
+      ),
+    });
+    expect(await service.preview(chatId)).toMatchObject({ eligible: false, reason: 'rights' });
+    config.set('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', true);
+    const plan = await service.preview(chatId);
+    expect(plan).toMatchObject({ eligible: true, reason: 'eligible', botId: 'working' });
+    await service.preserve({ ...plan, operationId: randomUUID() });
+    expect(await db.chat.findUniqueOrThrow({ where: { id: chatId } })).toMatchObject({
+      fixedModeratorBotId: 'working',
+    });
+    expect(await db.chatSettings.findUniqueOrThrow({ where: { chatId } })).toMatchObject({
+      textFiltersBanEnabled: true,
+    });
   });
 
   it('preserves the working moderator without changing independent Publisher receipts', async () => {

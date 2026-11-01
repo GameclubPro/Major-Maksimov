@@ -1,4 +1,5 @@
-import { Injectable, ConflictException } from '@nestjs/common';
+import { Injectable, ConflictException, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -71,6 +72,7 @@ export class FixedModeratorPreservationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly registry: MaxBotRegistryService,
+    @Optional() private readonly config?: ConfigService,
   ) {}
 
   async preview(chatId: string, observedAt = new Date()): Promise<ModeratorPreservationPreview> {
@@ -151,7 +153,12 @@ export class FixedModeratorPreservationService {
       routingVersion: chat.routingVersion,
       candidates,
     };
-    const duties = await readFixedModeratorSettingsPurposes(tx, chatId, chat.entityType);
+    const duties = await readFixedModeratorSettingsPurposes(
+      tx,
+      chatId,
+      chat.entityType,
+      this.config?.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED') === true,
+    );
     const required = [...new Set([...requiredFixedModeratorPurposes(state), ...duties])].sort();
     const receipts: Receipt[] = [];
     let reason: ModeratorPreservationPreview['reason'] = chat.fixedModeratorBotId
