@@ -68,6 +68,8 @@ module.exports = {
     '^@maxim/contracts/publisher-auto-replies$':
       '<rootDir>/../../packages/contracts/src/publisher-auto-replies.ts',
     '^@maxim/contracts/safety-desk$': '<rootDir>/../../packages/contracts/src/safety-desk.ts',
+    '^@maxim/contracts/commercial-ai-quality$':
+      '<rootDir>/../../packages/contracts/src/commercial-ai-quality.ts',
     '^@maxim/contracts/reports$': '<rootDir>/../../packages/contracts/src/reports.ts',
     '^@maxim/contracts/settings-apply-error$':
       '<rootDir>/../../packages/contracts/src/settings-apply-error.ts',

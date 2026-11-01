@@ -9,6 +9,10 @@ rollout stays off; the explicit image stop-list still uses OCR. Retained commerc
 and rollback, not active image advertising analysis. Automatic corpus labels and
 synthetic tests are regression evidence, not measured accuracy.
 
+For active AI results, provisional reviewer-less diagnostics and offline routing
+comparisons, use the separate [AI evidence runbook](commercial-ai-quality-evidence.md).
+Missing asynchronous results are not completed deterministic KEEP decisions.
+
 ## Collection and review
 
 Enablement follows each chat's existing commercial-filter setting. Capture all hits,

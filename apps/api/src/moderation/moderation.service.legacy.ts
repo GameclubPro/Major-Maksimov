@@ -2425,6 +2425,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             settings,
             messageCreatedAt: extractCommercialOcrSourceCreatedAt(update.raw),
             violation: violations.find((violation) => violation.ruleCode === 'COMMERCIAL_AD'),
+            activeAiEnforcement: this.commercialAi?.enabled() === true,
             commercialCampaignContext,
           });
           if (commercialQualityObservation) {

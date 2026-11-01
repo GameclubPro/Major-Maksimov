@@ -120,6 +120,14 @@ claimed from synthetic examples or unlabelled production results.
 
 ## Durable effects
 
+CPU ownership is pinned before the actual HTTP handoff, including legacy shadow,
+confirmation, negative-audit and closed smoke callers. Abort, timeout, transport
+failure and invalid responses retain the exact persistent lease. Only a complete
+validated response or a proved pre-dispatch refusal releases it. Late completion
+may release only the original token and never restore expired source authority.
+Use the protected CPU recovery procedure for an uncertain hold; an idle or healthy
+container alone does not authorize clearing it.
+
 The new `COMMERCIAL_LLM_DELETE` reason enters the existing DELETE journal only
 through that proof-bound child handoff. It preserves the original webhook receipt,
 receiving/execution bot and event time in `moderation_delete_reason_origins`; it
@@ -133,6 +141,12 @@ proof and absolute deadline. Changed content, disabled settings, missing proof,
 uncertain rights and expiry reject AI authority. That rejection permits another
 independently verified reason to progress. Final SQL/transport deadline fences
 remain active. Exact absence is settlement, not an AI deletion or sanction.
+
+An AI moderation event requires its own `moderationDeleteVerified=true` receipt,
+written with the confirmed remote DELETE using the freshly authorized reason keys.
+Registration, rejected AI authority, another rule's successful deletion and recovered
+historical success cannot create new AI attribution. Existing historical events are
+preserved; they do not retroactively establish this receipt for their AI reason.
 
 After the remote source read, AI enablement, exact current settings, proof and the
 original deadline are checked again before consuming participant protection. An

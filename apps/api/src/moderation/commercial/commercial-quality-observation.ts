@@ -28,10 +28,12 @@ export function buildCommercialTextQualityObservation(input: {
   messageCreatedAt: string | null;
   settings: ChatSettings;
   violation: RuleViolation | undefined;
+  activeAiEnforcement?: boolean;
   commercialCampaignContext?: CommercialCampaignContext | null;
 }): Candidate | null {
-  const metadata = input.violation?.metadata ?? {};
-  const hasDetection = Boolean(input.violation);
+  const activeAi = input.activeAiEnforcement === true;
+  const metadata = activeAi ? {} : (input.violation?.metadata ?? {});
+  const hasDetection = !activeAi && Boolean(input.violation);
   const sample = buildCommercialQualitySample({
     ...input,
     source: 'TEXT',
@@ -39,7 +41,11 @@ export function buildCommercialTextQualityObservation(input: {
     reviewRecommended: metadata.reviewRecommended === true || metadata.actionBand === 'REVIEW_ONLY',
   });
   if (!sample) return null;
-  const actionBand = typeof metadata.actionBand === 'string' ? metadata.actionBand : 'ALLOW';
+  const actionBand = activeAi
+    ? 'NOT_EVALUATED'
+    : typeof metadata.actionBand === 'string'
+      ? metadata.actionBand
+      : 'ALLOW';
   const deleteEligible = isCommercialMessageDeleteEligible(
     actionBand,
     metadata.actionable === true,
@@ -51,8 +57,11 @@ export function buildCommercialTextQualityObservation(input: {
     settings: input.settings,
     commercialCampaignContext: input.commercialCampaignContext,
   });
-  const version =
-    typeof metadata.decisionVersion === 'string'
+  // FLAG: Synchronous capture cannot observe the asynchronous model's result or grant permission.
+  // A separate identity prevents these sources being certified as completed deterministic KEEP.
+  const version = activeAi
+    ? 'commercial-ai-asynchronous-v1'
+    : typeof metadata.decisionVersion === 'string'
       ? metadata.decisionVersion
       : COMMERCIAL_ENGINE_CONFIG.decisionVersion;
   const disposition = deleteEligible ? 'DELETE' : 'KEEP';
@@ -63,17 +72,17 @@ export function buildCommercialTextQualityObservation(input: {
     messageId: input.messageId,
     text: input.text,
     source: 'TEXT',
-    score: (input.violation?.score ?? 0) * 100,
+    score: (activeAi ? 0 : (input.violation?.score ?? 0)) * 100,
     actionBand,
     messageDisposition: disposition,
     detectorVersion: version,
     detectorSourceSha256: COMMERCIAL_OCR_DETECTOR_SOURCE_SHA256,
     settingsProfileDigest: fingerprintCommercialTextSettingsProfile(input.settings),
     hasDetection,
-    deleteEligible,
-    decisionOutcome: disposition,
-    executionOutcome: deleteEligible ? 'UNKNOWN' : 'NOT_REQUESTED',
-    analysisOutcome: 'COMPLETE',
+    deleteEligible: activeAi ? null : deleteEligible,
+    decisionOutcome: activeAi ? null : disposition,
+    executionOutcome: activeAi || deleteEligible ? 'UNKNOWN' : 'NOT_REQUESTED',
+    analysisOutcome: activeAi ? 'NOT_APPLICABLE' : 'COMPLETE',
     imageReviewRequired: false,
     sourceExcerptComplete: true,
     requiredPolicyCohorts: strings(metadata.requiredPolicyCohorts),

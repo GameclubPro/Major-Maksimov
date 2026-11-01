@@ -84,7 +84,13 @@ const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
       Parameters<CommercialLlmClient['classify']>
     >();
     const processor = () =>
-      new CommercialLlmShadowProcessor(store, lease, { classify }, governor, async () => true);
+      new CommercialLlmShadowProcessor(
+        store,
+        lease,
+        () => ({ classify }),
+        governor,
+        async () => true,
+      );
     const current = () => prisma.commercialReviewSample.findFirstOrThrow({ where: { chatId } });
     beforeAll(async () => {
       for (const raw of [databaseUrl, redisUrl]) {

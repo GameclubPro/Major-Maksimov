@@ -7389,7 +7389,7 @@ export class ModerationDeleteIntentService {
         AND reason."moderation_event_id" IS NULL
         AND reason."event_type" IS NOT NULL
         AND COALESCE(reason."user_id", intent."subject_user_id") IS NOT NULL
-        AND (reason."rule_code" NOT IN (${Prisma.join([...MESSAGE_LIMITS_GUARDED_RULES, ...STOP_WORDS_DELETE_RULE_CODES, ...MODERATION_STATE_DELETE_RULES, ...CLOSED_CHAT_DELETE_RULE_CODES, REQUIRED_SUBSCRIPTION_DELETE_RULE_CODE])}) OR reason."metadata"->'moderationDeleteVerified' = 'true'::jsonb)
+        AND (reason."rule_code" NOT IN (${Prisma.join([...MESSAGE_LIMITS_GUARDED_RULES, ...STOP_WORDS_DELETE_RULE_CODES, ...MODERATION_STATE_DELETE_RULES, ...CLOSED_CHAT_DELETE_RULE_CODES, REQUIRED_SUBSCRIPTION_DELETE_RULE_CODE, COMMERCIAL_LLM_DELETE_RULE_CODE])}) OR reason."metadata"->'moderationDeleteVerified' = 'true'::jsonb)
         AND (${profanityVerified} OR reason."rule_code" <> ${PROFANITY_DELETE_RULE_CODE})
         AND (reason."rule_code" <> ${COMMERCIAL_TEXT_DELETE_RULE_CODE} OR ${commercialAttribution})
       ON CONFLICT ("id") DO NOTHING
@@ -7407,7 +7407,7 @@ export class ModerationDeleteIntentService {
         AND reason."moderation_event_id" IS NULL
         AND reason."event_type" IS NOT NULL
         AND COALESCE(reason."user_id", intent."subject_user_id") IS NOT NULL
-        AND (reason."rule_code" NOT IN (${Prisma.join([...MESSAGE_LIMITS_GUARDED_RULES, ...STOP_WORDS_DELETE_RULE_CODES, ...MODERATION_STATE_DELETE_RULES, ...CLOSED_CHAT_DELETE_RULE_CODES, REQUIRED_SUBSCRIPTION_DELETE_RULE_CODE])}) OR reason."metadata"->'moderationDeleteVerified' = 'true'::jsonb)
+        AND (reason."rule_code" NOT IN (${Prisma.join([...MESSAGE_LIMITS_GUARDED_RULES, ...STOP_WORDS_DELETE_RULE_CODES, ...MODERATION_STATE_DELETE_RULES, ...CLOSED_CHAT_DELETE_RULE_CODES, REQUIRED_SUBSCRIPTION_DELETE_RULE_CODE, COMMERCIAL_LLM_DELETE_RULE_CODE])}) OR reason."metadata"->'moderationDeleteVerified' = 'true'::jsonb)
         AND (${profanityVerified} OR reason."rule_code" <> ${PROFANITY_DELETE_RULE_CODE})
         AND (reason."rule_code" <> ${COMMERCIAL_TEXT_DELETE_RULE_CODE} OR ${commercialAttribution})
     `);

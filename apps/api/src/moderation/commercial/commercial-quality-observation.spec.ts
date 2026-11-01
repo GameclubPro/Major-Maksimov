@@ -31,6 +31,30 @@ const input = {
 };
 
 describe('commercial quality observation', () => {
+  it('does not describe an asynchronous AI source without a result as a completed deterministic KEEP', () => {
+    let sampled: ReturnType<typeof buildCommercialTextQualityObservation> = null;
+    for (let index = 0; !sampled && index < 100; index++) {
+      sampled = buildCommercialTextQualityObservation({
+        ...input,
+        messageId: `ai-pending-${index}`,
+        violation: undefined,
+        activeAiEnforcement: true,
+      });
+    }
+    expect(sampled).not.toBeNull();
+    expect(sampled).toMatchObject({
+      detectorVersion: 'commercial-ai-asynchronous-v1',
+      decisionOutcome: null,
+      deleteEligible: null,
+      executionOutcome: 'UNKNOWN',
+      analysisOutcome: 'NOT_APPLICABLE',
+      hasDetection: false,
+    });
+    expect(sampled?.candidateDecision).toMatchObject({
+      detectorVersion: 'commercial-intent-quality-v1',
+    });
+  });
+
   it('stores released permission and independent candidate without changing the violation', () => {
     const before = JSON.stringify(input.violation);
     const sample = buildCommercialTextQualityObservation(input)!;

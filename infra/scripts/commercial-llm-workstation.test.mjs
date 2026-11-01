@@ -225,7 +225,8 @@ test('online smoke waits for readiness to return between two examples sharing on
         released = true;
       },
     },
-    client: {
+    createCpuScope: (token) => ({ finish: () => deps.lease.release(token) }),
+    createClient: () => ({
       classify: async () => {
         assert.equal(
           ready,
@@ -250,7 +251,7 @@ test('online smoke waits for readiness to return between two examples sharing on
           },
         };
       },
-    },
+    }),
     hasHeadroom: async () => true,
     heartbeatKey: 'synthetic',
     matchesIdentity: (value) => value.modelAlias === identity.modelAlias,
@@ -262,6 +263,55 @@ test('online smoke waits for readiness to return between two examples sharing on
   assert.ok(reads >= 3);
   assert.ok(released && disconnected);
   validateWorkstationSmokeResponse(value, true);
+});
+
+test('smoke delegates uncertain CPU lease cleanup to its scope exactly once', async () => {
+  const { runWorkstationSmoke } = await import('./commercial-llm-workstation-smoke.cjs');
+  let finished = 0,
+    rawRelease = 0,
+    disconnected = false;
+  const scope = {
+    finish: async () => {
+      finished++;
+    },
+  };
+  await assert.rejects(
+    runWorkstationSmoke(
+      {
+        redis: {
+          connect: async () => {},
+          disconnect: () => {
+            disconnected = true;
+          },
+        },
+        lease: {
+          acquire: async () => 'owned',
+          owns: async () => true,
+          release: async () => {
+            rawRelease++;
+          },
+        },
+        createCpuScope: (token) => {
+          assert.equal(token, 'owned');
+          return scope;
+        },
+        createClient: (value) => {
+          assert.equal(value, scope);
+          return {
+            classify: async () => {
+              throw new Error('unknown_cpu');
+            },
+          };
+        },
+        hasHeadroom: async () => true,
+      },
+      false,
+    ),
+    /unknown_cpu/,
+  );
+  assert.equal(finished, 1);
+  assert.equal(rawRelease, 0);
+  assert.equal(disconnected, true);
 });
 
 test('smoke readiness has its own short precondition deadline and rejects foreign identity', async () => {

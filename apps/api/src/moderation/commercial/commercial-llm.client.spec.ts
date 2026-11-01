@@ -233,4 +233,67 @@ describe('bounded commercial LLM HTTP client', () => {
       }).classify('Привет'),
     ).rejects.toMatchObject({ kind: 'UNAVAILABLE', message: 'Commercial LLM UNAVAILABLE' });
   });
+
+  it('pins before actual dispatch and proves completion only after bounded validation', async () => {
+    const events: string[] = [];
+    const client = clientWith(async () => {
+      events.push('fetch');
+      return jsonResponse(completion());
+    });
+    await client.classifyWithLifecycle('Привет', undefined, {
+      beforeDispatch: async () => {
+        events.push('pin');
+      },
+      dispatched: () => {
+        events.push('dispatch');
+      },
+      completed: () => {
+        events.push('complete');
+      },
+    });
+    expect(events).toEqual(['pin', 'dispatch', 'fetch', 'complete']);
+  });
+
+  it('never dispatches when persistent pinning fails or cancellation arrives while pinning', async () => {
+    for (const gate of ['pin', 'abort'] as const) {
+      const controller = new AbortController();
+      const fetchImpl = jest.fn<ReturnType<typeof fetch>, Parameters<typeof fetch>>();
+      const dispatched = jest.fn();
+      const completed = jest.fn();
+      await expect(
+        clientWith(fetchImpl).classifyWithLifecycle('Привет', controller.signal, {
+          beforeDispatch: async () => {
+            if (gate === 'pin') throw new CommercialLlmError('ABORTED');
+            controller.abort();
+          },
+          dispatched,
+          completed,
+        }),
+      ).rejects.toMatchObject({ kind: 'ABORTED' });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(completed).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['timeout', 'invalid'] as const)(
+    'does not manufacture completion on %s',
+    async (failure) => {
+      const dispatched = jest.fn();
+      const completed = jest.fn();
+      const fetchImpl: typeof fetch =
+        failure === 'timeout'
+          ? async () => new Promise<Response>(() => undefined)
+          : async () => jsonResponse({});
+      await expect(
+        clientWith(fetchImpl, 10).classifyWithLifecycle('Привет', undefined, {
+          beforeDispatch: async () => {},
+          dispatched,
+          completed,
+        }),
+      ).rejects.toBeInstanceOf(CommercialLlmError);
+      expect(dispatched).toHaveBeenCalledTimes(1);
+      expect(completed).not.toHaveBeenCalled();
+    },
+  );
 });

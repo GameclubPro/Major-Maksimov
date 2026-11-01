@@ -68,6 +68,7 @@
         "packages/contracts/src/publisher-auto-replies.ts"
       ],
       "@maxim/contracts/safety-desk": ["packages/contracts/src/safety-desk.ts"],
+      "@maxim/contracts/commercial-ai-quality": ["packages/contracts/src/commercial-ai-quality.ts"],
       "@maxim/contracts/reports": ["packages/contracts/src/reports.ts"],
       "@maxim/contracts/settings-apply-error": ["packages/contracts/src/settings-apply-error.ts"],
       "@maxim/contracts/settings": ["packages/contracts/src/settings.ts"],

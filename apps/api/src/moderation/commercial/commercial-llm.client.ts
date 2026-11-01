@@ -15,6 +15,7 @@ import {
   COMMERCIAL_LLM_CHAT_TEMPLATE_SHA256,
   parseCommercialLlmDecision,
   type CommercialLlmDecision,
+  type CommercialLlmObservationResult,
 } from './commercial-llm.protocol';
 
 export const COMMERCIAL_LLM_RESPONSE_MAX_BYTES = 16 * 1024;
@@ -52,6 +53,19 @@ export type CommercialLlmClientOptions = {
   endpoint: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+};
+
+export type CommercialLlmHttpLifecycle = Readonly<{
+  beforeDispatch: () => Promise<void>;
+  dispatched: () => void;
+  completed: () => void;
+}>;
+export type CommercialLlmHttpClassifier = {
+  classifyWithLifecycle(
+    excerpt: string,
+    signal: AbortSignal | undefined,
+    lifecycle: CommercialLlmHttpLifecycle,
+  ): Promise<CommercialLlmObservationResult>;
 };
 
 export function commercialLlmCompletionUrl(endpoint: string): string {
@@ -93,6 +107,22 @@ export class CommercialLlmClient {
   }
 
   async classify(excerpt: string, signal?: AbortSignal): Promise<CommercialLlmResult> {
+    return this.execute(excerpt, signal);
+  }
+
+  async classifyWithLifecycle(
+    excerpt: string,
+    signal: AbortSignal | undefined,
+    lifecycle: CommercialLlmHttpLifecycle,
+  ): Promise<CommercialLlmResult> {
+    return this.execute(excerpt, signal, lifecycle);
+  }
+
+  private async execute(
+    excerpt: string,
+    signal?: AbortSignal,
+    lifecycle?: CommercialLlmHttpLifecycle,
+  ): Promise<CommercialLlmResult> {
     let request: ReturnType<typeof buildCommercialLlmRequest>;
     try {
       request = buildCommercialLlmRequest(excerpt);
@@ -115,7 +145,7 @@ export class CommercialLlmClient {
     });
     try {
       const decision = await Promise.race([
-        this.requestDecision(request, controller.signal),
+        this.requestDecision(request, controller.signal, lifecycle),
         aborted,
       ]);
       return {
@@ -147,7 +177,14 @@ export class CommercialLlmClient {
   private async requestDecision(
     request: ReturnType<typeof buildCommercialLlmRequest>,
     signal: AbortSignal,
+    lifecycle?: CommercialLlmHttpLifecycle,
   ): Promise<CommercialLlmDecision> {
+    signal.throwIfAborted();
+    await lifecycle?.beforeDispatch();
+    signal.throwIfAborted();
+    // FLAG: This synchronous hook is the actual HTTP handoff, not caller admission or timeout.
+    // The exact physical lease must already be pinned before fetch can start computing.
+    lifecycle?.dispatched();
     const response = await this.fetchImpl(this.completionUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -176,7 +213,11 @@ export class CommercialLlmClient {
     } catch {
       throw new CommercialLlmError('INVALID_RESPONSE');
     }
-    return parseCommercialLlmEnvelope(envelope, COMMERCIAL_LLM_MODEL_ALIAS);
+    const decision = parseCommercialLlmEnvelope(envelope, COMMERCIAL_LLM_MODEL_ALIAS);
+    // FLAG: Only a complete bounded, validated response proves the physical request finished.
+    // This hook belongs to the real request promise, even if its caller lost Promise.race.
+    lifecycle?.completed();
+    return decision;
   }
 }
 
