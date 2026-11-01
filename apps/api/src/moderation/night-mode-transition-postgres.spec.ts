@@ -817,6 +817,66 @@ describeNative('night mode durable handoffs with PostgreSQL and BullMQ', () => {
     expect(maxClient.deleteMessage).not.toHaveBeenCalled();
   }, 20_000);
 
+  it('keeps a new future close verifiable when PostgreSQL is ahead of the application clock', async () => {
+    const realNow = new Date();
+    const minute = realNow.getUTCHours() * 60 + realNow.getUTCMinutes();
+    await prisma.chatSettings.update({
+      where: { chatId },
+      data: {
+        nightModeStartTimeMinutes: (minute + 4 * 60) % 1440,
+        nightModeEndTimeMinutes: (minute + 20 * 60) % 1440,
+      },
+    });
+    // FLAG: Control the JS wall clock only; PostgreSQL/Redis clocks and all I/O timers stay real.
+    jest.useFakeTimers({
+      now: realNow.getTime() - 60_000,
+      doNotFake: [
+        'hrtime',
+        'nextTick',
+        'performance',
+        'queueMicrotask',
+        'setImmediate',
+        'clearImmediate',
+        'setInterval',
+        'clearInterval',
+        'setTimeout',
+        'clearTimeout',
+      ],
+    });
+    try {
+      const scheduler = createScheduler();
+      await expect(scheduler.repairAccessSchedule(chatId)).resolves.toMatchObject({
+        queueAvailable: true,
+        scheduleEnabled: true,
+      });
+      const rows = await prisma.nightModeTransitionScheduledJob.findMany({ where: { chatId } });
+      const closeRow = rows.find(
+        (row) => row.transition === 'close' && row.scheduledFor.getTime() > Date.now(),
+      )!;
+      expect(closeRow).toBeDefined();
+      expect(closeRow.createdAt.getTime()).toBeGreaterThan(Date.now());
+      const closeJob = (await queue.getJob(closeRow.jobId))!;
+      const marker = closeJob.data.stickyRouteProbe!;
+      expect(marker).toBeDefined();
+      expect(Date.parse(marker.authorizedAt)).toBeGreaterThanOrEqual(closeRow.createdAt.getTime());
+      expect(Date.parse(marker.authorizedAt)).toBeLessThan(closeRow.scheduledFor.getTime());
+      await expect(scheduler.repairAccessSchedule(chatId)).resolves.toMatchObject({
+        queueAvailable: true,
+        scheduleEnabled: true,
+      });
+      expect((await queue.getJob(closeRow.jobId))!.data).toEqual(closeJob.data);
+      expect(
+        (
+          await prisma.nightModeTransitionScheduledJob.findUniqueOrThrow({
+            where: { chatId_jobId: { chatId, jobId: closeRow.jobId } },
+          })
+        ).createdAt,
+      ).toEqual(closeRow.createdAt);
+    } finally {
+      jest.useRealTimers();
+    }
+  }, 20_000);
+
   it('fences an ambiguous close cleanup without retrying it or stopping the future schedule', async () => {
     const current = await prisma.chatSettings.findUniqueOrThrow({
       where: { chatId },

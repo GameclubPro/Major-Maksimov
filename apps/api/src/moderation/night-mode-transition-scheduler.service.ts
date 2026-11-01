@@ -1660,7 +1660,12 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
         options.reconcileFence,
       );
       try {
-        const stickyRouteProbe = this.buildFutureStickyRouteProbe(occurrence, scheduleFingerprint);
+        const stickyRouteProbe = await this.buildFutureStickyRouteProbe(
+          chatId,
+          jobId,
+          occurrence,
+          scheduleFingerprint,
+        );
         if (!isCurrentCatchUp) {
           await this.promoteFutureTransitionJob(jobId, scheduleFingerprint, stickyRouteProbe);
         }
@@ -3510,6 +3515,7 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
 
   private async listScheduledJobRegistryRows(
     chatIds: readonly string[],
+    jobId?: string,
   ): Promise<NightModeScheduledJobRegistryRow[]> {
     if (typeof this.prisma.$queryRaw === 'function') {
       return this.prisma.$queryRaw<NightModeScheduledJobRegistryRow[]>(Prisma.sql`
@@ -3525,13 +3531,14 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
           "created_at"
         FROM "night_mode_transition_scheduled_jobs"
         WHERE "chat_id" IN (${Prisma.join(chatIds)})
+          ${jobId === undefined ? Prisma.empty : Prisma.sql`AND "job_id" = ${jobId}`}
         ORDER BY "chat_id" ASC, "scheduled_for" ASC, "job_id" ASC
       `);
     }
 
     const chatIdSet = new Set(chatIds);
     return Array.from(this.fallbackScheduledJobRegistry.values())
-      .filter((row) => chatIdSet.has(row.chat_id))
+      .filter((row) => chatIdSet.has(row.chat_id) && (jobId === undefined || row.job_id === jobId))
       .sort(
         (left, right) =>
           left.chat_id.localeCompare(right.chat_id) ||
@@ -3544,7 +3551,7 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
     chatId: string,
     jobId: string,
   ): Promise<NightModeScheduledJobRegistryRow | null> {
-    const rows = await this.listScheduledJobRegistryRows([chatId]);
+    const rows = await this.listScheduledJobRegistryRows([chatId], jobId);
     return rows.find((row) => row.job_id === jobId) ?? null;
   }
 
@@ -3720,19 +3727,43 @@ export class NightModeTransitionSchedulerService implements OnModuleInit, OnModu
     return `${chatId}\u0000${jobId}`;
   }
 
-  private buildFutureStickyRouteProbe(
+  private async buildFutureStickyRouteProbe(
+    chatId: string,
+    jobId: string,
     occurrence: NightModeTransitionOccurrence,
     scheduleFingerprint: string,
-  ): NightModeStickyRouteProbe | undefined {
-    const authorizedAt = new Date();
-    if (occurrence.transition !== 'close' || occurrence.dueAt.getTime() <= authorizedAt.getTime()) {
+  ): Promise<NightModeStickyRouteProbe | undefined> {
+    if (occurrence.transition !== 'close' || occurrence.dueAt.getTime() <= Date.now()) {
+      return undefined;
+    }
+    const registry = await this.findScheduledJobRegistryRow(chatId, jobId);
+    const scheduledFor = occurrence.dueAt.toISOString();
+    if (
+      !this.registryMatchesFutureTransition(
+        registry,
+        {
+          chatId,
+          transition: occurrence.transition,
+          scheduledFor,
+          sessionKey: occurrence.sessionKey,
+        },
+        jobId,
+        scheduleFingerprint,
+      )
+    ) {
+      return undefined;
+    }
+    // FLAG: SQL timestamp rounding or clock skew must not put new-job authorization before its
+    // committed intent. Both clocks must still precede the exact future CLOSE boundary.
+    const authorizedAt = new Date(Math.max(Date.now(), registry.created_at.getTime()));
+    if (occurrence.dueAt.getTime() <= authorizedAt.getTime()) {
       return undefined;
     }
     return {
       kind: NIGHT_MODE_STICKY_ROUTE_PROBE_KIND,
       version: 1,
       authorizedAt: authorizedAt.toISOString(),
-      scheduledFor: occurrence.dueAt.toISOString(),
+      scheduledFor,
       sessionKey: occurrence.sessionKey,
       scheduleFingerprint,
     };

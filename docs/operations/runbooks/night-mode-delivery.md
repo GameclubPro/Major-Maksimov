@@ -25,6 +25,10 @@ retry an uncertain SEND to make a transition appear complete.
 - Opening and closing keep their existing logical SEND idempotency keys. Only a matching
   successful terminal ledger receipt proves delivery. An absent event or receipt is not proof
   that the message was never sent.
+- A future CLOSE authorization uses the later of the application clock and its exact committed
+  registry creation time. PostgreSQL timestamp rounding or clock skew must not invalidate a new
+  job; both times must still precede the scheduled boundary. Missing or mismatched registry proof
+  never grants sticky route authority, and an overdue job cannot acquire it retroactively.
 - Cleanup preserves current settings, session, selected executor and lease guards. A new night,
   changed schedule, missing exact message authority or unknown outcome never authorizes deletion
   of an older session's message. A matching persisted closing event with its original bot can
