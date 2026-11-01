@@ -1,7 +1,9 @@
 # MAXIM: безопасный рефакторинг и удобство работы агентов
 
-Дата: 1 ноября 2026. Актуальный проверенный source: `3096266b1f81ab50b82da759293fbcc5483f2ead`.
-Статус: **финальная редакция v4 после проверки безопасности 70 целей; runtime-рефакторинг не начат**.
+Дата исходного плана: 1 ноября 2026. Source исходного аудита: `3096266b1f81ab50b82da759293fbcc5483f2ead`.
+Статус плана: **финальная редакция v4 после проверки безопасности 70 целей**.
+Исполнение ведётся изолированными срезами с отдельным подтверждением каждого gate;
+наличие ID в каталоге не означает выполненную или выпущенную реализацию.
 Проверка безопасности: 01.11.2026 02:12 МСК. Основание и ограничения —
 [технический аудит](../../development/refactoring-audit-2026-11-01.md) и
 [оценка всех 70 целей](../../development/refactoring-plan-review-2026-11-01.md).
@@ -20,8 +22,8 @@ incident gates и границы разрешений. Он не разреша�
 
 Проверка безопасности каждой цели вынесена в
 [матрицу допуска и отката](../../development/refactoring-plan-review-2026-11-01.md#safety-matrix).
-План не является доказательством корректности будущего diff. Сейчас завершены анализ и
-документы; реализация выбранной цели проходит свой baseline, regression, CI и release gates.
+План не является доказательством корректности будущего diff. Анализ и документы относятся
+к исходному срезу; каждая выбранная реализация проходит свой baseline, regression, CI и release gates.
 Условие «стоп» относится к указанному execution scope, а не к возможности читать код или
 подготовить недостающую проверку. Ни один новый missing test не помечен исполненным.
 
@@ -110,6 +112,13 @@ result не считается независимой проверкой. При
    smoke, затем применимые acceptance gates. Для общего API image обновляются все
    роли/auxiliaries по действующей topology, stores не пересоздаются.
 
+Перед выпуском сравнить выбранный SHA с **активными component source SHA**, а не только
+с PR base: в диапазоне могут быть ещё не выпущенные изменения других задач. Для каждого
+унаследованного cross-product protocol подтвердить совместимый живой provider и порядок
+выпуска по его runbook; готовность собственной функции и зелёный PR этого не заменяют.
+Применить действующий paired-release fingerprint/admission, когда он нужен. MAXIM deploy
+не разрешает обновлять соседний продукт или обходить его gate.
+
 Документация/тесты/tooling не требуют runtime deploy. Планировочный dry-run не является
 проверкой. Не копировать старый CI success на новый SHA и не повторять зелёный aggregate
 для заполнения статуса. Точный набор проверок выбирается по реальному diff.
@@ -150,8 +159,9 @@ DROP, исправления checksum или нового live SQL collector и�
 
 ## P0 — подготовить проверяемые границы
 
-Микроцели описывают следующие изменения. Evidence финализации уже собрана в аудите,
-но selectors/decoder/runtime ещё не менялись. Ссылки E01–E11 ведут к разделам аудита.
+Таблицы описывают кандидатов и условия допуска, а не текущий реестр внедрений. Evidence
+исходной финализации собрана в аудите; актуальность выбранной границы проверяется на SHA
+её реализации. Ссылки E01–E11 ведут к разделам исходного аудита.
 
 | ID  | Зависимость                                             | Микроцель и конкретный результат                                                                                                                           | Проверка завершения                                                                                                                                                                                    |
 | --- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -277,15 +287,15 @@ session mocks — альтернативный путь; direct page fixture roo
 
 ## P2 — settings, dialog и events по границам состояния
 
-| ID  | Зависимость                                                 | Микроцель и конкретный результат                                                                                 | Проверка завершения                                                                                                                                                                                                   |
-| --- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| F01 | A01; concrete remaining cluster и свой A06, U01 при overlap | Выбрать ещё не выделенную presentation model одной settings section либо принять existing helper как достаточный | Польза consumer/context доказана; useSettingsDraft revision/conflict прежние; section metadata/shared rendering уже существуют; независимый срез не ждёт U02/U06, допускается no-op                                   |
-| F02 | A01; свой section census и browser baseline                 | Для allowlist вынести только bounded presentation через existing ReactNode port и прежние callbacks              | Immediate add/remove/schedule, count/payload/errors/invalidation прежние; React type/key/DOM placement/focus/local state стабильны на rerender; нет нового remount/stale-callback policy; controller move отдельно    |
-| F03 | A01; A06 для dialog, C04 если меняется fixture              | Вынести только immutable merge/update/remove/toggle cluster, сохранив structural sharing без JSX/MAX handlers    | Input не мутирует, unrelated message identity сохранена, update idempotent, reaction state корректен; double-toggle сравнивает semantics без требования прежнего sort order; tests не повторяют loop                  |
-| F07 | A01; свой attachment baseline                               | Вынести только existing CommentMessageAttachments с прежними props/keys/DOM/click handlers; F03 не prerequisite  | MIME/URL/missing fallback, click propagation/album index и stable React/DOM identity на rerender; gallery/modal/native Back/download/scroll owners прежние; compose/viewer/lazy-loading не включаются автоматически   |
-| F04 | A01; свой async attachment corpus и реальные runtime mounts | Выделить один owner generation/cancel/async preparation только у реально затронутого dialog flow                 | API/user/profile/entity/chat/dialog/token/capability и A→B→A epoch сохранены; late import/read/edit/unmount, limits/partial results и cleanup; active suggest — отдельный keyed page, старые ветки не расширяют scope |
-| F05 | A01; A06 для реально затронутого dialog и behavioral corpus | Сначала выделить query + terminal-stop owner одного runtime dialog; mutation family и suggest page отдельно      | Таймер/refocus/retry/in-flight прекращаются после terminal, A→B→A и same-user auth remount fenced; moderation/Publisher проверяются явно; canonical QueryClient/key и reaction rollback за своим scope                |
-| F06 | A01; свой A06 и real EventsPage read-state baseline         | Выделить только dashboard query/snapshot/read model; participant mutations и review workspace оставить           | Keyed chat/range/include flags, initialDataUpdatedAt=0, delayed hydration и display/current/authoritative identity; cached-only snapshot не разрешает mutation; feed hook tests не заменяют page behavior             |
+| ID  | Зависимость                                                 | Микроцель и конкретный результат                                                                                                 | Проверка завершения                                                                                                                                                                                                                                                                                                                                                          |
+| --- | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F01 | A01; concrete remaining cluster и свой A06, U01 при overlap | Выбрать ещё не выделенную presentation model одной settings section либо принять existing helper как достаточный                 | Польза consumer/context доказана; useSettingsDraft revision/conflict прежние; section metadata/shared rendering уже существуют; независимый срез не ждёт U02/U06, допускается no-op                                                                                                                                                                                          |
+| F02 | A01; свой section census и browser baseline                 | Для allowlist вынести только bounded presentation через existing ReactNode port и прежние callbacks                              | Immediate add/remove/schedule, count/payload/errors/invalidation прежние; React type/key/DOM placement/focus/local state стабильны на rerender; нет нового remount/stale-callback policy; controller move отдельно                                                                                                                                                           |
+| F03 | A01; A06 для dialog, C04 если меняется fixture              | Первым вынести только existing 59-line `toggleDialogReactionLocally`; mutation callbacks и независимый preview transport прежние | Frozen input и unrelated references сохранены, outputs заданы literal. Inverse только для unique-emoji groups с не более одной own при initial no-own либо own=target; сравнивать per-emoji count/own без требования исходного порядка. Switch→remove имеет отдельный literal expected, прежняя reaction не восстанавливается; cancel/snapshot/update/rollback order прежний |
+| F07 | A01; свой attachment baseline                               | Вынести только existing CommentMessageAttachments с прежними props/keys/DOM/click handlers; F03 не prerequisite                  | MIME/URL/missing fallback, click propagation/album index и stable React/DOM identity на rerender; gallery/modal/native Back/download/scroll owners прежние; compose/viewer/lazy-loading не включаются автоматически                                                                                                                                                          |
+| F04 | A01; свой async attachment corpus и реальные runtime mounts | Выделить один owner generation/cancel/async preparation только у реально затронутого dialog flow                                 | API/user/profile/entity/chat/dialog/token/capability и A→B→A epoch сохранены; late import/read/edit/unmount, limits/partial results и cleanup; active suggest — отдельный keyed page, старые ветки не расширяют scope                                                                                                                                                        |
+| F05 | A01; A06 для реально затронутого dialog и behavioral corpus | Сначала выделить query + terminal-stop owner одного runtime dialog; mutation family и suggest page отдельно                      | Таймер/refocus/retry/in-flight прекращаются после terminal, A→B→A и same-user auth remount fenced; moderation/Publisher проверяются явно; canonical QueryClient/key и reaction rollback за своим scope                                                                                                                                                                       |
+| F06 | A01; свой A06 и real EventsPage read-state baseline         | Выделить только dashboard query/snapshot/read model; participant mutations и review workspace оставить                           | Keyed chat/range/include flags, initialDataUpdatedAt=0, delayed hydration и display/current/authoritative identity; cached-only snapshot не разрешает mutation; feed hook tests не заменяют page behavior                                                                                                                                                                    |
 
 F03 не зависит от удаления settings-кода и может быть выбран следующим этапом вместо
 F01/F02, но не вести оба runtime этапа одновременно. Имеющиеся feed/rules/subscription
@@ -381,8 +391,9 @@ quotas/concurrency, очистка Redis/очередей и удаление un
 ## Первый практический цикл
 
 1. A01: выбрать одну границу и заморозить source. Для native CI gap — узкие A02/A12,
-   один A03 и применимый A11. Восемь кандидатов уже прошли локально на старом baseline;
-   selectors ещё не исправлены. Сохранять свежесть receipts по изменившимся inputs.
+   один A03 и применимый A11. Восемь кандидатов исходного аудита прошли локально на его baseline;
+   перед выбором проверить текущие selectors и выполненные срезы, исключив уже закрытые gaps.
+   Сохранять свежесть receipts по изменившимся inputs.
 2. Для agent workflow сначала маленький A10. Из structural runtime кандидатов первым
    рассмотреть T04 либо F03: оба имеют ограниченный pure seam. Если текущая задача UI,
    она не ждёт устранения unrelated backend CI gap. Выбор зависит от нужного домена.
