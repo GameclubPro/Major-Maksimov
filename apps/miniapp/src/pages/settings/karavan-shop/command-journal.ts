@@ -238,17 +238,35 @@ async function transaction<T>(
     }
   });
 }
+function compactShopReceipts(
+  results: ShopCommandJournal['results'],
+  latestOwner?: string,
+): ShopCommandJournal['results'] {
+  const entries = Object.entries(results);
+  if (entries.length <= 40) return results;
+  const recent = [...entries].reverse();
+  const retained = new Set(latestOwner && Object.hasOwn(results, latestOwner) ? [latestOwner] : []);
+  // FLAG: Per-application receipts must not evict the fixed owners that restore
+  // invitation links and appearance. Pending commands and their media are separate.
+  for (const [owner] of [
+    ...recent.filter(([owner]) => !owner.startsWith('application:')),
+    ...recent,
+  ]) {
+    retained.add(owner);
+    if (retained.size === 40) break;
+  }
+  return Object.fromEntries(entries.filter(([owner]) => retained.has(owner)));
+}
 function checked(value: unknown): ShopCommandJournal {
   const parsed = journalSchema.safeParse(value);
-  if (
-    !parsed.success ||
-    parsed.data.key !== shopJournalKey(parsed.data.scope) ||
-    Object.keys(parsed.data.results).length > 40
-  )
+  if (!parsed.success || parsed.data.key !== shopJournalKey(parsed.data.scope))
     throw new Error(
       'Сохранённое действие повреждено. Повторите загрузку или обратитесь в поддержку.',
     );
-  return parsed.data as ShopCommandJournal;
+  const journal = parsed.data as ShopCommandJournal;
+  // FLAG: Older clients could persist more than 40 completed owners. Normalize
+  // only receipts; reading recovery never changes the original pending command.
+  return { ...journal, results: compactShopReceipts(journal.results) };
 }
 function scopeMatches(scope: ShopJournalScope, request: MarketplaceManagementRequest) {
   return (
@@ -524,20 +542,24 @@ export async function settleShopCommand(
       };
     if (response?.operation === 'appearance_apply' || response?.operation === 'appearance_save')
       appearanceDraft = null;
+    if (response) delete results[pending.ui.owner];
     return {
       ...current,
       revision: current.revision + 1,
       pending: null,
       appearanceDraft,
       results: response
-        ? {
-            ...results,
-            [pending.ui.owner]: {
-              ui: pending.ui,
-              request: pending.request as MarketplaceManagementRequest,
-              response,
+        ? compactShopReceipts(
+            {
+              ...results,
+              [pending.ui.owner]: {
+                ui: pending.ui,
+                request: pending.request as MarketplaceManagementRequest,
+                response,
+              },
             },
-          }
+            pending.ui.owner,
+          )
         : results,
     };
   });

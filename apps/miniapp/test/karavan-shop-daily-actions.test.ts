@@ -4,6 +4,7 @@ import { ApiRequestError } from '../src/lib/api-request-error';
 import { shopMutationFailureKind } from '../src/pages/settings/karavan-shop/command-failure';
 import {
   sameShopRules,
+  orderedShopCategories,
   shopRulesRequireAcceptance,
   shopRulesNeedConfirmation,
   type ShopRules,
@@ -52,6 +53,24 @@ test('semantic rules equality ignores selection insertion order and schema-trimm
   assert.equal(
     sameShopRules(rules, { ...rules, allowedSubcategoryIds: ['services.repair'] }),
     false,
+  );
+});
+
+test('category order retains explicit ranks and exposes unranked categories in the public feed order', () => {
+  const unordered = { ...rules, categoryOrder: [] };
+  assert.deepEqual(orderedShopCategories(unordered), ['real_estate', 'services']);
+  assert.equal(
+    sameShopRules(unordered, { ...unordered, categoryOrder: ['real_estate', 'services'] }),
+    true,
+  );
+  assert.equal(sameShopRules(unordered, rules), false);
+  assert.deepEqual(
+    orderedShopCategories({
+      ...rules,
+      allowedCategoryIds: ['services', 'grocery', 'real_estate'],
+      categoryOrder: ['services'],
+    }),
+    ['services', 'grocery', 'real_estate'],
   );
 });
 

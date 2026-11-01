@@ -273,10 +273,178 @@ try {
         assert.deepEqual(confirmed.results[operation], settled.results[operation]);
         await second.close();
       }
+      const history = await page.evaluate(async (scope) => {
+        const h = globalThis.h;
+        const completed = [];
+        const decide = async (applicationId) => {
+          const request = h.prepareShopRequest(scope, {
+            operation: 'decide',
+            applicationId,
+            input: {
+              commandId: crypto.randomUUID(),
+              expectedRevision: 1,
+              decision: 'approve',
+              reason: null,
+            },
+          });
+          const response = {
+            operation: 'decide',
+            data: {
+              listing: {
+                id: applicationId,
+                marketplaceId: scope.marketplaceId,
+                storeId: applicationId,
+                storeName: 'Продавец',
+                marketplaceName: 'Магазин соседей',
+                revision: 2,
+                reviewState: 'approved',
+                sellerState: 'enabled',
+                publicationReason: 'published',
+                rank: '1',
+                approvedProfileVersionId: applicationId,
+                pendingApplicationId: null,
+                acceptedRulesVersion: 1,
+                requiredRulesVersion: 1,
+                decisionReason: null,
+              },
+            },
+          };
+          const reserved = await h.reserveShopCommand(scope, request, {
+            owner: `application:${applicationId}`,
+            page: 'applications',
+          });
+          const settled = await h.settleShopCommand(await h.claimShopCommand(reserved), response);
+          if (Object.keys(settled.results).length > 40)
+            throw new Error('Completed application receipts must remain bounded');
+          return request.commandId;
+        };
+        for (let index = 0; index < 45; index++) {
+          const id = crypto.randomUUID();
+          completed.push(id);
+          await decide(id);
+        }
+        const refreshedOwner = `application:${completed[10]}`;
+        const refreshedId = await decide(completed[10]);
+        for (let index = 0; index < 10; index++) {
+          const id = crypto.randomUUID();
+          completed.push(id);
+          await decide(id);
+        }
+        const journal = await h.loadShopCommandJournal(scope);
+        return { journal, completed, refreshedOwner, refreshedId };
+      }, scope);
+      assert.equal(Object.keys(history.journal.results).length, 40);
+      assert.equal(history.journal.pending, null);
+      assert.equal(history.journal.results[`application:${history.completed[0]}`], undefined);
+      assert.equal(
+        history.journal.results[history.refreshedOwner].request.commandId,
+        history.refreshedId,
+        'repeated owner retains its latest receipt after later applications',
+      );
+      assert.ok(history.journal.results[`application:${history.completed.at(-1)}`]);
+      for (const operation of ['image', 'appearance_apply', 'invitation_create'])
+        assert.equal(history.journal.results[operation].response.operation, operation);
+
+      const overflow = await page.evaluate(async (scope) => {
+        const h = globalThis.h;
+        const request = h.prepareShopRequest(scope, {
+          operation: 'image',
+          input: {
+            commandId: crypto.randomUUID(),
+            fileName: 'legacy.jpg',
+            mimeType: 'image/jpeg',
+            dataBase64: 'AQIDBAUGBwg=',
+          },
+        });
+        let journal = await h.claimShopCommand(
+          await h.reserveShopCommand(scope, request, {
+            owner: 'legacy-image',
+            page: 'appearance',
+            imageTarget: 'coverImageUrl',
+          }),
+        );
+        try {
+          await h.dispatchShopRequest(h.transport, await h.restoreShopCommand(journal));
+          throw new Error('Expected lost response');
+        } catch (cause) {
+          if (cause.message === 'Expected lost response') throw cause;
+          journal = await h.releaseShopCommand(journal);
+        }
+        const sample = Object.values(journal.results).find(
+          (receipt) => receipt.response.operation === 'decide',
+        );
+        const legacy = structuredClone(journal);
+        for (let index = 0; index < 45; index++) {
+          const owner = `application:${crypto.randomUUID()}`;
+          legacy.results[owner] = { ...sample, ui: { ...sample.ui, owner } };
+        }
+        await new Promise((resolve, reject) => {
+          const opened = indexedDB.open('major-shop-commands', 1);
+          opened.onerror = () => reject(opened.error);
+          opened.onsuccess = () => {
+            const db = opened.result;
+            const tx = db.transaction('journals', 'readwrite');
+            tx.objectStore('journals').put(legacy);
+            tx.oncomplete = () => {
+              db.close();
+              resolve();
+            };
+            tx.onerror = tx.onabort = () => {
+              db.close();
+              reject(tx.error);
+            };
+          };
+        });
+        return { request, pending: journal.pending, revision: journal.revision };
+      }, scope);
+      await page.reload();
+      await page.waitForFunction(() => Boolean(globalThis.h));
+      const recovered = await page.evaluate(async (scope) => {
+        const h = globalThis.h;
+        const journal = await h.loadShopCommandJournal(scope);
+        let fenced = false;
+        try {
+          await h.assertShopEntryWriteAvailable(
+            scope.actorMaxUserId,
+            scope.chatId,
+            scope.marketplaceId,
+          );
+        } catch {
+          fenced = true;
+        }
+        return { journal, request: await h.restoreShopCommand(journal), fenced };
+      }, scope);
+      assert.equal(Object.keys(recovered.journal.results).length, 40);
+      assert.equal(recovered.journal.revision, overflow.revision);
+      assert.deepEqual(recovered.journal.pending, overflow.pending);
+      assert.deepEqual(recovered.request, overflow.request);
+      assert.equal(recovered.fenced, true, 'legacy overflow must preserve the pending write fence');
+      assert.equal(
+        attempts.get(overflow.request.commandId),
+        1,
+        'history recovery never dispatches',
+      );
+      const replayed = await page.evaluate(async (scope) => {
+        const h = globalThis.h;
+        const claimed = await h.claimShopCommand(await h.loadShopCommandJournal(scope));
+        const response = await h.dispatchShopRequest(
+          h.transport,
+          await h.restoreShopCommand(claimed),
+        );
+        return h.settleShopCommand(claimed, response);
+      }, scope);
+      assert.equal(replayed.pending, null);
+      assert.equal(replayed.results['legacy-image'].request.commandId, overflow.request.commandId);
+      assert.equal(Object.keys(replayed.results).length, 40);
+      assert.equal(
+        attempts.get(overflow.request.commandId),
+        2,
+        'explicit replay uses the original command',
+      );
       assert.deepEqual(errors, []);
       await context.close();
       process.stdout.write(
-        `${engine}: lost committed response, exact retry after reload, persistent binary/result, actor/generation/shared-shop fences and concurrent lease passed\n`,
+        `${engine}: lost committed response, exact retry after reload, persistent binary/result, actor/generation/shared-shop fences, concurrent lease and bounded legacy receipt recovery passed\n`,
       );
     } finally {
       await browser.close();

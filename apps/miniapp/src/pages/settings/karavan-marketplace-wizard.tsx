@@ -568,7 +568,9 @@ export default function KaravanMarketplaceWizard({
                         />
                         {category.label}
                       </label>
-                      {draft.categories.includes(category.id) && category.subcategories.length ? (
+                      {category.id !== 'real_estate' &&
+                      draft.categories.includes(category.id) &&
+                      category.subcategories.length ? (
                         <details className="karavan-module__subcategories">
                           <summary>
                             Направления ·{' '}

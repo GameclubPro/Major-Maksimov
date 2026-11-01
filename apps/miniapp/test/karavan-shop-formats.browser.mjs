@@ -12,6 +12,7 @@ import {
   settleVisualFrame,
 } from '../../../scripts/miniapp-smartphone.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
+import { runShopCategoryChecks } from './karavan-shop-categories.browser.mjs';
 
 const fixtures = resolve(import.meta.dirname, '../build/shop-browser-fixtures');
 await mkdir(fixtures, { recursive: true });
@@ -127,6 +128,14 @@ try {
           };
           const choose = (label) =>
             home.getByRole('button', { name: new RegExp(`^${label}`) }).click();
+
+          if (process.env.SHOP_CATEGORY_ONLY === '1') {
+            await runShopCategoryChecks({ begin, page, home, requests, shot });
+            assert.deepEqual(errors, []);
+            profiles++;
+            console.log(`${engineName}/${width}/${theme}: categories passed`);
+            continue;
+          }
 
           await begin('format_setup');
           await home
@@ -460,6 +469,7 @@ try {
             );
             await shot(`${scenario}-saved`, panel);
           }
+          await runShopCategoryChecks({ begin, page, home, requests, shot });
           assert.deepEqual(errors, []);
           profiles++;
           console.log(
@@ -478,3 +488,10 @@ try {
   await stopChildProcess(server);
   await rm(fixture, { recursive: true, force: true });
 }
+if (
+  process.env.SHOP_CATEGORY_ONLY !== '1' &&
+  process.env.SHOP_FORMAT_ONLY_CHOICE !== '1' &&
+  !process.env.SHOP_FORMAT_ENGINE &&
+  !process.env.SHOP_FORMAT_THEME
+)
+  await import('./karavan-shop-command-journal.browser.mjs');

@@ -14,6 +14,7 @@ import {
 } from './runtime';
 import {
   sameShopRules,
+  orderedShopCategories,
   shopRulesRequireAcceptance,
   shopRulesNeedConfirmation,
 } from './category-changes';
@@ -52,6 +53,7 @@ export default function ShopCategories() {
     [error, setError] = useState<unknown>(null);
   const [arranging, setArranging] = useState(false);
   const value = draft ?? query.data?.rules;
+  const categoryOrder = value ? orderedShopCategories(value) : [];
   const changed = !!draft && !!query.data && !sameShopRules(draft, query.data.rules);
   useStorefrontDirty('categories', changed || checking || mutation.uncertain);
   if (query.isPending || options.isPending) return <ShopLoading />;
@@ -145,6 +147,7 @@ export default function ShopCategories() {
       >
         {options.data.categories.map((category) => {
           const enabled = value.allowedCategoryIds.includes(category.id);
+          const subcategories = category.id === 'real_estate' ? [] : category.subcategories;
           return (
             <details key={category.id} className="karavan-shop__category">
               <summary>
@@ -156,24 +159,20 @@ export default function ShopCategories() {
                   type="checkbox"
                   checked={
                     enabled &&
-                    category.subcategories.every((row) =>
-                      value.allowedSubcategoryIds.includes(row.id),
-                    )
+                    subcategories.every((row) => value.allowedSubcategoryIds.includes(row.id))
                   }
                   ref={(input) => {
                     if (input)
                       input.indeterminate =
                         enabled &&
-                        category.subcategories.some(
-                          (row) => !value.allowedSubcategoryIds.includes(row.id),
-                        );
+                        subcategories.some((row) => !value.allowedSubcategoryIds.includes(row.id));
                   }}
                   onChange={(event) => {
                     const next = event.target.checked;
                     change({
                       ...value,
                       allowedCategoryIds: next
-                        ? [...value.allowedCategoryIds, category.id]
+                        ? [...new Set([...value.allowedCategoryIds, category.id])]
                         : value.allowedCategoryIds.filter((id) => id !== category.id),
                       allowedSubcategoryIds: next
                         ? [
@@ -195,7 +194,7 @@ export default function ShopCategories() {
                 />
                 Вся категория
               </label>
-              {category.subcategories.map((subcategory) => (
+              {subcategories.map((subcategory) => (
                 <label className="karavan-shop__check" key={subcategory.id}>
                   <input
                     type="checkbox"
@@ -223,16 +222,16 @@ export default function ShopCategories() {
             </details>
           );
         })}
-        {value.categoryOrder.length > 1 ? (
+        {categoryOrder.length > 1 ? (
           <div>
             <button type="button" aria-pressed={arranging} onClick={() => setArranging(!arranging)}>
               {arranging ? 'Готово' : 'Изменить порядок категорий'}
             </button>
             {arranging
-              ? value.categoryOrder.map((id, index) => {
+              ? categoryOrder.map((id, index) => {
                   const label = options.data.categories.find((item) => item.id === id)?.label ?? id;
                   const move = (offset: number) => {
-                    const next = [...value.categoryOrder];
+                    const next = [...categoryOrder];
                     [next[index], next[index + offset]] = [next[index + offset]!, next[index]!];
                     change({ ...value, categoryOrder: next });
                   };
@@ -250,7 +249,7 @@ export default function ShopCategories() {
                       <button
                         type="button"
                         aria-label={`Ниже: ${label}`}
-                        disabled={index === value.categoryOrder.length - 1}
+                        disabled={index === categoryOrder.length - 1}
                         onClick={() => move(1)}
                       >
                         ↓

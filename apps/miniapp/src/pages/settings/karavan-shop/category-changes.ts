@@ -5,12 +5,20 @@ export type ShopRules = Extract<
   { operation: 'rules_preview' }
 >['input']['rules'];
 
+export function orderedShopCategories(rules: ShopRules): ShopRules['categoryOrder'] {
+  const explicit = rules.categoryOrder.filter((id) => rules.allowedCategoryIds.includes(id));
+  const remaining = rules.allowedCategoryIds
+    .filter((id) => !explicit.includes(id))
+    .sort((left, right) => left.localeCompare(right));
+  return [...new Set([...explicit, ...remaining])];
+}
+
 export function sameShopRules(left: ShopRules, right: ShopRules): boolean {
   const normalize = (rules: ShopRules) => ({
     text: rules.text.trim(),
     categories: [...new Set(rules.allowedCategoryIds)].sort(),
     subcategories: [...new Set(rules.allowedSubcategoryIds)].sort(),
-    order: rules.categoryOrder,
+    order: orderedShopCategories(rules),
   });
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
