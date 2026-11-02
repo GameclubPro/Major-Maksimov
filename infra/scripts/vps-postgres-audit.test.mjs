@@ -1909,6 +1909,7 @@ test('closed webhook cohorts retain the bounded read-only envelope and reject op
   assert.match(sql, /ordinal <= 512/u);
   assert.match(sql, /closed_webhook_cohort/u);
   assert.match(sql, /NO_REPLAY_HELD/u);
+  assert.match(readFileSync(data.dockerArgs, 'utf8'), /search_path=pg_catalog,public,pg_temp/u);
   assert.equal(runAudit(data, ['webhook-cohort', '--explain']).status, 0);
   assert.match(readFileSync(data.sql, 'utf8'), /EXPLAIN \(FORMAT JSON\)/u);
   assert.doesNotMatch(readFileSync(data.sql, 'utf8'), /EXPLAIN ANALYZE/u);
@@ -1922,6 +1923,7 @@ test('closed webhook cohorts retain the bounded read-only envelope and reject op
     assert.match(shortSql, /interval '30 seconds' AS until_at/u);
     assert.match(shortSql, /ORDER BY created_at, id LIMIT 513/u);
     assert.match(shortSql, /ordinal <= 512/u);
+    assert.match(readFileSync(data.dockerArgs, 'utf8'), /search_path=pg_catalog,public,pg_temp/u);
     assert.equal(shortSql.includes('EXPLAIN (FORMAT JSON)'), flags.includes('--explain'));
     assert.equal(runConnect(data, ['postgres-audit', 'webhook-cohort', ...flags]).status, 0);
     assert.match(readFileSync(data.sshArgs, 'utf8'), /--short/u);
@@ -1952,6 +1954,146 @@ test('closed webhook cohorts retain the bounded read-only envelope and reject op
   }
   assert.equal(runAudit(data, ['all']).status, 0);
   assert.doesNotMatch(readFileSync(data.sql, 'utf8'), /closed_webhook_cohort/u);
+});
+
+test('failed webhook windows preserve fixed bounds and guard both report and plain EXPLAIN', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  const from = '2026-11-02T01:35:00Z';
+  const until = '2026-11-02T02:05:00Z';
+  for (const options of [
+    ['--failed-window', from, until],
+    ['--failed-window', from, until, '--explain'],
+    ['--explain', '--failed-window', from, until],
+  ]) {
+    const result = runAudit(data, ['webhook-cohort', ...options]);
+    assert.equal(result.status, 0, result.stderr);
+    const sql = readFileSync(data.sql, 'utf8');
+    assert.match(sql, /^BEGIN READ ONLY;$/mu);
+    assert.match(sql, /^COMMIT;$/mu);
+    assert.ok(sql.includes(from.slice(0, -1)));
+    assert.ok(sql.includes(until.slice(0, -1)));
+    const closedGuard = sql.indexOf('MAXIM_WEBHOOK_FAILED_WINDOW_NOT_CLOSED');
+    const indexGuard = sql.indexOf('MAXIM_WEBHOOK_FAILED_WINDOW_INDEX_UNAVAILABLE');
+    const report = /'audit',\s*'failed_webhook_window'/u.exec(sql);
+    assert.ok(closedGuard >= 0);
+    assert.ok(indexGuard > closedGuard, 'closed-window refusal precedes index admission');
+    assert.ok(report && report.index > indexGuard, 'index admission precedes report planning');
+    assert.match(sql.slice(0, indexGuard), /webhook_events_status_created_at_id_idx/u);
+    assert.match(sql.slice(0, indexGuard), /webhook_events_pkey/u);
+    assert.match(sql, /FROM public\.webhook_events/u);
+    assert.match(sql, /ORDER BY created_at, id LIMIT 513/u);
+    assert.match(sql, /ORDER BY created_at, id LIMIT 512/u);
+    assert.match(sql, /'status_scope',\s*'FAILED'/u);
+    assert.match(sql, /'remote_effects_proven',\s*false/u);
+    assert.match(sql, /'saved_metadata_only'/u);
+    assert.equal(sql.includes('EXPLAIN (FORMAT JSON)'), options.includes('--explain'));
+    if (options.includes('--explain')) assert.ok(sql.indexOf('EXPLAIN (FORMAT JSON)') > indexGuard);
+    assert.doesNotMatch(sql, /EXPLAIN\s+ANALYZE|FOR UPDATE/iu);
+    assert.doesNotMatch(sql, /'audit',\s*'closed_webhook_cohort'/u);
+
+    const dockerArgs = readFileSync(data.dockerArgs, 'utf8');
+    for (const expected of [
+      'PGOPTIONS=',
+      'search_path=pg_catalog,public,pg_temp',
+      'default_transaction_read_only=on',
+      'statement_timeout=2500ms',
+      'lock_timeout=250ms',
+      'idle_in_transaction_session_timeout=4s',
+      'max_parallel_workers_per_gather=0',
+      'work_mem=1MB',
+      'ON_ERROR_STOP=1',
+      'ECHO=none',
+      'VERBOSITY=terse',
+      'SHOW_CONTEXT=never',
+    ])
+      assert.ok(dockerArgs.includes(expected), expected);
+    assert.match(dockerArgs, /-U\nmaxim_audit\n/u);
+
+    const connected = runConnect(data, ['postgres-audit', 'webhook-cohort', ...options]);
+    assert.equal(connected.status, 0, connected.stderr);
+    const sshArgs = readFileSync(data.sshArgs, 'utf8');
+    assert.match(sshArgs, /vps-postgres-audit\.sh\\ webhook-cohort/u);
+    assert.ok(sshArgs.includes('--failed-window'));
+    assert.equal(sshArgs.split(from).length - 1, 1);
+    assert.equal(sshArgs.split(until).length - 1, 1);
+    assert.ok(sshArgs.indexOf(from) < sshArgs.indexOf(until));
+    assert.equal(sshArgs.includes('--explain'), options.includes('--explain'));
+  }
+
+  assert.equal(runAudit(data, ['all']).status, 0);
+  assert.doesNotMatch(
+    readFileSync(data.sql, 'utf8'),
+    /failed_webhook_window|MAXIM_WEBHOOK_FAILED_WINDOW/u,
+  );
+});
+
+test('failed webhook window syntax is refused locally before SSH or Docker', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  const from = '2026-11-02T01:35:00Z';
+  const until = '2026-11-02T02:05:00Z';
+  for (const options of [
+    ['--failed-window'],
+    ['--failed-window', from],
+    ['--failed-window', from, from],
+    ['--failed-window', until, from],
+    ['--failed-window', from, '2026-11-02T02:06:00Z'],
+    ['--failed-window', '0000-11-02T01:35:00Z', '0000-11-02T02:05:00Z'],
+    ['--failed-window', '2026-02-30T01:35:00Z', '2026-02-30T02:05:00Z'],
+    ['--failed-window', '2026-11-02T01:35:00+00:00', until],
+    ['--failed-window', '2026-11-02T01:35:01Z', until],
+    ['--failed-window', `${from}'; SELECT 1; --`, until],
+    ['--failed-window', '/tmp/query.sql', until],
+    ['--short', '--failed-window', from, until],
+    ['--failed-window', from, until, '--short'],
+    ['--failed-window', from, until, '--failed-window', from, until],
+    ['--explain', '--failed-window', from, until, '--explain'],
+    ['--failed-window', from, until, '--explain=analyze'],
+    ['--failed-window', from, until, '--apply'],
+    ['--failed-window', from, until, 'FAILED'],
+    ['--failed-window', from, until, 'SELECT 1'],
+  ]) {
+    for (const path of [data.dockerArgs, data.allDockerCalls, data.sshArgs])
+      rmSync(path, { force: true });
+    const direct = runAudit(data, ['webhook-cohort', ...options]);
+    const connected = runConnect(data, ['postgres-audit', 'webhook-cohort', ...options]);
+    assert.equal(direct.status, 2, JSON.stringify(options));
+    assert.equal(connected.status, 2, JSON.stringify(options));
+    for (const path of [data.dockerArgs, data.allDockerCalls, data.sshArgs])
+      assert.equal(existsSync(path), false, path);
+  }
+});
+
+test('failed webhook windows retain private errors, exact cleanup and the wall-time ceiling', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  const args = [
+    'webhook-cohort',
+    '--failed-window',
+    '2026-11-02T01:35:00Z',
+    '2026-11-02T02:05:00Z',
+  ];
+  for (const options of [[], ['--explain']]) {
+    const failed = runAudit(data, [...args, ...options], { MOCK_AUDIT_FAIL: '1' });
+    assert.equal(failed.status, 7, failed.stderr);
+    assert.match(failed.stderr, /Bounded webhook cohort audit failed closed/u);
+    assert.doesNotMatch(failed.stdout + failed.stderr, /fixture-event|ERROR near/u);
+    const appName = /PGAPPNAME=(maxim-bounded-audit-[A-Za-z0-9-]+)/u.exec(
+      readFileSync(data.dockerArgs, 'utf8'),
+    )?.[1];
+    assert.ok(appName);
+    const cleanup = readFileSync(data.cleanupArgs, 'utf8');
+    assert.match(cleanup, new RegExp(`application_name = '${appName}'`, 'u'));
+    assert.match(cleanup, /pg_terminate_backend\(live\.pid\)/u);
+    assert.match(cleanup, /HAVING count\(\*\) = 1/u);
+    assert.match(cleanup, /live\.backend_start = singleton\.backend_start/u);
+  }
+  rmSync(data.allDockerCalls, { force: true });
+  const tooWideBudget = runAudit(data, args, { MAXIM_POSTGRES_AUDIT_WALL_TIMEOUT_SEC: '9' });
+  assert.equal(tooWideBudget.status, 2, tooWideBudget.stderr);
+  assert.match(tooWideBudget.stderr, /integer between 1 and 8/u);
+  assert.equal(existsSync(data.allDockerCalls), false);
 });
 
 test('legacy candidate classification never skips an earlier unknown fence or leaks source data', async (t) => {
@@ -4360,10 +4502,15 @@ test('global audit flock rejects an overlapping diagnostic before Docker', async
   }
   assert.equal(existsSync(holderReady), true);
 
-  const result = runAudit(data, ['queue']);
-  assert.equal(result.status, 75, result.stderr);
-  assert.match(result.stderr, /Another bounded PostgreSQL audit is already running/u);
-  assert.equal(existsSync(data.dockerArgs), false);
+  for (const modeArgs of [
+    ['queue'],
+    ['webhook-cohort', '--failed-window', '2026-11-02T01:35:00Z', '2026-11-02T02:05:00Z'],
+  ]) {
+    const result = runAudit(data, modeArgs);
+    assert.equal(result.status, 75, result.stderr);
+    assert.match(result.stderr, /Another bounded PostgreSQL audit is already running/u);
+    assert.equal(existsSync(data.dockerArgs), false);
+  }
   process.kill(-holder.pid, 'SIGTERM');
   await once(holder, 'exit');
 });
@@ -4372,6 +4519,7 @@ for (const modeArgs of [
   ['queue'],
   ['webhook-quarantine-proof', '2026-10-15T01:37:00Z'],
   ['webhook-recovery-key-cohort', '2026-10-18T22:40:00Z', '-101,-202'],
+  ['webhook-cohort', '--failed-window', '2026-11-02T01:35:00Z', '2026-11-02T02:05:00Z'],
 ]) {
   test(`wall timeout cleans the exact ${modeArgs[0]} backend`, (t) => {
     const data = fixture();

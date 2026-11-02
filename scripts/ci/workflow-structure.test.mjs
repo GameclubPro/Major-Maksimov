@@ -299,7 +299,7 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
     [
       'Outcome cohort online migrations with native PostgreSQL',
       'Selected Publisher target cancellation with native PostgreSQL',
-      'Quarantine proof bounds with native PostgreSQL',
+      'Webhook audit bounds with native PostgreSQL',
       'Shared statistics with native PostgreSQL',
       'Check traffic policy revision and activation guards',
       'Participant report SQL, shared executor, journal and retention',
@@ -315,6 +315,15 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
   assert.equal(
     cancellation.run,
     'node --test --test-concurrency=1 infra/scripts/publisher-cancel-selected-targets.native.test.mjs',
+  );
+  const webhookAudits = compatibility.find(
+    (step) => step.name === 'Webhook audit bounds with native PostgreSQL',
+  );
+  assert.equal(webhookAudits.env.MAXIM_TEST_POSTGRES_URL, '${{ env.DATABASE_URL }}');
+  assert.equal(webhookAudits.env.TZ, 'UTC');
+  assert.equal(
+    webhookAudits.run,
+    'node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs',
   );
   for (const step of postgres.steps) {
     assert.equal(step['continue-on-error'], undefined);

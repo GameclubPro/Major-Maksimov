@@ -118,6 +118,7 @@ Commands:
   postgres-audit delete-retry-heads [--explain]
   postgres-audit chat-message-window <chat-id> <UTC-minute> [--slice <0..11>] [--explain]
   postgres-audit webhook-cohort [--short] [--explain]
+  postgres-audit webhook-cohort --failed-window <UTC-minute> <UTC-minute> [--explain]
   postgres-audit webhook-recovery-key-cohort <UTC-second> <private-chat-ID-CSV> [--explain]
   postgres-audit webhook-workload [--explain]
   postgres-audit duplicate [--status <STATUS>] [--explain]
