@@ -31,6 +31,25 @@ export const WEBHOOK_SEMANTIC_MIRROR_QUARANTINE_READER_VERSION = 1;
 export const WEBHOOK_QUARANTINE_BATCH_SIZE = 16;
 export const WEBHOOK_QUARANTINE_RECHECK_MS = 60_000;
 
+type SemanticMirrorRefusal =
+  | 'disabled_or_same_receipt'
+  | 'snapshot_source'
+  | 'claim_fence_busy'
+  | 'receipt_snapshot'
+  | 'receipt_identity_or_fence'
+  | 'receipt_publisher'
+  | 'receipt_source'
+  | 'receipt_aliases'
+  | 'receipt_claim'
+  | 'receipt_other_claim'
+  | 'mirror_activation_or_identity'
+  | 'owner_identity_or_state'
+  | 'canonical_claim'
+  | 'owner_aliases'
+  | 'disposition'
+  | 'existing_journal'
+  | 'unavailable';
+
 function orderedChat(event: WebhookEvent): string | null {
   if (
     !event.normalizedPayload ||
@@ -72,6 +91,10 @@ function precedes(blocker: WebhookEvent, receipt: WebhookEvent): boolean {
 export class WebhookDependencyQuarantineService {
   private mirrorHeadOffset = 0;
   private readonly logger = new Logger(WebhookDependencyQuarantineService.name);
+  private readonly semanticMirrorRefusals = new Map<
+    SemanticMirrorRefusal,
+    { loggedAt: number; suppressed: number }
+  >();
   private readonly writesEnabled = WEBHOOK_DEPENDENCY_QUARANTINE_WRITES_ENABLED;
   private readonly publisherBotId: string;
   constructor(
@@ -81,6 +104,21 @@ export class WebhookDependencyQuarantineService {
     this.publisherBotId = buildPublisherBotDescriptor({
       id: config.get<string>('MAX_PUBLISHER_BOT_ID'),
     }).id;
+  }
+
+  private reportSemanticMirrorRefusal(reason: SemanticMirrorRefusal): false {
+    const now = performance.now();
+    const previous = this.semanticMirrorRefusals.get(reason);
+    if (previous && now - previous.loggedAt < 60_000) {
+      previous.suppressed = Math.min(previous.suppressed + 1, Number.MAX_SAFE_INTEGER);
+    } else {
+      this.semanticMirrorRefusals.set(reason, { loggedAt: now, suppressed: 0 });
+      this.logger.warn(
+        { reason, suppressed: previous?.suppressed ?? 0 },
+        'Semantic mirror quarantine refused',
+      );
+    }
+    return false;
   }
 
   // FLAG: This is scheduling isolation only. The uncertain source/claim/remote journals
@@ -124,7 +162,8 @@ export class WebhookDependencyQuarantineService {
   // FLAG: This exact semantic dependency has no ordering lifetime. Retain the uncertain
   // owner, claim, errors and effects; only a never-activated copy stops active scheduling.
   async parkSemanticMirror(ownerId: string, mirrorId: string): Promise<boolean> {
-    if (!this.writesEnabled || ownerId === mirrorId) return false;
+    if (!this.writesEnabled || ownerId === mirrorId)
+      return this.reportSemanticMirrorRefusal('disabled_or_same_receipt');
     try {
       return await this.prisma.$transaction(
         async (tx) => {
@@ -132,7 +171,8 @@ export class WebhookDependencyQuarantineService {
           await tx.$executeRaw`SET LOCAL statement_timeout = '1000ms'`;
           const snapshot = await tx.webhookEvent.findUnique({ where: { id: mirrorId } });
           const chatId = snapshot && removalChat(snapshot);
-          if (!snapshot?.semanticKey || !chatId) return false;
+          if (!snapshot?.semanticKey || !chatId)
+            return this.reportSemanticMirrorRefusal('snapshot_source');
           const semanticKey = snapshot.semanticKey;
           const messageId = (snapshot.normalizedPayload as MaxUpdate).message!.messageId;
           // FLAG: Fence independent claim creation before claim-before-receipt locks.
@@ -143,7 +183,7 @@ export class WebhookDependencyQuarantineService {
               buildGroupCommandKey(chatId, messageId),
             ]))
           )
-            return false;
+            return this.reportSemanticMirrorRefusal('claim_fence_busy');
           await tx.$queryRaw(Prisma.sql`
             SELECT id FROM webhook_execution_claims
             WHERE kind = 'EXECUTION' AND semantic_key = ${semanticKey} FOR UPDATE
@@ -152,7 +192,9 @@ export class WebhookDependencyQuarantineService {
             SELECT id FROM webhook_events WHERE id IN (${ownerId}, ${mirrorId})
             ORDER BY id FOR UPDATE
           `);
-          const mirror = await this.lockUnstartedReceipt(tx, mirrorId, ownerId);
+          const mirror = await this.lockUnstartedReceipt(tx, mirrorId, ownerId, (reason) => {
+            this.reportSemanticMirrorRefusal(reason);
+          });
           const owner = await tx.webhookEvent.findUnique({ where: { id: ownerId } });
           const claim = await tx.webhookExecutionClaim.findUnique({
             where: { kind_semanticKey: { kind: 'EXECUTION', semanticKey } },
@@ -163,13 +205,21 @@ export class WebhookDependencyQuarantineService {
             mirror.queueName !== null ||
             mirror.queuedAt !== null ||
             mirror.enqueueAttempts !== 0 ||
-            !this.exactRemovalReceipt(mirror, semanticKey, chatId) ||
+            !this.exactRemovalReceipt(mirror, semanticKey, chatId)
+          ) {
+            if (!mirror) return false;
+            return this.reportSemanticMirrorRefusal('mirror_activation_or_identity');
+          }
+          if (
             !owner ||
             !this.exactRemovalReceipt(owner, semanticKey, chatId) ||
             owner.status !== WebhookStatus.FAILED ||
             owner.nextEnqueueAt !== null ||
             owner.processedAt !== null ||
-            hasWebhookReplayFence(owner) ||
+            hasWebhookReplayFence(owner)
+          )
+            return this.reportSemanticMirrorRefusal('owner_identity_or_state');
+          if (
             !claim ||
             claim.kind !== 'EXECUTION' ||
             claim.semanticKey !== semanticKey ||
@@ -185,14 +235,15 @@ export class WebhookDependencyQuarantineService {
             !Number.isFinite(claim.businessStartedAt.getTime()) ||
             claim.completedAt !== null
           )
-            return false;
+            return this.reportSemanticMirrorRefusal('canonical_claim');
           const ownerClaims = await readLegacyReceiptClaims(
             tx,
             owner.id,
             semanticKey,
             buildGroupCommandKey(chatId, messageId),
           );
-          if (!ownerClaims || ownerClaims.some((row) => row.id !== claim.id)) return false;
+          if (!ownerClaims || ownerClaims.some((row) => row.id !== claim.id))
+            return this.reportSemanticMirrorRefusal('owner_aliases');
           for (const receiptId of [ownerId, mirrorId]) {
             const legacyDisposition = await tx.webhookLegacyReceiptDisposition.findUnique({
               where: { receiptId },
@@ -202,12 +253,13 @@ export class WebhookDependencyQuarantineService {
               where: { receiptId },
               select: { receiptId: true },
             });
-            if (legacyDisposition || sourceDisposition) return false;
+            if (legacyDisposition || sourceDisposition)
+              return this.reportSemanticMirrorRefusal('disposition');
           }
           const existing = await tx.webhookDependencyQuarantine.findUnique({
             where: { receiptId_blockerId: { receiptId: mirrorId, blockerId: ownerId } },
           });
-          if (existing) return false;
+          if (existing) return this.reportSemanticMirrorRefusal('existing_journal');
           await tx.webhookDependencyQuarantine.create({
             data: {
               receiptId: mirrorId,
@@ -231,8 +283,7 @@ export class WebhookDependencyQuarantineService {
         { maxWait: 250, timeout: 2_000 },
       );
     } catch {
-      this.logger.warn('Semantic mirror quarantine unavailable');
-      return false;
+      return this.reportSemanticMirrorRefusal('unavailable');
     }
   }
 
@@ -274,9 +325,14 @@ export class WebhookDependencyQuarantineService {
     tx: Prisma.TransactionClient,
     receiptId: string,
     mirrorOwnerId?: string,
+    reportRefusal?: (reason: SemanticMirrorRefusal) => void,
   ) {
+    const refuse = (reason: SemanticMirrorRefusal): null => {
+      reportRefusal?.(reason);
+      return null;
+    };
     const snapshot = await tx.webhookEvent.findUnique({ where: { id: receiptId } });
-    if (!snapshot?.semanticKey) return null;
+    if (!snapshot?.semanticKey) return refuse('receipt_snapshot');
     // FLAG: Match business-start's claim-before-receipt order. An absent claim may be
     // inserted concurrently, but its final start must lock and reread this receipt.
     await tx.$queryRaw(Prisma.sql`
@@ -299,7 +355,7 @@ export class WebhookDependencyQuarantineService {
       receipt.timeoutQuarantineExpiresAt !== null ||
       hasWebhookReplayFence(receipt)
     )
-      return null;
+      return refuse('receipt_identity_or_fence');
     const claim = await tx.webhookExecutionClaim.findUnique({
       where: { kind_semanticKey: { kind: 'EXECUTION', semanticKey: receipt.semanticKey } },
     });
@@ -308,7 +364,8 @@ export class WebhookDependencyQuarantineService {
     // fenced, and no moderation claim is created, completed or borrowed for observation.
     const publisherObservation =
       (receipt.normalizedPayload as MaxUpdate).botId?.trim() === this.publisherBotId;
-    if (publisherObservation && (receipt.botId !== this.publisherBotId || claim)) return null;
+    if (publisherObservation && (receipt.botId !== this.publisherBotId || claim))
+      return refuse('receipt_publisher');
     // FLAG: A pristine physical mirror is not the started semantic owner. Retain that
     // owner's claim unchanged; require no activation and no independent/legacy claim.
     const pristineMirror = Boolean(
@@ -325,14 +382,15 @@ export class WebhookDependencyQuarantineService {
       const message = (
         receipt.normalizedPayload as { message?: { chatId?: string; messageId?: string } }
       ).message;
-      if (!message?.chatId || !message.messageId) return null;
+      if (!message?.chatId || !message.messageId) return refuse('receipt_source');
       const evidence = await readLegacyReceiptClaims(
         tx,
         receipt.id,
         receipt.semanticKey,
         buildGroupCommandKey(message.chatId, message.messageId),
       );
-      if (!evidence || evidence.some((row) => row.id !== claim!.id)) return null;
+      if (!evidence || evidence.some((row) => row.id !== claim!.id))
+        return refuse('receipt_aliases');
     }
     if (
       claim &&
@@ -344,14 +402,14 @@ export class WebhookDependencyQuarantineService {
         claim.leaseToken !== null ||
         claim.leaseExpiresAt !== null)
     )
-      return null;
+      return refuse('receipt_claim');
     // FLAG: Independent command/legacy claims are evidence too; do not infer their absence from
     // the canonical semantic claim. This is an indexed exact-receipt probe, not a history scan.
     const otherClaim = await tx.webhookExecutionClaim.findFirst({
       where: { webhookEventId: receipt.id, ...(claim ? { id: { not: claim.id } } : {}) },
       select: { id: true },
     });
-    if (otherClaim) return null;
+    if (otherClaim) return refuse('receipt_other_claim');
     return receipt;
   }
 

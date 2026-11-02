@@ -3,6 +3,7 @@ import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-
 import { buildBotAccessSnapshotPersistence } from './bot-access-snapshot.util';
 import { probeManagedEntityActor } from './managed-entity-actor-probe';
 import { ManagedEntityAccessRefreshService } from '../admin/managed-entity-access-refresh.service';
+import type { MaxChatMemberAccess, MaxClientService } from './max-client.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const native = databaseUrl ? describe : describe.skip;
@@ -56,6 +57,68 @@ native('managed access demand on native PostgreSQL', () => {
   });
   afterAll(async () => {
     await prisma?.$disconnect();
+  });
+
+  it('preserves grants on ambiguous human role evidence and revokes them on explicit denial', async () => {
+    await prisma.chatAdminAllowlist.create({ data: { chatId, userId } });
+    await prisma.managedEntityAccessEdge.create({
+      data: {
+        chatId,
+        userId,
+        botId: 'peer',
+        state: 'GRANTED',
+        userRole: 'ADMIN',
+        botRole: 'ADMIN',
+        checkedAt: old,
+      },
+    });
+    const cache = { applyAdminAccessEpochMutation: jest.fn() };
+    const member: MaxChatMemberAccess = {
+      userId,
+      isBot: false,
+      isAdmin: false,
+      isOwner: false,
+      permissions: [],
+      explicitPrivilegeEvidence: false,
+      explicitNonPrivilegeEvidence: false,
+    };
+    const maxClient: Pick<MaxClientService, 'getChatMembersAccess'> = {
+      getChatMembersAccess: async () => new Map([[userId, member]]),
+    };
+    const probe = () =>
+      probeManagedEntityActor({
+        prisma: prisma as never,
+        cache: cache as never,
+        maxClient: maxClient as MaxClientService,
+        chatId,
+        botId,
+        userId,
+        requiredCheckedAfter: new Date(Date.now() - 10),
+      });
+
+    await expect(probe()).rejects.toThrow('role evidence is incomplete');
+    const preserved = await prisma.managedEntityAccessEdge.findMany({
+      where: { chatId, userId },
+    });
+    expect(preserved).toHaveLength(2);
+    expect(preserved.every((edge) => edge.state === 'GRANTED')).toBe(true);
+    expect(preserved.every((edge) => edge.checkedAt.getTime() === old.getTime())).toBe(true);
+    expect(
+      await prisma.chatAdminAllowlist.findUnique({ where: { chatId_userId: { chatId, userId } } }),
+    ).not.toBeNull();
+    expect(cache.applyAdminAccessEpochMutation).not.toHaveBeenCalled();
+
+    member.explicitNonPrivilegeEvidence = true;
+    await expect(probe()).resolves.toBe(true);
+    const denied = await prisma.managedEntityAccessEdge.findMany({ where: { chatId, userId } });
+    expect(denied).toHaveLength(2);
+    expect(denied.every((edge) => edge.state === 'USER_DENIED')).toBe(true);
+    expect(
+      await prisma.chatAdminAllowlist.findUnique({ where: { chatId_userId: { chatId, userId } } }),
+    ).toBeNull();
+    expect(cache.applyAdminAccessEpochMutation).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId, userId, state: 'user_denied' }),
+    );
   });
 
   it('remembers a former administrator through revocation without turning history into a grant', async () => {

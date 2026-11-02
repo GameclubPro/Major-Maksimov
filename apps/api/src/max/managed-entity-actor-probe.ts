@@ -82,6 +82,14 @@ export async function probeManagedEntityActor(params: {
   // FLAG: An omitted requested member is not an exact negative privilege response.
   if (!access) throw new Error('MAX actor privilege evidence is unavailable');
   if (access && typeof access.isBot !== 'boolean') throw new Error('MAX actor type is unknown');
+  // FLAG: Missing human privilege fields are unknown, not a revocation of a retained grant.
+  if (
+    !access.isAdmin &&
+    !access.isOwner &&
+    access.isBot !== true &&
+    access.explicitNonPrivilegeEvidence !== true
+  )
+    throw new Error('MAX actor role evidence is incomplete');
   if (access && (access.isAdmin || access.isOwner) && access.explicitPrivilegeEvidence !== true)
     throw new Error('MAX actor privilege evidence is incomplete');
   const granted = hasExplicitHumanAdministrator(access ?? undefined, userId);

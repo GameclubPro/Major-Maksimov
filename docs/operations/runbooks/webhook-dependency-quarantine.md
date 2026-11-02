@@ -107,6 +107,12 @@ this feature does not widen a previously approved cutoff.
 
 ## Visibility and release gates
 
+When a nonordered removal mirror keeps deferring, inspect `Semantic mirror quarantine refused`
+in the enqueue role. Its fixed `reason` identifies the refused guard; `suppressed` counts
+omitted repetitions since that reason's previous sample. Each reason is logged at most once
+per minute without receipt, chat or message identifiers. These samples explain refusal only;
+they never authorize changing a claim, removing a fence or replaying the original handler.
+
 Local readiness includes `checks.queueLag.quarantinedCountLowerBound`,
 `quarantineSampleLimitReached` and `oldestQuarantinedAgeSec`. The covered query reads at most
 65 retained receipt heads; 65 means **at least** 65. Age is receipt age. These fields describe

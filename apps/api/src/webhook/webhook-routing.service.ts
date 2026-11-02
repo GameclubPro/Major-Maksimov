@@ -7,7 +7,10 @@ import {
   getDefaultWebhookWorkerGroupQueues,
   type DefaultWebhookWorkerGroupName,
 } from '../runtime/moderation-runtime';
-import { QueueMetricsService } from '../system/queue-metrics.service';
+import {
+  QueueMetricsService,
+  type WebhookDefaultShardSnapshot,
+} from '../system/queue-metrics.service';
 import {
   DEFAULT_WEBHOOK_QUEUE_NAMES,
   type ActiveWebhookQueueName,
@@ -79,9 +82,9 @@ export class WebhookRoutingService {
   private readonly chatAssignments = new Map<string, ChatQueueAssignment>();
   private readonly maxChatAssignments: number;
   private readonly expiryIndex = new AssignmentExpiryIndex();
-  private readonly assignmentCounts: AssignmentCounts = { byQueue: new Map(), byWorker: new Map() };
+  private readonly assignmentCounts = new Map<DefaultWebhookQueueName, number>();
   private readonly assignmentRefreshes = new Map<string, Promise<DefaultWebhookQueueName>>();
-  private readonly workerGroupByQueue = this.buildWorkerGroupByQueue();
+  private workerGroupByQueue = this.buildWorkerGroupByQueue();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -230,6 +233,7 @@ export class WebhookRoutingService {
       (await this.queueMetricsService.getWebhookDefaultShardSnapshot({
         maxAgeMs: this.queueSnapshotMaxAgeMs,
       }));
+    this.updateWorkerGroupByQueue(snapshot);
     const nextQueue = this.selectLeastPressuredQueue(chatId, snapshot, fallbackQueue, now);
     return this.storeAssignment(assignmentKey, nextQueue, now);
   }
@@ -284,9 +288,13 @@ export class WebhookRoutingService {
   ): QueuePressure {
     const queueCounters = snapshot.webhookDefaultShards[queueName];
     const queuePressure =
-      (queueCounters?.waiting ?? 0) + (queueCounters?.active ?? 0) + (queueCounters?.delayed ?? 0);
+      (queueCounters?.waiting ?? 0) +
+      (queueCounters?.prioritized ?? 0) +
+      (queueCounters?.active ?? 0) +
+      (queueCounters?.delayed ?? 0);
     const queuePressureScore =
       (queueCounters?.waiting ?? 0) +
+      (queueCounters?.prioritized ?? 0) +
       (queueCounters?.active ?? 0) * ACTIVE_QUEUE_PRESSURE_WEIGHT +
       (queueCounters?.delayed ?? 0);
     const workerGroupName = this.workerGroupByQueue[queueName];
@@ -294,10 +302,12 @@ export class WebhookRoutingService {
       ? snapshot.webhookDefaultWorkerGroups[workerGroupName]?.counters
       : null;
     const workerPressure = workerCounters
-      ? workerCounters.waiting + workerCounters.active
+      ? workerCounters.waiting + workerCounters.prioritized + workerCounters.active
       : queuePressure;
     const workerPressureScore = workerCounters
-      ? workerCounters.waiting + workerCounters.active * ACTIVE_WORKER_PRESSURE_WEIGHT
+      ? workerCounters.waiting +
+        workerCounters.prioritized +
+        workerCounters.active * ACTIVE_WORKER_PRESSURE_WEIGHT
       : queuePressureScore;
 
     const leasedChats = assignments.byQueue.get(queueName) ?? 0;
@@ -321,14 +331,16 @@ export class WebhookRoutingService {
     for (const key of this.expiryIndex.takeExpired(now, EXPIRY_MAINTENANCE_BUDGET)) {
       this.removeAssignment(key);
     }
-    return this.assignmentCounts;
+    const byWorker = new Map<DefaultWebhookWorkerGroupName, number>();
+    for (const [queueName, count] of this.assignmentCounts) {
+      const worker = this.workerGroupByQueue[queueName];
+      if (worker) byWorker.set(worker, (byWorker.get(worker) ?? 0) + count);
+    }
+    return { byQueue: this.assignmentCounts, byWorker };
   }
 
   private adjustAssignmentCounts(queueName: DefaultWebhookQueueName, delta: number): void {
-    const { byQueue, byWorker } = this.assignmentCounts;
-    byQueue.set(queueName, (byQueue.get(queueName) ?? 0) + delta);
-    const worker = this.workerGroupByQueue[queueName];
-    if (worker) byWorker.set(worker, (byWorker.get(worker) ?? 0) + delta);
+    this.assignmentCounts.set(queueName, (this.assignmentCounts.get(queueName) ?? 0) + delta);
   }
 
   private removeAssignment(key: string): void {
@@ -418,18 +430,21 @@ export class WebhookRoutingService {
       return null;
     }
 
+    const snapshot = await this.queueMetricsService.getWebhookDefaultShardSnapshot({
+      maxAgeMs: this.queueSnapshotMaxAgeMs,
+    });
+    this.updateWorkerGroupByQueue(snapshot);
     const workerGroupName = this.workerGroupByQueue[assignment.queueName];
     if (!workerGroupName) {
       return null;
     }
-
-    const snapshot = await this.queueMetricsService.getWebhookDefaultShardSnapshot({
-      maxAgeMs: this.queueSnapshotMaxAgeMs,
-    });
     const workerGroups = Object.values(snapshot.webhookDefaultWorkerGroups);
     const totalPressure = workerGroups.reduce(
       (sum, metrics) =>
-        sum + metrics.counters.waiting + metrics.counters.active * ACTIVE_WORKER_PRESSURE_WEIGHT,
+        sum +
+        metrics.counters.waiting +
+        metrics.counters.prioritized +
+        metrics.counters.active * ACTIVE_WORKER_PRESSURE_WEIGHT,
       0,
     );
     if (totalPressure < this.hotWorkerRebalancePressureMin) {
@@ -443,6 +458,7 @@ export class WebhookRoutingService {
 
     const currentPressure =
       currentWorker.counters.waiting +
+      currentWorker.counters.prioritized +
       currentWorker.counters.active * ACTIVE_WORKER_PRESSURE_WEIGHT;
     const workerPressureShare = currentPressure / totalPressure;
     return workerPressureShare >= this.hotWorkerRebalancePressureShare ? snapshot : null;
@@ -539,6 +555,19 @@ export class WebhookRoutingService {
     }
 
     return workerGroupByQueue;
+  }
+
+  private updateWorkerGroupByQueue(snapshot: WebhookDefaultShardSnapshot): void {
+    const owners = this.buildWorkerGroupByQueue();
+    for (const [groupName, group] of Object.entries(snapshot.webhookDefaultWorkerGroups) as Array<
+      [
+        DefaultWebhookWorkerGroupName,
+        WebhookDefaultShardSnapshot['webhookDefaultWorkerGroups'][DefaultWebhookWorkerGroupName],
+      ]
+    >) {
+      for (const queueName of group.queues) owners[queueName] = groupName;
+    }
+    this.workerGroupByQueue = owners;
   }
 
   private readConfigInt(value: unknown, fallback: number, min = 1): number {

@@ -1,6 +1,13 @@
 import { WebhookRoutingService } from './webhook-routing.service';
+import type {
+  QueueCounters,
+  QueueMetricsService,
+  WebhookDefaultShardSnapshot,
+} from '../system/queue-metrics.service';
+import type { DefaultWebhookWorkerGroupName } from '../runtime/moderation-runtime';
 import {
   DEFAULT_WEBHOOK_QUEUE_NAMES,
+  type DefaultWebhookQueueName,
   resolveDefaultWebhookQueueNameForChatId,
   resolveJoinWebhookQueueNameForChatId,
 } from './webhook-queues';
@@ -17,18 +24,20 @@ function createConfigMock(overrides: Partial<Record<string, number>> = {}) {
   };
 }
 
-function buildDefaultShardSnapshot() {
+type SnapshotFixture = Omit<WebhookDefaultShardSnapshot, 'generatedAt'>;
+
+function buildDefaultShardSnapshot(): Record<DefaultWebhookQueueName, QueueCounters> {
   return Object.fromEntries(
     Array.from({ length: 16 }, (_, index) => [
       `moderation-default-${index}`,
-      { waiting: 3, active: 1, delayed: 0, failed: 0, completed: 0 },
+      { waiting: 3, prioritized: 0, active: 1, delayed: 0, failed: 0, completed: 0 },
     ]),
-  );
+  ) as Record<DefaultWebhookQueueName, QueueCounters>;
 }
 
 function buildWorkerGroupSnapshot(
-  overrides: Partial<Record<string, { waiting: number; active: number }>> = {},
-) {
+  overrides: Partial<Record<DefaultWebhookWorkerGroupName, Partial<QueueCounters>>> = {},
+): WebhookDefaultShardSnapshot['webhookDefaultWorkerGroups'] {
   return {
     'api-moderation': {
       queues: [
@@ -39,6 +48,7 @@ function buildWorkerGroupSnapshot(
       ],
       counters: {
         waiting: 4,
+        prioritized: 0,
         active: 1,
         delayed: 0,
         failed: 0,
@@ -55,6 +65,7 @@ function buildWorkerGroupSnapshot(
       ],
       counters: {
         waiting: 4,
+        prioritized: 0,
         active: 1,
         delayed: 0,
         failed: 0,
@@ -71,6 +82,7 @@ function buildWorkerGroupSnapshot(
       ],
       counters: {
         waiting: 4,
+        prioritized: 0,
         active: 1,
         delayed: 0,
         failed: 0,
@@ -87,6 +99,7 @@ function buildWorkerGroupSnapshot(
       ],
       counters: {
         waiting: 4,
+        prioritized: 0,
         active: 1,
         delayed: 0,
         failed: 0,
@@ -99,30 +112,36 @@ function buildWorkerGroupSnapshot(
 
 function createService(params?: {
   hasPending?: boolean;
-  queueSnapshot?: {
-    webhookDefaultShards: Record<string, { waiting: number; active: number; delayed: number }>;
-    webhookDefaultWorkerGroups: Record<
-      string,
-      { queues: string[]; counters: { waiting: number; active: number } }
-    >;
-  };
+  queueSnapshot?: SnapshotFixture;
   config?: Partial<Record<string, number>>;
 }) {
   const prisma = {
     $queryRaw: jest.fn().mockResolvedValue([{ has_pending: params?.hasPending ?? false }]),
   };
   const queueMetricsService = {
-    getWebhookDefaultShardSnapshot: jest.fn().mockResolvedValue(
-      params?.queueSnapshot ?? {
-        webhookDefaultShards: buildDefaultShardSnapshot(),
-        webhookDefaultWorkerGroups: buildWorkerGroupSnapshot(),
-      },
-    ),
+    getWebhookDefaultShardSnapshot: jest
+      .fn<
+        Promise<SnapshotFixture>,
+        Parameters<QueueMetricsService['getWebhookDefaultShardSnapshot']>
+      >()
+      .mockResolvedValue(
+        params?.queueSnapshot ?? {
+          webhookDefaultShards: buildDefaultShardSnapshot(),
+          webhookDefaultWorkerGroups: buildWorkerGroupSnapshot(),
+        },
+      ),
+  };
+
+  const queueMetricsFacade: Pick<QueueMetricsService, 'getWebhookDefaultShardSnapshot'> = {
+    getWebhookDefaultShardSnapshot: async (...args) => ({
+      ...(await queueMetricsService.getWebhookDefaultShardSnapshot(...args)),
+      generatedAt: new Date().toISOString(),
+    }),
   };
 
   const service = new WebhookRoutingService(
     prisma as never,
-    queueMetricsService as never,
+    queueMetricsFacade as QueueMetricsService,
     createConfigMock(params?.config) as never,
   );
 
@@ -213,7 +232,129 @@ describe('WebhookRoutingService', () => {
     expect(state.countActiveAssignments(now).byWorker.get('api-moderation-realtime-c')).toBe(1);
     state.countActiveAssignments(now + 200_000);
     expect(state.chatAssignments.size).toBe(0);
-    expect([...state.assignmentCounts.byWorker.values()].every((n) => n === 0)).toBe(true);
+    expect(
+      [...state.countActiveAssignments(now + 200_000).byWorker.values()].every((n) => n === 0),
+    ).toBe(true);
+  });
+
+  it('avoids a shard with prioritized backlog when selecting an idle chat', async () => {
+    const shards = buildDefaultShardSnapshot();
+    for (const queueName of DEFAULT_WEBHOOK_QUEUE_NAMES) {
+      shards[queueName] = {
+        waiting: 0,
+        prioritized: 30,
+        active: 0,
+        delayed: 0,
+        failed: 0,
+        completed: 0,
+      };
+    }
+    shards['moderation-default-4'] = {
+      waiting: 0,
+      prioritized: 0,
+      active: 0,
+      delayed: 0,
+      failed: 0,
+      completed: 0,
+    };
+    const groups = buildWorkerGroupSnapshot();
+    for (const group of Object.values(groups)) {
+      group.counters = {
+        waiting: 0,
+        prioritized: 0,
+        active: 0,
+        delayed: 0,
+        failed: 0,
+        completed: 0,
+      };
+    }
+    const chatId = Array.from({ length: 100 }, (_, index) => `priority-chat-${index}`).find(
+      (value) => resolveDefaultWebhookQueueNameForChatId(value) === 'moderation-default-0',
+    )!;
+    const { service } = createService({
+      queueSnapshot: { webhookDefaultShards: shards, webhookDefaultWorkerGroups: groups },
+    });
+
+    await expect(
+      service.resolveQueueName('priority-event', { type: 'message_created', message: { chatId } }),
+    ).resolves.toBe('moderation-default-4');
+  });
+
+  it.each([false, true])(
+    'uses the actual worker for a transferred shard and preserves pending work (pending=%s)',
+    async (hasPending) => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-03-30T17:00:00.000Z'));
+      const shards = buildDefaultShardSnapshot();
+      shards['moderation-default-2'] = {
+        waiting: 0,
+        prioritized: 0,
+        active: 0,
+        delayed: 0,
+        failed: 0,
+        completed: 0,
+      };
+      const initialGroups = buildWorkerGroupSnapshot({
+        'api-moderation': { waiting: 20, active: 0 },
+        'api-moderation-realtime-b': { waiting: 20, active: 0 },
+        'api-moderation-realtime-c': { waiting: 0, active: 0 },
+        'api-moderation-realtime-d': { waiting: 20, active: 0 },
+      });
+      const { service, prisma, queueMetricsService } = createService({
+        queueSnapshot: { webhookDefaultShards: shards, webhookDefaultWorkerGroups: initialGroups },
+      });
+      const payload = { type: 'message_created', message: { chatId: 'transferred-chat' } };
+      await expect(service.resolveQueueName('first', payload)).resolves.toBe(
+        'moderation-default-2',
+      );
+
+      const transferredGroups = buildWorkerGroupSnapshot({
+        'api-moderation': { waiting: 0, active: 0 },
+        'api-moderation-realtime-b': { waiting: 0, prioritized: 20, active: 0 },
+        'api-moderation-realtime-c': { waiting: 0, active: 0 },
+        'api-moderation-realtime-d': { waiting: 0, active: 0 },
+      });
+      transferredGroups['api-moderation-realtime-c'].queues = transferredGroups[
+        'api-moderation-realtime-c'
+      ].queues.filter((queue) => queue !== 'moderation-default-2');
+      transferredGroups['api-moderation-realtime-b'].queues.push('moderation-default-2');
+      queueMetricsService.getWebhookDefaultShardSnapshot.mockResolvedValueOnce({
+        webhookDefaultShards: shards,
+        webhookDefaultWorkerGroups: transferredGroups,
+      });
+      prisma.$queryRaw.mockResolvedValueOnce([
+        { has_pending: hasPending, queue_name: 'moderation-default-2' },
+      ]);
+      jest.advanceTimersByTime(15_000);
+
+      const selected = await service.resolveQueueName('second', payload);
+      if (hasPending) expect(selected).toBe('moderation-default-2');
+      else expect(selected).not.toBe('moderation-default-2');
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('moves cached shard assignment counts to the actual worker without scanning chats', () => {
+    const { service } = createService();
+    const state = service as any;
+    const now = Date.now();
+    for (let index = 0; index < 20; index++)
+      state.storeAssignment(`transferred-${index}`, 'moderation-default-2', now);
+    const scans = jest.spyOn(state.chatAssignments, 'values');
+    const groups = buildWorkerGroupSnapshot();
+    groups['api-moderation-realtime-c'].queues = groups['api-moderation-realtime-c'].queues.filter(
+      (queue) => queue !== 'moderation-default-2',
+    );
+    groups['api-moderation-realtime-b'].queues.push('moderation-default-2');
+    state.updateWorkerGroupByQueue({
+      webhookDefaultShards: buildDefaultShardSnapshot(),
+      webhookDefaultWorkerGroups: groups,
+      generatedAt: new Date().toISOString(),
+    });
+
+    const counts = state.countActiveAssignments(now);
+    expect(counts.byWorker.get('api-moderation-realtime-b')).toBe(20);
+    expect(counts.byWorker.get('api-moderation-realtime-c') ?? 0).toBe(0);
+    expect(scans).not.toHaveBeenCalled();
   });
 
   it('routes critical and background update types without touching adaptive chat routing', async () => {
@@ -305,6 +446,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot['moderation-default-7'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -313,6 +455,7 @@ describe('WebhookRoutingService', () => {
     const secondSnapshot = buildDefaultShardSnapshot();
     secondSnapshot['moderation-default-2'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -365,6 +508,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot['moderation-default-7'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -373,6 +517,7 @@ describe('WebhookRoutingService', () => {
     const secondSnapshot = buildDefaultShardSnapshot();
     secondSnapshot['moderation-default-2'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -419,6 +564,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot['moderation-default-7'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -463,6 +609,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot[firstQueue] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -511,6 +658,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot[firstQueue] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -519,6 +667,7 @@ describe('WebhookRoutingService', () => {
     const pressureSnapshot = buildDefaultShardSnapshot();
     pressureSnapshot[pressurePreferredQueue] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -570,6 +719,7 @@ describe('WebhookRoutingService', () => {
         ...buildDefaultShardSnapshot(),
         'moderation-default-7': {
           waiting: 0,
+          prioritized: 0,
           active: 1,
           delayed: 0,
           failed: 0,
@@ -577,6 +727,7 @@ describe('WebhookRoutingService', () => {
         },
         'moderation-default-2': {
           waiting: 0,
+          prioritized: 0,
           active: 0,
           delayed: 0,
           failed: 0,
@@ -606,6 +757,7 @@ describe('WebhookRoutingService', () => {
     const firstSnapshot = buildDefaultShardSnapshot();
     firstSnapshot['moderation-default-7'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,
@@ -614,6 +766,7 @@ describe('WebhookRoutingService', () => {
     const secondSnapshot = buildDefaultShardSnapshot();
     secondSnapshot['moderation-default-7'] = {
       waiting: 1,
+      prioritized: 0,
       active: 1,
       delayed: 0,
       failed: 0,
@@ -621,6 +774,7 @@ describe('WebhookRoutingService', () => {
     };
     secondSnapshot['moderation-default-2'] = {
       waiting: 0,
+      prioritized: 0,
       active: 0,
       delayed: 0,
       failed: 0,

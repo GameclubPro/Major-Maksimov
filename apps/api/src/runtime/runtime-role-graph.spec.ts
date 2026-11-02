@@ -173,6 +173,13 @@ describe('runtime role dependency graphs', () => {
             expect(outbox.dependencyQuarantine).toBe(
               context.get(WebhookDependencyQuarantineService),
             );
+            const { WebhookService } = await import('../webhook/webhook.service');
+            const webhook = context.get(WebhookService) as unknown as {
+              dependencyQuarantine: unknown;
+            };
+            expect(webhook.dependencyQuarantine).toBe(
+              context.get(WebhookDependencyQuarantineService),
+            );
           }
           if (providerNames.has('MarketplaceAccessService')) {
             const { MarketplaceAccessService } =
