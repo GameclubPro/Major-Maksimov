@@ -13,6 +13,7 @@ import {
   MAX_PUBLICATION_IMAGES_TOTAL_BASE64_LENGTH,
   MAX_PUBLICATION_TEXT_LENGTH,
   publicationContentInputSchema,
+  publicationDraftContentInputSchema,
   publicationScheduleInputSchema,
   DEFAULT_PUBLICATION_LATE_POLICY,
   publicationDeliverySchema,
@@ -24,9 +25,50 @@ import {
   publicationTargetsRefreshResponseSchema,
   retryPublicationOccurrenceRequestSchema,
   updatePublicationRequestSchema,
+  testPublicationRequestSchema,
 } from '@maxim/contracts/publication';
 
 describe('publication contracts', () => {
+  it.each(['image-ref', 'video-ref'] as const)(
+    'preserves a bounded %s source across publication requests',
+    (type) => {
+      const media = [{ type, assetId: 'shared-asset', sourcePublicationId: 'source-post' }];
+      const content = { text: 'copy', media };
+      const audience = { targets: [{ chatId: 'chat', entityType: 'chat' }] };
+      const create = createPublicationRequestSchema.parse({
+        requestId: 'copy-request',
+        content,
+        audience,
+        schedule: { mode: 'now', timezone: 'UTC' },
+      });
+      const update = updatePublicationRequestSchema.parse({
+        requestId: 'edit-request',
+        expectedRevision: 1,
+        content,
+      });
+      const test = testPublicationRequestSchema.parse({
+        requestId: 'test-request',
+        content,
+        sourceTarget: audience.targets[0],
+      });
+      for (const parsed of [create, update, test]) expect(parsed.content?.media).toEqual(media);
+      expect(publicationDraftContentInputSchema.parse(content).media).toEqual(media);
+      expect(
+        publicationContentInputSchema.parse({
+          text: 'old client',
+          media: [{ type, assetId: 'owned' }],
+        }).media,
+      ).toEqual([{ type, assetId: 'owned' }]);
+      for (const sourcePublicationId of ['', 'x'.repeat(257)])
+        expect(
+          publicationContentInputSchema.safeParse({
+            ...content,
+            media: [{ type, assetId: 'shared', sourcePublicationId }],
+          }).success,
+        ).toBe(false);
+    },
+  );
+
   it('preserves omitted top-level fields in a minimal publication update', () => {
     const request = { expectedRevision: 2, requestId: 'update_request_1' };
     expect(updatePublicationRequestSchema.parse(request)).toEqual(request);

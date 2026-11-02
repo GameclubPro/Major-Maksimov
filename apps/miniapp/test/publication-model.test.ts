@@ -1124,6 +1124,41 @@ test('duplicates content and recipients but requires a new schedule choice', () 
   assert.equal(duplicate.recurrence.startsAt, null);
 });
 
+test('keeps each retained media source in copies and private test requests before cloud save', () => {
+  for (const type of ['image', 'video'] as const) {
+    const source = createEmptyPublicationDraft([chatTarget]);
+    source.text = 'Общая публикация';
+    source.retainedAssets = [
+      {
+        id: 'shared-media',
+        type,
+        mimeType: type === 'image' ? 'image/jpeg' : 'video/mp4',
+        fileName: type === 'image' ? 'photo.jpg' : 'video.mp4',
+        sizeBytes: 1024,
+        sourcePublicationId: 'source-publication',
+      },
+    ];
+    const copy = createPublicationDuplicateDraft(source);
+    assert.equal(copy.cloudDraft, undefined);
+    const expected = [
+      {
+        type: type === 'image' ? 'image-ref' : 'video-ref',
+        assetId: 'shared-media',
+        sourcePublicationId: 'source-publication',
+      },
+    ];
+    assert.deepEqual(buildPublicationContent(copy).media, expected);
+    assert.deepEqual(buildTestPublicationRequest(copy, 'private-test').content.media, expected);
+    assert.equal(
+      hasPublicationDraftChanges(copy, {
+        ...copy,
+        retainedAssets: [{ ...copy.retainedAssets[0]!, sourcePublicationId: 'new-cloud-copy' }],
+      }),
+      true,
+    );
+  }
+});
+
 test('detects unsaved edit changes without treating refreshed target metadata as content', () => {
   const initial = createEmptyPublicationDraft([channelTarget]);
   initial.text = 'Исходный текст';

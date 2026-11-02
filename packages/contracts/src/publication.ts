@@ -165,11 +165,13 @@ export const publicationVideoInputSchema = z.object({
 export const publicationImageReferenceInputSchema = z.object({
   type: z.literal('image-ref'),
   assetId: z.string().trim().min(1),
+  sourcePublicationId: z.string().trim().min(1).max(256).optional(),
 });
 
 export const publicationVideoReferenceInputSchema = z.object({
   type: z.literal('video-ref'),
   assetId: z.string().trim().min(1),
+  sourcePublicationId: z.string().trim().min(1).max(256).optional(),
 });
 
 export const publicationMediaInputSchema = z.discriminatedUnion('type', [

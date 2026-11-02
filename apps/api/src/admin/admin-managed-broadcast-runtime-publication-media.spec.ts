@@ -5,6 +5,7 @@ import {
 import { AdminManagedBroadcastRuntime } from './admin-managed-broadcast-runtime';
 import {
   PUBLICATION_VIDEO_ASSET_ID_FIELD,
+  PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD,
   PUBLICATION_VIDEO_INLINE_BASE64_FIELD,
   PUBLICATION_UPLOADED_VIDEO_FIELD,
 } from './publication-video-media';
@@ -60,6 +61,81 @@ function createVideoRequestPayload(mediaPayload: Record<string, unknown>) {
 }
 
 describe('AdminManagedBroadcastRuntime publication media', () => {
+  it('rechecks the exact shared source before resolving private-test video bytes', async () => {
+    const { runtime, assetFindFirst, uploadVideo } = createRuntime();
+    const bytes = Buffer.from('shared-video');
+    assetFindFirst.mockResolvedValue({
+      bytes,
+      mimeType: 'video/mp4',
+      fileName: 'clip.mp4',
+      durablePayload: null,
+    });
+    const result = await (runtime as any).mediaRuntime.resolveManagedBroadcastMedia(
+      createVideoRequestPayload({
+        [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'shared-video',
+        [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source-publication',
+      }),
+      'chat',
+      'source-chat',
+      'second-admin',
+      'publisher-bot',
+      undefined,
+      undefined,
+      { trustedPublicationVideoMarkers: true },
+    );
+    expect(result).toEqual({
+      attachments: [{ type: 'video', payload: { token: 'uploaded-video-token' } }],
+    });
+    expect(assetFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'shared-video',
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              contentLinks: {
+                some: {
+                  contentRevision: {
+                    publication: expect.objectContaining({
+                      id: 'source-publication',
+                      dispatchProfile: 'PUBLIK_V1',
+                    }),
+                  },
+                },
+              },
+            }),
+          ]),
+        }),
+      }),
+    );
+    expect(uploadVideo).toHaveBeenCalledWith(
+      bytes,
+      'clip.mp4',
+      'video/mp4',
+      expect.objectContaining({ botId: 'publisher-bot' }),
+    );
+  });
+
+  it('rejects a shared source revoked after private-test payload validation without uploading', async () => {
+    const { runtime, assetFindFirst, uploadVideo } = createRuntime();
+    assetFindFirst.mockResolvedValue(null);
+    await expect(
+      (runtime as any).mediaRuntime.resolveManagedBroadcastMedia(
+        createVideoRequestPayload({
+          [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'shared-video',
+          [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'revoked-publication',
+        }),
+        'chat',
+        'source-chat',
+        'second-admin',
+        'publisher-bot',
+        undefined,
+        undefined,
+        { trustedPublicationVideoMarkers: true },
+      ),
+    ).rejects.toThrow('больше недоступно');
+    expect(uploadVideo).not.toHaveBeenCalled();
+  });
+
   it('reuses a directly uploaded MAX video without a local file or reupload and fences its bot', async () => {
     const { runtime, findUnique, assetFindFirst, uploadVideo } = createRuntime();
     const asset = {
@@ -460,9 +536,14 @@ describe('AdminManagedBroadcastRuntime publication media', () => {
     expect(assetFindFirst).toHaveBeenCalledWith({
       where: {
         id: 'asset-owned',
-        contentLinks: {
-          some: { contentRevision: { publication: { actorUserId: 'user-1' } } },
-        },
+        OR: expect.arrayContaining([
+          {
+            actorUserId: 'user-1',
+            contentLinks: {
+              some: { contentRevision: { publication: { actorUserId: 'user-1' } } },
+            },
+          },
+        ]),
       },
       select: { bytes: true, mimeType: true, fileName: true, durablePayload: true },
     });

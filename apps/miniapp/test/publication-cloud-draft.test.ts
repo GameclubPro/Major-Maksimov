@@ -276,29 +276,84 @@ test('a remotely deleted draft stops retries and can be saved as a separate copy
   assert.equal(copy.text, 'Несохранённая правка');
 });
 
-test('local storage restores confirmed video references only with a valid cloud identity', () => {
+test('local storage retains exact media sources before and after cloud autosave', () => {
+  const asset = {
+    id: 'video-asset',
+    type: 'video' as const,
+    mimeType: 'video/mp4',
+    fileName: 'video.mp4',
+    sizeBytes: 100,
+  };
   const draft = {
     ...initial(),
     cloudDraft: { id: 'cloud-draft', revision: 3 },
-    retainedAssets: [
-      {
-        id: 'video-asset',
-        type: 'video' as const,
-        mimeType: 'video/mp4',
-        fileName: 'video.mp4',
-        sizeBytes: 100,
-      },
-    ],
+    retainedAssets: [asset],
+  };
+  assert.deepEqual(parsePublicationDraftEnvelope({ version: 3, draft })?.retainedAssets, [
+    { ...asset, sourcePublicationId: 'cloud-draft' },
+  ]);
+  const copy = {
+    ...draft,
+    cloudDraft: undefined,
+    retainedAssets: [{ ...asset, sourcePublicationId: 'source-post' }],
   };
   assert.deepEqual(
-    parsePublicationDraftEnvelope({ version: 3, draft })?.retainedAssets,
-    draft.retainedAssets,
+    parsePublicationDraftEnvelope({ version: 3, draft: copy })?.retainedAssets,
+    copy.retainedAssets,
   );
+  const malformed = {
+    ...copy,
+    retainedAssets: [{ ...asset, sourcePublicationId: 'x'.repeat(257) }],
+  };
   assert.deepEqual(
-    parsePublicationDraftEnvelope({ version: 3, draft: { ...draft, cloudDraft: null } })
-      ?.retainedAssets,
-    [],
+    parsePublicationDraftEnvelope({ version: 3, draft: malformed })?.retainedAssets,
+    [asset],
   );
+});
+
+test('a copied asset rebases once to the saved draft and keeps its frozen source across a lost response', async () => {
+  const fixture = setup();
+  const saved = await saveServerPublicationDraft(
+    fixture.api,
+    null,
+    serverDraftRequest(
+      {
+        ...initial(),
+        images: [{ base64: 'aGVsbG8=', mimeType: 'image/jpeg', fileName: 'photo.jpg' }],
+      },
+      'source-request',
+    ),
+  );
+  const source = draftFromServer(saved);
+  const copied = { ...source, cloudDraft: undefined, cloudRequestId: undefined };
+  const writes: Parameters<typeof saveServerPublicationDraft>[2][] = [];
+  let loseFirstResponse = true;
+  const engine = new PublicationDraftAutosave(copied, {
+    ...fixture.dependencies,
+    save: async (id, request) => {
+      writes.push(request);
+      const result = await saveServerPublicationDraft(fixture.api, id, request);
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new Error('lost response');
+      }
+      return result;
+    },
+  });
+  await assert.rejects(engine.flush(), /lost response/);
+  const result = await engine.flush();
+  assert.deepEqual(writes[0], writes[1]);
+  assert.equal(writes[0].content.media[0].type, 'image-ref');
+  assert.equal(
+    'sourcePublicationId' in writes[0].content.media[0] &&
+      writes[0].content.media[0].sourcePublicationId,
+    source.cloudDraft?.id,
+  );
+  assert.notEqual(result.cloudDraft?.id, source.cloudDraft?.id);
+  assert.equal(result.retainedAssets[0].sourcePublicationId, result.cloudDraft?.id);
+  assert.equal(engine.dirty, false);
+  await engine.flush();
+  assert.equal(writes.length, 2);
 });
 
 test('draft media is readable only through its linked publication; deletion is version guarded', async () => {

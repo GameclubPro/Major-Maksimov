@@ -21,10 +21,12 @@ import type { AdminManagedBroadcastRuntimeContext } from './admin-managed-broadc
 import {
   PUBLICATION_MAX_VIDEO_BYTES,
   PUBLICATION_VIDEO_ASSET_ID_FIELD,
+  PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD,
   PUBLICATION_VIDEO_INLINE_BASE64_FIELD,
   PUBLICATION_UPLOADED_VIDEO_FIELD,
   readPublicationUploadedVideo,
 } from './publication-video-media';
+import { publicationAssetReferenceWhere } from './publication-asset-access';
 import {
   PUBLICATION_ASSET_METADATA_SELECT,
   PUBLICATION_MAX_IMAGE_BYTES,
@@ -196,11 +198,20 @@ export class AdminManagedBroadcastMediaRuntime {
       const publicationInlineBase64 = this.readTrimmedString(
         payload.mediaPayload[PUBLICATION_VIDEO_INLINE_BASE64_FIELD],
       );
-      if (publicationAssetId || publicationInlineBase64) {
+      const sourcePublicationId = this.readTrimmedString(
+        payload.mediaPayload[PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD],
+      );
+      const hasSourcePublication =
+        PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD in payload.mediaPayload;
+      if (publicationAssetId || publicationInlineBase64 || hasSourcePublication) {
         if (!options.trustedPublicationVideoMarkers) {
           throw new BadRequestException('Внутренняя ссылка на видео недоступна.');
         }
-        if (publicationAssetId && publicationInlineBase64) {
+        if (
+          (publicationAssetId && publicationInlineBase64) ||
+          (hasSourcePublication &&
+            (!publicationAssetId || !sourcePublicationId || sourcePublicationId.length > 256))
+        ) {
           throw new BadRequestException('Видео публикации повреждено.');
         }
       }
@@ -213,6 +224,7 @@ export class AdminManagedBroadcastMediaRuntime {
             botId,
             maxApiOptions,
             onProgress,
+            sourcePublicationId ?? undefined,
           )
         : publicationInlineBase64
           ? await this.uploadManagedBroadcastInlinePublicationVideo(
@@ -321,8 +333,8 @@ export class AdminManagedBroadcastMediaRuntime {
       return { requestMedia: await this.loadManagedBroadcastRequestMedia(row) };
     }
 
-    // FLAG: Canonical execution loads only immutable metadata here. Bytes belong to the
-    // exact actor/revision and are read sequentially inside pre-dispatch preparation.
+    // FLAG: Canonical execution reads the exact publication actor/revision link. A copied
+    // asset keeps its original owner; the accepted immutable link authorizes its bytes.
     const revision = await this.prisma.publicationContentRevision.findFirst({
       where: {
         id: row.publicationContentRevisionId,
@@ -337,7 +349,7 @@ export class AdminManagedBroadcastMediaRuntime {
         },
       },
     });
-    if (!revision || revision.assets.some(({ asset }) => asset.actorUserId !== row.actorUserId)) {
+    if (!revision) {
       throw new BadRequestException('Медиа публикации больше недоступно.');
     }
     return {
@@ -476,7 +488,7 @@ export class AdminManagedBroadcastMediaRuntime {
     const persisted = await this.prisma.publicationAsset.findFirst({
       where: {
         id: asset.id,
-        actorUserId: source.actorUserId,
+        actorUserId: asset.actorUserId,
         sha256: asset.sha256,
         sizeBytes: asset.sizeBytes,
         contentLinks: {
@@ -799,14 +811,16 @@ export class AdminManagedBroadcastMediaRuntime {
     botId?: string,
     maxApiOptions?: ManagedBroadcastMaxApiOptions,
     onProgress?: ManagedBroadcastProgressCallback,
+    sourcePublicationId?: string,
   ): Promise<Record<string, unknown>> {
     const asset = await this.prisma.publicationAsset.findFirst({
-      where: {
-        id: assetId,
-        contentLinks: {
-          some: { contentRevision: { publication: { actorUserId } } },
-        },
-      },
+      // FLAG: Private tests have no accepted execution revision. Recheck the exact source
+      // and current Publisher access even after the authoring layer validated the marker.
+      where: publicationAssetReferenceWhere(actorUserId, {
+        assetId,
+        expectedType: 'video',
+        sourcePublicationId,
+      }),
       select: { bytes: true, mimeType: true, fileName: true, durablePayload: true },
     });
     const mimeType = asset?.mimeType.trim().toLowerCase() ?? '';

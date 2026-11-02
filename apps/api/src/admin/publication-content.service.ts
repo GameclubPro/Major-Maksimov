@@ -15,7 +15,9 @@ import {
   hasPublicationVideoInternalMarker,
   PUBLICATION_MAX_VIDEO_BYTES,
   PUBLICATION_VIDEO_ASSET_ID_FIELD,
+  PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD,
   PUBLICATION_VIDEO_INLINE_BASE64_FIELD,
+  PUBLICATION_UPLOADED_VIDEO_FIELD,
   readPublicationUploadedVideo,
 } from './publication-video-media';
 import {
@@ -23,7 +25,11 @@ import {
   PUBLICATION_MAX_TOTAL_IMAGE_BYTES,
   PUBLICATION_ASSET_METADATA_SELECT,
 } from './publication-media-limits';
-import { publicationAdminAccessWhere, publicationAdminScope } from './publication-admin-access';
+import {
+  publicationAssetReferenceWhere,
+  publicationAssetSourceWhere,
+  publicationUploadedVideoWhere,
+} from './publication-asset-access';
 import { canonicalizeAdminMaxMediaFileName } from './admin-max-media-file-name';
 
 const PUBLICATION_VIDEO_MIME_TYPE_FALLBACK = 'application/octet-stream';
@@ -69,6 +75,7 @@ type PreparedAssetInput =
       kind: 'reference';
       assetId: string;
       expectedType: 'image' | 'video';
+      sourcePublicationId?: string;
     }
   | ({ kind: 'prepared' } & Omit<PersistedAssetInput, 'existingAssetId'>);
 
@@ -105,16 +112,7 @@ export class PublicationContentService {
     const asset = await this.prisma.publicationAsset.findFirst({
       where: {
         id: assetId,
-        contentLinks: {
-          some: {
-            contentRevision: {
-              publication: {
-                id: publicationId,
-                ...publicationAdminAccessWhere(publicationAdminScope(actorUserId), 'PUBLIK_V1'),
-              },
-            },
-          },
-        },
+        ...publicationAssetSourceWhere(actorUserId, publicationId, 'read'),
       },
       select: { bytes: true, mimeType: true },
     });
@@ -184,32 +182,24 @@ export class PublicationContentService {
         continue;
       }
 
-      let persisted = await this.prisma.publicationAsset.findFirst({
+      const persisted = await this.prisma.publicationAsset.findFirst({
         where: {
-          id: asset.assetId,
-          actorUserId,
-          bytes: { not: null },
-          contentLinks: { some: { contentRevision: { publication: { actorUserId } } } },
+          AND: [
+            publicationAssetReferenceWhere(actorUserId, asset, publicationId),
+            {
+              mimeType: { startsWith: 'video/' },
+              OR: [{ bytes: { not: null } }, publicationUploadedVideoWhere(this.publisherBotId())],
+            },
+          ],
         },
-        select: { mimeType: true },
+        select: PUBLICATION_ASSET_METADATA_SELECT,
       });
-      if (!persisted && publicationId) {
-        persisted = await this.prisma.publicationAsset.findFirst({
-          where: {
-            id: asset.assetId,
-            bytes: { not: null },
-            ...this.sharedAssetReferenceWhere(actorUserId, publicationId),
-          },
-          select: { mimeType: true },
-        });
-      }
       if (
-        (!persisted || !persisted.mimeType.toLowerCase().startsWith('video/')) &&
-        !(await this.findOwnedUploadedVideo(this.prisma, asset.assetId, actorUserId, publicationId))
+        !persisted ||
+        (this.hasUploadedVideoMarker(persisted.durablePayload) &&
+          !readPublicationUploadedVideo(persisted.durablePayload, this.publisherBotId()))
       ) {
-        throw new BadRequestException(
-          'Сохранённое видео загружено другим ботом. Выберите видеофайл снова.',
-        );
+        throw new BadRequestException('Сохранённое видео недоступно. Выберите видеофайл снова.');
       }
     }
   }
@@ -308,13 +298,11 @@ export class PublicationContentService {
         }
       } else {
         const asset = await this.prisma.publicationAsset.findFirst({
-          where: {
-            id: media.assetId,
-            actorUserId,
-            contentLinks: {
-              some: { contentRevision: { publication: { actorUserId } } },
-            },
-          },
+          where: publicationAssetReferenceWhere(actorUserId, {
+            assetId: media.assetId,
+            expectedType: media.type === 'video-ref' ? 'video' : 'image',
+            sourcePublicationId: media.sourcePublicationId,
+          }),
         });
         if (!asset) {
           throw new BadRequestException('Медиа публикации больше недоступно.');
@@ -330,10 +318,21 @@ export class PublicationContentService {
           });
         } else {
           const payload = this.readJsonObject(asset.durablePayload);
+          if (
+            this.hasUploadedVideoMarker(payload) &&
+            !readPublicationUploadedVideo(payload, this.publisherBotId())
+          ) {
+            throw new BadRequestException('Медиа публикации больше недоступно.');
+          }
           if (!payload || readPublicationUploadedVideo(payload, this.publisherBotId())) {
             if ((asset.bytes || payload) && asset.mimeType.toLowerCase().startsWith('video/')) {
               video = {
-                payload: { [PUBLICATION_VIDEO_ASSET_ID_FIELD]: asset.id },
+                payload: {
+                  [PUBLICATION_VIDEO_ASSET_ID_FIELD]: asset.id,
+                  ...(media.sourcePublicationId
+                    ? { [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: media.sourcePublicationId }
+                    : {}),
+                },
                 mimeType: asset.mimeType,
                 fileName: asset.fileName,
               };
@@ -379,6 +378,7 @@ export class PublicationContentService {
           kind: 'reference',
           assetId: item.assetId,
           expectedType: item.type === 'video-ref' ? 'video' : 'image',
+          ...(item.sourcePublicationId ? { sourcePublicationId: item.sourcePublicationId } : {}),
         });
         continue;
       }
@@ -471,28 +471,10 @@ export class PublicationContentService {
     let totalImageBytes = 0;
     for (const item of prepared) {
       if (item.kind === 'reference') {
-        let linkedAsset = await tx.publicationAsset.findFirst({
-          where: {
-            id: item.assetId,
-            actorUserId,
-            contentLinks: { some: { contentRevision: { publication: { actorUserId } } } },
-          },
+        const asset = await tx.publicationAsset.findFirst({
+          where: publicationAssetReferenceWhere(actorUserId, item, publicationId),
           select: PUBLICATION_ASSET_METADATA_SELECT,
         });
-        if (!linkedAsset && publicationId) {
-          linkedAsset = await tx.publicationAsset.findFirst({
-            where: {
-              id: item.assetId,
-              ...this.sharedAssetReferenceWhere(actorUserId, publicationId),
-            },
-            select: PUBLICATION_ASSET_METADATA_SELECT,
-          });
-        }
-        const asset =
-          linkedAsset ??
-          (item.expectedType === 'video'
-            ? await this.findOwnedUploadedVideo(tx, item.assetId, actorUserId, publicationId)
-            : null);
         if (!asset) {
           throw new BadRequestException('Медиа публикации больше недоступно.');
         }
@@ -500,6 +482,13 @@ export class PublicationContentService {
           asset.durablePayload || asset.mimeType.toLowerCase().startsWith('video/')
             ? 'video'
             : 'image';
+        if (
+          actualType === 'video' &&
+          this.hasUploadedVideoMarker(asset.durablePayload) &&
+          !readPublicationUploadedVideo(asset.durablePayload, this.publisherBotId())
+        ) {
+          throw new BadRequestException('Медиа публикации больше недоступно.');
+        }
         if (actualType !== item.expectedType) {
           throw new BadRequestException('Тип сохранённого медиа не совпадает.');
         }
@@ -538,57 +527,17 @@ export class PublicationContentService {
     return resolved;
   }
 
-  private sharedAssetReferenceWhere(
-    actorUserId: string,
-    publicationId: string,
-  ): Prisma.PublicationAssetWhereInput {
-    return {
-      contentLinks: {
-        some: {
-          contentRevision: {
-            publication: {
-              id: publicationId,
-              ...publicationAdminAccessWhere(
-                publicationAdminScope(actorUserId),
-                'PUBLIK_V1',
-                'manage',
-              ),
-            },
-          },
-        },
-      },
-    };
-  }
-
   private publisherBotId(): string {
     return buildPublisherBotDescriptor({ id: process.env.MAX_PUBLISHER_BOT_ID }).id;
   }
 
-  private async findOwnedUploadedVideo(
-    tx: any,
-    assetId: string,
-    actorUserId: string,
-    publicationId?: string,
-  ) {
-    let asset = await tx.publicationAsset.findFirst({
-      where: { id: assetId, actorUserId, bytes: null },
-      select: PUBLICATION_ASSET_METADATA_SELECT,
-    });
-    if (!asset && publicationId) {
-      asset = await tx.publicationAsset.findFirst({
-        where: {
-          id: assetId,
-          bytes: null,
-          ...this.sharedAssetReferenceWhere(actorUserId, publicationId),
-        },
-        select: PUBLICATION_ASSET_METADATA_SELECT,
-      });
-    }
-    return asset &&
-      asset.mimeType.startsWith('video/') &&
-      readPublicationUploadedVideo(asset.durablePayload, this.publisherBotId())
-      ? asset
-      : null;
+  private hasUploadedVideoMarker(value: unknown): boolean {
+    return Boolean(
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      PUBLICATION_UPLOADED_VIDEO_FIELD in value,
+    );
   }
 
   private decodeImageBase64(value: string): Buffer {

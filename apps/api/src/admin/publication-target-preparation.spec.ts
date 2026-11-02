@@ -1,8 +1,10 @@
 import {
   createPendingPublicationContext,
+  createRepreparedPublicationContext,
   preparePendingPublicationContext,
 } from './publication-target-preparation';
 import { PublicationPublisherRoutingService } from './publication-publisher-routing.service';
+import type { Prisma } from '../prisma/prisma-client';
 
 describe('independent immutable publication target preparation', () => {
   it('materializes all 100 targets without consulting current rights or preparing dialogs', async () => {
@@ -52,6 +54,7 @@ describe('independent immutable publication target preparation', () => {
       const delivery = {
         id: 'delivery',
         targetChatId: 'chat',
+        contentRevisionId: 'content',
         publisherDialogContext: marker as never,
       };
       const prepared = { version: 1, dialogBotId: 'publik', buttons: [], reference: null };
@@ -91,6 +94,7 @@ describe('independent immutable publication target preparation', () => {
     const delivery = {
       id: 'delivery',
       targetChatId: 'chat',
+      contentRevisionId: 'content',
       publisherDialogContext: marker as never,
     };
     const winner = {
@@ -133,6 +137,7 @@ describe('independent immutable publication target preparation', () => {
         {
           id: 'delivery',
           targetChatId: 'chat',
+          contentRevisionId: 'content',
           publisherDialogContext: createPendingPublicationContext(
             { chatId: 'chat', entityType: 'chat' },
             'old-bot',
@@ -144,4 +149,67 @@ describe('independent immutable publication target preparation', () => {
     ).rejects.toThrow('unavailable');
     expect(prepare).not.toHaveBeenCalled();
   });
+  it('fences a losing legacy preparation against the worker content snapshot', async () => {
+    const marker = createPendingPublicationContext(
+      { chatId: 'chat', entityType: 'chat' },
+      'publik',
+      [],
+    );
+    const findFirst = jest.fn().mockResolvedValue(null);
+    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
+    await expect(
+      preparePendingPublicationContext(
+        {
+          prisma: { managedBroadcastDelivery: { updateMany, findFirst } },
+          publisherDialogContextService: {
+            prepare: jest.fn().mockResolvedValue({
+              version: 1,
+              dialogBotId: 'publik',
+              buttons: [],
+              reference: null,
+            }),
+          },
+        } as never,
+        {
+          id: 'delivery',
+          targetChatId: 'chat',
+          contentRevisionId: 'old-content',
+          publisherDialogContext: marker as unknown as Prisma.JsonValue,
+        },
+        'publik',
+      ),
+    ).rejects.toThrow('fence');
+    expect(updateMany.mock.calls[0][0].where.contentRevisionId).toBe('old-content');
+    expect(findFirst.mock.calls[0][0].where.contentRevisionId).toBe('old-content');
+  });
+  it.each(['expired', 'future', 'mismatched-content'])(
+    'refuses %s repreparation before preparing metadata',
+    async (kind) => {
+      const now = Date.now();
+      const prepare = jest.fn();
+      const marker = createRepreparedPublicationContext(
+        { chatId: 'chat', entityType: 'chat' },
+        'publik',
+        [],
+        'content',
+        {
+          authorizedAt: new Date(kind === 'future' ? now + 60_000 : now - 60_000),
+          expiresAt: new Date(kind === 'expired' ? now - 1 : now + 120_000),
+        },
+      );
+      await expect(
+        preparePendingPublicationContext(
+          { publisherDialogContextService: { prepare } } as never,
+          {
+            id: 'delivery',
+            targetChatId: 'chat',
+            contentRevisionId: kind === 'mismatched-content' ? 'other' : 'content',
+            publisherDialogContext: marker as unknown as Prisma.JsonValue,
+          },
+          'publik',
+        ),
+      ).rejects.toThrow(/expired|revision/);
+      expect(prepare).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -216,7 +216,12 @@ describe('Publisher pre-dispatch claim deferral', () => {
       );
       await service.deferClaimed({
         row: { id: 'broadcast', publicationOccurrenceId: null, requiredBotId: 'publik' },
-        delivery: { id: 'delivery', targetChatId: 'chat', dialogBotId: 'publik' },
+        delivery: {
+          id: 'delivery',
+          targetChatId: 'chat',
+          dialogBotId: 'publik',
+          contentRevisionId: 'content',
+        },
         deliveryLockToken: 'exact-lock',
         blockerCode: 'bot_access_expired',
         sendAttemptStarted,

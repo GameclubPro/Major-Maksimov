@@ -63,6 +63,12 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
       'marker.dialogBotId !== requiredBotId',
       "status: 'PENDING'",
       'attemptCount: 0',
+      'PUBLISHER_PUBLICATION_REPREPARATION_VERSION = 2',
+      'contentRevisionId: delivery.contentRevisionId',
+      'marker.contentRevisionId !== delivery.contentRevisionId',
+      'occurrence.retryAuthorizedAt?.getTime() !== authorizedAtMs',
+      'occurrence.retryExpiresAt?.getTime() !== expiresAtMs',
+      'attemptCount: current.attemptCount',
       'publisherDialogContext: { equals: marker }',
       'persisted.count !== 1',
     ],
@@ -116,6 +122,14 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
   [
     'apps/api/src/admin/publication.service.ts',
     ['readPublicationLatePolicy(rule)', 'maxResults: 300'],
+  ],
+  [
+    'apps/api/src/admin/admin-managed-broadcast-media-runtime.ts',
+    [
+      'actorUserId: asset.actorUserId',
+      'contentRevisionId: source.contentRevisionId',
+      'where: publicationAssetReferenceWhere(actorUserId,',
+    ],
   ],
 ];
 

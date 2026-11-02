@@ -147,15 +147,21 @@ export class PublicationDraftAutosave {
         const response = await this.dependencies.save(pending.id, pending.request);
         if (!this.active) return this.current;
         const identity = { id: response.publication.id, revision: response.publication.version };
+        // FLAG: Rebase links to the newly saved draft and share one media snapshot;
+        // separate equivalent arrays would keep reference-based autosave dirty forever.
+        const savedMedia = response.publication.content.media.map((asset) => ({
+          ...asset,
+          sourcePublicationId: identity.id,
+        }));
         const acknowledged = {
-          ...withSavedPublicationMedia(pending.snapshot, response.publication.content.media),
+          ...withSavedPublicationMedia(pending.snapshot, savedMedia),
           cloudDraft: identity,
         };
         this.saved = acknowledged;
         this.pending = null;
         const current =
           this.dependencies.canSave() && samePublicationDraftMedia(this.current, pending.snapshot)
-            ? withSavedPublicationMedia(this.current, response.publication.content.media)
+            ? withSavedPublicationMedia(this.current, savedMedia)
             : this.current;
         this.replace({ ...current, cloudDraft: identity });
         await this.dependencies.persist(this.current);

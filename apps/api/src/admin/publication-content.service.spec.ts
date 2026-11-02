@@ -1,4 +1,7 @@
-import { publicationAdminAccessWhere, publicationAdminScope } from './publication-admin-access';
+import {
+  publicationAssetReferenceWhere,
+  publicationAssetSourceWhere,
+} from './publication-asset-access';
 import { PublicationContentService } from './publication-content.service';
 import { PUBLICATION_UPLOADED_VIDEO_FIELD } from './publication-video-media';
 import { DEFAULT_MAX_PUBLISHER_BOT_ID } from '../publisher/publisher-bot-descriptor';
@@ -120,9 +123,9 @@ describe('PublicationContentService', () => {
     };
     const findFirst = jest
       .fn()
-      .mockImplementation(async ({ where }) =>
-        where.bytes === null && where.actorUserId === 'owner' ? asset : null,
-      );
+      .mockResolvedValueOnce(asset)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(asset);
     const service = createService({ publicationAsset: { findFirst } });
     const prepared = await service.prepareContentRevision({
       text: '',
@@ -134,8 +137,22 @@ describe('PublicationContentService', () => {
       service.assertPublisherCompatibleContent(prepared, 'owner'),
     ).resolves.toBeUndefined();
     await expect(service.assertPublisherCompatibleContent(prepared, 'other')).rejects.toThrow(
-      'другим ботом',
+      'недоступно',
     );
+    const privateTest = await service.buildLegacyTestPayload(
+      {
+        requestId: 'direct-upload-test',
+        content: {
+          text: '',
+          textFormat: 'plain',
+          buttons: [],
+          media: [{ type: 'video-ref', assetId: 'uploaded' }],
+        },
+        sourceTarget: { chatId: 'chat', entityType: 'chat' },
+      },
+      'owner',
+    );
+    expect(privateTest.mediaPayload).toEqual({ __publicationVideoAssetId: 'uploaded' });
     const tx = createTransaction();
     tx.publicationAsset.findFirst = findFirst;
     await service.persistPreparedContentRevision(tx, 'publication', 1, prepared, 'owner');
@@ -171,20 +188,16 @@ describe('PublicationContentService', () => {
   });
 
   it('rejects saved remote uploads from another Publisher bot', async () => {
-    const findFirst = jest.fn().mockImplementation(async ({ where }) =>
-      where.bytes === null
-        ? {
-            mimeType: 'video/mp4',
-            durablePayload: {
-              [PUBLICATION_UPLOADED_VIDEO_FIELD]: {
-                version: 1,
-                botId: 'another-bot',
-                token: 'token',
-              },
-            },
-          }
-        : null,
-    );
+    const findFirst = jest.fn().mockResolvedValue({
+      mimeType: 'video/mp4',
+      durablePayload: {
+        [PUBLICATION_UPLOADED_VIDEO_FIELD]: {
+          version: 1,
+          botId: 'another-bot',
+          token: 'token',
+        },
+      },
+    });
     const service = createService({ publicationAsset: { findFirst } });
     const prepared = await service.prepareContentRevision({
       text: '',
@@ -193,7 +206,7 @@ describe('PublicationContentService', () => {
       media: [{ type: 'video-ref', assetId: 'uploaded' }],
     });
     await expect(service.assertPublisherCompatibleContent(prepared, 'owner')).rejects.toThrow(
-      'другим ботом',
+      'недоступно',
     );
   });
 
@@ -208,17 +221,7 @@ describe('PublicationContentService', () => {
     expect(prisma.publicationAsset.findFirst).toHaveBeenCalledWith({
       where: {
         id: 'asset',
-        contentLinks: {
-          some: {
-            contentRevision: {
-              publication: {
-                id: 'publication',
-                ...publicationAdminAccessWhere(publicationAdminScope('owner'), 'PUBLIK_V1'),
-                dispatchProfile: 'PUBLIK_V1',
-              },
-            },
-          },
-        },
+        ...publicationAssetSourceWhere('owner', 'publication', 'read'),
       },
       select: { bytes: true, mimeType: true },
     });
@@ -365,7 +368,6 @@ describe('PublicationContentService', () => {
     const findFirst = jest
       .fn()
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ mimeType: 'video/mp4' });
     const service = createService({ publicationAsset: { findFirst } });
     const prepared = await service.prepareContentRevision({
@@ -381,16 +383,17 @@ describe('PublicationContentService', () => {
     await expect(
       service.assertPublisherCompatibleContent(prepared, 'actor-a'),
     ).resolves.toBeUndefined();
+    expect(findFirst).toHaveBeenCalledTimes(2);
     expect(findFirst).toHaveBeenCalledWith({
-      where: {
-        id: 'saved-video',
-        actorUserId: 'actor-a',
-        bytes: { not: null },
-        contentLinks: {
-          some: { contentRevision: { publication: { actorUserId: 'actor-a' } } },
-        },
-      },
-      select: { mimeType: true },
+      where: expect.objectContaining({
+        AND: expect.arrayContaining([
+          publicationAssetReferenceWhere('actor-a', {
+            assetId: 'saved-video',
+            expectedType: 'video',
+          }),
+        ]),
+      }),
+      select: PUBLICATION_ASSET_METADATA_SELECT,
     });
   });
 
@@ -444,13 +447,11 @@ describe('PublicationContentService', () => {
 
     expect(tx.publicationAsset.findFirst).toHaveBeenCalledWith({
       select: PUBLICATION_ASSET_METADATA_SELECT,
-      where: {
-        id: 'asset-owned',
-        actorUserId: 'actor-a',
-        contentLinks: {
-          some: { contentRevision: { publication: { actorUserId: 'actor-a' } } },
-        },
-      },
+      where: publicationAssetReferenceWhere(
+        'actor-a',
+        { assetId: 'asset-owned', expectedType: 'image' },
+        'publication-a',
+      ),
     });
     expect(tx.publicationAsset.upsert).not.toHaveBeenCalled();
   });
@@ -581,5 +582,75 @@ describe('PublicationContentService', () => {
       status: 400,
       message: 'Не удалось распознать файл. Выберите исправный файл поддерживаемого формата.',
     });
+  });
+  it.each(['image', 'video'] as const)(
+    'retains the exact shared %s source and creates only a content link',
+    async (type) => {
+      const asset = {
+        id: 'shared-asset',
+        actorUserId: 'original-owner',
+        sha256: 'f'.repeat(64),
+        mimeType: type === 'video' ? 'video/mp4' : 'image/png',
+        fileName: 'shared',
+        sizeBytes: 8,
+        durablePayload: null,
+      };
+      const service = createService();
+      const prepared = await service.prepareContentRevision({
+        text: 'Copy',
+        textFormat: 'plain',
+        buttons: [],
+        media: [
+          {
+            type: type === 'video' ? 'video-ref' : 'image-ref',
+            assetId: asset.id,
+            sourcePublicationId: 'source-post',
+          },
+        ],
+      });
+      expect(prepared.assets).toEqual([
+        {
+          kind: 'reference',
+          assetId: asset.id,
+          expectedType: type,
+          sourcePublicationId: 'source-post',
+        },
+      ]);
+      const tx = createTransaction();
+      tx.publicationAsset.findFirst.mockResolvedValue(asset);
+      await service.persistPreparedContentRevision(tx, 'new-copy', 1, prepared, 'second-admin');
+      expect(tx.publicationAsset.findFirst).toHaveBeenCalledTimes(1);
+      expect(tx.publicationAsset.findFirst).toHaveBeenCalledWith({
+        where: publicationAssetReferenceWhere(
+          'second-admin',
+          { assetId: asset.id, expectedType: type, sourcePublicationId: 'source-post' },
+          'new-copy',
+        ),
+        select: PUBLICATION_ASSET_METADATA_SELECT,
+      });
+      expect(tx.publicationContentAsset.create).toHaveBeenCalledWith({
+        data: { contentRevisionId: 'content-1', assetId: asset.id, position: 0 },
+      });
+      expect(tx.publicationAsset.upsert).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a denied shared source before writing its revision or link', async () => {
+    const service = createService();
+    const prepared = await service.prepareContentRevision({
+      text: 'copy',
+      textFormat: 'plain',
+      buttons: [],
+      media: [
+        { type: 'image-ref', assetId: 'private-asset', sourcePublicationId: 'guessed-source' },
+      ],
+    });
+    const tx = createTransaction();
+    tx.publicationAsset.findFirst.mockResolvedValue(null);
+    await expect(
+      service.persistPreparedContentRevision(tx, 'new-copy', 1, prepared, 'second-admin'),
+    ).rejects.toThrow('недоступно');
+    expect(tx.publicationContentRevision.create).not.toHaveBeenCalled();
+    expect(tx.publicationContentAsset.create).not.toHaveBeenCalled();
   });
 });

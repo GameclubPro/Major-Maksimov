@@ -53,6 +53,7 @@ type PublisherBroadcastRow = {
 type PublisherDeliveryRow = {
   id: string;
   targetChatId: string;
+  contentRevisionId: string | null;
   dialogBotId: string | null;
   publisherDialogContext?: Prisma.JsonValue;
 };

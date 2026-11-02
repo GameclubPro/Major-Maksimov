@@ -1,6 +1,7 @@
 import { publicationAdminAccessWhere, publicationAdminScope } from './publication-admin-access';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { MINIAPP_PROFILES_METADATA } from '../auth/miniapp-profile';
+import { publicationAssetReferenceWhere } from './publication-asset-access';
 import { PublicationDraftsService } from './publication-drafts.service';
 import { PublicationDraftsController } from './publication-drafts.controller';
 import { PublicationAssetsController } from './publication-assets.controller';
@@ -257,6 +258,57 @@ describe('PublicationDraftsService', () => {
       assets: [{ kind: 'prepared', sizeBytes: 1 }],
     } as never);
     await expect(service.save(null, actor, request)).rejects.toThrow('128 МБ');
+  });
+  it('checks quota with bounded exact asset/source pairs and no media bytes', async () => {
+    const { service, tx, content } = setup();
+    const assets = [
+      {
+        kind: 'reference' as const,
+        assetId: 'shared-a',
+        expectedType: 'image' as const,
+        sourcePublicationId: 'source-a',
+      },
+      {
+        kind: 'reference' as const,
+        assetId: 'shared-b',
+        expectedType: 'image' as const,
+        sourcePublicationId: 'source-b',
+      },
+    ];
+    content.prepareContentRevision.mockResolvedValue({ text: '', buttons: [], assets } as never);
+    tx.publicationAsset.findMany.mockResolvedValue(
+      assets.map((asset) => ({ id: asset.assetId, sizeBytes: 10 })) as never,
+    );
+    await service.save(null, actor, request);
+    expect(tx.publicationAsset.findMany).toHaveBeenCalledTimes(1);
+    expect(tx.publicationAsset.findMany).toHaveBeenCalledWith({
+      where: { OR: assets.map((asset) => publicationAssetReferenceWhere('owner', asset)) },
+      select: { id: true, sizeBytes: true },
+    });
+  });
+  it('rejects duplicate asset IDs with different sources before a batch can authorize either', async () => {
+    const { service, tx, content } = setup();
+    content.prepareContentRevision.mockResolvedValue({
+      text: '',
+      buttons: [],
+      assets: [
+        {
+          kind: 'reference',
+          assetId: 'same',
+          expectedType: 'image',
+          sourcePublicationId: 'allowed',
+        },
+        {
+          kind: 'reference',
+          assetId: 'same',
+          expectedType: 'image',
+          sourcePublicationId: 'unrelated',
+        },
+      ],
+    } as never);
+    await expect(service.save(null, actor, request)).rejects.toThrow('Один и тот же медиафайл');
+    expect(tx.publicationAsset.findMany).not.toHaveBeenCalled();
+    expect(content.persistPreparedContentRevision).not.toHaveBeenCalled();
   });
   it('prunes only unreferenced revisions and actor-owned orphan assets', async () => {
     const { service, tx } = setup();

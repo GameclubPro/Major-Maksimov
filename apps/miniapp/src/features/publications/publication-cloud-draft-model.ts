@@ -3,11 +3,11 @@ import type {
   PublicationDraftState,
   SavePublicationDraftRequest,
 } from '@maxim/contracts/publication-draft';
-import type { PublicationAsset } from '@maxim/contracts/publication';
 import {
   buildPublicationContent,
   createPublicationDraftFromDetails,
   type PublicationDraft,
+  type PublicationRetainedAsset,
 } from './publication-model';
 import {
   hasBroadcastLinkButtonErrors,
@@ -80,7 +80,7 @@ export function samePublicationDraftMedia(
 
 export function withSavedPublicationMedia(
   draft: PublicationDraft,
-  assets: PublicationAsset[],
+  assets: PublicationRetainedAsset[],
 ): PublicationDraft {
   return {
     ...draft,

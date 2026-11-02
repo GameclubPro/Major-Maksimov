@@ -152,7 +152,8 @@ function executionMediaKind(
         !asset ||
         typeof asset.id !== 'string' ||
         !asset.id.trim() ||
-        asset.actorUserId !== source.actorUserId ||
+        typeof asset.actorUserId !== 'string' ||
+        !asset.actorUserId.trim() ||
         !Number.isSafeInteger(asset.sizeBytes) ||
         asset.sizeBytes <= 0 ||
         (asset.durablePayload !== null && !objectPayload(asset.durablePayload))

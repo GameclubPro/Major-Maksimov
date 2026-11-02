@@ -13,6 +13,7 @@ import {
 import { z } from 'zod';
 import {
   PUBLICATION_VIDEO_ASSET_ID_FIELD,
+  PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD,
   PUBLICATION_VIDEO_INLINE_BASE64_FIELD,
 } from './publication-video-media';
 
@@ -148,12 +149,14 @@ function readTrustedPublicationVideoMarker(
 
   const hasAssetId = PUBLICATION_VIDEO_ASSET_ID_FIELD in payload;
   const hasInlineBase64 = PUBLICATION_VIDEO_INLINE_BASE64_FIELD in payload;
-  if (!hasAssetId && !hasInlineBase64) {
+  const hasSourcePublicationId = PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD in payload;
+  if (!hasAssetId && !hasInlineBase64 && !hasSourcePublicationId) {
     return { present: false, assetId: null, inlineBase64: null, hasUnexpectedFields: false };
   }
 
   const assetIdValue = payload[PUBLICATION_VIDEO_ASSET_ID_FIELD];
   const inlineBase64Value = payload[PUBLICATION_VIDEO_INLINE_BASE64_FIELD];
+  const sourcePublicationIdValue = payload[PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD];
   const assetId = typeof assetIdValue === 'string' ? assetIdValue.trim() || null : null;
   const inlineBase64 =
     typeof inlineBase64Value === 'string' ? inlineBase64Value.trim() || null : null;
@@ -166,9 +169,18 @@ function readTrustedPublicationVideoMarker(
     assetId,
     inlineBase64,
     hasUnexpectedFields:
-      Object.keys(payload).some((key) => key !== allowedField) ||
+      Object.keys(payload).some(
+        (key) =>
+          key !== allowedField &&
+          !(hasAssetId && key === PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD),
+      ) ||
       (hasAssetId && typeof assetIdValue !== 'string') ||
-      (hasInlineBase64 && typeof inlineBase64Value !== 'string'),
+      (hasInlineBase64 && typeof inlineBase64Value !== 'string') ||
+      (hasSourcePublicationId &&
+        (!hasAssetId ||
+          typeof sourcePublicationIdValue !== 'string' ||
+          !sourcePublicationIdValue.trim() ||
+          sourcePublicationIdValue.trim().length > 256)),
   };
 }
 
