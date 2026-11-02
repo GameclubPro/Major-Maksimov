@@ -245,14 +245,47 @@ describe('canonical Publication execution binary media', () => {
     ]);
   });
 
-  it.each([null, { assets: [{ asset: createAsset({ actorUserId: 'another-owner' }) }] }])(
-    'rejects a missing or foreign revision before reading bytes',
-    async (revision) => {
-      const { load, revisionFindFirst, assetFindFirst, uploadImage } = createRuntime();
-      revisionFindFirst.mockResolvedValue(revision);
-      await expect(load()).rejects.toThrow('больше недоступно');
-      expect(assetFindFirst).not.toHaveBeenCalled();
-      expect(uploadImage).not.toHaveBeenCalled();
+  it('rejects a missing or foreign revision before reading bytes', async () => {
+    const { load, revisionFindFirst, assetFindFirst, uploadImage } = createRuntime();
+    revisionFindFirst.mockResolvedValue(null);
+    await expect(load()).rejects.toThrow('больше недоступно');
+    expect(assetFindFirst).not.toHaveBeenCalled();
+    expect(uploadImage).not.toHaveBeenCalled();
+  });
+
+  it.each(['image', 'video'])(
+    'sends a copied %s through its accepted revision while retaining the original asset owner',
+    async (type) => {
+      const bytes = type === 'image' ? JPEG : Buffer.from('copied-video');
+      const asset = createAsset({
+        actorUserId: 'original-author',
+        mimeType: type === 'image' ? 'image/jpeg' : 'video/mp4',
+        sizeBytes: bytes.length,
+      });
+      const { load, resolve, assetFindFirst, uploadImage, uploadVideo } = createRuntime([asset]);
+      assetFindFirst.mockResolvedValue({ bytes });
+      const result = await resolve(await load());
+      expect(result).toEqual(
+        type === 'image'
+          ? { imagePayload: { token: 'image-token' } }
+          : { attachments: [{ type: 'video', payload: { token: 'video-token' } }] },
+      );
+      expect(assetFindFirst).toHaveBeenCalledWith({
+        where: {
+          id: asset.id,
+          actorUserId: 'original-author',
+          sha256: asset.sha256,
+          sizeBytes: bytes.length,
+          contentLinks: {
+            some: {
+              contentRevisionId: 'revision-current',
+              contentRevision: { publication: { actorUserId: 'owner' } },
+            },
+          },
+        },
+        select: { bytes: true },
+      });
+      expect(type === 'image' ? uploadImage : uploadVideo).toHaveBeenCalledTimes(1);
     },
   );
 

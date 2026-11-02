@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261102023205_index_sanction_fence_user_state",
-  "baselineNamesSha256": "5b58aa354225fcc11e0991be9a1e7f751c1b466c7c456108fe852077e2667344",
-  "baselineContentsSha256": "67e44bdd666cea34f5d9ed168c007bbee61c5d24e28b7a5ef4081053237c9b60",
+  "baselineThrough": "20261102120000_reprepare_publication_content_contexts",
+  "baselineNamesSha256": "1064757fce1d5847c53078c4683246acbe7fd71d30f057437f6150063d2683c2",
+  "baselineContentsSha256": "ebe7c42b5796b80cd5360ef6278fd18deb5e4c380b08c034c13258db5755abc1",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -176,6 +176,11 @@
       "reason": "Reviewed additive columns and a static row trigger. EXECUTE FUNCTION is a parser classification; no dynamic SQL, destructive DDL, table scan or existing-row backfill.",
       "twoPhaseRelease": true,
       "runtimeCompatibilityEvidence": "Older clients ignore the new columns. The trigger records actual effective moderator/entity changes without altering routing_version or scheduling. Existing witnesses keep the old routing_version check through a nullable epoch; only explicit new bindings adopt stable authority. Old rollback readers remain stricter and cannot reopen revoked access."
+    },
+    "20261102120000_reprepare_publication_content_contexts": {
+      "reason": "Reviewed static replacement of the existing immutable-route trigger and additive NOT VALID context constraint. The frozen-content UPDATE now invalidates only safely unattempted recipients or an exact explicit retry, using bounded primary-key revision lookups. No retained row backfill, table scan, index build, dynamic SQL or history deletion occurs.",
+      "twoPhaseRelease": true,
+      "runtimeCompatibilityEvidence": "The migration leaves all existing v1 and legacy v0 rows unchanged. Only a new content revision writes v2 pending intent; SEND constraints still reject every v0. Old readers can prepare only attempt-zero markers and cannot claim attempted v0 recipients, so a mixed-version rollout fails closed. Both rollback paths require the version-2 content/retry/CAS source floor. Attempt counters remain unchanged; exact human mark_failed retains its reviewed retry exception and automated absence/unknown-effect recipients stay fenced. Expired intent remains cancellable under the structural durable CHECK."
     }
   },
   "nonConcurrentIndexExceptions": {

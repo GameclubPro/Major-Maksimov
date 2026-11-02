@@ -29,6 +29,7 @@ import {
   publicationAdminTargetWhere,
 } from './publication-admin-access';
 import { PublisherPolicyService } from './publisher-policy.service';
+import { publicationAssetReferenceWhere } from './publication-asset-access';
 
 const draftWhere = (actorUserId: string, mode: 'read' | 'manage' = 'read') => ({
   ...publicationAdminAccessWhere(publicationAdminScope(actorUserId), 'PUBLIK_V1', mode),
@@ -318,41 +319,24 @@ export class PublicationDraftsService {
       throw new BadRequestException(
         `Можно сохранить до ${MAX_PUBLICATION_SERVER_DRAFTS} черновиков.`,
       );
-    const referenceIds = content.assets.flatMap((asset) =>
-      asset.kind === 'reference' ? [asset.assetId] : [],
-    );
-    const references = referenceIds.length
+    const referencesToResolve = content.assets.filter((asset) => asset.kind === 'reference');
+    // FLAG: One asset cannot appear with two source hints and let a valid pair authorize
+    // its unrelated sibling. The final content writer also rejects duplicate links.
+    if (
+      new Set(referencesToResolve.map((asset) => asset.assetId)).size !== referencesToResolve.length
+    )
+      throw new BadRequestException('Один и тот же медиафайл добавлен несколько раз.');
+    const references = referencesToResolve.length
       ? await tx.publicationAsset.findMany({
           where: {
-            id: { in: referenceIds },
-            OR: [
-              { actorUserId: actingActorUserId },
-              ...(excludeId
-                ? [
-                    {
-                      contentLinks: {
-                        some: {
-                          contentRevision: {
-                            publication: {
-                              id: excludeId,
-                              ...publicationAdminAccessWhere(
-                                publicationAdminScope(actingActorUserId),
-                                'PUBLIK_V1',
-                                'manage',
-                              ),
-                            },
-                          },
-                        },
-                      },
-                    },
-                  ]
-                : []),
-            ],
+            OR: referencesToResolve.map((asset) =>
+              publicationAssetReferenceWhere(actingActorUserId, asset, excludeId ?? undefined),
+            ),
           },
           select: { id: true, sizeBytes: true },
         })
       : [];
-    if (references.length !== new Set(referenceIds).size)
+    if (references.length !== referencesToResolve.length)
       throw new BadRequestException('Медиа черновика недоступно.');
     const bytes =
       drafts.reduce(

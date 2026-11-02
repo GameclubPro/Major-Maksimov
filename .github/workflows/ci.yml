@@ -374,6 +374,7 @@ jobs:
         if: matrix.shard == '2/2'
         run: |
           node apps/miniapp/test/publication-session.browser.mjs
+          node apps/miniapp/test/publication-shared-media.browser.mjs
           node apps/miniapp/test/publication-video-picker.browser.mjs
           node apps/miniapp/test/publication-composer-usability.browser.mjs
       - name: Rich text formatting, typing state and imported drafts

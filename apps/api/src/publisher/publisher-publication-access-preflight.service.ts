@@ -238,7 +238,12 @@ export class PublisherPublicationAccessPreflightService implements OnModuleInit,
         publisherDialogContext: { path: ['version'], equals: 0 },
       },
       take: PER_OCCURRENCE_TARGET_BUDGET,
-      select: { id: true, targetChatId: true, publisherDialogContext: true },
+      select: {
+        id: true,
+        targetChatId: true,
+        contentRevisionId: true,
+        publisherDialogContext: true,
+      },
     });
     for (const delivery of deliveries) {
       try {

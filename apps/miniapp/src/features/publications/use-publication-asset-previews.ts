@@ -1,4 +1,4 @@
-import type { PublicationAsset } from '@maxim/contracts/publication';
+import type { PublicationRetainedAsset } from './publication-model';
 import { useEffect, useMemo, useState } from 'react';
 import type { ApiTransport } from '../../lib/api/transport';
 import type { PublisherPostImportAssetPreview } from './use-publisher-post-import-asset-previews';
@@ -6,24 +6,34 @@ import type { PublisherPostImportAssetPreview } from './use-publisher-post-impor
 export function usePublicationAssetPreviews(
   api: ApiTransport,
   publicationId: string | null,
-  assets: readonly PublicationAsset[],
+  assets: readonly PublicationRetainedAsset[],
 ) {
-  const key = useMemo(() => assets.map((asset) => asset.id).join(','), [assets]);
+  const key = useMemo(
+    () =>
+      JSON.stringify(
+        assets.flatMap((asset) => {
+          const source = asset.sourcePublicationId ?? publicationId;
+          return source ? [[source, asset.id]] : [];
+        }),
+      ),
+    [assets, publicationId],
+  );
   const [previews, setPreviews] = useState<PublisherPostImportAssetPreview[]>([]);
   useEffect(() => {
     setPreviews([]);
-    if (!publicationId || !key) return;
+    const references = JSON.parse(key) as [string, string][];
+    if (references.length === 0) return;
     const abort = new AbortController();
     const urls: string[] = [];
-    const ids = key.split(',');
     let next = 0;
     async function load() {
       const { getPublicationAsset } = await import('../../lib/api/publication-drafts-client');
       while (!abort.signal.aborted) {
-        const assetId = ids[next++];
-        if (!assetId) return;
+        const reference = references[next++];
+        if (!reference) return;
+        const [sourceId, assetId] = reference;
         try {
-          const blob = await getPublicationAsset(api, publicationId!, assetId, abort.signal);
+          const blob = await getPublicationAsset(api, sourceId, assetId, abort.signal);
           if (abort.signal.aborted) return;
           const url = URL.createObjectURL(blob);
           urls.push(url);
@@ -33,11 +43,11 @@ export function usePublicationAssetPreviews(
         }
       }
     }
-    void Promise.all(Array.from({ length: Math.min(3, ids.length) }, load));
+    void Promise.all(Array.from({ length: Math.min(3, references.length) }, load));
     return () => {
       abort.abort();
       urls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [api, key, publicationId]);
+  }, [api, key]);
   return previews;
 }

@@ -44,6 +44,8 @@ import {
 } from './publication-delivery-error';
 
 export type PublicationView = 'current' | 'schedules' | 'history';
+export type PublicationRetainedAsset = PublicationAsset & { sourcePublicationId?: string };
+
 export type PublicationEditorKind = 'create' | 'edit' | 'duplicate' | 'import' | 'draft';
 export type PublicationEditorContext =
   | { kind: 'create' }
@@ -318,7 +320,7 @@ export type PublicationDraft = {
   mediaBase64: string;
   mediaMimeType: string;
   mediaFileName: string;
-  retainedAssets: PublicationAsset[];
+  retainedAssets: PublicationRetainedAsset[];
 };
 
 export type PublicationRecurrenceDraft = {
@@ -1032,7 +1034,8 @@ export function hasPublicationDraftChanges(
         left.type === right.type &&
         left.mimeType === right.mimeType &&
         left.fileName === right.fileName &&
-        left.sizeBytes === right.sizeBytes,
+        left.sizeBytes === right.sizeBytes &&
+        left.sourcePublicationId === right.sourcePublicationId,
     )
   );
 }
@@ -1152,7 +1155,13 @@ export function buildPublicationContent(draft: PublicationDraft): PublicationCon
   const retainedVideo = draft.retainedAssets.find((asset) => asset.type === 'video');
   const retainedImages = draft.retainedAssets
     .filter((asset) => asset.type === 'image')
-    .map((asset) => ({ type: 'image-ref' as const, assetId: asset.id }));
+    .map((asset) => ({
+      type: 'image-ref' as const,
+      assetId: asset.id,
+      ...(asset.sourcePublicationId || draft.cloudDraft?.id
+        ? { sourcePublicationId: asset.sourcePublicationId ?? draft.cloudDraft?.id }
+        : {}),
+    }));
   const newImages = draft.images.map((image) => ({
     type: 'image' as const,
     base64: image.base64,
@@ -1162,7 +1171,15 @@ export function buildPublicationContent(draft: PublicationDraft): PublicationCon
   const media = selectedVideo
     ? [selectedVideo]
     : retainedVideo
-      ? [{ type: 'video-ref' as const, assetId: retainedVideo.id }]
+      ? [
+          {
+            type: 'video-ref' as const,
+            assetId: retainedVideo.id,
+            ...(retainedVideo.sourcePublicationId || draft.cloudDraft?.id
+              ? { sourcePublicationId: retainedVideo.sourcePublicationId ?? draft.cloudDraft?.id }
+              : {}),
+          },
+        ]
       : [...retainedImages, ...newImages];
 
   return {
@@ -1380,7 +1397,10 @@ export function createPublicationDraftFromDetails(
     mediaBase64: '',
     mediaMimeType: '',
     mediaFileName: '',
-    retainedAssets: details.content.media,
+    retainedAssets: details.content.media.map((asset) => ({
+      ...asset,
+      sourcePublicationId: details.id,
+    })),
   };
 }
 

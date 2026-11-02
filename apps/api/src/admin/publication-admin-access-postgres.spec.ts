@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { PrismaClient, createPrismaAdapter, type Prisma } from '../prisma/prisma-client';
 import { DEFAULT_MAX_PUBLISHER_BOT_ID } from '../publisher/publisher-bot-descriptor';
 import { publicationAdminAccessWhere, publicationAdminScope } from './publication-admin-access';
@@ -8,6 +8,16 @@ import { PublicationContentService } from './publication-content.service';
 import { selectPublicationSearchPage } from './publication-failed-page-query';
 import { PublicationPresenterService } from './publication-presenter.service';
 import { PublicationService } from './publication.service';
+import { PublicationDraftsService } from './publication-drafts.service';
+import { PublisherSelectedAccessService } from './publisher-selected-access.service';
+import type { PublisherPolicyService } from './publisher-policy.service';
+import type { ManagedEntitiesService } from './managed-entities.service';
+import type { ManagedBroadcastService } from './managed-broadcast.service';
+import type { MaxClientService } from '../max/max-client.service';
+import { validateMaxMediaUploadPayload } from '../max/max-media-upload-validation';
+import { AdminManagedBroadcastMediaRuntime } from './admin-managed-broadcast-media-runtime';
+import { safeParseTrustedPublicationTestBroadcastRequest } from './publication-test-broadcast-request';
+import { PUBLICATION_UPLOADED_VIDEO_FIELD } from './publication-video-media';
 import { PublisherManagedBroadcastDispatch } from './publisher-managed-broadcast-dispatch';
 import { PublicationPublisherRoutingService } from './publication-publisher-routing.service';
 import type { PublisherReadinessService } from '../publisher/publisher-readiness.service';
@@ -42,6 +52,16 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
     >
   >;
   const publications: string[] = [];
+  const mediaBroadcasts: string[] = [];
+  let drafts: PublicationDraftsService;
+  let mediaRuntime: AdminManagedBroadcastMediaRuntime;
+  const uploadImage = jest
+    .fn<ReturnType<MaxClientService['uploadImage']>, Parameters<MaxClientService['uploadImage']>>()
+    .mockResolvedValue({ token: 'native-image-token' });
+  const uploadVideo = jest
+    .fn<ReturnType<MaxClientService['uploadVideo']>, Parameters<MaxClientService['uploadVideo']>>()
+    .mockResolvedValue({ token: 'native-video-token' });
+  const testMedia: unknown[] = [];
   let db: PrismaClient;
   let singleId: string;
   let multiId: string;
@@ -54,18 +74,44 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
   let service: PublicationService;
   const wake = { enqueueAfterCommittedMutation: jest.fn(), enqueueResolution: jest.fn() };
 
+  const imageFixture = Buffer.from(
+    '/9j/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAj/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AJXAIf/Z',
+    'base64',
+  );
+  const draftState = {
+    formatVersion: 1,
+    timingMode: 'now',
+    scheduleKind: 'slots',
+    scheduleTimezone: 'UTC',
+    scheduledSlots: [],
+    onceDate: '',
+    onceTime: '',
+    recurrence: {
+      frequency: 'weekly',
+      interval: 1,
+      weekdays: [],
+      times: [],
+      startsAt: null,
+      endsAt: null,
+      maxOccurrences: null,
+    },
+  } as const;
   async function createPublication(
     targets: string[],
     lifecycle: 'ACTIVE' | 'ERROR' | 'DRAFT' = 'ACTIVE',
+    uniqueAsset = false,
+    publicationBotId = botId,
   ) {
-    const imageBytes = Buffer.from(`image:${targets.join(',')}`);
+    const imageBytes = Buffer.from(
+      `image:${targets.join(',')}${uniqueAsset ? `:${randomUUID()}` : ''}`,
+    );
     const row = await db.publication.create({
       data: {
         actorUserId: creator,
         requestId: randomUUID(),
         title: `${prefix}-common`,
         dispatchProfile: 'PUBLIK_V1',
-        requiredBotId: botId,
+        requiredBotId: publicationBotId,
         lifecycle,
         targets: {
           create: targets.map((targetChatId, position) => ({
@@ -223,12 +269,82 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
     });
     presenter = new PublicationPresenterService(db as never);
     content = new PublicationContentService(db as never, {} as never);
+    const selectedAccess = new PublisherSelectedAccessService(
+      db as never,
+      {
+        getPublisherBotDescriptor: () => ({
+          id: botId,
+          kind: 'publisher',
+          label: 'Публик',
+          contactId: null,
+        }),
+      } as never,
+    );
+    const entityAccess = {
+      assertChatAdminAccess: (id, user) => selectedAccess.assertAccess(user, id, 'chat'),
+      assertChannelAdminAccess: (id, user) => selectedAccess.assertAccess(user, id, 'channel'),
+    } satisfies Pick<ManagedEntitiesService, 'assertChatAdminAccess' | 'assertChannelAdminAccess'>;
+    mediaRuntime = new AdminManagedBroadcastMediaRuntime({
+      prisma: db,
+      maxClient: {
+        uploadImage,
+        uploadVideo,
+        validateMediaUploadPayload: validateMaxMediaUploadPayload,
+      } satisfies Pick<
+        MaxClientService,
+        'uploadImage' | 'uploadVideo' | 'validateMediaUploadPayload'
+      >,
+      logger: new Logger('publication-shared-media-native'),
+    } as never);
+    const preparePrivateTest: ManagedBroadcastService['sendPublicationBroadcastTest'] = async (
+      sourceChatId,
+      user,
+      body,
+    ) => {
+      const parsed = safeParseTrustedPublicationTestBroadcastRequest(body);
+      if (!parsed.success) throw new Error(parsed.error.message);
+      testMedia.push(
+        await mediaRuntime.resolveManagedBroadcastMedia(
+          parsed.data,
+          'chat',
+          sourceChatId,
+          user.userId,
+          botId,
+          undefined,
+          undefined,
+          { trustedPublicationVideoMarkers: true, trustedPublicationTestPayload: true },
+        ),
+      );
+      return { delivered: true, messageId: null, chatId: null, url: null };
+    };
+    const testBroadcasts = {
+      sendPublicationBroadcastTest: preparePrivateTest,
+      sendPublicationChannelBroadcastTest: preparePrivateTest,
+    } satisfies Pick<
+      ManagedBroadcastService,
+      'sendPublicationBroadcastTest' | 'sendPublicationChannelBroadcastTest'
+    >;
+    drafts = new PublicationDraftsService(
+      db as never,
+      content,
+      presenter,
+      {
+        requireNewRoute: () => ({ dispatchProfile: 'PUBLIK_V1', requiredBotId: botId }),
+      } as never,
+      {
+        async resolveDraftTargets(user, targets) {
+          for (const target of targets)
+            await selectedAccess.assertAccess(user, target.chatId, target.entityType);
+          return [...targets];
+        },
+      } satisfies Pick<PublisherPolicyService, 'resolveDraftTargets'> as never,
+    );
     service = new PublicationService(
       db as never,
       content,
       presenter,
-      {} as never,
-      {} as never,
+      entityAccess as never,
+      testBroadcasts as never,
       {} as never,
       {} as never,
       {
@@ -249,7 +365,9 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
 
   afterAll(async () => {
     if (!db) return;
-    await db.managedBroadcast.deleteMany({ where: { actorUserId: creator } });
+    await db.managedBroadcast.deleteMany({
+      where: { OR: [{ actorUserId: creator }, { id: { in: mediaBroadcasts } }] },
+    });
     await db.publication.deleteMany({ where: { id: { in: publications } } });
     await db.publicationAsset.deleteMany({
       where: { actorUserId: creator, contentLinks: { none: {} } },
@@ -778,6 +896,226 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
       }),
     ).toEqual({ actorUserId: creator });
   });
+
+  it.each(['image', 'video'] as const)(
+    'copies and tests shared %s through public services without changing asset ownership',
+    async (type) => {
+      const source = await createPublication([chatId], 'DRAFT', true);
+      const revisionId = source.contentRevisions[0]!.id;
+      const assetId = source.contentRevisions[0]!.assets[0]!.assetId;
+      await db.publicationAsset.update({
+        where: { id: assetId },
+        data:
+          type === 'image'
+            ? {
+                bytes: imageFixture,
+                sizeBytes: imageFixture.length,
+                mimeType: 'image/jpeg',
+                sha256: createHash('sha256').update(imageFixture).digest('hex'),
+              }
+            : {
+                bytes: null,
+                sizeBytes: 90_000_000,
+                mimeType: 'video/mp4',
+                durablePayload: {
+                  [PUBLICATION_UPLOADED_VIDEO_FIELD]: {
+                    version: 1,
+                    botId,
+                    token: 'shared-native-remote-token',
+                  },
+                },
+              },
+      });
+      const reference = {
+        type: type === 'image' ? ('image-ref' as const) : ('video-ref' as const),
+        assetId,
+        sourcePublicationId: source.id,
+      };
+      const contentInput = {
+        text: 'Shared media copy',
+        textFormat: 'plain' as const,
+        buttons: [],
+        media: [reference],
+      };
+      const assetCount = await db.publicationAsset.count({
+        where: { actorUserId: { in: [creator, admin.userId] } },
+      });
+      testMedia.length = 0;
+      await service.sendTest(admin, {
+        requestId: randomUUID(),
+        content: contentInput,
+        sourceTarget: { chatId, entityType: 'chat' },
+      });
+      expect(testMedia).toHaveLength(1);
+      const expectedMedia =
+        type === 'image'
+          ? { imagePayload: { token: 'native-image-token' } }
+          : { attachments: [{ type: 'video', payload: { token: 'shared-native-remote-token' } }] };
+      expect(testMedia[0]).toMatchObject(expectedMedia);
+      const copy = await drafts.save(null, admin, {
+        requestId: randomUUID(),
+        title: 'Copied shared media',
+        content: contentInput,
+        targets: [{ chatId, entityType: 'chat' }],
+        state: draftState,
+      });
+      publications.push(copy.publication.id);
+      expect(copy.publication.content.media.map((asset) => asset.id)).toEqual([assetId]);
+      expect(
+        await db.publicationAsset.count({
+          where: { actorUserId: { in: [creator, admin.userId] } },
+        }),
+      ).toBe(assetCount);
+      const persistedAsset = await db.publicationAsset.findUniqueOrThrow({
+        where: { id: assetId },
+        select: { actorUserId: true, bytes: true },
+      });
+      expect(persistedAsset.actorUserId).toBe(creator);
+      expect(persistedAsset.bytes ? Buffer.from(persistedAsset.bytes) : null).toEqual(
+        type === 'image' ? imageFixture : null,
+      );
+      await db.publication.delete({ where: { id: source.id } });
+      await expect(
+        service.sendTest(admin, {
+          requestId: randomUUID(),
+          content: contentInput,
+          sourceTarget: { chatId, entityType: 'chat' },
+        }),
+      ).rejects.toThrow('недоступно');
+      const copiedReference = { ...reference, sourcePublicationId: copy.publication.id };
+      await service.sendTest(admin, {
+        requestId: randomUUID(),
+        content: { ...contentInput, media: [copiedReference] },
+        sourceTarget: { chatId, entityType: 'chat' },
+      });
+      const copyRow = await db.publication.findUniqueOrThrow({
+        where: { id: copy.publication.id },
+        select: {
+          canonicalContentRevisionId: true,
+          schedule: { select: { id: true, revision: true } },
+        },
+      });
+      expect(copyRow.canonicalContentRevisionId).not.toBe(revisionId);
+      if (!copyRow.canonicalContentRevisionId || !copyRow.schedule)
+        throw new Error('Saved copy must have canonical content and a schedule');
+      const copiedOccurrence = await db.publicationOccurrence.create({
+        data: {
+          publicationId: copy.publication.id,
+          scheduleId: copyRow.schedule.id,
+          scheduleRevision: copyRow.schedule.revision,
+          contentRevisionId: copyRow.canonicalContentRevisionId,
+          scheduledAt: new Date('2030-01-01T12:00:00.000Z'),
+          dispatchProfile: 'PUBLIK_V1',
+          requiredBotId: botId,
+        },
+      });
+      const broadcast = await db.managedBroadcast.create({
+        data: {
+          sourceChatId: chatId,
+          actorUserId: admin.userId,
+          targetChatIds: [chatId],
+          buttons: [],
+          dispatchProfile: 'PUBLIK_V1',
+          requiredBotId: botId,
+          publicationOccurrenceId: copiedOccurrence.id,
+          publicationContentRevisionId: copyRow.canonicalContentRevisionId,
+        },
+      });
+      mediaBroadcasts.push(broadcast.id);
+      const execution = await mediaRuntime.loadManagedBroadcastExecutionMedia(broadcast);
+      const parsed = safeParseTrustedPublicationTestBroadcastRequest(
+        await content.buildLegacyTestPayload(
+          {
+            requestId: randomUUID(),
+            content: { ...contentInput, media: [copiedReference] },
+            sourceTarget: { chatId, entityType: 'chat' },
+          },
+          admin.userId,
+        ),
+      );
+      if (!parsed.success) throw new Error(parsed.error.message);
+      const media = await mediaRuntime.resolveManagedBroadcastExecutionMedia(
+        execution,
+        parsed.data,
+        'chat',
+        chatId,
+        admin.userId,
+        botId,
+      );
+      expect(media).toMatchObject(expectedMedia);
+      if (type === 'video') expect(uploadVideo).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects unrelated, private, Major-only and different-bot shared-media sources', async () => {
+    const invalidBotSource = await createPublication(
+      [chatId],
+      'DRAFT',
+      true,
+      `${prefix}-other-publisher`,
+    );
+    const cases = [
+      { actor: admin, assetId: privateAssetId, sourcePublicationId: singleId },
+      { actor: admin, assetId: sharedAssetId, sourcePublicationId: privateId },
+      { actor: admin, assetId: sharedAssetId, sourcePublicationId: draftId },
+      { actor: outsider, assetId: sharedAssetId, sourcePublicationId: singleId },
+      {
+        actor: admin,
+        assetId: invalidBotSource.contentRevisions[0]!.assets[0]!.assetId,
+        sourcePublicationId: invalidBotSource.id,
+      },
+    ];
+    for (const item of cases) {
+      await expect(
+        drafts.save(null, item.actor, {
+          requestId: randomUUID(),
+          title: 'Forbidden copy',
+          content: {
+            text: 'copy',
+            media: [
+              {
+                type: 'image-ref',
+                assetId: item.assetId,
+                sourcePublicationId: item.sourcePublicationId,
+              },
+            ],
+          },
+          targets: [],
+          state: draftState,
+        }),
+      ).rejects.toThrow('недоступно');
+    }
+  });
+
+  it.each(['USER_DENIED', 'MEMBER'] as const)(
+    'rechecks an explicit %s source grant at copy admission',
+    async (denial) => {
+      const edgeWhere = { chatId_userId_botId: { chatId, userId: admin.userId, botId } };
+      await db.managedEntityAccessEdge.update({
+        where: edgeWhere,
+        data: denial === 'USER_DENIED' ? { state: 'USER_DENIED' } : { userRole: 'MEMBER' },
+      });
+      try {
+        await expect(
+          drafts.save(null, admin, {
+            requestId: randomUUID(),
+            title: 'Revoked copy',
+            content: {
+              text: 'copy',
+              media: [{ type: 'image-ref', assetId: sharedAssetId, sourcePublicationId: singleId }],
+            },
+            targets: [],
+            state: draftState,
+          }),
+        ).rejects.toThrow('недоступно');
+      } finally {
+        await db.managedEntityAccessEdge.update({
+          where: edgeWhere,
+          data: { state: 'GRANTED', userRole: 'ADMIN' },
+        });
+      }
+    },
+  );
 
   it('does not grant authorship, Major rights or empty private drafts shared authority', async () => {
     await expect(service.get(privateId, admin, 'PUBLIK_V1')).rejects.toBeInstanceOf(

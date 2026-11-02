@@ -3834,9 +3834,7 @@ describe('PublicationService', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: 'asset-video-owned',
-          contentLinks: {
-            some: { contentRevision: { publication: { actorUserId: 'user-2' } } },
-          },
+          OR: expect.arrayContaining([expect.objectContaining({ actorUserId: 'user-2' })]),
         }),
       }),
     );

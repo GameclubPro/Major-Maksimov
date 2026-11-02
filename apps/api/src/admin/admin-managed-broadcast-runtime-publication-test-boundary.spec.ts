@@ -3,6 +3,7 @@ import { validateMaxMediaUploadPayload } from '../max/max-media-upload-validatio
 import { AdminManagedBroadcastRuntime } from './admin-managed-broadcast-runtime';
 import {
   PUBLICATION_VIDEO_ASSET_ID_FIELD,
+  PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD,
   PUBLICATION_VIDEO_INLINE_BASE64_FIELD,
 } from './publication-video-media';
 
@@ -209,6 +210,13 @@ describe('AdminManagedBroadcastRuntime publication test request boundary', () =>
       { [PUBLICATION_VIDEO_INLINE_BASE64_FIELD]: Buffer.from('inline-video').toString('base64') },
     ],
     ['retained asset', { [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset-video-owned' }],
+    [
+      'shared asset',
+      {
+        [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset-video-shared',
+        [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source-publication',
+      },
+    ],
   ])('accepts a trusted %s video marker', async (_label, mediaPayload) => {
     const { runtime } = createRuntime();
     const body = createPayload({
@@ -252,8 +260,52 @@ describe('AdminManagedBroadcastRuntime publication test request boundary', () =>
   });
 
   it.each([
+    { [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source-publication' },
+    {
+      [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset',
+      [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: '',
+    },
+    {
+      [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset',
+      [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 123,
+    },
+    {
+      [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset',
+      [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'x'.repeat(257),
+    },
+    {
+      [PUBLICATION_VIDEO_INLINE_BASE64_FIELD]: 'dmlkZW8=',
+      [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source',
+    },
+    {
+      [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset',
+      [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source',
+      token: 'forged-token',
+    },
+  ])('rejects malformed or mixed trusted video source markers: %j', async (mediaPayload) => {
+    const { runtime, assertAdminAccess } = createRuntime();
+    await expect(
+      preparePublicationTest(
+        runtime,
+        createPayload({
+          mediaType: 'video',
+          mediaPayload,
+        }),
+      ),
+    ).rejects.toThrow();
+    expect(assertAdminAccess).toHaveBeenCalledWith('chat-1', 'user-1', 'chat');
+  });
+
+  it.each([
     ['inline', { [PUBLICATION_VIDEO_INLINE_BASE64_FIELD]: 'aW5saW5lLXZpZGVv' }],
     ['retained asset', { [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset-video-owned' }],
+    [
+      'shared asset',
+      {
+        [PUBLICATION_VIDEO_ASSET_ID_FIELD]: 'asset-video-shared',
+        [PUBLICATION_VIDEO_SOURCE_PUBLICATION_ID_FIELD]: 'source-publication',
+      },
+    ],
   ])(
     'keeps the %s marker out of ordinary public broadcast requests',
     async (_label, mediaPayload) => {

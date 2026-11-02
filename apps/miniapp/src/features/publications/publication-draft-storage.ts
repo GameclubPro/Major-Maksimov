@@ -309,13 +309,22 @@ export function parsePublicationDraftEnvelope(value: unknown): PublicationDraft 
     mediaFileName: readString(draft.mediaFileName),
     ...(cloudDraft ? { cloudDraft } : {}),
     ...(cloudRequestId ? { cloudRequestId } : {}),
-    retainedAssets:
-      cloudDraft && Array.isArray(draft.retainedAssets)
-        ? draft.retainedAssets.slice(0, MAX_PUBLICATION_IMAGES).flatMap((asset) => {
-            const parsed = publicationAssetSchema.safeParse(asset);
-            return parsed.success ? [parsed.data] : [];
-          })
-        : [],
+    retainedAssets: Array.isArray(draft.retainedAssets)
+      ? draft.retainedAssets.slice(0, MAX_PUBLICATION_IMAGES).flatMap((asset) => {
+          const parsed = publicationAssetSchema.safeParse(asset);
+          if (!parsed.success) return [];
+          const source =
+            isObject(asset) && typeof asset.sourcePublicationId === 'string'
+              ? asset.sourcePublicationId.trim()
+              : cloudDraft?.id;
+          return [
+            {
+              ...parsed.data,
+              ...(source && source.length <= 256 ? { sourcePublicationId: source } : {}),
+            },
+          ];
+        })
+      : [],
   };
 }
 

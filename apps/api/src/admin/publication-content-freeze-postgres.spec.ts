@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { ConflictException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { PublicationContentInput } from '@maxim/contracts/publication';
-import { PrismaClient, createPrismaAdapter, type Prisma } from '../prisma/prisma-client';
+import {
+  MaxActionLedgerStatus,
+  PrismaClient,
+  createPrismaAdapter,
+  type Prisma,
+} from '../prisma/prisma-client';
 import { PublicationService } from './publication.service';
 import { PublicationContentService } from './publication-content.service';
 import type { PublicationPublisherRoutingService } from './publication-publisher-routing.service';
@@ -15,6 +20,12 @@ import { AdminManagedBroadcastMediaRuntime } from './admin-managed-broadcast-med
 import type { AdminManagedBroadcastRuntimeContext } from './admin-managed-broadcast-runtime-context';
 import type { PrismaService } from '../prisma/prisma.service';
 import { createPublicationExecutionObserver } from './publication-delivery-timing';
+import {
+  createPendingPublicationContext,
+  preparePendingPublicationContext,
+} from './publication-target-preparation';
+import { PublisherDialogContextService } from './publisher-dialog-context.service';
+import { AdminManagedBroadcastMessageRuntime } from './admin-managed-broadcast-message-runtime';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const integration = databaseUrl ? describe : describe.skip;
@@ -303,6 +314,398 @@ integration('Publication content freeze and immutable recovery on PostgreSQL', (
       },
       'PUBLIK_V1',
     );
+
+  const oldButton = { text: 'Old offer', url: 'https://example.com/old', row: 0 };
+  const newButton = { text: 'New offer', url: 'https://example.com/new', row: 0 };
+  function dialogPreparation() {
+    return {
+      prisma: db as never,
+      publisherDialogContextService: new PublisherDialogContextService(
+        db as never,
+        {
+          buildChatDialogButton: () => ({
+            type: 'callback',
+            text: 'Комментарии',
+            payload: 'synthetic-comments',
+          }),
+        } as never,
+      ),
+    };
+  }
+  async function seedInitialKeyboard(version: 0 | 1, buttons: (typeof oldButton)[]) {
+    // FLAG: Fixture construction precedes every effect; the service edit under test still
+    // executes its real bulk UPDATE and PostgreSQL route trigger without a SQL double.
+    await db.publicationContentRevision.update({
+      where: { id: contentRevisionId },
+      data: { buttons },
+    });
+    const initial = await db.managedBroadcastDelivery.findUniqueOrThrow({
+      where: { id: deliveryId },
+    });
+    await db.managedBroadcastDelivery.delete({ where: { id: deliveryId } });
+    await db.managedBroadcastDelivery.create({
+      data: {
+        ...initial,
+        publisherDialogContext: createPendingPublicationContext(
+          { chatId, entityType: 'chat' },
+          botId,
+          buttons,
+        ),
+      },
+    });
+    await db.publisherEntitySettings.upsert({
+      where: { chatId },
+      create: { chatId, chatCommentsEnabled: true, chatCommentsPostsEnabled: true },
+      update: { chatCommentsEnabled: true, chatCommentsPostsEnabled: true },
+    });
+    if (version === 1) {
+      const delivery = await db.managedBroadcastDelivery.findUniqueOrThrow({
+        where: { id: deliveryId },
+      });
+      await preparePendingPublicationContext(dialogPreparation(), delivery, botId);
+    }
+  }
+  async function assertCurrentMessageButtons(buttons: (typeof oldButton)[]) {
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: { status: 'IN_PROGRESS' },
+    });
+    const delivery = await db.managedBroadcastDelivery.findUniqueOrThrow({
+      where: { id: deliveryId },
+    });
+    await preparePendingPublicationContext(dialogPreparation(), delivery, botId);
+    const row = await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } });
+    const message = await new AdminManagedBroadcastMessageRuntime(
+      {
+        resolveBroadcastButtonContext: async () => {
+          throw new Error('Unexpected legacy button fallback');
+        },
+      } as never,
+      new Logger('PublicationKeyboardTest'),
+    ).buildMessage(chatId, 'chat', row as never, row.text, {} as never, botId, botId, {
+      value: delivery.publisherDialogContext,
+      required: true,
+    });
+    const custom =
+      message.messageOptions?.buttons?.flat().filter((button) => button.type === 'link') ?? [];
+    expect(custom).toEqual(buttons.map(({ text, url }) => ({ type: 'link', text, url })));
+    expect(message.commentDialogReference).toMatchObject({
+      customButtons: buttons.map(({ text, url }) => ({ text, url })),
+      dialogBotId: botId,
+      includeCommentsButton: true,
+    });
+    expect(message.messageOptions?.buttons?.flat()).toContainEqual(
+      expect.objectContaining({ type: 'callback', payload: 'synthetic-comments' }),
+    );
+  }
+
+  it.each(
+    ([0, 1] as const).flatMap((version) => [
+      { version, action: 'add', before: [], after: [newButton] },
+      { version, action: 'change', before: [oldButton], after: [newButton] },
+      { version, action: 'remove', before: [oldButton], after: [] },
+    ]),
+  )(
+    'reprepares $action buttons from v$version through the real edit transaction',
+    async ({ version, before, after }) => {
+      await seedInitialKeyboard(version, before);
+      await update(service, { ...oldContent, buttons: after });
+      const delivery = await db.managedBroadcastDelivery.findUniqueOrThrow({
+        where: { id: deliveryId },
+      });
+      expect(delivery).toMatchObject({
+        attemptCount: 0,
+        publisherDialogContext: {
+          version: 0,
+          preparationRevision: 2,
+          customButtons: after,
+          contentRevisionId: delivery.contentRevisionId,
+        },
+      });
+      await expect(
+        db.managedBroadcastDelivery.update({
+          where: { id: deliveryId },
+          data: { status: 'SENDING', attemptCount: 1 },
+        }),
+      ).rejects.toThrow();
+      await assertCurrentMessageButtons(after);
+    },
+  );
+
+  it('does not reuse a new preflight winner under a losing legacy content snapshot', async () => {
+    await seedInitialKeyboard(0, [oldButton]);
+    const stale = await db.managedBroadcastDelivery.findUniqueOrThrow({
+      where: { id: deliveryId },
+    });
+    const started = gate();
+    const release = gate();
+    const preparation = dialogPreparation();
+    const originalPrepare = preparation.publisherDialogContextService.prepare.bind(
+      preparation.publisherDialogContextService,
+    );
+    jest
+      .spyOn(preparation.publisherDialogContextService, 'prepare')
+      .mockImplementation(async (input) => {
+        const prepared = await originalPrepare(input);
+        started.resolve();
+        await release.promise;
+        return prepared;
+      });
+    const losing = preparePendingPublicationContext(preparation, stale, botId);
+    await started.promise;
+    await update(service, { ...oldContent, buttons: [newButton] });
+    await assertCurrentMessageButtons([newButton]);
+    const rejection = expect(losing).rejects.toThrow('fence');
+    release.resolve();
+    await rejection;
+    expect(stale.contentRevisionId).toBe(contentRevisionId);
+    expect(stale.publisherDialogContext).toMatchObject({ version: 0 });
+  });
+
+  it.each(['latest', 'original', 'latest-manual'] as const)(
+    'preserves attempts and history during %s retry',
+    async (mode) => {
+      await seedInitialKeyboard(1, [oldButton]);
+      const original = await db.managedBroadcastDelivery.findUniqueOrThrow({
+        where: { id: deliveryId },
+      });
+      const row = await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } });
+      const actionKey = buildManagedBroadcastDeliveryActionKey(row, 1, chatId);
+      const retainedLedger = await db.maxActionLedgerEntry.create({
+        data: {
+          jobId: actionKey,
+          actionType: 'SEND_MESSAGE',
+          chatId,
+          status: MaxActionLedgerStatus.FAILED_TERMINAL,
+          terminal: true,
+          dispatchBotId: botId,
+          completedAt: new Date(),
+        },
+      });
+      await db.managedBroadcastDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: 'FAILED',
+          attemptCount: 3,
+          capacityDeferralCount: 7,
+          rateLimitDeferralCount: 9,
+          ...(mode === 'latest-manual'
+            ? {
+                remoteMessageId: 'reviewed-absent',
+                sentAt: new Date(),
+                lastError: 'Администратор подтвердил, что сообщение не было опубликовано.',
+              }
+            : {}),
+        },
+      });
+      const sentSibling = await db.managedBroadcastDelivery.create({
+        data: {
+          broadcastId,
+          occurrenceIndex: 1,
+          targetChatId: `${chatId}-sent`,
+          publicationOccurrenceId: occurrenceId,
+          contentRevisionId,
+          dispatchProfile: 'PUBLIK_V1',
+          requiredBotId: botId,
+          dialogBotId: botId,
+          publicationPolicyRevision: 0,
+          status: 'SENT',
+          attemptCount: 1,
+          remoteMessageId: 'retained-sibling',
+          sentAt: new Date(),
+          publisherDialogContext: original.publisherDialogContext as Prisma.InputJsonValue,
+        },
+      });
+      const ambiguousEnvelope = await db.managedBroadcast.create({
+        data: {
+          sourceChatId: chatId,
+          actorUserId: chatId,
+          text: oldContent.text,
+          buttons: [],
+          entityType: 'CHANNEL',
+          status: 'FAILED',
+          targetChatIds: [`${chatId}-ambiguous`],
+          publicationOccurrenceId: occurrenceId,
+          publicationContentRevisionId: contentRevisionId,
+          dispatchProfile: 'PUBLIK_V1',
+          requiredBotId: botId,
+          deliveries: {
+            create: {
+              occurrenceIndex: 1,
+              targetChatId: `${chatId}-ambiguous`,
+              publicationOccurrenceId: occurrenceId,
+              contentRevisionId,
+              dispatchProfile: 'PUBLIK_V1',
+              requiredBotId: botId,
+              dialogBotId: botId,
+              publicationPolicyRevision: 0,
+              status: 'AMBIGUOUS',
+              attemptCount: 1,
+              publisherDialogContext: original.publisherDialogContext as Prisma.InputJsonValue,
+            },
+          },
+        },
+        include: { deliveries: true },
+      });
+      const ambiguousSibling = ambiguousEnvelope.deliveries[0]!;
+      await db.managedBroadcast.update({ where: { id: broadcastId }, data: { status: 'PARTIAL' } });
+      await db.publicationOccurrence.update({
+        where: { id: occurrenceId },
+        data: { status: 'PARTIAL' },
+      });
+      const latest = await db.publicationContentRevision.create({
+        data: { publicationId, revision: 2, text: oldContent.text, buttons: [newButton] },
+      });
+      await db.publication.update({
+        where: { id: publicationId },
+        data: { canonicalContentRevisionId: latest.id },
+      });
+      await service.retryOccurrence(
+        publicationId,
+        occurrenceId,
+        user(),
+        {
+          requestId: `retry_${randomUUID()}`,
+          contentMode: mode === 'original' ? 'original' : 'latest',
+          ...(mode === 'original'
+            ? {}
+            : { expectedPublicationVersion: 1, expectedContentRevision: 2 }),
+        },
+        'PUBLIK_V1',
+      );
+      const retried = await db.managedBroadcastDelivery.findUniqueOrThrow({
+        where: { id: deliveryId },
+      });
+      expect(retried).toMatchObject({
+        status: 'PENDING',
+        attemptCount: 3,
+        capacityDeferralCount: 7,
+        rateLimitDeferralCount: 9,
+        remoteMessageId: null,
+        sentAt: null,
+      });
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: sentSibling.id } }),
+      ).toEqual(sentSibling);
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: ambiguousSibling.id } }),
+      ).toEqual(ambiguousSibling);
+      expect(await db.maxActionLedgerEntry.findUnique({ where: { jobId: actionKey } })).toEqual(
+        retainedLedger,
+      );
+      if (mode === 'original') {
+        expect(retried.publisherDialogContext).toEqual(original.publisherDialogContext);
+        expect(retried.contentRevisionId).toBe(contentRevisionId);
+      } else {
+        expect(retried.publisherDialogContext).toMatchObject({
+          version: 0,
+          preparationRevision: 2,
+          contentRevisionId: latest.id,
+        });
+        await db.publicationOccurrence.update({
+          where: { id: occurrenceId },
+          data:
+            mode === 'latest'
+              ? { dispatchBlockerCode: null, dispatchBlockedAt: null }
+              : { dispatchBlockerCode: 'PUBLISHER_BOT_NOT_ADMIN' },
+        });
+        await assertCurrentMessageButtons([newButton]);
+        expect(
+          (await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }))
+            .attemptCount,
+        ).toBe(3);
+      }
+    },
+  );
+
+  it('cancels expired attempted intent and renews the exact same-content retry authority', async () => {
+    await seedInitialKeyboard(1, [oldButton]);
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: { status: 'FAILED', attemptCount: 3 },
+    });
+    await db.managedBroadcast.update({ where: { id: broadcastId }, data: { status: 'FAILED' } });
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: { status: 'FAILED' },
+    });
+    const latest = await db.publicationContentRevision.create({
+      data: { publicationId, revision: 2, text: oldContent.text, buttons: [newButton] },
+    });
+    await db.publication.update({
+      where: { id: publicationId },
+      data: { canonicalContentRevisionId: latest.id },
+    });
+    await service.retryOccurrence(
+      publicationId,
+      occurrenceId,
+      user(),
+      {
+        requestId: `retry_${randomUUID()}`,
+        contentMode: 'latest',
+        expectedPublicationVersion: 1,
+        expectedContentRevision: 2,
+      },
+      'PUBLIK_V1',
+    );
+    const pending = await db.managedBroadcastDelivery.findUniqueOrThrow({
+      where: { id: deliveryId },
+    });
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: {
+        retryAuthorizedAt: new Date(Date.now() - 120_000),
+        retryExpiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    await expect(
+      preparePendingPublicationContext(dialogPreparation(), pending, botId),
+    ).rejects.toThrow('fence');
+    await expect(
+      db.managedBroadcastDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          publisherDialogContext: { version: 1, dialogBotId: botId, buttons: [], reference: null },
+        },
+      }),
+    ).rejects.toThrow('immutable');
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: { status: 'CANCELED' },
+    });
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: { status: 'FAILED' },
+    });
+    await db.managedBroadcast.update({ where: { id: broadcastId }, data: { status: 'FAILED' } });
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: { status: 'FAILED' },
+    });
+    await service.retryOccurrence(
+      publicationId,
+      occurrenceId,
+      user(),
+      { requestId: `renew_${randomUUID()}`, contentMode: 'original' },
+      'PUBLIK_V1',
+    );
+    const renewed = await db.managedBroadcastDelivery.findUniqueOrThrow({
+      where: { id: deliveryId },
+    });
+    const occurrence = await db.publicationOccurrence.findUniqueOrThrow({
+      where: { id: occurrenceId },
+    });
+    expect(renewed).toMatchObject({
+      attemptCount: 3,
+      contentRevisionId: latest.id,
+      publisherDialogContext: {
+        version: 0,
+        retryAuthorizedAtMs: occurrence.retryAuthorizedAt!.getTime(),
+        retryExpiresAtMs: occurrence.retryExpiresAt!.getTime(),
+      },
+    });
+    await assertCurrentMessageButtons([newButton]);
+  });
 
   async function prepareCalendarReservation(
     at = new Date(Math.ceil((Date.now() + 120_000) / 60_000) * 60_000),

@@ -99,6 +99,17 @@ describe('Publication delivery timing', () => {
     ]);
   });
 
+  it.each(['image/jpeg', 'video/mp4'])(
+    'classifies copied %s assets from the accepted revision without changing their owner',
+    (mimeType) => {
+      const execution = frozenExecutionMedia([mimeType]);
+      execution.publicationSource!.assets[0]!.actorUserId = 'original-author';
+      const observer = createPublicationExecutionObserver({ log: jest.fn() }, publicationRow, true);
+      observer.observeExecutionMedia(execution);
+      expect(observer.dimensions.media).toBe(mimeType.startsWith('image/') ? 'image' : 'video');
+    },
+  );
+
   it('refuses missing, mismatched and contradictory frozen metadata without legacy fallback', () => {
     const observer = createPublicationExecutionObserver({ log: jest.fn() }, publicationRow, true);
     const execution = frozenExecutionMedia(['image/jpeg']);
@@ -111,7 +122,7 @@ describe('Publication delivery timing', () => {
         ...execution,
         publicationSource: {
           ...source,
-          assets: [{ ...source.assets[0]!, actorUserId: 'different-actor' }],
+          assets: [{ ...source.assets[0]!, actorUserId: '' }],
         },
       },
       {

@@ -452,3 +452,36 @@ test('recognizes an ambiguous test result and provides actionable copy', () => {
     durationMs: 6_000,
   });
 });
+
+test('shared media source participates in both save and private-test request identity', () => {
+  const resolve = createIdentityResolver();
+  const draft = {
+    ...createEmptyPublicationDraft([chatTarget]),
+    text: 'copy',
+    retainedAssets: [
+      {
+        id: 'asset',
+        type: 'image' as const,
+        mimeType: 'image/png',
+        fileName: 'shared.png',
+        sizeBytes: 10,
+        sourcePublicationId: 'source-a',
+      },
+    ],
+  };
+  const changed = {
+    ...draft,
+    retainedAssets: draft.retainedAssets.map((asset) => ({
+      ...asset,
+      sourcePublicationId: 'source-b',
+    })),
+  };
+  for (const key of [
+    (value: typeof draft) => buildPublicationSaveRequestKey(value, { kind: 'duplicate' }, false),
+    (value: typeof draft) => buildPublicationTestRequestKey(value),
+  ]) {
+    const first = resolve(null, key(draft));
+    assert.equal(resolve(first, key(draft)).requestId, first.requestId);
+    assert.notEqual(resolve(first, key(changed)).requestId, first.requestId);
+  }
+});
