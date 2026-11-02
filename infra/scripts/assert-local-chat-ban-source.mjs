@@ -80,8 +80,9 @@ export const LOCAL_CHAT_BAN_SOURCE_CHECKS = Object.freeze([
   [
     'infra/scripts/vps-connect.sh',
     [
-      './infra/scripts/vps-runtime-rollback.sh \\ maxim_topology_require_local_chat_ban_reader',
-      'capability_marker=maxim_topology_require_local_chat_ban_reader',
+      './infra/scripts/vps-runtime-rollback.sh \\ maxim_topology_require_statistics_and_night_mode_recovery',
+      'capability_marker=maxim_topology_require_statistics_and_night_mode_recovery',
+      'if [[ "$capability_marker" == maxim_topology_require_statistics_and_night_mode_recovery ]]; then capability_marker=maxim_topology_require_local_chat_ban_reader fi',
     ],
   ],
 ]);
@@ -98,6 +99,7 @@ export function assertLocalChatBanSource(
 ) {
   if (!/^[0-9a-f]{40}$/u.test(commitSha ?? '')) throw new Error('Exact source SHA required');
   const sources = new Map();
+  let connectorSource = '';
   for (const [path, fragments] of LOCAL_CHAT_BAN_SOURCE_CHECKS) {
     let source;
     try {
@@ -113,6 +115,7 @@ export function assertLocalChatBanSource(
       throw new Error(`Rollback target lacks local chat ban readers: ${path}`);
     }
     sources.set(path, compact(source));
+    if (path === 'infra/scripts/vps-connect.sh') connectorSource = source;
   }
   const admin = sources.get('apps/api/src/admin/admin.service.legacy.ts');
   const start = admin.indexOf('privateasyncapplyManualModerationActionLocked(');
@@ -124,6 +127,25 @@ export function assertLocalChatBanSource(
   const moderation = sources.get('apps/api/src/moderation/moderation.service.legacy.ts');
   if (moderation.split('this.enforceLocalChatBanForUpdate(').length - 1 < 2) {
     throw new Error('Rollback target lacks local chat ban readers: join/message enforcement');
+  }
+  const builderStart = connectorSource.indexOf('build_guarded_rollback_command() {');
+  const builderEnd = connectorSource.indexOf('\n}\n', builderStart);
+  const builder = compact(connectorSource.slice(builderStart, builderEnd));
+  const promotion = builder.indexOf(
+    'if[["$capability_marker"==maxim_topology_require_statistics_and_night_mode_recovery]];then',
+  );
+  const command = builder.indexOf('printf-vcommand_ref');
+  const argumentsTail = compact(
+    String.raw`"$entrypoint" \ "$capability_marker" \ "$(shell_quote_args "$@")"`,
+  );
+  if (
+    builderStart < 0 ||
+    builderEnd < builderStart ||
+    promotion < 0 ||
+    command < promotion ||
+    !builder.slice(command).includes(argumentsTail)
+  ) {
+    throw new Error('Rollback target lacks local chat ban readers: API bootstrap promotion');
   }
   for (const [path, transition] of [
     ['infra/scripts/vps-runtime-rollback.sh', 'begin_runtime_rollback_transition'],

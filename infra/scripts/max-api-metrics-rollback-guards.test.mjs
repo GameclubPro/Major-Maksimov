@@ -41,12 +41,12 @@ function wrapperMarker(name, args) {
       `
     set -euo pipefail
     ${functionBlock(name)}
-    build_guarded_rollback_command() {
-      local -n result="$1"
-      result="$3"
-    }
+    ${functionBlock('build_guarded_rollback_command')}
+    ${functionBlock('shell_quote_args')}
+    rollback_entrypoint_bootstrap_source() { printf '%s\\n' 'printf "%s\\n" "$3"'; }
+    git() { printf 'reviewed\\n'; }
     prepend_webhook_rollout_recovery_env() { :; }
-    remote_exec() { printf '%s\\n' "$1"; }
+    remote_exec() { bash -c "$1"; }
     ${name} "$@"
   `,
       'rollback-wrapper-marker-test',

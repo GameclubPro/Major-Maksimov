@@ -126,12 +126,54 @@ test('API wrappers require the new rollback capability while static-only rollbac
     source.indexOf('rollback_release() {'),
     source.indexOf('\nhealth() {'),
   );
-  assert.match(runtime, /maxim_topology_require_local_chat_ban_reader/u);
+  assert.match(runtime, /maxim_topology_require_statistics_and_night_mode_recovery/u);
   assert.match(release, /local capability_marker=select_release_recovery_base/u);
   assert.match(release, /if \[\[ "\$rollback_component" == api-shared \]\]/u);
   assert.equal(
-    (release.match(/capability_marker=maxim_topology_require_local_chat_ban_reader/gu) ?? [])
-      .length,
+    (
+      release.match(
+        /capability_marker=maxim_topology_require_statistics_and_night_mode_recovery/gu,
+      ) ?? []
+    ).length,
     2,
+  );
+});
+
+test('the API bootstrap promotion cannot be removed, changed or moved after command assembly', () => {
+  const path = 'infra/scripts/vps-connect.sh';
+  const source = read(path);
+  const promotion = `  if [[ "$capability_marker" == maxim_topology_require_statistics_and_night_mode_recovery ]]; then
+    capability_marker=maxim_topology_require_local_chat_ban_reader
+  fi`;
+  assert.ok(source.includes(promotion));
+  for (const replacement of [
+    '',
+    promotion.replace('==', '!='),
+    promotion.replace(
+      'capability_marker=maxim_topology_require_local_chat_ban_reader',
+      'capability_marker=select_release_recovery_base',
+    ),
+  ]) {
+    assert.throws(
+      () =>
+        assertLocalChatBanSource(revision, (name) =>
+          name === path ? source.replace(promotion, replacement) : read(name),
+        ),
+      failure,
+    );
+  }
+  const late = source
+    .replace(promotion, '')
+    .replace('\ncommercial_ocr_promote() {', `\n${promotion}\ncommercial_ocr_promote() {`);
+  assert.throws(
+    () => assertLocalChatBanSource(revision, (name) => (name === path ? late : read(name))),
+    /API bootstrap promotion/u,
+  );
+  const originalArgument = source.replace('    "$capability_marker" \\', '    "$3" \\');
+  assert.notEqual(originalArgument, source);
+  assert.throws(
+    () =>
+      assertLocalChatBanSource(revision, (name) => (name === path ? originalArgument : read(name))),
+    /API bootstrap promotion/u,
   );
 });
