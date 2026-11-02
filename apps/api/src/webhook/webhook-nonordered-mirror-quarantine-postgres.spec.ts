@@ -31,6 +31,8 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
   const actionIds: string[] = [];
   const commandIds: string[] = [];
   const holdIds: string[] = [];
+  const cancellationIds: string[] = [];
+  const backlogReceiptIds: string[] = [];
 
   beforeAll(async () => {
     const url = new URL(databaseUrl);
@@ -49,6 +51,24 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
   });
 
   afterEach(async () => {
+    if (cancellationIds.length || backlogReceiptIds.length) {
+      const ownedCancellations = cancellationIds.splice(0);
+      const ownedReceipts = backlogReceiptIds.splice(0);
+      // FLAG: Only this guarded disposable database may remove its exact test evidence.
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL session_replication_role = 'replica'`;
+        await tx.webhookBacklogReceipt.deleteMany({ where: { receiptId: { in: ownedReceipts } } });
+        await tx.webhookBacklogCancellation.deleteMany({
+          where: { id: { in: ownedCancellations } },
+        });
+        expect(
+          await tx.webhookBacklogReceipt.count({ where: { receiptId: { in: ownedReceipts } } }),
+        ).toBe(0);
+        expect(
+          await tx.webhookBacklogCancellation.count({ where: { id: { in: ownedCancellations } } }),
+        ).toBe(0);
+      });
+    }
     await prisma.webhookLegacyRecovery.deleteMany({ where: { certificateId: { in: holdIds } } });
     await prisma.webhookLegacyQuiescenceCertificate.deleteMany({
       where: { id: { in: holdIds.splice(0) } },
@@ -329,7 +349,7 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
     }
   });
 
-  async function commandFixture(padding = '') {
+  async function commandFixture(padding = '', withoutTimestamp = false) {
     const removal = await fixture();
     const { owner, mirror, claim, mirrorPayload } = removal;
     const chatId = mirrorPayload.message!.chatId;
@@ -338,10 +358,10 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
     const raw = {
       update_type: 'message_created',
       update_id: randomUUID(),
-      timestamp,
+      ...(withoutTimestamp ? {} : { timestamp }),
       ...(padding ? { fixture_padding: padding } : {}),
       message: {
-        timestamp,
+        ...(withoutTimestamp ? {} : { timestamp }),
         sender: { user_id: 'fixture-admin', is_bot: false },
         recipient: { chat_id: chatId, chat_type: 'chat' },
         body: { mid: messageId, text: 'Старт' },
@@ -375,6 +395,54 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
     expect(command.id).not.toBe(claim.id);
     return { ...removal, source, command, update, raw };
   }
+
+  it('isolates a command source using an ingress fallback clock', async () => {
+    const { owner, mirror, source, command, update, raw } = await commandFixture('', true);
+    expect(update.eventTimestampSource).toBe('ingress');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(new WebhookParser().parse(raw, { botId: source.botId! }).message!.createdAt).not.toBe(
+      update.message!.createdAt,
+    );
+    expect(await quarantineService().parkSemanticMirror(owner.id, mirror.id)).toBe(true);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: source.id } })).toEqual(source);
+    expect(await prisma.webhookExecutionClaim.findUnique({ where: { id: command.id } })).toEqual(
+      command,
+    );
+  });
+
+  it.each([
+    'ingress-as-payload',
+    'payload-as-ingress',
+    'invalid-saved-time',
+    'noncanonical-saved-time',
+    'changed-text',
+    'changed-raw',
+  ] as const)('refuses command source with fallback clock mismatch: %s', async (variant) => {
+    const { owner, mirror, source, update } = await commandFixture(
+      '',
+      variant !== 'payload-as-ingress',
+    );
+    const changed = {
+      ...update,
+      ...(variant === 'ingress-as-payload' ? { eventTimestampSource: 'payload' } : {}),
+      ...(variant === 'payload-as-ingress' ? { eventTimestampSource: 'ingress' } : {}),
+      message: {
+        ...update.message!,
+        ...(variant === 'invalid-saved-time' ? { createdAt: 'invalid' } : {}),
+        ...(variant === 'noncanonical-saved-time' ? { createdAt: '2026-01-01' } : {}),
+        ...(variant === 'changed-text' ? { text: 'different' } : {}),
+      },
+    };
+    await prisma.webhookEvent.update({
+      where: { id: source.id },
+      data: {
+        normalizedPayload: changed as unknown as Prisma.InputJsonValue,
+        ...(variant === 'changed-raw' ? { rawPayload: { changed: true } } : {}),
+      },
+    });
+    expect(await quarantineService().parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(mirror);
+  });
 
   it('isolates a pristine removal mirror despite a command belonging to the created message', async () => {
     const { owner, mirror, claim, action, source, command } = await commandFixture();
@@ -534,6 +602,9 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
     }
     if (variant === 'source-hold') {
       const cancellationId = randomUUID();
+      const backlogReceiptId = randomUUID();
+      cancellationIds.push(cancellationId);
+      backlogReceiptIds.push(backlogReceiptId);
       await prisma.webhookBacklogCancellation.create({
         data: {
           id: cancellationId,
@@ -544,7 +615,7 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
       });
       await prisma.webhookBacklogReceipt.create({
         data: {
-          receiptId: randomUUID(),
+          receiptId: backlogReceiptId,
           cancellationId,
           semanticKey: source.semanticKey,
           chatId: update.message!.chatId,

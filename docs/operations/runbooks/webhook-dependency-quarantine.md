@@ -24,6 +24,8 @@ message. It is not authority for the removal when its distinct source receipt is
 and its receiving bot, deduplication key, parser-derived payload and semantic identity
 agree. Source holds, missing proof, direct receipt claims and unknown aliases remain
 blocking. The command and its effects are never changed by mirror isolation.
+For an ingress timestamp, source comparison reuses only the saved canonical fallback
+clock; it changes neither the stored source nor any execution deadline.
 The hold lookup relies on the stopped-fleet installation required by the
 [legacy recovery](legacy-webhook-order-recovery.md),
 [source abandonment](webhook-source-abandonment.md), and

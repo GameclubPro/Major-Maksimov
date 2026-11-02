@@ -211,6 +211,19 @@ export class WebhookDependencyQuarantineService {
       const parsed = new WebhookParser().parse(raw as Record<string, unknown>, {
         botId: source.botId,
       });
+      // FLAG: Ingress fallback time is parser-generated, not part of the MAX source.
+      // Preserve only its original canonical value while comparing every other field.
+      if (update.eventTimestampSource === 'ingress' && parsed.eventTimestampSource === 'ingress') {
+        const saved = update.message?.createdAt;
+        const timestamp = typeof saved === 'string' ? Date.parse(saved) : Number.NaN;
+        if (
+          !parsed.message ||
+          !Number.isFinite(timestamp) ||
+          new Date(timestamp).toISOString() !== saved
+        )
+          return false;
+        parsed.message.createdAt = saved;
+      }
       const original = { ...update };
       delete original.executionOwnerBotId;
       const storedRaw = source.rawPayload;
