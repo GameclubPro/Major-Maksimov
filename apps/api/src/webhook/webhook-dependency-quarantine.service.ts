@@ -1,7 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { MaxUpdate } from '@maxim/contracts';
-import { Prisma, WebhookStatus, type WebhookEvent } from '../prisma/prisma-client';
+import {
+  Prisma,
+  WebhookDependencyKind,
+  WebhookStatus,
+  type WebhookDependencyQuarantine,
+  type WebhookEvent,
+} from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildWebhookSemanticEventKey } from './webhook-semantic-event-key';
 import { buildWebhookReceiptSemanticKey } from './webhook-receipt-semantic-key';
@@ -9,6 +15,7 @@ import { buildPublisherBotDescriptor } from '../publisher/publisher-bot-descript
 import { hasWebhookReplayFence } from './webhook-execution-deadline';
 import { buildGroupCommandKey } from '../common/group-command-key';
 import { readLegacyReceiptClaims } from './webhook-legacy-claims';
+import { tryLockWebhookSemanticClaimFences } from './webhook-semantic-claim-fence';
 import {
   isPendingWebhookTimeoutQuarantineMessage,
   WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PREFIX,
@@ -17,6 +24,9 @@ import {
 // FLAG: Writers require compatible readers. Deploy under the mandatory stopped-worker
 // queue fence, with enqueue recreated last; retain the compatible writer-disabled image.
 export const WEBHOOK_DEPENDENCY_QUARANTINE_WRITES_ENABLED = true;
+
+// FLAG: Rollback readers must distinguish an exact semantic hold from ordered deadline expiry.
+export const WEBHOOK_SEMANTIC_MIRROR_QUARANTINE_READER_VERSION = 1;
 
 export const WEBHOOK_QUARANTINE_BATCH_SIZE = 16;
 export const WEBHOOK_QUARANTINE_RECHECK_MS = 60_000;
@@ -32,6 +42,21 @@ function orderedChat(event: WebhookEvent): string | null {
   if (payload.type !== 'message_created' && payload.type !== 'message_edited') return null;
   const chatId = payload.message?.chatId;
   return typeof chatId === 'string' && chatId.trim() === chatId && chatId.length > 0
+    ? chatId
+    : null;
+}
+
+function removalChat(event: WebhookEvent): string | null {
+  const payload = event.normalizedPayload as Partial<MaxUpdate> | null;
+  const chatId = payload?.message?.chatId;
+  const messageId = payload?.message?.messageId;
+  return payload?.type === 'message_removed' &&
+    typeof chatId === 'string' &&
+    chatId.length > 0 &&
+    chatId.trim() === chatId &&
+    typeof messageId === 'string' &&
+    messageId.length > 0 &&
+    messageId.trim() === messageId
     ? chatId
     : null;
 }
@@ -74,6 +99,141 @@ export class WebhookDependencyQuarantineService {
       parked += Number(await this.parkOne(blockerId, receiptId, anchorId));
     }
     return parked;
+  }
+
+  private exactRemovalReceipt(event: WebhookEvent, semanticKey: string, chatId: string): boolean {
+    const update = event.normalizedPayload as MaxUpdate;
+    return (
+      removalChat(event) === chatId &&
+      event.semanticKey === semanticKey &&
+      buildWebhookSemanticEventKey(update) === semanticKey &&
+      buildWebhookReceiptSemanticKey(update, this.publisherBotId) === semanticKey &&
+      typeof event.botId === 'string' &&
+      event.botId.length > 0 &&
+      event.botId.trim() === event.botId &&
+      update.botId === event.botId &&
+      event.botId !== this.publisherBotId &&
+      event.executionDeadlineAt === null &&
+      event.legacyDispositionId === null &&
+      event.legacyDispositionReceiptId === null &&
+      event.sourceDispositionId === null &&
+      event.sourceDispositionReceiptId === null
+    );
+  }
+
+  // FLAG: This exact semantic dependency has no ordering lifetime. Retain the uncertain
+  // owner, claim, errors and effects; only a never-activated copy stops active scheduling.
+  async parkSemanticMirror(ownerId: string, mirrorId: string): Promise<boolean> {
+    if (!this.writesEnabled || ownerId === mirrorId) return false;
+    try {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
+          await tx.$executeRaw`SET LOCAL statement_timeout = '1000ms'`;
+          const snapshot = await tx.webhookEvent.findUnique({ where: { id: mirrorId } });
+          const chatId = snapshot && removalChat(snapshot);
+          if (!snapshot?.semanticKey || !chatId) return false;
+          const semanticKey = snapshot.semanticKey;
+          const messageId = (snapshot.normalizedPayload as MaxUpdate).message!.messageId;
+          // FLAG: Fence independent claim creation before claim-before-receipt locks.
+          // Contention preserves the original scheduling state, never infers absence.
+          if (
+            !(await tryLockWebhookSemanticClaimFences(tx, [
+              semanticKey,
+              buildGroupCommandKey(chatId, messageId),
+            ]))
+          )
+            return false;
+          await tx.$queryRaw(Prisma.sql`
+            SELECT id FROM webhook_execution_claims
+            WHERE kind = 'EXECUTION' AND semantic_key = ${semanticKey} FOR UPDATE
+          `);
+          await tx.$queryRaw(Prisma.sql`
+            SELECT id FROM webhook_events WHERE id IN (${ownerId}, ${mirrorId})
+            ORDER BY id FOR UPDATE
+          `);
+          const mirror = await this.lockUnstartedReceipt(tx, mirrorId, ownerId);
+          const owner = await tx.webhookEvent.findUnique({ where: { id: ownerId } });
+          const claim = await tx.webhookExecutionClaim.findUnique({
+            where: { kind_semanticKey: { kind: 'EXECUTION', semanticKey } },
+          });
+          if (
+            !mirror ||
+            mirror.status !== WebhookStatus.RECEIVED ||
+            mirror.queueName !== null ||
+            mirror.queuedAt !== null ||
+            mirror.enqueueAttempts !== 0 ||
+            !this.exactRemovalReceipt(mirror, semanticKey, chatId) ||
+            !owner ||
+            !this.exactRemovalReceipt(owner, semanticKey, chatId) ||
+            owner.status !== WebhookStatus.FAILED ||
+            owner.nextEnqueueAt !== null ||
+            owner.processedAt !== null ||
+            hasWebhookReplayFence(owner) ||
+            !claim ||
+            claim.kind !== 'EXECUTION' ||
+            claim.semanticKey !== semanticKey ||
+            claim.webhookEventId !== ownerId ||
+            !claim.enforced ||
+            claim.status !== 'READY' ||
+            !claim.executionBotId ||
+            claim.executionBotId.trim() !== claim.executionBotId ||
+            claim.executionBotId === this.publisherBotId ||
+            !(claim.preparedAt instanceof Date) ||
+            !Number.isFinite(claim.preparedAt.getTime()) ||
+            !(claim.businessStartedAt instanceof Date) ||
+            !Number.isFinite(claim.businessStartedAt.getTime()) ||
+            claim.completedAt !== null
+          )
+            return false;
+          const ownerClaims = await readLegacyReceiptClaims(
+            tx,
+            owner.id,
+            semanticKey,
+            buildGroupCommandKey(chatId, messageId),
+          );
+          if (!ownerClaims || ownerClaims.some((row) => row.id !== claim.id)) return false;
+          for (const receiptId of [ownerId, mirrorId]) {
+            const legacyDisposition = await tx.webhookLegacyReceiptDisposition.findUnique({
+              where: { receiptId },
+              select: { receiptId: true },
+            });
+            const sourceDisposition = await tx.webhookSourceReceiptDisposition.findUnique({
+              where: { receiptId },
+              select: { receiptId: true },
+            });
+            if (legacyDisposition || sourceDisposition) return false;
+          }
+          const existing = await tx.webhookDependencyQuarantine.findUnique({
+            where: { receiptId_blockerId: { receiptId: mirrorId, blockerId: ownerId } },
+          });
+          if (existing) return false;
+          await tx.webhookDependencyQuarantine.create({
+            data: {
+              receiptId: mirrorId,
+              blockerId: ownerId,
+              anchorId: ownerId,
+              chatId,
+              kind: WebhookDependencyKind.SEMANTIC_MIRROR,
+              originalStatus: mirror.status,
+              deadlineAt: null,
+              nextCheckAt: new Date(Date.now() + WEBHOOK_QUARANTINE_RECHECK_MS),
+            },
+          });
+          const changed = await tx.webhookEvent.updateMany({
+            where: { id: mirror.id, status: mirror.status, semanticKey },
+            data: { status: WebhookStatus.QUARANTINED },
+          });
+          if (changed.count !== 1)
+            throw new Error('Semantic mirror quarantine receipt CAS changed');
+          return true;
+        },
+        { maxWait: 250, timeout: 2_000 },
+      );
+    } catch {
+      this.logger.warn('Semantic mirror quarantine unavailable');
+      return false;
+    }
   }
 
   async findQuarantinedMirrorOwners(headIds: readonly string[]): Promise<Map<string, string>> {
@@ -254,6 +414,7 @@ export class WebhookDependencyQuarantineService {
             blockerId,
             anchorId,
             chatId,
+            kind: WebhookDependencyKind.ORDERED,
             originalStatus: receipt.status,
             deadlineAt: receipt.executionDeadlineAt,
             nextCheckAt: new Date(Date.now() + WEBHOOK_QUARANTINE_RECHECK_MS),
@@ -268,6 +429,77 @@ export class WebhookDependencyQuarantineService {
       },
       { timeout: 2_000, maxWait: 1_000 },
     );
+  }
+
+  private async reconcileSemanticMirrorWithClient(
+    tx: Prisma.TransactionClient,
+    entry: WebhookDependencyQuarantine,
+    receipt: WebhookEvent,
+  ): Promise<'waiting' | 'released'> {
+    // FLAG: A semantic mirror cannot expire into a new execution lifetime. Preserve null
+    // deadlines and require the same owner to supply positive completion before ordinary dedup.
+    if (
+      entry.deadlineAt !== null ||
+      receipt.executionDeadlineAt !== null ||
+      entry.anchorId !== entry.blockerId ||
+      !receipt.semanticKey ||
+      receipt.queueName !== null ||
+      receipt.queuedAt !== null ||
+      receipt.enqueueAttempts !== 0 ||
+      !this.exactRemovalReceipt(receipt, receipt.semanticKey, entry.chatId)
+    )
+      return 'waiting';
+    await tx.$queryRaw(Prisma.sql`
+      SELECT id FROM webhook_events WHERE id = ${entry.blockerId} FOR UPDATE
+    `);
+    const owner = await tx.webhookEvent.findUnique({ where: { id: entry.blockerId } });
+    if (
+      !owner ||
+      !this.exactRemovalReceipt(owner, receipt.semanticKey, entry.chatId) ||
+      owner.status !== 'PROCESSED' ||
+      !owner.processedAt ||
+      owner.errorMessage !== null ||
+      owner.nextEnqueueAt !== null ||
+      owner.timeoutQuarantineExpiresAt !== null
+    )
+      return 'waiting';
+    const completed = await tx.webhookExecutionClaim.findUnique({
+      where: { kind_semanticKey: { kind: 'EXECUTION', semanticKey: receipt.semanticKey } },
+    });
+    if (
+      !completed ||
+      !completed.enforced ||
+      completed.webhookEventId !== owner.id ||
+      completed.status !== 'COMPLETED' ||
+      !(completed.preparedAt instanceof Date) ||
+      !Number.isFinite(completed.preparedAt.getTime()) ||
+      !(completed.completedAt instanceof Date) ||
+      !Number.isFinite(completed.completedAt.getTime()) ||
+      !(completed.businessStartedAt instanceof Date) ||
+      !Number.isFinite(completed.businessStartedAt.getTime()) ||
+      !completed.executionBotId ||
+      completed.executionBotId.trim() !== completed.executionBotId ||
+      completed.executionBotId === this.publisherBotId ||
+      owner.processedAt.getTime() !== completed.completedAt.getTime() ||
+      completed.leaseToken !== null ||
+      completed.leaseExpiresAt !== null
+    )
+      return 'waiting';
+    // FLAG: The shared claim and receipts stay locked. Re-admission only lets normal
+    // canonical dedup observe completion; this lane never runs business or writes success.
+    const [released] = await tx.$queryRaw<Array<{ releasedAt: Date }>>`
+      UPDATE webhook_events
+      SET status = 'RECEIVED', queue_name = NULL,
+          next_enqueue_at = clock_timestamp() AT TIME ZONE 'UTC'
+      WHERE id = ${receipt.id} AND status = 'QUARANTINED'
+        AND execution_deadline_at IS NULL
+      RETURNING next_enqueue_at AS "releasedAt"`;
+    if (!released) return 'waiting';
+    await tx.webhookDependencyQuarantine.update({
+      where: { receiptId_blockerId: { receiptId: receipt.id, blockerId: entry.blockerId } },
+      data: { state: 'RELEASED', resolvedAt: released.releasedAt },
+    });
+    return 'released';
   }
 
   async reconcileDue(): Promise<{ inspected: number; released: number; expired: number }> {
@@ -302,6 +534,9 @@ export class WebhookDependencyQuarantineService {
             });
             const receipt = await this.lockUnstartedReceipt(tx, item.receiptId, entry.blockerId);
             if (!receipt || receipt.status !== WebhookStatus.QUARANTINED) return 'waiting';
+            if (entry.kind === WebhookDependencyKind.SEMANTIC_MIRROR)
+              return this.reconcileSemanticMirrorWithClient(tx, entry, receipt);
+            if (entry.kind !== WebhookDependencyKind.ORDERED || !entry.deadlineAt) return 'waiting';
             const anchor = await tx.webhookEvent.findUnique({ where: { id: entry.anchorId } });
             const now = new Date();
             if (

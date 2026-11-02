@@ -22,6 +22,7 @@ const paths = [
   'apps/api/src/moderation/moderation.service.legacy.ts',
   'apps/api/src/webhook/webhook-outbox.service.ts',
   'apps/api/src/webhook/webhook-legacy-authority.ts',
+  'apps/api/src/webhook/webhook-dependency-quarantine.service.ts',
 ];
 
 test('both rollback paths reject targets that erase shared multibot authority', () => {

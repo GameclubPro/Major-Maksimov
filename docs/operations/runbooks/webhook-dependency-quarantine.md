@@ -10,6 +10,15 @@ neighboring and subsequently received messages to follow ordinary processing. Th
 deadline and time. A second blocker creates another journal entry. No quarantine operation
 changes the uncertain original, claims or MAX action evidence.
 
+An exact pristine `message_removed` mirror can reach this isolation directly during
+preparation. It uses the typed `SEMANTIC_MIRROR` journal variant and preserves its absent
+execution deadline as null. This variant requires the terminal FAILED owner, its exact
+enforced prepared and started unfinished claim, reconstructed semantic identity and no
+independent or legacy authority for the mirror. It never extends isolation to another
+message or imports a legacy hold marker. Existing ordered journals retain `ORDERED` and
+their original nonnull deadline. The additive migration does not rewrite existing rows;
+both API rollback paths require readers for both variants.
+
 When a different bot's earlier copy is the physical order head, bounded indexed discovery
 retains that receipt as `anchor_id` and the real failing owner as `blocker_id`. Pristine
 never-activated copies may be parked only with the exact enforced shared owner and no
@@ -77,6 +86,13 @@ Reconciliation also checks the PostgreSQL wall clock in the locked receipt UPDAT
 completion-proof reads. If those reads cross the original deadline, the journal becomes
 `EXPIRED` in the same transaction and the receipt stays `QUARANTINED`; no stale queue handoff
 is created. The final business-start deadline check remains required after a valid release.
+
+For `SEMANTIC_MIRROR`, absence of a deadline is retained rather than treated as expiry.
+Reconciliation retains quarantine until the exact owner has a clean PROCESSED receipt and
+an enforced, unleased COMPLETED claim. It then returns only the pristine mirror to ordinary
+canonical deduplication. This does not restart the owner's business handler or claim that
+its remote effects succeeded. Failed storage, missing proof or changed identity keeps the
+mirror parked.
 
 The scope follows the existing dependency: chat ordering for pending timeouts, exact semantic
 identity for terminal FAILED owners. Other chats and nonordered

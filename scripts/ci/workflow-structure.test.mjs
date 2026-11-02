@@ -216,6 +216,10 @@ test('requires native quarantine isolation and delayed Redis reply coverage befo
     pkg.scripts['test:postgres-races:unlocked'],
     /webhook-dependency-quarantine-postgres\.spec\.ts/u,
   );
+  assert.match(
+    pkg.scripts['test:postgres-races:unlocked'],
+    /webhook-nonordered-mirror-quarantine-postgres\.spec\.ts/u,
+  );
   const postgres = jobBody('postgres-races', 'commercial-benchmark');
   assert.match(postgres, /npm run test:postgres-races --workspace @maxim\/api/u);
   assert.doesNotMatch(postgres, /continue-on-error/u);

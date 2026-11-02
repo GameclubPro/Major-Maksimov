@@ -123,16 +123,17 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
 
   async function seedIndexedRows(sql: Prisma.Sql, client: PrismaClient = db): Promise<number> {
     // FLAG: Limit planner changes to fixture inserts; preserve initial table statistics
-    // and restore the connection before production selection and plan assertions.
+    // and restore session settings before selection and plan assertions. Reuse indexed
+    // trigger lookup plans instead of replanning them for every synthetic row.
     const [settings, inserted] = await client.$transaction([
       client.$queryRaw<Array<{ seq: string; jit: string; cache: string }>>(Prisma.sql`
         SELECT set_config('enable_seqscan', 'off', true) AS seq,
           set_config('jit', 'off', true) AS jit,
-          set_config('plan_cache_mode', 'force_custom_plan', true) AS cache
+          set_config('plan_cache_mode', 'force_generic_plan', true) AS cache
       `),
       client.$executeRaw(sql),
     ]);
-    expect(settings).toEqual([{ seq: 'off', jit: 'off', cache: 'force_custom_plan' }]);
+    expect(settings).toEqual([{ seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
     return inserted;
   }
 
@@ -1749,6 +1750,10 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         }),
       ).rejects.toThrow('synthetic temporal read failure');
       expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(before);
+      await connection.$queryRaw(Prisma.sql`
+        SELECT set_config('plan_cache_mode', 'force_custom_plan', false)
+      `);
+      const fixtureBefore = await connection.$queryRaw<Settings[]>(settings);
       await seedIndexedRows(
         Prisma.sql`CREATE TEMP TABLE fixture_seed_planner_probe AS ${settings}`,
         connection,
@@ -1757,12 +1762,12 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         await connection.$queryRaw<Settings[]>(
           Prisma.sql`SELECT * FROM fixture_seed_planner_probe`,
         ),
-      ).toEqual([{ ...before[0]!, seq: 'off', jit: 'off', cache: 'force_custom_plan' }]);
-      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(before);
+      ).toEqual([{ ...fixtureBefore[0]!, seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
+      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
       await expect(seedIndexedRows(Prisma.sql`SELECT 1 / 0`, connection)).rejects.toThrow(
         /division by zero/u,
       );
-      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(before);
+      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
     } finally {
       await connection.$disconnect();
     }
