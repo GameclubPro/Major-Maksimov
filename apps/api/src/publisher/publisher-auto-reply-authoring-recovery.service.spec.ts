@@ -1,5 +1,6 @@
-import { PublisherAutoReplyAuthoringState } from '../prisma/prisma-client';
+import { type Prisma, PublisherAutoReplyAuthoringState } from '../prisma/prisma-client';
 import { PublisherAutoReplyAuthoringRecoveryService } from './publisher-auto-reply-authoring-recovery.service';
+import type { PublisherAutoReplyAuthoringQueueService } from './publisher-auto-reply-authoring.queue';
 
 describe('PublisherAutoReplyAuthoringRecoveryService', () => {
   it('requeues live PROCESSING, SAVING, and pending notification work', async () => {
@@ -127,6 +128,7 @@ describe('PublisherAutoReplyAuthoringRecoveryService', () => {
     expect(updateMany).toHaveBeenCalledWith({
       where: {
         id: 'session-1',
+        notificationRevision: 8,
         notificationClaimRevision: 7,
         notificationLockToken: 'old-lock',
         notificationDispatchStartedAt: { not: null },
@@ -142,6 +144,83 @@ describe('PublisherAutoReplyAuthoringRecoveryService', () => {
     expect(queue.enqueueNotification).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'session-1', notification: 'ready' }),
     );
+  });
+
+  it('settles an unchanged stale revision without requeueing its uncertain notification', async () => {
+    const now = new Date('2026-08-29T12:10:15.000Z');
+    const findMany = jest
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'session-1',
+          notificationRevision: 7,
+          notificationClaimRevision: 7,
+          notificationLockToken: 'old-lock',
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    const updateMany = jest
+      .fn<Promise<Prisma.BatchPayload>, [Prisma.PublisherAutoReplyAuthoringSessionUpdateManyArgs]>()
+      .mockResolvedValue({ count: 1 });
+    const queue = {
+      enqueueProcessContent: jest
+        .fn<
+          ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueProcessContent']>,
+          Parameters<PublisherAutoReplyAuthoringQueueService['enqueueProcessContent']>
+        >()
+        .mockResolvedValue(undefined),
+      enqueueActivation: jest
+        .fn<
+          ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueActivation']>,
+          Parameters<PublisherAutoReplyAuthoringQueueService['enqueueActivation']>
+        >()
+        .mockResolvedValue(undefined),
+      enqueueNotification: jest
+        .fn<
+          ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueNotification']>,
+          Parameters<PublisherAutoReplyAuthoringQueueService['enqueueNotification']>
+        >()
+        .mockResolvedValue(undefined),
+    } satisfies Pick<
+      PublisherAutoReplyAuthoringQueueService,
+      'enqueueProcessContent' | 'enqueueActivation' | 'enqueueNotification'
+    >;
+    const service = new PublisherAutoReplyAuthoringRecoveryService(
+      {
+        publisherAutoReplyAuthoringSession: { findMany, updateMany, deleteMany: jest.fn() },
+      } as never,
+      queue as never,
+      { releaseExpired: jest.fn().mockResolvedValue(0) } as never,
+      { runExclusive: jest.fn((_lane: string, run: () => Promise<void>) => run()) } as never,
+      { dispatchEnabled: true } as never,
+    );
+
+    await service.recoverOnce(now);
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'session-1',
+        notificationRevision: 7,
+        notificationClaimRevision: 7,
+        notificationLockToken: 'old-lock',
+        notificationDispatchStartedAt: { not: null },
+      },
+      data: {
+        notificationPending: false,
+        notificationKind: null,
+        notificationLockedAt: null,
+        notificationLockToken: null,
+        notificationClaimRevision: null,
+        notificationDispatchStartedAt: null,
+        notificationLastAmbiguousRevision: 7,
+      },
+    });
+    expect(queue.enqueueNotification).not.toHaveBeenCalled();
   });
 
   it('garbage-collects only archived drafts and now-unreferenced assets before session expiry', async () => {

@@ -3,8 +3,11 @@ import { createPrismaClient, type Prisma, type PrismaClient } from '../prisma/pr
 import { buildBotAccessSnapshotPersistence } from '../max/bot-access-snapshot.util';
 import { PublisherAutoReplyDeliveryService } from './publisher-auto-reply-delivery.service';
 import { PublisherAutoReplyRecoveryService } from './publisher-auto-reply-recovery.service';
+import { PublisherAutoReplyAuthoringRecoveryService } from './publisher-auto-reply-authoring-recovery.service';
+import type { PublisherAutoReplyAuthoringQueueService } from './publisher-auto-reply-authoring.queue';
 import { PublisherAutoReplySourceFenceService } from './publisher-auto-reply-source-fence.service';
 import { PublisherBackgroundWorkCoordinatorService } from './publisher-background-work-coordinator.service';
+import { PublisherPrivateFlowLeaseService } from './publisher-private-flow-lease.service';
 import type { PublisherAutoReplyJob } from './publisher-auto-reply.queue';
 import { PublisherReadinessService } from './publisher-readiness.service';
 
@@ -779,5 +782,238 @@ integration('Publisher auto-reply exact receipt settlement on PostgreSQL', () =>
     });
     expect(maxClient.sendMessageImmediateWithId).toHaveBeenCalledTimes(1);
     expect(health.recordSendFailure).not.toHaveBeenCalled();
+  });
+
+  describe('authoring notification recovery ownership', () => {
+    let writer: PrismaClient;
+
+    beforeAll(async () => {
+      writer = createPrismaClient(databaseUrl, { max: 1, statement_timeout: 10_000 });
+      await writer.$connect();
+    });
+
+    afterAll(async () => {
+      await writer?.$disconnect();
+    });
+
+    async function createStaleNotification(now: Date) {
+      return db.publisherAutoReplyAuthoringSession.create({
+        data: {
+          publisherBotId: botId,
+          actorUserId: 'synthetic-admin',
+          requestId: randomUUID(),
+          startToken: randomUUID(),
+          targetChatId: chatId,
+          privateChatId: 'synthetic-admin',
+          ruleId,
+          contentRevisionId,
+          state: 'REVIEW',
+          stageRevision: 3,
+          phrase: 'прайс',
+          notificationKind: 'ready',
+          notificationPending: true,
+          notificationRevision: 7,
+          notificationClaimRevision: 7,
+          notificationLockToken: 'synthetic-old-notification-lock',
+          notificationLockedAt: new Date(now.getTime() - 61_000),
+          notificationDispatchStartedAt: new Date(now.getTime() - 61_000),
+          expiresAt: new Date(now.getTime() + 20 * 60_000),
+        },
+      });
+    }
+
+    function createAuthoringRecovery(afterStaleRead?: () => Promise<void>) {
+      const authoringQueue = {
+        enqueueProcessContent: jest
+          .fn<
+            ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueProcessContent']>,
+            Parameters<PublisherAutoReplyAuthoringQueueService['enqueueProcessContent']>
+          >()
+          .mockResolvedValue(undefined),
+        enqueueActivation: jest
+          .fn<
+            ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueActivation']>,
+            Parameters<PublisherAutoReplyAuthoringQueueService['enqueueActivation']>
+          >()
+          .mockResolvedValue(undefined),
+        enqueueNotification: jest
+          .fn<
+            ReturnType<PublisherAutoReplyAuthoringQueueService['enqueueNotification']>,
+            Parameters<PublisherAutoReplyAuthoringQueueService['enqueueNotification']>
+          >()
+          .mockResolvedValue(undefined),
+      } satisfies Pick<
+        PublisherAutoReplyAuthoringQueueService,
+        'enqueueProcessContent' | 'enqueueActivation' | 'enqueueNotification'
+      >;
+      const observed = new Proxy(db, {
+        get(target, field) {
+          if (field !== 'publisherAutoReplyAuthoringSession') return Reflect.get(target, field);
+          return new Proxy(target.publisherAutoReplyAuthoringSession, {
+            get(delegate, method) {
+              if (method !== 'findMany') return Reflect.get(delegate, method);
+              return async (args: Prisma.PublisherAutoReplyAuthoringSessionFindManyArgs) => {
+                const rows = await delegate.findMany(args);
+                if (args.where?.notificationClaimRevision && afterStaleRead) {
+                  const change = afterStaleRead;
+                  afterStaleRead = undefined;
+                  // FLAG: Keep the actual SQL snapshot while a second committed write changes
+                  // its authority. No mock evaluates the production compare-and-swap predicate.
+                  await change();
+                }
+                return rows;
+              };
+            },
+          });
+        },
+      });
+      return {
+        queue: authoringQueue,
+        recovery: new PublisherAutoReplyAuthoringRecoveryService(
+          observed as never,
+          authoringQueue as never,
+          new PublisherPrivateFlowLeaseService(db as never),
+          new PublisherBackgroundWorkCoordinatorService(),
+          { dispatchEnabled: true } as never,
+        ),
+      };
+    }
+
+    it('preserves a revision committed after the stale read and recovers it on the next pass', async () => {
+      const now = new Date();
+      const session = await createStaleNotification(now);
+      await db.publisherAutoReplyAuthoringSession.update({
+        where: { id: session.id },
+        data: {
+          state: 'PROCESSING',
+          notificationKind: 'processing',
+          lockedAt: now,
+          lockToken: 'synthetic-content-lock',
+        },
+      });
+      const authoring = createAuthoringRecovery(async () => {
+        const completed = await writer.publisherAutoReplyAuthoringSession.updateMany({
+          where: { id: session.id, state: 'PROCESSING', lockToken: 'synthetic-content-lock' },
+          data: {
+            state: 'REVIEW',
+            stageRevision: { increment: 1 },
+            notificationKind: 'ready',
+            notificationPending: true,
+            notificationRevision: { increment: 1 },
+            lockedAt: null,
+            lockToken: null,
+          },
+        });
+        expect(completed.count).toBe(1);
+      });
+
+      await authoring.recovery.recoverOnce(now);
+
+      expect(
+        await db.publisherAutoReplyAuthoringSession.findUniqueOrThrow({
+          where: { id: session.id },
+        }),
+      ).toMatchObject({
+        state: 'REVIEW',
+        notificationRevision: 8,
+        notificationPending: true,
+        notificationKind: 'ready',
+        notificationClaimRevision: 7,
+        notificationLockToken: session.notificationLockToken,
+        notificationDispatchStartedAt: session.notificationDispatchStartedAt,
+        notificationLastAmbiguousRevision: null,
+      });
+      expect(authoring.queue.enqueueNotification).not.toHaveBeenCalled();
+
+      const nextPassAt = new Date(now.getTime() + 30_000);
+      await authoring.recovery.recoverOnce(nextPassAt);
+
+      expect(
+        await db.publisherAutoReplyAuthoringSession.findUniqueOrThrow({
+          where: { id: session.id },
+        }),
+      ).toMatchObject({
+        notificationRevision: 8,
+        notificationPending: true,
+        notificationKind: 'ready',
+        notificationClaimRevision: null,
+        notificationLockToken: null,
+        notificationDispatchStartedAt: null,
+        notificationLastAmbiguousRevision: 7,
+      });
+      expect(authoring.queue.enqueueNotification).toHaveBeenCalledTimes(1);
+      expect(authoring.queue.enqueueNotification).toHaveBeenCalledWith({
+        sessionId: session.id,
+        notification: 'ready',
+        callbackId: null,
+        dedupeKey: `recovery-ready-${Math.floor(nextPassAt.getTime() / 30_000)}`,
+        requestedAt: nextPassAt,
+      });
+      expect(maxClient.sendMessageImmediateWithId).not.toHaveBeenCalled();
+    });
+
+    it('records an unchanged stale notification as ambiguous without scheduling a replay', async () => {
+      const now = new Date();
+      const session = await createStaleNotification(now);
+      const authoring = createAuthoringRecovery();
+
+      await authoring.recovery.recoverOnce(now);
+      await authoring.recovery.recoverOnce(new Date(now.getTime() + 30_000));
+
+      expect(
+        await db.publisherAutoReplyAuthoringSession.findUniqueOrThrow({
+          where: { id: session.id },
+        }),
+      ).toMatchObject({
+        notificationRevision: 7,
+        notificationPending: false,
+        notificationKind: null,
+        notificationClaimRevision: null,
+        notificationLockToken: null,
+        notificationDispatchStartedAt: null,
+        notificationLastAmbiguousRevision: 7,
+      });
+      expect(authoring.queue.enqueueNotification).not.toHaveBeenCalled();
+      expect(maxClient.sendMessageImmediateWithId).not.toHaveBeenCalled();
+    });
+
+    it.each(['token', 'claim'] as const)(
+      'preserves a replacement %s acquired after the stale notification read',
+      async (replacement) => {
+        const now = new Date();
+        const session = await createStaleNotification(now);
+        const replacementData = {
+          notificationLockedAt: now,
+          notificationDispatchStartedAt: now,
+          ...(replacement === 'token'
+            ? { notificationLockToken: 'synthetic-new-notification-lock' }
+            : { notificationClaimRevision: 8 }),
+        } satisfies Prisma.PublisherAutoReplyAuthoringSessionUpdateInput;
+        const authoring = createAuthoringRecovery(async () => {
+          await writer.publisherAutoReplyAuthoringSession.update({
+            where: { id: session.id },
+            data: replacementData,
+          });
+        });
+
+        await authoring.recovery.recoverOnce(now);
+
+        expect(
+          await db.publisherAutoReplyAuthoringSession.findUniqueOrThrow({
+            where: { id: session.id },
+          }),
+        ).toMatchObject({
+          notificationRevision: 7,
+          notificationPending: true,
+          notificationKind: 'ready',
+          notificationLastAmbiguousRevision: null,
+          notificationLockToken: session.notificationLockToken,
+          notificationClaimRevision: session.notificationClaimRevision,
+          ...replacementData,
+        });
+        expect(authoring.queue.enqueueNotification).not.toHaveBeenCalled();
+        expect(maxClient.sendMessageImmediateWithId).not.toHaveBeenCalled();
+      },
+    );
   });
 });
