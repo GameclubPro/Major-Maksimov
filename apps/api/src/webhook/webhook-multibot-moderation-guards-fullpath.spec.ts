@@ -1,5 +1,6 @@
 import { persistVoiceSource } from '../moderation/voice-webhook-source';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { markMaxMessageSendAttempted } from '../max/max-mutation-outcome.util';
 import { markMaxMemberMutationAttempted } from '../max/max-member-error.util';
 import { MaxExactMessageLookupMissingIdError } from '../max/max-exact-message-lookup.error';
@@ -64,7 +65,24 @@ describeStores('native current-rule authorization across mirrored bot delivery',
   }
 
   async function localChatBanFixture() {
-    const s = await fixture(2);
+    const previousPoolMax = process.env.PRISMA_PG_POOL_MAX;
+    let s: MultibotHarness;
+    try {
+      // FLAG: Use production eligibility and its supported preparation budget;
+      // direct fixture polling can reconsider an active QUEUED receipt after 20ms.
+      process.env.PRISMA_PG_POOL_MAX = '24';
+      h = s = await createMultibotHarness({
+        databaseUrl,
+        redisUrl,
+        bots: 2,
+        mode: 'on',
+        productionEnqueueCapacity: true,
+        productionOutboxSelection: true,
+      });
+    } finally {
+      if (previousPoolMax === undefined) delete process.env.PRISMA_PG_POOL_MAX;
+      else process.env.PRISMA_PG_POOL_MAX = previousPoolMax;
+    }
     const [chatId] = await s.seedCatalog(1, {
       deleteSpammersEnabled: false,
       removeBotsFromGroupEnabled: false,
@@ -102,10 +120,69 @@ describeStores('native current-rule authorization across mirrored bot delivery',
   it('local chat ban removes every new join once across mirrors without a greeting or spammer opt-in', async () => {
     const { s, chatId, ingestJoin } = await localChatBanFixture();
     const handler = jest.spyOn(s.moderation, 'handleUpdate');
+    type FinishContext = Parameters<typeof s.canonical.completeExecution>[0];
+    const finishBoundary = s.canonical as unknown as {
+      observeAwaitedFinish(context: FinishContext): { source: FinishContext['webhookEvent'] };
+    };
+    let phase = 'first-join';
+    const complete = s.canonical.completeExecution.bind(s.canonical);
+    jest.spyOn(s.canonical, 'completeExecution').mockImplementation(async (context) => {
+      try {
+        await complete(context);
+      } catch (cause: unknown) {
+        const source = finishBoundary.observeAwaitedFinish(context).source;
+        const [fresh, claim] = await Promise.all([
+          s.prisma.webhookEvent.findUnique({ where: { id: source.id } }),
+          s.prisma.webhookExecutionClaim.findFirst({
+            where: { kind: 'EXECUTION', webhookEventId: source.id },
+            select: {
+              id: true,
+              status: true,
+              preparedAt: true,
+              businessStartedAt: true,
+              completedAt: true,
+              leaseExpiresAt: true,
+            },
+          }),
+        ]);
+        const fields = (row: FinishContext['webhookEvent'] | null) =>
+          row && {
+            id: row.id,
+            status: row.status,
+            errorMessage: row.errorMessage?.slice(0, 500) ?? null,
+            executionDeadlineAt: row.executionDeadlineAt,
+            processedAt: row.processedAt,
+            timeoutQuarantineExpiresAt: row.timeoutQuarantineExpiresAt,
+            queueName: row.queueName,
+            queuedAt: row.queuedAt,
+            nextEnqueueAt: row.nextEnqueueAt,
+            enqueueAttempts: row.enqueueAttempts,
+          };
+        throw new Error(
+          `Local chat ban finish failed: ${JSON.stringify({
+            phase,
+            before: fields(source),
+            fresh: fields(fresh),
+            payloadUnchanged:
+              fresh && isDeepStrictEqual(source.normalizedPayload, fresh.normalizedPayload),
+            claim,
+          })}`,
+          { cause },
+        );
+      }
+    });
+    const drain = async (nextPhase: 'first-join' | 'second-join') => {
+      phase = nextPhase;
+      try {
+        await s.drain();
+      } catch (cause: unknown) {
+        throw new Error(`Local chat ban drain failed: ${phase}`, { cause });
+      }
+    };
     const at = Date.now() - 10;
     const ids = await Promise.all(s.bots.map((bot) => ingestJoin(at, bot.id)));
     try {
-      await s.drain();
+      await drain('first-join');
       // FLAG: Non-split drain does not await every webhook job. Pause waits for
       // in-flight handlers before direct replay can inspect these exact receipts.
       await s.pause();
@@ -139,6 +216,7 @@ describeStores('native current-rule authorization across mirrored bot delivery',
         await s.prisma.maxActionLedgerEntry.count({ where: { chatId, actionType: 'BAN_MEMBER' } }),
       ).toBe(0);
       const firstHandlerCount = handler.mock.calls.length;
+      phase = 'direct-replay';
       for (const id of ids) await s.moderation.processWebhookEvent(id);
       expect(handler).toHaveBeenCalledTimes(firstHandlerCount);
       expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(1);
@@ -147,7 +225,7 @@ describeStores('native current-rule authorization across mirrored bot delivery',
       await s.resume();
     }
     await ingestJoin(Date.now(), s.bots[0]!.id);
-    await s.drain();
+    await drain('second-join');
     expect(s.failures).toEqual([]);
     expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(2);
     expect(s.effects.filter((effect) => effect.method === 'post')).toEqual([]);
