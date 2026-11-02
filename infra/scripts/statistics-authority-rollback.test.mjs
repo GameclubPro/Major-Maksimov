@@ -20,6 +20,33 @@ test('compatible lifecycle source retains the permanent writer and both reader f
   assert.throws(() => assertStatisticsAuthoritySource('main', read), /Exact source SHA required/u);
 });
 
+test('the installed pre-local-ban lifecycle checker accepts the promoted API selector', async () => {
+  const current = read('infra/scripts/assert-statistics-authority-source.mjs');
+  const selector = "['capability_marker=maxim_topology_require_local_chat_ban_reader']";
+  assert.equal(current.split(selector).length, 2);
+  // The installed checker differs only in this required connector fragment.
+  const installed = current.replace(
+    selector,
+    "['capability_marker=maxim_topology_require_statistics_and_night_mode_recovery']",
+  );
+  const { assertStatisticsAuthoritySource: installedCheck } = await import(
+    `data:text/javascript;base64,${Buffer.from(installed).toString('base64')}`
+  );
+  assert.doesNotThrow(() => installedCheck('a'.repeat(40), read));
+  assert.throws(
+    () =>
+      installedCheck('a'.repeat(40), (path) =>
+        path === 'infra/scripts/vps-connect.sh'
+          ? read(path).replaceAll(
+              'capability_marker=maxim_topology_require_statistics_and_night_mode_recovery',
+              'capability_marker=removed',
+            )
+          : read(path),
+      ),
+    failure,
+  );
+});
+
 test('a migration or version marker cannot substitute for the terminal writer, exact predecessor or reader fences', () => {
   const path = 'apps/api/src/statistics/stats-access.service.ts';
   const source = read(path);

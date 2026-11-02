@@ -1122,6 +1122,12 @@ build_guarded_rollback_command() {
   local bootstrap
   local tooling_sha
 
+  # FLAG: Retain the API selector recognized by installed lifecycle controllers,
+  # then require the newer local-ban reader at the actual bootstrap boundary.
+  if [[ "$capability_marker" == maxim_topology_require_statistics_and_night_mode_recovery ]]; then
+    capability_marker=maxim_topology_require_local_chat_ban_reader
+  fi
+
   if ! tooling_sha="$(git rev-parse --verify --end-of-options 'main^{commit}' 2>/dev/null)"; then
     echo "Cannot resolve local main to the reviewed rollback tooling SHA." >&2
     return 2
@@ -1861,7 +1867,7 @@ rollback_runtime() {
   build_guarded_rollback_command \
     remote_command \
     ./infra/scripts/vps-runtime-rollback.sh \
-    maxim_topology_require_local_chat_ban_reader \
+    maxim_topology_require_statistics_and_night_mode_recovery \
     "$@"
   prepend_webhook_rollout_recovery_env remote_command
   remote_exec "$remote_command"
@@ -1881,11 +1887,11 @@ rollback_release() {
   # plus maxim_topology_require_commercial_ai_pool_delete_reader and preceding floors.
   # Static-only rollback keeps its existing image-only offline path.
   if [[ $# -eq 1 ]]; then
-    capability_marker=maxim_topology_require_local_chat_ban_reader
+    capability_marker=maxim_topology_require_statistics_and_night_mode_recovery
   else
     for rollback_component in "${@:2}"; do
       if [[ "$rollback_component" == api-shared ]]; then
-        capability_marker=maxim_topology_require_local_chat_ban_reader
+        capability_marker=maxim_topology_require_statistics_and_night_mode_recovery
         break
       fi
     done
