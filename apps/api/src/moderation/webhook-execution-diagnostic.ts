@@ -87,6 +87,7 @@ const LOCAL_FAILURES = new Map([
   ['Message limit state deadline exceeded', 'message_limit_state_deadline'],
   ['Media cooldown state deadline exceeded', 'media_cooldown_state_deadline'],
   ['DUPLICATE_STATE_BUDGET_EXCEEDED', 'duplicate_state_budget'],
+  ['DUPLICATE_WINDOW_CAPACITY_EXCEEDED', 'duplicate_history_local_capacity'],
   ['Message duplicate history deadline exceeded', 'duplicate_history_reply_deadline'],
   ['Message duplicate window deadline exceeded', 'duplicate_history_admission_deadline'],
   ['required_subscription_no_longer_authorized', 'subscription_authority_rejected'],

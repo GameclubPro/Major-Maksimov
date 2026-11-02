@@ -293,6 +293,10 @@ accepted command; it never retries that command or extends duplicate action auth
 Missing replies still fail closed. Execution diagnostics distinguish
 `duplicate_history_reply_deadline` from `duplicate_history_admission_deadline`; neither
 label authorizes replay or settlement of a previously started webhook.
+Each RedisCounterService permits at most 128 unsettled duplicate-window commands, retaining
+each slot until its Redis promise settles even if its caller times out. A full local pool refuses
+before sending and reports `duplicate_history_local_capacity`; this is not proof that the
+surrounding webhook had no earlier effects, and does not authorize replay.
 
 The SQL cleanup reconciler retains its limit of 25 due obligations per 10-second tick. Its
 `message_duplicate_cleanup_sample` log reuses that indexed selection: `sampledDue` is a lower

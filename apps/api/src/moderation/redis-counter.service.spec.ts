@@ -1,4 +1,9 @@
-import { RedisCounterService } from './redis-counter.service';
+import {
+  DUPLICATE_WINDOW_MAX_OUTSTANDING,
+  DuplicateWindowCapacityError,
+  RedisCounterService,
+} from './redis-counter.service';
+import { MessageDuplicateHistoryService } from './message-duplicate/message-duplicate-history.service';
 
 function createService(evalResult: unknown) {
   const redis = {
@@ -7,8 +12,84 @@ function createService(evalResult: unknown) {
   };
   const service = Object.create(RedisCounterService.prototype) as RedisCounterService;
   Object.defineProperty(service, 'redis', { value: redis });
+  Object.defineProperty(service, 'duplicateWindowOutstanding', { value: 0, writable: true });
   return { redis, service };
 }
+
+describe('duplicate window Redis capacity', () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('retains slots after caller timeout, rejects before dispatch and releases on actual settlement', async () => {
+    jest.useFakeTimers();
+    const { redis, service } = createService(null);
+    const pending: Array<{ resolve: (value: string) => void; reject: (error: Error) => void }> = [];
+    redis.eval.mockImplementation(
+      () =>
+        new Promise<string>((resolve, reject) => {
+          pending.push({ resolve, reject });
+        }),
+    );
+    const history = new MessageDuplicateHistoryService(service);
+    const calls = Array.from({ length: DUPLICATE_WINDOW_MAX_OUTSTANDING }, (_, index) =>
+      history.remove('chat', `message-${index}`).then(
+        () => null,
+        (error: unknown) => error,
+      ),
+    );
+    await jest.advanceTimersByTimeAsync(1_001);
+    const results = await Promise.all(calls);
+    expect(results).toHaveLength(DUPLICATE_WINDOW_MAX_OUTSTANDING);
+    expect(
+      results.every(
+        (error) =>
+          error instanceof Error && error.message === 'Message duplicate history deadline exceeded',
+      ),
+    ).toBe(true);
+    expect(redis.eval).toHaveBeenCalledTimes(DUPLICATE_WINDOW_MAX_OUTSTANDING);
+    await expect(service.duplicateWindow('chat', { op: 'remove' })).rejects.toBeInstanceOf(
+      DuplicateWindowCapacityError,
+    );
+    expect(redis.eval).toHaveBeenCalledTimes(DUPLICATE_WINDOW_MAX_OUTSTANDING);
+
+    const other = createService(JSON.stringify({ kind: 'ok' }));
+    await expect(other.service.duplicateWindow('another-chat', { op: 'remove' })).resolves.toEqual({
+      kind: 'ok',
+    });
+    expect(other.redis.eval).toHaveBeenCalledTimes(1);
+
+    pending[0]!.resolve(JSON.stringify({ kind: 'ok' }));
+    await jest.advanceTimersByTimeAsync(0);
+    const afterResolve = service.duplicateWindow('chat', { op: 'remove' });
+    expect(redis.eval).toHaveBeenCalledTimes(DUPLICATE_WINDOW_MAX_OUTSTANDING + 1);
+    pending[DUPLICATE_WINDOW_MAX_OUTSTANDING]!.resolve(JSON.stringify({ kind: 'ok' }));
+    await expect(afterResolve).resolves.toEqual({ kind: 'ok' });
+
+    pending[1]!.reject(new Error('Redis disconnected'));
+    await jest.advanceTimersByTimeAsync(0);
+    const afterReject = service.duplicateWindow('chat', { op: 'remove' });
+    expect(redis.eval).toHaveBeenCalledTimes(DUPLICATE_WINDOW_MAX_OUTSTANDING + 2);
+    pending[DUPLICATE_WINDOW_MAX_OUTSTANDING + 1]!.resolve(JSON.stringify({ kind: 'ok' }));
+    await expect(afterReject).resolves.toEqual({ kind: 'ok' });
+
+    for (const operation of pending.slice(2, DUPLICATE_WINDOW_MAX_OUTSTANDING)) {
+      operation.resolve(JSON.stringify({ kind: 'ok' }));
+    }
+    await jest.advanceTimersByTimeAsync(0);
+  });
+
+  it('releases a slot after a synchronous Redis dispatch failure', async () => {
+    const { redis, service } = createService(JSON.stringify({ kind: 'ok' }));
+    redis.eval.mockImplementationOnce(() => {
+      throw new Error('dispatch failed');
+    });
+    await expect(service.duplicateWindow('chat', { op: 'remove' })).rejects.toThrow(
+      'dispatch failed',
+    );
+    await expect(service.duplicateWindow('chat', { op: 'remove' })).resolves.toEqual({
+      kind: 'ok',
+    });
+  });
+});
 
 describe('RedisCounterService revisioned set memberships', () => {
   const deadlineAtMs = 1_800_000_000_000;
