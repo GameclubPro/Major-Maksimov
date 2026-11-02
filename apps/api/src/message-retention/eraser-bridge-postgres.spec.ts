@@ -455,6 +455,7 @@ native('independent Lastik bridge with PostgreSQL', () => {
       expect(result.items.filter((item) => [chatId, ownedId].includes(item.chatId))).toHaveLength(
         2,
       );
+      expect(result).not.toHaveProperty('incomplete');
       expect(result.items.find((item) => item.chatId === ownedId)).toMatchObject({
         hours: 168,
         chatTitle: 'Independent owner',
