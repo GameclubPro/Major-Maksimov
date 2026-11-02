@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
@@ -236,6 +237,85 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
       ).toBeNull();
     } finally {
       await ingress.onModuleDestroy();
+    }
+  });
+
+  it('coalesces privacy-safe refusal reasons without changing the uncertain owner', async () => {
+    const { owner, mirror, claim } = await fixture();
+    const quarantine = quarantineService();
+    const internals = quarantine as unknown as {
+      logger: Logger;
+      semanticMirrorRefusals: Map<string, { loggedAt: number; suppressed: number }>;
+    };
+    const warn = jest.spyOn(internals.logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await prisma.webhookEvent.update({
+        where: { id: owner.id },
+        data: { nextEnqueueAt: new Date() },
+      });
+      const ownerBefore = await prisma.webhookEvent.findUniqueOrThrow({ where: { id: owner.id } });
+      const mirrorBefore = await prisma.webhookEvent.findUniqueOrThrow({
+        where: { id: mirror.id },
+      });
+      expect(await quarantine.parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+      expect(await quarantine.parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenNthCalledWith(
+        1,
+        { reason: 'owner_identity_or_state', suppressed: 0 },
+        'Semantic mirror quarantine refused',
+      );
+      const state = internals.semanticMirrorRefusals.get('owner_identity_or_state');
+      expect(state?.suppressed).toBe(1);
+      state!.loggedAt -= 60_000;
+      expect(await quarantine.parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+      expect(warn).toHaveBeenNthCalledWith(
+        2,
+        { reason: 'owner_identity_or_state', suppressed: 1 },
+        'Semantic mirror quarantine refused',
+      );
+      expect(await prisma.webhookEvent.findUnique({ where: { id: owner.id } })).toEqual(
+        ownerBefore,
+      );
+      expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(
+        mirrorBefore,
+      );
+      expect(await prisma.webhookExecutionClaim.findUnique({ where: { id: claim.id } })).toEqual(
+        claim,
+      );
+      expect(
+        await prisma.webhookDependencyQuarantine.count({ where: { receiptId: mirror.id } }),
+      ).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports an independent receipt claim without exposing its identity', async () => {
+    const { owner, mirror } = await fixture();
+    await prisma.webhookExecutionClaim.create({
+      data: {
+        kind: 'INDEPENDENT_FIXTURE',
+        semanticKey: randomUUID(),
+        webhookEventId: mirror.id,
+        businessStartedAt: new Date(),
+      },
+    });
+    const quarantine = quarantineService();
+    const logger = (quarantine as unknown as { logger: Logger }).logger;
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await quarantine.parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        { reason: 'receipt_aliases', suppressed: 0 },
+        'Semantic mirror quarantine refused',
+      );
+      expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(mirror);
+      expect(
+        await prisma.webhookDependencyQuarantine.count({ where: { receiptId: mirror.id } }),
+      ).toBe(0);
+    } finally {
+      warn.mockRestore();
     }
   });
 

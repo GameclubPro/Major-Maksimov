@@ -191,6 +191,8 @@ communities require an explicit designation before agent-initiated test mutation
 
 ## Managed Entities And Multi-Bot
 
+- Exact-user privilege refresh preserves confirmed human grants when a negative MAX response lacks explicit nonadministrator evidence. A lone `is_admin=false` does not exclude ownership. Require the parsed explicit nonprivilege proof before revoking human access; an explicitly identified bot remains ineligible for human administrator access. Cover this boundary in `managed-entity-actor-probe.spec.ts` and `managed-access-demand-postgres.spec.ts`.
+
 - The fleet has six moderation bots (two Major, two Majorsha and two Rex) plus a separate Publisher that works alongside them. Publisher never replaces a moderator: keep its configured identity outside the non-Publisher runtime route registry and moderation candidate pool, and keep its lifecycle in `PublisherEntityBinding` without assigning `Chat.botId`, `primaryBotId` or `ChatBotMembership`.
 - Confirmed bot access has no time expiry. `botAccessExpiresAt` is legacy/negative diagnostic data, never positive execution authority. Keep explicit activation, exact-bot denial/removal, capability ceilings and SQL proof fences. Fleet permission timers are retired; retained scheduled bot/maintenance jobs drain without MAX calls. Connection rosters and exact-user mini app demand use the existing bounded queues; Publisher human authority is also durable; imminent-publication preparation only nominates genuinely missing evidence. See `docs/operations/plans/2026-10-12-managed-access-demand-plan.md`.
 

@@ -306,6 +306,10 @@ negative cases, effects evidence and following-event/no-replay checks.
   failures from overdue executable backlog. Compare due time, active lock/runtime age and bounded
   movement across snapshots; queue creation age or a nonzero queue count alone is insufficient.
   Do not empty every namespace merely to make a dashboard show zero.
+- Adaptive default-shard routing includes BullMQ `prioritized` work in queue and worker pressure.
+  Use the snapshot's actual shard owners for pressure, cached-chat counts and rebalance decisions;
+  aggregate at most the fixed shard counters, never scan the full chat-assignment cache.
+  Persisted outstanding same-chat work still pins its existing shard across ownership handoff.
 - Separate API-role stability from native sandbox containment. `probeApiFleet.totalRestartCount`
   includes auxiliaries: classify fixed lifecycle reasons, exact times and OOM/health state before
   drawing conclusions. A mandatory native timeout recycle is not proof of a stalled webhook

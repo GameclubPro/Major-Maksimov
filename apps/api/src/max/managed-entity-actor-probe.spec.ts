@@ -1,4 +1,5 @@
 import { probeManagedEntityActor } from './managed-entity-actor-probe';
+import type { MaxChatMemberAccess } from './max-client.service';
 
 describe('personal human access probe', () => {
   function fixture() {
@@ -20,7 +21,7 @@ describe('personal human access probe', () => {
       },
       chat: { entityType: 'CHAT' },
     };
-    const human = {
+    const human: MaxChatMemberAccess = {
       userId: '123',
       isBot: false,
       isAdmin: true,
@@ -114,10 +115,42 @@ describe('personal human access probe', () => {
     f.maxClient.getChatMembersAccess.mockResolvedValue(new Map());
     await expect(f.run()).rejects.toThrow('unavailable');
     expect(f.prisma.$transaction).not.toHaveBeenCalled();
-    f.maxClient.getChatMembersAccess.mockResolvedValue(
-      new Map([['123', { ...f.human, isAdmin: false }]]),
-    );
+    const member: MaxChatMemberAccess = {
+      ...f.human,
+      isAdmin: false,
+      explicitPrivilegeEvidence: false,
+      explicitNonPrivilegeEvidence: true,
+    };
+    f.maxClient.getChatMembersAccess.mockResolvedValue(new Map([['123', member]]));
     await f.run();
+    expect(f.prisma.managedEntityAccessEdge.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ update: expect.objectContaining({ state: 'USER_DENIED' }) }),
+    );
+  });
+  it('preserves confirmed human access when negative role evidence is incomplete', async () => {
+    const f = fixture();
+    const member: MaxChatMemberAccess = {
+      ...f.human,
+      isAdmin: false,
+      explicitPrivilegeEvidence: false,
+      explicitNonPrivilegeEvidence: false,
+    };
+    f.maxClient.getChatMembersAccess.mockResolvedValue(new Map([['123', member]]));
+    await expect(f.run()).rejects.toThrow('role evidence is incomplete');
+    expect(f.prisma.$transaction).not.toHaveBeenCalled();
+    expect(f.cache.applyAdminAccessEpochMutation).not.toHaveBeenCalled();
+  });
+  it('accepts an explicit bot identity as a denial of human access', async () => {
+    const f = fixture();
+    const bot: MaxChatMemberAccess = {
+      ...f.human,
+      isBot: true,
+      isAdmin: false,
+      explicitPrivilegeEvidence: false,
+      explicitNonPrivilegeEvidence: false,
+    };
+    f.maxClient.getChatMembersAccess.mockResolvedValue(new Map([['123', bot]]));
+    await expect(f.run()).resolves.toBe(true);
     expect(f.prisma.managedEntityAccessEdge.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ update: expect.objectContaining({ state: 'USER_DENIED' }) }),
     );
