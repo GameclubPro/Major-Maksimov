@@ -68,10 +68,8 @@ export function parseAdditionalMaxBotsJson(
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(normalized);
-  } catch (error: unknown) {
-    throw new Error(
-      `MAX_BOTS_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  } catch {
+    throw new Error('MAX_BOTS_JSON must be valid JSON');
   }
 
   const parsed = maxAdditionalBotsSchema.safeParse(parsedJson);

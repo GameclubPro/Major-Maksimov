@@ -14,11 +14,21 @@ export class WebhookDynamicLeaseStatusService implements OnModuleDestroy {
   private summaryCacheAtMs = 0;
 
   constructor(configService: ConfigService) {
-    this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'));
+    this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'), {
+      commandTimeout: 500,
+      connectTimeout: 1_000,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+    });
+    this.redis.on('error', () => undefined);
   }
 
   async onModuleDestroy() {
-    await this.redis.quit();
+    try {
+      await this.redis.quit();
+    } catch {
+      this.redis.disconnect();
+    }
   }
 
   async getSummary(maxAgeMs = 0): Promise<DefaultWebhookLeaseSummary | null> {

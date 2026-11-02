@@ -176,6 +176,7 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
         trafficClass: 'background',
         botId: '777000_bot',
         sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
+        forceUpsert: true,
       },
     );
     expect(maxClient.listWebhookSubscriptions).toHaveBeenCalledTimes(2);
@@ -449,8 +450,8 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     ]);
     await initPromise;
 
-    expect(startedBots).toEqual(['first_bot', 'second_bot']);
-    expect(maxClient.listWebhookSubscriptions).toHaveBeenCalledTimes(2);
+    expect(startedBots).toEqual(['first_bot', 'first_bot', 'second_bot', 'second_bot']);
+    expect(maxClient.listWebhookSubscriptions).toHaveBeenCalledTimes(4);
     expect(statusService.writeSyncState).toHaveBeenCalledWith(
       expect.objectContaining({
         bots: expect.objectContaining({
@@ -660,7 +661,10 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     await service.onModuleInit();
 
     expect(maxClient.deleteWebhookSubscription).not.toHaveBeenCalled();
-    expect(maxClient.ensureWebhookSubscription).not.toHaveBeenCalled();
+    expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledWith(
+      [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+      expect.objectContaining({ botId: 'idle_bot', forceUpsert: true }),
+    );
     expect(statusService.writeSnapshot).toHaveBeenLastCalledWith(
       expect.objectContaining({
         status: 'warning',
@@ -690,7 +694,7 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     await service.onModuleDestroy();
   });
 
-  it('removes stale owned bot webhook URLs even when sync-state lost the previous URL', async () => {
+  it('preserves foreign-origin subscriptions when sync-state lost the previous URL', async () => {
     process.env.APP_ROLE = 'ingress';
 
     const botRegistry = {
@@ -736,6 +740,10 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
             updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
           },
           {
+            url: 'https://hook.maxim.play-team.ru/api/webhook/max/777000_bot/old-secret',
+            updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+          },
+          {
             url: 'https://example.test/third-party/webhook',
             updateTypes: ['message_created'],
           },
@@ -766,29 +774,222 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
 
     await service.onModuleInit();
 
-    expect(maxClient.ensureWebhookSubscription).not.toHaveBeenCalled();
-    expect(maxClient.deleteWebhookSubscription).toHaveBeenCalledWith(
-      'https://hook.maxim.play-team.ru/api/webhook/max/777000_bot/old-secret',
-      {
-        trafficClass: 'background',
-        botId: '777000_bot',
-        sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
-      },
+    expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledWith(
+      [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+      expect.objectContaining({ botId: '777000_bot', forceUpsert: true }),
     );
-    expect(maxClient.deleteWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(maxClient.deleteWebhookSubscription).not.toHaveBeenCalled();
     expect(maxClient.listWebhookSubscriptions).toHaveBeenCalledTimes(2);
     expect(statusService.writeSnapshot).toHaveBeenLastCalledWith(
       expect.objectContaining({
         status: 'warning',
-        otherSubscriptionsCount: 1,
+        otherSubscriptionsCount: 2,
         bots: expect.objectContaining({
           '777000_bot': expect.objectContaining({
-            otherSubscriptionsCount: 1,
+            otherSubscriptionsCount: 2,
           }),
         }),
       }),
     );
 
+    await service.onModuleDestroy();
+  });
+
+  it.each(['missing', 'incomplete', 'unavailable'] as const)(
+    'retains the old subscription when the new target is %s after an upsert',
+    async (condition) => {
+      process.env.APP_ROLE = 'ingress';
+      const botId = '777000_bot';
+      const oldUrl = `https://old.example/api/webhook/max/${botId}/old-secret`;
+      const targetUrl = `https://major-maksimov.ru/api/webhook/max/${botId}/new-secret`;
+      const previous = {
+        configuredUrl: oldUrl,
+        headerSecretFingerprint: 'old-fingerprint',
+        updatedAt: '2026-03-30T00:00:00.000Z',
+        lastIncomingWebhookAt: null,
+        lastAutoRecreateAt: null,
+      };
+      const statusService = {
+        getSyncState: jest.fn().mockResolvedValue({ bots: { [botId]: previous } }),
+        getSnapshot: jest.fn().mockResolvedValue(null),
+        writeSyncState: jest.fn().mockResolvedValue(undefined),
+        writeSnapshot: jest.fn().mockResolvedValue(undefined),
+      };
+      const list = jest
+        .fn()
+        .mockResolvedValueOnce([
+          { url: oldUrl, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] },
+        ]);
+      if (condition === 'unavailable') list.mockRejectedValueOnce(new Error('unavailable'));
+      else
+        list.mockResolvedValueOnce(
+          condition === 'missing'
+            ? []
+            : [{ url: targetUrl, updateTypes: MAX_REQUIRED_WEBHOOK_UPDATE_TYPES.slice(1) }],
+        );
+      const maxClient = {
+        getConfiguredWebhookSubscriptionTarget: jest
+          .fn()
+          .mockReturnValue({ url: targetUrl, maskedUrl: 'masked' }),
+        listWebhookSubscriptions: list,
+        matchesConfiguredWebhookUrl: jest.fn((url: string) => url === targetUrl),
+        ensureWebhookSubscription: jest.fn().mockResolvedValue({
+          url: targetUrl,
+          updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+        }),
+        deleteWebhookSubscription: jest.fn(),
+      };
+      const registry = {
+        getAllBots: jest
+          .fn()
+          .mockReturnValue([{ id: botId, webhookHeaderSecrets: ['new-secret'] }]),
+        getDefaultBot: jest.fn().mockReturnValue({ id: botId }),
+        computeWebhookHeaderSecretFingerprint: jest.fn().mockReturnValue('new-fingerprint'),
+      };
+      const service = new MaxWebhookSubscriptionReconcilerService(
+        maxClient as never,
+        registry as never,
+        statusService as never,
+        createPrismaMock() as never,
+        { get: jest.fn((_: string, fallback?: unknown) => fallback) } as never,
+      );
+      await service.onModuleInit();
+      expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledTimes(1);
+      expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledWith(
+        [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+        expect.objectContaining({ botId, forceUpsert: true }),
+      );
+      expect(maxClient.deleteWebhookSubscription).not.toHaveBeenCalled();
+      expect(statusService.writeSyncState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bots: expect.objectContaining({ [botId]: expect.objectContaining(previous) }),
+        }),
+      );
+      expect(statusService.writeSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bots: expect.objectContaining({
+            [botId]: expect.objectContaining({ status: 'warning' }),
+          }),
+        }),
+      );
+      await service.onModuleDestroy();
+    },
+  );
+
+  it('removes a recorded previous host only after the new subscription is confirmed', async () => {
+    process.env.APP_ROLE = 'ingress';
+    const botId = '777000_bot';
+    const oldUrl = `https://old.example/api/webhook/max/${botId}/old-secret`;
+    const foreignUrl = `https://foreign.example/api/webhook/max/${botId}/foreign-secret`;
+    const targetUrl = `https://major-maksimov.ru/api/webhook/max/${botId}/new-secret`;
+    const full = (url: string) => ({ url, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] });
+    const statusService = {
+      getSyncState: jest.fn().mockResolvedValue({
+        bots: {
+          [botId]: {
+            configuredUrl: oldUrl,
+            headerSecretFingerprint: 'old',
+            updatedAt: '2026-03-30T00:00:00.000Z',
+            lastIncomingWebhookAt: null,
+            lastAutoRecreateAt: null,
+          },
+        },
+      }),
+      getSnapshot: jest.fn().mockResolvedValue(null),
+      writeSyncState: jest.fn().mockResolvedValue(undefined),
+      writeSnapshot: jest.fn().mockResolvedValue(undefined),
+    };
+    const maxClient = {
+      getConfiguredWebhookSubscriptionTarget: jest
+        .fn()
+        .mockReturnValue({ url: targetUrl, maskedUrl: 'masked' }),
+      listWebhookSubscriptions: jest
+        .fn()
+        .mockResolvedValueOnce([full(oldUrl), full(foreignUrl)])
+        .mockResolvedValueOnce([full(oldUrl), full(foreignUrl), full(targetUrl)])
+        .mockResolvedValueOnce([full(foreignUrl), full(targetUrl)]),
+      matchesConfiguredWebhookUrl: jest.fn((url: string) => url === targetUrl),
+      ensureWebhookSubscription: jest.fn().mockResolvedValue(full(targetUrl)),
+      deleteWebhookSubscription: jest.fn().mockResolvedValue(undefined),
+    };
+    const registry = {
+      getAllBots: jest.fn().mockReturnValue([{ id: botId, webhookHeaderSecrets: ['new-secret'] }]),
+      getDefaultBot: jest.fn().mockReturnValue({ id: botId }),
+      computeWebhookHeaderSecretFingerprint: jest.fn().mockReturnValue('new'),
+    };
+    const service = new MaxWebhookSubscriptionReconcilerService(
+      maxClient as never,
+      registry as never,
+      statusService as never,
+      createPrismaMock() as never,
+      { get: jest.fn((_: string, fallback?: unknown) => fallback) } as never,
+    );
+    await service.onModuleInit();
+    expect(maxClient.deleteWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(maxClient.deleteWebhookSubscription).toHaveBeenCalledWith(
+      oldUrl,
+      expect.objectContaining({ botId }),
+    );
+    expect(maxClient.listWebhookSubscriptions.mock.invocationCallOrder[1]).toBeLessThan(
+      maxClient.deleteWebhookSubscription.mock.invocationCallOrder[0]!,
+    );
+    await service.onModuleDestroy();
+  });
+
+  it('upserts the secret when its applied fingerprint is unknown, then retains the verified fingerprint', async () => {
+    process.env.APP_ROLE = 'ingress';
+    const botId = '777000_bot';
+    const url = `https://major-maksimov.ru/api/webhook/max/${botId}/secret-path`;
+    let savedState: unknown = null;
+    const statusService = {
+      getSyncState: jest.fn(async () => savedState),
+      writeSyncState: jest.fn(async (value: unknown) => {
+        savedState = value;
+      }),
+      writeSnapshot: jest.fn().mockResolvedValue(undefined),
+      getSnapshot: jest.fn().mockResolvedValue(null),
+    };
+    const maxClient = {
+      getConfiguredWebhookSubscriptionTarget: jest
+        .fn()
+        .mockReturnValue({ url, maskedUrl: 'masked' }),
+      listWebhookSubscriptions: jest
+        .fn()
+        .mockResolvedValue([{ url, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] }]),
+      matchesConfiguredWebhookUrl: jest.fn((candidate: string) => candidate === url),
+      ensureWebhookSubscription: jest
+        .fn()
+        .mockResolvedValue({ url, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] }),
+      deleteWebhookSubscription: jest.fn(),
+    };
+    const registry = {
+      getAllBots: jest.fn().mockReturnValue([{ id: botId, webhookHeaderSecrets: ['new-secret'] }]),
+      getDefaultBot: jest.fn().mockReturnValue({ id: botId }),
+      computeWebhookHeaderSecretFingerprint: jest.fn().mockReturnValue('new-fingerprint'),
+    };
+    const service = new MaxWebhookSubscriptionReconcilerService(
+      maxClient as never,
+      registry as never,
+      statusService as never,
+      createPrismaMock() as never,
+      { get: jest.fn((_: string, fallback?: unknown) => fallback) } as never,
+    );
+    await service.onModuleInit();
+    await (service as unknown as { reconcile(reason: 'scheduled'): Promise<void> }).reconcile(
+      'scheduled',
+    );
+    expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledTimes(1);
+    expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledWith(
+      [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
+      expect.objectContaining({ botId, forceUpsert: true }),
+    );
+    expect(savedState).toEqual(
+      expect.objectContaining({
+        bots: expect.objectContaining({
+          [botId]: expect.objectContaining({ headerSecretFingerprint: 'new-fingerprint' }),
+        }),
+      }),
+    );
     await service.onModuleDestroy();
   });
 
@@ -934,7 +1135,7 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     },
   );
 
-  it('upserts a normalized current subscription match without a delivery gap', async () => {
+  it('establishes the exact URL before deleting a same-origin trailing-slash URL', async () => {
     process.env.APP_ROLE = 'ingress';
 
     const configuredUrl = 'https://major-maksimov.ru/api/webhook/max/777000_bot/secret-path';
@@ -972,15 +1173,21 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
         url: configuredUrl,
         maskedUrl: 'https://major-maksimov.ru/api/webhook/max/777000_bot/***',
       }),
-      listWebhookSubscriptions: jest.fn().mockResolvedValue([
-        {
-          url: currentUrl,
-          updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
-        },
-      ]),
+      listWebhookSubscriptions: jest
+        .fn()
+        .mockResolvedValueOnce([
+          { url: currentUrl, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] },
+        ])
+        .mockResolvedValueOnce([
+          { url: configuredUrl, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] },
+          { url: currentUrl, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] },
+        ])
+        .mockResolvedValueOnce([
+          { url: configuredUrl, updateTypes: [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES] },
+        ]),
       matchesConfiguredWebhookUrl: jest
         .fn()
-        .mockImplementation((url: string) => url.replace(/\/+$/u, '') === configuredUrl),
+        .mockImplementation((url: string) => url === configuredUrl),
       deleteWebhookSubscription: jest.fn().mockResolvedValue(undefined),
       ensureWebhookSubscription: jest.fn().mockResolvedValue({
         url: configuredUrl,
@@ -1004,7 +1211,13 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
 
     await service.onModuleInit();
 
-    expect(maxClient.deleteWebhookSubscription).not.toHaveBeenCalled();
+    expect(maxClient.deleteWebhookSubscription).toHaveBeenCalledWith(
+      currentUrl,
+      expect.objectContaining({ botId: '777000_bot' }),
+    );
+    expect(maxClient.listWebhookSubscriptions.mock.invocationCallOrder[1]).toBeLessThan(
+      maxClient.deleteWebhookSubscription.mock.invocationCallOrder[0]!,
+    );
     expect(maxClient.ensureWebhookSubscription).toHaveBeenCalledWith(
       [...MAX_REQUIRED_WEBHOOK_UPDATE_TYPES],
       expect.objectContaining({

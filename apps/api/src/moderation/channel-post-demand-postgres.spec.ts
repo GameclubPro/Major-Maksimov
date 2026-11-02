@@ -84,6 +84,71 @@ native('durable channel post demand in PostgreSQL', () => {
       SELECT id FROM chats WHERE id = ANY(${extra}::text[])`);
     await db.$executeRawUnsafe('ANALYZE channel_post_demand_channels');
   }
+
+  it('pages channel scan settings through the unique chat index before filtering flags', async () => {
+    const prefix = `channel-scan-${randomUUID()}-`;
+    const ids = Array.from(
+      { length: 4_096 },
+      (_, index) => `${prefix}${String(index).padStart(5, '0')}`,
+    );
+    try {
+      await db.chat.createMany({
+        data: ids.map((id) => ({ id, title: 'Disposable scan fixture', entityType: 'CHANNEL' })),
+      });
+      await db.channelSettings.createMany({
+        data: ids.map((chatId, index) => ({
+          id: `${prefix}settings-${index}`,
+          chatId,
+          quickButtonsEnabled: index === ids.length - 1,
+        })),
+      });
+      await db.$executeRawUnsafe('ANALYZE channel_settings');
+      const after = ids[2_000]!;
+      const page = await db.channelSettings.findMany({
+        where: { chatId: { gt: after } },
+        select: {
+          chatId: true,
+          quickButtonsEnabled: true,
+          postSignatureEnabled: true,
+          commentsEnabled: true,
+          postSuggestionsEnabled: true,
+        },
+        orderBy: { chatId: 'asc' },
+        take: 64,
+      });
+      expect(page).toHaveLength(64);
+      expect(page[0]?.chatId).toBe(ids[2_001]);
+      expect(page.every((row) => !row.quickButtonsEnabled)).toBe(true);
+
+      type Plan = {
+        'Node Type': string;
+        'Index Name'?: string;
+        'Actual Rows'?: number;
+        'Actual Loops'?: number;
+        'Rows Removed by Filter'?: number;
+        Plans?: Plan[];
+      };
+      const plans = await db.$queryRaw<{ 'QUERY PLAN': Array<{ Plan: Plan }> }[]>(Prisma.sql`
+        EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON)
+        SELECT chat_id, quick_buttons_enabled, post_signature_enabled,
+          comments_enabled, post_suggestions_enabled
+        FROM channel_settings WHERE chat_id > ${after} ORDER BY chat_id ASC LIMIT 64
+      `);
+      const visit = (node: Plan): Plan[] => [node, ...(node.Plans ?? []).flatMap(visit)];
+      const indexScan = visit(plans[0]!['QUERY PLAN'][0]!.Plan).find(
+        (node) => node['Index Name'] === 'channel_settings_chat_id_key',
+      );
+      expect(indexScan).toMatchObject({
+        'Node Type': 'Index Scan',
+        'Actual Rows': 64,
+        'Actual Loops': 1,
+      });
+      expect(indexScan?.['Rows Removed by Filter'] ?? 0).toBe(0);
+    } finally {
+      await db.chat.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
   it('admits only new moderation channel-button posts even when every legacy decorator is off', async () => {
     const chatId = await channel();
     await db.channelSettings.update({

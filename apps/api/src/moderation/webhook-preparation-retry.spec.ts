@@ -1,6 +1,7 @@
 import { DelayedError } from 'bullmq';
 import { Logger } from '@nestjs/common';
 import { WebhookPreparationDeferredError } from '../common/webhook-preparation-deferred.error';
+import * as commandNoticeRecovery from '../common/group-command-notice-recovery';
 import { DefaultWebhookLeaseManagerService } from './default-webhook-lease-manager.service';
 import { BackgroundWebhookProcessor, ModerationService } from './moderation.service';
 import { createUpdate } from './moderation.service.spec-support';
@@ -116,6 +117,43 @@ describe('webhook preparation queue retry', () => {
       );
     },
   );
+
+  it.each(['static', 'dynamic'] as const)(
+    'delays %s saved-notice preparation waits without starting or failing the handler',
+    async (kind) => {
+      const f = fixture();
+      const cause = new WebhookPreparationDeferredError('Saved notice lease is busy', 1_000);
+      jest.spyOn(commandNoticeRecovery, 'recoverGroupCommandNotice').mockRejectedValueOnce(cause);
+      const now = Date.now();
+      jest.spyOn(Date, 'now').mockReturnValue(now);
+      const job = {
+        id: 'event-a',
+        data: { webhookEventId: 'event-a' },
+        moveToDelayed: jest.fn().mockResolvedValue(undefined),
+      };
+      await expect(processor(kind, f.service)(job, 'owned-token')).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+      expect(job.moveToDelayed).toHaveBeenCalledWith(expect.any(Number), 'owned-token');
+      expect(job.moveToDelayed.mock.calls[0]![0]).toBeGreaterThanOrEqual(now + 1_000);
+      expect(job.moveToDelayed.mock.calls[0]![0]).toBeLessThanOrEqual(now + 1_250);
+      expect(f.canonical.prepareExecution).not.toHaveBeenCalled();
+      expect(f.handler).not.toHaveBeenCalled();
+      expect(f.canonical.failExecution).not.toHaveBeenCalled();
+      expect(f.canonical.completeExecution).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves an uncertain saved-notice failure without scheduling preparation again', async () => {
+    const f = fixture();
+    const error = new Error('Unknown send outcome');
+    jest.spyOn(commandNoticeRecovery, 'recoverGroupCommandNotice').mockRejectedValueOnce(error);
+    const job = { id: 'event-a', data: { webhookEventId: 'event-a' }, moveToDelayed: jest.fn() };
+    await expect(processor('static', f.service)(job, 'owned-token')).rejects.toBe(error);
+    expect(job.moveToDelayed).not.toHaveBeenCalled();
+    expect(f.canonical.prepareExecution).not.toHaveBeenCalled();
+    expect(f.handler).not.toHaveBeenCalled();
+  });
 
   it('leaves an untyped preparation failure unchanged', async () => {
     const f = fixture();

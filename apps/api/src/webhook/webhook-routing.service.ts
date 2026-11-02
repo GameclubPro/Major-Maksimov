@@ -38,6 +38,10 @@ type OutstandingMessageQueueWork = {
   queueName: DefaultWebhookQueueName | null;
 };
 
+type RoutingQueueSnapshot = Awaited<
+  ReturnType<QueueMetricsService['getWebhookDefaultShardSnapshot']>
+>;
+
 type QueuePressure = {
   queueName: DefaultWebhookQueueName;
   queuePressureScore: number;
@@ -58,6 +62,7 @@ const DEFAULT_MAX_CHAT_ASSIGNMENTS = 50_000;
 const EXPIRY_MAINTENANCE_BUDGET = 256;
 const DEFAULT_CHAT_ASSIGNMENT_TTL_SEC = 90;
 const DEFAULT_QUEUE_SNAPSHOT_MAX_AGE_MS = 1_000;
+const QUEUE_SNAPSHOT_WAIT_MS = 500;
 const ACTIVE_QUEUE_PRESSURE_WEIGHT = 4;
 const ACTIVE_WORKER_PRESSURE_WEIGHT = 6;
 const ADAPTIVE_TTL_HOT_QUEUE_MS = 30_000;
@@ -84,6 +89,7 @@ export class WebhookRoutingService {
   private readonly expiryIndex = new AssignmentExpiryIndex();
   private readonly assignmentCounts = new Map<DefaultWebhookQueueName, number>();
   private readonly assignmentRefreshes = new Map<string, Promise<DefaultWebhookQueueName>>();
+  private queueSnapshotObservation: Promise<RoutingQueueSnapshot | null> | null = null;
   private workerGroupByQueue = this.buildWorkerGroupByQueue();
 
   constructor(
@@ -228,11 +234,10 @@ export class WebhookRoutingService {
       return this.storeAssignment(assignmentKey, outstandingWork.queueName ?? fallbackQueue, now);
     }
 
-    const snapshot =
-      preloadedSnapshot ??
-      (await this.queueMetricsService.getWebhookDefaultShardSnapshot({
-        maxAgeMs: this.queueSnapshotMaxAgeMs,
-      }));
+    const snapshot = preloadedSnapshot ?? (await this.readQueueSnapshot());
+    if (!snapshot) {
+      return this.storeAssignment(assignmentKey, fallbackQueue, now);
+    }
     this.updateWorkerGroupByQueue(snapshot);
     const nextQueue = this.selectLeastPressuredQueue(chatId, snapshot, fallbackQueue, now);
     return this.storeAssignment(assignmentKey, nextQueue, now);
@@ -430,9 +435,8 @@ export class WebhookRoutingService {
       return null;
     }
 
-    const snapshot = await this.queueMetricsService.getWebhookDefaultShardSnapshot({
-      maxAgeMs: this.queueSnapshotMaxAgeMs,
-    });
+    const snapshot = await this.readQueueSnapshot();
+    if (!snapshot) return null;
     this.updateWorkerGroupByQueue(snapshot);
     const workerGroupName = this.workerGroupByQueue[assignment.queueName];
     if (!workerGroupName) {
@@ -462,6 +466,33 @@ export class WebhookRoutingService {
       currentWorker.counters.active * ACTIVE_WORKER_PRESSURE_WEIGHT;
     const workerPressureShare = currentPressure / totalPressure;
     return workerPressureShare >= this.hotWorkerRebalancePressureShare ? snapshot : null;
+  }
+
+  private readQueueSnapshot(): Promise<RoutingQueueSnapshot | null> {
+    if (this.queueSnapshotObservation) return this.queueSnapshotObservation;
+
+    let resolveObservation!: (snapshot: RoutingQueueSnapshot | null) => void;
+    const observation = new Promise<RoutingQueueSnapshot | null>((resolve) => {
+      resolveObservation = resolve;
+    });
+    this.queueSnapshotObservation = observation;
+    const timer = setTimeout(() => resolveObservation(null), QUEUE_SNAPSHOT_WAIT_MS);
+    const settle = (snapshot: RoutingQueueSnapshot | null) => {
+      clearTimeout(timer);
+      if (this.queueSnapshotObservation === observation) this.queueSnapshotObservation = null;
+      resolveObservation(snapshot);
+    };
+
+    // FLAG: Pressure is advisory. A timeout preserves routing and keeps one underlying
+    // observation until actual settlement; later callers must not accumulate reads or callbacks.
+    void Promise.resolve()
+      .then(() =>
+        this.queueMetricsService.getWebhookDefaultShardSnapshot({
+          maxAgeMs: this.queueSnapshotMaxAgeMs,
+        }),
+      )
+      .then(settle, () => settle(null));
+    return observation;
   }
 
   private resolveAdaptiveTtlMs(queueName: DefaultWebhookQueueName): number {

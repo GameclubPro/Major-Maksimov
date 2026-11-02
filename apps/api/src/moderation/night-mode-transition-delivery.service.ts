@@ -786,13 +786,10 @@ export class NightModeTransitionDeliveryService {
       classification,
     );
     if (!accessLossReason) {
-      if (
-        params.operation === 'delete-close-notice' &&
-        classification.kind !== 'message_not_found'
-      ) {
-        return null;
-      }
-      return NIGHT_MODE_TRANSITION_PROCESS_CONTINUE;
+      return params.operation === 'delete-close-notice' &&
+        classification.kind === 'message_not_found'
+        ? NIGHT_MODE_TRANSITION_PROCESS_CONTINUE
+        : null;
     }
 
     await this.managedEntityAccessLossService?.recordManagedEntityAccessLost({

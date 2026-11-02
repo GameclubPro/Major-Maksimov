@@ -1388,24 +1388,24 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
   }
 
   async processWebhookEvent(webhookEventId: string) {
-    if (
-      await recoverGroupCommandNotice(
-        this.prisma,
-        this.maxClient,
-        this.injectedGroupCommandAuthority ?? new GroupCommandAuthorityService(this.prisma),
-        webhookEventId,
-        { readiness: this.injectedExecutionOwnerReadiness, links: this.maxBotLinkService },
-      )
-    )
-      return;
     let execution: WebhookCanonicalExecutionContext | null;
     try {
+      if (
+        await recoverGroupCommandNotice(
+          this.prisma,
+          this.maxClient,
+          this.injectedGroupCommandAuthority ?? new GroupCommandAuthorityService(this.prisma),
+          webhookEventId,
+          { readiness: this.injectedExecutionOwnerReadiness, links: this.maxBotLinkService },
+        )
+      )
+        return;
       execution = await this.webhookCanonicalExecutionService.prepareExecution(
         webhookEventId,
         this.maxBotLinkService?.getDefaultBotId?.(),
       );
     } catch (error: unknown) {
-      // FLAG: Mark only typed preparation deferrals before entering the handler.
+      // FLAG: Only preparation and fenced saved-notice waits may delay this queue job.
       // Handler failures retain their existing durable effects and recovery path.
       if (error instanceof WebhookPreparationDeferredError)
         throw new WebhookPreparationRetryError(webhookEventId, error);
@@ -15091,13 +15091,10 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const executionPlan = await this.resolveChannelAutoPostExecutionPlan();
-    if (!executionPlan) {
-      return;
-    }
-
     this.channelAutoPostInFlight = true;
     try {
+      const executionPlan = await this.resolveChannelAutoPostExecutionPlan();
+      if (!executionPlan) return;
       await this.channelAutoPostScanRuntime.run({
         prisma: this.prisma,
         maxClient: this.maxClient,
@@ -15120,6 +15117,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             'Failed channel auto post buttons scan',
           ),
       });
+    } catch {
+      this.logger.warn('Channel auto post scan failed; retrying on the next scheduled tick');
     } finally {
       this.channelAutoPostInFlight = false;
     }
@@ -15154,6 +15153,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         capability: 'background_scans',
       })) ??
       undefined;
+    if (!scanBotId) return;
     let messages: Awaited<ReturnType<MaxClientService['listMessages']>>;
     const readAttemptStartedAt = new Date();
     try {
@@ -15161,13 +15161,13 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         count: 10,
         trafficClass: 'background',
         sourceTag: MAX_API_SOURCE_TAGS.CHANNEL_AUTO_POST,
-        ...(scanBotId ? { botId: scanBotId } : {}),
+        botId: scanBotId,
       });
     } catch (error: unknown) {
       if (
         await this.recordChannelAutoPostAccessLossIfTerminal({
           chatId,
-          botId: scanBotId ?? null,
+          botId: scanBotId,
           source: 'channel_auto_post:scan',
           operation: 'read',
           lifecycleEventAt: readAttemptStartedAt,

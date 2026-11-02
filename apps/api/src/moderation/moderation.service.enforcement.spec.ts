@@ -601,7 +601,9 @@ describe('ModerationService', () => {
       const maxClient = {
         sendMessage: jest
           .fn()
-          .mockRejectedValue(createMaxApiError(404, 'Request failed with status code 404')),
+          .mockRejectedValue(
+            createMaxApiError(404, 'Request failed with status code 404', 'chat.not.found'),
+          ),
         deleteMessage: jest.fn(),
       };
       const redisCounter = createRedisCounterMock();
@@ -662,7 +664,7 @@ describe('ModerationService', () => {
         lifecycleSource: 'live_probe',
         reason: 'chat_not_found',
         source: 'night_mode_transition:send-close-notice',
-        lastMaxErrorCode: null,
+        lastMaxErrorCode: 'chat.not.found',
         lastMaxErrorMessage: 'request failed with status code 404',
         lastMaxStatusCode: 404,
       });
@@ -1501,7 +1503,9 @@ describe('ModerationService', () => {
       const maxClient = {
         sendMessage: jest
           .fn()
-          .mockRejectedValue(createMaxApiError(403, 'Request failed with status code 403')),
+          .mockRejectedValue(
+            createMaxApiError(403, 'Request failed with status code 403', 'chat.denied'),
+          ),
         deleteMessage: jest.fn(),
       };
       const redisCounter = createRedisCounterMock();
@@ -1574,7 +1578,7 @@ describe('ModerationService', () => {
         lifecycleSource: 'live_probe',
         reason: 'bot_denied',
         source: 'night_mode_transition:send-open-notice',
-        lastMaxErrorCode: null,
+        lastMaxErrorCode: 'chat.denied',
         lastMaxErrorMessage: 'request failed with status code 403',
         lastMaxStatusCode: 403,
       });

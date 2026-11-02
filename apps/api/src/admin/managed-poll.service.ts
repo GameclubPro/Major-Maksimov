@@ -1436,9 +1436,7 @@ export class ManagedPollService {
           return true;
         }
       } catch (error: unknown) {
-        if (await this.reconcileMissingPollPublication(poll, botId, entityType, error)) {
-          return true;
-        }
+        await this.verifyPollPublicationAfterEditFailure(poll, botId, entityType, error);
         await this.deferPollRender(retryKey);
         await this.recordPollRenderError(poll.id, poll.renderRevision, chatId, action, error);
         const status = (error as { response?: { status?: number } })?.response?.status;
@@ -1468,33 +1466,28 @@ export class ManagedPollService {
     return false;
   }
 
-  private async reconcileMissingPollPublication(
+  private async verifyPollPublicationAfterEditFailure(
     poll: Awaited<ReturnType<ManagedPollService['loadPollAggregate']>>,
     botId: string | null | undefined,
     entityType: ManagedEntityType,
     error: unknown,
-  ): Promise<boolean> {
+  ): Promise<void> {
     const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
     if (
       status !== 404 ||
       !poll.publicationMessageId ||
       typeof this.maxClient.getExactMessagePresence !== 'function'
     ) {
-      return false;
+      return;
     }
 
-    let presence: 'present' | 'absent';
     const lookupAttemptStartedAt = new Date();
     try {
-      presence = await this.maxClient.getExactMessagePresence(
-        poll.chatId,
-        poll.publicationMessageId,
-        {
-          ...this.buildMaxOptions(botId, MANAGED_POLL_EDIT_TIMEOUT_MS, 'background'),
-          bypassCache: true,
-          ignoreFailureMetricStatuses: [404],
-        },
-      );
+      await this.maxClient.getExactMessagePresence(poll.chatId, poll.publicationMessageId, {
+        ...this.buildMaxOptions(botId, MANAGED_POLL_EDIT_TIMEOUT_MS, 'background'),
+        bypassCache: true,
+        ignoreFailureMetricStatuses: [404],
+      });
     } catch (lookupError: unknown) {
       if (resolveExplicitMembershipAccessDenial(lookupError))
         await this.recordAccessLoss(
@@ -1516,66 +1509,7 @@ export class ManagedPollService {
         },
         'Failed to verify missing managed poll publication',
       );
-      return false;
     }
-    if (presence !== 'absent') {
-      return false;
-    }
-
-    const reconciledAt = new Date();
-    let reconciled = false;
-    await this.prisma.$transaction(async (tx) => {
-      const update = await tx.managedPoll.updateMany({
-        where: {
-          id: poll.id,
-          chatId: poll.chatId,
-          status: poll.status,
-          publicationMessageId: poll.publicationMessageId,
-          renderRevision: poll.renderRevision,
-        },
-        data: {
-          ...(poll.status === ManagedPollStatus.ACTIVE
-            ? { status: ManagedPollStatus.CLOSED, closedAt: reconciledAt }
-            : {}),
-          publicationMessageId: null,
-          publicationUrl: null,
-          renderedRevision: poll.renderRevision,
-          renderFormatVersion: MANAGED_POLL_RENDER_FORMAT_VERSION,
-          lastRenderError: null,
-        },
-      });
-      if (update.count === 0) {
-        return;
-      }
-      reconciled = true;
-      await tx.auditLog.create({
-        data: {
-          chatId: poll.chatId,
-          actorUserId: poll.actorUserId,
-          action: `RECONCILE_MISSING_${this.pollEntityAuditLabel(entityType)}_POLL_PUBLICATION`,
-          payload: {
-            pollId: poll.id,
-            publicationMessageId: poll.publicationMessageId,
-            publicationBotId: botId ?? null,
-            previousStatus: poll.status,
-            reconciledAt: reconciledAt.toISOString(),
-          },
-        },
-      });
-    });
-    if (reconciled) {
-      await this.chatContextCache.invalidate(poll.chatId);
-      this.logger.warn(
-        {
-          pollId: poll.id,
-          chatId: poll.chatId,
-          messageId: poll.publicationMessageId,
-          previousStatus: poll.status,
-        },
-        'Reconciled a managed poll whose MAX publication is absent',
-      );
-    }
-    return reconciled;
   }
 
   private buildCallbackMessageEdit(

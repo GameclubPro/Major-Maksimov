@@ -1779,99 +1779,75 @@ describe('ManagedPollService callback rendering', () => {
     });
   });
 
-  it('closes a stale active poll only after MAX confirms that its publication is absent', async () => {
-    const tx = {
-      managedPoll: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
-      auditLog: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
-    };
-    const prisma = {
-      managedPoll: { updateMany: jest.fn() },
-      $transaction: jest.fn(async (callback: (client: typeof tx) => Promise<unknown>) =>
-        callback(tx),
-      ),
-    };
-    const missingError = {
-      response: {
-        status: 404,
-        data: { code: 'message.not.found', message: 'Message not found' },
-      },
-    };
-    const maxClient = {
-      editMessageInlineKeyboard: jest.fn().mockRejectedValue(missingError),
-      getExactMessagePresence: jest.fn().mockResolvedValue('absent'),
-    };
-    const chatContextCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
-    const service = new ManagedPollService(
-      prisma as never,
-      maxClient as never,
-      {} as never,
-      chatContextCache as never,
-    );
-    jest.spyOn(service as any, 'loadPollAggregate').mockResolvedValue({
-      id: 'poll-1',
-      chatId: 'channel-1',
-      actorUserId: 'admin-1',
-      chat: { entityType: ChatEntityType.CHANNEL },
-      question: 'Текст администратора',
-      questionFormat: 'plain',
-      status: ManagedPollStatus.ACTIVE,
-      resultOptions: [
-        { id: 'option-1', position: 0, text: 'Да', votes: 0, percent: 0 },
-        { id: 'option-2', position: 1, text: 'Нет', votes: 0, percent: 0 },
-      ],
-      publicationMessageId: 'message-missing',
-      publicationBotId: 'bot-1',
-      publicationUrl: 'https://max.ru/channel/message-missing',
-      renderRevision: 0,
-    });
-
-    await expect(
-      (service as any).renderPollPublication('channel-1', 'poll-1', 'background-repair'),
-    ).resolves.toBe(true);
-
-    expect(maxClient.getExactMessagePresence).toHaveBeenCalledWith(
-      'channel-1',
-      'message-missing',
-      expect.objectContaining({
-        botId: 'bot-1',
-        bypassCache: true,
-        trafficClass: 'background',
-        ignoreFailureMetricStatuses: [404],
-      }),
-    );
-    expect(tx.managedPoll.updateMany).toHaveBeenCalledWith({
-      where: {
+  it.each(['present', 'unavailable'] as const)(
+    'keeps the publication and schedules repair when exact presence is %s',
+    async (presence) => {
+      const prisma = {
+        managedPoll: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+        $transaction: jest.fn(),
+      };
+      const missingError = {
+        response: {
+          status: 404,
+          data: { code: 'message.not.found', message: 'Message not found' },
+        },
+      };
+      const maxClient = {
+        editMessageInlineKeyboard: jest.fn().mockRejectedValue(missingError),
+        getExactMessagePresence: jest.fn<
+          ReturnType<MaxClientService['getExactMessagePresence']>,
+          Parameters<MaxClientService['getExactMessagePresence']>
+        >(),
+      } satisfies Pick<MaxClientService, 'editMessageInlineKeyboard' | 'getExactMessagePresence'>;
+      if (presence === 'present') maxClient.getExactMessagePresence.mockResolvedValue('present');
+      else maxClient.getExactMessagePresence.mockRejectedValue({ response: { status: 404 } });
+      const chatContextCache = { invalidate: jest.fn().mockResolvedValue(undefined) };
+      const service = new ManagedPollService(
+        prisma as never,
+        maxClient as never,
+        {} as never,
+        chatContextCache as never,
+      );
+      jest.spyOn(service as any, 'loadPollAggregate').mockResolvedValue({
         id: 'poll-1',
         chatId: 'channel-1',
-        status: ManagedPollStatus.ACTIVE,
-        publicationMessageId: 'message-missing',
-        renderRevision: 0,
-      },
-      data: expect.objectContaining({
-        status: ManagedPollStatus.CLOSED,
-        closedAt: expect.any(Date),
-        publicationMessageId: null,
-        publicationUrl: null,
-        renderedRevision: 0,
-        renderFormatVersion: POLL_RENDER_FORMAT_VERSION,
-        lastRenderError: null,
-      }),
-    });
-    expect(tx.auditLog.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        chatId: 'channel-1',
         actorUserId: 'admin-1',
-        action: 'RECONCILE_MISSING_CHANNEL_POLL_PUBLICATION',
-        payload: expect.objectContaining({
-          pollId: 'poll-1',
-          publicationMessageId: 'message-missing',
-          previousStatus: ManagedPollStatus.ACTIVE,
+        chat: { entityType: ChatEntityType.CHANNEL },
+        question: 'Текст администратора',
+        questionFormat: 'plain',
+        status: ManagedPollStatus.ACTIVE,
+        resultOptions: [
+          { id: 'option-1', position: 0, text: 'Да', votes: 0, percent: 0 },
+          { id: 'option-2', position: 1, text: 'Нет', votes: 0, percent: 0 },
+        ],
+        publicationMessageId: 'message-missing',
+        publicationBotId: 'bot-1',
+        publicationUrl: 'https://max.ru/channel/message-missing',
+        renderRevision: 0,
+      });
+
+      await expect(
+        (service as any).renderPollPublication('channel-1', 'poll-1', 'background-repair'),
+      ).resolves.toBe(false);
+
+      expect(maxClient.getExactMessagePresence).toHaveBeenCalledWith(
+        'channel-1',
+        'message-missing',
+        expect.objectContaining({
+          botId: 'bot-1',
+          bypassCache: true,
+          trafficClass: 'background',
+          ignoreFailureMetricStatuses: [404],
         }),
-      }),
-    });
-    expect(prisma.managedPoll.updateMany).not.toHaveBeenCalled();
-    expect(chatContextCache.invalidate).toHaveBeenCalledWith('channel-1');
-  });
+      );
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.managedPoll.updateMany).toHaveBeenCalledWith({
+        where: { id: 'poll-1', renderRevision: 0 },
+        data: { lastRenderError: 'Message not found' },
+      });
+      expect(chatContextCache.invalidate).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     [{ response: { status: 404 } }, 'access_ambiguous', 404],
@@ -1902,10 +1878,10 @@ describe('ManagedPollService callback rendering', () => {
         renderRevision: 7,
       };
       expect(
-        await (service as any).reconcileMissingPollPublication(poll, 'bot-1', 'chat', {
+        await (service as any).verifyPollPublicationAfterEditFailure(poll, 'bot-1', 'chat', {
           response: { status: 404 },
         }),
-      ).toBe(false);
+      ).toBeUndefined();
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(prisma.managedPoll.updateMany).not.toHaveBeenCalled();
       expect(warn).toHaveBeenCalledWith(
