@@ -37,6 +37,12 @@ export function buildPreviewParticipantDetails(state: PreviewState, userId: stri
       Date.parse(item.createdAt) <= now &&
       ['WARN', 'DELETE_MESSAGE', 'MUTE', 'KICK', 'BAN'].includes(item.action),
   ).length;
+  const hasHistory =
+    state.chatActivity.some((item) => item.userId === userId) ||
+    state.chatViolations.some((item) => item.userId === userId);
+  const canSanction = participant
+    ? participant.role === 'member' && !participant.isBot
+    : hasHistory;
   return chatParticipantDetailsSchema.parse({
     ...(participant ?? {
       userId,
@@ -47,6 +53,8 @@ export function buildPreviewParticipantDetails(state: PreviewState, userId: stri
     violationCount,
     membershipStatus: participant ? 'member' : 'left',
     canManage: participant?.role === 'member' && !participant.isBot,
+    canMute: canSanction,
+    canBan: canSanction,
   });
 }
 
@@ -81,6 +89,20 @@ export function createModerationResult(
         : null,
     message: buildModerationMessage(payload),
   });
+}
+
+export function applyPreviewManualModeration(
+  state: PreviewState,
+  userId: string,
+  payload: ManualModerationActionRequest,
+): ManualModerationActionResult {
+  const user = resolvePreviewUser(state, userId);
+  const violation = createManualViolation(userId, user, payload, state.clock);
+  if (payload.action === 'BAN' && !state.chatParticipants.some((item) => item.userId === userId)) {
+    violation.metadata = { ...violation.metadata, mode: 'LOCAL_REJOIN' };
+  }
+  state.chatViolations = [violation, ...state.chatViolations];
+  return createModerationResult(userId, payload, state.clock);
 }
 
 export function createPreviewSpammerReviewCandidates(now: Date): GlobalSpammerReviewCandidate[] {

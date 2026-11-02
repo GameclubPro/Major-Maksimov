@@ -1,7 +1,6 @@
-import { ModerationService } from './moderation.service';
 import { ModerationRuleSanctionRejectedError } from './moderation-rule-sanction-authority';
 import { deliverSanctionNotice } from './moderation-sanction-notice-delivery';
-import { createSettings, createUpdate } from './moderation.service.spec-support';
+import { ModerationService, createSettings, createUpdate } from './moderation.service.spec-support';
 import type { MaxUpdate } from '@maxim/contracts';
 import type { FreshHeldCommandReceipt } from '../webhook/webhook-legacy-fresh-command';
 import { WebhookParser } from '../webhook/webhook.parser';

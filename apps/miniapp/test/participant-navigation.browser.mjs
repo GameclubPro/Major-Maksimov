@@ -134,8 +134,8 @@ try {
         .click();
       await page.getByRole('radio', { name: 'Журнал', exact: true }).click();
       await page.locator('.event-feed-item__person').first().click();
-      await card.getByRole('button', { name: 'Заблокировать', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Блокировка участника', exact: true }).waitFor();
+      await card.getByRole('button', { name: 'Бан', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Бан участника', exact: true }).waitFor();
       await page.evaluate(() => {
         history.pushState(
           null,
@@ -146,7 +146,7 @@ try {
       });
       await card.waitFor({ state: 'detached' });
       await page
-        .getByRole('dialog', { name: 'Блокировка участника', exact: true })
+        .getByRole('dialog', { name: 'Бан участника', exact: true })
         .waitFor({ state: 'detached' });
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),

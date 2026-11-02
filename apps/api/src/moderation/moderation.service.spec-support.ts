@@ -21,7 +21,8 @@ import {
   buildDeveloperForcedGlobalSpammerCacheKey,
   buildDeveloperForcedGlobalSpammerWarmMarkerKey,
 } from './developer-forced-global-spammer-cache';
-import { ModerationService } from './moderation.service';
+import { ModerationService as RuntimeModerationService } from './moderation.service';
+import type { enforceLocalChatBan } from './local-chat-ban';
 import { resolveModerationDeleteIntentRollout } from './moderation-delete-intent-rollout.util';
 import {
   WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PREFIX,
@@ -49,6 +50,25 @@ import {
   REQUIRED_SUBSCRIPTION_MEMBERSHIP_HOT_PATH_TIMEOUT_MS,
   SHARED_CHAT_EXECUTION_LOCK_AMBIGUOUS_RETRY_AFTER_MS,
 } from './moderation.service.support';
+
+class ModerationService extends RuntimeModerationService {
+  constructor(...args: ConstructorParameters<typeof RuntimeModerationService>) {
+    super(...args);
+    // FLAG: These orchestration fixtures explicitly have no local return bans.
+    // Local-ban unit/native suites use the real hook; preserve the original Prisma
+    // capability surface and raw mock queues for existing immunity/authority fixtures.
+    const enforceLocalChatBanForUpdate = jest
+      .fn<
+        ReturnType<typeof enforceLocalChatBan>,
+        [
+          update: Parameters<typeof enforceLocalChatBan>[0],
+          userId: Parameters<typeof enforceLocalChatBan>[1],
+        ]
+      >()
+      .mockResolvedValue(false);
+    Object.assign(this, { enforceLocalChatBanForUpdate });
+  }
+}
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace

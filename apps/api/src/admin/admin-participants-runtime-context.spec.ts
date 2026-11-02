@@ -39,6 +39,7 @@ function createParticipantsRuntimeContext(params: {
     readTrimmedString: jest.fn().mockReturnValue(null),
     resolveBackgroundReadBotAssignment: jest.fn().mockResolvedValue('bot-2'),
     resolveParticipantCleanupBotAssignment: jest.fn().mockResolvedValue('bot-2'),
+    isKnownRuntimeBotUserId: jest.fn().mockReturnValue(false),
     resolveLogsDashboardFrom: jest.fn(
       (_range: unknown, to: Date) => new Date(to.getTime() - 1_000),
     ),
@@ -61,6 +62,7 @@ describe('AdminParticipantsRuntimeContext', () => {
       getManagedEntityHeader: jest.fn(),
       prepareManualModerationTarget: jest.fn(),
       resolveParticipantCleanupBotAssignment: jest.fn(),
+      isKnownRuntimeBotUserId: jest.fn().mockReturnValue(false),
       resolveBackgroundReadBotAssignment(chatId: string) {
         return Promise.resolve(`${this.prefix}:${chatId}`);
       },

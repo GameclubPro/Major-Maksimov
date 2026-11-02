@@ -140,6 +140,7 @@ export class ChatSanctionsService {
           reason: readSanctionString(metadata.reason)?.slice(0, 500) ?? null,
           actorDisplayName: readSanctionString(metadata.initiatedByDisplayName),
           createdAt: row.createdAt.toISOString(),
+          banOnRejoin: row.action === 'BAN' && metadata.mode === 'LOCAL_REJOIN',
           ...state,
         });
         if (items.length === query.limit) {

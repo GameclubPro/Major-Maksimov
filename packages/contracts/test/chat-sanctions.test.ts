@@ -1,9 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { chatSanctionsQuerySchema } from '../src/chat-sanctions';
+import { chatSanctionItemSchema, chatSanctionsQuerySchema } from '../src/chat-sanctions';
 import { chatParticipantsQuerySchema } from '../src/chat-participants';
 import { manualModerationActionRequestSchema } from '../src/manual-moderation';
 
 describe('chat sanction and activity contracts', () => {
+  it('preserves local ban release capability without changing older sanction responses', () => {
+    const item = {
+      id: 'local-ban',
+      userId: '42',
+      userDisplayName: 'Alex',
+      avatarUrl: null,
+      profileHandoffUrl: null,
+      action: 'BAN',
+      status: 'active',
+      ruleCode: 'MANUAL_BAN',
+      reason: null,
+      operator: 'ADMIN',
+      actorDisplayName: null,
+      createdAt: '2026-11-02T10:00:00.000Z',
+      expiresAt: null,
+      endedAt: null,
+      permanent: true,
+      releaseAction: 'UNBAN',
+    };
+    expect(chatSanctionItemSchema.parse(item).banOnRejoin).toBeUndefined();
+    expect(chatSanctionItemSchema.parse({ ...item, banOnRejoin: true })).toMatchObject({
+      banOnRejoin: true,
+      releaseAction: 'UNBAN',
+    });
+  });
   it('defaults sanctions to active state without a journal range', () => {
     expect(chatSanctionsQuerySchema.parse({})).toEqual({
       status: 'active',

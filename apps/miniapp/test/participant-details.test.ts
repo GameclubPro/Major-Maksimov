@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getChatParticipantDetails } from '../src/lib/api/participant-details-client';
-import { participantDetailsKey } from '../src/lib/participant-card';
+import { participantCapabilities, participantDetailsKey } from '../src/lib/participant-card';
+import type { ChatParticipantDetails } from '@maxim/contracts';
 import type { ApiTransport } from '../src/lib/api/transport';
 
 const details = {
@@ -48,5 +49,65 @@ test('keeps cached participant details isolated by chat, identity and period', (
   assert.notDeepEqual(
     participantDetailsKey('chat-1', 'same', '7d'),
     participantDetailsKey('chat-1', 'same', '30d'),
+  );
+});
+
+test('a verified former participant can receive sanctions without gaining immunity controls', () => {
+  const former = {
+    ...details,
+    role: null,
+    membershipStatus: 'left',
+    canManage: false,
+    canMute: true,
+    canBan: true,
+  } as ChatParticipantDetails;
+  assert.deepEqual(participantCapabilities(former, true), {
+    canManage: false,
+    canMute: true,
+    canBan: true,
+  });
+  assert.deepEqual(participantCapabilities({ ...former, canMute: false }, true), {
+    canManage: false,
+    canMute: false,
+    canBan: true,
+  });
+});
+
+test('missing details, unknown membership, protected roles and bots keep sanctions unavailable', () => {
+  const allowed = {
+    ...details,
+    canMute: true,
+    canBan: true,
+  } as ChatParticipantDetails;
+  const denied = { canManage: false, canMute: false, canBan: false };
+  assert.deepEqual(participantCapabilities(allowed, false), denied);
+  for (const extra of [
+    { membershipStatus: 'unknown' as const },
+    { role: 'admin' as const },
+    { role: 'owner' as const },
+    { isBot: true },
+    { canManage: false, canMute: false, canBan: false },
+  ]) {
+    assert.deepEqual(participantCapabilities({ ...allowed, ...extra }, true), denied);
+  }
+});
+
+test('old responses retain their original capability without granting sanctions to former members', () => {
+  assert.deepEqual(participantCapabilities(details as ChatParticipantDetails, true), {
+    canManage: true,
+    canMute: true,
+    canBan: true,
+  });
+  assert.deepEqual(
+    participantCapabilities(
+      {
+        ...details,
+        role: null,
+        membershipStatus: 'left',
+        canManage: false,
+      } as ChatParticipantDetails,
+      true,
+    ),
+    { canManage: false, canMute: false, canBan: false },
   );
 });

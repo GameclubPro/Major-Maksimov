@@ -40,12 +40,11 @@ import {
   resolveChatTitle,
 } from './preview-transport-dialog';
 import {
+  applyPreviewManualModeration,
   buildPreviewSpammerDiagnostics,
   buildPreviewSpammerReviewMetrics,
-  createManualViolation,
   createModerationResult,
   createPreviewSpammerReviewResult,
-  resolvePreviewUser,
   buildPreviewParticipantDetails,
 } from './preview-transport-events-fixtures';
 import type { PreviewState } from './preview-transport-state';
@@ -1352,12 +1351,7 @@ function handleChatEventsPreviewRequest(
   if (tail[0] === 'members' && tail[1] && tail[2] === 'moderation-action' && method === 'POST') {
     const userId = decodeURIComponent(tail[1]);
     const payload = manualModerationActionRequestSchema.parse(parseJsonBody(init));
-    const user = resolvePreviewUser(state, userId);
-    state.chatViolations = [
-      createManualViolation(userId, user, payload, state.clock),
-      ...state.chatViolations,
-    ];
-    return createModerationResult(userId, payload, state.clock);
+    return applyPreviewManualModeration(state, userId, payload);
   }
 
   if (tail[0] === 'members' && tail[1] && tail[2] === 'immunity' && method === 'PUT') {

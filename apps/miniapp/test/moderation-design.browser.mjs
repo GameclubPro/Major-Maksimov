@@ -69,7 +69,7 @@ try {
     await page.getByRole('button', { name: 'Сбросить фильтры', exact: true }).click();
     await page.locator('.sanctions-workspace__details-trigger').first().click();
     const panel = page.locator('.sanction-details');
-    const primary = panel.getByRole('button', { name: 'Разрешить писать', exact: true });
+    const primary = panel.getByRole('button', { name: 'Снять мут', exact: true });
     await primary.click({ trial: true });
     const footerBefore = await panel.locator('.settings-drilldown__footer').boundingBox();
     assert.ok(footerBefore.y + footerBefore.height <= height + 1);
@@ -82,11 +82,39 @@ try {
     await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
     const tabs = page.getByRole('group', { name: 'Раздел статистики' });
     await tabs.getByRole('button', { name: 'Участники', exact: true }).click();
-    await page.locator('.participants-roster__item').first().waitFor();
-    const participantsTop = (await page.locator('.participants-roster__item').first().boundingBox())
-      .y;
-    if (width === 320)
-      assert.ok(participantsTop <= 350, `participants start too low: ${participantsTop}`);
+    const firstParticipant = page.locator('.participants-roster__item').first();
+    await firstParticipant.waitFor();
+    const participantsTop = (await firstParticipant.boundingBox()).y;
+    if (width === 320) {
+      // Filter rows may grow with their labels; keep the first participant's touch target reachable.
+      const target = await firstParticipant.evaluate((button) => {
+        const bounds = button.getBoundingClientRect();
+        const filters = document
+          .querySelector('.participants-roster__filters')
+          .getBoundingClientRect();
+        const left = Math.max(0, bounds.left);
+        const top = Math.max(0, bounds.top);
+        const right = Math.min(innerWidth, bounds.right);
+        const bottom = Math.min(visualViewport?.height ?? innerHeight, bounds.bottom);
+        return {
+          width: right - left,
+          height: bottom - top,
+          belowFilters: bounds.top >= filters.bottom,
+          enabled: button.matches('button:not(:disabled)'),
+          clear: button.contains(document.elementFromPoint((left + right) / 2, (top + bottom) / 2)),
+        };
+      });
+      assert.ok(
+        target.width >= 44 && target.height >= 44,
+        'first participant lacks a visible 44px touch target',
+      );
+      assert.equal(target.belowFilters, true, 'participant overlaps filters');
+      assert.equal(
+        target.enabled && target.clear,
+        true,
+        'first participant touch target is blocked',
+      );
+    }
     await page.getByLabel('Роль участника', { exact: true }).selectOption('bots');
     await page.locator('.participants-roster__pill--bot').first().waitFor();
     await page.waitForFunction(

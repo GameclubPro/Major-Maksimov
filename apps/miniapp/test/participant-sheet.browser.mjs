@@ -34,7 +34,7 @@ const actions = () => page.evaluate(() => window.participantSheetTest.actions);
 
 try {
   await fresh();
-  await page.getByRole('button', { name: 'Без сообщений', exact: true }).click();
+  await page.getByRole('button', { name: 'Мут', exact: true }).click();
   await page.waitForFunction(
     () => document.activeElement?.id === 'participant-sheet-mute-composer',
   );
@@ -44,7 +44,7 @@ try {
   await page.waitForFunction(() =>
     document.activeElement?.classList.contains('participant-sheet__action--mute'),
   );
-  await page.getByRole('button', { name: 'Без сообщений', exact: true }).click();
+  await page.getByRole('button', { name: 'Мут', exact: true }).click();
   assert.equal(
     await page.getByRole('slider', { name: 'Срок ограничения в часах' }).inputValue(),
     '24',
@@ -54,16 +54,19 @@ try {
   );
 
   await fresh();
-  await page.getByRole('button', { name: 'Без сообщений', exact: true }).click();
+  await page.getByRole('button', { name: 'Мут', exact: true }).click();
   await page.getByRole('button', { name: '6 ч', exact: true }).click();
   assert.equal(
     await page.getByRole('slider', { name: 'Срок ограничения в часах' }).inputValue(),
     '6',
   );
-  await page.getByRole('button', { name: 'Ограничить сообщения', exact: true }).click();
+  await page.getByRole('button', { name: 'Назначить мут', exact: true }).click();
   assert.deepEqual(await actions(), [{ kind: 'mute', payload: 6 }]);
-  await page.getByRole('button', { name: 'Как работает ограничение сообщений' }).click();
-  assert.match(await page.locator('#participant-sheet-hint-mute').innerText(), /останется в чате/u);
+  await page.getByRole('button', { name: 'Как работает мут' }).click();
+  assert.match(
+    await page.locator('#participant-sheet-hint-mute').innerText(),
+    /после возвращения/u,
+  );
   await page.evaluate(() => window.participantSheetTest.back());
   await page.locator('#participant-sheet-hint-mute').waitFor({ state: 'detached' });
   assert.equal(await page.locator('#participant-sheet-hint-mute').count(), 0);
@@ -134,7 +137,7 @@ try {
   await fresh();
   await page.getByRole('button', { name: 'Защита', exact: true }).click();
   await page.getByRole('slider', { name: 'Срок защиты в днях' }).fill('7');
-  await page.getByRole('slider', { name: 'Лимит нарушающих сообщений в день' }).fill('5');
+  await page.getByRole('slider', { name: 'Лимит сообщений с нарушениями в день' }).fill('5');
   await page.evaluate(() =>
     window.participantSheetTest.render({
       item: { ...window.participantSheetTest.participant, violationCount: 4 },
@@ -166,7 +169,7 @@ try {
   await page.getByRole('button', { name: 'Защита', exact: true }).click();
   assert.equal(await page.getByRole('slider', { name: 'Срок защиты в днях' }).inputValue(), '3');
   assert.equal(
-    await page.getByRole('slider', { name: 'Лимит нарушающих сообщений в день' }).inputValue(),
+    await page.getByRole('slider', { name: 'Лимит сообщений с нарушениями в день' }).inputValue(),
     '3',
   );
   console.log(
@@ -186,14 +189,9 @@ try {
         }),
       role,
     );
-    await page
-      .getByRole('button', { name: 'Заблокировать', exact: true })
-      .waitFor({ state: 'detached' });
-    assert.equal(await page.getByRole('button', { name: 'Заблокировать', exact: true }).count(), 0);
-    assert.equal(
-      await page.getByRole('button', { name: 'Без сообщений', exact: true }).isDisabled(),
-      true,
-    );
+    await page.getByRole('button', { name: 'Бан', exact: true }).waitFor({ state: 'detached' });
+    assert.equal(await page.getByRole('button', { name: 'Бан', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Мут', exact: true }).isDisabled(), true);
     assert.equal(
       await page.getByRole('button', { name: 'Защита', exact: true }).isDisabled(),
       true,
@@ -212,8 +210,8 @@ try {
     await page.setViewportSize({ width, height });
     await fresh();
     await page.evaluate((theme) => (document.documentElement.dataset.maxTheme = theme), theme);
-    await page.getByRole('button', { name: 'Без сообщений', exact: true }).click();
-    await page.getByRole('button', { name: 'Как работает ограничение сообщений' }).click();
+    await page.getByRole('button', { name: 'Мут', exact: true }).click();
+    await page.getByRole('button', { name: 'Как работает мут' }).click();
     for (const composer of ['mute', 'immunity']) {
       if (composer === 'immunity') {
         await page.getByRole('button', { name: 'К участнику', exact: true }).click();

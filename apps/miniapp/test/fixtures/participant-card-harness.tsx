@@ -17,6 +17,13 @@ const pending = new Map<
 >();
 const requests: string[] = [];
 const aborted: string[] = [];
+const actions: Array<{
+  chatId: string;
+  userId: string;
+  action: 'MUTE' | 'BAN';
+  durationHours?: number;
+  banOnRejoin?: boolean;
+}> = [];
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 const api: ApiTransport = {
   requestKeepalive: () => {},
@@ -56,8 +63,9 @@ const show = (chatId: string, userId: string) => {
           onClose: () => root.render(null),
           onProfileActivate: () => {},
           onSpammerDiagnostics: () => {},
-          onMute: () => {},
-          onBan: () => {},
+          onMute: (durationHours) =>
+            actions.push({ chatId, userId, action: 'MUTE', durationHours }),
+          onBan: (banOnRejoin) => actions.push({ chatId, userId, action: 'BAN', banOnRejoin }),
           onRelease: async () => 'ok',
           describeReason: () => '',
         }),
@@ -80,6 +88,14 @@ const fail = (chatId: string, userId: string) =>
   pending.get(`/chats/${chatId}/members/${userId}?range=7d`)?.reject(new Error('Сеть недоступна'));
 document.body.dataset.miniappProfile = 'moderation';
 Object.assign(window, {
-  participantCardTest: { show, resolve, fail, requests, aborted, back: runNativeBackHandlers },
+  participantCardTest: {
+    show,
+    resolve,
+    fail,
+    requests,
+    aborted,
+    actions,
+    back: runNativeBackHandlers,
+  },
 });
 show('chat-1', 'one');

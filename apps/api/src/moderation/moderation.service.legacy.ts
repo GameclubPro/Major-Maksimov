@@ -28,6 +28,7 @@ import {
   nominateRequiredSubscriptionCandidate,
 } from './required-subscription-candidate-adapter';
 import { legacyBotCleanupSourceAt } from './legacy-bot-message-cleanup-source';
+import { enforceLocalChatBan } from './local-chat-ban';
 import {
   WebhookLegacyHoldService,
   type WebhookLegacyHoldDatabase,
@@ -2104,6 +2105,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
         return true;
       };
+
+      if (await this.enforceLocalChatBanForUpdate(update, senderId)) {
+        await suppressDeferredPhotoAnalysisActions();
+        return;
+      }
 
       this.markWebhookHotPathStage(hotPathProfile, 'active-mute');
       const activeMute = await this.getActiveMute(chatId, senderId, settings.muteDurationHours);
@@ -8362,6 +8368,14 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    if (update.membership?.action === 'added') {
+      for (const userId of update.membership.memberUserIds) {
+        if (excludedGreetingUserIds.has(userId)) continue;
+        if (await this.enforceLocalChatBanForUpdate(update, userId))
+          excludedGreetingUserIds.add(userId);
+      }
+    }
+
     await this.handleInvitationAccessMembershipUpdate({
       chatId,
       messageId,
@@ -8397,6 +8411,33 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       deleteBotMessagesEnabled: settings.deleteBotMessagesEnabled,
       deleteBotMessagesDelayMinutes: settings.deleteBotMessagesDelayMinutes,
       excludedUserIds: excludedGreetingUserIds,
+    });
+  }
+
+  private enforceLocalChatBanForUpdate(update: MaxUpdate, userId: string): Promise<boolean> {
+    return enforceLocalChatBan(update, userId, {
+      prisma: this.prisma,
+      fence: this.moderationSanctionStateFenceService,
+      sanctionLock: this.moderationSanctionStateLockService,
+      max: this.maxClient,
+      legacyHolds: this.legacyHolds,
+      isKnownBotUserId: (targetUserId) => this.isKnownRuntimeBotUserId(targetUserId),
+      kick: (chatId, targetUserId, optionsForBot) =>
+        this.executeModerationActionWithFallback({
+          chatId,
+          userId: targetUserId,
+          action: 'moderate_member',
+          operation: async (botId) =>
+            this.maxClient.kickMember(chatId, targetUserId, {
+              ...(await optionsForBot(botId)),
+              botId,
+              immediate: true,
+              trafficClass: 'critical',
+              actionHealthLane: 'critical',
+              sourceTag: MAX_API_SOURCE_TAGS.MODERATION_SANCTION,
+              timeoutMs: MODERATION_ACTION_DISPATCH_TIMEOUT_MS,
+            }),
+        }),
     });
   }
 

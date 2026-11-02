@@ -1,7 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChannelStatsResponse } from '@maxim/contracts/channel-stats';
+import type { ChatParticipantDetails, ChatSanctionsPage } from '@maxim/contracts';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
+
+test('preview former participants keep sanctions independent from immunity and expose local ban release', async () => {
+  const api = createPreviewApiTransport();
+  const details = (await api.request(
+    '/chats/preview-chat/members/preview-old-ban?range=7d',
+  )) as ChatParticipantDetails;
+  assert.equal(details.membershipStatus, 'left');
+  assert.equal(details.canManage, false);
+  assert.equal(details.canMute, true);
+  assert.equal(details.canBan, true);
+  await api.request('/chats/preview-chat/members/preview-old-ban/moderation-action', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'BAN', scope: 'current_chat' }),
+  });
+  const sanctions = (await api.request(
+    '/chats/preview-chat/sanctions?status=active&userId=preview-old-ban',
+  )) as ChatSanctionsPage;
+  assert.equal(sanctions.items.length, 1);
+  assert.equal(sanctions.items[0]?.banOnRejoin, true);
+  assert.equal(sanctions.items[0]?.releaseAction, 'UNBAN');
+  const unknown = (await api.request(
+    '/chats/preview-chat/members/unseen-user?range=7d',
+  )) as ChatParticipantDetails;
+  assert.equal(unknown.canMute, false);
+  assert.equal(unknown.canBan, false);
+});
 
 test('preview channel ban adds one departure without changing chat moderation', async () => {
   const api = createPreviewApiTransport();

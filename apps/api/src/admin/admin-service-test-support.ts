@@ -532,6 +532,9 @@ export function createPrismaMock() {
     chatMembershipActivityEvent: {
       findFirst: jest.fn().mockResolvedValue(null),
     },
+    chatMembershipActivityFeedItem: {
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     managedBotChatCatalog: {
       findMany: jest.fn().mockResolvedValue([]),
     },
