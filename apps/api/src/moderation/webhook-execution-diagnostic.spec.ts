@@ -63,6 +63,7 @@ describe('webhook execution diagnostics', () => {
   it.each([
     ['MAX_API_INTERNAL_RATE_LIMIT', 'max_internal_rate_limit'],
     ['MAX_API_CIRCUIT_OPEN', 'max_circuit_open'],
+    ['DUPLICATE_WINDOW_CAPACITY_EXCEEDED', 'duplicate_history_local_capacity'],
   ])('classifies the fixed local %s code without its message', (code, failureReason) => {
     const result = describeWebhookExecutionFailure({
       code,

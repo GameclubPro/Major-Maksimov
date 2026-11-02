@@ -313,9 +313,21 @@ export type DeadlineLockAcquireResult =
   | { kind: 'busy' }
   | { kind: 'deadline_exceeded' };
 
+export const DUPLICATE_WINDOW_MAX_OUTSTANDING = 128;
+
+export class DuplicateWindowCapacityError extends Error {
+  readonly code = 'DUPLICATE_WINDOW_CAPACITY_EXCEEDED';
+
+  constructor() {
+    super('Message duplicate window capacity exceeded before Redis dispatch');
+    this.name = 'DuplicateWindowCapacityError';
+  }
+}
+
 @Injectable()
 export class RedisCounterService implements OnModuleDestroy {
   private readonly redis: Redis;
+  private duplicateWindowOutstanding = 0;
 
   constructor(private readonly configService: ConfigService) {
     this.redis = new Redis(this.configService.getOrThrow<string>('REDIS_URL'));
@@ -329,12 +341,21 @@ export class RedisCounterService implements OnModuleDestroy {
     chatId: string,
     input: Record<string, unknown>,
   ): Promise<DuplicateWindowResult> {
-    const raw = await this.redis.eval(
-      MESSAGE_DUPLICATE_WINDOW_SCRIPT,
-      1,
-      `dup:window:v1:${digestDuplicateContent(chatId)}:`,
-      JSON.stringify({ ...input, deadline: Date.now() + 250 }),
-    );
+    if (this.duplicateWindowOutstanding >= DUPLICATE_WINDOW_MAX_OUTSTANDING)
+      throw new DuplicateWindowCapacityError();
+    this.duplicateWindowOutstanding += 1;
+    let raw: unknown;
+    try {
+      // FLAG: A caller's timeout does not settle the Redis operation or release its slot.
+      raw = await this.redis.eval(
+        MESSAGE_DUPLICATE_WINDOW_SCRIPT,
+        1,
+        `dup:window:v1:${digestDuplicateContent(chatId)}:`,
+        JSON.stringify({ ...input, deadline: Date.now() + 250 }),
+      );
+    } finally {
+      this.duplicateWindowOutstanding -= 1;
+    }
     const result = JSON.parse(String(raw)) as DuplicateWindowResult;
     if (result.kind === 'deadline_exceeded')
       throw new Error('Message duplicate window deadline exceeded');

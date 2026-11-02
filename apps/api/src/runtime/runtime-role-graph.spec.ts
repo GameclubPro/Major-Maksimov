@@ -173,6 +173,10 @@ describe('runtime role dependency graphs', () => {
             expect(outbox.dependencyQuarantine).toBe(
               context.get(WebhookDependencyQuarantineService),
             );
+            const quarantine = context.get(WebhookDependencyQuarantineService) as unknown as {
+              legacyHolds: unknown;
+            };
+            expect(quarantine.legacyHolds).toBe(context.get(WebhookLegacyHoldService));
             const { WebhookService } = await import('../webhook/webhook.service');
             const webhook = context.get(WebhookService) as unknown as {
               dependencyQuarantine: unknown;

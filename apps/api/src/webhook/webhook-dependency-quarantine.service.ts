@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { MaxUpdate } from '@maxim/contracts';
 import {
@@ -16,6 +16,9 @@ import { hasWebhookReplayFence } from './webhook-execution-deadline';
 import { buildGroupCommandKey } from '../common/group-command-key';
 import { readLegacyReceiptClaims } from './webhook-legacy-claims';
 import { tryLockWebhookSemanticClaimFences } from './webhook-semantic-claim-fence';
+import { WebhookLegacyHoldService } from './webhook-legacy-hold.service';
+import { legacySnapshotDigest } from './webhook-legacy-source';
+import { WebhookParser } from './webhook.parser';
 import {
   isPendingWebhookTimeoutQuarantineMessage,
   WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PREFIX,
@@ -100,6 +103,7 @@ export class WebhookDependencyQuarantineService {
   constructor(
     private readonly prisma: PrismaService,
     config: ConfigService,
+    @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
   ) {
     this.publisherBotId = buildPublisherBotDescriptor({
       id: config.get<string>('MAX_PUBLISHER_BOT_ID'),
@@ -159,6 +163,70 @@ export class WebhookDependencyQuarantineService {
     );
   }
 
+  private async exactIndependentCommandSource(
+    tx: Prisma.TransactionClient,
+    source: WebhookEvent,
+    chatId: string,
+    messageId: string,
+  ): Promise<boolean> {
+    const update = source.normalizedPayload as unknown as MaxUpdate;
+    const raw = update?.raw;
+    if (
+      !source.botId ||
+      source.botId.trim() !== source.botId ||
+      source.botId === this.publisherBotId ||
+      update?.botId !== source.botId ||
+      update.type !== 'message_created' ||
+      update.message?.chatId !== chatId ||
+      update.message?.messageId !== messageId ||
+      typeof update.message?.senderId !== 'string' ||
+      !update.message.senderId ||
+      update.message.senderId.trim() !== update.message.senderId ||
+      typeof update.updateId !== 'string' ||
+      !update.updateId ||
+      source.dedupKey !== `${source.botId}:${update.updateId}` ||
+      source.semanticKey !== buildWebhookReceiptSemanticKey(update, this.publisherBotId) ||
+      source.semanticKey !== buildWebhookSemanticEventKey(update) ||
+      !raw ||
+      typeof raw !== 'object' ||
+      Array.isArray(raw) ||
+      source.legacyDispositionId !== null ||
+      source.legacyDispositionReceiptId !== null ||
+      source.sourceDispositionId !== null ||
+      source.sourceDispositionReceiptId !== null ||
+      ['NO_REPLAY_HELD', 'QUARANTINED', 'CANCELLED'].includes(source.status) ||
+      hasWebhookReplayFence(source)
+    )
+      return false;
+    const holds = this.legacyHolds ?? WebhookLegacyHoldService.forPrisma(this.prisma);
+    if (!holds || (await holds.isUpdateHeld(update, tx))) return false;
+    const legacyDisposition = await tx.webhookLegacyReceiptDisposition.findUnique({
+      where: { receiptId: source.id },
+    });
+    const sourceDisposition = await tx.webhookSourceReceiptDisposition.findUnique({
+      where: { receiptId: source.id },
+    });
+    if (legacyDisposition || sourceDisposition) return false;
+    try {
+      const parsed = new WebhookParser().parse(raw as Record<string, unknown>, {
+        botId: source.botId,
+      });
+      const original = { ...update };
+      delete original.executionOwnerBotId;
+      const storedRaw = source.rawPayload;
+      return (
+        legacySnapshotDigest(parsed) === legacySnapshotDigest(original) &&
+        !!storedRaw &&
+        typeof storedRaw === 'object' &&
+        !Array.isArray(storedRaw) &&
+        (Object.keys(storedRaw).length === 0 ||
+          legacySnapshotDigest(storedRaw) === legacySnapshotDigest(raw))
+      );
+    } catch {
+      return false;
+    }
+  }
+
   // FLAG: This exact semantic dependency has no ordering lifetime. Retain the uncertain
   // owner, claim, errors and effects; only a never-activated copy stops active scheduling.
   async parkSemanticMirror(ownerId: string, mirrorId: string): Promise<boolean> {
@@ -175,26 +243,82 @@ export class WebhookDependencyQuarantineService {
             return this.reportSemanticMirrorRefusal('snapshot_source');
           const semanticKey = snapshot.semanticKey;
           const messageId = (snapshot.normalizedPayload as MaxUpdate).message!.messageId;
+          const commandKey = buildGroupCommandKey(chatId, messageId);
           // FLAG: Fence independent claim creation before claim-before-receipt locks.
           // Contention preserves the original scheduling state, never infers absence.
-          if (
-            !(await tryLockWebhookSemanticClaimFences(tx, [
-              semanticKey,
-              buildGroupCommandKey(chatId, messageId),
-            ]))
-          )
+          if (!(await tryLockWebhookSemanticClaimFences(tx, [semanticKey, commandKey])))
             return this.reportSemanticMirrorRefusal('claim_fence_busy');
           await tx.$queryRaw(Prisma.sql`
             SELECT id FROM webhook_execution_claims
             WHERE kind = 'EXECUTION' AND semantic_key = ${semanticKey} FOR UPDATE
           `);
           await tx.$queryRaw(Prisma.sql`
-            SELECT id FROM webhook_events WHERE id IN (${ownerId}, ${mirrorId})
+            SELECT id FROM webhook_execution_claims
+            WHERE kind = 'COMMAND' AND semantic_key = ${commandKey} FOR UPDATE
+          `);
+          const command = await tx.webhookExecutionClaim.findUnique({
+            where: { kind_semanticKey: { kind: 'COMMAND', semanticKey: commandKey } },
+          });
+          if (
+            command &&
+            (!command.webhookEventId || [ownerId, mirrorId].includes(command.webhookEventId))
+          )
+            return this.reportSemanticMirrorRefusal('receipt_aliases');
+          const receiptIds = [
+            ownerId,
+            mirrorId,
+            ...(command?.webhookEventId ? [command.webhookEventId] : []),
+          ];
+          await tx.$queryRaw(Prisma.sql`
+            SELECT id FROM webhook_events WHERE id IN (${Prisma.join(receiptIds)})
             ORDER BY id FOR UPDATE
           `);
-          const mirror = await this.lockUnstartedReceipt(tx, mirrorId, ownerId, (reason) => {
-            this.reportSemanticMirrorRefusal(reason);
-          });
+          if (command?.webhookEventId) {
+            // FLAG: Bound detoasting before reading either source payload. PG16 pglz and
+            // LZ4 expand by at most 91 and 255 bytes per stored byte, respectively.
+            const sizes = await tx.$queryRaw<Array<{ admitted: boolean | null }>>(Prisma.sql`
+              SELECT (
+                (CASE
+                  WHEN pg_column_compression(normalized_payload) IS NULL
+                    THEN pg_column_size(normalized_payload)
+                  WHEN pg_column_compression(normalized_payload) = 'pglz'
+                    THEN 4 + 91 * pg_column_size(normalized_payload)::bigint
+                  WHEN pg_column_compression(normalized_payload) = 'lz4'
+                    THEN 4 + 255 * pg_column_size(normalized_payload)::bigint
+                  ELSE NULL
+                END) +
+                (CASE
+                  WHEN pg_column_compression(raw_payload) IS NULL
+                    THEN pg_column_size(raw_payload)
+                  WHEN pg_column_compression(raw_payload) = 'pglz'
+                    THEN 4 + 91 * pg_column_size(raw_payload)::bigint
+                  WHEN pg_column_compression(raw_payload) = 'lz4'
+                    THEN 4 + 255 * pg_column_size(raw_payload)::bigint
+                  ELSE NULL
+                END) <= 262144
+              ) AS admitted
+              FROM webhook_events WHERE id = ${command.webhookEventId}
+            `);
+            if (sizes.length !== 1 || sizes[0]!.admitted !== true)
+              return this.reportSemanticMirrorRefusal('receipt_aliases');
+            const source = await tx.webhookEvent.findUnique({
+              where: { id: command.webhookEventId },
+            });
+            if (
+              !source ||
+              !(await this.exactIndependentCommandSource(tx, source, chatId, messageId))
+            )
+              return this.reportSemanticMirrorRefusal('receipt_aliases');
+          }
+          const mirror = await this.lockUnstartedReceipt(
+            tx,
+            mirrorId,
+            ownerId,
+            (reason) => {
+              this.reportSemanticMirrorRefusal(reason);
+            },
+            command?.id,
+          );
           const owner = await tx.webhookEvent.findUnique({ where: { id: ownerId } });
           const claim = await tx.webhookExecutionClaim.findUnique({
             where: { kind_semanticKey: { kind: 'EXECUTION', semanticKey } },
@@ -236,13 +360,11 @@ export class WebhookDependencyQuarantineService {
             claim.completedAt !== null
           )
             return this.reportSemanticMirrorRefusal('canonical_claim');
-          const ownerClaims = await readLegacyReceiptClaims(
-            tx,
-            owner.id,
-            semanticKey,
-            buildGroupCommandKey(chatId, messageId),
-          );
-          if (!ownerClaims || ownerClaims.some((row) => row.id !== claim.id))
+          const ownerClaims = await readLegacyReceiptClaims(tx, owner.id, semanticKey, commandKey);
+          if (
+            !ownerClaims ||
+            ownerClaims.some((row) => row.id !== claim.id && row.id !== command?.id)
+          )
             return this.reportSemanticMirrorRefusal('owner_aliases');
           for (const receiptId of [ownerId, mirrorId]) {
             const legacyDisposition = await tx.webhookLegacyReceiptDisposition.findUnique({
@@ -326,6 +448,7 @@ export class WebhookDependencyQuarantineService {
     receiptId: string,
     mirrorOwnerId?: string,
     reportRefusal?: (reason: SemanticMirrorRefusal) => void,
+    independentCommandId?: string,
   ) {
     const refuse = (reason: SemanticMirrorRefusal): null => {
       reportRefusal?.(reason);
@@ -389,7 +512,10 @@ export class WebhookDependencyQuarantineService {
         receipt.semanticKey,
         buildGroupCommandKey(message.chatId, message.messageId),
       );
-      if (!evidence || evidence.some((row) => row.id !== claim!.id))
+      if (
+        !evidence ||
+        evidence.some((row) => row.id !== claim!.id && row.id !== independentCommandId)
+      )
         return refuse('receipt_aliases');
     }
     if (

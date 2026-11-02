@@ -1,13 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
+import { GroupCommandAuthorityService } from '../common/group-command-authority.service';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import { buildGroupCommandKey } from '../common/group-command-key';
 import { WebhookCanonicalExecutionService } from '../moderation/webhook-canonical-execution.service';
 import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
 import { QueueMetricsService } from '../system/queue-metrics.service';
 import { WebhookDependencyQuarantineService } from './webhook-dependency-quarantine.service';
+import { WebhookLegacyHoldService } from './webhook-legacy-hold.service';
 import { buildWebhookExecutionDeadlineAt } from './webhook-execution-deadline';
 import { buildWebhookReceiptSemanticKey } from './webhook-receipt-semantic-key';
 import { writeWebhookEnqueueState } from './webhook-receipt-write';
@@ -27,6 +29,8 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
   let constraints: Pool;
   const ids: string[] = [];
   const actionIds: string[] = [];
+  const commandIds: string[] = [];
+  const holdIds: string[] = [];
 
   beforeAll(async () => {
     const url = new URL(databaseUrl);
@@ -36,6 +40,7 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
     )
       throw new Error('Disposable loopback PostgreSQL required');
     prisma = createPrismaClient(databaseUrl, { max: 8, statement_timeout: 10_000 });
+    new WebhookLegacyHoldService(prisma as never);
     constraints = new Pool({ connectionString: databaseUrl, max: 1, statement_timeout: 10_000 });
     const [identity] = await prisma.$queryRaw<Array<{ version: string; timezone: string }>>`
       SELECT version(), current_setting('TimeZone') AS timezone`;
@@ -44,8 +49,13 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
   });
 
   afterEach(async () => {
+    await prisma.webhookLegacyRecovery.deleteMany({ where: { certificateId: { in: holdIds } } });
+    await prisma.webhookLegacyQuiescenceCertificate.deleteMany({
+      where: { id: { in: holdIds.splice(0) } },
+    });
     await prisma.webhookDependencyQuarantine.deleteMany({ where: { receiptId: { in: ids } } });
     await prisma.maxActionLedgerEntry.deleteMany({ where: { id: { in: actionIds.splice(0) } } });
+    await prisma.webhookExecutionClaim.deleteMany({ where: { id: { in: commandIds.splice(0) } } });
     await prisma.webhookExecutionClaim.deleteMany({ where: { webhookEventId: { in: ids } } });
     await prisma.webhookEvent.deleteMany({ where: { id: { in: ids.splice(0) } } });
   });
@@ -318,6 +328,277 @@ native('nonordered semantic mirror quarantine on native PostgreSQL', () => {
       warn.mockRestore();
     }
   });
+
+  async function commandFixture(padding = '') {
+    const removal = await fixture();
+    const { owner, mirror, claim, mirrorPayload } = removal;
+    const chatId = mirrorPayload.message!.chatId;
+    const messageId = mirrorPayload.message!.messageId!;
+    const timestamp = owner.createdAt.getTime() - 1_000;
+    const raw = {
+      update_type: 'message_created',
+      update_id: randomUUID(),
+      timestamp,
+      ...(padding ? { fixture_padding: padding } : {}),
+      message: {
+        timestamp,
+        sender: { user_id: 'fixture-admin', is_bot: false },
+        recipient: { chat_id: chatId, chat_type: 'chat' },
+        body: { mid: messageId, text: 'Старт' },
+      },
+    };
+    const update = new WebhookParser().parse(raw, { botId: 'major-command-source' });
+    const source = await prisma.webhookEvent.create({
+      data: {
+        dedupKey: `${update.botId}:${update.updateId}`,
+        botId: update.botId,
+        semanticKey: buildWebhookSemanticEventKey(update),
+        normalizedPayload: update as unknown as Prisma.InputJsonValue,
+        rawPayload: raw as Prisma.InputJsonValue,
+        createdAt: new Date(timestamp),
+      },
+    });
+    ids.push(source.id);
+    expect(update.type).toBe('message_created');
+    expect(update.message).toMatchObject({ chatId, messageId });
+    expect(source.id).not.toBe(owner.id);
+    expect(source.id).not.toBe(mirror.id);
+    expect(source.semanticKey).not.toBe(owner.semanticKey);
+    await new GroupCommandAuthorityService(prisma as never).observeStart(update);
+    const command = await prisma.webhookExecutionClaim.findUniqueOrThrow({
+      where: {
+        kind_semanticKey: { kind: 'COMMAND', semanticKey: buildGroupCommandKey(chatId, messageId) },
+      },
+    });
+    commandIds.push(command.id);
+    expect(command.webhookEventId).toBe(source.id);
+    expect(command.id).not.toBe(claim.id);
+    return { ...removal, source, command, update, raw };
+  }
+
+  it('isolates a pristine removal mirror despite a command belonging to the created message', async () => {
+    const { owner, mirror, claim, action, source, command } = await commandFixture();
+    const parked = await quarantineService().parkSemanticMirror(owner.id, mirror.id);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: owner.id } })).toEqual(owner);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: source.id } })).toEqual(source);
+    expect(await prisma.webhookExecutionClaim.findUnique({ where: { id: claim.id } })).toEqual(
+      claim,
+    );
+    expect(await prisma.webhookExecutionClaim.findUnique({ where: { id: command.id } })).toEqual(
+      command,
+    );
+    expect(await prisma.maxActionLedgerEntry.findUnique({ where: { id: action.id } })).toEqual(
+      action,
+    );
+    expect(parked).toBe(true);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual({
+      ...mirror,
+      status: 'QUARANTINED',
+    });
+    expect(
+      await prisma.webhookDependencyQuarantine.findUnique({
+        where: { receiptId_blockerId: { receiptId: mirror.id, blockerId: owner.id } },
+      }),
+    ).toMatchObject({ kind: 'SEMANTIC_MIRROR', anchorId: owner.id, deadlineAt: null });
+  });
+
+  it.each([
+    ['bounded compressed', 'bounded'],
+    ['oversized compressible', 'compressed'],
+    ['oversized high-entropy', 'random'],
+  ] as const)('applies physical source admission for %s payload', async (_label, variant) => {
+    const padding =
+      variant === 'bounded'
+        ? 'a'.repeat(8_000)
+        : variant === 'compressed'
+          ? 'a'.repeat(2_000_000)
+          : randomBytes(200_000).toString('hex');
+    const { owner, mirror, source } = await commandFixture(padding);
+    const [storage] = await prisma.$queryRaw<
+      Array<{ compression: string | null; bytes: number }>
+    >`SELECT pg_column_compression(normalized_payload) AS compression,
+          pg_column_size(normalized_payload) AS bytes FROM webhook_events WHERE id = ${source.id}`;
+    expect(storage).toBeDefined();
+    if (variant !== 'random') expect(storage!.compression).toBe('pglz');
+    const quarantine = quarantineService();
+    const inspect = jest.spyOn(
+      quarantine as unknown as { exactIndependentCommandSource: () => Promise<boolean> },
+      'exactIndependentCommandSource',
+    );
+    const parked = await quarantine.parkSemanticMirror(owner.id, mirror.id);
+    if (variant === 'bounded') {
+      expect(inspect).toHaveBeenCalledTimes(1);
+      expect(parked).toBe(true);
+    } else {
+      expect(inspect).not.toHaveBeenCalled();
+      expect(parked).toBe(false);
+      expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(mirror);
+    }
+  });
+
+  it.each([
+    'owner-linked',
+    'mirror-linked',
+    'null-source',
+    'missing-source',
+    'malformed-source',
+    'wrong-chat',
+    'wrong-message',
+    'wrong-bot',
+    'publisher',
+    'wrong-dedup',
+    'wrong-semantic',
+    'wrong-raw',
+    'legacy-hold',
+    'source-hold',
+    'independent-kind',
+    'overflow',
+  ] as const)('refuses unrelated command exception for %s', async (variant) => {
+    const { owner, mirror, source, command, update } = await commandFixture();
+    if (variant === 'owner-linked' || variant === 'mirror-linked' || variant === 'null-source')
+      await prisma.webhookExecutionClaim.update({
+        where: { id: command.id },
+        data: {
+          webhookEventId:
+            variant === 'null-source' ? null : variant === 'owner-linked' ? owner.id : mirror.id,
+        },
+      });
+    if (variant === 'missing-source')
+      await prisma.webhookEvent.delete({ where: { id: source.id } });
+    if (variant === 'malformed-source')
+      await prisma.webhookEvent.update({
+        where: { id: source.id },
+        data: { normalizedPayload: { type: 'message_created' } },
+      });
+    if (variant === 'wrong-chat' || variant === 'wrong-message' || variant === 'wrong-bot')
+      await prisma.webhookEvent.update({
+        where: { id: source.id },
+        data: {
+          normalizedPayload: {
+            ...update,
+            ...(variant === 'wrong-bot' ? { botId: 'wrong-bot' } : {}),
+            message: {
+              ...update.message!,
+              ...(variant === 'wrong-chat' ? { chatId: '-wrong-chat' } : {}),
+              ...(variant === 'wrong-message' ? { messageId: 'wrong-message' } : {}),
+            },
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+    if (variant === 'publisher' || variant === 'wrong-dedup' || variant === 'wrong-semantic')
+      await prisma.webhookEvent.update({
+        where: { id: source.id },
+        data:
+          variant === 'publisher'
+            ? { botId: publisherBotId }
+            : variant === 'wrong-dedup'
+              ? { dedupKey: randomUUID() }
+              : { semanticKey: 'wrong-semantic' },
+      });
+    if (variant === 'wrong-raw')
+      await prisma.webhookEvent.update({
+        where: { id: source.id },
+        data: { rawPayload: { x: 1 } },
+      });
+    if (variant === 'legacy-hold') {
+      const certificateId = randomUUID();
+      holdIds.push(certificateId);
+      await prisma.webhookLegacyQuiescenceCertificate.create({
+        data: {
+          id: certificateId,
+          sourceSha: 'a'.repeat(40),
+          imageId: `sha256:${'b'.repeat(64)}`,
+          attestation: {},
+          attestationDigest: 'c'.repeat(64),
+          previewSha256: 'd'.repeat(64),
+        },
+      });
+      await prisma.webhookLegacyRecovery.create({
+        data: {
+          id: randomUUID(),
+          semanticKey: source.semanticKey!,
+          ownerWebhookEventId: source.id,
+          claimId: command.id,
+          chatId: update.message!.chatId,
+          messageId: update.message!.messageId!,
+          userId: update.message!.senderId,
+          sourceAt: source.createdAt,
+          rawPayloadDigest: 'e'.repeat(64),
+          normalizedPayloadDigest: 'f'.repeat(64),
+          ownerSnapshot: {},
+          claimSnapshot: {},
+          settingsSnapshot: {},
+          certificateId,
+        },
+      });
+    }
+    if (variant === 'source-hold') {
+      const cancellationId = randomUUID();
+      await prisma.webhookBacklogCancellation.create({
+        data: {
+          id: cancellationId,
+          cutoff: new Date(Date.now() - 60_000),
+          sourceSha: 'a'.repeat(40),
+          imageId: `sha256:${'b'.repeat(64)}`,
+        },
+      });
+      await prisma.webhookBacklogReceipt.create({
+        data: {
+          receiptId: randomUUID(),
+          cancellationId,
+          semanticKey: source.semanticKey,
+          chatId: update.message!.chatId,
+          messageId: update.message!.messageId!,
+          originalSnapshot: {},
+        },
+      });
+    }
+    if (variant === 'independent-kind')
+      await prisma.webhookExecutionClaim.create({
+        data: { kind: 'OTHER_FIXTURE', semanticKey: owner.semanticKey!, webhookEventId: source.id },
+      });
+    if (variant === 'overflow')
+      await prisma.webhookExecutionClaim.createMany({
+        data: Array.from({ length: 33 }, (_, index) => ({
+          kind: `OVERFLOW_${index}`,
+          semanticKey: randomUUID(),
+          webhookEventId: mirror.id,
+        })),
+      });
+    const beforeMirror = await prisma.webhookEvent.findUniqueOrThrow({ where: { id: mirror.id } });
+    expect(await quarantineService().parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+    expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(
+      beforeMirror,
+    );
+    expect(
+      await prisma.webhookDependencyQuarantine.count({ where: { receiptId: mirror.id } }),
+    ).toBe(0);
+  });
+
+  it.each(['command', 'execution', 'source'] as const)(
+    'retains the mirror when the %s row is concurrently locked',
+    async (locked) => {
+      const { owner, mirror, claim, source, command } = await commandFixture();
+      const client = await constraints.connect();
+      try {
+        await client.query('BEGIN');
+        if (locked === 'source')
+          await client.query('SELECT id FROM webhook_events WHERE id = $1 FOR UPDATE', [source.id]);
+        else
+          await client.query('SELECT id FROM webhook_execution_claims WHERE id = $1 FOR UPDATE', [
+            locked === 'command' ? command.id : claim.id,
+          ]);
+        expect(await quarantineService().parkSemanticMirror(owner.id, mirror.id)).toBe(false);
+        expect(await prisma.webhookEvent.findUnique({ where: { id: mirror.id } })).toEqual(mirror);
+        expect(
+          await prisma.webhookExecutionClaim.findUnique({ where: { id: command.id } }),
+        ).toEqual(command);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+    },
+  );
 
   it('has one parking winner and refuses a stale preparation deferral after quarantine', async () => {
     const { owner, mirror, claim, action, mirrorPayload } = await fixture();

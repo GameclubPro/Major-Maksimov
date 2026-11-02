@@ -19,6 +19,17 @@ message or imports a legacy hold marker. Existing ordered journals retain `ORDER
 their original nonnull deadline. The additive migration does not rewrite existing rows;
 both API rollback paths require readers for both variants.
 
+A `COMMAND` key also covers the original `message_created` event for the same chat and
+message. It is not authority for the removal when its distinct source receipt is locked
+and its receiving bot, deduplication key, parser-derived payload and semantic identity
+agree. Source holds, missing proof, direct receipt claims and unknown aliases remain
+blocking. The command and its effects are never changed by mirror isolation.
+The hold lookup relies on the stopped-fleet installation required by the
+[legacy recovery](legacy-webhook-order-recovery.md),
+[source abandonment](webhook-source-abandonment.md), and
+[backlog cancellation](webhook-backlog-cancellation.md) procedures; it does not lock
+the absence of future hold rows.
+
 When a different bot's earlier copy is the physical order head, bounded indexed discovery
 retains that receipt as `anchor_id` and the real failing owner as `blocker_id`. Pristine
 never-activated copies may be parked only with the exact enforced shared owner and no
