@@ -91,14 +91,18 @@ export type VkPostImportPersistenceSnapshot = {
 
 const VK_POST_STATUS_NEW = 'NEW';
 const VK_POST_STATUS_FAILED = 'FAILED';
+const VK_POST_STATUS_PUBLISHED = 'PUBLISHED';
 const VK_POST_STATUS_CHANGED_AFTER_PUBLISH = 'CHANGED_AFTER_PUBLISH';
 const VK_POST_STATUS_UNAVAILABLE = 'UNAVAILABLE';
+const VK_POST_STATUS_SKIPPED = 'SKIPPED';
 const VK_POST_MISSING_RECONCILIATION_STATUSES = [
   VK_POST_STATUS_NEW,
   VK_POST_STATUS_FAILED,
   VK_POST_STATUS_CHANGED_AFTER_PUBLISH,
 ];
 const VK_POST_IMPORT_CHUNK_SIZE = 50;
+const VK_POST_IMPORT_JS_WHITESPACE =
+  '\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
 
 @Injectable()
 export class VkParsingPostImportRepository {
@@ -422,6 +426,37 @@ export class VkParsingPostImportRepository {
       )`,
     );
 
+    // FLAG: SEND may settle after the import snapshot but before this conflict write. Classify
+    // against the current lifecycle/receipt and preserve both errors if either is quarantined.
+    // Match the quarantine helpers' JS trim exactly; SQL's default trim omits tabs/NBSP/FEFF.
+    const quarantined = Prisma.sql`(
+      starts_with(btrim(COALESCE("vk_parsing_posts"."last_error", ''), ${VK_POST_IMPORT_JS_WHITESPACE}), ${VK_MAX_SEND_AMBIGUOUS_ERROR_PREFIX})
+      OR starts_with(btrim(COALESCE("vk_parsing_posts"."last_error", ''), ${VK_POST_IMPORT_JS_WHITESPACE}), ${VK_MAX_SEND_CONFIRMED_PERSISTENCE_ERROR_PREFIX})
+      OR starts_with(btrim(COALESCE("vk_parsing_posts"."auto_publish_error", ''), ${VK_POST_IMPORT_JS_WHITESPACE}), ${VK_MAX_SEND_AMBIGUOUS_ERROR_PREFIX})
+      OR starts_with(btrim(COALESCE("vk_parsing_posts"."auto_publish_error", ''), ${VK_POST_IMPORT_JS_WHITESPACE}), ${VK_MAX_SEND_CONFIRMED_PERSISTENCE_ERROR_PREFIX})
+    )`;
+    const publishedHash = Prisma.sql`COALESCE(
+      NULLIF("vk_parsing_posts"."published_content_hash", ''),
+      CASE WHEN "vk_parsing_posts"."status" = ${VK_POST_STATUS_PUBLISHED}
+        THEN NULLIF("vk_parsing_posts"."content_hash", '') END
+    )`;
+    const resolvedStatus = Prisma.sql`CASE
+      WHEN "vk_parsing_posts"."status" IN (${VK_POST_STATUS_PUBLISHED}, ${VK_POST_STATUS_CHANGED_AFTER_PUBLISH})
+        AND ${publishedHash} <> EXCLUDED."content_hash"
+        THEN ${VK_POST_STATUS_CHANGED_AFTER_PUBLISH}
+      WHEN "vk_parsing_posts"."status" = ${VK_POST_STATUS_UNAVAILABLE}
+        THEN ${VK_POST_STATUS_NEW}
+      WHEN "vk_parsing_posts"."status" = ${VK_POST_STATUS_SKIPPED}
+        AND "vk_parsing_posts"."content_hash" <> EXCLUDED."content_hash"
+        THEN ${VK_POST_STATUS_NEW}
+      ELSE COALESCE(NULLIF("vk_parsing_posts"."status", ''), ${VK_POST_STATUS_NEW})
+    END`;
+    const effectiveStatus = Prisma.sql`CASE
+      WHEN ${quarantined} THEN "vk_parsing_posts"."status"
+      ELSE ${resolvedStatus}
+    END`;
+    const clearOrdinaryErrors = Prisma.sql`(NOT ${quarantined} AND (${resolvedStatus}) = ${VK_POST_STATUS_NEW})`;
+
     // FLAG: An active intent owns one immutable content revision. Once its key is cleared, a
     // later sync may import a newer VK revision and classify it against the published hash.
     // FLAG: Preserve equal stored JSON values so PostgreSQL can reuse their TOAST pointers.
@@ -539,26 +574,26 @@ export class VkParsingPostImportRepository {
           ELSE EXCLUDED."raw"
         END,
         "content_hash" = EXCLUDED."content_hash",
-        "status" = EXCLUDED."status",
+        "status" = ${effectiveStatus},
         "last_seen_at" = EXCLUDED."last_seen_at",
         "missing_since_at" = NULL,
         "missing_seen_count" = 0,
         "last_availability_checked_at" = EXCLUDED."last_availability_checked_at",
         "unavailable_at" = NULL,
         "skipped_at" = CASE
-          WHEN EXCLUDED."status" = ${VK_POST_STATUS_NEW} THEN NULL
+          WHEN ${clearOrdinaryErrors} THEN NULL
           ELSE "vk_parsing_posts"."skipped_at"
         END,
         "skip_reason" = CASE
-          WHEN EXCLUDED."status" = ${VK_POST_STATUS_NEW} THEN NULL
+          WHEN ${clearOrdinaryErrors} THEN NULL
           ELSE "vk_parsing_posts"."skip_reason"
         END,
         "auto_publish_error" = CASE
-          WHEN EXCLUDED."status" = ${VK_POST_STATUS_NEW} THEN NULL
+          WHEN ${clearOrdinaryErrors} THEN NULL
           ELSE "vk_parsing_posts"."auto_publish_error"
         END,
         "last_error" = CASE
-          WHEN EXCLUDED."status" = ${VK_POST_STATUS_NEW} THEN NULL
+          WHEN ${clearOrdinaryErrors} THEN NULL
           ELSE "vk_parsing_posts"."last_error"
         END,
         "updated_at" = CURRENT_TIMESTAMP
@@ -574,7 +609,7 @@ export class VkParsingPostImportRepository {
             "vk_parsing_posts"."has_unsupported_attachments", "vk_parsing_posts"."is_advertising",
             "vk_parsing_posts"."missing_since_at", "vk_parsing_posts"."missing_seen_count", "vk_parsing_posts"."unavailable_at"
           ) IS DISTINCT FROM ROW(
-            EXCLUDED."source_id", EXCLUDED."vk_published_at", EXCLUDED."url", EXCLUDED."content_hash", EXCLUDED."status",
+            EXCLUDED."source_id", EXCLUDED."vk_published_at", EXCLUDED."url", EXCLUDED."content_hash", ${effectiveStatus},
             EXCLUDED."has_unsupported_attachments", EXCLUDED."is_advertising", NULL, 0, NULL
           )
           OR (
@@ -597,7 +632,7 @@ export class VkParsingPostImportRepository {
             EXCLUDED."advertising_markers", EXCLUDED."raw"
           )
           OR (
-            EXCLUDED."status" = ${VK_POST_STATUS_NEW}
+            ${clearOrdinaryErrors}
             AND ROW(
               "vk_parsing_posts"."skipped_at", "vk_parsing_posts"."skip_reason",
               "vk_parsing_posts"."auto_publish_error", "vk_parsing_posts"."last_error"
