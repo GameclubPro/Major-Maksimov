@@ -788,7 +788,7 @@ type MaxApiRequestOptions = {
 };
 
 type MaxCallbackAnswerRequestOptions = MaxApiRequestOptions & {
-  /** Runs after preparation and pre-dispatch checks, immediately before POST /answers. */
+  /** Runs after preparation, before final request admission; a local guard may still refuse dispatch. */
   onDispatchAttempt?: () => void | Promise<void>;
 };
 
@@ -1180,6 +1180,10 @@ export class MaxClientService implements OnModuleDestroy {
     method: 'post' | 'put' | 'delete';
     path: string;
     requestOptions: MaxApiRequestOptions;
+    explicitExistingMessage?: {
+      messageId: string;
+      object: import('./max-bound-message').MaxBoundObjectReference;
+    };
     quotaState: { error?: unknown };
     messageMutation?: MaxMessageMutationRateLimitScope;
     finalGuard?: (revalidateRoute?: () => Promise<void>) => Promise<void>;
@@ -5714,7 +5718,28 @@ export class MaxClientService implements OnModuleDestroy {
       messageEdit.text.trim().length > 0;
     const messageId = hasMessageEdit ? this.readTrimmedString(messageEdit?.messageId) : null;
     const rateLimitEntityId = this.readTrimmedString(requestOptions.rateLimitEntityId);
-    const executeAnswer = async (assertOwnership?: () => Promise<void>) => {
+    const pollTarget = requestOptions.boundObject?.kind === 'poll';
+    if (
+      pollTarget &&
+      (!hasMessageEdit ||
+        !messageId ||
+        messageEdit?.messageId !== messageId ||
+        !rateLimitEntityId ||
+        requestOptions.rateLimitEntityId !== rateLimitEntityId ||
+        isPrivateDirectChatId(rateLimitEntityId) ||
+        rateLimitEntityId.startsWith('user:') ||
+        !this.readTrimmedString(requestOptions.boundObject?.id) ||
+        requestOptions.boundObject?.id !== requestOptions.boundObject?.id.trim())
+    ) {
+      throw markMaxPreDispatchGuardRejected(
+        new Error('A poll callback edit requires an exact poll, chat and message target'),
+        MAX_EDIT_PRE_DISPATCH_GUARD_REJECTED_CODE,
+      );
+    }
+    const executeAnswer = async (
+      assertOwnership?: () => Promise<void>,
+      assertCurrentOwnership?: () => void,
+    ) => {
       const callbackData: Record<string, unknown> = {};
       if (normalizedNotification) {
         callbackData.notification = normalizedNotification;
@@ -5731,38 +5756,67 @@ export class MaxClientService implements OnModuleDestroy {
           ...(messageEdit?.options?.textFormat ? { format: messageEdit.options.textFormat } : {}),
           ...(attachments.length > 0 ? { attachments } : {}),
         };
-        await assertOwnership?.();
+        if (!pollTarget) await assertOwnership?.();
       }
 
-      await this.executeMutation(
-        rateLimitEntityId,
-        async () => {
-          await assertOwnership?.();
-          await requestOptions.onDispatchAttempt?.();
-          await this.request('post', '/answers', {
-            params: {
-              callback_id: normalizedCallbackId,
-            },
-            data: callbackData,
-          });
-        },
-        {
-          trafficClass: 'critical',
-          actionHealthLane: requestOptions.actionHealthLane,
-          sourceTag:
-            this.normalizeMetricSourceTag(requestOptions.sourceTag) ??
-            MAX_API_SOURCE_TAGS.CALLBACK_ANSWER,
-          ignoreFailureMetricStatuses: requestOptions.ignoreFailureMetricStatuses,
-          timeoutMs: requestOptions.timeoutMs,
-          botId: requestOptions.botId,
-        },
-        {
-          messageMutation: {
-            operation: 'answer',
-            entityId: rateLimitEntityId,
-          },
-        },
-      );
+      const answerOptions: MaxApiRequestOptions = {
+        trafficClass: 'critical',
+        actionHealthLane: requestOptions.actionHealthLane,
+        sourceTag:
+          this.normalizeMetricSourceTag(requestOptions.sourceTag) ??
+          MAX_API_SOURCE_TAGS.CALLBACK_ANSWER,
+        ignoreFailureMetricStatuses: requestOptions.ignoreFailureMetricStatuses,
+        timeoutMs: requestOptions.timeoutMs,
+        botId: requestOptions.botId,
+        ...(pollTarget ? { boundObject: requestOptions.boundObject } : {}),
+      };
+      const quotaState: { error?: unknown } = {};
+      const messageMutation: MaxMessageMutationRateLimitScope = {
+        operation: 'answer',
+        entityId: rateLimitEntityId,
+      };
+      const dispatch = async () => {
+        if (!pollTarget) await assertOwnership?.();
+        await requestOptions.onDispatchAttempt?.();
+        await this.request('post', '/answers', {
+          params: { callback_id: normalizedCallbackId },
+          data: callbackData,
+        });
+      };
+      const operation = pollTarget
+        ? scopeMaxHttpOperation(dispatch, (run) =>
+            this.mutationExecutionScope.run(
+              {
+                chatId: rateLimitEntityId!,
+                purpose: 'edit_message',
+                guardCode: MAX_EDIT_PRE_DISPATCH_GUARD_REJECTED_CODE,
+                method: 'post',
+                path: '/answers',
+                requestOptions: answerOptions,
+                explicitExistingMessage: {
+                  messageId: messageId!,
+                  object: requestOptions.boundObject!,
+                },
+                quotaState,
+                messageMutation,
+                // FLAG: All asynchronous preparation precedes the quota/SQL checkpoint.
+                // Only the synchronous keyboard lease check may follow final authority.
+                finalGuard: withMaxFinalAuthorityCheckpoint(async (checkpoint) => {
+                  await assertOwnership?.();
+                  await this.assertLegacyMessageMutationAllowed(rateLimitEntityId!, messageId!);
+                  await checkpoint?.();
+                  assertCurrentOwnership?.();
+                }),
+              },
+              run,
+            ),
+          )
+        : dispatch;
+      await this.executeMutation(rateLimitEntityId, operation, answerOptions, {
+        messageMutation,
+        deferRateLimitReservation: pollTarget,
+        deferredQuotaState: quotaState,
+      });
     };
 
     if (messageId) {
@@ -9543,14 +9597,15 @@ export class MaxClientService implements OnModuleDestroy {
       if (scope && method === scope.method && path === scope.path) {
         const messageId = this.readTrimmedString(this.asRecord(config.params)?.message_id);
         const existingMessage =
-          messageId && (scope.purpose === 'edit_message' || scope.purpose === 'delete_message')
+          scope.explicitExistingMessage ??
+          (messageId && (scope.purpose === 'edit_message' || scope.purpose === 'delete_message')
             ? {
                 messageId,
                 ...(scope.requestOptions.boundObject
                   ? { object: scope.requestOptions.boundObject }
                   : {}),
               }
-            : undefined;
+            : undefined);
         // FLAG: Reserve the unchanged quota once at this exact HTTP mutation, after remote
         // preparation. Recheck the SQL route epoch after waits, then grant the feature permit last.
         await this.runPreDispatchMutationGuard(async () => {

@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { ManagedPollService } from '../admin/managed-poll.service';
+import type { MaxClientService } from '../max/max-client.service';
+import { wasMaxPreDispatchGuardRejected } from '../max/max-action-pre-dispatch-guard';
 import {
   createMultibotHarness,
   type MultibotHarness,
@@ -9,9 +12,56 @@ const redisUrl = process.env.MAXIM_TEST_REDIS_URL ?? '';
 const integration = databaseUrl && redisUrl ? describe : describe.skip;
 jest.setTimeout(60_000);
 
+function deferredGate() {
+  let release!: () => void;
+  let reached!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const observation = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  return {
+    wait,
+    release,
+    reached,
+    observe: async () => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          observation,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Native callback gate was not reached')),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
+function messageAnswers(s: MultibotHarness) {
+  return s.requests.filter(
+    (request) =>
+      request.path === '/answers' &&
+      Boolean((request.body as { message?: unknown } | undefined)?.message),
+  );
+}
+
 integration('fixed moderator through native ingress, queues and guarded MAX transport', () => {
   let h: MultibotHarness | undefined;
+  const pollServices: ManagedPollService[] = [];
   afterEach(async () => {
+    for (const service of pollServices.splice(0)) {
+      const repairs = (service as unknown as { scheduledRenderRepairs: Map<string, Promise<void>> })
+        .scheduledRenderRepairs;
+      await Promise.all([...repairs.values()]);
+    }
+    jest.restoreAllMocks();
     await h?.dispose();
     h = undefined;
   });
@@ -32,6 +82,276 @@ integration('fixed moderator through native ingress, queues and guarded MAX tran
     await s.cache.invalidate(chatId);
     s.links.forgetChatBotBinding(chatId);
   }
+
+  async function pollFixture(type: 'CHAT' | 'CHANNEL' = 'CHAT') {
+    const s = await fixture(2);
+    if (type === 'CHANNEL')
+      for (const bot of s.bots)
+        s.setBotPermissions(bot.id, [
+          'read_all_messages',
+          'write',
+          'edit_message',
+          'delete_message',
+        ]);
+    const [chatId] = await s.seedCatalog(1, {}, type);
+    const originalBot = s.bots[0]!.id;
+    await fix(s, chatId!, s.bots[1]!.id);
+    const messageId = randomUUID();
+    s.messages.set(messageId, {
+      sender: { user_id: originalBot, is_bot: true },
+      recipient: { chat_id: chatId, chat_type: type.toLowerCase() },
+      body: { mid: messageId, text: 'Authored poll question', attachments: [] },
+    });
+    const poll = await s.prisma.managedPoll.create({
+      data: {
+        chatId: chatId!,
+        actorUserId: 'fixture-admin',
+        question: 'Authored poll question',
+        identitySalt: randomUUID(),
+        status: 'ACTIVE',
+        lockToken: randomUUID(),
+        publicationMessageId: messageId,
+        publicationBotId: originalBot,
+        options: {
+          create: [
+            { position: 0, text: 'Yes' },
+            { position: 1, text: 'No' },
+          ],
+        },
+      },
+      include: { options: true },
+    });
+    const service = new ManagedPollService(
+      s.prisma as never,
+      s.max,
+      {} as never,
+      s.cache,
+      undefined,
+      s.counters,
+    );
+    pollServices.push(service);
+    const update: Parameters<ManagedPollService['tryHandleCallback']>[0] = {
+      updateId: randomUUID(),
+      botId: originalBot,
+      type: 'message_callback',
+      message: {
+        chatId: chatId!,
+        messageId,
+        senderId: originalBot,
+        text: poll.question,
+        createdAt: new Date().toISOString(),
+      },
+      raw: {
+        callback: {
+          callback_id: randomUUID(),
+          payload: `poll|v3|${poll.id}|${poll.lockToken}|${poll.options[0]!.id}`,
+          user: { user_id: 'fixture-voter' },
+        },
+      },
+    };
+    const requestOptions = {
+      botId: originalBot,
+      rateLimitEntityId: chatId!,
+      boundObject: { kind: 'poll' as const, id: poll.id },
+    };
+    return { s, chatId: chatId!, originalBot, messageId, poll, service, update, requestOptions };
+  }
+
+  async function revokeEdit(s: MultibotHarness, chatId: string, botId: string) {
+    expect(
+      await s.links.recordBotAccessProbe({
+        chatId,
+        botId,
+        access: {
+          isAdmin: true,
+          isOwner: false,
+          permissionsKnown: true,
+          permissions: ['read_all_messages'],
+        },
+        checkedAt: new Date(),
+        source: 'fixture-permission-revocation',
+        allowMembershipRecovery: false,
+      }),
+    ).toBe(true);
+    await s.cache.invalidate(chatId);
+  }
+
+  it.each(['CHAT', 'CHANNEL'] as const)(
+    'edits a valid old-bot poll callback in %s and reserves answer quota once',
+    async (type) => {
+      const { s, originalBot, poll, service, update } = await pollFixture(type);
+      const boundary = s.max as unknown as {
+        reserveRateLimitSlot: (...args: unknown[]) => Promise<string | undefined>;
+      };
+      const quota = jest.spyOn(boundary, 'reserveRateLimitSlot');
+      await expect(service.tryHandleCallback(update)).resolves.toBe(true);
+      expect(messageAnswers(s)).toMatchObject([
+        { botId: originalBot, body: { message: { text: poll.question } } },
+      ]);
+      expect(
+        quota.mock.calls.filter(
+          (args) => (args[5] as { operation?: string } | undefined)?.operation === 'answer',
+        ),
+      ).toHaveLength(1);
+      expect(
+        await s.prisma.managedPoll.findUniqueOrThrow({ where: { id: poll.id } }),
+      ).toMatchObject({ renderRevision: 1, renderedRevision: 1 });
+      const vote = await s.prisma.managedPollVoter.findFirstOrThrow({ where: { pollId: poll.id } });
+      expect(vote.userId).toBeNull();
+    },
+  );
+
+  it.each(['CHAT', 'CHANNEL'] as const)(
+    'refuses a forged poll callback target in %s while retaining the exact binding',
+    async (type) => {
+      const { s, messageId, requestOptions } = await pollFixture(type);
+      const forged = randomUUID();
+      s.messages.set(forged, {
+        ...s.messages.get(messageId),
+        body: { mid: forged, text: 'Other' },
+      });
+      const error = await s.max
+        .answerCallback(
+          randomUUID(),
+          undefined,
+          { messageId: forged, text: 'Forbidden' },
+          requestOptions,
+        )
+        .catch((caught: unknown) => caught);
+      expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+      expect(messageAnswers(s)).toEqual([]);
+    },
+  );
+
+  it.each(['CHAT', 'CHANNEL'] as const)(
+    'rechecks native SQL capabilities after callback quota admission in %s',
+    async (type) => {
+      const { s, chatId, originalBot, messageId, requestOptions } = await pollFixture(type);
+      const boundary = s.max as unknown as {
+        reserveRateLimitSlot: (...args: unknown[]) => Promise<string | undefined>;
+      };
+      const reserve = boundary.reserveRateLimitSlot.bind(s.max);
+      const gate = deferredGate();
+      const quota = jest
+        .spyOn(boundary, 'reserveRateLimitSlot')
+        .mockImplementation(async (...args) => {
+          const admitted = await reserve(...args);
+          if ((args[5] as { operation?: string } | undefined)?.operation === 'answer') {
+            gate.reached();
+            await gate.wait;
+          }
+          return admitted;
+        });
+      const answer = s.max.answerCallback(
+        randomUUID(),
+        undefined,
+        { messageId, text: 'Forbidden' },
+        requestOptions,
+      );
+      void answer.catch(() => undefined);
+      try {
+        await gate.observe();
+        await revokeEdit(s, chatId, originalBot);
+      } finally {
+        gate.release();
+        await answer.catch(() => undefined);
+      }
+      const error = await answer.catch((caught: unknown) => caught);
+      expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+      expect(messageAnswers(s)).toEqual([]);
+      expect(
+        quota.mock.calls.filter(
+          (args) => (args[5] as { operation?: string } | undefined)?.operation === 'answer',
+        ),
+      ).toHaveLength(1);
+      quota.mockRestore();
+      await expect(
+        s.max.answerCallback(randomUUID(), 'Vote received', undefined, {
+          botId: originalBot,
+          rateLimitEntityId: chatId,
+        }),
+      ).resolves.toBeUndefined();
+      expect(s.requests.filter((request) => request.path === '/answers')).toHaveLength(1);
+    },
+  );
+
+  it('awaits an async callback hook before its current native SQL authority proof', async () => {
+    const { s, chatId, originalBot, messageId, requestOptions } = await pollFixture();
+    const error = await s.max
+      .answerCallback(
+        randomUUID(),
+        undefined,
+        { messageId, text: 'Forbidden' },
+        {
+          ...requestOptions,
+          onDispatchAttempt: async () => {
+            await s.demote(chatId, originalBot);
+          },
+        },
+      )
+      .catch((caught: unknown) => caught);
+    expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+    expect(messageAnswers(s)).toEqual([]);
+  });
+
+  it('refuses a bound callback after losing its real Redis keyboard ownership', async () => {
+    const { s, messageId, requestOptions } = await pollFixture();
+    const error = await s.max
+      .answerCallback(
+        randomUUID(),
+        undefined,
+        { messageId, text: 'Forbidden' },
+        {
+          ...requestOptions,
+          onDispatchAttempt: async () => {
+            await s.redis.del(
+              `max:message-keyboard-edit:v1:${createHash('sha256')
+                .update(messageId)
+                .digest('hex')}`,
+            );
+          },
+        },
+      )
+      .catch((caught: unknown) => caught);
+    expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+    expect(messageAnswers(s)).toEqual([]);
+  });
+
+  it('refuses a poll callback edit after native SQL demotion during message preparation', async () => {
+    const { s, chatId, originalBot, poll, service, update } = await pollFixture();
+    const boundary = s.max as unknown as {
+      getMessageById: (
+        messageId: string,
+        options?: Parameters<MaxClientService['answerCallback']>[3],
+      ) => Promise<Record<string, unknown> | null>;
+    };
+    const read = boundary.getMessageById.bind(s.max);
+    const gate = deferredGate();
+    const spy = jest.spyOn(boundary, 'getMessageById').mockImplementationOnce(async (...args) => {
+      const message = await read(...args);
+      expect(message).not.toBeNull();
+      gate.reached();
+      await gate.wait;
+      return message;
+    });
+    const handling = service.tryHandleCallback(update);
+    void handling.catch(() => undefined);
+    try {
+      await gate.observe();
+      await s.demote(chatId, originalBot);
+    } finally {
+      gate.release();
+      await handling.catch(() => undefined);
+    }
+    await expect(handling).resolves.toBe(true);
+    spy.mockRestore();
+    expect(messageAnswers(s)).toEqual([]);
+    expect(await s.prisma.managedPollVote.count({ where: { pollId: poll.id } })).toBe(1);
+    expect(await s.prisma.managedPoll.findUniqueOrThrow({ where: { id: poll.id } })).toMatchObject({
+      renderRevision: 1,
+      renderedRevision: 0,
+    });
+  });
 
   it.each([1, 2, 3, 6])(
     'executes one logical deletion with the fixed bot among %i mirrors',
