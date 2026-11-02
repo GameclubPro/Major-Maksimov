@@ -14,6 +14,19 @@ import { WebhookOutboxService } from '../webhook/webhook-outbox.service';
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const describePostgres = databaseUrl ? describe : describe.skip;
 
+type SanctionsPlanNode = {
+  Plans?: SanctionsPlanNode[];
+  'Node Type': string;
+  'Relation Name'?: string;
+  Alias?: string;
+  'Actual Rows': number;
+  'Actual Loops': number;
+  'Rows Removed by Filter'?: number;
+  'Rows Removed by Index Recheck'?: number;
+  'Shared Hit Blocks'?: number;
+  'Shared Read Blocks'?: number;
+};
+
 describePostgres('PostgreSQL sanctions registry and retention', () => {
   let prisma: PrismaClient;
   let service: ChatSanctionsService;
@@ -130,24 +143,116 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
     );
   });
 
-  it('keeps the candidate plan indexed with a much larger ordinary event history', async () => {
-    await prisma.$executeRaw(Prisma.sql`
-      INSERT INTO chat_moderation_feed_items (id, chat_id, user_id, event_type, rule_code, action, created_at, updated_at)
-      SELECT ${chatId} || '-noise-' || n, ${chatId}, 'noise', 'SYSTEM'::"EventType", 'PROFANITY', 'WARN'::"SanctionAction", NOW(), NOW()
-      FROM generate_series(1, 20000) n
-    `);
-    await prisma.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
-    let statement: Prisma.Sql | undefined;
-    const reader = {
-      $queryRaw: (query: Prisma.Sql) => {
-        statement = query;
-        return prisma.$queryRaw(query);
-      },
-    };
-    await new ChatSanctionsService(reader as never, fence).getPage(chatId, 'admin', {});
-    expect(statement).toBeDefined();
-    const plan = await prisma.$queryRaw(Prisma.sql`EXPLAIN (FORMAT JSON) ${statement!}`);
-    expect(JSON.stringify(plan)).toContain('chat_moderation_feed_sanctions_idx');
-    expect(JSON.stringify(plan)).toContain('chat_moderation_feed_sanction_user_state_idx');
+  it('bounds candidate and successor work under ordinary history and chat/user skew', async () => {
+    const planChatId = `${chatId}-plan`;
+    const otherChatId = `${chatId}-other`;
+    const ownedChats = [planChatId, otherChatId];
+    const candidateCount = 32;
+    try {
+      await prisma.chat.createMany({
+        data: ownedChats.map((id) => ({ id, title: 'Sanctions plan fixture' })),
+      });
+      await prisma.moderationEvent.createMany({
+        data: Array.from({ length: candidateCount }, (_, index) => ({
+          id: `${planChatId}-ban-${index}`,
+          chatId: planChatId,
+          userId: `plan-user-${index}`,
+          eventType: EventType.SYSTEM,
+          action: SanctionAction.BAN,
+          ruleCode: 'MANUAL_BAN',
+          createdAt: ago(2),
+        })),
+      });
+      // FLAG: New ordinary history for the same user and chat must not make the
+      // successor probe scan 20,000 rows to prove this old ban has no successor.
+      await prisma.$executeRaw(Prisma.sql`
+        INSERT INTO chat_moderation_feed_items (id, chat_id, user_id, event_type, rule_code, action, created_at, updated_at)
+        SELECT ${planChatId} || '-ordinary-' || n, ${planChatId}, 'plan-user-0', 'SYSTEM'::"EventType", 'PROFANITY', 'WARN'::"SanctionAction", NOW(), NOW()
+        FROM generate_series(1, 20000) n
+        UNION ALL
+        SELECT ${planChatId} || '-other-user-' || n, ${planChatId}, 'other-user-' || n, 'SYSTEM'::"EventType", 'MANUAL_UNBAN', 'NONE'::"SanctionAction", NOW(), NOW()
+        FROM generate_series(1, 4000) n
+        UNION ALL
+        SELECT ${otherChatId} || '-same-user-' || n, ${otherChatId}, 'plan-user-0', 'SYSTEM'::"EventType", 'MANUAL_UNBAN', 'NONE'::"SanctionAction", NOW(), NOW()
+        FROM generate_series(1, 4000) n
+      `);
+      await prisma.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
+      const statements: Prisma.Sql[] = [];
+      const reader = {
+        $queryRaw: (query: Prisma.Sql) => {
+          statements.push(query);
+          return prisma.$queryRaw(query);
+        },
+      };
+      const page = await new ChatSanctionsService(reader as never, fence).getPage(
+        planChatId,
+        'admin',
+        { status: 'all', limit: 50 },
+      );
+      expect(page.items).toHaveLength(candidateCount);
+      expect(page.items.every((item) => item.status === 'active')).toBe(true);
+      expect(statements).toHaveLength(1);
+      const plan = await prisma.$queryRaw<{ 'QUERY PLAN': { Plan: SanctionsPlanNode }[] }[]>(
+        Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${statements[0]!}`,
+      );
+      const root = plan[0]!['QUERY PLAN'][0]!.Plan;
+      const visit = (
+        node: SanctionsPlanNode,
+        parentAlias?: string,
+      ): { node: SanctionsPlanNode; alias: string | undefined }[] => {
+        const alias = node.Alias ?? parentAlias;
+        return [{ node, alias }, ...(node.Plans ?? []).flatMap((child) => visit(child, alias))];
+      };
+      const physicalScans = visit(root).filter(({ node }) =>
+        [
+          'Seq Scan',
+          'Index Scan',
+          'Index Only Scan',
+          'Bitmap Heap Scan',
+          'Bitmap Index Scan',
+        ].includes(node['Node Type']),
+      );
+      const blocks = (node: SanctionsPlanNode) =>
+        (node['Shared Hit Blocks'] ?? 0) + (node['Shared Read Blocks'] ?? 0);
+      try {
+        expect(
+          physicalScans.some(
+            ({ node, alias }) =>
+              node['Relation Name'] === 'chat_moderation_feed_items' &&
+              /^feed(?:_\d+)?$/u.test(alias ?? '') &&
+              node['Actual Loops'] > 0,
+          ),
+        ).toBe(true);
+        for (const alias of ['later', 'original'])
+          expect(
+            physicalScans.some((scan) => scan.alias === alias && scan.node['Actual Loops'] > 0),
+          ).toBe(true);
+        // FLAG: Inspect every physical scan, including renamed candidate aliases
+        // and bitmap children. Buffer counts already include every loop.
+        for (const { node, alias } of physicalScans) {
+          expect(
+            alias === 'later' || alias === 'original' || /^feed(?:_\d+)?$/u.test(alias ?? ''),
+          ).toBe(true);
+          const perLoop =
+            node['Actual Rows'] +
+            (node['Rows Removed by Filter'] ?? 0) +
+            (node['Rows Removed by Index Recheck'] ?? 0);
+          expect(perLoop).toBeLessThanOrEqual(alias === 'later' ? 8 : 64);
+          expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
+            alias === 'later' ? candidateCount * 8 : 64,
+          );
+          expect(blocks(node)).toBeLessThanOrEqual(alias === 'later' ? 256 : 128);
+        }
+        // Parent buffer totals are inclusive; do not sum them with child totals.
+        expect(blocks(root)).toBeLessThanOrEqual(512);
+      } catch (error: unknown) {
+        throw new Error(`Sanctions registry exceeded work bounds: ${JSON.stringify(plan)}`, {
+          cause: error,
+        });
+      }
+    } finally {
+      await prisma.chatModerationFeedItem.deleteMany({ where: { chatId: { in: ownedChats } } });
+      await prisma.chat.deleteMany({ where: { id: { in: ownedChats } } });
+    }
   });
 });
