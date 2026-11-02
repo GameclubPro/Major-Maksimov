@@ -1,4 +1,5 @@
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
+import { WebhookDependencyQuarantineService } from './webhook-dependency-quarantine.service';
 import { withStatsMembershipInvalidation } from '../statistics/stats-native-observation';
 import { captureVoiceSourceInput, persistVoiceSource } from '../moderation/voice-webhook-source';
 import {
@@ -357,6 +358,7 @@ export class WebhookService extends RuntimeWorkerOwner implements OnModuleDestro
     @Optional() private readonly runtimeDiagnostics?: RuntimeDiagnosticsService,
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
     @Optional() private readonly permissionEventRegistry?: MaxBotRegistryService,
+    @Optional() private readonly dependencyQuarantine?: WebhookDependencyQuarantineService,
   ) {
     super();
     this.preparationAdmission = new WebhookPreparationAdmission(
@@ -1254,11 +1256,25 @@ export class WebhookService extends RuntimeWorkerOwner implements OnModuleDestro
         'Canonical owner retains timeout replay fence',
         1_000,
       );
-    if (owner.status === WebhookStatus.FAILED && owner.nextEnqueueAt === null)
+    if (owner.status === WebhookStatus.FAILED && owner.nextEnqueueAt === null) {
+      // FLAG: Nonordered removals have no ordered-head discovery or execution deadline.
+      // Isolate only an exact pristine semantic copy, retaining the uncertain owner and effects.
+      if (
+        update.type === 'message_removed' &&
+        (await this.dependencyQuarantine?.parkSemanticMirror(owner.id, mirror.id))
+      )
+        return {
+          canonical: false,
+          prepared: false,
+          normalizedPayload: update,
+          executionBotId: null,
+          enforced: true,
+        };
       throw new WebhookPreparationDeferredError(
         'Terminal canonical owner requires proof recovery',
         5_000,
       );
+    }
     if (claim.status === WebhookExecutionClaimStatus.PENDING) {
       // FLAG: An older mirror can be the exact chat head. Help only the existing owner prepare,
       // within this admission slot; waiting without this redirect would deadlock its later receipt.

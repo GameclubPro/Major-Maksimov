@@ -229,7 +229,7 @@ maxim_topology_require_image_text_stop_list_delete_guard() {
 
 # FLAG: A rollback cannot make durable parked receipts executable or erase their evidence.
 maxim_topology_require_dependency_quarantine() {
-  node - "$1" <<'NODE'
+  node - "$1" <<'NODE' || return
 const { execFileSync } = require('node:child_process');
 const sha = process.argv[2];
 try {
@@ -254,6 +254,8 @@ try {
   process.exit(1);
 }
 NODE
+  # FLAG: QUARANTINED status alone cannot read a semantic mirror's null deadline safely.
+  node "$(dirname "${BASH_SOURCE[0]}")/../assert-semantic-mirror-quarantine-source.mjs" "$1"
 }
 
 maxim_topology_require_multibot_authority() {

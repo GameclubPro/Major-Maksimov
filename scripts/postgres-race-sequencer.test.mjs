@@ -62,11 +62,12 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 130 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 130);
-  assert.equal(new Set(nativePaths).size, 130);
+test('all 131 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 131);
+  assert.equal(new Set(nativePaths).size, 131);
   assert.ok(nativePaths.includes('src/admin/managed-giveaway-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/former-participant-sanctions-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/webhook/webhook-nonordered-mirror-quarantine-postgres.spec.ts'));
   const tests = makeTests();
   const baseline = await partitions(DefaultSequencer, tests);
   const selected = await partitions(SelectedSequencer, tests);

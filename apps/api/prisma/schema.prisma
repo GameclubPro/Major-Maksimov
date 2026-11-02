@@ -107,6 +107,11 @@ enum WebhookExecutionClaimStatus {
   COMPLETED
 }
 
+enum WebhookDependencyKind {
+  ORDERED
+  SEMANTIC_MIRROR
+}
+
 enum ChatEntityType {
   CHAT
   CHANNEL
@@ -2637,7 +2642,8 @@ model WebhookDependencyQuarantine {
   anchorId String @map("anchor_id")
   chatId String @map("chat_id")
   originalStatus WebhookStatus @map("original_status")
-  deadlineAt DateTime @map("deadline_at")
+  kind WebhookDependencyKind @default(ORDERED)
+  deadlineAt DateTime? @map("deadline_at")
   state String @default("WAITING")
   createdAt DateTime @default(now()) @map("created_at")
   nextCheckAt DateTime @default(now()) @map("next_check_at")
