@@ -50,6 +50,7 @@ export type AdminParticipantsRuntimeContext = {
   ): Promise<string>;
   resolveBackgroundReadBotAssignment(chatId: string): Promise<string | undefined>;
   resolveParticipantCleanupBotAssignment(chatId: string): Promise<string | undefined>;
+  isKnownRuntimeBotUserId(userId: string): boolean;
 };
 
 export function createAdminParticipantsRuntimeContext(

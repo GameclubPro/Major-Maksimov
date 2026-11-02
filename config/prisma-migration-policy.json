@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261101183300_expand_commercial_review_rating_kind",
-  "baselineNamesSha256": "c4bab9f0ba050df8e766085d962a2ad8e24bb96b97cba1b9904a374580a792d9",
-  "baselineContentsSha256": "fca16e55576cabf303287ffb383ee66b64e89cfe4f5d5436a0e22b00da3c07dd",
+  "baselineThrough": "20261102023205_index_sanction_fence_user_state",
+  "baselineNamesSha256": "5b58aa354225fcc11e0991be9a1e7f751c1b466c7c456108fe852077e2667344",
+  "baselineContentsSha256": "67e44bdd666cea34f5d9ed168c007bbee61c5d24e28b7a5ef4081053237c9b60",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",

@@ -28,10 +28,12 @@ try {
     const rows = page.locator('.sanctions-workspace__row');
     assert.equal(await rows.count(), 4);
     const oldBan = rows.filter({ hasText: 'Александр Кузнецов' });
-    await oldBan.click();
-    await page.getByRole('button', { name: 'Снять блокировку', exact: true }).click();
-    const confirmation = page.getByRole('dialog', { name: 'Снять блокировку?' });
-    await confirmation.getByRole('button', { name: 'Снять ограничение', exact: true }).click();
+    await oldBan.locator('.sanctions-workspace__details-trigger').click();
+    await page.getByRole('button', { name: /^(Снять бан|Проверить снятие в MAX)$/u }).click();
+    const confirmation = page.getByRole('dialog', {
+      name: /^(Снять бан|Проверить снятие в MAX)\?$/u,
+    });
+    await confirmation.getByRole('button', { name: /^(Снять бан|Проверить)$/u }).click();
     await confirmation.waitFor({ state: 'hidden' });
     await oldBan.waitFor({ state: 'hidden' });
     await page.getByLabel('Состояние ограничения').selectOption('archive');
@@ -50,10 +52,11 @@ try {
     await page
       .locator('.sanctions-workspace__row')
       .filter({ hasText: 'Екатерина Михайлова' })
+      .locator('.sanctions-workspace__details-trigger')
       .click();
-    await page.getByRole('button', { name: 'Разрешить писать', exact: true }).click();
-    const unmute = page.getByRole('dialog', { name: 'Разрешить писать?' });
-    await unmute.getByRole('button', { name: 'Снять ограничение', exact: true }).click();
+    await page.getByRole('button', { name: 'Снять мут', exact: true }).click();
+    const unmute = page.getByRole('dialog', { name: 'Снять мут?' });
+    await unmute.getByRole('button', { name: 'Снять мут', exact: true }).click();
     await unmute.waitFor({ state: 'hidden' });
     await page
       .locator('.sanctions-workspace__row')
@@ -69,9 +72,16 @@ try {
     await page.locator('.participants-roster__activity--unknown').first().waitFor();
     assert.equal(await page.locator('.participants-roster__activity--long').count(), 0);
     await page.locator('.participants-roster__item').first().click();
-    await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
-    await page.locator('.sanctions-workspace__user-filter').waitFor();
-    await page.getByRole('button', { name: 'Все участники', exact: true }).click();
+    const card = page.locator('.participant-card');
+    await card.getByRole('button', { name: /Ограничения/u }).click();
+    const participantSanctions = page.locator('.participant-card-sanctions');
+    await participantSanctions.waitFor();
+    assert.equal(await page.locator('.sanctions-workspace__user-filter').count(), 0);
+    await participantSanctions.getByRole('button', { name: 'К участнику', exact: true }).click();
+    await card.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+    await card.waitFor({ state: 'detached' });
+    await sections.getByRole('button', { name: 'Модерация', exact: true }).click();
+    await page.getByRole('radio', { name: 'Ограничения', exact: true }).click();
     await page.locator('.sanctions-workspace__row').first().waitFor();
     await page.getByRole('radio', { name: 'Журнал', exact: true }).click();
     await page.locator('.event-feed-item').first().waitFor();

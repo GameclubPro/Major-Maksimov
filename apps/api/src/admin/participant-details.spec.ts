@@ -16,7 +16,11 @@ function harness() {
       findUnique: jest.fn().mockResolvedValue({ nightModeTimezone: 'Europe/Moscow' }),
     },
     chatParticipantModerationImmunity: { findUnique: jest.fn().mockResolvedValue(null) },
-    moderationEvent: { count: jest.fn().mockResolvedValue(3) },
+    moderationEvent: {
+      count: jest.fn().mockResolvedValue(3),
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
+    chatMembershipActivityFeedItem: { findFirst: jest.fn().mockResolvedValue(null) },
   };
   const maxClient = {
     getChatMemberAccess: jest.fn().mockResolvedValue(access),
@@ -39,6 +43,7 @@ function harness() {
     ensureEntityType: jest.fn().mockResolvedValue(undefined),
     resolveBackgroundReadBotAssignment: jest.fn().mockResolvedValue('bot-1'),
     buildProfileMentionHandoffUrl: jest.fn(() => null),
+    isKnownRuntimeBotUserId: jest.fn().mockReturnValue(false),
   };
   const runtime = new AdminParticipantsRuntime(
     context as unknown as AdminParticipantsRuntimeContext,
@@ -108,6 +113,7 @@ describe('Participant details', () => {
     const { load, maxClient, prisma } = harness();
     maxClient.getChatMemberAccess.mockResolvedValue(null);
     maxClient.getChatMemberProfiles.mockResolvedValue(new Map());
+    prisma.chatMembershipActivityFeedItem.findFirst.mockResolvedValue({ canonicalKey: 'left-1' });
     prisma.chatParticipantModerationImmunity.findUnique.mockResolvedValue({
       expiresAt: null,
       dailyViolationLimit: null,
@@ -119,7 +125,30 @@ describe('Participant details', () => {
       role: null,
       membershipStatus: 'left',
       canManage: false,
+      canMute: true,
+      canBan: true,
       immunity: { mode: 'always' },
+    });
+  });
+
+  it('does not offer sanctions for an absent person without history in this chat', async () => {
+    const { load, maxClient } = harness();
+    maxClient.getChatMemberAccess.mockResolvedValue(null);
+    await expect(load()).resolves.toMatchObject({
+      canManage: false,
+      canMute: false,
+      canBan: false,
+    });
+  });
+
+  it('keeps runtime bots protected after leaving', async () => {
+    const { load, maxClient, context } = harness();
+    maxClient.getChatMemberAccess.mockResolvedValue(null);
+    context.isKnownRuntimeBotUserId.mockReturnValue(true);
+    await expect(load()).resolves.toMatchObject({
+      canManage: false,
+      canMute: false,
+      canBan: false,
     });
   });
 

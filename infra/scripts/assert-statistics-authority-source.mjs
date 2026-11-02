@@ -92,7 +92,7 @@ export const STATISTICS_AUTHORITY_SOURCE_CHECKS = Object.freeze([
   ],
   [
     'infra/scripts/vps-connect.sh',
-    ['capability_marker=maxim_topology_require_statistics_and_night_mode_recovery'],
+    ['capability_marker=maxim_topology_require_local_chat_ban_reader'],
   ],
   [
     'infra/scripts/assert-statistics-authority-source.mjs',

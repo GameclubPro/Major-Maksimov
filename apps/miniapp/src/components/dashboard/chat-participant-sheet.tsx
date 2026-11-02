@@ -11,7 +11,7 @@ import { isTopmostModalDialog } from '../../lib/dialog-focus';
 import { PersonAvatar } from '../ui/person-avatar';
 import { SettingsDrilldownPanel } from '../ui/settings-drilldown-panel';
 import { ActionConfirmSheet } from '../ui/action-confirm-sheet';
-import type { ParticipantCardTarget } from '../../lib/participant-card';
+import { participantCapabilities, type ParticipantCardTarget } from '../../lib/participant-card';
 import './chat-participant-sheet.css';
 import './chat-participant-sheet-controls.css';
 import './chat-participant-sheet-theme.css';
@@ -72,7 +72,7 @@ type ChatParticipantSheetProps = {
   onSpammerDiagnostics: () => void;
   onSanctionsActivate?: () => void;
   onMute: (durationHours: number) => void;
-  onBan: () => void;
+  onBan: (banOnRejoin: boolean) => void;
 };
 
 function resolveDisplayName(item: ParticipantView): string {
@@ -432,8 +432,11 @@ export function ChatParticipantSheet({
   const violationCount = Number.isFinite(item.violationCount)
     ? Math.max(0, Math.trunc(item.violationCount))
     : 0;
-  const canManageParticipant =
-    detailsReady && ('canManage' in item ? item.canManage : !item.isBot && item.role === 'member');
+  const {
+    canManage: canManageParticipant,
+    canMute,
+    canBan,
+  } = participantCapabilities(item, detailsReady);
   const isBusy = isSavingImmunity || isApplyingModeration || isOpeningProfile;
   const immunity = resolveImmunity(item);
   const immunityValue = formatImmunityValue(immunity);
@@ -496,11 +499,7 @@ export function ChatParticipantSheet({
         id="participant-sheet"
         open={open}
         title={
-          activeComposer === 'mute'
-            ? 'Без сообщений'
-            : activeComposer === 'immunity'
-              ? 'Защита'
-              : 'Участник'
+          activeComposer === 'mute' ? 'Мут' : activeComposer === 'immunity' ? 'Защита' : 'Участник'
         }
         summary={activeComposer ? displayName : undefined}
         tone="sky"
@@ -524,7 +523,7 @@ export function ChatParticipantSheet({
           ) : undefined
         }
         footer={
-          activeComposer && canManageParticipant ? (
+          (isMuteComposerOpen ? canMute : isImmunityComposerOpen && canManageParticipant) ? (
             <div className="participant-sheet__row-actions">
               {isImmunityComposerOpen && item.immunity ? (
                 <button
@@ -571,7 +570,7 @@ export function ChatParticipantSheet({
                 {isMuteComposerOpen
                   ? isApplyingModeration
                     ? 'Применяем...'
-                    : 'Ограничить сообщения'
+                    : 'Назначить мут'
                   : isSavingImmunity && pendingImmunityAction === 'save'
                     ? 'Сохраняем...'
                     : 'Сохранить защиту'}
@@ -695,9 +694,9 @@ export function ChatParticipantSheet({
                   </button>
                   <button
                     type="button"
-                    aria-label="Без сообщений"
+                    aria-label="Мут"
                     className="participant-sheet__action participant-sheet__action--mute"
-                    disabled={isBusy || !canManageParticipant}
+                    disabled={isBusy || !canMute}
                     onClick={(event) => {
                       editorTriggerRef.current = event.currentTarget;
                       setActiveComposer('mute');
@@ -705,7 +704,7 @@ export function ChatParticipantSheet({
                   >
                     <IconoirSprite variant="iconoir" icon="SoundOff" aria-hidden />
                     <span>
-                      Без сообщений<small>{muteLabel}</small>
+                      Мут<small>{muteLabel}</small>
                     </span>
                     <IconoirSprite variant="iconoir" icon="NavArrowRight" aria-hidden />
                   </button>
@@ -749,15 +748,17 @@ export function ChatParticipantSheet({
                     <IconoirSprite variant="iconoir" icon="NavArrowRight" aria-hidden />
                   </button>
 
-                  {canManageParticipant ? (
+                  {canBan ? (
                     <button
                       type="button"
                       className="participant-sheet__action participant-sheet__action--ban"
-                      onClick={onBan}
+                      onClick={() =>
+                        onBan('membershipStatus' in item && item.membershipStatus === 'left')
+                      }
                       disabled={isBusy}
                     >
                       <IconoirSprite variant="iconoir" icon="Prohibition" aria-hidden />
-                      <span>Заблокировать</span>
+                      <span>Бан</span>
                     </button>
                   ) : null}
                 </div>
@@ -766,7 +767,7 @@ export function ChatParticipantSheet({
           </>
         ) : null}
 
-        {canManageParticipant && isMuteComposerOpen ? (
+        {canMute && isMuteComposerOpen ? (
           <div
             id={MUTE_COMPOSER_ID}
             className="participant-sheet__composer"
@@ -775,10 +776,10 @@ export function ChatParticipantSheet({
           >
             <div className="participant-sheet__composer-head">
               <div className="participant-sheet__label-with-info">
-                <span className="participant-sheet__composer-title">Без сообщений</span>
+                <span className="participant-sheet__composer-title">Мут</span>
                 <InfoButton
                   hintKey="mute"
-                  label="Как работает ограничение сообщений"
+                  label="Как работает мут"
                   openHintKey={openHintKey}
                   onToggle={toggleHint}
                 />
@@ -787,8 +788,8 @@ export function ChatParticipantSheet({
             </div>
             {openHintKey === 'mute' ? (
               <p id="participant-sheet-hint-mute" className="participant-sheet__hint">
-                Участник останется в чате, но бот будет удалять его новые сообщения в течение
-                выбранного срока. После этого ограничение снимется автоматически.
+                Бот удаляет новые сообщения до конца срока мута, в том числе после возвращения
+                участника в чат. Срок идёт с момента назначения.
               </p>
             ) : null}
             <div

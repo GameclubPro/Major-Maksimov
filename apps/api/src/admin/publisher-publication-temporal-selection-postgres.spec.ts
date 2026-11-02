@@ -512,8 +512,10 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
           seedStage = 'broadcasts';
           stageStarted = performance.now();
           // FLAG: Bound row-triggered inserts without reducing the retained parent history.
-          for (let first = 1; first <= parents + retained; first += 2_000) {
-            await seedIndexedRows(Prisma.sql`
+          const broadcastBatchSize = 500;
+          let insertedBroadcasts = 0;
+          for (let first = 1; first <= parents + retained; first += broadcastBatchSize) {
+            insertedBroadcasts += await seedIndexedRows(Prisma.sql`
             INSERT INTO "managed_broadcasts" (
               "id", "source_chat_id", "actor_user_id", "target_chat_ids", "buttons", "status",
               "publication_occurrence_id", "publication_content_revision_id", "dispatch_profile", "required_bot_id", "next_send_at", "updated_at"
@@ -523,9 +525,10 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               CASE WHEN n <= ${parents} THEN 'ACTIVE'::"ManagedBroadcastStatus" ELSE 'COMPLETED'::"ManagedBroadcastStatus" END,
               ${prefix} || '-occurrence-' || n::text, ${previousContent.id}, 'PUBLIK_V1', ${botId},
               ${now}::timestamp - interval '1 day' + n * interval '1 millisecond', ${now}
-            FROM generate_series(${first}::integer, ${Math.min(first + 1_999, parents + retained)}::integer) AS n
+            FROM generate_series(${first}::integer, ${Math.min(first + broadcastBatchSize - 1, parents + retained)}::integer) AS n
           `);
           }
+          expect(insertedBroadcasts).toBe(parents + retained);
           completed = true;
         } finally {
           stageTimingsMs[seedStage] = performance.now() - stageStarted;

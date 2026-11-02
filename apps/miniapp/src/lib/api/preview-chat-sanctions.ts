@@ -116,6 +116,7 @@ export function buildPreviewSanctionsPage(
       permanent,
       status,
       releaseAction: status === 'active' ? (item.action === 'MUTE' ? 'UNMUTE' : 'UNBAN') : null,
+      banOnRejoin: metadata.mode === 'LOCAL_REJOIN',
     });
   }
   items.reverse();

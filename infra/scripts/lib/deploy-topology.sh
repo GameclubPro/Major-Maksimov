@@ -462,6 +462,13 @@ maxim_topology_require_statistics_and_night_mode_recovery() {
   maxim_topology_require_night_mode_recovery_reader "$commit_sha" || return $?
 }
 
+maxim_topology_require_local_chat_ban_reader() {
+  local commit_sha="$1"
+  # FLAG: LOCAL_REJOIN survives image rollback; an older UNBAN can remove or add
+  # a participant instead of clearing the local ban. Retain enforcement and release.
+  node "$(dirname "${BASH_SOURCE[0]}")/../assert-local-chat-ban-source.mjs" "$commit_sha"
+}
+
 maxim_topology_require_managed_entity_activation() {
   local commit_sha="$1"
   # FLAG: Known denials, pending activation, capability ceilings and receipt-only

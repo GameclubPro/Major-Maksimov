@@ -111,6 +111,7 @@ maxim_topology_require_managed_network_foundation "$TARGET_FULL_SHA"
 maxim_topology_require_network_settings_v2 "$TARGET_FULL_SHA"
 maxim_topology_require_exact_statistics_rollup_reader "$TARGET_FULL_SHA"
 maxim_topology_require_statistics_and_night_mode_recovery "$TARGET_FULL_SHA"
+maxim_topology_require_local_chat_ban_reader "$TARGET_FULL_SHA"
 if maxim_topology_git_compose_has_service "$TARGET_FULL_SHA" "$MAXIM_MEDIA_ANALYSIS_SERVICE"; then
   TARGET_HAS_MEDIA_ANALYSIS=1
   if maxim_topology_git_has_commercial_ocr_raster_smoke "$TARGET_FULL_SHA"; then

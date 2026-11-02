@@ -1,5 +1,6 @@
 import { persistVoiceSource } from '../moderation/voice-webhook-source';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { markMaxMessageSendAttempted } from '../max/max-mutation-outcome.util';
 import { markMaxMemberMutationAttempted } from '../max/max-member-error.util';
 import { MaxExactMessageLookupMissingIdError } from '../max/max-exact-message-lookup.error';
@@ -39,6 +40,8 @@ import {
 } from '../moderation/night-mode-transition-generation.util';
 import { resolveNightModeTransitionSnapshot } from '../moderation/night-mode-transition-time.util';
 import { NightModeTransitionEventService } from '../moderation/night-mode-transition-event.service';
+import { LOCAL_CHAT_BAN_MODE } from '../moderation/local-chat-ban';
+import { WebhookParser } from './webhook.parser';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -60,6 +63,283 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     h = await createMultibotHarness({ databaseUrl, redisUrl, bots, mode: 'on' });
     return h;
   }
+
+  async function localChatBanFixture() {
+    const previousPoolMax = process.env.PRISMA_PG_POOL_MAX;
+    let s: MultibotHarness;
+    try {
+      // FLAG: Use production eligibility and its supported preparation budget;
+      // direct fixture polling can reconsider an active QUEUED receipt after 20ms.
+      process.env.PRISMA_PG_POOL_MAX = '24';
+      h = s = await createMultibotHarness({
+        databaseUrl,
+        redisUrl,
+        bots: 2,
+        mode: 'on',
+        productionEnqueueCapacity: true,
+        productionOutboxSelection: true,
+      });
+    } finally {
+      if (previousPoolMax === undefined) delete process.env.PRISMA_PG_POOL_MAX;
+      else process.env.PRISMA_PG_POOL_MAX = previousPoolMax;
+    }
+    const [chatId] = await s.seedCatalog(1, {
+      deleteSpammersEnabled: false,
+      removeBotsFromGroupEnabled: false,
+      greetingEnabled: true,
+    });
+    const ban = await s.prisma.moderationEvent.create({
+      data: {
+        chatId: chatId!,
+        userId: 'fixture-user',
+        eventType: 'MEMBER_ACTION',
+        ruleCode: 'MANUAL_BAN',
+        action: 'BAN',
+        operator: 'ADMIN',
+        createdAt: new Date(Date.now() - 2_000),
+        metadata: { mode: LOCAL_CHAT_BAN_MODE, initiatedByUserId: 'fixture-admin' },
+      },
+    });
+    const ingestJoin = async (at: number, botId: string) => {
+      const update = new WebhookParser().parse(
+        {
+          update_type: 'user_added',
+          timestamp: at,
+          chat_id: chatId,
+          user: { user_id: 'fixture-user', name: 'Fixture user', is_bot: false },
+        },
+        { botId },
+      );
+      const id = (await s.ingress.storeReceipt(update, null)).webhookEventId!;
+      s.receiptIds.push(id);
+      return id;
+    };
+    return { s, chatId: chatId!, ban, ingestJoin };
+  }
+
+  it('local chat ban removes every new join once across mirrors without a greeting or spammer opt-in', async () => {
+    const { s, chatId, ingestJoin } = await localChatBanFixture();
+    const handler = jest.spyOn(s.moderation, 'handleUpdate');
+    type FinishContext = Parameters<typeof s.canonical.completeExecution>[0];
+    const finishBoundary = s.canonical as unknown as {
+      observeAwaitedFinish(context: FinishContext): { source: FinishContext['webhookEvent'] };
+    };
+    let phase = 'first-join';
+    const complete = s.canonical.completeExecution.bind(s.canonical);
+    jest.spyOn(s.canonical, 'completeExecution').mockImplementation(async (context) => {
+      try {
+        await complete(context);
+      } catch (cause: unknown) {
+        const source = finishBoundary.observeAwaitedFinish(context).source;
+        const [fresh, claim] = await Promise.all([
+          s.prisma.webhookEvent.findUnique({ where: { id: source.id } }),
+          s.prisma.webhookExecutionClaim.findFirst({
+            where: { kind: 'EXECUTION', webhookEventId: source.id },
+            select: {
+              id: true,
+              status: true,
+              preparedAt: true,
+              businessStartedAt: true,
+              completedAt: true,
+              leaseExpiresAt: true,
+            },
+          }),
+        ]);
+        const fields = (row: FinishContext['webhookEvent'] | null) =>
+          row && {
+            id: row.id,
+            status: row.status,
+            errorMessage: row.errorMessage?.slice(0, 500) ?? null,
+            executionDeadlineAt: row.executionDeadlineAt,
+            processedAt: row.processedAt,
+            timeoutQuarantineExpiresAt: row.timeoutQuarantineExpiresAt,
+            queueName: row.queueName,
+            queuedAt: row.queuedAt,
+            nextEnqueueAt: row.nextEnqueueAt,
+            enqueueAttempts: row.enqueueAttempts,
+          };
+        throw new Error(
+          `Local chat ban finish failed: ${JSON.stringify({
+            phase,
+            before: fields(source),
+            fresh: fields(fresh),
+            payloadUnchanged:
+              fresh && isDeepStrictEqual(source.normalizedPayload, fresh.normalizedPayload),
+            claim,
+          })}`,
+          { cause },
+        );
+      }
+    });
+    const drain = async (nextPhase: 'first-join' | 'second-join') => {
+      phase = nextPhase;
+      try {
+        await s.drain();
+      } catch (cause: unknown) {
+        throw new Error(`Local chat ban drain failed: ${phase}`, { cause });
+      }
+    };
+    const at = Date.now() - 10;
+    const ids = await Promise.all(s.bots.map((bot) => ingestJoin(at, bot.id)));
+    try {
+      await drain('first-join');
+      // FLAG: Non-split drain does not await every webhook job. Pause waits for
+      // in-flight handlers before direct replay can inspect these exact receipts.
+      await s.pause();
+      expect(s.failures).toEqual([]);
+      const receipts = await s.prisma.webhookEvent.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, status: true },
+      });
+      expect(receipts).toHaveLength(ids.length);
+      expect(receipts.map((receipt) => receipt.status).sort()).toEqual(['DUPLICATE', 'PROCESSED']);
+      const claims = await s.prisma.webhookExecutionClaim.findMany({
+        where: { kind: 'EXECUTION', webhookEventId: { in: ids } },
+      });
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({
+        status: 'COMPLETED',
+        completedAt: expect.any(Date),
+        commandResult: expect.objectContaining({ kind: 'EXECUTION_FINISHED' }),
+        leaseToken: null,
+        leaseExpiresAt: null,
+      });
+      expect(s.effects.filter((effect) => effect.path === `/chats/${chatId}/members`)).toHaveLength(
+        1,
+      );
+      expect(s.effects.filter((effect) => effect.method === 'post')).toEqual([]);
+      const firstKick = await s.prisma.maxActionLedgerEntry.findFirstOrThrow({
+        where: { chatId, actionType: 'KICK_MEMBER' },
+      });
+      expect(firstKick.status).toBe('SUCCEEDED');
+      expect(
+        await s.prisma.maxActionLedgerEntry.count({ where: { chatId, actionType: 'BAN_MEMBER' } }),
+      ).toBe(0);
+      const firstHandlerCount = handler.mock.calls.length;
+      phase = 'direct-replay';
+      for (const id of ids) await s.moderation.processWebhookEvent(id);
+      expect(handler).toHaveBeenCalledTimes(firstHandlerCount);
+      expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(1);
+      expect(s.failures).toEqual([]);
+    } finally {
+      await s.resume();
+    }
+    await ingestJoin(Date.now(), s.bots[0]!.id);
+    await drain('second-join');
+    expect(s.failures).toEqual([]);
+    expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(2);
+    expect(s.effects.filter((effect) => effect.method === 'post')).toEqual([]);
+  });
+
+  it('local chat ban uses a fresh message fallback and stops after a persisted release', async () => {
+    const { s, chatId } = await localChatBanFixture();
+    const at = Date.now() - 10;
+    const messageId = `local-ban-fallback-${randomUUID()}`;
+    await Promise.all(
+      s.bots.map((bot) =>
+        s.ingest({ chatId, botId: bot.id, messageId, at, text: 'Returned without a join receipt' }),
+      ),
+    );
+    await s.drain();
+    expect(s.failures).toEqual([]);
+    expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(1);
+    await s.prisma.moderationEvent.create({
+      data: {
+        chatId,
+        userId: 'fixture-user',
+        eventType: 'MEMBER_ACTION',
+        ruleCode: 'MANUAL_UNBAN',
+        action: 'NONE',
+        operator: 'ADMIN',
+      },
+    });
+    await s.ingest({
+      chatId,
+      messageId: `local-ban-released-${randomUUID()}`,
+      text: 'Allowed after release',
+    });
+    await s.drain();
+    expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(1);
+    expect(s.failures).toEqual([]);
+  });
+
+  it.each(['SUCCEEDED', 'AMBIGUOUS', 'IN_PROGRESS'] as const)(
+    'local chat ban reconciles only older confirmed native BAN evidence: %s',
+    async (status) => {
+      const { s, chatId, ingestJoin } = await localChatBanFixture();
+      const at = new Date(Date.now() - 5_000);
+      const prior = await s.prisma.maxActionLedgerEntry.create({
+        data: {
+          jobId: `local-ban-prior-native-${randomUUID()}`,
+          chatId,
+          userId: 'fixture-user',
+          botId: s.bots[1]!.id,
+          actionType: 'BAN_MEMBER',
+          status,
+          ambiguous: status === 'AMBIGUOUS',
+          terminal: status !== 'IN_PROGRESS',
+          attemptCount: 1,
+          firstAttemptAt: at,
+          lastAttemptAt: at,
+          dispatchStartedAt: at,
+          dispatchBotId: s.bots[1]!.id,
+          completedAt: status === 'IN_PROGRESS' ? null : at,
+        },
+      });
+      await ingestJoin(Date.now() - 10, s.bots[0]!.id);
+      if (status === 'SUCCEEDED') {
+        await s.drain();
+        expect(s.failures).toEqual([]);
+        expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toHaveLength(1);
+        expect(
+          await s.prisma.maxActionLedgerEntry.findUnique({ where: { jobId: prior.jobId } }),
+        ).toBeNull();
+      } else {
+        await expect(s.drain()).rejects.toThrow('Retained member action requires settlement');
+        expect(s.effects).toEqual([]);
+        expect(
+          await s.prisma.maxActionLedgerEntry.findUnique({ where: { jobId: prior.jobId } }),
+        ).toEqual(prior);
+      }
+    },
+  );
+
+  it.each(['release', 'admin-promotion'] as const)(
+    'local chat ban rejects %s at the actual member dispatch boundary',
+    async (change) => {
+      const { s, chatId, ingestJoin } = await localChatBanFixture();
+      const lookup = s.max.getChatMemberAccess.bind(s.max);
+      let targetProbes = 0;
+      jest.spyOn(s.max, 'getChatMemberAccess').mockImplementation(async (...args) => {
+        const access = await lookup(...args);
+        if (args[0] === chatId && args[1] === 'fixture-user') targetProbes += 1;
+        if (args[0] === chatId && args[1] === 'fixture-user' && targetProbes >= 2) {
+          if (change === 'release')
+            await s.prisma.moderationEvent.create({
+              data: {
+                chatId,
+                userId: 'fixture-user',
+                eventType: 'MEMBER_ACTION',
+                ruleCode: 'MANUAL_UNBAN',
+                action: 'NONE',
+                operator: 'ADMIN',
+              },
+            });
+          else return { ...access!, isAdmin: true };
+        }
+        return access;
+      });
+      await ingestJoin(Date.now() - 10, s.bots[0]!.id);
+      await s.drain();
+      expect(s.failures).toEqual([]);
+      expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toEqual([]);
+      expect(
+        await s.prisma.maxActionLedgerEntry.count({
+          where: { chatId, actionType: 'KICK_MEMBER', status: 'SUCCEEDED' },
+        }),
+      ).toBe(0);
+    },
+  );
 
   it.each(['forever', 'timed', 'expired'] as const)(
     'night cleanup rechecks %s manual closure at the final DELETE boundary',

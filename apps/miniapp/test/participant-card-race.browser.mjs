@@ -65,11 +65,39 @@ try {
       role: null,
       membershipStatus: 'left',
       canManage: false,
+      canMute: true,
+      canBan: true,
     }),
   );
   await card.getByText('Вне чата', { exact: true }).waitFor();
-  assert.equal(await card.getByRole('button', { name: 'Заблокировать', exact: true }).count(), 0);
+  assert.equal(await card.getByRole('button', { name: 'Мут', exact: true }).isEnabled(), true);
   assert.equal(await card.getByRole('button', { name: 'Защита', exact: true }).isDisabled(), true);
+  await card.getByRole('button', { name: 'Мут', exact: true }).click();
+  await card.getByRole('button', { name: 'Назначить мут', exact: true }).click();
+  await card.getByRole('button', { name: 'К участнику', exact: true }).click();
+  await card.getByRole('button', { name: 'Бан', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => window.participantCardTest.actions), [
+    { chatId: 'chat-2', userId: 'two', action: 'MUTE', durationHours: 24 },
+    { chatId: 'chat-2', userId: 'two', action: 'BAN', banOnRejoin: true },
+  ]);
+  assert.equal(await card.getByRole('button', { name: 'Защита', exact: true }).isDisabled(), true);
+
+  await page.evaluate(() => window.participantCardTest.show('chat-2', 'unknown'));
+  await page.waitForFunction(() =>
+    window.participantCardTest.requests.some((path) => path.includes('/members/unknown?')),
+  );
+  await page.evaluate(() =>
+    window.participantCardTest.resolve('chat-2', 'unknown', {
+      role: null,
+      membershipStatus: 'unknown',
+      canManage: false,
+      canMute: false,
+      canBan: false,
+    }),
+  );
+  await card.getByText('Статус в чате неизвестен', { exact: true }).waitFor();
+  assert.equal(await card.getByRole('button', { name: 'Мут', exact: true }).isDisabled(), true);
+  assert.equal(await card.getByRole('button', { name: 'Бан', exact: true }).count(), 0);
   assert.ok(
     (await page.evaluate(() => window.participantCardTest.requests)).every(
       (path) => path.includes('/members/') || path.includes('/sanctions?'),
