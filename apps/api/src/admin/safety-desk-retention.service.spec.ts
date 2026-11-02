@@ -104,8 +104,113 @@ describe('closed retention operator boundary', () => {
       diagnostics: { ...runtime.items[0]!.diagnostics, lastError: 'unknown' },
     });
     expect(JSON.stringify(result)).not.toContain('private-upstream-detail');
+    expect(result).not.toHaveProperty('incomplete');
     expect(eraser.request).toHaveBeenCalledWith('/runtime?chatIds=-123');
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { name: 'unknown remote', remote: undefined, legacy: undefined, expected: undefined },
+    { name: 'complete remote', remote: false, legacy: undefined, expected: false },
+    { name: 'incomplete remote', remote: true, legacy: undefined, expected: true },
+    {
+      name: 'unknown remote with complete legacy',
+      remote: undefined,
+      legacy: false,
+      expected: undefined,
+    },
+    {
+      name: 'unknown remote with incomplete legacy',
+      remote: undefined,
+      legacy: true,
+      expected: true,
+    },
+    { name: 'complete remote with incomplete legacy', remote: false, legacy: true, expected: true },
+    { name: 'incomplete remote with complete legacy', remote: true, legacy: false, expected: true },
+  ])('preserves completeness for $name', async ({ remote, legacy, expected }) => {
+    const { prisma, store, capabilities } = setup();
+    const owned: RetentionRuntimePageRow = { chatId: '-123', chatTitle: 'Owned', source: 'eraser' };
+    const legacyRow: RetentionRuntimePageRow = {
+      chatId: '-456',
+      chatTitle: 'Legacy',
+      source: 'legacy',
+      enabled: true,
+      hours: 48,
+      revision: 1,
+      activationId: 'legacy',
+      pendingCount: 0,
+      deletedCount: 0,
+      skippedCount: 0,
+      nextRunAt: null,
+      captureAfter: null,
+      pausedAt: null,
+      updatedAt: new Date('2026-10-28T10:00:00Z'),
+      lastStatus: 'off',
+    };
+    const diagnostic: LegacyRuntimeBatch['diagnostics'][number] = {
+      chatId: '-456',
+      oldestSourceMs: null,
+      incomplete: legacy ?? false,
+      hasTerminalReview: false,
+      hasWorkerError: false,
+      hasWaitingAccess: false,
+      hasUnresolvedReceipt: false,
+      hasDeferred: false,
+      hasLegacyRetry: false,
+    };
+    const snapshot: SafetyDeskRetentionRuntimeResponse = {
+      generatedAt: '2026-10-28T10:00:00Z',
+      mode: 'on',
+      nextAfter: null,
+      quotas: [],
+      ...(remote === undefined ? {} : { incomplete: remote }),
+      items: [
+        {
+          chatId: '-123',
+          chatTitle: 'Owned',
+          enabled: true,
+          hours: 48,
+          revision: 1,
+          activationId: 'owned',
+          pendingCount: 0,
+          deletedCount: 0,
+          skippedCount: 0,
+          status: 'delayed',
+          oldestDueAt: null,
+          nextRunAt: null,
+          hasTerminalReview: false,
+          hasUnresolvedReceipt: false,
+        },
+      ],
+    };
+    const eraser: jest.Mocked<Pick<EraserControlService, 'enabled' | 'request'>> = {
+      enabled: true,
+      request: jest.fn().mockResolvedValue(snapshot),
+    };
+    prisma.$queryRaw
+      .mockReset()
+      .mockResolvedValueOnce(legacy === undefined ? [owned] : [owned, legacyRow])
+      .mockResolvedValueOnce([
+        {
+          diagnostics: legacy === undefined ? [] : [diagnostic],
+          quotas: [],
+        } satisfies LegacyRuntimeBatch,
+      ]);
+    const service = new SafetyDeskRetentionService(
+      prisma as unknown as PrismaService,
+      store as never,
+      capabilities as never,
+      eraser as unknown as EraserControlService,
+    );
+
+    const result = await service.runtime();
+
+    if (expected === undefined) expect(result).not.toHaveProperty('incomplete');
+    else expect(result.incomplete).toBe(expected);
+    expect(result.items).toHaveLength(legacy === undefined ? 1 : 2);
+    expect(result.unavailableSources).toEqual([]);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(capabilities.assertChatSettingsBotCapabilities).not.toHaveBeenCalled();
   });
 
   it('forwards opaque Lastik review cursors and exact microsecond retry versions', async () => {
@@ -187,6 +292,7 @@ describe('closed retention operator boundary', () => {
       items: [],
       nextAfter: null,
       mode: 'off',
+      incomplete: false,
     });
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
   });

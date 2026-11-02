@@ -132,6 +132,9 @@ source, chat, policy revision and activation. Keep the cursor unchanged. A chang
 requires a fresh page; a manual retry still uses the exact journal timestamp and attempt
 count, and its returned snapshot starts at the first page. Missing completeness metadata
 from an older runtime means unknown completeness, not an empty or fully checked ledger.
+Mixed pages preserve that unknown state when legacy diagnostics are complete. A known
+incomplete diagnostic or unavailable source takes precedence; explicit completeness requires
+every selected source to report complete diagnostics. Pagination alone does not mean incomplete.
 
 Pending, due-and-retry-ready, and uncertain counts are separate bounded observations.
 A capped count is a lower bound. Eligibility does not bypass the final rights, pins or

@@ -93,7 +93,9 @@ export class SafetyDeskRetentionService {
       SafetyDeskRetentionRuntimeResponse['unavailableSources']
     > = [];
     const items: SafetyDeskRetentionRuntimeResponse['items'] = [];
-    let incomplete = remote?.incomplete ?? false;
+    // FLAG: Missing completeness from an owned older runtime stays unknown. Complete legacy
+    // diagnostics cannot establish completeness for that ledger; known incompleteness still wins.
+    let incomplete: boolean | undefined = ownedIds.length > 0 ? remote?.incomplete : false;
     for (const policy of page) {
       if (policy.source === 'eraser') {
         const item = remoteItems.get(policy.chatId);
@@ -123,7 +125,7 @@ export class SafetyDeskRetentionService {
         });
         continue;
       }
-      incomplete ||= diagnostic.incomplete;
+      if (diagnostic.incomplete) incomplete = true;
       const dueMs =
         !policy.enabled || diagnostic.oldestSourceMs === null
           ? Infinity
@@ -167,6 +169,7 @@ export class SafetyDeskRetentionService {
         updatedAt: policy.updatedAt.toISOString(),
       });
     }
+    if (unavailableSources.length > 0) incomplete = true;
     return safetyDeskRetentionRuntimeResponseSchema.parse({
       generatedAt: new Date().toISOString(),
       mode: remote?.mode ?? this.store.mode,
@@ -174,7 +177,7 @@ export class SafetyDeskRetentionService {
       ...(remote?.cooldown ? { cooldown: remote.cooldown } : {}),
       ...(remote?.health ? { health: remote.health } : {}),
       nextAfter: rows.length > 50 ? page.at(-1)!.chatId : null,
-      incomplete: incomplete || unavailableSources.length > 0,
+      ...(incomplete === undefined ? {} : { incomplete }),
       unavailableSources,
       quotas: legacy.quotas.map((q) => ({ ...q, cap: MESSAGE_RETENTION_SHARD_LIMIT })),
       items,
