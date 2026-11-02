@@ -90,7 +90,7 @@ describe('classifyMaxTerminalChatActionError', () => {
           'lookup',
           classifyMaxTerminalChatActionError(createMaxApiError(status, 'MAX rejected request'))!,
         ),
-      ).toBe(reason);
+      ).toBeNull();
     },
   );
 
@@ -138,20 +138,19 @@ describe('classifyMaxTerminalChatActionError', () => {
     expect(resolveManagedEntityAccessLossReason('delete', classification!)).toBeNull();
   });
 
-  it('resolves bare send 403/404 as managed entity access loss', () => {
-    expect(
-      resolveManagedEntityAccessLossReason(
-        'send',
-        classifyMaxTerminalChatActionError(createMaxApiError(403, 'Forbidden'))!,
-      ),
-    ).toBe('bot_denied');
-    expect(
-      resolveManagedEntityAccessLossReason(
-        'send',
-        classifyMaxTerminalChatActionError(createMaxApiError(404, 'Not found'))!,
-      ),
-    ).toBe('chat_not_found');
-  });
+  it.each(['send', 'read', 'lookup'] as const)(
+    'does not infer bot access loss from bare 403/404 on %s',
+    (operation) => {
+      for (const status of [403, 404]) {
+        expect(
+          resolveManagedEntityAccessLossReason(
+            operation,
+            classifyMaxTerminalChatActionError(createMaxApiError(status, 'Request failed'))!,
+          ),
+        ).toBeNull();
+      }
+    },
+  );
 
   it('does not treat bare edit permission errors as full managed-entity access loss', () => {
     expect(
@@ -240,6 +239,87 @@ describe('classifyMaxTerminalChatActionError', () => {
 describe('ManagedEntityAccessLossService', () => {
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it.each(['empty', 'unavailable'] as const)(
+    'preserves runtime work when the lost bot is unknown and survivor evidence is %s',
+    async (survivorState) => {
+      const findMany =
+        survivorState === 'empty'
+          ? jest.fn().mockResolvedValue([])
+          : jest.fn().mockRejectedValue(new Error('survivor lookup unavailable'));
+      const prisma = {
+        chat: {
+          findUnique: jest.fn().mockResolvedValue({ title: 'channel', entityType: 'CHANNEL' }),
+        },
+        chatBotMembership: { findMany },
+        managedAutopostRule: { updateMany: jest.fn() },
+        managedBroadcast: { updateMany: jest.fn() },
+        managedBroadcastDelivery: { updateMany: jest.fn() },
+        managedBroadcastOccurrence: { updateMany: jest.fn() },
+      };
+      const service = new ManagedEntityAccessLossService(
+        prisma as never,
+        { markChatBotRemoved: jest.fn() } as never,
+        {} as never,
+        undefined,
+        undefined,
+        createMaxBotRegistry(['bot-1']) as never,
+      );
+      const result = await service.recordIfManagedEntityAccessLost({
+        chatId: '-123',
+        botId: null,
+        operation: 'read',
+        source: 'test',
+        error: createMaxApiError(403, 'Forbidden', 'chat.denied'),
+        lifecycleEventAt: new Date(),
+      });
+      expect(result).toMatchObject({ reason: 'bot_denied', recorded: null });
+      expect(findMany).not.toHaveBeenCalled();
+      expect(prisma.managedAutopostRule.updateMany).not.toHaveBeenCalled();
+      expect(prisma.managedBroadcast.updateMany).not.toHaveBeenCalled();
+      expect(prisma.managedBroadcastDelivery.updateMany).not.toHaveBeenCalled();
+      expect(prisma.managedBroadcastOccurrence.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not clean runtime work if checking surviving access fails', async () => {
+    const failure = new Error('survivor lookup unavailable');
+    const prisma = {
+      chat: {
+        findUnique: jest.fn().mockResolvedValue({ title: 'channel', entityType: 'CHANNEL' }),
+      },
+      chatBotMembership: { findMany: jest.fn().mockRejectedValue(failure) },
+      managedEntityAccessEdge: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      managedAutopostRule: { updateMany: jest.fn() },
+      managedBroadcast: { updateMany: jest.fn() },
+    };
+    const cache = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+      invalidateManagedEntityHeader: jest.fn().mockResolvedValue(undefined),
+      clearManagedEntitiesRecentBootstrapForChat: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new ManagedEntityAccessLossService(
+      prisma as never,
+      { markChatBotRemoved: jest.fn().mockResolvedValue(null) } as never,
+      cache as never,
+      undefined,
+      undefined,
+      createMaxBotRegistry(['bot-1', 'bot-2']) as never,
+    );
+    await expect(
+      service.recordManagedEntityAccessLost({
+        chatId: '-123',
+        botId: 'bot-1',
+        reason: 'bot_denied',
+        source: 'test',
+      }),
+    ).rejects.toBe(failure);
+    expect(cache.invalidate).toHaveBeenCalledWith('-123');
+    expect(cache.invalidateManagedEntityHeader).toHaveBeenCalledWith('-123');
+    expect(cache.clearManagedEntitiesRecentBootstrapForChat).toHaveBeenCalled();
+    expect(prisma.managedAutopostRule.updateMany).not.toHaveBeenCalled();
+    expect(prisma.managedBroadcast.updateMany).not.toHaveBeenCalled();
   });
 
   it('forwards the remote probe epoch when recording classified access loss', async () => {
@@ -1881,7 +1961,7 @@ describe('ManagedEntityAccessLossService', () => {
     expect(prisma.vkParsingSource.updateMany).not.toHaveBeenCalled();
   });
 
-  it('keeps runtime work when the lost bot is unresolved but another actionable bot has fresh confirmed access', async () => {
+  it('keeps runtime work when the lost bot is unresolved even if another bot has fresh access', async () => {
     const prisma = {
       chat: {
         findUnique: jest.fn().mockResolvedValue({
@@ -1954,34 +2034,11 @@ describe('ManagedEntityAccessLossService', () => {
         reason: 'bot_denied',
         source: 'unit-test',
       }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        chatId: 'chat-1',
-        botId: null,
-        updatedAccessEdges: 0,
-        cleanup: {
-          nightModeJobsCleared: false,
-          canceledBroadcasts: null,
-          canceledBroadcastDeliveries: null,
-          canceledBroadcastOccurrences: null,
-          clearedVkPublishPosts: null,
-          pausedVkSources: null,
-          removedRosterSyncJobs: null,
-        },
-      }),
-    );
+    ).resolves.toBeNull();
 
     expect(maxBotLinkService.markChatBotRemoved).not.toHaveBeenCalled();
     expect(prisma.managedEntityAccessEdge.updateMany).not.toHaveBeenCalled();
-    expect(prisma.chatBotMembership.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          chatId: 'chat-1',
-          botId: { in: ['bot-2'] },
-          status: ChatBotMembershipStatus.ACTIVE,
-        }),
-      }),
-    );
+    expect(prisma.chatBotMembership.findMany).not.toHaveBeenCalled();
     expect(nightModeTransitionScheduler.reconcileChat).not.toHaveBeenCalled();
     expect(rosterSyncQueue.getJob).not.toHaveBeenCalled();
     expect(prisma.managedBroadcast.updateMany).not.toHaveBeenCalled();
@@ -2147,13 +2204,7 @@ describe('ManagedEntityAccessLossService', () => {
         reason: 'bot_denied',
         source: 'unit-test',
       }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        chatId: 'chat-1',
-        botId: null,
-        updatedAccessEdges: 0,
-      }),
-    );
+    ).resolves.toBeNull();
 
     expect(maxBotLinkService.markChatBotRemoved).not.toHaveBeenCalled();
     expect(prisma.managedEntityAccessEdge.updateMany).not.toHaveBeenCalled();
@@ -2192,13 +2243,7 @@ describe('ManagedEntityAccessLossService', () => {
         reason: 'bot_denied',
         source: 'unit-test',
       }),
-    ).resolves.toEqual(
-      expect.objectContaining({
-        chatId: 'chat-1',
-        botId: null,
-        updatedAccessEdges: 0,
-      }),
-    );
+    ).resolves.toBeNull();
 
     expect(maxBotLinkService.resolveBotId).not.toHaveBeenCalled();
     expect(maxBotLinkService.markChatBotRemoved).not.toHaveBeenCalled();

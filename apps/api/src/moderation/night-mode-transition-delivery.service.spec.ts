@@ -863,7 +863,7 @@ describe('NightModeTransitionDeliveryService', () => {
         await request.onDispatchAttempt({ botId: 'bot-routed', job: {} });
         await request.beforeSendMutation({ botId: 'bot-routed', job: {} });
         jest.setSystemTime(errorHandledAt);
-        throw createMaxApiError(403, 'Request failed with status code 403');
+        throw createMaxApiError(403, 'Request failed with status code 403', 'chat.denied');
       }),
     };
     const service = new NightModeTransitionDeliveryService(
@@ -899,7 +899,7 @@ describe('NightModeTransitionDeliveryService', () => {
         botId: 'bot-routed',
         reason: 'bot_denied',
         source: 'night_mode_transition:send-open-notice',
-        lastMaxErrorCode: null,
+        lastMaxErrorCode: 'chat.denied',
         lastMaxErrorMessage: 'request failed with status code 403',
         lastMaxStatusCode: 403,
         lifecycleEventAt: dispatchAttemptStartedAt,
@@ -910,6 +910,42 @@ describe('NightModeTransitionDeliveryService', () => {
       jest.useRealTimers();
     }
   });
+
+  it.each([403, 404])(
+    'retains a failed notice when MAX returns an ambiguous HTTP %s',
+    async (status) => {
+      const error = createMaxApiError(status, `Request failed with status code ${status}`);
+      const maxClient = {
+        sendMessage: jest.fn().mockRejectedValue(error),
+        deleteMessage: jest.fn(),
+      };
+      const accessLoss = { recordManagedEntityAccessLost: jest.fn() };
+      const eventService = createEventService();
+      const service = new NightModeTransitionDeliveryService(
+        maxClient as never,
+        {
+          resolveMedia: jest.fn().mockReturnValue(null),
+          withMediaOptions: jest.fn(async (options) => options),
+        } as never,
+        eventService as never,
+        accessLoss as never,
+      );
+      await expect(
+        service.sendClosedNotice(
+          createSettings(),
+          {
+            startMinutes: 23 * 60,
+            endMinutes: 8 * 60,
+            timezone: 'Europe/Moscow',
+            sessionKey: 'unknown-status',
+          },
+          createAdapters(),
+        ),
+      ).rejects.toBe(error);
+      expect(accessLoss.recordManagedEntityAccessLost).not.toHaveBeenCalled();
+      expect(eventService.createTransitionEvent).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not record access loss for a terminal-shaped pre-dispatch failure', async () => {
     const preDispatchError = createMaxApiError(403, 'Request failed with status code 403');
@@ -1454,7 +1490,9 @@ describe('NightModeTransitionDeliveryService', () => {
     const maxClient = {
       sendMessage: jest
         .fn()
-        .mockRejectedValue(createMaxApiError(404, 'Request failed with status code 404')),
+        .mockRejectedValue(
+          createMaxApiError(404, 'Request failed with status code 404', 'chat.not.found'),
+        ),
       deleteMessage: jest.fn(),
     };
     const accessLoss = {
@@ -1489,7 +1527,7 @@ describe('NightModeTransitionDeliveryService', () => {
         botId: 'bot-1',
         reason: 'chat_not_found',
         source: 'night_mode_transition:send-close-notice',
-        lastMaxErrorCode: null,
+        lastMaxErrorCode: 'chat.not.found',
         lastMaxErrorMessage: 'request failed with status code 404',
         lastMaxStatusCode: 404,
         lifecycleEventAt: dispatchAttemptStartedAt,

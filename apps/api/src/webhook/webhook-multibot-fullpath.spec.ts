@@ -27,6 +27,7 @@ import { buildWebhookSemanticEventKey } from './webhook-semantic-event-key';
 import { DORMANT_BOT_OBSERVATION_MARKER } from './webhook-dormant-observation';
 import { WebhookParser } from './webhook.parser';
 import type { ProcessWebhookJob } from './webhook-queues';
+import type { QueueMetricsService } from '../system/queue-metrics.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -63,6 +64,62 @@ describeStores('native multibot ingress → outbox → moderation → guarded si
       ),
     );
   }
+
+  it('keeps a persisted chat shard and drains independent work while advisory metrics hang', async () => {
+    const s = await fixture(2, 'on');
+    await s.pause();
+    const [chatId, independentChatId] = await s.seedCatalog(2, { maxMessageLengthEnabled: false });
+    const owner = await s.ingest({
+      chatId: chatId!,
+      messageId: randomUUID(),
+      text: 'Fixture owner',
+      botId: s.bots[0]!.id,
+    });
+    await s.pumpWork();
+    const queued = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: owner } });
+    expect(queued.status).toBe('QUEUED');
+    expect(queued.queueName).toBeTruthy();
+    const state = s.routing as unknown as {
+      queueMetricsService: Pick<QueueMetricsService, 'getWebhookDefaultShardSnapshot'>;
+      removeAssignment(key: string): void;
+    };
+    state.removeAssignment(`chat:${chatId!}`);
+    const metrics = jest
+      .spyOn(state.queueMetricsService, 'getWebhookDefaultShardSnapshot')
+      .mockImplementation(() => new Promise(() => undefined));
+    try {
+      const following = await s.ingest({
+        chatId: chatId!,
+        messageId: randomUUID(),
+        text: 'Fixture following',
+        botId: s.bots[0]!.id,
+      });
+      const pending = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: following } });
+      await expect(s.routing.resolveQueueName(following, pending.normalizedPayload)).resolves.toBe(
+        queued.queueName,
+      );
+      expect(metrics).not.toHaveBeenCalled();
+      const independent = await s.ingest({
+        chatId: independentChatId!,
+        messageId: randomUUID(),
+        text: 'Fixture independent',
+        botId: s.bots[0]!.id,
+      });
+      await s.resume();
+      await s.drain();
+      const receipts = await s.prisma.webhookEvent.findMany({
+        where: { id: { in: [owner, following, independent] } },
+        select: { id: true, status: true },
+      });
+      expect(receipts).toHaveLength(3);
+      expect(receipts.every((row) => row.status === 'PROCESSED')).toBe(true);
+      for (const id of [owner, following, independent])
+        expect(s.processedIds.filter((processed) => processed === id)).toHaveLength(1);
+      expect(metrics).toHaveBeenCalledTimes(1);
+    } finally {
+      metrics.mockRestore();
+    }
+  });
 
   it.each(['before', 'after'] as const)(
     'completes an owner and mirror when an optional duplicate explanation fails %s its budget',

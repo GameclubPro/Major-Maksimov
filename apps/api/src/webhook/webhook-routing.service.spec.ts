@@ -172,6 +172,95 @@ describe('WebhookRoutingService', () => {
     jest.clearAllMocks();
   });
 
+  it('keeps cached and independent routes moving when one pressure observation never settles', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-03T00:00:00.000Z'));
+    const { service, prisma, queueMetricsService } = createService();
+    const cachedPayload = { type: 'message_created', message: { chatId: 'cached-chat' } };
+    const cachedQueue = await service.resolveQueueName('cached-first', cachedPayload);
+    jest.advanceTimersByTime(12_000);
+    queueMetricsService.getWebhookDefaultShardSnapshot.mockImplementationOnce(
+      () => new Promise<SnapshotFixture>(() => undefined),
+    );
+
+    const cachedRoute = service.resolveQueueName('cached-next', cachedPayload);
+    const freshPayload = { type: 'message_created', message: { chatId: 'independent-chat' } };
+    const freshRoute = service.resolveQueueName('fresh-first', freshPayload);
+    await jest.advanceTimersByTimeAsync(500);
+    await expect(cachedRoute).resolves.toBe(cachedQueue);
+    await expect(freshRoute).resolves.toBe(
+      resolveDefaultWebhookQueueNameForChatId('independent-chat'),
+    );
+
+    const repeated = await Promise.all(
+      Array.from({ length: 128 }, (_, index) =>
+        service.resolveQueueName(`cached-later-${index}`, cachedPayload),
+      ),
+    );
+    expect(repeated.every((queue) => queue === cachedQueue)).toBe(true);
+    expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(2);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes pressure after actual settlement without rerouting from a late observation', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-03T00:00:00.000Z'));
+    const { service, queueMetricsService } = createService();
+    const payload = { type: 'message_created', message: { chatId: 'late-observation-chat' } };
+    let release!: (snapshot: SnapshotFixture) => void;
+    queueMetricsService.getWebhookDefaultShardSnapshot.mockReturnValueOnce(
+      new Promise<SnapshotFixture>((resolve) => {
+        release = resolve;
+      }),
+    );
+    const firstRoute = service.resolveQueueName('late-first', payload);
+    await jest.advanceTimersByTimeAsync(500);
+    const fallback = resolveDefaultWebhookQueueNameForChatId('late-observation-chat');
+    await expect(firstRoute).resolves.toBe(fallback);
+
+    release({
+      webhookDefaultShards: buildDefaultShardSnapshot(),
+      webhookDefaultWorkerGroups: buildWorkerGroupSnapshot(),
+    });
+    await jest.advanceTimersByTimeAsync(0);
+    await expect(service.resolveQueueName('late-next', payload)).resolves.toBe(fallback);
+    expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(1);
+
+    await service.resolveQueueName('other-first', {
+      type: 'message_created',
+      message: { chatId: 'other-after-settlement' },
+    });
+    expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the exact pending shard during a pressure outage and recovers after rejection', async () => {
+    const { service, prisma, queueMetricsService } = createService();
+    queueMetricsService.getWebhookDefaultShardSnapshot.mockRejectedValueOnce(
+      new Error('Pressure observer unavailable'),
+    );
+    await expect(
+      service.resolveQueueName('outage-first', {
+        type: 'message_created',
+        message: { chatId: 'outage-chat' },
+      }),
+    ).resolves.toBe(resolveDefaultWebhookQueueNameForChatId('outage-chat'));
+
+    prisma.$queryRaw.mockResolvedValueOnce([
+      { has_pending: true, queue_name: 'moderation-default-7' },
+    ]);
+    await expect(
+      service.resolveQueueName('pending-first', {
+        type: 'message_created',
+        message: { chatId: 'pending-chat' },
+      }),
+    ).resolves.toBe('moderation-default-7');
+    expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(1);
+
+    await service.resolveQueueName('recovered-first', {
+      type: 'message_created',
+      message: { chatId: 'recovered-chat' },
+    });
+    expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(2);
+  });
+
   it.each([10_000, 12_000, 30_000])(
     'keeps %i chat routes without full-cache scans',
     (catalogSize) => {

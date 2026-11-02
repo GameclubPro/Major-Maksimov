@@ -351,25 +351,14 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
         ? syncState.configuredUrl
         : null;
     const shouldRotateWebhookSecret =
-      Boolean(current) &&
-      (Boolean(syncState?.headerSecretFingerprint) || bot.webhookHeaderSecrets.length > 1) &&
-      (!syncState?.headerSecretFingerprint ||
-        syncState.headerSecretFingerprint !== headerSecretFingerprint);
+      !syncState?.headerSecretFingerprint ||
+      syncState.headerSecretFingerprint !== headerSecretFingerprint;
     const staleIngress = this.isStaleIngress(botState.latestRecordedIncomingWebhookAt);
     let reconciledAt: string | null = null;
     let subscriptionsChanged = false;
     const deletedSubscriptionUrls = new Set<string>();
-    if (shouldRotateWebhookSecret && current) {
-      await this.maxClient.ensureWebhookSubscription([...this.requiredUpdateTypes], {
-        trafficClass: 'background',
-        botId: bot.id,
-        sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
-        forceUpsert: true,
-        ...(this.replaceUpdateTypes ? { replaceUpdateTypes: true } : {}),
-      });
-      reconciledAt = new Date().toISOString();
-      subscriptionsChanged = true;
-    } else if (
+    if (
+      shouldRotateWebhookSecret ||
       !current ||
       missingUpdateTypes.length > 0 ||
       (this.replaceUpdateTypes && extraUpdateTypes.length > 0)
@@ -378,14 +367,34 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
         trafficClass: 'background',
         botId: bot.id,
         sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
+        ...(shouldRotateWebhookSecret ? { forceUpsert: true } : {}),
         ...(this.replaceUpdateTypes ? { replaceUpdateTypes: true } : {}),
       });
       reconciledAt = new Date().toISOString();
       subscriptionsChanged = true;
     }
 
+    const establishedSubscriptions = subscriptionsChanged
+      ? await this.maxClient.listWebhookSubscriptions({
+          trafficClass: 'background',
+          botId: bot.id,
+          sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
+        })
+      : existing;
+    const establishedCurrent = establishedSubscriptions.find((item) =>
+      this.maxClient.matchesConfiguredWebhookUrl(item.url, bot.id),
+    );
+    if (
+      !establishedCurrent ||
+      this.requiredUpdateTypes.some((type) => !establishedCurrent.updateTypes.includes(type))
+    ) {
+      throw new Error('Current webhook subscription could not be confirmed');
+    }
+
     if (previousConfiguredUrl) {
-      const hasPreviousConfiguredUrl = existing.some((item) => item.url === previousConfiguredUrl);
+      const hasPreviousConfiguredUrl = establishedSubscriptions.some(
+        (item) => item.url === previousConfiguredUrl,
+      );
       if (hasPreviousConfiguredUrl) {
         await this.maxClient.deleteWebhookSubscription(previousConfiguredUrl, {
           trafficClass: 'background',
@@ -398,11 +407,11 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
       }
     }
 
-    for (const subscription of existing) {
+    for (const subscription of establishedSubscriptions) {
       if (
         deletedSubscriptionUrls.has(subscription.url) ||
         this.maxClient.matchesConfiguredWebhookUrl(subscription.url, bot.id) ||
-        !this.isOwnedBotWebhookSubscriptionUrl(subscription.url, bot.id)
+        !this.isOwnedBotWebhookSubscriptionUrl(subscription.url, bot.id, target.url)
       ) {
         continue;
       }
@@ -417,13 +426,14 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
       subscriptionsChanged = true;
     }
 
-    const confirmedSubscriptions = subscriptionsChanged
-      ? await this.maxClient.listWebhookSubscriptions({
-          trafficClass: 'background',
-          botId: bot.id,
-          sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
-        })
-      : existing;
+    const confirmedSubscriptions =
+      deletedSubscriptionUrls.size > 0
+        ? await this.maxClient.listWebhookSubscriptions({
+            trafficClass: 'background',
+            botId: bot.id,
+            sourceTag: MAX_API_SOURCE_TAGS.WEBHOOK_SUBSCRIPTION_RECONCILE,
+          })
+        : establishedSubscriptions;
     const refreshedCurrent = confirmedSubscriptions.find((item) =>
       this.maxClient.matchesConfiguredWebhookUrl(item.url, bot.id),
     );
@@ -580,12 +590,18 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
     };
   }
 
-  private isOwnedBotWebhookSubscriptionUrl(url: string, botId: string): boolean {
+  private isOwnedBotWebhookSubscriptionUrl(url: string, botId: string, targetUrl: string): boolean {
     try {
       const parsed = new URL(url);
+      const target = new URL(targetUrl);
       const segments = parsed.pathname.split('/').filter((segment) => segment.length > 0);
       return (
-        segments.length >= 5 &&
+        parsed.origin === target.origin &&
+        !parsed.username &&
+        !parsed.password &&
+        !parsed.search &&
+        !parsed.hash &&
+        segments.length === 5 &&
         segments[0] === 'api' &&
         segments[1] === 'webhook' &&
         segments[2] === 'max' &&

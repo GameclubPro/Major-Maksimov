@@ -5977,12 +5977,12 @@ describe('ModerationService', () => {
 
   it('loads full channel auto-post contexts only for the selected scan batch', async () => {
     const candidateChannels = [
-      { chatId: 'channel-1' },
-      { chatId: 'channel-2' },
-      { chatId: 'channel-3' },
-      { chatId: 'channel-4' },
-      { chatId: 'channel-5' },
-      { chatId: 'channel-6' },
+      { commentsEnabled: true, chatId: 'channel-1' },
+      { commentsEnabled: true, chatId: 'channel-2' },
+      { commentsEnabled: true, chatId: 'channel-3' },
+      { commentsEnabled: true, chatId: 'channel-4' },
+      { commentsEnabled: true, chatId: 'channel-5' },
+      { commentsEnabled: true, chatId: 'channel-6' },
     ];
     const channelBatch = ['channel-1', 'channel-2', 'channel-3', 'channel-4'];
     const prisma = {
@@ -6038,7 +6038,12 @@ describe('ModerationService', () => {
       expect.objectContaining({
         select: {
           chatId: true,
+          quickButtonsEnabled: true,
+          postSignatureEnabled: true,
+          commentsEnabled: true,
+          postSuggestionsEnabled: true,
         },
+        take: 64,
       }),
     );
     expect(prisma.channelSettings.findMany).toHaveBeenNthCalledWith(

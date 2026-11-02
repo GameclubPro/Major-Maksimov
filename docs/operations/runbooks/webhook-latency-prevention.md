@@ -219,6 +219,11 @@ no parked/expired starts, no original replay, claim/start races, exact completio
 restart, repeated blockers and bounded indexed reconciliation. Its required CI lane and
 reader-before-writer rollout are described in [the quarantine runbook](webhook-dependency-quarantine.md).
 
+Advisory routing-metrics deadlines also require `webhook-routing.service.spec.ts` and native
+`webhook-multibot-fullpath.spec.ts`: persisted shard pinning, independent progress, one underlying
+observation after timeout, and no started-handler replay. Saved command-notice waits use only the
+typed preparation retry boundary; uncertain SEND failures stay fenced.
+
 These are existing executable regressions, not substitutes for required impact checks or exact-SHA
 CI. Paths in the table are relative to `apps/api/src` except the explicit `infra/` path. Run the
 rows affected by a change; do not rerun unrelated suites for a documentation-only edit.

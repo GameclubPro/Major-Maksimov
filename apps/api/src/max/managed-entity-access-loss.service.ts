@@ -190,7 +190,8 @@ export class ManagedEntityAccessLossService {
     params: RecordManagedEntityAccessLostParams,
   ): Promise<RecordManagedEntityAccessLostResult | null> {
     const chatId = params.chatId.trim();
-    if (!chatId || isPrivateDirectChatId(chatId)) {
+    const explicitBotId = this.readTrimmedString(params.botId);
+    if (!chatId || isPrivateDirectChatId(chatId) || !explicitBotId) {
       return null;
     }
 
@@ -201,7 +202,7 @@ export class ManagedEntityAccessLossService {
         entityType: true,
       },
     });
-    const botId = await this.resolveBotId(chatId, params.botId);
+    const botId = await this.resolveBotId(chatId, explicitBotId);
     const title = params.title?.trim() || chat?.title || `Chat ${chatId}`;
     const entityType = params.entityType ?? chat?.entityType ?? null;
     const lifecycleEventAt = this.normalizeDate(params.lifecycleEventAt);
@@ -258,66 +259,68 @@ export class ManagedEntityAccessLossService {
           })
         : 0;
     let cleanup = this.createEmptyCleanupResult();
-    if (lifecycleFinalization && botId && lifecycleEventAt) {
-      if (lifecycleFinalization.removalStillCurrent) {
-        if (this.rosterSyncQueue) {
-          await this.enqueueDeferredRuntimeCleanup({
-            chatId,
-            botId,
-            lifecycleEventAt,
-            lifecycleEventType,
-            lifecycleSource,
-            reason: params.reason,
-            source: params.source,
-          });
-        } else {
-          // Queue-less construction is retained for isolated tests and one-off tooling only.
-          const hasSurvivingBotAccess = await this.hasConfirmedSurvivingBotAccess({
-            chatId,
-            // A newer grant may reactivate the same bot after lifecycle finalization.
-            lostBotId: null,
-            preferredBotId: nextOwnerBotId,
-          });
-          if (!hasSurvivingBotAccess) {
-            cleanup = await this.cleanupRuntimeWork({
+    try {
+      if (lifecycleFinalization && botId && lifecycleEventAt) {
+        if (lifecycleFinalization.removalStillCurrent) {
+          if (this.rosterSyncQueue) {
+            await this.enqueueDeferredRuntimeCleanup({
               chatId,
+              botId,
+              lifecycleEventAt,
+              lifecycleEventType,
+              lifecycleSource,
               reason: params.reason,
               source: params.source,
             });
+          } else {
+            // Queue-less construction is retained for isolated tests and one-off tooling only.
+            const hasSurvivingBotAccess = await this.hasConfirmedSurvivingBotAccess({
+              chatId,
+              // A newer grant may reactivate the same bot after lifecycle finalization.
+              lostBotId: null,
+              preferredBotId: nextOwnerBotId,
+            });
+            if (!hasSurvivingBotAccess) {
+              cleanup = await this.cleanupRuntimeWork({
+                chatId,
+                reason: params.reason,
+                source: params.source,
+              });
+            }
           }
         }
-      }
-    } else {
-      const hasSurvivingBotAccess = await this.hasConfirmedSurvivingBotAccess({
-        chatId,
-        lostBotId: botId,
-        preferredBotId: nextOwnerBotId,
-      });
-      if (!hasSurvivingBotAccess) {
-        cleanup = await this.cleanupRuntimeWork({
+      } else {
+        const hasSurvivingBotAccess = await this.hasConfirmedSurvivingBotAccess({
           chatId,
-          reason: params.reason,
-          source: params.source,
+          lostBotId: botId,
+          preferredBotId: nextOwnerBotId,
         });
-      }
-    }
-
-    if (!lifecycleFinalization) {
-      await this.awaitCachePublications(
-        [
-          this.chatContextCache.invalidate(chatId),
-          this.chatContextCache.invalidateManagedEntityHeader?.(chatId),
-          this.chatContextCache.clearManagedEntitiesRecentBootstrapForChat(
+        if (!hasSurvivingBotAccess) {
+          cleanup = await this.cleanupRuntimeWork({
             chatId,
-            mapManagedEntityType(entityType),
-          ),
-        ],
-        {
-          chatId,
-          source: params.source,
-          maxWaitMs: params.cachePublicationWaitMs,
-        },
-      );
+            reason: params.reason,
+            source: params.source,
+          });
+        }
+      }
+    } finally {
+      if (!lifecycleFinalization) {
+        await this.awaitCachePublications(
+          [
+            this.chatContextCache.invalidate(chatId),
+            this.chatContextCache.invalidateManagedEntityHeader?.(chatId),
+            this.chatContextCache.clearManagedEntitiesRecentBootstrapForChat(
+              chatId,
+              mapManagedEntityType(entityType),
+            ),
+          ],
+          {
+            chatId,
+            source: params.source,
+            maxWaitMs: params.cachePublicationWaitMs,
+          },
+        );
+      }
     }
 
     this.logger.warn(
@@ -1014,7 +1017,7 @@ export class ManagedEntityAccessLossService {
         },
         'Failed to verify replacement bot access after managed entity access loss',
       );
-      return false;
+      throw error;
     }
   }
 
@@ -1122,7 +1125,7 @@ export class ManagedEntityAccessLossService {
         },
         'Failed to verify surviving bot access after managed entity access loss',
       );
-      return false;
+      throw error;
     }
   }
 
@@ -1426,24 +1429,11 @@ export function classifyMaxTerminalChatActionError(
 }
 
 export function resolveManagedEntityAccessLossReason(
-  operation: ManagedEntityAccessLossOperation,
+  _operation: ManagedEntityAccessLossOperation,
   classification: MaxTerminalChatActionErrorClassification,
 ): ManagedEntityAccessLossReason | null {
   if (classification.kind === 'managed_entity_access_lost') {
     return classification.reason ?? 'chat_inaccessible';
-  }
-
-  if (classification.kind !== 'terminal_unknown') {
-    return null;
-  }
-
-  if (operation === 'send' || operation === 'read' || operation === 'lookup') {
-    if (classification.statusCode === 404) {
-      return 'chat_not_found';
-    }
-    if (classification.statusCode === 403) {
-      return 'bot_denied';
-    }
   }
 
   return null;

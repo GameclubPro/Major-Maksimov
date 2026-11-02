@@ -1,6 +1,7 @@
 import type { MaxUpdate } from '@maxim/contracts';
 import { BadRequestException } from '@nestjs/common';
 import { ChannelPostSignatureService } from '../admin/channel-post-signature.service';
+import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import { MaxApiInternalRateLimitError, type MaxClientService } from '../max/max-client.service';
 import {
   markMaxPreDispatchGuardRejected,
@@ -285,6 +286,19 @@ function createChannelAutoPostAttachMarkerMock() {
   };
 
   return { delegate, rows };
+}
+
+function configureChannelAutoPostScanRoute(service: ModerationService): void {
+  const fixture = service as unknown as { maxBotLinkService?: Partial<MaxBotLinkService> };
+  fixture.maxBotLinkService = {
+    ...fixture.maxBotLinkService,
+    resolveBotIdForCapability: jest
+      .fn<
+        ReturnType<MaxBotLinkService['resolveBotIdForCapability']>,
+        Parameters<MaxBotLinkService['resolveBotIdForCapability']>
+      >()
+      .mockResolvedValue('777000_bot'),
+  };
 }
 
 function configureDefaultChannelAutoPostEditRoute(service: ModerationService): void {
@@ -3526,34 +3540,19 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(prisma.channelSettings.findMany).toHaveBeenNthCalledWith(1, {
-      where: {
-        chat: {
-          entityType: 'CHANNEL',
-        },
-        OR: [
-          {
-            quickButtonsEnabled: true,
-          },
-          {
-            postSignatureEnabled: true,
-          },
-          {
-            commentsEnabled: true,
-          },
-          {
-            postSuggestionsEnabled: true,
-          },
-        ],
-      },
       select: {
         chatId: true,
+        quickButtonsEnabled: true,
+        postSignatureEnabled: true,
+        commentsEnabled: true,
+        postSuggestionsEnabled: true,
       },
-      orderBy: {
-        updatedAt: 'desc',
-      },
+      orderBy: { chatId: 'asc' },
+      take: 64,
     });
     expect(prisma.channelSettings.findMany).toHaveBeenNthCalledWith(2, {
       where: {
@@ -3580,6 +3579,7 @@ describe('ModerationService channel auto post buttons', () => {
       count: 10,
       trafficClass: 'background',
       sourceTag: 'channel_auto_post',
+      botId: '777000_bot',
     });
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
       'channel-1',
@@ -3616,7 +3616,7 @@ describe('ModerationService channel auto post buttons', () => {
       channelSettings: {
         findMany: jest
           .fn()
-          .mockResolvedValueOnce([{ chatId: 'chat-1' }])
+          .mockResolvedValueOnce([{ chatId: 'chat-1', commentsEnabled: true }])
           .mockResolvedValueOnce([]),
       },
       auditLog: {
@@ -3641,6 +3641,7 @@ describe('ModerationService channel auto post buttons', () => {
       createConfigMock() as never,
     );
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(prisma.channelSettings.findMany).toHaveBeenNthCalledWith(
@@ -3736,11 +3737,13 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     await service.handleUpdate(createRuntimeBotChannelPostUpdate());
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.listMessages).not.toHaveBeenCalled();
 
     jest.setSystemTime(new Date('2026-03-06T15:11:01.000Z'));
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.listMessages).toHaveBeenCalledTimes(1);
@@ -3748,6 +3751,7 @@ describe('ModerationService channel auto post buttons', () => {
       count: 10,
       trafficClass: 'background',
       sourceTag: 'channel_auto_post',
+      botId: '777000_bot',
     });
   });
 
@@ -4123,6 +4127,7 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
@@ -4193,6 +4198,7 @@ describe('ModerationService channel auto post buttons', () => {
       'claimChannelAutoPost',
     );
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(resolveMutationBot).toHaveBeenCalledWith({
@@ -4282,6 +4288,7 @@ describe('ModerationService channel auto post buttons', () => {
       );
 
       configureDefaultChannelAutoPostEditRoute(service);
+      configureChannelAutoPostScanRoute(service);
       await (service as any).processChannelAutoPostButtons();
 
       expect(maxClient.getCurrentChatMemberAccess).toHaveBeenCalledWith('channel-1', {
@@ -4424,6 +4431,7 @@ describe('ModerationService channel auto post buttons', () => {
     );
     (service as any).channelPostSignatureService = channelPostSignatureService;
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.editMessageInlineKeyboard).not.toHaveBeenCalled();
@@ -4559,7 +4567,9 @@ describe('ModerationService channel auto post buttons', () => {
       adminService as never,
     );
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(prisma.channelSettings.findMany).toHaveBeenCalledTimes(isolated ? 3 : 2);
@@ -4570,6 +4580,7 @@ describe('ModerationService channel auto post buttons', () => {
       count: 10,
       trafficClass: 'background',
       sourceTag: 'channel_auto_post',
+      botId: '777000_bot',
     });
   });
 
@@ -4649,12 +4660,16 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
     jest.advanceTimersByTime(30_000);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
     jest.advanceTimersByTime(30_000);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
     jest.advanceTimersByTime(30_000);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.listMessages).toHaveBeenCalledTimes(3);
@@ -4729,6 +4744,7 @@ describe('ModerationService channel auto post buttons', () => {
       nextScanAtMs: Date.now() + 60_000,
     });
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.listMessages).toHaveBeenCalledTimes(1);
@@ -4736,6 +4752,7 @@ describe('ModerationService channel auto post buttons', () => {
       count: 10,
       trafficClass: 'background',
       sourceTag: 'channel_auto_post',
+      botId: '777000_bot',
     });
   });
 
@@ -4824,8 +4841,10 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
     jest.advanceTimersByTime(30_000);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledTimes(4);
@@ -4941,6 +4960,7 @@ describe('ModerationService channel auto post buttons', () => {
       createConfigMock() as never,
     );
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(systemModeService.getEffectiveSnapshot).toHaveBeenCalled();
@@ -5006,6 +5026,7 @@ describe('ModerationService channel auto post buttons', () => {
       createConfigMock() as never,
     );
 
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(systemModeService.getEffectiveSnapshot).toHaveBeenCalled();
@@ -5197,7 +5218,7 @@ describe('ModerationService channel auto post buttons', () => {
       channelSettings: {
         findMany: jest
           .fn()
-          .mockResolvedValueOnce([{ chatId: 'channel-1' }])
+          .mockResolvedValueOnce([{ chatId: 'channel-1', commentsEnabled: true }])
           .mockResolvedValueOnce([
             {
               chatId: 'channel-1',
@@ -5268,6 +5289,7 @@ describe('ModerationService channel auto post buttons', () => {
     jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledTimes(1);
@@ -5410,7 +5432,7 @@ describe('ModerationService channel auto post buttons', () => {
       channelSettings: {
         findMany: jest
           .fn()
-          .mockResolvedValueOnce([{ chatId: 'channel-1' }])
+          .mockResolvedValueOnce([{ chatId: 'channel-1', commentsEnabled: true }])
           .mockResolvedValueOnce([
             {
               chatId: 'channel-1',
@@ -5484,6 +5506,7 @@ describe('ModerationService channel auto post buttons', () => {
     );
 
     configureDefaultChannelAutoPostEditRoute(service);
+    configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledTimes(1);

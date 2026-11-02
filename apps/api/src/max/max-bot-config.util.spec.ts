@@ -5,6 +5,13 @@ import {
 } from './max-bot-config.util';
 
 describe('max bot config util', () => {
+  it('does not include malformed bot credentials in a JSON parse error', () => {
+    const malformed = '[{"token":synthetic_token_123456}]';
+    expect(() => parseAdditionalMaxBotsJson(malformed)).toThrow(
+      /^MAX_BOTS_JSON must be valid JSON$/u,
+    );
+  });
+
   it.each([
     ['id613070470872_9_bot', 'Майор Максимов', 'male'],
     ['id613002203036_bot', 'Майор Максимов', 'male'],
