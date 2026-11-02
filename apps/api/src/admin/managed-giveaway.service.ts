@@ -959,19 +959,17 @@ export class ManagedGiveawayService {
       throw new BadRequestException('Выдачу можно отметить только для актуального победителя.');
     }
 
-    const updated = await this.prisma.managedGiveawayWinner
-      .update({
-        where: {
-          id: winner.id,
-          status: winner.status,
-          ...(winner.status === ManagedGiveawayWinnerStatus.SELECTED
-            ? { OR: [{ claimDeadlineAt: null }, { claimDeadlineAt: { gt: new Date() } }] }
-            : {}),
-        },
-        data: {
-          status: ManagedGiveawayWinnerStatus.DELIVERED,
-          deliveredAt: new Date(),
-        },
+    const updated = await this.prisma
+      .$transaction(async (tx) => {
+        const transitioned = await this.transitionCurrentGiveawayWinner(
+          tx,
+          winner,
+          ManagedGiveawayWinnerStatus.DELIVERED,
+        );
+        if (!transitioned) {
+          throw new ConflictException('Состояние победителя изменилось. Обновите экран.');
+        }
+        return { id: winner.id };
       })
       .catch((error: unknown) => {
         if (isPrismaKnownError(error, 'P2025')) {
@@ -1377,22 +1375,22 @@ export class ManagedGiveawayService {
       );
     }
 
-    const claimedAt = new Date();
-    const updated = await this.prisma.managedGiveawayWinner
-      .update({
-        where: {
-          id: winner.id,
-          status: ManagedGiveawayWinnerStatus.SELECTED,
-          OR: [{ claimDeadlineAt: null }, { claimDeadlineAt: { gt: claimedAt } }],
-        },
-        data: {
-          status: ManagedGiveawayWinnerStatus.CLAIMED,
-          claimedAt,
-        },
-        include: {
-          prize: true,
-          entry: true,
-        },
+    const updated = await this.prisma
+      .$transaction(async (tx) => {
+        const transitioned = await this.transitionCurrentGiveawayWinner(
+          tx,
+          winner,
+          ManagedGiveawayWinnerStatus.CLAIMED,
+        );
+        if (!transitioned) {
+          throw new ConflictException(
+            'Срок подтверждения истёк или победитель уже изменён. Обновите экран.',
+          );
+        }
+        return tx.managedGiveawayWinner.findUniqueOrThrow({
+          where: { id: winner.id },
+          include: { prize: true, entry: true },
+        });
       })
       .catch((error: unknown) => {
         if (isPrismaKnownError(error, 'P2025')) {
@@ -2252,6 +2250,48 @@ export class ManagedGiveawayService {
     }
 
     return winner.status;
+  }
+
+  private async transitionCurrentGiveawayWinner(
+    tx: Prisma.TransactionClient,
+    winner: Pick<PersistedManagedGiveawayWinner, 'id' | 'giveawayId' | 'entryId' | 'status'>,
+    nextStatus: 'CLAIMED' | 'DELIVERED',
+  ): Promise<boolean> {
+    const [locked] = await tx.$queryRaw<Pick<PersistedManagedGiveawayWinner, 'id' | 'status'>[]>`
+      SELECT id, status FROM managed_giveaway_winners
+      WHERE id = ${winner.id} AND giveaway_id = ${winner.giveawayId}
+        AND entry_id = ${winner.entryId}
+      FOR UPDATE
+    `;
+    if (!locked || locked.status !== winner.status) {
+      return false;
+    }
+
+    const timestampAssignment =
+      nextStatus === ManagedGiveawayWinnerStatus.CLAIMED
+        ? Prisma.sql`claimed_at = transition_time.checked_at,`
+        : Prisma.sql`delivered_at = transition_time.checked_at,`;
+    // FLAG: Sample DB time in a separate write after the exact winner lock is owned.
+    // A clock read in the locking SELECT can run before its wait; CLAIMED delivery has no deadline.
+    const changed = await tx.$queryRaw<Pick<PersistedManagedGiveawayWinner, 'id'>[]>(Prisma.sql`
+      WITH transition_time AS MATERIALIZED (
+        SELECT clock_timestamp() AT TIME ZONE 'UTC' AS checked_at
+      )
+      UPDATE managed_giveaway_winners AS current_winner
+      SET status = ${nextStatus}::"ManagedGiveawayWinnerStatus",
+        ${timestampAssignment}
+        updated_at = transition_time.checked_at
+      FROM transition_time
+      WHERE current_winner.id = ${winner.id}
+        AND current_winner.giveaway_id = ${winner.giveawayId}
+        AND current_winner.entry_id = ${winner.entryId}
+        AND current_winner.status = ${winner.status}::"ManagedGiveawayWinnerStatus"
+        AND (current_winner.status <> 'SELECTED'
+          OR current_winner.claim_deadline_at IS NULL
+          OR current_winner.claim_deadline_at > transition_time.checked_at)
+      RETURNING current_winner.id
+    `);
+    return changed.length === 1;
   }
 
   private isGiveawayClaimDeadlineExpired(

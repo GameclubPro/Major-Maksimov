@@ -338,7 +338,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
             botId: bot.id,
             ...(messageId ? { messageId } : {}),
             body: request.data,
-            ...(path.endsWith('/members')
+            ...(path.endsWith('/members') || path === '/answers'
               ? { params: { ...Object.fromEntries(url.searchParams), ...request.params } }
               : {}),
           };
@@ -469,6 +469,9 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
               ...existing,
               body: { ...(existing.body as object), ...request.data },
             });
+            data = { success: true };
+          } else if (method === 'post' && path === '/answers') {
+            effects.push(call);
             data = { success: true };
           } else if (method === 'post' && path === '/messages') {
             effects.push(call);
