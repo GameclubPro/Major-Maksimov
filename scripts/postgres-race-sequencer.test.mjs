@@ -62,15 +62,17 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 129 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 129);
-  assert.equal(new Set(nativePaths).size, 129);
+test('all 130 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 130);
+  assert.equal(new Set(nativePaths).size, 130);
+  assert.ok(nativePaths.includes('src/admin/managed-giveaway-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/admin/former-participant-sanctions-postgres.spec.ts'));
   const tests = makeTests();
   const baseline = await partitions(DefaultSequencer, tests);
   const selected = await partitions(SelectedSequencer, tests);
   const flat = selected.flat();
-  assert.equal(flat.length, 129);
-  assert.equal(new Set(flat).size, 129, 'No suite object may appear in two lanes');
+  assert.equal(flat.length, nativePaths.length);
+  assert.equal(new Set(flat).size, nativePaths.length, 'No suite object may appear in two lanes');
   assert.deepEqual(new Set(flat), new Set(tests), 'Keep every original native suite object');
   assert.deepEqual(
     selected.map((lane) => lane.length),

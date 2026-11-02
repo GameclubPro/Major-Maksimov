@@ -6817,6 +6817,36 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
+  it.each(['message', 'chat', 'poll', 'private-chat', 'noncanonical-chat'] as const)(
+    'rejects an invalid bound poll callback %s before preparation',
+    async (invalid) => {
+      const httpService = { request: jest.fn() };
+      const service = createService(httpService);
+      const edit: NonNullable<Parameters<MaxClientService['answerCallback']>[2]> = {
+        messageId: 'mid-poll',
+        text: 'Poll',
+      };
+      const options: NonNullable<Parameters<MaxClientService['answerCallback']>[3]> = {
+        rateLimitEntityId: '-100',
+        boundObject: { kind: 'poll', id: 'poll-1' },
+      };
+      if (invalid === 'message') delete edit.messageId;
+      if (invalid === 'chat') delete options.rateLimitEntityId;
+      if (invalid === 'poll') options.boundObject = { kind: 'poll', id: '' };
+      if (invalid === 'private-chat') options.rateLimitEntityId = '12345';
+      if (invalid === 'noncanonical-chat') options.rateLimitEntityId = ' -100 ';
+      try {
+        const error = await service
+          .answerCallback('callback-invalid', undefined, edit, options)
+          .catch((caught: unknown) => caught);
+        expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+        expect(httpService.request).not.toHaveBeenCalled();
+      } finally {
+        await service.onModuleDestroy();
+      }
+    },
+  );
+
   it('does not mark a callback dispatch attempt when exact-message preparation fails', async () => {
     const preparationError = new Error('Exact callback message lookup failed');
     const httpService = {

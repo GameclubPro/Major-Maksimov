@@ -60,6 +60,7 @@ export async function createManagedPoll(
     method: 'POST',
     body: JSON.stringify(requestBody),
     timeoutMs: MANAGED_POLL_MUTATION_TIMEOUT_MS,
+    retryMutationOnTransportError: false,
   });
   return managedPollDetailsSchema.parse(response);
 }

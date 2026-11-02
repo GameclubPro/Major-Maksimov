@@ -3,6 +3,11 @@ import { decodeManagedPollListCursor, encodeManagedPollListCursor } from '@maxim
 import { ConflictException } from '@nestjs/common';
 import { ChatEntityType, ManagedPollStatus, ManagedPollVisibility } from '../prisma/prisma-client';
 import { ManagedPollService } from './managed-poll.service';
+import type { MaxClientService } from '../max/max-client.service';
+import {
+  MAX_EDIT_PRE_DISPATCH_GUARD_REJECTED_CODE,
+  markMaxPreDispatchGuardRejected,
+} from '../max/max-action-pre-dispatch-guard';
 
 const POLL_IDENTITY_SALT = '12345678901234567890123456789012';
 const POLL_RENDER_FORMAT_VERSION = 7;
@@ -431,7 +436,14 @@ describe('ManagedPollService vote persistence', () => {
 
 describe('ManagedPollService callback rendering', () => {
   it('acknowledges a text poll with updated result buttons through the message response', async () => {
-    const maxClient = { answerCallback: jest.fn().mockResolvedValue(undefined) };
+    const maxClient = {
+      answerCallback: jest
+        .fn<
+          ReturnType<MaxClientService['answerCallback']>,
+          Parameters<MaxClientService['answerCallback']>
+        >()
+        .mockResolvedValue(undefined),
+    };
     const service = new ManagedPollService(
       {} as never,
       maxClient as never,
@@ -503,7 +515,12 @@ describe('ManagedPollService callback rendering', () => {
           ],
         }),
       }),
-      expect.objectContaining({ botId: 'bot-1', trafficClass: 'critical' }),
+      expect.objectContaining({
+        botId: 'bot-1',
+        trafficClass: 'critical',
+        rateLimitEntityId: 'chat-1',
+        boundObject: { kind: 'poll', id: 'poll-1' },
+      }),
     );
     expect(markRendered).toHaveBeenCalledWith('poll-1', 2);
     expect(recordVote.mock.invocationCallOrder[0]).toBeLessThan(
@@ -584,91 +601,121 @@ describe('ManagedPollService callback rendering', () => {
     expect(scheduleRepair).toHaveBeenCalledWith('channel-1', 'poll-1');
   });
 
-  it('falls back to a notification and schedules repair when callback preparation fails', async () => {
-    const prepareError = new Error('exact message lookup failed');
-    const maxClient = {
-      answerCallback: jest
-        .fn()
-        .mockRejectedValueOnce(prepareError)
-        .mockResolvedValueOnce(undefined),
-    };
-    const service = new ManagedPollService(
-      {} as never,
-      maxClient as never,
-      {} as never,
-      {} as never,
-    );
-    jest.spyOn(service as any, 'recordVote').mockResolvedValue({
-      kind: 'recorded',
-      changed: true,
-      pollId: 'poll-1',
-      needsRender: true,
-    });
-    jest.spyOn(service as any, 'loadPollAggregate').mockResolvedValue({
-      id: 'poll-1',
-      chatId: 'chat-1',
-      chat: { entityType: ChatEntityType.CHAT },
-      question: 'Текст администратора',
-      questionFormat: 'plain',
-      status: ManagedPollStatus.ACTIVE,
-      publicationMessageId: 'message-1',
-      publicationBotId: 'bot-1',
-      renderRevision: 2,
-      imageCount: 0,
-      resultOptions: [
-        { id: 'option-1', position: 0, text: 'Да', votes: 1, percent: 100 },
-        { id: 'option-2', position: 1, text: 'Нет', votes: 0, percent: 0 },
-      ],
-    });
-    jest.spyOn(service as any, 'resolvePollChannelEngagement').mockResolvedValue({ state: 'none' });
-    const recordRenderError = jest
-      .spyOn(service as any, 'recordPollRenderError')
-      .mockResolvedValue(undefined);
-    const scheduleRepair = jest
-      .spyOn(service as any, 'schedulePollRenderRepair')
-      .mockImplementation(() => undefined);
+  it.each(['preparation', 'final guard'] as const)(
+    'falls back to a notification and schedules repair when callback %s refuses dispatch',
+    async (stage) => {
+      const prepareError =
+        stage === 'preparation'
+          ? new Error('exact message lookup failed')
+          : markMaxPreDispatchGuardRejected(
+              new Error('authority changed'),
+              MAX_EDIT_PRE_DISPATCH_GUARD_REJECTED_CODE,
+            );
+      const maxClient = {
+        answerCallback: jest
+          .fn<
+            ReturnType<MaxClientService['answerCallback']>,
+            Parameters<MaxClientService['answerCallback']>
+          >()
+          .mockImplementationOnce(async (_callbackId, _notification, _edit, options) => {
+            if (stage === 'final guard') await options?.onDispatchAttempt?.();
+            throw prepareError;
+          })
+          .mockResolvedValueOnce(undefined),
+      };
+      const service = new ManagedPollService(
+        {} as never,
+        maxClient as never,
+        {} as never,
+        {} as never,
+      );
+      jest.spyOn(service as any, 'recordVote').mockResolvedValue({
+        kind: 'recorded',
+        changed: true,
+        pollId: 'poll-1',
+        needsRender: true,
+      });
+      jest.spyOn(service as any, 'loadPollAggregate').mockResolvedValue({
+        id: 'poll-1',
+        chatId: 'chat-1',
+        chat: { entityType: ChatEntityType.CHAT },
+        question: 'Текст администратора',
+        questionFormat: 'plain',
+        status: ManagedPollStatus.ACTIVE,
+        publicationMessageId: 'message-1',
+        publicationBotId: 'bot-1',
+        renderRevision: 2,
+        imageCount: 0,
+        resultOptions: [
+          { id: 'option-1', position: 0, text: 'Да', votes: 1, percent: 100 },
+          { id: 'option-2', position: 1, text: 'Нет', votes: 0, percent: 0 },
+        ],
+      });
+      jest
+        .spyOn(service as any, 'resolvePollChannelEngagement')
+        .mockResolvedValue({ state: 'none' });
+      const recordRenderError = jest
+        .spyOn(service as any, 'recordPollRenderError')
+        .mockResolvedValue(undefined);
+      const scheduleRepair = jest
+        .spyOn(service as any, 'schedulePollRenderRepair')
+        .mockImplementation(() => undefined);
+      const logger = (service as unknown as { logger: { warn: (...args: unknown[]) => void } })
+        .logger;
+      const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      const render = jest.spyOn(service as any, 'renderPollPublication').mockResolvedValue(true);
 
-    await expect(
-      service.tryHandleCallback({
-        updateId: 'update-1',
-        botId: 'bot-1',
-        message: { chatId: 'chat-1', messageId: 'message-1' },
-        raw: {
-          callback: {
-            callback_id: 'callback-1',
-            payload: 'poll|v2|poll-1|option-1',
-            user: { user_id: 'user-1' },
+      await expect(
+        service.tryHandleCallback({
+          updateId: 'update-1',
+          botId: 'bot-1',
+          message: { chatId: 'chat-1', messageId: 'message-1' },
+          raw: {
+            callback: {
+              callback_id: 'callback-1',
+              payload: 'poll|v2|poll-1|option-1',
+              user: { user_id: 'user-1' },
+            },
           },
-        },
-      } as never),
-    ).resolves.toBe(true);
+        } as never),
+      ).resolves.toBe(true);
 
-    const firstOptions = maxClient.answerCallback.mock.calls[0]?.[3];
-    expect(firstOptions?.onDispatchAttempt).toEqual(expect.any(Function));
-    expect(maxClient.answerCallback).toHaveBeenNthCalledWith(
-      2,
-      'callback-1',
-      'Голос учтён',
-      undefined,
-      expect.objectContaining({ botId: 'bot-1' }),
-    );
-    expect(recordRenderError).toHaveBeenCalledWith(
-      'poll-1',
-      2,
-      'chat-1',
-      'vote-callback-prepare',
-      prepareError,
-    );
-    expect(scheduleRepair).toHaveBeenCalledWith('chat-1', 'poll-1');
-  });
+      const firstOptions = maxClient.answerCallback.mock.calls[0]?.[3];
+      expect(firstOptions?.onDispatchAttempt).toEqual(expect.any(Function));
+      expect(maxClient.answerCallback).toHaveBeenNthCalledWith(
+        2,
+        'callback-1',
+        'Голос учтён',
+        undefined,
+        expect.objectContaining({ botId: 'bot-1' }),
+      );
+      expect(recordRenderError).toHaveBeenCalledWith(
+        'poll-1',
+        2,
+        'chat-1',
+        'vote-callback-prepare',
+        prepareError,
+      );
+      expect(scheduleRepair).toHaveBeenCalledWith('chat-1', 'poll-1');
+      expect(warn).not.toHaveBeenCalled();
+      expect(render).not.toHaveBeenCalled();
+    },
+  );
 
   it('treats callback failures after dispatch begins as ambiguous', async () => {
     const maxClient = {
-      answerCallback: jest.fn().mockImplementation(async (...args: unknown[]) => {
-        const requestOptions = args[3] as { onDispatchAttempt?: () => void } | undefined;
-        requestOptions?.onDispatchAttempt?.();
-        throw new Error('POST /answers failed');
-      }),
+      answerCallback: jest
+        .fn<
+          ReturnType<MaxClientService['answerCallback']>,
+          Parameters<MaxClientService['answerCallback']>
+        >()
+        .mockImplementation(async (_callbackId, _notification, _edit, requestOptions) => {
+          await requestOptions?.onDispatchAttempt?.();
+          throw Object.assign(new Error('POST /answers timed out'), {
+            code: 'ECONNABORTED',
+            request: {},
+          });
+        }),
     };
     const service = new ManagedPollService(
       {} as never,

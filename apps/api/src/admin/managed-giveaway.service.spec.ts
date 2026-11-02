@@ -6,6 +6,7 @@ import {
   ManagedGiveawayStatus,
   ManagedGiveawayWinnerNotificationStatus,
   ManagedGiveawayWinnerStatus,
+  type Prisma,
 } from '../prisma/prisma-client';
 import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
@@ -84,6 +85,7 @@ function createPrismaMock() {
       create: jest.fn().mockResolvedValue(undefined),
     },
     $transaction: jest.fn(),
+    $queryRaw: jest.fn() as jest.MockedFunction<Prisma.TransactionClient['$queryRaw']>,
   };
   prisma.$transaction.mockImplementation(async (callback) => callback(prisma));
   return prisma;
@@ -558,7 +560,7 @@ describe('ManagedGiveawayService', () => {
     expect(prisma.managedGiveawayEntry.upsert).not.toHaveBeenCalled();
   });
 
-  it('fences a claim with the deadline and status after the fresh MAX check', async () => {
+  it('does not persist a claim when the final database deadline guard rejects after MAX', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-09-11T10:00:00Z'));
     const prisma = createPrismaMock();
     const service = new ManagedGiveawayService(
@@ -579,22 +581,16 @@ describe('ManagedGiveawayService', () => {
       jest.setSystemTime(new Date('2026-09-11T10:00:02Z'));
       return { state: 'VERIFIED', reason: null, missingChannelIds: [] };
     });
-    prisma.managedGiveawayWinner.update.mockRejectedValue({ code: 'P2025' });
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ id: winner.id, status: winner.status }])
+      .mockResolvedValueOnce([]);
     await expect(service.claimGiveaway('giveaway-1', user)).rejects.toBeInstanceOf(
       ConflictException,
     );
-    expect(prisma.managedGiveawayWinner.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          id: winner.id,
-          status: 'SELECTED',
-          OR: [
-            { claimDeadlineAt: null },
-            { claimDeadlineAt: { gt: new Date('2026-09-11T10:00:02Z') } },
-          ],
-        },
-      }),
-    );
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
+    expect(prisma.managedGiveawayWinner.update).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('does not persist entries or winners after losing its draw lease', async () => {

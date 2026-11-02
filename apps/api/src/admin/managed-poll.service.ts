@@ -51,6 +51,7 @@ import {
   type MaxSendMessageOptions,
 } from '../max/max-client.service';
 import { isAmbiguousMaxSendError } from '../max/max-send-ambiguity.util';
+import { wasMaxPreDispatchGuardRejected } from '../max/max-action-pre-dispatch-guard';
 import {
   MaxRoutedPublicationService,
   type MaxRoutedPublicationResult,
@@ -1089,6 +1090,7 @@ export class ManagedPollService {
           ),
           trafficClass: 'critical',
           rateLimitEntityId: chatId,
+          boundObject: { kind: 'poll', id: poll.id },
           onDispatchAttempt: () => {
             callbackAttempted = true;
           },
@@ -1117,7 +1119,7 @@ export class ManagedPollService {
           }
         }
       } catch (error: unknown) {
-        if (!callbackAttempted) {
+        if (!callbackAttempted || wasMaxPreDispatchGuardRejected(error)) {
           await this.recordPollRenderError(
             poll.id,
             poll.renderRevision,
