@@ -231,6 +231,9 @@ export class PublisherAutoReplyAuthoringRecoveryService implements OnModuleInit,
       await this.prisma.publisherAutoReplyAuthoringSession.updateMany({
         where: {
           id: row.id,
+          // FLAG: Authoring can advance after this read without replacing the old claim.
+          // Settle only the observed revision; a fresh pass preserves its successor.
+          notificationRevision: row.notificationRevision,
           notificationClaimRevision: claimRevision,
           notificationLockToken: row.notificationLockToken,
           notificationDispatchStartedAt: { not: null },
