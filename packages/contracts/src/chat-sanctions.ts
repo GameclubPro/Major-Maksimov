@@ -27,6 +27,7 @@ export const chatSanctionItemSchema = z.object({
   endedAt: z.string().datetime().nullable(),
   permanent: z.boolean(),
   releaseAction: z.enum(['UNMUTE', 'UNBAN']).nullable(),
+  banOnRejoin: z.boolean().optional(),
 });
 export type ChatSanctionItem = z.infer<typeof chatSanctionItemSchema>;
 

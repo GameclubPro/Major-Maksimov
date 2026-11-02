@@ -210,6 +210,8 @@ export function ChatSanctionsWorkspace({
     selected.status === 'active' &&
     (selected.permanent || (selected.expiresAt && Date.parse(selected.expiresAt) > nowMs)),
   );
+  const selectedNeedsMaxCheck =
+    selected?.action === 'BAN' && !selected.banOnRejoin && !isMaxMemberRestoreAvailable();
   const closeDetails = () => {
     if (!release.isPending && !confirmOpen && !isOpeningProfile) setSelected(null);
   };
@@ -261,10 +263,10 @@ export function ChatSanctionsWorkspace({
         >
           <IconoirSprite variant="iconoir" icon="ShieldCheck" width={20} height={20} aria-hidden />
           {selected.action === 'BAN'
-            ? isMaxMemberRestoreAvailable()
-              ? 'Снять блокировку'
+            ? selected.banOnRejoin || isMaxMemberRestoreAvailable()
+              ? 'Снять бан'
               : 'Проверить снятие в MAX'
-            : 'Разрешить писать'}
+            : 'Снять мут'}
         </button>
       ) : null}
     </div>
@@ -331,8 +333,8 @@ export function ChatSanctionsWorkspace({
             onChange={(event) => setAction(event.target.value as ChatSanctionsQuery['action'])}
           >
             <option value="all">Все типы</option>
-            <option value="MUTE">Запрет писать</option>
-            <option value="BAN">Блокировка</option>
+            <option value="MUTE">Мут</option>
+            <option value="BAN">Бан</option>
           </select>
         </label>
       </div>
@@ -507,7 +509,7 @@ export function ChatSanctionsWorkspace({
                         aria-hidden
                       />
                     )}
-                    {item.action === 'BAN' ? 'Блокировка' : 'Запрет писать'}
+                    {item.action === 'BAN' ? 'Бан' : 'Мут'}
                   </span>
                   <strong className="sanctions-workspace__timer">
                     {formatSanctionRemaining(item, nowMs)}
@@ -571,7 +573,7 @@ export function ChatSanctionsWorkspace({
                   className="sanction-details__avatar"
                 />
                 <div>
-                  <span>{selected.action === 'BAN' ? 'Блокировка' : 'Запрет писать'}</span>
+                  <span>{selected.action === 'BAN' ? 'Бан' : 'Мут'}</span>
                   <small>
                     {selectedStatus === 'active'
                       ? selected.permanent
@@ -633,10 +635,10 @@ export function ChatSanctionsWorkspace({
         open={confirmOpen && Boolean(selected)}
         title={
           selected?.action === 'BAN'
-            ? isMaxMemberRestoreAvailable()
-              ? 'Снять блокировку?'
+            ? !selectedNeedsMaxCheck
+              ? 'Снять бан?'
               : 'Проверить снятие в MAX?'
-            : 'Разрешить писать?'
+            : 'Снять мут?'
         }
         summary={selected?.userDisplayName}
         previewTitle={chatTitle}
@@ -645,23 +647,21 @@ export function ChatSanctionsWorkspace({
             <span role="alert">
               {describeUserFacingError(release.error, 'Не удалось снять ограничение.')}
             </span>
-          ) : selected?.action === 'BAN' && !isMaxMemberRestoreAvailable() ? (
+          ) : selectedNeedsMaxCheck ? (
             'Снимите блокировку вручную в MAX. Проверка подтвердит возвращение участника в чат.'
           ) : selected ? (
             `Назначено ${formatDate(selected.createdAt)}`
           ) : undefined
         }
         confirmLabel={
-          selected?.action === 'BAN' && !isMaxMemberRestoreAvailable()
+          selectedNeedsMaxCheck
             ? 'Проверить'
-            : 'Снять ограничение'
+            : selected?.action === 'BAN'
+              ? 'Снять бан'
+              : 'Снять мут'
         }
         confirmDisabled={!releaseAvailable}
-        confirmBusyLabel={
-          selected?.action === 'BAN' && !isMaxMemberRestoreAvailable()
-            ? 'Проверяем...'
-            : 'Снимаем...'
-        }
+        confirmBusyLabel={selectedNeedsMaxCheck ? 'Проверяем...' : 'Снимаем...'}
         tone="accent"
         isBusy={release.isPending}
         onClose={() => {

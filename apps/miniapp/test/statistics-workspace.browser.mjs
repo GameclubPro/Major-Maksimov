@@ -56,11 +56,11 @@ try {
   );
   await page.getByLabel('Роль участника', { exact: true }).selectOption('members');
   await page.locator('.participants-roster__item').first().click();
-  await page.getByRole('button', { name: 'Заблокировать', exact: true }).click();
+  await page.getByRole('button', { name: 'Бан', exact: true }).click();
   await page.evaluate(() => {
     window.statisticsTest.holdMutations = true;
   });
-  const confirm = page.getByRole('dialog', { name: 'Блокировка участника' });
+  const confirm = page.getByRole('dialog', { name: 'Бан участника' });
   await confirm.getByRole('button', { name: 'В этом чате', exact: true }).evaluate((button) => {
     button.click();
     button.click();
@@ -104,19 +104,42 @@ try {
   assert.equal(await page.locator('.membership-feed__item').count(), 75);
   console.log('PASS channel moderation preserves paginated event history');
 
+  await navigate('/chat/local-ban/events?section=moderation&moderationView=sanctions');
+  await page.locator('.sanctions-workspace__details-trigger').first().click();
+  await page.getByRole('button', { name: 'Снять бан', exact: true }).click();
+  const localRelease = page.getByRole('dialog', { name: 'Снять бан?', exact: true });
+  assert.equal(await localRelease.getByText(/Снимите блокировку вручную/u).count(), 0);
+  await localRelease.getByRole('button', { name: 'Снять бан', exact: true }).click();
+  await localRelease.waitFor({ state: 'hidden' });
+  assert.deepEqual(
+    await page.evaluate(() =>
+      window.statisticsTest.calls.filter(
+        (call) => call.path === '/chats/local-ban/members/local-user/moderation-action',
+      ),
+    ),
+    [
+      {
+        path: '/chats/local-ban/members/local-user/moderation-action',
+        method: 'POST',
+        body: { action: 'UNBAN', expectedSanctionEventId: 'local-ban-event' },
+      },
+    ],
+  );
+  console.log('PASS local ban release stays available after MAX member restore retirement');
+
   await navigate('/expiry');
   await page.locator('.sanctions-workspace__row').first().click();
-  await page.getByRole('button', { name: 'Разрешить писать', exact: true }).click();
-  const release = page.getByRole('dialog', { name: 'Разрешить писать?' });
+  await page.getByRole('button', { name: 'Снять мут', exact: true }).click();
+  const release = page.getByRole('dialog', { name: 'Снять мут?' });
   await page.waitForFunction(
     () =>
       document.querySelector('#sanction-release-title') &&
       [...document.querySelectorAll('.action-confirm-sheet__button')].some(
-        (node) => node.textContent === 'Снять ограничение' && node.disabled,
+        (node) => node.textContent === 'Снять мут' && node.disabled,
       ),
   );
   assert.equal(
-    await release.getByRole('button', { name: 'Снять ограничение', exact: true }).isDisabled(),
+    await release.getByRole('button', { name: 'Снять мут', exact: true }).isDisabled(),
     true,
   );
   await page.waitForTimeout(1200);

@@ -15,10 +15,10 @@ const guardedFiles = [
   },
   {
     path: 'apps/api/src/admin/admin.service.legacy.ts',
-    maxLines: 22777,
+    maxLines: 22807,
     targetLines: 22500,
     reason:
-      'AdminService remains a legacy hotspot; the three-line lazy dialog-context bridge keeps per-target preparation in a focused helper; this ceiling includes the shared crash-safe Major/Publisher suggestion delivery ledger and sanction lock/fence guards at existing side-effect boundaries, while unrelated domains should keep moving to focused services.',
+      'AdminService remains a legacy hotspot; the three-line lazy dialog-context bridge keeps per-target preparation in a focused helper; this ceiling includes the shared crash-safe Major/Publisher suggestion delivery ledger, sanction lock/fence guards and former-participant capability/transition bindings at existing side-effect boundaries. Former-participant history, local persistence and release policy stay in focused helpers; unrelated domains should keep moving out.',
   },
   {
     path: 'apps/api/src/admin/admin-managed-broadcast-runtime.ts',
@@ -50,10 +50,10 @@ const guardedFiles = [
   },
   {
     path: 'apps/api/src/moderation/moderation.service.legacy.ts',
-    maxLines: 18673,
+    maxLines: 18714,
     targetLines: 17000,
     reason:
-      'ModerationService remains a legacy hotspot; this ceiling includes crash-fenced webhook timeout settlement, the Karavan policy handoff, ordered predecessor deferral, thin participant-report admission/counter hooks, and the voice-source evidence binding call. Report state, voice capture/revocation and deletion authorization remain in focused services.',
+      'ModerationService remains a legacy hotspot; this ceiling includes crash-fenced webhook timeout settlement, the Karavan policy handoff, ordered predecessor deferral, thin participant-report admission/counter hooks, the voice-source evidence binding call and local-ban join/message/selected-executor bindings. Local-ban state, source, role and dispatch authorization stay in the focused local-chat-ban helper alongside the existing focused report and voice services.',
   },
   {
     path: 'apps/api/src/moderation/private-control.service.legacy.ts',

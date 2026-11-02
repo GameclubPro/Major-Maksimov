@@ -2,6 +2,11 @@ import { resolveModerationSanctionExpiry } from '../moderation/moderation-sancti
 import { resolveEffectiveChatClosure } from '../moderation/night-mode-transition-time.util';
 import { resolveAdminBotUserId } from './admin-bot-identity';
 import { ManagedEntityPresentationService } from './managed-entity-presentation.service';
+import {
+  applyFormerParticipantModeration,
+  hasFormerParticipantHistory,
+  readLocalChatBanForRelease,
+} from './former-participant-moderation';
 import { assertPublisherSuggestionDeliveryReady } from './publisher-suggestion-setup-block';
 import {
   advanceChatMutationOrder,
@@ -1172,6 +1177,7 @@ export class AdminService implements OnModuleDestroy {
           owner.resolveBackgroundReadBotAssignment(chatId),
         resolveParticipantCleanupBotAssignment: (chatId) =>
           owner.resolveParticipantCleanupBotAssignment(chatId),
+        isKnownRuntimeBotUserId: (userId) => owner.isKnownRuntimeBotUserId(userId),
       }),
     ))(this);
   private readonly requiredSubscriptionRuntime = ((owner: AdminService) =>
@@ -9039,8 +9045,21 @@ export class AdminService implements OnModuleDestroy {
         return this.resolveManualBanResultFromLedger(sourceLedger, targetUserId);
       }
     }
+    const localUnban =
+      actionRequest.action === 'UNBAN' &&
+      (await readLocalChatBanForRelease(
+        this.prisma,
+        this.moderationSanctionStateFence,
+        chatId,
+        targetUserId,
+      ));
+    if (localUnban)
+      options = {
+        ...options,
+        expectedSanctionEventId: options.expectedSanctionEventId ?? localUnban.id,
+      };
     const resolvedBotId =
-      actionRequest.action === 'UNMUTE'
+      actionRequest.action === 'UNMUTE' || localUnban
         ? undefined
         : await this.resolveManualModerationActionBotAssignment(
             chatId,
@@ -9114,6 +9133,51 @@ export class AdminService implements OnModuleDestroy {
       initiatedByUserId: user.userId,
       ...releasedSanctionMetadata,
     } as const;
+    const applyLocalBan = (action: 'BAN' | 'UNBAN', metadata: Record<string, unknown> = {}) =>
+      applyFormerParticipantModeration(
+        action,
+        targetUserId,
+        {
+          leaseGuard,
+          prepare: (intendedAction) =>
+            this.prepareManualSanctionStateFence({
+              chatId,
+              targetUserId,
+              intendedAction,
+              source,
+              leaseGuard,
+            }),
+          record: (localAction, localMetadata) =>
+            this.recordManualModerationAction({
+              chatId,
+              targetUserId,
+              targetDisplayName,
+              actorUserId: user.userId,
+              ruleCode: localAction === 'BAN' ? 'MANUAL_BAN' : 'MANUAL_UNBAN',
+              sanctionAction: localAction === 'BAN' ? SanctionAction.BAN : SanctionAction.NONE,
+              auditAction: localAction === 'BAN' ? 'MANUAL_BAN_MEMBER' : 'MANUAL_UNBAN_MEMBER',
+              metadata: { ...metadataBase, ...localMetadata },
+              auditPayload: { userId: targetUserId, ...metadataBase, ...localMetadata },
+            }),
+          commit: this.commitManualSanctionStateFence.bind(this),
+          abort: this.abortManualSanctionStateFence.bind(this),
+          onRecorded: options.onModerationEventRecorded,
+        },
+        metadata,
+      );
+    // FLAG: Local release precedes experimental/native unban paths: removing a
+    // return ban must never add or remove a participant in MAX.
+    if (
+      actionRequest.action === 'UNBAN' &&
+      (await readLocalChatBanForRelease(
+        this.prisma,
+        this.moderationSanctionStateFence,
+        chatId,
+        targetUserId,
+      ))
+    ) {
+      return applyLocalBan('UNBAN');
+    }
     const requestedScope =
       actionRequest.scope ??
       (source === 'miniapp' && actionRequest.action === 'BAN' ? 'all_chats' : 'current_chat');
@@ -9175,6 +9239,7 @@ export class AdminService implements OnModuleDestroy {
         targetUserId,
         'MUTE',
         resolvedBotId,
+        source === 'miniapp' && !isChannel,
       );
       if (sourceLedgerRootKey) {
         sourceMuteLedgerOperationKey =
@@ -9376,12 +9441,25 @@ export class AdminService implements OnModuleDestroy {
       }
       let executionMode: ManualBanExecutionMode;
       try {
-        await this.assertManualMemberModerationPreconditions(
+        const targetState = await this.assertManualMemberModerationPreconditions(
           chatId,
           targetUserId,
           'BAN',
           resolvedBotId,
+          source === 'miniapp' && !isChannel,
         );
+        if (targetState === 'former') {
+          const followUp = shouldFanoutManualAction
+            ? await this.resolveManualBanFollowUpSummaries({
+                sourceChatId: chatId,
+                targetUserId,
+                actor: user,
+                source: 'miniapp',
+                leaseGuard,
+              })
+            : {};
+          return applyLocalBan('BAN', { scope: requestedScope, ...followUp });
+        }
         executionMode = await this.resolveManualBanExecutionMode(chatId, resolvedBotId);
       } catch (error: unknown) {
         this.throwManualModerationTransientMaxError(error);
@@ -12808,13 +12886,20 @@ export class AdminService implements OnModuleDestroy {
     targetUserId: string,
     action: ManualMemberModerationAction,
     botId?: string,
-  ): Promise<void> {
+    allowFormerParticipant = false,
+  ): Promise<'present' | 'former'> {
     if (action === 'BAN') {
       await this.assertBotCanManageMembers(chatId, action, botId);
     } else {
       await this.assertBotCanDeleteMessages(chatId, botId);
     }
-    await this.assertTargetUserCanBeModerated(chatId, targetUserId, action, botId);
+    return this.assertTargetUserCanBeModerated(
+      chatId,
+      targetUserId,
+      action,
+      botId,
+      allowFormerParticipant,
+    );
   }
 
   private async assertBotCanManageMembers(
@@ -12927,7 +13012,8 @@ export class AdminService implements OnModuleDestroy {
     targetUserId: string,
     action: ManualMemberModerationAction,
     botId?: string,
-  ): Promise<void> {
+    allowFormerParticipant = false,
+  ): Promise<'present' | 'former'> {
     if (this.isKnownRuntimeBotUserId(targetUserId)) {
       throw new BadRequestException(
         'Действие отклонено: настроенные боты MAX защищены от модерации.',
@@ -12938,15 +13024,24 @@ export class AdminService implements OnModuleDestroy {
       getChatMemberAccess?: (chatId: string, userId: string) => Promise<MaxChatMemberAccess | null>;
     };
     if (typeof maxClientWithMemberAccess.getChatMemberAccess !== 'function') {
-      return;
+      return 'present';
     }
 
     const targetAccess = await maxClientWithMemberAccess.getChatMemberAccess(chatId, targetUserId, {
       trafficClass: 'critical',
       actionHealthLane: ADMIN_ACTION_HEALTH_LANE,
+      ...(allowFormerParticipant ? { bypassCache: true } : {}),
       ...(botId ? { botId } : {}),
     } as never);
     if (!targetAccess) {
+      if (
+        allowFormerParticipant &&
+        (await this.prisma.chat.findUnique({ where: { id: chatId }, select: { entityType: true } }))
+          ?.entityType === ChatEntityType.CHAT &&
+        (await hasFormerParticipantHistory(this.prisma, chatId, targetUserId))
+      ) {
+        return 'former';
+      }
       throw new BadRequestException('Участник уже вышел из чата или был удалён.');
     }
 
@@ -12957,6 +13052,7 @@ export class AdminService implements OnModuleDestroy {
           : 'Мут нельзя применить к владельцу или администратору чата.',
       );
     }
+    return 'present';
   }
 
   private isKnownRuntimeBotUserId(userId: string | null | undefined): boolean {

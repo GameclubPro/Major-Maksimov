@@ -164,6 +164,7 @@ type PendingScopeAction = {
   action: Extract<ManualModerationAction, 'MUTE' | 'BAN'>;
   source: 'participant' | 'spammer-diagnostics';
   muteDurationHours?: number;
+  banOnRejoin?: boolean;
 };
 
 const MUTE_DURATION_MIN_HOURS = 1;
@@ -201,10 +202,10 @@ const SPAMMER_DIAGNOSTICS_FULL_QUERY = {
 const actionLabelMap: Record<DisplayAction, string> = {
   DELETE_MESSAGE: 'Удаление',
   WARN: 'Предупреждение',
-  MUTE: 'Без сообщений',
-  BAN: 'Блокировка',
-  UNMUTE: 'Снова может писать',
-  UNBAN: 'Блокировка снята',
+  MUTE: 'Мут',
+  BAN: 'Бан',
+  UNMUTE: 'Мут снят',
+  UNBAN: 'Бан снят',
 };
 
 const actionToneMap: Record<DisplayAction, 'neutral' | 'warning' | 'danger' | 'success'> = {
@@ -446,11 +447,11 @@ function formatViolationRule(ruleCode: string): string {
     DUPLICATE_MUTE: 'Повторяющиеся сообщения',
     DUPLICATE_KICK: 'Повторяющиеся сообщения',
     DUPLICATE_BAN: 'Повторяющиеся сообщения',
-    MANUAL_MUTE: 'Запрет сообщений модератором',
-    MANUAL_UNMUTE: 'Сообщения снова разрешены',
+    MANUAL_MUTE: 'Мут модератором',
+    MANUAL_UNMUTE: 'Снятие мута',
     MANUAL_KICK: 'Удаление вручную',
-    MANUAL_BAN: 'Блокировка модератором',
-    MANUAL_UNBAN: 'Возврат в чат',
+    MANUAL_BAN: 'Бан модератором',
+    MANUAL_UNBAN: 'Снятие бана',
     THEMATIC_FILTER: 'Объявления по теме',
     GLOBAL_USER_BLACKLIST_KICK: 'Запрет по базе',
     GLOBAL_CROSS_CHAT_SPAM: 'Рассылка по чатам',
@@ -490,7 +491,7 @@ function resolveModerationCodeLabel(code: string): string {
     return 'Телефон';
   }
   if (normalized.includes('MUTE')) {
-    return 'Запрет сообщений';
+    return 'Мут';
   }
   if (normalized.includes('BAN') || normalized.includes('KICK')) {
     return 'Исключение из чата';
@@ -589,9 +590,7 @@ function resolveViolationBlurb(violation: ViolationItem): string {
         ? metadata.muteDurationHours
         : null;
 
-    return muteDurationHours
-      ? `Без сообщений на ${muteDurationHours} ч`
-      : 'Модератор запретил отправлять сообщения';
+    return muteDurationHours ? `Мут на ${muteDurationHours} ч` : 'Модератор назначил мут';
   }
 
   if (violation.ruleCode === 'MANUAL_KICK') {
@@ -599,7 +598,7 @@ function resolveViolationBlurb(violation: ViolationItem): string {
   }
 
   if (violation.ruleCode === 'MANUAL_BAN') {
-    return 'Модератор заблокировал участника';
+    return 'Модератор назначил бан';
   }
 
   return formatViolationRule(violation.ruleCode);
@@ -627,18 +626,18 @@ function resolveApplyActionLabel(
   muteDurationHours: number,
 ): string {
   if (action === 'MUTE') {
-    return `Ограничить на ${formatMuteDurationCompact(muteDurationHours)}`;
+    return `Мут на ${formatMuteDurationCompact(muteDurationHours)}`;
   }
 
   if (action === 'UNMUTE') {
-    return 'Разрешить писать';
+    return 'Снять мут';
   }
 
   if (action === 'UNBAN') {
-    return 'Вернуть участника';
+    return 'Снять бан';
   }
 
-  return 'Заблокировать';
+  return 'Бан';
 }
 
 function resolveConfirmMessage(
@@ -647,16 +646,17 @@ function resolveConfirmMessage(
   violation?: ViolationItem,
 ): string {
   if (action === 'MUTE') {
-    return `Запретить сообщения на ${muteDurationHours} ч? Участник останется в чате, но его новые сообщения будут удаляться до конца срока.`;
+    return `Назначить мут на ${muteDurationHours} ч? Новые сообщения будут удаляться до конца срока.`;
   }
 
   if (action === 'UNMUTE') {
-    return 'Снять ограничение? Участник снова сможет писать в чате.';
+    return 'Снять мут?';
   }
 
   if (action === 'UNBAN') {
+    if (violation?.metadata?.mode === 'LOCAL_REJOIN') return 'Снять бан?';
     if (violation && isBanActiveFromViolation(violation)) {
-      return 'Снять блокировку и вернуть участника в чат?';
+      return 'Снять бан и вернуть участника в чат?';
     }
 
     if (
@@ -669,7 +669,7 @@ function resolveConfirmMessage(
     return 'Вернуть участника в чат?';
   }
 
-  return 'Заблокировать участника? Он не сможет вернуться в чат, пока модератор не снимет блокировку.';
+  return 'Назначить бан участнику?';
 }
 
 function isMuteActiveFromViolation(violation: ViolationItem): boolean {
@@ -746,11 +746,14 @@ function resolveReleaseAction(
   return null;
 }
 
-function resolveReleaseLabel(action: Extract<ManualModerationAction, 'UNMUTE' | 'UNBAN'>): string {
+function resolveReleaseLabel(
+  action: Extract<ManualModerationAction, 'UNMUTE' | 'UNBAN'>,
+  banOnRejoin: boolean,
+): string {
   return action === 'UNMUTE'
-    ? 'Разрешить писать'
-    : isMaxMemberRestoreAvailable()
-      ? 'Снять блокировку'
+    ? 'Снять мут'
+    : banOnRejoin || isMaxMemberRestoreAvailable()
+      ? 'Снять бан'
       : 'Проверить снятие в MAX';
 }
 
@@ -1478,9 +1481,9 @@ function SpammerDiagnosticsSheet({
           className="spammer-diagnostics__action spammer-diagnostics__action--danger"
           disabled={isActionBusy}
           onClick={() => onBan(diagnostics.userId)}
-          aria-label="Заблокировать участника: выбрать чаты"
+          aria-label="Бан участника: выбрать чаты"
         >
-          <span>{isBanning ? 'Блокируем...' : 'Заблокировать'}</span>
+          <span>{isBanning ? 'Блокируем...' : 'Бан'}</span>
           {isBanning ? null : <small>выбрать чаты</small>}
         </button>
       </div>
@@ -1517,8 +1520,8 @@ function SpammerDiagnosticsSheet({
               Оценка основана на замеченных повторах, рассылках и блокировках. Это не доказательство
               нарушения. «Не спам» исключает участника из этой проверки, но не снимает ограничения в
               чате. «Подтвердить спам» сохраняет ваше решение без немедленного удаления. Дальнейшие
-              действия зависят от настроек защиты чата. Для блокировки выберите «Заблокировать» и
-              подтвердите, в каких чатах она нужна.
+              действия зависят от настроек защиты чата. Для блокировки выберите «Бан» и подтвердите,
+              в каких чатах она нужна.
             </p>
           ) : null}
         </span>
@@ -1827,7 +1830,7 @@ function ViolationModerationControls({
               setMuteExpanded((current) => !current);
             }}
           >
-            Без сообщений
+            Мут
           </button>
         ) : null}
         {!releaseAction ? (
@@ -1848,7 +1851,7 @@ function ViolationModerationControls({
               setPendingAction(null);
             }}
           >
-            Заблокировать
+            Бан
           </button>
         ) : null}
         {releaseAction ? (
@@ -1863,7 +1866,7 @@ function ViolationModerationControls({
               setPendingAction((current) => (current === releaseAction ? null : releaseAction));
             }}
           >
-            {resolveReleaseLabel(releaseAction)}
+            {resolveReleaseLabel(releaseAction, violation.metadata?.mode === 'LOCAL_REJOIN')}
           </button>
         ) : null}
       </div>
@@ -1984,9 +1987,7 @@ function ViolationModerationControls({
         <ActionConfirmSheet
           id={`violation-scope-${violation.id}`}
           open
-          title={
-            pendingScopeAction.action === 'BAN' ? 'Блокировка участника' : 'Ограничение сообщений'
-          }
+          title={pendingScopeAction.action === 'BAN' ? 'Бан участника' : 'Мут участника'}
           summary={resolveOffenderName(violation)}
           previewTitle={resolveConfirmMessage(
             pendingScopeAction.action,
@@ -2914,10 +2915,10 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
         label: 'Удаления',
         count: violationsSummary.deleteMessage,
       },
-      { value: 'MUTE', label: 'Без сообщений', count: violationsSummary.mute },
-      { value: 'BAN', label: 'Блокировки', count: violationsSummary.ban },
-      { value: 'UNMUTE', label: 'Снова могут писать', count: violationsSummary.unmute },
-      { value: 'UNBAN', label: 'Возвраты', count: violationsSummary.unban },
+      { value: 'MUTE', label: 'Мут', count: violationsSummary.mute },
+      { value: 'BAN', label: 'Бан', count: violationsSummary.ban },
+      { value: 'UNMUTE', label: 'Мут снят', count: violationsSummary.unmute },
+      { value: 'UNBAN', label: 'Бан снят', count: violationsSummary.unban },
     ];
 
     return options;
@@ -3378,7 +3379,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                 userDisplayName: item.userDisplayName,
                 avatarUrl: item.avatarUrl,
                 origin: {
-                  title: item.action === 'BAN' ? 'Блокировка' : 'Запрет сообщений',
+                  title: item.action === 'BAN' ? 'Бан' : 'Мут',
                   date: item.createdAt,
                   reason: item.reason,
                 },
@@ -3962,9 +3963,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
       <ActionConfirmSheet
         id={pendingScopeAction?.id ?? 'manual-moderation-scope'}
         open={Boolean(pendingScopeAction && pendingScopeAction.chatId === chatId)}
-        title={
-          pendingScopeAction?.action === 'BAN' ? 'Блокировка участника' : 'Ограничение сообщений'
-        }
+        title={pendingScopeAction?.action === 'BAN' ? 'Бан участника' : 'Мут участника'}
         summary={
           pendingScopeAction?.source === 'participant'
             ? selectedParticipant?.userDisplayName
@@ -3977,8 +3976,10 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
         }
         previewTitle={
           pendingScopeAction?.action === 'BAN'
-            ? 'В выбранных чатах участник будет заблокирован. Вернуться можно только после снятия блокировки.'
-            : 'Участник останется в выбранных чатах. Его новые сообщения будут удаляться до конца срока.'
+            ? pendingScopeAction.banOnRejoin
+              ? 'При возвращении участник будет удалён.'
+              : 'Участник будет удалён из выбранных чатов.'
+            : 'Новые сообщения будут удаляться до конца срока мута.'
         }
         confirmLabel="В этом чате"
         confirmBusyLabel="Применяем..."
@@ -4109,7 +4110,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                 muteDurationHours: clampMuteDurationHours(durationHours),
               });
             }}
-            onBan={() => {
+            onBan={(banOnRejoin) => {
               if (!selectedParticipant) {
                 return;
               }
@@ -4119,6 +4120,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                 userId: selectedParticipant.userId,
                 action: 'BAN',
                 source: 'participant',
+                banOnRejoin,
               });
             }}
           />

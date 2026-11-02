@@ -1861,7 +1861,7 @@ rollback_runtime() {
   build_guarded_rollback_command \
     remote_command \
     ./infra/scripts/vps-runtime-rollback.sh \
-    maxim_topology_require_statistics_and_night_mode_recovery \
+    maxim_topology_require_local_chat_ban_reader \
     "$@"
   prepend_webhook_rollout_recovery_env remote_command
   remote_exec "$remote_command"
@@ -1876,15 +1876,16 @@ rollback_release() {
   local remote_command
   local capability_marker=select_release_recovery_base
   local rollback_component
-  # FLAG: API rollback retains statistics successors and independent night-mode recovery,
+  # FLAG: API rollback retains LOCAL_REJOIN enforcement and local release in addition
+  # to statistics successors and independent night-mode recovery,
   # plus maxim_topology_require_commercial_ai_pool_delete_reader and preceding floors.
   # Static-only rollback keeps its existing image-only offline path.
   if [[ $# -eq 1 ]]; then
-    capability_marker=maxim_topology_require_statistics_and_night_mode_recovery
+    capability_marker=maxim_topology_require_local_chat_ban_reader
   else
     for rollback_component in "${@:2}"; do
       if [[ "$rollback_component" == api-shared ]]; then
-        capability_marker=maxim_topology_require_statistics_and_night_mode_recovery
+        capability_marker=maxim_topology_require_local_chat_ban_reader
         break
       fi
     done

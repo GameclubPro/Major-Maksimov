@@ -1,4 +1,5 @@
 import { readTrimmedString } from './admin-legacy-utils';
+import { hasFormerParticipantHistory } from './former-participant-moderation';
 import { toSafeInteger, resolveLogsDashboardFrom } from './admin-statistics-values';
 import { buildUserProfileUrl, normalizeMaxProfileUrl } from './admin-profile-links';
 import {
@@ -292,6 +293,15 @@ export class AdminParticipantsRuntime {
     const username = profile?.username?.replace(/^@+/u, '').trim() || null;
     const displayName =
       profile?.displayName?.trim() || localName?.displayName || username || 'Участник';
+    const protectedTarget =
+      targetUserId === user.userId || this.context.isKnownRuntimeBotUserId(targetUserId);
+    const canManage = !protectedTarget && role === 'member' && access?.isBot === false;
+    const canSanction =
+      canManage ||
+      (!protectedTarget &&
+        accessResult.known &&
+        !access &&
+        (await hasFormerParticipantHistory(this.prisma, chatId, targetUserId)));
     // FLAG: A failed MAX lookup is unknown, not evidence that the participant left the chat.
     return chatParticipantDetailsSchema.parse({
       userId: targetUserId,
@@ -311,7 +321,9 @@ export class AdminParticipantsRuntime {
       role,
       isBot: access?.isBot === true,
       membershipStatus: !accessResult.known ? 'unknown' : access ? 'member' : 'left',
-      canManage: role === 'member' && access?.isBot === false && targetUserId !== user.userId,
+      canManage,
+      canMute: canSanction,
+      canBan: canSanction,
       violationCount,
       immunity: immunity
         ? this.buildChatParticipantImmunitySummary(
