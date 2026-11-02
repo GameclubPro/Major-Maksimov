@@ -13,6 +13,8 @@ source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
 source "$ROOT_DIR/infra/scripts/lib/webhook-rollout-quiescence.sh"
 # shellcheck source=infra/scripts/lib/outcome-cohort-online-prepare.sh
 source "$ROOT_DIR/infra/scripts/lib/outcome-cohort-online-prepare.sh"
+# shellcheck source=infra/scripts/lib/routing-index-online-prepare.sh
+source "$ROOT_DIR/infra/scripts/lib/routing-index-online-prepare.sh"
 # shellcheck source=infra/scripts/lib/deploy-lock.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"
 # shellcheck source=infra/scripts/lib/legacy-cold-maintenance.sh
@@ -941,6 +943,7 @@ reexec_if_current_script_changed() {
     "infra/scripts/lib/photo-native-lifecycle.sh" \
     "infra/scripts/lib/webhook-rollout-quiescence.sh" \
     "infra/scripts/lib/outcome-cohort-online-prepare.sh" \
+    "infra/scripts/lib/routing-index-online-prepare.sh" \
     "infra/scripts/lib/change-impact-components.generated.sh" || status=$?
   case "$status" in
     0) ;;
@@ -1679,6 +1682,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   require_stateful_services_ready
   maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES
   maxim_outcome_cohort_preflight COMPOSE_FILES
+  maxim_routing_index_preflight COMPOSE_FILES
 fi
 
 prepare_deploy_disk_capacity
@@ -1701,6 +1705,9 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   maxim_topology_require_ocr_native_sandbox_image_capability \
     "$MAXIM_API_IMAGE" "$TARGET_HAS_OCR_NATIVE_SANDBOX"
   maxim_topology_require_photo_native_image_capability "${MAXIM_API_IMAGE}"
+  # FLAG: Build the routing index while old roles and the current manifest remain live.
+  # A failed or interrupted preparation cannot enter the runtime transition.
+  maxim_routing_index_prepare
   begin_release_runtime_transition
   DEPLOY_RUNTIME_STARTED=1
   verify_inherited_release_components
@@ -1761,6 +1768,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   fi
   maxim_webhook_assert_multibot_migration_indexes COMPOSE_FILES
   maxim_outcome_cohort_assert COMPOSE_FILES
+  maxim_routing_index_assert COMPOSE_FILES
   if [[ "$TARGET_HAS_MEDIA_ANALYSIS" -eq 1 ]]; then
     maxim_webhook_assert_api_rollout_quiescence COMPOSE_FILES
     maxim_topology_stop_media_analysis_before_api_transition COMPOSE_FILES

@@ -17,6 +17,8 @@ infra/**
 !infra/certs/
 !infra/certs/**
 !infra/scripts/outcome-cohort-online-state.mjs
+!infra/scripts/routing-index-online-state.mjs
+!infra/scripts/online-migration-receipts.mjs
 
 apps/*/node_modules
 apps/*/dist

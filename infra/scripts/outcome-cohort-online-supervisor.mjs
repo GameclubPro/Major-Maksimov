@@ -49,6 +49,8 @@ export async function prepareOutcomeCohortIndexes(
     stop = stopOwnedMigration,
     waitForTick = waitForMultibotTick,
     onProgress = () => {},
+    stage = 'outcome_cohort_prepare',
+    failureCode = outcomeCohortFailureCode,
   } = {},
 ) {
   validateMultibotComposeArgs(composeArgs);
@@ -97,7 +99,7 @@ export async function prepareOutcomeCohortIndexes(
   };
   const progress = (phase, extra = {}) =>
     onProgress({
-      stage: 'outcome_cohort_prepare',
+      stage,
       phase,
       attempt,
       sourceSha: /^[a-f0-9]{40}$/u.test(env.MAXIM_EXPECTED_DEPLOY_SHA ?? '')
@@ -241,11 +243,11 @@ export async function prepareOutcomeCohortIndexes(
     progress('complete');
     return { state: 'already_applied' };
   } catch (error) {
-    let failure = outcomeCohortFailureCode(error);
+    let failure = failureCode(error);
     try {
       await cleanup();
     } catch {
-      failure = 'OUTCOME_COHORT_CLEANUP_UNCONFIRMED';
+      failure = failureCode(new Error('OUTCOME_COHORT_CLEANUP_UNCONFIRMED'));
     }
     progress('failed', { code: failure });
     throw new Error(failure);

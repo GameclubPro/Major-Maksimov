@@ -272,6 +272,12 @@ counts and store availability; a mock-only pass is not native-store coverage. Ne
 a failing fence assertion to obtain green CI. An intentional outcome correction must retain the
 negative cases, effects evidence and following-event/no-replay checks.
 
+Bounded shard lookup additionally requires `webhook-routing-postgres.spec.ts`: old/new results,
+unknown/NULL queues, ID/timestamp ties and actual custom/generic plans over retained history.
+The [routing index release](webhook-routing-index.md) prepares its fixed concurrent index while
+old roles run, before the runtime journal; a healthy small fixture cannot justify an unobserved
+production build or a weaker receipt/catalog gate.
+
 ## Fast incident response and acceptance
 
 - Capture one bounded baseline with exact UTC interval and runtime source/image, then compare ingress,

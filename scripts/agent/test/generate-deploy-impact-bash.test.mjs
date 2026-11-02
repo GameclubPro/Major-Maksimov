@@ -50,6 +50,13 @@ test('classifies deploy components in Bash and fails closed for unknown paths', 
 test('selects the API image only for the exact packaged migration preparer', () => {
   assert.deepEqual(classify('scripts/agent/multibot-online-prepare.mjs'), [1, 0, 0, 0]);
   for (const path of [
+    'scripts/agent/routing-index-online-target.mjs',
+    'scripts/agent/routing-index-online-prepare.mjs',
+    'infra/scripts/routing-index-online-state.mjs',
+    'infra/scripts/online-migration-receipts.mjs',
+  ])
+    assert.deepEqual(classify(path), [1, 0, 0, 0], path);
+  for (const path of [
     'scripts/agent/plan.mjs',
     'scripts/agent/test/multibot-online-prepare.test.mjs',
     'scripts/agent/multibot-online-prepare-retired.mjs',

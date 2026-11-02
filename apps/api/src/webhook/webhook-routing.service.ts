@@ -513,42 +513,49 @@ export class WebhookRoutingService {
     chatId: string,
     webhookEventId: string,
   ): Promise<OutstandingMessageQueueWork> {
+    const pendingPredicate = Prisma.sql`
+      e.id <> ${webhookEventId}
+      AND (
+        e.status = ANY(ARRAY['RECEIVED', 'QUEUED']::"WebhookStatus"[])
+        OR (
+          e.status = 'FAILED'::"WebhookStatus"
+          AND (
+            e.next_enqueue_at IS NOT NULL
+            OR LEFT(COALESCE(e.error_message, ''), ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_LENGTH_SQL}) = ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_SQL}
+          )
+        )
+      )
+      AND LOWER(
+        COALESCE(
+          NULLIF(BTRIM(e.normalized_payload->>'type'), ''),
+          NULLIF(BTRIM(e.normalized_payload->>'update_type'), '')
+        )
+      ) = ANY(ARRAY['message_created', 'message_edited'])
+      AND COALESCE(
+        NULLIF(BTRIM(e.normalized_payload->'message'->>'chatId'), ''),
+        NULLIF(BTRIM(e.normalized_payload->>'chatId'), '')
+      ) = ${chatId}
+    `;
     const rows = await this.prisma.$queryRaw<
       Array<{ has_pending?: boolean; queue_name?: string | null }>
     >(
       Prisma.sql`
-        WITH outstanding AS MATERIALIZED (
-          SELECT queue_name, created_at, id
-          FROM webhook_events
-          WHERE id <> ${webhookEventId}
-            AND (
-              status = ANY(ARRAY['RECEIVED', 'QUEUED']::"WebhookStatus"[])
-              OR (
-                status = 'FAILED'::"WebhookStatus"
-                AND (
-                  next_enqueue_at IS NOT NULL
-                  OR LEFT(COALESCE(error_message, ''), ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_LENGTH_SQL}) = ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_SQL}
-                )
-              )
-            )
-            AND LOWER(
-              COALESCE(
-                NULLIF(BTRIM(normalized_payload->>'type'), ''),
-                NULLIF(BTRIM(normalized_payload->>'update_type'), '')
-              )
-            ) = ANY(ARRAY['message_created', 'message_edited'])
-            AND COALESCE(
-              NULLIF(BTRIM(normalized_payload->'message'->>'chatId'), ''),
-              NULLIF(BTRIM(normalized_payload->>'chatId'), '')
-            ) = ${chatId}
-        )
+        -- FLAG: One statement keeps pending existence and shard selection on the same snapshot.
         SELECT
-          EXISTS (SELECT 1 FROM outstanding LIMIT 1) AS has_pending,
+          EXISTS (SELECT 1 FROM webhook_events e WHERE ${pendingPredicate} LIMIT 1) AS has_pending,
           (
-            SELECT queue_name
-            FROM outstanding
-            WHERE queue_name IN (${Prisma.join(DEFAULT_WEBHOOK_QUEUE_NAMES)})
-            ORDER BY created_at ASC, id ASC
+            SELECT candidate.queue_name
+            FROM (VALUES ${Prisma.join(
+              DEFAULT_WEBHOOK_QUEUE_NAMES.map((queueName) => Prisma.sql`(${queueName}::text)`),
+            )}) AS queues(queue_name)
+            CROSS JOIN LATERAL (
+              SELECT e.queue_name, e.created_at, e.id
+              FROM webhook_events e
+              WHERE ${pendingPredicate} AND e.queue_name = queues.queue_name
+              ORDER BY e.created_at ASC, e.id ASC
+              LIMIT 1
+            ) AS candidate
+            ORDER BY candidate.created_at ASC, candidate.id ASC
             LIMIT 1
           ) AS queue_name
       `,

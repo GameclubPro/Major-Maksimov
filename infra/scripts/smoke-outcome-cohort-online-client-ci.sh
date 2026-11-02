@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 if [[ "${1:-}" != --bounded ]]; then
-  # FLAG: Reserve 60s after the work deadline for at most thirteen cleanup commands,
+  # FLAG: Reserve 60s after the work deadline for at most seventeen cleanup commands,
   # each capped at 3s with SIGKILL. Cleanup stays inside the owned process group.
   exec timeout --kill-after=60s 300s bash "$0" --bounded "$@"
 fi
@@ -26,6 +26,8 @@ project="multibot_ci_$(node -p 'require("node:crypto").randomUUID().replaceAll("
 good_tag="maxim-online-$(node -p 'require("node:crypto").randomUUID()')"
 cancel_tag="maxim-online-$(node -p 'require("node:crypto").randomUUID()')"
 resolver_tag="maxim-online-$(node -p 'require("node:crypto").randomUUID()')"
+routing_bootstrap_tag="maxim-online-$(node -p 'require("node:crypto").randomUUID()')"
+routing_tag="maxim-online-$(node -p 'require("node:crypto").randomUUID()')"
 attempt_owned=0
 inspect_ci_object() {
   local kind="$1" object="$2" format="$3" result
@@ -46,7 +48,7 @@ inspect_ci_object() {
 cleanup() {
   local status=$? cleanup_failed=0 object label id inspect_status
   local ids=()
-  local clients=("$good_tag" "$cancel_tag" "$resolver_tag")
+  local clients=("$good_tag" "$cancel_tag" "$resolver_tag" "$routing_bootstrap_tag" "$routing_tag")
   trap '' INT TERM
   echo OUTCOME_COHORT_CLIENT_CI_CLEANUP_PENDING >&2
   if [[ "$attempt_owned" -eq 1 ]]; then
@@ -89,7 +91,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 docker info >/dev/null
-for object in "$good_tag" "$cancel_tag" "$resolver_tag"; do
+for object in "$good_tag" "$cancel_tag" "$resolver_tag" "$routing_bootstrap_tag" "$routing_tag"; do
   if inspect_ci_object container "$object" '{{.Id}}' >/dev/null; then exit 1; else
     [[ "$?" -eq 3 ]] || exit 1
   fi
@@ -117,4 +119,4 @@ for ((attempt=0; attempt<30; attempt++)); do
 done
 [[ "$ready" -eq 1 ]] || exit 1
 export MAXIM_EXPECTED_DEPLOY_SHA="$GITHUB_SHA"
-node infra/scripts/outcome-cohort-online-client-ci-fixture.mjs run "$fixture_dir" "$project" "$ROOT_DIR" "$image_id" "$good_tag" "$cancel_tag" "$resolver_tag" "$owner"
+node infra/scripts/outcome-cohort-online-client-ci-fixture.mjs run "$fixture_dir" "$project" "$ROOT_DIR" "$image_id" "$good_tag" "$cancel_tag" "$resolver_tag" "$routing_bootstrap_tag" "$routing_tag" "$owner"

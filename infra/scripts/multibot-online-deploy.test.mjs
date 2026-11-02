@@ -74,7 +74,7 @@ function probeEarlyPreflight(t, failure = 'none', receipt = '0', buildApiImage =
   const composeDeclaration = deploy.match(/^COMPOSE_FILES=\([^\r\n]+\)$/mu)?.[0];
   assert.ok(projectDeclaration && composeDeclaration, 'Use the real main Compose scope');
   const block = deploy.match(
-    /\nif \[\[ "\$BUILD_API_IMAGE" -eq 1 \]\]; then\n {2}require_stateful_services_ready\n {2}maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES\n {2}maxim_outcome_cohort_preflight COMPOSE_FILES\nfi\n/u,
+    /\nif \[\[ "\$BUILD_API_IMAGE" -eq 1 \]\]; then\n {2}require_stateful_services_ready\n {2}maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES\n {2}maxim_outcome_cohort_preflight COMPOSE_FILES\n {2}maxim_routing_index_preflight COMPOSE_FILES\nfi\n/u,
   )?.[0];
   assert.ok(block, 'An early API-only preflight block is required');
   const bin = mkdtempSync(resolve(tmpdir(), 'maxim-multibot-capacity-'));
@@ -130,6 +130,7 @@ trap 'printf "images=%s journal=%s ingress=%s workers=%s paused=%s cutoff=%s\\n"
 require_stateful_services_ready() { echo ready; }
 # This fixture isolates the historical cutoff; the independent outcome hook has its own tests.
 maxim_outcome_cohort_preflight() { :; }
+maxim_routing_index_preflight() { :; }
 timeout() { [[ "$failure" != receipt ]] || return 1; printf '%s\\n' "$receipt"; }
 docker() { echo 'Unexpected mutation' >&2; return 99; }
 run_online_multibot_migrations() { echo 'Unexpected mutation' >&2; return 99; }
