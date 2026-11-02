@@ -30,6 +30,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh [queue|activity|duplicate|publication-schema|storage|all]
   ./infra/scripts/vps-postgres-audit.sh queue [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-cohort [--short] [--explain]
+  ./infra/scripts/vps-postgres-audit.sh webhook-cohort --failed-window <UTC-minute> <UTC-minute> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-recovery-key-cohort <UTC-second> <private-chat-ID-CSV> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-workload [--explain]
   ./infra/scripts/vps-postgres-audit.sh legacy-order-candidates
@@ -237,7 +238,7 @@ esac
 
 # FLAG: This report attests public relations. Pin resolution before the shared
 # privilege admission as well as the report, including pg_temp last explicitly.
-if [[ "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
+if [[ "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
   POSTGRES_AUDIT_OPTIONS+=' -c search_path=pg_catalog,public,pg_temp'
 fi
 if [[ "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
