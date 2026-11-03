@@ -17,6 +17,9 @@ const describePostgres = databaseUrl ? describe : describe.skip;
 type SanctionsPlanNode = {
   Plans?: SanctionsPlanNode[];
   'Node Type': string;
+  'Parent Relationship'?: string;
+  'Subplan Name'?: string;
+  'CTE Name'?: string;
   'Relation Name'?: string;
   Alias?: string;
   'Index Name'?: string;
@@ -94,8 +97,8 @@ function assertBoundedSanctionsPlan(
     // Parent buffer totals are inclusive; do not sum them with child totals.
     expect(blocks(root)).toBeLessThanOrEqual(512);
     if (sourceHistoryPhase) {
-      // FLAG: Retained and sparse source history must stay behind exact candidate
-      // id probes; a small live-row count cannot justify reading the whole heap.
+      // FLAG: Read retained and sparse source history once through the bounded
+      // candidate id array; a small live-row count cannot justify a full heap scan.
       const originals = physicalScans
         .filter(({ alias }) => alias === 'original')
         .map(({ node }) => node);
@@ -104,9 +107,11 @@ function assertBoundedSanctionsPlan(
       if (original['Node Type'] === 'Bitmap Heap Scan') {
         expect(originals).toHaveLength(2);
         expect(original['Relation Name']).toBe('moderation_events');
-        expect(original['Recheck Cond']).toMatch(/id = feed(?:_\d+)?\.id/u);
-        expect(original.Plans).toHaveLength(1);
-        index = original.Plans![0]!;
+        const children = (original.Plans ?? []).filter(
+          (node) => node['Parent Relationship'] !== 'InitPlan',
+        );
+        expect(children).toHaveLength(1);
+        index = children[0]!;
         expect(index).toBe(originals[1]);
         expect(index['Node Type']).toBe('Bitmap Index Scan');
       } else {
@@ -114,14 +119,33 @@ function assertBoundedSanctionsPlan(
         expect(['Index Scan', 'Index Only Scan']).toContain(original['Node Type']);
       }
       expect(index['Index Name']).toBe('moderation_events_pkey');
-      expect(index['Index Cond']).toMatch(/id = feed(?:_\d+)?\.id/u);
+      const candidateArray = index['Index Cond']?.match(/id = ANY \((\$\d+)\)/u)?.[1];
+      expect(candidateArray).toMatch(/^\$\d+$/u);
+      if (original['Node Type'] === 'Bitmap Heap Scan') {
+        expect(original['Recheck Cond']).toContain(`id = ANY (${candidateArray})`);
+      }
+      const arrayPlans = visit(root)
+        .map(({ node }) => node)
+        .filter(
+          (node) =>
+            node['Parent Relationship'] === 'InitPlan' &&
+            node['Subplan Name']?.startsWith('InitPlan ') &&
+            node['Subplan Name'].endsWith(`(returns ${candidateArray})`),
+        );
+      expect(arrayPlans).toHaveLength(1);
+      const candidateReads = visit(arrayPlans[0]!)
+        .map(({ node }) => node)
+        .filter((node) => node['Node Type'] === 'CTE Scan' && node['CTE Name'] === 'candidates');
+      expect(candidateReads).toHaveLength(1);
+      expect(candidateReads[0]!['Actual Rows']).toBe(candidateCount);
+      expect(candidateReads[0]!['Actual Loops']).toBe(1);
       for (const node of originals) {
         expect(
           node['Actual Rows'] +
             (node['Rows Removed by Filter'] ?? 0) +
             (node['Rows Removed by Index Recheck'] ?? 0),
-        ).toBeLessThanOrEqual(1);
-        expect(node['Actual Loops']).toBe(candidateCount);
+        ).toBeLessThanOrEqual(candidateCount);
+        expect(node['Actual Loops']).toBe(1);
       }
     }
   } catch (error: unknown) {
@@ -281,6 +305,7 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
         SELECT ${otherChatId} || '-same-user-' || n, ${otherChatId}, 'plan-user-0', 'SYSTEM'::"EventType", 'MANUAL_UNBAN', 'NONE'::"SanctionAction", NOW(), NOW()
         FROM generate_series(1, 4000) n
       `);
+      await prisma.$executeRawUnsafe('ANALYZE moderation_events');
       await prisma.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
       const statements: Prisma.Sql[] = [];
       const reader = {

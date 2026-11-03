@@ -41,10 +41,10 @@ outside ordinary history cleanup. Dedicated cleanup uses only its remaining budg
 and must not resurrect an older mute. Missing original evidence remains reviewable,
 never fabricated or automatically restored.
 
-Original-evidence checks use a bounded primary-key lookup for each feed candidate.
-Native plan coverage includes unrelated retained source history; a small returned page
-must not hide a full source-table scan. Missing sources stay visible for review with
-no release action.
+Source-evidence checks preserve the native row and block budgets on compact,
+retained and cleared source history. A small returned page must not hide repeated
+scans of unrelated history. Missing sources stay visible for review with no
+release action.
 
 Release passes the selected sanction identity through the existing lock/fence checks.
 Preserve [current manual-sanction semantics](api-domain-reference.md#moderation-and-read-models),
