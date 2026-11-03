@@ -2,8 +2,8 @@
 
 ## Start Here
 
-- Verify implementation against code, `package.json`, Compose and scripts; fix stale notes.
-  Existing code/tests establish current behavior, not necessarily intended behavior.
+- Start with the [current documentation](docs/README.md). Verify notes against code and scripts;
+  existing behavior is evidence, not proof of intent.
 - Use configured `workspace`; preserve repo QA/release gates.
   See [interfaces](docs/development/agent-machine-contract.md).
 - Before editing, run `node scripts/agent/context.mjs --path <file>`; include callers.

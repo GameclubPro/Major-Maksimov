@@ -126,9 +126,8 @@ Use only the designated test chat and channel after fresh exact entity/bot/human
 with marked test content through the normal product. Require observed successful
 shortcuts and unchanged persisted results. Before numeric expansion, separately accept
 Publisher-specific durable correlation, an immutable accepted-source cohort and actual
-shortcut-exposure coverage from
-[execution plan stage 2D](../plans/2026-10-18-bot-refactoring-execution-plan.md).
-The 2A0/2A sampled diagnostics and a webhook-to-DELETE cohort do not satisfy this gate,
+shortcut-exposure coverage under the [admission evidence requirements](#publisher-admission-evidence).
+Sampled diagnostics and a webhook-to-DELETE cohort do not satisfy this gate,
 even when additive DELETE receipt references are present. The existing sliding
 created-occurrence report establishes occurrence-status evidence only; repeated
 observer counters and test shortcuts do not establish a complete operation/receipt
@@ -143,6 +142,33 @@ include pending, denied, expired, cancelled and unknown outcomes without invente
 completion times. Insufficient observations leave acceptance incomplete. Stop for any
 new duplicate effect, wrong sanction, authority bypass, lost receipt or more than
 10% p95/p99 regression at comparable load.
+
+## Publisher admission evidence
+
+Before numeric expansion, preserve typed immutable admission lineage and the saved audience
+version/membership independently of envelope/delivery cleanup. Count sources, due slots, recipients
+and invocations/receipts separately. Freeze a dynamic audience only at successful actual fanout;
+until then it is `not_materialized`. Only the writer first persisting the exact receipt evidence
+can establish its provenance. Retain actual shortcut exposure with explicit loss accounting;
+never backfill old gaps from enrollment hashes, current targets or delivery IDs.
+
+Keep every accepted operation in its population, including later denial, cancellation, expiry,
+quarantine, unknown, pending and future outcomes. Distinguish drafts, pre-admission rejection,
+replay and control mutations; `desiredIntent=publish` on an ordinary edit is not a new admission.
+Retries preserve original admission and deadlines. Read from immutable UTC admission heads with
+bounded fanout, rows, bytes, sentinels and retention; rolling endpoints retain their existing meaning.
+
+Separate first claim, queue/ordering wait, capacity deferral, retry lateness, HTTP and receipt
+persistence, with explicit timing evidence. A timestamp before SQL does not measure commit latency.
+Keep NOW/scheduled, text/image/video and completed-only latency populations distinct. Repeated
+poll aggregates or hash enrollment cannot prove actual path exposure. Missing records, flushes,
+heartbeats or retention evidence leave acceptance incomplete.
+
+Display unknown outcomes explicitly and forbid automatic replay. Entity IDs and their hashes
+are not metric labels. Manifest or diagnostic links confer no SEND authority and do not replace
+audience-completeness proof. An ingress cohort omits events MAX never delivered; separately verify
+subscriptions/reconciliation and correlated test sources. These requirements preserve the former
+execution plan's Publisher acceptance gate; removing that plan does not approve numeric rollout.
 
 ## Transition evidence and recovery
 

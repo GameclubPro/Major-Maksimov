@@ -1,9 +1,10 @@
 # Фото-антидубль: план оптимизации и агентских сессий
 
-Дата ревизии: 2026-08-06.
-
-Статус: план после production-аудита релиза `3d5a4647c7e14cb38a62ab74e5bffc0190532f4f`.
-Фото-антидубль остаётся в global `shadow`; enforcement и advanced allowlist пусты.
+Исторический аудит от 2026-08-06, релиз `3d5a4647c7e14cb38a62ab74e5bffc0190532f4f`.
+На том срезе фото-антидубль находился в global `shadow`; enforcement и advanced allowlist
+были пусты. Текущую конфигурацию этот отчёт не подтверждает. Для новой задачи сверяйте выбранный контракт
+с кодом, [правилами API](development/api-domain-reference.md#moderation-and-read-models)
+и [процедурами выпуска](runbook.md).
 
 ## Цель
 
@@ -709,34 +710,16 @@ positive невозможно отнести к одной причине.
 
 ## Deploy и rollback
 
-Перед API build требуется не менее 20 GiB на `/var/lib/docker`; baseline имеет около 7.1 GiB.
-Разрешены только manifest-aware MAXIM reclaim, расширение диска или reviewed exact-SHA CI image preload.
-Host-wide Docker GC и снижение preflight floor запрещены.
+Используйте [действующий регламент](development-reliability-plan.md) и
+[deploy/rollback reference](development/production-operations-reference.md#deploy-and-rollback).
+Текущие минимумы чистой сборки — 10 GiB для API и 6 GiB для static; проверяйте фактический
+запас штатным preflight. Разрешены manifest-aware MAXIM reclaim, расширение диска или
+reviewed exact-SHA CI image preload. Host-wide Docker GC и снижение порогов запрещены.
 
-Для каждого code release:
-
-```bash
-git add --patch -- apps/api/src/moderation/photo-duplicate infra/scripts/vps-monitor-readonly.sh
-node scripts/agent/plan.mjs --staged
-./infra/scripts/local-commit-push.sh "feat(moderation): add photo duplicate observability" main
-./infra/scripts/vps-connect.sh deploy main --plan
-# дождаться Required + Analyze JavaScript and TypeScript для exact SHA
-# если VPS не может build: manifest-aware reclaim/расширение, затем preload каждого selected component
-EXACT_SHA="$(git rev-parse HEAD)"
-./infra/scripts/vps-connect.sh preload-ci-image api "$EXACT_SHA"
-./infra/scripts/vps-connect.sh deploy main --auto
-```
-
-Пути в `git add --patch` заменяются явным owned scope текущего unit; новые owned files сначала добавляются
-через `git add --intent-to-add` с точными путями. `--all` не используется. Preload повторяется для каждого
-выбранного planner-компонента (`api`, `miniapp`, `admin`).
-
-Shared API/contract change пересоздаёт все production API roles. Contract consumers требуют выбранные
-planner-компоненты `miniapp-major-static` и `admin-static`; stateful Postgres/Redis не пересоздаются.
-
-Post-deploy evidence: current manifest SHA/image IDs, migration status, все 11 API roles/restarts,
-local ingress/admin live+ready, public live, `/app/`, Safety Desk и
-`./infra/scripts/vps-connect.sh monitor-readonly 900 15`. Deploy-сессия не меняет feature flags.
+Shared API change обновляет все 14 ролей и обе native-песочницы по штатному порядку;
+изменения contracts включают затронутые planner-компоненты. Postgres/Redis не пересоздаются.
+Проверяйте точный source/image, manifest и strict smokes. Наблюдение выбирается по текущей
+задаче и конкретному rollout-контракту. Deploy сам по себе не меняет feature flags.
 
 Primary rollback canary/enforcement:
 

@@ -4,7 +4,7 @@
 
 This plan addresses reproducible development and release failures, not unmeasured production
 performance. It changes no moderation policy, database schema, or rollout switch. Participant
-reports remain globally off until their separate live-smoke requirements are met.
+reports retain their separate [activation and live-smoke requirements](operations/runbooks/participant-reports-rollout.md).
 
 ## Implemented Controls
 
@@ -39,7 +39,7 @@ emulator image labeled as a native-layout success.
 4. Use `node scripts/agent/plan.mjs --worktree` to determine checks, migrations and deployment
    scope. Finish focused regressions before staging only intended paths, with their tests and
    generated output.
-5. Submit with `./infra/scripts/local-commit-push.sh "<message>" main`. Staged verification allows
+5. Submit from the task branch with `./infra/scripts/local-commit-push.sh "commit message"`. Staged verification allows
    unrelated Markdown notes but refuses different executable inputs. This mandatory helper owns
    the final impact aggregate: run it once after the edit stabilizes. If other runtime work must
    remain unstaged, submit from a separate worktree; do not stash someone else's work.

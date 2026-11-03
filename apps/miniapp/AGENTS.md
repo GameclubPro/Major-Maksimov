@@ -26,12 +26,12 @@
 - For miniapp-only runtime/UI changes, use the impact plan's repository static checks, `npm run check:miniapp`, `npm run build:miniapp:production`, and selected local visual smoke. `check:miniapp` already includes CSS ownership, type checking, and miniapp tests; do not rerun those subcommands after it passes.
 - Run focused tests/browser cases for the changed behavior first, then the planned checks. Expand or repeat successful checks only for changed inputs, a failure, or an identified coverage gap. Material UI changes need visual review of the affected screens, not an unrelated whole-product audit.
 - Do not add API/Prisma/admin suites or provision PostgreSQL/Redis for isolated miniapp UI changes. Expand validation when shared contracts, server code, root dependencies/build configuration, or concrete regression evidence crosses those boundaries; inspect changed callers and test doubles first.
-- Agent notes and documentation alone use the planner's static/docs checks and need no browser run or runtime deploy. Runtime releases still require the root exact-SHA CI gates; these local rules do not change which jobs the current CI requires.
+- Agent notes and Markdown-only changes select `check:docs` and need no browser run or runtime deploy. Runtime releases still require the root exact-SHA CI gates; these local rules do not change which jobs the current CI requires.
 - The Major image bakes `VITE_API_BASE=https://major-maksimov.ru/api/v1`; budget changes must also pass a build with that value.
 - Emulator examples:
-  - `npm run emulator:miniapp -- --device iphone --reuse-server`
-  - `npm run emulator:miniapp:android -- --reuse-server`
-  - `npm run emulator:miniapp -- --device iphone-se --reuse-server`
+  - `npm run emulator:miniapp -- --device iphone`
+  - `npm run emulator:miniapp:android`
+  - `npm run emulator:miniapp -- --device iphone-se`
   - add `--theme dark` and `--route '<path>'` for the exact screen
 - `npm run screenshots:miniapp` and `npm run audit:miniapp:visual` are local-first and start an owned server on an unused port. Explicit base URLs keep their port and fail if occupied; reuse requires `MINIAPP_SCREENSHOT_REUSE_SERVER=1` or `MINIAPP_VISUAL_AUDIT_REUSE_SERVER=1`. Only owned process groups are stopped.
 - Vite dev resolves public contract exports to TypeScript sources, so concurrent contracts builds cannot remove its inputs; production builds still use package exports.
@@ -90,7 +90,7 @@
 - Required-subscription controls preserve saved unknown sources and external-link fallback. Validate new selections without deleting existing ones on lookup failure.
 - Stop-word UI owns both blocked words and blocked domains. Domain entry defaults to `DOMAIN`, not an accidental exact root URL.
 - Stop-word edits use the revision-checked `/chats/:chatId/stop-words` API. Keep words/phrases atomic during bulk input, preserve unsaved buffers on failed saves, and poll only `/stop-words/status` for lightweight OCR availability. Legacy settings writes must not overwrite the independent policy.
-- Keep `VkParsingCard` lazy-loaded on chat/channel settings routes.
+- Keep `VkParsingCard` lazy-loaded in Publisher entity modules; do not restore it to Major settings routes.
 - Publication video selection uploads up to 100 MB directly to the MAX-issued HTTPS address. Keep progress, cancellation, persistent errors, generic native MIME inference, and actor-owned asset references; never encode the selected file as base64 or send it through the API mutation tunnel. `node apps/miniapp/test/publication-video-picker.browser.mjs` checks the local upload UI after builds finish.
 
 ## Performance And Product Presentation
