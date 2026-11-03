@@ -225,6 +225,127 @@ function commands(value) {
   ]);
 }
 
+export function parseActivationUnitProperties(raw) {
+  requireFact(
+    typeof raw === 'string' &&
+      raw.endsWith('\n') &&
+      Buffer.byteLength(raw) <= 65_536 &&
+      !/[\0\r]/u.test(raw),
+    'invalid_unit_observation',
+  );
+  const lines = raw.slice(0, -1).split('\n');
+  requireFact(
+    lines.length > 0 && lines.length <= PROPERTIES.length + 1,
+    'invalid_unit_observation',
+  );
+  const properties = {};
+  let prechecks = 0;
+  for (const line of lines) {
+    const at = line.indexOf('=');
+    requireFact(at > 0, 'invalid_unit_observation');
+    const key = line.slice(0, at);
+    const value = line.slice(at + 1);
+    requireFact(PROPERTIES.includes(key), 'invalid_unit_observation');
+    if (key === 'ExecStartPre') {
+      requireFact(
+        ++prechecks <= 2 && (prechecks === 1 || (properties[key] !== '' && value !== '')),
+        'invalid_unit_observation',
+      );
+      properties[key] = prechecks === 1 ? value : `${properties[key]} ${value}`;
+    } else {
+      requireFact(!Object.hasOwn(properties, key), 'invalid_unit_observation');
+      properties[key] = value;
+    }
+  }
+  return properties;
+}
+
+const EMPTY_COMMAND_KEYS = ['ExecCondition', 'ExecStartPost', 'ExecStop', 'ExecStopPost'];
+const EMPTY_COMMAND_OBSERVER = `
+import dbus, json, sys
+unit = sys.argv[1]
+keys = sys.argv[2:]
+allowed_units = ${JSON.stringify(Object.keys(UNIT_HASHES).filter((name) => name.endsWith('.service')))}
+allowed_keys = ${JSON.stringify(EMPTY_COMMAND_KEYS)}
+if unit not in allowed_units or not keys or keys != [key for key in allowed_keys if key in keys]:
+    raise RuntimeError('unreviewed_unit_command_request')
+expected_path = '/org/freedesktop/systemd1/unit/' + unit.replace('-', '_2d').replace('.', '_2e')
+bus = dbus.bus.BusConnection('unix:path=/run/dbus/system_bus_socket')
+held = False
+try:
+    manager = dbus.Interface(bus.get_object('org.freedesktop.systemd1', '/org/freedesktop/systemd1', introspect=False), 'org.freedesktop.systemd1.Manager')
+    manager.RefUnit(dbus.String(unit), timeout=1)
+    held = True
+    path = manager.GetUnit(dbus.String(unit), timeout=1)
+    if not isinstance(path, dbus.ObjectPath) or str(path) != expected_path:
+        raise RuntimeError('service_bus_identity_unproved')
+    props = dbus.Interface(bus.get_object('org.freedesktop.systemd1', path, introspect=False), 'org.freedesktop.DBus.Properties')
+    rows = []
+    for key in keys:
+        value = props.Get('org.freedesktop.systemd1.Service', key, timeout=1)
+        if not isinstance(value, dbus.Array) or str(value.signature) != '(sasbttttuii)' or len(value) != 0:
+            raise RuntimeError('empty_service_commands_unproved')
+        rows.append({'name': key, 'type': 'a' + str(value.signature), 'count': len(value)})
+finally:
+    try:
+        if held:
+            manager.UnrefUnit(dbus.String(unit), timeout=1)
+    finally:
+        bus.close()
+print(json.dumps({'unit': unit, 'objectPath': str(path), 'properties': rows, 'referenceReleased': True}))
+`;
+
+export async function observeActivationUnitProperties(name) {
+  requireFact(Object.hasOwn(UNIT_HASHES, name), 'unknown_backup_unit');
+  const properties = parseActivationUnitProperties(
+    await command('systemctl', [
+      'show',
+      name,
+      '--no-pager',
+      '--all',
+      ...PROPERTIES.map((key) => `--property=${key}`),
+    ]),
+  );
+  if (name.endsWith('.service')) {
+    const missing = EMPTY_COMMAND_KEYS.filter((key) => !Object.hasOwn(properties, key));
+    if (missing.length) {
+      // FLAG: systemctl omits empty command vectors even with --all. A temporary
+      // same-connection RefUnit prevents GC during typed reads without starting work.
+      // Never default omitted hooks; cleanup failure or process timeout also refuses.
+      const path = `/org/freedesktop/systemd1/unit/${name.replaceAll('-', '_2d').replaceAll('.', '_2e')}`;
+      const evidence = JSON.parse(
+        await command('python3', ['-I', '-B', '-c', EMPTY_COMMAND_OBSERVER, name, ...missing], {
+          maxBuffer: 8192,
+        }),
+      );
+      requireFact(
+        evidence !== null &&
+          typeof evidence === 'object' &&
+          !Array.isArray(evidence) &&
+          Object.keys(evidence).length === 4 &&
+          evidence.unit === name &&
+          evidence.objectPath === path &&
+          evidence.referenceReleased === true &&
+          Array.isArray(evidence.properties) &&
+          evidence.properties.length === missing.length &&
+          evidence.properties.every(
+            (value, index) =>
+              value !== null &&
+              typeof value === 'object' &&
+              !Array.isArray(value) &&
+              Object.keys(value).length === 3 &&
+              value.name === missing[index] &&
+              value.type === 'a(sasbttttuii)' &&
+              value.count === 0,
+          ),
+        'empty_service_commands_unproved',
+      );
+      for (const key of missing) properties[key] = '';
+    }
+  }
+  return properties;
+}
+
 export function validateActivationUnits(units) {
   requireFact(
     Object.keys(units).sort().join() === Object.keys(UNIT_HASHES).sort().join(),
@@ -903,27 +1024,13 @@ async function observe() {
   const units = {};
   for (const name of Object.keys(UNIT_HASHES)) {
     const value = await boundedFile(`/etc/systemd/system/${name}`, 16_384);
-    const raw = await command('systemctl', [
-      'show',
-      name,
-      '--no-pager',
-      ...PROPERTIES.map((key) => `--property=${key}`),
-    ]);
-    const rows = raw
-      .trimEnd()
-      .split('\n')
-      .map((line) => {
-        const at = line.indexOf('=');
-        requireFact(at > 0, 'invalid_unit_observation');
-        return [line.slice(0, at), line.slice(at + 1)];
-      });
-    requireFact(new Set(rows.map(([key]) => key)).size === rows.length, 'invalid_unit_observation');
+    const properties = await observeActivationUnitProperties(name);
     if (name.endsWith('.service')) await assertServiceCgroupEmpty(name);
     units[name] = {
       sha256: digest(value.bytes),
       uid: value.stat.uid,
       mode: value.stat.mode & 0o777,
-      properties: Object.fromEntries(rows),
+      properties,
     };
   }
   const directory = await lstat(SCHEDULE);
