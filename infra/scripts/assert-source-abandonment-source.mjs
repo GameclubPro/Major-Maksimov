@@ -97,61 +97,15 @@ export const SOURCE_ABANDONMENT_SOURCE_CHECKS = Object.freeze([
     'apps/api/src/webhook/webhook-legacy-forward-source.ts',
     [
       'export function inspectLegacyForwardText(',
-      'export function inspectLegacyPostSealForwardText(',
       'export function inspectSourceAbandonmentForwardText(',
       "return inspectForwardText(update, settings, 'legacy');",
       "return inspectForwardText(update, settings, 'legacy-post-seal');",
       "return inspectForwardText(update, settings, 'source-abandonment');",
       "const omittedSender = profile === 'source-abandonment' && link?.sender === undefined;",
       "link.type !== 'forward'",
-      // FLAG: Keep modern, created-only legacy links/previews and the strict fresh
-      // legacy default independent; see legacy-webhook-order-recovery.md.
+      // FLAG: Modern markup stays strict while the separate post-seal legacy path
+      // retains its bounded validators. The fresh legacy default remains disabled.
       "const modern = profile === 'source-abandonment';",
-      "const createdLegacyForward =\n    profile === 'legacy-post-seal' &&\n    update.type === 'message_created' &&\n    raw?.update_type === 'message_created' &&\n    record(message?.link)?.type === 'forward';",
-      "modern\n      ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)\n      : profile === 'legacy-post-seal'\n        ? (item) =>\n            isLegacyPostSealOuterMarkup(\n              item,\n              message?.link,\n              createdLegacyForward ? update.type : undefined,\n            )\n        : undefined",
-      "modern\n      ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPostSealMarkup(item.markup, item.text, createdLegacyForward)\n        : undefined",
-      "modern\n      ? (attachments) =>\n          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')\n      : createdLegacyForward\n        ? isLegacyPostSealLinkedMedia\n        : undefined",
-      `function isLegacyPostSealMarkup(value: unknown, text: unknown, allowLinks: boolean): boolean {
-  return (
-    isLegacyPassiveMarkup(value, text) ||
-    (allowLinks &&
-      Array.isArray(value) &&
-      value.length <= 64 &&
-      value.every(
-        (entry) => record(entry)?.type === 'link' || isLegacyPassiveMarkup([entry], text),
-      ) &&
-      isSourceAbandonmentMarkup(value, text))
-  );
-}`,
-      `function isLegacyPostSealLinkedMedia(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!Array.isArray(value) || value.length > 10) return false;
-  return (
-    value.every(isLegacyImageAttachment) ||
-    (value.length === 1 &&
-      record(value[0])?.type === 'share' &&
-      isSourceAbandonmentDirectMedia(value, undefined))
-  );
-}`,
-      `export function isLegacyPostSealOuterMarkup(
-  body: Record<string, unknown>,
-  linkValue: unknown,
-  updateType?: unknown,
-): boolean {
-  const link = record(linkValue);
-  const allowLinks = updateType === 'message_created' && link?.type === 'forward';
-  if (isLegacyPostSealMarkup(body.markup, body.text, allowLinks)) return true;
-  const linked = record(link?.message);
-  return Boolean(
-    body.text === '' &&
-    link?.type === 'forward' &&
-    linked &&
-    Array.isArray(body.markup) &&
-    body.markup.length <= 64 &&
-    isLegacyPostSealMarkup(linked.markup, linked.text, allowLinks) &&
-    JSON.stringify(body.markup) === JSON.stringify(linked.markup),
-  );
-}`,
       'item.attachments.length <= 10',
       'item.attachments.every(isLegacyImageAttachment)',
       'legacyParsedTextMatches(update)',
@@ -368,6 +322,85 @@ export const SOURCE_ABANDONMENT_SOURCE_CHECKS = Object.freeze([
   ],
 ]);
 
+const FORWARD_SOURCE_PATH = 'apps/api/src/webhook/webhook-legacy-forward-source.ts';
+
+// FLAG: Accept one complete reviewed reader profile, never a per-callback mix.
+// The created-forward profile additionally requires its strict original-source
+// receipt path: accepting SHARE content alone must not authorize its disposition.
+export const SOURCE_ABANDONMENT_FORWARD_PROFILES = Object.freeze({
+  passive: {
+    bindings: {
+      outer:
+        "modern\n      ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPostSealOuterMarkup(item, message?.link)\n        : undefined",
+      linked:
+        "modern\n      ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPassiveMarkup(item.markup, item.text)\n        : undefined",
+      media:
+        "modern\n      ? (attachments) =>\n          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')\n      : undefined",
+    },
+    guards: {
+      outer:
+        "export function isLegacyPostSealOuterMarkup(\n  body: Record<string, unknown>,\n  linkValue: unknown,\n): boolean {\n  if (isLegacyPassiveMarkup(body.markup, body.text)) return true;\n  const link = record(linkValue);\n  const linked = record(link?.message);\n  return Boolean(\n    body.text === '' &&\n    link?.type === 'forward' &&\n    linked &&\n    Array.isArray(body.markup) &&\n    body.markup.length <= 64 &&\n    isLegacyPassiveMarkup(linked.markup, linked.text) &&\n    JSON.stringify(body.markup) === JSON.stringify(linked.markup),\n  );\n}",
+    },
+    dependencies: {},
+  },
+  created: {
+    bindings: {
+      outer:
+        "modern\n      ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)\n      : profile === 'legacy-post-seal'\n        ? (item) =>\n            isLegacyPostSealOuterMarkup(\n              item,\n              message?.link,\n              createdLegacyForward ? update.type : undefined,\n            )\n        : undefined",
+      linked:
+        "modern\n      ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPostSealMarkup(item.markup, item.text, createdLegacyForward)\n        : undefined",
+      media:
+        "modern\n      ? (attachments) =>\n          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')\n      : createdLegacyForward\n        ? isLegacyPostSealLinkedMedia\n        : undefined",
+    },
+    guards: {
+      created:
+        "  const createdLegacyForward =\n    profile === 'legacy-post-seal' &&\n    update.type === 'message_created' &&\n    raw?.update_type === 'message_created' &&\n    record(message?.link)?.type === 'forward';",
+      markup:
+        "function isLegacyPostSealMarkup(value: unknown, text: unknown, allowLinks: boolean): boolean {\n  return (\n    isLegacyPassiveMarkup(value, text) ||\n    (allowLinks &&\n      Array.isArray(value) &&\n      value.length <= 64 &&\n      value.every(\n        (entry) => record(entry)?.type === 'link' || isLegacyPassiveMarkup([entry], text),\n      ) &&\n      isSourceAbandonmentMarkup(value, text))\n  );\n}",
+      media:
+        "function isLegacyPostSealLinkedMedia(value: unknown): boolean {\n  if (value === undefined) return true;\n  if (!Array.isArray(value) || value.length > 10) return false;\n  return (\n    value.every(isLegacyImageAttachment) ||\n    (value.length === 1 &&\n      record(value[0])?.type === 'share' &&\n      isSourceAbandonmentDirectMedia(value, undefined))\n  );\n}",
+      outer:
+        "export function isLegacyPostSealOuterMarkup(\n  body: Record<string, unknown>,\n  linkValue: unknown,\n  updateType?: unknown,\n): boolean {\n  const link = record(linkValue);\n  const allowLinks = updateType === 'message_created' && link?.type === 'forward';\n  if (isLegacyPostSealMarkup(body.markup, body.text, allowLinks)) return true;\n  const linked = record(link?.message);\n  return Boolean(\n    body.text === '' &&\n    link?.type === 'forward' &&\n    linked &&\n    Array.isArray(body.markup) &&\n    body.markup.length <= 64 &&\n    isLegacyPostSealMarkup(linked.markup, linked.text, allowLinks) &&\n    JSON.stringify(body.markup) === JSON.stringify(linked.markup),\n  );\n}",
+    },
+    dependencies: {
+      'apps/api/src/webhook/webhook-legacy-source.ts': [
+        "profile === 'source-abandonment'\n      ? !isSourceAbandonmentOuterMarkup(body, message.link)\n      : postSealForward && message.link !== undefined\n        ? !isLegacyPostSealOuterMarkup(body, message.link, update.type)\n        : !isLegacyPassiveMarkup(body.markup, sourceText)\n  )\n    return refuse('source_markup');",
+      ],
+      'apps/api/src/webhook/webhook-legacy-receipt-disposition.ts': [
+        'const linkedAttachments = linkedBody?.attachments;',
+        "    if (\n      event.errorMessage ===\n        'Webhook preparation deferred: Legacy scope installation is not sealed' ||\n      body?.text === undefined ||\n      body?.text === null ||\n      (link?.type === 'forward' &&\n        (body?.markup !== undefined ||\n          linkedBody?.markup !== undefined ||\n          (update?.type === 'message_created' &&\n            Array.isArray(linkedAttachments) &&\n            linkedAttachments.length <= 10 &&\n            linkedAttachments.some((attachment) => record(attachment)?.type === 'share'))))\n    ) {\n      const heldMessage = await inspectHeldMessageDisposition(tx, event);\n      if (!heldMessage || heldMessage === 'NOT_HELD')\n        return refuse('receipt_post_seal_source_unproved');\n      return writeLegacyReceiptDisposition(\n        tx,\n        event,\n        heldMessage.authorityId,\n        [],\n        'POST_SEAL_MEMBER',\n      );\n    }",
+      ],
+    },
+  },
+});
+
+function assertForwardReaderProfile(sources, readSource) {
+  const forward = sources.get(FORWARD_SOURCE_PATH);
+  for (const profile of Object.values(SOURCE_ABANDONMENT_FORWARD_PROFILES)) {
+    if (
+      ![...Object.values(profile.bindings), ...Object.values(profile.guards)].every((marker) =>
+        forward.includes(marker),
+      )
+    )
+      continue;
+    const dependenciesMatch = Object.entries(profile.dependencies).every(([path, markers]) => {
+      if (!sources.has(path)) {
+        try {
+          sources.set(path, readSource(path));
+        } catch {
+          return false;
+        }
+      }
+      const source = sources.get(path);
+      return typeof source === 'string' && markers.every((marker) => source.includes(marker));
+    });
+    if (dependenciesMatch) return;
+  }
+  throw new Error(
+    `Rollback target lacks permanent exact-source abandonment readers: ${FORWARD_SOURCE_PATH}`,
+  );
+}
+
 export function assertSourceAbandonmentSource(
   commitSha,
   readSource = (path) =>
@@ -378,12 +411,15 @@ export function assertSourceAbandonmentSource(
     }),
 ) {
   if (!/^[0-9a-f]{40}$/u.test(commitSha ?? '')) throw new Error('Exact source SHA required');
+  const sources = new Map();
   for (const [path, markers] of SOURCE_ABANDONMENT_SOURCE_CHECKS) {
     const source = readSource(path);
+    sources.set(path, source);
     if (typeof source !== 'string' || markers.some((marker) => !source.includes(marker)))
       throw new Error(`Rollback target lacks permanent exact-source abandonment readers: ${path}`);
   }
-  const holds = readSource('apps/api/src/webhook/webhook-legacy-hold.service.ts');
+  assertForwardReaderProfile(sources, readSource);
+  const holds = sources.get('apps/api/src/webhook/webhook-legacy-hold.service.ts');
   const members = holds.slice(
     holds.indexOf('  async hasChatHolds('),
     holds.indexOf('  async isAnyMessageSourceHeld('),

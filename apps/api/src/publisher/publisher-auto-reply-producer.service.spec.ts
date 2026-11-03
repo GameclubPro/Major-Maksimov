@@ -10,7 +10,10 @@ import {
   PublisherAutoReplyProducerService,
   PublisherAutoReplyEnqueuePendingError,
 } from './publisher-auto-reply-producer.service';
-import { PublisherAutoReplyAdmissionError } from './publisher-auto-reply.queue';
+import {
+  PublisherAutoReplyAdmissionError,
+  type PublisherAutoReplyQueueService,
+} from './publisher-auto-reply.queue';
 import type { PublisherAutoReplyFloodGateResult } from './publisher-auto-reply-flood-gate.service';
 import { PublisherAutoReplySourceReceiptHeldError } from './publisher-auto-reply-source-fence.service';
 
@@ -163,10 +166,19 @@ function harness(
     assertNewDeliveryAdmissionEnabled: options.admissionFailure
       ? jest.fn().mockRejectedValue(options.admissionFailure)
       : jest.fn().mockResolvedValue(undefined),
-    ensureDeliveryJob: options.queueFailure
-      ? jest.fn().mockRejectedValue(options.queueFailure)
-      : jest.fn().mockResolvedValue(undefined),
-  };
+    ensureDeliveryJob: jest
+      .fn<
+        ReturnType<PublisherAutoReplyQueueService['ensureDeliveryJob']>,
+        Parameters<PublisherAutoReplyQueueService['ensureDeliveryJob']>
+      >()
+      .mockImplementation(async () => {
+        if (options.queueFailure) throw options.queueFailure;
+        return { outcome: 'add_acknowledged' };
+      }),
+  } satisfies Pick<
+    PublisherAutoReplyQueueService,
+    'assertNewDeliveryAdmissionEnabled' | 'ensureDeliveryJob'
+  >;
   const floodGate = {
     reserve: options.floodFailure
       ? jest.fn().mockRejectedValue(options.floodFailure)

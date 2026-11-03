@@ -67,6 +67,18 @@ test('preserves full public aggregates and the bounded core selection', () => {
   assert.deepEqual(parseTestGlobs(scripts['test:agent-tools:core']), fullGlobs.slice(0, -1));
 });
 
+test('permanent rollback source floors run in mandatory core for application changes', () => {
+  const core = expandTestGlobs(parseTestGlobs(scripts['test:agent-tools:core']));
+  const infrastructure = expandTestGlobs(['infra/scripts/*.test.mjs']);
+  for (const name of ['source-abandonment-rollback', 'legacy-disposition-rollback']) {
+    assert.ok(core.includes(`scripts/ci/${name}.test.mjs`), `${name}: missing core coverage`);
+    assert.ok(
+      !infrastructure.includes(`infra/scripts/${name}.test.mjs`),
+      `${name}: repeated infrastructure coverage`,
+    );
+  }
+});
+
 test('full local verification runs core and infrastructure tests exactly once', () => {
   const commands = scripts.check.split(' && ');
   assert.ok(commands.includes('npm run check:static:ci'));

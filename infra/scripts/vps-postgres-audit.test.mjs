@@ -10,7 +10,6 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
-  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -23,6 +22,7 @@ import {
 } from './publisher-publications-audit.mjs';
 import { buildNetworkStatisticsAuditSql } from './network-statistics-audit.mjs';
 import { HELD_RECEIPT_COLUMNS, heldReceiptPrivilegesSql } from './webhook-held-receipt-audit.mjs';
+import { armAuditFixtureInactivityWatchdog } from './vps-postgres-audit-test-watchdog.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const audit = resolve(root, 'infra/scripts/vps-postgres-audit.sh');
@@ -32,31 +32,15 @@ const monitor = readFileSync(resolve(root, 'infra/scripts/vps-monitor-readonly.s
 const schema = readFileSync(resolve(root, 'apps/api/prisma/schema.prisma'), 'utf8');
 const nativePostgresUrl = process.env.MAXIM_TEST_POSTGRES_URL?.trim();
 
-let activeTestName = 'module_setup';
-let activeTestStartedAt = Date.now();
+// FLAG: Bound inactivity, not the cumulative duration of progressing tests. Keep the
+// unref'd watchdog armed during module setup and shutdown so stuck resources fail.
+const fixtureWatchdog = armAuditFixtureInactivityWatchdog();
 beforeEach((context) => {
-  activeTestName = context.name;
-  activeTestStartedAt = Date.now();
+  fixtureWatchdog.markProgress(context.name);
 });
 afterEach(() => {
-  activeTestName = 'between_tests_or_shutdown';
-  activeTestStartedAt = Date.now();
+  fixtureWatchdog.markProgress('between_tests_or_shutdown');
 });
-// FLAG: A stuck fixture must fail with its current test and resource kinds before the
-// job deadline discards that evidence. This timer is local to the isolated test file;
-// it never changes a production audit timeout or makes a failed test successful.
-setTimeout(() => {
-  writeSync(
-    2,
-    `${JSON.stringify({
-      failure: 'audit_fixture_file_deadline',
-      test: activeTestName,
-      testElapsedMs: Date.now() - activeTestStartedAt,
-      activeResources: process.getActiveResourcesInfo(),
-    })}\n`,
-  );
-  process.exit(1);
-}, 120_000).unref();
 
 const { PGlite } = await import('@electric-sql/pglite');
 

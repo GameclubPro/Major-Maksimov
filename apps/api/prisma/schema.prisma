@@ -896,6 +896,8 @@ model PublisherAutoReplyDelivery {
   matchedTrigger  PublisherAutoReplyTrigger?        @relation(fields: [matchedTriggerId], references: [id], onDelete: SetNull)
 
   @@unique([chatId, sourceMessageId], map: "publisher_auto_reply_deliveries_chat_source_message_key")
+  // FLAG: Partial pending (due_at,id) and sending (locked_at,id) recovery indexes
+  // are owned by the 20261103190000 and 20261103190100 online migrations.
   @@index([status, dueAt, lockedAt, id], map: "publisher_auto_reply_deliveries_status_due_locked_idx")
   @@index([ruleId, createdAt(sort: Desc)], map: "publisher_auto_reply_deliveries_rule_created_idx")
   @@index([contentRevisionId], map: "publisher_auto_reply_deliveries_content_revision_idx")
@@ -920,6 +922,8 @@ model PublisherAutoReplyAssetUpload {
   asset PublisherAutoReplyAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@unique([assetId, publisherBotId], map: "publisher_auto_reply_asset_uploads_asset_bot_key")
+  // FLAG: The partial UPLOADING keyset index with unique id suffix is owned by
+  // 20261103190200_index_auto_reply_upload_recovery; keep READY payloads unchanged.
   @@index([status, lockedAt, updatedAt], map: "publisher_auto_reply_asset_uploads_recovery_idx")
   @@map("publisher_auto_reply_asset_uploads")
 }
