@@ -10,6 +10,7 @@ const miniapp = jobs.miniapp;
 const shards = ['1/4', '2/4', '3/4', '4/4'];
 const browserFiles = [
   'karavan-shop-formats',
+  'karavan-shop-simple',
   'personal-access-entry',
   'entity-presentation',
   'moderator-choice',
@@ -36,6 +37,9 @@ const expectedCommands = [
   'npm run build:miniapp:production',
   'npm run screenshots:miniapp:smoke',
   ...browserFiles.map((path) => `node ${path}`),
+  ...['categories', 'boundaries', 'queue'].map(
+    (group) => `SHOP_SIMPLE_ONLY=${group} node apps/miniapp/test/karavan-shop-simple.browser.mjs`,
+  ),
 ];
 
 function selectedSteps(shard) {
@@ -58,7 +62,7 @@ test('four isolated browser jobs retain every existing validation command exactl
       .flatMap((step) => (step.run ?? '').trim().split('\n'))
       .filter(
         (command) =>
-          command.startsWith('node apps/miniapp/test/') || expectedCommands.includes(command),
+          command.includes('node apps/miniapp/test/') || expectedCommands.includes(command),
       ),
   );
   assert.deepEqual(commands.sort(), [...expectedCommands].sort());
