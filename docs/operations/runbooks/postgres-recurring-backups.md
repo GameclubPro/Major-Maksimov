@@ -219,6 +219,12 @@ Do not configure global or wildcard `safe.directory`. Verify an idle retry throu
 the actual root service environment after confirming no pending operation: a sudo
 shell can retain operator configuration and miss a systemd-only ownership failure.
 
+Root source observations must also preserve the operator's Git index. Set
+`GIT_OPTIONAL_LOCKS=0` for read-only Git commands; content comparisons additionally
+disable `diff.autoRefreshIndex` for that command. Check Git failures separately from
+an empty diff. A timestamp-only change must remain acceptable without rewriting the
+index, while a changed tracked backup script must still prevent execution.
+
 Health reports backup data age separately from readback verification age. The
 strict archive filename timestamp supplies a conservative generation-start bound,
 not an exact PostgreSQL snapshot time. Independent evidence selects the newest

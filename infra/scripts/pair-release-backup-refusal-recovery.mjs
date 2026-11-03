@@ -237,9 +237,15 @@ async function command(file, args, extra = {}) {
   }
 }
 
-async function git(root, args) {
-  return command('git', ['-c', `safe.directory=${root}`, '-C', root, ...args]);
+export async function observeBackupRefusalSourceGit(root, args) {
+  // FLAG: Root status reads must never replace the operator's index, even when
+  // the caller explicitly inherited optional locks enabled.
+  return command('git', ['-c', `safe.directory=${root}`, '-C', root, ...args], {
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
 }
+
+const git = observeBackupRefusalSourceGit;
 
 async function validatePaths() {
   requireFact(process.getuid() === 0, 'root_required');
