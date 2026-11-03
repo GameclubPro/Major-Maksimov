@@ -3,7 +3,12 @@ import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Job, Queue } from 'bullmq';
 import { createHash } from 'node:crypto';
-import { getAppRole, roleRunsEnqueue, roleRunsIngress, roleRunsPublisher } from '../runtime/app-role';
+import {
+  getAppRole,
+  roleRunsEnqueue,
+  roleRunsIngress,
+  roleRunsPublisher,
+} from '../runtime/app-role';
 import { buildPublisherBotDescriptor } from './publisher-bot-descriptor';
 import {
   PublisherAutoReplyBacklogQuota,
@@ -38,6 +43,10 @@ export type PublisherAutoReplyJob = {
   retryPolicyName: 'publisher-auto-reply';
   deliveryId: string;
 };
+
+export type PublisherAutoReplyJobEnsureResult =
+  | { outcome: 'already_live' }
+  | { outcome: 'add_acknowledged' };
 
 export function buildPublisherAutoReplyJobId(deliveryId: string): string {
   const digest = createHash('sha256').update(deliveryId.trim()).digest('hex').slice(0, 32);
@@ -77,8 +86,7 @@ export class PublisherAutoReplyQueueService implements OnModuleDestroy {
     }
     this.backlogLimit = backlogLimit;
     const role = getAppRole();
-    const ownsAdmission =
-      roleRunsIngress(role) || roleRunsEnqueue(role) || roleRunsPublisher(role);
+    const ownsAdmission = roleRunsIngress(role) || roleRunsEnqueue(role) || roleRunsPublisher(role);
     const redisUrl = ownsAdmission ? configService.get<string>('REDIS_URL')?.trim() : undefined;
     this.backlogQuota = new PublisherAutoReplyBacklogQuota(this.queue, this.backlogLimit, {
       ...(redisUrl ? { redisUrl } : {}),
@@ -109,7 +117,10 @@ export class PublisherAutoReplyQueueService implements OnModuleDestroy {
     }
   }
 
-  async ensureDeliveryJob(deliveryId: string, availableAt?: Date | null): Promise<void> {
+  async ensureDeliveryJob(
+    deliveryId: string,
+    availableAt?: Date | null,
+  ): Promise<PublisherAutoReplyJobEnsureResult> {
     const normalizedDeliveryId = deliveryId.trim();
     if (!normalizedDeliveryId) {
       throw new Error('Publisher auto-reply deliveryId is required');
@@ -118,7 +129,7 @@ export class PublisherAutoReplyQueueService implements OnModuleDestroy {
     const jobId = buildPublisherAutoReplyJobId(normalizedDeliveryId);
     const existing = await this.queue.getJob(jobId);
     if (existing && (await this.isLiveJob(existing))) {
-      return;
+      return { outcome: 'already_live' };
     }
     if (existing) {
       await this.removeReplaceableJob(existing);
@@ -156,6 +167,9 @@ export class PublisherAutoReplyQueueService implements OnModuleDestroy {
     } finally {
       await this.releaseBacklogClaim(backlogClaim);
     }
+    // FLAG: BullMQ also acknowledges a competing add of the same job ID; this is not
+    // proof that this call created a new job or that the delivery has executed.
+    return { outcome: 'add_acknowledged' };
   }
 
   private async isLiveJob(job: Job<PublisherAutoReplyJob>): Promise<boolean> {

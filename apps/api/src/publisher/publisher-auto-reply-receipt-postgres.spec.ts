@@ -8,7 +8,10 @@ import type { PublisherAutoReplyAuthoringQueueService } from './publisher-auto-r
 import { PublisherAutoReplySourceFenceService } from './publisher-auto-reply-source-fence.service';
 import { PublisherBackgroundWorkCoordinatorService } from './publisher-background-work-coordinator.service';
 import { PublisherPrivateFlowLeaseService } from './publisher-private-flow-lease.service';
-import type { PublisherAutoReplyJob } from './publisher-auto-reply.queue';
+import type {
+  PublisherAutoReplyJob,
+  PublisherAutoReplyQueueService,
+} from './publisher-auto-reply.queue';
 import { PublisherReadinessService } from './publisher-readiness.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
@@ -43,7 +46,14 @@ integration('Publisher auto-reply exact receipt settlement on PostgreSQL', () =>
   const triggerName = `${faultSchema}_fault`;
   const attempt = { final: false, attemptsMade: 1, maxAttempts: 7 };
   const remoteMessageId = 'synthetic-confirmed-auto-reply';
-  const queue = { ensureDeliveryJob: jest.fn().mockResolvedValue(undefined) };
+  const queue = {
+    ensureDeliveryJob: jest
+      .fn<
+        ReturnType<PublisherAutoReplyQueueService['ensureDeliveryJob']>,
+        Parameters<PublisherAutoReplyQueueService['ensureDeliveryJob']>
+      >()
+      .mockResolvedValue({ outcome: 'add_acknowledged' }),
+  } satisfies Pick<PublisherAutoReplyQueueService, 'ensureDeliveryJob'>;
   const health = {
     assertDispatchAllowed: jest.fn().mockResolvedValue(undefined),
     recordSendSuccess: jest.fn().mockResolvedValue(undefined),
@@ -696,7 +706,13 @@ integration('Publisher auto-reply exact receipt settlement on PostgreSQL', () =>
       await db.publisherAutoReplyRule.update({ where: { id: ruleId }, data: { enabled: false } });
       await expect(
         recovery.recoverOnce(new Date(fenced.lockedAt!.getTime() + 2 * 60_000 + 1)),
-      ).resolves.toMatchObject({ ambiguous: 1, enqueued: 0, reset: 0 });
+      ).resolves.toMatchObject({
+        ambiguous: 1,
+        alreadyLive: 0,
+        addAcknowledged: 0,
+        reset: 0,
+        budgetExhausted: false,
+      });
       expect(await row()).toMatchObject({
         status: 'AMBIGUOUS',
         dispatchStartedAt: fenced.dispatchStartedAt,
