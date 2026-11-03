@@ -13,10 +13,12 @@ head index, which remains installed. Dead tuples, MVCC visibility and physical I
 strictly bounded by LIMIT. Local custom and named generic plans must establish actual probe
 work on retained history and skewed hot chats.
 
-Each LATERAL lookup keeps the fixed `queue_name` before `(created_at, id)` in its order.
-Removing that redundant selection key can make PostgreSQL scan the old chat index and filter
-the entire pending chat once per queue. Validate after preceding native suites as well as on
-fresh stores: retained index sizes and planner statistics can change the chosen path.
+Each LATERAL lookup uses inclusive bounds for the exact `(chat, queue_name)` pair and orders
+by that pair followed by `(created_at, id)`. Equality filters alone can let PostgreSQL choose
+the old chat index and filter the entire pending chat once per queue. The local regression
+rebuilds a deliberately sparse index inside a rolled-back disposable-store transaction; this
+is a planner fixture, not production maintenance. Validate custom and generic plans after
+preceding native suites as well as on fresh stores, since index size and statistics affect plans.
 
 ## Fixed migration and release order
 

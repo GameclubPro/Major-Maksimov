@@ -513,7 +513,13 @@ export class WebhookRoutingService {
     chatId: string,
     webhookEventId: string,
   ): Promise<OutstandingMessageQueueWork> {
-    const pendingPredicate = Prisma.sql`
+    const chatExpression = Prisma.sql`
+      COALESCE(
+        NULLIF(BTRIM(e.normalized_payload->'message'->>'chatId'), ''),
+        NULLIF(BTRIM(e.normalized_payload->>'chatId'), '')
+      )
+    `;
+    const pendingBasePredicate = Prisma.sql`
       e.id <> ${webhookEventId}
       AND (
         e.status = ANY(ARRAY['RECEIVED', 'QUEUED']::"WebhookStatus"[])
@@ -531,11 +537,8 @@ export class WebhookRoutingService {
           NULLIF(BTRIM(e.normalized_payload->>'update_type'), '')
         )
       ) = ANY(ARRAY['message_created', 'message_edited'])
-      AND COALESCE(
-        NULLIF(BTRIM(e.normalized_payload->'message'->>'chatId'), ''),
-        NULLIF(BTRIM(e.normalized_payload->>'chatId'), '')
-      ) = ${chatId}
     `;
+    const pendingPredicate = Prisma.sql`${pendingBasePredicate} AND ${chatExpression} = ${chatId}`;
     const rows = await this.prisma.$queryRaw<
       Array<{ has_pending?: boolean; queue_name?: string | null }>
     >(
@@ -551,10 +554,12 @@ export class WebhookRoutingService {
             CROSS JOIN LATERAL (
               SELECT e.queue_name, e.created_at, e.id
               FROM webhook_events e
-              WHERE ${pendingPredicate} AND e.queue_name = queues.queue_name
-              -- FLAG: Keep the fixed queue key in the index order; omitting it can
-              -- scan the old chat index and filter the entire backlog per queue.
-              ORDER BY e.queue_name ASC, e.created_at ASC, e.id ASC
+              WHERE ${pendingBasePredicate}
+                AND (${chatExpression}, e.queue_name) >= (${chatId}::text, queues.queue_name)
+                AND (${chatExpression}, e.queue_name) <= (${chatId}::text, queues.queue_name)
+              -- FLAG: Tuple bounds preserve exact chat/queue equality while retaining
+              -- the full index order for a bounded lookup under skewed statistics.
+              ORDER BY ${chatExpression} ASC, e.queue_name ASC, e.created_at ASC, e.id ASC
               LIMIT 1
             ) AS candidate
             ORDER BY candidate.created_at ASC, candidate.id ASC

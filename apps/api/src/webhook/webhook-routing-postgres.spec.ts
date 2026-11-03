@@ -63,8 +63,8 @@ function testLiteral(value: unknown): string {
 
 describePostgres('bounded PostgreSQL webhook routing', () => {
   jest.setTimeout(60_000);
-  const prefix = `routing-${randomUUID()}-`;
-  const chatId = `${prefix}chat`;
+  const prefix = `r${randomUUID().slice(0, 7)}-`;
+  const chatId = `${prefix}c`;
   let client: Client;
 
   beforeAll(async () => {
@@ -239,115 +239,141 @@ describePostgres('bounded PostgreSQL webhook routing', () => {
       has_pending: true,
       queue_name: DEFAULT_WEBHOOK_QUEUE_NAMES[0]!,
     });
-    const query = await productionQuery(chatId, `${prefix}current`);
-    await client.query(`PREPARE routing_plan AS ${query.text}`);
-    try {
-      for (const mode of ['force_custom_plan', 'force_generic_plan']) {
-        await client.query(`SET plan_cache_mode = ${mode}`);
-        const execution = query.values.map(testLiteral).join(', ');
-        const result = await client.query(
-          `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE routing_plan(${execution})`,
-        );
-        const nodes = planNodes(result.rows[0]!['QUERY PLAN']);
-        const scans = nodes.filter((node) => node['Relation Name'] === 'webhook_events');
-        const planRoot = nodes.find((node) => typeof node['Node Type'] === 'string');
-        const safeIndexes = [
-          'webhook_events_ordered_chat_head_idx',
-          'webhook_events_chat_queue_head_idx',
-          'webhook_events_pkey',
-        ];
-        process.stdout.write(
-          `routing-plan-before-assert ${JSON.stringify({
-            mode,
-            scans: scans.map((scan) => ({
-              type: scan['Node Type'],
-              index: safeIndexes.includes(String(scan['Index Name']))
-                ? scan['Index Name']
-                : 'other',
-              queueInIndex: String(scan['Index Cond'] ?? '').includes('queue_name'),
-              queueInFilter: String(scan.Filter ?? '').includes('queue_name'),
-              parameterized: /\$\d+/u.test(String(scan['Index Cond'] ?? '')),
-              rows: scan['Actual Rows'],
-              loops: scan['Actual Loops'],
-              filtered: scan['Rows Removed by Filter'] ?? 0,
-              rechecked: scan['Rows Removed by Index Recheck'] ?? 0,
-              sharedHits: scan['Shared Hit Blocks'] ?? 0,
-              sharedReads: scan['Shared Read Blocks'] ?? 0,
-            })),
-            sorts: nodes
-              .filter((node) => node['Node Type'] === 'Sort')
-              .map((node) => ({
-                rows: node['Actual Rows'],
-                loops: node['Actual Loops'],
-                method: node['Sort Method'],
-              })),
-            sharedHits: planRoot?.['Shared Hit Blocks'],
-            sharedReads: planRoot?.['Shared Read Blocks'],
-          })}\n`,
-        );
-        expect(scans.length).toBeGreaterThan(0);
-        for (const scan of scans) {
-          expect(['Index Scan', 'Index Only Scan']).toContain(scan['Node Type']);
-          expect([
-            'webhook_events_ordered_chat_head_idx',
-            'webhook_events_chat_queue_head_idx',
-          ]).toContain(scan['Index Name']);
-        }
-        const indexed = scans.filter(
-          (node) =>
-            node['Index Name'] === 'webhook_events_chat_queue_head_idx' &&
-            typeof node['Index Cond'] === 'string' &&
-            node['Index Cond'].includes('queue_name'),
-        );
-        expect(indexed.length).toBeGreaterThan(0);
-        const queueLoops = indexed.reduce(
-          (total, node) => total + Number(node['Actual Loops'] ?? 0),
-          0,
-        );
-        expect(queueLoops).toBe(DEFAULT_WEBHOOK_QUEUE_NAMES.length);
-        const existenceScans = scans.filter((node) => !indexed.includes(node));
-        expect(existenceScans.length).toBeGreaterThan(0);
-        const examined = (records: Record<string, unknown>[]) =>
-          records.reduce(
-            (total, node) =>
-              total +
-              (Number(node['Actual Rows'] ?? 0) +
-                Number(node['Rows Removed by Filter'] ?? 0) +
-                Number(node['Rows Removed by Index Recheck'] ?? 0)) *
-                Number(node['Actual Loops'] ?? 0),
-            0,
+    for (const stage of ['fresh', 'sparse_index']) {
+      let sparseTransaction = false;
+      try {
+        if (stage === 'sparse_index') {
+          // FLAG: Test-only transactional REINDEX simulates a sparse physical index;
+          // rollback restores the disposable store before any other suite runs.
+          await client.query('BEGIN');
+          sparseTransaction = true;
+          await client.query(
+            'ALTER INDEX webhook_events_chat_queue_head_idx SET (fillfactor = 10)',
           );
-        const queueRows = examined(indexed);
-        const existenceRows = examined(existenceScans);
-        expect(queueRows).toBeLessThanOrEqual(DEFAULT_WEBHOOK_QUEUE_NAMES.length + 1);
-        expect(existenceRows).toBeLessThanOrEqual(2);
-        const sorts = nodes.filter((node) => node['Node Type'] === 'Sort');
-        const sortInputs = sorts.map((node) => {
-          const children = Array.isArray(node.Plans) ? node.Plans : [];
-          expect(children).toHaveLength(1);
-          const child = children[0] as Record<string, unknown>;
-          return Number(child['Actual Rows'] ?? 0) * Number(child['Actual Loops'] ?? 0);
-        });
-        for (const rows of sortInputs)
-          expect(rows).toBeLessThanOrEqual(DEFAULT_WEBHOOK_QUEUE_NAMES.length);
-        const rootPlan = nodes.find((node) => typeof node['Node Type'] === 'string');
-        expect(rootPlan).toBeDefined();
-        expect(typeof rootPlan!['Shared Hit Blocks']).toBe('number');
-        expect(typeof rootPlan!['Shared Read Blocks']).toBe('number');
-        const sharedBlocks =
-          Number(rootPlan!['Shared Hit Blocks']) + Number(rootPlan!['Shared Read Blocks']);
-        expect(sharedBlocks).toBeLessThanOrEqual(512);
-        expect(Number(rootPlan!['Temp Read Blocks'] ?? 0)).toBe(0);
-        expect(Number(rootPlan!['Temp Written Blocks'] ?? 0)).toBe(0);
-        if (mode === 'force_generic_plan') expect(JSON.stringify(indexed)).toMatch(/\$\d+/u);
-        console.info(
-          'routing-plan-summary',
-          JSON.stringify({ mode, queueLoops, queueRows, existenceRows, sortInputs, sharedBlocks }),
-        );
+          await client.query('REINDEX INDEX webhook_events_chat_queue_head_idx');
+          await client.query('ANALYZE webhook_events');
+        }
+        const query = await productionQuery(chatId, `${prefix}current`);
+        await client.query(`PREPARE routing_plan AS ${query.text}`);
+        try {
+          for (const mode of ['force_custom_plan', 'force_generic_plan']) {
+            await client.query(`SET plan_cache_mode = ${mode}`);
+            const execution = query.values.map(testLiteral).join(', ');
+            const result = await client.query(
+              `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE routing_plan(${execution})`,
+            );
+            const nodes = planNodes(result.rows[0]!['QUERY PLAN']);
+            const scans = nodes.filter((node) => node['Relation Name'] === 'webhook_events');
+            const planRoot = nodes.find((node) => typeof node['Node Type'] === 'string');
+            const safeIndexes = [
+              'webhook_events_ordered_chat_head_idx',
+              'webhook_events_chat_queue_head_idx',
+              'webhook_events_pkey',
+            ];
+            process.stdout.write(
+              `routing-plan-before-assert ${JSON.stringify({
+                stage,
+                mode,
+                scans: scans.map((scan) => ({
+                  type: scan['Node Type'],
+                  index: safeIndexes.includes(String(scan['Index Name']))
+                    ? scan['Index Name']
+                    : 'other',
+                  queueInIndex: String(scan['Index Cond'] ?? '').includes('queue_name'),
+                  queueInFilter: String(scan.Filter ?? '').includes('queue_name'),
+                  parameterized: /\$\d+/u.test(String(scan['Index Cond'] ?? '')),
+                  rows: scan['Actual Rows'],
+                  loops: scan['Actual Loops'],
+                  filtered: scan['Rows Removed by Filter'] ?? 0,
+                  rechecked: scan['Rows Removed by Index Recheck'] ?? 0,
+                  sharedHits: scan['Shared Hit Blocks'] ?? 0,
+                  sharedReads: scan['Shared Read Blocks'] ?? 0,
+                })),
+                sorts: nodes
+                  .filter((node) => node['Node Type'] === 'Sort')
+                  .map((node) => ({
+                    rows: node['Actual Rows'],
+                    loops: node['Actual Loops'],
+                    method: node['Sort Method'],
+                  })),
+                sharedHits: planRoot?.['Shared Hit Blocks'],
+                sharedReads: planRoot?.['Shared Read Blocks'],
+              })}\n`,
+            );
+            expect(scans.length).toBeGreaterThan(0);
+            for (const scan of scans) {
+              expect(['Index Scan', 'Index Only Scan']).toContain(scan['Node Type']);
+              expect([
+                'webhook_events_ordered_chat_head_idx',
+                'webhook_events_chat_queue_head_idx',
+              ]).toContain(scan['Index Name']);
+            }
+            const indexed = scans.filter(
+              (node) =>
+                node['Index Name'] === 'webhook_events_chat_queue_head_idx' &&
+                typeof node['Index Cond'] === 'string' &&
+                node['Index Cond'].includes('queue_name'),
+            );
+            expect(indexed.length).toBeGreaterThan(0);
+            const queueLoops = indexed.reduce(
+              (total, node) => total + Number(node['Actual Loops'] ?? 0),
+              0,
+            );
+            expect(queueLoops).toBe(DEFAULT_WEBHOOK_QUEUE_NAMES.length);
+            const existenceScans = scans.filter((node) => !indexed.includes(node));
+            expect(existenceScans.length).toBeGreaterThan(0);
+            const examined = (records: Record<string, unknown>[]) =>
+              records.reduce(
+                (total, node) =>
+                  total +
+                  (Number(node['Actual Rows'] ?? 0) +
+                    Number(node['Rows Removed by Filter'] ?? 0) +
+                    Number(node['Rows Removed by Index Recheck'] ?? 0)) *
+                    Number(node['Actual Loops'] ?? 0),
+                0,
+              );
+            const queueRows = examined(indexed);
+            const existenceRows = examined(existenceScans);
+            expect(queueRows).toBeLessThanOrEqual(DEFAULT_WEBHOOK_QUEUE_NAMES.length + 1);
+            expect(existenceRows).toBeLessThanOrEqual(2);
+            const sorts = nodes.filter((node) => node['Node Type'] === 'Sort');
+            const sortInputs = sorts.map((node) => {
+              const children = Array.isArray(node.Plans) ? node.Plans : [];
+              expect(children).toHaveLength(1);
+              const child = children[0] as Record<string, unknown>;
+              return Number(child['Actual Rows'] ?? 0) * Number(child['Actual Loops'] ?? 0);
+            });
+            for (const rows of sortInputs)
+              expect(rows).toBeLessThanOrEqual(DEFAULT_WEBHOOK_QUEUE_NAMES.length);
+            const rootPlan = nodes.find((node) => typeof node['Node Type'] === 'string');
+            expect(rootPlan).toBeDefined();
+            expect(typeof rootPlan!['Shared Hit Blocks']).toBe('number');
+            expect(typeof rootPlan!['Shared Read Blocks']).toBe('number');
+            const sharedBlocks =
+              Number(rootPlan!['Shared Hit Blocks']) + Number(rootPlan!['Shared Read Blocks']);
+            expect(sharedBlocks).toBeLessThanOrEqual(512);
+            expect(Number(rootPlan!['Temp Read Blocks'] ?? 0)).toBe(0);
+            expect(Number(rootPlan!['Temp Written Blocks'] ?? 0)).toBe(0);
+            if (mode === 'force_generic_plan') expect(JSON.stringify(indexed)).toMatch(/\$\d+/u);
+            console.info(
+              'routing-plan-summary',
+              JSON.stringify({
+                mode,
+                queueLoops,
+                queueRows,
+                existenceRows,
+                sortInputs,
+                sharedBlocks,
+              }),
+            );
+          }
+        } finally {
+          await client.query('DEALLOCATE routing_plan');
+          await client.query('RESET plan_cache_mode');
+        }
+      } finally {
+        if (sparseTransaction) await client.query('ROLLBACK');
       }
-    } finally {
-      await client.query('DEALLOCATE routing_plan');
-      await client.query('RESET plan_cache_mode');
     }
   });
 });
