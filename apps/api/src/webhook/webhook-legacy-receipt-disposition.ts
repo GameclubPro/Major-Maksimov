@@ -368,15 +368,23 @@ export async function materializeLegacyReceiptDisposition(
     const body = record(rawMessage?.body);
     const link = record(rawMessage?.link);
     const linkedBody = record(link?.message);
-    // FLAG: Captionless media, formatted forwards and a known hold deferral must
+    const linkedAttachments = linkedBody?.attachments;
+    // FLAG: Captionless media, formatted/share forwards and a known hold deferral must
     // not create an endless RECEIVED retry. They require strict original-source, complete
-    // sealed-scope and concurrent claim/journal absence proof before closure.
+    // sealed-scope and concurrent claim/journal absence proof before closure. A created
+    // SHARE without markup must take this same path; its shape grants no disposition.
     if (
       event.errorMessage ===
         'Webhook preparation deferred: Legacy scope installation is not sealed' ||
       body?.text === undefined ||
       body?.text === null ||
-      (link?.type === 'forward' && (body?.markup !== undefined || linkedBody?.markup !== undefined))
+      (link?.type === 'forward' &&
+        (body?.markup !== undefined ||
+          linkedBody?.markup !== undefined ||
+          (update?.type === 'message_created' &&
+            Array.isArray(linkedAttachments) &&
+            linkedAttachments.length <= 10 &&
+            linkedAttachments.some((attachment) => record(attachment)?.type === 'share'))))
     ) {
       const heldMessage = await inspectHeldMessageDisposition(tx, event);
       if (!heldMessage || heldMessage === 'NOT_HELD')

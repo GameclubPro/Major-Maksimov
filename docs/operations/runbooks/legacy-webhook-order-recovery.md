@@ -66,10 +66,17 @@ ordering without running moderation, downloading media or reporting successful e
 
 A flat post-seal held forward may retain bounded passive formatting on its original outer and
 linked text. An empty outer caption may carry only an exact copy of independently validated
-linked passive markup. Links, mentions, extra metadata, invalid offsets and unsupported media
-remain refused; every original text component and the parser-composed text must be non-command.
-Linked sender provenance remains mandatory. Fresh formatted forwards require the same complete
-pristine receipt, sealed-authority and concurrent claim/journal checks as saved deferrals above.
+linked passive markup. Only `message_created` projection additionally admits strict HTTPS link
+markup and one strict linked `share` preview, including its bounded optional title, description
+and image URL. The original linked sender remains mandatory. An empty outer caption may copy
+only the exact independently validated linked markup; offsets use each original UTF-16 text.
+Direct previews, edited-message links/previews, mentions, extra metadata, invalid offsets,
+mixed previews and other unsupported media remain refused. Every original text component and
+the parser-composed text must be non-command.
+Fresh formatted forwards require the same complete pristine receipt, sealed-authority and
+concurrent claim/journal checks as saved deferrals above.
+Created forwards with a share and no markup require those same checks, including complete
+matching sealed scopes, semantic admission fences and absence of Publisher delivery journals.
 This projects only an existing hold; historical installation and modern source policies do not
 change. It grants no replay, handler execution, image download or new moderation authority.
 

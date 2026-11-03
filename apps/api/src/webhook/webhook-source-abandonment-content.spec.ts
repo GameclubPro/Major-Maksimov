@@ -776,7 +776,7 @@ describe('modern source content profile', () => {
     'copied mismatch',
     'outer bounds',
     'linked bounds',
-    'link',
+    'unsafe link',
     'mention',
     'extra key',
     'missing sender',
@@ -797,8 +797,8 @@ describe('modern source content profile', () => {
     if (fault === 'copied mismatch') f.body.markup = [{ type: 'strong', from: 0, length: 6 }];
     if (fault === 'outer bounds') f.body.text = 'x';
     if (fault === 'linked bounds') f.linkedBody.text = 'x';
-    if (fault === 'link')
-      f.linkedBody.markup = [{ type: 'link', from: 0, length: 6, url: 'https://example.com' }];
+    if (fault === 'unsafe link')
+      f.linkedBody.markup = [{ type: 'link', from: 0, length: 6, url: 'http://example.com' }];
     if (fault === 'mention')
       f.linkedBody.markup = [{ type: 'user_mention', from: 0, length: 6, user_id: 7 }];
     if (fault === 'extra key')
@@ -813,9 +813,14 @@ describe('modern source content profile', () => {
       f.linkedBody.markup = [{ type: 'emphasized', from: -1, length: 6 }];
     if (fault === 'zero length') f.linkedBody.markup = [{ type: 'emphasized', from: 0, length: 0 }];
     if (
-      ['link', 'mention', 'extra key', 'too many spans', 'negative offset', 'zero length'].includes(
-        fault,
-      )
+      [
+        'unsafe link',
+        'mention',
+        'extra key',
+        'too many spans',
+        'negative offset',
+        'zero length',
+      ].includes(fault)
     )
       f.body.markup = structuredClone(f.linkedBody.markup);
     if (fault === 'missing sender') delete f.link.sender;
@@ -1261,6 +1266,231 @@ describe('modern source content profile', () => {
     f.body.markup = [{ type: 'link', from: 2, length: 8, url: 'https://example.com', ...patch }];
     expect(inspectSourceAbandonmentSource(f.owner())).toBeNull();
     expect(inspectSourceAbandonmentPostSealSource(f.owner())).toBeNull();
+  });
+});
+
+describe('legacy held forward link/share projection', () => {
+  const shapes = [
+    'outer link',
+    'linked link',
+    'both links',
+    'copied link',
+    'share without markup',
+    'share with links',
+    'share with copied link',
+  ] as const;
+  type ProjectionShape = (typeof shapes)[number];
+
+  function projectionFixture(shape: ProjectionShape) {
+    const f = fixture('forward');
+    f.body.text = shape.includes('copied') ? '' : 'Outer caption';
+    f.linkedBody.text = 'Quoted caption';
+    const span = { type: 'link', from: 0, length: 6, url: 'https://example.com/article' };
+    if (shape.startsWith('share')) f.linkedBody.attachments = [f.share];
+    if (shape !== 'share without markup') {
+      if (shape !== 'outer link') f.linkedBody.markup = [structuredClone(span)];
+      if (shape !== 'linked link') f.body.markup = [structuredClone(span)];
+    }
+    return f;
+  }
+
+  it.each(shapes)('projects only the original outer message for %s', (shape) => {
+    const f = projectionFixture(shape);
+    const source = f.owner();
+    const before = structuredClone(source);
+    const expected = {
+      chatId: '-111',
+      messageId: 'outer-mid',
+      userId: 'outer-user',
+      sourceAt: new Date(f.at),
+    };
+    expect(inspectLegacyPostSealTextSource(source)).toEqual(expected);
+    expect(inspectLegacyRecoverySource(source)).toBeNull();
+    expect(inspectSourceAbandonmentSource(source)).toEqual(expected);
+    expect(inspectSourceAbandonmentPostSealSource(source)).toEqual(expected);
+    expect(inspectPristineOperatorDiscardSource(source)).toEqual(expected);
+    expect(source).toEqual(before);
+  });
+
+  it.each(shapes)('does not extend legacy edited sources to %s', (shape) => {
+    const f = projectionFixture(shape);
+    f.raw.update_type = 'message_edited';
+    const source = f.owner();
+    expect(inspectLegacyPostSealTextSource(source)).toBeNull();
+    expect(inspectLegacyRecoverySource(source)).toBeNull();
+    expect(inspectSourceAbandonmentPostSealSource(source)).not.toBeNull();
+  });
+
+  it.each([false, true])('preserves passive formatted legacy edits (copied=%s)', (copied) => {
+    const f = fixture('forward');
+    f.raw.update_type = 'message_edited';
+    f.body.text = copied ? '' : 'Outer caption';
+    f.linkedBody.text = 'Quoted caption';
+    f.linkedBody.markup = [{ type: 'emphasized', from: 0, length: 6 }];
+    f.body.markup = structuredClone(f.linkedBody.markup);
+    expect(inspectLegacyPostSealTextSource(f.owner())).not.toBeNull();
+  });
+
+  it.each(['plain', 'reply'] as const)('keeps %s link markup outside the allowance', (shape) => {
+    const f = fixture(shape);
+    f.body.markup = [{ type: 'link', from: 2, length: 8, url: 'https://example.com' }];
+    expect(inspectLegacyPostSealTextSource(f.owner())).toBeNull();
+    expect(inspectSourceAbandonmentPostSealSource(f.owner())).not.toBeNull();
+  });
+
+  it.each([
+    'copy mismatch',
+    'outer bounds',
+    'linked bounds',
+    'negative offset',
+    'zero length',
+    'fractional offset',
+    'too many spans',
+    'http',
+    'credentials',
+    'url whitespace',
+    'url control',
+    'long url',
+    'mention',
+    'extra field',
+  ])('refuses unsupported link markup: %s', (fault) => {
+    const f = projectionFixture('copied link');
+    const span = (f.linkedBody.markup as Record<string, unknown>[])[0]!;
+    if (fault === 'copy mismatch') span.url = 'https://example.com/different';
+    if (fault === 'outer bounds') f.body.text = 'x';
+    if (fault === 'linked bounds') f.linkedBody.text = 'x';
+    if (fault === 'negative offset') span.from = -1;
+    if (fault === 'zero length') span.length = 0;
+    if (fault === 'fractional offset') span.from = 0.5;
+    if (fault === 'too many spans') f.linkedBody.markup = Array.from({ length: 65 }, () => span);
+    if (fault === 'http') span.url = 'http://example.com';
+    if (fault === 'credentials') span.url = 'https://user:pass@example.com';
+    if (fault === 'url whitespace') span.url = ' https://example.com';
+    if (fault === 'url control') span.url = 'https://example.com/\npath';
+    if (fault === 'long url') span.url = `https://example.com/${'a'.repeat(2049)}`;
+    if (fault === 'mention') {
+      delete span.url;
+      Object.assign(span, { type: 'user_mention', user_id: 7 });
+    }
+    if (fault === 'extra field') span.target = 'another-message';
+    if (fault !== 'copy mismatch') f.body.markup = structuredClone(f.linkedBody.markup);
+    expect(inspectLegacyPostSealTextSource(f.owner())).toBeNull();
+  });
+
+  it('validates link bounds against original UTF-16 text', () => {
+    const f = projectionFixture('linked link');
+    f.linkedBody.text = '😀x';
+    f.linkedBody.markup = [{ type: 'link', from: 2, length: 1, url: 'https://example.com' }];
+    expect(inspectLegacyPostSealTextSource(f.owner())).not.toBeNull();
+    (f.linkedBody.markup as Record<string, unknown>[])[0]!.length = 2;
+    expect(inspectLegacyPostSealTextSource(f.owner())).toBeNull();
+  });
+
+  it.each([
+    'unknown item',
+    'unknown payload',
+    'nested title',
+    'nested source',
+    'http',
+    'credentials',
+    'url control',
+    'bad preview',
+    'long token',
+    'long title',
+    'two shares',
+    'mixed images',
+    'direct share',
+  ])('refuses unsupported linked share: %s', (fault) => {
+    const f = projectionFixture('share without markup');
+    const payload = f.share.payload as Record<string, unknown>;
+    if (fault === 'unknown item') f.share.target = 'another-message';
+    if (fault === 'unknown payload') payload.hidden = {};
+    if (fault === 'nested title') f.share.title = { text: 'Nested title' };
+    if (fault === 'nested source') payload.message = { mid: 'another-message' };
+    if (fault === 'http') payload.url = 'http://example.com';
+    if (fault === 'credentials') payload.url = 'https://user:pass@example.com';
+    if (fault === 'url control') payload.url = 'https://example.com/\npath';
+    if (fault === 'bad preview') f.share.image_url = 'javascript:alert(1)';
+    if (fault === 'long token') payload.token = 'x'.repeat(32769);
+    if (fault === 'long title') f.share.title = 'x'.repeat(32769);
+    if (fault === 'two shares') f.linkedBody.attachments = [f.share, f.share];
+    if (fault === 'mixed images')
+      f.linkedBody.attachments = [f.share, { type: 'image', payload: { photo_id: 'photo' } }];
+    if (fault === 'direct share') {
+      delete f.message.link;
+      f.body.attachments = [f.share];
+    }
+    expect(inspectLegacyPostSealTextSource(f.owner())).toBeNull();
+  });
+
+  it.each([
+    'missing sender',
+    'null sender',
+    'sender metadata',
+    'missing chat',
+    'nested link',
+    'reply',
+    'unknown relation',
+    'missing outer text',
+    'null linked text',
+    'linked video',
+    'linked audio',
+    'linked sticker',
+    'direct image',
+    'normalized mismatch',
+    'sampled raw mismatch',
+  ])('retains the original forward boundary: %s', (fault) => {
+    const f = projectionFixture('share with links');
+    if (fault === 'missing sender') delete f.link.sender;
+    if (fault === 'null sender') f.link.sender = null;
+    if (fault === 'sender metadata') (f.link.sender as Record<string, unknown>).target = {};
+    if (fault === 'missing chat') delete f.link.chat_id;
+    if (fault === 'nested link') f.linkedBody.link = { type: 'forward' };
+    if (fault === 'reply') f.link.type = 'reply';
+    if (fault === 'unknown relation') f.link.type = 'unknown';
+    if (fault === 'missing outer text') delete f.body.text;
+    if (fault === 'null linked text') f.linkedBody.text = null;
+    if (fault.startsWith('linked ')) {
+      const type = fault.slice('linked '.length);
+      f.linkedBody.attachments = [
+        type === 'sticker'
+          ? {
+              type,
+              payload: { url: 'https://example.com/sticker', code: 'sticker' },
+              width: 10,
+              height: 10,
+            }
+          : { type, payload: { url: 'https://example.com/media', token: 'token', id: 42 } },
+      ];
+    }
+    if (fault === 'direct image')
+      f.body.attachments = [{ type: 'image', payload: { photo_id: 'photo' } }];
+    const source = f.owner();
+    if (fault === 'normalized mismatch')
+      (source.normalizedPayload as unknown as { message: { text: string } }).message.text =
+        'Forged text';
+    if (fault === 'sampled raw mismatch') source.rawPayload = { changed: true } as never;
+    expect(inspectLegacyPostSealTextSource(source)).toBeNull();
+  });
+
+  it.each(['outer', 'linked'] as const)(
+    'refuses default and configured commands in %s text',
+    (part) => {
+      for (const command of ['/ban', '$command', 'Старт', 'бан', 'особое', 'бан 999']) {
+        const f = projectionFixture('share without markup');
+        (part === 'outer' ? f.body : f.linkedBody).text = command;
+        expect(
+          inspectLegacyPostSealTextSource(f.owner(), { adminBanCommandName: 'особое' }),
+        ).toBeNull();
+      }
+    },
+  );
+
+  it('refuses a command formed by composing the original forward texts', () => {
+    const f = projectionFixture('share without markup');
+    f.body.text = 'super';
+    f.linkedBody.text = 'ban';
+    expect(inspectLegacyPostSealTextSource(f.owner())).toBeNull();
   });
 });
 

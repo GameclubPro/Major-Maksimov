@@ -98,7 +98,8 @@ export function inspectLegacyRecoverySource(
 }
 
 // FLAG: Only the already-held POST_SEAL receipt path may use edit/future-clock
-// provenance. This grants no recovery/cutoff authority and retains the strict text/image shapes.
+// provenance. Strict forward links/shares are created-only; this grants no
+// recovery/cutoff authority and preserves the existing edit content profile.
 export function inspectLegacyPostSealTextSource(
   owner: Pick<WebhookEvent, 'botId' | 'createdAt' | 'normalizedPayload' | 'rawPayload'>,
   settings?: AdminForwardedCommandSettings,
@@ -243,7 +244,7 @@ function inspectLegacyTextSource(
     profile === 'source-abandonment'
       ? !isSourceAbandonmentOuterMarkup(body, message.link)
       : postSealForward && message.link !== undefined
-        ? !isLegacyPostSealOuterMarkup(body, message.link)
+        ? !isLegacyPostSealOuterMarkup(body, message.link, update.type)
         : !isLegacyPassiveMarkup(body.markup, sourceText)
   )
     return refuse('source_markup');
