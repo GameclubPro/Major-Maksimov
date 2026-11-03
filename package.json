@@ -13,7 +13,7 @@
     "build": "npm run build --workspace @maxim/contracts && npm run build --workspace @maxim/api && npm run build --workspace @maxim/miniapp && npm run build --workspace @maxim/admin && npm run build --workspace @maxim/eraser",
     "build:miniapp:production": "VITE_API_BASE=https://major-maksimov.ru/api/v1 npm run build --workspace @maxim/miniapp",
     "build:docker": "docker build -f apps/api/Dockerfile -t maxim-api-ci . && docker build -f apps/miniapp/Dockerfile -t maxim-miniapp-ci . && docker build -f apps/admin/Dockerfile -t maxim-admin-ci . && docker build -f apps/eraser/Dockerfile -t maxim-eraser-ci .",
-    "check": "npm run check:static && npm run check:docs && npm run check:infra && npm run check:contracts && npm run check:api && npm run check:eraser && npm run check:prisma && npm run check:miniapp && npm run build:miniapp:production && npm run check:admin",
+    "check": "npm run check:static:ci && npm run check:docs && npm run check:infra && npm run check:contracts && npm run check:api && npm run check:eraser && npm run check:prisma && npm run check:miniapp && npm run build:miniapp:production && npm run check:admin",
     "check:admin": "npm run test:admin && npm run build --workspace @maxim/admin && npm run smoke:admin",
     "check:api": "npm run check:ci --workspace @maxim/api",
     "check:eraser": "npm run check --workspace @maxim/eraser",

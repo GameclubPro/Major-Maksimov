@@ -67,6 +67,19 @@ test('preserves full public aggregates and the bounded core selection', () => {
   assert.deepEqual(parseTestGlobs(scripts['test:agent-tools:core']), fullGlobs.slice(0, -1));
 });
 
+test('full local verification runs core and infrastructure tests exactly once', () => {
+  const commands = scripts.check.split(' && ');
+  assert.ok(commands.includes('npm run check:static:ci'));
+  assert.equal(commands.filter((command) => command === 'npm run check:infra').length, 1);
+  assert.ok(!commands.includes('npm run check:static'));
+  assert.ok(!commands.includes('npm run test:agent-tools'));
+  const core = expandTestGlobs(parseTestGlobs(scripts['test:agent-tools:core']));
+  const infrastructure = expandTestGlobs(['infra/scripts/*.test.mjs']);
+  const full = expandTestGlobs(parseTestGlobs(scripts['test:agent-tools']));
+  assert.equal(new Set([...core, ...infrastructure]).size, full.length);
+  assert.deepEqual([...core, ...infrastructure].sort(), full);
+});
+
 test('Static gives core and infrastructure independent bounded jobs without dropping full coverage', () => {
   const job = parse(workflow).jobs.static;
   assert.deepEqual(job.strategy, {

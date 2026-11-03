@@ -58,6 +58,39 @@ If the browser launch reports missing OS libraries, use the supported Playwright
 installer with administrator access. Existing compatible system libraries need no reinstall.
 Keep WSL projects, node_modules and temporary databases on the Linux filesystem for I/O efficiency.
 
+## API CI partitioning
+
+API CI has four ordinary Jest partitions and one types/build/storage/Redis job. All five block
+`Required`. The existing `test:ci` keeps its generator lock, serial worker and benchmark exclusion;
+public `check:ci:build` owns the remaining generation/type/storage/build phases. Local final
+`check:ci` still runs the whole API aggregate once. Partitioning CI is not permission to run
+concurrent local generators or treat skipped native tests as storage evidence.
+
+To inspect a partition without executing tests:
+
+```bash
+npm run test:ci --workspace @maxim/api -- -- -- --shard=1/4 --listTests --json
+```
+
+All three separators after the workspace are necessary for this public wrapper. Use
+`focused.mjs --test <path>` for ordinary file selection so it owns that forwarding.
+CI retains per-part JSON results on success or failure; a missing report is missing evidence.
+The [dated audit](../operations/incidents/2026-11-03-agent-workflow-audit.md) records the baseline;
+measure the current run before promising a duration.
+
+## Browser CI partitioning
+
+Miniapp CI runs four isolated jobs. The first owns CSS/type/unit checks, production build and
+visual smoke. The other jobs build contracts before their browser cases. All 21 browser commands
+run exactly once across the matrix, preserving the complete Android/iOS shop case and its WebKit
+installation. Each case retains its owned server and cleanup. Safety Desk remains independent.
+`scripts/ci/miniapp-shards.test.mjs` guards command coverage, setup order and the Required gate.
+
+For local edits, use only the affected scenarios from the
+[feature regression map](feature-regressions.md); do not manually replay all four CI partitions.
+The staged helper still owns the impact-selected final local aggregate. A changed workflow needs
+exact-SHA CI even when its commands have passed locally.
+
 ## Native CI partitioning
 
 The blocking PostgreSQL Races lane runs eight native Jest shards and one compatibility group.

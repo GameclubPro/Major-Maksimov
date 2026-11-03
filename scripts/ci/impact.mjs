@@ -70,6 +70,21 @@ const COMPONENT_LANES = {
   eraser: 'eraser',
 };
 
+// FLAG: Exact local-only entrypoints and their tests; shared helpers, impact policy,
+// locks, generators and unknown additions still exercise the complete CI graph.
+// Static owns every listed test and check:docs. Review callers before extending.
+const LOCAL_TOOLING_PATHS = new Set([
+  'scripts/agent/context.mjs',
+  'scripts/agent/doctor.mjs',
+  'scripts/agent/focused.mjs',
+  'scripts/agent/task-worktree.mjs',
+  'scripts/agent/test/context.test.mjs',
+  'scripts/agent/test/focused.test.mjs',
+  'scripts/agent/test/task-worktree.test.mjs',
+  'scripts/check-docs.mjs',
+  'scripts/check-docs.test.mjs',
+]);
+
 function git(cwd, args) {
   return execFileSync('git', args, {
     cwd,
@@ -102,8 +117,8 @@ function fullPlan(head, reason, base = null, changedFileCount = null) {
 
 export function selectCiLanes(impact, { base, head }) {
   const count = impact.changedFiles.length;
-  // FLAG: CI/workflow/tooling changes must exercise the whole graph. Unknown
-  // paths or newly introduced check kinds cannot silently reduce coverage.
+  // FLAG: Shared CI/workflow/tooling changes must exercise the whole graph.
+  // Unknown paths or newly introduced check kinds cannot silently reduce coverage.
   if (impact.unknownPaths.length || impact.checks.some((check) => !KNOWN_CHECKS.has(check))) {
     return fullPlan(head, 'unknown-impact', base, count);
   }
@@ -112,6 +127,7 @@ export function selectCiLanes(impact, { base, head }) {
     impact.changedFiles.some(
       (path) =>
         !path.endsWith('.md') &&
+        !LOCAL_TOOLING_PATHS.has(path) &&
         (/^(?:\.github|scripts|config|infra)\//u.test(path) || !path.includes('/')),
     )
   ) {

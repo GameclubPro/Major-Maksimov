@@ -111,6 +111,52 @@ test('API changes retain every native shard, Redis flow, benchmark and API image
   });
 });
 
+test('reviewed local agent tools need Static without unrelated application suites or images', async () => {
+  for (const path of [
+    'scripts/agent/context.mjs',
+    'scripts/agent/doctor.mjs',
+    'scripts/agent/focused.mjs',
+    'scripts/agent/task-worktree.mjs',
+    'scripts/agent/test/context.test.mjs',
+    'scripts/agent/test/focused.test.mjs',
+    'scripts/agent/test/task-worktree.test.mjs',
+    'scripts/check-docs.mjs',
+    'scripts/check-docs.test.mjs',
+  ]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const plan = await pushPlan(cwd, base, commit([path, 'docs/README.md']));
+      assert.deepEqual(selected(plan), ['static'], path);
+      assert.deepEqual(plan.dockerComponents, []);
+      assert.doesNotThrow(() => verifyCiResults(plan, results(plan)));
+    });
+  }
+});
+
+test('a local tool exception never hides shared callers, new tools or a rename into runtime', async () => {
+  for (const path of [
+    'scripts/agent/verify.mjs',
+    'scripts/agent/verification-command.mjs',
+    'scripts/agent/preflight.mjs',
+    'scripts/agent/new-tool.mjs',
+    'scripts/agent/test/new-tool.test.mjs',
+    'scripts/agent/context.mjs.backup',
+    'scripts/with-file-lock.mjs',
+  ]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const plan = await pushPlan(cwd, base, commit(['scripts/agent/context.mjs', path]));
+      assert.deepEqual(selected(plan), CI_LANES, path);
+    });
+  }
+  await repository(async ({ cwd, commit, git }) => {
+    const base = commit(['scripts/agent/context.mjs', 'apps/api/src/existing.ts']);
+    git('mv', 'scripts/agent/context.mjs', 'apps/api/src/new-runtime.ts');
+    const plan = await pushPlan(cwd, base, commit([]));
+    assert.equal(plan.lanes.api, true);
+    assert.equal(plan.lanes['postgres-races'], true);
+    assert.deepEqual(plan.dockerComponents, ['api']);
+  });
+});
+
 test('shared contracts, tooling, dependency inputs and unknown paths retain full coverage', async () => {
   for (const path of [
     'packages/contracts/src/networks.ts',

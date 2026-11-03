@@ -251,7 +251,9 @@ refactor guards and core tooling tests, then `check:infra` owns the infrastructu
 once. Tooling changes without an infrastructure selection use core tooling tests; a changed
 infrastructure caller still requires its focused regression. CI Static and public full aggregates
 keep the complete inventory. Inventory guards prove core coverage and complete infrastructure
-coverage when selected, without duplicate execution. Native PostgreSQL/Redis
+coverage when selected, without duplicate execution. The root `check` uses `check:static:ci`
+for core tests, then `check:infra` for infrastructure; the standalone `check:static` remains
+the complete tooling aggregate and must not be nested into `check` again. Native PostgreSQL/Redis
 cases remain mandatory for the affected invariant; skipped store cases are missing coverage.
 
 Miniapp-only UI changes need no API, Prisma, admin or native-store suites unless a changed boundary
@@ -269,22 +271,37 @@ need an explicit request or a concrete runtime risk; routine smoke success ends 
 CI uses the same impact classifier for the complete push range or the PR merge checkout against
 its recorded base. `Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
 steps run only for full plans, including shared tooling/infra changes and the scheduled run.
-Miniapp changes select both miniapp browser shards
+Miniapp changes select all four miniapp browser shards
 and its affected Docker image; API changes retain API, Redis, every PostgreSQL shard, the
 commercial benchmark and the affected API image. Shared contracts select all their consumers.
 Tests alone do not build unrelated runtime images. CodeQL remains a separate exact-SHA gate.
 
 Browser dependency setup uses HTTPS Ubuntu sources, omits package translation indexes and bounds
 network retries. It fails on incomplete apt updates and has its own three-minute step budget, so
-an unavailable mirror cannot silently consume most of the browser test deadline. Both miniapp
-shards and Safety Desk keep their complete test inventories and existing job budgets.
+an unavailable mirror cannot silently consume most of the browser test deadline. All miniapp
+shards and Safety Desk keep their complete test inventories and existing job budgets. The miniapp
+partitions preserve each browser command once, with per-job dependency setup and contract builds;
+only the complete Android/iOS shop partition installs WebKit. Keep long settings-draft, shop-format
+and publication-editor scenarios in separate jobs. Measure durations before changing assignments.
 
 Workflow, shared tooling, infrastructure, root build inputs, unknown files/check kinds, unproved
-Git history and manual/scheduled runs select full CI. Renames include both paths. The `Required`
+Git history and manual/scheduled runs select full CI. The exact local-only entrypoints in
+`LOCAL_TOOLING_PATHS` in `scripts/ci/impact.mjs` (context, doctor, focused checks, task ownership
+and documentation checks, with their reviewed tests) select Static. Static includes their tests,
+lint, refactor guards, dependency audit and documentation validation. New helpers and modified
+callers are not implicitly exempt; review callers before extending that list. Renames include
+both paths, and mixed changes take the union of required coverage. The `Required`
 job independently recomputes the selection and image matrix from Git and the event, requires
 success for selected lanes and accepts `skipped` only for lanes proved unrelated. Failed
 classification, missing results, cancellation and mismatched outputs block it. Workflow guards
 and real Git fixtures cover these boundaries; the weekly scheduled run retains full coverage.
+
+API CI runs the existing Jest inventory in four independent jobs through public `test:ci`,
+with one serial worker per job. A fifth job uses public `check:ci:build` for generation,
+types, retention storage checks and build, then runs the existing Redis cases. Every part blocks
+`Required`; PostgreSQL and benchmark lanes retain their separate complete coverage. See
+[local setup and partition inspection](development/agent-local-environment.md#api-ci-partitioning).
+CodeQL cancels superseded runs of the same PR, while main and scheduled runs remain uncancelled.
 
 `agent:verify` also avoids repeating included CSS checks. Full verification adds the browser smoke,
 which the root `check` script does not include. Focused local selection changes neither exact-SHA

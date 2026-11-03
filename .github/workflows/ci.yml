@@ -109,12 +109,17 @@ jobs:
       - run: npm run check:contracts
 
   api:
-    name: API
+    name: API (${{ matrix.part }})
     needs: impact
     if: needs.impact.outputs.api == 'true'
     runs-on: ubuntu-latest
-    # Include full API validation, Redis integration and runner cleanup.
-    timeout-minutes: 30
+    # FLAG: Required waits for compile/storage/Redis and every Jest partition.
+    # Each job owns its checkout and Redis; file workers remain serial within a shard.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [checks, 1/4, 2/4, 3/4, 4/4]
     services:
       redis:
         image: redis:7-alpine
@@ -132,14 +137,27 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci --no-audit
-      - name: Check API
+      - name: API types, build and retention storage
+        if: matrix.part == 'checks'
         env:
           NODE_OPTIONS: --max-old-space-size=6144
-        run: npm run check:ci --workspace @maxim/api
+        run: npm run check:ci:build --workspace @maxim/api
+      - name: API test shard
+        if: matrix.part != 'checks'
+        run: npm run test:ci --workspace @maxim/api -- -- -- --shard=${{ matrix.part }} --json --outputFile=api-tests.json
       - name: Check duplicate, interval and Publisher pause flows with Redis
+        if: matrix.part == 'checks'
         env:
           MAXIM_TEST_REDIS_URL: redis://127.0.0.1:6379
         run: npm test --workspace @maxim/api -- 'message-duplicate|photo-duplicate-history.redis|rule-engine-media-cooldown.redis|traffic-protection.redis|publisher-dispatch-health.redis|chat-context-cache.redis|publisher-refresh-operation.redis|publisher-access-refresh.redis|publisher-auto-reply-(backlog-quota|flood-gate)\.redis-integration\.spec\.ts$|commercial-ocr-admission.redis|marketplace-publisher-access.redis|statistics-access-demand.redis-integration|retention-priority-admission.redis-integration|message-retention-admission.redis-integration|commercial-llm-workstation'
+      - name: Save API shard result
+        if: always() && matrix.part != 'checks'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: api-tests-${{ strategy.job-index }}-${{ github.sha }}
+          path: apps/api/api-tests.json
+          if-no-files-found: warn
+          retention-days: 3
 
   postgres-races:
     name: PostgreSQL Races (${{ matrix.shard }})
@@ -291,11 +309,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # FLAG: Keep every browser case while bounding each serial runner below the
-    # job deadline; the aggregate Required check waits for both shards.
+    # job deadline; the aggregate Required check waits for all four shards.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1/2, 2/2]
+        shard: [1/4, 2/4, 3/4, 4/4]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -314,74 +332,74 @@ jobs:
       - run: npx playwright install --with-deps chromium
         timeout-minutes: 3
       - name: Install WebKit for chat shop mobile formats
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: npx playwright install --with-deps webkit
         timeout-minutes: 3
       - run: npm run check:miniapp
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - run: npm run build:miniapp:production
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - run: npm run screenshots:miniapp:smoke
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - name: Build browser contracts
-        if: matrix.shard == '2/2'
+        if: matrix.shard != '1/4'
         run: npm run build --workspace @maxim/contracts
       - name: Chat shop formats, viewing and command recovery on Android and iOS
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/karavan-shop-formats.browser.mjs
       - name: Saved catalogs and selected settings access on mobile
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/personal-access-entry.browser.mjs
       - name: Community titles and avatars on mobile
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/entity-presentation.browser.mjs
       - name: Moderator selection and interrupted response recovery
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/moderator-choice.browser.mjs
       - name: Participant report mobile settings and journal
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-reports.browser.mjs
       - name: Participant report journal polling and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/report-journal-races.browser.mjs
       - name: Required subscription drafts and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-required-subscription.browser.mjs
       - name: Settings draft saves and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-draft.browser.mjs
       - name: Cold settings search layout and focus
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/settings-search-layout.browser.mjs
       - name: Anti-duplicate controls, schedule and save conflicts
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/settings-antiduplicate.browser.mjs
       - name: Anti-duplicate diagnostics save and stale responses
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/settings-duplicate-diagnostics.browser.mjs
       - name: Rules drafts, publication races and image preparation
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: |
           node apps/miniapp/test/settings-rules.browser.mjs
           node apps/miniapp/test/rules-image-picker.browser.mjs
       - name: Publication feed filters, cursors and calendar scope
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/publication-list.browser.mjs
       - name: Publication action confirmations and request identity
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/publication-actions.browser.mjs
       - name: Publication editor drafts and session lifecycle
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: |
           node apps/miniapp/test/publication-session.browser.mjs
           node apps/miniapp/test/publication-shared-media.browser.mjs
           node apps/miniapp/test/publication-video-picker.browser.mjs
           node apps/miniapp/test/publication-composer-usability.browser.mjs
       - name: Rich text formatting, typing state and imported drafts
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/max-rich-text-formatting.browser.mjs
       - name: Speech styles and custom message preservation
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/bot-speech-style.browser.mjs
 
   admin:

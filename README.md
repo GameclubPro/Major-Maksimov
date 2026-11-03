@@ -73,12 +73,18 @@ Start with the [agent workflow](AGENTS.md), inspect changed callers, and select 
 ```bash
 node scripts/agent/preflight.mjs
 node scripts/agent/plan.mjs --worktree
+node scripts/agent/focused.mjs --test scripts/agent/test/verify.test.mjs
 ```
 
 Run the relevant [focused cases](docs/development/agent-machine-contract.md#focused-checks-before-submission)
 while editing. The staged commit helper below owns the final aggregate; do not pre-run
 its same aggregate or repeat included subchecks. Markdown-only work selects `check:docs`.
 Full validation needs a full impact plan or a concrete coverage gap.
+
+Use repeatable `--test` arguments with exact existing paths; `--dry-run --json` shows the
+command without running it. This avoids npm argument-forwarding mistakes that can accidentally
+start an entire Jest suite. For final submission, inspect `verify.mjs --staged --dry-run --json`
+if needed, then let the commit helper execute that aggregate once.
 
 API validation scripts serialize contracts/Prisma codegen; internal `*:unlocked` and
 `*:source` scripts are not normal entrypoints. Native storage coverage needs the
