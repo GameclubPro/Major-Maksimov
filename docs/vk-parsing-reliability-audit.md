@@ -1,6 +1,6 @@
 # VK-парсинг: надёжность и производительность
 
-Дата ревизии: 2026-09-17. Дополняет исторический [аудит 2026-08-29](vk-parsing-optimization-plan.md).
+Дата ревизии: 2026-09-17. Дополняет исторический [аудит 2026-08-29](https://github.com/GameclubPro/Major-Maksimov/blob/5876cfcd0987d86badc3c188d62050f12c8674ba/docs/operations/archive/vk-parsing-optimization-plan.md).
 
 ## Область проверки
 
