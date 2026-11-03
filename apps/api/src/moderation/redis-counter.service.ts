@@ -35,6 +35,12 @@ import {
   resolveDuplicateHistoryRetentionSeconds,
 } from './duplicate-state';
 
+const preDispatchUnavailableErrors = new WeakSet<Error>();
+
+export function isRedisCounterPreDispatchUnavailable(error: unknown): error is Error {
+  return error instanceof Error && preDispatchUnavailableErrors.has(error);
+}
+
 // FLAG: Cooldowns use event time, not delivery time. Rejected attempts never move the anchor,
 // and retries must recover their original decision before inspecting a newer anchor.
 const CLAIM_EVENT_COOLDOWN_SCRIPT = `
@@ -452,6 +458,7 @@ export class RedisCounterService implements OnModuleDestroy {
     windowSeconds: number;
     deadlineAtMs: number;
     memberTimestampToleranceMs?: number;
+    requireReadyBeforeDispatch?: boolean;
   }): Promise<'allowed' | 'blocked' | 'stale' | 'deadline_exceeded'> {
     if (
       !params.key.trim() ||
@@ -467,6 +474,7 @@ export class RedisCounterService implements OnModuleDestroy {
     ) {
       throw new Error('Invalid event cooldown input');
     }
+    if (params.requireReadyBeforeDispatch) this.requireReadyBeforeCounterDispatch(false);
     const result = Number(
       await this.redis.eval(
         CLAIM_EVENT_COOLDOWN_SCRIPT,
@@ -553,6 +561,7 @@ export class RedisCounterService implements OnModuleDestroy {
     countLimit?: number;
     deadlineAtMs: number;
     sharedBaseline?: { sharedKey: string; authorKey: string };
+    requireReadyBeforeDispatch?: boolean;
   }): Promise<RevisionedSetMembershipResult> {
     const stateKey = params.stateKey.trim();
     const member = params.member.trim();
@@ -594,11 +603,15 @@ export class RedisCounterService implements OnModuleDestroy {
       throw new Error('Revisioned membership state input must contain valid unique keys and times');
     }
 
+    let mutationEvalInvoked = false;
     for (let attempt = 0; attempt < REVISIONED_MEMBERSHIP_MAX_CAS_ATTEMPTS; attempt += 1) {
       if (Date.now() >= deadlineAtMs) {
         return { kind: 'deadline_exceeded' };
       }
 
+      if (params.requireReadyBeforeDispatch) {
+        this.requireReadyBeforeCounterDispatch(mutationEvalInvoked);
+      }
       const currentRaw = await this.redis.get(stateKey);
       if (Date.now() >= deadlineAtMs) {
         return { kind: 'deadline_exceeded' };
@@ -639,6 +652,12 @@ export class RedisCounterService implements OnModuleDestroy {
       const allMembershipKeys = Array.from(
         new Set([...(current?.memberships.keys() ?? []), ...membershipKeys]),
       ).sort();
+      if (params.requireReadyBeforeDispatch) {
+        this.requireReadyBeforeCounterDispatch(mutationEvalInvoked);
+      }
+      // FLAG: Once a mutating EVAL is invoked, even a CAS miss cannot certify this
+      // invocation as never dispatched. Preserve every subsequent error as unknown.
+      mutationEvalInvoked = true;
       const appliedResult = (await this.redis.eval(
         REPLACE_REVISIONED_SET_MEMBERSHIPS_BEFORE_DEADLINE_SCRIPT,
         1 + allMembershipKeys.length,
@@ -687,6 +706,19 @@ export class RedisCounterService implements OnModuleDestroy {
     }
 
     throw new Error('Redis revisioned membership state changed too frequently');
+  }
+
+  private requireReadyBeforeCounterDispatch(mutationEvalInvoked: boolean): void {
+    if (this.redis.status === 'ready') return;
+    const error = new Error(
+      mutationEvalInvoked
+        ? 'Redis counter became unavailable after a mutation dispatch'
+        : 'Redis counter is unavailable before dispatch',
+    );
+    // FLAG: Only this explicit admission refusal owns proof of no mutating dispatch.
+    // Matching properties or an error received from Redis never establish that proof.
+    if (!mutationEvalInvoked) preDispatchUnavailableErrors.add(error);
+    throw error;
   }
 
   async incrementByWithTtl(key: string, amount: number, ttlSeconds: number): Promise<number> {

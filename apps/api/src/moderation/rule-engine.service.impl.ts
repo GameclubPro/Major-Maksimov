@@ -53,7 +53,7 @@ import {
   extractUrlsFromText,
 } from './rule-engine-link-detector';
 import {
-  extractDetectedPhoneNumbers,
+  extractDetectedPhoneNumbers as extractLegacyDuplicatePhoneNumbers,
   RuleEngineMessageLimitsDetector,
 } from './rule-engine-message-limits.detector';
 import {
@@ -1039,7 +1039,15 @@ export class RuleEngineService {
         outcome: 'timeout',
       });
     });
-    this.messageLimitsDetector = new RuleEngineMessageLimitsDetector(redisCounter);
+    this.messageLimitsDetector = new RuleEngineMessageLimitsDetector(
+      redisCounter,
+      ({ rule, reason }) =>
+        this.runtimeDiagnosticsService?.recordHotPathStageOutcome({
+          stage: `rule-engine.${rule}`,
+          outcome: reason === 'deadline' ? 'timeout' : 'skip',
+          failOpen: true,
+        }),
+    );
     this.trafficProtectionDetector = new TrafficProtectionDetector(redisCounter);
   }
 
@@ -2426,7 +2434,7 @@ export class RuleEngineService {
     if (
       hasNavigationTarget ||
       extractUrlsFromText(rawText).length > 0 ||
-      extractDetectedPhoneNumbers(rawText).length > 0 ||
+      extractLegacyDuplicatePhoneNumbers(rawText).length > 0 ||
       rawText.trimStart().startsWith('/')
     ) {
       return true;
