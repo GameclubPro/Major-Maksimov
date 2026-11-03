@@ -9,9 +9,8 @@
 - Before editing, run `node scripts/agent/context.mjs --path <file>`; include callers.
   Read its scoped notes and relevant references. For behavior changes, follow the
   [evidence procedure](docs/development/behavior-evidence.md).
-- Keep one primary implementation/release stage active. Finish its checks and result before
-  opening another runtime workstream, except for a prerequisite or urgent production incident.
-  Independent read-only monitoring can continue.
+- Keep one implementation/release stage active through its checks and result. Only prerequisites,
+  urgent incidents and independent read-only monitoring may overlap it.
 - During an incident, name the next user-visible recovery result and its blocking gate. Defer
   unrelated refactoring and diagnostics; use the [incident delivery rules](docs/development-reliability-plan.md#incident-delivery).
 - Keep `main` clean at the verified production SHA; use task worktrees and fast-forward
@@ -39,10 +38,11 @@
    for environment setup; run `node scripts/agent/preflight.mjs` before expensive checks.
 2. For changed methods, find callers and test doubles with `rg` before broad tests. Keep doubles
    typed against the real contract. Run the affected unit and native integration cases first.
-3. Select scope with `node scripts/agent/plan.mjs --worktree`. Use focused tests; the commit helper
-   owns one final aggregate. No duplicate green suites or subchecks.
+3. Select scope with `node scripts/agent/plan.mjs --worktree`. While editing use
+   `node scripts/agent/focused.mjs --test <path>`; repeat `--test` for more files.
+   The commit helper owns the final aggregate; do not pre-run it or repeat green subchecks.
    Full runs need planner `full` or a concrete coverage gap. UI needs no unrelated API/native/admin
-   suites; local tooling uses core plus affected callers; Markdown uses `check:docs`. See
+   suites; tooling uses core plus affected callers; Markdown uses `check:docs`. See
    [check selection](docs/development-reliability-plan.md#boundaries-and-follow-up).
 4. Public API scripts own generator locks. Do not invoke `*:unlocked`, `*:source` or raw Prisma
    generation to bypass them. Native stores: `node scripts/agent/with-test-stores.mjs --migrate --`
@@ -56,7 +56,7 @@
    on the exact selected SHA; local check scope never bypasses CI. Deploy through
    `./infra/scripts/vps-connect.sh deploy main --auto`; read `infra/AGENTS.md`
    first. Verify the synchronized VPS SHA, strict smokes and immutable component manifest.
-   Do not use an old green commit's checks for a new release. Emergency bypass needs explicit reason.
+   Emergency bypass needs explicit reason.
 7. Unless the user says otherwise, validated runtime changes finish with the affected VPS deploy,
    before independent tooling follow-ups. Recreate all roles for a shared API image, never stores.
    Docs/tests/tooling need no deploy or second main CI wait after green PR merge. Active
