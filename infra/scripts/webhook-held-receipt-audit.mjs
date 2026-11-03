@@ -36,6 +36,19 @@ export const HELD_RECEIPT_COLUMNS = Object.freeze({
 });
 
 const literal = (value) => `'${value.replaceAll("'", "''")}'`;
+
+export function parseHeldReceiptAuditArgs(args) {
+  const values = [...args];
+  const explain = values.at(-1) === '--explain';
+  if (explain) values.pop();
+  const receiptId = values[0];
+  if (
+    values.length > 1 ||
+    (receiptId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(receiptId))
+  )
+    throw new Error('Expected one optional bounded receipt ID and optional --explain');
+  return { explain, receiptId };
+}
 const allowed = Object.entries(HELD_RECEIPT_COLUMNS)
   .flatMap(([table, columns]) => columns.map((column) => `(${literal(table)},${literal(column)})`))
   .join(',\n');
@@ -203,12 +216,17 @@ const recoveryColumns =
 
 // FLAG: Materialize the capped chat prefix before testing message_id. PostgreSQL
 // may choose chat/user and otherwise discard unbounded history below LIMIT.
-export function buildHeldReceiptAuditSql(explain = false) {
+export function buildHeldReceiptAuditSql(explain = false, receiptId) {
+  if (receiptId !== undefined) parseHeldReceiptAuditArgs([receiptId]);
+  const keyed = receiptId !== undefined;
+  const selection = keyed
+    ? `SELECT id FROM public.webhook_events WHERE id=${explain ? '$1' : literal(receiptId)} LIMIT 1`
+    : `SELECT id FROM public.webhook_events WHERE status='RECEIVED'::public."WebhookStatus"
+  ORDER BY created_at,id LIMIT 1`;
   const query = `WITH head AS MATERIALIZED (
-  SELECT id FROM public.webhook_events WHERE status='RECEIVED'::public."WebhookStatus"
-  ORDER BY created_at,id LIMIT 1
+  ${selection}
 ), candidate AS MATERIALIZED (
-  SELECT e.id,e.created_at,
+  SELECT e.id,e.status,e.created_at,
     CASE WHEN ${scalarBounded('e.semantic_key', 4096)} THEN e.semantic_key END AS semantic_key,
     CASE WHEN e.semantic_key IS NULL THEN 'absent'
       WHEN ${scalarBounded('e.semantic_key', 4096)} THEN 'bounded' ELSE 'uninspected' END AS semantic_key_admission,
@@ -228,12 +246,14 @@ export function buildHeldReceiptAuditSql(explain = false) {
   FROM head JOIN public.webhook_events e ON e.id=head.id
 ), scope AS MATERIALIZED (
   SELECT *,normalized->>'type'='message_removed' AS is_removal,
+    normalized->>'type' IN ('message_created','message_edited') AS is_authored_message,
+    normalized->>'type' IN (${keyed ? "'message_removed','message_created','message_edited'" : "'message_removed'"}) AS scope_supported,
     ${identity('chatId')} AS chat_id,${identity('messageId')} AS message_id,
     ${identity('senderId')} AS user_id FROM candidate
 ), exact_chat_prefix AS MATERIALIZED (
   SELECT r.* FROM scope s CROSS JOIN LATERAL (
     SELECT ${recoveryColumns} FROM public.webhook_legacy_recoveries r
-    WHERE s.is_removal AND s.chat_id IS NOT NULL AND s.message_id IS NOT NULL
+    WHERE s.scope_supported AND s.chat_id IS NOT NULL AND s.message_id IS NOT NULL
       AND r.chat_id=s.chat_id LIMIT 17
   ) r
 ), exact_scopes AS MATERIALIZED (
@@ -241,7 +261,7 @@ export function buildHeldReceiptAuditSql(explain = false) {
 ), user_scopes AS MATERIALIZED (
   SELECT r.* FROM scope s CROSS JOIN LATERAL (
     SELECT ${recoveryColumns} FROM public.webhook_legacy_recoveries r
-    WHERE s.is_removal AND s.user_id IS NOT NULL AND r.user_id=s.user_id LIMIT 17
+    WHERE s.scope_supported AND s.user_id IS NOT NULL AND r.user_id=s.user_id LIMIT 17
   ) r
 ), coverage AS MATERIALIZED (
   SELECT s.*,(SELECT count(*) FROM exact_chat_prefix) AS exact_chat_prefix_count,
@@ -249,7 +269,7 @@ export function buildHeldReceiptAuditSql(explain = false) {
     (SELECT count(*) FROM user_scopes) AS user_count,
     (SELECT COALESCE(bool_and(metadata_bounded),true) FROM exact_chat_prefix) AS exact_metadata_bounded,
     (SELECT COALESCE(bool_and(metadata_bounded),true) FROM user_scopes) AS user_metadata_bounded,
-    s.is_removal AND s.chat_id IS NOT NULL AND s.message_id IS NOT NULL
+    s.scope_supported AND s.chat_id IS NOT NULL AND s.message_id IS NOT NULL
       AND s.user_id IS NOT NULL AND (SELECT count(*) FROM exact_chat_prefix)<17
       AND (SELECT count(*) FROM user_scopes)<17
       AND (SELECT COALESCE(bool_and(metadata_bounded),true) FROM exact_chat_prefix)
@@ -288,25 +308,27 @@ export function buildHeldReceiptAuditSql(explain = false) {
     c.sealed_at AS certificate_sealed_at,a.sealed_at AS authority_sealed_at,c.quiesced_at
   FROM winner w LEFT JOIN authority a ON true LEFT JOIN certificate c ON true
 ), other_holds AS MATERIALIZED (
-  SELECT CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN
+  SELECT CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN
     EXISTS (SELECT 1 FROM public.webhook_source_abandonments m
       WHERE m.chat_id=v.chat_id AND m.message_id=v.message_id LIMIT 1) END AS modern_exact,
-    CASE WHEN v.is_removal THEN EXISTS (SELECT 1 FROM public.webhook_backlog_receipts b
+    CASE WHEN v.scope_supported THEN EXISTS (SELECT 1 FROM public.webhook_backlog_receipts b
       WHERE b.receipt_id=v.id LIMIT 1) END AS backlog_receipt,
-    CASE WHEN v.is_removal AND v.semantic_key IS NOT NULL THEN
+    CASE WHEN v.scope_supported AND v.semantic_key IS NOT NULL THEN
       EXISTS (SELECT 1 FROM public.webhook_backlog_receipts b
         WHERE b.semantic_key=v.semantic_key LIMIT 1) END AS backlog_stored_semantic
   FROM coverage v
 )
 SELECT jsonb_build_object(
-  'schema_version',1,'audit','webhook_held_receipt','authority','DIAGNOSTICS_ONLY','diagnostics_only',true,
+  'schema_version',2,'audit','webhook_held_receipt','authority','DIAGNOSTICS_ONLY','diagnostics_only',true,
   'read_only',current_setting('transaction_read_only')='on','sampled_at',statement_timestamp(),
   'runtime_classifier_evaluated',false,'settlement_authorized',false,'replay_authorized',false,
   'effect_completeness','unknown','source_validation','not_evaluated',
+  'selection',${literal(keyed ? 'exact_receipt' : 'oldest_received')},
   'classification',CASE
-    WHEN v.id IS NULL THEN 'no_received'
+    WHEN v.id IS NULL THEN ${literal(keyed ? 'receipt_missing' : 'no_received')}
+    WHEN v.status<>'RECEIVED'::public."WebhookStatus" THEN 'receipt_not_received'
     WHEN v.payload_admission<>'bounded' THEN 'payload_uninspected'
-    WHEN v.is_removal IS NOT TRUE THEN 'not_message_removed'
+    WHEN v.scope_supported IS NOT TRUE THEN ${literal(keyed ? 'unsupported_event_type' : 'not_message_removed')}
     WHEN v.chat_id IS NULL OR v.message_id IS NULL OR v.user_id IS NULL THEN 'normalized_scope_unproved'
     WHEN v.exact_metadata_bounded IS NOT TRUE OR v.user_metadata_bounded IS NOT TRUE
       THEN 'legacy_scope_metadata_uninspected'
@@ -317,8 +339,10 @@ SELECT jsonb_build_object(
     WHEN z.binding_metadata_bounded IS NOT TRUE THEN 'binding_metadata_uninspected'
     WHEN z.scalar_identity_matches IS NOT TRUE OR z.recovery_metadata_matches IS NOT TRUE
       THEN 'legacy_seal_mismatch' ELSE 'legacy_sealed_scope_present' END,
-  'receipt',jsonb_build_object('created_at',CASE WHEN isfinite(v.created_at) THEN v.created_at END,
-    'event_type',CASE WHEN v.is_removal THEN 'message_removed' ELSE 'other_or_uninspected' END,
+  'receipt',jsonb_build_object('found',v.id IS NOT NULL,'status',v.status::text,
+    'still_received',v.status='RECEIVED'::public."WebhookStatus",
+    'created_at',CASE WHEN isfinite(v.created_at) THEN v.created_at END,
+    'event_type',CASE WHEN v.scope_supported THEN v.normalized->>'type' ELSE 'other_or_uninspected' END,
     'payload_admission',v.payload_admission,'queue_absent',v.queue_name IS NULL AND v.queued_at IS NULL,
     'zero_enqueue_attempts',v.enqueue_attempts=0,'processed',v.processed_at IS NOT NULL,
     'legacy_proof_pointer_present',v.legacy_disposition_id IS NOT NULL OR v.legacy_disposition_receipt_id IS NOT NULL,
@@ -326,27 +350,33 @@ SELECT jsonb_build_object(
     'saved_preparation_reason',v.saved_preparation_reason,
     'stored_semantic_key_admission',v.semantic_key_admission),
   'scope_metadata',jsonb_build_object('chat_id_valid',v.chat_id IS NOT NULL,
-    'message_id_valid',v.message_id IS NOT NULL,'normalized_actor_valid',v.user_id IS NOT NULL,
+    'message_id_valid',v.message_id IS NOT NULL,
+    'normalized_actor_valid',CASE WHEN v.is_removal THEN v.user_id IS NOT NULL END,
+    'normalized_author_valid',CASE WHEN v.scope_supported AND v.is_authored_message THEN v.user_id IS NOT NULL END,
+    'user_nomination',CASE WHEN v.is_removal THEN 'normalized_removal_actor'
+      WHEN v.scope_supported AND v.is_authored_message THEN 'normalized_outer_message_sender' ELSE 'unavailable' END,
     'original_author_proven',false,'scopes_complete',v.scopes_complete,
-    'exact_family_available',v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL,
-    'exact_chat_prefix_count_lower_bound',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count END,
-    'exact_chat_prefix_saturated',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count=17 END,
-    'exact_chat_prefix_complete',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count<17 AND v.exact_metadata_bounded END,
-    'exact_match_count_lower_bound',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_count END,
-    'exact_saturated',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_count=17 END,
-    'exact_family_metadata_bounded',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_metadata_bounded END,
-    'exact_family_complete',CASE WHEN v.is_removal AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count<17 AND v.exact_metadata_bounded END,
-    'global_user_family_available',v.is_removal AND v.user_id IS NOT NULL,
-    'global_user_match_count_lower_bound',CASE WHEN v.is_removal AND v.user_id IS NOT NULL THEN v.user_count END,
-    'global_user_saturated',CASE WHEN v.is_removal AND v.user_id IS NOT NULL THEN v.user_count=17 END,
-    'global_user_family_metadata_bounded',CASE WHEN v.is_removal AND v.user_id IS NOT NULL THEN v.user_metadata_bounded END,
-    'global_user_family_complete',CASE WHEN v.is_removal AND v.user_id IS NOT NULL THEN v.user_count<17 AND v.user_metadata_bounded END,
+    'exact_family_available',v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL,
+    'exact_chat_prefix_count_lower_bound',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count END,
+    'exact_chat_prefix_saturated',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count=17 END,
+    'exact_chat_prefix_complete',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count<17 AND v.exact_metadata_bounded END,
+    'exact_match_count_lower_bound',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_count END,
+    'exact_saturated',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_count=17 END,
+    'exact_family_metadata_bounded',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_metadata_bounded END,
+    'exact_family_complete',CASE WHEN v.scope_supported AND v.chat_id IS NOT NULL AND v.message_id IS NOT NULL THEN v.exact_chat_prefix_count<17 AND v.exact_metadata_bounded END,
+    'global_user_family_available',v.scope_supported AND v.user_id IS NOT NULL,
+    'global_user_match_count_lower_bound',CASE WHEN v.scope_supported AND v.user_id IS NOT NULL THEN v.user_count END,
+    'global_user_saturated',CASE WHEN v.scope_supported AND v.user_id IS NOT NULL THEN v.user_count=17 END,
+    'global_user_family_metadata_bounded',CASE WHEN v.scope_supported AND v.user_id IS NOT NULL THEN v.user_metadata_bounded END,
+    'global_user_family_complete',CASE WHEN v.scope_supported AND v.user_id IS NOT NULL THEN v.user_count<17 AND v.user_metadata_bounded END,
     'family_cap',16,'sentinel_cap',17,'scalar_uncompressed_max_bytes',1024),
   'other_hold_metadata',jsonb_build_object('modern_exact_message_present',h.modern_exact,
     'backlog_exact_receipt_present',h.backlog_receipt,'backlog_stored_semantic_present',h.backlog_stored_semantic,
     'backlog_message_family',CASE WHEN v.is_removal THEN 'not_applicable_to_message_removed' ELSE 'not_evaluated' END,
+    'protocol_family_coverage','partial','exclusive_protocol_proven',false,
     'canonical_semantic_key_rebuilt',false),
   'legacy_scope',jsonb_build_object('selected',z.recovery_id IS NOT NULL,
+    'seal_coverage','selected_scope_only','all_matching_scopes_sealed_proven',false,
     'selection_role',CASE WHEN v.legacy_disposition_id IS NOT NULL OR v.legacy_disposition_receipt_id IS NOT NULL
       OR v.source_disposition_id IS NOT NULL OR v.source_disposition_receipt_id IS NOT NULL
       THEN 'diagnostic_only_existing_pointer' ELSE 'metadata_only' END,
@@ -365,6 +395,13 @@ SELECT jsonb_build_object(
       THEN v.created_at>z.certificate_sealed_at END)
 ) FROM (SELECT 1) singleton LEFT JOIN coverage v ON true LEFT JOIN seal z ON true
   LEFT JOIN other_holds h ON true;`;
+  // FLAG: A keyed plain plan must not print the nominated private receipt ID in
+  // its index condition. The generic parameter still uses the attested exact PK.
+  if (keyed && explain)
+    return `SET LOCAL plan_cache_mode='force_generic_plan';
+PREPARE maxim_held_receipt_audit(text) AS ${query}
+EXPLAIN (FORMAT JSON) EXECUTE maxim_held_receipt_audit(${literal(receiptId)});
+DEALLOCATE maxim_held_receipt_audit;`;
   return `${explain ? 'EXPLAIN (FORMAT JSON) ' : ''}${query}`;
 }
 
@@ -380,20 +417,24 @@ export function emitHeldReceiptPrivilegesSql(requireAll = false) {
   );
 }
 
-export function emitHeldReceiptAuditSql(explain = false) {
-  return `SET LOCAL search_path TO pg_catalog, public, pg_temp;\nSET LOCAL timezone='UTC';\n${emitHeldReceiptPrivilegesSql(true)}${guard(heldReceiptIndexesSql, 'held_receipt_indexes_ready', 'WEBHOOK_HELD_RECEIPT_INDEXES_INVALID')}${buildHeldReceiptAuditSql(explain)}\n`;
+export function emitHeldReceiptAuditSql(explain = false, receiptId) {
+  return `SET LOCAL search_path TO pg_catalog, public, pg_temp;\nSET LOCAL timezone='UTC';\n${emitHeldReceiptPrivilegesSql(true)}${guard(heldReceiptIndexesSql, 'held_receipt_indexes_ready', 'WEBHOOK_HELD_RECEIPT_INDEXES_INVALID')}${buildHeldReceiptAuditSql(explain, receiptId)}\n`;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
-  if (args.length > 1 || (args.length === 1 && !['--explain', '--privileges'].includes(args[0]))) {
-    process.stderr.write('Usage: webhook-held-receipt-audit.mjs [--explain] | --privileges\n');
-    process.exitCode = 2;
-  } else {
-    process.stdout.write(
-      args[0] === '--privileges'
-        ? emitHeldReceiptPrivilegesSql()
-        : emitHeldReceiptAuditSql(args[0] === '--explain'),
+  try {
+    if (args.length === 1 && args[0] === '--privileges') {
+      process.stdout.write(emitHeldReceiptPrivilegesSql());
+    } else {
+      const validateOnly = args[0] === '--validate-scope';
+      const { explain, receiptId } = parseHeldReceiptAuditArgs(validateOnly ? args.slice(1) : args);
+      if (!validateOnly) process.stdout.write(emitHeldReceiptAuditSql(explain, receiptId));
+    }
+  } catch {
+    process.stderr.write(
+      'Usage: webhook-held-receipt-audit.mjs [receipt-id] [--explain] | --privileges\n',
     );
+    process.exitCode = 2;
   }
 }

@@ -63,13 +63,25 @@ accept either the entire new group or none; this mode requires the entire group.
 Keep the source SHA, actual API image SHA and observation window separately.
 Tooling synchronization does not roll out the API image or restore availability.
 
-The report selects one oldest RECEIVED through `(status, created_at, id)` before
-inspecting its type. A different event type remains explicit. Original normalized
-payload storage must pass the existing PostgreSQL 16 decoded-size bound before
-JSON extraction. Only bounded normalized chat, message and actor fields guide
-indexed probes; their values never appear in the report. A removal actor does
-not establish the original message's author. Raw source parsing, canonical key
-reconstruction and original source clock validation remain unevaluated.
+Without an ID, the report selects one oldest RECEIVED through
+`(status, created_at, id)` before inspecting its type and retains removal-only
+scope inspection. For an already nominated receipt, use
+`postgres-audit webhook-held-receipt <receipt-id> --explain`, review the plain
+plan, then run the same command without `--explain`. The ID is one opaque token
+of at most 128 ASCII letters, digits, underscores or hyphens, starting with a
+letter or digit. Exact selection uses the primary key regardless of current
+status. Missing and no-longer-RECEIVED receipts are explicit; it never substitutes
+a newer head. A generic prepared plan keeps the nominated ID out of plan output.
+
+Keyed mode also inspects `message_created` and `message_edited` metadata. Original
+normalized payload storage must pass the existing PostgreSQL 16 decoded-size
+bound before JSON extraction. Only bounded normalized chat, message and sender
+fields guide indexed probes; their values never appear in the report. Schema v2
+labels the removal actor separately from the created/edited message's normalized
+outer sender. A missing outer sender stays unproved, even if a forwarded linked
+sender is present. Neither nomination establishes the original author's identity.
+Raw source parsing, canonical key reconstruction and original source clock
+validation remain unevaluated.
 
 The legacy message probe first admits at most 16 rows plus one saturation sentinel
 from the indexed chat prefix, then filters that materialized prefix by message.
@@ -87,10 +99,16 @@ definitions, including both existing chat/message and chat/user access paths.
 The selected certificate and authority use exact unique lookups. Scalar binding
 and seal comparisons distinguish missing, mismatched and matching records; the
 receipt/seal relationship concerns receipt creation time only.
+Seal coverage is explicitly `selected_scope_only`; it does not prove that every
+matching legacy scope is sealed.
 
 Modern exact-message presence, backlog exact-receipt presence and backlog stored
 semantic-key presence are independent metadata observations. They are not a
 reconstructed `isUpdateHeld` result. Existing disposition pointers remain explicit.
+The unchanged 28-column privilege group cannot read backlog message-family
+identities. For created/edited messages, that family stays `not_evaluated`, protocol
+coverage is `partial` and `exclusive_protocol_proven=false`. An absent sampled
+family cannot establish absence of every hold or identify the runtime refusal.
 No claim, effect history, handler or materializer runs. The report retains
 `runtime_classifier_evaluated=false`, `settlement_authorized=false`,
 `replay_authorized=false` and `effect_completeness=unknown`. In particular,

@@ -52,7 +52,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh storage [--explain]
   ./infra/scripts/vps-postgres-audit.sh multibot-preparation [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-owner-proof [--explain]
-  ./infra/scripts/vps-postgres-audit.sh webhook-held-receipt [--explain]
+  ./infra/scripts/vps-postgres-audit.sh webhook-held-receipt [receipt-id] [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-source-proof [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-source-envelope <owner-receipt-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-retry-proof [--explain]
@@ -163,7 +163,11 @@ case "$AUDIT_MODE" in
     MODERATION_OUTCOME_ARGS=("${@:2}")
     node "$ROOT_DIR/infra/scripts/moderation-outcomes-audit.mjs" "${MODERATION_OUTCOME_ARGS[@]}" >/dev/null || exit 2
     ;;
-  webhook-workload|delete-retry-heads|queue|publisher-publications|publisher-access-census|commercial-quality|storage|multibot-preparation|webhook-owner-proof|webhook-source-proof|webhook-retry-proof|webhook-queued-proof|webhook-held-receipt|legacy-order-window|legacy-semantic-mirrors)
+  webhook-held-receipt)
+    HELD_RECEIPT_ARGS=("${@:2}")
+    node "$ROOT_DIR/infra/scripts/webhook-held-receipt-audit.mjs" --validate-scope "${HELD_RECEIPT_ARGS[@]}" >/dev/null || exit 2
+    ;;
+  webhook-workload|delete-retry-heads|queue|publisher-publications|publisher-access-census|commercial-quality|storage|multibot-preparation|webhook-owner-proof|webhook-source-proof|webhook-retry-proof|webhook-queued-proof|legacy-order-window|legacy-semantic-mirrors)
     if [[ $# -gt 2 || ( $# -eq 2 && "$2" != '--explain' ) ]]; then
       usage
       exit 2
@@ -2456,9 +2460,7 @@ emit_sql() {
       node "$ROOT_DIR/infra/scripts/webhook-source-envelope-audit.mjs" "${source_envelope_args[@]}"
       ;;
     webhook-held-receipt)
-      local held_receipt_args=()
-      if [[ -n "$RULES_CLEANUP_EXPLAIN" ]]; then held_receipt_args+=("$RULES_CLEANUP_EXPLAIN"); fi
-      node "$ROOT_DIR/infra/scripts/webhook-held-receipt-audit.mjs" "${held_receipt_args[@]}"
+      node "$ROOT_DIR/infra/scripts/webhook-held-receipt-audit.mjs" "${HELD_RECEIPT_ARGS[@]}"
       ;;
     webhook-owner-proof|webhook-source-proof|webhook-retry-proof|webhook-queued-proof)
       local owner_proof_args=()
