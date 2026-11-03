@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { migrate } from '../src/migrate.js';
 import { Store } from '../src/store.js';
+import { updatePolicy, connectionProof } from './support/policy-proof.js';
 import type { Candidate, Message } from '../src/types.js';
 
 const url = process.env.MAXIM_TEST_POSTGRES_URL;
@@ -33,7 +34,7 @@ async function enable() {
     holdMessageIds: [],
     completeThrough: new Date().toISOString(),
   });
-  await store.update('-1', {
+  await updatePolicy(store, '-1', {
     enabled: true,
     hours: 24,
     expectedRevision: 0,
@@ -43,7 +44,7 @@ async function enable() {
 }
 async function update(hours: 24 | 48 | 168) {
   const policy = (await store.policy('-1'))!;
-  return store.update('-1', {
+  return updatePolicy(store, '-1', {
     enabled: true,
     hours,
     expectedRevision: policy.revision,
@@ -758,7 +759,7 @@ test('a completed safety window cannot clear a retained gap outside its current 
 test('connection activation keeps the legacy reader floor below retained gaps', async () => {
   await enable();
   const policy = (await store.policy('-1'))!;
-  await store.update('-1', {
+  await updatePolicy(store, '-1', {
     enabled: true,
     hours: 24,
     expectedRevision: policy.revision,
@@ -774,7 +775,7 @@ test('connection activation keeps the legacy reader floor below retained gaps', 
   const [connection] = await store.reserveConnections(1);
   assert.ok(connection);
   assert.equal(
-    await store.activateConnection('-1', connection.leaseToken, new Date(Date.now() + 30_000)),
+    await store.activateConnection('-1', connection.leaseToken, await connectionProof(store, '-1')),
     true,
   );
   const active = (await store.policy('-1'))!;

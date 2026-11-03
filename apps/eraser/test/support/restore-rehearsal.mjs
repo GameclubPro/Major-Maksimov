@@ -13,6 +13,7 @@ const root = fileURLToPath(new URL('../../../../', import.meta.url)),
   pg = require('pg'),
   { Redis } = require('ioredis');
 const { Store } = await import(root + '/apps/eraser/src/store.ts');
+const { updatePolicy } = await import(root + '/apps/eraser/test/support/policy-proof.ts');
 const { migrate } = await import(root + '/apps/eraser/src/migrate.ts');
 const { CleanupRuntime } = await import(root + '/apps/eraser/src/runtime.ts');
 const { DurableRateLimit } = await import(root + '/apps/eraser/src/rate-limit.ts');
@@ -70,7 +71,7 @@ try {
     holdMessageIds: [],
     completeThrough: new Date().toISOString(),
   });
-  await source.update('-1', {
+  await updatePolicy(source, '-1', {
     enabled: true,
     hours: 24,
     expectedRevision: 0,

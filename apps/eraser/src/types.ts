@@ -29,6 +29,7 @@ export type Policy = {
   deleted_removal_receipt_count: string;
   skipped_count: string;
   connection_status: 'connected' | 'missing' | 'no_access' | 'unknown';
+  connection_generation: string;
   last_error: string | null;
   lease_until: Date | null;
   updated_at: Date;
@@ -67,6 +68,19 @@ export type UpdatePolicy = {
   actorUserId: string;
   connectWhenReady?: boolean;
 };
+export type ConnectionProof = {
+  chatId: string;
+  connectionGeneration: string;
+  expiresAt: Date;
+};
+export type PolicyActivationGuard = {
+  chatId: string;
+  operationId: string;
+  expectedRevision: number;
+  connectionGeneration: string;
+};
+export type PolicyActivationProof = PolicyActivationGuard & { expiresAt: Date };
+export type PendingConnectionRequest = ConnectionRequest & { connection_generation: string };
 export type ConnectionRequest = {
   chat_id: string;
   operation_id: string;

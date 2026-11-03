@@ -9,6 +9,7 @@ import { createHttpServer } from '../src/http.js';
 import type { Config } from '../src/config.js';
 import { migrate } from '../src/migrate.js';
 import { Store } from '../src/store.js';
+import { updatePolicy } from './support/policy-proof.js';
 import { CleanupRuntime, MAX_SAFETY_WAKEUPS, MAX_WAKEUPS, type Wakeup } from '../src/runtime.js';
 import { HttpLimiter } from '../src/limiter.js';
 import { MaxClient, MaxError, type MaxTransport } from '../src/max.js';
@@ -60,7 +61,7 @@ function protection(extra: Partial<Protection> = {}): Protection {
 }
 async function enable(id = '-1', hours: 24 | 48 | 168 = 24) {
   await store.bootstrap(id, hours, protection());
-  return store.update(id, {
+  return updatePolicy(store, id, {
     enabled: true,
     hours,
     expectedRevision: 0,
@@ -393,14 +394,14 @@ describe('real PostgreSQL ownership, journals and restart', () => {
       actorUserId: '5',
     };
     const result = await Promise.allSettled([
-      store.update('-1', op),
-      store.update('-1', { ...op, hours: 168, operationId: randomUUID() }),
+      updatePolicy(store, '-1', op),
+      updatePolicy(store, '-1', { ...op, hours: 168, operationId: randomUUID() }),
     ]);
     assert.equal(result.filter((x) => x.status === 'fulfilled').length, 1);
     const winner = result.find((x) => x.status === 'fulfilled');
     assert.ok(winner?.status === 'fulfilled');
     if (winner.value.lastOperationId === op.operationId) {
-      assert.deepEqual(await store.update('-1', op), winner.value);
+      assert.deepEqual(await updatePolicy(store, '-1', op), winner.value);
       assert.deepEqual(await store.operation('-1', op), winner.value);
     }
     assert.equal((await store.snapshot('-1')).revision, 1);
@@ -1165,7 +1166,7 @@ describe('bounded history and same-chat progress', () => {
       });
     }
     const at = Date.now() - 72 * 3_600_000;
-    await store.update('-1', {
+    await updatePolicy(store, '-1', {
       enabled: true,
       hours: 168,
       expectedRevision: 1,
@@ -1216,7 +1217,7 @@ describe('bounded history and same-chat progress', () => {
     assert.equal(scans.length, 1, 'age nomination must bypass retained issued attempts by index');
     assert.equal(scans[0]!['Actual Rows'], 200);
     assert.equal(scans[0]!['Rows Removed by Filter'] ?? 0, 0);
-    await store.update('-1', {
+    await updatePolicy(store, '-1', {
       enabled: true,
       hours: 48,
       expectedRevision: 2,
@@ -1278,7 +1279,7 @@ describe('bounded history and same-chat progress', () => {
           "SELECT * FROM eraser_candidates WHERE message_id<>'age-deferred' ORDER BY message_id",
         )
       ).rows;
-      await store.update('-1', {
+      await updatePolicy(store, '-1', {
         enabled: true,
         hours,
         expectedRevision: 1,

@@ -31,8 +31,12 @@ try {
       new DurableRateLimit(pool, settings.botId),
     ),
   );
-  await client.subscribe();
-  process.stdout.write('Eraser webhook registration confirmed.\n');
+  const verification = await client.subscribe();
+  process.stdout.write(
+    verification.updateTypes === 'verified'
+      ? 'Eraser webhook registration confirmed; update types: verified.\n'
+      : 'Eraser webhook registration confirmed; update types: unknown (not reported by MAX).\n',
+  );
 } finally {
   try {
     await redis.quit();

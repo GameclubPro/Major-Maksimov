@@ -93,6 +93,7 @@ maxim_topology_require_karavan_marketplaces "$TARGET_FULL_SHA"
 maxim_topology_require_eraser_connection_requests "$TARGET_FULL_SHA" all
 # FLAG: Ref rollback replaces controller files but does not replace the Lastik image.
 maxim_topology_require_eraser_rate_limit_reader "$TARGET_FULL_SHA" tooling
+maxim_topology_require_eraser_connection_proof_reader "$TARGET_FULL_SHA" tooling
 maxim_topology_require_suggestion_subscription_guard "$TARGET_FULL_SHA"
 maxim_topology_require_message_duplicate_delete_guard "$TARGET_FULL_SHA"
 maxim_topology_require_multibot_authority "$TARGET_FULL_SHA"

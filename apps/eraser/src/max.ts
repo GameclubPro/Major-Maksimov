@@ -3,6 +3,14 @@ import { HttpAdmissionDeferred, HttpLimiter } from './limiter.js';
 import { record, parseMessage, type Message } from './types.js';
 import { HttpTelemetry, type HttpPurpose, type TransportMetrics } from './telemetry.js';
 
+const ERASER_WEBHOOK_UPDATE_TYPES = [
+  'message_created',
+  'message_edited',
+  'message_removed',
+  'bot_added',
+  'bot_removed',
+] as const;
+
 export class MaxError extends Error {
   constructor(
     readonly status: number,
@@ -256,8 +264,8 @@ export class MaxClient implements MaxTransport {
       throw error;
     }
   }
-  async subscribe(): Promise<void> {
-    if (!this.config.webhookUrl) return;
+  async subscribe(): Promise<{ updateTypes: 'verified' | 'unknown' }> {
+    if (!this.config.webhookUrl) return { updateTypes: 'unknown' };
     const identity = await this.request('GET', '/me', { metric: 'identity' });
     if (String(identity.user_id) !== this.config.botId || identity.is_bot !== true)
       throw new Error('Configured Eraser bot identity does not match its token');
@@ -276,13 +284,7 @@ export class MaxClient implements MaxTransport {
       body: {
         url: this.config.webhookUrl,
         secret: this.config.webhookSecret,
-        update_types: [
-          'message_created',
-          'message_edited',
-          'message_removed',
-          'bot_added',
-          'bot_removed',
-        ],
+        update_types: ERASER_WEBHOOK_UPDATE_TYPES,
       },
     });
     if (result.success !== true) throw new Error('MAX webhook subscription unconfirmed');
@@ -293,5 +295,19 @@ export class MaxClient implements MaxTransport {
       record(confirmed.subscriptions[0])?.url !== this.config.webhookUrl
     )
       throw new Error('MAX webhook subscription readback unconfirmed');
+    const updateTypes = record(confirmed.subscriptions[0])?.update_types;
+    // FLAG: MAX documents Subscription.update_types as optional and nullable:
+    // https://dev.max.ru/docs-api/methods/GET/subscriptions
+    // Missing type evidence preserves URL confirmation, but never certifies event coverage.
+    if (updateTypes === undefined || updateTypes === null) return { updateTypes: 'unknown' };
+    if (
+      !Array.isArray(updateTypes) ||
+      updateTypes.some((value) => typeof value !== 'string' || !value.trim())
+    )
+      throw new Error('MAX webhook subscription readback unconfirmed');
+    const reported = new Set(updateTypes.map((value: string) => value.trim().toLowerCase()));
+    if (ERASER_WEBHOOK_UPDATE_TYPES.some((value) => !reported.has(value)))
+      throw new Error('MAX webhook subscription readback unconfirmed');
+    return { updateTypes: 'verified' };
   }
 }

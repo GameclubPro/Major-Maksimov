@@ -243,11 +243,10 @@ export class CleanupRuntime {
       const request = await this.store.connectionRequest(chatId, leaseToken);
       if (!request || this.stopping || !this.config.enabled) return;
       const before = async () => {
-        if (
-          this.stopping ||
-          !this.config.enabled ||
-          !(await this.store.connectionRequest(chatId, leaseToken))
-        )
+        const current = await this.store.connectionRequest(chatId, leaseToken);
+        if (current && current.connection_generation !== request.connection_generation)
+          throw new MaxError(0, 'connection_guard_changed', false);
+        if (this.stopping || !this.config.enabled || !current)
           throw new ServiceError(
             409,
             'ERASER_CONNECTION_STOPPED',
@@ -267,11 +266,11 @@ export class CleanupRuntime {
       });
       if (Date.now() - botCheckedAt > 15_000)
         throw new MaxError(0, 'connection_proof_stale', false);
-      const activated = await this.store.activateConnection(
+      const activated = await this.store.activateConnection(chatId, leaseToken, {
         chatId,
-        leaseToken,
-        new Date(botCheckedAt + 15_000),
-      );
+        connectionGeneration: request.connection_generation,
+        expiresAt: new Date(botCheckedAt + 15_000),
+      });
       if (!activated)
         await this.store.finishConnection(
           chatId,
@@ -281,6 +280,8 @@ export class CleanupRuntime {
           30_000,
         );
     } catch (failure) {
+      if (failure instanceof MaxError && failure.code === 'eraser_rights_missing')
+        await this.store.connection(chatId, 'no_access');
       const cancelled =
         actorCheck &&
         failure instanceof MaxError &&

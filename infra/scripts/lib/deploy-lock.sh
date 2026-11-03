@@ -46,8 +46,14 @@ maxim_pair_release_mode() {
 
 require_pair_release_admission_dispatch() {
   maxim_pair_release_required || return 0
+  local target="$1" candidate entry proof_source
+  # FLAG: Older local rollback bootstraps already call this remote boundary before
+  # checkout. The installed proof floor must reject a target that would erase it.
+  if [[ -e /var/lib/maxim-deploy/eraser-connection-proof-reader-version || -L /var/lib/maxim-deploy/eraser-connection-proof-reader-version ]]; then
+    proof_source="$(git rev-parse --verify --end-of-options "${target}^{commit}")" || return 1
+    node "${BASH_SOURCE[0]%/*}/../assert-eraser-source.mjs" "$proof_source" --installed-connection-proof-reader tooling || return 1
+  fi
   maxim_pair_release_load || return 1
-  local target="$1" candidate entry
   pair_release_admission_candidate "$target" infra/scripts/lib/pair-release-admission.sh || return 1
   candidate="$(git show "${target}:infra/scripts/lib/deploy-lock.sh")" || return 1
   grep -Eq '^maxim_pair_release_assert\(\)' <<<"$candidate" \

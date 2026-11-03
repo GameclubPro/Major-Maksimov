@@ -17,7 +17,26 @@ import {
   type UpdatePolicy,
   type Hours,
   type ConnectionRequest,
+  type PendingConnectionRequest,
+  type ConnectionProof,
+  type PolicyActivationGuard,
+  type PolicyActivationProof,
 } from './types.js';
+
+export const ERASER_CONNECTION_PROOF_READER_VERSION = 1;
+
+function validConnectionProof(
+  proof: ConnectionProof | undefined,
+  chatId: string,
+): proof is ConnectionProof {
+  return (
+    proof?.chatId === chatId &&
+    typeof proof.connectionGeneration === 'string' &&
+    /^\d+$/.test(proof.connectionGeneration) &&
+    proof.expiresAt instanceof Date &&
+    Number.isFinite(proof.expiresAt.getTime())
+  );
+}
 
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
@@ -602,7 +621,43 @@ export class Store {
       );
     return row.response;
   }
-  async update(chatId: string, input: UpdatePolicy): Promise<Record<string, unknown>> {
+  async activationGuard(chatId: string, input: UpdatePolicy): Promise<PolicyActivationGuard> {
+    return this.transaction(async (client) => {
+      await this.ensure(client, chatId);
+      const policy = (
+        await client.query<PolicyRow>('SELECT * FROM eraser_policies WHERE chat_id=$1', [chatId])
+      ).rows[0]!;
+      if (policy.revision !== input.expectedRevision)
+        throw new ServiceError(
+          409,
+          'MESSAGE_RETENTION_REVISION_CONFLICT',
+          'Настройки уже изменены.',
+        );
+      // FLAG: Capture before MAX admission/HTTP; never refresh this generation after rights return.
+      return {
+        chatId,
+        operationId: input.operationId,
+        expectedRevision: input.expectedRevision,
+        connectionGeneration: policy.connection_generation,
+      };
+    });
+  }
+  async assertActivationGuard(guard: PolicyActivationGuard): Promise<void> {
+    const policy = await this.policy(guard.chatId);
+    if (!policy || policy.revision !== guard.expectedRevision)
+      throw new ServiceError(409, 'MESSAGE_RETENTION_REVISION_CONFLICT', 'Настройки уже изменены.');
+    if (policy.connection_generation !== guard.connectionGeneration)
+      throw new ServiceError(
+        409,
+        'ERASER_CONNECTION_GUARD_CHANGED',
+        'Доступ Ластика изменился. Повторите сохранение.',
+      );
+  }
+  async update(
+    chatId: string,
+    input: UpdatePolicy,
+    proof?: PolicyActivationProof,
+  ): Promise<Record<string, unknown>> {
     if (input.connectWhenReady && !input.enabled)
       throw new ServiceError(400, 'INVALID_POLICY', 'Подключение требует включения очистки.');
     const hash = createHash('sha256')
@@ -664,8 +719,23 @@ export class Store {
         cutoff = now - input.hours * HOUR;
       const enabled = input.enabled && !input.connectWhenReady;
       const restart = enabled && (!policy.enabled || input.hours !== policy.hours);
-      await client.query(
+      if (
+        enabled &&
+        (!validConnectionProof(proof, chatId) ||
+          proof.operationId !== input.operationId ||
+          proof.expectedRevision !== input.expectedRevision ||
+          proof.connectionGeneration !== policy.connection_generation)
+      )
+        throw new ServiceError(
+          409,
+          'ERASER_CONNECTION_GUARD_CHANGED',
+          'Доступ Ластика изменился. Повторите сохранение.',
+        );
+      // FLAG: Positive connection authority and accepted policy share one transaction. A late
+      // removal, stale operation or proof consumed by a lock wait cannot lift the durable fence.
+      const updated = await client.query(
         `UPDATE eraser_policies SET enabled=$2,hours=$3,revision=revision+1,last_operation_id=$4,updated_at=CURRENT_TIMESTAMP,last_error=NULL,
+        connection_status=CASE WHEN $2 THEN 'connected' ELSE connection_status END,
         activation_id=CASE WHEN enabled <> $2 THEN $5::uuid ELSE activation_id END,
         enabled_at=CASE WHEN NOT enabled AND $2 THEN CURRENT_TIMESTAMP ELSE enabled_at END,
         first_enabled_at=CASE WHEN $2 THEN COALESCE(first_enabled_at,CURRENT_TIMESTAMP) ELSE first_enabled_at END,
@@ -682,7 +752,8 @@ export class Store {
         live_scan_purpose=CASE WHEN $6 THEN NULL ELSE live_scan_purpose END,
         live_scan_had_messages=CASE WHEN $6 THEN false ELSE live_scan_had_messages END,
         safety_next_at=CASE WHEN $6 THEN CURRENT_TIMESTAMP ELSE safety_next_at END,normal_next_at=CURRENT_TIMESTAMP,next_run_at=CURRENT_TIMESTAMP
-        WHERE chat_id=$1`,
+        WHERE chat_id=$1 AND revision=$9 AND (NOT $2 OR
+          (connection_generation=$10::bigint AND $11::timestamptz>clock_timestamp())) RETURNING chat_id`,
         [
           chatId,
           enabled,
@@ -692,8 +763,17 @@ export class Store {
           restart,
           cutoff + 1,
           cutoff,
+          input.expectedRevision,
+          proof?.connectionGeneration ?? null,
+          proof?.expiresAt ?? null,
         ],
       );
+      if (!updated.rowCount)
+        throw new ServiceError(
+          409,
+          'ERASER_CONNECTION_GUARD_CHANGED',
+          'Доступ Ластика изменился. Повторите сохранение.',
+        );
       if (enabled && input.hours > policy.hours)
         await this.parkYoungCandidates(client, chatId, input.hours, now);
       if (enabled && input.hours < policy.hours) {
@@ -737,6 +817,21 @@ export class Store {
         'INSERT INTO eraser_operations(chat_id,operation_id,request_hash,actor_user_id,response) VALUES($1,$2,$3,$4,$5)',
         [chatId, input.operationId, hash, input.actorUserId, response],
       );
+      // FLAG: Candidate/request locks and response reads also consume the same proof budget.
+      if (
+        enabled &&
+        !(
+          await client.query<{ fresh: boolean }>(
+            'SELECT $1::timestamptz>clock_timestamp() AS fresh',
+            [proof!.expiresAt],
+          )
+        ).rows[0]?.fresh
+      )
+        throw new ServiceError(
+          409,
+          'ERASER_CONNECTION_GUARD_CHANGED',
+          'Доступ Ластика изменился. Повторите сохранение.',
+        );
       return response;
     });
   }
@@ -780,12 +875,15 @@ export class Store {
       return reserved;
     });
   }
-  async connectionRequest(chatId: string, leaseToken: string): Promise<ConnectionRequest | null> {
+  async connectionRequest(
+    chatId: string,
+    leaseToken: string,
+  ): Promise<PendingConnectionRequest | null> {
     if (!this.executionEnabled) return null;
     return (
       (
-        await this.pool.query<ConnectionRequest>(
-          `SELECT r.* FROM eraser_connection_requests r JOIN eraser_policies p USING(chat_id)
+        await this.pool.query<PendingConnectionRequest>(
+          `SELECT r.*,p.connection_generation FROM eraser_connection_requests r JOIN eraser_policies p USING(chat_id)
          WHERE r.chat_id=$1 AND r.lease_token=$2 AND r.status='pending' AND NOT p.enabled
          AND p.revision=r.policy_revision AND r.expires_at>clock_timestamp() AND r.lease_until>clock_timestamp()`,
           [chatId, leaseToken],
@@ -811,16 +909,18 @@ export class Store {
   async activateConnection(
     chatId: string,
     leaseToken: string,
-    proofExpiresAt: Date,
+    proof: ConnectionProof,
   ): Promise<boolean> {
-    if (!this.executionEnabled || !Number.isFinite(proofExpiresAt.getTime())) return false;
+    if (!this.executionEnabled || !validConnectionProof(proof, chatId)) return false;
+    const proofExpiresAt = proof.expiresAt;
     return this.transaction(async (client) => {
       const policy = (
         await client.query<PolicyRow>('SELECT * FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [
           chatId,
         ])
       ).rows[0];
-      if (!policy || policy.enabled) return false;
+      if (!policy || policy.enabled || policy.connection_generation !== proof.connectionGeneration)
+        return false;
       const request = (
         await client.query<ConnectionRequest>(
           `SELECT * FROM eraser_connection_requests WHERE chat_id=$1 AND lease_token=$2
@@ -851,11 +951,18 @@ export class Store {
          safety_upper=NULL,safety_cursor=NULL,safety_signature=NULL,safety_had_messages=false,safety_gap=false,
          live_scan_purpose=NULL,live_scan_had_messages=false,safety_next_at=clock_timestamp(),normal_next_at=clock_timestamp(),
          lease_token=NULL,lease_until=NULL,last_error=NULL,next_run_at=clock_timestamp(),updated_at=clock_timestamp()
-         WHERE chat_id=$1 AND NOT enabled AND revision=$4 AND $5::timestamptz>clock_timestamp() AND EXISTS(
+         WHERE chat_id=$1 AND NOT enabled AND revision=$4 AND connection_generation=$6::bigint AND $5::timestamptz>clock_timestamp() AND EXISTS(
            SELECT 1 FROM eraser_connection_requests r WHERE r.chat_id=p.chat_id AND r.lease_token=$2
            AND r.status='pending' AND r.policy_revision=p.revision AND r.expires_at>clock_timestamp()
            AND r.lease_until>clock_timestamp()) RETURNING chat_id`,
-        [chatId, leaseToken, randomUUID(), policy.revision, proofExpiresAt],
+        [
+          chatId,
+          leaseToken,
+          randomUUID(),
+          policy.revision,
+          proofExpiresAt,
+          proof.connectionGeneration,
+        ],
       );
       if (!result.rowCount) return false;
       await client.query(
@@ -1130,15 +1237,11 @@ export class Store {
       );
     });
   }
-  async connection(
-    chatId: string,
-    status: Policy['connection_status'],
-    explicitActivation = false,
-  ): Promise<void> {
+  async connection(chatId: string, status: 'connected' | 'no_access'): Promise<void> {
     // FLAG: Passive rights observations cannot undo an authenticated removal or proven denial.
     await this.pool.query(
-      "UPDATE eraser_policies SET connection_status=$2 WHERE chat_id=$1 AND ($2<>'connected' OR $3 OR connection_status NOT IN ('missing','no_access'))",
-      [chatId, status, explicitActivation],
+      "UPDATE eraser_policies SET connection_status=$2,connection_generation=connection_generation+CASE WHEN $2='no_access' THEN 1 ELSE 0 END WHERE chat_id=$1 AND ($2<>'connected' OR connection_status NOT IN ('missing','no_access'))",
+      [chatId, status],
     );
   }
   async active(chatId: string, token: string): Promise<PolicyRow | null> {
@@ -1738,7 +1841,7 @@ export class Store {
       }
       if (raw.update_type === 'bot_removed' && raw.chat_id !== undefined)
         await client.query(
-          "UPDATE eraser_policies SET connection_status='missing',last_error='bot_removed',next_run_at=CURRENT_TIMESTAMP+INTERVAL '5 minutes' WHERE chat_id=$1",
+          "UPDATE eraser_policies SET connection_status='missing',connection_generation=connection_generation+1,last_error='bot_removed',next_run_at=CURRENT_TIMESTAMP+INTERVAL '5 minutes' WHERE chat_id=$1",
           [String(raw.chat_id)],
         );
     });

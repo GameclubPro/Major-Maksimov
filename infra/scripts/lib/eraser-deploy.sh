@@ -19,6 +19,13 @@ maxim_eraser_install_rate_limit_reader_floor() {
   node infra/scripts/assert-eraser-source.mjs "$source_sha" --install-rate-limit-reader-floor
 }
 
+# FLAG: Install after compatible tooling reload, before migration or either positive writer.
+maxim_eraser_install_connection_proof_reader_floor() {
+  local source_sha="$1"
+  maxim_eraser_configured || return 0
+  node infra/scripts/assert-eraser-source.mjs "$source_sha" --install-connection-proof-reader-floor
+}
+
 maxim_eraser_require_secrets() {
   local path mode
   for path in "${MAXIM_ERASER_ENV_FILE:-/var/lib/maxim-secrets/eraser.env}" \

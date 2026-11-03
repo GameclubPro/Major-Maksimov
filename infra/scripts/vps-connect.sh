@@ -1069,6 +1069,12 @@ if [[ "$rate_limit_floor_required" -eq 1 && ( -e /var/lib/maxim-deploy/eraser-ra
   maxim_topology_require_eraser_rate_limit_reader "$(git rev-parse HEAD)" tooling || exit 1
 fi
 
+# FLAG: The same Lastik/source-changing scope applies to generation-bound connection proofs.
+if [[ "$rate_limit_floor_required" -eq 1 && ( -e /var/lib/maxim-deploy/eraser-connection-proof-reader-version || -L /var/lib/maxim-deploy/eraser-connection-proof-reader-version ) ]]; then
+  source infra/scripts/lib/deploy-topology.sh
+  maxim_topology_require_eraser_connection_proof_reader "$(git rev-parse HEAD)" tooling || exit 1
+fi
+
 # Routine immutable rollback stays image-only and offline when the checked-out entrypoint is current.
 if [[ -x "$entrypoint" ]] && grep -Fq -- "$capability_marker" "$entrypoint"; then
   source "$entrypoint" "$@"
@@ -1089,6 +1095,10 @@ if [[ "$(git rev-parse --verify refs/heads/main 2>/dev/null || true)" != "$expec
 fi
 require_market_statistics_lock_dispatch "$expected_tooling_sha" || exit 1
 require_pair_release_admission_dispatch "$expected_tooling_sha" || exit 1
+if [[ -e /var/lib/maxim-deploy/eraser-connection-proof-reader-version || -L /var/lib/maxim-deploy/eraser-connection-proof-reader-version ]]; then
+  source infra/scripts/lib/deploy-topology.sh
+  maxim_topology_require_eraser_connection_proof_reader "$expected_tooling_sha" tooling || exit 1
+fi
 if [[ -e /var/lib/maxim-deploy/eraser-rate-limit-reader-version || -L /var/lib/maxim-deploy/eraser-rate-limit-reader-version ]]; then
   source infra/scripts/lib/deploy-topology.sh
   maxim_topology_require_eraser_rate_limit_reader "$expected_tooling_sha" tooling || exit 1

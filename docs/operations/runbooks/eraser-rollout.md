@@ -89,6 +89,12 @@ loopback port 3005. Then register and read back the bot's HTTPS subscription:
 ./infra/scripts/vps-connect.sh eraser-webhook
 ```
 
+When MAX returns an explicit `update_types` list, readback must contain all five
+requested event types. Missing or null `update_types` is permitted by MAX's
+subscription contract: successful registration and the matching URL remain valid,
+but event coverage is unknown. The registration command reports coverage as
+verified or unknown; an explicit incomplete or malformed list fails verification.
+
 Review the preview diff before application. Unknown anchors, conflicting or partially
 modified Lastik blocks fail closed; exact installed blocks are idempotent. The fixed
 canonical file is `/etc/nginx/sites-available/major-maksimov.ru.conf`, selected by the
@@ -118,6 +124,26 @@ deletion decision from escaping this check. An unavailable service or matching
 dispatching/uncertain journal refuses installation. Additive holds survive that refusal:
 reconcile the exact journal before continuing, without deleting holds or blindly
 repeating an uncertain operation. The Lastik bot token never enters these clients.
+
+## Atomic activation and connection proofs
+
+An immediate enable captures the policy's private connection generation before
+checking the exact bot's rights. Only the accepted settings transaction can set
+`connected`: it rechecks operation replay, revision, protection, the same generation,
+and the proof's 15-second deadline against the database clock after lock waits.
+A rejected save cannot clear `missing` or `no_access`, enable execution, or save a
+new operation result. An exact replay returns its saved response without rechecking
+rights or changing today's connection fence.
+
+Every committed authenticated removal or proven rights denial advances the private
+generation, including a new observation with the same visible status. A duplicate
+webhook receipt is still deduplicated. A proof captured before that change cannot
+reactivate the bot. Ambiguous transport failures do not manufacture a denial or a
+positive connection. Passive successful rights observations cannot lift an existing
+negative fence. Both direct settings activation and the pending connection worker
+use this rule; a superseded pending attempt retains the original one-hour opt-in
+and its cancellation/expiry boundaries. Generation remains separate from the public
+settings revision and existing deletion/uncertainty journals.
 
 ## Reading diagnostics without changing execution
 
@@ -336,6 +362,24 @@ absence readback and preserves its exact operation journal.
 An immutable `rollback-release <release-id> eraser` selects only Lastik's recorded
 application image. It never restores or recreates either store. API rollback must retain
 the installed Lastik ownership reader even when its availability flag is disabled.
+Migration `0009-connection-generation.sql` is additive, but old positive writers
+would reintroduce rejected-save and stale-proof activation. Before applying it or
+starting the new writer, the selected exact source must support the permanent
+`/var/lib/maxim-deploy/eraser-connection-proof-reader-version` floor, version 1.
+Install only after source synchronization and controller re-exec have loaded the
+compatible helpers. A failed migration retains that floor; recover with compatible
+tooling and images, never remove or lower it. Unknown, partial or linked floor files
+refuse admission without repair.
+
+The proof floor checks the exact Lastik image on Lastik rollback and checks tooling
+on supported production source switches, including both retained and fetched deploy refs. The current
+remote `require_pair_release_admission_dispatch` enforces it before checkout even
+when a supported older local wrapper does not recognize the new filename. Supported
+older wrappers must already call that dispatch before source changes; wrappers
+predating shared admission are not supported. Immutable API/static-only rollback
+keeps its component scope when neither Lastik nor controller files change. Disabled
+execution, removed credentials or expired requests never relax the installed floor.
+
 The due-scheduling migration is additive and introduces no new reader floor. Native
 scheduling writes keep the finite legacy `next_run_at` projection of ordinary and
 control-scan deadlines and a conservative `live_floor` covering unfinished work from

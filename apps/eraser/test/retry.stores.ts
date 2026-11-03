@@ -8,6 +8,7 @@ import { createHttpServer } from '../src/http.js';
 import { migrate } from '../src/migrate.js';
 import type { MaxTransport } from '../src/max.js';
 import { Store } from '../src/store.js';
+import { updatePolicy } from './support/policy-proof.js';
 import type { Candidate } from '../src/types.js';
 
 const databaseUrl = process.env.MAXIM_TEST_POSTGRES_URL;
@@ -122,7 +123,7 @@ beforeEach(async () => {
     holdMessageIds: [],
     completeThrough: new Date().toISOString(),
   });
-  await store.update('-1', {
+  await updatePolicy(store, '-1', {
     enabled: true,
     hours: 24,
     expectedRevision: 0,
