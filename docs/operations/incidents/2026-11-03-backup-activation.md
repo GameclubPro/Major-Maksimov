@@ -89,6 +89,23 @@ errors separately from an empty content difference. Real Git regressions use cha
 file timestamps with unchanged content, then actual source changes, and verify both
 the source decision and preservation of index bytes and metadata.
 
+## Disposable PostgreSQL startup
+
+After the Git correction reached source `8ab28cc7054a74ae239e158f7e3223bd0a264575`,
+Lastik's scheduled retry completed a previously deferred operation at
+14:45:01–14:45:10 UTC. Its new archive passed full encrypted independent readback.
+The subsequent isolated restore at 14:49:48–14:49:50 UTC failed when `createdb`
+could not find the PostgreSQL Unix socket, despite the preceding readiness success.
+No restore receipt was written; cleanup removed the disposable container.
+
+The readiness check used the default Unix socket. The PostgreSQL image starts a
+temporary socket-only server during initialization, stops it, then starts the final
+server. A successful socket probe can therefore precede a disappearing endpoint.
+The failure journal alone does not prove that exact timing; the startup regressions
+exercise that boundary separately. Readiness now waits for the final loopback TCP
+endpoint inside the isolated container. Restore clients retain socket authentication;
+the resource limits, watchdog, cleanup and bounded startup wait remain unchanged.
+
 ## Follow-up acceptance
 
 After recovery, synchronize the compatible backup scripts through the guarded
@@ -96,8 +113,8 @@ source-update path and inspect actual installed units and timer states. Exercise
 an idle retry only after proving no pending scheduler operation, using the actual
 root service environment. A successful idle retry proves scheduler wiring only.
 
-Lastik needs an actual new-generation copy, full independent encrypted readback
-and isolated restore for its updated schema. Main backup and restore timers remain
+Lastik acceptance requires a new-generation copy, full independent encrypted readback
+and isolated restore for the same archive and updated schema. Main backup and restore timers remain
 disabled until their own recovery evidence passes. Local freshness monitoring is
 independent of producer enablement and sends no external messages. A future
 scheduled success is separate from manual acceptance; follow the
