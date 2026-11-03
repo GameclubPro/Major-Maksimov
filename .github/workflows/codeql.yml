@@ -13,7 +13,9 @@ permissions:
   security-events: write
 
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  # FLAG: Pending jobs also replace each other in a concurrency group. Give
+  # non-PR runs unique groups so every main/scheduled SHA can finish its gate.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

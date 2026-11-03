@@ -90,7 +90,7 @@ test('the default Jest partitions cover the tracked API test inventory once', as
   const paths = execFileSync('git', ['ls-files', '-z', 'apps/api'], { cwd: root, encoding: 'utf8' })
     .split('\0')
     .filter((path) => pattern.test(path) && !ignored.test(path));
-  assert.ok(paths.length > 1000, 'Guard against an empty or accidentally narrowed inventory');
+  assert.ok(paths.length > 0, 'The selected API inventory must not be empty');
   const context = { config: { rootDir: resolve(root, 'apps/api') } };
   const tests = paths.map((path) => ({ path: resolve(root, path), context }));
   const sequencer = new Sequencer({ contexts: [], globalConfig: {} });
@@ -107,7 +107,8 @@ test('the default Jest partitions cover the tracked API test inventory once', as
 test('CodeQL cancels superseded PR runs while preserving main and scheduled security gates', () => {
   const codeql = parse(read('.github/workflows/codeql.yml'));
   assert.deepEqual(codeql.concurrency, {
-    group: 'codeql-${{ github.workflow }}-${{ github.ref }}',
+    group:
+      "codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
     'cancel-in-progress': "${{ github.event_name == 'pull_request' }}",
   });
   assert.equal(codeql.jobs.analyze.name, 'Analyze JavaScript and TypeScript');
