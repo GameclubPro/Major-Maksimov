@@ -79,6 +79,8 @@ Commands:
                                 Archive one proved completed, interrupted admission
   recover-pair-backup-refusal preview|apply <reviewed identity flags>
                                 Archive the exact unwritten root backup admission refusal
+  recover-pair-backup-activation preview|apply <reviewed identity flags>
+                                Prove and archive the interrupted backup unit installation
   legacy-cold-recovery <private-request.json>
                               Inspect or apply an exact journal-bound legacy recovery
   source-abandonment <private-request.json>
@@ -403,6 +405,27 @@ NODE
   # FLAG: The retained owner blocks normal installation. Stream only the exact green
   # controller; it archives one proved pre-write refusal under all original locks.
   remote_exec "$(shell_quote_args timeout --signal=TERM --kill-after=2 40 sudo -n node --input-type=module - "$@")" <"$recovery_source"
+)
+
+recover_pair_backup_activation() (
+  set -euo pipefail
+  local controller_sha recovery_source
+  [[ "$MAXIM_VPS_REPO_DIR" == /var/www/Chat_bot ]] || return 2
+  node --input-type=module - "$ROOT_DIR" "$@" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, ...args] = process.argv.slice(2);
+const { parseBackupActivationRecoveryArgs } = await import(pathToFileURL(`${root}/infra/scripts/pair-release-backup-activation-recovery.mjs`));
+parseBackupActivationRecoveryArgs(args);
+NODE
+  [[ -z "$(git status --porcelain)" ]] || { echo 'Backup activation recovery requires a clean exact controller.' >&2; return 2; }
+  controller_sha="$(git rev-parse HEAD)"
+  node scripts/ci/assert-green.mjs "$controller_sha"
+  recovery_source="$(mktemp)"
+  trap 'rm -f -- "$recovery_source"' EXIT
+  git show "$controller_sha:infra/scripts/pair-release-backup-activation-recovery.mjs" >"$recovery_source"
+  # FLAG: This incident owner prevents source synchronization. The exact green controller
+  # proves the bounded installation outcome before preserving its owner and recovery proof.
+  remote_exec "$(shell_quote_args sudo -n timeout --signal=TERM --kill-after=5s 90s node --input-type=module - "$@")" <"$recovery_source"
 )
 
 install_pair_release_admission() (
@@ -2087,6 +2110,9 @@ case "$command" in
     ;;
   recover-pair-backup-refusal)
     recover_pair_backup_refusal "$@"
+    ;;
+  recover-pair-backup-activation)
+    recover_pair_backup_activation "$@"
     ;;
   install-pair-release-admission)
     install_pair_release_admission "$@"

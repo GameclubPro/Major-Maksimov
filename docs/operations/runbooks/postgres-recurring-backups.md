@@ -212,6 +212,13 @@ state versions fail closed. The service limit is 18 hours 20 minutes, covering t
 producer and replication outer deadlines plus termination grace; the underlying
 12-hour dump, six-hour replication and readiness watchdog limits are unchanged.
 
+Root systemd services read the operator-owned checkout with command-local Git trust
+for that exact directory only. This covers the scheduler revision, immutable tool
+snapshot and producer source recheck; ordinary-user ownership checks stay unchanged.
+Do not configure global or wildcard `safe.directory`. Verify an idle retry through
+the actual root service environment after confirming no pending operation: a sudo
+shell can retain operator configuration and miss a systemd-only ownership failure.
+
 Health reports backup data age separately from readback verification age. The
 strict archive filename timestamp supplies a conservative generation-start bound,
 not an exact PostgreSQL snapshot time. Independent evidence selects the newest
