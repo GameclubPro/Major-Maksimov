@@ -564,6 +564,6 @@ rollback сохраняет commercial guard capability. Этот докумен
 - Settings: `packages/contracts/src/core.ts`, `apps/api/src/admin/admin-chat-settings.ts`,
   `apps/miniapp/src/pages/settings-page.legacy.tsx`, `apps/miniapp/src/lib/api/chat-settings-client.ts`,
   `apps/miniapp/src/pages/settings/settings-page-helpers.tsx`, `settings-commercial-filter-section.tsx`.
-- [Исторический production аудит сентября](commercial-filter-audit-2026-09-12.md).
+- [Исторический production аудит сентября](operations/archive/commercial-filter-audit-2026-09-12.md).
 - [История выполненных улучшений](commercial-filter-upgrade-plan.md).
 - [Контракт текущего guard и совместимого rollback](operations/runbooks/commercial-text-delete-guard.md).

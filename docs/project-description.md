@@ -17,6 +17,7 @@ MAX, поддерживает публикации и предоставляет
 - `apps/api` — NestJS + Fastify + Prisma + BullMQ.
 - `apps/miniapp` — React 19 + Vite, публичное MAX mini app.
 - `apps/admin` — React + Vite, закрытый Safety Desk; это не MAX mini app.
+- `apps/eraser` — независимый бот «Ластик» со своими Postgres/Redis.
 - `packages/contracts` — общие Zod-схемы и TypeScript-типы.
 - `infra` — Docker Compose, nginx и production-скрипты.
 - `scripts` — локальные проверки, emulator и visual tooling.
@@ -47,11 +48,15 @@ Production-сервисы:
 | `api-moderation-background` | background moderation and scheduled work    |
 | `api-media-analysis`        | OCR queue, downloads, policy and UDS client |
 | `ocr-native-sandbox`        | no-network Sharp/Tesseract auxiliary        |
+| `photo-native-sandbox`      | изолированное декодирование фото            |
 | `api-action`                | durable MAX action dispatch                 |
+| `api-message-retention`     | ограниченная очистка истории сообщений     |
 | `api-publisher`             | isolated Publik dispatch                    |
 
-Для локальной отладки доступны роли `all`, `ingress`, `admin`, `enqueue`, `moderation` и `action`.
-Production Compose не использует `all`.
+Актуальный список ролей и команд локальной отладки находится в
+`apps/api/src/runtime/runtime-topology.ts` и `apps/api/package.json`. Production Compose
+не использует `all`. Независимый `eraser` запускается из отдельного образа со своими
+`eraser-postgres` и `eraser-redis`.
 
 Nginx направляет публичные webhooks/health в `api-ingress`, обычный `/api/v1/` — в `api-admin`.
 Публичный ready endpoint намеренно закрыт; локальные ready endpoints доступны на портах 3001 и 3002.
@@ -112,21 +117,21 @@ Mini app:
 - использует server-side cursor filtering для больших publication/feed списков;
 - имеет публичные legal routes, доступные без init data.
 
-Обычная публикация создаётся в `/publications`; legacy broadcast/autopost UI открывается только по
-явному handoff/legacy target. Native back, storage, links, sharing, viewport и haptics проходят через
-общие bridge helpers.
+Публикации в `/publications` и VK parsing принадлежат профилю Публика. Старые ссылки
+Major на публикации и автопостинг открывают переход в Публик, не монтируя редактор.
+Native back, storage, links, sharing, viewport и haptics проходят через общие bridge helpers.
 
 Visual tooling по умолчанию запускает локальный mini app и проверяет текущий working tree. Проверка
 production origin включается только явным visual mode.
 
-Интеграция с отдельной биржей «Связка» добавляет пилотный профиль площадки и общую
-агрегированную статистику в Major и Publisher. Базы и выпуски остаются независимыми;
-профиль, сделки и рекламные размещения принадлежат бирже. Передача статистики,
-публикация профиля и кнопка будущих публикаций MAXIM требуют отдельных действий
-владельца. Общий сбор сначала дополняет данные биржи; переключение отдельных метрик
-допускается после проверки полноты и сопоставимости. Реализация, ограничения и
-раздельные статусы локальных проверок, выпуска и MAX зафиксированы в
-[журнале интеграции](maxim-svyazka-integration.md).
+Интеграция с «Биржиком» открывает рекламную биржу через собственного бота сервиса
+из Major и Publisher. Базы и выпуски остаются независимыми; профиль, сделки и
+рекламные размещения принадлежат бирже. Доступ администратора, управление владельца
+и независимые настройки кнопок описаны в [журнале интеграции](marketplace-birzhik-integration-2026-10-28.md).
+Внутренний статистический обмен работает по проверенным правам без отдельного
+переключателя в интерфейсе и сохраняет явные прежние отказы; см. [контракт v2](maxim-svyazka-statistics-v2.md)
+и [ограниченный постраничный обмен v3](maxim-svyazka-statistics-v3.md). Сбор статистики
+не выдаёт согласия на рекламные размещения и не публикует профиль.
 
 ## 7. Safety Desk
 
