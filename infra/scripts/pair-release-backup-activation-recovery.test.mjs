@@ -66,10 +66,14 @@ const argv = (value) =>
 
 async function unitsFixture() {
   // Interpret only the installer’s literal unit templates; never execute the installer.
-  const source = await readFile(
-    new URL('./vps-install-postgres-backup-timers.sh', import.meta.url),
-    'utf8',
-  );
+  const source = (
+    await readFile(new URL('./vps-install-postgres-backup-timers.sh', import.meta.url), 'utf8')
+  )
+    // Recovery is pinned to the original installed bytes, including its daily description.
+    .replace(
+      'Description=Request MAXIM PostgreSQL backup twice daily',
+      'Description=Run MAXIM PostgreSQL backup daily',
+    );
   const units = {};
   for (const profile of ['maxim', 'eraser']) {
     const eraser = profile === 'eraser';

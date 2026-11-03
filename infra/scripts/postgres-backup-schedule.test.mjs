@@ -296,7 +296,7 @@ test('stale deferred receipt cannot authorize retry of a new unknown attempt', a
   assert.equal(f.calls.length, 2);
 });
 
-test('six admission attempts and the twelve-hour deadline survive new daily requests', async (t) => {
+test('six admission attempts and the twelve-hour deadline survive new requests', async (t) => {
   const f = await fixture(t);
   f.setProducer('deferred');
   await f.invoke('request');
@@ -316,6 +316,25 @@ test('six admission attempts and the twelve-hour deadline survive new daily requ
   assert.equal((await other.invoke('request')).phase, 'overdue');
   assert.equal(other.calls.length, 1);
 });
+
+for (const profile of ['maxim', 'eraser']) {
+  test(`${profile} the next half-day request preserves an overdue operation and its original budget`, async (t) => {
+    const f = await fixture(t, profile);
+    f.setProducer('deferred');
+    const first = await f.invoke('request');
+    const original = await f.readState();
+    for (const elapsed of [ADMISSION_DEADLINE_MS, 2 * ADMISSION_DEADLINE_MS]) {
+      f.setTime(initialTime + elapsed);
+      assert.equal((await f.invoke('request')).phase, 'overdue');
+      const current = await f.readState();
+      assert.equal(current.operationId, first.operationId);
+      assert.equal(current.requestedAt, original.requestedAt);
+      assert.equal(current.deadlineAt, original.deadlineAt);
+      assert.equal(current.attempts, 1);
+      assert.equal(f.calls.length, 1);
+    }
+  });
+}
 
 test('source update stops pending admission before a different producer can run', async (t) => {
   const f = await fixture(t);

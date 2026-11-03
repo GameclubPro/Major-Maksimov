@@ -78,15 +78,16 @@ MAXIM_ENABLE_POSTGRES_RESTORE_SMOKE_TIMER=1 \
 sudo systemctl list-timers --all 'maxim-postgres-*'
 ```
 
-The installer checks recovery evidence before enabling timers. Daily backup is at
-03:20 (server timezone, with up to 20 minutes jitter); restore is Sunday 05:30 with
-up to 30 minutes jitter. Check sibling schedules and actual elapsed times before
-enablement: lock contention is not a successful new backup. Observe the first planned
-run separately from manual acceptance.
+The installer checks recovery evidence before enabling timers. Backup requests are at
+03:20 and 15:20 (server timezone, each with up to 20 minutes jitter); restore is Sunday
+05:30 with up to 30 minutes jitter. Lastik's requests are offset by two hours. Check
+the actual host timezone, sibling schedules and elapsed times before enablement:
+lock contention is not a successful new backup. Observe the first planned run
+separately from manual acceptance.
 
 The hourly `maxim-postgres-backup-health.timer` fails when verified independent
-evidence exceeds 28 hours, a restore exceeds eight days, receipts are malformed/future,
-or its bounded directory census is incomplete. This is an operational freshness gate,
+data or its readback verification exceeds 24 hours, a restore exceeds eight days,
+receipts are malformed/future, or its bounded directory census is incomplete. This is an operational freshness gate,
 not a promised application RPO/RTO; measure actual copy and restore durations first.
 Inspect the failed service and journal through host monitoring. No external alert
 destination is configured by this helper.
@@ -124,8 +125,8 @@ safety, current remote-object availability or recovery from the independent copy
 Install the eraser units with both timer switches left off. After a guarded manual
 backup, full encrypted remote readback and isolated restore have succeeded, run
 `maxim-eraser-postgres-backup-health.service`. Only then enable this profile's timers
-with the existing installer switches. Lastik defaults to daily 01:20 backup and
-Sunday 02:30 restore (server timezone, the same jitter as the main profile).
+with the existing installer switches. Lastik defaults to backup requests at 01:20 and
+13:20 and Sunday 02:30 restore (server timezone, the same jitter as the main profile).
 Inspect actual sibling schedules and durations before enabling them. A skipped
 locked run is not a fresh backup. The main profile's timer state is independent.
 
@@ -145,10 +146,10 @@ Never bring a recovery worker online merely because schema checks passed.
 
 ## Durable scheduled admission and exact replication recovery
 
-The daily service calls `postgres-backup-schedule.sh request`. Its companion
+The service requested twice daily calls `postgres-backup-schedule.sh request`. Its companion
 `backup-retry.timer` calls `tick` every 15 minutes; both use one private coordinator
 lock per profile. The installer enables this retry timer only after the same backup
-health gate as the daily timer. `Restart=no` remains deliberate: a failed or
+health gate as the request timer. `Restart=no` remains deliberate: a failed or
 interrupted dump must not automatically become a new dump.
 
 The private `.scheduler-v1/state.json` records one operation, its source revision,
@@ -159,9 +160,16 @@ pair or product lock conflict, or a failed pre-start readiness check, permits a 
 Pair conflict is observed on its validated kernel lock before normal admission;
 a race in the existing shared helper remains an unknown refusal. The shared pair
 protocol, helper and lock ordering are unchanged. An unknown refusal, watchdog
-abort or started dump failure becomes `needs_review`; new daily requests do not
+abort or started dump failure becomes `needs_review`; new scheduled requests do not
 reset its budget or start another dump. A checkout change also requires review
 before any pending producer can run under a different revision.
+
+The two request windows provide room to complete a new independently verified copy
+before the 24-hour freshness limit. They do not guarantee two completed backups.
+The next twelve-hour request preserves an unfinished or overdue operation, its
+original deadline and its attempt count; it cannot silently reset admission or
+clear manual recovery. A verified or explicitly closed operation permits the next
+request to create a new operation.
 
 `status` reports `idle`, `waiting`, `producing`, `replication_pending`, `replicating`,
 `needs_review`, `overdue`, `verified` or `closed`, with the last saved process
@@ -201,7 +209,7 @@ Use `MAXIM_BACKUP_PROFILE=eraser` for Lastik. A reviewed recovery uses the same
 invocation with a distinct transient unit name and `resume-replication` followed
 by the exact reported operation UUID. `close OPERATION_ID` explicitly acknowledges
 an operation in `needs_review` or `overdue`, releases its retention pin and permits
-a future daily request. It does not verify, remove or repair any archive. Before
+a future scheduled request. It does not verify, remove or repair any archive. Before
 closing, preserve failure evidence and resolve any uncertain primary work or shared
 admission owner through the existing incident procedure; never delete scheduler
 state or shared lock files to reset a failure.
@@ -234,7 +242,9 @@ strict archive filename timestamp supplies a conservative generation-start bound
 not an exact PostgreSQL snapshot time. Independent evidence selects the newest
 verified archive generation and binds both reported ages to that same receipt;
 restore evidence selects the latest exercise and reports that archive's data age.
-Independent data older than 28 hours fails health even if re-read today. Existing
-28-hour verification and eight-day restore-exercise gates remain. The old
-`independentAgeMs` and `restoreAgeMs` fields remain verification-age aliases;
+Independent data older than 24 hours fails health even if re-read today. Readback
+verification must also be at most 24 hours old; the restore exercise must be at most
+eight days old. These gates support the one-day data-loss objective without proving
+that objective from a schedule alone. The old `independentAgeMs` and `restoreAgeMs`
+fields remain verification-age aliases;
 `independentDataAgeMs` and `restoreDataAgeMs` identify the data-age measurements.
