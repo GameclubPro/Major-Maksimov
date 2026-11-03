@@ -33,6 +33,13 @@ export const ACTIVATION = Object.freeze({
   primitiveSha256: '73dd7e647328c6c28371e30cb81b04b34078936a8aac3352151d041d0fe4a167',
   environmentSha256: '713f39aafe315e40b8e2a0fcd87c40f192228cd35bef5329f901c73b6289ffd0',
 });
+const OCR_CONTAINER = Object.freeze({
+  id: '5f69399b82fb89ef9e2eb1d7779b48128278a4edc98eb7491c1c65ea349aca4e',
+  created: '2026-11-02T22:27:11.07201918Z',
+  observedRestartCount: 15,
+});
+const OCR_ENTRY =
+  'apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js';
 const UNIT_HASHES = Object.freeze({
   'maxim-postgres-backup.service':
     '5bc019a6f414934b939180e19b570d4f4df30eb7c5a0a060923ddea1819ec1aa',
@@ -361,7 +368,140 @@ export function validateActivationUnits(units) {
   return stable;
 }
 
-export function validateActivationRuntime(runtime, snapshot) {
+function timestampNanos(value) {
+  requireFact(typeof value === 'string', 'invalid_runtime_timestamp');
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?Z$/u.exec(value);
+  requireFact(match, 'invalid_runtime_timestamp');
+  const whole = Date.parse(`${match[1]}Z`);
+  requireFact(
+    Number.isSafeInteger(whole) && new Date(whole).toISOString().slice(0, 19) === match[1],
+    'invalid_runtime_timestamp',
+  );
+  return BigInt(whole) * 1_000_000n + BigInt((match[2] ?? '').padEnd(9, '0'));
+}
+
+// FLAG: Only the OCR generation observed in this incident may cross the owner start.
+// A timeout lifecycle record corroborates its latest recycle, never all historical restarts.
+export function validateActivationOcrRestart(item, evidence, nowMs = Date.now()) {
+  requireFact(
+    item.id === OCR_CONTAINER.id &&
+      item.created === OCR_CONTAINER.created &&
+      Number.isSafeInteger(item.restarts) &&
+      item.restarts > OCR_CONTAINER.observedRestartCount,
+    'unreviewed_ocr_generation',
+  );
+  const started = timestampNanos(item.started);
+  requireFact(
+    timestampNanos(item.created) < timestampNanos(ACTIVATION.startedAt) &&
+      started > timestampNanos(ACTIVATION.startedAt),
+    'unreviewed_ocr_restart',
+  );
+  requireFact(Number.isSafeInteger(nowMs) && nowMs > 0, 'invalid_observation_clock');
+  const now = BigInt(nowMs) * 1_000_000n + 999_999n;
+  const container = evidence?.container;
+  const state = container?.state;
+  requireFact(
+    container?.id === item.id &&
+      container.created === item.created &&
+      container.image === item.image &&
+      container.restarts === item.restarts &&
+      state?.StartedAt === item.started &&
+      state.Status === 'running' &&
+      state.Running === true &&
+      state.Restarting === false &&
+      state.Paused === false &&
+      state.Dead === false &&
+      state.OOMKilled === false &&
+      container.restartPolicy === 'unless-stopped' &&
+      JSON.stringify(container.command) === JSON.stringify(['node', OCR_ENTRY]),
+    'ocr_process_state_unproved',
+  );
+  const healthcheck = container.healthcheck;
+  requireFact(
+    JSON.stringify(healthcheck?.Test) === JSON.stringify(['CMD', 'node', OCR_ENTRY, '--probe']) &&
+      healthcheck.Interval === 10_000_000_000 &&
+      healthcheck.Timeout === 8_000_000_000 &&
+      healthcheck.Retries === 3 &&
+      healthcheck.StartPeriod === 20_000_000_000 &&
+      state.Health?.Status === 'healthy' &&
+      state.Health.FailingStreak === 0 &&
+      Array.isArray(state.Health.Log) &&
+      state.Health.Log.length > 0 &&
+      state.Health.Log.length <= 5,
+    'ocr_health_unproved',
+  );
+  const latestProbe = state.Health.Log.at(-1);
+  const probeStart = timestampNanos(latestProbe.Start);
+  const probeEnd = timestampNanos(latestProbe.End);
+  requireFact(
+    latestProbe.ExitCode === 0 &&
+      started <= probeStart &&
+      probeStart <= probeEnd &&
+      probeEnd <= now &&
+      now - probeEnd <= 30_000_000_000n,
+    'ocr_health_not_fresh',
+  );
+  const logs = evidence?.logs;
+  requireFact(
+    typeof logs?.stdout === 'string' &&
+      typeof logs.stderr === 'string' &&
+      Buffer.byteLength(logs.stdout) + Buffer.byteLength(logs.stderr) < 65_536,
+    'ocr_log_observation_capped',
+  );
+  const lines = `${logs.stdout}\n${logs.stderr}`.split('\n').filter((line) => line !== '');
+  requireFact(lines.length > 0 && lines.length < 32, 'ocr_log_observation_capped');
+  const lifecycle = [];
+  for (const line of lines) {
+    const split = line.indexOf(' ');
+    requireFact(split > 0, 'ocr_log_timestamp_unproved');
+    const timestamp = line.slice(0, split);
+    const at = timestampNanos(timestamp);
+    requireFact(at >= started - 5_000_000_000n && at < started, 'ocr_log_window_changed');
+    const message = line.slice(split + 1);
+    let event;
+    try {
+      event = JSON.parse(message);
+    } catch {
+      requireFact(!message.includes('native_ocr_sandbox_recycle'), 'ocr_lifecycle_invalid');
+      continue;
+    }
+    if (event?.event === 'native_ocr_sandbox_recycle') lifecycle.push({ timestamp, at, event });
+  }
+  requireFact(lifecycle.length === 1, 'ocr_timeout_recycle_unproved');
+  const { timestamp, at, event } = lifecycle[0];
+  const numeric = [
+    'queueDepth',
+    'pendingBytes',
+    'requestedTimeoutMs',
+    'executionBudgetMs',
+    'queueWaitMs',
+    'operationElapsedMs',
+  ];
+  requireFact(
+    event.reason === 'native_timeout' &&
+      event.operation === 'recognize' &&
+      Object.keys(event).length === 3 + numeric.length &&
+      numeric.every((key) => Number.isSafeInteger(event[key]) && event[key] >= 0) &&
+      event.requestedTimeoutMs > 0 &&
+      event.requestedTimeoutMs <= 10_000 &&
+      event.executionBudgetMs > 0 &&
+      event.executionBudgetMs <= event.requestedTimeoutMs &&
+      at > timestampNanos(ACTIVATION.startedAt),
+    'ocr_timeout_recycle_unproved',
+  );
+  return {
+    containerId: item.id,
+    createdAt: item.created,
+    startedAt: item.started,
+    restartCount: item.restarts,
+    recycleAt: timestamp,
+    lifecycleSha256: digest(JSON.stringify(event)),
+    readiness: 'fresh_successful_image_owned_probe',
+    attribution: 'latest_timeout_recycle_correlated; historical_restarts_not_attributed',
+  };
+}
+
+export function validateActivationRuntime(runtime, snapshot, ocrRestart) {
   requireFact(
     runtime.length === ROLES.length &&
       new Set(runtime.map((row) => row.name)).size === ROLES.length &&
@@ -382,9 +522,14 @@ export function validateActivationRuntime(runtime, snapshot) {
         Number.isFinite(Date.parse(item.created)) &&
         Number.isFinite(Date.parse(item.started)) &&
         Date.parse(item.created) <= Date.parse(item.started) &&
-        Date.parse(item.started) < Date.parse(ACTIVATION.startedAt),
+        Date.parse(item.created) < Date.parse(ACTIVATION.startedAt),
       'runtime_generation_changed',
     );
+    let restartProof;
+    if (Date.parse(item.started) >= Date.parse(ACTIVATION.startedAt)) {
+      requireFact(role === 'ocr-native-sandbox', 'runtime_generation_changed');
+      restartProof = validateActivationOcrRestart(item, ocrRestart);
+    }
     if (['postgres', 'redis', 'eraser-postgres', 'eraser-redis'].includes(role)) {
       const volume = `infra_${role.replaceAll('-', '_')}_data`;
       const destination = role.endsWith('postgres') ? '/var/lib/postgresql/data' : '/data';
@@ -404,7 +549,7 @@ export function validateActivationRuntime(runtime, snapshot) {
         ];
       requireFact(component?.imageId === item.image, 'runtime_image_changed');
     }
-    stable.push(item);
+    stable.push(restartProof ? { ...item, ocrRestartEvidence: restartProof } : item);
   }
   return stable;
 }
@@ -454,7 +599,7 @@ export function buildBackupActivationProof(request, observation) {
     'pair_state_changed',
   );
   const unitProjection = validateActivationUnits(observation.units);
-  const runtime = validateActivationRuntime(observation.runtime, snapshot);
+  const runtime = validateActivationRuntime(observation.runtime, snapshot, observation.ocrRestart);
   const messages = [
     "fatal: detected dubious ownership in repository at '/var/www/Chat_bot'",
     'To add an exception for this directory, call:',
@@ -496,12 +641,15 @@ export function buildBackupActivationProof(request, observation) {
     environmentSha256: observation.environmentSha256,
     unitsSha256: digest(JSON.stringify(unitProjection)),
     runtimeSha256: digest(JSON.stringify(runtime)),
+    ocrRestartEvidence:
+      runtime.find((item) => item.name === '/infra-ocr-native-sandbox-1').ocrRestartEvidence ??
+      null,
     schedulerSha256: observation.schedulerSha256,
     eraserCoordinator: 'absent_not_locked; triggers_beyond_bounded_recovery',
     journalSha256: digest(JSON.stringify(journal)),
     verification: 'installed_units_and_git_refusal_before_operation_or_producer',
     runtimeEvidence:
-      'current_manifest_images_and_generations_predating_owner; no_prior_container_inventory',
+      'current_manifest_images_and_containers_predating_owner; only_pinned_ocr_timeout_recycle_may_restart_after_owner; no_prior_container_inventory',
   };
 }
 
@@ -695,6 +843,51 @@ async function assertServiceCgroupEmpty(name) {
     }
   }
 }
+export async function observeActivationOcrRestart(item) {
+  if (Date.parse(item.started) < Date.parse(ACTIVATION.startedAt)) return null;
+  requireFact(
+    item.id === OCR_CONTAINER.id && item.created === OCR_CONTAINER.created,
+    'unreviewed_ocr_generation',
+  );
+  const container = JSON.parse(
+    await command(
+      'docker',
+      [
+        'inspect',
+        '--format',
+        '{"id":{{json .Id}},"created":{{json .Created}},"image":{{json .Image}},"restarts":{{json .RestartCount}},"state":{{json .State}},"command":{{json .Config.Cmd}},"healthcheck":{{json .Config.Healthcheck}},"restartPolicy":{{json .HostConfig.RestartPolicy.Name}}}',
+        OCR_CONTAINER.id,
+      ],
+      { maxBuffer: 65_536 },
+    ),
+  );
+  const started = timestampNanos(item.started);
+  const since = new Date(Number((started - 5_000_000_000n) / 1_000_000n)).toISOString();
+  let logs;
+  try {
+    // Docker preserves container stderr on its own stderr. Both bounded streams
+    // are evidence; neither stderr output nor an empty events buffer proves failure.
+    const result = await execute(
+      'docker',
+      [
+        'logs',
+        '--timestamps',
+        '--since',
+        since,
+        '--until',
+        item.started,
+        '--tail',
+        '32',
+        OCR_CONTAINER.id,
+      ],
+      { timeout: 10_000, maxBuffer: 32_768, encoding: 'utf8' },
+    );
+    logs = { stdout: result.stdout, stderr: result.stderr };
+  } catch {
+    throw new Error('ocr_log_observation_failed');
+  }
+  return { container, logs };
+}
 async function observe() {
   const state = await protectedPaths();
   await assertSource();
@@ -770,6 +963,9 @@ async function observe() {
       const [id, name, created, image, imageRef, started, status, restarts, mounts] = values;
       return { id, name, created, image, imageRef, started, status, restarts, mounts };
     });
+  const ocrRestart = await observeActivationOcrRestart(
+    runtime.find((item) => item.name === '/infra-ocr-native-sandbox-1'),
+  );
   const journalRaw = await command(
     'journalctl',
     [`_SYSTEMD_INVOCATION_ID=${ACTIVATION.invocationId}`, '--no-pager', '-n', '50', '-o', 'json'],
@@ -810,6 +1006,7 @@ async function observe() {
     snapshot,
     units,
     runtime,
+    ocrRestart,
     journal,
   };
 }

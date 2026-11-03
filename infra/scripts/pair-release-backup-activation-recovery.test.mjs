@@ -11,6 +11,8 @@ import {
   buildBackupActivationProof,
   recoverBackupActivation,
   withActivationSchedulerLock,
+  validateActivationOcrRestart,
+  observeActivationOcrRestart,
 } from './pair-release-backup-activation-recovery.mjs';
 import {
   withBackupRefusalLocks,
@@ -659,4 +661,366 @@ test('replaced scheduler lock refuses archive and preserves original owner', asy
     );
   });
   assert.deepEqual(await readFile(ownerPath), observation.ownerBytes);
+});
+
+async function ocrRestartFixture() {
+  const value = await fixture();
+  const item = value.observation.runtime.find((row) => row.name === '/infra-ocr-native-sandbox-1');
+  Object.assign(item, {
+    id: '5f69399b82fb89ef9e2eb1d7779b48128278a4edc98eb7491c1c65ea349aca4e',
+    created: '2026-11-02T22:27:11.07201918Z',
+    started: '2026-11-03T11:19:29.16575727Z',
+    restarts: 17,
+  });
+  const entry =
+    'apps/api/dist/apps/api/src/moderation/commercial-ocr/native-ocr-sandbox.entrypoint.js';
+  value.observation.ocrRestart = {
+    container: {
+      id: item.id,
+      created: item.created,
+      image: item.image,
+      restarts: item.restarts,
+      command: ['node', entry],
+      healthcheck: {
+        Test: ['CMD', 'node', entry, '--probe'],
+        Interval: 10_000_000_000,
+        Timeout: 8_000_000_000,
+        Retries: 3,
+        StartPeriod: 20_000_000_000,
+      },
+      restartPolicy: 'unless-stopped',
+      state: {
+        Status: 'running',
+        Running: true,
+        Restarting: false,
+        Paused: false,
+        Dead: false,
+        OOMKilled: false,
+        StartedAt: item.started,
+        Health: {
+          Status: 'healthy',
+          FailingStreak: 0,
+          Log: [
+            {
+              Start: new Date(Date.now() - 2_000).toISOString(),
+              End: new Date(Date.now() - 1_000).toISOString(),
+              ExitCode: 0,
+            },
+          ],
+        },
+      },
+    },
+    logs: {
+      stdout: '',
+      stderr:
+        '2026-11-03T11:19:29.011689382Z {"event":"native_ocr_sandbox_recycle","reason":"native_timeout","operation":"recognize","queueDepth":0,"pendingBytes":0,"requestedTimeoutMs":10000,"executionBudgetMs":9923,"queueWaitMs":0,"operationElapsedMs":9936}\n',
+    },
+  };
+  return value;
+}
+
+test('accepts only the established OCR container after a corroborated timeout recycle and healthy restart', async () => {
+  const { request, observation } = await ocrRestartFixture();
+  const proof = buildBackupActivationProof(request, observation);
+  assert.equal(proof.ocrRestartEvidence.containerId, observation.ocrRestart.container.id);
+  assert.equal(
+    proof.ocrRestartEvidence.startedAt,
+    observation.ocrRestart.container.state.StartedAt,
+  );
+  assert.equal(proof.ocrRestartEvidence.restartCount, 17);
+  assert.equal(proof.ocrRestartEvidence.recycleAt, '2026-11-03T11:19:29.011689382Z');
+  assert.ok(Buffer.byteLength(JSON.stringify(proof)) < 4096);
+});
+
+for (const [name, alter] of [
+  [
+    'different OCR container',
+    (o) => {
+      o.runtime.find((r) => r.name === '/infra-ocr-native-sandbox-1').id = 'f'.repeat(64);
+      o.ocrRestart.container.id = 'f'.repeat(64);
+    },
+  ],
+  [
+    'different OCR creation time',
+    (o) => {
+      o.runtime.find((r) => r.name === '/infra-ocr-native-sandbox-1').created =
+        '2026-11-02T21:00:00Z';
+      o.ocrRestart.container.created = '2026-11-02T21:00:00Z';
+    },
+  ],
+  [
+    'unadvanced OCR restart count',
+    (o) => {
+      o.runtime.find((r) => r.name === '/infra-ocr-native-sandbox-1').restarts = 15;
+      o.ocrRestart.container.restarts = 15;
+    },
+  ],
+  [
+    'OCR inspection counter drift',
+    (o) => {
+      o.ocrRestart.container.restarts++;
+    },
+  ],
+  [
+    'OCR inspection start drift',
+    (o) => {
+      o.ocrRestart.container.state.StartedAt = '2026-11-03T11:19:30Z';
+    },
+  ],
+  [
+    'wrong OCR image',
+    (o) => {
+      o.runtime.find((r) => r.name === '/infra-ocr-native-sandbox-1').image =
+        `sha256:${'f'.repeat(64)}`;
+      o.ocrRestart.container.image = `sha256:${'f'.repeat(64)}`;
+    },
+  ],
+  [
+    'active OCR restart',
+    (o) => {
+      o.ocrRestart.container.state.Restarting = true;
+    },
+  ],
+  [
+    'OCR OOM marker',
+    (o) => {
+      o.ocrRestart.container.state.OOMKilled = true;
+    },
+  ],
+  [
+    'OCR not healthy',
+    (o) => {
+      o.ocrRestart.container.state.Health.Status = 'unhealthy';
+    },
+  ],
+  [
+    'missing OCR health',
+    (o) => {
+      delete o.ocrRestart.container.state.Health;
+    },
+  ],
+  [
+    'OCR health failure',
+    (o) => {
+      o.ocrRestart.container.state.Health.Log[0].ExitCode = 1;
+    },
+  ],
+  [
+    'stale OCR health',
+    (o) => {
+      o.ocrRestart.container.state.Health.Log[0].Start = new Date(
+        Date.now() - 62_000,
+      ).toISOString();
+      o.ocrRestart.container.state.Health.Log[0].End = new Date(Date.now() - 61_000).toISOString();
+    },
+  ],
+  [
+    'future OCR health',
+    (o) => {
+      o.ocrRestart.container.state.Health.Log[0].Start = new Date(
+        Date.now() + 60_000,
+      ).toISOString();
+      o.ocrRestart.container.state.Health.Log[0].End = new Date(Date.now() + 61_000).toISOString();
+    },
+  ],
+  [
+    'health from prior OCR process',
+    (o) => {
+      o.ocrRestart.container.state.Health.Log[0].Start = '2026-11-03T10:00:00Z';
+      o.ocrRestart.container.state.Health.Log[0].End = '2026-11-03T10:00:01Z';
+    },
+  ],
+  [
+    'malformed OCR health clock',
+    (o) => {
+      o.ocrRestart.container.state.Health.Log[0].End = '2026-11-31T10:00:01Z';
+    },
+  ],
+  [
+    'wrong OCR probe command',
+    (o) => {
+      o.ocrRestart.container.healthcheck.Test = ['CMD', 'true'];
+    },
+  ],
+  [
+    'wrong OCR command',
+    (o) => {
+      o.ocrRestart.container.command = ['node', 'other.js'];
+    },
+  ],
+  [
+    'wrong OCR restart policy',
+    (o) => {
+      o.ocrRestart.container.restartPolicy = 'always';
+    },
+  ],
+  [
+    'missing OCR lifecycle log',
+    (o) => {
+      o.ocrRestart.logs.stderr = '';
+    },
+  ],
+  [
+    'different OCR recycle reason',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.replace(
+        'native_timeout',
+        'native_output_limit',
+      );
+    },
+  ],
+  [
+    'different OCR recycle operation',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.replace('recognize', 'normalize');
+    },
+  ],
+  [
+    'OCR recycle outside window',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.replace(
+        '11:19:29.011689382Z',
+        '11:19:23.011689382Z',
+      );
+    },
+  ],
+  [
+    'OCR recycle after process start',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.replace(
+        '11:19:29.011689382Z',
+        '11:19:29.165757271Z',
+      );
+    },
+  ],
+  [
+    'untrusted OCR log timestamp',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.slice(
+        o.ocrRestart.logs.stderr.indexOf(' ') + 1,
+      );
+    },
+  ],
+  [
+    'malformed OCR lifecycle JSON',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.replace('"event":', '"event"=');
+    },
+  ],
+  [
+    'capped OCR logs',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.repeat(32);
+    },
+  ],
+  [
+    'multiple rapid OCR recycles',
+    (o) => {
+      o.ocrRestart.logs.stderr = o.ocrRestart.logs.stderr.repeat(2);
+    },
+  ],
+  [
+    'future OCR start',
+    (o) => {
+      const start = new Date(Date.now() + 60_000).toISOString();
+      o.runtime.find((r) => r.name === '/infra-ocr-native-sandbox-1').started = start;
+      o.ocrRestart.container.state.StartedAt = start;
+    },
+  ],
+])
+  test(`fixed OCR exception refuses ${name}`, async () => {
+    const { request, observation } = await ocrRestartFixture();
+    alter(observation);
+    assert.throws(() => buildBackupActivationProof(request, observation));
+  });
+
+for (const name of [
+  '/infra-api-ingress-1',
+  '/infra-photo-native-sandbox-1',
+  '/infra-postgres-1',
+  '/infra-redis-1',
+])
+  test(`OCR exception does not admit post-owner start for ${name}`, async () => {
+    const { request, observation } = await ocrRestartFixture();
+    observation.runtime.find((row) => row.name === name).started = '2026-11-03T11:00:00Z';
+    assert.throws(
+      () => buildBackupActivationProof(request, observation),
+      /runtime_generation_changed/u,
+    );
+  });
+
+test('OCR evidence requires a finite observation clock and accepts Docker stderr or stdout', async () => {
+  const { request, observation } = await ocrRestartFixture();
+  const item = observation.runtime.find((row) => row.name === '/infra-ocr-native-sandbox-1');
+  for (const clock of [NaN, Infinity, -1, 1.5])
+    assert.throws(
+      () => validateActivationOcrRestart(item, observation.ocrRestart, clock),
+      /invalid_observation_clock/u,
+    );
+  const first = buildBackupActivationProof(request, observation);
+  observation.ocrRestart.logs.stdout = observation.ocrRestart.logs.stderr;
+  observation.ocrRestart.logs.stderr = '';
+  assert.deepEqual(buildBackupActivationProof(request, observation), first);
+});
+
+test('fresh rolling OCR probes preserve proof while a new restart requires a new preview', async () => {
+  const { request, observation } = await ocrRestartFixture();
+  const before = buildBackupActivationProof(request, observation);
+  const refreshed = structuredClone(observation);
+  refreshed.ocrRestart.container.state.Health.Log[0].Start = new Date(
+    Date.now() - 900,
+  ).toISOString();
+  refreshed.ocrRestart.container.state.Health.Log[0].End = new Date(Date.now() - 500).toISOString();
+  assert.deepEqual(buildBackupActivationProof(request, refreshed), before);
+  const preview = await recoverBackupActivation(request, { observe: async () => observation });
+  let count = 0;
+  let archived = false;
+  await assert.rejects(
+    recoverBackupActivation(
+      { ...request, mode: 'apply', proofSha256: preview.proofSha256 },
+      {
+        observe: async () => {
+          const value = structuredClone(observation);
+          if (++count > 1) {
+            value.runtime.find((row) => row.name === '/infra-ocr-native-sandbox-1').restarts++;
+            value.ocrRestart.container.restarts++;
+          }
+          return value;
+        },
+        archive: async () => {
+          archived = true;
+        },
+      },
+    ),
+    /recovery_evidence_changed/u,
+  );
+  assert.equal(archived, false);
+});
+
+test('OCR collector actually captures bounded container stderr without invoking mutators', async (t) => {
+  const directory = await temporary(t);
+  const { request, observation } = await ocrRestartFixture();
+  const evidence = observation.ocrRestart;
+  const fakeDocker = `#!${process.execPath}
+const args=process.argv.slice(2);
+if(args[0]==='inspect' && args.at(-1)===${JSON.stringify(evidence.container.id)}) process.stdout.write(${JSON.stringify(JSON.stringify(evidence.container))});
+else if(args[0]==='logs' && args.at(-1)===${JSON.stringify(evidence.container.id)} && args.includes('--timestamps') && args[args.indexOf('--tail')+1]==='32' && args[args.indexOf('--until')+1]===${JSON.stringify(evidence.container.state.StartedAt)}) process.stderr.write(${JSON.stringify(evidence.logs.stderr)});
+else process.exitCode=99;
+`;
+  await writeFile(join(directory, 'docker'), fakeDocker, { mode: 0o700 });
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${directory}:${oldPath}`;
+  try {
+    observation.ocrRestart = await observeActivationOcrRestart(
+      observation.runtime.find((row) => row.name === '/infra-ocr-native-sandbox-1'),
+    );
+    assert.equal(observation.ocrRestart.logs.stdout, '');
+    assert.equal(observation.ocrRestart.logs.stderr, evidence.logs.stderr);
+    assert.equal(
+      buildBackupActivationProof(request, observation).ocrRestartEvidence.restartCount,
+      17,
+    );
+  } finally {
+    process.env.PATH = oldPath;
+  }
 });

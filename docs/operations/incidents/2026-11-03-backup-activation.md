@@ -40,9 +40,19 @@ under the original shared/product locks. It retains the original owner and durab
 proof in a separate recovery archive. The shared admission helper and reporter
 remain unchanged.
 
-Runtime evidence checks the current manifest's image identities and container
-generations predating the installation. No earlier complete container inventory was
-captured, so this is not a claim of identical historical container inventory.
+Runtime evidence checks the current manifest's image identities and process starts
+predating the installation, with one incident-specific OCR exception. The retained
+OCR container later recycled after native timeouts. Its exact container identity and
+creation time remain pinned to the saved incident observation. A later start requires
+a bounded timestamped timeout-recycle record immediately before that start, unchanged
+image and restart policy, and a fresh successful native health probe. Other roles and
+stores retain the original process-start check. A changed OCR start or restart count
+between preview and apply requires a new preview.
+
+The Docker event history did not retain a complete observation window. The exception
+uses the native lifecycle record and current container evidence; it does not claim
+complete restart history or successful OCR requests. No earlier complete container
+inventory was captured, so this is not a claim of identical historical inventory.
 
 The recovery scope is the interrupted unit installation only. It does not finish
 a backup, resume a producer, reset scheduler state, enable a timer or recreate a

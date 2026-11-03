@@ -130,8 +130,13 @@ From a clean exact controller with successful required CI, retain the preview:
 This command accepts only the reviewed incident identity. It checks source and unit
 integrity, the trusted service journal, completed processes, scheduler state and
 unchanged configuration under the existing locks. Runtime evidence requires current
-manifest image identities and container generations predating the installation;
-there is no earlier complete container inventory to compare. Preview does not
+manifest image identities and process starts predating the installation. Only the
+incident's pinned OCR container may have a later start: it requires a timestamped
+native-timeout recycle immediately before that start, the original image and restart
+policy, and fresh native health evidence. Changed start/restart evidence requires a
+new preview. This exception does not prove complete Docker event history or successful
+OCR requests; all other roles and stores retain the pre-installation start check.
+There is no earlier complete container inventory to compare. Preview does not
 archive the owner or start work. Review its exact proof and preserve any refusal.
 
 ```bash
