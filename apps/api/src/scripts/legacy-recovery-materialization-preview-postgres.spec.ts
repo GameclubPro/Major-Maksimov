@@ -419,6 +419,25 @@ native('read-only materialization preview on representative PostgreSQL history',
     ).toHaveLength(2);
     expect(result.cost.probes).toBeLessThan(40);
   });
+  it('keeps the ordered-head index for tied pages with mixed queue assignments', async () => {
+    const template = await receipt('Other author', 'unrelated-user', Date.now() - 1000);
+    const queues = [null, 'unknown', 'default', 'other'];
+    const rows = Array.from({ length: 400 }, (_, index) => ({
+      ...template,
+      id: randomUUID(),
+      dedupKey: randomUUID(),
+      queueName: queues[index % queues.length],
+    }));
+    receipts.push(...rows.map(({ id }) => id));
+    await db.webhookEvent.createMany({ data: rows as never });
+    const result = await preview();
+    expect(result.decision).toBe('READY');
+    expect(result.scannedReceipts).toBe(402);
+    expect(result.prefixPages).toBe(3);
+    expect(
+      result.plans.filter((plan) => plan.indexes.includes('webhook_events_ordered_chat_head_idx')),
+    ).toHaveLength(3);
+  });
   it('previews and materializes 800 held receipts within the production query budget', async () => {
     for (let index = 0; index < 800; index++)
       await receipt(`Ordinary retained photo caption ${index}`);

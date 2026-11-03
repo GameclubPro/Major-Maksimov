@@ -250,6 +250,41 @@ describePostgres('bounded PostgreSQL webhook routing', () => {
         );
         const nodes = planNodes(result.rows[0]!['QUERY PLAN']);
         const scans = nodes.filter((node) => node['Relation Name'] === 'webhook_events');
+        const planRoot = nodes.find((node) => typeof node['Node Type'] === 'string');
+        const safeIndexes = [
+          'webhook_events_ordered_chat_head_idx',
+          'webhook_events_chat_queue_head_idx',
+          'webhook_events_pkey',
+        ];
+        process.stdout.write(
+          `routing-plan-before-assert ${JSON.stringify({
+            mode,
+            scans: scans.map((scan) => ({
+              type: scan['Node Type'],
+              index: safeIndexes.includes(String(scan['Index Name']))
+                ? scan['Index Name']
+                : 'other',
+              queueInIndex: String(scan['Index Cond'] ?? '').includes('queue_name'),
+              queueInFilter: String(scan.Filter ?? '').includes('queue_name'),
+              parameterized: /\$\d+/u.test(String(scan['Index Cond'] ?? '')),
+              rows: scan['Actual Rows'],
+              loops: scan['Actual Loops'],
+              filtered: scan['Rows Removed by Filter'] ?? 0,
+              rechecked: scan['Rows Removed by Index Recheck'] ?? 0,
+              sharedHits: scan['Shared Hit Blocks'] ?? 0,
+              sharedReads: scan['Shared Read Blocks'] ?? 0,
+            })),
+            sorts: nodes
+              .filter((node) => node['Node Type'] === 'Sort')
+              .map((node) => ({
+                rows: node['Actual Rows'],
+                loops: node['Actual Loops'],
+                method: node['Sort Method'],
+              })),
+            sharedHits: planRoot?.['Shared Hit Blocks'],
+            sharedReads: planRoot?.['Shared Read Blocks'],
+          })}\n`,
+        );
         expect(scans.length).toBeGreaterThan(0);
         for (const scan of scans) {
           expect(['Index Scan', 'Index Only Scan']).toContain(scan['Node Type']);

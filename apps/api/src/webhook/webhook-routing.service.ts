@@ -552,7 +552,9 @@ export class WebhookRoutingService {
               SELECT e.queue_name, e.created_at, e.id
               FROM webhook_events e
               WHERE ${pendingPredicate} AND e.queue_name = queues.queue_name
-              ORDER BY e.created_at ASC, e.id ASC
+              -- FLAG: Keep the fixed queue key in the index order; omitting it can
+              -- scan the old chat index and filter the entire backlog per queue.
+              ORDER BY e.queue_name ASC, e.created_at ASC, e.id ASC
               LIMIT 1
             ) AS candidate
             ORDER BY candidate.created_at ASC, candidate.id ASC

@@ -2,6 +2,7 @@
 const path = require('node:path');
 
 // FLAG: Continue the frozen operation through the existing ordered-head index.
+// Include the constant NULL chat key in ordering so the full index remains usable.
 // Historical terminal failures are outside its predicate. Never change the cutoff,
 // installed image, original snapshots, claim evidence or cancellation semantics.
 function pendingPageSql(Prisma, nullChat, cursor) {
@@ -22,7 +23,7 @@ function pendingPageSql(Prisma, nullChat, cursor) {
             : Prisma.sql`AND (${chat},created_at,id) > (${cursor.chatKey},${cursor.at},${cursor.id})`
           : Prisma.empty
       }
-    ORDER BY ${nullChat ? Prisma.empty : Prisma.sql`${chat},`} created_at,id LIMIT 200
+    ORDER BY ${chat},created_at,id LIMIT 200
   ) SELECT page.*, e.normalized_payload AS update, e.semantic_key AS "semanticKey",
       e.legacy_disposition_id AS "legacyDispositionId", e.source_disposition_id AS "sourceDispositionId"
     FROM page CROSS JOIN LATERAL (SELECT * FROM webhook_events WHERE id=page.id OFFSET 0) e

@@ -223,6 +223,82 @@ native('operator backlog cancellation with native PostgreSQL and Redis', () => {
     }
   });
 
+  it('keeps both pending readers bounded across null-chat queue skew and cursor pages', async () => {
+    const { pendingPageSql, assertPendingPlan } = createRequire(__filename)(
+      '../../../../infra/scripts/backlog-cancellation-pending-client.cjs',
+    );
+    const prefix = `cancel-plan-${randomUUID()}-`;
+    try {
+      await db.$executeRaw(Prisma.sql`INSERT INTO webhook_events
+        (id,dedup_key,status,queue_name,raw_payload,normalized_payload,created_at)
+        SELECT ${prefix} || lpad(n::text, 5, '0'), ${prefix} || lpad(n::text, 5, '0'),
+          'RECEIVED'::"WebhookStatus",
+          CASE n % 4 WHEN 0 THEN NULL WHEN 1 THEN 'unknown' WHEN 2 THEN 'default' ELSE 'other' END,
+          '{}'::jsonb, CASE WHEN n <= 4000 THEN '{"type":"message_created"}'::jsonb
+            ELSE jsonb_build_object('type','message_created','message',jsonb_build_object('chatId',${prefix}::text)) END,
+          '1900-01-01'::timestamp + (n / 4) * interval '1 second'
+        FROM generate_series(1,4500) n`);
+      await db.$executeRaw`ANALYZE webhook_events`;
+      for (const missingChat of [true, false]) {
+        for (const query of [
+          (cursor: { id: string; at: Date; chatKey: string | null } | null) =>
+            backlogPendingReceiptPageSql(missingChat, cursor),
+          (cursor: { id: string; at: Date; chatKey: string | null } | null) =>
+            pendingPageSql(Prisma, missingChat, cursor),
+        ]) {
+          let cursor: { id: string; at: Date; chatKey: string | null } | null = null;
+          const seen = new Set<string>();
+          for (let page = 0; page < 2; page++) {
+            const statement = query(cursor);
+            const plan = await readBacklogPage<any[]>(
+              db,
+              Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`,
+            );
+            assertPendingPlan(plan);
+            const nodes: any[] = [];
+            const walk = (node: any) => {
+              nodes.push(node);
+              for (const child of node.Plans ?? []) walk(child);
+            };
+            walk(plan[0]['QUERY PLAN'][0].Plan);
+            const pageRoot = nodes.find((node) => node['Subplan Name'] === 'CTE page');
+            expect(pageRoot).toBeDefined();
+            const pageNodes: any[] = [];
+            const visitPage = (node: any) => {
+              pageNodes.push(node);
+              for (const child of node.Plans ?? []) visitPage(child);
+            };
+            visitPage(pageRoot);
+            expect(
+              pageNodes.some((node) => ['Sort', 'Incremental Sort'].includes(node['Node Type'])),
+            ).toBe(false);
+            const scan = pageNodes.find(
+              (node) => node['Index Name'] === 'webhook_events_ordered_chat_head_idx',
+            );
+            expect(scan).toBeDefined();
+            expect(Number(scan['Actual Rows']) * Number(scan['Actual Loops'])).toBeLessThanOrEqual(
+              200,
+            );
+            expect(Number(scan['Rows Removed by Filter'] ?? 0)).toBe(0);
+            if (cursor) expect(String(scan['Index Cond'])).toContain('created_at');
+            const rows = await readBacklogPage<
+              Array<{ id: string; at: Date; chatKey: string | null }>
+            >(db, statement);
+            expect(rows).toHaveLength(200);
+            for (const item of rows) {
+              expect(item.id.startsWith(prefix)).toBe(true);
+              expect(seen.has(item.id)).toBe(false);
+              seen.add(item.id);
+            }
+            cursor = rows[rows.length - 1]!;
+          }
+        }
+      }
+    } finally {
+      await db.webhookEvent.deleteMany({ where: { id: { startsWith: prefix } } });
+    }
+  });
+
   it('bounds each SQL page even across retained failed history and tied timestamps', async () => {
     const at = new Date(Date.now() - 3600_000);
     const prefix = randomUUID();

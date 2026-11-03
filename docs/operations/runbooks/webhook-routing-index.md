@@ -13,6 +13,11 @@ head index, which remains installed. Dead tuples, MVCC visibility and physical I
 strictly bounded by LIMIT. Local custom and named generic plans must establish actual probe
 work on retained history and skewed hot chats.
 
+Each LATERAL lookup keeps the fixed `queue_name` before `(created_at, id)` in its order.
+Removing that redundant selection key can make PostgreSQL scan the old chat index and filter
+the entire pending chat once per queue. Validate after preceding native suites as well as on
+fresh stores: retained index sizes and planner statistics can change the chosen path.
+
 ## Fixed migration and release order
 
 Migration: `20261103120000_index_webhook_chat_queue_head`.
