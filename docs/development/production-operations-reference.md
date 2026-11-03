@@ -202,7 +202,8 @@ Detailed constraints selected by the routing table in [infrastructure agent note
   Unknown components, missing mandatory components and malformed descriptors remain errors.
   Lastik is outside the fourteen API roles; API fleet health does not attest its availability.
 - Read-only monitor keyword scans must discard successful 2xx/3xx access-log lines before matching words such as `error`, `failed`, or `denied` in asset names.
-- Compare completed capacity windows locally with `node infra/scripts/monitor-capacity-report.cjs --from <UTC-ISO> --to <UTC-ISO> [--compare-from <UTC-ISO> --compare-to <UTC-ISO>]`. The report reads only bounded private archive files, makes no network/DB calls, and distinguishes missing coverage from healthy observations. Its percentiles describe sampled oldest-queue lag, not request latency; see `docs/bot-runtime-optimization-plan.md`.
+- Compare completed capacity windows with the [offline report](#offline-capacity-comparison);
+  its sampled queue ages are not request latency or proof of successful moderation.
 
 - Cold recovery completes a finite protected scope independently from overall queue drainage. A verified seal, complete receipt cursors, exact fleet/native identity, released queues and fresh healthy DB/Redis may finish with `fleetReady: false` only for automatic queue-backlog degradation. Keep the true HTTP/lag result visible and final release smokes strict; another chat's backlog must not stop the recovered fleet. Start the two captured natives first and require both healthy within 60 seconds with unchanged identity/isolation before starting the 14 API containers; then retain the strict native attestation. Startup diagnostics use fixed phase/command/failure codes and allowlisted process metadata only, never raw Docker errors or inventory.
 - Modern started-source discard uses `vps-connect.sh source-abandonment <private-request.json>`, with a fixed elapsed cutoff and at most eight owners. It shares the cold maintenance lock/journal but has separate immutable source/child/receipt tables and a bound `source-abandonment-v1` protocol; it cannot resume a legacy operation. Preserve original claims and ambiguous action receipts, and never install member/global-user immunity for a modern message. Its strict plain-text/direct-image-or-video/share-preview/flat-forward/reply profile uses only the outer human message identity; a modern forward may omit its linked sender, while any supplied sender remains validated. Both rollback paths retain the modern owner and late-receipt provenance readers. Read-only preflight precedes stopped-generation preparation, reviewed installation and positive readback. Require a 20 GiB Docker reserve. See `docs/operations/runbooks/webhook-source-abandonment.md`.
@@ -333,3 +334,31 @@ Detailed constraints selected by the routing table in [infrastructure agent note
 - After a Redis restore/merge, audit schedule queues before workers start. Rebuild future `night-mode-transitions` from DB rather than restoring stale due jobs; require empty wait/active/failed and `delayed_due_now=0`, with persisted `NIGHT_MODE_CLOSE_NOTICE` as idempotency source.
 
 - Publication deadlines, per-recipient capacity waits, durable human authority and Publisher-only scheduling raise the API rollback floor: both rollback paths require `assert-publication-policy-source.mjs` readers and final dispatch wiring. Content repreparation also requires exact revision and finite retry readers: the SQL trigger invalidates the keyboard atomically on a safe content change, preserving attempt history, immutable routes and uncertain receipts. Pending v0 is never SEND authority; expired retry markers remain cancellable. These migrations perform no retained-row backfill or validation scan. Use current reviewed wrappers after any rollback.
+
+## Offline Capacity Comparison
+
+The local [report](../../infra/scripts/monitor-capacity-report.cjs) reads the private
+archive created by `monitor-readonly`, without SSH, database or MAX calls. Set actual
+captured UTC windows; do not reuse a historical release's sample dates:
+
+```bash
+: "${CAPACITY_FROM:?Set the captured window start in UTC ISO format}"
+: "${CAPACITY_TO:?Set the captured window end in UTC ISO format}"
+node infra/scripts/monitor-capacity-report.cjs --from "$CAPACITY_FROM" --to "$CAPACITY_TO"
+```
+
+Optional `--compare-from` and `--compare-to` select an earlier, non-overlapping window
+of equal duration. Each window must span 1–60 minutes and already have ended.
+`--archive-dir` selects the private archive instead of its default XDG state location.
+Missing files, sparse samples, stale/unknown data, reset counters and unfinished windows
+are not successful observations. `status` covers the entire interval; `last` is only
+its final snapshot. Retain the report's private-file, bounded-input and redaction rules.
+
+The basis is `sampled_oldest_queue_lag`. Raw `lagSec` and `operationalLagSec` percentiles
+remain separate, with explicit `operationalLagCoverage`. Old records without operational
+values remain unavailable; never substitute zero or raw age. A lower p95 under different
+traffic is descriptive, not a causal speedup. Readiness, closed cohorts and actual action
+outcomes remain separate evidence, especially for waiting or quarantined events.
+
+[Report regressions](../../infra/scripts/monitor-capacity-report.test.mjs) cover bounded
+archives, coverage, redaction, counter resets and invalid comparison windows.

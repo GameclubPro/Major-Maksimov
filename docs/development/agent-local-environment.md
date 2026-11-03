@@ -4,21 +4,30 @@ Use the repository's Node 24 requirement and lockfile. Install dependencies with
 checkout being tested; never replace another worktree's dependencies or copy a stale generated
 Prisma client. Public API scripts own code generation and its lock.
 
-## Check before expensive work
+## One-time setup and routine checks
+
+For environment setup only:
 
 ```bash
 node scripts/agent/doctor.mjs --browser
-node scripts/agent/preflight.mjs
-node scripts/agent/plan.mjs --worktree
 ```
+
+For an ordinary change, inspect context and callers, then run preflight before expensive
+checks and use the impact planner. The staged commit helper owns the final aggregate;
+see [check selection](../development-reliability-plan.md#boundaries-and-follow-up).
+Markdown-only work needs no browser or native-store setup. `check:docs` uses the Git and
+Docker Compose CLIs to inspect documentation and service names, but does not start a
+Docker daemon, containers or application services.
 
 The doctor checks local tools, dependency presence and the matching Playwright Chromium binary.
 `--browser` also launches an isolated headless page without network access. It does not inspect
 credentials or change Codex settings. Dependency presence is not lockfile-integrity validation;
-use `npm ci` after dependency changes. Docker availability is optional when native test stores work.
+use `npm ci` after dependency changes. A running Docker daemon is optional when native test stores work.
 
-Required tools: Node 24/npm, Git, GitHub CLI, ripgrep, Python 3, ShellCheck, jq, PostgreSQL 16
-server/client binaries and Redis 7 server/client. Keep `initdb`, `postgres`, `pg_isready`, `createdb`,
+Tools depend on scope: Node 24/npm, Git and the Docker Compose CLI support repository
+and documentation checks; GitHub CLI handles delivery. Tooling/infra work additionally uses
+ripgrep, Python 3, ShellCheck and jq. Native store work needs PostgreSQL 16 server/client
+binaries and Redis 7 server/client. Keep `initdb`, `postgres`, `pg_isready`, `createdb`,
 `psql`, `redis-server` and `redis-cli` on PATH. For workflow editing, install the actionlint version
 pinned in `.github/workflows/ci.yml` (currently 1.7.7). Compiler/build tools are needed only when
 installing a dependency with native compilation. Do not update application dependencies merely
