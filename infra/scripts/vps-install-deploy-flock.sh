@@ -88,7 +88,9 @@ if git cat-file -e "$new_sha:infra/scripts/lib/pair-release-admission.sh" 2>/dev
   echo 'Pair-aware source requires the guarded install-pair-release-admission bootstrap first.' >&2
   exit 1
 fi
-git show "$new_sha:infra/scripts/lib/deploy-lock.sh" | grep -Fq 'export MAXIM_DEPLOY_LOCK_VERSION=flock-v1'
+# FLAG: Consume the complete source so an early marker match cannot SIGPIPE Git.
+# Keep pipefail: a failed producer must refuse the transition even after a match.
+git show "$new_sha:infra/scripts/lib/deploy-lock.sh" | grep -F -- 'export MAXIM_DEPLOY_LOCK_VERSION=flock-v1' >/dev/null
 git show "$new_sha:infra/scripts/legacy-cold-journal.mjs" >/dev/null
 assert_no_legacy_actors
 git merge --ff-only "$new_sha"

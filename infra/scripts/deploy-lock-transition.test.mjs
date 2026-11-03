@@ -7,7 +7,13 @@ import { test } from 'node:test';
 import { deployLockEnvironment } from './test-fixtures/deploy-lock.mjs';
 import { pairReleaseFixture } from './test-fixtures/pair-release.mjs';
 
-function fixture(t) {
+const lockMarker = 'export MAXIM_DEPLOY_LOCK_VERSION=flock-v1';
+const lockTrailer = `#${'x'.repeat(126)}\n`.repeat(8192);
+
+function fixture(
+  t,
+  { largeLockSource = false, missingLockMarker = false, failLockSourceRead = false } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'maxim-lock-transition-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, 'repo');
@@ -44,10 +50,15 @@ function fixture(t) {
         pair?.protectedDirectory ?? '/var/lib/major-karavan-release',
       )
       .replaceAll('/tmp/maxim-main-deploy.lock', legacy);
-  writeFileSync(
-    join(repo, 'infra/scripts/lib/deploy-lock.sh'),
-    relocate(readFileSync(new URL('./lib/deploy-lock.sh', import.meta.url), 'utf8')),
-  );
+  let lockSource = relocate(readFileSync(new URL('./lib/deploy-lock.sh', import.meta.url), 'utf8'));
+  assert.ok(lockSource.includes(lockMarker), 'fixture must retain the reviewed lock marker');
+  if (missingLockMarker) {
+    lockSource = lockSource.replaceAll(lockMarker, 'export MAXIM_DEPLOY_LOCK_VERSION=missing');
+  }
+  // FLAG: A valid committed shell trailer exceeds the pipe capacity after the marker.
+  // A successful marker match must not terminate this real Git source read early.
+  if (largeLockSource) lockSource += lockTrailer;
+  writeFileSync(join(repo, 'infra/scripts/lib/deploy-lock.sh'), lockSource);
   pair = pairReleaseFixture(root, join(repo, 'infra/scripts/lib/pair-release-admission.sh'));
   writeFileSync(join(repo, 'infra/scripts/legacy-cold-journal.mjs'), '// reviewed fixture\n');
   git('add', '.');
@@ -57,6 +68,30 @@ function fixture(t) {
   git('remote', 'add', 'origin', remote);
   git('push', 'origin', 'main');
   git('checkout', '-B', 'main', old);
+  if (failLockSourceRead) {
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    env.MAXIM_TEST_REAL_GIT = execFileSync('bash', ['-c', 'command -v git'], {
+      env,
+      encoding: 'utf8',
+    }).trim();
+    env.MAXIM_TEST_LOCK_SOURCE_REVISION = `${target}:infra/scripts/lib/deploy-lock.sh`;
+    // FLAG: Only the exact candidate read fails after real Git emits its complete
+    // stream. Every other Git operation and both lock protocols remain real.
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == show && "\${2:-}" == "$MAXIM_TEST_LOCK_SOURCE_REVISION" ]]; then
+  "$MAXIM_TEST_REAL_GIT" "$@"
+  exit 73
+fi
+exec "$MAXIM_TEST_REAL_GIT" "$@"
+`,
+      { mode: 0o755 },
+    );
+    env.PATH = `${bin}:${env.PATH}`;
+  }
   // Only process discovery is removed from this isolated protocol test; real Git,
   // inode validation, both locks and exact owned cleanup execute unchanged.
   let script = relocate(
@@ -101,6 +136,34 @@ test('one-time transition advances exact source under both locks and retains the
     { cwd: h.repo, env: h.env, encoding: 'utf8' },
   );
   assert.equal(probe.status, 0, probe.stderr);
+});
+
+test('one-time transition reads the complete large committed source before advancing', (t) => {
+  const h = fixture(t, { largeLockSource: true });
+  assert.ok(
+    Number(h.git('cat-file', '-s', `${h.target}:infra/scripts/lib/deploy-lock.sh`)) > 1048576,
+  );
+  const result = h.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(h.git('rev-parse', 'HEAD'), h.target);
+  assert.equal(existsSync(h.legacy), false);
+  assert.equal(existsSync(join(h.protectedDir, 'deploy.lock')), true);
+});
+
+test('missing lock marker refuses a large candidate without advancing source', (t) => {
+  const h = fixture(t, { largeLockSource: true, missingLockMarker: true });
+  const result = h.run();
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(h.git('rev-parse', 'HEAD'), h.old);
+  assert.equal(existsSync(h.legacy), false);
+});
+
+test('a Git failure after the complete matching source still refuses the transition', (t) => {
+  const h = fixture(t, { largeLockSource: true, failLockSourceRead: true });
+  const result = h.run();
+  assert.equal(result.status, 73, result.stderr);
+  assert.equal(h.git('rev-parse', 'HEAD'), h.old);
+  assert.equal(existsSync(h.legacy), false);
 });
 
 test('foreign legacy lock is preserved without changing source or provisioning new authority', (t) => {
