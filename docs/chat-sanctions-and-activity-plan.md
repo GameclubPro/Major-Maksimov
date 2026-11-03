@@ -425,7 +425,7 @@ Postgres/Redis не пересоздавать, disk preflight не обходи
 - `apps/api/src/moderation/sanction.service.ts`: эскалация, которую нельзя менять сроком архива.
 - `apps/api/src/max/max-client.service.ts`: roster и реализация `UNBAN_MEMBER`.
 - `apps/miniapp/src/pages/events-page.tsx`, `src/components/dashboard/chat-participant-sheet.tsx`, `chat-participants-roster.tsx`: существующие экраны.
-- `docs/moderation-participants-plan.md`: уже выполненные улучшения списка; сохраняются, а не планируются повторно.
+- [Регрессии участников](development/feature-regressions.md#participants-and-moderation-ui): уже выполненные улучшения списка сохраняются, а не планируются повторно.
 
 Публичная документация MAX, проверенная 12 сентября 2026 года:
 
