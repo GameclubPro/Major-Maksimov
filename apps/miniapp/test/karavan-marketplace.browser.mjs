@@ -11,6 +11,11 @@ import {
 const scenarios = [
   'setup',
   'setup_simple',
+  'first_native_unavailable',
+  'first_native_stall',
+  'first_server_pending',
+  'first_lost_response',
+  'first_cached_error',
   'setup_actor_switch',
   'legacy_multichat',
   'draft_wrong_intent',
@@ -128,6 +133,18 @@ const draftKey='karavan-setup-draft:v2:777:-123:create';
 const savedDraft={mode:'new',existingId:null,name:'Сохранённый ввод',rules:'Правила',categories:['services'],subcategories:['services.repair'],initialized:true,admissionPolicy:'applications',chatIds:['-123']};
 const journalKey='karavan-setup:v1:777:-123';
 const journalRequest={operationId:uuid,chatIds:['-123'],existingMarketplaceId:uuid,expectedPolicyRevision:1};
+if(scenario.startsWith('first_')) {
+  document.documentElement.dataset.maxClient='native';
+  window.WebApp.initData='fixture-init-data';window.WebApp.platform='android';
+  window.__nativeReads=[];window.__nativeWrites=[];
+  window.WebApp.DeviceStorage={
+    getItem:async(key)=>{window.__nativeReads.push(key);if(scenario==='first_native_stall')return new Promise(()=>{});throw {error:{code:'client.device_storage_get_key.not_found'}};},
+    setItem:async(key)=>{window.__nativeWrites.push(key);return {};},
+    removeItem:async(key)=>{window.__nativeWrites.push(key);return {};},
+  };
+  if(scenario==='first_server_pending'&&!operation) operation={operationId:uuid,state:'unknown',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[{chatId:'-123',state:'unknown',bindingId:null,generation:null}]}};
+  connected=operation?.state==='complete';
+}
 if(scenario==='pending_reload') {
   operation={operationId:uuid,state:'pending',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[{chatId:'-123',state:'pending',bindingId:null,generation:null}]}};
   localStorage.setItem(journalKey,JSON.stringify(journalRequest));
@@ -187,10 +204,12 @@ const api={request:async(path,init={})=>{
   }
   if(path.endsWith('/setup')) {
     const input=JSON.parse(init.body); setups++;sessionStorage.setItem('setups',String(setups));
-    const complete=scenario==='setup_simple'||setups>1;
+    const complete=scenario==='setup_simple'||(scenario.startsWith('first_')&&scenario!=='first_lost_response')||setups>1;
     operation={operationId:input.operationId,state:complete?'complete':'pending',request:input,checkpoints:{marketplaceId:uuid,bindings:input.chatIds.map(chatId=>({chatId,state:complete?'connected':'pending',bindingId:binding.id,generation:1}))}};
     if(['partial','partial_bound'].includes(scenario)) { operation.state='partial'; connected=scenario==='partial_bound'; operation.checkpoints.bindings.forEach(item=>item.state=connected&&item.chatId==='-123'?'connected':'failed'); return operation; }
+    if(scenario==='first_lost_response'&&setups===1)operation.state='unknown';
     sessionStorage.setItem('operation',JSON.stringify(operation));
+    if(scenario==='first_lost_response'&&setups===1)throw new Error('Ответ потерян');
     if(['unknown','existing_unknown'].includes(scenario)&&setups===1) throw new Error('Сеть недоступна');
     if(complete) { connected=true;if(scenario==='replace') Object.assign(marketplace,{id:input.existingMarketplaceId,name:'Другой магазин'}); }
     if(scenario==='setup_actor_switch') await new Promise(resolve=>{window.__releaseSetup=resolve;});
@@ -202,13 +221,19 @@ const api={request:async(path,init={})=>{
   if(scenario==='error' && reads++===0) throw new Error('Сеть недоступна');
   if(scenario==='loading') await new Promise(resolve=>setTimeout(resolve,800));
   if(scenario==='recovery_restored_unavailable'&&!sessionStorage.getItem('restored-allow-read')) throw new Error('Проверка временно недоступна');
-  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:scenario.includes('_after_publications')&&!window.__storageReady?{operationId:uuid,state:'partial',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[]}}:['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
+  if(scenario==='first_cached_error'&&window.__cachedFirstSeeded)throw new Error('Проверка недоступна');
+  return {enabled:true,actorMaxUserId:moduleActor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:scenario.includes('_after_publications')&&!window.__storageReady?{operationId:uuid,state:'partial',request:journalRequest,checkpoints:{marketplaceId:uuid,bindings:[]}}:(['server_restore','journal_server_conflict','journal_native_stall'].includes(scenario)||scenario.startsWith('first_'))?operation:null,currentChatTitle:'Соседи',buyerUrl:connected?'https://max.ru/synthetic_buyer_bot?startapp=m_'+(path.includes('/-456/')?'other-shop':'synthetic-shop'):null,previewUrl:connected&&scenario!=='preview_missing'&&['draft','paused'].includes(marketplace.status)?'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop':null,bindings:connected?[binding]:[],publicationChoices:scenario==='choice'&&!chosen?[{id:uuid,marketplaceId:uuid,marketplaceName:marketplace.name,chatId:'-123',expiresAt:new Date(Date.now()+900000).toISOString(),stores:[{id:uuid,name:'Первая витрина'},{id:'bb669048-0279-4a35-987c-60f94593163e',name:'Вторая витрина'}]}]:[],marketplace:connected?(path.includes('/-456/')?{...marketplace,name:'Другой магазин'}:marketplace):null,binding:connected?binding:null,access:{reason:scenario.startsWith('first_')&&!connected?'unbound':!recovered&&(scenario==='access_changed'||scenario==='recovery'||scenario.startsWith('recovery_conflict'))?'binding_changed':scenario==='public_view'?'forbidden':'allowed',canRecover:!recovered&&(scenario==='recovery'||scenario==='access_changed'||scenario.startsWith('recovery_conflict'))},permissions:scenario==='public_view'||(!recovered&&scenario==='access_changed')?[]:scenario==='reviewer'?['review_listing']:['manage_network','bind_chat','manage_marketplace','review_listing'],counts:{listings:connected&&scenario!=='draft_empty'?12:0,pendingApplications:connected&&scenario!=='draft_empty'?3:0,chats:connected?2:0},canManage:scenario!=='reviewer'};
 },requestKeepalive:()=>{}};
 function Harness(){window.__pendingMutations=useIsMutating();const [chatId,setChatId]=React.useState('-123');window.__switchKaravanChat=()=>setChatId('-456');return <StorefrontWorkspace key={chatId} open onClose={()=>{}} dirty={scenario.includes('_after_publications')} footer={<button onClick={()=>{window.__publicationSaves=(window.__publicationSaves??0)+1;}}>Сохранить ответ бота</button>}><Panel api={api} chatId={chatId} publications={<p>Настройки ответа бота</p>}/></StorefrontWorkspace>;}
 const queryClient=new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}});
 window.__readPreparedDaily=()=>loadShopCommandJournal({actorMaxUserId:'777',chatId:'-123',marketplaceId:uuid,expectedBindingGeneration:binding.generation});
 window.__failStorage=()=>{window.__storageReady=false;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
 window.__switchKaravanActor=()=>{moduleActor='888';binding.generation=2;if(scenario==='setup_actor_switch')connected=true;return queryClient.invalidateQueries({queryKey:['karavan-marketplace','-123']});};
+if(scenario==='first_cached_error') {
+  const snapshot=await api.request('/chats/-123/karavan-marketplace');
+  queryClient.setQueryData(['karavan-marketplace','-123'],snapshot);
+  window.__cachedFirstSeeded=true;
+}
 if(scenario==='recovery_restored_cached') {
   const snapshot=await api.request('/chats/-123/karavan-marketplace');
   queryClient.setQueryData(['karavan-marketplace','-123'],{...snapshot,binding:{...binding,generation:1}});
@@ -288,6 +313,127 @@ try {
             ].includes(scenario)
           )
             await page.getByRole('button', { name: /^Магазин участников/ }).click();
+          if (scenario.startsWith('first_')) {
+            if (scenario === 'first_cached_error') {
+              await page
+                .getByText('Не удалось проверить магазин.', { exact: true })
+                .waitFor({ timeout: 3000 });
+              assert.equal(
+                await page.getByRole('button', { name: /^Магазин участников/ }).count(),
+                0,
+              );
+              assert.deepEqual(await page.evaluate(() => window.__nativeReads), []);
+              assert.equal(
+                await page.evaluate(
+                  () =>
+                    window.__karavanRequests.filter((item) => item.path.endsWith('/setup')).length,
+                ),
+                0,
+              );
+              console.log(`${width}/${theme}/${scenario}: passed`);
+              continue;
+            }
+            if (scenario === 'first_server_pending') {
+              await page
+                .getByText('Результат создания ещё не подтверждён.', { exact: true })
+                .waitFor({ timeout: 3000 });
+              assert.equal(
+                await page.getByRole('button', { name: /^Магазин участников/ }).count(),
+                0,
+              );
+              await page
+                .getByRole('button', { name: 'Продолжить подключение', exact: true })
+                .click();
+            } else {
+              await page
+                .getByRole('button', { name: /^Магазин участников/ })
+                .click({ timeout: 3000 });
+              await page
+                .getByRole('textbox', { name: 'Название магазина', exact: true })
+                .waitFor({ timeout: 3000 });
+              assert.equal(
+                await page.evaluate(
+                  () =>
+                    window.__karavanRequests.filter((item) => item.path.endsWith('/setup')).length,
+                ),
+                0,
+              );
+              await page
+                .getByRole('checkbox', { name: 'Подтверждаю выбранные чаты и правила магазина' })
+                .check();
+              await page.getByRole('button', { name: 'Создать магазин', exact: true }).click();
+            }
+            if (scenario === 'first_lost_response') {
+              await page
+                .getByText('Ответ потерян', {
+                  exact: true,
+                })
+                .waitFor();
+              await page.reload();
+              await page
+                .getByText('Результат создания ещё не подтверждён.', { exact: true })
+                .waitFor({ timeout: 3000 });
+              assert.equal(
+                await page.getByRole('button', { name: /^Магазин участников/ }).count(),
+                0,
+              );
+              const originalId = await page.evaluate(
+                () => JSON.parse(localStorage.getItem('karavan-setup:v1:777:-123')).operationId,
+              );
+              await page
+                .getByRole('button', { name: 'Продолжить подключение', exact: true })
+                .click();
+              await page.waitForFunction(() =>
+                window.__karavanRequests.some((item) => item.path.endsWith('/setup')),
+              );
+              assert.equal(
+                await page.evaluate(
+                  () =>
+                    window.__karavanRequests.find((item) => item.path.endsWith('/setup')).body
+                      .operationId,
+                ),
+                originalId,
+              );
+            }
+            await page
+              .locator('.karavan-module__identity p')
+              .filter({ hasText: /^(Черновик|Закрыт для покупателей)/u })
+              .waitFor();
+            const requests = await page.evaluate(() =>
+              window.__karavanRequests.filter((item) => item.path.endsWith('/setup')),
+            );
+            assert.equal(requests.length, 1, 'Only the explicit setup action dispatches');
+            if (scenario === 'first_server_pending')
+              assert.equal(requests[0].body.operationId, 'a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10');
+            assert.deepEqual(
+              await page.evaluate(() => window.__nativeReads),
+              [],
+              'First setup uses server recovery without native storage',
+            );
+            assert.deepEqual(
+              await page.evaluate(() => window.__nativeWrites),
+              [],
+              'Unread native evidence is never overwritten',
+            );
+            await page.reload();
+            await page
+              .locator('.karavan-module__identity p')
+              .filter({ hasText: /^(Черновик|Закрыт для покупателей)/u })
+              .waitFor();
+            assert.equal(
+              await page.evaluate(() => Number(sessionStorage.getItem('setups'))),
+              scenario === 'first_lost_response' ? 2 : 1,
+              'Reopening never creates another shop',
+            );
+            assert.deepEqual(errors, []);
+            await geometry(page, scenario);
+            await page.screenshot({
+              path: output + '/' + width + '-' + theme + '-' + scenario + '.png',
+              fullPage: true,
+            });
+            console.log(`${width}/${theme}/${scenario}: passed`);
+            continue;
+          }
           if (scenario.includes('_storage_error')) {
             await page
               .getByRole('heading', { name: 'Нет', exact: true })

@@ -622,4 +622,42 @@
       border-radius: 24px;
     }
   }
+  @media (max-width: 380px) {
+    body[data-miniapp-profile='moderation']:is(
+        .settings-home-page-open,
+        .channel-settings-page-open
+      )
+      .settings-drilldown__panel--module
+      .settings-drilldown__header-actions {
+      display: contents;
+    }
+    body[data-miniapp-profile='moderation']:is(
+        .settings-home-page-open,
+        .channel-settings-page-open
+      )
+      .settings-drilldown__panel--module
+      .settings-drilldown__header-actions
+      > .settings-drilldown__close {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    body[data-miniapp-profile='moderation']:is(
+        .settings-home-page-open,
+        .channel-settings-page-open
+      )
+      .settings-drilldown__panel--module
+      .settings-drilldown__secondary-actions {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      flex-wrap: wrap;
+    }
+    body[data-miniapp-profile='moderation']:is(
+        .settings-home-page-open,
+        .channel-settings-page-open
+      )
+      .settings-drilldown__panel--module
+      .settings-drilldown__title {
+      overflow-wrap: normal;
+    }
+  }
 }

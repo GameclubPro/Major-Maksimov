@@ -20,7 +20,14 @@ import {
   saveKaravanPublicationChoice,
   cancelKaravanMarketplaceSetup,
 } from '../../lib/api/karavan-marketplace-client';
-import { saveMirroredItem, removeMirroredItem } from '../../lib/native-storage';
+import {
+  saveMirroredItem,
+  removeMirroredItem,
+  readLocalMirrorItemState,
+  writeLocalMirrorItem,
+  removeLocalMirrorItem,
+} from '../../lib/native-storage';
+import { localShopRecoveryReaders } from './karavan-shop/storage-recovery';
 import { openKaravanStorefront } from '../../lib/karavan-storefront-navigation';
 import { karavanAccessMessage } from '../../lib/karavan-storefront-access';
 import { ApiRequestError } from '../../lib/api-request-error';
@@ -52,6 +59,7 @@ export default function KaravanMarketplacePanel({
     queryKey,
     queryFn: ({ signal }) => getKaravanMarketplace(api, chatId, signal),
     staleTime: 15_000,
+    refetchOnMount: 'always',
     retry: false,
   });
   const [setupIntent, setSetupIntent] = useState<ShopSetupIntent | null>(null);
@@ -68,6 +76,35 @@ export default function KaravanMarketplacePanel({
   const viewLabel =
     module?.marketplace?.format === 'storefront' ? 'Посмотреть витрину' : 'Посмотреть магазин чата';
   const storageKey = module ? `karavan-setup:v1:${module.actorMaxUserId}:${chatId}` : null;
+  const recoveryScope = useRef<{ key: string; localOnly: boolean } | null>(null);
+  if (
+    storageKey &&
+    module &&
+    recoveryScope.current?.key !== storageKey &&
+    query.isSuccess &&
+    query.isFetchedAfterMount &&
+    !query.isFetching
+  ) {
+    // FLAG: Fresh unbound server state owns first-setup recovery, including its
+    // durable active operation. Never infer an empty native journal from not_found:
+    // MAX also uses it for invalid sessions. Leave that journal unread and untouched.
+    recoveryScope.current = {
+      key: storageKey,
+      localOnly:
+        module.access?.reason === 'unbound' &&
+        module.binding === null &&
+        module.marketplace === null &&
+        readLocalMirrorItemState(`karavan-binding:v1:${module.actorMaxUserId}:${chatId}`).status ===
+          'missing' &&
+        (module.setupOperation !== null ||
+          readLocalMirrorItemState(storageKey).status === 'missing'),
+    };
+  }
+  const recoveryScopeReady = recoveryScope.current?.key === storageKey;
+  const localOnlyRecovery = recoveryScopeReady && recoveryScope.current?.localOnly === true;
+  const recoveryStorage = localOnlyRecovery ? localShopRecoveryReaders : undefined;
+  const saveRecoveryItem = localOnlyRecovery ? writeLocalMirrorItem : saveMirroredItem;
+  const removeRecoveryItem = localOnlyRecovery ? removeLocalMirrorItem : removeMirroredItem;
   const canEnter = Boolean(
     module?.marketplace &&
     module.permissions.length > 0 &&
@@ -81,7 +118,9 @@ export default function KaravanMarketplacePanel({
   // checks. Load connection recovery only for connection actions, retaining that
   // scope once requested so navigation cannot interrupt an in-flight command.
   if (storageKey && !managingCurrentShop) requestedRecoveryScope.current = storageKey;
-  const recoveryRequested = Boolean(storageKey && requestedRecoveryScope.current === storageKey);
+  const recoveryRequested = Boolean(
+    storageKey && recoveryScopeReady && requestedRecoveryScope.current === storageKey,
+  );
   const liveStorageKey = useRef(storageKey);
   liveStorageKey.current = storageKey;
   const [setupRecovery, setSetupRecovery] = useState<{
@@ -97,6 +136,7 @@ export default function KaravanMarketplacePanel({
     chatId,
     recoveryRequested ? module?.actorMaxUserId : undefined,
     query.isSuccess && query.isFetchedAfterMount && !query.isFetching ? module?.binding : undefined,
+    localOnlyRecovery,
   );
   const recoveryReady = managingCurrentShop || (bind.hydrated && setupHydration.status === 'ready');
   useLayoutEffect(() => {
@@ -113,9 +153,10 @@ export default function KaravanMarketplacePanel({
     () => setPendingManagerOpen(false),
     pendingManagerOpen && workspace?.page === 'home',
   );
-  const publicationEntry = publications ? (
-    <ShopPublicationsEntry>{publications}</ShopPublicationsEntry>
-  ) : null;
+  const publicationEntry =
+    publications && recoveryReady ? (
+      <ShopPublicationsEntry>{publications}</ShopPublicationsEntry>
+    ) : null;
   const [disconnectConfirm, setDisconnectConfirm] = useState(false);
   const chats = useQuery({
     queryKey: ['karavan-setup-chats'],
@@ -131,8 +172,12 @@ export default function KaravanMarketplacePanel({
     setSetupRecovery({ key: storageKey, state: { status: 'loading' } });
     setSaved(null);
     setOperation(module?.setupOperation ?? null);
-    void readShopSetupRecovery(storageKey, chatId, module?.setupOperation ?? null, (operationId) =>
-      getKaravanMarketplaceOperation(api, chatId, operationId),
+    void readShopSetupRecovery(
+      storageKey,
+      chatId,
+      module?.setupOperation ?? null,
+      (operationId) => getKaravanMarketplaceOperation(api, chatId, operationId),
+      recoveryStorage,
     )
       .then((state) => {
         if (!active) return;
@@ -141,7 +186,7 @@ export default function KaravanMarketplacePanel({
         if (state.status === 'ready') {
           setSaved(state.request);
           if (state.operation?.state === 'complete' || state.operation?.state === 'cancelled') {
-            removeMirroredItem(storageKey);
+            removeRecoveryItem(storageKey);
             setSaved(null);
             void queryClient.invalidateQueries({ queryKey });
           }
@@ -163,7 +208,16 @@ export default function KaravanMarketplacePanel({
     return () => {
       active = false;
     };
-  }, [storageKey, api, chatId, module?.setupOperation, setupRecoveryAttempt, recoveryRequested]);
+  }, [
+    storageKey,
+    api,
+    chatId,
+    module?.setupOperation,
+    setupRecoveryAttempt,
+    recoveryRequested,
+    recoveryStorage,
+    removeRecoveryItem,
+  ]);
 
   const setup = useMutation({
     mutationFn: (input: KaravanMarketplaceSetup) => setupKaravanMarketplace(api, chatId, input),
@@ -178,7 +232,7 @@ export default function KaravanMarketplacePanel({
         return;
       setOperation(state);
       setSaved(state.request);
-      if (storageKey) saveMirroredItem(storageKey, JSON.stringify(state.request));
+      if (storageKey) saveRecoveryItem(storageKey, JSON.stringify(state.request));
       setNotice(null);
       if (
         state.state === 'partial' &&
@@ -189,7 +243,7 @@ export default function KaravanMarketplacePanel({
         void queryClient.invalidateQueries({ queryKey });
       if (state.state === 'complete' || state.state === 'cancelled') {
         setCreated(state.state === 'complete' && !!state.request.create);
-        if (storageKey) removeMirroredItem(storageKey);
+        if (storageKey) removeRecoveryItem(storageKey);
         setSaved(null);
         setSetupIntent(null);
         void queryClient.invalidateQueries({ queryKey });
@@ -244,7 +298,7 @@ export default function KaravanMarketplacePanel({
   const cancelSetup = useMutation({
     mutationFn: () => cancelKaravanMarketplaceSetup(api, chatId, saved!.operationId),
     onSuccess: () => {
-      if (storageKey) removeMirroredItem(storageKey);
+      if (storageKey) removeRecoveryItem(storageKey);
       setSaved(null);
       setOperation(null);
       setSetupIntent(null);
@@ -300,7 +354,7 @@ export default function KaravanMarketplacePanel({
             key: originalKey,
             state: { status: 'ready', request, operation: null },
           });
-        saveMirroredItem(originalKey, JSON.stringify(request));
+        saveRecoveryItem(originalKey, JSON.stringify(request));
         submittedSetup.current = { key: originalKey, operationId: request.operationId };
         setSaved(request);
         setCreated(false);
@@ -629,7 +683,7 @@ export default function KaravanMarketplacePanel({
                 <button
                   type="button"
                   onClick={() => {
-                    if (storageKey) removeMirroredItem(storageKey);
+                    if (storageKey) removeRecoveryItem(storageKey);
                     setSaved(null);
                     setOperation(null);
                     setNotice(null);
@@ -702,6 +756,7 @@ export default function KaravanMarketplacePanel({
                 sellerBotUrl={module.sellerBotUrl}
                 intent={setupIntent ?? { kind: 'create' }}
                 onCancel={setupIntent ? () => setSetupIntent(null) : undefined}
+                localOnlyRecovery={localOnlyRecovery}
                 onSubmit={start}
               />
               {!marketplace && (!setupIntent || setupIntent.kind === 'create') ? (

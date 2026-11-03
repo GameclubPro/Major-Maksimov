@@ -723,3 +723,59 @@ test('bot authoring polls only active states and presents the next expected step
   assert.equal(isActiveAutoReplyAuthoringState('canceled'), false);
   assert.equal(getAutoReplyAuthoringStateLabel('awaiting_content'), 'Публик ждёт текст или фото');
 });
+
+test('auto-reply close can only acknowledge a durable complete draft', async () => {
+  const previousWindow = globalThis.window;
+  const local = new Map<string, string>();
+  const native = new Map<string, string>();
+  let localWritable = false;
+  let nativeWritable = false;
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      indexedDB: undefined,
+      localStorage: {
+        getItem: (key: string) => local.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          if (!localWritable) throw new Error('Quota exceeded');
+          local.set(key, value);
+        },
+      },
+      MAX: {
+        WebApp: {
+          platform: 'android',
+          initData: 'synthetic',
+          DeviceStorage: {
+            getItem: async (key: string) => ({ value: native.get(key) ?? null }),
+            setItem: async (key: string, value: string) => {
+              if (!nativeWritable) throw new Error('Storage unavailable');
+              native.set(key, value);
+            },
+          },
+        },
+      },
+    },
+  });
+  const draft = { ...createEmptyAutoReplyDraft(), phrases: ['Каталог'], text: 'Ответ' };
+  try {
+    assert.equal(await saveAutoReplyDraft('save-proof', 'chat', null, draft), false);
+    localWritable = true;
+    assert.equal(await saveAutoReplyDraft('save-proof', 'chat', null, draft), true);
+    localWritable = false;
+    nativeWritable = true;
+    assert.equal(
+      await saveAutoReplyDraft('save-proof', 'chat', null, { ...draft, text: 'Новый ответ' }),
+      true,
+    );
+    assert.equal(
+      await saveAutoReplyDraft('save-proof', 'chat', null, {
+        ...draft,
+        images: [{ base64: 'AA==', mimeType: 'image/png', fileName: 'photo.png' }],
+      }),
+      false,
+      'text mirrors cannot confirm that image bytes were saved',
+    );
+  } finally {
+    Object.defineProperty(globalThis, 'window', { value: previousWindow, configurable: true });
+  }
+});

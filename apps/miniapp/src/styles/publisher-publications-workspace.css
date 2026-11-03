@@ -264,8 +264,13 @@
     }
 
     body[data-miniapp-profile='publisher'] .publication-weekdays {
-      grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
-      gap: 6px;
+      grid-template-columns: repeat(7, minmax(44px, 1fr));
+      gap: 2px;
+
+      @media (max-width: 359px) {
+        grid-template-columns: repeat(4, minmax(44px, 1fr));
+        gap: 6px;
+      }
     }
 
     body[data-miniapp-profile='publisher'] .publication-weekdays button {

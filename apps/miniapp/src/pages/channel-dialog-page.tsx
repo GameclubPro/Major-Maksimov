@@ -3127,7 +3127,7 @@ export function ChannelDialogPage({
 
   const handleBubbleKeyDown =
     (messageId: string) => (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== 'Enter' && event.key !== ' ') {
+      if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) {
         return;
       }
 
