@@ -42,6 +42,7 @@ import { resolveNightModeTransitionSnapshot } from '../moderation/night-mode-tra
 import { NightModeTransitionEventService } from '../moderation/night-mode-transition-event.service';
 import { LOCAL_CHAT_BAN_MODE } from '../moderation/local-chat-ban';
 import { WebhookParser } from './webhook.parser';
+import { isRedisCounterPreDispatchUnavailable } from '../moderation/redis-counter.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -63,6 +64,417 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     h = await createMultibotHarness({ databaseUrl, redisUrl, bots, mode: 'on' });
     return h;
   }
+
+  it.each([' ', '\n'])(
+    'phone blocking deletes adjacent real numbers once across mirrored delivery, separator=%j',
+    async (separator) => {
+      const s = await fixture(4);
+      const [chatId] = await s.seedCatalog(1, {
+        maxMessageLengthEnabled: false,
+        antiSpamEnabled: false,
+        antiDuplicateEnabled: false,
+        phoneNumbersEnabled: false,
+      });
+      const handler = jest.spyOn(s.moderation, 'handleUpdate');
+      const messageId = `phone-adjacent-${randomUUID()}`;
+      const at = Date.now();
+      const ids = await Promise.all(
+        s.bots.map((bot) =>
+          s.ingest({
+            chatId: chatId!,
+            messageId,
+            botId: bot.id,
+            at,
+            text: `8 (999) 123-45-67${separator}8 (888) 123-45-67`,
+          }),
+        ),
+      );
+      await s.drain();
+      await waitForUserDelete(s, chatId!, messageId);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+      expect(s.effects.filter((effect) => effect.method !== 'delete')).toEqual([]);
+      const intent = await s.prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: chatId!, messageId } },
+        include: { reasons: true },
+      });
+      expect(intent.reasons).toEqual([
+        expect.objectContaining({
+          ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE',
+          metadata: expect.objectContaining({ moderationDeleteVerified: true }),
+        }),
+      ]);
+      const receipts = await s.prisma.webhookEvent.findMany({ where: { id: { in: ids } } });
+      expect(receipts.map((row) => row.status).sort()).toEqual([
+        'DUPLICATE',
+        'DUPLICATE',
+        'DUPLICATE',
+        'PROCESSED',
+      ]);
+      for (const id of ids) await s.moderation.processWebhookEvent(id);
+      expect(handler).toHaveBeenCalledTimes(1);
+      const nextId = await s.ingest({
+        chatId: chatId!,
+        messageId: `phone-next-${randomUUID()}`,
+        text: 'Ordinary message',
+      });
+      await s.drain();
+      expect(
+        (await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: nextId } })).status,
+      ).toBe('PROCESSED');
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+      expect(s.failures).toEqual([]);
+    },
+  );
+
+  it.each([
+    'tel:+79991234567',
+    'https://example.test/orders/89991234567',
+    'ИНН 9991234567',
+    'Артикул 89991234567',
+  ])('phone blocking preserves a source edited to exempt content: %s', async (text) => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      phoneNumbersEnabled: false,
+    });
+    const ensure = s.intents.ensureAndAttempt.bind(s.intents);
+    let edited = false;
+    jest.spyOn(s.intents, 'ensureAndAttempt').mockImplementation(async (input, options) => {
+      if (input.ruleCode === 'PHONE_NUMBER_BLOCKED_DELETE' && !edited) {
+        edited = true;
+        await s.ingest({
+          chatId: chatId!,
+          messageId: input.messageId,
+          text,
+          type: 'message_edited',
+        });
+      }
+      return ensure(input, options);
+    });
+    const messageId = `phone-edited-${randomUUID()}`;
+    await s.ingest({ chatId: chatId!, messageId, text: '+79991234567' });
+    await s.drain();
+    expect(edited).toBe(true);
+    expect(s.messages.has(messageId)).toBe(true);
+    expect(s.effects).toEqual([]);
+    const intent = await s.prisma.moderationDeleteIntent.findUnique({
+      where: { chatId_messageId: { chatId: chatId!, messageId } },
+      include: { reasons: true },
+    });
+    if (intent) {
+      expect(intent.status).toBe('FAILED_TERMINAL');
+      expect(intent.remoteDeleteSucceededAt).toBeNull();
+      expect(
+        intent.reasons.every(
+          (reason) =>
+            (reason.metadata as Record<string, unknown> | null)?.moderationDeleteVerified !== true,
+        ),
+      ).toBe(true);
+    }
+    expect(
+      await s.prisma.moderationEvent.count({
+        where: { chatId, messageId, action: { in: ['DELETE_MESSAGE', 'WARN', 'MUTE', 'BAN'] } },
+      }),
+    ).toBe(0);
+    expect(
+      await s.prisma.violation.count({ where: { chatId, ruleCode: 'PHONE_NUMBER_BLOCKED' } }),
+    ).toBe(0);
+    const nextId = await s.ingest({
+      chatId: chatId!,
+      messageId: `phone-after-edit-${randomUUID()}`,
+      text: 'Ordinary message',
+    });
+    await s.drain();
+    expect((await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: nextId } })).status).toBe(
+      'PROCESSED',
+    );
+    expect(s.effects).toEqual([]);
+    expect(s.failures).toEqual([]);
+  });
+
+  it('phone blocking gives only the still-valid length reason credit after a source edit', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      phoneNumbersEnabled: false,
+    });
+    await s.pause();
+    const messageId = `phone-independent-${randomUUID()}`;
+    const at = source(s, chatId!, messageId, '+79991234567');
+    const settings = await s.prisma.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    const future = new Date(Date.now() + 60_000);
+    const input = {
+      chatId: chatId!,
+      messageId,
+      subjectUserId: 'fixture-user',
+      sourceMessageAt: at,
+      originBotId: s.bots[0]!.id,
+      routingPolicy: 'origin_first' as const,
+      executeAt: future,
+      entityType: 'CHAT' as const,
+      messageAuthorKind: 'user' as const,
+    };
+    const ensured = await s.intents.ensureIntent({
+      ...input,
+      reasonKey: 'phone:original',
+      ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE',
+      event: {
+        userId: 'fixture-user',
+        eventType: 'MESSAGE',
+        metadata: bindMessageLimitEvidence(settings, at.getTime(), 'PHONE_NUMBER_BLOCKED_DELETE'),
+      },
+    });
+    if (!ensured.intentId) throw new Error('Expected durable phone intent');
+    await s.ingest({
+      chatId: chatId!,
+      messageId,
+      text: 'Артикул 89991234567; длинное описание товара без контактных данных',
+      type: 'message_edited',
+    });
+    await s.intents.ensureIntent({
+      ...input,
+      reasonKey: 'length:current',
+      ruleCode: 'MESSAGE_TOO_LONG_DELETE',
+      event: { userId: 'fixture-user', eventType: 'MESSAGE' },
+    });
+    await s.prisma.moderationDeleteIntent.update({
+      where: { id: ensured.intentId },
+      data: { executeAt: new Date(0), nextAttemptAt: new Date(0) },
+    });
+    expect(await s.intents.attemptIntent(ensured.intentId)).toMatchObject({
+      kind: 'confirmed',
+      verifiedReasonKeys: ['length:current'],
+    });
+    const reasons = await s.prisma.moderationDeleteIntentReason.findMany({
+      where: { intentId: ensured.intentId },
+    });
+    expect(reasons.find((reason) => reason.reasonKey === 'length:current')?.metadata).toMatchObject(
+      {
+        moderationDeleteVerified: true,
+      },
+    );
+    expect(
+      reasons.find((reason) => reason.reasonKey === 'phone:original')?.metadata,
+    ).not.toMatchObject({
+      moderationDeleteVerified: true,
+    });
+    expect(
+      await s.prisma.moderationEvent.findMany({
+        where: { chatId, messageId, action: 'DELETE_MESSAGE' },
+        select: { ruleCode: true },
+      }),
+    ).toEqual([{ ruleCode: 'MESSAGE_TOO_LONG_DELETE' }]);
+    expect(
+      await s.prisma.violation.count({ where: { chatId, ruleCode: 'PHONE_NUMBER_BLOCKED' } }),
+    ).toBe(0);
+    expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+    expect(s.effects.filter((effect) => effect.method !== 'delete')).toEqual([]);
+  });
+
+  it('message limit Redis admission refusal preserves independent content deletion and next-event progress', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 5,
+      stopWordsPolicy: Prisma.DbNull,
+      messageLimitsBlockedWords: ['casino'],
+    });
+    const keys = new Set<string>();
+    const refused: unknown[] = [];
+    const command = jest.spyOn(s.counterRedis, 'sendCommand');
+    const replace = s.counters.replaceRevisionedSetMembershipsBeforeDeadline.bind(s.counters);
+    const counter = jest
+      .spyOn(s.counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .mockImplementation(async (params) => {
+        keys.add(params.stateKey);
+        for (const key of params.membershipKeys) keys.add(key);
+        if (refused.length || !params.stateKey.startsWith(`message:count-limit:v2:${chatId}:`)) {
+          return replace(params);
+        }
+        const beforeCommands = command.mock.calls.length;
+        const previousStatus = s.counterRedis.status;
+        let result: ReturnType<typeof replace>;
+        // FLAG: Exercise the real service's pre-dispatch refusal without disconnecting Redis.
+        // Restore readiness synchronously; no unrelated invocation sees an artificial outage.
+        Reflect.set(s.counterRedis, 'status', 'end');
+        try {
+          result = replace(params);
+        } finally {
+          Reflect.set(s.counterRedis, 'status', previousStatus);
+        }
+        try {
+          return await result;
+        } catch (error: unknown) {
+          refused.push(error);
+          expect(command.mock.calls.length).toBe(beforeCommands);
+          throw error;
+        }
+      });
+    try {
+      const handler = jest.spyOn(s.moderation, 'handleUpdate');
+      const messageId = `counter-refused-${randomUUID()}`;
+      const id = await s.ingest({ chatId: chatId!, messageId, text: 'casino' });
+      await s.drain();
+      expect(refused).toHaveLength(1);
+      expect(isRedisCounterPreDispatchUnavailable(refused[0])).toBe(true);
+      await waitForUserDelete(s, chatId!, messageId);
+      const intent = await s.prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: chatId!, messageId } },
+        include: { reasons: true },
+      });
+      expect(intent.reasons).toEqual([
+        expect.objectContaining({
+          ruleCode: 'MESSAGE_BLOCKED_WORD_DELETE',
+          metadata: expect.objectContaining({ moderationDeleteVerified: true }),
+        }),
+      ]);
+      expect(
+        await s.prisma.webhookExecutionClaim.findFirstOrThrow({
+          where: { kind: 'EXECUTION', webhookEventId: id },
+        }),
+      ).toMatchObject({ status: 'COMPLETED', completedAt: expect.any(Date) });
+      await s.moderation.processWebhookEvent(id);
+      expect(handler).toHaveBeenCalledTimes(1);
+      const nextId = await s.ingest({
+        chatId: chatId!,
+        messageId: `counter-after-refusal-${randomUUID()}`,
+        text: 'Ordinary message',
+      });
+      await s.drain();
+      expect(
+        (await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: nextId } })).status,
+      ).toBe('PROCESSED');
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+      expect(s.effects.filter((effect) => effect.method !== 'delete')).toEqual([]);
+      expect(s.failures).toEqual([]);
+    } finally {
+      counter.mockRestore();
+      command.mockRestore();
+      if (keys.size) await s.redis.del(...keys);
+    }
+  });
+
+  it('message limit Redis committed response failure retains its started handler fence', async () => {
+    const s = await fixture(1);
+    const [chatId, otherChatId] = await s.seedCatalog(2, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 5,
+      stopWordsPolicy: Prisma.DbNull,
+      messageLimitsBlockedWords: ['casino'],
+    });
+    await s.pause();
+    type CounterInput = Parameters<
+      MultibotHarness['counters']['replaceRevisionedSetMembershipsBeforeDeadline']
+    >[0];
+    const targetInputs: CounterInput[] = [];
+    const keys = new Set<string>();
+    const replace = s.counters.replaceRevisionedSetMembershipsBeforeDeadline.bind(s.counters);
+    const counter = jest
+      .spyOn(s.counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .mockImplementation((params) => {
+        keys.add(params.stateKey);
+        for (const key of params.membershipKeys) keys.add(key);
+        if (params.stateKey.startsWith(`message:count-limit:v2:${chatId}:`))
+          targetInputs.push(params);
+        return replace(params);
+      });
+    const injected = new Error('Fixture counter EVAL response lost after commit');
+    const send = s.counterRedis.sendCommand.bind(s.counterRedis);
+    let committedAt: number | null = null;
+    let mutatingCommands = 0;
+    const command = jest
+      .spyOn(s.counterRedis, 'sendCommand')
+      .mockImplementation((request, stream) => {
+        const target = targetInputs[0];
+        if (
+          request.name !== 'eval' ||
+          !target ||
+          String(request.args[2]) !== target.stateKey ||
+          Number(request.args[1]) <= 1
+        ) {
+          return send(request, stream);
+        }
+        mutatingCommands += 1;
+        // FLAG: Lose only the response after Redis acknowledges its real mutation.
+        // The resulting unknown error must never become pre-dispatch refusal or handler replay.
+        return Promise.resolve(send(request, stream)).then((result: unknown) => {
+          expect(Array.isArray(result) && Number(result[0]) === 1).toBe(true);
+          committedAt = Date.now();
+          throw injected;
+        });
+      });
+    try {
+      const handler = jest.spyOn(s.moderation, 'handleUpdate');
+      const messageId = `counter-committed-${randomUUID()}`;
+      const id = await s.ingest({ chatId: chatId!, messageId, text: 'casino' });
+      await s.ingress.preparePersistedWebhookEvent(id);
+      await expect(s.moderation.processWebhookEvent(id)).rejects.toBe(injected);
+      const target = targetInputs[0];
+      expect(target).toBeDefined();
+      expect(committedAt).not.toBeNull();
+      expect(committedAt).toBeLessThan(target!.deadlineAtMs);
+      expect(isRedisCounterPreDispatchUnavailable(injected)).toBe(false);
+      expect(mutatingCommands).toBe(1);
+      const state = await s.redis.get(target!.stateKey);
+      expect(state).not.toBeNull();
+      for (const key of target!.membershipKeys) {
+        expect(await s.redis.zcard(key)).toBe(1);
+        expect(await s.redis.zscore(key, target!.member)).toBe(String(target!.revision));
+      }
+      const failed = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id } });
+      expect(failed.status).toBe('FAILED');
+      expect(failed.errorMessage).toContain(injected.message);
+      const claim = await s.prisma.webhookExecutionClaim.findFirstOrThrow({
+        where: { kind: 'EXECUTION', webhookEventId: id },
+      });
+      expect(claim.businessStartedAt).not.toBeNull();
+      expect(claim.completedAt).toBeNull();
+      expect(claim.commandResult).toBeNull();
+      expect(s.effects).toEqual([]);
+      expect(await s.prisma.violation.count({ where: { chatId } })).toBe(0);
+      await s.moderation.processWebhookEvent(id);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(mutatingCommands).toBe(1);
+      expect(await s.redis.get(target!.stateKey)).toBe(state);
+      for (const key of target!.membershipKeys) expect(await s.redis.zcard(key)).toBe(1);
+      expect(await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id } })).toMatchObject({
+        status: 'FAILED',
+        errorMessage: failed.errorMessage,
+      });
+      expect(
+        await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: claim.id } }),
+      ).toEqual(claim);
+      const nextId = await s.ingest({
+        chatId: otherChatId!,
+        messageId: `counter-independent-${randomUUID()}`,
+        text: 'Ordinary message',
+      });
+      await s.ingress.preparePersistedWebhookEvent(nextId);
+      await s.moderation.processWebhookEvent(nextId);
+      expect(
+        (await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: nextId } })).status,
+      ).toBe('PROCESSED');
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(s.effects).toEqual([]);
+      expect(s.failures).toEqual([]);
+    } finally {
+      counter.mockRestore();
+      command.mockRestore();
+      if (keys.size) await s.redis.del(...keys);
+    }
+  });
 
   async function localChatBanFixture() {
     const previousPoolMax = process.env.PRISMA_PG_POOL_MAX;

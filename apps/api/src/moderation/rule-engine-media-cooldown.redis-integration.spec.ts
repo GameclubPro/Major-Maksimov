@@ -2,14 +2,16 @@ import { ConfigService } from '@nestjs/config';
 import { chatSettingsSchema } from '@maxim/contracts';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { RuleEngineService } from './rule-engine.service';
 import type { ChatSettings } from '../prisma/prisma-client';
-import { RedisCounterService } from './redis-counter.service';
+import { isRedisCounterPreDispatchUnavailable, RedisCounterService } from './redis-counter.service';
 import { CommercialAdDetector } from './commercial';
 import {
   ANTI_SPAM_BURST_LIMIT,
   ANTI_SPAM_BURST_WINDOW_SEC,
   RuleEngineMessageLimitsDetector,
+  type MessageLimitStateObservation,
 } from './rule-engine-message-limits.detector';
 
 const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
@@ -23,11 +25,13 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
   let settings: ChatSettings;
   let now: number;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     redis = new RedisCounterService(new ConfigService({ REDIS_URL: url }));
     inspector = new Redis(url);
     detector = new RuleEngineMessageLimitsDetector(redis);
     chatId = randomUUID();
+    // FLAG: Establish both real connections before measuring the rule's operation budget.
+    await Promise.all([inspector.ping(), redis.getString(`media-cooldown:${chatId}:ready`)]);
     now = Date.now();
     settings = {
       photoMessageCooldownEnabled: true,
@@ -64,6 +68,196 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
 
   const burstWindowKey = () =>
     `message:anti-spam-burst:v2:${chatId}:user:${ANTI_SPAM_BURST_LIMIT}:${ANTI_SPAM_BURST_WINDOW_SEC}`;
+
+  const nativeClient = (service: RedisCounterService): Redis => {
+    const client: unknown = Reflect.get(service, 'redis');
+    if (!(client instanceof Redis)) throw new Error('Expected a real ioredis counter client');
+    return client;
+  };
+  const stateRules = [
+    'anti-spam-burst',
+    'message-count-limit',
+    'photo-cooldown',
+    'sticker-cooldown',
+  ] as const;
+  const runStateRule = (
+    target: RuleEngineMessageLimitsDetector,
+    rule: MessageLimitStateObservation['rule'],
+  ) => {
+    const input = {
+      chatId,
+      userId: 'user',
+      messageId: 'admission-boundary',
+      eventTimestampMs: now,
+      settings: {
+        ...settings,
+        antiSpamEnabled: true,
+        messageCountLimitEnabled: true,
+        messageCountLimitMessages: 1,
+        messageCountLimitWindowHours: 1,
+      },
+    };
+    if (rule === 'anti-spam-burst') return target.detectAntiSpamBurstLimit(input);
+    if (rule === 'message-count-limit') return target.detectMessageCountLimit(input);
+    return target.detectMediaCooldownLimits({
+      ...input,
+      hasPhotoAttachment: rule === 'photo-cooldown',
+      hasStickerAttachment: rule === 'sticker-cooldown',
+    });
+  };
+
+  it.each(stateRules)(
+    'refuses disconnected %s before dispatch with one observation and no writes',
+    async (rule) => {
+      const unavailable = new RedisCounterService(new ConfigService({ REDIS_URL: url }));
+      const client = nativeClient(unavailable);
+      try {
+        await unavailable.getString(`media-cooldown:${chatId}:isolated-ready`);
+        const ended = once(client, 'end');
+        client.disconnect();
+        await ended;
+        expect(client.status).toBe('end');
+        const get = jest.spyOn(client, 'get');
+        const evalCommand = jest.spyOn(client, 'eval');
+        const claim = jest.spyOn(unavailable, 'claimEventCooldown');
+        const membership = jest.spyOn(unavailable, 'replaceRevisionedSetMembershipsBeforeDeadline');
+        const observations: MessageLimitStateObservation[] = [];
+        const isolatedDetector = new RuleEngineMessageLimitsDetector(unavailable, (value) => {
+          observations.push(value);
+        });
+        expect(await runStateRule(isolatedDetector, rule)).toEqual(
+          rule.endsWith('cooldown') ? [] : null,
+        );
+        expect(observations).toEqual([{ rule, reason: 'pre_dispatch_unavailable' }]);
+        expect(get).not.toHaveBeenCalled();
+        expect(evalCommand).not.toHaveBeenCalled();
+        const claimParams = claim.mock.calls[0]?.[0];
+        const memberParams = membership.mock.calls[0]?.[0];
+        const keys = claimParams
+          ? [claimParams.key, claimParams.memberKey]
+          : [memberParams!.stateKey, ...memberParams!.membershipKeys];
+        expect(await inspector.exists(...keys)).toBe(0);
+        expect(claim.mock.calls.length + membership.mock.calls.length).toBe(1);
+      } finally {
+        client.disconnect();
+      }
+    },
+  );
+
+  it.each(stateRules)(
+    'preserves committed %s state and the original lost EVAL response',
+    async (rule) => {
+      const client = nativeClient(redis);
+      const original = client.eval.bind(client);
+      const error = new Error('Committed EVAL response lost');
+      const evalCommand = jest.spyOn(client, 'eval').mockImplementationOnce(async (...args) => {
+        await original(...args);
+        throw error;
+      });
+      const claim = jest.spyOn(redis, 'claimEventCooldown');
+      const membership = jest.spyOn(redis, 'replaceRevisionedSetMembershipsBeforeDeadline');
+      const observations: MessageLimitStateObservation[] = [];
+      const target = new RuleEngineMessageLimitsDetector(redis, (value) => {
+        observations.push(value);
+      });
+      try {
+        await expect(runStateRule(target, rule)).rejects.toBe(error);
+        expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+        expect(observations).toEqual([]);
+        expect(evalCommand).toHaveBeenCalledTimes(1);
+        expect(claim.mock.calls.length + membership.mock.calls.length).toBe(1);
+        const claimParams = claim.mock.calls[0]?.[0];
+        if (claimParams) {
+          expect(await inspector.get(claimParams.key)).toBe(String(now));
+          expect(JSON.parse((await inspector.get(claimParams.memberKey))!)).toEqual({
+            timestamp: now,
+            result: 1,
+          });
+          expect(await inspector.pttl(claimParams.key)).toBeGreaterThan(0);
+          expect(await inspector.pttl(claimParams.memberKey)).toBeGreaterThan(0);
+        } else {
+          const params = membership.mock.calls[0]![0];
+          const key = params.membershipKeys[0]!;
+          expect(await inspector.zcard(key)).toBe(1);
+          expect(await inspector.zscore(key, params.member)).toBe(String(now));
+          expect(JSON.parse((await inspector.get(params.stateKey))!)).toMatchObject({
+            revision: now,
+            memberships: [{ key, count: 1 }],
+          });
+          expect(await inspector.pttl(key)).toBeGreaterThan(0);
+          expect(await inspector.pttl(params.stateKey)).toBeGreaterThan(0);
+        }
+      } finally {
+        evalCommand.mockRestore();
+        claim.mockRestore();
+        membership.mockRestore();
+      }
+    },
+  );
+
+  it.each(stateRules)(
+    'observes a committed %s deadline once even when its late response rejects',
+    async (rule) => {
+      const client = nativeClient(redis);
+      const original = client.eval.bind(client);
+      let releaseResponse!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseResponse = resolve;
+      });
+      let finishResponse!: () => void;
+      const done = new Promise<void>((resolve) => {
+        finishResponse = resolve;
+      });
+      let committed = false;
+      const response = jest.spyOn(client, 'eval').mockImplementationOnce(async (...args) => {
+        try {
+          await original(...args);
+          committed = true;
+          await barrier;
+          throw new Error('Late committed response lost');
+        } finally {
+          finishResponse();
+        }
+      });
+      const observations: MessageLimitStateObservation[] = [];
+      const target = new RuleEngineMessageLimitsDetector(redis, (value) => {
+        observations.push(value);
+      });
+      const detection = runStateRule(target, rule);
+      try {
+        expect(await detection).toEqual(rule.endsWith('cooldown') ? [] : null);
+        expect(committed).toBe(true);
+        expect(observations).toEqual([{ rule, reason: 'deadline' }]);
+        expect(response).toHaveBeenCalledTimes(1);
+        const args = response.mock.calls[0]!;
+        const keys = args.slice(2, 2 + Number(args[1])).map(String);
+        expect(await inspector.exists(...keys)).toBe(keys.length);
+        const values = await Promise.all(
+          keys.map(async (key) => ({
+            type: await inspector.type(key),
+            dump: await inspector.dump(key),
+            ttl: await inspector.pttl(key),
+          })),
+        );
+        expect(values.every((value) => value.ttl > 0)).toBe(true);
+        releaseResponse();
+        await done;
+        await Promise.resolve();
+        expect(observations).toEqual([{ rule, reason: 'deadline' }]);
+        expect(response).toHaveBeenCalledTimes(1);
+        for (const [index, key] of keys.entries()) {
+          expect(await inspector.type(key)).toBe(values[index]!.type);
+          expect(await inspector.dump(key)).toEqual(values[index]!.dump);
+          expect(await inspector.pttl(key)).toBeGreaterThan(0);
+          expect(await inspector.pttl(key)).toBeLessThanOrEqual(values[index]!.ttl);
+        }
+      } finally {
+        releaseResponse();
+        await Promise.allSettled([detection, ...(response.mock.calls.length ? [done] : [])]);
+        response.mockRestore();
+      }
+    },
+  );
 
   it.each(['photo', 'sticker'] as const)(
     'enforces %s cooldown alongside review-only commercial telemetry without recounting a replay',

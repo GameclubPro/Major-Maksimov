@@ -21,7 +21,7 @@ import {
   hasForwardedMessage,
   shouldSkipAntiSpamBurstForForward,
 } from './moderation-update-extractors';
-import { extractDetectedPhoneNumbers } from './rule-engine-message-limits.detector';
+import { extractBlockedPhoneNumbers } from './phone-blocking-evidence';
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moderation.service.support';
 
 export const MESSAGE_LIMITS_CURRENT_CONTENT_RULES = new Set([
@@ -324,7 +324,7 @@ export class MessageLimitsDeleteGuardService {
       case 'PHONE_NUMBER_BLOCKED_DELETE':
         return (
           !settings.phoneNumbersEnabled &&
-          extractDetectedPhoneNumbers(update.message?.text ?? '').length > 0
+          extractBlockedPhoneNumbers(update.message?.text ?? '').length > 0
         );
       case 'PHOTO_BLOCKED_DELETE':
         return !settings.photoMessagesEnabled && media.hasPhotoAttachment;

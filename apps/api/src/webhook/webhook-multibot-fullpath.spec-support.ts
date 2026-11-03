@@ -260,6 +260,11 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
   };
   const context = new MaxBotContextService();
   const counters = new RedisCounterService(config);
+  const counterClient: unknown = Reflect.get(counters, 'redis');
+  if (!(counterClient instanceof Redis))
+    throw new Error('Expected the actual counter Redis client');
+  const counterRedis = counterClient;
+  await counterRedis.ping();
   const health = new ActionHealthService(config);
   const legacyHolds = new WebhookLegacyHoldService(prisma as never);
   const ledger = new MaxActionLedgerService(prisma as never, legacyHolds);
@@ -1192,6 +1197,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     prisma,
     legacyHolds,
     redis,
+    counterRedis,
     bots,
     config,
     links,

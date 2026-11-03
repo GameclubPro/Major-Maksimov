@@ -462,6 +462,81 @@ describe('current message limit deletion authorization', () => {
     expect(s.max.getExactMessageRow).not.toHaveBeenCalled();
   });
 
+  it.each([' ', '\n'])('authorizes adjacent current phones separated by %j', async (separator) => {
+    const s = fixture();
+    s.settings.phoneNumbersEnabled = false;
+    s.message.body.text = `8 (999) 123-45-67${separator}8 (999) 111-22-33`;
+    await expect(
+      s.service.authorize({
+        ...input,
+        reasons: [{ ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE', reasonKey: 'phone' }],
+      }),
+    ).resolves.toEqual({ reasonKeys: ['phone'] });
+  });
+
+  it.each([
+    'https://example.com/orders/79991234567',
+    'https://example.com/orders/(79991234567)',
+    'tel:+79991234567',
+    'sms:+79991234567',
+    'https://wa.me/79991234567',
+    'ИНН 9991234567',
+    'Артикул 89991234567',
+    'ИНН 1234 5678 9012',
+    'Артикул 8 (999) 123-45-67',
+  ])('revokes a stale phone reason after the current source becomes %s', async (text) => {
+    const s = fixture();
+    s.settings.phoneNumbersEnabled = false;
+    const request = {
+      ...input,
+      reasons: [{ ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE', reasonKey: 'phone' }],
+    };
+    s.message.body.text = '8 (999) 123-45-67';
+    await expect(s.service.authorize(request)).resolves.toEqual({ reasonKeys: ['phone'] });
+    s.message.body.text = text;
+    await expect(s.service.authorize(request)).rejects.toMatchObject({
+      code: 'message_limits_delete_no_longer_authorized',
+    });
+    s.message.body.text += ' 8 (999) 111-22-33';
+    await expect(s.service.authorize(request)).resolves.toEqual({ reasonKeys: ['phone'] });
+  });
+
+  it.each(['enabled', 'admin'])('revokes genuine phone authority when %s changes', async (kind) => {
+    const s = fixture();
+    s.settings.phoneNumbersEnabled = false;
+    s.message.body.text = '8 (999) 123-45-67';
+    const request = {
+      ...input,
+      reasons: [{ ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE', reasonKey: 'phone' }],
+    };
+    await expect(s.service.authorize(request)).resolves.toEqual({ reasonKeys: ['phone'] });
+    if (kind === 'enabled') s.settings.phoneNumbersEnabled = true;
+    else
+      s.max.getChatMemberAccess.mockResolvedValue({
+        userId: 'user-1',
+        isAdmin: true,
+        isOwner: false,
+      });
+    await expect(s.service.authorize(request)).rejects.toMatchObject({
+      code: 'message_limits_delete_no_longer_authorized',
+    });
+  });
+
+  it('retains only the independent length reason when the current phone is exempt', async () => {
+    const s = fixture();
+    s.settings.phoneNumbersEnabled = false;
+    s.message.body.text = 'Артикул 89991234567';
+    await expect(
+      s.service.authorize({
+        ...input,
+        reasons: [
+          ...input.reasons,
+          { ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE', reasonKey: 'phone' },
+        ],
+      }),
+    ).resolves.toEqual({ reasonKeys: ['length'] });
+  });
+
   it('checks phones and attachment reasons independently against current settings', async () => {
     const s = fixture();
     s.settings.maxMessageLengthEnabled = false;

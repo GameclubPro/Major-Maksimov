@@ -8,6 +8,9 @@ import type { NavigationTargetEvidence } from './navigation/navigation-evidence.
 import { PROFANITY_EXACT_VARIANT_COUNT, TARGETED_INSULT_VARIANT_COUNT } from './profanity-lexicon';
 import { DUPLICATE_STATE_BUDGET_MS } from './rule-engine-duplicate-detector';
 import { RuleEngineService } from './rule-engine.service';
+import { RedisCounterService } from './redis-counter.service';
+import { RuntimeDiagnosticsService } from '../system/runtime-diagnostics.service';
+import type Redis from 'ioredis';
 
 class MockRedisCounterService {
   private readonly counters = new Map<string, number>();
@@ -42,14 +45,9 @@ class MockRedisCounterService {
     };
   }
 
-  async replaceRevisionedSetMembershipsBeforeDeadline(params: {
-    stateKey: string;
-    member: string;
-    revision: number;
-    membershipKeys: readonly string[];
-    windowSeconds: number;
-    ttlSeconds: number;
-  }) {
+  async replaceRevisionedSetMembershipsBeforeDeadline(
+    params: Parameters<RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']>[0],
+  ): ReturnType<RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']> {
     const current = this.revisionedStates.get(params.stateKey);
     if (current && params.revision < current.revision) {
       return { kind: 'stale' as const };
@@ -425,6 +423,124 @@ async function detectCommercialViolation(
 }
 
 describe('RuleEngineService', () => {
+  it.each(['anti-spam-burst', 'message-count-limit'] as const)(
+    'reports %s unavailable state while continuing independent blocked-word detection',
+    async (rule) => {
+      const diagnostics = {
+        recordHotPathStageOutcome: jest
+          .fn<
+            ReturnType<RuntimeDiagnosticsService['recordHotPathStageOutcome']>,
+            Parameters<RuntimeDiagnosticsService['recordHotPathStageOutcome']>
+          >()
+          .mockResolvedValue(undefined),
+        recordHotPathProfile: jest
+          .fn<
+            ReturnType<RuntimeDiagnosticsService['recordHotPathProfile']>,
+            Parameters<RuntimeDiagnosticsService['recordHotPathProfile']>
+          >()
+          .mockResolvedValue(undefined),
+      } satisfies Pick<
+        RuntimeDiagnosticsService,
+        'recordHotPathStageOutcome' | 'recordHotPathProfile'
+      >;
+      const diagnosticsService = Object.assign(
+        Object.create(RuntimeDiagnosticsService.prototype) as RuntimeDiagnosticsService,
+        diagnostics,
+      );
+      const input = {
+        chatId: 'chat-1',
+        userId: 'u-1',
+        messageId: 'message-1',
+        duplicateStateEventTimestampMs: Date.now(),
+        text: 'спаммаркер',
+        domainAllowlist: [],
+        settings: buildSettings({
+          antiDuplicateEnabled: false,
+          antiSpamEnabled: rule === 'anti-spam-burst',
+          messageCountLimitEnabled: rule === 'message-count-limit',
+          messageLimitsBlockedWords: ['спаммаркер'],
+        }),
+      };
+      const counters = new MockRedisCounterService();
+      jest
+        .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+        .mockResolvedValue({ kind: 'deadline_exceeded' });
+      const timedOut = new RuleEngineService(
+        counters as unknown as RedisCounterService,
+        diagnosticsService,
+      );
+      const result = await timedOut.detect(input);
+      expect(result.violations.map((value) => value.ruleCode)).toEqual(['MESSAGE_BLOCKED_WORD']);
+      expect(diagnostics.recordHotPathStageOutcome.mock.calls).toEqual([
+        [
+          {
+            stage: `rule-engine.${rule}`,
+            outcome: 'timeout',
+            failOpen: true,
+          },
+        ],
+      ]);
+      diagnostics.recordHotPathStageOutcome.mockClear();
+
+      const unavailableRedis = {
+        status: 'end',
+        get: jest.fn<ReturnType<Redis['get']>, Parameters<Redis['get']>>(),
+        eval: jest.fn<ReturnType<Redis['eval']>, []>(),
+      } satisfies Pick<Redis, 'status' | 'get' | 'eval'>;
+      const refusedCounters = Object.create(RedisCounterService.prototype) as RedisCounterService;
+      Object.defineProperty(refusedCounters, 'redis', { value: unavailableRedis });
+      const refused = new RuleEngineService(refusedCounters, diagnosticsService);
+      const afterRefusal = await refused.detect({ ...input, messageId: 'message-2' });
+      expect(afterRefusal.violations.map((value) => value.ruleCode)).toEqual([
+        'MESSAGE_BLOCKED_WORD',
+      ]);
+      expect(unavailableRedis.get).not.toHaveBeenCalled();
+      expect(unavailableRedis.eval).not.toHaveBeenCalled();
+      expect(diagnostics.recordHotPathStageOutcome.mock.calls).toEqual([
+        [
+          {
+            stage: `rule-engine.${rule}`,
+            outcome: 'skip',
+            failOpen: true,
+          },
+        ],
+      ]);
+    },
+  );
+
+  it('retains the legacy labelled-number signal for duplicate admission', async () => {
+    const service = new RuleEngineService(new MockRedisCounterService() as never);
+    for (const [index, text] of ['ИНН 9991234567', 'Артикул 89991234567'].entries()) {
+      const input = {
+        chatId: 'chat-1',
+        userId: 'u-1',
+        messageId: `label-${index}`,
+        duplicateStateEventTimestampMs: Date.now() + index,
+        text,
+        domainAllowlist: [],
+        settings: buildSettings({
+          antiSpamEnabled: false,
+          phoneNumbersEnabled: true,
+          duplicateWarnMaxCount: 1,
+          duplicateBotMessageEnabled: false,
+          duplicateMuteEnabled: false,
+          duplicateBanEnabled: false,
+        }),
+      };
+      const first = await service.detect(input);
+      const next = await service.detect({
+        ...input,
+        messageId: `label-${index}-next`,
+        duplicateStateEventTimestampMs: input.duplicateStateEventTimestampMs + 1,
+      });
+      expect(first.duplicateDecision).toBeUndefined();
+      expect(next.duplicateDecision).toMatchObject({ action: 'WARN', threshold: 1 });
+      expect(next.violations.some((value) => value.ruleCode === 'PHONE_NUMBER_BLOCKED')).toBe(
+        false,
+      );
+    }
+  });
+
   it('ships with 2000+ exact profanity and insult variants', () => {
     expect(PROFANITY_EXACT_VARIANT_COUNT).toBeGreaterThanOrEqual(2000);
   });

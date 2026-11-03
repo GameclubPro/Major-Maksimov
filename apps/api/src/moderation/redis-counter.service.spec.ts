@@ -1,20 +1,226 @@
+import type Redis from 'ioredis';
+import type { Callback, RedisKey, RedisValue } from 'ioredis';
 import {
   DUPLICATE_WINDOW_MAX_OUTSTANDING,
   DuplicateWindowCapacityError,
   RedisCounterService,
+  isRedisCounterPreDispatchUnavailable,
 } from './redis-counter.service';
 import { MessageDuplicateHistoryService } from './message-duplicate/message-duplicate-history.service';
 
+type RedisEvalArguments = [
+  script: Parameters<Redis['eval']>[0],
+  numkeys: Parameters<Redis['eval']>[1],
+  ...args: Array<RedisValue | RedisKey[] | Callback<unknown> | undefined>,
+];
+
 function createService(evalResult: unknown) {
-  const redis = {
-    eval: jest.fn().mockResolvedValue(evalResult),
-    get: jest.fn().mockResolvedValue(null),
-  };
+  const redis: jest.Mocked<Pick<Redis, 'status' | 'get'>> & {
+    eval: jest.Mock<ReturnType<Redis['eval']>, RedisEvalArguments>;
+  } = {
+    status: 'ready',
+    eval: jest.fn<ReturnType<Redis['eval']>, RedisEvalArguments>().mockResolvedValue(evalResult),
+    get: jest.fn<ReturnType<Redis['get']>, Parameters<Redis['get']>>().mockResolvedValue(null),
+  } satisfies Pick<Redis, 'status' | 'eval' | 'get'>;
   const service = Object.create(RedisCounterService.prototype) as RedisCounterService;
   Object.defineProperty(service, 'redis', { value: redis });
   Object.defineProperty(service, 'duplicateWindowOutstanding', { value: 0, writable: true });
   return { redis, service };
 }
+
+describe('RedisCounterService pre-dispatch admission', () => {
+  const cooldown = (): Parameters<RedisCounterService['claimEventCooldown']>[0] => ({
+    key: 'cooldown-key',
+    memberKey: 'cooldown-member',
+    eventTimestampMs: Date.now(),
+    windowSeconds: 60,
+    deadlineAtMs: Date.now() + 10_000,
+    requireReadyBeforeDispatch: true,
+  });
+  const membership = (): Parameters<
+    RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']
+  >[0] => ({
+    stateKey: 'state-key',
+    member: 'member',
+    revision: 20,
+    membershipKeys: ['membership-key'],
+    windowSeconds: 60,
+    ttlSeconds: 61,
+    deadlineAtMs: Date.now() + 10_000,
+    requireReadyBeforeDispatch: true,
+  });
+  const captureError = async (operation: Promise<unknown>): Promise<Error> => {
+    try {
+      await operation;
+    } catch (error) {
+      if (error instanceof Error) return error;
+      throw error;
+    }
+    throw new Error('Expected the counter operation to reject');
+  };
+  const invoke = (service: RedisCounterService, kind: 'cooldown' | 'membership') =>
+    kind === 'cooldown'
+      ? service.claimEventCooldown(cooldown())
+      : service.replaceRevisionedSetMembershipsBeforeDeadline(membership());
+
+  it.each<Redis['status']>(['wait', 'reconnecting', 'connecting', 'connect', 'close', 'end'])(
+    'refuses %s before GET or EVAL and brands only the actual errors',
+    async (status) => {
+      for (const kind of ['cooldown', 'membership'] as const) {
+        const { redis, service } = createService(null);
+        redis.status = status;
+        const error = await captureError(invoke(service, kind));
+        expect(isRedisCounterPreDispatchUnavailable(error)).toBe(true);
+        expect(redis.get).not.toHaveBeenCalled();
+        expect(redis.eval).not.toHaveBeenCalled();
+        for (const forged of [
+          new Error(error.message),
+          Object.assign(new Error(error.message), error),
+          Object.create(error),
+          { ...error, name: error.name, message: error.message, preDispatch: true },
+          null,
+        ]) {
+          expect(isRedisCounterPreDispatchUnavailable(forged)).toBe(false);
+        }
+      }
+    },
+  );
+
+  it('preserves input errors and the existing membership deadline before admission', async () => {
+    const { redis, service } = createService(null);
+    redis.status = 'end';
+    for (const operation of [
+      service.claimEventCooldown({ ...cooldown(), key: '' }),
+      service.replaceRevisionedSetMembershipsBeforeDeadline({ ...membership(), member: '' }),
+    ]) {
+      const error = await captureError(operation);
+      expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+      expect(error.message).toMatch(/input/i);
+    }
+    await expect(
+      service.replaceRevisionedSetMembershipsBeforeDeadline({
+        ...membership(),
+        deadlineAtMs: Date.now() - 1,
+      }),
+    ).resolves.toEqual({ kind: 'deadline_exceeded' });
+    expect(redis.get).not.toHaveBeenCalled();
+    expect(redis.eval).not.toHaveBeenCalled();
+  });
+
+  it('rechecks readiness after GET and refuses the first mutation', async () => {
+    const { redis, service } = createService([1, 1]);
+    redis.get.mockImplementationOnce(async () => {
+      redis.status = 'reconnecting';
+      return null;
+    });
+    const error = await captureError(
+      service.replaceRevisionedSetMembershipsBeforeDeadline(membership()),
+    );
+    expect(isRedisCounterPreDispatchUnavailable(error)).toBe(true);
+    expect(redis.get).toHaveBeenCalledTimes(1);
+    expect(redis.eval).not.toHaveBeenCalled();
+  });
+
+  it.each(['NOAUTH', 'WRONGTYPE', 'connection lost'])(
+    'preserves an actual GET rejection: %s',
+    async (message) => {
+      const { redis, service } = createService([1, 1]);
+      const error = new Error(message);
+      redis.get.mockRejectedValueOnce(error);
+      await expect(
+        service.replaceRevisionedSetMembershipsBeforeDeadline(membership()),
+      ).rejects.toBe(error);
+      expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+      expect(redis.eval).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['cooldown', 'membership'] as const)(
+    'preserves synchronous and asynchronous %s EVAL failures after admission',
+    async (kind) => {
+      for (const synchronous of [true, false]) {
+        const { redis, service } = createService(null);
+        const error = new Error('EVAL response lost');
+        redis.eval.mockImplementationOnce(() => {
+          redis.status = 'end';
+          if (synchronous) throw error;
+          return Promise.reject(error);
+        });
+        await expect(invoke(service, kind)).rejects.toBe(error);
+        expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+        expect(redis.eval).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it('never brands readiness loss after a mutating CAS attempt', async () => {
+    const { redis, service } = createService([2]);
+    redis.eval.mockImplementationOnce(async () => {
+      redis.status = 'reconnecting';
+      return [2];
+    });
+    const error = await captureError(
+      service.replaceRevisionedSetMembershipsBeforeDeadline(membership()),
+    );
+    expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+    expect(error.message).toMatch(/after a mutation dispatch/);
+    expect(redis.get).toHaveBeenCalledTimes(1);
+    expect(redis.eval).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves readonly verification errors and malformed state/results', async () => {
+    const replay = createService(1);
+    replay.redis.get.mockResolvedValue(
+      JSON.stringify({
+        v: 1,
+        revision: 20,
+        memberships: { 'membership-key': 1 },
+      }),
+    );
+    const error = new Error('readonly verification failed');
+    replay.redis.eval.mockRejectedValueOnce(error);
+    await expect(
+      replay.service.replaceRevisionedSetMembershipsBeforeDeadline(membership()),
+    ).rejects.toBe(error);
+    expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
+
+    const corrupt = createService([1, 1]);
+    corrupt.redis.get.mockResolvedValue('{broken');
+    const parseError = await captureError(
+      corrupt.service.replaceRevisionedSetMembershipsBeforeDeadline(membership()),
+    );
+    expect(isRedisCounterPreDispatchUnavailable(parseError)).toBe(false);
+    expect(corrupt.redis.eval).not.toHaveBeenCalled();
+    for (const kind of ['cooldown', 'membership'] as const) {
+      const invalid = createService(kind === 'cooldown' ? 100 : [1, -1]);
+      const resultError = await captureError(invoke(invalid.service, kind));
+      expect(isRedisCounterPreDispatchUnavailable(resultError)).toBe(false);
+      expect(resultError.message).toMatch(/invalid/);
+    }
+  });
+
+  it.each([undefined, false])(
+    'preserves existing callers when admission is %s',
+    async (requireReadyBeforeDispatch) => {
+      const claim = createService(1);
+      claim.redis.status = 'connecting';
+      await expect(
+        claim.service.claimEventCooldown({ ...cooldown(), requireReadyBeforeDispatch }),
+      ).resolves.toBe('allowed');
+      expect(claim.redis.eval).toHaveBeenCalledTimes(1);
+      const counter = createService([1, 1]);
+      counter.redis.status = 'connecting';
+      await expect(
+        counter.service.replaceRevisionedSetMembershipsBeforeDeadline({
+          ...membership(),
+          requireReadyBeforeDispatch,
+        }),
+      ).resolves.toEqual({ kind: 'applied', counts: [1] });
+      expect(counter.redis.get).toHaveBeenCalledTimes(1);
+      expect(counter.redis.eval).toHaveBeenCalledTimes(1);
+    },
+  );
+});
 
 describe('duplicate window Redis capacity', () => {
   afterEach(() => jest.useRealTimers());
