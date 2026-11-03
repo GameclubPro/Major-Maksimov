@@ -8,7 +8,7 @@ import {
   readDocumentation,
 } from './check-documentation-links.mjs';
 
-const shellFencePattern = /```(?:bash|sh|shell)\s*\n([\s\S]*?)```/gu;
+const shellFencePattern = /```(?:bash|sh|shell)[\t ]*\r?\n([\s\S]*?)```/gu;
 const bannedExecutablePattern =
   /(?:app2\.major-maksimov\.ru|s3:\/\/|\byc\s+storage\b|object[ -]?storage|cdn-cache)/iu;
 const composeServiceCommands = new Set(['exec', 'run', 'logs', 'restart']);

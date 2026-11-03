@@ -121,9 +121,9 @@ test('rejects broken local links and heading anchors', async (t) => {
 
 test('checks commands in scoped instructions and former archive directories', async (t) => {
   const root = fixture(t, '# Project\n');
-  write(root, 'apps/api/AGENTS.md', '```bash\n# comment\n\nnpm run missing-scope\n```\n');
+  write(root, 'apps/api/AGENTS.md', '```bash\n\n# comment\n\nnpm run missing-scope\n```\n');
   write(root, 'docs/operations/archive/old.md', '```bash\nnpm run missing-archive\n```\n');
   const messages = (await findDocumentationViolations(root)).join('\n');
-  assert.match(messages, /apps\/api\/AGENTS.md:4.*missing-scope/u);
+  assert.match(messages, /apps\/api\/AGENTS.md:5.*missing-scope/u);
   assert.match(messages, /docs\/operations\/archive\/old.md:2.*missing-archive/u);
 });
