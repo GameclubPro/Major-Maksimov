@@ -61,6 +61,10 @@ readiness and both storage reserves, and has a 12-hour deadline. It restores the
 checksum-verified local archive and verifies migration completion plus critical
 webhook, authority, action-ledger and publication primary indexes. Its receipt describes
 this schema check, not an end-to-end business exercise or a decrypted S3 restore.
+Wait for PostgreSQL readiness on `127.0.0.1` inside that container. The image's temporary
+initialization server accepts Unix-socket connections before it stops; that socket
+must not satisfy the restore admission check. Loopback readiness retains network
+isolation and the existing socket authentication used by the restore commands.
 An operator should also periodically decrypt a downloaded independent copy with the
 off-host key and run a recovery rehearsal from that copy.
 
