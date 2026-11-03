@@ -5,11 +5,10 @@ import {
   readOutcomeCohortSource,
 } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
-  OUTCOME_COHORT_HISTORICAL_COMPATIBILITY,
   historicalCompatibilityCtes,
   historicalCompatibilityProjection,
-  isCompatibleHistoricalReceipt,
 } from '../../scripts/agent/outcome-cohort-historical-compatibility.mjs';
+import { validateOnlineMigrationReceipts } from './online-migration-receipts.mjs';
 
 const fail = (code) => {
   throw new Error(`OUTCOME_COHORT_${code}`);
@@ -109,36 +108,10 @@ export function verifyOutcomeCohortPreparationState(snapshot, source) {
     snapshot.indexes.length !== 2
   )
     fail('STATE_INVALID');
-  const known = new Map(source.map((migration) => [migration.name, migration.checksum]));
-  const active = new Map();
-  for (const receipt of snapshot.receipts) {
-    if (receipt.rolled_back === true) continue;
-    if (
-      receipt.rolled_back !== false ||
-      receipt.finished !== true ||
-      !Number.isInteger(receipt.steps) ||
-      receipt.steps < 0 ||
-      typeof receipt.name !== 'string' ||
-      !/^[a-f0-9]{64}$/u.test(receipt.checksum ?? '') ||
-      active.has(receipt.name)
-    )
-      fail('RECEIPT_BLOCKED');
-    active.set(receipt.name, receipt);
-  }
   // FLAG: Validate every active receipt before considering the four exact historical
   // variants. Their pinned successor receipts and current catalog must agree; no
   // receipt is rewritten and an unknown or unfinished migration still blocks release.
-  for (const receipt of active.values()) {
-    const historical = OUTCOME_COHORT_HISTORICAL_COMPATIBILITY.some(
-      (variant) => variant.name === receipt.name && variant.checksum === receipt.checksum,
-    );
-    if (
-      historical
-        ? !isCompatibleHistoricalReceipt(receipt, known, active, snapshot.historicalCompatibility)
-        : known.get(receipt.name) !== receipt.checksum
-    )
-      fail('RECEIPT_BLOCKED');
-  }
+  const active = validateOnlineMigrationReceipts(snapshot, source, () => fail('RECEIPT_BLOCKED'));
   const targets = OUTCOME_COHORT_TARGETS.map((target) => {
     const indexes = snapshot.indexes.filter((index) => index.selector === target.selector);
     if (

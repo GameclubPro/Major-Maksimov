@@ -23,8 +23,9 @@ const statuses = ['RECEIVED', 'QUEUED', 'FAILED'] as const;
 const pageSize = 200;
 type PendingCursor = { id: string; at: Date; chatKey: string | null };
 
-// FLAG: Walk only current message ordering heads, including NULL chat keys. The
-// retained terminal FAILED history must not consume a stopped-fleet capture budget.
+// FLAG: Walk only current message ordering heads, including NULL chat keys. Keep
+// chat in both ORDER BY variants so PostgreSQL can use the complete ordered index;
+// for NULL chat it is constant and leaves the (created_at,id) order unchanged.
 export function backlogPendingReceiptPageSql(nullChat: boolean, cursor: PendingCursor | null) {
   const chat = Prisma.sql`COALESCE(NULLIF(BTRIM(normalized_payload->'message'->>'chatId'), ''), NULLIF(BTRIM(normalized_payload->>'chatId'), ''))`;
   return Prisma.sql`WITH page AS MATERIALIZED (
@@ -43,7 +44,7 @@ export function backlogPendingReceiptPageSql(nullChat: boolean, cursor: PendingC
             : Prisma.sql`AND (${chat},created_at,id) > (${cursor.chatKey},${cursor.at},${cursor.id})`
           : Prisma.empty
       }
-    ORDER BY ${nullChat ? Prisma.empty : Prisma.sql`${chat},`} created_at,id LIMIT 200
+    ORDER BY ${chat},created_at,id LIMIT 200
   ) SELECT page.*, e.normalized_payload AS update, e.semantic_key AS "semanticKey",
       (e.legacy_disposition_id IS NULL AND e.source_disposition_id IS NULL) AS eligible
     FROM page CROSS JOIN LATERAL (SELECT * FROM webhook_events WHERE id=page.id OFFSET 0) e

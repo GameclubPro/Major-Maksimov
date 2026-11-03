@@ -63,6 +63,8 @@ project=multibot_ci_fixture
 good_tag=maxim-online-bootstrap
 cancel_tag=maxim-online-delete
 resolver_tag=maxim-online-recipient
+routing_bootstrap_tag=maxim-online-routing-bootstrap
+routing_tag=maxim-online-routing
 attempt_owned=1
 ${cleanup}
 trap cleanup EXIT
@@ -92,7 +94,7 @@ ${terminate ? 'sleep 30' : `exit ${exitCode}`}
 }
 
 test('CI cleanup reserve covers every hard-bounded cleanup command', () => {
-  assert(reserve > 13 * 3, 'reserve must exceed thirteen 3-second cleanup commands');
+  assert(reserve > 17 * 3, 'reserve must exceed seventeen 3-second cleanup commands');
   assert.doesNotMatch(cleanup, /(?<!3s )docker /u);
 });
 
@@ -107,7 +109,7 @@ test('CI cleanup distinguishes confirmed absence from failed or ambiguous inspec
       ['present', 'absent'].includes(mode) ? /CLEANUP_CONFIRMED/u : /CLEANUP_UNCONFIRMED/u,
     );
     if (mode === 'present') {
-      for (const tag of ['bootstrap', 'delete', 'recipient']) {
+      for (const tag of ['bootstrap', 'delete', 'recipient', 'routing-bootstrap', 'routing']) {
         assert.match(result.calls, new RegExp(`rm -f maxim-online-${tag}`, 'u'));
       }
       assert.match(result.calls, /network rm infra_default/u);

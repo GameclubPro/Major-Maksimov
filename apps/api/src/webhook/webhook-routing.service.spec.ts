@@ -505,10 +505,13 @@ describe('WebhookRoutingService', () => {
     expect(sqlText).toContain('LIMIT 1');
     expect(sqlText).toContain('status = \'FAILED\'::"WebhookStatus"');
     expect(sqlText).toContain('next_enqueue_at IS NOT NULL');
-    expect(sqlText).toContain(`LEFT(COALESCE(error_message, ''), 37) = '${quarantineMarker}'`);
+    expect(sqlText).toContain(`LEFT(COALESCE(e.error_message, ''), 37) = '${quarantineMarker}'`);
+    expect(sqlText).toContain('CROSS JOIN LATERAL');
+    expect(sqlText).not.toContain('MATERIALIZED');
     expect(query?.values).not.toContain(37);
     expect(query?.values).not.toContain(quarantineMarker);
     expect(query?.values).toEqual(expect.arrayContaining([webhookEventId, chatId]));
+    expect(query?.values).toEqual(expect.arrayContaining([...DEFAULT_WEBHOOK_QUEUE_NAMES]));
     expect(sqlText).not.toMatch(/COUNT\s*\(\s*\*\s*\)/iu);
   });
 

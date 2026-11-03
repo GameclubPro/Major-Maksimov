@@ -75,7 +75,7 @@ for (const name of names) {
   try { cmd = readFileSync(`/proc/${name}/cmdline`, 'utf8').replaceAll('\0', ' '); }
   catch (error) { if (error.code === 'ENOENT' || error.code === 'ESRCH') continue; throw error; }
   if (cmd.length > 1048576) throw new Error('Process argument budget');
-  if (/(?:vps-(?:pull-build|runtime-rollback|release-rollback|finalize-release|commercial-ocr|publisher-dispatch|docker-space-reclaim|retire-|recover-|preload)|backup-postgres|restore-postgres|multibot-online-supervisor|outcome-cohort-online-supervisor|legacy-cold-host|pg_dump|pg_restore|docker\s+(?:build|buildx|compose\b.*\b(?:build|up|start|run)))/u.test(cmd))
+  if (/(?:vps-(?:pull-build|runtime-rollback|release-rollback|finalize-release|commercial-ocr|publisher-dispatch|docker-space-reclaim|retire-|recover-|preload)|backup-postgres|restore-postgres|multibot-online-supervisor|outcome-cohort-online-supervisor|routing-index-online-supervisor|legacy-cold-host|pg_dump|pg_restore|docker\s+(?:build|buildx|compose\b.*\b(?:build|up|start|run)))/u.test(cmd))
     throw new Error('An incompatible maintenance actor is present');
 }
 NODE

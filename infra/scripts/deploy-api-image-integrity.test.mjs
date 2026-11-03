@@ -271,49 +271,53 @@ test('rejects modified or staged tracked API Docker build inputs', () => {
   });
 });
 
-test('guards the exact outcome state runtime input when untracked, ignored, modified or staged', () => {
-  withGitFixture((fixture) => {
-    const relativePath = 'infra/scripts/outcome-cohort-online-state.mjs';
-    const path = join(fixture, relativePath);
-    mkdirSync(join(fixture, 'infra/scripts'), { recursive: true });
-    writeFileSync(path, 'export const state = 1;\n');
-    const check = () =>
-      runTopologyProbe('maxim_topology_refuse_dirty_api_build_inputs\n', {}, fixture);
-    const requireBlocked = (result) => {
-      assert.equal(result.status, 1, result.stderr);
-      assert.match(result.stderr, /infra\/scripts\/outcome-cohort-online-state\.mjs/u);
-    };
-    requireBlocked(check());
+for (const relativePath of [
+  'infra/scripts/outcome-cohort-online-state.mjs',
+  'infra/scripts/routing-index-online-state.mjs',
+  'infra/scripts/online-migration-receipts.mjs',
+])
+  test(`guards ${relativePath} when untracked, ignored, modified or staged`, () => {
+    withGitFixture((fixture) => {
+      const path = join(fixture, relativePath);
+      mkdirSync(join(fixture, 'infra/scripts'), { recursive: true });
+      writeFileSync(path, 'export const state = 1;\n');
+      const check = () =>
+        runTopologyProbe('maxim_topology_refuse_dirty_api_build_inputs\n', {}, fixture);
+      const requireBlocked = (result) => {
+        assert.equal(result.status, 1, result.stderr);
+        assert.ok(result.stderr.includes(relativePath));
+      };
+      requireBlocked(check());
 
-    writeFileSync(join(fixture, '.gitignore'), `${relativePath}\n`);
-    const ignored = check();
-    requireBlocked(ignored);
-    assert.match(ignored.stderr, /Git-ignored inputs included by Docker/u);
-    rmSync(join(fixture, '.gitignore'));
+      writeFileSync(join(fixture, '.gitignore'), `${relativePath}\n`);
+      const ignored = check();
+      requireBlocked(ignored);
+      assert.match(ignored.stderr, /Git-ignored inputs included by Docker/u);
+      rmSync(join(fixture, '.gitignore'));
 
-    const git = (args) => {
-      const result = spawnSync('git', args, { cwd: fixture, encoding: 'utf8' });
-      assert.equal(result.status, 0, result.stderr);
-    };
-    git(['add', relativePath]);
-    git([
-      '-c',
-      'user.name=MAXIM Test',
-      '-c',
-      'user.email=maxim-test@example.invalid',
-      'commit',
-      '--quiet',
-      '-m',
-      'fixture',
-    ]);
-    const clean = check();
-    assert.equal(clean.status, 0, clean.stderr);
-    writeFileSync(path, 'export const state = 2;\n');
-    requireBlocked(check());
-    git(['add', relativePath]);
-    requireBlocked(check());
+      const git = (args) => {
+        const result = spawnSync('git', args, { cwd: fixture, encoding: 'utf8' });
+        assert.equal(result.status, 0, result.stderr);
+      };
+      git(['add', relativePath]);
+      git([
+        '-c',
+        'user.name=MAXIM Test',
+        '-c',
+        'user.email=maxim-test@example.invalid',
+        'commit',
+        '--quiet',
+        '-m',
+        'fixture',
+      ]);
+      const clean = check();
+      assert.equal(clean.status, 0, clean.stderr);
+      writeFileSync(path, 'export const state = 2;\n');
+      requireBlocked(check());
+      git(['add', relativePath]);
+      requireBlocked(check());
+    });
   });
-});
 
 test('allows ignored env files and unrelated untracked files outside API build inputs', () => {
   withGitFixture((fixture) => {

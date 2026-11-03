@@ -302,6 +302,7 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
     compatibility.map((step) => step.name),
     [
       'Outcome cohort online migrations with native PostgreSQL',
+      'Routing index online migration with native PostgreSQL',
       'Selected Publisher target cancellation with native PostgreSQL',
       'Webhook audit bounds with native PostgreSQL',
       'Shared statistics with native PostgreSQL',
@@ -310,6 +311,15 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
       'Retention admission and receipt recovery with PostgreSQL',
       'Conservative moderation rollup compatibility with PostgreSQL',
     ],
+  );
+  const routingIndex = compatibility.find(
+    (step) => step.name === 'Routing index online migration with native PostgreSQL',
+  );
+  assert.equal(routingIndex.env.MAXIM_TEST_POSTGRES_URL, '${{ env.DATABASE_URL }}');
+  assert.equal(routingIndex.env.TZ, 'UTC');
+  assert.equal(
+    routingIndex.run,
+    'node --test --test-concurrency=1 infra/scripts/routing-index-online.native.test.mjs',
   );
   const cancellation = compatibility.find(
     (step) => step.name === 'Selected Publisher target cancellation with native PostgreSQL',

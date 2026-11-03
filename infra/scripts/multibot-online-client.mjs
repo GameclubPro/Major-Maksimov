@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { validateMultibotComposeArgs } from './multibot-prepare-capacity.mjs';
 import { requireOutcomeCohortTarget } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
+import { verifyRoutingIndexDatabaseUrl } from '../../scripts/agent/routing-index-online-target.mjs';
 
 const shaPattern = /^[a-f0-9]{40}$/u;
 const imageIdPattern = /^sha256:[a-f0-9]{64}$/u;
@@ -187,10 +188,26 @@ export async function createOutcomeCohortOnlineClientLauncher(composeArgs, selec
   );
 }
 
+export function routingIndexOnlineClientCreateArgs(applicationName, identity) {
+  const args = multibotOnlineClientCreateArgs(applicationName, identity);
+  return [...args.slice(0, -1), 'scripts/agent/routing-index-online-prepare.mjs'];
+}
+
+export async function createRoutingIndexOnlineClientLauncher(composeArgs, selector, options = {}) {
+  if (selector !== 'routing') fail('TARGET_INVALID');
+  return createOnlineClientLauncher(
+    composeArgs,
+    options,
+    routingIndexOnlineClientCreateArgs,
+    verifyRoutingIndexDatabaseUrl,
+  );
+}
+
 async function createOnlineClientLauncher(
   composeArgs,
   { run = runClientCommand, env = process.env, start = spawn },
   createArgs,
+  validateDatabase = () => {},
 ) {
   validateMultibotComposeArgs(composeArgs);
   const read = async (args, options) => {
@@ -214,6 +231,7 @@ async function createOnlineClientLauncher(
     composeArgs,
     env.MAXIM_EXPECTED_DEPLOY_SHA,
   );
+  validateDatabase(config.databaseUrl);
   const images = await json(['image', 'inspect', config.imageRef]);
   const networks = await json(['network', 'inspect', config.networkName]);
   if (

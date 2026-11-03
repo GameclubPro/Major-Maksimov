@@ -508,6 +508,10 @@ test('deploy gates precede quiescence, new image imports ship, historical cutoff
     'scripts/agent/outcome-cohort-online-prepare.mjs',
     'scripts/agent/outcome-cohort-historical-compatibility.mjs',
     'infra/scripts/outcome-cohort-online-state.mjs',
+    'scripts/agent/routing-index-online-target.mjs',
+    'scripts/agent/routing-index-online-prepare.mjs',
+    'infra/scripts/routing-index-online-state.mjs',
+    'infra/scripts/online-migration-receipts.mjs',
   ])
     assert.ok(dockerfile.includes(file));
   const old = readFileSync(resolve(root, 'scripts/agent/multibot-online-prepare.mjs'), 'utf8');
@@ -519,14 +523,22 @@ test('deploy gates precede quiescence, new image imports ship, historical cutoff
 test('outcome image modules load from the narrow Docker context and isolated runtime layout', () => {
   const dockerfile = readFileSync(resolve(root, 'apps/api/Dockerfile'), 'utf8');
   const statePath = 'infra/scripts/outcome-cohort-online-state.mjs';
+  const infrastructureModules = [
+    statePath,
+    'infra/scripts/routing-index-online-state.mjs',
+    'infra/scripts/online-migration-receipts.mjs',
+  ];
   const copyLines = dockerfile.split(/\r?\n/u).filter((line) => line.startsWith('COPY '));
-  assert.ok(copyLines.includes(`COPY ${statePath} ./${statePath}`));
+  for (const file of infrastructureModules) assert.ok(copyLines.includes(`COPY ${file} ./${file}`));
   assert.ok(copyLines.includes('COPY scripts scripts'));
   const exceptions = readFileSync(resolve(root, '.dockerignore'), 'utf8')
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line.startsWith('!infra/scripts'));
-  assert.deepEqual(exceptions, [`!${statePath}`]);
+  assert.deepEqual(
+    exceptions,
+    infrastructureModules.map((file) => `!${file}`),
+  );
 
   const directory = mkdtempSync(resolve(tmpdir(), 'maxim-outcome-image-modules-'));
   const modules = [
@@ -534,11 +546,13 @@ test('outcome image modules load from the narrow Docker context and isolated run
     'scripts/agent/outcome-cohort-online-targets.mjs',
     'scripts/agent/outcome-cohort-online-prepare.mjs',
     'scripts/agent/outcome-cohort-historical-compatibility.mjs',
-    statePath,
+    'scripts/agent/routing-index-online-target.mjs',
+    'scripts/agent/routing-index-online-prepare.mjs',
+    ...infrastructureModules,
   ];
   try {
     for (const file of modules) {
-      if (file !== statePath) {
+      if (!infrastructureModules.includes(file)) {
         assert.ok(copyLines.includes(`COPY --from=build /app/${file} ./${file}`), file);
       }
       const destination = resolve(directory, file);
@@ -558,12 +572,18 @@ test('outcome image modules load from the narrow Docker context and isolated run
 import assert from 'node:assert/strict';
 const runner = await import(process.argv[1]);
 const state = await import(process.argv[2]);
+const routing = await import(process.argv[3]);
+const routingState = await import(process.argv[4]);
 assert.equal(typeof state.outcomeCohortStateSql, 'string');
 assert.throws(() => state.verifyOutcomeCohortPreparationState({}, []), /STATE_INVALID/);
 await assert.rejects(runner.runOutcomeCohortOnlinePrepare({ selector: 'delete', env: {} }), /TAGGED_DATABASE_REQUIRED/);
+assert.equal(typeof routingState.routingIndexStateSql, 'string');
+await assert.rejects(routing.runRoutingIndexOnlinePrepare({ env: {} }), /TAGGED_DATABASE_REQUIRED/);
 `,
         pathToFileURL(resolve(directory, modules[2])).href,
         pathToFileURL(resolve(directory, statePath)).href,
+        pathToFileURL(resolve(directory, 'scripts/agent/routing-index-online-prepare.mjs')).href,
+        pathToFileURL(resolve(directory, 'infra/scripts/routing-index-online-state.mjs')).href,
       ],
       { cwd: directory, encoding: 'utf8', timeout: 5000 },
     );

@@ -437,6 +437,18 @@
       "checks": ["repo-static", "agent-tools", "infra", "api", "prisma"],
       "deployComponents": ["api-shared"],
       "migrationImpact": "tooling"
+    },
+    {
+      "id": "routing-index-migration-runtime",
+      "include": [
+        "scripts/agent/routing-index-online-target.mjs",
+        "scripts/agent/routing-index-online-prepare.mjs",
+        "infra/scripts/routing-index-online-state.mjs",
+        "infra/scripts/online-migration-receipts.mjs"
+      ],
+      "checks": ["repo-static", "docs", "agent-tools", "infra", "prisma", "api"],
+      "deployComponents": ["api-shared"],
+      "migrationImpact": "tooling"
     }
   ],
   "fallback": {

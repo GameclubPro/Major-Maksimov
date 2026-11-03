@@ -936,9 +936,10 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     });
     const collect = jest.spyOn(service, 'collect');
     // FLAG: Expire the original proof so the retry checks the new exact MAX denial.
+    const expiredAt = Date.now() - 60_000;
     await db.karavanMarketplaceAuthorityGrant.updateMany({
       where: { chatId },
-      data: { expiresAt: new Date(Date.now() - 1) },
+      data: { checkedAt: new Date(expiredAt - 15_000), expiresAt: new Date(expiredAt) },
     });
 
     expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
@@ -1400,9 +1401,10 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     ]);
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     const proof = await service.issue(scope(), principal);
+    const expiredAt = Date.now() - 60_000;
     await db.karavanMarketplaceAuthorityGrant.updateMany({
       where: { chatId },
-      data: { checkedAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000) },
+      data: { checkedAt: new Date(expiredAt - 15_000), expiresAt: new Date(expiredAt) },
     });
     await expect(service.introspect(proof)).rejects.toThrow('устарело');
   });
