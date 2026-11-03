@@ -1632,7 +1632,7 @@ const scenarioBehaviors = [
     beforeShot: async (page) => {
       await page.locator('.publications-editor').waitFor({ state: 'visible' });
       await page
-        .getByText('Получатель из ссылки пока не готов к публикации через Публик', {
+        .getByText('Получатель из ссылки пока не готов к публикации через Публика', {
           exact: true,
         })
         .waitFor({ state: 'visible' });
@@ -2053,11 +2053,11 @@ const scenarioBehaviors = [
         .filter({ hasText: 'Екатерина Михайлова' })
         .locator('.sanctions-workspace__details-trigger')
         .click();
-      await page.getByRole('button', { name: 'Разрешить писать', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Разрешить писать?' }).waitFor();
+      await page.getByRole('button', { name: 'Снять мут', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Снять мут?' }).waitFor();
       await page
-        .getByRole('dialog', { name: 'Разрешить писать?' })
-        .getByRole('button', { name: 'Снять ограничение', exact: true })
+        .getByRole('dialog', { name: 'Снять мут?' })
+        .getByRole('button', { name: 'Снять мут', exact: true })
         .click({ trial: true });
     },
   },
@@ -2094,8 +2094,8 @@ const scenarioBehaviors = [
         .getByRole('button', { name: 'Показать детали нарушения: Мария Ссылкина', exact: true })
         .click();
       await event.locator('.event-feed-item__details').waitFor({ state: 'visible' });
-      await event.getByRole('button', { name: 'Заблокировать', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Блокировка участника' }).waitFor();
+      await event.getByRole('button', { name: 'Бан', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Бан участника' }).waitFor();
     },
     afterShot: (page) => assertModerationScopeBusy(page, 'В этом чате'),
   },
@@ -2198,8 +2198,8 @@ const scenarioBehaviors = [
       await participant.click();
       const sheet = page.locator('.participant-sheet');
       await sheet.waitFor({ state: 'visible' });
-      await sheet.getByRole('button', { name: 'Заблокировать', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Блокировка участника' }).waitFor();
+      await sheet.getByRole('button', { name: 'Бан', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Бан участника' }).waitFor();
     },
     afterShot: (page) => assertModerationScopeBusy(page, 'Во всех чатах'),
   },
@@ -2471,7 +2471,7 @@ const scenarioBehaviors = [
       await panel
         .locator('.duplicate-diagnostics__facts > div')
         .filter({ has: page.getByText('Сохранённая настройка', { exact: true }) })
-        .getByText('Выключен', { exact: true })
+        .getByText('Выключена', { exact: true })
         .waitFor();
     },
   },
@@ -2594,9 +2594,16 @@ const scenarioBehaviors = [
   {
     name: 'chat-settings-storefront',
     beforeShot: async (page) => {
-      await page.getByRole('checkbox', { name: 'Включить кнопку витрины Караван' }).waitFor({
-        state: 'visible',
-      });
+      const panel = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
+      await panel.waitFor();
+      // The generic preview has no verified shop binding; full shop flows use their typed fixture.
+      await panel.getByText('Не удалось проверить магазин.', { exact: true }).waitFor();
+      await panel.getByRole('button', { name: 'Повторить', exact: true }).click({ trial: true });
+      if (await panel.getByRole('button', { name: 'Объявления в чате', exact: true }).count()) {
+        throw new Error(
+          'Unverified shop access must not expose an action that immediately returns home.',
+        );
+      }
     },
   },
   {
@@ -4559,10 +4566,8 @@ async function assertFavoriteCategoryIndicatorsContained(page, scenario) {
         const row = card.querySelector('.chat-card__row-actions');
         const settings = row?.querySelector('.chat-card__action--settings');
         const statistics = row?.querySelector('.chat-card__action--statistics');
-        const identityUrl =
-          identity instanceof HTMLAnchorElement ? new URL(identity.href) : null;
-        const settingsUrl =
-          settings instanceof HTMLAnchorElement ? new URL(settings.href) : null;
+        const identityUrl = identity instanceof HTMLAnchorElement ? new URL(identity.href) : null;
+        const settingsUrl = settings instanceof HTMLAnchorElement ? new URL(settings.href) : null;
         const entityType = identityUrl?.pathname.match(/\/(chat|channel)\/[^/]+\/settings$/u)?.[1];
         if (
           !(identity instanceof HTMLAnchorElement) ||
@@ -4581,9 +4586,7 @@ async function assertFavoriteCategoryIndicatorsContained(page, scenario) {
           settingsUrl?.pathname !== identityUrl?.pathname ||
           settingsUrl?.searchParams.get('focus') === 'storefront' ||
           settings.textContent?.trim() !== 'Настройки' ||
-          !settings
-            .getAttribute('aria-label')
-            ?.startsWith('Открыть настройки: ') ||
+          !settings.getAttribute('aria-label')?.startsWith('Открыть настройки: ') ||
           !statistics.textContent?.includes('Статистика')
         ) {
           return [

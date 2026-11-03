@@ -1376,21 +1376,9 @@ export function ChannelSuggestDialogPage({
             isComposerBusy && 'is-disabled',
             draftAttachments.length > 0 && 'is-active',
           )}
-          aria-label={`Добавить до ${MAX_SUGGEST_IMAGES} фото`}
-          aria-disabled={isComposerBusy}
-          role="button"
           onClick={() => {
             blurSuggestComposerFocus();
             armImageInputWatcher();
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') {
-              return;
-            }
-            event.preventDefault();
-            blurSuggestComposerFocus();
-            armImageInputWatcher();
-            imageInputRef.current?.click();
           }}
         >
           <input

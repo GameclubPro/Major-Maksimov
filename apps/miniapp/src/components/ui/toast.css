@@ -1,17 +1,17 @@
 @layer components {
   .toast-stack {
     --toast-bottom-offset: 98px;
+    --toast-bottom: var(--toast-inset, calc(var(--app-safe-bottom) + var(--toast-bottom-offset)));
 
     position: fixed;
-    left: 50%;
-    bottom: var(--toast-inset, calc(var(--app-safe-bottom) + var(--toast-bottom-offset)));
-    transform: translateX(-50%);
+    inset: auto 0 var(--toast-bottom);
+    margin-inline: auto;
     width: min(92vw, 520px);
     display: grid;
     gap: var(--space-2);
     z-index: 1700;
     pointer-events: none;
-    max-height: calc(var(--app-viewport-height, 100dvh) - 24px);
+    max-height: calc(var(--app-viewport-height, 100dvh) - var(--toast-bottom) - 12px);
     overflow-y: auto;
   }
 

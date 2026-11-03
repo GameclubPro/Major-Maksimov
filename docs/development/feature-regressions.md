@@ -114,6 +114,11 @@ For actual publication recovery and access, use the maintained
 [diagnostics](../operations/runbooks/publisher-publication-diagnostics.md) and
 [access runbook](../operations/runbooks/publisher-access-refresh-rollout.md).
 
+Mobile feedback, draft write failures/retry, numeric correction, narrow weekday controls and
+keyboard/caret visibility are covered by [mobile UI quality](../../apps/miniapp/test/mobile-ui-quality.browser.mjs).
+It starts an owned local server and uses WebKit/Chromium with both keyboard models.
+`MOBILE_QUALITY_WIDTH` selects one of its viewport profiles for a focused rerun.
+
 ## Chat Shop
 
 Use the [current product decisions](miniapp-product-decisions.md#miniapp-shop-03-управление-магазином-без-лишних-шагов)
@@ -134,3 +139,8 @@ Inspect each browser entrypoint's server and environment options before running 
 Major's synthetic fixtures do not validate Karavan's seller implementation or live MAX.
 For Birzhik advertising/profile cases, use the separate
 [marketplace regression map](marketplace-integration.md#focused-evidence).
+
+[Shop mobile quality](../../apps/miniapp/test/karavan-shop-mobile-quality.browser.mjs) checks
+visible field errors, the category consequence review before applying changes, and retained
+listing pages with a section switch. It runs the real components with the existing typed
+shop fixture on narrow WebKit and Android Chromium profiles.

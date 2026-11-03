@@ -31,10 +31,12 @@ export function useShop() {
   if (!value) throw new Error('Missing shop');
   return value;
 }
-export function useShopPages<K extends 'listings' | 'applications' | 'catalog' | 'invitations'>(
+export function useShopPages<
+  K extends 'listings' | 'applications' | 'catalog' | 'invitations' | 'content',
+>(
   command: Extract<
     ShopCommand,
-    { operation: 'listings' | 'applications' | 'catalog' | 'invitations' }
+    { operation: 'listings' | 'applications' | 'catalog' | 'invitations' | 'content' }
   > & { operation: K },
   enabled = true,
 ) {

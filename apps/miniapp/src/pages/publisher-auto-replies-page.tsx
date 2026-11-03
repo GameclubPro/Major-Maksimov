@@ -285,6 +285,7 @@ function PublisherAutoReplyEditor({
     dirty,
     missingImageCount,
     storageReadError,
+    storageWriteError,
     modifiedSinceHydration,
     retryHydration,
     persist,
@@ -300,6 +301,7 @@ function PublisherAutoReplyEditor({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [buttonsOpen, setButtonsOpen] = useState(false);
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const [persisting, setPersisting] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [imagesPreparing, setImagesPreparing] = useState(false);
   const [phraseInput, setPhraseInput] = useState('');
@@ -519,15 +521,39 @@ function PublisherAutoReplyEditor({
     [missingImageCount],
   );
 
+  const revealIssues = useCallback((nextIssues: AutoReplyDraftIssues) => {
+    setIssues(nextIssues);
+    window.requestAnimationFrame(() => {
+      const selector = nextIssues.phrases
+        ? '[aria-labelledby="publisher-auto-reply-phrase-title"]:not(:disabled)'
+        : nextIssues.fuzzyMatch
+          ? '.publisher-auto-reply-editor__match-error'
+          : nextIssues.content
+            ? '.is-content [contenteditable="true"]'
+            : null;
+      if (!selector) return;
+      const field = editorRef.current?.querySelector<HTMLElement>(selector);
+      if (!field) return;
+      if (!field.matches('input, button, [contenteditable="true"]')) field.tabIndex = -1;
+      field.focus({ preventScroll: true });
+      field.scrollIntoView({ block: 'center', behavior: 'instant' });
+    });
+  }, []);
+
   const validateAndReview = useCallback(() => {
     const composed = mergePendingPhrase();
     if (composed.issue) {
-      setIssues((current) => ({ ...current, phrases: composed.issue }));
+      revealIssues({ phrases: composed.issue });
       return;
     }
     const nextIssues = validateEditorDraft(composed.draft);
-    setIssues(nextIssues);
-    if (nextIssues.buttons) {
+    revealIssues(nextIssues);
+    if (
+      nextIssues.buttons &&
+      !nextIssues.phrases &&
+      !nextIssues.fuzzyMatch &&
+      !nextIssues.content
+    ) {
       setButtonsOpen(true);
     } else if (Object.keys(nextIssues).length === 0) {
       if (composed.draft !== draft) {
@@ -536,7 +562,7 @@ function PublisherAutoReplyEditor({
       }
       setReviewOpen(true);
     }
-  }, [draft, mergePendingPhrase, setDraft, validateEditorDraft]);
+  }, [draft, mergePendingPhrase, revealIssues, setDraft, validateEditorDraft]);
 
   const editorDirty = dirty || normalizeAutoReplyPhrase(phraseInput).length > 0;
 
@@ -879,10 +905,9 @@ function PublisherAutoReplyEditor({
             Выберите заново {missingImageCount} фото из сохранённого черновика.
           </small>
         ) : null}
-        {storageReadError ? (
+        {storageWriteError ? (
           <small className="publisher-auto-reply-editor__missing-images" role="alert">
-            Не удалось прочитать черновик на устройстве. Сохраните автоответ перед закрытием
-            редактора.
+            Черновик не сохранён на устройстве. Не закрывайте приложение до сохранения автоответа.
           </small>
         ) : null}
         {totalImages > 0 ? (
@@ -1026,14 +1051,17 @@ function PublisherAutoReplyEditor({
         open={closeConfirmOpen}
         title="Закрыть редактор?"
         summary={
-          storageReadError
-            ? 'Не удалось прочитать черновик на устройстве. Несохранённые изменения будут потеряны.'
-            : 'Черновик останется на этом устройстве и восстановится при следующем открытии.'
+          storageWriteError
+            ? 'Не удалось сохранить черновик на устройстве. Попробуйте ещё раз или вернитесь в редактор.'
+            : 'Сохраним черновик на этом устройстве перед закрытием.'
         }
-        confirmLabel="Закрыть"
-        tone="danger"
+        confirmLabel={storageWriteError ? 'Повторить' : 'Сохранить и закрыть'}
+        confirmBusyLabel="Сохраняем…"
+        isBusy={persisting}
+        tone="accent"
         onClose={() => setCloseConfirmOpen(false)}
         onConfirm={() => {
+          if (persisting) return;
           const composed = mergePendingPhrase();
           if (composed.issue) {
             setIssues((current) => ({ ...current, phrases: composed.issue }));
@@ -1048,9 +1076,13 @@ function PublisherAutoReplyEditor({
             setCloseConfirmOpen(false);
             return;
           }
-          void persist(composed.draft);
-          setCloseConfirmOpen(false);
-          onClose();
+          setPersisting(true);
+          void persist(composed.draft).then((saved) => {
+            setPersisting(false);
+            if (!saved) return;
+            setCloseConfirmOpen(false);
+            onClose();
+          });
         }}
       />
     </div>

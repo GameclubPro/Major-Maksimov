@@ -15,6 +15,7 @@ import { renderPlainTextAsEditorHtml, renderSupportedMarkdownAsHtml } from '../l
 import { clipboardHtmlToSupportedMarkdown } from '../lib/max-rich-text-clipboard';
 import { parseEditorLinkHref, serializeEditorLinkMarkdown } from '../lib/max-rich-text-link';
 import { serializeEditorInlineMarkdown } from '../lib/max-rich-text-serialization';
+import { useVisibleEditorCaret } from '../lib/use-visible-editor-caret';
 import { useNormalizedMarkdownSource } from '../lib/use-normalized-markdown-source';
 import {
   isElementInTopmostNativeBackModal,
@@ -87,6 +88,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
     ref,
   ) {
     const editorRef = useRef<HTMLDivElement | null>(null);
+    useVisibleEditorCaret(editorRef);
     const savedRangeRef = useRef<Range | null>(null);
     const editingLinkRef = useRef<HTMLAnchorElement | null>(null);
     const lastEmittedMarkdownRef = useRef(value);
@@ -138,6 +140,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       const nextMarkdown = serializeEditorMarkdown(editor, {
         preserveCurlyBracePlaceholders,
       });
+      if (nextMarkdown === lastEmittedMarkdownRef.current) return;
       lastEmittedMarkdownRef.current = nextMarkdown;
       lastRenderedSourceFormatRef.current = 'markdown';
       onChange(nextMarkdown);
@@ -145,19 +148,15 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
 
     const syncActiveTools = useCallback(() => {
       const editor = editorRef.current;
-      if (!editor || !interactiveRef.current || typeof document === 'undefined') {
-        setActiveTools(new Set());
-        return;
-      }
-
-      const range = readCurrentEditorRange(editor);
-      if (!range) {
-        setActiveTools(new Set());
-        return;
-      }
-
-      savedRangeRef.current = range.cloneRange();
-      setActiveTools(resolveActiveTools(editor, range));
+      const range =
+        editor && interactiveRef.current && typeof document !== 'undefined'
+          ? readCurrentEditorRange(editor)
+          : null;
+      if (range) savedRangeRef.current = range.cloneRange();
+      const next = editor && range ? resolveActiveTools(editor, range) : new Set<MaxMarkdownTool>();
+      setActiveTools((current) =>
+        current.size === next.size && [...next].every((tool) => current.has(tool)) ? current : next,
+      );
     }, []);
 
     useEffect(() => {

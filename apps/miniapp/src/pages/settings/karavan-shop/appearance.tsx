@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { StorefrontActions, useStorefrontDirty } from '../storefront-workspace';
 import {
   marketplaceAppearanceSchema,
@@ -49,11 +49,30 @@ async function imageData(file: File, cover: boolean): Promise<string> {
   }
 }
 export default function ShopAppearance({ onView }: { onView?: () => void }) {
+  const errorId = useId();
+  const [validationAttempt, setValidationAttempt] = useState(0);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const blocksRef = useRef<HTMLFieldSetElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const [invalidField, setInvalidField] = useState<'name' | 'blocks' | null>(null);
   const commands = useShopCommands();
   const query = useShopQuery<'appearance'>({ operation: 'appearance' });
   const [draft, setDraft] = useState<MarketplaceAppearance | null>(null),
     [uploading, setUploading] = useState(false),
     [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!error) return;
+    const target =
+      invalidField === 'name'
+        ? nameRef.current
+        : invalidField === 'blocks'
+          ? blocksRef.current
+          : errorRef.current;
+    const details = target?.closest('details');
+    if (details) details.open = true;
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: 'center', behavior: 'instant' });
+  }, [error, invalidField, validationAttempt]);
   const mutation = useShopMutation({ owner: 'appearance', page: 'appearance' }, (command) => {
     if (command.operation === 'appearance_apply' || command.operation === 'appearance_save')
       setDraft((current) =>
@@ -91,10 +110,12 @@ export default function ShopAppearance({ onView }: { onView?: () => void }) {
   ) => {
     setDraft({ ...value, [key]: next });
     setError(null);
+    setInvalidField(null);
   };
   const upload = async (file: File, key: 'logoImageUrl' | 'coverImageUrl') => {
     setUploading(true);
     setError(null);
+    setInvalidField(null);
     let dataBase64: string;
     try {
       dataBase64 = await imageData(file, key === 'coverImageUrl');
@@ -125,10 +146,20 @@ export default function ShopAppearance({ onView }: { onView?: () => void }) {
   const save = (operation: 'appearance_apply' | 'appearance_save') => {
     const parsed = marketplaceAppearanceSchema.safeParse(value);
     if (!parsed.success) {
-      setError('Проверьте название и выберите хотя бы один раздел.');
+      setValidationAttempt((attempt) => attempt + 1);
+      const field = parsed.error.issues[0]?.path[0];
+      setInvalidField(field === 'name' || field === 'blocks' ? field : null);
+      setError(
+        field === 'name'
+          ? 'Введите название магазина.'
+          : field === 'blocks'
+            ? 'Выберите хотя бы один раздел.'
+            : 'Проверьте оформление магазина.',
+      );
       return;
     }
     setError(null);
+    setInvalidField(null);
     mutation.mutate(
       {
         operation,
@@ -147,15 +178,28 @@ export default function ShopAppearance({ onView }: { onView?: () => void }) {
     <>
       <MutationFailure mutation={mutation} />
       <MutationFailure mutation={imageMutation} />
-      {error ? <p role="alert">{error}</p> : null}
+      {error && !invalidField ? (
+        <p ref={errorRef} tabIndex={-1} role="alert">
+          {error}
+        </p>
+      ) : null}
       <fieldset className="karavan-shop__form" disabled={editingBlocked}>
         <label className="karavan-module__field">
-          Название
+          <span id={`${errorId}-name`}>Название</span>
           <input
+            aria-labelledby={`${errorId}-name`}
+            ref={nameRef}
+            aria-invalid={invalidField === 'name'}
+            aria-describedby={invalidField === 'name' ? errorId : undefined}
             value={value.name}
             maxLength={120}
             onChange={(event) => change('name', event.target.value)}
           />
+          {invalidField === 'name' ? (
+            <small id={errorId} role="alert">
+              {error}
+            </small>
+          ) : null}
         </label>
         <div className="karavan-shop__media">
           {(['logoImageUrl', 'coverImageUrl'] as const).map((key) => (
@@ -211,8 +255,18 @@ export default function ShopAppearance({ onView }: { onView?: () => void }) {
               )}
             </div>
           </fieldset>
-          <fieldset className="karavan-module__choices">
+          <fieldset
+            ref={blocksRef}
+            tabIndex={-1}
+            className="karavan-module__choices"
+            aria-describedby={invalidField === 'blocks' ? errorId : undefined}
+          >
             <legend>Главная магазина</legend>
+            {invalidField === 'blocks' ? (
+              <p id={errorId} role="alert">
+                {error}
+              </p>
+            ) : null}
             {value.blocks.map((block, index) => (
               <div className="karavan-shop__block" key={block.id}>
                 <label>

@@ -4277,6 +4277,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           ...current,
           messageLimitsBlockedWords: prepared.errors.join(' '),
         }));
+        revealStopWordsFeedback({
+          field: 'stopWordsPolicy.rules',
+          path: ['stopWordsPolicy', 'rules'],
+        });
         return null;
       }
       draftSettings = { ...draft, stopWordsPolicy: prepared.policy };
@@ -4302,7 +4306,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
 
     const payload = buildSectionPayload(section);
     if (!payload) {
+      if (section === 'stopWords') return;
       pushToast({
+        replaceKey: `settings-validation:${section}`,
         tone: 'danger',
         title: `Исправьте блок «${SECTION_LABELS[section]}»`,
         description: 'В блоке есть ошибки, их нужно исправить перед сохранением.',
@@ -4327,7 +4333,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
 
     const payload = buildSectionPayload(section);
     if (!payload) {
+      if (section === 'stopWords') return;
       pushToast({
+        replaceKey: `settings-validation:${section}`,
         tone: 'danger',
         title: `Исправьте блок «${SECTION_LABELS[section]}»`,
         description: 'В блоке есть ошибки, их нужно исправить перед сохранением.',
