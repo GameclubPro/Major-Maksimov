@@ -10,7 +10,7 @@ const script = resolve(import.meta.dirname, 'replicate-postgres-backup.sh');
 const ageAvailable = spawnSync('age', ['--version']).status === 0;
 
 for (const profile of ['maxim', 'eraser']) {
-  for (const scenario of ['valid', 'corrupt', 'foreign-checksum']) {
+  for (const scenario of ['valid', 'corrupt', 'foreign-checksum', 'changed-scheduled-hash']) {
     const corrupt = scenario === 'corrupt';
     const foreignChecksum = scenario === 'foreign-checksum';
     const accepted = scenario === 'valid';
@@ -68,9 +68,11 @@ else: sys.exit(2)
           TEST_CORRUPT: corrupt ? '1' : '0',
           MAXIM_BACKUP_AGE_RECIPIENTS: recipients,
           MAXIM_BACKUP_RCLONE_CONFIG: join(dir, 'config'),
-          MAXIM_BACKUP_REMOTE_PREFIX: 'test:bucket/postgres',
+          MAXIM_BACKUP_REMOTE_PREFIX: 'test:bucket/postgres///',
           MAXIM_BACKUP_MIN_FREE_BYTES: '1048576',
           MAXIM_BACKUP_REPLICATION_TIMEOUT_SEC: '30',
+          MAXIM_BACKUP_EXPECTED_SHA256:
+            scenario === 'changed-scheduled-hash' ? 'a'.repeat(64) : sha,
         };
         const result = spawnSync('bash', [script, dump], {
           env,
@@ -79,7 +81,7 @@ else: sys.exit(2)
         });
         assert.equal(result.status === 0, accepted, result.stderr);
         const files = readdirSync(remote);
-        if (foreignChecksum) assert.deepEqual(files, []);
+        if (foreignChecksum || scenario === 'changed-scheduled-hash') assert.deepEqual(files, []);
         assert.equal(
           files.some((file) => file.endsWith('.verified.json')),
           accepted,
@@ -89,6 +91,7 @@ else: sys.exit(2)
           assert.equal(receipt.dumpSha256, sha);
           assert.equal(receipt.profile, profile);
           assert.equal(receipt.remoteObject.includes('/eraser/'), profile === 'eraser');
+          assert.equal(receipt.remoteObject.includes('//'), false);
           assert.equal(receipt.verification, 'full_ciphertext_readback');
           const encrypted = files.find((file) => file.endsWith('.age'));
           const decrypted = spawnSync('age', ['-d', '-i', key, join(remote, encrypted)]);

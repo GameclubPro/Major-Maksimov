@@ -138,3 +138,86 @@ work in a fresh Redis namespace using a fake MAX transport. It cannot authorize
 deletions after restoring an old production snapshot: stop execution, retain the
 newer effect journals and reconcile the snapshot gap before admitting any effect.
 Never bring a recovery worker online merely because schema checks passed.
+
+## Durable scheduled admission and exact replication recovery
+
+The daily service calls `postgres-backup-schedule.sh request`. Its companion
+`backup-retry.timer` calls `tick` every 15 minutes; both use one private coordinator
+lock per profile. The installer enables this retry timer only after the same backup
+health gate as the daily timer. `Restart=no` remains deliberate: a failed or
+interrupted dump must not automatically become a new dump.
+
+The private `.scheduler-v1/state.json` records one operation, its source revision,
+attempt identities, original deadline, last process heartbeat and exact archive.
+Admission permits at most six attempts over the original twelve-hour window, with
+15-minute, 30-minute, one-hour, two-hour and four-hour delays. Only a proved backup,
+pair or product lock conflict, or a failed pre-start readiness check, permits a retry.
+Pair conflict is observed on its validated kernel lock before normal admission;
+a race in the existing shared helper remains an unknown refusal. The shared pair
+protocol, helper and lock ordering are unchanged. An unknown refusal, watchdog
+abort or started dump failure becomes `needs_review`; new daily requests do not
+reset its budget or start another dump. A checkout change also requires review
+before any pending producer can run under a different revision.
+
+`status` reports `idle`, `waiting`, `producing`, `replication_pending`, `replicating`,
+`needs_review`, `overdue`, `verified` or `closed`, with the last saved process
+heartbeat and deadline. It reads one atomic state snapshot without acquiring the
+execution lock or starting work, so observation remains available during an active
+dump or replication. Deferred admission exits 75 for
+systemd without claiming a fresh backup; freshness remains the separate health
+service's responsibility. Failed evidence becomes `needs_review`, not an endlessly
+running status. These results and failures are local journal/state signals only;
+the helper sends no external notifications. A missing or stale process heartbeat
+is an observation gap, never proof that a process is still working.
+
+After a reviewed replication failure, use `resume-replication OPERATION_ID` on the
+same profile. It validates the exact persisted archive name, byte count, checksum,
+destination and complete readback receipt; it never creates another dump. There
+are at most three replication attempts per operation, including the first attempt.
+A complete archive followed by producer cleanup failure remains available for this
+explicit recovery. Retention preserves the pending dump and checksum even when a
+newer manual archive exists. Replication uses a private hash-checked snapshot of its
+shell and profile helper from the original Git revision, because the deployment
+lock is released before remote transfer. It performs one full local checksum pass
+inside the existing replication deadline. Existing root-only operation and
+immutable-checkout discipline still apply while the producer holds its deploy lock.
+
+Run these commands in a root service with the configured environment file. For
+example, this read-only inspection does not start a dump:
+
+```bash
+sudo systemd-run --wait --pipe --collect \
+  --unit=maxim-postgres-backup-inspect \
+  --property=EnvironmentFile=/etc/maxim-postgres-backup.env \
+  /usr/bin/env MAXIM_BACKUP_PROFILE=maxim \
+  /var/www/Chat_bot/infra/scripts/postgres-backup-schedule.sh status
+```
+
+Use `MAXIM_BACKUP_PROFILE=eraser` for Lastik. A reviewed recovery uses the same
+invocation with a distinct transient unit name and `resume-replication` followed
+by the exact reported operation UUID. `close OPERATION_ID` explicitly acknowledges
+an operation in `needs_review` or `overdue`, releases its retention pin and permits
+a future daily request. It does not verify, remove or repair any archive. Before
+closing, preserve failure evidence and resolve any uncertain primary work or shared
+admission owner through the existing incident procedure; never delete scheduler
+state or shared lock files to reset a failure.
+
+Both profiles' generated services require the tracked scheduler capability in
+`ExecStartPre`, alongside Lastik's existing profile guard. Install compatible units
+before first using scheduler state, with timers disabled until recovery evidence
+passes. A checkout rollback without that capability fails before running old health
+or producer behavior. Do not reinstall an older timer installer over these units;
+this host-tooling constraint is separate from application image rollback. Unknown
+state versions fail closed. The service limit is 18 hours 20 minutes, covering the
+producer and replication outer deadlines plus termination grace; the underlying
+12-hour dump, six-hour replication and readiness watchdog limits are unchanged.
+
+Health reports backup data age separately from readback verification age. The
+strict archive filename timestamp supplies a conservative generation-start bound,
+not an exact PostgreSQL snapshot time. Independent evidence selects the newest
+verified archive generation and binds both reported ages to that same receipt;
+restore evidence selects the latest exercise and reports that archive's data age.
+Independent data older than 28 hours fails health even if re-read today. Existing
+28-hour verification and eight-day restore-exercise gates remain. The old
+`independentAgeMs` and `restoreAgeMs` fields remain verification-age aliases;
+`independentDataAgeMs` and `restoreDataAgeMs` identify the data-age measurements.

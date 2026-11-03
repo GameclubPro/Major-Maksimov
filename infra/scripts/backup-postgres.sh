@@ -24,6 +24,12 @@ REPLICATION_REQUIRED="${MAXIM_BACKUP_REPLICATION_REQUIRED:-0}"
 MODE="${1:-}"
 DEPLOY_LOCK_ACQUIRED=0
 
+record_schedule_result() {
+  if [[ -n "${MAXIM_BACKUP_OPERATION_ID:-}${MAXIM_BACKUP_RESULT_FILE:-}" ]]; then
+    node "$ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs" producer-result "$@"
+  fi
+}
+
 validate_non_negative_integer() {
   local name="$1"
   local value="$2"
@@ -100,9 +106,14 @@ if [[ "$MODE" != "--preflight-only" ]]; then
 fi
 
 mkdir -p "$BACKUP_DIR"
+record_schedule_result admission
 exec {BACKUP_LOCK_FD}>>"$LOCK_FILE"
-if ! flock -n "$BACKUP_LOCK_FD"; then
+if flock -n -E 75 "$BACKUP_LOCK_FD"; then
+  :
+else
+  BACKUP_LOCK_STATUS=$?
   echo "Another PostgreSQL backup is already running." >&2
+  if [[ "$BACKUP_LOCK_STATUS" == 75 ]]; then record_schedule_result deferred backup_lock_busy; fi
   exit 75
 fi
 
@@ -112,6 +123,7 @@ probe_runtime_ready() {
 
 if ! probe_runtime_ready; then
   echo "Refusing PostgreSQL backup while readiness or raw queue lag is degraded." >&2
+  record_schedule_result deferred readiness_not_ready
   exit 75
 fi
 
@@ -122,9 +134,19 @@ if [[ "$MODE" != "--preflight-only" ]]; then
   source "$DEPLOY_LOCK_HELPER"
   if ! acquire_deploy_lock; then
     echo "Refusing PostgreSQL backup while a deployment or maintenance operation is active." >&2
+    case "${MAXIM_DEPLOY_ADMISSION_REFUSAL:-unknown}" in
+      pair_lock_busy|product_lock_busy) record_schedule_result deferred "$MAXIM_DEPLOY_ADMISSION_REFUSAL" ;;
+    esac
     exit 75
   fi
   DEPLOY_LOCK_ACQUIRED=1
+  # FLAG: Admission can outlive a deploy. Refuse source drift before touching the
+  # primary; the acquired deploy lock now keeps these checked shell inputs stable.
+  if [[ -n "${MAXIM_BACKUP_SOURCE_SHA:-}" ]]; then
+    [[ "$MAXIM_BACKUP_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$MAXIM_BACKUP_SOURCE_SHA" ]]
+    git -C "$ROOT_DIR" diff --quiet "$MAXIM_BACKUP_SOURCE_SHA" -- infra/scripts
+  fi
 fi
 
 if [[ "$REQUIRE_DEDICATED_FILESYSTEM" == "1" ]] && \
@@ -136,6 +158,9 @@ fi
 
 # Remove expired generations before the capacity check, but preserve the newest completed
 # dump/checksum pair until a later run has successfully published its replacement.
+# FLAG: Retention cannot remove an exact archive awaiting independent verification,
+# including one produced by an interrupted scheduled operation.
+PINNED_DUMP="$(MAXIM_BACKUP_DIR="${MAXIM_BACKUP_DIR:-$ROOT_DIR/infra/data/backups}" node "$ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs" retention-pin)"
 LATEST_COMPLETED_DUMP=""
 shopt -s nullglob
 for completed_dump in "$BACKUP_DIR"/"${MAXIM_BACKUP_PREFIX}"_*.dump; do
@@ -147,13 +172,13 @@ shopt -u nullglob
 
 if [[ "$MODE" != "--preflight-only" ]]; then
   while IFS= read -r -d '' expired_dump; do
-    if [[ "$expired_dump" == "$LATEST_COMPLETED_DUMP" ]]; then
+    if [[ "$expired_dump" == "$LATEST_COMPLETED_DUMP" || "$(basename "$expired_dump")" == "$PINNED_DUMP" ]]; then
       continue
     fi
     rm -f -- "$expired_dump" "$expired_dump.sha256"
   done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "${MAXIM_BACKUP_PREFIX}_*.dump" -mtime "+$RETENTION_DAYS" -print0)
   while IFS= read -r -d '' expired_checksum; do
-    if [[ "$expired_checksum" == "$LATEST_COMPLETED_DUMP.sha256" ]]; then
+    if [[ "$expired_checksum" == "$LATEST_COMPLETED_DUMP.sha256" || "$(basename "$expired_checksum")" == "$PINNED_DUMP.sha256" ]]; then
       continue
     fi
     rm -f -- "$expired_checksum"
@@ -213,6 +238,7 @@ if [[ -e "$TARGET" || -e "$CHECKSUM_TARGET" ]]; then
   echo "Refusing to overwrite an existing PostgreSQL backup generation." >&2
   exit 1
 fi
+record_schedule_result producing "$(basename "$TARGET")"
 TEMP_DUMP="$(mktemp "$BACKUP_DIR/.${MAXIM_BACKUP_PREFIX}_${STAMP}.XXXXXX.dump.tmp")"
 TEMP_CHECKSUM="$(mktemp "$BACKUP_DIR/.${MAXIM_BACKUP_PREFIX}_${STAMP}.XXXXXX.sha256.tmp")"
 TEMP_PIPE="$(mktemp "$BACKUP_DIR/.${MAXIM_BACKUP_PREFIX}_${STAMP}.XXXXXX.pipe.tmp")"
@@ -380,6 +406,7 @@ PUBLISH_STARTED=1
 mv -- "$TEMP_DUMP" "$TARGET"
 mv -- "$TEMP_CHECKSUM" "$CHECKSUM_TARGET"
 PUBLISH_STARTED=0
+record_schedule_result local_complete "$(basename "$TARGET")" "$CHECKSUM" "$(stat -c %s "$TARGET")"
 rm -f -- "$WATCHDOG_ABORT_MARKER"
 release_deploy_lock
 DEPLOY_LOCK_ACQUIRED=0
