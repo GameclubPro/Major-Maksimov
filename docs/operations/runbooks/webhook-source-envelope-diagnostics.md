@@ -61,6 +61,14 @@ command detection, full media/URL validation, formatting bounds against original
 UTF-16 text and complete descendant/effect coverage are not evaluated. An
 apparently supported shape grants no no-effects, replay or settlement proof.
 
+The generic attachment `keys_supported` uses its original small structural key set.
+For `share`, the separate `modern_share_keys_supported` and
+`modern_share_payload_keys_supported` booleans distinguish the modern preview key
+sets, including optional `description` and `image_url`. Their fixed value kinds
+remain visible without values. A false generic result can therefore coexist with
+supported modern keys. These observations do not validate URL safety, lengths,
+text equivalence or the separate legacy post-seal content policy.
+
 The existing audit-role privileges, READ ONLY session, pinned schema resolution,
 2.5-second statement limit, 250-millisecond lock limit, eight-second wall ceiling,
 memory/temp limits, private error handling and exact-backend cleanup remain in

@@ -136,7 +136,7 @@ Commands:
   postgres-audit storage [--explain]
   postgres-audit multibot-preparation [--explain]
   postgres-audit webhook-owner-proof [--explain]
-  postgres-audit webhook-held-receipt [--explain]
+  postgres-audit webhook-held-receipt [receipt-id] [--explain]
   postgres-audit webhook-source-proof [--explain]
   postgres-audit webhook-source-envelope <owner-receipt-id> [--explain]
   postgres-audit webhook-retry-proof [--explain]
@@ -836,9 +836,15 @@ postgres_audit() {
     return
   fi
 
+  if [[ "$mode" == 'webhook-held-receipt' ]]; then
+    node "$ROOT_DIR/infra/scripts/webhook-held-receipt-audit.mjs" --validate-scope "${@:2}" >/dev/null || return 2
+    remote_exec "$(shell_quote_args ./infra/scripts/vps-postgres-audit.sh "$@")"
+    return
+  fi
+
   if [[ "$mode" == 'webhook-workload' || "$mode" == 'delete-retry-heads' || "$mode" == 'queue' || "$mode" == 'publisher-publications' || "$mode" == 'publisher-access-census' ||
         "$mode" == 'storage' || "$mode" == 'commercial-quality' || "$mode" == 'duplicate' ||
-        "$mode" == 'multibot-preparation' || "$mode" == 'webhook-owner-proof' || "$mode" == 'webhook-source-proof' || "$mode" == 'webhook-retry-proof' || "$mode" == 'webhook-queued-proof' || "$mode" == 'webhook-held-receipt' || "$mode" == 'legacy-order-window' ||
+        "$mode" == 'multibot-preparation' || "$mode" == 'webhook-owner-proof' || "$mode" == 'webhook-source-proof' || "$mode" == 'webhook-retry-proof' || "$mode" == 'webhook-queued-proof' || "$mode" == 'legacy-order-window' ||
         "$mode" == 'legacy-semantic-mirrors' ]]; then
     if [[ $# -gt 2 || ( $# -eq 2 && "$2" != '--explain' ) ]]; then
       echo "Usage: postgres-audit $mode [--explain]" >&2

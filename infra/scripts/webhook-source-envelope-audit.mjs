@@ -137,6 +137,13 @@ function mediaShape(value) {
     `jsonb_build_object(
     'type', ${finiteType('item', attachmentTypes)}, 'kind', ${kind('item')},
     'keys_supported', ${keys('item', ['type', 'payload', 'title', 'thumbnail'])},
+    'modern_share_keys_supported', CASE WHEN item->>'type'='share'
+      THEN ${keys('item', ['type', 'payload', 'title', 'description', 'image_url'])} END,
+    'modern_share_payload_keys_supported', CASE WHEN item->>'type'='share'
+      THEN ${keys("item->'payload'", ['url', 'token'])} END,
+    'title_kind', ${kind("item->'title'")},
+    'description_kind', ${kind("item->'description'")},
+    'image_url_kind', ${kind("item->'image_url'")},
     'payload_kind', ${kind("item->'payload'")},
     'payload_keys_supported', ${keys("item->'payload'", ['photo_id', 'video_id', 'audio_id', 'token', 'url'])},
     'photo_id_kind', ${kind("item#>'{payload,photo_id}'")},

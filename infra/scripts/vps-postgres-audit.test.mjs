@@ -1189,7 +1189,12 @@ test('owner proof is opt-in, fixed, preserves cleanup and suppresses raw databas
 test('held receipt catalog is opt-in, read-only and keeps database errors private', (t) => {
   const data = fixture();
   t.after(() => rmSync(data.directory, { force: true, recursive: true }));
-  for (const options of [[], ['--explain']]) {
+  for (const options of [
+    [],
+    ['--explain'],
+    ['private-receipt'],
+    ['private-receipt', '--explain'],
+  ]) {
     const result = runAudit(data, ['webhook-held-receipt', ...options]);
     assert.equal(result.status, 0, result.stderr);
     const sql = readFileSync(data.sql, 'utf8');
@@ -1197,7 +1202,12 @@ test('held receipt catalog is opt-in, read-only and keeps database errors privat
     assert.match(sql, /held_receipt_privileges_ready/u);
     assert.match(sql, /held_receipt_indexes_ready/u);
     assert.match(sql, /'audit',\s*'webhook_held_receipt'/u);
-    assert.equal(sql.includes('EXPLAIN (FORMAT JSON)'), options.length > 0);
+    assert.equal(sql.includes('EXPLAIN (FORMAT JSON)'), options.includes('--explain'));
+    if (options.includes('private-receipt')) {
+      assert.match(sql, /'selection','exact_receipt'/u);
+      assert.doesNotMatch(sql, /ORDER BY created_at,id LIMIT 1/u);
+      if (options.includes('--explain')) assert.match(sql, /force_generic_plan/u);
+    }
     assert.doesNotMatch(sql, /EXPLAIN ANALYZE|FOR UPDATE/u);
     const dockerArgs = readFileSync(data.dockerArgs, 'utf8');
     for (const expected of [
@@ -1218,7 +1228,11 @@ test('held receipt catalog is opt-in, read-only and keeps database errors privat
     ['SELECT 1'],
     ['--apply'],
     ['/tmp/private-query.sql'],
-    ['private-receipt'],
+    ['private-receipt', 'another-receipt'],
+    ['private-receipt;SELECT 1'],
+    ['x'.repeat(129)],
+    ['--explain', 'private-receipt'],
+    ['--validate-scope'],
     ['--privileges'],
     ['--explain', '--explain'],
   ]) {

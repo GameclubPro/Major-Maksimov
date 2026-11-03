@@ -9,6 +9,7 @@ import {
   heldReceiptIndexesSql,
   buildHeldReceiptAuditSql,
   emitHeldReceiptAuditSql,
+  parseHeldReceiptAuditArgs,
 } from './webhook-held-receipt-audit.mjs';
 
 const privateValue = 'PRIVATE_MESSAGE_IDENTITY_CONTENT_TOKEN';
@@ -95,10 +96,11 @@ async function seedSeal(db, cert = 'private-cert', seal = sealAt) {
     [cert],
   );
 }
-async function report(db) {
+async function report(db, targetId) {
   await db.exec('BEGIN READ ONLY');
   try {
-    const value = (await db.query(buildHeldReceiptAuditSql())).rows[0].jsonb_build_object;
+    const value = (await db.query(buildHeldReceiptAuditSql(false, targetId))).rows[0]
+      .jsonb_build_object;
     assert.equal(value.read_only, true);
     assert.equal(value.diagnostics_only, true);
     assert.equal(value.runtime_classifier_evaluated, false);
@@ -106,6 +108,8 @@ async function report(db) {
     assert.equal(value.replay_authorized, false);
     assert.equal(value.effect_completeness, 'unknown');
     assert.equal(value.source_validation, 'not_evaluated');
+    assert.equal(value.other_hold_metadata.exclusive_protocol_proven, false);
+    assert.equal(value.legacy_scope.all_matching_scopes_sealed_proven, false);
     const output = JSON.stringify(value);
     assert.ok(Buffer.byteLength(output) < 8192);
     assert.doesNotMatch(
@@ -142,7 +146,10 @@ test('CLI emits guarded read-only catalog SQL and refuses arbitrary scopes or re
   }
   for (const args of [
     ['--apply'],
-    [receiptId],
+    ['receipt', 'another'],
+    ['receipt;SELECT 1'],
+    ['x'.repeat(129)],
+    ['--explain', receiptId],
     ['--explain', '--explain'],
     ['--privileges', '--explain'],
   ]) {
@@ -159,6 +166,130 @@ test('CLI emits guarded read-only catalog SQL and refuses arbitrary scopes or re
   ]);
   assert.equal(result.status, 0);
   assert.match(result.stdout.toString(), /IN \(0,28\)/u);
+  for (const args of [[], ['--explain'], [receiptId], [receiptId, '--explain']]) {
+    const parsed = parseHeldReceiptAuditArgs(args);
+    assert.equal(parsed.explain, args.includes('--explain'));
+    assert.equal(parsed.receiptId, args.includes(receiptId) ? receiptId : undefined);
+    const validated = spawnSync(process.execPath, [
+      'infra/scripts/webhook-held-receipt-audit.mjs',
+      '--validate-scope',
+      ...args,
+    ]);
+    assert.equal(validated.status, 0);
+    assert.equal(validated.stdout.length, 0);
+  }
+  const keyedPlan = buildHeldReceiptAuditSql(true, receiptId);
+  assert.match(keyedPlan, /force_generic_plan/u);
+  assert.match(keyedPlan, /WHERE id=\$1 LIMIT 1/u);
+  assert.match(keyedPlan, /EXPLAIN \(FORMAT JSON\) EXECUTE maxim_held_receipt_audit/u);
+});
+
+test('a keyed receipt never falls back to the moving head, including missing and no-longer-received rows', async (t) => {
+  const db = await fixture(t);
+  await seedReceipt(db);
+  await seedScope(db);
+  await seedSeal(db);
+  await db.query(
+    `INSERT INTO webhook_events(id,status,created_at,normalized_payload)
+    VALUES ('older-receipt','RECEIVED','2020-01-01',$1)`,
+    [JSON.stringify({ type: 'other' })],
+  );
+  assert.equal((await report(db)).classification, 'not_message_removed');
+  const selected = await report(db, receiptId);
+  assert.equal(selected.selection, 'exact_receipt');
+  assert.equal(selected.classification, 'legacy_sealed_scope_present');
+  assert.equal(selected.receipt.status, 'RECEIVED');
+  assert.equal(selected.receipt.still_received, true);
+  assert.equal(selected.legacy_scope.seal_coverage, 'selected_scope_only');
+  const missing = await report(db, 'missing-receipt');
+  assert.equal(missing.classification, 'receipt_missing');
+  assert.equal(missing.receipt.found, false);
+  assert.equal(missing.receipt.status, null);
+  assert.equal(missing.legacy_scope.selected, false);
+  for (const status of ['QUEUED', 'PROCESSED', 'FAILED']) {
+    await db.query('UPDATE webhook_events SET status=$1 WHERE id=$2', [status, receiptId]);
+    const changed = await report(db, receiptId);
+    assert.equal(changed.classification, 'receipt_not_received');
+    assert.equal(changed.receipt.status, status);
+    assert.equal(changed.receipt.still_received, false);
+    assert.equal(changed.legacy_scope.scalar_identity_matches, true);
+  }
+});
+
+test('keyed created and edited metadata nominate the outer author without substituting a linked sender', async (t) => {
+  const db = await fixture(t);
+  await seedScope(db);
+  await seedSeal(db);
+  await db.query(
+    `INSERT INTO webhook_legacy_recoveries
+    (id,chat_id,message_id,user_id,owner_webhook_event_id,certificate_id)
+    VALUES ('private-linked-scope','other-chat','other-message','PRIVATE_LINKED_SENDER',$1,'missing-cert')`,
+    [receiptId],
+  );
+  for (const type of ['message_created', 'message_edited']) {
+    const payload = {
+      ...source(),
+      type,
+      raw: {
+        message: {
+          sender: { user_id: privateValue },
+          link: { sender: { user_id: 'PRIVATE_LINKED_SENDER' } },
+        },
+      },
+    };
+    await seedReceipt(db, payload);
+    assert.equal((await report(db)).classification, 'not_message_removed');
+    const value = await report(db, receiptId);
+    assert.equal(value.classification, 'legacy_sealed_scope_present');
+    assert.equal(value.receipt.event_type, type);
+    assert.equal(value.scope_metadata.user_nomination, 'normalized_outer_message_sender');
+    assert.equal(value.scope_metadata.normalized_author_valid, true);
+    assert.equal(value.scope_metadata.normalized_actor_valid, null);
+    assert.equal(value.scope_metadata.original_author_proven, false);
+    assert.equal(value.scope_metadata.global_user_match_count_lower_bound, 1);
+    assert.equal(value.legacy_scope.owner_is_receipt, false);
+    assert.equal(value.other_hold_metadata.backlog_message_family, 'not_evaluated');
+    assert.equal(value.other_hold_metadata.protocol_family_coverage, 'partial');
+    await seedReceipt(db, { ...payload, message: { ...payload.message, senderId: null } });
+    const missing = await report(db, receiptId);
+    assert.equal(missing.classification, 'normalized_scope_unproved');
+    assert.equal(missing.scope_metadata.normalized_author_valid, false);
+    assert.equal(missing.scope_metadata.global_user_family_available, false);
+    assert.equal(missing.legacy_scope.selected, false);
+  }
+  await seedReceipt(db);
+  const removal = await report(db, receiptId);
+  assert.equal(removal.scope_metadata.user_nomination, 'normalized_removal_actor');
+  assert.equal(removal.scope_metadata.normalized_author_valid, null);
+  assert.equal(removal.scope_metadata.normalized_actor_valid, true);
+});
+
+test('keyed message protocol observations retain unknown backlog message coverage and unsupported types', async (t) => {
+  const db = await fixture(t);
+  await seedReceipt(db, { ...source(), type: 'message_created' });
+  await db.query('INSERT INTO webhook_source_abandonments(chat_id,message_id) VALUES ($1,$1)', [
+    privateValue,
+  ]);
+  await db.query('INSERT INTO webhook_backlog_receipts(receipt_id,semantic_key) VALUES ($1,$2)', [
+    receiptId,
+    semanticKey,
+  ]);
+  const value = await report(db, receiptId);
+  assert.equal(value.classification, 'no_legacy_scope');
+  assert.equal(value.other_hold_metadata.modern_exact_message_present, true);
+  assert.equal(value.other_hold_metadata.backlog_exact_receipt_present, true);
+  assert.equal(value.other_hold_metadata.backlog_stored_semantic_present, true);
+  assert.equal(value.other_hold_metadata.backlog_message_family, 'not_evaluated');
+  await db.exec('UPDATE webhook_events SET semantic_key=NULL');
+  assert.equal(
+    (await report(db, receiptId)).other_hold_metadata.backlog_stored_semantic_present,
+    null,
+  );
+  await seedReceipt(db, { ...source(), type: 'user_removed' });
+  const unsupported = await report(db, receiptId);
+  assert.equal(unsupported.classification, 'unsupported_event_type');
+  assert.equal(unsupported.other_hold_metadata.modern_exact_message_present, null);
+  assert.equal(unsupported.scope_metadata.exact_family_available, false);
 });
 
 test('no head and unsupported oldest type remain explicit without selecting a later removal', async (t) => {
@@ -462,6 +593,56 @@ test(
       assert.notEqual(saturated.classification, 'no_legacy_scope');
       assert.notEqual(saturated.classification, 'legacy_sealed_scope_present');
 
+      for (const type of ['message_created', 'message_edited']) {
+        await seedReceipt(db, { ...source(), type });
+        const keyed = await report(db, receiptId);
+        assert.equal(keyed.receipt.event_type, type);
+        assert.equal(keyed.scope_metadata.user_nomination, 'normalized_outer_message_sender');
+        assert.equal(keyed.scope_metadata.exact_chat_prefix_count_lower_bound, 17);
+        assert.equal(keyed.scope_metadata.scopes_complete, false);
+        assert.equal(keyed.legacy_scope.selected, false);
+        const keyedPlan = (
+          await db.query(
+            `EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) ${buildHeldReceiptAuditSql(false, receiptId)}`,
+          )
+        ).rows[0]['QUERY PLAN'][0].Plan;
+        const keyedScans = walk(keyedPlan).filter((node) => node['Relation Name']);
+        const receiptScans = keyedScans.filter(
+          (node) => node['Relation Name'] === 'webhook_events',
+        );
+        assert.equal(receiptScans.length, 2);
+        for (const scan of keyedScans) {
+          assert.match(scan['Node Type'], /^Index (Only )?Scan$/u);
+          assert.ok(scan['Index Cond'], JSON.stringify(scan));
+          const inspected =
+            (scan['Actual Rows'] +
+              (scan['Rows Removed by Filter'] ?? 0) +
+              (scan['Rows Removed by Index Recheck'] ?? 0)) *
+            scan['Actual Loops'];
+          assert.ok(inspected <= 17, JSON.stringify(scan));
+        }
+        for (const scan of receiptScans) {
+          assert.equal(scan['Index Name'], 'webhook_events_pkey');
+          assert.ok(scan['Actual Rows'] * scan['Actual Loops'] <= 1);
+        }
+      }
+      await db.exec('BEGIN READ ONLY');
+      try {
+        const results = await db.query(buildHeldReceiptAuditSql(true, receiptId));
+        const generic = results.find((result) => result.command === 'EXPLAIN').rows[0][
+          'QUERY PLAN'
+        ];
+        const serialized = JSON.stringify(generic);
+        assert.doesNotMatch(serialized, /private-receipt|PRIVATE_MESSAGE/u);
+        assert.match(serialized, /\$1/u);
+        assert.ok(
+          walk(generic[0].Plan).some((node) => node['Index Name'] === 'webhook_events_pkey'),
+        );
+      } finally {
+        await db.exec('ROLLBACK');
+      }
+      await seedReceipt(db);
+
       await db.exec("DELETE FROM webhook_legacy_recoveries WHERE id LIKE 'distractor-%'");
       await db.query(
         `INSERT INTO webhook_legacy_recoveries
@@ -595,6 +776,7 @@ test(
         await locker.query('BEGIN');
         await locker.query('SELECT id FROM webhook_events WHERE id=$1 FOR UPDATE', [receiptId]);
         assert.equal((await report(db)).classification, 'legacy_sealed_scope_present');
+        assert.equal((await report(db, receiptId)).classification, 'legacy_sealed_scope_present');
       } finally {
         await locker.query('ROLLBACK');
         await locker.end();
@@ -704,7 +886,7 @@ test(
       );
       await seedReceipt(db, { ...source(), private: privateValue.repeat(20000) });
       assert.equal((await report(db)).classification, 'payload_uninspected');
-      await seedReceipt(db);
+      await seedReceipt(db, { ...source(), type: 'message_created' });
       await db.exec(`CREATE ROLE ${auditor}; GRANT USAGE ON SCHEMA public TO ${auditor};
         GRANT SELECT ON webhook_events TO ${auditor}; ${grants(auditor)} SET ROLE ${auditor}`);
       assert.equal(
@@ -712,6 +894,7 @@ test(
         true,
       );
       await report(db);
+      assert.equal((await report(db, receiptId)).receipt.event_type, 'message_created');
       await assert.rejects(
         db.query('SELECT owner_snapshot FROM webhook_legacy_recoveries'),
         /permission denied/u,

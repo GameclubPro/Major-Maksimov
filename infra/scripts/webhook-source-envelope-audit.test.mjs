@@ -132,6 +132,39 @@ test('one exact source reports finite forwarded envelope shape while withholding
   assert.equal((await report(db, 'missing-owner')).found, false);
 });
 
+test('share diagnostics distinguish the modern key set from the legacy generic shape without admitting content', async (t) => {
+  const db = await fixture(t);
+  const p = payload();
+  const share = {
+    type: 'share',
+    payload: { url: `https://example.com/${privateValue}`, token: privateValue },
+    title: privateValue,
+    description: privateValue,
+    image_url: `https://example.com/${privateValue}`,
+  };
+  p.raw.message.link.message.attachments = [share];
+  await seed(db, p);
+  let item = (await report(db)).shape.linked_body.attachments.items[0];
+  assert.equal(item.keys_supported, false);
+  assert.equal(item.modern_share_keys_supported, true);
+  assert.equal(item.modern_share_payload_keys_supported, true);
+  assert.equal(item.title_kind, 'string');
+  assert.equal(item.description_kind, 'string');
+  assert.equal(item.image_url_kind, 'string');
+  share[privateValue] = privateValue;
+  await seed(db, p);
+  item = (await report(db)).shape.linked_body.attachments.items[0];
+  assert.equal(item.modern_share_keys_supported, false);
+  delete share[privateValue];
+  share.payload[privateValue] = privateValue;
+  await seed(db, p);
+  assert.equal(
+    (await report(db)).shape.linked_body.attachments.items[0].modern_share_payload_keys_supported,
+    false,
+  );
+  assert.equal((await report(db)).shape.media_and_markup_runtime_validation, 'not_evaluated');
+});
+
 const faults = [
   [
     'raw',
