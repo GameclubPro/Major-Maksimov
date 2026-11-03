@@ -11,7 +11,8 @@ import {
   getKaravanMarketplaceSetupOptions,
   previewKaravanMarketplace,
 } from '../../lib/api/karavan-marketplace-client';
-import { saveMirroredItem } from '../../lib/native-storage';
+import { saveMirroredItem, writeLocalMirrorItem } from '../../lib/native-storage';
+import { localShopRecoveryReaders } from './karavan-shop/storage-recovery';
 import { describeUserFacingError } from '../../lib/user-facing-error';
 import { openMaxBotLink } from '../../lib/max-bridge';
 import {
@@ -41,6 +42,7 @@ export default function KaravanMarketplaceWizard({
   onSubmit,
   onCancel,
   sellerBotUrl,
+  localOnlyRecovery = false,
 }: {
   api: ApiTransport;
   chatId: string;
@@ -50,6 +52,7 @@ export default function KaravanMarketplaceWizard({
   onSubmit: (input: KaravanMarketplaceSetup) => void;
   onCancel?: () => void;
   sellerBotUrl?: string;
+  localOnlyRecovery?: boolean;
 }) {
   const storageKey = shopSetupDraftKey(actorId, chatId, intent);
   const creating = intent.kind === 'create';
@@ -133,7 +136,12 @@ export default function KaravanMarketplaceWizard({
     let active = true;
     setHydrated(false);
     setDraftRecoveryError(false);
-    void readShopDraftRecovery(actorId, chatId, intent)
+    void readShopDraftRecovery(
+      actorId,
+      chatId,
+      intent,
+      localOnlyRecovery ? localShopRecoveryReaders : undefined,
+    )
       .then((state) => {
         if (!active) return;
         if (state.status === 'error') {
@@ -155,7 +163,7 @@ export default function KaravanMarketplaceWizard({
     return () => {
       active = false;
     };
-  }, [storageKey, actorId, chatId, draftRecoveryAttempt]);
+  }, [storageKey, actorId, chatId, draftRecoveryAttempt, localOnlyRecovery]);
   useEffect(() => {
     if (!creating || !hydrated || draft.initialized || !options.data) return;
     setDraft((value) => ({
@@ -169,8 +177,12 @@ export default function KaravanMarketplaceWizard({
     }));
   }, [creating, hydrated, draft.initialized, options.data]);
   useEffect(() => {
-    if (hydrated) saveMirroredItem(storageKey, JSON.stringify(draft));
-  }, [draft, hydrated, storageKey]);
+    if (hydrated)
+      (localOnlyRecovery ? writeLocalMirrorItem : saveMirroredItem)(
+        storageKey,
+        JSON.stringify(draft),
+      );
+  }, [draft, hydrated, storageKey, localOnlyRecovery]);
   const change = (patch: Partial<ShopSetupDraft>) => {
     setDraft((value) => ({ ...value, ...patch }));
     setNotice(null);
