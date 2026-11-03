@@ -11,6 +11,7 @@ DUMP_PATH="${1:?Usage: replicate-postgres-backup.sh /absolute/path/maxim_TIMESTA
 RECIPIENTS="${MAXIM_BACKUP_AGE_RECIPIENTS:?Configure a public age recipients file}"
 RCLONE_CONFIG="${MAXIM_BACKUP_RCLONE_CONFIG:?Configure a dedicated MAXIM rclone file}"
 REMOTE_PREFIX="${MAXIM_BACKUP_REMOTE_PREFIX:?Configure the MAXIM backup object prefix}"
+while [[ "$REMOTE_PREFIX" == */ ]]; do REMOTE_PREFIX="${REMOTE_PREFIX%/}"; done
 MIN_FREE_BYTES="${MAXIM_BACKUP_MIN_FREE_BYTES:-17179869184}"
 TIMEOUT_SEC="${MAXIM_BACKUP_REPLICATION_TIMEOUT_SEC:-21600}"
 BW_LIMIT="${MAXIM_BACKUP_REPLICATION_BYTES_PER_SEC:-16777216}"
@@ -38,6 +39,11 @@ flock -n "$REPLICATION_LOCK_FD" || exit 75
 (( $(stat -c %s "$DUMP_PATH.sha256") <= 256 ))
 CHECKSUM_LINE="$(cat "$DUMP_PATH.sha256")"
 EXPECTED_SHA="${CHECKSUM_LINE:0:64}"
+# FLAG: Scheduled recovery binds the existing archive to its persisted identity.
+# This same deadline-bound checksum pass remains the sole full local verification.
+if [[ -n "${MAXIM_BACKUP_EXPECTED_SHA256:-}" ]]; then
+  [[ "$MAXIM_BACKUP_EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ && "$EXPECTED_SHA" == "$MAXIM_BACKUP_EXPECTED_SHA256" ]]
+fi
 [[ "$EXPECTED_SHA" =~ ^[a-f0-9]{64}$ && "$CHECKSUM_LINE" == "$EXPECTED_SHA  $(basename "$DUMP_PATH")" ]]
 (cd "$BACKUP_DIR" && run_bounded sha256sum --check --status "$(basename "$DUMP_PATH").sha256")
 DUMP_BYTES="$(stat -c %s "$DUMP_PATH")"

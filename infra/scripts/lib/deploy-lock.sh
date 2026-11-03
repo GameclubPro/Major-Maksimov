@@ -218,7 +218,8 @@ require_market_statistics_lock_dispatch() {
 }
 
 acquire_deploy_lock() {
-  local lock_file identity
+  local lock_file identity admission_status pair_probe_fd pair_probe_path
+  export MAXIM_DEPLOY_ADMISSION_REFUSAL=unknown
   if ! command -v flock >/dev/null 2>&1 || ! command -v stat >/dev/null 2>&1; then
     echo 'Linux flock, stat and procfs are required for the deploy lock.' >&2
     return 1
@@ -234,7 +235,22 @@ acquire_deploy_lock() {
 
   if maxim_pair_release_required; then
     maxim_pair_release_load || return 1
-    # FLAG: Acquire the host pair admission before the existing MAXIM product lock.
+    # FLAG: The shared helper's historical 75 is ambiguous. Observe only an exact
+    # kernel conflict on its validated inode, then close our descriptor before normal
+    # admission. A later acquisition race remains unknown; never alter the shared helper.
+    if [[ -z "${PAIR_RELEASE_ADMISSION_TOKEN:-}" ]]; then
+      _pair_release_paths || return 1
+      pair_probe_path="$(pair_release_admission_directory)/state/admission.lock"
+      exec {pair_probe_fd}<>"$pair_probe_path" || return 1
+      if flock -n -E 75 "$pair_probe_fd"; then
+        exec {pair_probe_fd}>&-
+      else
+        admission_status=$?
+        exec {pair_probe_fd}>&-
+        if [[ "$admission_status" == 75 ]]; then MAXIM_DEPLOY_ADMISSION_REFUSAL=pair_lock_busy; fi
+        return 1
+      fi
+    fi
     pair_release_admission_acquire major '' "$(maxim_pair_release_mode)" || return 1
   fi
   trap release_deploy_lock EXIT
@@ -242,10 +258,13 @@ acquire_deploy_lock() {
   lock_file="$(deploy_lock_file)"
   identity="$(stat -c '%d:%i' -- "$lock_file")" || return 1
   exec {MAXIM_DEPLOY_LOCK_FD}<>"$lock_file" || return 1
-  if ! flock -n "$MAXIM_DEPLOY_LOCK_FD"; then
+  if flock -n -E 75 "$MAXIM_DEPLOY_LOCK_FD"; then
+    :
+  else
+    admission_status=$?
     exec {MAXIM_DEPLOY_LOCK_FD}>&-
     unset MAXIM_DEPLOY_LOCK_FD
-    maxim_pair_release_release || true
+    if maxim_pair_release_release && [[ "$admission_status" == 75 ]]; then MAXIM_DEPLOY_ADMISSION_REFUSAL=product_lock_busy; fi
     echo 'Another supported deploy, rollback or runtime operation holds the deploy lock.' >&2
     return 1
   fi

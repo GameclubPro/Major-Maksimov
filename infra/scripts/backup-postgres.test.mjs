@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -494,69 +495,191 @@ test('Lastik readiness failure or unknown backup profile cannot start a dump', (
   assert.equal(existsSync(data.dockerLog), false);
 });
 
-for (const scenario of ['disabled', 'healthy', 'missing-evidence']) {
-  test(`Lastik timer installation keeps its own identity and evidence gate: ${scenario}`, (t) => {
-    const directory = mkdtempSync(join(tmpdir(), 'eraser-backup-units-'));
-    t.after(() => rmSync(directory, { recursive: true, force: true }));
-    const bin = join(directory, 'bin');
-    const units = join(directory, 'units');
-    const log = join(directory, 'commands');
-    mkdirSync(bin);
-    mkdirSync(units);
-    writeFileSync(
-      join(bin, 'sudo'),
-      `#!/usr/bin/env bash
+for (const profile of ['maxim', 'eraser']) {
+  const unitPrefix = profile === 'eraser' ? 'maxim-eraser-postgres' : 'maxim-postgres';
+  for (const scenario of ['disabled', 'healthy', 'missing-evidence']) {
+    test(`${profile} timer installation keeps its own identity and evidence gate: ${scenario}`, (t) => {
+      const directory = mkdtempSync(join(tmpdir(), 'eraser-backup-units-'));
+      t.after(() => rmSync(directory, { recursive: true, force: true }));
+      const bin = join(directory, 'bin');
+      const units = join(directory, 'units');
+      const log = join(directory, 'commands');
+      mkdirSync(bin);
+      mkdirSync(units);
+      writeFileSync(
+        join(bin, 'sudo'),
+        `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$TEST_UNIT_LOG"
 case "$1" in
   install) cp -- "$8" "$9" ;;
   test) exit 0 ;;
   systemctl)
-    if [[ "$2" == start && "$3" == maxim-eraser-postgres-backup-health.service ]]; then
+    if [[ "$2" == start && "$3" == "$TEST_UNIT_PREFIX-backup-health.service" ]]; then
       exit "$TEST_UNIT_HEALTH"
     fi ;;
   *) exit 99 ;;
 esac
 `,
-      { mode: 0o700 },
-    );
-    const result = spawnSync('bash', [installer], {
-      encoding: 'utf8',
-      timeout: 5000,
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        MAXIM_SYSTEMD_UNIT_DIR: units,
-        MAXIM_BACKUP_PROFILE: 'eraser',
-        MAXIM_ENABLE_POSTGRES_BACKUP_TIMER: scenario === 'disabled' ? '0' : '1',
-        MAXIM_ENABLE_POSTGRES_RESTORE_SMOKE_TIMER: scenario === 'disabled' ? '0' : '1',
-        TEST_UNIT_LOG: log,
-        TEST_UNIT_HEALTH: scenario === 'missing-evidence' ? '1' : '0',
-      },
-    });
-    assert.equal(result.status === 0, scenario !== 'missing-evidence', result.stderr);
-    const names = readdirSync(units);
-    assert.equal(names.length, 6);
-    assert.ok(names.every((name) => name.startsWith('maxim-eraser-postgres-')));
-    for (const name of names.filter((name) => name.endsWith('.service'))) {
-      const service = readFileSync(join(units, name), 'utf8');
-      assert.match(service, /ExecStart=.*MAXIM_BACKUP_PROFILE=eraser /);
-      const precheck = service.match(/^ExecStartPre=\/usr\/bin\/test -f (.+)$/m)?.[1];
-      assert.equal(precheck, join(root, 'infra/scripts/lib/postgres-backup-profile.sh'));
-      // A checkout rollback removes this newly introduced tracked capability file. Systemd
-      // must fail, not skip the unit successfully or execute the old main-database script.
-      assert.equal(spawnSync('/usr/bin/test', ['-f', precheck]).status, 0);
-      assert.notEqual(
-        spawnSync('/usr/bin/test', [
-          '-f',
-          join(directory, 'old-checkout', 'infra/scripts/lib/postgres-backup-profile.sh'),
-        ]).status,
-        0,
+        { mode: 0o700 },
       );
-      assert.doesNotMatch(service, /^ConditionPathExists=.*postgres-backup-profile/m);
-    }
-    const commands = readFileSync(log, 'utf8');
-    assert.doesNotMatch(commands, /systemctl (?:start|enable).* maxim-postgres-/);
-    assert.equal(commands.includes('systemctl enable --now'), scenario === 'healthy');
-  });
+      const result = spawnSync('bash', [installer], {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          MAXIM_SYSTEMD_UNIT_DIR: units,
+          MAXIM_BACKUP_PROFILE: profile,
+          TEST_UNIT_PREFIX: unitPrefix,
+          MAXIM_ENABLE_POSTGRES_BACKUP_TIMER: scenario === 'disabled' ? '0' : '1',
+          MAXIM_ENABLE_POSTGRES_RESTORE_SMOKE_TIMER: scenario === 'disabled' ? '0' : '1',
+          TEST_UNIT_LOG: log,
+          TEST_UNIT_HEALTH: scenario === 'missing-evidence' ? '1' : '0',
+        },
+      });
+      assert.equal(result.status === 0, scenario !== 'missing-evidence', result.stderr);
+      const names = readdirSync(units);
+      assert.equal(names.length, 8);
+      assert.ok(names.every((name) => name.startsWith(unitPrefix + '-')));
+      for (const name of names.filter((name) => name.endsWith('.service'))) {
+        const service = readFileSync(join(units, name), 'utf8');
+        assert.match(service, new RegExp('ExecStart=.*MAXIM_BACKUP_PROFILE=' + profile + ' '));
+        assert.match(service, /ExecStartPre=.*postgres-backup-schedule.mjs capability/);
+        const precheck = service.match(/^ExecStartPre=\/usr\/bin\/test -f (.+)$/m)?.[1];
+        if (profile === 'eraser') {
+          assert.equal(precheck, join(root, 'infra/scripts/lib/postgres-backup-profile.sh'));
+          // A checkout rollback removes this newly introduced tracked capability file. Systemd
+          // must fail, not skip the unit successfully or execute the old main-database script.
+          assert.equal(spawnSync('/usr/bin/test', ['-f', precheck]).status, 0);
+          assert.notEqual(
+            spawnSync('/usr/bin/test', [
+              '-f',
+              join(directory, 'old-checkout', 'infra/scripts/lib/postgres-backup-profile.sh'),
+            ]).status,
+            0,
+          );
+          assert.doesNotMatch(service, /^ConditionPathExists=.*postgres-backup-profile/m);
+        } else assert.equal(precheck, undefined);
+      }
+      const commands = readFileSync(log, 'utf8');
+      if (profile === 'eraser')
+        assert.doesNotMatch(commands, /systemctl (?:start|enable).* maxim-postgres-/);
+      const backup = readFileSync(join(units, unitPrefix + '-backup.service'), 'utf8');
+      const retry = readFileSync(join(units, unitPrefix + '-backup-retry.service'), 'utf8');
+      assert.match(backup, /postgres-backup-schedule.sh request/);
+      assert.match(retry, /postgres-backup-schedule.sh tick/);
+      if (scenario === 'healthy')
+        assert.match(commands, new RegExp(unitPrefix + '-backup-retry.timer'));
+      assert.equal(commands.includes('systemctl enable --now'), scenario === 'healthy');
+    });
+  }
 }
+
+function scheduledContext(data, archive = null) {
+  const stateDirectory = join(data.backup, '.scheduler-v1');
+  mkdirSync(stateDirectory, { mode: 0o700 });
+  const operationId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const attemptId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  const destination = 'test:bucket/postgres';
+  writeFileSync(
+    join(stateDirectory, 'state.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      profile: 'maxim',
+      operationId,
+      attemptId,
+      sourceSha: 'a'.repeat(40),
+      phase: archive ? 'needs_review' : 'producing',
+      requestedAt: 0,
+      deadlineAt: 43_200_000,
+      nextAttemptAt: 0,
+      attempts: 1,
+      replicationAttempts: 0,
+      destination,
+      destinationHash: createHash('sha256').update(destination).digest('hex'),
+      archive,
+    }),
+    { mode: 0o600 },
+  );
+  return {
+    MAXIM_BACKUP_OPERATION_ID: operationId,
+    MAXIM_BACKUP_ATTEMPT_ID: attemptId,
+    MAXIM_BACKUP_RESULT_FILE: join(stateDirectory, 'producer-result.json'),
+  };
+}
+
+test('producer reports a proved pre-start refusal bound to operation and attempt', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const context = scheduledContext(data);
+  const result = runHelper(data, [], { ...context, MOCK_READY_FAIL: '1' });
+  assert.equal(result.status, 75, result.stderr);
+  const receipt = JSON.parse(readFileSync(context.MAXIM_BACKUP_RESULT_FILE));
+  assert.equal(receipt.phase, 'deferred');
+  assert.equal(receipt.reason, 'readiness_not_ready');
+  assert.equal(receipt.operationId, context.MAXIM_BACKUP_OPERATION_ID);
+  assert.equal(receipt.attemptId, context.MAXIM_BACKUP_ATTEMPT_ID);
+  assert.equal(existsSync(data.dockerLog), false);
+});
+
+test('backup lock utility failure is unknown and cannot authorize a fresh dump retry', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const context = scheduledContext(data);
+  writeFileSync(join(data.bin, 'flock'), '#!/bin/sh\nexit 70\n', { mode: 0o700 });
+  const result = runHelper(data, [], context);
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal(JSON.parse(readFileSync(context.MAXIM_BACKUP_RESULT_FILE)).phase, 'admission');
+  assert.equal(existsSync(data.dockerLog), false);
+});
+
+test('producer refuses source revision drift after admission before sizing or dump', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const context = scheduledContext(data);
+  const result = runHelper(data, [], { ...context, MAXIM_BACKUP_SOURCE_SHA: 'b'.repeat(40) });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(JSON.parse(readFileSync(context.MAXIM_BACKUP_RESULT_FILE)).phase, 'admission');
+  assert.equal(existsSync(data.dockerLog), false);
+  assert.equal(spawnSync('flock', ['-n', data.deployLock, 'true']).status, 0);
+});
+
+test('producer publishes exact complete archive evidence before releasing admission', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const context = scheduledContext(data);
+  const result = runHelper(data, [], context);
+  assert.equal(result.status, 0, result.stderr);
+  const receipt = JSON.parse(readFileSync(context.MAXIM_BACKUP_RESULT_FILE));
+  assert.equal(receipt.phase, 'local_complete');
+  const archive = readFileSync(join(data.backup, receipt.archiveName));
+  assert.equal(receipt.sha256, createHash('sha256').update(archive).digest('hex'));
+  assert.equal(receipt.bytes, archive.length);
+  assert.equal(receipt.attemptId, context.MAXIM_BACKUP_ATTEMPT_ID);
+});
+
+test('manual retention preserves an older pending archive and checksum beside the newest generation', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { recursive: true, force: true }));
+  const names = [
+    'maxim_20200101T000000Z.dump',
+    'maxim_20200102T000000Z.dump',
+    'maxim_20200103T000000Z.dump',
+  ];
+  for (const name of names) {
+    for (const suffix of ['', '.sha256']) {
+      const path = join(data.backup, name + suffix);
+      writeFileSync(path, 'old');
+      utimesSync(path, new Date('2020-01-01'), new Date('2020-01-01'));
+    }
+  }
+  scheduledContext(data, { name: names[0], sha256: 'a'.repeat(64), bytes: 3 });
+  const result = runHelper(data, [], { MOCK_DUMP_FAIL: '1' });
+  assert.notEqual(result.status, 0);
+  for (const suffix of ['', '.sha256']) {
+    assert.equal(existsSync(join(data.backup, names[0] + suffix)), true);
+    assert.equal(existsSync(join(data.backup, names[1] + suffix)), false);
+    assert.equal(existsSync(join(data.backup, names[2] + suffix)), true);
+  }
+});

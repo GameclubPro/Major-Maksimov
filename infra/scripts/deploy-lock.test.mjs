@@ -456,3 +456,72 @@ read -r _
     assert.equal(spawnSync('flock', ['-n', foreign, 'true']).status, 0);
   },
 );
+
+test('admission diagnostics prove pair conflict without changing the shared helper', async (t) => {
+  const data = fixture(t);
+  const holder = actor(t, data, 'exec 9<>"$2"; flock 9; printf "HELD\\n"; read -r _', [
+    data.pair.file,
+  ]);
+  await holder.marker((line) => line === 'HELD');
+  const denied = command(
+    data,
+    'if acquire_deploy_lock; then exit 99; fi; printf "%s\\n" "$MAXIM_DEPLOY_ADMISSION_REFUSAL"',
+  );
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.equal(denied.stdout.trim(), 'pair_lock_busy');
+  holder.gate();
+  await holder.done;
+  assert.equal(observe(data), 0);
+});
+
+for (const helperStatus of [70, 75]) {
+  test(`a pair helper refusal ${helperStatus} after a free probe remains unknown`, (t) => {
+    const data = fixture(t);
+    const denied = command(
+      data,
+      `
+maxim_pair_release_load
+maxim_pair_release_load() { :; }
+pair_release_admission_acquire() { return ${helperStatus}; }
+MAXIM_DEPLOY_ADMISSION_REFUSAL=pair_lock_busy
+if acquire_deploy_lock; then exit 99; fi
+printf '%s\\n' "$MAXIM_DEPLOY_ADMISSION_REFUSAL"
+`,
+    );
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.equal(denied.stdout.trim(), 'unknown');
+  });
+}
+
+for (const [flockStatus, releaseStatus, expected] of [
+  [75, 0, 'product_lock_busy'],
+  [70, 0, 'unknown'],
+  [75, 70, 'unknown'],
+]) {
+  test(`product refusal classifies only conflict=${flockStatus} with successful release=${releaseStatus}`, (t) => {
+    const data = fixture(t);
+    const denied = command(
+      data,
+      `
+maxim_pair_release_required() { return 1; }
+maxim_pair_release_release() { return ${releaseStatus}; }
+flock() { return ${flockStatus}; }
+if acquire_deploy_lock; then exit 99; fi
+trap - EXIT
+printf '%s\\n' "$MAXIM_DEPLOY_ADMISSION_REFUSAL"
+`,
+    );
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.equal(denied.stdout.trim(), expected);
+  });
+}
+
+test('pair probe utility errors never become a busy classification', (t) => {
+  const data = fixture(t);
+  const denied = command(
+    data,
+    `flock() { return 70; }; if acquire_deploy_lock; then exit 99; fi; printf '%s\\n' "$MAXIM_DEPLOY_ADMISSION_REFUSAL"`,
+  );
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.equal(denied.stdout.trim(), 'unknown');
+});

@@ -37,9 +37,10 @@ Type=oneshot
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=-/etc/maxim-postgres-backup.env
 $PROFILE_PRECHECK
-ExecStart=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE $ROOT_DIR/infra/scripts/backup-postgres.sh
+ExecStartPre=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE node $ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs capability
+ExecStart=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE $ROOT_DIR/infra/scripts/postgres-backup-schedule.sh request
 SuccessExitStatus=75
-TimeoutStartSec=18h15m
+TimeoutStartSec=18h20m
 TimeoutStopSec=1m
 KillSignal=SIGTERM
 Restart=no
@@ -47,6 +48,23 @@ UMask=0077
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+EOF
+
+# The retry service shares the coordinator flock with the daily request.
+sed 's/postgres-backup-schedule.sh request/postgres-backup-schedule.sh tick/' \
+  "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup.service" > "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.service"
+
+cat > "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.timer" <<EOF
+[Unit]
+Description=Retry pending MAXIM PostgreSQL admission within its original budget
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.service
+
+[Install]
+WantedBy=timers.target
 EOF
 
 cat > "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" <<EOF
@@ -75,6 +93,7 @@ Type=oneshot
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=-/etc/maxim-postgres-backup.env
 $PROFILE_PRECHECK
+ExecStartPre=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE node $ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs capability
 ExecStart=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE $ROOT_DIR/infra/scripts/restore-postgres-backup-smoke.sh
 TimeoutStartSec=12h15m
 TimeoutStopSec=1m
@@ -109,6 +128,7 @@ Type=oneshot
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=/etc/maxim-postgres-backup.env
 $PROFILE_PRECHECK
+ExecStartPre=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE node $ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs capability
 ExecStart=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE node $ROOT_DIR/infra/scripts/check-postgres-backup-health.mjs
 TimeoutStartSec=30s
 UMask=0077
@@ -138,7 +158,7 @@ if [[ "$ENABLE_BACKUP_TIMER" == "1" ]]; then
     exit 2
   fi
   sudo systemctl start "${MAXIM_BACKUP_UNIT_PREFIX}-backup-health.service"
-  sudo systemctl enable --now "${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-backup-health.timer"
+  sudo systemctl enable --now "${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-backup-health.timer"
 else
   echo "Backup timer installed but left disabled. Configure $BACKUP_ENV_FILE and a separate backup volume, then run the service once before enabling the timer."
 fi
@@ -155,4 +175,4 @@ else
 fi
 
 sudo systemctl list-timers --all \
-  "${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-restore-smoke.timer" --no-pager
+  "${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.timer" "${MAXIM_BACKUP_UNIT_PREFIX}-restore-smoke.timer" --no-pager
