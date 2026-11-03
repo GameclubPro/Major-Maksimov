@@ -8,7 +8,13 @@ import {
 } from '../../lib/api/karavan-marketplace-client';
 import { ApiRequestError } from '../../lib/api-request-error';
 import type { ApiTransport } from '../../lib/api/transport';
-import { removeMirroredItem, saveMirroredItem } from '../../lib/native-storage';
+import {
+  removeMirroredItem,
+  saveMirroredItem,
+  removeLocalMirrorItem,
+  writeLocalMirrorItem,
+} from '../../lib/native-storage';
+import { localShopRecoveryReaders } from './karavan-shop/storage-recovery';
 import { describeUserFacingError } from '../../lib/user-facing-error';
 import {
   karavanBindingRecoveryMessage,
@@ -21,8 +27,11 @@ export function useKaravanMarketplaceBinding(
   chatId: string,
   actorId?: string,
   freshBinding?: KaravanMarketplaceModule['binding'],
+  localOnlyRecovery = false,
 ) {
   const queryClient = useQueryClient();
+  const saveRecoveryItem = localOnlyRecovery ? writeLocalMirrorItem : saveMirroredItem;
+  const removeRecoveryItem = localOnlyRecovery ? removeLocalMirrorItem : removeMirroredItem;
   const storageKey = actorId ? `karavan-binding:v1:${actorId}:${chatId}` : null;
   const [request, setRequest] = useState<KaravanChatBindingInput | null>(null);
   const liveRequest = useRef(request);
@@ -55,7 +64,10 @@ export function useKaravanMarketplaceBinding(
     hadUnknownOutcome.current = false;
     if (!storageKey) return;
     let active = true;
-    void readKaravanBindingRecovery(storageKey)
+    void readKaravanBindingRecovery(
+      storageKey,
+      localOnlyRecovery ? localShopRecoveryReaders : undefined,
+    )
       .then((state) => {
         if (!active) return;
         if (state.status === 'ready' && state.request) {
@@ -74,7 +86,7 @@ export function useKaravanMarketplaceBinding(
       active = false;
       startingRef.current = null;
     };
-  }, [storageKey, recoveryAttempt]);
+  }, [storageKey, recoveryAttempt, localOnlyRecovery]);
   const mutation = useMutation({
     mutationFn: (original: {
       request: KaravanChatBindingInput;
@@ -90,7 +102,7 @@ export function useKaravanMarketplaceBinding(
         liveRequest.current !== original.request
       )
         return;
-      removeMirroredItem(original.storageKey);
+      removeRecoveryItem(original.storageKey);
       requestStorageKey.current = null;
       liveRequest.current = null;
       setRequest(null);
@@ -114,7 +126,7 @@ export function useKaravanMarketplaceBinding(
       if (bindingChanged && !hadUnknownOutcome.current) {
         // FLAG: Only a definitively rejected fresh request can be discarded. Never
         // replay a mutation; an earlier unknown outcome needs the independent fence below.
-        removeMirroredItem(original.storageKey);
+        removeRecoveryItem(original.storageKey);
         requestStorageKey.current = null;
         liveRequest.current = null;
         setRequest(null);
@@ -153,7 +165,7 @@ export function useKaravanMarketplaceBinding(
     // retain uncertainty; never replay, reconnect or reopen a shop during reconciliation.
     startingRef.current = null;
     setStarting(false);
-    if (storageKey) removeMirroredItem(storageKey);
+    if (storageKey) removeRecoveryItem(storageKey);
     requestStorageKey.current = null;
     liveRequest.current = null;
     setRequest(null);
@@ -207,7 +219,7 @@ export function useKaravanMarketplaceBinding(
             requestStorageKey.current
           )
             return;
-          saveMirroredItem(originalKey, JSON.stringify(next));
+          saveRecoveryItem(originalKey, JSON.stringify(next));
           requestStorageKey.current = originalKey;
           liveRequest.current = next;
           setRequest(next);
@@ -292,7 +304,7 @@ export function useKaravanMarketplaceBinding(
         startingRef.current
       )
         return;
-      if (storageKey) removeMirroredItem(storageKey);
+      if (storageKey) removeRecoveryItem(storageKey);
       requestStorageKey.current = null;
       liveRequest.current = null;
       setRequest(null);
