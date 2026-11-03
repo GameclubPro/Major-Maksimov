@@ -309,11 +309,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # FLAG: Keep every browser case while bounding each serial runner below the
-    # job deadline; the aggregate Required check waits for both shards.
+    # job deadline; the aggregate Required check waits for all four shards.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1/2, 2/2]
+        shard: [1/4, 2/4, 3/4, 4/4]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -332,74 +332,74 @@ jobs:
       - run: npx playwright install --with-deps chromium
         timeout-minutes: 3
       - name: Install WebKit for chat shop mobile formats
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: npx playwright install --with-deps webkit
         timeout-minutes: 3
       - run: npm run check:miniapp
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - run: npm run build:miniapp:production
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - run: npm run screenshots:miniapp:smoke
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
       - name: Build browser contracts
-        if: matrix.shard == '2/2'
+        if: matrix.shard != '1/4'
         run: npm run build --workspace @maxim/contracts
       - name: Chat shop formats, viewing and command recovery on Android and iOS
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/karavan-shop-formats.browser.mjs
       - name: Saved catalogs and selected settings access on mobile
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/personal-access-entry.browser.mjs
       - name: Community titles and avatars on mobile
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/entity-presentation.browser.mjs
       - name: Moderator selection and interrupted response recovery
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/moderator-choice.browser.mjs
       - name: Participant report mobile settings and journal
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-reports.browser.mjs
       - name: Participant report journal polling and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/report-journal-races.browser.mjs
       - name: Required subscription drafts and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-required-subscription.browser.mjs
       - name: Settings draft saves and response races
-        if: matrix.shard == '1/2'
+        if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-draft.browser.mjs
       - name: Cold settings search layout and focus
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '1/4'
         run: node apps/miniapp/test/settings-search-layout.browser.mjs
       - name: Anti-duplicate controls, schedule and save conflicts
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/settings-antiduplicate.browser.mjs
       - name: Anti-duplicate diagnostics save and stale responses
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/settings-duplicate-diagnostics.browser.mjs
       - name: Rules drafts, publication races and image preparation
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: |
           node apps/miniapp/test/settings-rules.browser.mjs
           node apps/miniapp/test/rules-image-picker.browser.mjs
       - name: Publication feed filters, cursors and calendar scope
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/publication-list.browser.mjs
       - name: Publication action confirmations and request identity
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/publication-actions.browser.mjs
       - name: Publication editor drafts and session lifecycle
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: |
           node apps/miniapp/test/publication-session.browser.mjs
           node apps/miniapp/test/publication-shared-media.browser.mjs
           node apps/miniapp/test/publication-video-picker.browser.mjs
           node apps/miniapp/test/publication-composer-usability.browser.mjs
       - name: Rich text formatting, typing state and imported drafts
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '4/4'
         run: node apps/miniapp/test/max-rich-text-formatting.browser.mjs
       - name: Speech styles and custom message preservation
-        if: matrix.shard == '2/2'
+        if: matrix.shard == '3/4'
         run: node apps/miniapp/test/bot-speech-style.browser.mjs
 
   admin:

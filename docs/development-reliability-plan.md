@@ -271,15 +271,18 @@ need an explicit request or a concrete runtime risk; routine smoke success ends 
 CI uses the same impact classifier for the complete push range or the PR merge checkout against
 its recorded base. `Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
 steps run only for full plans, including shared tooling/infra changes and the scheduled run.
-Miniapp changes select both miniapp browser shards
+Miniapp changes select all four miniapp browser shards
 and its affected Docker image; API changes retain API, Redis, every PostgreSQL shard, the
 commercial benchmark and the affected API image. Shared contracts select all their consumers.
 Tests alone do not build unrelated runtime images. CodeQL remains a separate exact-SHA gate.
 
 Browser dependency setup uses HTTPS Ubuntu sources, omits package translation indexes and bounds
 network retries. It fails on incomplete apt updates and has its own three-minute step budget, so
-an unavailable mirror cannot silently consume most of the browser test deadline. Both miniapp
-shards and Safety Desk keep their complete test inventories and existing job budgets.
+an unavailable mirror cannot silently consume most of the browser test deadline. All miniapp
+shards and Safety Desk keep their complete test inventories and existing job budgets. The miniapp
+partitions preserve each browser command once, with per-job dependency setup and contract builds;
+only the complete Android/iOS shop partition installs WebKit. Keep long settings-draft, shop-format
+and publication-editor scenarios in separate jobs. Measure durations before changing assignments.
 
 Workflow, shared tooling, infrastructure, root build inputs, unknown files/check kinds, unproved
 Git history and manual/scheduled runs select full CI. The exact local-only entrypoints in

@@ -124,12 +124,15 @@ test('chat shop formats run the full mobile matrix in a blocking miniapp shard',
   const miniapp = config.jobs.miniapp;
   assert.equal(miniapp['timeout-minutes'], 15);
   assert.equal(miniapp['continue-on-error'], undefined);
-  assert.deepEqual(miniapp.strategy, { 'fail-fast': false, matrix: { shard: ['1/2', '2/2'] } });
+  assert.deepEqual(miniapp.strategy, {
+    'fail-fast': false,
+    matrix: { shard: ['1/4', '2/4', '3/4', '4/4'] },
+  });
   const run = 'node apps/miniapp/test/karavan-shop-formats.browser.mjs';
   const selected = miniapp.steps.filter((step) => step.run === run);
   assert.equal(selected.length, 1, 'Shop formats must run once without a shell or profile filter');
   const browser = selected[0];
-  assert.equal(browser.if, "matrix.shard == '2/2'");
+  assert.equal(browser.if, "matrix.shard == '3/4'");
   assert.equal(browser['continue-on-error'], undefined);
   assert.ok(statSync(resolve(root, 'apps/miniapp/test/karavan-shop-formats.browser.mjs')).isFile());
   for (const env of [config.env, miniapp.env, browser.env])
@@ -144,7 +147,7 @@ test('chat shop formats run the full mobile matrix in a blocking miniapp shard',
   assert.equal(webkit['timeout-minutes'], 3);
   const contracts = miniapp.steps.find((step) => step.name === 'Build browser contracts');
   assert.equal(contracts.run, 'npm run build --workspace @maxim/contracts');
-  assert.equal(contracts.if, browser.if);
+  assert.equal(contracts.if, "matrix.shard != '1/4'");
   assert.ok(
     miniapp.steps.indexOf(webkit) >
       miniapp.steps.findIndex((step) => step.name === 'Use HTTPS for browser dependencies'),
@@ -153,7 +156,7 @@ test('chat shop formats run the full mobile matrix in a blocking miniapp shard',
   assert.ok(miniapp.steps.indexOf(contracts) < miniapp.steps.indexOf(browser));
   assert.ok(
     config.jobs.required.needs.includes('miniapp'),
-    'Required must retain both miniapp shards',
+    'Required must retain all miniapp shards',
   );
 });
 

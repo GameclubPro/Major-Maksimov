@@ -28,6 +28,11 @@ partitions 715/802 s, Docker API 446 s. Native PostgreSQL CI already uses eight 
 and a compatibility group. Increasing local process concurrency would not preserve fixture and
 generator isolation; this change leaves those limits intact.
 
+Browser step measurements identify separate long groups: settings drafts 188 s, shop formats
+180 s plus 50 s WebKit setup, report settings 125 s and publication editing 205 s. The four-way
+browser assignment separates those groups and retains all 21 browser commands plus the three
+general miniapp validation commands. Each job owns its checkout and dependency preparation.
+
 ## Regression Evidence
 
 Real Git fixtures reproduce the local-tool over-selection, mixed changes and rename boundaries.
@@ -39,6 +44,13 @@ with each of the four shards selected 264 tests per shard; their union equals th
 selection with no duplicates. This proves selection and argument forwarding, not execution.
 CI execution, including native cases, remains the acceptance gate for the new matrix.
 
+[CI run 41642087143](https://github.com/GameclubPro/Major-Maksimov/actions/runs/41642087143)
+verified the API partition change on PR head `8a9a39d77d9aad5f3ea5f5a8628fd1aa6e5cce3a`:
+the API matrix completed in a 281 s wall span, versus the 1,108 s baseline. Downloaded JSON
+reports preserve the same 1,056-file union, 22,163 passing tests and 4,233 native/opt-in pending
+tests, with no failures or duplicates. Separate required native lanes, Required and CodeQL passed.
+This observation precedes the browser partition change and does not attest a later revision.
+
 ## Retained Boundaries And Remaining Limits
 
 - `legacy`, recovery and rollback files are not automatically unused. Current webhook code still
@@ -48,8 +60,8 @@ CI execution, including native cases, remains the acceptance gate for the new ma
   removed. Their ownership and retained-state obligations are separate from source cleanup.
 - Shared-tooling and infrastructure CI remains conservative. Extending the local-only exception
   requires caller/consumer evidence and a regression that retains mixed-change coverage.
-- Miniapp browser CI remains substantial. Browser scenario deletion or further splitting needs
-  scenario-level duration/isolation evidence; the existing mobile matrices remain complete.
+- Browser scenarios remain substantial. Further reassignment needs scenario-level duration and
+  isolation evidence; the existing mobile matrices remain complete and no scenarios are deleted.
 - No reusable green cache, changed-file-only Jest inference or cross-checkout dependency copying
   was introduced. Exact-SHA Required and CodeQL, staged-input guards and native coverage stay
   authoritative. Maintained commands live in the development references, not this dated record.
