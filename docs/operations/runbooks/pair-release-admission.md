@@ -112,6 +112,41 @@ drift, incomplete publication or an interrupted standalone maintenance operation
 outcome evidence stays blocked for a separately reviewed recovery. Never switch a runtime owner to
 tooling mode or invent a manifest to make recovery pass.
 
+### Interrupted backup unit installation
+
+The fixed [3 November installation incident](../incidents/2026-11-03-backup-activation.md)
+has a separate recovery boundary. Its completed child failed during an idle systemd
+retry after installing unit files. It has no runtime target or new release manifest;
+neither generic reconciliation nor the earlier root backup refusal proves its outcome.
+
+From a clean exact controller with successful required CI, retain the preview:
+
+```bash
+./infra/scripts/vps-connect.sh recover-pair-backup-activation preview \
+  --owner-sha256 "$OWNER_SHA256" --state-sha256 "$PAIR_STATE_SHA256" \
+  --source-sha "$DEPLOYED_SOURCE_SHA" --invocation-id "$RETRY_INVOCATION_ID"
+```
+
+This command accepts only the reviewed incident identity. It checks source and unit
+integrity, the trusted service journal, completed processes, scheduler state and
+unchanged configuration under the existing locks. Runtime evidence requires current
+manifest image identities and container generations predating the installation;
+there is no earlier complete container inventory to compare. Preview does not
+archive the owner or start work. Review its exact proof and preserve any refusal.
+
+```bash
+./infra/scripts/vps-connect.sh recover-pair-backup-activation apply \
+  --owner-sha256 "$OWNER_SHA256" --state-sha256 "$PAIR_STATE_SHA256" \
+  --source-sha "$DEPLOYED_SOURCE_SHA" --invocation-id "$RETRY_INVOCATION_ID" \
+  --proof-sha256 "$PREVIEW_PROOF_SHA256"
+```
+
+Apply requires the same freshly proved result and archives the unchanged original
+owner with durable evidence. It never changes the shared helper, lock inode, release
+manifest, units, timers or stores. Any unknown/changed outcome remains blocked.
+Afterward, read back admission and continue the separately verified backup activation;
+successful reconciliation does not establish recovery coverage or a scheduled backup.
+
 ### Known root backup admission refusal
 
 The separate `recover-pair-backup-refusal preview|apply` connector handles only the retained

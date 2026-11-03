@@ -144,8 +144,12 @@ if [[ "$MODE" != "--preflight-only" ]]; then
   # primary; the acquired deploy lock now keeps these checked shell inputs stable.
   if [[ -n "${MAXIM_BACKUP_SOURCE_SHA:-}" ]]; then
     [[ "$MAXIM_BACKUP_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
-    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$MAXIM_BACKUP_SOURCE_SHA" ]]
-    git -C "$ROOT_DIR" diff --quiet "$MAXIM_BACKUP_SOURCE_SHA" -- infra/scripts
+    # FLAG: Root systemd reads the operator-owned checkout without inherited sudo
+    # trust. Scope this exception to each exact-source command, never global config.
+    BACKUP_SOURCE_GIT_ARGS=()
+    if ((EUID == 0)); then BACKUP_SOURCE_GIT_ARGS=(-c "safe.directory=$ROOT_DIR"); fi
+    [[ "$(git "${BACKUP_SOURCE_GIT_ARGS[@]}" -C "$ROOT_DIR" rev-parse HEAD)" == "$MAXIM_BACKUP_SOURCE_SHA" ]]
+    git "${BACKUP_SOURCE_GIT_ARGS[@]}" -C "$ROOT_DIR" diff --quiet "$MAXIM_BACKUP_SOURCE_SHA" -- infra/scripts
   fi
 fi
 
