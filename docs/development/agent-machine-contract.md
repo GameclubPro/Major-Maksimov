@@ -43,6 +43,11 @@ the mandatory repository commit helper and accepts `--include-agents` for agent 
 Do not run the same final aggregate separately. Track returned operation IDs, logs,
 heartbeats, deadlines and terminal exits with `workspace operation`/`workspace status`.
 A successful submission does not prove PR CI, merge, deployment or acceptance.
+If an operation reports changed inputs or an uncertain status after creating a commit,
+inspect its terminal helper result and Git/remote identity before retrying. The installed
+coordinator's `workspace reconcile-submit` verifies the intended parent/tree and retained
+submission evidence. Use that reconciliation for its supported case; do not create a
+second commit or repeat a push merely to replace an ambiguous watcher status.
 
 The coordinator records the repository-owned editing baseline. For an independently
 created checkout, run `task-worktree.mjs start` before editing and `check` after submission,
