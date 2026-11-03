@@ -61,6 +61,17 @@ new scheduler operation or changed runtime evidence must refuse recovery.
 The exact CLI and preview/apply boundary are documented in the
 [admission runbook](../runbooks/pair-release-admission.md).
 
+The first live preview refused the repeated `ExecStartPre` properties emitted by
+systemd for Lastik's two preparation commands. The collector now preserves both
+ordered command records and validates the complete expected sequence. Repeated
+scalar properties, unknown fields and extra preparation commands still fail closed.
+For command vectors omitted from the text output, the collector requires a typed
+D-Bus empty-array response from that exact service; missing text is never evidence
+of an absent command.
+The regression exercises the collector subprocess with the observed output format;
+reconstructed property objects alone did not cover this boundary. This preview
+refusal left the original owner and production state unchanged.
+
 ## Follow-up acceptance
 
 After recovery, synchronize the compatible backup scripts through the guarded
