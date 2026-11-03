@@ -251,7 +251,9 @@ refactor guards and core tooling tests, then `check:infra` owns the infrastructu
 once. Tooling changes without an infrastructure selection use core tooling tests; a changed
 infrastructure caller still requires its focused regression. CI Static and public full aggregates
 keep the complete inventory. Inventory guards prove core coverage and complete infrastructure
-coverage when selected, without duplicate execution. Native PostgreSQL/Redis
+coverage when selected, without duplicate execution. The root `check` uses `check:static:ci`
+for core tests, then `check:infra` for infrastructure; the standalone `check:static` remains
+the complete tooling aggregate and must not be nested into `check` again. Native PostgreSQL/Redis
 cases remain mandatory for the affected invariant; skipped store cases are missing coverage.
 
 Miniapp-only UI changes need no API, Prisma, admin or native-store suites unless a changed boundary
@@ -280,11 +282,23 @@ an unavailable mirror cannot silently consume most of the browser test deadline.
 shards and Safety Desk keep their complete test inventories and existing job budgets.
 
 Workflow, shared tooling, infrastructure, root build inputs, unknown files/check kinds, unproved
-Git history and manual/scheduled runs select full CI. Renames include both paths. The `Required`
+Git history and manual/scheduled runs select full CI. The exact local-only entrypoints in
+`LOCAL_TOOLING_PATHS` in `scripts/ci/impact.mjs` (context, doctor, focused checks, task ownership
+and documentation checks, with their reviewed tests) select Static. Static includes their tests,
+lint, refactor guards, dependency audit and documentation validation. New helpers and modified
+callers are not implicitly exempt; review callers before extending that list. Renames include
+both paths, and mixed changes take the union of required coverage. The `Required`
 job independently recomputes the selection and image matrix from Git and the event, requires
 success for selected lanes and accepts `skipped` only for lanes proved unrelated. Failed
 classification, missing results, cancellation and mismatched outputs block it. Workflow guards
 and real Git fixtures cover these boundaries; the weekly scheduled run retains full coverage.
+
+API CI runs the existing Jest inventory in four independent jobs through public `test:ci`,
+with one serial worker per job. A fifth job uses public `check:ci:build` for generation,
+types, retention storage checks and build, then runs the existing Redis cases. Every part blocks
+`Required`; PostgreSQL and benchmark lanes retain their separate complete coverage. See
+[local setup and partition inspection](development/agent-local-environment.md#api-ci-partitioning).
+CodeQL cancels superseded runs of the same PR, while main and scheduled runs remain uncancelled.
 
 `agent:verify` also avoids repeating included CSS checks. Full verification adds the browser smoke,
 which the root `check` script does not include. Focused local selection changes neither exact-SHA

@@ -161,7 +161,8 @@ test('keeps the functional API lane separate from the median commercial benchmar
   const api = jobBody('api', 'postgres-races');
   const benchmark = jobBody('commercial-benchmark', 'miniapp');
 
-  assert.match(api, /npm run check:ci --workspace @maxim\/api/u);
+  assert.match(api, /npm run check:ci:build --workspace @maxim\/api/u);
+  assert.match(api, /npm run test:ci --workspace @maxim\/api/u);
   assert.match(api, /NODE_OPTIONS:\s*--max-old-space-size=6144/u);
   assert.doesNotMatch(api, /check:api|commercial-benchmark/u);
   assert.match(benchmark, /COMMERCIAL_BENCHMARK_PROFILE: github-hosted/u);
@@ -178,7 +179,9 @@ test('requires duplicate, interval, Publisher, OCR, retention and workstation Re
     api,
     /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
   );
-  assert.doesNotMatch(api, /continue-on-error|^ {6,}(?:- )?if:/mu);
+  assert.doesNotMatch(api, /continue-on-error/u);
+  const redis = parse(workflow).jobs.api.steps.find((step) => step.env?.MAXIM_TEST_REDIS_URL);
+  assert.equal(redis.if, "matrix.part == 'checks'");
   assert.equal(parse(workflow).jobs.api.if, "needs.impact.outputs.api == 'true'");
 });
 
