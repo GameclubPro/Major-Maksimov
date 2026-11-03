@@ -887,8 +887,16 @@ export async function withActivationSchedulerLock(path, work) {
   }
 }
 
+export async function observeActivationSourceGit(root, args) {
+  // FLAG: Root status reads must never replace the operator's index. Override
+  // inherited optional-lock settings while retaining immutable object reads.
+  return command('git', ['-c', `safe.directory=${root}`, '-C', root, ...args], {
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_OPTIONAL_LOCKS: '0' },
+  });
+}
+
 async function assertSource() {
-  const git = (root, args) => command('git', ['-c', `safe.directory=${root}`, '-C', root, ...args]);
+  const git = observeActivationSourceGit;
   requireFact(
     (await git(MAJOR, ['rev-parse', 'HEAD'])).trim() === ACTIVATION.sourceSha &&
       (await git(MAJOR, ['status', '--porcelain'])).trim() === '' &&

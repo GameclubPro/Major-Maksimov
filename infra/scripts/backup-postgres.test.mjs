@@ -215,7 +215,15 @@ function rootRunner(t) {
   return null;
 }
 
-for (const source of ['clean', 'wrong-revision', 'dirty-scripts']) {
+for (const source of [
+  'clean',
+  'clean-stale-stat',
+  'wrong-revision',
+  'dirty-scripts',
+  'dirty-script-mode',
+  'deleted-script',
+  'invalid-index',
+]) {
   test(`root scheduled producer checks operator-owned source before dump: ${source}`, (t) => {
     const elevated = rootRunner(t);
     if (!elevated) return;
@@ -246,6 +254,8 @@ for (const source of ['clean', 'wrong-revision', 'dirty-scripts']) {
         `DEPLOY_LOCK_HELPER='${data.deployLockData.helper}'`,
       ),
     );
+    const sourceOnly = join(repo, 'infra/scripts/source-only.sh');
+    writeFileSync(sourceOnly, '# fixture-only source\n');
     const git = (...args) => {
       const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
@@ -264,8 +274,17 @@ for (const source of ['clean', 'wrong-revision', 'dirty-scripts']) {
       'source',
     );
     const sha = git('rev-parse', 'HEAD');
-    if (source === 'dirty-scripts') {
-      writeFileSync(join(repo, 'infra/scripts/rate-limit-stream.mjs'), '// changed source\n');
+    if (source === 'clean-stale-stat') {
+      const changedTime = new Date(Date.now() + 5_000);
+      utimesSync(sourceOnly, changedTime, changedTime);
+    } else if (source === 'dirty-scripts') {
+      writeFileSync(sourceOnly, '# changed source\n');
+    } else if (source === 'dirty-script-mode') {
+      chmodSync(sourceOnly, 0o755);
+    } else if (source === 'deleted-script') {
+      rmSync(sourceOnly);
+    } else if (source === 'invalid-index') {
+      writeFileSync(join(repo, '.git/index'), 'invalid fixture index\n');
     }
     if (process.getuid() === 0) {
       const ownership = elevated(['chown', '-R', '65534', repo]);
@@ -284,11 +303,49 @@ for (const source of ['clean', 'wrong-revision', 'dirty-scripts']) {
     const env = Object.fromEntries(
       Object.entries(configured).filter(([name]) => /^(?:PATH$|MAXIM_BACKUP_|MOCK_)/.test(name)),
     );
+    env.GIT_OPTIONAL_LOCKS = '1';
+    const gitPaths = ['.git', '.git/index', '.git/HEAD', '.git/config'];
+    const gitMetadata = () =>
+      gitPaths.map((name) => {
+        const value = statSync(join(repo, name), { bigint: true });
+        return {
+          name,
+          uid: value.uid,
+          gid: value.gid,
+          mode: value.mode,
+          ino: value.ino,
+          size: value.size,
+          mtimeNs: value.mtimeNs,
+          ctimeNs: value.ctimeNs,
+        };
+      });
+    const metadataBefore = gitMetadata();
+    const contentBefore = gitPaths.slice(1).map((name) =>
+      createHash('sha256')
+        .update(readFileSync(join(repo, name)))
+        .digest('hex'),
+    );
     const result = elevated(['bash', producer], env);
-    assert.equal(result.status, source === 'clean' ? 0 : 1, result.stderr);
+    const clean = source === 'clean' || source === 'clean-stale-stat';
+    assert.equal(result.status, clean ? 0 : source === 'invalid-index' ? 128 : 1, result.stderr);
+    assert.deepEqual(
+      gitMetadata(),
+      metadataBefore,
+      'Source reads must preserve Git ownership and metadata',
+    );
+    assert.deepEqual(
+      gitPaths.slice(1).map((name) =>
+        createHash('sha256')
+          .update(readFileSync(join(repo, name)))
+          .digest('hex'),
+      ),
+      contentBefore,
+      'Source reads must preserve Git file bytes',
+    );
+    assert.doesNotMatch(result.stdout, /source-only\.sh|changed source/u);
     assert.doesNotMatch(result.stderr, /dubious ownership/);
     const operations = readFileSync(data.dockerLog, 'utf8');
-    if (source === 'clean') {
+    if (clean) {
       assert.match(operations, /pg_dump/);
       assert.equal(dumpFiles(data).filter((name) => name.endsWith('.dump')).length, 1);
     } else {

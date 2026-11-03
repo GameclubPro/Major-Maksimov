@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile, mkdtemp, writeFile, lstat, rm, access, symlink, rename } from 'node:fs/promises';
+import {
+  readFile,
+  mkdtemp,
+  writeFile,
+  lstat,
+  rm,
+  access,
+  symlink,
+  rename,
+  utimes,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,6 +24,7 @@ import {
   validateActivationOcrRestart,
   observeActivationOcrRestart,
   observeActivationUnitProperties,
+  observeActivationSourceGit,
   parseActivationUnitProperties,
 } from './pair-release-backup-activation-recovery.mjs';
 import {
@@ -1362,3 +1373,64 @@ for (const [name, records] of [
       /service_command_changed/u,
     );
   });
+
+test('activation source Git reads preserve the index despite stale file stats and inherited optional locks', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'maxim-activation-git-read-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', directory, ...args], {
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  git('init', '--quiet');
+  const tracked = join(directory, 'tracked.txt');
+  await writeFile(tracked, 'committed content\n');
+  git('add', 'tracked.txt');
+  git(
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'source',
+  );
+  const current = await lstat(tracked);
+  const changedTime = new Date(current.mtimeMs + 10_000);
+  await utimes(tracked, changedTime, changedTime);
+  const index = join(directory, '.git/index');
+  const identity = async () => {
+    const metadata = await lstat(index, { bigint: true });
+    return {
+      ...Object.fromEntries(
+        ['dev', 'ino', 'uid', 'gid', 'mode', 'size', 'mtimeNs', 'ctimeNs'].map((key) => [
+          key,
+          metadata[key],
+        ]),
+      ),
+      bytes: digest(await readFile(index)),
+    };
+  };
+  const before = await identity();
+  const inherited = process.env.GIT_OPTIONAL_LOCKS;
+  const mask = process.umask(0o077);
+  process.env.GIT_OPTIONAL_LOCKS = '1';
+  try {
+    assert.equal(await observeActivationSourceGit(directory, ['status', '--porcelain']), '');
+    assert.deepEqual(await identity(), before);
+    await writeFile(tracked, 'changed content\n');
+    await writeFile(join(directory, 'untracked.txt'), 'new file\n');
+    const status = await observeActivationSourceGit(directory, ['status', '--porcelain']);
+    assert.match(status, /^ M tracked\.txt$/mu);
+    assert.match(status, /^\?\? untracked\.txt$/mu);
+    assert.deepEqual(await identity(), before);
+  } finally {
+    process.umask(mask);
+    if (inherited === undefined) delete process.env.GIT_OPTIONAL_LOCKS;
+    else process.env.GIT_OPTIONAL_LOCKS = inherited;
+  }
+});

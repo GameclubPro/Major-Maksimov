@@ -72,6 +72,23 @@ The regression exercises the collector subprocess with the observed output forma
 reconstructed property objects alone did not cover this boundary. This preview
 refusal left the original owner and production state unchanged.
 
+## Git index ownership during root observations
+
+The exact installation owner was archived after a successful locked preview and
+matching apply. During the subsequent root service probes, `git status` refreshed
+the operator-owned checkout's index. The probe's restrictive umask left that file
+owned by root with mode `0600`; a later operator source check could no longer read
+it. The tracked source remained clean. Recovery changed only the observed index's
+ownership under shared admission, preserving its bytes, inode and restrictive mode.
+
+Read-only Git observations must disable optional index updates explicitly, including
+when the caller inherited `GIT_OPTIONAL_LOCKS=1`. The producer's source comparison
+also needs command-local suppression of automatic diff index refresh. Checking only
+the output of a failed Git command is insufficient: retain its exit status and reject
+errors separately from an empty content difference. Real Git regressions use changed
+file timestamps with unchanged content, then actual source changes, and verify both
+the source decision and preservation of index bytes and metadata.
+
 ## Follow-up acceptance
 
 After recovery, synchronize the compatible backup scripts through the guarded
