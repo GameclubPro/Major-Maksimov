@@ -24,7 +24,7 @@
 ## Validation And Visual Work
 
 - For miniapp-only runtime/UI changes, use the impact plan's repository static checks, `npm run check:miniapp`, `npm run build:miniapp:production`, and selected local visual smoke. `check:miniapp` already includes CSS ownership, type checking, and miniapp tests; do not rerun those subcommands after it passes.
-- Run focused tests/browser cases for the changed behavior first, then the planned checks. Expand or repeat successful checks only for changed inputs, a failure, or an identified coverage gap. Material UI changes need visual review of the affected screens, not an unrelated whole-product audit.
+- Run focused tests/browser cases for the changed behavior first; use the [feature regression map](../../docs/development/feature-regressions.md) to find existing cases and their local server requirements. Then run the planned checks. Expand or repeat successful checks only for changed inputs, a failure, or an identified coverage gap. Material UI changes need visual review of the affected screens, not an unrelated whole-product audit.
 - Do not add API/Prisma/admin suites or provision PostgreSQL/Redis for isolated miniapp UI changes. Expand validation when shared contracts, server code, root dependencies/build configuration, or concrete regression evidence crosses those boundaries; inspect changed callers and test doubles first.
 - Agent notes and Markdown-only changes select `check:docs` and need no browser run or runtime deploy. Runtime releases still require the root exact-SHA CI gates; these local rules do not change which jobs the current CI requires.
 - The Major image bakes `VITE_API_BASE=https://major-maksimov.ru/api/v1`; budget changes must also pass a build with that value.
