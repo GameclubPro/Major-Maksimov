@@ -101,7 +101,9 @@ describe('PublisherAutoReplyQueueService', () => {
     };
     const { service, redisEval } = createService(queue);
 
-    await service.ensureDeliveryJob('delivery-1');
+    await expect(service.ensureDeliveryJob('delivery-1')).resolves.toEqual({
+      outcome: 'add_acknowledged',
+    });
 
     expect(queue.add).toHaveBeenCalledWith(
       'deliver',
@@ -121,38 +123,48 @@ describe('PublisherAutoReplyQueueService', () => {
     expect(callsFor(redisEval, 'BACKLOG_RELEASE_V2')).toHaveLength(1);
   });
 
-  it('keeps an existing live job without allocating another quota slot', async () => {
-    const existing = {
-      getState: jest.fn().mockResolvedValue('delayed'),
-    } as unknown as Job<PublisherAutoReplyJob>;
-    const queue = {
-      getJob: jest.fn().mockResolvedValue(existing),
-      add: jest.fn(),
-    };
-    const { service, redisEval } = createService(queue);
+  it.each(['active', 'waiting', 'delayed', 'prioritized'])(
+    'reports an existing %s job without allocating another quota slot',
+    async (state) => {
+      const existing = {
+        getState: jest.fn().mockResolvedValue(state),
+      } as unknown as Job<PublisherAutoReplyJob>;
+      const queue = {
+        getJob: jest.fn().mockResolvedValue(existing),
+        add: jest.fn(),
+      };
+      const { service, redisEval } = createService(queue);
 
-    await service.ensureDeliveryJob('delivery-1');
+      await expect(service.ensureDeliveryJob('delivery-1')).resolves.toEqual({
+        outcome: 'already_live',
+      });
 
-    expect(queue.add).not.toHaveBeenCalled();
-    expect(redisEval).not.toHaveBeenCalled();
-  });
+      expect(queue.add).not.toHaveBeenCalled();
+      expect(redisEval).not.toHaveBeenCalled();
+    },
+  );
 
-  it('replaces a completed job when its durable delivery remains pending', async () => {
-    const existing = {
-      getState: jest.fn().mockResolvedValue('completed'),
-      remove: jest.fn().mockResolvedValue(undefined),
-    } as unknown as Job<PublisherAutoReplyJob>;
-    const queue = {
-      getJob: jest.fn().mockResolvedValue(existing),
-      add: jest.fn().mockResolvedValue(undefined),
-    };
-    const { service } = createService(queue);
+  it.each(['completed', 'failed'])(
+    'acknowledges replacement of a %s job when its durable delivery remains pending',
+    async (state) => {
+      const existing = {
+        getState: jest.fn().mockResolvedValue(state),
+        remove: jest.fn().mockResolvedValue(undefined),
+      } as unknown as Job<PublisherAutoReplyJob>;
+      const queue = {
+        getJob: jest.fn().mockResolvedValue(existing),
+        add: jest.fn().mockResolvedValue(undefined),
+      };
+      const { service } = createService(queue);
 
-    await service.ensureDeliveryJob('delivery-1');
+      await expect(service.ensureDeliveryJob('delivery-1')).resolves.toEqual({
+        outcome: 'add_acknowledged',
+      });
 
-    expect(existing.remove).toHaveBeenCalled();
-    expect(queue.add).toHaveBeenCalled();
-  });
+      expect(existing.remove).toHaveBeenCalled();
+      expect(queue.add).toHaveBeenCalled();
+    },
+  );
 
   it('rejects admission while the Publisher runtime kill switch is active', async () => {
     const queue = {
@@ -278,24 +290,26 @@ describe('PublisherAutoReplyQueueService', () => {
     expect(queue.add).not.toHaveBeenCalled();
   });
 
-  it('uses one stable operation id and separate fencing attempts for duplicate ensures', async () => {
+  it('reports only acknowledgements for concurrent duplicate ensures under separate fencing attempts', async () => {
     const redisEval = jest.fn(defaultRedisEval);
+    const acknowledgedJob = { id: buildPublisherAutoReplyJobId('same-delivery') };
     const firstQueue = {
       getJob: jest.fn().mockResolvedValue(null),
-      add: jest.fn().mockResolvedValue(undefined),
+      add: jest.fn().mockResolvedValue(acknowledgedJob),
     };
     const secondQueue = {
       getJob: jest.fn().mockResolvedValue(null),
-      add: jest.fn().mockResolvedValue(undefined),
+      add: jest.fn().mockResolvedValue(acknowledgedJob),
     };
     const first = createService(firstQueue, { redisEval }).service;
     const second = createService(secondQueue, { redisEval }).service;
 
-    await Promise.all([
+    const results = await Promise.all([
       first.ensureDeliveryJob('same-delivery'),
       second.ensureDeliveryJob('same-delivery'),
     ]);
 
+    expect(results).toEqual([{ outcome: 'add_acknowledged' }, { outcome: 'add_acknowledged' }]);
     const claims = callsFor(redisEval, 'BACKLOG_CLAIM_V2');
     expect(claims).toHaveLength(2);
     expect(claims[0]?.at(-4)).toBe(claims[1]?.at(-4));

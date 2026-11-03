@@ -271,6 +271,8 @@ need an explicit request or a concrete runtime risk; routine smoke success ends 
 CI uses the same impact classifier for the complete push range or the PR merge checkout against
 its recorded base. `Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
 steps run only for full plans, including shared tooling/infra changes and the scheduled run.
+Permanent source-abandonment and legacy-disposition rollback floors belong to the mandatory core
+test inventory, so API-only changes also check compatibility with the deployed safety readers.
 Miniapp changes select all four miniapp browser shards
 and its affected Docker image; API changes retain API, Redis, every PostgreSQL shard, the
 commercial benchmark and the affected API image. Shared contracts select all their consumers.
