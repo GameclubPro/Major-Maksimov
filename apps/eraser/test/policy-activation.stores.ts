@@ -173,6 +173,38 @@ beforeEach(async () => {
   );
 });
 
+for (const offset of [0, -16_000, -30_000, -59_999, -31 * 60_000, 31 * 60_000]) {
+  test(`synthetic connection proofs remain fresh with scheduling clock offset ${offset}ms`, async (t) => {
+    const schedulingNow = new Date().getTime() + offset;
+    t.mock.method(Date, 'now', () => schedulingNow);
+    await store.bootstrap('-1', 48, protection());
+    await updatePolicy(store, '-1', input({ expectedRevision: 0 }));
+    const active = (await store.policy('-1'))!;
+    assert.equal(active.enabled, true);
+    assert.equal(Number(active.live_floor), schedulingNow - 48 * 3_600_000 + 1);
+
+    await store.bootstrap('-2', 48, protection());
+    await store.update('-2', input({ expectedRevision: 0, connectWhenReady: true }));
+    const pending = (await store.reserveConnections(1))[0]!;
+    assert.equal(pending.chatId, '-2');
+    const expiredAt = new Date(0);
+    const expired = await connectionProof(store, '-2', expiredAt);
+    assert.equal(expired.expiresAt, expiredAt);
+    assert.equal(await store.activateConnection('-2', pending.leaseToken, expired), false);
+    assert.equal((await store.policy('-2'))!.enabled, false);
+
+    const proof = await connectionProof(store, '-2');
+    const remaining = (
+      await pool.query<{ remaining_ms: number }>(
+        'SELECT (EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp()))*1000)::double precision AS remaining_ms',
+        [proof.expiresAt],
+      )
+    ).rows[0]!.remaining_ms;
+    assert.ok(remaining > 0 && remaining <= 15_000, 'proof has at most 15 real seconds');
+    assert.equal(await store.activateConnection('-2', pending.leaseToken, proof), true);
+  });
+}
+
 for (const status of ['missing', 'no_access'] as const) {
   test(`A03 rejected stale HTTP save preserves durable ${status} and execution fence`, async (t) => {
     await setup(status);
