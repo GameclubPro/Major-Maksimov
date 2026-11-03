@@ -16,8 +16,14 @@ import test from 'node:test';
 import { deployLockFixture, deployLockEnvironment } from './test-fixtures/deploy-lock.mjs';
 
 for (const profile of ['maxim', 'eraser']) {
-  for (const scenario of ['valid', 'invalid-schema', 'foreign-checksum']) {
-    const valid = scenario === 'valid';
+  for (const scenario of [
+    'valid',
+    'invalid-schema',
+    'foreign-checksum',
+    'initialization-restart',
+    'socket-only-never-ready',
+  ]) {
+    const valid = scenario === 'valid' || scenario === 'initialization-restart';
     const foreignChecksum = scenario === 'foreign-checksum';
     test(`restore is isolated, cleaned and receipts require authority schema; profile=${profile}, scenario=${scenario}`, (t) => {
       const dir = mkdtempSync(join(tmpdir(), 'maxim-restore-test-'));
@@ -35,6 +41,12 @@ for (const profile of ['maxim', 'eraser']) {
         { mode: 0o700 },
       );
       const log = join(dir, 'docker.log');
+      const probes = join(dir, 'tcp-probes');
+      writeFileSync(
+        join(bin, 'sleep'),
+        '#!/usr/bin/env bash\nif [[ "$1" == 1 ]]; then exit 0; fi\nexec /bin/sleep "$@"\n',
+        { mode: 0o700 },
+      );
       writeFileSync(
         join(bin, 'curl'),
         `#!/bin/sh
@@ -49,6 +61,28 @@ set -euo pipefail
 printf '%s\\n' "$*" >> "$TEST_DOCKER_LOG"
 case "$*" in
   *pg_database_size*) echo 1024 ;;
+  *pg_isready*)
+    if [[ "$TEST_STARTUP_SCENARIO" == initialization-restart || "$TEST_STARTUP_SCENARIO" == socket-only-never-ready ]]; then
+      # The initialization server answers only through the Unix socket, then stops.
+      # Final TCP readiness appears only after the simulated shutdown gap.
+      if [[ " $* " != *' -h 127.0.0.1 '* ]]; then exit 0; fi
+      count=0
+      if [[ -f "$TEST_TCP_PROBES" ]]; then read -r count < "$TEST_TCP_PROBES"; fi
+      count=$((count + 1))
+      printf '%s\\n' "$count" > "$TEST_TCP_PROBES"
+      if [[ "$TEST_STARTUP_SCENARIO" == socket-only-never-ready || "$count" -lt 3 ]]; then exit 1; fi
+    fi
+    ;;
+  *createdb*)
+    if [[ "$TEST_STARTUP_SCENARIO" == initialization-restart || "$TEST_STARTUP_SCENARIO" == socket-only-never-ready ]]; then
+      count=0
+      if [[ -f "$TEST_TCP_PROBES" ]]; then read -r count < "$TEST_TCP_PROBES"; fi
+      if ((count < 3)); then
+        echo 'createdb: connection to server on socket failed: No such file or directory' >&2
+        exit 1
+      fi
+    fi
+    ;;
   *pg_restore*) cat >/dev/null ;;
   *psql*-XAtq*) cat >/dev/null; echo "$TEST_SCHEMA_VALID" ;;
   *psql*critical*) echo "$TEST_SCHEMA_VALID" ;;
@@ -86,6 +120,8 @@ esac
         MAXIM_BACKUP_POSTGRES_IMAGE: 'sha256:fixture',
         MAXIM_BACKUP_COMPOSE_FILE: join(dir, 'group-backup', 'docker-compose.yml'),
         TEST_DOCKER_LOG: log,
+        TEST_TCP_PROBES: probes,
+        TEST_STARTUP_SCENARIO: scenario,
         TEST_SCHEMA_VALID: valid ? '1' : '0',
       });
       const result = spawnSync('bash', [script], { env, encoding: 'utf8', timeout: 5000 });
@@ -101,6 +137,15 @@ esac
         return;
       }
       const operations = readFileSync(log, 'utf8');
+      if (scenario === 'initialization-restart') {
+        assert.equal(readFileSync(probes, 'utf8'), '3\n');
+        assert.equal(operations.match(/pg_isready/g)?.length, 3);
+        assert.match(operations, /createdb -U postgres/u);
+      } else if (scenario === 'socket-only-never-ready') {
+        assert.equal(readFileSync(probes, 'utf8'), '60\n');
+        assert.match(result.stderr, /Disposable PostgreSQL did not become ready/u);
+        assert.doesNotMatch(operations, /^exec[^\n]*\s(?:createdb|pg_restore|psql)(?:\s|$)/mu);
+      }
       assert.match(operations, /--network none --cpus 2 --memory 4g --pids-limit 128/u);
       assert.ok(
         operations.includes(
