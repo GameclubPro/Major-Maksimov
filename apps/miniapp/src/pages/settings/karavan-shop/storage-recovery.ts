@@ -19,6 +19,11 @@ const readers: ShopRecoveryReaders = {
   native: readNativeStorageItemState,
 };
 
+export const localShopRecoveryReaders: ShopRecoveryReaders = {
+  local: readLocalMirrorItemState,
+  native: async () => ({ status: 'unavailable' }),
+};
+
 export async function boundShopRecoveryRead<T>(
   read: () => Promise<T>,
   timeoutMs = 8_000,
