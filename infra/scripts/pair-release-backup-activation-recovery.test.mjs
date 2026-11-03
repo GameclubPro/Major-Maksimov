@@ -13,6 +13,8 @@ import {
   withActivationSchedulerLock,
   validateActivationOcrRestart,
   observeActivationOcrRestart,
+  observeActivationUnitProperties,
+  parseActivationUnitProperties,
 } from './pair-release-backup-activation-recovery.mjs';
 import {
   withBackupRefusalLocks,
@@ -1024,3 +1026,339 @@ else process.exitCode=99;
     process.env.PATH = oldPath;
   }
 });
+
+// Sanitized verbatim systemctl representation: two records, including its spaces
+// before separators. No owner token, invocation identity or private export is embedded.
+const eraserPrecheckRecords = [
+  'ExecStartPre={ path=/usr/bin/test ; argv[]=/usr/bin/test -f /var/www/Chat_bot/infra/scripts/lib/postgres-backup-profile.sh ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }',
+  'ExecStartPre={ path=/usr/bin/env ; argv[]=/usr/bin/env MAXIM_BACKUP_PROFILE=eraser node /var/www/Chat_bot/infra/scripts/postgres-backup-schedule.mjs capability ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }',
+];
+
+const emptyCommandKeys = ['ExecCondition', 'ExecStartPost', 'ExecStop', 'ExecStopPost'];
+async function withUnitCollector(t, name, raw, options, inspect) {
+  const directory = await temporary(t);
+  const missing = options.missing ?? emptyCommandKeys;
+  const callsPath = join(directory, 'calls.jsonl');
+  const actualPython = spawnSync(
+    'python3',
+    ['-I', '-B', '-c', 'import sys; print(sys.executable)'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(actualPython.status, 0);
+  const systemctl = `#!${process.execPath}\nconst args=process.argv.slice(2); if(args[0]!=='show'||args[1]!==${JSON.stringify(name)}||!args.includes('--all')||!args.includes('--property=ExecStartPre')||!args.includes('--property=NeedDaemonReload')) process.exit(99); process.stdout.write(${JSON.stringify(raw)});\n`;
+  // Run the actual embedded Python body with a typed fake D-Bus module. This checks
+  // isolation/arguments, same-connection lifetime, typed values and cleanup failures.
+  const fakeDbus = `
+import json, sys, types
+scenario = ${JSON.stringify(options.scenario ?? '')}
+calls_path = ${JSON.stringify(callsPath)}
+expected_unit = ${JSON.stringify(name)}
+expected_keys = ${JSON.stringify(missing)}
+def record(method):
+    with open(calls_path, 'a') as stream: stream.write(json.dumps(method) + '\\n')
+class ObjectPath(str): pass
+class Array(list):
+    def __init__(self, values=(), signature='(sasbttttuii)'):
+        super().__init__(values)
+        self.signature = signature
+class Bus:
+    def __init__(self, address):
+        assert address == 'unix:path=/run/dbus/system_bus_socket'
+        self.held = False
+    def get_object(self, destination, path, introspect):
+        assert destination == 'org.freedesktop.systemd1' and introspect is False
+        return self
+    def RefUnit(self, unit, timeout):
+        assert unit == expected_unit and timeout == 1 and not self.held
+        record('ref')
+        if scenario == 'ref_failure': raise RuntimeError('ref_failed')
+        self.held = True
+    def GetUnit(self, unit, timeout):
+        assert unit == expected_unit and timeout == 1 and self.held
+        record('path')
+        if scenario == 'lookup_failure': raise RuntimeError('lookup_failed')
+        path = '/org/freedesktop/systemd1/unit/' + unit.replace('-', '_2d').replace('.', '_2e')
+        if scenario == 'wrong_path': path += '_unrelated'
+        return str(path) if scenario == 'wrong_path_type' else ObjectPath(path)
+    def Get(self, interface, key, timeout):
+        assert interface == 'org.freedesktop.systemd1.Service' and key in expected_keys and timeout == 1 and self.held
+        record(key)
+        if scenario == 'property_failure': raise RuntimeError('property_failed')
+        if scenario == 'plain_list': return []
+        return Array(['/bin/true'] if scenario == 'nonempty' else [], 's' if scenario == 'wrong_signature' else '(sasbttttuii)')
+    def UnrefUnit(self, unit, timeout):
+        assert unit == expected_unit and timeout == 1 and self.held
+        record('unref')
+        if scenario == 'unref_failure': raise RuntimeError('unref_failed')
+        self.held = False
+    def close(self):
+        record('close')
+        if scenario == 'close_failure': raise RuntimeError('close_failed')
+def interface(obj, name):
+    assert name in ['org.freedesktop.systemd1.Manager', 'org.freedesktop.DBus.Properties']
+    return obj
+sys.modules['dbus'] = types.SimpleNamespace(bus=types.SimpleNamespace(BusConnection=Bus), Interface=interface, String=str, ObjectPath=ObjectPath, Array=Array)
+`;
+  const python = `#!${process.execPath}
+const fs=require('node:fs');const {spawnSync}=require('node:child_process');const args=process.argv.slice(2);
+if(JSON.stringify(args.slice(0,3))!==JSON.stringify(['-I','-B','-c'])||JSON.stringify(args.slice(4))!==${JSON.stringify(JSON.stringify([name, ...missing]))}) process.exit(99);
+const result=spawnSync(${JSON.stringify(actualPython.stdout.trim())},['-I','-B','-c',${JSON.stringify(fakeDbus)}+args[3],...args.slice(4)],{encoding:'utf8'});
+process.stdout.write(${options.reply === undefined ? 'result.stdout' : JSON.stringify(options.reply)});process.stderr.write(result.stderr);process.exitCode=result.status ?? 99;
+`;
+  await writeFile(join(directory, 'systemctl'), systemctl, { mode: 0o700 });
+  await writeFile(join(directory, 'python3'), python, { mode: 0o700 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${directory}:${previousPath}`;
+  try {
+    await inspect(
+      async () => observeActivationUnitProperties(name),
+      async () => {
+        try {
+          return (await readFile(callsPath, 'utf8'))
+            .trimEnd()
+            .split('\n')
+            .map((line) => JSON.parse(line));
+        } catch (error) {
+          if (error.code === 'ENOENT') return [];
+          throw error;
+        }
+      },
+    );
+  } finally {
+    process.env.PATH = previousPath;
+  }
+}
+
+test('actual collector preserves repeated Eraser prechecks and proves omitted command vectors through typed D-Bus', async (t) => {
+  const { request, observation } = await fixture();
+  const name = 'maxim-eraser-postgres-backup.service';
+  const raw =
+    Object.entries(observation.units[name].properties)
+      .flatMap(([key, value]) =>
+        key === 'ExecStartPre' ? eraserPrecheckRecords : [`${key}=${value}`],
+      )
+      .join('\n') + '\n';
+  const omittedEmptyCommands = raw.replace(/^Exec(?:Condition|StartPost|Stop|StopPost)=\n/gmu, '');
+  await withUnitCollector(t, name, omittedEmptyCommands, {}, async (collect, calls) => {
+    observation.units[name].properties = await collect();
+    assert.equal(
+      observation.units[name].properties.ExecStartPre,
+      eraserPrecheckRecords.map((line) => line.slice('ExecStartPre='.length)).join(' '),
+    );
+    for (const key of emptyCommandKeys) assert.equal(observation.units[name].properties[key], '');
+    assert.deepEqual(await calls(), ['ref', 'path', ...emptyCommandKeys, 'unref', 'close']);
+    assert.doesNotThrow(() => buildBackupActivationProof(request, observation));
+  });
+});
+
+for (const [name, scenario] of [
+  ['wrong unit path', 'wrong_path'],
+  ['untyped unit path', 'wrong_path_type'],
+  ['GetUnit failure', 'lookup_failure'],
+  ['RefUnit failure', 'ref_failure'],
+  ['wrong command signature', 'wrong_signature'],
+  ['nonempty command vector', 'nonempty'],
+  ['untyped command vector', 'plain_list'],
+  ['property read failure', 'property_failure'],
+  ['reference release failure', 'unref_failure'],
+  ['connection close failure', 'close_failure'],
+]) {
+  test(`actual typed collector refuses ${name} and closes its connection`, async (t) => {
+    const unit = 'maxim-eraser-postgres-backup.service';
+    await withUnitCollector(t, unit, `Id=${unit}\n`, { scenario }, async (collect, calls) => {
+      await assert.rejects(collect, /bounded_observation_failed/u);
+      const observed = await calls();
+      assert.equal(observed[0], 'ref');
+      assert.equal(observed.at(-1), 'close');
+      assert.equal(observed.includes('unref'), scenario !== 'ref_failure');
+    });
+  });
+}
+
+for (const [name, mutate] of [
+  [
+    'wrong unit',
+    (value) => {
+      value.unit = 'unrelated.service';
+    },
+  ],
+  [
+    'wrong path',
+    (value) => {
+      value.objectPath = '/unrelated';
+    },
+  ],
+  [
+    'unreleased reference',
+    (value) => {
+      value.referenceReleased = false;
+    },
+  ],
+  [
+    'missing vector',
+    (value) => {
+      value.properties.pop();
+    },
+  ],
+  [
+    'extra vector',
+    (value) => {
+      value.properties.push(value.properties[0]);
+    },
+  ],
+  [
+    'reordered vectors',
+    (value) => {
+      value.properties.reverse();
+    },
+  ],
+  [
+    'unknown vector',
+    (value) => {
+      value.properties[0].name = 'Unknown';
+    },
+  ],
+  [
+    'wrong signature',
+    (value) => {
+      value.properties[0].type = 'as';
+    },
+  ],
+  [
+    'nonzero count',
+    (value) => {
+      value.properties[0].count = 1;
+    },
+  ],
+  [
+    'extra evidence key',
+    (value) => {
+      value.extra = true;
+    },
+  ],
+  [
+    'extra vector key',
+    (value) => {
+      value.properties[0].extra = true;
+    },
+  ],
+]) {
+  test(`typed collector reply refuses ${name}`, async (t) => {
+    const unit = 'maxim-eraser-postgres-backup.service';
+    const evidence = {
+      unit,
+      objectPath: '/org/freedesktop/systemd1/unit/maxim_2deraser_2dpostgres_2dbackup_2eservice',
+      properties: emptyCommandKeys.map((name) => ({ name, type: 'a(sasbttttuii)', count: 0 })),
+      referenceReleased: true,
+    };
+    mutate(evidence);
+    await withUnitCollector(
+      t,
+      unit,
+      `Id=${unit}\n`,
+      { reply: JSON.stringify(evidence) },
+      async (collect) => {
+        await assert.rejects(collect, /empty_service_commands_unproved/u);
+      },
+    );
+  });
+}
+
+test('typed fallback queries only missing hooks and never overwrites an observed nonempty hook', async (t) => {
+  const { request, observation } = await fixture();
+  const name = 'maxim-postgres-backup.service';
+  const p = observation.units[name].properties;
+  p.ExecStop = argv('/bin/true');
+  const raw =
+    Object.entries(p)
+      .filter(([key]) => key !== 'ExecCondition')
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n') + '\n';
+  await withUnitCollector(t, name, raw, { missing: ['ExecCondition'] }, async (collect) => {
+    observation.units[name].properties = await collect();
+    assert.equal(observation.units[name].properties.ExecCondition, '');
+    assert.equal(observation.units[name].properties.ExecStop, p.ExecStop);
+    assert.throws(
+      () => buildBackupActivationProof(request, observation),
+      /service_execution_boundary_changed/u,
+    );
+  });
+});
+
+for (const name of ['maxim-postgres-backup.service', 'maxim-postgres-backup.timer'])
+  test(`complete ${name} observation does not query D-Bus`, async (t) => {
+    const units = await unitsFixture();
+    const raw =
+      Object.entries(units[name].properties)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n') + '\n';
+    await withUnitCollector(t, name, raw, { scenario: 'ref_failure' }, async (collect, calls) => {
+      assert.deepEqual(await collect(), units[name].properties);
+      assert.deepEqual(await calls(), []);
+    });
+  });
+
+test('unknown unit is refused before any collector command', async (t) => {
+  await withUnitCollector(
+    t,
+    'unrelated.service',
+    'Id=unrelated.service\n',
+    {},
+    async (collect, calls) => {
+      await assert.rejects(collect, /unknown_backup_unit/u);
+      assert.deepEqual(await calls(), []);
+    },
+  );
+});
+
+for (const [name, raw] of [
+  ['duplicate scalar', 'Id=one\nId=one\n'],
+  ['duplicate ExecStart', 'ExecStart=one\nExecStart=two\n'],
+  ['unknown property', 'Unexpected=value\n'],
+  ['extra precheck', eraserPrecheckRecords.concat(eraserPrecheckRecords[0]).join('\n') + '\n'],
+  ['empty repeated precheck', eraserPrecheckRecords[0] + '\nExecStartPre=\n'],
+  ['empty leading precheck', 'ExecStartPre=\n' + eraserPrecheckRecords[0] + '\n'],
+  ['blank interior line', 'Id=one\n\nLoadState=loaded\n'],
+  ['extra trailing newline', 'Id=one\n\n'],
+  ['missing newline', 'Id=one'],
+  ['carriage return', 'Id=one\r\n'],
+  ['NUL byte', 'Id=one\0\n'],
+  ['continuation line', 'Id=one\n malformed continuation\n'],
+  ['oversized value', 'Id=' + 'a'.repeat(65_536) + '\n'],
+])
+  test(`systemctl parser refuses ${name}`, () => {
+    assert.throws(() => parseActivationUnitProperties(raw), /invalid_unit_observation/u);
+  });
+
+test('single precheck and empty scalar retain their exact property values', () => {
+  const line = eraserPrecheckRecords[1];
+  assert.deepEqual(parseActivationUnitProperties(`User=\n${line}\n`), {
+    User: '',
+    ExecStartPre: line.slice('ExecStartPre='.length),
+  });
+});
+
+for (const [name, records] of [
+  ['reversed', [...eraserPrecheckRecords].reverse()],
+  ['duplicated', [eraserPrecheckRecords[0], eraserPrecheckRecords[0]]],
+  [
+    'additional loaded command',
+    [
+      eraserPrecheckRecords[0],
+      eraserPrecheckRecords[1] + ' { path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; }',
+    ],
+  ],
+])
+  test(`preserved ${name} Eraser prechecks still fail exact command validation`, async () => {
+    const { request, observation } = await fixture();
+    const name = 'maxim-eraser-postgres-backup.service';
+    const raw =
+      Object.entries(observation.units[name].properties)
+        .flatMap(([key, value]) => (key === 'ExecStartPre' ? records : [`${key}=${value}`]))
+        .join('\n') + '\n';
+    observation.units[name].properties = parseActivationUnitProperties(raw);
+    assert.throws(
+      () => buildBackupActivationProof(request, observation),
+      /service_command_changed/u,
+    );
+  });
