@@ -12,10 +12,10 @@
 - Export reusable schemas/types from focused source modules and add an explicit `package.json` subpath when consumers import that module directly.
 - Do not commit generated JS beside `src`; build output belongs only in ignored `dist/`.
 - The public build script serializes and cleans `dist`, then verifies exports. Do not bypass it with `build:source` while another contracts/API validation is running.
-- Focused checks:
-  - `npm run typecheck:contracts`
-  - `npm run test:contracts`
-  - `npm run build --workspace @maxim/contracts`
+- Run affected files through the [focused runner](../../docs/development/agent-machine-contract.md#focused-checks-before-submission),
+  then let the staged commit helper own planned contracts and consumer aggregates.
+  `check:contracts` includes typecheck and tests; `test:contracts` already owns its build.
+  Do not repeat those subchecks or add unrelated consumers for Markdown-only changes.
 - Contract tests live in `packages/contracts/test` and run with Vitest. Keep pure schema/mapping tests here instead of making API Jest own contract-only behavior.
 
 ## Compatibility

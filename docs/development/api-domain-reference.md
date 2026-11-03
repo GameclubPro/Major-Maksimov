@@ -145,6 +145,13 @@ communities require an explicit designation before agent-initiated test mutation
 - Sanction explanations, warnings, and published rules append the fixed admin-contact link through dedicated `*AdminContactButtonEnabled`/`Url` fields. Mute/ban notices do not include it.
 - Empty stored editable bot-speech text means inherited catalog copy; any non-empty value is custom even if it matches an old default. Never infer inheritance by string comparison.
 
+## Marketplace Integration
+
+For Birzhik profile rights, advertising consent, module/legacy compatibility and final
+send checks, read the [maintained marketplace contract](marketplace-integration.md).
+For chat shops, use the [Karavan runbook](../operations/runbooks/karavan-chat-marketplaces.md).
+Statistics exchange does not grant advertising or shop authority.
+
 ## Publishing And Outbound Actions
 
 - With `MAX_PUBLISHER_DISPATCH_ENABLED=false`, `api-publisher` may run identity attestation, heartbeat, webhook reconciliation, and passive lifecycle handling only; do not start publication, binding, suggestion, or chat/channel-comment recovery scans and do not probe MAX entity access.
@@ -259,6 +266,11 @@ communities require an explicit designation before agent-initiated test mutation
 - Duplicate windows use the shared contracts resolver with a 48-hour maximum. History v4 uses Redis-clock-bounded absolute expiry, preserves earlier expiry on replay/qualification, and retains v3 reset/removal fences while isolating positive history. Parser-aligned source selection preserves webhook identity/deadlines through their explicit v1 projection. Storage-version transitions revoke all old evidence, including IMAGE, without changing raster hashes. Constant-size lifecycle materialization provenance must survive state loss and invalidate; unchanged or unverified old content cannot rebuild a baseline across reset epochs, including accepted future timestamps. Never shorten durable action revocation or sanction idempotency to the comparison window. Optional photo proof-cache Redis uses its own fail-fast connection and retires timed-out inflight queues; authority/history connections must remain independent.
 - Duplicate final transport guards recheck the original history binding after quota/route/payload waits, before the final SQL/Redis authorization read. A history reset or lifecycle invalidation does not revoke the separate ordering grant. Preserve the early history check and immunity consumption order; the final recheck performs no MAX reads. Native reset and final SQL policy coverage live in `message-duplicate-flow.redis-integration.spec.ts` and `message-duplicate-sanction-receipt-postgres.spec.ts`.
 - Allowlist `DOMAIN` matches the host and subdomains; `EXACT` remains URL-specific.
+- Sanction-register retention, release identity and MAX activity paging follow the
+  [maintained contract and regression map](feature-regressions.md#sanctions-and-participant-activity).
+- Observational membership heartbeats coalesce same-chat/bot writes and start cooldown only
+  after success; bounded cache eviction grants no access. Preserve independent keys and retry
+  after failed writes. See [heartbeat regressions](../../apps/api/src/max/max-bot-link.service.spec.ts).
 - Moderation and membership feeds use maintained read models (`chat_moderation_feed_items`, `chat_moderation_affected_user_hours`, `chat_membership_activity_feed_items`), not raw-event reconstruction per request.
 - Channel statistics return saved top-post previews from `channel_posts.preview_url`. Missing images remain optional; response construction must not wait for per-post MAX lookups. The existing bounded channel statistics collector owns preview updates alongside post snapshots, without a separate request-triggered queue.
 - Recurring channel view discovery sizes its five-minute pass for a nominal twelve-hour fleet cycle, capped at 24 channels when healthy and 12 under slow admission. Each channel retains two recent pages and the existing MAX source limits. Recheck pressure and shutdown between channels; stop starting discovery work after 60 seconds. A skipped or interrupted pass does not prove freshness, and pressure can extend the target cycle.

@@ -2,8 +2,8 @@
 
 ## Start Here
 
-- Start with the [current documentation](docs/README.md). Verify notes against code and scripts;
-  existing behavior is evidence, not proof of intent.
+- Start with [current docs](docs/README.md); verify notes against code and scripts.
+  Existing behavior does not prove intent.
 - Use configured `workspace`; preserve repo QA/release gates.
   See [interfaces](docs/development/agent-machine-contract.md).
 - Before editing, run `node scripts/agent/context.mjs --path <file>`; include callers.
@@ -21,8 +21,9 @@
 
 ## Project And Production
 
-- Node 24 LTS (`.nvmrc`); npm workspaces: NestJS/Fastify API with Prisma/Postgres/BullMQ/Redis,
-  React/Vite MAX mini app, closed Safety Desk, and shared Zod contracts. Use `npm ci`.
+- Node 24 LTS (`.nvmrc`), npm workspaces; use `npm ci`. API: NestJS/Fastify/Prisma,
+  Postgres/BullMQ/Redis; React/Vite mini app and Safety Desk, shared Zod contracts.
+  [Lastik](apps/eraser/AGENTS.md) owns its image and stores.
 - Production is REG.RU through `maxim-vps`, checkout `/var/www/Chat_bot`. The shared server has
   12 physical cores / 24 threads and 64 GB RAM; preserve sibling Svyazka and Karavan workloads.
   See [host profile](docs/operations/runbooks/reg-production-profile.md). The retired Yandex host

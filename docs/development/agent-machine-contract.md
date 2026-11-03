@@ -16,6 +16,41 @@ remain in scope. Its `source.base` and `source.head` are resolved commit SHAs. P
 migration follows the current worktree, and schema review compares baseline with worktree. This
 scope cannot be combined with explicit worktree/staged/range modes or `verify --full`.
 
+## Configured Workspace And Ownership
+
+`workspace` is a separately installed local coordinator, not an npm script or a file
+in this repository. Inspect `workspace --help` for the installed version's commands.
+When it is configured, use one task identity and its returned checkout throughout:
+
+```bash
+: "${WORKSPACE_TASK:?Set a new descriptive task id}"
+workspace start "$WORKSPACE_TASK" --scope major --goal 'Describe the concrete requested result' --no-install
+workspace status "$WORKSPACE_TASK" --json
+workspace context "$WORKSPACE_TASK" --json
+workspace plan "$WORKSPACE_TASK" --json
+```
+
+The coordinator starts from its configured base ref, which may be the production `main`
+rather than the newest remote commit. Inspect source/checkout SHAs and fetch before
+selecting the task baseline; advance only the idle task branch when appropriate. Keep
+production `main` and another task's worktree untouched. `--no-install` is appropriate
+for read-only/docs work; use `workspace prepare` when this checkout needs dependencies.
+Never change checkout inputs while one of its operations is active.
+
+`workspace check` accepts exact `major:path` tests, with `--native` for real stores.
+Stage owned files before `workspace submit --repo major --message ...`; it delegates to
+the mandatory repository commit helper and accepts `--include-agents` for agent notes.
+Do not run the same final aggregate separately. Track returned operation IDs, logs,
+heartbeats, deadlines and terminal exits with `workspace operation`/`workspace status`.
+A successful submission does not prove PR CI, merge, deployment or acceptance.
+
+The coordinator records the repository-owned editing baseline. For an independently
+created checkout, run `task-worktree.mjs start` before editing and `check` after submission,
+as specified by the [ownership procedure](../development-reliability-plan.md#worktree-ownership-and-completion).
+Do not create a replacement baseline to hide inherited changes. If the configured
+coordinator is unavailable, preserve the task record and use these repository entrypoints
+with the same validation/delivery gates; do not invent a replacement external protocol.
+
 ## Verification JSON v1
 
 `verify --json` and `--format json` emit one final JSON document on stdout, including failures.
@@ -61,6 +96,12 @@ files, traversal and links outside the repository fail closed; they never trigge
 
 Contracts cases under `packages/contracts/test/*.spec.ts` or `*.test.ts` use the public contracts
 npm test, retaining its locked build and forwarding selected Vitest paths.
+
+Browser `.browser.mjs` scripts, API storage `.node.ts` cases and Eraser tests are not
+accepted by this focused interface. Use their maintained public family entrypoints:
+[feature browsers](feature-regressions.md), [API stores](agent-local-environment.md),
+and [Lastik](../../apps/eraser/AGENTS.md). Do not rename a test or bypass API generator
+locks to force it into a supported family.
 
 Focused checks are not the final aggregate. The commit helper owns final staged verification;
 do not run `verify`'s same aggregate in advance merely to populate coordinator status. Native cases

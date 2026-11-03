@@ -15,6 +15,7 @@ code. Its detailed guards remain mandatory. Do not load unrelated domain section
 | Publications, outbound effects, VK                          | [Publishing](../../docs/development/api-domain-reference.md#publishing-and-outbound-actions) and [VK](../../docs/development/api-domain-reference.md#vk-parsing)                            |
 | Moderation, duplicate/OCR rules, retention, statistics      | [Moderation](../../docs/development/api-domain-reference.md#moderation-and-read-models)                                                                                                     |
 | Markup, forwarding, attachments, links                      | [Message semantics](../../docs/development/api-domain-reference.md#message-and-link-semantics)                                                                                              |
+| Advertising buttons, Birzhik profiles, Karavan shops        | [Marketplace contract](../../docs/development/marketplace-integration.md) and [chat shops](../../docs/operations/runbooks/karavan-chat-marketplaces.md)                                     |
 | Operational script or production audit                      | [Bounded commands](../../docs/development/api-domain-reference.md#bounded-operational-commands) and [infra notes](../../infra/AGENTS.md)                                                    |
 
 ## Core Boundaries

@@ -50,7 +50,7 @@ Production-сервисы:
 | `ocr-native-sandbox`        | no-network Sharp/Tesseract auxiliary        |
 | `photo-native-sandbox`      | изолированное декодирование фото            |
 | `api-action`                | durable MAX action dispatch                 |
-| `api-message-retention`     | ограниченная очистка истории сообщений     |
+| `api-message-retention`     | ограниченная очистка истории сообщений      |
 | `api-publisher`             | isolated Publik dispatch                    |
 
 Актуальный список ролей и команд локальной отладки находится в
@@ -127,7 +127,7 @@ production origin включается только явным visual mode.
 Интеграция с «Биржиком» открывает рекламную биржу через собственного бота сервиса
 из Major и Publisher. Базы и выпуски остаются независимыми; профиль, сделки и
 рекламные размещения принадлежат бирже. Доступ администратора, управление владельца
-и независимые настройки кнопок описаны в [журнале интеграции](marketplace-birzhik-integration-2026-10-28.md).
+и независимые настройки кнопок описаны в [действующем контракте интеграции](development/marketplace-integration.md).
 Внутренний статистический обмен работает по проверенным правам без отдельного
 переключателя в интерфейсе и сохраняет явные прежние отказы; см. [контракт v2](maxim-svyazka-statistics-v2.md)
 и [ограниченный постраничный обмен v3](maxim-svyazka-statistics-v3.md). Сбор статистики
@@ -170,28 +170,13 @@ Prisma Client генерируется в игнорируемый `apps/api/src
 
 ## 9. Локальная Разработка
 
-Требуется Node 24 LTS.
-
-```bash
-docker compose -f infra/docker-compose.yml -f infra/docker-compose.local.yml up -d postgres redis
-npm run dev:all
-```
-
-Focused команды:
-
-```bash
-npm run dev:api
-npm run dev:miniapp
-npm run dev:admin
-npm run check:api
-npm run check:prisma
-npm run check:miniapp
-npm run typecheck:admin
-npm run test:contracts
-```
-
-API validation/build scripts сериализуют contracts/Prisma codegen через file locks; внутренние
-`*:unlocked` и `*:source` scripts не предназначены для параллельного ручного запуска.
+Требуется Node 24 LTS. Полная последовательность настройки локальных адресов,
+API env и миграций находится в [README](../README.md#local-start).
+Для UI и disposable PostgreSQL/Redis используйте
+[локальное окружение](development/agent-local-environment.md).
+Проверки выбираются по [рабочему процессу](development-reliability-plan.md#daily-workflow);
+итоговый агрегат выполняет commit helper. API validation/build scripts владеют
+блокировками codegen; внутренние `*:unlocked` и `*:source` не запускаются вручную.
 
 ## 10. Production И Деплой
 

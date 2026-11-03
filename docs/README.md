@@ -19,6 +19,11 @@ scripts. A configuration default or an earlier release report does not establish
 | Refactoring an existing boundary                     | [Preserved contracts](refactor-safe-boundaries.md) and [candidate roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md)         |
 | Workspace and runtime overview                       | [Project description](project-description.md)                                                                                               |
 
+Independent Lastik work starts with [its scoped instructions](../apps/eraser/AGENTS.md).
+Advertising buttons and Birzhik profiles use the [marketplace contract](development/marketplace-integration.md);
+chat shops use the [Karavan runbook](operations/runbooks/karavan-chat-marketplaces.md).
+Sanctions and activity use the [current regression map](development/feature-regressions.md#sanctions-and-participant-activity).
+
 ## Plans And Historical Evidence
 
 Dated plans, audits and [incident reports](operations/incidents/) describe their own source revision
@@ -32,3 +37,10 @@ Superseded design proposals, duplicate execution plans and retired cloud notes h
 from the working tree. Their contents remain in Git history; consult a historical revision only
 when it helps explain a specific decision. Current instructions and maintained references take
 precedence over obsolete commands, release snapshots and implementation checklists.
+
+Retire a completed plan when its durable requirements, current code/test links and
+remaining acceptance boundaries have a maintained home. Remove or replace inbound links
+in the same change and let `check:docs` verify them. A date, unused-looking filename or
+lack of imports alone is not evidence that a migration, fixture, asset, recovery reader
+or operational tool is unnecessary. Preserve those consumers and safety contracts;
+Git history holds superseded execution chronology without keeping competing instructions.
