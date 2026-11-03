@@ -7,6 +7,7 @@ import { Redis } from 'ioredis';
 import pg from 'pg';
 import { CleanupRuntime, MAX_WAKEUPS, type Wakeup } from '../src/runtime.js';
 import { Store } from '../src/store.js';
+import { updatePolicy } from './support/policy-proof.js';
 import { migrate } from '../src/migrate.js';
 import type { MaxTransport } from '../src/max.js';
 
@@ -328,7 +329,7 @@ test('shutdown during the final pin read cannot acquire a new DELETE journal', a
       holdMessageIds: [],
       completeThrough: new Date().toISOString(),
     });
-    await store.update('-1', {
+    await updatePolicy(store, '-1', {
       enabled: true,
       hours: 24,
       expectedRevision: 0,

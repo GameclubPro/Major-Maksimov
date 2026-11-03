@@ -11,6 +11,7 @@ import { ADMIT_HTTP_LUA, HttpAdmissionDeferred, HttpLimiter } from '../src/limit
 import { MaxClient, MaxError } from '../src/max.js';
 import { CleanupRuntime } from '../src/runtime.js';
 import { Store } from '../src/store.js';
+import { updatePolicy } from './support/policy-proof.js';
 
 const databaseUrl = process.env.MAXIM_TEST_POSTGRES_URL;
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL;
@@ -64,7 +65,7 @@ test('received DELETE 429 survives Redis disconnect and a new client cannot disp
       holdMessageIds: [],
       completeThrough: new Date().toISOString(),
     });
-    await store.update('-1', {
+    await updatePolicy(store, '-1', {
       enabled: true,
       hours: 24,
       expectedRevision: 0,

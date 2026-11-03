@@ -2820,3 +2820,11 @@ maxim_topology_require_eraser_rate_limit_reader() {
   node infra/scripts/assert-eraser-source.mjs "$source_sha" --validate-rate-limit-reader-floor || return
   node infra/scripts/assert-eraser-source.mjs "$source_sha" --rate-limit-reader "$component"
 }
+
+# FLAG: Negative connection observations invalidate earlier positive proofs permanently.
+maxim_topology_require_eraser_connection_proof_reader() {
+  local source_sha="$1" component="${2:-all}"
+  local marker=/var/lib/maxim-deploy/eraser-connection-proof-reader-version
+  [[ -e "$marker" || -L "$marker" ]] || return 0
+  node infra/scripts/assert-eraser-source.mjs "$source_sha" --installed-connection-proof-reader "$component"
+}

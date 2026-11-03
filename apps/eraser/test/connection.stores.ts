@@ -12,6 +12,7 @@ import { HttpLimiter } from '../src/limiter.js';
 import { migrate } from '../src/migrate.js';
 import { CleanupRuntime, MAX_CONNECTION_WAKEUPS, MAX_WAKEUPS } from '../src/runtime.js';
 import { Store } from '../src/store.js';
+import { connectionProof } from './support/policy-proof.js';
 import type { Protection, UpdatePolicy } from '../src/types.js';
 
 const databaseUrl = process.env.MAXIM_TEST_POSTGRES_URL;
@@ -225,7 +226,7 @@ test('request lease and final activation survive a service restart without moder
     await replacementStore.activateConnection(
       '-1',
       abandoned.leaseToken,
-      new Date(Date.now() + 15_000),
+      await connectionProof(replacementStore, '-1'),
     ),
     false,
   );
@@ -283,7 +284,11 @@ test('activation cannot use transaction-start time after waiting across the data
   try {
     await blocker.query('BEGIN');
     await blocker.query("SELECT chat_id FROM eraser_policies WHERE chat_id='-1' FOR UPDATE");
-    activating = store.activateConnection('-1', wakeup.leaseToken, new Date(Date.now() + 15_000));
+    activating = store.activateConnection(
+      '-1',
+      wakeup.leaseToken,
+      await connectionProof(store, '-1'),
+    );
     await waitForActivationLock();
     await pool.query(
       "UPDATE eraser_connection_requests SET expires_at=clock_timestamp()+INTERVAL '100 milliseconds' WHERE chat_id='-1'",
@@ -308,7 +313,11 @@ test('fresh rights proof expires during a policy lock wait while the request and
     await blocker.query('BEGIN');
     await blocker.query("SELECT chat_id FROM eraser_policies WHERE chat_id='-1' FOR UPDATE");
     const proofExpiresAt = new Date(Date.now() + 1000);
-    activating = store.activateConnection('-1', wakeup.leaseToken, proofExpiresAt);
+    activating = store.activateConnection(
+      '-1',
+      wakeup.leaseToken,
+      await connectionProof(store, '-1', proofExpiresAt),
+    );
     await waitForActivationLock();
     await delay(Math.max(1, proofExpiresAt.getTime() - Date.now() + 100));
     const clocks = (

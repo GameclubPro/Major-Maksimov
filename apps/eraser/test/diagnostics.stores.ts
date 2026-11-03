@@ -8,6 +8,7 @@ import { createHttpServer } from '../src/http.js';
 import { migrate } from '../src/migrate.js';
 import type { MaxTransport } from '../src/max.js';
 import { Store } from '../src/store.js';
+import { updatePolicy } from './support/policy-proof.js';
 import type { Candidate } from '../src/types.js';
 import type { CleanupRuntime } from '../src/runtime.js';
 
@@ -198,7 +199,7 @@ test('public health projection distinguishes healthy idle work from a stopped wo
     operationId: randomUUID(),
     actorUserId: '5',
   };
-  const stored = await store.update('-1', input);
+  const stored = await updatePolicy(store, '-1', input);
   assert.equal((await read<State>('chats/-1/policy')).status, 'running');
   assert.equal((await read<State>('chats/-1/policy')).coverage.executionStopped, false);
   const worker = {

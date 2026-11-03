@@ -1638,6 +1638,9 @@ fi
 if contains_service eraser "${SERVICES[@]}"; then
   maxim_eraser_install_rate_limit_reader_floor "$TARGET_SHA"
 fi
+if contains_service eraser "${SERVICES[@]}"; then
+  maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"
+fi
 RELEASE_ID="release-$(date -u +%Y%m%dT%H%M%SZ)-${TARGET_SHA:0:12}"
 TARGET_HAS_MEDIA_ANALYSIS=0
 TARGET_HAS_OCR_NATIVE_SANDBOX=0

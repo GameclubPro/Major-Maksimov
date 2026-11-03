@@ -14,6 +14,8 @@ import {
   validChat,
   type Protection,
   type UpdatePolicy,
+  type PolicyActivationProof,
+  type PolicyActivationGuard,
 } from './types.js';
 
 function equalSecret(actual: unknown, expected: string): boolean {
@@ -243,12 +245,35 @@ export function createHttpServer(
           const input = updateInput(await body(request));
           const cached = await store.operation(chatId, input);
           if (cached) return send(response, 200, policyResponse(cached));
+          let proof: PolicyActivationProof | undefined;
           if (input.enabled && !input.connectWhenReady) {
             if (!config.enabled) fail(503, 'ERASER_UNAVAILABLE', 'Ластик пока недоступен.');
+            let guard: PolicyActivationGuard;
             try {
-              await max.rights(chatId);
-              await store.connection(chatId, 'connected', true);
+              guard = await store.activationGuard(chatId, input);
             } catch (error) {
+              // FLAG: A concurrent exact operation may commit after the first receipt lookup.
+              // Its revision advance must return that receipt without probing or reactivating.
+              if (
+                error instanceof ServiceError &&
+                error.code === 'MESSAGE_RETENTION_REVISION_CONFLICT'
+              ) {
+                const committed = await store.operation(chatId, input);
+                if (committed) return send(response, 200, policyResponse(committed));
+              }
+              throw error;
+            }
+            try {
+              await max.rights(chatId, () => store.assertActivationGuard(guard));
+              proof = { ...guard, expiresAt: new Date(Date.now() + 15_000) };
+            } catch (error) {
+              if (error instanceof ServiceError) {
+                if (error.code === 'MESSAGE_RETENTION_REVISION_CONFLICT') {
+                  const committed = await store.operation(chatId, input);
+                  if (committed) return send(response, 200, policyResponse(committed));
+                }
+                throw error;
+              }
               if (error instanceof MaxError && error.code === 'eraser_rights_missing') {
                 await store.connection(chatId, 'no_access');
                 fail(
@@ -264,7 +289,7 @@ export function createHttpServer(
               );
             }
           }
-          return send(response, 200, policyResponse(await store.update(chatId, input)));
+          return send(response, 200, policyResponse(await store.update(chatId, input, proof)));
         }
         if (route === 'review' && request.method === 'GET')
           return send(response, 200, await review(store, chatId, url.searchParams.get('after')));

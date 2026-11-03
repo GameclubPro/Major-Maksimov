@@ -15,6 +15,95 @@ export const ERASER_CONNECTION_REQUEST_FLOOR =
   '/var/lib/maxim-deploy/eraser-connection-request-version';
 export const ERASER_RATE_LIMIT_READER_FLOOR =
   '/var/lib/maxim-deploy/eraser-rate-limit-reader-version';
+export const ERASER_CONNECTION_PROOF_READER_FLOOR =
+  '/var/lib/maxim-deploy/eraser-connection-proof-reader-version';
+
+export const ERASER_CONNECTION_PROOF_READER_CHECKS = Object.freeze({
+  eraser: [
+    [
+      'apps/eraser/src/store.ts',
+      [
+        'ERASER_CONNECTION_PROOF_READER_VERSION = 1;',
+        'async activationGuard(',
+        'connection_generation',
+        'assertActivationGuard(',
+        'validConnectionProof(proof, chatId)',
+        'proof.connectionGeneration',
+      ],
+    ],
+    [
+      'apps/eraser/src/types.ts',
+      ['PolicyActivationProof', 'ConnectionProof', 'connectionGeneration: string'],
+    ],
+    ['apps/eraser/src/http.ts', ['store.activationGuard(', 'store.update(']],
+    ['apps/eraser/src/runtime.ts', ['connectionGeneration:', 'activateConnection(']],
+    [
+      'apps/eraser/migrations/0009-connection-generation.sql',
+      ['connection_generation', 'bigint', 'CHECK'],
+    ],
+  ],
+  tooling: [
+    [
+      'infra/scripts/lib/deploy-lock.sh',
+      [
+        'require_pair_release_admission_dispatch()',
+        'node "${BASH_SOURCE[0]%/*}/../assert-eraser-source.mjs" "$proof_source" --installed-connection-proof-reader tooling || return 1',
+      ],
+    ],
+    [
+      'infra/scripts/lib/deploy-topology.sh',
+      [
+        'maxim_topology_require_eraser_connection_proof_reader()',
+        'node infra/scripts/assert-eraser-source.mjs "$source_sha" --installed-connection-proof-reader "$component"',
+      ],
+    ],
+    [
+      'infra/scripts/lib/eraser-deploy.sh',
+      [
+        'maxim_eraser_install_connection_proof_reader_floor()',
+        'node infra/scripts/assert-eraser-source.mjs "$source_sha" --install-connection-proof-reader-floor',
+      ],
+    ],
+    [
+      'infra/scripts/vps-pull-build-up.sh',
+      [
+        'maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"',
+        'require_pair_release_admission_dispatch "origin/$BRANCH" || return 2',
+        'require_pair_release_admission_dispatch "refs/heads/$BRANCH" || return 2',
+      ],
+    ],
+    [
+      'infra/scripts/vps-release-rollback.sh',
+      [
+        'maxim_topology_require_eraser_connection_proof_reader "${COMPONENT_SOURCE_SHA[eraser]}" eraser',
+      ],
+    ],
+    [
+      'infra/scripts/vps-runtime-rollback.sh',
+      [
+        'maxim_topology_require_eraser_connection_proof_reader "$TARGET_FULL_SHA" tooling',
+        'require_pair_release_admission_dispatch "$TARGET_FULL_SHA" || exit 1',
+      ],
+    ],
+    [
+      'infra/scripts/vps-connect.sh',
+      [
+        'maxim_topology_require_eraser_connection_proof_reader "$(git rev-parse HEAD)" tooling || exit 1',
+        'maxim_topology_require_eraser_connection_proof_reader "$expected_tooling_sha" tooling || exit 1',
+        'require_pair_release_admission_dispatch "$expected_tooling_sha" || exit 1',
+      ],
+    ],
+    [
+      'infra/scripts/assert-eraser-source.mjs',
+      [
+        'export function assertEraserConnectionProofReaderSource(',
+        'validateEraserConnectionProofReaderFloor();',
+        'installEraserConnectionProofReaderFloor();',
+        'assertEraserConnectionProofReaderSource(sha, component);',
+      ],
+    ],
+  ],
+});
 
 export const ERASER_RATE_LIMIT_READER_CHECKS = Object.freeze({
   eraser: [
@@ -214,6 +303,19 @@ export function installEraserRateLimitReaderFloor(path = ERASER_RATE_LIMIT_READE
   installReaderFloor(path, 'rate limit');
 }
 
+// FLAG: Disabling Lastik or expiring a request never makes old positive writers safe.
+export function validateEraserConnectionProofReaderFloor(
+  path = ERASER_CONNECTION_PROOF_READER_FLOOR,
+) {
+  validateReaderFloor(path, 'connection proof');
+}
+
+export function installEraserConnectionProofReaderFloor(
+  path = ERASER_CONNECTION_PROOF_READER_FLOOR,
+) {
+  installReaderFloor(path, 'connection proof');
+}
+
 // FLAG: A quoted or commented capability is not a reader. Keep quoted shell arguments intact,
 // but require each marker to start in executable source rather than a literal or comment.
 function activeReaderSource(raw, path) {
@@ -313,6 +415,153 @@ function activeReaderSource(raw, path) {
   return { source: visible.join(''), active };
 }
 
+export function assertEraserConnectionProofReaderSource(
+  sha,
+  component = 'all',
+  readSource = (path) =>
+    execFileSync('git', ['show', `${sha}:${path}`], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }),
+) {
+  if (!/^[a-f0-9]{40}$/u.test(sha ?? ''))
+    throw new Error('Lastik connection proof reader requires an exact source SHA.');
+  const scopes =
+    component === 'all' ? Object.keys(ERASER_CONNECTION_PROOF_READER_CHECKS) : [component];
+  if (scopes.some((scope) => !Object.hasOwn(ERASER_CONNECTION_PROOF_READER_CHECKS, scope)))
+    throw new Error('Unknown Lastik connection proof source component.');
+  const sources = new Map();
+  const sourceFor = (path) => {
+    if (!sources.has(path)) sources.set(path, activeReaderSource(readSource(path), path));
+    return sources.get(path);
+  };
+  const position = (path, marker, start = 0) => {
+    const { source, active } = sourceFor(path);
+    for (let at = source.indexOf(marker, start); at >= 0; at = source.indexOf(marker, at + 1))
+      if (active[at]) return at;
+    throw new Error(`Rollback target lacks the installed Lastik connection proof reader: ${path}`);
+  };
+  for (const scope of scopes)
+    for (const [path, markers] of ERASER_CONNECTION_PROOF_READER_CHECKS[scope])
+      for (const marker of markers) position(path, marker);
+  if (scopes.includes('eraser')) {
+    const store = sourceFor('apps/eraser/src/store.ts').source;
+    const requiredSql = [
+      "connection_status=CASE WHEN $2 THEN 'connected' ELSE connection_status END",
+      'connection_generation=$10::bigint AND $11::timestamptz>clock_timestamp()',
+      'connection_generation=$6::bigint AND $5::timestamptz>clock_timestamp()',
+      "connection_generation=connection_generation+CASE WHEN $2='no_access' THEN 1 ELSE 0 END",
+      "connection_status='missing',connection_generation=connection_generation+1",
+    ];
+    if (requiredSql.some((sql) => !store.includes(sql)) || /\bexplicitActivation\b/u.test(store))
+      throw new Error(
+        'Lastik connection proof reader lacks atomic positive or negative generation guards.',
+      );
+    const http = 'apps/eraser/src/http.ts';
+    const captured = position(http, 'guard = await store.activationGuard(chatId, input)');
+    if (
+      captured >=
+        position(http, 'await max.rights(chatId, () => store.assertActivationGuard(guard))') ||
+      captured >= position(http, 'store.update(chatId, input, proof)')
+    )
+      throw new Error(
+        'Lastik policy rights must follow generation capture and reach the atomic update.',
+      );
+    position('apps/eraser/src/runtime.ts', 'connectionGeneration: request.connection_generation');
+    position(
+      'apps/eraser/src/runtime.ts',
+      'current.connection_generation !== request.connection_generation',
+    );
+  }
+  if (scopes.includes('tooling')) {
+    const before = (path, check, mutation, start = 0) => {
+      if (position(path, check, start) >= position(path, mutation, start))
+        throw new Error(`Lastik connection proof check follows source/runtime mutation: ${path}`);
+    };
+    // FLAG: The old caller reaches this exact remote function. A detached marker or
+    // a check after checkout cannot preserve the next generation of enforcing tooling.
+    const lock = 'infra/scripts/lib/deploy-lock.sh';
+    const dispatchStart = position(lock, 'require_pair_release_admission_dispatch() {');
+    const dispatchEnd = sourceFor(lock).source.indexOf('\n}', dispatchStart);
+    const bridge = position(
+      lock,
+      'node "${BASH_SOURCE[0]%/*}/../assert-eraser-source.mjs" "$proof_source" --installed-connection-proof-reader tooling || return 1',
+      dispatchStart,
+    );
+    if (bridge >= dispatchEnd)
+      throw new Error('Lastik connection proof bridge is outside source dispatch.');
+    before(
+      lock,
+      'node "${BASH_SOURCE[0]%/*}/../assert-eraser-source.mjs" "$proof_source" --installed-connection-proof-reader tooling || return 1',
+      'pair_release_admission_candidate "$target"',
+      dispatchStart,
+    );
+    const deploy = 'infra/scripts/vps-pull-build-up.sh';
+    const sync = position(deploy, 'sync_branch() {');
+    for (const ref of ['origin/$BRANCH', 'refs/heads/$BRANCH'])
+      before(
+        deploy,
+        `require_pair_release_admission_dispatch "${ref}" || return 2`,
+        'git checkout "$BRANCH"',
+        sync,
+      );
+    before(
+      deploy,
+      'reexec_if_current_script_changed\n',
+      'maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"',
+    );
+    before(
+      deploy,
+      'maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"',
+      'docker compose "${ERASER_MIGRATION_COMPOSE_FILES[@]}" run',
+    );
+    const rollback = 'infra/scripts/vps-runtime-rollback.sh';
+    before(
+      rollback,
+      'maxim_topology_require_eraser_connection_proof_reader "$TARGET_FULL_SHA" tooling',
+      'git switch --detach "$TARGET_FULL_SHA"',
+    );
+    before(
+      rollback,
+      'require_pair_release_admission_dispatch "$TARGET_FULL_SHA" || exit 1',
+      'git switch --detach "$TARGET_FULL_SHA"',
+    );
+    const release = 'infra/scripts/vps-release-rollback.sh';
+    const selected = position(release, 'if [[ "$SELECT_ERASER" -eq 1 ]]; then');
+    const selectedEnd = sourceFor(release).source.indexOf('\nfi', selected);
+    if (
+      position(
+        release,
+        'maxim_topology_require_eraser_connection_proof_reader "${COMPONENT_SOURCE_SHA[eraser]}" eraser',
+        selected,
+      ) >= selectedEnd
+    )
+      throw new Error('Lastik connection proof rollback check is outside its component scope.');
+    before(
+      release,
+      'maxim_topology_require_eraser_connection_proof_reader "${COMPONENT_SOURCE_SHA[eraser]}" eraser',
+      'begin_release_runtime_transition\n',
+    );
+    const connector = 'infra/scripts/vps-connect.sh';
+    before(
+      connector,
+      'require_pair_release_admission_dispatch "$expected_tooling_sha" || exit 1',
+      'git checkout main',
+    );
+    before(
+      connector,
+      'maxim_topology_require_eraser_connection_proof_reader "$expected_tooling_sha" tooling || exit 1',
+      'git checkout main',
+    );
+    before(
+      connector,
+      'maxim_topology_require_eraser_connection_proof_reader "$(git rev-parse HEAD)" tooling || exit 1',
+      'if [[ -x "$entrypoint" ]]',
+    );
+  }
+}
+
 export function assertEraserRateLimitReaderSource(
   sha,
   component = 'all',
@@ -410,7 +659,15 @@ export function assertEraserSource(
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
     const [sha, action, component] = process.argv.slice(2);
-    if (action === '--connection-requests') {
+    if (action === '--connection-proof-reader') {
+      assertEraserConnectionProofReaderSource(sha, component);
+    } else if (action === '--installed-connection-proof-reader') {
+      validateEraserConnectionProofReaderFloor();
+      assertEraserConnectionProofReaderSource(sha, component);
+    } else if (action === '--install-connection-proof-reader-floor') {
+      assertEraserConnectionProofReaderSource(sha);
+      installEraserConnectionProofReaderFloor();
+    } else if (action === '--connection-requests') {
       assertEraserConnectionRequestSource(sha, component);
     } else if (action === '--install-connection-request-floor') {
       assertEraserConnectionRequestSource(sha);

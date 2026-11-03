@@ -421,7 +421,7 @@ test('webhook registration verifies exact bot, rejects conflicting subscriptions
       return Response.json({ subscriptions: registered ? [{ url }] : [] });
     },
   );
-  await max.subscribe();
+  assert.deepEqual(await max.subscribe(), { updateTypes: 'unknown' });
   assert.deepEqual(calls, [
     'GET /me',
     'GET /subscriptions',
@@ -437,6 +437,83 @@ test('webhook registration verifies exact bot, rejects conflicting subscriptions
         : Response.json({ subscriptions: [{ url: 'https://other.invalid/webhook' }] }),
   );
   await assert.rejects(conflict.subscribe(), /Conflicting Eraser webhook subscription/);
+});
+
+test('webhook registration distinguishes verified, unknown and incompatible update types', async (t) => {
+  const url = 'https://major-maksimov.ru/eraser/webhook';
+  const required = [
+    'message_created',
+    'message_edited',
+    'message_removed',
+    'bot_added',
+    'bot_removed',
+  ];
+  const cases: Array<{
+    name: string;
+    updateTypes: unknown;
+    expected: 'verified' | 'unknown' | 'rejected';
+  }> = [
+    { name: 'omitted', updateTypes: undefined, expected: 'unknown' },
+    { name: 'nullable', updateTypes: null, expected: 'unknown' },
+    { name: 'complete', updateTypes: required, expected: 'verified' },
+    {
+      name: 'normalized superset',
+      updateTypes: [
+        ...required.map((value) => ` ${value.toUpperCase()} `),
+        'bot_added',
+        'user_added',
+      ],
+      expected: 'verified',
+    },
+    ...required.map((missing) => ({
+      name: `missing ${missing}`,
+      updateTypes: required.filter((value) => value !== missing),
+      expected: 'rejected' as const,
+    })),
+    { name: 'empty list', updateTypes: [], expected: 'rejected' },
+    { name: 'object', updateTypes: {}, expected: 'rejected' },
+    { name: 'string', updateTypes: 'message_created', expected: 'rejected' },
+    { name: 'non-string member', updateTypes: [...required, 1], expected: 'rejected' },
+    { name: 'blank member', updateTypes: [...required, ' '], expected: 'rejected' },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const calls: string[] = [];
+      let registered = false;
+      const max = new MaxClient(
+        { ...settings, webhookUrl: url },
+        { acquire: async () => {}, cooldown: async () => {} },
+        async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          calls.push(`${init?.method} ${path}`);
+          if (path === '/me') return Response.json({ user_id: 123, is_bot: true });
+          if (init?.method === 'POST') {
+            assert.deepEqual(JSON.parse(String(init.body)), {
+              url,
+              secret: settings.webhookSecret,
+              update_types: required,
+            });
+            registered = true;
+            return Response.json({ success: true });
+          }
+          return Response.json({
+            subscriptions: registered ? [{ url, update_types: scenario.updateTypes }] : [],
+          });
+        },
+      );
+      if (scenario.expected === 'rejected') {
+        await assert.rejects(max.subscribe(), /MAX webhook subscription readback unconfirmed/);
+      } else {
+        assert.deepEqual(await max.subscribe(), { updateTypes: scenario.expected });
+      }
+      assert.deepEqual(calls, [
+        'GET /me',
+        'GET /subscriptions',
+        'POST /subscriptions',
+        'GET /subscriptions',
+      ]);
+    });
+  }
 });
 
 test('standalone runtime image carries both Russian CAs, exact source identity and no API runtime dependency', async () => {
