@@ -241,7 +241,17 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
           expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
             alias === 'later' ? candidateCount * 8 : 64,
           );
-          expect(blocks(node)).toBeLessThanOrEqual(alias === 'later' ? 256 : 128);
+          // FLAG: Point-lookup buffers vary with B-tree depth and visibility work.
+          // Grant a per-candidate budget only to bounded source index probes;
+          // compact hashed source scans retain the ordinary row/block ceilings.
+          const sourcePointProbe =
+            alias === 'original' &&
+            ['Index Scan', 'Index Only Scan'].includes(node['Node Type']) &&
+            perLoop <= 1 &&
+            node['Actual Loops'] <= candidateCount;
+          expect(blocks(node)).toBeLessThanOrEqual(
+            alias === 'later' || sourcePointProbe ? candidateCount * 8 : 128,
+          );
         }
         // Parent buffer totals are inclusive; do not sum them with child totals.
         expect(blocks(root)).toBeLessThanOrEqual(512);

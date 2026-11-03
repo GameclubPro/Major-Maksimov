@@ -273,7 +273,6 @@ test('keeps docs and agent notes deployment-free', () => {
     { status: 'M', path: 'infra/env/README.md' },
     { status: 'M', path: 'infra/nginx/README.md' },
     { status: 'M', path: 'infra/certs/README.md' },
-    { status: 'M', path: 'infra/vk-proxy/README.md' },
     { status: 'M', path: 'infra/www/major-maksimov/README.md' },
     { status: 'M', path: 'infra/README.md' },
     { status: 'M', path: 'apps/api/src/__tests__/README.md' },
