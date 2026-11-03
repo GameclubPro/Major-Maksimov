@@ -209,7 +209,8 @@ export class KaravanStorefrontRelayService {
         const scopedStore =
           resolved.result.status === 'published' ? resolved.result.stores[0] : null;
         store = scopedStore ? { ...scopedStore, sellerAccountId: null } : null;
-        if (!store && trigger !== 'bare') return 'noop';
+        if (!store && scopedPublication.format !== 'storefront' && trigger !== 'bare')
+          return 'noop';
       } else {
         store = await this.lookupStorefront(storefrontOwnerUserId, { fresh: true });
         if (store === undefined) return 'failed';
@@ -217,7 +218,8 @@ export class KaravanStorefrontRelayService {
       }
 
       const idempotencyKey = this.buildRelayIdempotencyKey(context.chatId, context.messageId!);
-      const variant: StorefrontRelayVariant = store ? 'storefront' : 'directory';
+      const variant: StorefrontRelayVariant =
+        store || scopedPublication?.format === 'storefront' ? 'storefront' : 'directory';
       const texts = resolveKaravanStorefrontTexts(context.storefrontTexts);
       pendingAudit = await this.createPendingAuditLog({
         context,

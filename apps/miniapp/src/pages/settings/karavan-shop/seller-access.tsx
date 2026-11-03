@@ -7,7 +7,8 @@ function useSellerAccessState() {
   const { module } = useShop();
   const market = module.marketplace!;
   const allowed = module.permissions.includes('manage_marketplace') && market.status !== 'archived';
-  const invitation = market.admissionPolicy === 'invitation';
+  const mode = market.admissionMode ?? market.admissionPolicy;
+  const invitation = mode === 'invitation';
   const publicUrl = sellerApplicationUrl(module.sellerBotUrl, market.id);
   const [link, setLink] = useState<{ id: string; url: string | null; expiresAt: number } | null>(
     null,
@@ -151,6 +152,8 @@ export function AddOwnOfferAction({
 }
 export function SellerAccessAction({ primary = false }: { primary?: boolean }) {
   const access = useSellerAccess();
+  const { module } = useShop();
+  const simple = (module.chatShopFlowVersion ?? 1) >= 2;
   if (!access.allowed) return null;
   const disabled =
     access.sharing ||
@@ -166,18 +169,26 @@ export function SellerAccessAction({ primary = false }: { primary?: boolean }) {
       >
         {access.sharing
           ? 'Готовим ссылку…'
-          : access.invitation
-            ? 'Пригласить продавца'
-            : 'Ссылка для продавцов'}
+          : simple && !access.invitation
+            ? 'Пригласить продавцов'
+            : access.invitation
+              ? 'Пригласить продавца'
+              : 'Ссылка для продавцов'}
       </button>
       <MutationFailure mutation={access.mutation} />
       {access.copied ? <p role="status">Ссылка скопирована</p> : null}
       {access.revealed && access.url ? (
         <>
-          <label className="karavan-module__field">
-            Ссылка для продавцов
-            <input readOnly value={access.url} onFocus={(event) => event.currentTarget.select()} />
-          </label>
+          {!simple ? (
+            <label className="karavan-module__field">
+              Ссылка для продавцов
+              <input
+                readOnly
+                value={access.url}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </label>
+          ) : null}
           {canShareNativeContent() ? (
             <button type="button" disabled={disabled} onClick={() => void access.share(true)}>
               Скопировать ссылку
@@ -197,7 +208,11 @@ export function SellerAccessAction({ primary = false }: { primary?: boolean }) {
         </>
       ) : null}
       {access.copyError ? (
-        <p role="alert">Не удалось скопировать. Нажмите на ссылку и выберите «Копировать».</p>
+        <p role="alert">
+          {simple
+            ? 'Не удалось скопировать ссылку. Повторите.'
+            : 'Не удалось скопировать. Нажмите на ссылку и выберите «Копировать».'}
+        </p>
       ) : null}
       {access.invitation && access.link && !access.url ? (
         <p role="alert">Ссылка не сохранилась. Отзовите это приглашение и создайте новое.</p>

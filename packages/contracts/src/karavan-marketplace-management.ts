@@ -50,6 +50,7 @@ export const marketplaceFormatPreviewRequestSchema = z
   .object({
     expectedRevision: z.number().int().positive(),
     format: karavanShopFormatSchema,
+    setupVersion: z.literal(2).optional(),
     administrationStoreId: z.string().uuid().nullable().optional(),
   })
   .strict();
@@ -77,10 +78,122 @@ export const marketplaceAdministrationStoreResponseSchema = z.object({
   ),
 });
 
+const marketplaceShopCommandSchema = z.object({ commandId: z.string().trim().min(8).max(120) });
+const marketplaceShopExpectedChatBindingSchema = z
+  .object({
+    id: z.string().uuid(),
+    chatId: z.string().regex(/^-?\d{1,24}$/u),
+    botId: z.string().min(1).max(128),
+    generation: z.number().int().positive(),
+  })
+  .strict();
+
+const id = /* @__PURE__ */ (() => z.string().uuid())();
+const revision = /* @__PURE__ */ (() => z.number().int().positive())();
+const maxUserId = /* @__PURE__ */ (() => z.string().regex(/^\d{1,24}$/u))();
+const administrationChange = /* @__PURE__ */ (() =>
+  marketplaceShopCommandSchema.extend({
+    expectedRevision: revision,
+    expectedChatBinding: marketplaceShopExpectedChatBindingSchema,
+  }))();
+export const marketplaceAdministrationStoreChangeSchema = /* @__PURE__ */ (() =>
+  z.discriminatedUnion('action', [
+    administrationChange.extend({ action: z.literal('create') }).strict(),
+    administrationChange.extend({ action: z.literal('attach'), storeId: id }).strict(),
+    administrationChange.extend({ action: z.literal('detach'), storeId: id }).strict(),
+  ]))();
+export const marketplaceAdministrationStoresResponseSchema = /* @__PURE__ */ (() =>
+  z.object({
+    marketplace: marketplaceSummarySchema,
+    actorMaxUserId: z.string().min(1).max(80),
+    administrationStores: z.array(karavanAdministrationStoreSchema).max(100),
+    administrationStoreCount: z.number().int().nonnegative(),
+    availableStores: z.array(karavanAdministrationStoreSchema).max(50),
+    canCreate: z.boolean(),
+    buyerUrl: z.string().url().nullable(),
+    expectedChatBinding: marketplaceShopExpectedChatBindingSchema.nullable(),
+    selectedStoreId: id.optional(),
+  }))();
+export const marketplaceSellerGrantTargetRequestSchema = /* @__PURE__ */ (() =>
+  z.object({ targetMaxUserId: maxUserId }).strict())();
+export const marketplaceSellerGrantTargetResponseSchema = /* @__PURE__ */ (() =>
+  z.object({
+    target: z.object({ maxUserId, name: z.string(), username: z.string().nullable() }).nullable(),
+    stores: z.array(karavanAdministrationStoreSchema).max(50),
+  }))();
+export const marketplaceSellerGrantCreateSchema = /* @__PURE__ */ (() =>
+  marketplaceShopCommandSchema
+    .extend({
+      expectedPolicyRevision: revision,
+      targetMaxUserId: maxUserId,
+      storeId: id.nullable(),
+      expiresAt: z.string().datetime(),
+    })
+    .strict())();
+export const marketplaceSellerGrantRevokeSchema = /* @__PURE__ */ (() =>
+  marketplaceShopCommandSchema.extend({ grantId: id, expectedRevision: revision }).strict())();
+export const marketplaceSellerGrantSchema = /* @__PURE__ */ (() =>
+  z.object({
+    id,
+    marketplaceId: id,
+    targetMaxUserId: maxUserId,
+    storeId: id.nullable(),
+    revision,
+    expiresAt: z.string().datetime(),
+    revokedAt: z.string().datetime().nullable(),
+    claimedAt: z.string().datetime().nullable(),
+  }))();
+export const marketplaceSellerGrantResponseSchema = /* @__PURE__ */ (() =>
+  z.object({ grant: marketplaceSellerGrantSchema, url: z.string().url() }))();
+export const marketplaceSellerGrantListResponseSchema = /* @__PURE__ */ (() =>
+  z.object({
+    grants: z.array(marketplaceSellerGrantSchema).max(48),
+    nextCursor: z.string().nullable(),
+  }))();
+export const marketplaceSellerGrantListQuerySchema = marketplacePageQuerySchema;
+export type MarketplaceAdministrationStoresResponse = z.infer<
+  typeof marketplaceAdministrationStoresResponseSchema
+>;
+export type MarketplaceAdministrationStoreChange = z.infer<
+  typeof marketplaceAdministrationStoreChangeSchema
+>;
+export type MarketplaceSellerGrant = z.infer<typeof marketplaceSellerGrantSchema>;
+
 // Bounded domain operations. Paths, actor identity and permissions are never supplied by the browser.
 export const marketplaceManagementOperationSchema = /* @__PURE__ */ (() =>
   z.discriminatedUnion('operation', [
     z.object({ operation: z.literal('administration_store') }).strict(),
+    z.object({ operation: z.literal('administration_stores') }).strict(),
+    z
+      .object({
+        operation: z.literal('administration_store_change'),
+        input: marketplaceAdministrationStoreChangeSchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal('seller_grant_target'),
+        input: marketplaceSellerGrantTargetRequestSchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal('seller_grants'),
+        input: marketplaceSellerGrantListQuerySchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal('seller_grant_create'),
+        input: marketplaceSellerGrantCreateSchema,
+      })
+      .strict(),
+    z
+      .object({
+        operation: z.literal('seller_grant_revoke'),
+        input: marketplaceSellerGrantRevokeSchema,
+      })
+      .strict(),
     z
       .object({
         operation: z.literal('format_preview'),
@@ -196,6 +309,30 @@ export const marketplaceManagementRequestSchema = /* @__PURE__ */ (() =>
     ))();
 export const marketplaceManagementResponseSchema = /* @__PURE__ */ (() =>
   z.discriminatedUnion('operation', [
+    z.object({
+      operation: z.literal('administration_stores'),
+      data: marketplaceAdministrationStoresResponseSchema,
+    }),
+    z.object({
+      operation: z.literal('administration_store_change'),
+      data: marketplaceAdministrationStoresResponseSchema,
+    }),
+    z.object({
+      operation: z.literal('seller_grant_target'),
+      data: marketplaceSellerGrantTargetResponseSchema,
+    }),
+    z.object({
+      operation: z.literal('seller_grants'),
+      data: marketplaceSellerGrantListResponseSchema,
+    }),
+    z.object({
+      operation: z.literal('seller_grant_create'),
+      data: marketplaceSellerGrantResponseSchema,
+    }),
+    z.object({
+      operation: z.literal('seller_grant_revoke'),
+      data: z.object({ revoked: z.boolean() }),
+    }),
     z.object({
       operation: z.literal('administration_store'),
       data: marketplaceAdministrationStoreResponseSchema,

@@ -22,9 +22,10 @@ export function useAdministrationStorefrontLink(enabled: boolean) {
     module.administrationStore.id === module.marketplace?.administrationStoreId &&
     !['ARCHIVED', 'BLOCKED'].includes(module.administrationStore.status),
   );
+  const shopManagement = (module.chatShopFlowVersion ?? 1) >= 2;
   const disabled =
     !enabled ||
-    !knownStore ||
+    (!shopManagement && !knownStore) ||
     !module.permissions.includes('manage_marketplace') ||
     commands.blocked ||
     opening;
@@ -56,8 +57,8 @@ export function useAdministrationStorefrontLink(enabled: boolean) {
     setOpening(true);
     setError(null);
     try {
-      // FLAG: The server derives the fixed administrative store from the verified
-      // marketplace binding. Never launch a personal seller profile or a supplied store id.
+      // FLAG: The server derives the administrative shop scope from its verified
+      // binding. Never launch a remembered personal store or a browser-supplied store id.
       const handoff = await openKaravanMarketplace(
         api,
         scope.chatId,

@@ -20,6 +20,7 @@ postgres('Private Karavan publication choice persistence', () => {
   };
   let generation: number;
   let format: 'storefront' | undefined;
+  let commonAdministrationShop: boolean;
   const marketplaceId = randomUUID();
   const storeId = randomUUID();
   const otherStoreId = randomUUID();
@@ -52,6 +53,7 @@ postgres('Private Karavan publication choice persistence', () => {
     originalFetch = global.fetch;
     generation = 1;
     format = undefined;
+    commonAdministrationShop = false;
     input = {
       actorMaxUserId: '777',
       chatId: `-${Date.now()}${Math.floor(Math.random() * 1000)}`,
@@ -75,6 +77,7 @@ postgres('Private Karavan publication choice persistence', () => {
       return new Response(
         JSON.stringify({
           status: selected ? 'published' : 'choose_store',
+          ...(commonAdministrationShop ? { publicationTarget: 'administration_shop' } : {}),
           marketplace: {
             id: marketplaceId,
             networkId: randomUUID(),
@@ -93,7 +96,12 @@ postgres('Private Karavan publication choice persistence', () => {
             visibilityRevision: 1,
           },
           binding: { id: randomUUID(), generation },
-          stores: (selected ? [selected] : [storeId, otherStoreId]).map((id) => ({
+          stores: (commonAdministrationShop
+            ? []
+            : selected
+              ? [selected]
+              : [storeId, otherStoreId]
+          ).map((id) => ({
             id,
             slug: id,
             name: 'Витрина',
@@ -251,5 +259,34 @@ postgres('Private Karavan publication choice persistence', () => {
     await expect(
       resolver.saveChoice({ actorMaxUserId: input.actorMaxUserId, choiceId: choice.id, storeId }),
     ).rejects.toThrow('Запрос изменился');
+  });
+  it('keeps a durable personal preference unchanged when v2 publishes the common administration shop', async () => {
+    const choice = await prompt();
+    await resolver.saveChoice({
+      actorMaxUserId: input.actorMaxUserId,
+      choiceId: choice.id,
+      storeId: otherStoreId,
+    });
+    format = 'storefront';
+    commonAdministrationShop = true;
+    resolver = makeResolver();
+    const publication = (
+      await resolver.resolve({ ...input, sourceMessageId: 'administration-shop' })
+    ).publication!;
+    expect(publication).toMatchObject({
+      storeId: null,
+      format: 'storefront',
+      url: 'https://max.ru/test_bot?startapp=m_synthetic',
+    });
+    expect(
+      await db.karavanMarketplacePublicationChoice.findUnique({
+        where: {
+          actorMaxUserId_chatId: { actorMaxUserId: input.actorMaxUserId, chatId: input.chatId },
+        },
+      }),
+    ).toMatchObject({ promptId: choice.id, selectedStoreId: otherStoreId });
+    expect((await resolver.listChoices({ actorMaxUserId: input.actorMaxUserId })).choices).toEqual(
+      [],
+    );
   });
 });

@@ -22,6 +22,7 @@ const pages = {
   chats: 'Подключённые чаты',
   publications: 'Объявления в чате',
   settings: 'Настройки',
+  seller_access: 'Добавить продавца',
 } as const;
 export type StorefrontPage = keyof typeof pages;
 type Navigation = {
@@ -31,6 +32,7 @@ type Navigation = {
   reportDirty: (page: string, dirty: boolean) => void;
   setBack: (handler: (() => void) | null) => void;
   footerTarget: HTMLDivElement | null;
+  setInlinePublications: (open: boolean) => void;
 };
 const WorkspaceContext = createContext<Navigation | null>(null);
 export function useStorefrontWorkspace() {
@@ -108,6 +110,7 @@ export function StorefrontWorkspace({
   const [drafts, setDrafts] = useState<Record<string, boolean>>({});
   const [footerTarget, setFooterTarget] = useState<HTMLDivElement | null>(null);
   const [customBack, setCustomBack] = useState<(() => void) | null>(null);
+  const [inlinePublications, setInlinePublications] = useState(false);
   const setBack = useCallback((handler: (() => void) | null) => setCustomBack(() => handler), []);
   const positions = useRef(new Map<StorefrontPage, number>());
   const body = () =>
@@ -169,10 +172,11 @@ export function StorefrontWorkspace({
     setPublicationsParent('home');
     setVisited(new Set(['home']));
     setDrafts({});
+    setInlinePublications(false);
     positions.current.clear();
   }, [open]);
   const context = useMemo(
-    () => ({ page, visited, navigate, reportDirty, footerTarget, setBack }),
+    () => ({ page, visited, navigate, reportDirty, footerTarget, setBack, setInlinePublications }),
     [page, visited, navigate, reportDirty, footerTarget, setBack],
   );
   const parent =
@@ -211,7 +215,9 @@ export function StorefrontWorkspace({
         keepFooterVisibleWhenKeyboardOpen
         footer={
           <div className="storefront-workspace__footer" ref={setFooterTarget}>
-            {page === 'publications' && dirty ? footer : null}
+            {(page === 'publications' || (page === 'home' && inlinePublications)) && dirty
+              ? footer
+              : null}
           </div>
         }
       >
