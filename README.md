@@ -8,6 +8,7 @@ app, and the closed owner Safety Desk.
 - `apps/api`: NestJS + Fastify + Prisma + BullMQ + Postgres/Redis.
 - `apps/miniapp`: React/Vite MAX mini app served under `/app/`.
 - `apps/admin`: React/Vite Safety Desk; not a MAX mini app.
+- `apps/eraser`: independent «Ластик» bot with its own Postgres/Redis stores.
 - `packages/contracts`: shared Zod schemas and TypeScript types.
 - `infra`: Docker Compose, nginx, deploy, rollback, backup, and monitoring scripts.
 
@@ -57,12 +58,13 @@ codegen; internal `*:unlocked` and `*:source` scripts are not normal parallel en
 
 ## Submit Changes
 
+Work in a task worktree on a `codex/` branch; keep `main` clean at the verified production SHA.
 `local-commit-push.sh` uses the existing Git index by default: stage the intended paths first, then
 run the helper. It validates staged impact, commits, and pushes the exact resulting `HEAD`.
 
 ```bash
 git add --patch
-./infra/scripts/local-commit-push.sh "describe the change" main
+./infra/scripts/local-commit-push.sh "describe the change"
 ```
 
 Use `--all` only for an intentional broad commit. All root/scoped `AGENTS.md` files remain excluded
@@ -101,7 +103,7 @@ and app2 checks are paused.
 ## Production Runtime
 
 `infra/docker-compose.yml` runs Postgres, Redis, three static/front-door components, and one shared
-API image split into these services:
+API image split into fourteen API roles:
 
 - `api-ingress`: public health and webhooks.
 - `api-admin`: `/api/v1/`, mini app, and owner APIs.
@@ -113,6 +115,11 @@ API image split into these services:
 - `api-moderation-background`: scheduled/background work.
 - `api-media-analysis`: CPU-isolated commercial-image OCR moderation.
 - `api-action`: durable MAX action dispatch.
+- `api-message-retention`: bounded message-history retention.
+- `api-publisher`: publication dispatch.
+
+The same API image also serves `photo-native-sandbox` and `ocr-native-sandbox`. The independent
+`eraser` service uses its own image, `eraser-postgres`, and `eraser-redis`.
 
 Static services:
 
@@ -123,8 +130,8 @@ Static services:
 `infra/docker-compose.scale.yml` is load-testing/split-stack infrastructure and must not run beside
 the main production stack.
 
-Local role development supports `all`, `ingress`, `admin`, `enqueue`, `moderation`, and `action`, for
-example `npm run dev:admin --workspace @maxim/api`.
+See `apps/api/src/runtime/runtime-topology.ts` and `apps/api/package.json` for runtime roles and
+their development commands, for example `npm run dev:admin --workspace @maxim/api`.
 
 ## VPS Access And Deploy
 
@@ -189,7 +196,7 @@ component. See `docs/runbook.md` before production changes.
 - Incident response: `docs/incident-playbook.md`
 - Detailed architecture: `docs/project-description.md`
 - Architecture decision: `docs/ADR-001-architecture.md`
-- Historical delivery/cloud context: `docs/operations/archive/` (non-authoritative)
+- Historical plans, audits, and delivery context: [archive index](docs/operations/archive/README.md)
 
 Never commit bot tokens, webhook secrets, production env files, cloud credentials, or Safety Desk
 access credentials.

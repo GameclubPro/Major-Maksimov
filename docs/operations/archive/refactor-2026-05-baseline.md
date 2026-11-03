@@ -2,7 +2,7 @@
 
 This is the historical June planning snapshot. Some implementation and dependency
 statuses below are superseded; for the source audit and prioritized next steps use the
-[1 November 2026 roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md).
+[1 November 2026 roadmap](../plans/2026-11-01-safe-refactoring-roadmap.md).
 Applicable safety boundaries remain binding: preserve public behavior, keep runtime
 deploys small, and make each extraction reviewable through focused tests.
 
