@@ -41,7 +41,6 @@
       "id": "review-play-team-nginx",
       "label": "Compare the live play-team nginx site before applying"
     },
-    { "id": "review-vk-proxy", "label": "Review the dormant VK proxy configuration" },
     { "id": "review-nginx-change", "label": "Review and select the matching nginx apply runbook" },
     {
       "id": "review-deploy-tooling",
@@ -363,14 +362,6 @@
       "manualOperations": ["review-play-team-nginx"]
     },
     {
-      "id": "vk-proxy",
-      "include": ["infra/vk-proxy/**"],
-      "exclude": ["**/*.md"],
-      "checks": ["repo-static", "infra"],
-      "deployComponents": [],
-      "manualOperations": ["review-vk-proxy"]
-    },
-    {
       "id": "other-nginx",
       "include": ["infra/nginx/**"],
       "exclude": [
@@ -402,7 +393,6 @@
         "infra/env/**",
         "infra/nginx/**",
         "infra/scripts/**",
-        "infra/vk-proxy/**",
         "infra/www/major-maksimov/**",
         "**/*.md"
       ],

@@ -13,8 +13,9 @@ function write(root, path, contents) {
   writeFileSync(target, contents);
 }
 
-function fixture(markdown) {
+function fixture(t, markdown) {
   const root = mkdtempSync(join(tmpdir(), 'maxim-docs-guard-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   execFileSync('git', ['init', '--quiet'], { cwd: root });
   write(root, 'package.json', JSON.stringify({ scripts: { check: 'node ok.mjs' } }));
   write(root, 'README.md', markdown);
@@ -23,46 +24,49 @@ function fixture(markdown) {
   return root;
 }
 
-test('accepts executable checked-in commands', () => {
+test('accepts executable checked-in commands', async (t) => {
   const root = fixture(
+    t,
     '```bash\nnpm run check\ndocker compose -f infra/docker-compose.yml logs api-admin\n```\n',
   );
-  assert.deepEqual(findDocumentationViolations(root), []);
+  assert.deepEqual(await findDocumentationViolations(root), []);
 });
 
-test('rejects missing scripts, placeholders, dormant delivery commands, and unknown services', () => {
+test('rejects missing scripts, placeholders, dormant delivery commands, and unknown services', async (t) => {
   const root = fixture(
+    t,
     '```bash\nnpm run missing\n./deploy.sh <service>\nyc storage cp ./dist s3://bucket/app2.major-maksimov.ru\ndocker compose -f infra/docker-compose.yml logs api\n```\n',
   );
-  const messages = findDocumentationViolations(root).join('\n');
+  const messages = (await findDocumentationViolations(root)).join('\n');
   assert.match(messages, /missing root npm script/u);
   assert.match(messages, /angle-bracket placeholder/u);
   assert.match(messages, /dormant CDN\/Object Storage/u);
   assert.match(messages, /unknown Compose service api/u);
 });
 
-test('parses adversarial Compose-like command text without backtracking', () => {
-  const root = fixture(`\`\`\`bash\ndocker composerun ${'-! '.repeat(50_000)}!\n\`\`\`\n`);
+test('parses adversarial Compose-like command text without backtracking', async (t) => {
+  const root = fixture(t, `\`\`\`bash\ndocker composerun ${'-! '.repeat(50_000)}!\n\`\`\`\n`);
 
-  assert.deepEqual(findDocumentationViolations(root), []);
+  assert.deepEqual(await findDocumentationViolations(root), []);
 });
 
-test('finds a Compose service after a long sequence of flags', () => {
+test('finds a Compose service after a long sequence of flags', async (t) => {
   const root = fixture(
+    t,
     `\`\`\`bash\ndocker compose logs ${'--follow '.repeat(10_000)}missing-service\n\`\`\`\n`,
   );
 
   assert.match(
-    findDocumentationViolations(root).join('\n'),
+    (await findDocumentationViolations(root)).join('\n'),
     /unknown Compose service missing-service/u,
   );
 });
 
-test('preserves Compose parsing across ECMAScript whitespace', () => {
-  const root = fixture('```bash\ndocker\u00a0compose\u00a0logs\u00a0missing-service\n```\n');
+test('preserves Compose parsing across ECMAScript whitespace', async (t) => {
+  const root = fixture(t, '```bash\ndocker\u00a0compose\u00a0logs\u00a0missing-service\n```\n');
 
   assert.match(
-    findDocumentationViolations(root).join('\n'),
+    (await findDocumentationViolations(root)).join('\n'),
     /unknown Compose service missing-service/u,
   );
 });
@@ -105,4 +109,21 @@ test('guidance budgets include tracked and override notes but exclude ignored de
   const violations = findAgentGuidanceViolations(root);
   assert.equal(violations.length, 1);
   assert.match(violations[0], /apps\/api\/AGENTS.override.md exceeds/u);
+});
+
+test('rejects broken local links and heading anchors', async (t) => {
+  const root = fixture(t, '[missing](docs/deleted.md)\n[section](docs/current.md#removed)\n');
+  write(root, 'docs/current.md', '# Current\n');
+  const messages = (await findDocumentationViolations(root)).join('\n');
+  assert.match(messages, /README.md:1.*missing.*docs\/deleted.md/u);
+  assert.match(messages, /README.md:2.*missing.*#removed/u);
+});
+
+test('checks commands in scoped instructions and former archive directories', async (t) => {
+  const root = fixture(t, '# Project\n');
+  write(root, 'apps/api/AGENTS.md', '```bash\n# comment\n\nnpm run missing-scope\n```\n');
+  write(root, 'docs/operations/archive/old.md', '```bash\nnpm run missing-archive\n```\n');
+  const messages = (await findDocumentationViolations(root)).join('\n');
+  assert.match(messages, /apps\/api\/AGENTS.md:4.*missing-scope/u);
+  assert.match(messages, /docs\/operations\/archive\/old.md:2.*missing-archive/u);
 });

@@ -186,7 +186,11 @@ deploy locks, rollback compatibility or unknown-effect fences. The
 [19 October review](development/agent-incident-throughput-review-2026-10-19.md) records the evidence
 behind these changes; its historical durations are not release estimates.
 
-`npm run check:docs` enforces this project's guidance budgets: 8 KiB for root entry notes,
+`npm run check:docs` checks tracked and nonignored Markdown throughout the repository, including
+scoped instructions and historical directories. It validates local Markdown links/images and
+heading anchors, executable examples and Compose service names; external URLs are not fetched.
+It rejects symlink targets and paths outside the checkout. Keep private/ignored artifacts out of
+documentation links. It also enforces this project's guidance budgets: 8 KiB for root entry notes,
 16 KiB per scoped entry and 24 KiB across an ancestor chain. These are repository maintenance
 limits, not a claim about Codex's configured context limit. Keep domain detail in linked references
 selected by a routing table; moving it does not make its safety constraints optional.

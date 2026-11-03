@@ -1,7 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import {
+  findDocumentationLinkViolations,
+  readDocumentation,
+} from './check-documentation-links.mjs';
 
 const shellFencePattern = /```(?:bash|sh|shell)\s*\n([\s\S]*?)```/gu;
 const bannedExecutablePattern =
@@ -13,29 +18,13 @@ const rootGuidanceBudget = 8 * 1024;
 const scopedGuidanceBudget = 16 * 1024;
 const guidanceChainBudget = 24 * 1024;
 
-export function findAgentGuidanceViolations(root) {
-  const paths = execFileSync(
-    'git',
-    [
-      'ls-files',
-      '--cached',
-      '--others',
-      '--exclude-standard',
-      '-z',
-      '--',
-      ':(glob)**/AGENTS.md',
-      ':(glob)**/AGENTS.override.md',
-    ],
-    { cwd: root, encoding: 'utf8' },
-  )
-    .split('\0')
-    .filter(Boolean);
-  const entries = [...new Set(paths)]
-    .filter((path) => existsSync(resolve(root, path)))
-    .map((path) => ({
+export function findAgentGuidanceViolations(root, documents = readDocumentation(root).documents) {
+  const entries = [...documents]
+    .filter(([path]) => /(?:^|\/)AGENTS(?:\.override)?\.md$/u.test(path))
+    .map(([path, contents]) => ({
       path,
       directory: dirname(path),
-      bytes: Buffer.byteLength(readFileSync(resolve(root, path), 'utf8')),
+      bytes: Buffer.byteLength(contents),
     }));
   const violations = [];
   for (const entry of entries) {
@@ -165,23 +154,10 @@ function findComposeServiceReferences(contents) {
   return references;
 }
 
-function walkMarkdown(directory) {
-  if (!existsSync(directory)) {
-    return [];
-  }
-  return readdirSync(directory).flatMap((entry) => {
-    const path = resolve(directory, entry);
-    if (statSync(path).isDirectory()) {
-      return entry === 'archive' && path.includes(`${resolve(directory, 'operations')}`)
-        ? []
-        : walkMarkdown(path);
-    }
-    return path.endsWith('.md') ? [path] : [];
-  });
-}
-
-export function findDocumentationViolations(root) {
-  const violations = findAgentGuidanceViolations(root);
+export async function findDocumentationViolations(root) {
+  const { documents, violations } = readDocumentation(root);
+  violations.push(...findAgentGuidanceViolations(root, documents));
+  violations.push(...(await findDocumentationLinkViolations(root, documents)));
   const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
   const scripts = new Set(Object.keys(packageJson.scripts ?? {}));
   const workspacePackages = new Map();
@@ -201,22 +177,13 @@ export function findDocumentationViolations(root) {
     }
   }
 
-  const archiveRoot = `${resolve(root, 'docs/operations/archive')}/`;
-  const markdownFiles = [resolve(root, 'README.md'), ...walkMarkdown(resolve(root, 'docs'))].filter(
-    (path) => existsSync(path) && !`${path}/`.startsWith(archiveRoot),
-  );
-  for (const filePath of markdownFiles) {
-    const repoPath = relative(root, filePath).split('\\').join('/');
-    const contents = readFileSync(filePath, 'utf8');
+  for (const [repoPath, contents] of documents) {
     for (const match of contents.matchAll(shellFencePattern)) {
       const block = match[1];
       const startLine = contents.slice(0, match.index).split('\n').length + 1;
-      const commands = block
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith('#'));
-
-      for (const [offset, command] of commands.entries()) {
+      for (const [offset, line] of block.split('\n').entries()) {
+        const command = line.trim();
+        if (!command || command.startsWith('#')) continue;
         const location = `${repoPath}:${startLine + offset}`;
         if (bannedExecutablePattern.test(command)) {
           violations.push(`${location} contains a dormant CDN/Object Storage command.`);
@@ -262,9 +229,7 @@ export function findDocumentationViolations(root) {
       .split('\n')
       .filter(Boolean),
   );
-  for (const filePath of markdownFiles) {
-    const repoPath = relative(root, filePath).split('\\').join('/');
-    const contents = readFileSync(filePath, 'utf8');
+  for (const [repoPath, contents] of documents) {
     for (const reference of findComposeServiceReferences(contents)) {
       if (!composeServices.has(reference.service)) {
         violations.push(
@@ -279,7 +244,7 @@ export function findDocumentationViolations(root) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const root = resolve(import.meta.dirname, '..');
-  const violations = findDocumentationViolations(root);
+  const violations = await findDocumentationViolations(root);
   for (const violation of violations) {
     console.error(violation);
   }

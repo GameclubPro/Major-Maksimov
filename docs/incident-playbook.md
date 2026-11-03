@@ -159,8 +159,10 @@ full-path suite. Never remove uncertainty/order fences or clear Redis to repair 
 4. Prefer the fixed catalog and health snapshots. Do not run raw `psql`, broad `webhook_events` or
    ledger aggregates during live pressure. A new diagnostic shape is code to review and test, not
    an inline incident command.
-5. Quarantine or reprocess stale events only after root cause and exact IDs are reviewed. Queue/data
-   mutation is a separate authorized repair, not a diagnostic step.
+5. Queue/data mutation requires a separately authorized, bounded repair under the matching
+   recovery runbook. Root cause and exact IDs alone do not authorize replay: prove source authority
+   and the permitted continuation, preserve unknown effects and ordering fences, and never retry
+   an entire handler merely because an event is stale.
 6. Ready can lag live while queues drain after deploy. Confirm that effective lag and oldest queued
    timestamps are improving before recreating workers.
 
