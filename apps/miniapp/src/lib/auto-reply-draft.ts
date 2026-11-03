@@ -284,32 +284,27 @@ async function readIndexedEnvelope(key: string): Promise<AutoReplyDraftEnvelopeR
 async function writeIndexedDraft(
   key: string,
   envelope: AutoReplyDraftEnvelope | null,
-): Promise<void> {
+): Promise<boolean> {
   const opened = await openAutoReplyDraftDb();
-  if (opened.status !== 'available') {
-    return;
-  }
+  if (opened.status !== 'available') return false;
   const { db } = opened;
-
   try {
-    await new Promise<void>((resolve) => {
+    return await new Promise<boolean>((resolve) => {
       const transaction = db.transaction(AUTO_REPLY_DRAFT_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(AUTO_REPLY_DRAFT_STORE_NAME);
-      if (envelope) {
-        store.put(envelope, key);
-      } else {
-        store.delete(key);
-      }
-      const finish = () => {
+      if (envelope) store.put(envelope, key);
+      else store.delete(key);
+      const finish = (saved: boolean) => {
         db.close();
-        resolve();
+        resolve(saved);
       };
-      transaction.oncomplete = finish;
-      transaction.onerror = finish;
-      transaction.onabort = finish;
+      transaction.oncomplete = () => finish(true);
+      transaction.onerror = () => finish(false);
+      transaction.onabort = () => finish(false);
     });
   } catch {
     db.close();
+    return false;
   }
 }
 
@@ -637,9 +632,9 @@ export function saveAutoReplyDraft(
   ruleId: string | null | undefined,
   draft: AutoReplyDraft,
   options: { imagesComplete?: boolean; imageCount?: number } = {},
-): Promise<void> {
+): Promise<boolean> {
   if (typeof window === 'undefined') {
-    return Promise.resolve();
+    return Promise.resolve(false);
   }
 
   const key = getAutoReplyDraftStorageKey(userId, chatId, ruleId);
@@ -651,10 +646,7 @@ export function saveAutoReplyDraft(
     imagesComplete,
     imageCount: Math.min(
       AUTO_REPLY_MAX_IMAGES,
-      Math.max(
-        options.imageCount ?? normalizedDraft.images.length,
-        normalizedDraft.images.length,
-      ),
+      Math.max(options.imageCount ?? normalizedDraft.images.length, normalizedDraft.images.length),
     ),
     draft: normalizedDraft,
   };
@@ -662,10 +654,17 @@ export function saveAutoReplyDraft(
   writeLocalMirrorItem(key, nativeEnvelope);
   return enqueueAutoReplyDraftStorageMutation(key, async () => {
     writeLocalMirrorItem(key, nativeEnvelope);
-    await Promise.allSettled([
-      writeNativeStorageItem(key, nativeEnvelope),
-      ...(imagesComplete ? [writeIndexedDraft(key, envelope)] : []),
+    const [indexedSaved, native] = await Promise.all([
+      imagesComplete ? writeIndexedDraft(key, envelope) : Promise.resolve(false),
+      writeNativeStorageItem(key, nativeEnvelope).then(() => readNativeStorageItemState(key)),
     ]);
+    if (indexedSaved) return true;
+    if (!imagesComplete || normalizedDraft.images.length > 0) return false;
+    const local = readLocalMirrorItemState(key);
+    return (
+      (local.status === 'found' && local.value === nativeEnvelope) ||
+      (native.status === 'found' && native.value === nativeEnvelope)
+    );
   });
 }
 

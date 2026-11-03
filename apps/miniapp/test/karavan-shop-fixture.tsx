@@ -431,8 +431,21 @@ const api = {
       } else if (operation === 'content') {
         const { id: offerId, kind, title, imageUrl, allowedCategory, restriction } = offer;
         data = {
-          items: [{ id: offerId, kind, title, imageUrl, allowedCategory, restriction }],
-          nextCursor: null,
+          items:
+            scenario === 'daily_content_pages'
+              ? Array.from({ length: 24 }, (_, index) => ({
+                  id: `a0d9b7ce-0040-4c85-a7ec-${String(Number(input.cursor ?? 0) * 24 + index + 1).padStart(12, '0')}`,
+                  kind: input.kind,
+                  title: `${input.kind === 'product' ? 'Товар' : 'Объект'} ${Number(input.cursor ?? 0) * 24 + index + 1}`,
+                  imageUrl,
+                  allowedCategory,
+                  restriction,
+                }))
+              : [{ id: offerId, kind, title, imageUrl, allowedCategory, restriction }],
+          nextCursor:
+            scenario === 'daily_content_pages' && Number(input.cursor ?? 0) < 2
+              ? String(Number(input.cursor ?? 0) + 1)
+              : null,
           storeId: second,
         };
       } else if (operation === 'settings') {
@@ -593,27 +606,26 @@ const api = {
         };
       } else if (operation === 'listings')
         data = {
-          listings:
-            params.get('scenario') === 'daily_reorder'
-              ? [id, second].map((listingId, index) => ({
-                  id: listingId,
-                  marketplaceId: id,
-                  storeId: second,
-                  storeName: `Продавец ${index + 1}`,
-                  marketplaceName: market.name,
-                  revision: 1,
-                  reviewState: 'approved',
-                  sellerState: 'enabled',
-                  publicationReason: 'published',
-                  rank: String(index + 1),
-                  position: index + 1,
-                  approvedProfileVersionId: id,
-                  pendingApplicationId: null,
-                  acceptedRulesVersion: 1,
-                  requiredRulesVersion: 1,
-                  decisionReason: null,
-                }))
-              : [],
+          listings: ['daily_reorder', 'daily_content_pages'].includes(scenario)
+            ? [id, second].map((listingId, index) => ({
+                id: listingId,
+                marketplaceId: id,
+                storeId: second,
+                storeName: `Продавец ${index + 1}`,
+                marketplaceName: market.name,
+                revision: 1,
+                reviewState: 'approved',
+                sellerState: 'enabled',
+                publicationReason: 'published',
+                rank: String(index + 1),
+                position: index + 1,
+                approvedProfileVersionId: id,
+                pendingApplicationId: null,
+                acceptedRulesVersion: 1,
+                requiredRulesVersion: 1,
+                decisionReason: null,
+              }))
+            : [],
           nextCursor: null,
           orderRevision: market.orderRevision,
           total: 2,

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useToast } from '../../components/ui/toast';
 
 export function PublicationNumberInput({
   value,
@@ -15,6 +16,7 @@ export function PublicationNumberInput({
   disabled: boolean;
   onChange: (value: number) => void;
 }) {
+  const { pushToast } = useToast();
   const [draft, setDraft] = useState(String(value));
   const [editing, setEditing] = useState(false);
   useEffect(() => {
@@ -28,6 +30,13 @@ export function PublicationNumberInput({
       min={min}
       max={max}
       aria-label={label}
+      aria-invalid={
+        editing &&
+        (!draft.trim() ||
+          !Number.isInteger(Number(draft)) ||
+          Number(draft) < min ||
+          Number(draft) > max)
+      }
       value={draft}
       disabled={disabled}
       onFocus={() => setEditing(true)}
@@ -39,6 +48,14 @@ export function PublicationNumberInput({
           onChange(number);
       }}
       onBlur={() => {
+        const number = Number(draft);
+        if (!draft.trim() || !Number.isInteger(number) || number < min || number > max) {
+          pushToast({
+            replaceKey: `publication-number:${label}`,
+            title: `${label}: от ${min} до ${max}`,
+            description: `Нужно целое число. Оставлено: ${value}.`,
+          });
+        }
         setEditing(false);
         setDraft(String(value));
       }}

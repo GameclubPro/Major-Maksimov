@@ -25,6 +25,7 @@ export function useAutoReplyDraft({
   const [draft, setDraftState] = useState(initialDraft);
   const [baseline, setBaseline] = useState(initialDraft);
   const [hydrated, setHydrated] = useState(false);
+  const [storageWriteError, setStorageWriteError] = useState(false);
   const [storageReadError, setStorageReadError] = useState(false);
   const [hydrationRevision, setHydrationRevision] = useState(0);
   const [restoredMissingImageCount, setRestoredMissingImageCount] = useState(0);
@@ -43,6 +44,7 @@ export function useAutoReplyDraft({
     setBaseline(initialDraft);
     setRestoredMissingImageCount(0);
     setStorageReadError(false);
+    setStorageWriteError(false);
     setHydrated(false);
 
     void loadAutoReplyDraftState(userId, chatId, ruleId)
@@ -92,10 +94,20 @@ export function useAutoReplyDraft({
       return undefined;
     }
 
+    let cancelled = false;
     const timeout = window.setTimeout(() => {
-      void saveAutoReplyDraft(userId, chatId, ruleId, draft, { imagesComplete: true });
+      void saveAutoReplyDraft(userId, chatId, ruleId, draft, { imagesComplete: true })
+        .then((saved) => {
+          if (!cancelled) setStorageWriteError(!saved);
+        })
+        .catch(() => {
+          if (!cancelled) setStorageWriteError(true);
+        });
     }, AUTO_REPLY_DRAFT_SAVE_DELAY_MS);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
   }, [chatId, dirty, draft, hydrated, missingImageCount, ruleId, storageReadError, userId]);
 
   const discard = useCallback(async () => {
@@ -103,6 +115,7 @@ export function useAutoReplyDraft({
     setDraftState(baseline);
     setRestoredMissingImageCount(0);
     setStorageReadError(false);
+    setStorageWriteError(false);
     setHydrated(true);
     await clearAutoReplyDraft(userId, chatId, ruleId);
   }, [baseline, chatId, ruleId, userId]);
@@ -112,17 +125,21 @@ export function useAutoReplyDraft({
   }, []);
 
   const persist = useCallback(
-    (draftOverride?: AutoReplyDraft) => {
+    async (draftOverride?: AutoReplyDraft) => {
       const candidate = draftOverride ?? draftRef.current;
       const overrideChanged =
         draftOverride !== undefined && !areAutoReplyDraftsEqual(candidate, draftRef.current);
       if (!modifiedSinceHydrationRef.current && !overrideChanged) {
-        return Promise.resolve();
+        return true;
       }
       if (storageReadError || missingImageCount > 0) {
-        return Promise.resolve();
+        return false;
       }
-      return saveAutoReplyDraft(userId, chatId, ruleId, candidate, { imagesComplete: true });
+      const saved = await saveAutoReplyDraft(userId, chatId, ruleId, candidate, {
+        imagesComplete: true,
+      }).catch(() => false);
+      setStorageWriteError(!saved);
+      return saved;
     },
     [chatId, missingImageCount, ruleId, storageReadError, userId],
   );
@@ -145,6 +162,7 @@ export function useAutoReplyDraft({
     dirty,
     missingImageCount,
     storageReadError,
+    storageWriteError,
     modifiedSinceHydration: modifiedSinceHydrationRef.current,
     retryHydration,
     persist,

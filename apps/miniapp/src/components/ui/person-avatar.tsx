@@ -7,8 +7,8 @@ type PersonAvatarProps = {
 };
 
 export function PersonAvatar({ avatarUrl, fallback, className }: PersonAvatarProps) {
-  const [imageBroken, setImageBroken] = useState(false);
-  const showImage = Boolean(avatarUrl) && !imageBroken;
+  const [brokenUrl, setBrokenUrl] = useState<string | null>(null);
+  const showImage = Boolean(avatarUrl) && avatarUrl !== brokenUrl;
 
   return (
     <span className={`${className} ${showImage ? `${className}--image` : ''}`.trim()}>
@@ -19,7 +19,7 @@ export function PersonAvatar({ avatarUrl, fallback, className }: PersonAvatarPro
           loading="lazy"
           decoding="async"
           referrerPolicy="no-referrer"
-          onError={() => setImageBroken(true)}
+          onError={() => setBrokenUrl(avatarUrl)}
         />
       ) : (
         fallback

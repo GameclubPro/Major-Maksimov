@@ -1615,6 +1615,7 @@ export function ChannelStatsOverview({
                         {hasFlow ? (
                           <span className="channel-summary-table__movement-pair">
                             <span
+                              role="img"
                               className={`channel-summary-table__movement-pill ${
                                 joined === null ? 'is-neutral' : 'is-positive'
                               }`}
@@ -1628,6 +1629,7 @@ export function ChannelStatsOverview({
                               <em aria-hidden="true">{formatDenseCount(joined)}</em>
                             </span>
                             <span
+                              role="img"
                               className={`channel-summary-table__movement-pill ${
                                 left === null ? 'is-neutral' : 'is-negative'
                               }`}

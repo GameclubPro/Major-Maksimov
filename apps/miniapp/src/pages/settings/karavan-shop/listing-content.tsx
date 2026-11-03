@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ShopFailure, ShopLoading, useShopQuery } from './runtime';
+import { ShopFailure, ShopLoading, useShopPages } from './runtime';
 
 export default function ListingContent({
   listingId,
@@ -8,25 +8,18 @@ export default function ListingContent({
   listingId: string;
   enabled: boolean;
 }) {
-  const [page, setPage] = useState<{ kind: 'product' | 'property'; cursor: string | null }>({
-    kind: 'product',
-    cursor: null,
-  });
-  const query = useShopQuery<'content'>(
-    { operation: 'content', listingId, input: { ...page, limit: 24 } },
+  const [kind, setKind] = useState<'product' | 'property'>('product');
+  const query = useShopPages<'content'>(
+    { operation: 'content', listingId, input: { kind, cursor: null, limit: 24 } },
     enabled,
   );
+  const items = query.data?.pages.flatMap((page) => page.items) ?? [];
   return (
     <div className="karavan-module__actions">
       <div className="karavan-shop__filters">
         <label>
           Раздел
-          <select
-            value={page.kind}
-            onChange={(event) =>
-              setPage({ kind: event.target.value as typeof page.kind, cursor: null })
-            }
-          >
+          <select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}>
             <option value="product">Товары и услуги</option>
             <option value="property">Недвижимость</option>
           </select>
@@ -34,12 +27,12 @@ export default function ListingContent({
       </div>
       {query.isPending ? (
         <ShopLoading />
-      ) : query.isError ? (
+      ) : query.isError && !query.data ? (
         <ShopFailure error={query.error} retry={() => void query.refetch()} />
       ) : (
         <>
-          {query.data.items.length ? (
-            query.data.items.map((item) => (
+          {items.length ? (
+            items.map((item) => (
               <div className="karavan-shop__row" key={`${item.kind}:${item.id}`}>
                 <div className="karavan-shop__identity">
                   {item.imageUrl ? <img src={item.imageUrl} alt="" loading="lazy" /> : null}
@@ -54,21 +47,20 @@ export default function ListingContent({
           ) : (
             <p>Объявлений пока нет</p>
           )}
-          <div className="karavan-module__entry-actions">
-            {query.data.nextCursor ? (
+          {query.isFetchNextPageError ? (
+            <ShopFailure error={query.error} retry={() => void query.fetchNextPage()} />
+          ) : null}
+          {query.hasNextPage && !query.isFetchNextPageError ? (
+            <div className="karavan-module__entry-actions">
               <button
                 type="button"
-                onClick={() => setPage({ ...page, cursor: query.data.nextCursor })}
+                disabled={query.isFetchingNextPage}
+                onClick={() => void query.fetchNextPage()}
               >
-                Далее
+                {query.isFetchingNextPage ? 'Загружаем…' : 'Показать ещё'}
               </button>
-            ) : null}
-            {page.cursor ? (
-              <button type="button" onClick={() => setPage({ ...page, cursor: null })}>
-                В начало
-              </button>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </>
       )}
     </div>

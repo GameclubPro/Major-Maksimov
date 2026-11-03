@@ -1641,9 +1641,9 @@
   }
 
   .vk-parsing-post-card__vk-link {
-    width: 32px;
-    min-width: 32px;
-    height: 32px;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
     border: 1px solid var(--vk-line);
     border-radius: var(--vk-radius);
     display: inline-flex;

@@ -153,9 +153,10 @@ export default function KaravanMarketplacePanel({
     () => setPendingManagerOpen(false),
     pendingManagerOpen && workspace?.page === 'home',
   );
-  const publicationEntry = publications ? (
-    <ShopPublicationsEntry>{publications}</ShopPublicationsEntry>
-  ) : null;
+  const publicationEntry =
+    publications && recoveryReady ? (
+      <ShopPublicationsEntry>{publications}</ShopPublicationsEntry>
+    ) : null;
   const [disconnectConfirm, setDisconnectConfirm] = useState(false);
   const chats = useQuery({
     queryKey: ['karavan-setup-chats'],
