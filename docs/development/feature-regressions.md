@@ -31,6 +31,38 @@ to its `/app/` URL; the scripts have different default ports. Run only the affec
 and stop the server owned by the task afterward. Use the scoped miniapp visual workflow
 for light/dark, narrow screens, native Back and safe-area review.
 
+## Sanctions And Participant Activity
+
+The sanctions register reads the maintained moderation feed with bounded candidates,
+not raw webhooks. Active sanctions are independent of the event journal's selected
+period; the archive covers the year after completion. Keep the last authoritative
+sanction state, subsequent `SANCTION_STATE_FENCE` transitions and manual releases
+outside ordinary history cleanup. Dedicated cleanup uses only its remaining budget
+and must not resurrect an older mute. Missing original evidence remains reviewable,
+never fabricated or automatically restored.
+
+Release passes the selected sanction identity through the existing lock/fence checks.
+Preserve [current manual-sanction semantics](api-domain-reference.md#moderation-and-read-models),
+including former-participant `LOCAL_REJOIN` bans. Native MAX capabilities, manual
+confirmation and local restriction removal remain distinct; a successful HTTP response
+alone does not prove restoration of membership. A countdown uses server time and
+monotonic elapsed time; unknown duration is not invented.
+
+Participant inactivity describes MAX's observed last activity, not silence in this
+chat or a new automatic removal policy. Keep the 7/14/30/60/90-day and no-data filters,
+missing/private activity evidence, bounded roster pages and actor/chat/filter-bound
+continuations. An incomplete scan is not an empty or complete audience.
+
+| Boundary                                                    | Focused checks                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cursor scope, active/archive/review state and bounded reads | [Service](../../apps/api/src/admin/chat-sanctions.service.spec.ts), [PostgreSQL](../../apps/api/src/admin/chat-sanctions-postgres.spec.ts), [state](../../apps/api/src/admin/chat-sanction-state.spec.ts)                                                           |
+| Retained sanction state and protection                      | [Cleanup](../../apps/api/src/moderation/sanction-history-retention.spec.ts), [fences](../../apps/api/src/moderation/moderation-sanction-state-fence.service.spec.ts), [former participants](../../apps/api/src/admin/former-participant-sanctions-postgres.spec.ts) |
+| Activity paging and UI release confirmation                 | [Activity](../../apps/api/src/admin/participant-activity-page.spec.ts), [browser](../../apps/miniapp/test/chat-sanctions.browser.mjs)                                                                                                                               |
+
+The sanctions browser needs an existing local server, defaulting to port 3015;
+`MINIAPP_TEST_BASE_URL` selects its `/app/` URL. Local previews do not establish live
+MAX unban capabilities or authorize a test in a user group.
+
 ## Links And Comment Restrictions
 
 Allowlist reads canonicalize legacy rows without writes. Domain rules match a host and
@@ -81,3 +113,24 @@ instead of assuming that every browser test accepts `MINIAPP_TEST_BASE_URL`.
 For actual publication recovery and access, use the maintained
 [diagnostics](../operations/runbooks/publisher-publication-diagnostics.md) and
 [access runbook](../operations/runbooks/publisher-access-refresh-rollout.md).
+
+## Chat Shop
+
+Use the [current product decisions](miniapp-product-decisions.md#miniapp-shop-03-управление-магазином-без-лишних-шагов)
+and [integration runbook](../operations/runbooks/karavan-chat-marketplaces.md).
+The superseded four-entry menu and separate mandatory draft/apply steps are not the
+current UI contract. Preserve both shop formats, explicit opening for buyers, ordinary
+public Karavan navigation, exact bindings and unknown-command recovery.
+
+| Boundary                                                         | Focused checks                                                                                                                                                                                                          |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shop navigation, drafts, applications, admission and public link | [Shop browser](../../apps/miniapp/test/karavan-shop.browser.mjs), [route](../../apps/miniapp/test/karavan-shop-route.browser.mjs)                                                                                       |
+| Setup authority, changed rules and partial outcomes              | [Integration browser](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [setup review](../../apps/miniapp/test/karavan-marketplace-setup-review.test.ts)                                                        |
+| Formats, readiness, categories and preview                       | [Formats](../../apps/miniapp/test/karavan-shop-formats.browser.mjs), [readiness](../../apps/miniapp/test/karavan-shop-readiness.browser.mjs), [categories](../../apps/miniapp/test/karavan-shop-categories.browser.mjs) |
+| Durable browser commands and uncertain results                   | [Command journal](../../apps/miniapp/test/karavan-shop-command-journal.browser.mjs), [command runtime](../../apps/miniapp/test/karavan-shop-command-runtime.browser.mjs)                                                |
+| Final authorized publication choice                              | [PostgreSQL](../../apps/api/src/integrations/karavan-marketplace/karavan-publication-choice-postgres.spec.ts)                                                                                                           |
+
+Inspect each browser entrypoint's server and environment options before running it.
+Major's synthetic fixtures do not validate Karavan's seller implementation or live MAX.
+For Birzhik advertising/profile cases, use the separate
+[marketplace regression map](marketplace-integration.md#focused-evidence).

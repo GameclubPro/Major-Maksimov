@@ -11,7 +11,10 @@
 
 ## Workflow
 
-- Validate with `npm run typecheck:admin`, `npm run test:admin`, and `npm run build --workspace @maxim/admin` for material changes.
+- Inspect changed callers and run the affected focused cases first. The impact planner and
+  staged commit helper select `check:admin`, which includes admin tests, build and browser smoke.
+  Do not pre-run the same aggregate or repeat its included subchecks. Markdown-only work needs
+  `check:docs`, with no browser setup or runtime deploy.
 - UI-only changes deploy `admin-static`.
 - Shared contracts or API authentication/authorization changes also validate and deploy every shared API role.
 - Changes to `infra/nginx/admin.major-maksimov.ru.conf` are separate infrastructure work; follow `infra/AGENTS.md` and apply the site with the repo script only after nginx review.

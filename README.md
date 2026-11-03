@@ -16,26 +16,51 @@ Use Node 24 LTS (`.nvmrc`). Dockerfiles install from `package-lock.json` with `n
 
 ## Local Start
 
-1. Copy `.env.example` to ignored `.env` and configure local values.
+For browser-only UI work, use `npm ci` and `npm run dev:miniapp` (or
+`npm run dev:admin`). The mini app's local preview routes do not require a live API.
+Use the [local environment guide](docs/development/agent-local-environment.md) for
+browser setup and disposable test stores.
+
+For a local API with persistent development stores:
+
+1. Create the API workspace's ignored env file on first setup:
+
+   ```bash
+   cp .env.example apps/api/.env
+   ```
+
+   Edit `apps/api/.env` for a dedicated development bot and local values. API npm scripts
+   execute in `apps/api`, where Nest and Prisma load `.env`; a root `.env` alone is not
+   their configuration. For host-side Node processes, use
+   `DATABASE_URL=postgresql://maxim:maxim@127.0.0.1:5432/maxim?schema=public` and
+   `REDIS_URL=redis://127.0.0.1:6379`. The example's `postgres`/`redis` hostnames belong
+   to the Compose network. Keep the database password consistent with `POSTGRES_PASSWORD`
+   (Compose's local default is `maxim`). Do not copy production credentials.
+
 2. Install dependencies:
 
    ```bash
    npm ci
    ```
 
-3. Start Postgres and Redis with local ports:
+3. Start the local stores, then apply migrations to that local database:
 
    ```bash
-   docker compose -f infra/docker-compose.yml -f infra/docker-compose.local.yml up -d postgres redis
+   docker compose --env-file apps/api/.env -f infra/docker-compose.yml -f infra/docker-compose.local.yml up -d postgres redis
+   npm run prisma:migrate:deploy --workspace @maxim/api
    ```
 
-4. Start all development servers:
+4. Start the development servers:
 
    ```bash
    npm run dev:all
    ```
 
 Focused servers are `npm run dev:api`, `npm run dev:miniapp`, and `npm run dev:admin`.
+`dev:all` does not start Lastik; its separate workspace follows
+[Lastik's instructions](apps/eraser/AGENTS.md). API dev uses the TypeScript contract sources through the shared path mappings and
+generates Prisma, but does not apply migrations. Public build/test scripts own any
+required contract build.
 
 The env example supports multiple bots: `MAX_ENTRY_BOT_ID` selects the canonical start/startapp bot,
 additional bots live in `MAX_BOTS_JSON`, and `state: "dormant"` keeps a provisioned bot visible in
@@ -43,18 +68,21 @@ metadata without webhook/action execution.
 
 ## Validation
 
+Start with the [agent workflow](AGENTS.md), inspect changed callers, and select the scope:
+
 ```bash
-npm run typecheck:contracts
-npm run test:contracts
-npm run check:api
-npm run check:prisma
-npm run check:miniapp
-npm run typecheck:admin
-npm run test:admin
+node scripts/agent/preflight.mjs
+node scripts/agent/plan.mjs --worktree
 ```
 
-Use `npm run check` for the broad CI-style pass. API validation scripts serialize contracts/Prisma
-codegen; internal `*:unlocked` and `*:source` scripts are not normal parallel entrypoints.
+Run the relevant [focused cases](docs/development/agent-machine-contract.md#focused-checks-before-submission)
+while editing. The staged commit helper below owns the final aggregate; do not pre-run
+its same aggregate or repeat included subchecks. Markdown-only work selects `check:docs`.
+Full validation needs a full impact plan or a concrete coverage gap.
+
+API validation scripts serialize contracts/Prisma codegen; internal `*:unlocked` and
+`*:source` scripts are not normal entrypoints. Native storage coverage needs the
+[disposable PostgreSQL/Redis wrapper](docs/development/agent-local-environment.md).
 
 ## Submit Changes
 
@@ -75,7 +103,7 @@ unless `--include-agents` is also passed; staged agent notes are rejected withou
 ```bash
 npm run emulator:miniapp
 npm run emulator:miniapp:android
-npm run emulator:miniapp -- --device android --route '/chat/preview-chat/settings?focus=broadcast'
+npm run emulator:miniapp -- --device android --route '/chat/preview-chat/settings'
 npm run screenshots:miniapp
 npm run audit:miniapp:visual
 ```
