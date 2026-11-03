@@ -6,7 +6,7 @@ import {
   assertLegacyDispositionSource,
   LEGACY_CLAIM_WRITER_SOURCE_COUNTS,
   LEGACY_DISPOSITION_SOURCE_CHECKS,
-} from './assert-legacy-disposition-source.mjs';
+} from '../../infra/scripts/assert-legacy-disposition-source.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const read = (path) => readFileSync(resolve(root, path), 'utf8');
