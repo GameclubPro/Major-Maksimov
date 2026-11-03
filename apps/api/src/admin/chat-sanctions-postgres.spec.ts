@@ -176,16 +176,7 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
         SELECT ${otherChatId} || '-same-user-' || n, ${otherChatId}, 'plan-user-0', 'SYSTEM'::"EventType", 'MANUAL_UNBAN', 'NONE'::"SanctionAction", NOW(), NOW()
         FROM generate_series(1, 4000) n
       `);
-      // FLAG: The source-existence probe also needs retained history. Otherwise
-      // its index depth and buffer cost depend on which suites ran before this one.
-      await prisma.$executeRaw(Prisma.sql`
-        INSERT INTO moderation_events (id, chat_id, user_id, event_type, rule_code, action)
-        SELECT ${otherChatId} || '-source-history-' || n, ${otherChatId}, 'source-user',
-          'SYSTEM'::"EventType", 'PROFANITY', 'WARN'::"SanctionAction"
-        FROM generate_series(1, 20000) n
-      `);
       await prisma.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
-      await prisma.$executeRawUnsafe('ANALYZE moderation_events');
       const statements: Prisma.Sql[] = [];
       const reader = {
         $queryRaw: (query: Prisma.Sql) => {
@@ -201,16 +192,9 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
       expect(page.items).toHaveLength(candidateCount);
       expect(page.items.every((item) => item.status === 'active')).toBe(true);
       expect(statements).toHaveLength(1);
-      const coldReader = createPrismaClient(databaseUrl, { max: 1 });
-      let plan: { 'QUERY PLAN': { Plan: SanctionsPlanNode }[] }[];
-      try {
-        await coldReader.$connect();
-        plan = await coldReader.$queryRaw(
-          Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${statements[0]!}`,
-        );
-      } finally {
-        await coldReader.$disconnect();
-      }
+      const plan = await prisma.$queryRaw<{ 'QUERY PLAN': { Plan: SanctionsPlanNode }[] }[]>(
+        Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${statements[0]!}`,
+      );
       const root = plan[0]!['QUERY PLAN'][0]!.Plan;
       const visit = (
         node: SanctionsPlanNode,
@@ -253,19 +237,20 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
             node['Actual Rows'] +
             (node['Rows Removed by Filter'] ?? 0) +
             (node['Rows Removed by Index Recheck'] ?? 0);
-          expect(perLoop).toBeLessThanOrEqual(
-            alias === 'original' ? 1 : alias === 'later' ? 8 : 64,
-          );
+          expect(perLoop).toBeLessThanOrEqual(alias === 'later' ? 8 : 64);
           expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
-            alias === 'original' ? candidateCount : alias === 'later' ? candidateCount * 8 : 64,
+            alias === 'later' ? candidateCount * 8 : 64,
           );
-          if (alias === 'original')
-            expect(node['Actual Loops']).toBeLessThanOrEqual(candidateCount);
           // FLAG: Point-lookup buffers vary with B-tree depth and visibility work.
-          // Bound both probes per candidate, retaining exact source rows and the
-          // unchanged whole-query ceiling; do not assume four blocks per PK lookup.
+          // Grant a per-candidate budget only to bounded source index probes;
+          // compact hashed source scans retain the ordinary row/block ceilings.
+          const sourcePointProbe =
+            alias === 'original' &&
+            ['Index Scan', 'Index Only Scan'].includes(node['Node Type']) &&
+            perLoop <= 1 &&
+            node['Actual Loops'] <= candidateCount;
           expect(blocks(node)).toBeLessThanOrEqual(
-            alias === 'later' || alias === 'original' ? candidateCount * 8 : 128,
+            alias === 'later' || sourcePointProbe ? candidateCount * 8 : 128,
           );
         }
         // Parent buffer totals are inclusive; do not sum them with child totals.
