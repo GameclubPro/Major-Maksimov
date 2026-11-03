@@ -93,7 +93,7 @@ slow mode. Её существующий контракт сохранять, н
 
 ### Не Повторять Уже Сделанную Работу
 
-[Аудит 12 сентября](operations/archive/commercial-filter-audit-2026-09-12.md) выявил ошибки с
+[Аудит 12 сентября](https://github.com/GameclubPro/Major-Maksimov/blob/5876cfcd0987d86badc3c188d62050f12c8674ba/docs/operations/archive/commercial-filter-audit-2026-09-12.md) выявил ошибки с
 запросами услуг, отзывами, частными продажами, контактами и обезличиванием.
 Коммит `71defd9a` уже исправил часть этих случаев. Актуальный перечень исправлений:
 [September Implementation](commercial-filter-upgrade-plan.md#september-implementation-scoped-corrections).

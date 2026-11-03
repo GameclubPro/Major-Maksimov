@@ -196,7 +196,7 @@ component. See `docs/runbook.md` before production changes.
 - Incident response: `docs/incident-playbook.md`
 - Detailed architecture: `docs/project-description.md`
 - Architecture decision: `docs/ADR-001-architecture.md`
-- Historical plans, audits, and delivery context: [archive index](docs/operations/archive/README.md)
+- Current references and document status: [documentation index](docs/README.md)
 
 Never commit bot tokens, webhook secrets, production env files, cloud credentials, or Safety Desk
 access credentials.

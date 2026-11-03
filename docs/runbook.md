@@ -1,7 +1,7 @@
 # Production Runbook
 
-This is the active production entrypoint. Historical delivery/cloud experiments under
-`docs/operations/archive/` are non-authoritative.
+This is the active production entrypoint. Select maintained references through the
+[documentation index](README.md); dated reports do not establish current production state.
 
 ## Production Shape
 
@@ -313,11 +313,11 @@ path does not manage REG.RU.
 
 ## Submit And Deploy Gate
 
-The submit helper is staged-only by default. Stage the intended paths, then run:
+The submit helper is staged-only by default. On the task branch, stage the intended paths, then run:
 
 ```bash
 git add --patch
-./infra/scripts/local-commit-push.sh "describe the change" main
+./infra/scripts/local-commit-push.sh "describe the change"
 ```
 
 It runs staged-impact validation, commits, and pushes the exact resulting `HEAD`. `--all` is an
