@@ -19,6 +19,9 @@ type SanctionsPlanNode = {
   'Node Type': string;
   'Relation Name'?: string;
   Alias?: string;
+  'Index Name'?: string;
+  'Index Cond'?: string;
+  'Recheck Cond'?: string;
   'Actual Rows': number;
   'Actual Loops': number;
   'Rows Removed by Filter'?: number;
@@ -26,6 +29,108 @@ type SanctionsPlanNode = {
   'Shared Hit Blocks'?: number;
   'Shared Read Blocks'?: number;
 };
+
+type SanctionsPlan = { 'QUERY PLAN': { Plan: SanctionsPlanNode }[] }[];
+
+function assertBoundedSanctionsPlan(
+  plan: SanctionsPlan,
+  candidateCount: number,
+  sourceHistoryPhase?: 'retained' | 'cleared',
+): void {
+  const root = plan[0]!['QUERY PLAN'][0]!.Plan;
+  const visit = (
+    node: SanctionsPlanNode,
+    parentAlias?: string,
+  ): { node: SanctionsPlanNode; alias: string | undefined }[] => {
+    const alias = node.Alias ?? parentAlias;
+    return [{ node, alias }, ...(node.Plans ?? []).flatMap((child) => visit(child, alias))];
+  };
+  const physicalScans = visit(root).filter(({ node }) =>
+    ['Seq Scan', 'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan', 'Bitmap Index Scan'].includes(
+      node['Node Type'],
+    ),
+  );
+  const blocks = (node: SanctionsPlanNode) =>
+    (node['Shared Hit Blocks'] ?? 0) + (node['Shared Read Blocks'] ?? 0);
+  try {
+    expect(
+      physicalScans.some(
+        ({ node, alias }) =>
+          node['Relation Name'] === 'chat_moderation_feed_items' &&
+          /^feed(?:_\d+)?$/u.test(alias ?? '') &&
+          node['Actual Loops'] > 0,
+      ),
+    ).toBe(true);
+    for (const alias of ['later', 'original'])
+      expect(
+        physicalScans.some((scan) => scan.alias === alias && scan.node['Actual Loops'] > 0),
+      ).toBe(true);
+    // FLAG: Inspect every physical scan, including renamed candidate aliases
+    // and bitmap children. Buffer counts already include every loop.
+    for (const { node, alias } of physicalScans) {
+      expect(
+        alias === 'later' || alias === 'original' || /^feed(?:_\d+)?$/u.test(alias ?? ''),
+      ).toBe(true);
+      const perLoop =
+        node['Actual Rows'] +
+        (node['Rows Removed by Filter'] ?? 0) +
+        (node['Rows Removed by Index Recheck'] ?? 0);
+      expect(perLoop).toBeLessThanOrEqual(alias === 'later' ? 8 : 64);
+      expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
+        alias === 'later' ? candidateCount * 8 : 64,
+      );
+      // FLAG: Point-lookup buffers vary with B-tree depth and visibility work.
+      // Grant a per-candidate budget only to bounded source index probes;
+      // compact hashed source scans retain the ordinary row/block ceilings.
+      const sourcePointProbe =
+        alias === 'original' &&
+        ['Index Scan', 'Index Only Scan'].includes(node['Node Type']) &&
+        perLoop <= 1 &&
+        node['Actual Loops'] <= candidateCount;
+      expect(blocks(node)).toBeLessThanOrEqual(
+        alias === 'later' || sourcePointProbe ? candidateCount * 8 : 128,
+      );
+    }
+    // Parent buffer totals are inclusive; do not sum them with child totals.
+    expect(blocks(root)).toBeLessThanOrEqual(512);
+    if (sourceHistoryPhase) {
+      // FLAG: Retained and sparse source history must stay behind exact candidate
+      // id probes; a small live-row count cannot justify reading the whole heap.
+      const originals = physicalScans
+        .filter(({ alias }) => alias === 'original')
+        .map(({ node }) => node);
+      const original = originals[0]!;
+      let index = original;
+      if (original['Node Type'] === 'Bitmap Heap Scan') {
+        expect(originals).toHaveLength(2);
+        expect(original['Relation Name']).toBe('moderation_events');
+        expect(original['Recheck Cond']).toMatch(/id = feed(?:_\d+)?\.id/u);
+        expect(original.Plans).toHaveLength(1);
+        index = original.Plans![0]!;
+        expect(index).toBe(originals[1]);
+        expect(index['Node Type']).toBe('Bitmap Index Scan');
+      } else {
+        expect(originals).toHaveLength(1);
+        expect(['Index Scan', 'Index Only Scan']).toContain(original['Node Type']);
+      }
+      expect(index['Index Name']).toBe('moderation_events_pkey');
+      expect(index['Index Cond']).toMatch(/id = feed(?:_\d+)?\.id/u);
+      for (const node of originals) {
+        expect(
+          node['Actual Rows'] +
+            (node['Rows Removed by Filter'] ?? 0) +
+            (node['Rows Removed by Index Recheck'] ?? 0),
+        ).toBeLessThanOrEqual(1);
+        expect(node['Actual Loops']).toBe(candidateCount);
+      }
+    }
+  } catch (error: unknown) {
+    throw new Error(
+      `Sanctions registry exceeded work bounds (${sourceHistoryPhase ?? 'feed history'}): ${JSON.stringify(plan)}`,
+      { cause: error },
+    );
+  }
+}
 
 describePostgres('PostgreSQL sanctions registry and retention', () => {
   let prisma: PrismaClient;
@@ -192,77 +297,105 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
       expect(page.items).toHaveLength(candidateCount);
       expect(page.items.every((item) => item.status === 'active')).toBe(true);
       expect(statements).toHaveLength(1);
-      const plan = await prisma.$queryRaw<{ 'QUERY PLAN': { Plan: SanctionsPlanNode }[] }[]>(
+      const plan = await prisma.$queryRaw<SanctionsPlan>(
         Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${statements[0]!}`,
       );
-      const root = plan[0]!['QUERY PLAN'][0]!.Plan;
-      const visit = (
-        node: SanctionsPlanNode,
-        parentAlias?: string,
-      ): { node: SanctionsPlanNode; alias: string | undefined }[] => {
-        const alias = node.Alias ?? parentAlias;
-        return [{ node, alias }, ...(node.Plans ?? []).flatMap((child) => visit(child, alias))];
-      };
-      const physicalScans = visit(root).filter(({ node }) =>
-        [
-          'Seq Scan',
-          'Index Scan',
-          'Index Only Scan',
-          'Bitmap Heap Scan',
-          'Bitmap Index Scan',
-        ].includes(node['Node Type']),
-      );
-      const blocks = (node: SanctionsPlanNode) =>
-        (node['Shared Hit Blocks'] ?? 0) + (node['Shared Read Blocks'] ?? 0);
-      try {
-        expect(
-          physicalScans.some(
-            ({ node, alias }) =>
-              node['Relation Name'] === 'chat_moderation_feed_items' &&
-              /^feed(?:_\d+)?$/u.test(alias ?? '') &&
-              node['Actual Loops'] > 0,
-          ),
-        ).toBe(true);
-        for (const alias of ['later', 'original'])
-          expect(
-            physicalScans.some((scan) => scan.alias === alias && scan.node['Actual Loops'] > 0),
-          ).toBe(true);
-        // FLAG: Inspect every physical scan, including renamed candidate aliases
-        // and bitmap children. Buffer counts already include every loop.
-        for (const { node, alias } of physicalScans) {
-          expect(
-            alias === 'later' || alias === 'original' || /^feed(?:_\d+)?$/u.test(alias ?? ''),
-          ).toBe(true);
-          const perLoop =
-            node['Actual Rows'] +
-            (node['Rows Removed by Filter'] ?? 0) +
-            (node['Rows Removed by Index Recheck'] ?? 0);
-          expect(perLoop).toBeLessThanOrEqual(alias === 'later' ? 8 : 64);
-          expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
-            alias === 'later' ? candidateCount * 8 : 64,
-          );
-          // FLAG: Point-lookup buffers vary with B-tree depth and visibility work.
-          // Grant a per-candidate budget only to bounded source index probes;
-          // compact hashed source scans retain the ordinary row/block ceilings.
-          const sourcePointProbe =
-            alias === 'original' &&
-            ['Index Scan', 'Index Only Scan'].includes(node['Node Type']) &&
-            perLoop <= 1 &&
-            node['Actual Loops'] <= candidateCount;
-          expect(blocks(node)).toBeLessThanOrEqual(
-            alias === 'later' || sourcePointProbe ? candidateCount * 8 : 128,
-          );
-        }
-        // Parent buffer totals are inclusive; do not sum them with child totals.
-        expect(blocks(root)).toBeLessThanOrEqual(512);
-      } catch (error: unknown) {
-        throw new Error(`Sanctions registry exceeded work bounds: ${JSON.stringify(plan)}`, {
-          cause: error,
-        });
-      }
+      assertBoundedSanctionsPlan(plan, candidateCount);
     } finally {
       await prisma.chatModerationFeedItem.deleteMany({ where: { chatId: { in: ownedChats } } });
       await prisma.chat.deleteMany({ where: { id: { in: ownedChats } } });
     }
   });
+
+  it('bounds exact source probes through retained and cleared history without losing missing sources', async () => {
+    const planChatId = `${chatId}-source-plan`;
+    const historyChatId = `${chatId}-source-history`;
+    const ownedChats = [planChatId, historyChatId];
+    const candidateCount = 32;
+    const missingSourceId = `${planChatId}-ban-0`;
+    try {
+      await prisma.chat.createMany({
+        data: ownedChats.map((id) => ({ id, title: 'Sanctions source plan fixture' })),
+      });
+      await prisma.moderationEvent.createMany({
+        data: Array.from({ length: candidateCount }, (_, index) => ({
+          id: `${planChatId}-ban-${index}`,
+          chatId: planChatId,
+          userId: `source-user-${index}`,
+          eventType: EventType.SYSTEM,
+          action: SanctionAction.BAN,
+          ruleCode: 'MANUAL_BAN',
+          createdAt: ago(2),
+        })),
+      });
+      await prisma.$transaction(
+        async (tx) => {
+          // FLAG: Hold insertion, deletion and both plans in the same transaction.
+          // Uncommitted history cannot be vacuumed away between the sparse-heap
+          // fixture and its measurement; no global planner or vacuum changes apply.
+          expect(
+            await tx.$executeRaw(Prisma.sql`
+              INSERT INTO moderation_events
+                (id, chat_id, user_id, event_type, rule_code, action, created_at)
+              SELECT ${historyChatId} || '-ordinary-' || n, ${historyChatId}, 'history-user',
+                'SYSTEM'::"EventType", 'PLAN_HISTORY', 'NONE'::"SanctionAction", NOW()
+              FROM generate_series(1, 20000) n
+            `),
+          ).toBe(20_000);
+          const transactionFence = new ModerationSanctionStateFenceService(tx as never);
+          for (const phase of ['retained', 'cleared'] as const) {
+            if (phase === 'cleared') {
+              expect(
+                (await tx.moderationEvent.deleteMany({ where: { chatId: historyChatId } })).count,
+              ).toBe(20_000);
+              await tx.moderationEvent.delete({ where: { id: missingSourceId } });
+              expect(
+                await tx.chatModerationFeedItem.findUnique({ where: { id: missingSourceId } }),
+              ).not.toBeNull();
+            }
+            await tx.$executeRawUnsafe('ANALYZE moderation_events');
+            await tx.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
+            const [size] = await tx.$queryRaw<{ heapPages: bigint }[]>(Prisma.sql`
+              SELECT pg_relation_size('moderation_events') / current_setting('block_size')::bigint AS "heapPages"
+            `);
+            expect(Number(size!.heapPages)).toBeGreaterThan(128);
+            const statements: Prisma.Sql[] = [];
+            const reader: Pick<Prisma.TransactionClient, '$queryRaw'> = {
+              $queryRaw<T = unknown>(query: TemplateStringsArray | Prisma.Sql) {
+                if (!('sql' in query)) throw new Error('Expected the captured sanctions SQL');
+                statements.push(query);
+                return tx.$queryRaw<T>(query);
+              },
+            };
+            const page = await new ChatSanctionsService(reader as never, transactionFence).getPage(
+              planChatId,
+              'admin',
+              { status: 'all', limit: 50 },
+            );
+            expect(page.items).toHaveLength(candidateCount);
+            expect(page.items.filter((item) => item.status === 'active')).toHaveLength(
+              candidateCount - (phase === 'cleared' ? 1 : 0),
+            );
+            if (phase === 'cleared') {
+              expect(page.items.find((item) => item.id === missingSourceId)).toMatchObject({
+                status: 'review',
+                releaseAction: null,
+              });
+            }
+            expect(statements).toHaveLength(1);
+            const plan = await tx.$queryRaw<SanctionsPlan>(
+              Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${statements[0]!}`,
+            );
+            assertBoundedSanctionsPlan(plan, candidateCount, phase);
+          }
+        },
+        { timeout: 45_000 },
+      );
+    } finally {
+      await prisma.chatModerationFeedItem.deleteMany({ where: { chatId: { in: ownedChats } } });
+      await prisma.chat.deleteMany({ where: { id: { in: ownedChats } } });
+      await prisma.$executeRawUnsafe('ANALYZE moderation_events');
+      await prisma.$executeRawUnsafe('ANALYZE chat_moderation_feed_items');
+    }
+  }, 60_000);
 });

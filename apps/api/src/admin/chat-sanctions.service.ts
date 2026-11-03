@@ -62,6 +62,8 @@ export class ChatSanctionsService {
     let last: SanctionFeedRow | null = null;
     for (let batch = 0; batch < MAX_SCAN_BATCHES; batch += 1) {
       const search = query.search?.trim();
+      // FLAG: Keep source evidence behind an exact candidate id probe. A scalar
+      // subquery avoids the global hashed source scan that EXISTS can select.
       const rows = await this.prisma.$queryRaw<SanctionFeedRow[]>(Prisma.sql`
         WITH candidates AS MATERIALIZED (
           SELECT * FROM chat_moderation_feed_items feed
@@ -76,7 +78,9 @@ export class ChatSanctionsService {
           feed.action, feed.rule_code AS "ruleCode", feed.operator, feed.metadata,
           feed.created_at AS "createdAt", successor.created_at AS "nextEventAt",
           successor.rule_code AS "nextRuleCode",
-          EXISTS(SELECT 1 FROM moderation_events original WHERE original.id = feed.id) AS "sourceExists"
+          COALESCE((
+            SELECT TRUE FROM moderation_events original WHERE original.id = feed.id LIMIT 1
+          ), FALSE) AS "sourceExists"
         FROM candidates feed
         LEFT JOIN LATERAL (
           SELECT later.created_at, later.rule_code
