@@ -27,6 +27,19 @@ for (const [path, markers] of SOURCE_ABANDONMENT_SOURCE_CHECKS) {
     });
 }
 const forwardPath = 'apps/api/src/webhook/webhook-legacy-forward-source.ts';
+const modernOuter = '(item) => isSourceAbandonmentOuterMarkup(item, message?.link)';
+const legacyOuter = `(item) =>
+            isLegacyPostSealOuterMarkup(
+              item,
+              message?.link,
+              createdLegacyForward ? update.type : undefined,
+            )`;
+const modernLinked = '(item) => isSourceAbandonmentMarkup(item.markup, item.text)';
+const legacyLinked =
+  '(item) => isLegacyPostSealMarkup(item.markup, item.text, createdLegacyForward)';
+const modernMedia = `(attachments) =>
+          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')`;
+const legacyMedia = 'isLegacyPostSealLinkedMedia';
 function refusesForwardMutation(change, retained) {
   const source = read(forwardPath);
   const changed = change(source);
@@ -49,56 +62,84 @@ test('forward rollback keeps the modern profile selector exact', () => {
         "const modern = profile === 'source-abandonment';",
         "const modern = profile !== 'legacy';",
       ),
-    [
-      'isSourceAbandonmentOuterMarkup(item, message?.link)',
-      'isLegacyPostSealOuterMarkup(item, message?.link)',
-    ],
+    [modernOuter, legacyOuter],
   );
 });
-for (const [body, modern, legacy] of [
-  [
-    'outer',
-    'isSourceAbandonmentOuterMarkup(item, message?.link)',
-    'isLegacyPostSealOuterMarkup(item, message?.link)',
-  ],
-  [
-    'linked',
-    'isSourceAbandonmentMarkup(item.markup, item.text)',
-    'isLegacyPassiveMarkup(item.markup, item.text)',
-  ],
+for (const [body, modern, legacy, legacyCondition] of [
+  ['outer', modernOuter, legacyOuter, "profile === 'legacy-post-seal'"],
+  ['linked', modernLinked, legacyLinked, "profile === 'legacy-post-seal'"],
+  ['media', modernMedia, legacyMedia, 'createdLegacyForward'],
 ]) {
   test(`forward rollback retains the ${body} modern condition with the legacy fallback intact`, () => {
     refusesForwardMutation(
-      (source) =>
-        source.replace(`modern\n      ? (item) => ${modern}`, `false\n      ? (item) => ${modern}`),
+      (source) => source.replace(`modern\n      ? ${modern}`, `false\n      ? ${modern}`),
       [legacy],
     );
   });
   test(`forward rollback retains the ${body} modern validator with the legacy fallback intact`, () => {
     refusesForwardMutation((source) => source.replace(modern, legacy), [legacy]);
   });
-  test(`forward rollback retains the ${body} legacy profile condition with the modern validator intact`, () => {
+  test(`forward rollback retains the ${body} legacy condition with the modern validator intact`, () => {
     refusesForwardMutation(
       (source) =>
-        source.replace(
-          `profile === 'legacy-post-seal'\n        ? (item) => ${legacy}`,
-          `profile === 'legacy'\n        ? (item) => ${legacy}`,
-        ),
+        source.replace(`${legacyCondition}\n        ? ${legacy}`, `true\n        ? ${legacy}`),
       [modern],
     );
   });
   test(`forward rollback retains the ${body} legacy validator with the modern validator intact`, () => {
-    refusesForwardMutation((source) => source.replace(legacy, modern), [modern]);
+    refusesForwardMutation(
+      (source) =>
+        source.replace(`? ${legacy}\n        : undefined`, `? ${modern}\n        : undefined`),
+      [modern],
+    );
   });
   test(`forward rollback retains the ${body} strict default with both validators intact`, () => {
     refusesForwardMutation(
       (source) =>
-        source.replace(
-          `? (item) => ${legacy}\n        : undefined`,
-          `? (item) => ${legacy}\n        : (item) => true`,
-        ),
+        source.replace(`? ${legacy}\n        : undefined`, `? ${legacy}\n        : (item) => true`),
       [modern, legacy],
     );
+  });
+}
+for (const condition of [
+  "profile === 'legacy-post-seal' &&",
+  "update.type === 'message_created' &&",
+  "raw?.update_type === 'message_created' &&",
+  "record(message?.link)?.type === 'forward'",
+]) {
+  test(`forward rollback retains the created legacy eligibility check: ${condition}`, () => {
+    refusesForwardMutation(
+      (source) => source.replace(condition, condition.endsWith('&&') ? 'true &&' : 'true'),
+      [modernOuter, modernLinked],
+    );
+  });
+}
+for (const [name, before, after] of [
+  ['created link allowance', '(allowLinks &&', '(true &&'],
+  ['bounded link spans', 'value.length <= 64 &&', 'value.length <= 65 &&'],
+  [
+    'legacy markup families',
+    "(entry) => record(entry)?.type === 'link' || isLegacyPassiveMarkup([entry], text)",
+    '() => true',
+  ],
+  ['strict link validation', 'isSourceAbandonmentMarkup(value, text))', 'true)'],
+  ['single share preview', 'value.length === 1 &&', 'value.length <= 10 &&'],
+  ['share-only preview', "record(value[0])?.type === 'share' &&", 'true &&'],
+  ['strict preview validation', 'isSourceAbandonmentDirectMedia(value, undefined))', 'true)'],
+  [
+    'outer created-forward allowance',
+    "const allowLinks = updateType === 'message_created' && link?.type === 'forward';",
+    'const allowLinks = true;',
+  ],
+  [
+    'independent linked markup validation',
+    'isLegacyPostSealMarkup(linked.markup, linked.text, allowLinks) &&',
+    'true &&',
+  ],
+  ['exact copied markup', 'JSON.stringify(body.markup) === JSON.stringify(linked.markup)', 'true'],
+]) {
+  test(`forward rollback retains ${name} with modern validators intact`, () => {
+    refusesForwardMutation((source) => source.replace(before, after), [modernOuter, modernLinked]);
   });
 }
 test('modern source rows cannot become a member-wide hold through rollback', () => {

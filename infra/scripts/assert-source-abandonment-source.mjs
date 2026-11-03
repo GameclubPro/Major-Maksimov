@@ -97,15 +97,61 @@ export const SOURCE_ABANDONMENT_SOURCE_CHECKS = Object.freeze([
     'apps/api/src/webhook/webhook-legacy-forward-source.ts',
     [
       'export function inspectLegacyForwardText(',
+      'export function inspectLegacyPostSealForwardText(',
       'export function inspectSourceAbandonmentForwardText(',
+      "return inspectForwardText(update, settings, 'legacy');",
+      "return inspectForwardText(update, settings, 'legacy-post-seal');",
+      "return inspectForwardText(update, settings, 'source-abandonment');",
       "const omittedSender = profile === 'source-abandonment' && link?.sender === undefined;",
       "link.type !== 'forward'",
-      // FLAG: Modern markup stays strict while the separate post-seal legacy path
-      // retains its bounded validators. The fresh legacy default remains disabled.
+      // FLAG: Keep modern, created-only legacy links/previews and the strict fresh
+      // legacy default independent; see legacy-webhook-order-recovery.md.
       "const modern = profile === 'source-abandonment';",
-      "modern\n      ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPostSealOuterMarkup(item, message?.link)\n        : undefined",
-      "modern\n      ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPassiveMarkup(item.markup, item.text)\n        : undefined",
-      "modern\n      ? (attachments) =>\n          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')\n      : undefined",
+      "const createdLegacyForward =\n    profile === 'legacy-post-seal' &&\n    update.type === 'message_created' &&\n    raw?.update_type === 'message_created' &&\n    record(message?.link)?.type === 'forward';",
+      "modern\n      ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)\n      : profile === 'legacy-post-seal'\n        ? (item) =>\n            isLegacyPostSealOuterMarkup(\n              item,\n              message?.link,\n              createdLegacyForward ? update.type : undefined,\n            )\n        : undefined",
+      "modern\n      ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)\n      : profile === 'legacy-post-seal'\n        ? (item) => isLegacyPostSealMarkup(item.markup, item.text, createdLegacyForward)\n        : undefined",
+      "modern\n      ? (attachments) =>\n          isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')\n      : createdLegacyForward\n        ? isLegacyPostSealLinkedMedia\n        : undefined",
+      `function isLegacyPostSealMarkup(value: unknown, text: unknown, allowLinks: boolean): boolean {
+  return (
+    isLegacyPassiveMarkup(value, text) ||
+    (allowLinks &&
+      Array.isArray(value) &&
+      value.length <= 64 &&
+      value.every(
+        (entry) => record(entry)?.type === 'link' || isLegacyPassiveMarkup([entry], text),
+      ) &&
+      isSourceAbandonmentMarkup(value, text))
+  );
+}`,
+      `function isLegacyPostSealLinkedMedia(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > 10) return false;
+  return (
+    value.every(isLegacyImageAttachment) ||
+    (value.length === 1 &&
+      record(value[0])?.type === 'share' &&
+      isSourceAbandonmentDirectMedia(value, undefined))
+  );
+}`,
+      `export function isLegacyPostSealOuterMarkup(
+  body: Record<string, unknown>,
+  linkValue: unknown,
+  updateType?: unknown,
+): boolean {
+  const link = record(linkValue);
+  const allowLinks = updateType === 'message_created' && link?.type === 'forward';
+  if (isLegacyPostSealMarkup(body.markup, body.text, allowLinks)) return true;
+  const linked = record(link?.message);
+  return Boolean(
+    body.text === '' &&
+    link?.type === 'forward' &&
+    linked &&
+    Array.isArray(body.markup) &&
+    body.markup.length <= 64 &&
+    isLegacyPostSealMarkup(linked.markup, linked.text, allowLinks) &&
+    JSON.stringify(body.markup) === JSON.stringify(linked.markup),
+  );
+}`,
       'item.attachments.length <= 10',
       'item.attachments.every(isLegacyImageAttachment)',
       'legacyParsedTextMatches(update)',

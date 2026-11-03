@@ -104,8 +104,8 @@ try {
           safeTop: 0,
           safeBottom: engineName === 'webkit' ? 34 : 24,
         });
-        await page.waitForURL((url) => url.searchParams.get('focus') === 'storefront');
         const home = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
+        await home.waitFor();
         await home.getByRole('button', { name: 'Посмотреть магазин чата', exact: true }).waitFor();
         assert.deepEqual(await home.locator('.karavan-shop__menu button').allTextContents(), [
           'Товары и услуги',
@@ -238,7 +238,7 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
   page.on('pageerror', (error) => errors.push(error.message));
   try {
     await page.goto(`${base}build/shop-browser-fixtures/${fixture.split('/').at(-1)}/index.html`);
-    await page.getByRole('button', { name: 'Настроить черновик', exact: true }).click();
+    // Current management opens directly; connection recovery is loaded in its own screen.
     await page.getByRole('button', { name: 'Настройки', exact: true }).click();
     const settings = page.getByRole('dialog', { name: 'Настройки', exact: true });
     const invitation = settings.getByRole('radio', { name: 'По приглашению', exact: true });
@@ -282,6 +282,7 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
     await page.evaluate(() => window.__changeProbeScope('arrange'));
     const home = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
     await home.getByRole('button', { name: 'Товары и услуги', exact: true }).waitFor();
+    await home.getByRole('button', { name: 'Заявки', exact: true }).waitFor({ state: 'detached' });
     assert.equal(await home.getByRole('button', { name: 'Заявки', exact: true }).count(), 0);
     assert.deepEqual(await page.evaluate(() => window.__probeWrites), []);
     assert.deepEqual(errors, []);

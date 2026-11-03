@@ -10,11 +10,13 @@ export function ShopFormatPicker({
   onChange,
   disabled = false,
   storefrontDisabled = false,
+  simple = false,
 }: {
   value: ShopFormat | null;
   onChange: (format: ShopFormat) => void;
   disabled?: boolean;
   storefrontDisabled?: boolean;
+  simple?: boolean;
 }) {
   return (
     <div className="karavan-shop-format" role="group" aria-label="Формат магазина">
@@ -46,9 +48,21 @@ export function ShopFormatPicker({
             <SettingsSectionIcon name={format.icon} />
           </span>
           <span className="karavan-shop-format__copy">
-            <strong>{shopFormatLabel(format.id)}</strong>
-            <span>{format.text}</span>
-            <small>{format.destination}</small>
+            <strong>
+              {simple
+                ? format.id === 'storefront'
+                  ? 'Администрация'
+                  : 'Участники'
+                : shopFormatLabel(format.id)}
+            </strong>
+            <span>
+              {simple
+                ? format.id === 'storefront'
+                  ? 'Витрины администрации чата'
+                  : 'Продавцы размещаются на выбранных вами условиях'
+                : format.text}
+            </span>
+            {!simple ? <small>{format.destination}</small> : null}
           </span>
           <span className="karavan-shop-format__radio" aria-hidden="true" />
         </button>

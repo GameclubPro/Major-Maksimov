@@ -133,6 +133,52 @@ describe('Chat shop publication format boundary', () => {
       url: 'https://max.ru/test_bot?startapp=m_synthetic',
     });
   });
+  it('publishes the stable administration shop without consulting a saved personal choice', async () => {
+    const { input, result, resolver, findChoice, job } = fixture();
+    result.publicationTarget = 'administration_shop';
+    result.marketplace!.administrationStoreId = null;
+    result.stores = [];
+    const publication = (await resolver.resolve(input)).publication!;
+    expect(publication).toMatchObject({
+      format: 'storefront',
+      storeId: null,
+      url: 'https://max.ru/test_bot?startapp=m_synthetic',
+    });
+    await expect(resolver.assertDispatch(job(publication), input.botId)).resolves.toBeUndefined();
+    expect(findChoice).not.toHaveBeenCalled();
+    result.marketplace!.formatRevision = 2;
+    await expect(resolver.assertDispatch(job(publication), input.botId)).rejects.toThrow(
+      'Привязка или витрина',
+    );
+  });
+  it('only accepts a specific administration target for the exact requested attached store', async () => {
+    const { input, result, resolver, job } = fixture();
+    const publication = (await resolver.resolve(input)).publication!;
+    result.publicationTarget = 'administration_store';
+    result.marketplace!.administrationStoreId = null;
+    await expect(resolver.resolve(input)).rejects.toThrow('Общая витрина');
+    await expect(resolver.assertDispatch(job(publication), input.botId)).resolves.toBeUndefined();
+    result.stores[0].id = randomUUID();
+    await expect(resolver.assertDispatch(job(publication), input.botId)).rejects.toThrow(
+      'Общая витрина',
+    );
+  });
+  it('rejects ambiguous common targets and never turns an unavailable shop into a catalog send', async () => {
+    const { input, result, resolver } = fixture();
+    result.publicationTarget = 'administration_shop';
+    await expect(resolver.resolve(input)).rejects.toThrow('Общая витрина');
+    result.stores = [];
+    result.marketplace!.format = 'community';
+    await expect(resolver.resolve(input)).rejects.toThrow('Общая витрина');
+    result.marketplace!.format = 'storefront';
+    for (const status of ['no_listing', 'choose_store'] as const) {
+      result.status = status;
+      await expect(resolver.resolve(input)).rejects.toThrow('Общая витрина');
+    }
+    delete result.publicationTarget;
+    result.status = 'no_listing';
+    expect((await resolver.resolve(input)).publication).toBeNull();
+  });
   it('rejects queued buttons after a format round trip even when the final URL is unchanged', async () => {
     const { input, result, resolver, job } = fixture();
     const publication = (await resolver.resolve(input)).publication!;

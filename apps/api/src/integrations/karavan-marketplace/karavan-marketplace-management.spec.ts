@@ -83,6 +83,60 @@ describe('native Major shop commands', () => {
       expect(JSON.stringify((error as HttpException).getResponse())).not.toContain('database');
     }
   });
+  it('relays a personal grant with the exact recipient and original command identity', async () => {
+    const { service, authority, fetchMock, payload } = setup();
+    const expiresAt = '2026-12-01T00:00:00.000Z';
+    const command = {
+      operation: 'seller_grant_create',
+      input: {
+        commandId: payload.commandId,
+        expectedPolicyRevision: 7,
+        targetMaxUserId: '9007199254740993',
+        storeId: null,
+        expiresAt,
+      },
+    };
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          operation: 'seller_grant_create',
+          data: {
+            grant: {
+              id: randomUUID(),
+              marketplaceId: payload.marketplaceId,
+              targetMaxUserId: command.input.targetMaxUserId,
+              storeId: null,
+              revision: 1,
+              expiresAt,
+              revokedAt: null,
+              claimedAt: null,
+            },
+            url: 'https://max.ru/seller?startapp=personal',
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      service.manage('-123', '777', { ...payload, command }, principal),
+    ).resolves.toMatchObject({
+      operation: 'seller_grant_create',
+      data: { grant: { targetMaxUserId: command.input.targetMaxUserId } },
+    });
+    expect(authority.issue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorMaxUserId: '777',
+        chatId: '-123',
+        commandId: payload.commandId,
+        marketplaceId: payload.marketplaceId,
+        expectedBindingGeneration: 3,
+      }),
+      principal,
+    );
+    expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string).payload.command).toEqual(
+      command,
+    );
+  });
   it.each([
     ['MARKETPLACE_FORMAT_LIMIT', 409],
     ['MARKETPLACE_FORMAT_CHANGED', 409],
@@ -90,6 +144,16 @@ describe('native Major shop commands', () => {
     ['ADMINISTRATION_STORE_OWNER_REQUIRED', 403],
     ['ADMINISTRATION_STORE_REQUIRED', 409],
     ['ADMINISTRATION_STORE_NOT_READY', 409],
+    ['ADMINISTRATION_STORE_UNAVAILABLE', 409],
+    ['MARKETPLACE_LISTING_LIMIT', 409],
+    ['MARKETPLACE_GRANTS_UNAVAILABLE', 409],
+    ['MARKETPLACE_GRANT_ALREADY_CLAIMED', 409],
+    ['MARKETPLACE_GRANT_REQUIRED', 403],
+    ['MARKETPLACE_GRANT_STORE_OWNER', 403],
+    ['MARKETPLACE_GRANT_UNAVAILABLE', 403],
+    ['MARKETPLACE_INVITATION_EXPIRY', 400],
+    ['MARKETPLACE_INVITATION_LIMIT', 409],
+    ['MARKETPLACE_RULES_CHANGED', 409],
     ['PLACEMENT_REVIEW_REQUIRED', 409],
     ['SELLER_STOREFRONT_LIMIT', 409],
     ['MARKETPLACE_INDEPENDENT_REVIEW_REQUIRED', 403],

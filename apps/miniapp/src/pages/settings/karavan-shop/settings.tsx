@@ -26,7 +26,9 @@ export default function ShopSettings({
   const administration = marketplace.format === 'storefront';
   const canManage = module.permissions.includes('manage_marketplace');
   const access = useSellerAccess();
-  const [policy, setPolicy] = useState<typeof marketplace.admissionPolicy | null>(null);
+  const [policy, setPolicy] = useState<'open' | 'applications' | 'selected' | 'invitation' | null>(
+    null,
+  );
   const mutation = useShopMutation({ owner: 'settings', page: 'settings' }, () => setPolicy(null));
   useEffect(() => {
     if (

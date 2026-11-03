@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 // FLAG: Enrollment and queued scoped SENDs outlive feature flags. An older
 // dispatcher must never interpret their metadata as permission for a legacy send.
-// Format epochs and fixed administration targets remain publication authority after a format change.
+// Format epochs and explicit administration targets remain publication authority after a format change.
 export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
   [
     'apps/api/src/max/max-action-dispatch.service.ts',
@@ -44,6 +44,12 @@ export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
       '      format,\n      formatRevision,',
       "if (format === 'storefront' && result.status !== 'published')",
       'result.marketplace.administrationStoreId !== store?.id',
+      "result.publicationTarget === 'administration_shop'",
+      "result.publicationTarget === 'administration_store'",
+      "format !== 'storefront'",
+      "result.status !== 'published'",
+      'payload.storeId !== null || result.stores.length !== 0',
+      'result.stores[0]?.id !== payload.storeId',
       "(expected.format ?? 'community') !== format",
       '(expected.formatRevision ?? 1) !== formatRevision',
       'expected.storeId !== publication.storeId',
@@ -55,14 +61,21 @@ export const KARAVAN_MARKETPLACE_SOURCE_CHECKS = Object.freeze([
   ],
   [
     'apps/api/src/integrations/karavan-storefront/karavan-storefront-relay.service.ts',
-    ['shouldUseScopedRelay(', 'karavanMarketplacePublication: params.scopedPublication'],
+    [
+      'shouldUseScopedRelay(',
+      'karavanMarketplacePublication: params.scopedPublication',
+      "scopedPublication.format !== 'storefront' && trigger !== 'bare'",
+    ],
   ],
   [
     'packages/contracts/src/karavan-marketplace.ts',
     [
       "'cancelled'",
       'karavanPublicationChoiceSaveSchema',
-      '  format: karavanShopFormatSchema.optional(),\n  administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),\n  formatRevision: z.number().int().positive().optional(),',
+      '  format: karavanShopFormatSchema.optional(),',
+      '  administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),',
+      '  formatRevision: z.number().int().positive().optional(),',
+      "publicationTarget: z.enum(['administration_shop', 'administration_store']).optional(),",
     ],
   ],
   [

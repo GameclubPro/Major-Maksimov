@@ -126,6 +126,52 @@ describe('KaravanStorefrontRelayService', () => {
       f.restore();
     }
   });
+  it.each(['$', '$ Продам цветы'])(
+    'publishes the common administration shop for %s without inventing a personal storefront',
+    async (text) => {
+      const publication = {
+        chatId: baseContext.chatId,
+        actorMaxUserId: baseContext.senderId,
+        subjectMaxUserId: baseContext.senderId,
+        sourceMessageId: baseContext.messageId,
+        botId: baseContext.botId,
+        marketplaceId: '7d6aac8f-060b-4758-bc51-a63e07ae29a2',
+        bindingGeneration: 3,
+        format: 'storefront',
+        formatRevision: 2,
+        storeId: null,
+        url: 'https://max.ru/synthetic_bot?startapp=m_synthetic',
+        sourceFingerprint: 'a'.repeat(64),
+      };
+      const resolver = {
+        shouldUseScopedRelay: jest.fn().mockResolvedValue(true),
+        resolve: jest.fn().mockResolvedValue({
+          result: { status: 'published', publicationTarget: 'administration_shop', stores: [] },
+          publication,
+        }),
+      };
+      const f = createService({ config: { KARAVAN_MARKETPLACE_ENABLED: true }, resolver });
+      try {
+        expect(
+          await f.service.handleMessageCreated({
+            ...baseContext,
+            text,
+            raw: { message: { body: { text } } },
+          }),
+        ).toBe('handled');
+        expect(f.fetchMock).not.toHaveBeenCalled();
+        const args = f.maxClient.sendMessage.mock.calls[0];
+        expect(args[2].buttons).toEqual([[expect.objectContaining({ url: publication.url })]]);
+        expect(args[3]).toMatchObject({
+          routing: { requiredBotId: baseContext.botId },
+          ledgerContext: { karavanMarketplacePublication: publication },
+        });
+      } finally {
+        f.restore();
+      }
+    },
+  );
+
   it.each([true, false])(
     'never downgrades enrolled chats after resolver failure (feature=%s)',
     async (enabled) => {

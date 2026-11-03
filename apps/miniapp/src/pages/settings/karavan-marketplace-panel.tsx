@@ -486,7 +486,9 @@ export default function KaravanMarketplacePanel({
   return (
     <StorefrontPublicationPreviewContext.Provider value={module.publicationPreview ?? null}>
       <section className="karavan-module" aria-label="Магазин чата">
-        {created && workspace?.page === 'home' ? <p role="status">Магазин создан.</p> : null}
+        {created && (module.chatShopFlowVersion ?? 1) < 2 && workspace?.page === 'home' ? (
+          <p role="status">Магазин создан.</p>
+        ) : null}
         {(!connectionState || managingCurrentShop) && (notice || bind.error) ? (
           <p className="karavan-module__notice" role="alert">
             {notice || bind.error}
@@ -754,12 +756,15 @@ export default function KaravanMarketplacePanel({
                 chatTitle={module.currentChatTitle ?? ''}
                 actorId={module.actorMaxUserId}
                 sellerBotUrl={module.sellerBotUrl}
+                flowVersion={module.chatShopFlowVersion}
                 intent={setupIntent ?? { kind: 'create' }}
                 onCancel={setupIntent ? () => setSetupIntent(null) : undefined}
                 localOnlyRecovery={localOnlyRecovery}
                 onSubmit={start}
               />
-              {!marketplace && (!setupIntent || setupIntent.kind === 'create') ? (
+              {!marketplace &&
+              (module.chatShopFlowVersion ?? 1) < 2 &&
+              (!setupIntent || setupIntent.kind === 'create') ? (
                 <details>
                   <summary>Другие варианты</summary>
                   <button
@@ -773,7 +778,9 @@ export default function KaravanMarketplacePanel({
             </>
           )}
         </div>
-        {ready && !(marketplace && canEnter) ? publicationEntry : null}
+        {ready && (module.chatShopFlowVersion ?? 1) < 2 && !(marketplace && canEnter)
+          ? publicationEntry
+          : null}
       </section>
     </StorefrontPublicationPreviewContext.Provider>
   );

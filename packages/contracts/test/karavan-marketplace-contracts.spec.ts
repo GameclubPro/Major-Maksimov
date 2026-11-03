@@ -79,6 +79,7 @@ describe('Karavan command boundary', () => {
     const previous = karavanMarketplaceCreateSchema.parse(input);
     expect(previous).not.toHaveProperty('format');
     expect(previous).not.toHaveProperty('administrationStoreId');
+    expect(previous).not.toHaveProperty('setupVersion');
     const next = karavanMarketplaceCreateSchema.parse({
       ...input,
       format: 'storefront',
@@ -154,6 +155,84 @@ describe('Karavan command boundary', () => {
         }).success,
       ).toBe(false);
     }
+  });
+
+  it('signs the new admission modes only when explicitly requested', () => {
+    const input = {
+      commandId: 'operation:create',
+      name: 'Соседи',
+      rules: { text: 'Правила', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+    };
+    for (const admissionPolicy of ['open', 'applications', 'selected', 'invitation']) {
+      const parsed = karavanMarketplaceCreateSchema.parse({
+        ...input,
+        admissionPolicy,
+        setupVersion: 2,
+      });
+      expect(parsed.admissionPolicy).toBe(admissionPolicy);
+      expect(parsed.setupVersion).toBe(2);
+    }
+    expect(karavanMarketplaceCreateSchema.safeParse({ ...input, setupVersion: 1 }).success).toBe(
+      false,
+    );
+  });
+
+  it('bounds administration changes and personal grants to exact command and binding revisions', () => {
+    const commandId = 'operation:change';
+    const envelope = {
+      commandId,
+      chatId: '-9007199254740993',
+      marketplaceId: 'f07ca391-24bb-4f3b-b64e-e49ed0fdbed6',
+      expectedBindingGeneration: 3,
+    };
+    const expectedChatBinding = {
+      id: envelope.marketplaceId,
+      chatId: envelope.chatId,
+      botId: 'major_bot',
+      generation: 3,
+    };
+    const command = {
+      operation: 'administration_store_change',
+      input: { commandId, expectedRevision: 2, expectedChatBinding, action: 'create' },
+    };
+    expect(marketplaceManagementRequestSchema.parse({ ...envelope, command }).command).toEqual(
+      command,
+    );
+    for (const input of [
+      { ...command.input, expectedChatBinding: undefined },
+      { ...command.input, isAdmin: true },
+      { ...command.input, storeId: envelope.marketplaceId },
+      { ...command.input, commandId: 'operation:other' },
+    ]) {
+      expect(
+        marketplaceManagementRequestSchema.safeParse({
+          ...envelope,
+          command: { ...command, input },
+        }).success,
+      ).toBe(false);
+    }
+    const grant = {
+      operation: 'seller_grant_create',
+      input: {
+        commandId,
+        expectedPolicyRevision: 4,
+        targetMaxUserId: '9007199254740993',
+        storeId: null,
+        expiresAt: '2026-12-01T00:00:00.000Z',
+      },
+    };
+    expect(
+      marketplaceManagementRequestSchema.parse({ ...envelope, command: grant }).command,
+    ).toEqual(grant);
+    expect(
+      marketplaceManagementRequestSchema.safeParse({
+        ...envelope,
+        command: {
+          ...grant,
+          input: { ...grant.input, targetMaxUserId: Number('9007199254740993') },
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 
