@@ -2,6 +2,7 @@ import type { AdminForwardedCommandSettings } from '../moderation/admin-forwarde
 import { parseAdminForwardedModerationCommand } from '../moderation/admin-forwarded-command.util';
 import {
   inspectSourceAbandonmentLinkedMediaRefusal,
+  isSourceAbandonmentDirectMedia,
   isSourceAbandonmentLinkedMedia,
   type SourceAbandonmentLinkedMediaRefusal,
 } from './webhook-source-abandonment-media';
@@ -118,7 +119,8 @@ export function inspectLegacyForwardText(
 }
 
 // FLAG: Only projection of an existing post-seal hold admits passive formatting.
-// Historical installation, linked identities, media and command authority stay strict.
+// A new flat message_created may also carry strict HTTPS links or one linked share;
+// historical installation, edits, linked identities and command authority stay strict.
 export function inspectLegacyPostSealForwardText(
   update: Record<string, unknown>,
   settings?: AdminForwardedCommandSettings,
@@ -126,14 +128,45 @@ export function inspectLegacyPostSealForwardText(
   return inspectForwardText(update, settings, 'legacy-post-seal');
 }
 
+// FLAG: The created-forward allowance adds only strict link spans. A modern
+// mention or future markup family never silently enters the legacy hold profile.
+function isLegacyPostSealMarkup(value: unknown, text: unknown, allowLinks: boolean): boolean {
+  return (
+    isLegacyPassiveMarkup(value, text) ||
+    (allowLinks &&
+      Array.isArray(value) &&
+      value.length <= 64 &&
+      value.every(
+        (entry) => record(entry)?.type === 'link' || isLegacyPassiveMarkup([entry], text),
+      ) &&
+      isSourceAbandonmentMarkup(value, text))
+  );
+}
+
+// FLAG: Share previews are passive source metadata, never downloads or new held
+// targets. Preserve the original image profile; no other modern media is admitted.
+function isLegacyPostSealLinkedMedia(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > 10) return false;
+  return (
+    value.every(isLegacyImageAttachment) ||
+    (value.length === 1 &&
+      record(value[0])?.type === 'share' &&
+      isSourceAbandonmentDirectMedia(value, undefined))
+  );
+}
+
 // FLAG: An empty outer caption may carry an exact copy of independently bounded
-// linked passive markup. Composed text never supplies offsets, links or targets.
+// linked markup. Strict links require an actual created forward; direct messages
+// and other relations retain passive-only bounds. Composed text supplies no offsets.
 export function isLegacyPostSealOuterMarkup(
   body: Record<string, unknown>,
   linkValue: unknown,
+  updateType?: unknown,
 ): boolean {
-  if (isLegacyPassiveMarkup(body.markup, body.text)) return true;
   const link = record(linkValue);
+  const allowLinks = updateType === 'message_created' && link?.type === 'forward';
+  if (isLegacyPostSealMarkup(body.markup, body.text, allowLinks)) return true;
   const linked = record(link?.message);
   return Boolean(
     body.text === '' &&
@@ -141,7 +174,7 @@ export function isLegacyPostSealOuterMarkup(
     linked &&
     Array.isArray(body.markup) &&
     body.markup.length <= 64 &&
-    isLegacyPassiveMarkup(linked.markup, linked.text) &&
+    isLegacyPostSealMarkup(linked.markup, linked.text, allowLinks) &&
     JSON.stringify(body.markup) === JSON.stringify(linked.markup),
   );
 }
@@ -165,6 +198,11 @@ function inspectForwardText(
   const message = record(raw?.message);
   const normalized = record(update.message);
   const modern = profile === 'source-abandonment';
+  const createdLegacyForward =
+    profile === 'legacy-post-seal' &&
+    update.type === 'message_created' &&
+    raw?.update_type === 'message_created' &&
+    record(message?.link)?.type === 'forward';
   let directRefusal: ForwardBodyRefusal = 'object';
   let linkedRefusal: ForwardBodyRefusal = 'object';
   const direct = body(
@@ -173,7 +211,12 @@ function inspectForwardText(
     modern
       ? (item) => isSourceAbandonmentOuterMarkup(item, message?.link)
       : profile === 'legacy-post-seal'
-        ? (item) => isLegacyPostSealOuterMarkup(item, message?.link)
+        ? (item) =>
+            isLegacyPostSealOuterMarkup(
+              item,
+              message?.link,
+              createdLegacyForward ? update.type : undefined,
+            )
         : undefined,
     undefined,
     (reason) => {
@@ -187,12 +230,14 @@ function inspectForwardText(
     modern
       ? (item) => isSourceAbandonmentMarkup(item.markup, item.text)
       : profile === 'legacy-post-seal'
-        ? (item) => isLegacyPassiveMarkup(item.markup, item.text)
+        ? (item) => isLegacyPostSealMarkup(item.markup, item.text, createdLegacyForward)
         : undefined,
     modern
       ? (attachments) =>
           isSourceAbandonmentLinkedMedia(attachments, 'forward', 'SOURCE_ABANDONMENT')
-      : undefined,
+      : createdLegacyForward
+        ? isLegacyPostSealLinkedMedia
+        : undefined,
     (reason) => {
       linkedRefusal = reason;
     },

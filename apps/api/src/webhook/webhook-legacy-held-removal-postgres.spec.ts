@@ -582,9 +582,26 @@ native('native post-seal held message removal without replay', () => {
     ).toBe(0);
   });
 
-  function heldFormattedForward(source: LegacyRecoveryCandidate, copied: boolean) {
+  type HeldForwardShape =
+    | 'passive'
+    | 'outer-link'
+    | 'linked-link'
+    | 'both-links'
+    | 'share-links'
+    | 'share-no-markup';
+
+  function heldFormattedForward(
+    source: LegacyRecoveryCandidate,
+    copied: boolean,
+    shape: HeldForwardShape = 'passive',
+  ) {
     const at = Date.now();
-    const markup = [{ type: 'emphasized', from: 0, length: 6 }];
+    const markup =
+      shape === 'passive'
+        ? [{ type: 'emphasized', from: 0, length: 6 }]
+        : [{ type: 'link', from: 0, length: 6, url: 'https://example.com/held-source' }];
+    const outerMarkup = shape !== 'linked-link' && shape !== 'share-no-markup';
+    const linkedMarkup = shape !== 'outer-link' && shape !== 'share-no-markup';
     return new WebhookParser().parse(
       {
         update_type: 'message_created',
@@ -594,7 +611,11 @@ native('native post-seal held message removal without replay', () => {
           sender: { user_id: source.source.userId, is_bot: false },
           recipient: { chat_id: source.source.chatId, chat_type: 'chat' },
           timestamp: at,
-          body: { mid: randomUUID(), text: copied ? '' : 'Outer caption', markup },
+          body: {
+            mid: randomUUID(),
+            text: copied ? '' : 'Outer caption',
+            ...(outerMarkup ? { markup } : {}),
+          },
           link: {
             type: 'forward',
             chat_id: -222,
@@ -602,16 +623,34 @@ native('native post-seal held message removal without replay', () => {
             message: {
               mid: randomUUID(),
               text: 'Quoted caption',
-              markup: structuredClone(markup),
-              attachments: [
-                { type: 'image', payload: { photo_id: 42, url: 'https://i.oneme.ru/fixture' } },
-              ],
+              ...(linkedMarkup ? { markup: structuredClone(markup) } : {}),
+              attachments: shape.startsWith('share-')
+                ? [
+                    {
+                      type: 'share',
+                      payload: { url: 'https://example.com/preview', token: 'native-share-token' },
+                      title: 'Fixture preview',
+                      description: 'Passive source preview',
+                      image_url: 'https://example.com/preview.png',
+                    },
+                  ]
+                : [{ type: 'image', payload: { photo_id: 42, url: 'https://i.oneme.ru/fixture' } }],
             },
           },
         },
       },
       { botId: state().bots[0]!.id },
     );
+  }
+
+  function heldRaceUpdate(
+    source: LegacyRecoveryCandidate,
+    eventKind: 'removal' | 'message' | 'share-no-markup',
+  ) {
+    if (eventKind === 'message') return heldImage(source);
+    if (eventKind === 'share-no-markup')
+      return heldFormattedForward(source, false, 'share-no-markup');
+    return removal(source);
   }
 
   // FLAG: Refusal fixtures seed the same pristine persisted envelope as ingress,
@@ -699,14 +738,26 @@ native('native post-seal held message removal without replay', () => {
   }
 
   it.each(
-    [false, true].flatMap((copied) => [false, true].map((deferred) => ({ copied, deferred }))),
+    (
+      [
+        { shape: 'passive', copied: false },
+        { shape: 'passive', copied: true },
+        { shape: 'outer-link', copied: false },
+        { shape: 'linked-link', copied: false },
+        { shape: 'both-links', copied: true },
+        { shape: 'share-links', copied: false },
+        { shape: 'share-links', copied: true },
+        { shape: 'share-no-markup', copied: false },
+        { shape: 'share-no-markup', copied: true },
+      ] satisfies Array<{ shape: HeldForwardShape; copied: boolean }>
+    ).flatMap((scenario) => [false, true].map((deferred) => ({ ...scenario, deferred }))),
   )(
-    'settles formatted held forward without execution (copied=$copied, deferred=$deferred)',
-    async ({ copied, deferred }) => {
+    'settles held $shape forward without execution (copied=$copied, deferred=$deferred)',
+    async ({ shape, copied, deferred }) => {
       const s = state();
       const source = await owner();
       await seal([source]);
-      const update = heldFormattedForward(source, copied);
+      const update = heldFormattedForward(source, copied, shape);
       const history = jest.spyOn(s.history, 'remove');
       const handler = jest.spyOn(s.moderation, 'handleUpdate');
       const before = deferred
@@ -727,6 +778,23 @@ native('native post-seal held message removal without replay', () => {
         scopeKind: 'POST_SEAL_MEMBER',
         reason: 'NO_REPLAY_HELD',
       });
+      expect(receipt.rawPayload).toEqual(update.raw);
+      expect(receipt.normalizedPayload).toEqual(update);
+      expect(receipt.errorMessage).toBe(deferred ? heldRetry : null);
+      expect(receipt.processedAt).toBeNull();
+      expect(receipt.executionDeadlineAt).not.toBeNull();
+      expect(proof.originalSnapshot).toMatchObject({
+        version: 1,
+        receipt: {
+          id: receipt.id,
+          status: 'RECEIVED',
+          errorMessage: receipt.errorMessage,
+          executionDeadlineAt: receipt.executionDeadlineAt!.toISOString(),
+        },
+        rawPayloadDigest: legacySnapshotDigest(update.raw),
+        normalizedPayloadDigest: legacySnapshotDigest(update),
+        claims: [],
+      });
       if (before)
         expect(receipt).toEqual({
           ...before,
@@ -740,6 +808,7 @@ native('native post-seal held message removal without replay', () => {
         canonical: false,
         prepared: false,
       });
+      expect(await s.canonical.prepareExecution(receipt.id, update.botId!)).toBeNull();
       await s.moderation.processWebhookEvent(receipt.id);
       expect(history).not.toHaveBeenCalled();
       expect(handler).not.toHaveBeenCalled();
@@ -758,6 +827,9 @@ native('native post-seal held message removal without replay', () => {
         await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: next.id } }),
       ).toMatchObject({ status: 'PROCESSED' });
       expect(await s.legacyHolds.isGlobalUserHeld(source.source.userId)).toBe(true);
+      expect(await s.legacyHolds.isMessageHeld(source.source.chatId, source.source.messageId)).toBe(
+        true,
+      );
       expect(
         await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: source.claim.id } }),
       ).toEqual(source.claim);
@@ -814,69 +886,144 @@ native('native post-seal held message removal without replay', () => {
     await blocked(receipt);
   });
 
-  it.each([
-    'QUEUED',
-    'attempted',
-    'queue name',
-    'processed',
-    'other error',
-    'command',
-    'raw sample',
-    'normalized text',
-    'old source',
-    'unsealed',
-    'authority digest',
-    'linked claim',
-    'canonical claim',
-    'publisher claim',
-    'command claim',
-    'delivery journal',
-  ])('keeps the held image fenced with %s', async (fault) => {
+  it.each(
+    [
+      { eventKind: 'image', deferred: true },
+      { eventKind: 'share-no-markup', deferred: false },
+      { eventKind: 'share-no-markup', deferred: true },
+    ].flatMap((scenario) =>
+      [
+        'QUEUED',
+        'attempted',
+        'queue name',
+        'processed',
+        'other error',
+        'command',
+        'raw sample',
+        'normalized text',
+        'old source',
+        'unsealed',
+        'authority digest',
+        'linked claim',
+        'canonical claim',
+        'publisher claim',
+        'command claim',
+        'delivery journal',
+      ].map((fault) => ({ ...scenario, fault })),
+    ),
+  )(
+    'keeps the held $eventKind fenced with $fault (deferred=$deferred)',
+    async ({ eventKind, deferred, fault }) => {
+      const s = state();
+      const source = await owner();
+      const certificate = await seal([source], fault !== 'unsealed');
+      let update =
+        eventKind === 'image'
+          ? heldImage(source, fault === 'command' ? '/ban' : undefined)
+          : heldFormattedForward(source, false, 'share-no-markup');
+      if (eventKind === 'share-no-markup' && fault === 'command') {
+        const raw = structuredClone(update.raw) as { message: { body: { text: string } } };
+        raw.message.body.text = '/ban';
+        update = new WebhookParser().parse(raw, { botId: update.botId! });
+      }
+      if (fault === 'normalized text') update.message!.text = 'mismatched text';
+      if (fault === 'old source')
+        (update.raw as Record<string, unknown>).timestamp = certificate.sealedAt!.getTime() - 1;
+      if (fault === 'authority digest')
+        await corruptFixture((tx) =>
+          tx.webhookLegacySealedAuthority.update({
+            where: { certificateId: certificate.id },
+            data: { attestationDigest: 'f'.repeat(64) },
+          }),
+        );
+      const receipt = await stage(update, {
+        ...(deferred ? { errorMessage: heldRetry } : {}),
+        ...(fault === 'QUEUED' ? { status: 'QUEUED' } : {}),
+        ...(fault === 'attempted' ? { enqueueAttempts: 1 } : {}),
+        ...(fault === 'queue name' ? { queueName: 'existing-queue' } : {}),
+        ...(fault === 'processed' ? { processedAt: new Date() } : {}),
+        ...(fault === 'other error' ? { errorMessage: 'Unproved earlier error' } : {}),
+        ...(fault === 'raw sample' ? { rawPayload: { ...update.raw, unknownField: true } } : {}),
+      });
+      if (fault.endsWith('claim')) {
+        const semanticKey =
+          fault === 'canonical claim'
+            ? buildWebhookSemanticEventKey(update)!
+            : fault === 'publisher claim'
+              ? buildWebhookReceiptSemanticKey(update, update.botId!)!
+              : fault === 'command claim'
+                ? buildGroupCommandKey(chatId, update.message!.messageId)
+                : randomUUID();
+        const claim = await s.prisma.webhookExecutionClaim.create({
+          data: {
+            kind: 'INDEPENDENT_RETAINED_KIND',
+            semanticKey,
+            ...(fault === 'linked claim' ? { webhookEventId: receipt.id } : {}),
+          },
+        });
+        extraClaims.push(claim.id);
+      }
+      if (fault === 'delivery journal') await publisherDelivery(update, source);
+      await blocked(receipt);
+      expect(await s.legacyHolds.isGlobalUserHeld(source.source.userId)).toBe(true);
+      expect(
+        await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: source.claim.id } }),
+      ).toEqual(source.claim);
+      expect(s.requests).toEqual([]);
+    },
+  );
+
+  it.each(
+    (
+      ['outer-link', 'linked-link', 'both-links', 'share-links', 'share-no-markup'] as const
+    ).flatMap((shape) => [false, true].map((deferred) => ({ shape, deferred }))),
+  )('keeps edited $shape forwards fenced (deferred=$deferred)', async ({ shape, deferred }) => {
     const s = state();
     const source = await owner();
-    const certificate = await seal([source], fault !== 'unsealed');
-    const update = heldImage(source, fault === 'command' ? '/ban' : undefined);
-    if (fault === 'normalized text') update.message!.text = 'mismatched text';
-    if (fault === 'old source')
-      (update.raw as Record<string, unknown>).timestamp = certificate.sealedAt!.getTime() - 1;
-    if (fault === 'authority digest')
-      await corruptFixture((tx) =>
-        tx.webhookLegacySealedAuthority.update({
-          where: { certificateId: certificate.id },
-          data: { attestationDigest: 'f'.repeat(64) },
-        }),
-      );
-    const receipt = await stage(update, {
-      errorMessage: heldRetry,
-      ...(fault === 'QUEUED' ? { status: 'QUEUED' } : {}),
-      ...(fault === 'attempted' ? { enqueueAttempts: 1 } : {}),
-      ...(fault === 'queue name' ? { queueName: 'existing-queue' } : {}),
-      ...(fault === 'processed' ? { processedAt: new Date() } : {}),
-      ...(fault === 'other error' ? { errorMessage: 'Unproved earlier error' } : {}),
-      ...(fault === 'raw sample' ? { rawPayload: { ...update.raw, unknownField: true } } : {}),
-    });
-    if (fault.endsWith('claim')) {
-      const semanticKey =
-        fault === 'canonical claim'
-          ? buildWebhookSemanticEventKey(update)!
-          : fault === 'publisher claim'
-            ? buildWebhookReceiptSemanticKey(update, update.botId!)!
-            : fault === 'command claim'
-              ? buildGroupCommandKey(chatId, update.message!.messageId)
-              : randomUUID();
-      const claim = await s.prisma.webhookExecutionClaim.create({
-        data: {
-          kind: 'INDEPENDENT_RETAINED_KIND',
-          semanticKey,
-          ...(fault === 'linked claim' ? { webhookEventId: receipt.id } : {}),
-        },
-      });
-      extraClaims.push(claim.id);
-    }
-    if (fault === 'delivery journal') await publisherDelivery(update, source);
+    await seal([source]);
+    const original = heldFormattedForward(source, shape === 'both-links', shape);
+    const update = new WebhookParser().parse(
+      { ...original.raw, update_type: 'message_edited' },
+      { botId: original.botId! },
+    );
+    const receipt = deferred
+      ? await stage(update, { errorMessage: heldRetry })
+      : await store(update);
+    expect(receipt.status).toBe('RECEIVED');
     await blocked(receipt);
     expect(await s.legacyHolds.isGlobalUserHeld(source.source.userId)).toBe(true);
+    expect(
+      await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: source.claim.id } }),
+    ).toEqual(source.claim);
+    expect(s.requests).toEqual([]);
   });
+
+  it.each([false, true])(
+    'keeps a no-markup SHARE fenced when another matching scope is unsealed (deferred=%s)',
+    async (deferred) => {
+      const s = state();
+      const source = await owner();
+      const other = await owner(source.source.userId);
+      await seal([source]);
+      await seal([other], false);
+      const update = heldFormattedForward(source, false, 'share-no-markup');
+      const receipt = deferred
+        ? await stage(update, { errorMessage: heldRetry })
+        : await store(update);
+      expect(receipt.status).toBe('RECEIVED');
+      await blocked(receipt);
+      for (const held of [source, other]) {
+        expect(
+          await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: held.claim.id } }),
+        ).toEqual(held.claim);
+        expect(await s.legacyHolds.isMessageHeld(held.source.chatId, held.source.messageId)).toBe(
+          true,
+        );
+      }
+      expect(await s.legacyHolds.isGlobalUserHeld(source.source.userId)).toBe(true);
+      expect(s.requests).toEqual([]);
+    },
+  );
 
   it('settles a captionless held image at ingress and allows independent same-chat work', async () => {
     const s = state();
@@ -1260,7 +1407,7 @@ native('native post-seal held message removal without replay', () => {
   );
 
   it.each(
-    ['removal', 'message'].flatMap((eventKind) =>
+    (['removal', 'message', 'share-no-markup'] as const).flatMap((eventKind) =>
       ['canonical', 'command'].map((kind) => ({ eventKind, kind })),
     ),
   )(
@@ -1269,7 +1416,7 @@ native('native post-seal held message removal without replay', () => {
       const s = state();
       const source = await owner();
       await seal([source]);
-      const update = eventKind === 'message' ? heldImage(source) : removal(source);
+      const update = heldRaceUpdate(source, eventKind);
       const receipt = await stage(update);
       const key =
         kind === 'canonical'
@@ -1313,108 +1460,114 @@ native('native post-seal held message removal without replay', () => {
     },
   );
 
-  it('rechecks committed claims after a peer wins the canonical fence', async () => {
-    const s = state();
-    const source = await owner();
-    await seal([source]);
-    const receipt = await stage(removal(source));
-    let admitted!: () => void;
-    let release!: () => void;
-    const peerAdmitted = new Promise<void>((resolve) => {
-      admitted = resolve;
-    });
-    const finishPeer = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const peer = s.prisma.$transaction(
-      async (tx) => {
-        expect(await tryLockWebhookSemanticClaimFences(tx, [receipt.semanticKey])).toBe(true);
-        admitted();
-        await finishPeer;
-        return tx.webhookExecutionClaim.create({
-          data: {
-            kind: 'INDEPENDENT_RETAINED_KIND',
-            semanticKey: receipt.semanticKey!,
-          },
-        });
-      },
-      { timeout: 10_000 },
-    );
-    let claim: Awaited<typeof peer>;
-    try {
-      await Promise.race([
-        peerAdmitted,
-        peer.then(() => {
-          throw new Error('Peer ended before holding its fence');
-        }),
-      ]);
-      await blocked(receipt);
-    } finally {
-      release();
-      claim = await peer;
-      extraClaims.push(claim.id);
-    }
-    await blocked(receipt);
-    expect(
-      await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: claim.id } }),
-    ).toEqual(claim);
-  });
-
-  it('rejects stale EXECUTION admission after the exact receipt acquires a no-replay proof', async () => {
-    const s = state();
-    const source = await owner();
-    await seal([source]);
-    const receipt = await stage(removal(source));
-    const handler = jest.spyOn(s.moderation, 'handleUpdate');
-    // FLAG: Model an already-read negative hold hint, then pause before the actual
-    // SQL admission transaction. Closing the real receipt must defeat this stale
-    // caller even when its earlier in-memory status still says RECEIVED.
-    const hint = jest.spyOn(s.legacyHolds, 'isUpdateHeld').mockResolvedValueOnce(false);
-    const transaction = s.prisma.$transaction.bind(s.prisma);
-    let admission!: () => void;
-    let resume!: () => void;
-    const admissionReached = new Promise<void>((resolve) => {
-      admission = resolve;
-    });
-    const resumeAdmission = new Promise<void>((resolve) => {
-      resume = resolve;
-    });
-    const paused = jest
-      .spyOn(s.prisma, '$transaction')
-      .mockImplementationOnce(async (...args: unknown[]) => {
-        admission();
-        await resumeAdmission;
-        return transaction(...(args as Parameters<typeof transaction>));
+  it.each(['removal', 'message', 'share-no-markup'] as const)(
+    'rechecks committed claims for %s after a peer wins the canonical fence',
+    async (eventKind) => {
+      const s = state();
+      const source = await owner();
+      await seal([source]);
+      const receipt = await stage(heldRaceUpdate(source, eventKind));
+      let admitted!: () => void;
+      let release!: () => void;
+      const peerAdmitted = new Promise<void>((resolve) => {
+        admitted = resolve;
       });
-    const preparing = s.ingress.preparePersistedWebhookEvent(receipt.id);
-    let closed: WebhookEvent | undefined;
-    try {
-      await Promise.race([
-        admissionReached,
-        preparing.then(() => {
-          throw new Error('Preparation ended before SQL admission');
-        }),
-      ]);
-      expect(await s.legacyHolds.materializeReceipt(receipt.id)).toBe('APPLIED_WITH_PROOF');
-      closed = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: receipt.id } });
-      expect(closed.status).toBe('NO_REPLAY_HELD');
-    } finally {
-      resume();
-      await preparing.catch(() => undefined);
-      paused.mockRestore();
-      hint.mockRestore();
-    }
-    expect(await preparing).toMatchObject({ canonical: false });
-    expect(
-      await s.prisma.webhookExecutionClaim.count({ where: { webhookEventId: receipt.id } }),
-    ).toBe(0);
-    expect(await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: receipt.id } })).toEqual(
-      closed,
-    );
-    expect(handler).not.toHaveBeenCalled();
-    expect(s.requests).toEqual([]);
-    expect(s.effects).toEqual([]);
-  });
+      const finishPeer = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const peer = s.prisma.$transaction(
+        async (tx) => {
+          expect(await tryLockWebhookSemanticClaimFences(tx, [receipt.semanticKey])).toBe(true);
+          admitted();
+          await finishPeer;
+          return tx.webhookExecutionClaim.create({
+            data: {
+              kind: 'INDEPENDENT_RETAINED_KIND',
+              semanticKey: receipt.semanticKey!,
+            },
+          });
+        },
+        { timeout: 10_000 },
+      );
+      let claim: Awaited<typeof peer>;
+      try {
+        await Promise.race([
+          peerAdmitted,
+          peer.then(() => {
+            throw new Error('Peer ended before holding its fence');
+          }),
+        ]);
+        await blocked(receipt);
+      } finally {
+        release();
+        claim = await peer;
+        extraClaims.push(claim.id);
+      }
+      await blocked(receipt);
+      expect(
+        await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: claim.id } }),
+      ).toEqual(claim);
+    },
+  );
+
+  it.each(['removal', 'message', 'share-no-markup'] as const)(
+    'rejects stale EXECUTION admission after the exact %s receipt acquires a no-replay proof',
+    async (eventKind) => {
+      const s = state();
+      const source = await owner();
+      await seal([source]);
+      const receipt = await stage(heldRaceUpdate(source, eventKind));
+      const handler = jest.spyOn(s.moderation, 'handleUpdate');
+      // FLAG: Model an already-read negative hold hint, then pause before the actual
+      // SQL admission transaction. Closing the real receipt must defeat this stale
+      // caller even when its earlier in-memory status still says RECEIVED.
+      const hint = jest.spyOn(s.legacyHolds, 'isUpdateHeld').mockResolvedValueOnce(false);
+      const transaction = s.prisma.$transaction.bind(s.prisma);
+      let admission!: () => void;
+      let resume!: () => void;
+      const admissionReached = new Promise<void>((resolve) => {
+        admission = resolve;
+      });
+      const resumeAdmission = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const paused = jest
+        .spyOn(s.prisma, '$transaction')
+        .mockImplementationOnce(async (...args: unknown[]) => {
+          admission();
+          await resumeAdmission;
+          return transaction(...(args as Parameters<typeof transaction>));
+        });
+      const preparing = s.ingress.preparePersistedWebhookEvent(receipt.id);
+      let closed: WebhookEvent | undefined;
+      try {
+        await Promise.race([
+          admissionReached,
+          preparing.then(() => {
+            throw new Error('Preparation ended before SQL admission');
+          }),
+        ]);
+        expect(await s.legacyHolds.materializeReceipt(receipt.id)).toBe('APPLIED_WITH_PROOF');
+        closed = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: receipt.id } });
+        expect(closed.status).toBe('NO_REPLAY_HELD');
+      } finally {
+        resume();
+        await preparing.catch(() => undefined);
+        paused.mockRestore();
+        hint.mockRestore();
+      }
+      expect(await preparing).toMatchObject({ canonical: false });
+      expect(
+        await s.prisma.webhookExecutionClaim.count({ where: { webhookEventId: receipt.id } }),
+      ).toBe(0);
+      expect(await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: receipt.id } })).toEqual(
+        closed,
+      );
+      expect(handler).not.toHaveBeenCalled();
+      expect(s.requests).toEqual([]);
+      expect(s.effects).toEqual([]);
+    },
+  );
 
   it.each(['observeStart', 'claim'] as const)(
     'refuses stale COMMAND %s against a closed receipt',
