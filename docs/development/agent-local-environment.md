@@ -4,21 +4,30 @@ Use the repository's Node 24 requirement and lockfile. Install dependencies with
 checkout being tested; never replace another worktree's dependencies or copy a stale generated
 Prisma client. Public API scripts own code generation and its lock.
 
-## Check before expensive work
+## One-time setup and routine checks
+
+For environment setup only:
 
 ```bash
 node scripts/agent/doctor.mjs --browser
-node scripts/agent/preflight.mjs
-node scripts/agent/plan.mjs --worktree
 ```
+
+For an ordinary change, inspect context and callers, then run preflight before expensive
+checks and use the impact planner. The staged commit helper owns the final aggregate;
+see [check selection](../development-reliability-plan.md#boundaries-and-follow-up).
+Markdown-only work needs no browser or native-store setup. `check:docs` uses the Git and
+Docker Compose CLIs to inspect documentation and service names, but does not start a
+Docker daemon, containers or application services.
 
 The doctor checks local tools, dependency presence and the matching Playwright Chromium binary.
 `--browser` also launches an isolated headless page without network access. It does not inspect
 credentials or change Codex settings. Dependency presence is not lockfile-integrity validation;
-use `npm ci` after dependency changes. Docker availability is optional when native test stores work.
+use `npm ci` after dependency changes. A running Docker daemon is optional when native test stores work.
 
-Required tools: Node 24/npm, Git, GitHub CLI, ripgrep, Python 3, ShellCheck, jq, PostgreSQL 16
-server/client binaries and Redis 7 server/client. Keep `initdb`, `postgres`, `pg_isready`, `createdb`,
+Tools depend on scope: Node 24/npm, Git and the Docker Compose CLI support repository
+and documentation checks; GitHub CLI handles delivery. Tooling/infra work additionally uses
+ripgrep, Python 3, ShellCheck and jq. Native store work needs PostgreSQL 16 server/client
+binaries and Redis 7 server/client. Keep `initdb`, `postgres`, `pg_isready`, `createdb`,
 `psql`, `redis-server` and `redis-cli` on PATH. For workflow editing, install the actionlint version
 pinned in `.github/workflows/ci.yml` (currently 1.7.7). Compiler/build tools are needed only when
 installing a dependency with native compilation. Do not update application dependencies merely
@@ -48,6 +57,39 @@ npx playwright install chromium
 If the browser launch reports missing OS libraries, use the supported Playwright dependency
 installer with administrator access. Existing compatible system libraries need no reinstall.
 Keep WSL projects, node_modules and temporary databases on the Linux filesystem for I/O efficiency.
+
+## API CI partitioning
+
+API CI has four ordinary Jest partitions and one types/build/storage/Redis job. All five block
+`Required`. The existing `test:ci` keeps its generator lock, serial worker and benchmark exclusion;
+public `check:ci:build` owns the remaining generation/type/storage/build phases. Local final
+`check:ci` still runs the whole API aggregate once. Partitioning CI is not permission to run
+concurrent local generators or treat skipped native tests as storage evidence.
+
+To inspect a partition without executing tests:
+
+```bash
+npm run test:ci --workspace @maxim/api -- -- -- --shard=1/4 --listTests --json
+```
+
+All three separators after the workspace are necessary for this public wrapper. Use
+`focused.mjs --test <path>` for ordinary file selection so it owns that forwarding.
+CI retains per-part JSON results on success or failure; a missing report is missing evidence.
+The [dated audit](../operations/incidents/2026-11-03-agent-workflow-audit.md) records the baseline;
+measure the current run before promising a duration.
+
+## Browser CI partitioning
+
+Miniapp CI runs four isolated jobs. The first owns CSS/type/unit checks, production build and
+visual smoke. The other jobs build contracts before their browser cases. All 21 browser commands
+run exactly once across the matrix, preserving the complete Android/iOS shop case and its WebKit
+installation. Each case retains its owned server and cleanup. Safety Desk remains independent.
+`scripts/ci/miniapp-shards.test.mjs` guards command coverage, setup order and the Required gate.
+
+For local edits, use only the affected scenarios from the
+[feature regression map](feature-regressions.md); do not manually replay all four CI partitions.
+The staged helper still owns the impact-selected final local aggregate. A changed workflow needs
+exact-SHA CI even when its commands have passed locally.
 
 ## Native CI partitioning
 

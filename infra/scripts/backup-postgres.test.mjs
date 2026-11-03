@@ -175,6 +175,188 @@ function runHelper(data, args = [], extraEnv = {}) {
   });
 }
 
+function rootRunner(t) {
+  // FLAG: Real Git must see a different owner with no sudo/user config trust,
+  // matching the root systemd producer rather than an operator's sudo shell.
+  const clean = [
+    '/usr/bin/env',
+    '-i',
+    `PATH=${process.env.PATH}`,
+    'GIT_CONFIG_NOSYSTEM=1',
+    'GIT_CONFIG_SYSTEM=/dev/null',
+    'GIT_CONFIG_GLOBAL=/dev/null',
+  ];
+  const candidates = process.getuid() === 0 ? [clean] : [['sudo', '-n', ...clean]];
+  if (process.getuid() !== 0 && process.env.WSL_DISTRO_NAME) {
+    candidates.push([
+      '/mnt/c/WINDOWS/system32/wsl.exe',
+      '--distribution',
+      process.env.WSL_DISTRO_NAME,
+      '--user',
+      'root',
+      '--exec',
+      ...clean,
+    ]);
+  }
+  for (const [executable, ...prefix] of candidates) {
+    const run = (args, env = {}) =>
+      spawnSync(
+        executable,
+        [...prefix, ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...args],
+        {
+          encoding: 'utf8',
+          timeout: 20_000,
+        },
+      );
+    if (run([process.execPath, '-e', 'process.exit(process.getuid() === 0 ? 0 : 1)']).status === 0)
+      return run;
+  }
+  t.skip('Cross-UID coverage requires passwordless root execution.');
+  return null;
+}
+
+for (const source of [
+  'clean',
+  'clean-stale-stat',
+  'wrong-revision',
+  'dirty-scripts',
+  'dirty-script-mode',
+  'deleted-script',
+  'invalid-index',
+]) {
+  test(`root scheduled producer checks operator-owned source before dump: ${source}`, (t) => {
+    const elevated = rootRunner(t);
+    if (!elevated) return;
+    const data = fixture();
+    t.after(() => {
+      const cleanup = elevated(['rm', '-rf', '--', data.directory]);
+      assert.equal(cleanup.status, 0, cleanup.stderr);
+    });
+    const repo = join(data.directory, 'repo');
+    mkdirSync(join(repo, 'infra/scripts/lib'), { recursive: true });
+    for (const file of [
+      'lib/postgres-backup-profile.sh',
+      'probe-postgres-backup-readiness.mjs',
+      'check-postgres-backup-readiness.mjs',
+      'postgres-backup-schedule.mjs',
+      'rate-limit-stream.mjs',
+    ]) {
+      writeFileSync(
+        join(repo, 'infra/scripts', file),
+        readFileSync(join(root, 'infra/scripts', file)),
+      );
+    }
+    const producer = join(repo, 'infra/scripts/backup-postgres.sh');
+    writeFileSync(
+      producer,
+      readFileSync(helper, 'utf8').replace(
+        'DEPLOY_LOCK_HELPER="$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"',
+        `DEPLOY_LOCK_HELPER='${data.deployLockData.helper}'`,
+      ),
+    );
+    const sourceOnly = join(repo, 'infra/scripts/source-only.sh');
+    writeFileSync(sourceOnly, '# fixture-only source\n');
+    const git = (...args) => {
+      const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      return result.stdout.trim();
+    };
+    git('init', '--quiet');
+    git('add', 'infra');
+    git(
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'source',
+    );
+    const sha = git('rev-parse', 'HEAD');
+    if (source === 'clean-stale-stat') {
+      const changedTime = new Date(Date.now() + 5_000);
+      utimesSync(sourceOnly, changedTime, changedTime);
+    } else if (source === 'dirty-scripts') {
+      writeFileSync(sourceOnly, '# changed source\n');
+    } else if (source === 'dirty-script-mode') {
+      chmodSync(sourceOnly, 0o755);
+    } else if (source === 'deleted-script') {
+      rmSync(sourceOnly);
+    } else if (source === 'invalid-index') {
+      writeFileSync(join(repo, '.git/index'), 'invalid fixture index\n');
+    }
+    if (process.getuid() === 0) {
+      const ownership = elevated(['chown', '-R', '65534', repo]);
+      assert.equal(ownership.status, 0, ownership.stderr);
+    }
+    writeFileSync(data.deployLock, '', { mode: 0o600 });
+    writeFileSync(data.dockerLog, '');
+    const denied = elevated(['git', '-C', repo, 'rev-parse', 'HEAD']);
+    assert.equal(denied.status, 128);
+    assert.match(denied.stderr, /dubious ownership/);
+    const configured = helperEnv(data, {
+      MAXIM_BACKUP_SOURCE_SHA: source === 'wrong-revision' ? 'b'.repeat(40) : sha,
+      MAXIM_BACKUP_PROFILE: 'maxim',
+      MAXIM_BACKUP_REPLICATION_REQUIRED: '0',
+    });
+    const env = Object.fromEntries(
+      Object.entries(configured).filter(([name]) => /^(?:PATH$|MAXIM_BACKUP_|MOCK_)/.test(name)),
+    );
+    env.GIT_OPTIONAL_LOCKS = '1';
+    const gitPaths = ['.git', '.git/index', '.git/HEAD', '.git/config'];
+    const gitMetadata = () =>
+      gitPaths.map((name) => {
+        const value = statSync(join(repo, name), { bigint: true });
+        return {
+          name,
+          uid: value.uid,
+          gid: value.gid,
+          mode: value.mode,
+          ino: value.ino,
+          size: value.size,
+          mtimeNs: value.mtimeNs,
+          ctimeNs: value.ctimeNs,
+        };
+      });
+    const metadataBefore = gitMetadata();
+    const contentBefore = gitPaths.slice(1).map((name) =>
+      createHash('sha256')
+        .update(readFileSync(join(repo, name)))
+        .digest('hex'),
+    );
+    const result = elevated(['bash', producer], env);
+    const clean = source === 'clean' || source === 'clean-stale-stat';
+    assert.equal(result.status, clean ? 0 : source === 'invalid-index' ? 128 : 1, result.stderr);
+    assert.deepEqual(
+      gitMetadata(),
+      metadataBefore,
+      'Source reads must preserve Git ownership and metadata',
+    );
+    assert.deepEqual(
+      gitPaths.slice(1).map((name) =>
+        createHash('sha256')
+          .update(readFileSync(join(repo, name)))
+          .digest('hex'),
+      ),
+      contentBefore,
+      'Source reads must preserve Git file bytes',
+    );
+    assert.doesNotMatch(result.stdout, /source-only\.sh|changed source/u);
+    assert.doesNotMatch(result.stderr, /dubious ownership/);
+    const operations = readFileSync(data.dockerLog, 'utf8');
+    if (clean) {
+      assert.match(operations, /pg_dump/);
+      assert.equal(dumpFiles(data).filter((name) => name.endsWith('.dump')).length, 1);
+    } else {
+      assert.equal(operations, '');
+      assert.deepEqual(dumpFiles(data), []);
+    }
+    assert.equal(elevated(['git', '-C', repo, 'rev-parse', 'HEAD']).status, 128);
+    assert.equal(spawnSync('flock', ['-n', data.deployLock, 'true']).status, 0);
+  });
+}
+
 function dumpFiles(data) {
   return readdirSync(data.backup).filter((name) => name.includes('.dump'));
 }

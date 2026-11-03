@@ -23,6 +23,8 @@
     "check": "node ../../scripts/with-file-lock.mjs api-validation -- npm run check:unlocked",
     "check:unlocked": "npm run prepare:codegen && npm run typecheck:source && npm run test:source && npm run test:retention-storage:source && npm run build:source",
     "check:ci": "node ../../scripts/with-file-lock.mjs api-validation -- npm run check:ci:unlocked",
+    "check:ci:build": "node ../../scripts/with-file-lock.mjs api-validation -- npm run check:ci:build:unlocked",
+    "check:ci:build:unlocked": "npm run prepare:codegen && npm run typecheck:source && npm run test:retention-storage:source && npm run build:source",
     "check:ci:unlocked": "npm run prepare:codegen && npm run typecheck:source && npm run test:ci:source && npm run test:retention-storage:source && npm run build:source",
     "test:retention-storage": "node ../../scripts/with-file-lock.mjs api-validation -- npm run test:retention-storage:unlocked",
     "test:retention-storage:unlocked": "npm run prepare:codegen && npm run test:retention-storage:source",

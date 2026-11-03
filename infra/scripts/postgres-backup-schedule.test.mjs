@@ -21,6 +21,127 @@ const initialTime = Date.parse('2026-11-03T10:00:00Z');
 const hash = (text) => createHash('sha256').update(text).digest('hex');
 const script = new URL('./postgres-backup-schedule.sh', import.meta.url).pathname;
 
+function rootRunner(t) {
+  // FLAG: A sudo shell can retain operator Git trust. Reproduce systemd without
+  // inherited HOME/SUDO/config, using real Git against a separately owned checkout.
+  const clean = [
+    '/usr/bin/env',
+    '-i',
+    `PATH=${process.env.PATH}`,
+    'GIT_CONFIG_NOSYSTEM=1',
+    'GIT_CONFIG_SYSTEM=/dev/null',
+    'GIT_CONFIG_GLOBAL=/dev/null',
+  ];
+  const candidates = process.getuid() === 0 ? [clean] : [['sudo', '-n', ...clean]];
+  if (process.getuid() !== 0 && process.env.WSL_DISTRO_NAME) {
+    candidates.push([
+      '/mnt/c/WINDOWS/system32/wsl.exe',
+      '--distribution',
+      process.env.WSL_DISTRO_NAME,
+      '--user',
+      'root',
+      '--exec',
+      ...clean,
+    ]);
+  }
+  for (const [executable, ...prefix] of candidates) {
+    const run = (args, env = {}) =>
+      spawnSync(
+        executable,
+        [...prefix, ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...args],
+        {
+          encoding: 'utf8',
+          timeout: 20_000,
+        },
+      );
+    if (run([process.execPath, '-e', 'process.exit(process.getuid() === 0 ? 0 : 1)']).status === 0)
+      return run;
+  }
+  t.skip('Cross-UID coverage requires passwordless root execution.');
+  return null;
+}
+
+test('root scheduler reads operator-owned HEAD and immutable snapshot without inherited Git trust', async (t) => {
+  const elevated = rootRunner(t);
+  if (!elevated) return;
+  const base = await mkdtemp(join(tmpdir(), 'backup-schedule-root-'));
+  t.after(() => {
+    const cleanup = elevated(['rm', '-rf', '--', base]);
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  });
+  const repo = join(base, 'repo');
+  const backup = join(base, 'backup');
+  await mkdir(join(repo, 'infra/scripts/lib'), { recursive: true });
+  await mkdir(backup);
+  for (const file of [
+    'postgres-backup-schedule.sh',
+    'postgres-backup-schedule.mjs',
+    'lib/postgres-backup-profile.sh',
+  ]) {
+    await writeFile(
+      join(repo, 'infra/scripts', file),
+      await readFile(new URL(file, import.meta.url)),
+    );
+  }
+  await writeFile(
+    join(repo, 'infra/scripts/replicate-postgres-backup.sh'),
+    '# immutable original\n',
+  );
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git('init', '--quiet');
+  git('add', 'infra');
+  git(
+    '-c',
+    'user.name=Fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    'commit',
+    '--quiet',
+    '-m',
+    'source',
+  );
+  const sha = git('rev-parse', 'HEAD');
+  if (process.getuid() === 0) {
+    const ownership = elevated(['chown', '-R', '65534', repo]);
+    assert.equal(ownership.status, 0, ownership.stderr);
+  }
+  const denied = elevated(['git', '-C', repo, 'rev-parse', 'HEAD']);
+  assert.equal(denied.status, 128);
+  assert.match(denied.stderr, /dubious ownership/);
+  const tick = elevated(['bash', join(repo, 'infra/scripts/postgres-backup-schedule.sh'), 'tick'], {
+    MAXIM_BACKUP_DIR: backup,
+    MAXIM_BACKUP_PROFILE: 'maxim',
+    MAXIM_BACKUP_REPLICATION_REQUIRED: '1',
+    MAXIM_BACKUP_REMOTE_PREFIX: 'test:bucket/postgres',
+  });
+  assert.equal(tick.status, 0, tick.stderr);
+  const observation = JSON.parse(tick.stdout);
+  assert.equal(observation.phase, 'idle');
+  assert.equal(observation.operationId, null);
+  const snapshot = elevated([
+    process.execPath,
+    '--input-type=module',
+    '-e',
+    `import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
+const [repo, backup, sha] = process.argv.slice(1);
+const { replicationSnapshot } = await import(pathToFileURL(repo + '/infra/scripts/postgres-backup-schedule.mjs'));
+const target = await replicationSnapshot(backup, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', sha, repo);
+process.stdout.write(await readFile(target, 'utf8'));`,
+    repo,
+    backup,
+    sha,
+  ]);
+  assert.equal(snapshot.status, 0, snapshot.stderr);
+  assert.equal(snapshot.stdout, '# immutable original\n');
+  assert.equal(elevated(['git', '-C', repo, 'rev-parse', 'HEAD']).status, 128);
+  assert.deepEqual(await readdir(backup), ['.scheduler-v1']);
+});
+
 async function fixture(t, profile = 'maxim') {
   const base = await mkdtemp(join(tmpdir(), 'backup-schedule-'));
   t.after(() => rm(base, { recursive: true, force: true }));

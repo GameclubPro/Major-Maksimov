@@ -12,6 +12,12 @@ permissions:
   contents: read
   security-events: write
 
+concurrency:
+  # FLAG: Pending jobs also replace each other in a concurrency group. Give
+  # non-PR runs unique groups so every main/scheduled SHA can finish its gate.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze JavaScript and TypeScript

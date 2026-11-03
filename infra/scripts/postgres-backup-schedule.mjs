@@ -30,6 +30,11 @@ const revision = /^[a-f0-9]{40}$/;
 const hash = /^[a-f0-9]{64}$/;
 const remote = /^[a-zA-Z0-9_-]+:[a-zA-Z0-9_/-]+$/;
 const root = resolve(import.meta.dirname, '../..');
+function sourceGitArgs(sourceRoot, args) {
+  // FLAG: Root systemd has no operator Git trust. Admit only this checkout for
+  // this read; never persist global trust or weaken ordinary-user ownership checks.
+  return process.getuid() === 0 ? ['-c', `safe.directory=${sourceRoot}`, ...args] : args;
+}
 function requireFact(value, message) {
   if (!value) throw new Error(message);
 }
@@ -533,10 +538,14 @@ export async function replicationSnapshot(directory, operationId, sourceSha, sou
   } else {
     const hashes = {};
     for (const file of files) {
-      const bytes = execFileSync('git', ['show', `${sourceSha}:${file}`], {
-        cwd: sourceRoot,
-        maxBuffer: 65_536,
-      });
+      const bytes = execFileSync(
+        'git',
+        sourceGitArgs(sourceRoot, ['show', `${sourceSha}:${file}`]),
+        {
+          cwd: sourceRoot,
+          maxBuffer: 65_536,
+        },
+      );
       const target = join(snapshot, file);
       const temporary = `${target}.${randomUUID()}.tmp`;
       const output = await open(temporary, 'wx', 0o600);
@@ -647,7 +656,7 @@ async function main() {
   const destination = profile === 'eraser' ? `${prefix}/eraser` : prefix;
   requireFact(remote.test(destination), 'Invalid backup destination');
   const destinationHash = createHash('sha256').update(destination).digest('hex');
-  const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+  const sourceSha = execFileSync('git', sourceGitArgs(root, ['rev-parse', 'HEAD']), {
     cwd: root,
     encoding: 'utf8',
   }).trim();

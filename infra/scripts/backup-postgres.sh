@@ -144,8 +144,17 @@ if [[ "$MODE" != "--preflight-only" ]]; then
   # primary; the acquired deploy lock now keeps these checked shell inputs stable.
   if [[ -n "${MAXIM_BACKUP_SOURCE_SHA:-}" ]]; then
     [[ "$MAXIM_BACKUP_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
-    [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$MAXIM_BACKUP_SOURCE_SHA" ]]
-    git -C "$ROOT_DIR" diff --quiet "$MAXIM_BACKUP_SOURCE_SHA" -- infra/scripts
+    # FLAG: Root systemd reads the operator-owned checkout without inherited sudo
+    # trust. Scope this exception to each exact-source command, never global config.
+    BACKUP_SOURCE_GIT_ARGS=()
+    if ((EUID == 0)); then BACKUP_SOURCE_GIT_ARGS=(-c "safe.directory=$ROOT_DIR"); fi
+    [[ "$(GIT_OPTIONAL_LOCKS=0 git "${BACKUP_SOURCE_GIT_ARGS[@]}" -C "$ROOT_DIR" rev-parse HEAD)" == "$MAXIM_BACKUP_SOURCE_SHA" ]]
+    # FLAG: Source reads must not replace the operator-owned index as root. A quiet
+    # diff without auto-refresh can reject stat-only changes; numstat compares content.
+    BACKUP_SOURCE_SCRIPT_DIFF="$(GIT_OPTIONAL_LOCKS=0 git "${BACKUP_SOURCE_GIT_ARGS[@]}" \
+      -c diff.autoRefreshIndex=false -C "$ROOT_DIR" diff --numstat --no-ext-diff --no-textconv \
+      "$MAXIM_BACKUP_SOURCE_SHA" -- infra/scripts)"
+    [[ -z "$BACKUP_SOURCE_SCRIPT_DIFF" ]]
   fi
 fi
 

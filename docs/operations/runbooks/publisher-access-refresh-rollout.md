@@ -1,142 +1,86 @@
-# Publisher access refresh rollout
+# Publisher Access And Preparation
 
-> Superseded for bot permission renewal by [personal access demand](../plans/2026-10-12-managed-access-demand-plan.md). Positive bot proofs no longer expire; the fleet bot/roster scheduler is retired. Publication-author preflight still checks human authority independently. Historical rollout parameters below describe the earlier scheduler.
+Use this runbook for current access behavior, bounded diagnostics and the retained
+migration recovery procedure. The former expiry-renewal scheduler is retired.
+Historical canary parameters are not instructions to restart it or activate a rollout.
+See also [publishing contracts](../../development/api-domain-reference.md#publishing-and-outbound-actions)
+and [publication diagnostics](publisher-publication-diagnostics.md).
 
-## Current operation
+## Current Operation
 
-Do not resume the fleet bot/roster scheduler or renew positive bot proofs by age.
-Saved catalogs are local, and administrator or publication-author checks are scoped
-to the selected entity or an imminent publication. Explicit denials still require the
-administrator activation flow; timeouts and rate limits do not revoke bot access.
+Confirmed exact-bot and Publisher human ADMIN/OWNER grants are durable. Neither
+`checkedAt`, `expiresAt` nor a new miniapp session expires them. Commands read current
+SQL authority; explicit exact-member nonadmin evidence, trusted removal and exact bot
+access loss still revoke rights. Generic 403/404, partial responses, timeouts and absence
+from an administrator roster do not revoke a confirmed human grant. A roster discovers
+positive grants; it never copies Major access into Publisher.
 
-A null bot expiry is valid durable evidence and creates no expiry-renewal obligation.
-`publisher-access-refresh-evidence` neither emits `missing_proof_identity` for it nor
-rewrites retained legacy obligations. Earlier hourly obligation/expiry-cohort metrics
-below describe the retired scheduler and cannot be used as the current rollout gate.
+Saved home catalogs are local. Opening the cabinet starts no all-chat permissions scan;
+selected Publisher settings use the exact stored grant. Major moderation settings retain
+their separate fresh authorization boundary. Feature-specific negative evidence, such as
+proving that a comment-sanction target is not an administrator, retains its fresh checks.
+A stored grant does not waive connection, catalog, policy, lifecycle or final effect guards.
+Missing or explicitly denied authority never becomes usable through cached history.
 
-Current preflight runs every two seconds with a ten-minute lookahead, up to eight
-target nominations per pass and sixteen queued preparation jobs; two queued urgent
-jobs suspend speculative admission. Worker concurrency remains two. Deadline dispatch
-and access preflight each use an independent coalesced slot, with other recovery work
-serialized. This schedules concrete publication work and is not a fleet rights scan.
-See [publication diagnostics](publisher-publication-diagnostics.md) for independent
-recipient preparation, author late policy, receipt clocks and rollback compatibility.
+Explicit activation requires fresh bot and human administrator proof. Known denial or
+missing baseline capabilities cannot recover merely through a timer or passive webhook.
+Retired `scheduled_bot_access` and `binding_maintenance` jobs drain without MAX calls.
+Connection rosters and actual missing-evidence work retain their bounded queue paths;
+keep SQL/lifecycle/version fences and existing worker concurrency and MAX quotas.
 
-## Historical scope and invariants
+Current publication preflight runs every two seconds with a ten-minute lookahead,
+up to eight target nominations per pass and sixteen queued preparation jobs. Two queued
+urgent jobs suspend speculative admission; worker concurrency remains two. Deadline
+dispatch and preflight each have an independent coalesced slot; other recovery work is
+serialized. Preparation serves concrete publication work and nominates genuinely missing
+evidence. It never periodically renews existing rights or extends send deadlines.
 
-The access coordinator delegates bot, actor, catalog and roster work to focused executors.
-Bot proofs retain their 15-minute lifetime. Publication authority still requires fresh exact-bot,
-exact-actor evidence and existing lifecycle/source-version fences. A completed queue operation
-is not a permission grant. Worker concurrency stays at two; MAX budgets and ambiguous-send
-recovery remain unchanged.
+## Retained Compatibility
 
-`MAX_PUBLISHER_ACCESS_REFRESH_MODE` accepts `off`, `canary`, or `on`. Application configuration
-and `.env.example` default to `off`. Production and scale Compose default to `canary` for this
-release; an explicit environment value overrides that default. Every API role receives the same
-setting because several roles produce jobs for the shared queue.
+Legacy job envelopes, diagnostic obligations and additive migration state remain readable.
+A null bot expiry is valid durable evidence, not `missing_proof_identity` or a renewal
+obligation. Do not rewrite retained obligations, delete bindings/access edges, clear queues
+or reset ambiguous publications to make diagnostics look healthy. SQL evidence and job
+completion are neither send receipts nor permission grants. Metrics readers accept the
+`reused` bot outcome without counting it as a newly committed proof.
 
-- `off` uses the previous scheduling/priority policy. Additive SQL metadata can remain in place.
-- `canary` separates roster scheduling for the deterministic SHA-256 bucket 0 of 10 over the
-  exact bot/entity pair. Deadline priorities apply to the whole queue; legacy cohort maintenance
-  must not compete with publication checks at priority five.
-- `on` separates roster scheduling for every Publisher binding.
+Older `publisher_refresh_v1` measurement bases, expiry-cohort metrics and hourly obligation
+reports describe the retired scheduler. Preserve release/window/basis when interpreting
+them; never merge incompatible samples or use an empty denominator as successful acceptance.
+Both API rollback paths must retain durable authority, activation and current publication
+readers. Leave additive columns, indexes and immutable migration receipts in place.
 
-Successful roster synchronization updates `rosterCheckedAt` and `rosterRefreshAfter` atomically
-with access edges. It first locks the parent chat and wins an exact-proof/lifecycle CAS on the
-binding; a failed CAS grants nothing. The next periodic check is due after 30 minutes. Manual,
-Start and connection/lifecycle flows retain immediate checks. Bootstrap initialization visits
-at most 200 bindings per scan and spreads first checks across 30 minutes. Due roster selection
-visits at most 25 rows per minute with a tuple cursor; retries leave evidence unchanged and persist
-at least one minute of scheduling backoff, honoring a larger MAX retry interval or HTTP Retry-After.
+## Bounded Population Census
 
-Bot selection uses an independent 25-row missing-expiry lane and a 200-row dated lane ordered
-by `(botAccessExpiresAt, chatId)`. Cursors advance past pending/slow work and wrap after exhaustion.
-Schedules survive queue loss because enqueue never advances SQL success metadata.
+For a bounded population snapshot, first review the fixed plan, then run:
 
-## Queue compatibility
+```bash
+./infra/scripts/vps-connect.sh postgres-audit publisher-access-census --explain
+./infra/scripts/vps-connect.sh postgres-audit publisher-access-census
+```
 
-Version-one jobs accept optional `requiredBefore`, `publicationRequested` and `publicationRequestedAt` and `publicationUrgentAt` fields. The promotion marker
-preserves an urgent nomination when it shares an existing scheduled job; it is scheduling metadata,
-never send authority. An explicit due nomination uses its first timestamp; lookahead work becomes urgent 60 seconds before its scheduled time. That boundary survives late admission and promotion, so waiting before enqueue remains in urgent latency; promoted actors still need a proof fresh enough for publication. Old jobs without these fields remain valid.
+Schema v2 uses seven exact binding metadata columns, including `bot_access_source`.
+After synchronizing the catalog, preview and apply the reviewed audit-role provision
+before running it. The publisher metadata group now has 17 exact columns; permission
+payloads and user identities are still inaccessible. The primary-key walk stops at
+50,001 rows before filtering or aggregation; only 50,000 enter the report.
 
-Priorities are manual/policy checks 1, urgent publication/lifecycle checks 5, future publication preparation 8, ordinary bot checks 10,
-and background roster/actor/bootstrap work 20. Bot checks become priority 5 within 60 seconds of
-expiry; background jobs may age to 10 after 30 minutes, never to 5 solely from age. A publication
-nomination promotes an exact pending bot or actor job without resetting its ID, attempts or delayed
-retry deadline. Actor coalescing includes candidate version. Interactive replies remain separate.
+Cohorts retain their deterministic SHA-256 split for historical comparison. Current
+categories are `durable_confirmed`, `activation_required`, `explicit_denied` and
+`metadata_unknown`. Old/null expiry does not invalidate a confirmed observation.
+Missing/future observation clocks are unknown; pending activation overrides a saved
+positive role. Inactive bindings are counted separately. This is **role metadata**:
+`permissions=not_inspected` and `actor_authorization=not_inspected` deliberately prevent
+using it as a full readiness verdict. Known capability loss and current actor authority
+remain runtime checks.
 
-Existing backlog compaction is bounded at 5,000 jobs per pass. A truncated pass must be reported
-when assessing rollout latency; it does not prove the whole backlog has been reprioritized.
+`source_truncated` prevents fleet-wide conclusions. Multiple active bot scopes must be
+reconciled with runtime identity before comparison. Timestamps describe observations,
+not binding-hours, historical deadline success or permission to send. The census never
+repairs, activates, or replays a publication. Historical scheduler acceptance is not a
+gate for the current runtime.
 
-## Bounded publication preparation
-
-Preflight runs every two seconds, with at most four target nominations and two targets per
-occurrence. Queue admission counts priority 1/5/8 work: two queued urgent jobs close speculative
-admission, and each target reserves room for both its possible bot and actor job within eight
-pending preparation jobs. Already active workers add at most two tasks. This is a speculative
-producer bound, not a hard cap on all due/manual jobs or a new MAX rate limit.
-
-Each occurrence persists its target position after both nomination acknowledgements. A partial
-page yields to other occurrences; a completed cycle wraps for changed audiences and lost Redis
-jobs. Restart resumes the SQL position, and a failed Redis acknowledgement leaves it unchanged.
-These nullable progress columns are observational/scheduling metadata, never permission proof.
-Cancellation/revision fences protect the progress update; all actual sends retain their existing
-author, content, schedule and permission guards. Large overload remains pending/missed under the
-existing publication rules; no target is removed to improve latency.
-
-Publication actor work may reuse the exact fresh SQL bot snapshot, including matching snapshot
-checkedAt, positive state, active lifecycle and at least 30 seconds remaining. Actor persistence
-rechecks the same bot proof and its expiry after the remote user probe. A concurrent renewal or
-expiry retries the actor work; removal/new generation or a newer denial grants nothing. Manual,
-Start and candidate-connection probes keep fresh remote bot checks.
-
-`publisher_refresh_v1` now includes `workClass=preparation|urgent|background` and
-`queueAgeBasis=all_urgent_refresh_boundaries_v3`. This basis includes manual/policy, lifecycle,
-connection/recovery and access-loss checks, plus ordinary bot checks once their expiry is within
-60 seconds. Bot urgency is measured from expiry minus 60 seconds, including late discovery;
-publication urgency retains its earliest nomination/scheduled boundary. Actor jobs never inherit
-a bot-expiry clock. Future publication preparation and aged maintenance remain separate.
-The timing helper does not rewrite the execution envelope or permission/source-version fences.
-Earlier v2 windows omitted urgent lifecycle/connection and expiring-bot work from the urgent
-histogram; they cannot satisfy the complete urgent-coverage gate or be merged into v3 evidence.
-Preserve the original reason/cohort;
-compare urgent initial attempts separately from preparation, and retain admission and full-cycle
-coverage as independent acceptance requirements. A new classification alone is not an improvement.
-`publisher_preflight_admission_v1` reports bounded per-minute visited-target/cycle counts, observed
-overdue targets, maximum admission delay and capacity-deferred ticks. Visited targets include
-already-fresh or denied targets; completion of a cycle is not proof of granted access. An unvisited
-backlog or a zero-sample window cannot pass readiness coverage.
-
-## Validation and release
-
-Run public locked API validation plus Prisma and infrastructure checks. With disposable localhost
-PostgreSQL/Redis, set `TZ=UTC`, `CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL` (database name containing
-`race_test`) and `MAXIM_TEST_REDIS_URL`. The access schedule PostgreSQL suite is part of
-`test:postgres-races`; Redis suites run with normal API tests when their URL is configured.
-
-Coverage includes 1,000/2,000 aged jobs ahead of urgent work at concurrency two, delayed retry
-promotion, actor versions, legacy envelopes, SQL restart/queue-loss recovery, revocation during a
-probe, proof races, atomic rollback of schedule/edges, indexed access paths and manual checks.
-Existing publication authority/send-ledger tests remain the send-safety acceptance gate. Synthetic
-queue order is not a production latency or MAX-throughput guarantee.
-
-The scheduler schema changes add two nullable timestamps and two concurrent indexes. The evidence
-release adds its diagnostic obligation table; admission adds three nullable occurrence progress
-columns without backfill/default. No historical SQL is changed.
-Review lock/statement timeouts and the immutable migration baseline. Leave these columns/indexes
-on rollback; never edit historical migration receipts or retry partial concurrent DDL blindly.
-
-Deploy through exact-SHA green CI and the regular queue-fenced shared API rollout. Both Compose
-changes affect the common API environment. The current conservative impact classifier selects
-all three active release components for a production Compose change: all 14 API roles and their
-auxiliary, Major mini app static and Safety Desk static. Follow the reviewed deploy plan and preload
-every selected component; PostgreSQL/Redis are never recreated by this application rollout. If clean API build capacity is
-below 10 GiB, use verified CI image preload and its own archive-plus-reserve check. Do not lower
-capacity floors. Required online multibot preparation separately checks and supervises a 10 GiB
-filesystem reserve; modeled peak estimates remain advisory. Verify background/OCR restart
-stability before proceeding.
-
-### Interrupted index migration
+## Interrupted Index Migration
 
 If `20261002120100_index_publisher_access_schedule` fails with a lock timeout, leave the
 immutable migration unchanged. Synchronize the reviewed recovery tooling only after exact-SHA
@@ -160,127 +104,27 @@ Resume through normal guarded deploy with caller-only `MAXIM_WEBHOOK_ROLLOUT_ADO
 when the interrupted transition journal requires adoption. Never persist that flag in production
 environment. The adoption path must re-prove the exact image and queue fence before release.
 
-## Canary acceptance
+## Focused Validation
 
-Keep the initial deterministic 10% cohort for at least 24 hours. Aggregate identifier-free
-`publisher_refresh_v1` windows by `reason`, `workClass`, `retrying` and `cohort`. Keep the
-measurement basis/release separate; never fold older unclassified windows into the new urgent SLA. `proofOutcomes` counts actual
-stage verdicts; `stageAttempts` distinguishes work attempted from deferred jobs. Use roster stage
-attempts for periodic maintenance per eligible cohort/time, and compare the same traffic window.
-`deadlineProbes` and `confirmedBeforeDeadline` describe observed jobs carrying a bot deadline;
-they do not estimate unscheduled bindings or prove fleet-wide coverage by themselves.
+Select changed callers through the [machine interface](../../development/agent-machine-contract.md).
+Relevant cases include [durable selected access](../../../apps/api/src/admin/publisher-selected-access.service.spec.ts),
+[roster grants](../../../apps/api/src/publisher/publisher-admin-roster.spec.ts),
+[binding refresh](../../../apps/api/src/publisher/publisher-binding-refresh.service.spec.ts),
+[preflight admission](../../../apps/api/src/publisher/publisher-publication-access-preflight.service.spec.ts)
+and [native access scheduling](../../../apps/api/src/publisher/publisher-access-schedule-postgres.spec.ts).
+Native cases require the [test-store wrapper](../../development/agent-local-environment.md).
+Preserve tests for explicit denial, missing evidence, proof supersession, retired-job drain,
+independent recipient progress and uncertain effects. Local tests do not establish live delivery.
 
-The evidence release adds `deadlineEvidenceBasis=committed_proof_attempt_v2`: the attempt
-counter uses the acknowledgement time of the committed bot proof, before optional catalog,
-roster or reply work. Forwarded candidates acquire that time only after their materialization
-transaction succeeds. Superseded probes remain unresolved in attempt metrics. Do not merge
-old end-of-job observations with this new basis or treat either attempt ratio as the SLA denominator.
-
-`publisher_access_refresh_obligations` stores one diagnostic obligation for the exact
-bot/entity/old-proof timestamp/expiry once the old proof enters the five-minute renewal horizon.
-The scanner records selected obligations before enqueue; a successful probe also registers a
-replaced eligible proof that was not previously scanned. A repeated scan or retry cannot reset
-the deadline or overwrite the first settlement. A pending obligation remains unsuccessful after
-expiry, including when its binding is subsequently deleted. Confirmed denials are separate and
-never count as successful renewals. SQL evidence is not a permission source or a send ledger.
-Telemetry errors emit identifier-free `publisher_access_evidence_gap_v1`; they leave committed
-permissions intact but make the affected acceptance interval incomplete.
-
-Each scheduler scan emits `publisher_access_obligations_v1` for the previous complete UTC hour.
-Replace repeated reports for the same release/from/to/cohort, never sum overlapping copies.
-The indexed source is capped at 50,001 rows, with aggregates over at most 50,000 and explicit
-`sourceTruncated`. A complete source reports obligations, confirmed-in-time, confirmed-late,
-denied, unresolved and registered-after-deadline counts. Empty/missing reports do not prove an
-empty fleet. Combine these denominators with complete expiry cursor cycles and the independent
-population census: registration alone cannot prove that a never-scanned binding was covered.
-Begin acceptance only after a full initialization/expiry scan cycle and instrumented warmup;
-discard release gaps, missing windows and mixed measurement semantics. The first partial hour
-is not a complete acceptance hour.
-
-Evidence remains available for seven days. Each scan deletes at most 500 expired rows from
-this new diagnostic table only; no binding, access edge, receipt, publication or send ledger is
-deleted. Rollback leaves the additive table in place. Old runtimes do not write obligations, so
-their intervals cannot pass the new evidence gate. Periodic compaction now emits its bounded
-result as `publisher_access_compaction_v1`, including truncation, even when no jobs changed.
-
-For a bounded population snapshot, first review the fixed plan, then run:
-
-```bash
-./infra/scripts/vps-connect.sh postgres-audit publisher-access-census --explain
-./infra/scripts/vps-connect.sh postgres-audit publisher-access-census
-```
-
-Schema v2 uses seven exact binding metadata columns, including `bot_access_source`.
-After synchronizing the catalog, preview and apply the reviewed audit-role provision
-before running it. The publisher metadata group now has 17 exact columns; permission
-payloads and user identities are still inaccessible. The primary-key walk stops at
-50,001 rows before filtering or aggregation; only 50,000 enter the report.
-
-Cohorts retain their deterministic SHA-256 split for historical comparison. Current
-categories are `durable_confirmed`, `activation_required`, `explicit_denied` and
-`metadata_unknown`. Old/null expiry does not invalidate a confirmed observation.
-Missing/future observation clocks are unknown; pending activation overrides a saved
-positive role. Inactive bindings are counted separately. This is **role metadata**:
-`permissions=not_inspected` and `actor_authorization=not_inspected` deliberately prevent
-using it as a full readiness verdict. Known capability loss and fresh human authority
-remain runtime checks.
-
-`source_truncated` prevents fleet-wide conclusions. Multiple active bot scopes must be
-reconciled with runtime identity before comparison. Timestamps describe observations,
-not binding-hours, historical deadline success or permission to send. The census never
-repairs, activates, or replays a publication. Historical scheduler acceptance below is
-retained for incident interpretation and is not the current operation's gate.
+Runtime changes follow the normal impact-selected release and exact-SHA CI gates.
+Use a task-specific bounded observation window only when required by that change;
+record release identity, missing samples and actual outcome evidence. Census counts,
+queue age and successful health checks alone cannot prove all permissions or sends.
 
 ### Acceptance protocol for the combined priority refactoring release
 
-Freeze the release identity and protocol before collection. The interrupted earlier observation
-is historical only. Start with instrumented warmup; require complete expiry, missing-expiry,
-roster-init and roster-due cycles and healthy release/fleet readiness. Then use the next full UTC
-hour as the acceptance boundary and collect at least 24 consecutive complete UTC hours. Retain
-only allowlisted aggregates; keep old and new measurement bases in separate archives. Metrics
-readers must accept the `reused` bot outcome without interpreting it as a new committed proof.
-
-Minimum sample requirements for this run are 1,000 initial urgent attempts and 10,000 exact
-obligations overall, with at least 1,000 obligations in each canary/control cohort. These floors
-allow assessment of observed tail rates; they are not statistical confidence guarantees. Report
-per-reason urgent counts and low-volume classes separately. Missing or insufficient traffic extends
-the canary; do not generate synthetic sends into user chats. Confirmed denials, late registration,
-late confirmations and unresolved obligations remain in the fixed denominator.
-
-Use population snapshots at five-minute cadence with gaps no larger than ten minutes. The
-periodic roster denominator is active confirmed-admin/owner binding exposure for each cohort,
-aligned to the exact metric interval. Report integral estimates and conservative exposure ranges
-from neighboring snapshot minima/maxima; record population changes. If either population changes
-by more than 5% within a snapshot interval, or cohorts show material composition differences,
-collect narrower or stratified read-only evidence before claiming comparable savings. Require the
-50% savings threshold even under the conservative exposure estimate. Other reasons and manual/
-webhook calls are reported separately from `binding_maintenance`, including all its retries.
-
-Replace repeated obligation reports for the same hour; never sum them. Missing hours, truncated
-sources/compaction, evidence gaps, unproven scan coverage or a changed release keep acceptance
-pending. Collection gaps may only be filled by bounded overlapping reads with verified release
-identity. Aggregate worker completions do not resolve missing obligations or prove send safety.
-Compare shared webhook preparation limits and duration, outbox oldest-eligible progress, MAX/
-SQL/Redis errors, send/access/moderation outcomes and complete capacity windows. Review the
-release's [preparation](webhook-preparation-bounds.md) and [outbox scan](webhook-outbox-fair-scan.md)
-runbooks alongside Publisher evidence.
-
-The repository-controlled Compose default is sufficient for a later reviewed `on` rollout only
-when a fresh preflight confirms no overriding runtime environment value. Recheck that condition
-at promotion; deploy every selected component through the ordinary guarded wrapper and attest
-all 14 API roles. A missing override today is not a permanent configuration guarantee.
-
-Required gates under supported load:
-
-- Initial urgent queue-age histograms: p95 at most 5 seconds and p99 at most 15 seconds.
-- At least 99.9% scheduled bot confirmations before expiry, with sufficient deadline observations
-  and `publisher_access_scan_v1` confirmation that scans completed full cursor cycles without errors.
-- At least 50% fewer periodic roster calls per comparable binding/time versus control/baseline.
-- No increase in denied/stale sends, ambiguous replay, API failures or sustained moderation lag.
-- No lost manual operation identity, missing roster recovery or scan/compaction truncation ignored
-  in the measurement.
-
-Promotion to `on` requires these measured gates, a recorded start/end window and exact deployed SHA.
-Low samples or missing windows mean acceptance is pending. An immediate release smoke cannot
-substitute for the full observation window. Return to explicit `off` through the normal shared API
-environment rollout if regression appears; retain the durable SQL state and pending job identities.
+This anchor remains for historical references. The 24-hour canary, expiry-renewal
+percentages and periodic-roster savings protocol belonged to the retired scheduler;
+it is not a current release gate or an instruction to promote `MAX_PUBLISHER_ACCESS_REFRESH_MODE`.
+The [original protocol](https://github.com/GameclubPro/Major-Maksimov/blob/932c81a1b195d2c0464285fc92ecc364cc613779/docs/operations/runbooks/publisher-access-refresh-rollout.md#acceptance-protocol-for-the-combined-priority-refactoring-release)
+is available in Git history for interpreting that release's incomplete observations.
