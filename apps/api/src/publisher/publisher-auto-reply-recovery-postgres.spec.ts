@@ -30,9 +30,9 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
 const integration = databaseUrl && redisUrl ? describe : describe.skip;
 const batchSize = 100;
-const createClient = () =>
+const createClient = (max = 5) =>
   new PrismaClient({
-    adapter: createPrismaAdapter(databaseUrl, { max: 5, statement_timeout: 3_000 }),
+    adapter: createPrismaAdapter(databaseUrl, { max, statement_timeout: 3_000 }),
     log: [{ emit: 'event', level: 'query' }],
   });
 
@@ -154,6 +154,10 @@ integration('Publisher auto-reply bounded recovery on PostgreSQL and Redis', () 
     } satisfies PublisherRuntimeHeartbeatSnapshot;
     await redis.set(buildPublisherRuntimeHeartbeatKey(botId), JSON.stringify(enabled), 'EX', 45);
     backgroundWork = new PublisherBackgroundWorkCoordinatorService();
+    recovery = createRecovery(db);
+  });
+
+  function createRecovery(client: PrismaClient): PublisherAutoReplyRecoveryService {
     const runtime = { dispatchEnabled: true } satisfies Pick<
       PublisherRuntimeBoundaryService,
       'dispatchEnabled'
@@ -164,15 +168,15 @@ integration('Publisher auto-reply bounded recovery on PostgreSQL and Redis', () 
     const attestation = {
       assertAttested: async () => undefined,
     } satisfies Pick<PublisherIdentityAttestationService, 'assertAttested'>;
-    recovery = new PublisherAutoReplyRecoveryService(
-      db as unknown as PrismaService,
+    return new PublisherAutoReplyRecoveryService(
+      client as unknown as PrismaService,
       queueService,
       runtime as PublisherRuntimeBoundaryService,
       health as PublisherDispatchHealthService,
       attestation as PublisherIdentityAttestationService,
       backgroundWork,
     );
-  });
+  }
 
   afterEach(async () => {
     recovery?.onModuleDestroy();
@@ -394,24 +398,30 @@ integration('Publisher auto-reply bounded recovery on PostgreSQL and Redis', () 
   async function assertDeliverySelectionPlans(selections: Prisma.QueryEvent[]): Promise<void> {
     for (const selection of selections) {
       const values = JSON.parse(selection.params) as unknown[];
-      const plainEvidence = await db.$queryRawUnsafe(
-        `EXPLAIN (FORMAT JSON) ${selection.query}`,
-        ...values,
-      );
-      const plain = planNodes(plainEvidence);
-      requireBoundedPlan(
-        !plain.some(
-          (node) =>
-            node['Relation Name'] === 'publisher_auto_reply_deliveries' &&
-            node['Node Type'] === 'Seq Scan',
-        ),
-        'Initial and cursor delivery pages must avoid scanning the active backlog',
-        plainEvidence,
-      );
-      const actualEvidence = await db.$queryRawUnsafe(
-        `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${selection.query}`,
-        ...values,
-      );
+      const actualEvidence = await db.$transaction(async (tx) => {
+        // FLAG: Replay the unchanged captured query under its actual page-local
+        // planner settings. Inspect the plain plan before executing native EXPLAIN.
+        await tx.$executeRaw`SET LOCAL enable_incremental_sort = off`;
+        await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`;
+        const plainEvidence = await tx.$queryRawUnsafe(
+          `EXPLAIN (FORMAT JSON) ${selection.query}`,
+          ...values,
+        );
+        const plain = planNodes(plainEvidence);
+        requireBoundedPlan(
+          !plain.some(
+            (node) =>
+              node['Relation Name'] === 'publisher_auto_reply_deliveries' &&
+              node['Node Type'] === 'Seq Scan',
+          ),
+          'Initial and cursor delivery pages must avoid scanning the active backlog',
+          plainEvidence,
+        );
+        return tx.$queryRawUnsafe(
+          `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF, FORMAT JSON) ${selection.query}`,
+          ...values,
+        );
+      });
       const actual = planNodes(actualEvidence);
       const reads = actual.filter(
         (node) => node['Relation Name'] === 'publisher_auto_reply_deliveries',
@@ -653,11 +663,19 @@ integration('Publisher auto-reply bounded recovery on PostgreSQL and Redis', () 
     expect(deliveryQuery).toBeDefined();
     expect(uploadQuery).toBeDefined();
 
-    const explain = async (event: Prisma.QueryEvent, analyze = false) =>
-      db.$queryRawUnsafe(
-        `EXPLAIN (${analyze ? 'ANALYZE, BUFFERS, TIMING OFF, ' : ''}FORMAT JSON) ${event.query}`,
-        ...(JSON.parse(event.params) as unknown[]),
-      );
+    const explain = async (event: Prisma.QueryEvent, analyze = false) => {
+      const read = (client: Pick<Prisma.TransactionClient, '$queryRawUnsafe'>) =>
+        client.$queryRawUnsafe(
+          `EXPLAIN (${analyze ? 'ANALYZE, BUFFERS, TIMING OFF, ' : ''}FORMAT JSON) ${event.query}`,
+          ...(JSON.parse(event.params) as unknown[]),
+        );
+      if (event !== deliveryQuery) return read(db);
+      return db.$transaction(async (tx) => {
+        await tx.$executeRaw`SET LOCAL enable_incremental_sort = off`;
+        await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`;
+        return read(tx);
+      });
+    };
     const deliveryPlainEvidence = await explain(deliveryQuery!);
     const uploadPlainEvidence = await explain(uploadQuery!);
     const plainEvidence = { delivery: deliveryPlainEvidence, upload: uploadPlainEvidence };
@@ -842,5 +860,67 @@ integration('Publisher auto-reply bounded recovery on PostgreSQL and Redis', () 
       }),
     ).toEqual(freshBefore);
     await assertDeliverySelectionPlans(selections);
+  });
+
+  it('restores the same pooled session after a failed page transaction and recovers its unvisited work', async () => {
+    const [deliveryId] = await seedDeliveries(1, 'planner-transaction');
+    const singleConnection = createClient(1);
+    const subject = createRecovery(singleConnection);
+    const settings = (client: Pick<Prisma.TransactionClient, '$queryRaw'>) =>
+      client.$queryRaw<Array<{ pid: number; incrementalSort: string; bitmapScan: string }>>`
+        SELECT pg_backend_pid() AS pid,
+          current_setting('enable_incremental_sort') AS "incrementalSort",
+          current_setting('enable_bitmapscan') AS "bitmapScan"
+      `;
+    const inside: Awaited<ReturnType<typeof settings>> = [];
+    const nativeTransaction = singleConnection.$transaction.bind(singleConnection);
+    let failAfterRead = true;
+    const transaction = jest
+      .spyOn(singleConnection, '$transaction')
+      .mockImplementation((operation, options) =>
+        nativeTransaction(async (tx) => {
+          const result = await operation(tx);
+          inside.push(...(await settings(tx)));
+          if (failAfterRead) {
+            failAfterRead = false;
+            await tx.$executeRaw`SELECT 1 / 0`;
+          }
+          return result;
+        }, options),
+      );
+    try {
+      const before = await settings(singleConnection);
+      expect(before).toEqual([
+        { pid: expect.any(Number), incrementalSort: 'on', bitmapScan: 'on' },
+      ]);
+      await expect(subject.recoverOnce(now)).rejects.toThrow();
+      expect(inside).toEqual([{ pid: before[0]!.pid, incrementalSort: 'off', bitmapScan: 'off' }]);
+      expect(await settings(singleConnection)).toEqual(before);
+      expect(await queue.getJob(buildPublisherAutoReplyJobId(deliveryId!))).toBeUndefined();
+      expect(
+        await db.publisherAutoReplyDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+      ).toMatchObject({ status: 'PENDING', lockToken: null, dispatchStartedAt: null });
+
+      await expect(subject.recoverOnce(now)).resolves.toMatchObject({
+        scanned: 1,
+        addAcknowledged: 1,
+        errors: 0,
+      });
+      expect(await queue.getJob(buildPublisherAutoReplyJobId(deliveryId!))).toBeDefined();
+      expect(inside.length).toBeGreaterThan(1);
+      expect(
+        inside.every(
+          (value) =>
+            value.pid === before[0]!.pid &&
+            value.incrementalSort === 'off' &&
+            value.bitmapScan === 'off',
+        ),
+      ).toBe(true);
+      expect(await settings(singleConnection)).toEqual(before);
+    } finally {
+      transaction.mockRestore();
+      subject.onModuleDestroy();
+      await singleConnection.$disconnect();
+    }
   });
 });
