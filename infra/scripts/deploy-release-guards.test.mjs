@@ -375,8 +375,17 @@ test('uses component manifests, immutable refs, conditional migrations, and stri
   assert.doesNotMatch(deploy, /up -d postgres redis/u);
   assert.ok(
     callIndex(deploy, 'require_stateful_services_ready') <
-      callIndex(deploy, 'maxim_topology_build_shared_api_image'),
+      callIndex(deploy, 'require_preloaded_target_image "$MAXIM_API_IMAGE"'),
   );
+  assert.ok(
+    callIndex(deploy, 'require_preloaded_target_image "$MAXIM_API_IMAGE"') <
+      callIndexes(deploy, 'begin_release_runtime_transition')[0],
+  );
+  assert.match(
+    functionBlock(deploy, 'verified_preloaded_target_image'),
+    /node infra\/scripts\/registry-preload-host\.mjs/u,
+  );
+  assert.doesNotMatch(deploy, /maxim_topology_build_shared_api_image|docker compose[^\n]* build/u);
   assert.ok(
     callIndex(deploy, 'require_stateful_services_ready') < callIndex(deploy, 'run_migrations'),
   );

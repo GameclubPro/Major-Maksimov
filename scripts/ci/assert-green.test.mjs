@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { GREEN_WORKFLOWS, REPOSITORY } from './green-workflow-proof.mjs';
+import { githubEvidence, workflowRun } from './test/github-evidence-fixture.mjs';
 
 import {
+  assertCommitHasGreenCi,
   assertGreenCheckRuns,
+  parseCiArguments,
   findLatestRequiredCheck,
   GITHUB_ACTIONS_APP_ID,
   parseGitHubRepository,
@@ -155,4 +163,78 @@ test('a newer queued rerun without started_at overrides an older success', () =>
       ),
     /queued\/pending/u,
   );
+});
+
+test('CLI parses explicit production and paired publication run identity', () => {
+  assert.deepEqual(
+    parseCiArguments(
+      ['abc', '--purpose', 'production', '--run-id', '123', '--run-attempt', '2'],
+      {},
+    ),
+    { sha: 'abc', purpose: 'production', expectedCiRun: { id: 123, attempt: 2 } },
+  );
+  assert.deepEqual(parseCiArguments([], {}), { sha: 'HEAD', purpose: 'review' });
+  assert.deepEqual(parseCiArguments(['HEAD'], { MAXIM_CI_PURPOSE: 'production' }), {
+    sha: 'HEAD',
+    purpose: 'production',
+  });
+  for (const args of [
+    ['--purpose'],
+    ['--purpose', 'anything'],
+    ['--run-id', '123'],
+    ['--run-attempt', '1'],
+    ['--run-id', '123', '--run-attempt', '1'],
+    ['--purpose', 'production', '--run-id', 'NaN', '--run-attempt', '1'],
+    ['HEAD', 'extra'],
+    ['--unknown'],
+  ]) {
+    assert.throws(() => parseCiArguments(args, {}));
+  }
+});
+
+test('operational gate binds production checks and publication run without borrowing an old attempt', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'maxim-ci-green-'));
+  const git = (...args) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  try {
+    git('init', '-b', 'main');
+    git('config', 'user.name', 'CI fixture');
+    git('config', 'user.email', 'ci@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', '/dev/null');
+    git('remote', 'add', 'origin', `https://github.com/${REPOSITORY}.git`);
+    writeFileSync(join(cwd, 'README.md'), 'fixture');
+    git('add', 'README.md');
+    git('commit', '--no-verify', '-m', 'fixture');
+    const sha = git('rev-parse', 'HEAD');
+    const runs = GREEN_WORKFLOWS.map((workflow, index) =>
+      workflowRun(sha, { workflow, id: 100 + index }),
+    );
+    const publication = workflowRun(sha, { id: 200, attempt: 2, event: 'workflow_dispatch' });
+    const options = { cwd, sha, purpose: 'production', expectedCiRun: { id: 200, attempt: 2 } };
+    const good = () => githubEvidence({ runs: [...runs, publication] });
+    const result = assertCommitHasGreenCi({ ...options, github: good() });
+    assert.equal(result.publication.runId, 200);
+    assert.equal(result.proofs[0].runId, 100);
+    assert.throws(
+      () => assertCommitHasGreenCi({ ...options, purpose: 'review', github: good() }),
+      /independent production gates/u,
+    );
+    assert.throws(
+      () =>
+        assertCommitHasGreenCi({
+          ...options,
+          expectedCiRun: { id: 200, attempt: 1 },
+          github: good(),
+        }),
+      /attempt differs/u,
+    );
+    publication.run.conclusion = 'failure';
+    assert.throws(() => assertCommitHasGreenCi({ ...options, github: good() }), /not successful/u);
+    publication.run.conclusion = 'success';
+    runs[0].run.conclusion = 'failure';
+    assert.throws(() => assertCommitHasGreenCi({ ...options, github: good() }), /not successful/u);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });

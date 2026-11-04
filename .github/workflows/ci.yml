@@ -1,10 +1,16 @@
 name: CI
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_preparation_id != '' && format('MAXIM image preparation {0}', inputs.release_preparation_id) || github.event.head_commit.message || github.workflow }}
 
 on:
   pull_request:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_preparation_id:
+        description: Correlation ID for an operator-requested image preparation
+        type: string
+        required: false
   schedule:
     - cron: '17 2 * * 1'
 
@@ -12,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -20,6 +26,9 @@ jobs:
     name: Change impact
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
     outputs:
       plan: ${{ steps.plan.outputs.plan }}
       static: ${{ steps.plan.outputs.static }}
@@ -31,6 +40,7 @@ jobs:
       admin: ${{ steps.plan.outputs.admin }}
       eraser: ${{ steps.plan.outputs.eraser }}
       docker: ${{ steps.plan.outputs.docker }}
+      registry: ${{ steps.plan.outputs.registry }}
       docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -40,6 +50,8 @@ jobs:
         with:
           node-version-file: .nvmrc
       - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/ci/impact.mjs plan
 
   static:
@@ -487,7 +499,6 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        if: matrix.component == 'api'
         with:
           node-version-file: .nvmrc
       - name: Restore trusted dependency build cache
@@ -623,31 +634,114 @@ jobs:
           IMAGE_REF: ${{ matrix.image_repository }}:${{ github.sha }}
         run: bash infra/scripts/smoke-backlog-cancellation-v2-ci.sh "$IMAGE_REF"
       - name: Package immutable production image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: needs.impact.outputs.registry == 'true'
         env:
           IMAGE_REF: ${{ matrix.image_repository }}:${{ github.sha }}
+          MAXIM_IMAGE_COMPONENT: ${{ matrix.component }}
         run: |
+          node scripts/ci/registry-images.mjs record
           docker image save "$IMAGE_REF" | gzip -1 > maxim-image.tar.gz
           sha256sum maxim-image.tar.gz > maxim-image.tar.gz.sha256
           docker image inspect --format '{{json .RootFS.Layers}}' "$IMAGE_REF" > maxim-image-layers.json
       - name: Upload immutable production image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: needs.impact.outputs.registry == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: maxim-image-${{ matrix.component }}-${{ github.sha }}
+          name: maxim-image-${{ matrix.component }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             maxim-image.tar.gz
             maxim-image.tar.gz.sha256
             maxim-image-layers.json
+            maxim-image-record.json
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+
+  registry:
+    name: Registry (${{ matrix.component }})
+    needs: [impact, docker]
+    if: needs.impact.outputs.registry == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.impact.outputs.docker_matrix) }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAXIM_IMAGE_COMPONENT: ${{ matrix.component }}
+      DOCKER_CONFIG: /tmp/maxim-registry-auth-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: maxim-image-${{ matrix.component }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Load the exact smoke-tested image
+        run: |
+          sha256sum --check maxim-image.tar.gz.sha256
+          gzip -dc maxim-image.tar.gz | docker image load
+      - name: Authenticate the isolated publication job
+        env:
+          REGISTRY_ACTOR: ${{ github.actor }}
+        run: |
+          install -m 700 -d "$DOCKER_CONFIG"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$REGISTRY_ACTOR" --password-stdin
+      - name: Publish the tested image and compare its registry identity
+        id: publish
+        run: node scripts/ci/registry-images.mjs publish
+      - name: Generate SPDX SBOM from the same loaded image
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: docker:${{ matrix.image_repository }}:${{ github.sha }}
+          format: spdx-json
+          output-file: image.spdx.json
+          syft-version: v1.56.0
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+      - name: Attest the exact registry digest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ steps.publish.outputs.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Attest the SBOM for the same registry digest
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-name: ${{ steps.publish.outputs.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: image.spdx.json
+          push-to-registry: true
+      - name: Verify OIDC source, workflow, runner, invocation and image ID
+        run: node scripts/ci/registry-images.mjs verify
+      - name: Upload the immutable registry receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: maxim-registry-${{ matrix.component }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: registry-record-${{ matrix.component }}.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove temporary publication credentials
+        if: always()
+        run: |
+          node -e 'require("node:fs").rmSync(process.env.DOCKER_CONFIG, { recursive: true, force: true })'
 
   required:
     name: Required
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
     needs:
       - impact
       - static
@@ -659,6 +753,7 @@ jobs:
       - admin
       - eraser
       - docker
+      - registry
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -669,4 +764,14 @@ jobs:
       - name: Require selected CI lanes and verify every skip
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          GH_TOKEN: ${{ github.token }}
+          CI_CERTIFICATE_PATH: main-green.json
         run: node scripts/ci/impact.mjs verify
+      - name: Preserve the verified main baseline certificate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-main-green-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: main-green.json
+          if-no-files-found: error
+          retention-days: 90

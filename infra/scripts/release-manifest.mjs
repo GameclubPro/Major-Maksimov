@@ -244,6 +244,9 @@ export function buildReleaseManifest({
       imageRef: component.imageRef,
       imageId: component.imageId,
       recordedAt: createdAt,
+      ...(component.registryProvenance
+        ? { registryProvenance: structuredClone(component.registryProvenance) }
+        : {}),
     });
   }
 
@@ -428,6 +431,58 @@ function validateComponent(component) {
   ) {
     throw new Error(`${component.id} imageId must be a Docker sha256 id or unknown.`);
   }
+  if (component.registryProvenance !== undefined) validateRegistryProvenance(component);
+}
+
+function validateRegistryProvenance(component) {
+  const proof = component.registryProvenance;
+  const names = {
+    'api-shared': ['api', 'maxim-api'],
+    'miniapp-major-static': ['miniapp', 'maxim-miniapp-major'],
+    'admin-static': ['admin', 'maxim-admin'],
+    eraser: ['eraser', 'maxim-eraser'],
+  };
+  const [imageComponent, alias] = names[component.id];
+  const source = proof?.record?.source;
+  const image = proof?.record?.image;
+  const registry = proof?.record?.registry;
+  const positiveId = /^[1-9][0-9]*$/u;
+  // FLAG: This is persisted identity metadata, not a replacement for the pre-deploy
+  // OIDC/SBOM checks. Legacy rollback manifests remain readable without this field.
+  if (
+    JSON.stringify(proof).length > 8192 ||
+    proof?.schemaVersion !== 1 ||
+    proof.record?.schemaVersion !== 1 ||
+    proof.record.component !== imageComponent ||
+    source?.sha !== component.sourceSha ||
+    source.repository !== 'GameclubPro/Major-Maksimov' ||
+    source.repositoryId !== '1168895008' ||
+    source.workflow !== '.github/workflows/ci.yml' ||
+    source.workflowRef !== 'GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main' ||
+    source.runnerEnvironment !== 'github-hosted' ||
+    !['push', 'workflow_dispatch'].includes(source.event) ||
+    !positiveId.test(source.runId ?? '') ||
+    !positiveId.test(source.runAttempt ?? '') ||
+    image?.alias !== `${alias}:${component.sourceSha}` ||
+    image.alias !== component.imageRef ||
+    image.imageId !== component.imageId ||
+    image.platform !== 'linux/amd64' ||
+    !Number.isSafeInteger(image.sizeBytes) ||
+    image.sizeBytes < 1 ||
+    image.sizeBytes > 64 * 1024 ** 3 ||
+    registry?.repository !== `ghcr.io/gameclubpro/major-maksimov-${imageComponent}` ||
+    !/^sha256:[0-9a-f]{64}$/u.test(registry.digest ?? '') ||
+    !Number.isSafeInteger(proof.artifact?.id) ||
+    proof.artifact.id < 1 ||
+    proof.artifact.name !==
+      `maxim-registry-${imageComponent}-${component.sourceSha}-${source.runId}-${source.runAttempt}` ||
+    !/^sha256:[0-9a-f]{64}$/u.test(proof.artifact.digest ?? '') ||
+    !Number.isFinite(Date.parse(proof.verifiedAt))
+  ) {
+    throw new Error(
+      `${component.id} registry provenance does not match the immutable component identity.`,
+    );
+  }
 }
 
 function assertReleaseId(releaseId) {
@@ -471,11 +526,13 @@ function syncDirectory(path) {
 
 function parseCli(argv) {
   const command = argv[0];
-  const options = { components: [], smokes: [] };
+  const options = { components: [], smokes: [], componentRegistryFiles: [] };
   for (let index = 1; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--component') {
       options.components.push(parseComponent(argv[++index]));
+    } else if (argument === '--component-registry-file') {
+      options.componentRegistryFiles.push(requireValue(argv, ++index, argument));
     } else if (argument === '--smoke') {
       options.smokes.push(requireValue(argv, ++index, argument));
     } else if (argument.startsWith('--')) {
@@ -522,6 +579,17 @@ function runCli(argv) {
   );
 
   if (command === 'commit' || command === 'inventory') {
+    const seenProvenance = new Set();
+    for (const value of options.componentRegistryFiles) {
+      const separator = value.indexOf('|');
+      const componentId = value.slice(0, separator);
+      const component = options.components.find(({ id }) => id === componentId);
+      if (separator <= 0 || !component || seenProvenance.has(componentId)) {
+        throw new Error('--component-registry-file requires one selected component id|path.');
+      }
+      seenProvenance.add(componentId);
+      component.registryProvenance = readJson(value.slice(separator + 1));
+    }
     const current = options.currentManifestFile
       ? readTransitionBaseManifest(options.currentManifestFile)
       : readCurrentManifest(stateDir);

@@ -32,6 +32,8 @@ jobs:
           build-mode: none
       - name: Analyze
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        with:
+          upload-database: ${{ github.event_name == 'schedule' }}
       - name: Reject open high-severity alerts
         env:
           GITHUB_TOKEN: ${{ github.token }}
