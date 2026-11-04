@@ -160,6 +160,34 @@ test('chat shop formats run the full mobile matrix in a blocking miniapp shard',
   );
 });
 
+test('simple chat shop runs every isolated group in the complete blocking mobile matrix', () => {
+  const config = parse(workflow);
+  const miniapp = config.jobs.miniapp;
+  const run = 'node apps/miniapp/test/karavan-shop-simple.browser.mjs';
+  const selected = miniapp.steps.filter((step) => step.run?.includes(run));
+  assert.equal(selected.length, 1, 'Simple shop groups must have one explicit CI owner');
+  const browser = selected[0];
+  assert.deepEqual(browser.run.trim().split('\n'), [
+    run,
+    `SHOP_SIMPLE_ONLY=categories ${run}`,
+    `SHOP_SIMPLE_ONLY=boundaries ${run}`,
+    `SHOP_SIMPLE_ONLY=queue ${run}`,
+  ]);
+  assert.equal(browser.if, "matrix.shard == '3/4'");
+  assert.equal(browser['continue-on-error'], undefined);
+  assert.ok(statSync(resolve(root, 'apps/miniapp/test/karavan-shop-simple.browser.mjs')).isFile());
+  for (const env of [config.env, miniapp.env, browser.env])
+    for (const key of ['SHOP_SIMPLE_ENGINE', 'SHOP_SIMPLE_THEME', 'SHOP_SIMPLE_ONLY'])
+      assert.equal(env?.[key], undefined, `CI cannot narrow the simple shop matrix: ${key}`);
+  const formats = miniapp.steps.find(
+    (step) => step.run === 'node apps/miniapp/test/karavan-shop-formats.browser.mjs',
+  );
+  assert.ok(formats, 'The existing shop runner owns the shared browser prerequisites');
+  assert.equal(browser.if, formats.if);
+  assert.ok(miniapp.steps.indexOf(formats) < miniapp.steps.indexOf(browser));
+  assert.ok(config.jobs.required.needs.includes('miniapp'));
+});
+
 test('keeps the functional API lane separate from the median commercial benchmark', () => {
   const api = jobBody('api', 'postgres-races');
   const benchmark = jobBody('commercial-benchmark', 'miniapp');

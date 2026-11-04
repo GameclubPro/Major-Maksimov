@@ -37,6 +37,7 @@ const uiSchema = z
       'chats',
       'publications',
       'settings',
+      'seller_access',
     ]),
     imageTarget: z.enum(['logoImageUrl', 'coverImageUrl']).optional(),
     appearanceDraft: marketplaceAppearanceSchema.optional(),
@@ -135,9 +136,15 @@ export function isShopWriteOperation(operation: ShopCommand['operation']): boole
     case 'settings':
     case 'status':
     case 'format_update':
+    case 'administration_store_change':
+    case 'seller_grant_create':
+    case 'seller_grant_revoke':
       return true;
     case 'appearance':
     case 'administration_store':
+    case 'administration_stores':
+    case 'seller_grant_target':
+    case 'seller_grants':
     case 'pins':
     case 'catalog':
     case 'invitations':

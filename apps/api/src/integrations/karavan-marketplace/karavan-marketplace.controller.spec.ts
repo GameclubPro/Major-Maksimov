@@ -212,4 +212,64 @@ describe('Karavan module destination permissions', () => {
     await expect(invoke('storefront')).rejects.toThrow('Общая витрина');
     expect(handoffs.issue).toHaveBeenCalledTimes(1);
   });
+
+  it('allows a current administrator to configure v2 storefronts before attaching one', async () => {
+    const { state, invoke, handoffs } = fixture();
+    state.chatShopFlowVersion = 2;
+    state.permissions = ['manage_marketplace'];
+    state.access = { reason: 'allowed', canRecover: false };
+    state.marketplace!.format = 'storefront';
+    state.administrationStores = [];
+    state.administrationStoreCount = 0;
+    await expect(invoke('storefront')).resolves.toHaveProperty('url');
+    state.access.reason = 'not_admin';
+    await expect(invoke('storefront')).rejects.toThrow('Общая витрина');
+    state.access.reason = 'allowed';
+    state.binding!.state = 'disconnected';
+    await expect(invoke('storefront')).rejects.toThrow('недоступно');
+    expect(handoffs.issue).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses connected v2 storefront count for the publication route and requires a published store', async () => {
+    const { state, invokeModule } = fixture();
+    state.chatShopFlowVersion = 2;
+    state.marketplace!.format = 'storefront';
+    state.marketplace!.status = 'active';
+    state.access = { reason: 'allowed', canRecover: false };
+    state.buyerUrl = 'https://max.ru/test_bot?startapp=m_synthetic';
+    state.administrationStores = [];
+    state.administrationStoreCount = 0;
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+    state.administrationStores.push({
+      id: randomUUID(),
+      slug: 'first',
+      name: 'Первая',
+      status: 'ACTIVE',
+      editRevision: 1,
+      publicationReason: 'no_published_offers',
+    });
+    state.administrationStoreCount = 1;
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+    state.administrationStores[0].publicationReason = 'published';
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+    state.counts.readyListings = 1;
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'administration_storefront' },
+    });
+    // The other connected store may be hidden or still being completed.
+    state.administrationStoreCount = 2;
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'chat_marketplace' },
+    });
+    state.administrationStores[0].status = 'BLOCKED';
+    await expect(invokeModule()).resolves.toMatchObject({
+      publicationPreview: { mode: 'unavailable', reason: 'closed' },
+    });
+  });
 });

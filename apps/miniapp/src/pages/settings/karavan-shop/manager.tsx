@@ -28,6 +28,7 @@ const Applications = lazy(() => import('./applications'));
 const Appearance = lazy(() => import('./appearance'));
 const Categories = lazy(() => import('./categories'));
 const Settings = lazy(() => import('./settings'));
+const ShopHome = lazy(() => import('./home'));
 const entries: Array<{ id: StorefrontPage; label: string; icon: SettingsSectionIconName }> = [
   { id: 'catalog', label: 'Товары и услуги', icon: 'storefront' },
   { id: 'applications', label: 'Заявки', icon: 'comments' },
@@ -400,7 +401,13 @@ export default function KaravanShopManager(props: Props) {
         }}
       >
         <SellerAccessProvider>
-          <Workspace {...props} />
+          {(props.module.chatShopFlowVersion ?? 1) >= 2 ? (
+            <Suspense fallback={<ShopLoading />}>
+              <ShopHome {...props} />
+            </Suspense>
+          ) : (
+            <Workspace {...props} />
+          )}
         </SellerAccessProvider>
       </ShopCommandProvider>
     </ShopContext.Provider>

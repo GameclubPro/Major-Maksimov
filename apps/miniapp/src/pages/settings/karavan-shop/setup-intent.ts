@@ -17,7 +17,9 @@ export const shopSetupDraftSchema = z
     categories: z.array(z.string().max(100)).max(40),
     subcategories: z.array(z.string().max(100)).max(1000),
     initialized: z.boolean(),
-    admissionPolicy: z.enum(['applications', 'invitation']),
+    admissionPolicy: z.enum(['open', 'applications', 'selected', 'invitation']),
+    setupVersion: z.literal(2).optional(),
+    started: z.boolean().optional(),
     chatIds: z
       .array(z.string().regex(/^-?\d{1,24}$/u))
       .min(1)

@@ -166,7 +166,21 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
       throw new ConflictException('Магазин недоступен.');
     const format = result.marketplace.format ?? 'community';
     const formatRevision = result.marketplace.formatRevision ?? 1;
-    // FLAG: A shared administration storefront never falls back to a catalog or a personal choice.
+    // FLAG: Administration publication requires the provider's explicit target or the legacy fixed store.
+    // A common shop target is never inferred from missing stores or a personal-choice response.
+    const administrationShop = result.publicationTarget === 'administration_shop';
+    const administrationStore = result.publicationTarget === 'administration_store';
+    if (
+      result.publicationTarget &&
+      (format !== 'storefront' ||
+        result.status !== 'published' ||
+        (administrationShop && (payload.storeId !== null || result.stores.length !== 0)) ||
+        (administrationStore &&
+          (payload.storeId === null ||
+            result.stores.length !== 1 ||
+            result.stores[0]?.id !== payload.storeId)))
+    )
+      throw new ConflictException('Общая витрина не подтверждена.');
     if (format === 'storefront' && result.status !== 'published') {
       if (result.status === 'choose_store')
         throw new ConflictException('Общая витрина не подтверждена.');
@@ -175,9 +189,18 @@ export class KaravanMarketplaceResolverService implements OnModuleInit, OnModule
     if (result.status === 'choose_store')
       return { result, publication: null, sourceFingerprint: issued.sourceFingerprint };
     const store = result.status === 'published' ? result.stores[0] : null;
-    if (result.status === 'published' && (result.stores.length !== 1 || !store))
+    if (
+      result.status === 'published' &&
+      !administrationShop &&
+      (result.stores.length !== 1 || !store)
+    )
       throw new ConflictException('Витрина не определена.');
-    if (format === 'storefront' && result.marketplace.administrationStoreId !== store?.id)
+    if (
+      format === 'storefront' &&
+      !administrationShop &&
+      !administrationStore &&
+      result.marketplace.administrationStoreId !== store?.id
+    )
       throw new ConflictException('Общая витрина изменилась.');
     const url = this.buyerUrl(result.marketplace.publicSlug, store?.slug);
     if (store && store.url !== url)
