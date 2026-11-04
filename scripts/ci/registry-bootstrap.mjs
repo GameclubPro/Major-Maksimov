@@ -155,7 +155,14 @@ async function executeBootstrap(env, argv, { execute = execFileSync, request = f
   const expected = bootstrapContext(env);
   onStage('credential-shape');
   const token = env.GH_TOKEN;
-  if (typeof token !== 'string' || !/^[A-Za-z0-9_]{20,255}$/u.test(token))
+  // FLAG: Bound an opaque printable ASCII credential for stdin and the Bearer header, never a vendor token format.
+  // The trusted workflow, authenticated login and exact private package binding establish access.
+  if (
+    typeof token !== 'string' ||
+    token.length === 0 ||
+    token.length > 4096 ||
+    /[^\x21-\x7E]/u.test(token)
+  )
     throw new Error('The isolated workflow package credential is required.');
   onStage('auth');
   const auth = mkdtempSync(join(tmpdir(), 'maxim-bootstrap-auth-'));
