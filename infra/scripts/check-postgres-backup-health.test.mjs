@@ -141,6 +141,37 @@ async function writeReceipt(directory, dump, verifiedAt, kind = 'remote', overri
 }
 
 for (const profile of ['maxim', 'eraser']) {
+  test(`${profile} independent evidence expires after 24 hours, including fresh readback of old data`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'maxim-backup-freshness-boundary-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const generatedAt = Date.parse('2026-11-02T12:00:00Z');
+    const dump = `${profile}_20261102T120000Z.dump`;
+    await writeReceipt(dir, dump, new Date(generatedAt).toISOString(), 'restore');
+    for (const ageMs of [23 * 3600_000, 24 * 3600_000, 24 * 3600_000 + 1]) {
+      const now = generatedAt + ageMs;
+      const overdue = ageMs > 24 * 3600_000;
+      await writeReceipt(dir, dump, new Date(generatedAt).toISOString());
+      const original = await checkPostgresBackupHealth(dir, now, profile);
+      assert.deepEqual(
+        original.problems,
+        overdue ? ['independent_backup_overdue', 'independent_backup_data_overdue'] : [],
+        `original readback at age ${ageMs}`,
+      );
+      assert.equal(original.independentVerificationAgeMs, ageMs);
+      assert.equal(original.independentDataAgeMs, ageMs);
+
+      await writeReceipt(dir, dump, new Date(now - 3600_000).toISOString());
+      const reread = await checkPostgresBackupHealth(dir, now, profile);
+      assert.deepEqual(
+        reread.problems,
+        overdue ? ['independent_backup_data_overdue'] : [],
+        `fresh readback at data age ${ageMs}`,
+      );
+      assert.equal(reread.independentVerificationAgeMs, 3600_000);
+      assert.equal(reread.independentDataAgeMs, ageMs);
+    }
+  });
+
   test(`${profile} fresh verification cannot renew old backup data`, async (t) => {
     const dir = await mkdtemp(join(tmpdir(), 'maxim-backup-data-age-'));
     t.after(() => rm(dir, { recursive: true, force: true }));
