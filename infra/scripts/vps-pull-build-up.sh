@@ -21,6 +21,8 @@ source "$ROOT_DIR/infra/scripts/lib/legacy-cold-maintenance.sh" || exit $?
 source "$ROOT_DIR/infra/scripts/lib/deploy-disk-capacity.sh"
 # shellcheck source=infra/scripts/lib/change-impact-components.generated.sh
 source "$ROOT_DIR/infra/scripts/lib/change-impact-components.generated.sh"
+# shellcheck source=infra/scripts/lib/durable-release-executor.sh
+source "$ROOT_DIR/infra/scripts/lib/durable-release-executor.sh"
 
 MAIN_PROJECT_NAME="infra"
 SCALE_PROJECT_NAME="infra-scale"
@@ -1570,14 +1572,30 @@ validate_commercial_ai_deploy_flag
 validate_commercial_ai_pool_deploy_flags
 validate_statistics_exchange_deploy_flag
 validate_statistics_central_deploy_epoch
-acquire_deploy_lock
+if maxim_durable_executor_requested; then
+  maxim_durable_executor_validate || exit $?
+fi
+if acquire_deploy_lock; then
+  :
+else
+  lock_status=$?
+  if maxim_durable_executor_requested; then
+    maxim_durable_executor_lock_refusal "$lock_status" || exit $?
+    exit 70
+  fi
+  exit "$lock_status"
+fi
 trap cleanup EXIT
 if [[ "$DEPLOY_MODE" != "plan" && "$IMAGE_PLAN_ONLY" -eq 0 ]]; then
   maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 fi
-sync_branch
-verify_expected_deploy_sha
-reexec_if_current_script_changed
+if maxim_durable_executor_requested; then
+  maxim_durable_executor_select_source || exit $?
+else
+  sync_branch
+  verify_expected_deploy_sha
+  reexec_if_current_script_changed
+fi
 if [[ "$DEPLOY_MODE" == "plan" ]]; then
   load_current_component_images
   print_deploy_plan
@@ -1589,6 +1607,9 @@ if [[ "$IMAGE_PLAN_ONLY" -eq 1 ]]; then
   exit 0
 fi
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
+if maxim_durable_executor_requested; then
+  maxim_durable_executor_admit || exit $?
+fi
 ensure_compose_env
 prepare_retention_deploy_mode
 prepare_commercial_ai_deploy_flag

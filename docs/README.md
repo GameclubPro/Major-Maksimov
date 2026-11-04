@@ -11,6 +11,7 @@ scripts. A configuration default or an earlier release report does not establish
 | Existing feature tests and browser server setup      | [Feature regression map](development/feature-regressions.md)                                                                                |
 | Local dependencies and disposable PostgreSQL/Redis   | [Local environment](development/agent-local-environment.md)                                                                                 |
 | Accumulated CI scope and verified registry delivery  | [CI image delivery](development/ci-image-delivery.md)                                                                                       |
+| Durable server release operations and restricted SSH | [Release service](operations/runbooks/durable-release-service.md)                                                                           |
 | Intended behavior, defects and conflicting evidence  | [Behavior evidence](development/behavior-evidence.md)                                                                                       |
 | API domains and compatibility boundaries             | [API reference](development/api-domain-reference.md)                                                                                        |
 | Product UI decisions and settings navigation         | [Active decisions](development/miniapp-product-decisions.md) and [settings contract](miniapp-settings-overview-design.md)                   |

@@ -50,7 +50,7 @@ function callIndex(script, call) {
 
 function callIndexes(script, call) {
   const expression = new RegExp(
-    `^\\s*${call.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:\\s|$)`,
+    `^\\s*(?:if\\s+)?${call.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?:\\s|;|$)`,
     'gmu',
   );
   let match;
