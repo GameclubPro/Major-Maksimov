@@ -62,8 +62,8 @@ export class ChatSanctionsService {
     let last: SanctionFeedRow | null = null;
     for (let batch = 0; batch < MAX_SCAN_BATCHES; batch += 1) {
       const search = query.search?.trim();
-      // FLAG: Materialize source evidence once from the capped candidate id array.
-      // Per-row subplans repeat compact scans; an unconstrained join can scan history.
+      // FLAG: Seek a closed primary-key range for each capped candidate. Equality
+      // alone makes ORDER BY redundant; an open range can traverse deleted keys.
       const rows = await this.prisma.$queryRaw<SanctionFeedRow[]>(Prisma.sql`
         WITH candidates AS MATERIALIZED (
           SELECT * FROM chat_moderation_feed_items feed
@@ -73,9 +73,6 @@ export class ChatSanctionsService {
             ${cursor ? Prisma.sql`AND (feed.created_at, feed.id) < (${new Date(cursor.createdAt)}, ${cursor.id})` : Prisma.empty}
           ORDER BY feed.created_at DESC, feed.id DESC
           LIMIT ${SCAN_BATCH + 1}
-        ), source_evidence AS MATERIALIZED (
-          SELECT original.id FROM moderation_events original
-          WHERE original.id = ANY(ARRAY(SELECT id FROM candidates))
         )
         SELECT feed.id, feed.user_id AS "userId", feed.user_display_name AS "userDisplayName",
           feed.action, feed.rule_code AS "ruleCode", feed.operator, feed.metadata,
@@ -83,7 +80,11 @@ export class ChatSanctionsService {
           successor.rule_code AS "nextRuleCode",
           (source.id IS NOT NULL) AS "sourceExists"
         FROM candidates feed
-        LEFT JOIN source_evidence source ON source.id = feed.id
+        LEFT JOIN LATERAL (
+          SELECT original.id FROM moderation_events original
+          WHERE original.id >= feed.id AND original.id <= feed.id
+          ORDER BY original.id LIMIT 1
+        ) source ON source.id = feed.id
         LEFT JOIN LATERAL (
           SELECT later.created_at, later.rule_code
           FROM chat_moderation_feed_items later
