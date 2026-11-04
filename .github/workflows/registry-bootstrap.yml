@@ -1,4 +1,4 @@
-name: Private registry bootstrap
+name: Private registry workflow access
 
 on:
   workflow_dispatch:
@@ -11,14 +11,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  seed:
-    name: Private seed (${{ matrix.component }})
+  verify:
+    name: Private access (${{ matrix.component }})
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
-      packages: write
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -31,9 +31,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
-      # FLAG: Only a synthetic scratch config may cross this bootstrap boundary.
-      # Application archives and source-SHA tags remain behind the ordinary privacy gate.
-      - name: Prepare and prove only the inert private package seed
+      # FLAG: Workflow tokens inherit the public repository visibility on creation.
+      # Only read already-private package metadata; missing packages must refuse.
+      - name: Prove private metadata and workflow access
         run: node scripts/ci/registry-bootstrap.mjs
       - name: Save bootstrap metadata, without creating a release receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

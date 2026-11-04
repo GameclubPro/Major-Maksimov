@@ -63,7 +63,7 @@ function fixture({ dispatch = false, runAttempt = 1, codeqlConclusion = 'success
       sizeBytes: 1234,
     },
     registry: {
-      repository: 'ghcr.io/gameclubpro/major-maksimov-release-api',
+      repository: 'ghcr.io/gameclubpro/major-maksimov-private-v1-api',
       digest: `sha256:${'c'.repeat(64)}`,
     },
   };

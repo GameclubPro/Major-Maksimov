@@ -38,7 +38,7 @@ the tested image and a bounded identity record. Their artifact name includes SHA
 A separate GitHub-hosted registry job consumes that exact artifact after Docker succeeds. It:
 
 1. Loads the checksummed archive and compares source labels, platform, config ID and image size.
-2. Reads full package metadata for `ghcr.io/gameclubpro/major-maksimov-release-COMPONENT` using
+2. Reads full package metadata for `ghcr.io/gameclubpro/major-maksimov-private-v1-COMPONENT` using
    the publication workflow's package credential. Before any Docker tag or push, it requires the
    exact container package name, private visibility and source repository ID/name binding.
    Missing packages, HTTP 403/404, empty or malformed metadata and unavailable evidence block
@@ -65,56 +65,67 @@ for the exact SHA, plus the successful current attempt of the image's publicatio
 rerun cannot reuse an earlier attempt's image. Manual preparation cannot substitute for main-push
 checks.
 
-## Private package bootstrap and namespace migration
+## Private package provisioning and workflow access
 
-The publication namespace is `ghcr.io/gameclubpro/major-maksimov-release-COMPONENT`, for
+The publication namespace is `ghcr.io/gameclubpro/major-maksimov-private-v1-COMPONENT`, for
 `api`, `miniapp`, `admin` and `eraser`. Local full-SHA Docker aliases and receipt artifact names
-retain their existing formats. Target image proofs accept only this publication namespace.
-Rollback manifest readers also accept the exact former
-`ghcr.io/gameclubpro/major-maksimov-COMPONENT` identities so historical manifests remain readable;
-that compatibility does not authorize a new release from a former registry record.
+retain their existing formats. New release proofs accept only this publication namespace.
+Historical manifest readers retain both exact former `major-maksimov-COMPONENT` and
+`major-maksimov-release-COMPONENT` repositories for rollback; that compatibility never authorizes
+new publication or preload from an old registry record. Provisioning does not delete old packages
+or change their visibility, repository binding or access settings.
 
-The former package names are public and are retired as publication targets. Their creation cause
-has not been established. GitHub documents that initial package publication defaults to private,
-that inherited repository permissions do not determine package visibility, and that a public
-package cannot be made private again. Do not delete or reconfigure the former packages as part
-of an ordinary release. See GitHub's
-[container publication documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images)
-and [package visibility rules](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+Do not create packages with `GITHUB_TOKEN` from this public repository. GitHub's
+[workflow-specific default visibility rule](https://docs.github.com/en/packages/managing-github-packages-using-github-actions-workflows/publishing-and-installing-a-package-with-github-actions#default-permissions-and-access-settings-for-packages-modified-through-workflows)
+says that packages created by a workflow token inherit repository visibility. The general
+[container guide's initial private default](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images)
+is not sufficient evidence for that workflow path. An already-public package cannot be returned
+to private through ordinary settings; see the
+[visibility rules](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
 
-Each new package requires a separate, explicitly dispatched bootstrap before application
-publication. Ordinary CI deliberately cannot create a missing package as a fallback:
+Provisioning and workflow access are separate operations:
 
-1. Review the four exact target names and dispatch
-   `.github/workflows/registry-bootstrap.yml` from trusted `main`. This dedicated workflow uses
-   its temporary GitHub workflow credential with `packages: write`; no owner token is required
-   for its ordinary path. Known public metadata blocks bootstrap and requires a reviewed
-   namespace decision. Bootstrap never deletes packages or changes their visibility.
-2. The bootstrap builds only a tiny inert `FROM scratch` seed with a bootstrap label and the source
-   repository label. It contains no application bytes, environment files or credentials and is
-   never tagged with a production SHA alias. HTTP 404 can hide an inaccessible package and does
-   not prove absence. Only this explicitly dispatched seed operation permits a bounded 404
-   response as a reason to attempt the reserved `bootstrap-private-v1` seed tag; it never permits
-   application bytes or application image tags. Known public metadata, HTTP 403 and unavailable
-   metadata block writes. The seed still requires positive private metadata after publication.
-3. After each seed publication, require private visibility and the exact source repository
-   binding under the workflow credential. If GitHub access or linking needs administration,
-   verify package settings, connect `GameclubPro/Major-Maksimov`, and grant its Actions package
-   access. Package metadata must report repository ID `1168895008` and the matching full name.
-   Permission inheritance alone does not prove visibility.
-4. Complete these checks for all four components before normal image delivery. The ordinary
-   publication gate independently rereads private, correctly bound metadata before any
-   application image tag or push. A bootstrap start, successful seed push or owner-only lookup
-   does not establish that this gate passes.
-5. Install the separate production pull credential with only `read:packages` through the
-   existing guarded credential procedure. The operator's GitHub control token remains separate
-   and never travels to production. Temporary bootstrap authentication is removed after use.
+1. Create a dedicated classic PAT for the personal namespace owner `GameclubPro`, with
+   `read:packages` and `write:packages`, without `delete:packages` or broad `repo` scope.
+   Follow the [GHCR authentication guide](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry).
+   Store it outside Git in `~/.config/maxim-delivery/ghcr-bootstrap.json`, a private regular
+   `0600` file containing only `username` and `token`. Its username must be `GameclubPro`.
+   This credential is separate from GitHub control access and production's read-only credential.
+2. Review a local preview for each component, for example:
 
-The inert bootstrap is not a release image and has no accepted release receipt. Namespace
-migration is complete only after all four private packages have workflow access, a trusted main
-run publishes and verifies the tested images, and the normal receipt/provenance gates pass.
-Until then, registry publication remains an external prerequisite; merging the privacy fix does
-not establish successful image delivery.
+   ```bash
+   node scripts/ci/registry-bootstrap-local.mjs --component api \
+     --credential-file "$HOME/.config/maxim-delivery/ghcr-bootstrap.json"
+   ```
+
+   Preview has no network, credential reads or registry effects. Add `--apply` for the explicit
+   local operation. It refuses GitHub Actions and never falls back to environment/control tokens.
+   It authenticates the namespace owner against the exact source repository ID, then reads
+   current package metadata. Existing private, exactly bound packages need no seed. PUBLIC,
+   denied or unknown metadata refuses writes. A bounded 404 authorizes only this explicitly
+   requested inert seed attempt; it does not establish absence or authorize application bytes.
+
+3. The seed uses a temporary isolated `FROM scratch` build context with no application files,
+   commands or entrypoint. Its only tag is `bootstrap-private-v1`, never a source-SHA runtime
+   alias. Docker receives the credential through login stdin in a temporary private config.
+   After push, positive metadata must prove `private` visibility and the exact source repository
+   binding. Failure at push or a later stage may follow a write; inspect retained evidence before
+   another apply. The local credential and the general default do not themselves prove privacy.
+4. For all four provisioned packages, run `.github/workflows/registry-bootstrap.yml` explicitly
+   from trusted `main`. This workflow uses only `packages: read` and the temporary workflow
+   credential to GET metadata. It has no Docker login/build/push path. Missing packages, PUBLIC,
+   denied responses, malformed metadata or a wrong binding refuse access. If needed, configure
+   package Actions access to `GameclubPro/Major-Maksimov` separately, then repeat the read-only
+   verification. Repository ID must be `1168895008` with the exact full name.
+5. A trusted main application run independently rechecks private metadata under its publication
+   credential before any application image tag/push and again afterward. Install a separate
+   production credential with only `read:packages` through the guarded procedure. Neither the
+   bootstrap PAT nor GitHub control token travels to production.
+
+Neither the seed nor workflow-access result is a release image receipt. Registry delivery is
+accepted only after the trusted main run publishes and verifies the tested application images,
+then all receipt/provenance gates pass. Before that, a merged implementation remains distinct
+from working private image delivery.
 
 Package credentials are opaque: their prefix, punctuation and length do not prove GitHub
 authority. Bootstrap, publication/proof and local/server preload use the same transport check:
@@ -131,11 +142,12 @@ fixed reasons. These diagnostics omit raw Docker output, expected/actual fields 
 parse errors. A reported mismatch blocks publication or preload; it never authorizes replacing
 the tested identity. Registry manifest digest and Docker config ID remain separate.
 
-Bootstrap failures report only a fixed `stage` and `code`, separating context/credential refusal,
-registry login, metadata reads, seed build/push and receipt persistence. They never print the
-credential, environment, dependency output or raw error. A failure at `seed-push` or a subsequent
-metadata, receipt or cleanup stage can follow a registry write; inspect the retained run before
-another dispatch.
+Provisioning failures report only fixed `stage` and `code` fields, separating local credential/owner
+admission, registry login, metadata reads and seed build/push. Workflow-access diagnostics retain
+the separate context, credential, metadata and receipt stages. They never print the
+credential, environment, dependency output or raw error. A local failure at `seed-push` or a
+subsequent metadata/cleanup stage can follow a registry write; inspect the retained evidence
+before another apply. The workflow's receipt failure follows only a metadata read.
 A diagnostic classification does not authorize publication or establish that no seed was written.
 
 ## Local package evidence credential
