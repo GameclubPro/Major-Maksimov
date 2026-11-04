@@ -1727,30 +1727,75 @@ WITH webhook_statuses(status) AS (
     ('QUEUED'::"WebhookStatus"),
     ('PROCESSED'::"WebhookStatus"),
     ('DUPLICATE'::"WebhookStatus"),
-    ('FAILED'::"WebhookStatus")
+    ('FAILED'::"WebhookStatus"),
+    ('NO_REPLAY_HELD'::"WebhookStatus"),
+    ('CANCELLED'::"WebhookStatus"),
+    ('QUARANTINED'::"WebhookStatus")
 ), recent_webhooks AS MATERIALIZED (
-  SELECT webhook_statuses.status, sample.created_at
-  FROM webhook_statuses
-  LEFT JOIN LATERAL (
-    SELECT webhook_events.created_at
-    FROM webhook_events
-    WHERE webhook_events.status = webhook_statuses.status
-      AND webhook_events.created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
-    ORDER BY webhook_events.created_at DESC
-    LIMIT $((MONITOR_SAMPLE_CAP + 1))
-  ) AS sample ON TRUE
+  -- FLAG: Each literal status owns an ordered limited index walk. A parameterized
+  -- lateral status can select Bitmap Heap Scan + Sort over an unbounded hot tail.
+  (SELECT 'RECEIVED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'RECEIVED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'QUEUED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'QUEUED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'PROCESSED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'PROCESSED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'DUPLICATE'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'DUPLICATE'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'FAILED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'FAILED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'NO_REPLAY_HELD'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'NO_REPLAY_HELD'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'CANCELLED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'CANCELLED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
+  UNION ALL
+  (SELECT 'QUARANTINED'::"WebhookStatus" AS status, created_at FROM webhook_events
+    WHERE status = 'QUARANTINED'::"WebhookStatus"
+      AND created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+      AND created_at <= statement_timestamp()
+    ORDER BY created_at DESC LIMIT $((MONITOR_SAMPLE_CAP + 1)))
 ), webhook_summary AS (
   SELECT
-    status,
-    count(created_at)::bigint AS sampled_count,
-    max(created_at) AS newest_created_at
-  FROM recent_webhooks
-  GROUP BY status
+    webhook_statuses.status,
+    count(recent_webhooks.created_at)::bigint AS sampled_count,
+    max(recent_webhooks.created_at) AS newest_created_at
+  FROM webhook_statuses
+  LEFT JOIN recent_webhooks ON recent_webhooks.status = webhook_statuses.status
+  GROUP BY webhook_statuses.status
 )
 SELECT json_build_object(
-  'schema_version', 1,
+  'schema_version', 2,
   'audit', 'recent_webhook_statuses',
   'window_minutes', $SIGNAL_WINDOW_MIN,
+  'window_started_at', statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN),
+  'window_ended_at', statement_timestamp(),
   'sample_cap_per_status', $MONITOR_SAMPLE_CAP,
   'rows', json_agg(
     json_build_object(
@@ -1771,34 +1816,72 @@ SELECT json_build_object(
 FROM webhook_summary;
 
 WITH moderation_sample AS MATERIALIZED (
-  SELECT id, chat_id, rule_code, message_id, metadata, created_at
+  -- FLAG: Reject compressed/oversized/non-object metadata before JSON inspection.
+  -- Materialize only bounded scalar keys; even admitted objects stay out of the cohort.
+  SELECT id, chat_id, rule_code, message_id, created_at,
+    CASE WHEN metadata IS NULL THEN 'ABSENT'
+      WHEN pg_column_compression(metadata) IS NOT NULL THEN 'COMPRESSED_NOT_INSPECTED'
+      WHEN pg_column_size(metadata) > 32768 THEN 'OVERSIZED_NOT_INSPECTED'
+      WHEN jsonb_typeof(metadata) <> 'object' THEN 'NON_OBJECT'
+      ELSE 'BOUNDED_OBJECT' END AS metadata_admission,
+    CASE WHEN pg_column_compression(metadata) IS NULL AND pg_column_size(metadata) <= 32768
+      THEN CASE WHEN jsonb_typeof(metadata) = 'object'
+        THEN CASE WHEN jsonb_typeof(metadata->'sessionKey') = 'string'
+          AND octet_length(metadata->>'sessionKey') BETWEEN 1 AND 512
+          AND btrim(metadata->>'sessionKey') <> '' THEN metadata->>'sessionKey' END
+      END END AS session_key,
+    CASE WHEN pg_column_compression(metadata) IS NULL AND pg_column_size(metadata) <= 32768
+      THEN CASE WHEN jsonb_typeof(metadata) = 'object'
+        THEN CASE WHEN jsonb_typeof(metadata->'originalEventId') = 'string'
+          AND octet_length(metadata->>'originalEventId') BETWEEN 1 AND 512
+          AND btrim(metadata->>'originalEventId') <> '' THEN metadata->>'originalEventId' END
+      END END AS original_event_id
   FROM moderation_events
   WHERE created_at >= statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN)
+    AND created_at <= statement_timestamp()
   ORDER BY created_at DESC
   LIMIT $((MONITOR_SAMPLE_CAP + 1))
 ), sample_state AS (
   SELECT count(*)::bigint AS sampled_count
   FROM moderation_sample
 ), bounded_moderation AS MATERIALIZED (
-  SELECT id, chat_id, rule_code, message_id, metadata, created_at
+  SELECT id, chat_id, rule_code, message_id, created_at,
+    metadata_admission, session_key, original_event_id
   FROM moderation_sample
   ORDER BY created_at DESC
   LIMIT $MONITOR_SAMPLE_CAP
+), metadata_summary AS (
+  SELECT count(*)::bigint AS observed_sample_count,
+    min(created_at) AS oldest_sample_at,
+    max(created_at) AS newest_sample_at,
+    count(*) FILTER (WHERE metadata_admission = 'ABSENT') AS absent,
+    count(*) FILTER (WHERE metadata_admission = 'COMPRESSED_NOT_INSPECTED') AS compressed,
+    count(*) FILTER (WHERE metadata_admission = 'OVERSIZED_NOT_INSPECTED') AS oversized,
+    count(*) FILTER (WHERE metadata_admission = 'NON_OBJECT') AS non_object,
+    count(*) FILTER (WHERE metadata_admission = 'BOUNDED_OBJECT') AS bounded_object,
+    count(*) FILTER (WHERE metadata_admission <> 'BOUNDED_OBJECT') AS unavailable_metadata,
+    count(*) FILTER (WHERE
+      (rule_code IN ('NIGHT_MODE_CLOSE_NOTICE', 'NIGHT_MODE_OPEN_NOTICE') AND session_key IS NULL)
+      OR (rule_code = 'NIGHT_MODE_CLOSE_NOTICE_RECOVERY_DELETE'
+        AND (metadata_admission <> 'BOUNDED_OBJECT'
+          OR (original_event_id IS NULL AND message_id IS NULL)))
+    ) AS unavailable_night_proof
+  FROM bounded_moderation
 ), close_events AS (
   SELECT
     id,
     chat_id,
-    metadata->>'sessionKey' AS session_key,
+    session_key,
     message_id,
     created_at,
     row_number() OVER (
-      PARTITION BY chat_id, metadata->>'sessionKey'
+      PARTITION BY chat_id, session_key
       ORDER BY created_at DESC, id DESC
     ) AS newest_rank,
-    count(*) OVER (PARTITION BY chat_id, metadata->>'sessionKey') AS group_count
+    count(*) OVER (PARTITION BY chat_id, session_key) AS group_count
   FROM bounded_moderation
   WHERE rule_code = 'NIGHT_MODE_CLOSE_NOTICE'
-    AND metadata->>'sessionKey' IS NOT NULL
+    AND session_key IS NOT NULL
 ), unrecovered_extras AS (
   SELECT close_events.id, close_events.chat_id, close_events.session_key
   FROM close_events
@@ -1809,17 +1892,19 @@ WITH moderation_sample AS MATERIALIZED (
       FROM bounded_moderation recovery
       WHERE recovery.chat_id = close_events.chat_id
         AND recovery.rule_code = 'NIGHT_MODE_CLOSE_NOTICE_RECOVERY_DELETE'
+        AND recovery.metadata_admission = 'BOUNDED_OBJECT'
         AND recovery.created_at >= close_events.created_at
         AND (
           recovery.message_id = close_events.message_id
-          OR recovery.metadata->>'originalEventId' = close_events.id
+          OR recovery.original_event_id = close_events.id
         )
     )
 ), night_mode_summary AS (
   SELECT
     rule_code,
     count(*)::bigint AS events,
-    count(DISTINCT (chat_id, metadata->>'sessionKey'))::bigint AS chat_sessions
+    count(DISTINCT (chat_id, session_key)) FILTER (WHERE session_key IS NOT NULL)::bigint AS chat_sessions,
+    count(*) FILTER (WHERE session_key IS NULL)::bigint AS unavailable_session_keys
   FROM bounded_moderation
   WHERE rule_code IN (
     'NIGHT_MODE_CLOSE_NOTICE',
@@ -1834,11 +1919,31 @@ WITH moderation_sample AS MATERIALIZED (
   FROM unrecovered_extras
 )
 SELECT json_build_object(
-  'schema_version', 1,
+  'schema_version', 2,
   'audit', 'recent_night_mode_signals',
   'window_minutes', $SIGNAL_WINDOW_MIN,
+  'window_started_at', statement_timestamp() - make_interval(mins => $SIGNAL_WINDOW_MIN),
+  'window_ended_at', statement_timestamp(),
   'sample_cap', $MONITOR_SAMPLE_CAP,
   'sample_saturated', sample_state.sampled_count > $MONITOR_SAMPLE_CAP,
+  'observed_sample_count', metadata_summary.observed_sample_count,
+  'oldest_sample_at', metadata_summary.oldest_sample_at,
+  'newest_sample_at', metadata_summary.newest_sample_at,
+  -- FLAG: All-rule sampling cannot promise a complete night-rule history.
+  -- Unknown metadata and an omitted tail never prove absence of duplicate notices.
+  'night_rule_coverage', 'PARTIAL_GLOBAL_COHORT',
+  'global_cohort_complete', sample_state.sampled_count <= $MONITOR_SAMPLE_CAP,
+  'metadata_admission', json_build_object(
+    'ABSENT', metadata_summary.absent,
+    'COMPRESSED_NOT_INSPECTED', metadata_summary.compressed,
+    'OVERSIZED_NOT_INSPECTED', metadata_summary.oversized,
+    'NON_OBJECT', metadata_summary.non_object,
+    'BOUNDED_OBJECT', metadata_summary.bounded_object
+  ),
+  'unavailable_night_proof_count', metadata_summary.unavailable_night_proof,
+  'duplicate_evidence', 'UNRECOVERED_CANDIDATES_IN_SAMPLE',
+  'duplicate_classification_complete', sample_state.sampled_count <= $MONITOR_SAMPLE_CAP
+    AND metadata_summary.unavailable_metadata = 0 AND metadata_summary.unavailable_night_proof = 0,
   'duplicate_groups_in_sample', duplicate_summary.duplicate_groups,
   'duplicate_extra_events_in_sample', duplicate_summary.duplicate_extra_events,
   'rows', coalesce(
@@ -1847,7 +1952,8 @@ SELECT json_build_object(
         json_build_object(
           'rule_code', rule_code,
           'events', events,
-          'chat_sessions', chat_sessions
+          'chat_sessions', chat_sessions,
+          'unavailable_session_keys', unavailable_session_keys
         )
         ORDER BY rule_code
       )
@@ -1857,7 +1963,8 @@ SELECT json_build_object(
   )
 )::text
 FROM sample_state
-CROSS JOIN duplicate_summary;
+CROSS JOIN duplicate_summary
+CROSS JOIN metadata_summary;
 \else
 \echo MAXIM_POSTGRES_MONITOR_AUDIT_INDEX_MISSING
 SELECT 1 / 0;

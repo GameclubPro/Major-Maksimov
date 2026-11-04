@@ -26,6 +26,9 @@ MONITOR_LOG_FD=""
 MONITOR_TEE_PID=""
 MONITOR_WORKER_PID=""
 CAPACITY_SAMPLE_INDEX=0
+SAMPLE_STEP_COUNT=0
+SAMPLE_STEP_FAILURES=0
+EXPECTED_SAMPLE_STEPS=16
 CAPACITY_SAMPLER_PID=""
 CAPACITY_SAMPLER_LOCK_FD=""
 PUBLIC_URL="${MAXIM_VPS_PUBLIC_URL:-https://major-maksimov.ru}"
@@ -60,13 +63,20 @@ run_step() {
   shift
 
   echo "--- $label ---"
+  echo "monitor_step label=$label phase=start at=$(date -u +%FT%TZ)"
   set +e
   "$@"
   status=$?
   set -e
+  SAMPLE_STEP_COUNT=$((SAMPLE_STEP_COUNT + 1))
   if ((status != 0)); then
+    SAMPLE_STEP_FAILURES=$((SAMPLE_STEP_FAILURES + 1))
     echo "WARN: $label failed with exit code $status"
+    echo "monitor_step label=$label phase=end exit=$status complete=false at=$(date -u +%FT%TZ)"
+  else
+    echo "monitor_step label=$label phase=end exit=0 complete=true at=$(date -u +%FT%TZ)"
   fi
+  return 0
 }
 
 summarize_capacity_observability() {
@@ -616,8 +626,19 @@ REMOTE
 }
 
 summarize_real_chat_signals() {
-  ./infra/scripts/vps-connect.sh exec \
-    ./infra/scripts/vps-postgres-audit.sh monitor-signals "$SIGNAL_WINDOW_MIN"
+  local output
+  local status=0
+  local collection_status=0
+
+  output="$(./infra/scripts/vps-connect.sh exec \
+    ./infra/scripts/vps-postgres-audit.sh monitor-signals "$SIGNAL_WINDOW_MIN")" || status=$?
+  printf '%s\n' "$output"
+  printf '%s\n' "$output" |
+    node "$ROOT_DIR/infra/scripts/monitor-signal-results.cjs" "$status" || collection_status=$?
+  if ((status != 0)); then
+    return "$status"
+  fi
+  return "$collection_status"
 }
 
 summarize_bullmq_state() {
@@ -893,11 +914,26 @@ summarize_log_signal_counts() {
   printf -v service_args '%q ' "${LOG_SERVICES[@]}"
   remote_command=$(cat <<REMOTE
 services=($service_args)
-printf "service\\tlevel40_50\\trate_limit\\tskipped_perm\\taccess_loss\\tstatus403\\ttimeout\\tgovernor\\tslow\\tledger\\tpg_warn\\n"
+failed=0
+printf "service\\tlevel40_50\\trate_limit\\tskipped_perm\\taccess_loss\\tstatus403\\ttimeout\\tgovernor\\tslow\\tledger\\tpg_warn\\tread_status\\ttruncated\\tsampled_lines\\tcounts_are_lower_bounds\\n"
 for service in "\${services[@]}"; do
-  logs=\$(docker compose --env-file .env -p infra -f infra/docker-compose.yml logs --since "${SIGNAL_WINDOW_MIN}m" --tail "$TAIL_LINES" "\$service" 2>/dev/null || true)
+  if ! logs=\$(docker compose --env-file .env -p infra -f infra/docker-compose.yml logs --since "${SIGNAL_WINDOW_MIN}m" --tail "$((TAIL_LINES + 1))" "\$service" 2>/dev/null); then
+    printf '%s\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tunknown\\tread_failed\\tunknown\\tunknown\\tunknown\\n' "\$service"
+    failed=1
+    continue
+  fi
+  sampled_lines=0
+  if [[ -n "\$logs" ]]; then
+    sampled_lines=\$(printf '%s\\n' "\$logs" | wc -l)
+  fi
+  truncated=false
+  if ((sampled_lines > $TAIL_LINES)); then
+    truncated=true
+    sampled_lines=$TAIL_LINES
+    logs=\$(printf '%s\\n' "\$logs" | tail -n "$TAIL_LINES")
+  fi
   count() { printf "%s" "\$logs" | grep -Eci "\$1" || true; }
-  printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" \\
+  printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\tcollected\\t%s\\t%s\\t%s\\n" \\
     "\$service" \\
     "\$(count '"level":(40|50)')" \\
     "\$(count 'rate[ _-]?limit|internal limiter|"statusCode":429|HTTP( status)? 429')" \\
@@ -908,8 +944,10 @@ for service in "\${services[@]}"; do
     "\$(count 'BackgroundRuntimeGovernor|governor|pause|slow path')" \\
     "\$(count 'slow|Slow')" \\
     "\$(count 'Failed to record successful MAX action ledger outcome|delivery-ledger-risk|ambiguous MAX')" \\
-    "\$(count 'client.query\\(\\) on a client that has already been checked out')"
+    "\$(count 'client.query\\(\\) on a client that has already been checked out')" \\
+    "\$truncated" "\$sampled_lines" "\$truncated"
 done
+exit "\$failed"
 REMOTE
 )
 
@@ -918,6 +956,10 @@ REMOTE
 
 sample_once() {
   local sample_index="$1"
+  local complete=false
+
+  SAMPLE_STEP_COUNT=0
+  SAMPLE_STEP_FAILURES=0
 
   echo "===== sample $sample_index $(date -Is) ====="
   run_step health ./infra/scripts/vps-connect.sh health
@@ -940,6 +982,10 @@ sample_once() {
     "$PUBLIC_URL/app/"
   run_step public-app-assets summarize_public_app_assets
   run_step public-access-guards summarize_public_access_guards
+  if ((SAMPLE_STEP_COUNT == EXPECTED_SAMPLE_STEPS && SAMPLE_STEP_FAILURES == 0)); then
+    complete=true
+  fi
+  echo "monitor_sample index=$sample_index steps=$SAMPLE_STEP_COUNT expected_steps=$EXPECTED_SAMPLE_STEPS failed_steps=$SAMPLE_STEP_FAILURES complete=$complete at=$(date -u +%FT%TZ)"
 }
 
 run_monitor() {
