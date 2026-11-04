@@ -75,7 +75,6 @@ export function DeleteRuntimeMetrics({
 }
 
 export function DeleteDesk({
-  accessCode,
   busyAmbiguousSendId,
   busyDeleteIntentId,
   filter,
@@ -89,7 +88,6 @@ export function DeleteDesk({
   onRetryDeleteIntent,
   onSelect,
 }: {
-  accessCode: string;
   busyAmbiguousSendId: string | null;
   busyDeleteIntentId: string | null;
   filter: DeleteFilter;
@@ -252,7 +250,6 @@ export function DeleteDesk({
       <section className="delete-detail-column" aria-label="Состояние удаления">
         {selectedItem ? (
           <DeleteDetails
-            accessCode={accessCode}
             item={selectedItem}
             busy={busyDeleteIntentId === selectedItem.id}
             onRetry={onRetryDeleteIntent}
@@ -269,12 +266,10 @@ export function DeleteDesk({
 }
 
 function DeleteDetails({
-  accessCode,
   item,
   busy,
   onRetry,
 }: {
-  accessCode: string;
   item: SafetyDeskDeleteIntentItem;
   busy: boolean;
   onRetry: (item: SafetyDeskDeleteIntentItem) => void;
@@ -313,7 +308,7 @@ function DeleteDetails({
       </div>
 
       <div className="delete-detail-scroll">
-        <DeleteEvidence key={item.id} intentId={item.id} accessCode={accessCode} />
+        <DeleteEvidence key={item.id} intentId={item.id} />
         <section className="delete-section">
           <div className="delete-section__head">
             <h3>Активные боты</h3>

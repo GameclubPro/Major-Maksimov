@@ -3,7 +3,7 @@ import { safetyDeskApiClient } from './safety-desk-api-client';
 import { ObservationPanel, observationTime, useObservationSnapshot } from './observation-view';
 import { CommercialAiPoolDesk } from './commercial-ai-pool-desk';
 
-const load = (code: string) => safetyDeskApiClient.fetchCommercialAiRuntime(code);
+const load = () => safetyDeskApiClient.fetchCommercialAiRuntime();
 const modes: Record<SafetyDeskCommercialAiResponse['mode'], string> = {
   OFF: 'Выключен',
   OBSERVE: 'Наблюдение без удаления',
@@ -200,8 +200,8 @@ export function CommercialAiSnapshot({ snapshot }: { snapshot: SafetyDeskCommerc
   );
 }
 
-export function CommercialAiDesk(props: { accessCode: string; refreshToken: number }) {
-  const view = useObservationSnapshot(load, props.accessCode, props.refreshToken);
+export function CommercialAiDesk(props: { refreshToken: number }) {
+  const view = useObservationSnapshot(load, props.refreshToken);
   return (
     <>
       <ObservationPanel title="Рекламный ИИ" {...view}>

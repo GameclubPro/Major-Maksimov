@@ -73,7 +73,7 @@ const environment = () => ({
   MAXIM_IMAGE_COMPONENT: 'api',
 });
 const provenance = 'https://slsa.dev/provenance/v1';
-const spdx = 'https://spdx.dev/Document';
+const spdx = 'https://spdx.dev/Document/v2.3';
 const attestation = (predicate = provenance) => [
   {
     verificationResult: {
@@ -623,6 +623,33 @@ test('proof-only validates provenance and SBOM without a local Docker daemon', (
       ),
     (error) => error.code === 'REGISTRY_PACKAGE_UNVERIFIED',
   );
+});
+
+test('release proofs require the exact SPDX 2.3 predicate emitted by the pinned SBOM action', () => {
+  const verify = (sbomPredicate) => {
+    const requested = [];
+    const run = (binary, args) => {
+      assert.equal(binary, 'gh');
+      if (args[0] === 'api') return JSON.stringify(packageMetadata());
+      const predicate = args[args.indexOf('--predicate-type') + 1];
+      requested.push(predicate);
+      return JSON.stringify(attestation(predicate === provenance ? provenance : sbomPredicate));
+    };
+    const reference = verifyRegistryImage(record(), expected, run, { proofOnly: true });
+    return { reference, requested };
+  };
+  assert.deepEqual(verify(spdx), {
+    reference: `${identity.repository}@${digest}`,
+    requested: [provenance, 'https://spdx.dev/Document/v2.3'],
+  });
+  for (const rejected of [
+    'https://spdx.dev/Document',
+    'https://spdx.dev/Document/v2.2',
+    'https://spdx.dev/Document/v3.0',
+    'https://cyclonedx.org/bom',
+  ]) {
+    assert.throws(() => verify(rejected), /Verified attestation does not bind/u, rejected);
+  }
 });
 
 test('previously signed image cannot be consumed after its package becomes public or unreadable', () => {

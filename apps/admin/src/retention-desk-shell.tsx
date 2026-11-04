@@ -8,13 +8,7 @@ const RetentionDesk = lazy(() =>
   import('./retention-desk').then((module) => ({ default: module.RetentionDesk })),
 );
 
-export function RetentionDeskPane({
-  accessCode,
-  controls,
-}: {
-  accessCode: string;
-  controls: RetentionDeskControls;
-}) {
+export function RetentionDeskPane({ controls }: { controls: RetentionDeskControls }) {
   return (
     <RetentionDeskLoadBoundary>
       <Suspense
@@ -25,7 +19,6 @@ export function RetentionDeskPane({
         }
       >
         <RetentionDesk
-          accessCode={accessCode}
           refreshToken={controls.refreshToken}
           onSnapshot={controls.onSnapshot}
           onBusyChange={controls.onBusyChange}

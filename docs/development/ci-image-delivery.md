@@ -47,8 +47,10 @@ A separate GitHub-hosted registry job consumes that exact artifact after Docker 
    publication. A verified public package produces a separate refusal. It checks privacy and
    binding again after push, then pulls the returned digest to compare its Docker image ID with
    the tested image.
-3. Generates an SPDX SBOM from the same local image and attests both provenance and SBOM for
-   the exact registry digest through GitHub OIDC.
+3. Generates an SPDX 2.3 SBOM from the same local image and attests both provenance and SBOM for
+   the exact registry digest through GitHub OIDC. Verification requires the exact
+   `https://spdx.dev/Document/v2.3` predicate emitted by the pinned SBOM action;
+   an unversioned or different SBOM predicate cannot substitute for it.
 4. Verifies signatures and signed certificate claims for repository identity, source SHA/ref,
    workflow path/digest, allowed runner and the exact run invocation/attempt.
 5. Uploads only `registry-record-COMPONENT.json` in the bounded receipt artifact

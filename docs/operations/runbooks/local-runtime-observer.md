@@ -20,7 +20,7 @@ The default directory is `~/.config/maxim-observer` with mode 0700 and files 060
 configuration is never replaced. Safe 0755 XDG parents are allowed. `overview-reader.json`
 contains a new independent token and Basic Auth password. `server-provision.json` contains
 the token SHA-256 and Basic credentials needed for server installation; keep it private.
-The observer does not receive `ADMIN_ACCESS_CODE`, MAX credentials, SSH or deployment keys.
+The observer does not receive owner Basic Auth credentials, MAX credentials, SSH or deployment keys.
 
 Provision `RUNTIME_OVERVIEW_READER_TOKEN_SHA256` from that private file for `api-admin` only;
 both Compose topologies explicitly erase it for other API roles. Blank disables the endpoint.
@@ -32,7 +32,8 @@ closed host and overwrites `X-Remote-User`; the reader additionally requires tha
 the token, admin role, allowed host, HTTPS forwarding and a permitted origin.
 
 Only `GET /api/v1/safety-desk/runtime-observer/overview` accepts the machine token.
-The existing owner/support content and mutation routes retain their separate admin access code.
+The machine Basic Auth identity cannot access owner/support content or mutation routes.
+Those routes require the owner login; the owner UI has no additional access-code prompt.
 Reader tokens are redacted from HTTP and provider error logs. The response uses the existing
 strict overview contract without message contents; the observer retains only timestamps,
 fixed reason codes, delivery identities and bounded numeric counts.

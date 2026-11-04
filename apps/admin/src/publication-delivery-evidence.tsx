@@ -78,18 +78,17 @@ const postActionLabels: Record<Evidence['waiting']['postActions']['pin'], string
 
 export function PublicationDeliveryEvidence({
   deliveryId,
-  accessCode,
   request,
 }: {
   deliveryId: string;
-  accessCode: string;
+
   request: number;
 }) {
   const load = useMemo(
-    () => (code: string) => safetyDeskApiClient.fetchPublicationDeliveryEvidence(deliveryId, code),
+    () => () => safetyDeskApiClient.fetchPublicationDeliveryEvidence(deliveryId),
     [deliveryId],
   );
-  const view = useObservationSnapshot(load, accessCode, request);
+  const view = useObservationSnapshot(load, request);
   const snapshot = view.snapshot;
   return (
     <ObservationPanel title="Подтверждения доставки" {...view}>

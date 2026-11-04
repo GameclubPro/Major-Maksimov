@@ -404,29 +404,35 @@ describe('validateEnv boolean parsing', () => {
     );
   });
 
-  it('retains the server-side Safety Desk access code', () => {
-    expect(
-      validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'server-admin-code' })).ADMIN_ACCESS_CODE,
-    ).toBe('server-admin-code');
-    expect(validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'abc123' })).ADMIN_ACCESS_CODE).toBe(
-      'abc123',
+  it('starts production without an additional Safety Desk access code', () => {
+    const env = validateEnv(
+      createValidEnv({
+        NODE_ENV: 'production',
+        MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
+        MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
+      }),
     );
-    expect(() => validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'short' }))).toThrow(
-      /ADMIN_ACCESS_CODE/u,
-    );
-    expect(() =>
-      validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'replace-with-random-admin-code' })),
-    ).toThrow(/ADMIN_ACCESS_CODE/u);
-    expect(() =>
-      validateEnv(
+
+    expect(env.NODE_ENV).toBe('production');
+    expect(env).not.toHaveProperty('ADMIN_ACCESS_CODE');
+  });
+
+  it.each(['', 'short', 'replace-with-random-admin-code', 'server-admin-code'])(
+    'ignores a retired Safety Desk access code in the environment: %s',
+    (accessCode) => {
+      const env = validateEnv(
         createValidEnv({
           NODE_ENV: 'production',
           MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
           MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
+          ADMIN_ACCESS_CODE: accessCode,
         }),
-      ),
-    ).toThrow(/ADMIN_ACCESS_CODE is required in production/u);
-  });
+      );
+
+      expect(env.NODE_ENV).toBe('production');
+      expect(env).not.toHaveProperty('ADMIN_ACCESS_CODE');
+    },
+  );
 
   it('defaults durable webhook ingress persistence target to two seconds', () => {
     const defaults = validateEnv(createValidEnv());
@@ -1132,7 +1138,6 @@ describe('validateEnv boolean parsing', () => {
   it('requires production public origins to use https on the default port', () => {
     const productionSecrets = {
       NODE_ENV: 'production',
-      ADMIN_ACCESS_CODE: 'server-admin-code',
       MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
       MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
     };
@@ -1179,7 +1184,6 @@ describe('validateEnv boolean parsing', () => {
   it('rejects the deprecated MAX API host in production', () => {
     const productionSecrets = {
       NODE_ENV: 'production',
-      ADMIN_ACCESS_CODE: 'server-admin-code',
       MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
       MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
     };
@@ -1347,7 +1351,6 @@ describe('validateEnv boolean parsing', () => {
       validateEnv(
         createValidEnv({
           NODE_ENV: 'production',
-          ADMIN_ACCESS_CODE: 'server-admin-code',
           MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
           MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
           KARAVAN_STOREFRONT_CATALOG_URL: 'http://example.com/catalog',

@@ -55,7 +55,6 @@ test('independent and adjudication requests carry only the optional human catego
     item,
     'NOT_COMMERCIAL',
     'Нужен мастер',
-    'private-code',
     'KEEP',
     semanticAnnotation,
   );
@@ -63,7 +62,6 @@ test('independent and adjudication requests carry only the optional human catego
     item,
     'NOT_COMMERCIAL',
     'Нужен мастер',
-    'private-code',
     'KEEP',
     semanticAnnotation,
   );
@@ -109,8 +107,8 @@ test('commercial owner feedback sends the server revision through the closed tra
       );
     }),
   );
-  await client.fetchCommercialReview('private-code', 'page', 'REVIEWED');
-  await client.labelCommercialReview(item, 'NOT_COMMERCIAL', 'Частное объявление', 'private-code');
+  await client.fetchCommercialReview('page', 'REVIEWED');
+  await client.labelCommercialReview(item, 'NOT_COMMERCIAL', 'Частное объявление');
   assert.equal(
     calls[0]?.url,
     '/api/v1/safety-desk/commercial/review?limit=50&status=REVIEWED&cursor=page',
@@ -123,13 +121,7 @@ test('commercial owner feedback sends the server revision through the closed tra
     expectedDisposition: 'KEEP',
     reason: 'Частное объявление',
   });
-  await client.adjudicateCommercialReview(
-    item,
-    'NOT_COMMERCIAL',
-    'Частное объявление',
-    'private-code',
-    'KEEP',
-  );
+  await client.adjudicateCommercialReview(item, 'NOT_COMMERCIAL', 'Частное объявление', 'KEEP');
   assert.equal(calls[2]?.url, '/api/v1/safety-desk/commercial/review/sample%2F1/adjudicate');
   assert.deepEqual(
     JSON.parse(String(calls[2]?.init?.body)),
@@ -143,6 +135,6 @@ test('commercial owner feedback sends the server revision through the closed tra
   );
   assert.equal(
     (calls[1]?.init?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'private-code',
+    undefined,
   );
 });

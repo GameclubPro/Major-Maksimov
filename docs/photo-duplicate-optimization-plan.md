@@ -24,17 +24,17 @@
 
 Срез на 2026-08-06 после релиза `release-20260805T211801Z-3d5a4647c7e1`:
 
-| Сигнал | Значение |
-| --- | --- |
-| API runtime | 11 ролей на одном SHA, restart count 0 |
-| Health | normal, DB/Redis ready, queue lag 0 |
-| Chat settings | 8622 записей |
-| Текстовый антидубль | включён у 7569 чатов |
-| Фото-антидубль | включён у 0 чатов |
-| `photo-duplicates` | wait/active/delayed/failed/completed = 0 |
-| Фото history/order keys | 0 |
-| Redis | около 453 MiB, evictions 0 |
-| VPS disk | 94%, свободно около 7.1 GiB |
+| Сигнал                  | Значение                                 |
+| ----------------------- | ---------------------------------------- |
+| API runtime             | 11 ролей на одном SHA, restart count 0   |
+| Health                  | normal, DB/Redis ready, queue lag 0      |
+| Chat settings           | 8622 записей                             |
+| Текстовый антидубль     | включён у 7569 чатов                     |
+| Фото-антидубль          | включён у 0 чатов                        |
+| `photo-duplicates`      | wait/active/delayed/failed/completed = 0 |
+| Фото history/order keys | 0                                        |
+| Redis                   | около 453 MiB, evictions 0               |
+| VPS disk                | 94%, свободно около 7.1 GiB              |
 
 Индексированная 30-минутная выборка реального трафика дала ориентир около 24 уникальных
 фото-jobs в минуту, p95 альбома 2, максимум 10. Самый активный чат дал 25 фото-сообщений
@@ -66,34 +66,34 @@
 
 ## Карта сессий
 
-| ID | Результат | Зависимость | Runtime rollout |
-| --- | --- | --- | --- |
-| S0 | Production baseline и этот план | завершено | без изменений |
-| S1 | Телеметрия и закрытая ручная проверка | исправленный S2 core | deploy, `shadow`, 0 чатов |
-| S2 | Correctness, retry/deadline и честный UI | S0 | deploy, `shadow`, 0 чатов |
-| S3 | Corpus, benchmark, admission, isolation и index | S1 + S2 | deploy, `shadow`, 0 чатов |
-| S4 | Стабильный 7-дневный shadow-canary | обязательные S3 units + approved IDs | согласованные чаты |
-| S5 | Exact delete-only cohorts | успешный S4 | allowlist по ступеням |
-| S6 | PDQ/advanced/full | успешный S5 и отдельные quality gates | по одной оси риска |
+| ID  | Результат                                       | Зависимость                           | Runtime rollout           |
+| --- | ----------------------------------------------- | ------------------------------------- | ------------------------- |
+| S0  | Production baseline и этот план                 | завершено                             | без изменений             |
+| S1  | Телеметрия и закрытая ручная проверка           | исправленный S2 core                  | deploy, `shadow`, 0 чатов |
+| S2  | Correctness, retry/deadline и честный UI        | S0                                    | deploy, `shadow`, 0 чатов |
+| S3  | Corpus, benchmark, admission, isolation и index | S1 + S2                               | deploy, `shadow`, 0 чатов |
+| S4  | Стабильный 7-дневный shadow-canary              | обязательные S3 units + approved IDs  | согласованные чаты        |
+| S5  | Exact delete-only cohorts                       | успешный S4                           | allowlist по ступеням     |
+| S6  | PDQ/advanced/full                               | успешный S5 и отдельные quality gates | по одной оси риска        |
 
 S1-S3 являются кодовыми campaigns из нескольких releasable units. S4-S6 нельзя склеивать с
 кодовым deploy: наблюдение должно происходить на одном неизменном SHA.
 
 На практике S1-S3 являются campaigns, а не одним огромным agent turn. Исполняемые units:
 
-| Unit | Scope одного agent session | Deploy |
-| --- | --- | --- |
-| S1-A | lifecycle metrics + closed snapshot + VPS monitor | API/infra |
-| S1-B | review models/API/evidence lifecycle | Prisma/contracts/API |
-| S1-C | Safety Desk review UI/blob client | contracts/admin |
-| S2-A | immutable observation-only semantics + fences | API |
-| S2-B | replay-safe counter/immunity + typed retry/cache/deadline | API |
-| S2-C | effective-mode contract/UI matrix | contracts/API/miniapp |
-| S3-A | corpus + benchmark harness, без runtime changes | нет |
-| S3-B | admission/governor/resource guards | API |
-| S3-C | platform-to-canonical cache, dual-run | API |
-| S3-D | PDQ v2 index, dual-read only | API |
-| S3-E | отдельный photo consumer/topology, обязательно до real-chat canary | API/infra |
+| Unit | Scope одного agent session                                         | Deploy                |
+| ---- | ------------------------------------------------------------------ | --------------------- |
+| S1-A | lifecycle metrics + closed snapshot + VPS monitor                  | API/infra             |
+| S1-B | review models/API/evidence lifecycle                               | Prisma/contracts/API  |
+| S1-C | Safety Desk review UI/blob client                                  | contracts/admin       |
+| S2-A | immutable observation-only semantics + fences                      | API                   |
+| S2-B | replay-safe counter/immunity + typed retry/cache/deadline          | API                   |
+| S2-C | effective-mode contract/UI matrix                                  | contracts/API/miniapp |
+| S3-A | corpus + benchmark harness, без runtime changes                    | нет                   |
+| S3-B | admission/governor/resource guards                                 | API                   |
+| S3-C | platform-to-canonical cache, dual-run                              | API                   |
+| S3-D | PDQ v2 index, dual-read only                                       | API                   |
+| S3-E | отдельный photo consumer/topology, обязательно до real-chat canary | API/infra             |
 
 Один agent session выполняет ровно один unit. Следующий unit начинается новым baseline/impact plan;
 агент не продолжает автоматически через deploy, migration или многодневный observation gate.
@@ -121,19 +121,19 @@ S1-S3 являются кодовыми campaigns из нескольких rele
 
 Новые файлы создаются рядом с указанными boundaries; точное имя проверяется по local patterns.
 
-| Unit | Основные owned paths |
-| --- | --- |
-| S2-A | `apps/api/src/moderation/moderation.service.legacy.ts`, `photo-duplicate.queue.ts`, `photo-duplicate-moderation.service.ts` и их specs |
-| S2-B | `photo-duplicate-moderation.service.ts`, history/immunity idempotency helpers, `secure-photo-downloader.ts`, analysis/fingerprint/decode, processor/order store и specs |
-| S1-A | новый `photo-duplicate-metrics.service.ts`, `apps/api/src/system/`, `infra/scripts/vps-monitor-readonly.sh` и monitor tests |
+| Unit | Основные owned paths                                                                                                                                                                  |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S2-A | `apps/api/src/moderation/moderation.service.legacy.ts`, `photo-duplicate.queue.ts`, `photo-duplicate-moderation.service.ts` и их specs                                                |
+| S2-B | `photo-duplicate-moderation.service.ts`, history/immunity idempotency helpers, `secure-photo-downloader.ts`, analysis/fingerprint/decode, processor/order store и specs               |
+| S1-A | новый `photo-duplicate-metrics.service.ts`, `apps/api/src/system/`, `infra/scripts/vps-monitor-readonly.sh` и monitor tests                                                           |
 | S1-B | `apps/api/prisma/schema.prisma` + migration, новый shared photo review module/service, `safety-desk.controller.ts`, `safety-desk.service.ts`, `packages/contracts/src/safety-desk.ts` |
-| S1-C | `apps/admin/src/safety-desk-ui.tsx`, API client/model, focused view/security tests и `styles.css` |
-| S2-C | `packages/contracts/src/duplicate-settings.ts`/`core.ts`, `admin-settings.service.ts`, `settings-page.legacy.tsx`, `settings-duplicate-photo-*`, rules/preview tests |
-| S3-A | новые corpus/benchmark files под `apps/api/src/moderation/photo-duplicate/` и `apps/api/src/scripts/`; package scripts wiring делает root |
-| S3-B | `photo-duplicate-enqueue.service.ts`, новый admission store, processor, config schema/spec и metrics call sites |
-| S3-C | `photo-duplicate-analysis.service.ts`, fingerprint/history cache helpers и oracle specs |
-| S3-D | versioned history/index store, `photo-fingerprint.ts` oracle/property tests и config schema |
-| S3-E | `app-role.ts`, `runtime-topology.ts`, both Compose files, Prisma pool spec, deploy topology/guards/monitor, scoped notes/runbook |
+| S1-C | `apps/admin/src/safety-desk-ui.tsx`, API client/model, focused view/security tests и `styles.css`                                                                                     |
+| S2-C | `packages/contracts/src/duplicate-settings.ts`/`core.ts`, `admin-settings.service.ts`, `settings-page.legacy.tsx`, `settings-duplicate-photo-*`, rules/preview tests                  |
+| S3-A | новые corpus/benchmark files под `apps/api/src/moderation/photo-duplicate/` и `apps/api/src/scripts/`; package scripts wiring делает root                                             |
+| S3-B | `photo-duplicate-enqueue.service.ts`, новый admission store, processor, config schema/spec и metrics call sites                                                                       |
+| S3-C | `photo-duplicate-analysis.service.ts`, fingerprint/history cache helpers и oracle specs                                                                                               |
+| S3-D | versioned history/index store, `photo-fingerprint.ts` oracle/property tests и config schema                                                                                           |
+| S3-E | `app-role.ts`, `runtime-topology.ts`, both Compose files, Prisma pool spec, deploy topology/guards/monitor, scoped notes/runbook                                                      |
 
 Root agent один редактирует shared conflict hotspots `apps/api/src/moderation/moderation.module.ts`,
 общий env wiring и package scripts после того, как subagents вернули интерфейсы. Во время одного unit
@@ -194,12 +194,12 @@ evidence, когда его требует match policy, запрещает dest
 
 ### Параллельные потоки
 
-| Поток | Ownership | Не трогает |
-| --- | --- | --- |
-| S1-A Metrics | новые photo metrics service/spec, system snapshot | Prisma, miniapp/admin UI |
-| S1-B Review API | Prisma migration, review service, guarded API, contracts | processor/moderation call sites |
-| S1-C Review UI | Safety Desk view/blob client/tests | API feature implementation, infra |
-| Root | module wiring и instrumentation call sites | чужие worktree changes |
+| Поток           | Ownership                                                | Не трогает                        |
+| --------------- | -------------------------------------------------------- | --------------------------------- |
+| S1-A Metrics    | новые photo metrics service/spec, system snapshot        | Prisma, miniapp/admin UI          |
+| S1-B Review API | Prisma migration, review service, guarded API, contracts | processor/moderation call sites   |
+| S1-C Review UI  | Safety Desk view/blob client/tests                       | API feature implementation, infra |
+| Root            | module wiring и instrumentation call sites               | чужие worktree changes            |
 
 ### Метрики
 
@@ -301,7 +301,7 @@ Verdict mutation передаёт `expectedUpdatedAt`; optimistic `updateMany = 
 intended/actual action и кнопки verdict. Никакой moderation action из review UI не выполняется.
 Preview загружается authenticated blob request-ом, создаёт object URL и всегда вызывает revoke; прямой
 `<img src>` не должен обходить Safety Desk request guard.
-Blob request использует существующий `X-Admin-Access-Code`; object URL отзывается при replace, unmount
+Blob request проходит через same-origin Basic Auth и серверный Safety Desk guard; object URL отзывается при replace, unmount
 и error. Endpoint возвращает только `image/webp` с `Cache-Control: no-store, private` и не принимает
 access token или source URL через query.
 
@@ -345,12 +345,12 @@ S1 заканчивается deploy всех выбранных planner-ком�
 
 ### Параллельные потоки
 
-| Поток | Ownership |
-| --- | --- |
-| S2-A Semantics | moderation enqueue path, photo moderation fences, integration specs |
-| S2-B Resilience | replay-safe counter/immunity, downloader errors, partial cache, deadline, decode/order processor specs |
-| S2-C UI contract | settings contract/API matrix, miniapp helper/UI/tests/screenshots |
-| Root | config/module wiring, instrumentation integration, final behavior matrix |
+| Поток            | Ownership                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| S2-A Semantics   | moderation enqueue path, photo moderation fences, integration specs                                    |
+| S2-B Resilience  | replay-safe counter/immunity, downloader errors, partial cache, deadline, decode/order processor specs |
+| S2-C UI contract | settings contract/API matrix, miniapp helper/UI/tests/screenshots                                      |
+| Root             | config/module wiring, instrumentation integration, final behavior matrix                               |
 
 ### Correctness semantics
 
@@ -763,13 +763,13 @@ counter и любые actions. Закрепи admin/bot/immunity/manual-release/
 
 ## Оценка трудоёмкости
 
-| Сессия | Инженерное время | Минимальное календарное окно |
-| --- | --- | --- |
-| S1 | 5-8 дней | 2-4 дня с тремя параллельными потоками |
-| S2 | 5-8 дней | 3-5 дней |
-| S3 | 10-16 дней | 1-3 недели последовательных units |
-| S4 | 1-3 дня оператора | минимум 7 дней на final SHA, окна reset после изменений |
-| S5-S6 | 2-6 дней оператора/инженера | 2-8 недель rollout |
+| Сессия | Инженерное время            | Минимальное календарное окно                            |
+| ------ | --------------------------- | ------------------------------------------------------- |
+| S1     | 5-8 дней                    | 2-4 дня с тремя параллельными потоками                  |
+| S2     | 5-8 дней                    | 3-5 дней                                                |
+| S3     | 10-16 дней                  | 1-3 недели последовательных units                       |
+| S4     | 1-3 дня оператора           | минимум 7 дней на final SHA, окна reset после изменений |
+| S5-S6  | 2-6 дней оператора/инженера | 2-8 недель rollout                                      |
 
 Общий ориентир: 23-38 инженерных дней и 6-12 календарных недель. Время наблюдения нельзя безопасно
 сократить увеличением числа агентов.

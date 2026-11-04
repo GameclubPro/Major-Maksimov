@@ -17,12 +17,11 @@ const families = {
 } as const;
 
 export function ObservabilityDesk(props: {
-  accessCode: string;
   refreshToken: number;
   accessScope?: OverviewAccessScope;
 }) {
   const [family, setFamily] = useState<keyof typeof families>('overview');
-  const fallbackScope = useMemo(() => ({ denied: false }), [props.accessCode]);
+  const fallbackScope = useMemo(() => ({ denied: false }), []);
   return (
     <div className="observation-panels">
       <nav className="observation-selector" aria-label="Вид наблюдений">

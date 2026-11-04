@@ -2,7 +2,8 @@
 
 The first view in Safety Desk's Observations shows shared runtime evidence through
 `GET /api/v1/safety-desk/runtime/overview`. It uses the existing closed owner guard,
-forwarded admin host/user and access code. It makes no MAX calls and cannot change
+forwarded admin host/user and origin checks after nginx Basic Auth, without another access code.
+It makes no MAX calls and cannot change
 bot assignments, effects, queue state or recovery fences.
 
 ## Collection and freshness

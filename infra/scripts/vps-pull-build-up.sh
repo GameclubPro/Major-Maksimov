@@ -1024,43 +1024,6 @@ ensure_compose_env() {
   return 1
 }
 
-validate_admin_access_code() {
-  local code
-  local normalized
-
-  code="$(
-    awk '
-      /^[[:space:]]*ADMIN_ACCESS_CODE[[:space:]]*=/ {
-        sub(/^[[:space:]]*ADMIN_ACCESS_CODE[[:space:]]*=[[:space:]]*/, "")
-        value = $0
-      }
-      END { print value }
-    ' .env
-  )"
-  code="${code%$'\r'}"
-  code="$(printf '%s' "$code" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-  if ((${#code} >= 2)) && [[ "$code" == \"*\" && "$code" == *\" ]]; then
-    code="${code:1:${#code}-2}"
-  elif ((${#code} >= 2)) && [[ "$code" == \'*\' && "$code" == *\' ]]; then
-    code="${code:1:${#code}-2}"
-  fi
-  code="$(printf '%s' "$code" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-  normalized="${code,,}"
-
-  if ((${#code} < 6 || ${#code} > 256)); then
-    echo "Refusing deploy: ADMIN_ACCESS_CODE must contain 6-256 characters." >&2
-    return 1
-  fi
-  case "$normalized" in
-    change-me|changeme|replace-me|replace-with-random-admin-code)
-      echo "Refusing deploy: ADMIN_ACCESS_CODE still uses a documented placeholder." >&2
-      return 1
-      ;;
-  esac
-
-  echo "Safety Desk server-side access code preflight passed."
-}
-
 warn_postgres_password_fallback() {
   if [[ -f .env ]] && grep -Eq '^[[:space:]]*POSTGRES_PASSWORD=.+$' .env; then
     return 0
@@ -1613,7 +1576,6 @@ if [[ -n "$RECOVERY_BASE_MANIFEST" ]]; then
   done
   echo "Interrupted release recovery selected every active component for full reconciliation."
 fi
-validate_admin_access_code
 warn_postgres_password_fallback
 
 if [[ -n "${COMMERCIAL_OCR_DEPLOY_MODE:-}" || -n "${COMMERCIAL_AI_DEPLOY_ENABLED:-}" || -n "${COMMERCIAL_AI_POOL_DEPLOY_REQUESTED:-}" || -n "$RETENTION_DEPLOY_MODE" || -n "$STATISTICS_EXCHANGE_DEPLOY_ENABLED" || -n "$STATISTICS_CENTRAL_DEPLOY_EPOCH" ]] && ! has_requested_api_service; then
