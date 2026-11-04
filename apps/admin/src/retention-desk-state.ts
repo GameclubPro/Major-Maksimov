@@ -10,7 +10,6 @@ import { safetyDeskApiClient } from './safety-desk-api-client';
 import { buildRetentionRetryRequest, readErrorMessage } from './safety-desk-model';
 
 export type RetentionDeskProps = {
-  accessCode: string;
   refreshToken: number;
   onSnapshot: (snapshot: SafetyDeskRetentionRuntimeResponse) => void;
   onBusyChange: (busy: boolean) => void;
@@ -27,12 +26,7 @@ export type RetentionDeskControls = ReturnType<typeof useRetentionDeskControls>;
 
 type RetentionPage = { after: string | null; trail: Array<string | null> };
 
-export function useRetentionDesk({
-  accessCode,
-  refreshToken,
-  onSnapshot,
-  onBusyChange,
-}: RetentionDeskProps) {
+export function useRetentionDesk({ refreshToken, onSnapshot, onBusyChange }: RetentionDeskProps) {
   const [runtime, setRuntime] = useState<SafetyDeskRetentionRuntimeResponse | null>(null);
   const [selected, setSelected] = useState<SafetyDeskRetentionRuntimeItem | null>(null);
   const [preview, setPreview] = useState<SafetyDeskRetentionPreviewResponse | null>(null);
@@ -94,7 +88,7 @@ export function useRetentionDesk({
       setPreviewNotice('');
       setPreviewLoading(false);
       try {
-        const response = await safetyDeskApiClient.fetchRetentionRuntime(accessCode, after);
+        const response = await safetyDeskApiClient.fetchRetentionRuntime(after);
         if (sequence !== pageSequence.current) return false;
         currentPage.current = request;
         setPageAfter(after);
@@ -111,7 +105,7 @@ export function useRetentionDesk({
         if (sequence === pageSequence.current) setLoading(false);
       }
     },
-    [accessCode, onSnapshot],
+    [onSnapshot],
   );
 
   useEffect(() => {
@@ -137,11 +131,7 @@ export function useRetentionDesk({
     setPreviewNotice('');
     setPreviewLoading(true);
     try {
-      const response = await safetyDeskApiClient.fetchRetentionPreview(
-        item.chatId,
-        accessCode,
-        after,
-      );
+      const response = await safetyDeskApiClient.fetchRetentionPreview(item.chatId, after);
       if (sequence === previewSequence.current) {
         if (
           response.chatId !== item.chatId ||
@@ -221,7 +211,7 @@ export function useRetentionDesk({
     setBusyMessageId(item.messageId);
     setPreviewNotice('Возвращаю сообщение в очередь…');
     try {
-      const response = await safetyDeskApiClient.retryRetention(chatId, request, accessCode);
+      const response = await safetyDeskApiClient.retryRetention(chatId, request);
       if (!isCurrent()) return;
       if (response.chatId !== chatId || (source && response.source !== source))
         throw new Error('Источник диагностики изменился. Обновите список чатов.');
@@ -240,7 +230,7 @@ export function useRetentionDesk({
           : `${readErrorMessage(error)} Проверяю состояние очереди…`;
       setPreviewNotice(message);
       try {
-        const response = await safetyDeskApiClient.fetchRetentionPreview(chatId, accessCode);
+        const response = await safetyDeskApiClient.fetchRetentionPreview(chatId);
         if (!isCurrent()) return;
         if (response.chatId !== chatId || (source && response.source !== source))
           throw new Error('Источник диагностики изменился. Обновите список чатов.');

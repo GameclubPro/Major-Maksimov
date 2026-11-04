@@ -50,7 +50,7 @@ function executionName(item: CommercialReviewItem): string {
           : 'Исполнение неизвестно';
 }
 
-export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
+export function CommercialReviewDesk() {
   const [queue, setQueue] = useState<CommercialReviewQueueResponse | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [cursor, setCursor] = useState<string | undefined>();
@@ -64,11 +64,7 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
   async function refresh(nextCursor: string | undefined, nextStatus = status) {
     setLoading(true);
     try {
-      const response = await safetyDeskApiClient.fetchCommercialReview(
-        accessCode,
-        nextCursor,
-        nextStatus,
-      );
+      const response = await safetyDeskApiClient.fetchCommercialReview(nextCursor, nextStatus);
       setQueue(response);
       setCursor(nextCursor);
       setStatus(nextStatus);
@@ -89,7 +85,7 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
     let active = true;
     setLoading(true);
     void safetyDeskApiClient
-      .fetchCommercialReview(accessCode)
+      .fetchCommercialReview()
       .then((response) => {
         if (active) {
           setQueue(response);
@@ -105,7 +101,7 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
     return () => {
       active = false;
     };
-  }, [accessCode]);
+  }, []);
 
   async function label(
     value: CommercialReviewLabel,
@@ -124,7 +120,6 @@ export function CommercialReviewDesk({ accessCode }: { accessCode: string }) {
         selected,
         value,
         reason,
-        accessCode,
         value === 'UNSURE' ? null : value === 'NOT_COMMERCIAL' ? 'KEEP' : expectedDisposition,
         semanticAnnotation,
       );

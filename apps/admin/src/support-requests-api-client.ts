@@ -11,18 +11,16 @@ const SUPPORT_REQUESTS_API_BASE = '/api/v1/support-requests';
 export class SupportRequestsApiClient {
   constructor(private readonly transport: AdminApiTransport = createAdminApiTransport()) {}
 
-  fetchQueue(accessCode: string): Promise<SupportRequestQueueResponse> {
+  fetchQueue(): Promise<SupportRequestQueueResponse> {
     return this.transport.request(
       `${SUPPORT_REQUESTS_API_BASE}/queue`,
-      accessCode,
       supportRequestQueueResponseSchema,
     );
   }
 
-  close(itemId: string, accessCode: string): Promise<SupportRequestDecisionResponse> {
+  close(itemId: string): Promise<SupportRequestDecisionResponse> {
     return this.transport.request(
       `${SUPPORT_REQUESTS_API_BASE}/items/${encodeURIComponent(itemId)}/close`,
-      accessCode,
       supportRequestDecisionResponseSchema,
       { method: 'POST', body: {} },
     );

@@ -18,7 +18,6 @@ if (process.argv.slice(2).some((argument) => argument !== '--runtime-overview'))
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const accessCode = 'admin-smoke-access-code';
 const generatedAt = '2026-07-19T00:00:00.000Z';
 const queue = {
   generatedAt,
@@ -147,16 +146,19 @@ async function smokeProfile(activeBrowser, profile) {
   const page = await context.newPage();
   await page.clock.install();
   const errors = [];
+  let startupDenied = true;
+  let startupRequests = 0;
+  const startupPaths = new Set([
+    '/api/v1/safety-desk/queue',
+    '/api/v1/support-requests/queue',
+    '/api/v1/safety-desk/runtime/deletes',
+  ]);
   let overviewRequests = 0;
   let overviewMode = 'fresh';
   const overviewControls = {
     readCount: () => overviewRequests,
     setMode: (mode) => {
       overviewMode = mode;
-    },
-    newOwner: () => {
-      expectedAccessCode = 'admin-smoke-overview-next-owner';
-      return expectedAccessCode;
     },
   };
   let cohortRequests = 0;
@@ -206,7 +208,6 @@ async function smokeProfile(activeBrowser, profile) {
     trafficCoverage: 'NOT_ESTABLISHED',
     confirmedDeletes: null,
   };
-  let expectedAccessCode = accessCode;
   const commercialAiPool = safetyDeskCommercialAiPoolResponseSchema.parse({
     schemaVersion: 1,
     generatedAt: commercialAi.generatedAt,
@@ -485,6 +486,14 @@ async function smokeProfile(activeBrowser, profile) {
   page.on('console', (message) => {
     if (message.type() === 'error') {
       if (
+        startupDenied &&
+        [...startupPaths].some(
+          (endpoint) => message.location().url === new URL(endpoint, baseUrl).href,
+        ) &&
+        /^Failed to load resource: the server responded with a status of 403\b/.test(message.text())
+      )
+        return;
+      if (
         overviewMode === 'denied' &&
         message.location().url === `${baseUrl}api/v1/safety-desk/runtime/overview` &&
         /^Failed to load resource: the server responded with a status of 403\b/.test(message.text())
@@ -522,16 +531,16 @@ async function smokeProfile(activeBrowser, profile) {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    if (
-      [accessCode, expectedAccessCode].some(
-        (code) => url.search.includes(code) || request.postData()?.includes(code),
-      )
-    ) {
-      throw new Error('Access code leaked into URL or request body.');
-    }
-    if (request.headers()['x-admin-access-code'] !== expectedAccessCode) {
-      await route.fulfill({ status: 401, json: { message: 'missing access code' } });
-      return;
+    if (request.headers()['x-admin-access-code'] !== undefined)
+      throw new Error('Safety Desk sent a retired access-code header.');
+    if (startupPaths.has(url.pathname)) {
+      if (request.method() !== 'GET' || request.postData())
+        throw new Error('Safety Desk startup attempted a mutation.');
+      ++startupRequests;
+      if (startupDenied) {
+        await route.fulfill({ status: 403, json: { message: 'Нет доступа к Safety Desk.' } });
+        return;
+      }
     }
     if (url.pathname.endsWith('/safety-desk/runtime/commercial-ai/pool')) {
       if (request.method() !== 'GET' || request.postData())
@@ -755,9 +764,24 @@ async function smokeProfile(activeBrowser, profile) {
   if (!response?.ok()) {
     throw new Error(`${profile.name} failed to load Safety Desk.`);
   }
-  await page.getByPlaceholder('Введите код').fill(accessCode);
-  await page.getByRole('button', { name: 'Войти' }).click();
+  await page.getByRole('alert').filter({ hasText: 'Нет доступа к Safety Desk.' }).waitFor();
+  if (startupRequests !== 3 || (await page.locator('.desk-shell').count()))
+    throw new Error('Denied startup displayed a loaded queue or repeated its reads.');
+  if (await page.locator('input[type="password"]').count())
+    throw new Error('Safety Desk still asks for an additional access code.');
+  const deniedReads = startupRequests;
+  await page.clock.fastForward(1_000);
+  if (startupRequests !== deniedReads)
+    throw new Error('Denied startup retried without an operator action.');
+  startupDenied = false;
+  await page.getByRole('button', { name: 'Повторить загрузку', exact: true }).click();
   await page.getByRole('button', { name: 'Публикации' }).waitFor();
+  if (startupRequests !== deniedReads + 3)
+    throw new Error('The startup retry did not load the server queues once.');
+  await page.reload();
+  await page.getByRole('button', { name: 'Публикации' }).waitFor();
+  if (await page.locator('input[type="password"]').count())
+    throw new Error('A fresh Safety Desk session still asks for an access code.');
   if (overviewOnly) {
     await page.getByRole('button', { name: 'Наблюдения', exact: true }).click();
     await smokeRuntimeOverview(page, profile, overviewControls);
@@ -1036,14 +1060,12 @@ async function smokeProfile(activeBrowser, profile) {
     throw new Error('Hidden commercial AI observations were refreshed.');
 
   // A fresh owner session requires a new explicit delivery selection.
-  expectedAccessCode = 'admin-smoke-next-owner';
   cohortUnavailable = false;
   deliveryEvidenceMalformed = false;
   deliveryEvidenceDenied = false;
   const previousEvidenceReads = deliveryEvidenceRequests;
   await page.reload();
-  await page.getByPlaceholder('Введите код').fill(expectedAccessCode);
-  await page.getByRole('button', { name: 'Войти' }).click();
+  await page.getByRole('button', { name: 'Публикации', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Наблюдения', exact: true }).click();
   await observationSelector.getByRole('button', { name: 'Доставки Публика', exact: true }).click();
   await deliveryPanel.getByRole('table').first().waitFor();
@@ -1073,18 +1095,8 @@ async function smokeProfile(activeBrowser, profile) {
   await page.getByRole('button', { name: 'Публикации' }).click();
 
   const state = await page.evaluate(() => ({
-    href: window.location.href,
-    localStorage: JSON.stringify(window.localStorage),
-    sessionStorage: JSON.stringify(window.sessionStorage),
     hasOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
   }));
-  if (
-    [accessCode, expectedAccessCode].some((code) =>
-      `${state.href}${state.localStorage}${state.sessionStorage}`.includes(code),
-    )
-  ) {
-    errors.push('access code leaked into browser URL/storage');
-  }
   if (state.hasOverflow) {
     errors.push(`horizontal overflow at ${profile.viewport.width}px`);
   }

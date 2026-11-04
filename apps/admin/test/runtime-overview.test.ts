@@ -14,12 +14,10 @@ const render = (snapshot = overviewFixture(now)) =>
   renderToStaticMarkup(createElement(RuntimeOverviewSnapshot, { snapshot, now }));
 
 test('default observations opens the overview and leaves detailed cohorts lazy', () => {
-  const html = renderToStaticMarkup(
-    createElement(ObservabilityDesk, { accessCode: 'private-owner-code', refreshToken: 0 }),
-  );
+  const html = renderToStaticMarkup(createElement(ObservabilityDesk, { refreshToken: 0 }));
   assert.match(html, /aria-label="Боты и очереди"/);
   assert.match(html, /Читаю сохранённые наблюдения/);
-  assert.doesNotMatch(html, /aria-label="Результаты обработки событий"|private-owner-code/);
+  assert.doesNotMatch(html, /aria-label="Результаты обработки событий"/);
 });
 
 test('a good completed p95 cannot hide an old incoming receipt or incomplete coverage', () => {
@@ -171,14 +169,14 @@ test('overview client uses a schema-validated, cancellable same-origin owner rea
       });
     }),
   );
-  await client.fetchRuntimeOverview('owner-private', controller.signal);
+  await client.fetchRuntimeOverview(controller.signal);
   assert.equal(captured!.url, '/api/v1/safety-desk/runtime/overview');
   assert.equal(captured!.options?.signal, controller.signal);
   assert.equal(captured!.options?.cache, 'no-store');
   assert.equal(captured!.options?.credentials, 'same-origin');
   assert.equal(
     (captured!.options?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'owner-private',
+    undefined,
   );
   assert.doesNotMatch(captured!.url, /owner-private|system/);
   const invalid = new SafetyDeskApiClient(
@@ -186,5 +184,5 @@ test('overview client uses a schema-validated, cancellable same-origin owner rea
       async () => new Response('{"bots":[]}', { headers: { 'Content-Type': 'application/json' } }),
     ),
   );
-  await assert.rejects(() => invalid.fetchRuntimeOverview('owner-private'));
+  await assert.rejects(() => invalid.fetchRuntimeOverview());
 });

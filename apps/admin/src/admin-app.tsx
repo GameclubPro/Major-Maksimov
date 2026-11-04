@@ -1,9 +1,9 @@
-import { Check, Download, Lock, Refresh } from 'iconoir-react';
+import { Check, Download, Refresh } from 'iconoir-react';
 import {
   type SafetyDeskDeleteIntentItem,
   type SafetyDeskDeleteRuntimeResponse,
 } from '@maxim/contracts/safety-desk';
-import { useMemo, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { DeleteDesk, DeleteRuntimeMetrics } from './delete-desk';
 import { ReviewDesk } from './review-desk';
 import { CommercialReviewDesk } from './commercial-review-desk';
@@ -41,10 +41,9 @@ import { SafetyDeskNavigation } from './safety-desk-navigation';
 import { ObservabilityDesk } from './observability-desk';
 
 export function AdminApp() {
-  const [unlocked, setUnlocked] = useState(false);
-  const [code, setCode] = useState('');
-  const [verifiedAccessCode, setVerifiedAccessCode] = useState('');
-  const overviewAccessScope = useMemo(() => ({ denied: false }), [verifiedAccessCode]);
+  const [hasSnapshot, setHasSnapshot] = useState(false);
+  const overviewAccessScope = useMemo(() => ({ denied: false }), []);
+  const queueRequestSequence = useRef(0);
   const [view, setView] = useState<DeskView>('review');
   const [filter, setFilter] = useState<'all' | QueueStatus>('all');
   const [supportFilter, setSupportFilter] = useState<'all' | SupportStatus>('new');
@@ -63,8 +62,8 @@ export function AdminApp() {
   const [selectedId, setSelectedId] = useState('');
   const [supportSelectedId, setSupportSelectedId] = useState('');
   const [deleteSelectedId, setDeleteSelectedId] = useState('');
-  const [notice, setNotice] = useState('Готово к проверке');
-  const [loading, setLoading] = useState(false);
+  const [notice, setNotice] = useState('Загружаю данные…');
+  const [loading, setLoading] = useState(true);
   const [busyItemId, setBusyItemId] = useState<string | null>(null);
   const [busySupportId, setBusySupportId] = useState<string | null>(null);
   const [busyAmbiguousSendId, setBusyAmbiguousSendId] = useState<string | null>(null);
@@ -92,39 +91,33 @@ export function AdminApp() {
   const visibleReviewItems = useMemo(() => getApprovableReviewItems(visibleItems), [visibleItems]);
   const bulkReviewCount = visibleReviewItems.length;
 
-  async function unlock() {
-    const candidate = code.trim();
-    if (!candidate) {
-      setNotice('Введите код доступа');
-      return;
-    }
-
-    const loaded = await refreshQueue('Очередь загружена', candidate);
-    if (loaded) {
-      setVerifiedAccessCode(candidate);
-      setUnlocked(true);
-      setCode('');
-      return;
-    }
-
-    setNotice('Неверный код доступа или API недоступен');
-  }
+  const loadInitialQueues = useEffectEvent((isCurrent: () => boolean) =>
+    refreshQueue('Очередь загружена', isCurrent),
+  );
+  useEffect(() => {
+    let current = true;
+    void loadInitialQueues(() => current);
+    return () => {
+      current = false;
+      ++queueRequestSequence.current;
+    };
+  }, []);
 
   async function refreshQueue(
     successMessage = 'Очередь обновлена с сервера',
-    requestAccessCode = verifiedAccessCode,
+    isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    if (!requestAccessCode) {
-      setNotice('Введите код доступа');
-      return false;
-    }
+    const sequence = ++queueRequestSequence.current;
+    const canApply = () => isCurrent() && sequence === queueRequestSequence.current;
     setLoading(true);
     try {
       const [queueResult, supportResult, deleteResult] = await Promise.allSettled([
-        safetyDeskApiClient.fetchQueue(requestAccessCode),
-        supportRequestsApiClient.fetchQueue(requestAccessCode),
-        safetyDeskApiClient.fetchDeleteRuntime(requestAccessCode),
+        safetyDeskApiClient.fetchQueue(),
+        supportRequestsApiClient.fetchQueue(),
+        safetyDeskApiClient.fetchDeleteRuntime(),
       ]);
+      // FLAG: Superseded or disposed reads cannot apply their late queue responses.
+      if (!canApply()) return false;
       if (queueResult.status === 'fulfilled') {
         applyQueueResponse(queueResult.value);
       }
@@ -140,6 +133,7 @@ export function AdminApp() {
         supportResult.status === 'fulfilled' &&
         deleteResult.status === 'fulfilled'
       ) {
+        setHasSnapshot(true);
         setNotice(successMessage);
         return true;
       }
@@ -152,6 +146,7 @@ export function AdminApp() {
         supportResult.status === 'fulfilled' ? 'обращения' : null,
         deleteResult.status === 'fulfilled' ? 'удаления' : null,
       ].filter(Boolean);
+      if (loaded.length > 0) setHasSnapshot(true);
       setNotice(
         loaded.length > 0
           ? `Частично обновлено: ${loaded.join(', ')}. ${errors.join('; ')}`
@@ -159,10 +154,10 @@ export function AdminApp() {
       );
       return loaded.length > 0;
     } catch (error) {
-      setNotice(readErrorMessage(error));
+      if (canApply()) setNotice(readErrorMessage(error));
       return false;
     } finally {
-      setLoading(false);
+      if (canApply()) setLoading(false);
     }
   }
 
@@ -174,7 +169,7 @@ export function AdminApp() {
     setBusySupportId(itemId);
     setNotice('Закрываю обращение');
     try {
-      const response = await supportRequestsApiClient.close(itemId, verifiedAccessCode);
+      const response = await supportRequestsApiClient.close(itemId);
       applySupportQueueResponse(response.queue, response.item?.id ?? itemId);
       setNotice(response.message);
     } catch (error) {
@@ -218,9 +213,7 @@ export function AdminApp() {
       }
       setBusyAmbiguousSendId(item.id);
       setNotice('Снимаю блокировку повторной публикации');
-      applyDeleteRuntimeResponse(
-        await safetyDeskApiClient.allowAmbiguousSendRetry(item, verifiedAccessCode),
-      );
+      applyDeleteRuntimeResponse(await safetyDeskApiClient.allowAmbiguousSendRetry(item));
       setNotice('Повторная публикация правил разрешена');
     } catch (error) {
       setNotice(readErrorMessage(error));
@@ -252,15 +245,12 @@ export function AdminApp() {
       setBusyDeleteIntentId(item.id);
       setNotice('Возвращаю удаление в безопасную очередь');
       applyDeleteRuntimeResponse(
-        await safetyDeskApiClient.retryDeleteIntent(
-          {
-            id: item.id,
-            status: item.status,
-            updatedAt: item.updatedAt,
-            attemptCount: item.attemptCount,
-          },
-          verifiedAccessCode,
-        ),
+        await safetyDeskApiClient.retryDeleteIntent({
+          id: item.id,
+          status: item.status,
+          updatedAt: item.updatedAt,
+          attemptCount: item.attemptCount,
+        }),
       );
       setNotice('Удаление возвращено в очередь');
     } catch (error) {
@@ -292,7 +282,7 @@ export function AdminApp() {
       setNotice(
         isReviewScopeFiltered ? 'Одобряю видимые материалы' : 'Одобряю материалы из очереди',
       );
-      const response = await safetyDeskApiClient.approveAll(itemIds, verifiedAccessCode);
+      const response = await safetyDeskApiClient.approveAll(itemIds);
       applyQueueResponse(response.queue);
       setNotice(response.message);
     } catch (error) {
@@ -315,7 +305,7 @@ export function AdminApp() {
     setBusyItemId(itemId);
     setNotice(progressMessage);
     try {
-      const response = await safetyDeskApiClient.decide(itemId, action, verifiedAccessCode);
+      const response = await safetyDeskApiClient.decide(itemId, action);
       applyQueueResponse(response.queue, response.item?.id ?? itemId);
       setNotice(response.message);
     } catch (error) {
@@ -376,44 +366,20 @@ export function AdminApp() {
     setNotice('Экспорт текущей очереди подготовлен и скачан');
   }
 
-  if (!unlocked) {
+  if (!hasSnapshot) {
     return (
       <main className="auth-shell">
-        <section className="auth-panel" aria-labelledby="auth-title">
-          <div className="auth-panel__mark">
-            <Lock width={24} height={24} />
-          </div>
-          <h1 id="auth-title">Safety Desk</h1>
-          {notice !== 'Готово к проверке' && (
-            <p className="auth-alert" aria-live="polite">
-              {notice}
-            </p>
+        <section className="auth-panel" aria-labelledby="desk-load-title" aria-busy={loading}>
+          <h1 id="desk-load-title">Safety Desk</h1>
+          <p className={loading ? undefined : 'auth-alert'} role={loading ? 'status' : 'alert'}>
+            {loading ? 'Загружаю данные…' : notice}
+          </p>
+          {!loading && (
+            <button className="primary-action" type="button" onClick={() => void refreshQueue()}>
+              <Refresh width={18} height={18} />
+              Повторить загрузку
+            </button>
           )}
-          <label className="auth-field">
-            <span>Код доступа</span>
-            <input
-              value={code}
-              onChange={(event) => setCode(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  void unlock();
-                }
-              }}
-              type="password"
-              autoComplete="current-password"
-              placeholder="Введите код"
-              disabled={loading}
-            />
-          </label>
-          <button
-            className="primary-action"
-            type="button"
-            disabled={loading}
-            onClick={() => void unlock()}
-          >
-            <Check width={18} height={18} />
-            Войти
-          </button>
         </section>
       </main>
     );
@@ -515,18 +481,16 @@ export function AdminApp() {
           onSelect={setSupportSelectedId}
         />
       ) : view === 'commercial' ? (
-        <CommercialReviewDesk accessCode={verifiedAccessCode} />
+        <CommercialReviewDesk />
       ) : view === 'retention' ? (
-        <RetentionDeskPane accessCode={verifiedAccessCode} controls={retention} />
+        <RetentionDeskPane controls={retention} />
       ) : view === 'observations' ? (
         <ObservabilityDesk
-          accessCode={verifiedAccessCode}
           refreshToken={observationRefreshToken}
           accessScope={overviewAccessScope}
         />
       ) : (
         <DeleteDesk
-          accessCode={verifiedAccessCode}
           busyAmbiguousSendId={busyAmbiguousSendId}
           busyDeleteIntentId={busyDeleteIntentId}
           filter={deleteFilter}

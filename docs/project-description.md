@@ -139,9 +139,10 @@ production origin включается только явным visual mode.
 
 - `admin-static` обслуживает UI на локальном порту 3004.
 - Nginx Basic Auth защищает сайт и проксирует same-origin `/api/v1/` в `api-admin`.
-- API guard проверяет admin forwarded host и `X-Remote-User`.
+- API guard проверяет совпадение admin host и forwarded host, `X-Remote-User` от nginx и origin запроса.
 - Public Major nginx sites явно запрещают Safety Desk/support endpoints.
-- `ADMIN_ACCESS_CODE` проверяется сервером и не попадает в Vite bundle.
+- По решению владельца от 4 ноября 2026 года дополнительного кода доступа нет:
+  после Basic Auth панель сразу загружает данные. Пароль не передаётся в приложение или Vite bundle.
 
 Safety Desk не использует MAX Bridge или mini app init data.
 

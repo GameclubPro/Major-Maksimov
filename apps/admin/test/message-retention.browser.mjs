@@ -263,8 +263,6 @@ async function fixture(viewport = { width: 1440, height: 900 }) {
     return respond({ generatedAt: date, summary: {}, items: [] });
   });
   await page.goto(base);
-  await page.getByLabel('Код доступа').fill('admin-test-access');
-  await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await page.getByRole('button', { name: 'Очистка', exact: true }).waitFor();
   return { context, page, state, errors };
 }
@@ -371,9 +369,7 @@ try {
     await page.getByRole('heading', { name: 'Не удалось открыть очистку', exact: true }).waitFor();
     await page.unroute(moduleUrl);
     await page.getByRole('button', { name: 'Перезагрузить Safety Desk', exact: true }).click();
-    await page.getByLabel('Код доступа').waitFor();
-    await page.getByLabel('Код доступа').fill('admin-test-access');
-    await page.getByRole('button', { name: 'Войти', exact: true }).click();
+    await page.getByRole('button', { name: 'Очистка', exact: true }).waitFor();
     await openRetention(page);
     assert.deepEqual(errors, []);
     await context.close();

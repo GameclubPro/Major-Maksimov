@@ -1,13 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash, timingSafeEqual } from 'node:crypto';
-
-const DISALLOWED_ACCESS_CODES = new Set([
-  'change-me',
-  'changeme',
-  'replace-me',
-  'replace-with-random-admin-code',
-]);
+import { RUNTIME_OVERVIEW_READER_USER } from './runtime-overview-reader.guard';
 
 @Injectable()
 export class SafetyDeskAdminGuard implements CanActivate {
@@ -18,7 +11,6 @@ export class SafetyDeskAdminGuard implements CanActivate {
       .switchToHttp()
       .getRequest<{ headers: Record<string, string | string[] | undefined> }>();
     const host = this.normalizeHost(this.readHeader(request.headers.host));
-    const hasValidAccessCode = this.hasValidAccessCode(request.headers);
 
     if (this.isProduction()) {
       const forwardedHost = this.normalizeHost(
@@ -26,14 +18,15 @@ export class SafetyDeskAdminGuard implements CanActivate {
       );
       const remoteUser = this.readHeader(request.headers['x-remote-user'])?.trim() ?? '';
 
+      // FLAG: The observation-only nginx identity must never acquire owner API access.
       if (
         remoteUser &&
+        remoteUser !== RUNTIME_OVERVIEW_READER_USER &&
         host &&
         forwardedHost &&
         host === forwardedHost &&
         this.isAllowedHost(host) &&
-        this.isAllowedAdminRequestOrigin(request.headers) &&
-        hasValidAccessCode
+        this.isAllowedAdminRequestOrigin(request.headers)
       ) {
         return true;
       }
@@ -41,7 +34,7 @@ export class SafetyDeskAdminGuard implements CanActivate {
       throw new ForbiddenException('Safety Desk доступен только через закрытый admin-хост.');
     }
 
-    if (host && this.isAllowedHost(host) && hasValidAccessCode) {
+    if (host && this.isAllowedHost(host)) {
       return true;
     }
 
@@ -68,23 +61,6 @@ export class SafetyDeskAdminGuard implements CanActivate {
     }
 
     return this.isAllowedHost(originHost);
-  }
-
-  private hasValidAccessCode(headers: Record<string, string | string[] | undefined>): boolean {
-    const configuredCode = this.configService.get<string>('ADMIN_ACCESS_CODE')?.trim() ?? '';
-    const expectedCode = configuredCode || (this.isProduction() ? '' : 'maxim-local');
-    const presentedCode = this.readHeader(headers['x-admin-access-code'])?.trim() ?? '';
-    if (
-      !expectedCode ||
-      DISALLOWED_ACCESS_CODES.has(expectedCode.toLowerCase()) ||
-      !presentedCode
-    ) {
-      return false;
-    }
-
-    const expectedDigest = createHash('sha256').update(expectedCode).digest();
-    const presentedDigest = createHash('sha256').update(presentedCode).digest();
-    return timingSafeEqual(expectedDigest, presentedDigest);
   }
 
   private isAllowedHost(value: string): boolean {

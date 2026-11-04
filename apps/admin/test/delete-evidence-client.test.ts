@@ -35,7 +35,7 @@ test('delete evidence reads only an exact encoded intent through authenticated G
       return Response.json(snapshot(intentId));
     }),
   );
-  const result = await client.fetchDeleteEvidence(intentId, 'private-code');
+  const result = await client.fetchDeleteEvidence(intentId);
   assert.equal(result.deletion.outcome, 'unknown');
   assert.equal(calls.length, 1);
   assert.equal(
@@ -46,7 +46,7 @@ test('delete evidence reads only an exact encoded intent through authenticated G
   assert.equal(calls[0]!.init?.credentials, 'same-origin');
   assert.equal(
     (calls[0]!.init?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'private-code',
+    undefined,
   );
   assert.equal(calls[0]!.init?.body, undefined);
   assert.equal(calls[0]!.url.includes('private-code'), false);
@@ -57,7 +57,7 @@ test('delete evidence refuses another intent or missing uncertainty metadata', a
     const client = new SafetyDeskApiClient(
       createAdminApiTransport(async () => Response.json(payload)),
     );
-    await assert.rejects(() => client.fetchDeleteEvidence('selected', 'private-code'));
+    await assert.rejects(() => client.fetchDeleteEvidence('selected'));
   }
 });
 

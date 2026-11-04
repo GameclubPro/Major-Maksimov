@@ -106,6 +106,39 @@ test('Safety Desk locations with local headers preserve the complete closed-site
   assertLocalHeadersPreserveSecuritySet(adminConfig, ADMIN_SECURITY_HEADERS);
 });
 
+test('Safety Desk owner APIs accept only the nginx Basic Auth identity on the closed host', () => {
+  assert.match(adminConfig, /^\s*auth_basic\s+"MAXIM Safety Desk";\s*$/mu);
+  assert.match(adminConfig, /^\s*auth_basic_user_file\s+\/etc\/nginx\/htpasswd-maxim-admin;\s*$/mu);
+  assert.doesNotMatch(adminConfig, /\bauth_basic\s+off\s*;|\bsatisfy\s+any\s*;/u);
+  const locations = readLocationBlocks(adminConfig);
+  for (const path of ['/api/v1/safety-desk/', '/api/v1/support-requests/']) {
+    const location = locations.find((block) =>
+      block.split('\n', 1)[0].includes(`location ^~ ${path} {`),
+    );
+    assert.ok(location, `Missing closed owner API location: ${path}`);
+    assert.match(location, /^\s*proxy_pass\s+http:\/\/127\.0\.0\.1:3002;\s*$/mu);
+    assert.match(location, /^\s*proxy_set_header\s+Host\s+\$host;\s*$/mu);
+    assert.match(location, /^\s*proxy_set_header\s+X-Forwarded-Host\s+\$host;\s*$/mu);
+    assert.match(location, /^\s*proxy_set_header\s+X-Remote-User\s+\$remote_user;\s*$/mu);
+    assert.match(location, /^\s*proxy_set_header\s+Authorization\s+"";\s*$/mu);
+  }
+
+  for (const [name, config] of [
+    ['major', majorConfig],
+    ['legacy', legacyConfig],
+  ]) {
+    const publicLocations = readLocationBlocks(config);
+    for (const path of ['/api/v1/safety-desk/', '/api/v1/support-requests/']) {
+      const location = publicLocations.find((block) =>
+        block.split('\n', 1)[0].includes(`location ^~ ${path} {`),
+      );
+      assert.ok(location, `${name} must deny ${path} before its generic API proxy`);
+      assert.match(location, /^\s*return\s+404;\s*$/mu);
+      assert.doesNotMatch(location, /\bproxy_pass\b/u);
+    }
+  }
+});
+
 test('installed Karavan long-lived routes preserve routing, privacy, and security controls', () => {
   const locations = readLocationBlocks(karavanSseLocations);
   assert.equal(locations.length, 6);

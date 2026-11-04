@@ -2,7 +2,7 @@ import type { SafetyDeskCommercialAiPoolResponse } from '@maxim/contracts/safety
 import { safetyDeskApiClient } from './safety-desk-api-client';
 import { ObservationPanel, observationTime, useObservationSnapshot } from './observation-view';
 
-const load = (code: string) => safetyDeskApiClient.fetchCommercialAiPoolRuntime(code);
+const load = () => safetyDeskApiClient.fetchCommercialAiPoolRuntime();
 const names = {
   'server-9b': 'Сервер · Qwen 9B',
   'pc-a-4b': 'ПК-A · Qwen 4B',
@@ -138,8 +138,8 @@ export function CommercialAiPoolSnapshot({
   );
 }
 
-export function CommercialAiPoolDesk(props: { accessCode: string; refreshToken: number }) {
-  const view = useObservationSnapshot(load, props.accessCode, props.refreshToken);
+export function CommercialAiPoolDesk(props: { refreshToken: number }) {
+  const view = useObservationSnapshot(load, props.refreshToken);
   return (
     <ObservationPanel title="Модели рекламного ИИ" {...view}>
       {view.snapshot && <CommercialAiPoolSnapshot snapshot={view.snapshot} />}
