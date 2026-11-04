@@ -51,3 +51,40 @@ test('Lastik bootstrap buffers a fragmented request through EOF before validatin
   assert.equal(stdout, '');
   assert.ok(!stderr.includes('test-only-'), 'request credentials must never enter diagnostics');
 });
+
+test('registry image planning decodes a fragmented UTF8 pipe before selecting exact components', async () => {
+  const sha = 'a'.repeat(40);
+  const request = Buffer.from(
+    `Синхронизация источников\nMAXIM_IMAGE_PLAN=${JSON.stringify({
+      schemaVersion: 1,
+      sourceSha: sha,
+      components: ['admin-static', 'api-shared'],
+    })}\n`,
+  );
+  const child = spawn(
+    process.execPath,
+    [resolve(import.meta.dirname, 'registry-preload.mjs'), 'plan', sha],
+    { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 },
+  );
+  let stdout = '',
+    stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const completed = new Promise((done, reject) => {
+    child.once('error', reject);
+    child.stdin.once('error', reject);
+    child.once('close', (code, signal) => done({ code, signal }));
+  });
+  for (let offset = 0; offset < request.length; offset += 7) {
+    child.stdin.write(request.subarray(offset, offset + 7));
+    await delay(2);
+  }
+  child.stdin.end();
+  assert.deepEqual(await completed, { code: 0, signal: null }, stderr);
+  assert.equal(stdout, 'admin-static\napi-shared\n');
+  assert.equal(stderr, '');
+});

@@ -1,11 +1,21 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { collectGitChanges } from '../agent/git-changes.mjs';
 import { loadImpactConfig } from '../agent/impact-config.mjs';
 import { createImpactPlan } from '../agent/impact-plan.mjs';
+import { createGitHubClient } from './green-workflow-proof.mjs';
+import {
+  BASELINE_POLICY_ID,
+  baselinePolicy,
+  ciContext,
+  createMainGreenCertificate,
+  discoverMainBaseline,
+  freezeBaselineProof,
+  validateFrozenBaseline,
+} from './main-baseline.mjs';
 
 export const CI_LANES = Object.freeze([
   'static',
@@ -17,6 +27,7 @@ export const CI_LANES = Object.freeze([
   'admin',
   'eraser',
   'docker',
+  'registry',
 ]);
 
 export const DOCKER_COMPONENTS = Object.freeze([
@@ -165,10 +176,30 @@ export function selectCiLanes(impact, { base, head }) {
   };
 }
 
-export async function createCiPlan({ cwd = process.cwd(), eventName, event, sha }) {
+// FLAG: Only the impact job discovers a baseline. Required reuses its frozen
+// evidence and computes the same range, even when other main runs finish later.
+export async function createCiPlan({
+  cwd = process.cwd(),
+  eventName,
+  event,
+  sha,
+  context,
+  github,
+  frozenProof,
+}) {
   if (!SHA.test(sha ?? '') || git(cwd, ['rev-parse', 'HEAD']) !== sha) {
     throw new Error('CI checkout must match the exact event SHA.');
   }
+  if (!context || context.sha !== sha || context.event !== eventName) {
+    throw new Error('CI plan requires the exact current workflow context.');
+  }
+  let policy;
+  try {
+    policy = baselinePolicy({ cwd, sha });
+  } catch {
+    policy = { id: BASELINE_POLICY_ID, fingerprint: null };
+  }
+  let proof;
   let base;
   if (eventName === 'pull_request') {
     base = event.pull_request?.base?.sha;
@@ -176,22 +207,68 @@ export async function createCiPlan({ cwd = process.cwd(), eventName, event, sha 
     if (!SHA.test(requestedHead ?? '') || !isAncestor(cwd, requestedHead, sha)) {
       throw new Error('CI checkout does not contain the pull request head.');
     }
+    proof =
+      SHA.test(base ?? '') && !/^0+$/u.test(base) && isAncestor(cwd, base, sha)
+        ? freezeBaselineProof({
+            context,
+            policy,
+            kind: 'pull-request',
+            base,
+            reason: 'recorded-pull-request-base',
+          })
+        : freezeBaselineProof({ context, policy, kind: 'full', reason: 'unproved-base' });
   } else if (eventName === 'push') {
     if (event.after !== sha) throw new Error('Push event and checked-out SHA disagree.');
-    base = event.before;
+    proof =
+      frozenProof ??
+      (policy.fingerprint
+        ? discoverMainBaseline({
+            cwd,
+            context,
+            policy,
+            github: github ?? createGitHubClient({ cwd }),
+          })
+        : freezeBaselineProof({ context, policy, kind: 'full', reason: 'unavailable-ci-policy' }));
+    base = proof.base;
   } else {
-    return fullPlan(sha, 'manual-scheduled-or-unsupported-event');
+    proof = freezeBaselineProof({
+      context,
+      policy,
+      kind: 'full',
+      reason: 'manual-scheduled-or-unsupported-event',
+    });
   }
-
-  // FLAG: Missing history, first pushes and rewritten histories run all lanes.
-  // A truncated API file list or a guessed parent must never authorize a skip.
-  if (!SHA.test(base ?? '') || /^0+$/u.test(base) || !isAncestor(cwd, base, sha)) {
-    return fullPlan(sha, 'unproved-base');
+  if (frozenProof) {
+    validateFrozenBaseline({
+      proof: frozenProof,
+      cwd,
+      context,
+      policy,
+      github: github ?? createGitHubClient({ cwd }),
+    });
+    if (JSON.stringify(proof) !== JSON.stringify(frozenProof)) {
+      throw new Error('Frozen CI proof disagrees with the recorded event base.');
+    }
   }
-  const config = await loadImpactConfig();
-  const changeSet = collectGitChanges({ cwd, mode: 'range', base, head: sha });
-  const impact = createImpactPlan({ config, changeSet });
-  return selectCiLanes(impact, { base, head: sha });
+  let plan;
+  if (proof.kind === 'full') {
+    plan = fullPlan(sha, proof.reason);
+  } else if (!SHA.test(base ?? '') || /^0+$/u.test(base) || !isAncestor(cwd, base, sha)) {
+    plan = fullPlan(sha, 'unproved-base');
+  } else {
+    const config = await loadImpactConfig();
+    const changeSet = collectGitChanges({ cwd, mode: 'range', base, head: sha });
+    const impact = createImpactPlan({ config, changeSet });
+    plan = selectCiLanes(impact, { base, head: sha });
+  }
+  // FLAG: Publishing permissions are restricted to trusted main push/manual preparation;
+  // pull requests and scheduled validation must never acquire registry credentials.
+  plan.lanes.registry =
+    ['push', 'workflow_dispatch'].includes(context.event) &&
+    context.ref === 'refs/heads/main' &&
+    plan.dockerComponents.length > 0;
+  plan.baselineProof = proof;
+  return plan;
 }
 
 export function ciOutputs(plan) {
@@ -234,17 +311,36 @@ export function verifyCiResults(plan, needs) {
 
 export async function runCiImpact(command, env = process.env) {
   if (!['plan', 'verify'].includes(command)) throw new Error('Expected plan or verify.');
+  const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8'));
+  const context = ciContext(env, event);
+  const needs = command === 'verify' ? JSON.parse(env.CI_NEEDS) : null;
+  const frozen = needs?.impact?.outputs?.plan;
+  if (command === 'verify' && (typeof frozen !== 'string' || frozen.length > 65536)) {
+    throw new Error('Required did not receive a bounded frozen impact plan.');
+  }
+  const recordedPlan = frozen ? JSON.parse(frozen) : null;
+  if (command === 'verify' && !recordedPlan?.baselineProof) {
+    throw new Error('Required did not receive the frozen baseline proof.');
+  }
   const plan = await createCiPlan({
     eventName: env.GITHUB_EVENT_NAME,
-    event: JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, 'utf8')),
+    event,
     sha: env.GITHUB_SHA,
+    context,
+    frozenProof: recordedPlan?.baselineProof,
   });
   if (command === 'verify') {
-    verifyCiResults(plan, JSON.parse(env.CI_NEEDS));
+    verifyCiResults(plan, needs);
+    if (env.CI_CERTIFICATE_PATH) {
+      const certificate = createMainGreenCertificate(plan);
+      if (certificate)
+        writeFileSync(env.CI_CERTIFICATE_PATH, `${JSON.stringify(certificate)}\n`, { mode: 0o600 });
+    }
     process.stdout.write(
-      'Required: every selected lane passed; every skip matches the verified impact.\n',
+      'Required: every selected lane passed; every skip matches the frozen baseline and verified impact.\n',
     );
   } else {
+    if (env.CI_PLAN_PATH) writeFileSync(env.CI_PLAN_PATH, `${JSON.stringify(plan, null, 2)}\n`);
     if (env.GITHUB_OUTPUT) {
       appendFileSync(
         env.GITHUB_OUTPUT,

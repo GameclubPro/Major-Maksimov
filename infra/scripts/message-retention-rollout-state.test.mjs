@@ -166,27 +166,122 @@ test('requires a complete Compose topology and exactly one explicit matching run
   }
 });
 
-test('caller accepts only explicit on/off and forwards the setting only through deploy', () => {
-  for (const mode of ['', 'on', 'off', 'shadow', 'canary', '*']) {
-    const result = shell(
-      `
-${block(connect, 'deploy_main')}
-maxim_validate_git_ssh_port() { :; }
-git() { printf '%040d' 1; }
-node() { :; }
+const connectorDoubles = `
+${block(connect, 'prepare_registry_release_images')}
+CONNECTOR_SHA=0000000000000000000000000000000000000001
+CONNECTOR_CI_CALLS=0
+CONNECTOR_SYNC_SEEN=0
+CONNECTOR_PRELOADS=0
+MAXIM_DEPLOY_EMERGENCY_BYPASS=0
+maxim_validate_git_ssh_port() { [[ "$#" == 1 && "$1" == default ]]; }
+git() {
+  [[ "$#" == 4 && "$*" == 'rev-parse --verify --end-of-options main^{commit}' ]] || return 91
+  printf '%s' "$CONNECTOR_SHA"
+}
+node() {
+  if [[ "$#" == 4 && "$1" == scripts/ci/assert-green.mjs && "$2" == "$CONNECTOR_SHA" && "$3" == --purpose && "$4" == production ]]; then
+    CONNECTOR_CI_CALLS=$((CONNECTOR_CI_CALLS + 1))
+    [[ "$CONNECTOR_CI_CALLS" -le 2 ]] || return 92
+    if [[ "$CONNECTOR_CI_CALLS" == 2 ]]; then
+      [[ "$CONNECTOR_SYNC_SEEN" == 1 && "$CONNECTOR_PRELOADS" == 1 ]] || return 93
+    fi
+    printf 'CI:%s\\n' "$CONNECTOR_CI_CALLS" >&2
+    [[ "\${CONNECTOR_FAIL_AT:-}" != "ci-$CONNECTOR_CI_CALLS" ]] || return 66
+  elif [[ "$#" == 3 && "$1" == infra/scripts/registry-preload.mjs && "$2" == plan && "$3" == "$CONNECTOR_SHA" ]]; then
+    command node "$@"
+  else
+    return 94
+  fi
+}
 shell_quote_args() { printf '%s ' "$@"; }
 prepend_webhook_rollout_recovery_env() { :; }
 prepend_post_release_reclaim_env() { :; }
 prepend_deploy_disk_floor_env() { :; }
 prepend_deploy_ready_timeout_env() { :; }
 maxim_prepend_git_ssh_transport() { :; }
-remote_exec() { printf '%s' "$1"; }
+connector_assert_runtime_command() {
+  [[ "$#" == 1 && "$1" == *"MAXIM_EXPECTED_DEPLOY_SHA=$CONNECTOR_SHA "* && "$1" == *'./infra/scripts/vps-pull-build-up.sh main --auto '* ]] || return 95
+  if [[ -n "\${MAXIM_MESSAGE_RETENTION_MODE:-}" ]]; then
+    [[ "$1" == *"MAXIM_MESSAGE_RETENTION_MODE=$MAXIM_MESSAGE_RETENTION_MODE "* ]] || return 96
+  else
+    [[ "$1" != *'MAXIM_MESSAGE_RETENTION_MODE='* ]] || return 96
+  fi
+}
+remote_exec() {
+  [[ "$#" == 1 ]] || return 97
+  if [[ "$1" == *' --plan ' ]]; then
+    [[ "$CONNECTOR_CI_CALLS" == 1 && "$CONNECTOR_SYNC_SEEN" == 0 && "$1" == "MAXIM_EXPECTED_DEPLOY_SHA=$CONNECTOR_SHA ./infra/scripts/vps-pull-build-up.sh main --plan " ]] || return 98
+    printf 'SYNC\\n' >&2
+    [[ "\${CONNECTOR_FAIL_AT:-}" != sync ]] || return 67
+    CONNECTOR_SYNC_SEEN=1
+  elif [[ "$1" == *' --image-plan' ]]; then
+    [[ "$CONNECTOR_CI_CALLS" == 1 && "$CONNECTOR_SYNC_SEEN" == 1 ]] || return 99
+    connector_assert_runtime_command "$1" || return
+    printf 'IMAGE_PLAN\\n' >&2
+    [[ "\${CONNECTOR_FAIL_AT:-}" != image-plan ]] || return 68
+    printf 'MAXIM_IMAGE_PLAN={"schemaVersion":1,"sourceSha":"%s","components":["api-shared"]}\\n' "$CONNECTOR_SHA"
+  else
+    [[ "$CONNECTOR_CI_CALLS" == 2 && "$CONNECTOR_SYNC_SEEN" == 1 && "$CONNECTOR_PRELOADS" == 1 ]] || return 100
+    connector_assert_runtime_command "$1" || return
+    printf 'RUNTIME\\n' >&2
+    printf '%s' "$1"
+  fi
+}
+preload_ci_image() {
+  [[ "$#" == 2 && "$1" == api-shared && "$2" == "$CONNECTOR_SHA" && "$CONNECTOR_CI_CALLS" == 1 && "$CONNECTOR_SYNC_SEEN" == 1 && "$CONNECTOR_PRELOADS" == 0 ]] || return 101
+  printf 'PRELOAD:api-shared\\n' >&2
+  [[ "\${CONNECTOR_FAIL_AT:-}" != preload ]] || return 69
+  CONNECTOR_PRELOADS=1
+}
+`;
+
+const connectorStages = ['CI:1', 'SYNC', 'IMAGE_PLAN', 'PRELOAD:api-shared', 'CI:2', 'RUNTIME'];
+function assertConnectorStages(result, accepted) {
+  const events = result.stderr
+    .trim()
+    .split('\n')
+    .filter((line) => connectorStages.includes(line));
+  assert.deepEqual(events, accepted ? connectorStages : []);
+}
+
+test('feature activation stops before runtime after either CI proof or image preparation fails', () => {
+  for (const [failAt, event, status] of [
+    ['ci-1', 'CI:1', 66],
+    ['sync', 'SYNC', 67],
+    ['image-plan', 'IMAGE_PLAN', 68],
+    ['preload', 'PRELOAD:api-shared', 69],
+    ['ci-2', 'CI:2', 66],
+  ]) {
+    const result = shell(
+      `
+${block(connect, 'deploy_main')}
+${connectorDoubles}
+deploy_main main --auto
+`,
+      { MAXIM_MESSAGE_RETENTION_MODE: 'on', CONNECTOR_FAIL_AT: failAt },
+    );
+    assert.equal(result.status, status, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(
+      result.stderr.trim().split('\n'),
+      connectorStages.slice(0, connectorStages.indexOf(event) + 1),
+    );
+  }
+});
+
+test('caller accepts only explicit on/off and forwards the setting only through deploy', () => {
+  for (const mode of ['', 'on', 'off', 'shadow', 'canary', '*']) {
+    const result = shell(
+      `
+${block(connect, 'deploy_main')}
+${connectorDoubles}
 deploy_main main --auto
 `,
       { MAXIM_MESSAGE_RETENTION_MODE: mode },
     );
     const accepted = ['', 'on', 'off'].includes(mode);
     assert.equal(result.status, accepted ? 0 : 2, result.stderr);
+    assertConnectorStages(result, accepted);
     if (accepted && mode)
       assert.match(result.stdout, new RegExp(`MAXIM_MESSAGE_RETENTION_MODE=${mode} `, 'u'));
     if (!accepted) assert.equal(result.stdout, '');
@@ -223,16 +318,7 @@ test('retention mode is caller-only across persisted VPS configuration', (t) => 
 ENV_FILE="$RETENTION_TEST_ENV_FILE"
 ${bootstrap}
 ${block(connect, 'deploy_main')}
-maxim_validate_git_ssh_port() { :; }
-git() { printf '%040d' 1; }
-node() { :; }
-shell_quote_args() { printf '%s ' "$@"; }
-prepend_webhook_rollout_recovery_env() { :; }
-prepend_post_release_reclaim_env() { :; }
-prepend_deploy_disk_floor_env() { :; }
-prepend_deploy_ready_timeout_env() { :; }
-maxim_prepend_git_ssh_transport() { :; }
-remote_exec() { printf '%s' "$1"; }
+${connectorDoubles}
 deploy_main main --auto
 `,
       {
@@ -241,6 +327,7 @@ deploy_main main --auto
       },
     );
     assert.equal(result.status, status, result.stderr);
+    assertConnectorStages(result, status === 0);
     if (expected) {
       assert.match(result.stdout, new RegExp(`MAXIM_MESSAGE_RETENTION_MODE=${expected} `, 'u'));
     } else {

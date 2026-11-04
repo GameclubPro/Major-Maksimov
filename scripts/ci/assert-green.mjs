@@ -3,8 +3,16 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  createGitHubClient,
+  GITHUB_ACTIONS_APP_ID,
+  GREEN_WORKFLOWS,
+  proveGreenWorkflow,
+  proveGreenWorkflows,
+  REPOSITORY,
+} from './green-workflow-proof.mjs';
+export { GITHUB_ACTIONS_APP_ID } from './green-workflow-proof.mjs';
 
-export const GITHUB_ACTIONS_APP_ID = 15368;
 export const PRODUCTION_REQUIRED_CHECK = 'Required';
 export const PRODUCTION_REQUIRED_CHECKS = Object.freeze([
   Object.freeze({ name: PRODUCTION_REQUIRED_CHECK, appId: GITHUB_ACTIONS_APP_ID }),
@@ -74,43 +82,99 @@ export function assertGreenCheckRuns(payload, sha, requiredChecks = PRODUCTION_R
 export function assertCommitHasGreenCi({
   cwd = process.cwd(),
   sha,
-  requiredChecks = PRODUCTION_REQUIRED_CHECKS,
+  purpose = process.env.MAXIM_CI_PURPOSE || 'review',
+  expectedCiRun,
+  github = createGitHubClient({ cwd }),
 }) {
+  if (expectedCiRun && purpose !== 'production') {
+    throw new Error('Image publication proof requires the independent production gates.');
+  }
   const exactSha = execFileSync(
     'git',
     ['rev-parse', '--verify', '--end-of-options', `${sha}^{commit}`],
     { cwd, encoding: 'utf8' },
   ).trim();
-  const remote = execFileSync('git', ['remote', 'get-url', 'origin'], {
-    cwd,
-    encoding: 'utf8',
-  });
-  const repository = process.env.GITHUB_REPOSITORY || parseGitHubRepository(remote);
-  const payload = JSON.parse(
-    execFileSync(
-      'gh',
-      [
-        'api',
-        '--method',
-        'GET',
-        `repos/${repository}/commits/${exactSha}/check-runs`,
-        '-f',
-        'per_page=100',
-      ],
-      { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
-    ),
-  );
-  const checks = assertGreenCheckRuns(payload, exactSha, requiredChecks);
-  return { repository, sha: exactSha, checks };
+  const remote = execFileSync('git', ['remote', 'get-url', 'origin'], { cwd, encoding: 'utf8' });
+  const repository = parseGitHubRepository(remote);
+  if (
+    repository !== REPOSITORY ||
+    (process.env.GITHUB_REPOSITORY && process.env.GITHUB_REPOSITORY !== repository)
+  ) {
+    throw new Error('CI evidence requires this exact GitHub repository and origin.');
+  }
+  // FLAG: Named green checks alone are not deployment authority. Bind both
+  // gates to their approved workflow, source, current run and current attempt.
+  const proofs = proveGreenWorkflows({ github, sha: exactSha, purpose });
+  let publication;
+  if (expectedCiRun) {
+    publication = proveGreenWorkflow({
+      github,
+      sha: exactSha,
+      workflow: GREEN_WORKFLOWS[0],
+      purpose: 'publication',
+      expectedRun: expectedCiRun,
+    });
+  }
+  return {
+    repository,
+    sha: exactSha,
+    checks: proofs.map((proof) => proof.check),
+    proofs,
+    ...(publication ? { publication } : {}),
+  };
+}
+
+export function parseCiArguments(args, env = process.env) {
+  let sha = 'HEAD';
+  let hasSha = false;
+  let purpose = env.MAXIM_CI_PURPOSE || 'review';
+  let runId;
+  let runAttempt;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (['--purpose', '--run-id', '--run-attempt'].includes(value)) {
+      const next = args[++index];
+      if (!next || next.startsWith('--')) throw new Error(`Missing value for ${value}.`);
+      if (value === '--purpose') purpose = next;
+      else if (value === '--run-id') runId = Number(next);
+      else runAttempt = Number(next);
+    } else if (value.startsWith('-') || hasSha) {
+      throw new Error(`Unknown CI assertion argument: ${value}.`);
+    } else {
+      sha = value;
+      hasSha = true;
+    }
+  }
+  if (!['production', 'review'].includes(purpose))
+    throw new Error('Expected production or review CI purpose.');
+  if (runId !== undefined || runAttempt !== undefined) {
+    if (
+      purpose !== 'production' ||
+      !Number.isSafeInteger(runId) ||
+      runId < 1 ||
+      !Number.isSafeInteger(runAttempt) ||
+      runAttempt < 1
+    ) {
+      throw new Error(
+        'Image publication requires production purpose and a positive run ID/attempt pair.',
+      );
+    }
+  }
+  return {
+    sha,
+    purpose,
+    ...(runId !== undefined ? { expectedCiRun: { id: runId, attempt: runAttempt } } : {}),
+  };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  const cwd = resolve(process.cwd());
-  const sha = process.argv[2] || 'HEAD';
   try {
-    const result = assertCommitHasGreenCi({ cwd, sha });
+    const options = parseCiArguments(process.argv.slice(2));
+    const result = assertCommitHasGreenCi({ cwd: resolve(process.cwd()), ...options });
     const names = result.checks.map((check) => check.name).join(', ');
-    const urls = result.checks.map((check) => check.html_url ?? 'success').join(', ');
+    const urls = result.checks
+      .map((check) => check.html_url ?? check.details_url ?? 'success')
+      .join(', ');
     process.stdout.write(`Verified ${names} for ${result.repository}@${result.sha}: ${urls}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);

@@ -338,11 +338,21 @@ test('Required still rejects any non-successful Static result', () => {
   assert.deepEqual([...job.needs].sort(), ['impact', ...CI_LANES].sort());
   assert.equal(job['continue-on-error'], undefined);
   for (const step of job.steps) {
-    assert.equal(step.if, undefined);
+    assert.equal(
+      step.if,
+      step.name === 'Preserve the verified main baseline certificate'
+        ? "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        : undefined,
+    );
     assert.equal(step['continue-on-error'], undefined);
   }
   const commands = job.steps.filter((step) => step.run);
   assert.equal(commands.length, 1);
   assert.equal(commands[0].run, 'node scripts/ci/impact.mjs verify');
   assert.equal(commands[0].env.CI_NEEDS, '${{ toJSON(needs) }}');
+  const certificate = job.steps.find(
+    (step) => step.name === 'Preserve the verified main baseline certificate',
+  );
+  assert.equal(certificate.with.path, commands[0].env.CI_CERTIFICATE_PATH);
+  assert.equal(certificate.with['if-no-files-found'], 'error');
 });

@@ -229,15 +229,17 @@ printf 'status=%s ingress=%s workers=%s paused=%s cutoff=%s\\n' "$status" "$ingr
   );
 }
 
-test('online prep follows all image builds and precedes queue fence, ingress stop and full migrations', () => {
+test('online prep follows verified image admission and precedes queue fence, ingress stop and full migrations', () => {
   const deploy = readFileSync(resolve(root, 'infra/scripts/vps-pull-build-up.sh'), 'utf8');
   const earlyPreflight = deploy.indexOf(
     '\n  maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES',
   );
-  const buildCapacity = deploy.indexOf('\nprepare_deploy_disk_capacity\n');
+  const imageCapacity = deploy.indexOf('\nprepare_deploy_disk_capacity\n');
   const alternateShutdown = deploy.indexOf('\nstop_conflicting_stacks\n');
-  const apiBuild = deploy.indexOf('\n    maxim_topology_build_shared_api_image ');
-  const staticBuild = deploy.indexOf('\n    docker compose "${COMPOSE_FILES[@]}" build');
+  const apiImageAdmission = deploy.indexOf('\n  require_preloaded_target_image "$MAXIM_API_IMAGE"');
+  const staticImageAdmission = deploy.indexOf(
+    '\n  require_preloaded_target_image "$candidate_image_ref"',
+  );
   const transition = deploy.indexOf('\n  begin_release_runtime_transition', earlyPreflight);
   const prepare = deploy.indexOf(
     '\n  maxim_webhook_prepare_multibot_before_quiescence COMPOSE_FILES',
@@ -247,11 +249,16 @@ test('online prep follows all image builds and precedes queue fence, ingress sto
     '\n  maxim_webhook_quiesce_legacy_ingress_for_multibot_cutover COMPOSE_FILES',
   );
   const migrations = deploy.indexOf('\n  if ! run_migrations');
-  assert.ok(earlyPreflight >= 0 && buildCapacity > earlyPreflight);
-  assert.ok(alternateShutdown > buildCapacity && apiBuild > alternateShutdown);
-  assert.ok(transition > apiBuild && staticBuild > transition && prepare > staticBuild);
+  assert.ok(earlyPreflight >= 0 && imageCapacity > earlyPreflight);
+  assert.ok(alternateShutdown > imageCapacity && apiImageAdmission > alternateShutdown);
+  assert.ok(
+    transition > apiImageAdmission &&
+      staticImageAdmission > transition &&
+      prepare > staticImageAdmission,
+  );
   assert.ok(quiesce > prepare && ingress > quiesce && migrations > ingress);
-  const beforePrepare = deploy.slice(apiBuild, prepare);
+  assert.doesNotMatch(deploy, /maxim_topology_build_shared_api_image|docker compose[^\n]* build/u);
+  const beforePrepare = deploy.slice(apiImageAdmission, prepare);
   assert.doesNotMatch(beforePrepare, /recreate_service_wave|up -d.*--force-recreate/u);
   const runner = deploy.slice(
     deploy.indexOf('run_online_multibot_migrations()'),

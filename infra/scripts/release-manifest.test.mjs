@@ -31,6 +31,101 @@ function component(id, digit) {
   };
 }
 
+function registryComponent() {
+  const sourceSha = sha('a');
+  const record = {
+    schemaVersion: 1,
+    component: 'api',
+    source: {
+      repository: 'GameclubPro/Major-Maksimov',
+      repositoryId: '1168895008',
+      sha: sourceSha,
+      workflow: '.github/workflows/ci.yml',
+      workflowRef: 'GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main',
+      runnerEnvironment: 'github-hosted',
+      event: 'push',
+      runId: '123',
+      runAttempt: '2',
+    },
+    image: {
+      alias: `maxim-api:${sourceSha}`,
+      imageId: imageId('b'),
+      platform: 'linux/amd64',
+      sizeBytes: 1234,
+    },
+    registry: { repository: 'ghcr.io/gameclubpro/major-maksimov-api', digest: imageId('c') },
+  };
+  return {
+    id: 'api-shared',
+    sourceSha,
+    imageRef: record.image.alias,
+    imageId: record.image.imageId,
+    registryProvenance: {
+      schemaVersion: 1,
+      record,
+      artifact: { id: 456, name: `maxim-registry-api-${sourceSha}-123-2`, digest: imageId('d') },
+      verifiedAt: '2026-11-04T03:00:00Z',
+    },
+  };
+}
+
+test('registry manifest metadata keeps registry digest distinct from Docker ID through partial releases', () => {
+  const api = registryComponent();
+  const first = buildReleaseManifest({
+    releaseId: 'registry-first',
+    targetSha: api.sourceSha,
+    components: [api],
+  });
+  const next = buildReleaseManifest({
+    releaseId: 'registry-static',
+    targetSha: sha('e'),
+    current: first,
+    components: [component('admin-static', 'e')],
+  });
+  const saved = next.components['api-shared'];
+  assert.equal(saved.imageId, imageId('b'));
+  assert.equal(saved.registryProvenance.record.registry.digest, imageId('c'));
+  assert.equal(saved.registryProvenance.record.source.runAttempt, '2');
+  api.registryProvenance.record.source.runAttempt = '9';
+  assert.equal(
+    saved.registryProvenance.record.source.runAttempt,
+    '2',
+    'caller mutation changed committed provenance',
+  );
+});
+
+test('registry provenance must agree with the component alias, source and tested image ID', () => {
+  for (const mutate of [
+    (value) => {
+      value.registryProvenance.record.image.imageId = imageId('f');
+    },
+    (value) => {
+      value.registryProvenance.record.source.sha = sha('e');
+    },
+    (value) => {
+      value.registryProvenance.record.source.runAttempt = '3';
+    },
+    (value) => {
+      value.registryProvenance.record.source.runnerEnvironment = 'self-hosted';
+    },
+    (value) => {
+      value.registryProvenance.record.registry.repository = 'ghcr.io/other/api';
+    },
+  ]) {
+    const api = registryComponent();
+    mutate(api);
+    assert.throws(
+      () =>
+        buildReleaseManifest({
+          releaseId: 'bad-provenance',
+          targetSha: api.sourceSha,
+          components: [api],
+        }),
+      /registry provenance/u,
+    );
+  }
+});
+
 test('atomically records a release and merges partial component updates', () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'maxim-release-'));
   const first = buildReleaseManifest({

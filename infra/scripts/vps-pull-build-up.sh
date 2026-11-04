@@ -32,6 +32,7 @@ PRE_PULL_HEAD=""
 EXPECTED_DEPLOY_SHA="${MAXIM_EXPECTED_DEPLOY_SHA:-}"
 RELEASE_STATE_DIR="${MAXIM_RELEASE_STATE_DIR:-/var/lib/maxim-deploy}"
 DEPLOY_MODE="manual"
+IMAGE_PLAN_ONLY=0
 DEPLOY_RUNTIME_STARTED=0
 DEPLOY_MANIFEST_RECORDED=0
 POST_RELEASE_RECLAIM="${MAXIM_DEPLOY_RECLAIM_OLD_IMAGES:-0}"
@@ -71,6 +72,9 @@ if [[ $# -ge 2 ]]; then
           exit 2
         fi
         DEPLOY_MODE="${argument#--}"
+        ;;
+      --image-plan)
+        IMAGE_PLAN_ONLY=1
         ;;
       --*)
         echo "Unknown deploy option: $argument" >&2
@@ -625,6 +629,26 @@ print_deploy_plan() {
   fi
 }
 
+print_image_preparation_plan() {
+  local component service
+  local selected=()
+  for component in "${RELEASE_COMPONENTS[@]}"; do
+    if impact_plan_selects_component "$component"; then selected+=("$component"); fi
+  done
+  for service in "${SERVICES[@]}"; do
+    case "$service" in
+      api-*) component=api-shared ;;
+      miniapp-major-static|admin-static|eraser) component="$service" ;;
+      *) echo "No CI registry component for deploy target: $service" >&2; return 1 ;;
+    esac
+    if ! contains_service "$component" "${selected[@]}"; then selected+=("$component"); fi
+  done
+  if [[ -n "${COMMERCIAL_OCR_DEPLOY_MODE:-}${COMMERCIAL_AI_DEPLOY_ENABLED:-}${COMMERCIAL_AI_POOL_WORKERS_DEPLOY_ENABLED:-}${COMMERCIAL_AI_POOL_DEPLOY_ENABLED:-}${COMMERCIAL_AI_POOL_DEPLOY_POLICY:-}${RETENTION_DEPLOY_MODE:-}${STATISTICS_EXCHANGE_DEPLOY_ENABLED:-}${STATISTICS_CENTRAL_DEPLOY_EPOCH:-}" ]] &&
+    ! contains_service api-shared "${selected[@]}"; then selected+=(api-shared); fi
+  node -e 'process.stdout.write("MAXIM_IMAGE_PLAN=" + JSON.stringify({schemaVersion:1,sourceSha:process.argv[1],components:process.argv.slice(2)}) + "\n")' \
+    "$(git rev-parse HEAD)" "${selected[@]}"
+}
+
 has_requested_api_service() {
   local service
   for service in "${API_SERVICES[@]}"; do
@@ -666,19 +690,31 @@ is_exact_deploy_target_image_ref() {
 verified_preloaded_target_image() {
   local image_ref="$1"
   local labels
+  local image_id
+  local component
 
   if ! labels="$(
     docker image inspect \
       --format '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.maxim.release-protected"}}' \
       "$image_ref" 2>/dev/null
   )"; then
-    echo "Selected immutable target image is not local and requires a build: $image_ref" >&2
+    echo "Selected immutable target image is not local; prepare and preload it from CI/GHCR: $image_ref" >&2
     return 1
   fi
   if [[ "$labels" != "${TARGET_SHA}|true" ]]; then
     echo "Selected target image has unverified release labels: $image_ref ($labels)" >&2
     return 1
   fi
+  case "$image_ref" in
+    "maxim-api:${TARGET_SHA}") component=api-shared ;;
+    "maxim-miniapp-major:${TARGET_SHA}") component=miniapp-major-static ;;
+    "maxim-admin:${TARGET_SHA}") component=admin-static ;;
+    "maxim-eraser:${TARGET_SHA}") component=eraser ;;
+    *) echo "No verified registry component for target: $image_ref" >&2; return 1 ;;
+  esac
+  image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")" || return
+  MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" node infra/scripts/registry-preload-host.mjs \
+    verify "$component" "$TARGET_SHA" "$image_ref" "$image_id" >/dev/null
 }
 
 selected_target_images_are_preloaded() {
@@ -751,7 +787,6 @@ prepare_deploy_disk_capacity() {
   local needs_static_build=0
   local service
 
-  REUSE_PRELOADED_TARGET_IMAGES_ONLY=0
   if selected_target_images_are_preloaded; then
     # FLAG: Exact image reuse removes build work but still requires the component rollout reserve.
     for service in "${SERVICES[@]}"; do
@@ -762,27 +797,14 @@ prepare_deploy_disk_capacity() {
       esac
     done
     maxim_check_deploy_reuse_disk_capacity "$BUILD_API_IMAGE" "$needs_static_build" || return
-    REUSE_PRELOADED_TARGET_IMAGES_ONLY=1
     echo "Reusing every selected exact immutable target image already local for $TARGET_SHA; absolute deploy reserve verified."
     return 0
   fi
 
-  for service in "${SERVICES[@]}"; do
-    case "$service" in
-      miniapp-static|miniapp-major-static|admin-static|eraser)
-        needs_static_build=1
-        ;;
-      api-*)
-        ;;
-      *)
-        echo "Unknown deploy target reached disk preflight: $service" >&2
-        maxim_check_deploy_disk_capacity 1 1
-        return
-        ;;
-    esac
-  done
-
-  maxim_check_deploy_disk_capacity "$BUILD_API_IMAGE" "$needs_static_build"
+  # FLAG: Production accepts only images already smoke-tested and attested in CI.
+  # Missing evidence stops before runtime changes; no host-build fallback is allowed.
+  echo 'Release image coverage is incomplete; prepare every selected component in CI and preload its immutable registry digest.' >&2
+  return 1
 }
 
 require_preloaded_target_image() {
@@ -792,8 +814,8 @@ require_preloaded_target_image() {
     return 0
   fi
 
-  echo "Preloaded target image disappeared or lost verified labels after the build disk preflight was skipped: $image_ref" >&2
-  echo "Refusing fallback build; restore the exact image or satisfy the disk build preflight." >&2
+  echo "Preloaded target image disappeared or lost its registry proof after admission: $image_ref" >&2
+  echo "Refusing fallback build; restore the exact verified registry image." >&2
   return 1
 }
 
@@ -1268,6 +1290,7 @@ record_successful_release() {
       verify_service_image_id "$service" "$image_id"
     fi
     args+=(--component "${component}|${TARGET_SHA}|${image_ref}|${image_id}")
+    args+=(--component-registry-file "${component}|${RELEASE_STATE_DIR}/registry-images/${component}-${TARGET_SHA}.json")
   done
   verify_inherited_release_components
 
@@ -1549,7 +1572,7 @@ validate_statistics_exchange_deploy_flag
 validate_statistics_central_deploy_epoch
 acquire_deploy_lock
 trap cleanup EXIT
-if [[ "$DEPLOY_MODE" != "plan" ]]; then
+if [[ "$DEPLOY_MODE" != "plan" && "$IMAGE_PLAN_ONLY" -eq 0 ]]; then
   maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 fi
 sync_branch
@@ -1558,6 +1581,11 @@ reexec_if_current_script_changed
 if [[ "$DEPLOY_MODE" == "plan" ]]; then
   load_current_component_images
   print_deploy_plan
+  exit 0
+fi
+if [[ "$IMAGE_PLAN_ONLY" -eq 1 ]]; then
+  load_current_component_images
+  print_image_preparation_plan
   exit 0
 fi
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
@@ -1690,17 +1718,8 @@ warn_legacy_miniapp_static_target
 
 if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   require_stateful_services_ready
-  if [[ "$REUSE_PRELOADED_TARGET_IMAGES_ONLY" -eq 1 ]]; then
-    require_preloaded_target_image "$MAXIM_API_IMAGE"
-    echo "Reusing existing immutable API image: $MAXIM_API_IMAGE"
-  else
-    if docker image inspect "$MAXIM_API_IMAGE" >/dev/null 2>&1 &&
-       ! verified_preloaded_target_image "$MAXIM_API_IMAGE"; then
-      echo "Refusing to reuse or overwrite an unverified exact-SHA API image." >&2
-      exit 1
-    fi
-    maxim_topology_build_shared_api_image "$MAXIM_API_IMAGE" "$TARGET_SHA"
-  fi
+  require_preloaded_target_image "$MAXIM_API_IMAGE"
+  echo "Reusing existing immutable API image: $MAXIM_API_IMAGE"
   maxim_topology_require_ocr_native_sandbox_image_capability \
     "$MAXIM_API_IMAGE" "$TARGET_HAS_OCR_NATIVE_SANDBOX"
   maxim_topology_require_photo_native_image_capability "${MAXIM_API_IMAGE}"
@@ -1728,18 +1747,8 @@ for service in "${SERVICES_TO_BUILD[@]}"; do
       exit 2
       ;;
   esac
-  if docker image inspect "$candidate_image_ref" >/dev/null 2>&1 &&
-     verified_preloaded_target_image "$candidate_image_ref"; then
-    echo "Reusing existing immutable static image: $candidate_image_ref"
-  elif docker image inspect "$candidate_image_ref" >/dev/null 2>&1; then
-    echo "Refusing to reuse or overwrite an unverified exact-SHA static image: $candidate_image_ref" >&2
-    exit 1
-  elif [[ "$REUSE_PRELOADED_TARGET_IMAGES_ONLY" -eq 1 ]]; then
-    require_preloaded_target_image "$candidate_image_ref"
-  else
-    docker compose "${COMPOSE_FILES[@]}" build "$service"
-    verified_preloaded_target_image "$candidate_image_ref"
-  fi
+  require_preloaded_target_image "$candidate_image_ref"
+  echo "Reusing existing immutable static image: $candidate_image_ref"
 done
 
 ensure_compose_env
