@@ -1,4 +1,17 @@
 import { ApiRequestError } from '../../../lib/api-request-error';
+import type { MarketplaceManagementOperation } from '@maxim/contracts/karavan-marketplace-management';
+
+export function isConfirmedShopCommandResult(
+  error: unknown,
+  operation: MarketplaceManagementOperation['operation'],
+): boolean {
+  return (
+    operation === 'administration_store_change' &&
+    error instanceof ApiRequestError &&
+    error.status === 409 &&
+    error.code === 'KARAVAN_COMMAND_RESULT_CONFIRMED'
+  );
+}
 
 type ShopFailureKind = 'validation' | 'refresh' | 'forbidden' | 'unknown';
 const accessRejections = {

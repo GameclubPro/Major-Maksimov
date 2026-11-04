@@ -1,5 +1,6 @@
 import '../src/styles.css';
 import React from 'react';
+import { z } from 'zod';
 import { runNativeBackHandlers } from '../src/lib/native-back';
 import { ApiRequestError } from '../src/lib/api-request-error';
 import { createRoot, type Root } from 'react-dom/client';
@@ -12,12 +13,17 @@ import { chatSettingsSchema } from '@maxim/contracts/settings';
 import {
   karavanMarketplaceCategories,
   karavanMarketplaceModuleSchema,
+  karavanMarketplaceOperationSchema,
+  karavanMarketplaceSetupSchema,
+  karavanMarketplaceSummarySchema,
+  karavanMarketplaceBindingSchema,
   type KaravanMarketplaceModule,
 } from '@maxim/contracts/karavan-marketplace';
 import type {
   MarketplaceApplication,
   MarketplaceManagementResponse,
 } from '@maxim/contracts/karavan-marketplace-management';
+import { karavanConnectionSnapshotSchema } from '@maxim/contracts/karavan-marketplace-connection';
 import '../src/pages/settings-page';
 import '../src/styles/moderation-workspace.css';
 const params = new URLSearchParams(location.search);
@@ -249,6 +255,63 @@ const invitationHistory = ['invitation_paged', 'daily_paged'].includes(params.ge
       revoked: false,
     }))
   : [];
+const backendSchema = z.object({
+  connection: karavanConnectionSnapshotSchema,
+  setups: z.array(karavanMarketplaceOperationSchema),
+  marketplace: karavanMarketplaceSummarySchema,
+  binding: karavanMarketplaceBindingSchema,
+  connected: z.boolean(),
+  administrationStore: karavanMarketplaceModuleSchema.shape.administrationStore,
+  administrationStores: karavanMarketplaceModuleSchema.shape.administrationStores,
+});
+// FLAG: This private fixture key models backend receipts across UI reloads; no
+// product recovery code reads it. Each browser scenario owns a separate backend.
+const backendKey = `shop-fixture-backend:v2:${scenario}:${params.get('scenarioRun') ?? params.get('run') ?? ''}`;
+const savedBackend = sessionStorage.getItem(backendKey);
+const backend = backendSchema.parse(
+  savedBackend
+    ? JSON.parse(savedBackend)
+    : {
+        connection: { version: 2, revision: 0, blocked: false, operation: null },
+        setups: [],
+        marketplace: market,
+        binding,
+        connected: formatConnected,
+        administrationStore,
+        administrationStores,
+      },
+);
+Object.assign(market, backend.marketplace);
+Object.assign(binding, backend.binding);
+formatConnected = backend.connected;
+administrationStore = backend.administrationStore ?? null;
+administrationStores = backend.administrationStores ?? [];
+function persistBackend() {
+  sessionStorage.setItem(
+    backendKey,
+    JSON.stringify(
+      backendSchema.parse({
+        ...backend,
+        marketplace: market,
+        binding,
+        connected: formatConnected,
+        administrationStore,
+        administrationStores,
+      }),
+    ),
+  );
+}
+function conflict(code: string): never {
+  throw new ApiRequestError(409, JSON.stringify({ code }), 'Изменилось подключение магазина.');
+}
+function sameRequest(original: unknown, input: unknown) {
+  if (JSON.stringify(original) !== JSON.stringify(input))
+    conflict('KARAVAN_COMMAND_SCOPE_CONFLICT');
+}
+function checkConnectionRevision(revision: number | undefined) {
+  if (revision !== backend.connection.revision) conflict('KARAVAN_CONNECTION_REVISION_CONFLICT');
+  if (backend.connection.blocked) conflict('KARAVAN_CONNECTION_OPERATION_PENDING');
+}
 const state = window as Window & {
   __shopRequests: Array<{ path: string; body: any }>;
   __shopOpened: string[];
@@ -268,6 +331,8 @@ const state = window as Window & {
   __shopNextFailure?: { operation: string; status: number; code?: string; message?: string };
   __shopReactRoot?: Root;
   __acceptShopSellerTerms?: () => void;
+  __readShopConnection?: () => Promise<unknown>;
+  __readShopSetup?: (operationId: string) => Promise<unknown>;
 };
 state.__shopRequests = [];
 state.__shopOpened = [];
@@ -304,6 +369,13 @@ const api = {
   request: async (path: string, init: { body?: string; method?: string } = {}) => {
     const body = init.body ? JSON.parse(init.body) : null;
     state.__shopRequests.push({ path, body });
+    if (path.endsWith('/connection')) return structuredClone(backend.connection);
+    const setupStatus = path.match(/\/operations\/([^/]+)$/u);
+    if (setupStatus) {
+      const operation = backend.setups.find((item) => item.operationId === setupStatus[1]);
+      if (!operation) throw new ApiRequestError(404, '{}', 'Подключение не найдено.');
+      return structuredClone(operation);
+    }
     if (path.includes('/karavan-storefront/allowlist')) {
       if (init.method === 'DELETE') {
         const index = allowedUsers.findIndex((user) => path.endsWith('/' + user.id));
@@ -357,37 +429,58 @@ const api = {
       };
     }
     if (path.endsWith('/setup')) {
+      const request = karavanMarketplaceSetupSchema.parse(body);
+      const prior = backend.setups.find((item) => item.operationId === request.operationId);
+      if (prior) {
+        sameRequest(prior.request, request);
+        return structuredClone(prior);
+      }
+      checkConnectionRevision(request.expectedConnectionRevision);
+      if (!request.chatIds.includes(fixtureChatId)) conflict('MARKETPLACE_BINDING_CHANGED');
+      if (request.existingMarketplaceId && request.existingMarketplaceId !== market.id)
+        conflict('MARKETPLACE_BINDING_CHANGED');
+      const operation = karavanMarketplaceOperationSchema.parse({
+        operationId: request.operationId,
+        state: 'pending',
+        request,
+        checkpoints: { marketplaceId: null, bindings: [] },
+      });
+      backend.setups.push(operation);
+      backend.connection.operation = { kind: 'setup', operation };
+      backend.connection.blocked = true;
+      backend.connection.revision++;
+      persistBackend();
       formatConnected = true;
-      market.status = body.create.setupVersion === 2 ? 'active' : 'draft';
-      market.name = body.create.name;
-      market.admissionMode = body.create.admissionPolicy;
-      market.format = body.create.format;
-      market.administrationStoreId =
-        body.create.format === 'storefront'
-          ? (body.create.administrationStoreId ?? administrationStoreId)
-          : null;
-      market.formatRevision = 1;
-      if (body.create.setupVersion === 2) {
-        market.administrationStoreId = null;
-        administrationStores = [];
+      if (request.create) {
+        market.status = request.create.setupVersion === 2 ? 'active' : 'draft';
+        market.name = request.create.name;
+        market.admissionMode = request.create.admissionPolicy;
+        market.format = request.create.format;
+        market.administrationStoreId =
+          request.create.format === 'storefront'
+            ? (request.create.administrationStoreId ?? administrationStoreId)
+            : null;
+        market.formatRevision = 1;
+        if (request.create.setupVersion === 2) {
+          market.administrationStoreId = null;
+          administrationStores = [];
+        }
       }
       if (administrationStore) administrationStore = { ...administrationStore, status: 'DRAFT' };
-      return {
-        operationId: body.operationId,
-        state: 'complete',
-        request: body,
-        checkpoints: {
-          marketplaceId: market.id,
-          bindings: [
-            {
-              chatId: fixtureChatId,
-              state: 'connected',
-              bindingId: binding.id,
-              generation: binding.generation,
-            },
-          ],
-        },
+      operation.state = 'complete';
+      operation.checkpoints = {
+        marketplaceId: market.id,
+        bindings: request.chatIds.map((chatId) => ({
+          chatId,
+          state: 'connected',
+          bindingId: binding.id,
+          generation: binding.generation,
+        })),
       };
+      backend.connection.blocked = false;
+      backend.connection.revision++;
+      persistBackend();
+      return structuredClone(operation);
     }
     if (path.endsWith('/setup-options'))
       return {
@@ -836,6 +929,11 @@ const api = {
             }
           : {}),
         enabled: true,
+        // FLAG: Raw commerce exports receive the Major envelope here; older provider
+        // fields do not imply an older Major connection capability.
+        ...(scenario === 'format_setup_unsupported'
+          ? {}
+          : { connection: structuredClone(backend.connection) }),
         actorMaxUserId: '777',
         sellerBotUrl: 'https://max.ru/synthetic_seller_bot',
         marketplace: params.get('scenario') === 'unbound' || !formatConnected ? null : market,
@@ -879,12 +977,19 @@ const api = {
               ? { mode: 'administration_storefront' }
               : { mode: 'chat_marketplace' }
             : { mode: 'unavailable', reason: 'closed', format: market.format ?? 'community' },
-        setupOperation: null,
+        setupOperation:
+          backend.connection.operation?.kind === 'setup'
+            ? structuredClone(backend.connection.operation.operation)
+            : null,
       };
     throw new Error('Unexpected request: ' + path);
   },
   requestKeepalive: () => {},
 };
+state.__readShopConnection = () =>
+  api.request(`/chats/${fixtureChatId}/karavan-marketplace/connection`);
+state.__readShopSetup = (operationId) =>
+  api.request(`/chats/${fixtureChatId}/karavan-marketplace/operations/${operationId}`);
 const initial = chatSettingsSchema.parse({
   karavanStorefrontEnabled: true,
   karavanStorefrontAdminsOnly: false,

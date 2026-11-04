@@ -7,6 +7,7 @@ import { KaravanMarketplaceController } from './karavan-marketplace.controller';
 import type { KaravanMarketplaceAuthorityService } from './karavan-marketplace-authority.service';
 import type { KaravanMarketplaceProxyService } from './karavan-marketplace-proxy.service';
 import type { KaravanMarketplaceHandoffService } from './karavan-marketplace-handoff.service';
+import type { KaravanMarketplaceConnectionsService } from './karavan-marketplace-connections.service';
 
 describe('Karavan module destination permissions', () => {
   function fixture() {
@@ -71,6 +72,14 @@ describe('Karavan module destination permissions', () => {
       proxy as unknown as KaravanMarketplaceProxyService,
       resolver as unknown as KaravanMarketplaceResolverService,
       handoffs as unknown as KaravanMarketplaceHandoffService,
+      {
+        snapshot: jest
+          .fn()
+          .mockResolvedValue({ version: 2, revision: 0, blocked: false, operation: null }),
+      } satisfies Pick<
+        KaravanMarketplaceConnectionsService,
+        'snapshot'
+      > as unknown as KaravanMarketplaceConnectionsService,
     );
     const invoke = (destination: string) =>
       controller.handoff(
@@ -271,5 +280,176 @@ describe('Karavan module destination permissions', () => {
     await expect(invokeModule()).resolves.toMatchObject({
       publicationPreview: { mode: 'unavailable', reason: 'closed' },
     });
+  });
+});
+
+describe('connection recovery authorization', () => {
+  const user = { userId: '777', username: null, displayName: null };
+  const request = {} as FastifyRequest;
+  function fixture() {
+    const principal = {
+      source: 'session' as const,
+      principalKey: 'a'.repeat(64),
+      launchBotId: 'synthetic',
+    };
+    const authority = {
+      principal: jest.fn().mockReturnValue(principal),
+      assertPrincipal: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<KaravanMarketplaceAuthorityService, 'principal' | 'assertPrincipal'>;
+    const proxy = {
+      module: jest.fn(),
+      inspectSetup: jest.fn().mockResolvedValue({ state: 'unknown' }),
+      setup: jest.fn(),
+    } satisfies Pick<KaravanMarketplaceProxyService, 'module' | 'inspectSetup' | 'setup'>;
+    const connections = {
+      settleBinding: jest.fn().mockResolvedValue(undefined),
+      bind: jest.fn<
+        ReturnType<KaravanMarketplaceConnectionsService['bind']>,
+        Parameters<KaravanMarketplaceConnectionsService['bind']>
+      >(),
+      status: jest.fn<
+        ReturnType<KaravanMarketplaceConnectionsService['status']>,
+        Parameters<KaravanMarketplaceConnectionsService['status']>
+      >(),
+      resume: jest.fn<
+        ReturnType<KaravanMarketplaceConnectionsService['resume']>,
+        Parameters<KaravanMarketplaceConnectionsService['resume']>
+      >(),
+      legacyBind: jest.fn<
+        ReturnType<KaravanMarketplaceConnectionsService['legacyBind']>,
+        Parameters<KaravanMarketplaceConnectionsService['legacyBind']>
+      >(),
+    } satisfies Pick<
+      KaravanMarketplaceConnectionsService,
+      'settleBinding' | 'bind' | 'status' | 'resume' | 'legacyBind'
+    >;
+    const controller = new KaravanMarketplaceController(
+      new ConfigService(),
+      authority as unknown as KaravanMarketplaceAuthorityService,
+      proxy as unknown as KaravanMarketplaceProxyService,
+      {} as KaravanMarketplaceResolverService,
+      {} as KaravanMarketplaceHandoffService,
+      connections as unknown as KaravanMarketplaceConnectionsService,
+    );
+    return { controller, authority, proxy, connections, principal };
+  }
+  it('reads an owned setup result without depending on live marketplace authorization', async () => {
+    const { controller, proxy, authority } = fixture();
+    const id = randomUUID();
+    await expect(controller.status('-123', id, user, request)).resolves.toEqual({
+      state: 'unknown',
+    });
+    expect(authority.assertPrincipal).toHaveBeenCalled();
+    expect(proxy.inspectSetup).toHaveBeenCalledWith(id, '777', '-123');
+    expect(proxy.module).not.toHaveBeenCalled();
+  });
+  it('does not settle another operation for an expired principal', async () => {
+    const { controller, authority, proxy, connections } = fixture();
+    authority.assertPrincipal.mockRejectedValue(new Error('Session expired'));
+    await expect(
+      controller.setup(
+        '-123',
+        {
+          operationId: randomUUID(),
+          chatIds: ['-123'],
+          existingMarketplaceId: randomUUID(),
+          expectedPolicyRevision: 1,
+        },
+        user,
+        request,
+      ),
+    ).rejects.toThrow();
+    expect(authority.assertPrincipal).toHaveBeenCalled();
+    expect(connections.settleBinding).not.toHaveBeenCalled();
+    expect(proxy.setup).not.toHaveBeenCalled();
+  });
+  function bindingInput() {
+    return {
+      commandId: randomUUID(),
+      marketplaceId: randomUUID(),
+      action: 'recover_chat' as const,
+      expectedBindingGeneration: 3,
+      expectedConnectionRevision: 4,
+    };
+  }
+  it('forwards a new binding with its original intent, route chat and authenticated principal', () => {
+    const { controller, authority, connections, principal } = fixture();
+    const input = bindingInput();
+    controller.connectionBinding('-123', input, user, request);
+    expect(authority.principal).toHaveBeenCalledWith(user, undefined);
+    expect(connections.bind).toHaveBeenCalledWith('-123', '777', input, principal);
+    expect(connections.bind).toHaveBeenCalledTimes(1);
+  });
+  it('imports the original binding only through the explicit import mode', () => {
+    const { controller, connections, principal } = fixture();
+    const input = bindingInput();
+    controller.importBinding('-123', input, user, request);
+    expect(connections.bind).toHaveBeenCalledWith('-123', '777', input, principal, true);
+    expect(connections.bind).toHaveBeenCalledTimes(1);
+  });
+  it('keeps owned status inspection and explicit continuation on their distinct service methods', () => {
+    const { controller, connections, principal } = fixture();
+    const id = randomUUID();
+    controller.connectionStatus('-123', id, user, request);
+    expect(connections.status).toHaveBeenCalledWith('-123', '777', id, principal);
+    expect(connections.resume).not.toHaveBeenCalled();
+    controller.connectionResume('-123', id, user, request);
+    expect(connections.resume).toHaveBeenCalledWith('-123', '777', id, principal);
+    expect(connections.status).toHaveBeenCalledTimes(1);
+    expect(connections.resume).toHaveBeenCalledTimes(1);
+    expect(connections.bind).not.toHaveBeenCalled();
+  });
+  it('adapts an old binding route into the same owned journal with its original command ID', () => {
+    const { controller, connections, principal } = fixture();
+    const marketplaceId = randomUUID();
+    const input = {
+      commandId: randomUUID(),
+      action: 'unbind_chat' as const,
+      expectedBindingGeneration: 3,
+    };
+    controller.bind('-123', marketplaceId, input, user, request);
+    expect(connections.legacyBind).toHaveBeenCalledWith(
+      '-123',
+      '777',
+      { ...input, marketplaceId },
+      principal,
+    );
+    expect(connections.legacyBind).toHaveBeenCalledTimes(1);
+    expect(connections.bind).not.toHaveBeenCalled();
+  });
+  it('rejects invalid route chat IDs before any connection service call', () => {
+    const { controller, connections } = fixture();
+    const input = bindingInput();
+    const legacy = {
+      commandId: input.commandId,
+      action: input.action,
+      expectedBindingGeneration: input.expectedBindingGeneration,
+    };
+    const id = randomUUID();
+    for (const invoke of [
+      () => controller.connectionBinding('invalid', input, user, request),
+      () => controller.importBinding('invalid', input, user, request),
+      () => controller.connectionStatus('invalid', id, user, request),
+      () => controller.connectionResume('invalid', id, user, request),
+      () => controller.bind('invalid', input.marketplaceId, legacy, user, request),
+    ])
+      expect(invoke).toThrow();
+    for (const method of Object.values(connections)) expect(method).not.toHaveBeenCalled();
+  });
+  it('rejects invalid operation and marketplace IDs before any connection service call', () => {
+    const { controller, connections } = fixture();
+    const input = bindingInput();
+    const legacy = {
+      commandId: input.commandId,
+      action: input.action,
+      expectedBindingGeneration: input.expectedBindingGeneration,
+    };
+    for (const invoke of [
+      () => controller.connectionStatus('-123', 'invalid', user, request),
+      () => controller.connectionResume('-123', 'invalid', user, request),
+      () => controller.bind('-123', 'invalid', legacy, user, request),
+    ])
+      expect(invoke).toThrow();
+    for (const method of Object.values(connections)) expect(method).not.toHaveBeenCalled();
   });
 });

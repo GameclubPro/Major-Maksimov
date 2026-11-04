@@ -35,13 +35,18 @@ import {
   type KaravanMarketplaceAuthorityScope,
   type KaravanMarketplaceModule,
   type KaravanMarketplaceOperation,
+  type KaravanMarketplaceSetup,
 } from '@maxim/contracts/karavan-marketplace';
+import { Prisma } from '../../prisma/prisma-client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   KaravanMarketplaceAuthorityService,
   karavanHash,
   type KaravanPrincipal,
 } from './karavan-marketplace-authority.service';
+import { ConnectionJournal } from './karavan-connection-journal';
+import { ManagementJournal, isDurableManagementWrite } from './karavan-management-journal';
+import { observeKaravanSetup } from './karavan-setup-observation';
 
 const moduleInput = z
   .object({ commandId: z.string().min(8).max(120), chatId: z.string().regex(/^-?\d{1,24}$/u) })
@@ -61,6 +66,11 @@ export class KaravanCommandUnavailable extends ServiceUnavailableException {
 class KaravanCreateNotDispatched extends Error {
   constructor(cause: unknown) {
     super('Marketplace creation was not dispatched.', { cause });
+  }
+}
+export class KaravanBindingNotDispatched extends Error {
+  constructor(cause: unknown) {
+    super('Binding command was not dispatched.', { cause });
   }
 }
 
@@ -94,6 +104,7 @@ export class KaravanMarketplaceProxyService {
     payload: unknown,
     principal: KaravanPrincipal,
     response: z.ZodType<T>,
+    beforeDispatch?: () => Promise<void>,
   ): Promise<T> {
     let authority: KaravanMarketplaceAuthorityRequest;
     try {
@@ -101,10 +112,13 @@ export class KaravanMarketplaceProxyService {
         { ...scope, payloadHash: karavanHash(payload) },
         principal,
       );
+      await beforeDispatch?.();
     } catch (error) {
       // FLAG: This call cannot have created a marketplace before authority succeeds.
       // Setup still preserves any unknown outcome from an earlier dispatch.
       if (scope.action === 'create_marketplace') throw new KaravanCreateNotDispatched(error);
+      if (['bind_chat', 'unbind_chat', 'transfer_chat', 'recover_chat'].includes(scope.action))
+        throw new KaravanBindingNotDispatched(error);
       throw error;
     }
     let result: Response;
@@ -149,19 +163,31 @@ export class KaravanMarketplaceProxyService {
 
   async manage(chatId: string, actorMaxUserId: string, raw: unknown, principal: KaravanPrincipal) {
     const payload = marketplaceManagementRequestSchema.parse({ ...(raw as object), chatId });
-    return this.command(
-      '/manage',
-      {
-        commandId: payload.commandId,
-        chatId,
-        actorMaxUserId,
-        action: 'manage_shop',
-        marketplaceId: payload.marketplaceId,
-        expectedBindingGeneration: payload.expectedBindingGeneration,
-      },
+    const dispatch = (beforeDispatch?: () => Promise<void>) =>
+      this.command(
+        '/manage',
+        {
+          commandId: payload.commandId,
+          chatId,
+          actorMaxUserId,
+          action: 'manage_shop',
+          marketplaceId: payload.marketplaceId,
+          expectedBindingGeneration: payload.expectedBindingGeneration,
+        },
+        payload,
+        principal,
+        marketplaceManagementResponseSchema,
+        beforeDispatch,
+      );
+    if (!isDurableManagementWrite(payload)) return dispatch();
+    await this.authority.assertPrincipal(principal, actorMaxUserId);
+    return new ManagementJournal(this.prisma, this.config).run(
+      actorMaxUserId,
       payload,
-      principal,
-      marketplaceManagementResponseSchema,
+      dispatch,
+      (error) =>
+        error instanceof KaravanManagementRejected ||
+        (error instanceof KaravanCommandUnavailable && error.outcome === 'rejected'),
     );
   }
 
@@ -280,6 +306,7 @@ export class KaravanMarketplaceProxyService {
     raw: unknown,
     principal: KaravanPrincipal,
     action = false,
+    beforeDispatch?: () => Promise<void>,
   ) {
     const actionPayload = action ? karavanMarketplaceBindingActionSchema.parse(raw) : null;
     const payload = actionPayload ?? karavanMarketplaceBindingCommandSchema.parse(raw);
@@ -296,6 +323,7 @@ export class KaravanMarketplaceProxyService {
       payload,
       principal,
       karavanMarketplaceBindingResultSchema,
+      beforeDispatch,
     );
     if (result.marketplace.id !== marketplaceId) throw new KaravanCommandUnavailable('unknown');
     if (!actionPayload || actionPayload.action !== 'unbind_chat')
@@ -306,11 +334,20 @@ export class KaravanMarketplaceProxyService {
     return result;
   }
 
-  async status(operationId: string, actorMaxUserId: string): Promise<KaravanMarketplaceOperation> {
+  async status(
+    operationId: string,
+    actorMaxUserId: string,
+    anchorChatId?: string,
+  ): Promise<KaravanMarketplaceOperation> {
     const row = await this.prisma.karavanMarketplaceConnectionOperation.findUnique({
       where: { id: operationId },
     });
-    if (!row || row.actorMaxUserId !== actorMaxUserId)
+    if (
+      !row ||
+      row.kind !== 'setup' ||
+      row.actorMaxUserId !== actorMaxUserId ||
+      (anchorChatId !== undefined && row.anchorChatId !== anchorChatId)
+    )
       throw new ForbiddenException('Подключение недоступно.');
     return karavanMarketplaceOperationSchema.parse({
       operationId: row.id,
@@ -325,7 +362,7 @@ export class KaravanMarketplaceProxyService {
     await this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ id: string }>
-      >`SELECT id FROM karavan_marketplace_connection_operations WHERE id=${operationId}::uuid AND actor_max_user_id=${actorMaxUserId} AND anchor_chat_id=${anchorChatId} FOR UPDATE`;
+      >`SELECT id FROM karavan_marketplace_connection_operations WHERE id=${operationId}::uuid AND actor_max_user_id=${actorMaxUserId} AND anchor_chat_id=${anchorChatId} AND kind='setup' FOR UPDATE`;
       if (!rows.length) throw new ForbiddenException('Подключение недоступно.');
       const row = await tx.karavanMarketplaceConnectionOperation.findUniqueOrThrow({
         where: { id: operationId },
@@ -343,16 +380,50 @@ export class KaravanMarketplaceProxyService {
         where: { id: operationId },
         data: { state: 'cancelled', activeScopeKey: null },
       });
+      await new ConnectionJournal(this.prisma).release(tx, operationId);
     });
     return this.status(operationId, actorMaxUserId);
+  }
+
+  async inspectSetup(operationId: string, actorMaxUserId: string, anchorChatId: string) {
+    return observeKaravanSetup(
+      this.config,
+      actorMaxUserId,
+      await this.status(operationId, actorMaxUserId, anchorChatId),
+    );
+  }
+
+  async settleSetup(chatId: string): Promise<void> {
+    const journal = new ConnectionJournal(this.prisma);
+    const scope = await journal.readWithLegacy(chatId);
+    if (!scope.activeOperationId) return;
+    const row = await this.prisma.karavanMarketplaceConnectionOperation.findUnique({
+      where: { id: scope.activeOperationId },
+    });
+    if (!row || row.kind !== 'setup' || (row.leaseUntil && row.leaseUntil > new Date())) return;
+    const observed = await this.inspectSetup(row.id, row.actorMaxUserId, row.anchorChatId);
+    if (observed.state !== 'complete') return;
+    await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.karavanMarketplaceConnectionOperation.updateMany({
+        where: { id: row.id, state: row.state, leaseId: row.leaseId, updatedAt: row.updatedAt },
+        data: {
+          state: 'complete',
+          checkpoints: observed.checkpoints,
+          activeScopeKey: null,
+          leaseId: null,
+          leaseUntil: null,
+        },
+      });
+      if (updated.count === 1) await journal.release(tx, row.id);
+    });
   }
 
   async activeSetup(actorMaxUserId: string, anchorChatId: string) {
     const row = await this.prisma.karavanMarketplaceConnectionOperation.findUnique({
       where: { activeScopeKey: `${actorMaxUserId}:${anchorChatId}` },
-      select: { id: true },
+      select: { id: true, kind: true },
     });
-    return row ? this.status(row.id, actorMaxUserId) : null;
+    return row?.kind === 'setup' ? this.status(row.id, actorMaxUserId, anchorChatId) : null;
   }
 
   async setup(
@@ -367,29 +438,54 @@ export class KaravanMarketplaceProxyService {
     await this.authority.assertPrincipal(principal, actorMaxUserId);
     // FLAG: One active setup per actor and entry chat survives tabs, lost local storage and devices.
     const activeScopeKey = `${actorMaxUserId}:${input.chatIds[0]}`;
+    const journal = new ConnectionJournal(this.prisma);
+    const claim = (tx: Prisma.TransactionClient, request: KaravanMarketplaceSetup) =>
+      journal.claim(tx, {
+        operationId: request.operationId,
+        chatIds: request.chatIds,
+        anchorChatId: request.chatIds[0]!,
+        expectedRevision: request.expectedConnectionRevision ?? 0,
+        marketplaceIds: request.existingMarketplaceId ? [request.existingMarketplaceId] : [],
+      });
     const row = await this.prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`karavan-setup:${activeScopeKey}`}))`;
       const existing = await tx.karavanMarketplaceConnectionOperation.findUnique({
         where: { id: input.operationId },
       });
       if (existing) {
-        if (existing.actorMaxUserId !== actorMaxUserId || existing.requestHash !== requestHash)
+        if (
+          existing.kind !== 'setup' ||
+          existing.actorMaxUserId !== actorMaxUserId ||
+          existing.requestHash !== requestHash
+        )
           throw new ConflictException('Подключение уже создано с другими параметрами.');
+        await claim(tx, karavanMarketplaceSetupSchema.parse(existing.request));
         return existing;
       }
       const active = await tx.karavanMarketplaceConnectionOperation.findUnique({
         where: { activeScopeKey },
       });
       if (active) {
-        if (active.requestHash !== karavanHash({ ...input, operationId: active.id }))
+        if (
+          active.kind !== 'setup' ||
+          active.requestHash !== karavanHash({ ...input, operationId: active.id })
+        )
           throw new ConflictException({
             code: 'KARAVAN_SETUP_IN_PROGRESS',
             message:
               'В этом чате уже начато подключение с другими настройками. Продолжите сохранённое подключение.',
           });
+        await claim(tx, karavanMarketplaceSetupSchema.parse(active.request));
         return active;
       }
-      return tx.karavanMarketplaceConnectionOperation.create({
+      // FLAG: An old client without an admission revision cannot start a delayed
+      // second setup after another intent has already changed this chat's scope.
+      const scope = await tx.karavanMarketplaceConnectionScope.findUnique({
+        where: { chatId: input.chatIds[0]! },
+      });
+      if (input.expectedConnectionRevision === undefined && scope && scope.revision > 0)
+        throw new ConflictException('Подключение изменилось. Обновите состояние магазина.');
+      const created = await tx.karavanMarketplaceConnectionOperation.create({
         data: {
           id: input.operationId,
           actorMaxUserId,
@@ -409,6 +505,8 @@ export class KaravanMarketplaceProxyService {
           },
         },
       });
+      await claim(tx, input);
+      return created;
     });
     input = karavanMarketplaceSetupSchema.parse(row.request);
     if (row.state === 'complete' || row.state === 'rejected' || row.state === 'cancelled')
@@ -429,19 +527,51 @@ export class KaravanMarketplaceProxyService {
     });
     const checkpoints = karavanMarketplaceCheckpointSchema.parse(leased.checkpoints);
     const checkpoint = async (state: KaravanMarketplaceOperation['state']) => {
-      const saved = await this.prisma.karavanMarketplaceConnectionOperation.updateMany({
-        where: { id: input.operationId, leaseId },
-        data: {
-          state,
-          checkpoints,
-          activeScopeKey: state === 'complete' || state === 'rejected' ? null : activeScopeKey,
-          leaseUntil: new Date(Date.now() + 90_000),
-        },
+      const saved = await this.prisma.$transaction(async (tx) => {
+        const updated = await tx.karavanMarketplaceConnectionOperation.updateMany({
+          where: { id: input.operationId, leaseId },
+          data: {
+            state,
+            checkpoints,
+            activeScopeKey: state === 'complete' || state === 'rejected' ? null : activeScopeKey,
+            leaseUntil: new Date(Date.now() + 90_000),
+          },
+        });
+        if (
+          updated.count === 1 &&
+          state !== 'complete' &&
+          state !== 'rejected' &&
+          checkpoints.marketplaceId
+        )
+          await journal.claim(tx, {
+            operationId: input.operationId,
+            chatIds: input.chatIds,
+            anchorChatId: input.chatIds[0]!,
+            marketplaceIds: [checkpoints.marketplaceId],
+          });
+        if (updated.count === 1 && (state === 'complete' || state === 'rejected'))
+          await journal.release(tx, input.operationId);
+        return updated;
       });
       if (saved.count !== 1)
         throw new ConflictException('Подключение уже продолжено в другой вкладке.');
     };
     try {
+      // Explicit continuation may persist observed committed receipts before
+      // dispatch. GET inspection uses the same observer without journal writes.
+      if (
+        leased.state === 'unknown' ||
+        checkpoints.bindings.some((item) => item.state === 'unknown')
+      ) {
+        const observed = await observeKaravanSetup(
+          this.config,
+          actorMaxUserId,
+          await this.status(input.operationId, actorMaxUserId),
+        );
+        Object.assign(checkpoints, observed.checkpoints);
+        await checkpoint(observed.state);
+        if (observed.state === 'complete') return observed;
+      }
       if (!checkpoints.marketplaceId) {
         if (!input.create) throw new ConflictException('Выберите магазин повторно.');
         // FLAG: Persist uncertainty before the remote call so a process crash cannot release its intent.
@@ -464,6 +594,14 @@ export class KaravanMarketplaceProxyService {
             payload,
             principal,
             createResult,
+            async () => {
+              const held = await this.prisma.karavanMarketplaceConnectionOperation.updateMany({
+                where: { id: input.operationId, leaseId, leaseUntil: { gt: new Date() } },
+                data: { leaseUntil: new Date(Date.now() + 90_000) },
+              });
+              if (held.count !== 1)
+                throw new ConflictException('Подключение продолжено в другой вкладке.');
+            },
           );
           checkpoints.marketplaceId = result.marketplace.id;
           await checkpoint('pending');
@@ -512,6 +650,14 @@ export class KaravanMarketplaceProxyService {
             },
             principal,
             bindingAction !== 'bind_chat',
+            async () => {
+              const held = await this.prisma.karavanMarketplaceConnectionOperation.updateMany({
+                where: { id: input.operationId, leaseId, leaseUntil: { gt: new Date() } },
+                data: { leaseUntil: new Date(Date.now() + 90_000) },
+              });
+              if (held.count !== 1)
+                throw new ConflictException('Подключение продолжено в другой вкладке.');
+            },
           );
           binding.state = 'connected';
           binding.bindingId = result.bindingId;

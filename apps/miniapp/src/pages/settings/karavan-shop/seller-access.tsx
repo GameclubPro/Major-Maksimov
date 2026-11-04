@@ -77,7 +77,7 @@ function useSellerAccessState() {
             targetMaxUserId: null,
           },
         });
-        if (current !== epoch.current || !('url' in result)) return;
+        if (current !== epoch.current || !result || !('url' in result)) return;
         target = result.url;
       }
       if (!target || current !== epoch.current) return;
