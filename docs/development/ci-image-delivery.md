@@ -116,6 +116,13 @@ run publishes and verifies the tested images, and the normal receipt/provenance 
 Until then, registry publication remains an external prerequisite; merging the privacy fix does
 not establish successful image delivery.
 
+Bootstrap failures report only a fixed `stage` and `code`, separating context/credential refusal,
+registry login, metadata reads, seed build/push and receipt persistence. They never print the
+credential, environment, dependency output or raw error. A failure at `seed-push` or a subsequent
+metadata, receipt or cleanup stage can follow a registry write; inspect the retained run before
+another dispatch.
+A diagnostic classification does not authorize publication or establish that no seed was written.
+
 ## Local package evidence credential
 
 Local GitHub control access for dispatch and workflow observation is separate from package

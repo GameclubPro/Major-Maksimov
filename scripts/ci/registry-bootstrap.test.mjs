@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { readdirSync, readFileSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import {
   BOOTSTRAP_WORKFLOW,
   bootstrapContext,
   bootstrapPrivatePackage,
+  bootstrapFailureMessage,
+  runBootstrap,
   seedDockerfile,
 } from './registry-bootstrap.mjs';
 
@@ -44,6 +49,287 @@ function response(patch = {}) {
     },
   };
 }
+
+test('CLI distinguishes context and credential refusals without rendering supplied values', () => {
+  const secret = 'synthetic-sensitive-marker';
+  for (const [patch, stage] of [
+    [{ GITHUB_REF: `refs/heads/${secret}`, GH_TOKEN: 'x'.repeat(40) }, 'context'],
+    [{ GH_TOKEN: `${secret}.invalid` }, 'credential-shape'],
+  ]) {
+    const result = spawnSync(process.execPath, ['scripts/ci/registry-bootstrap.mjs'], {
+      env: environment(patch),
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.equal(
+      result.stderr,
+      `Registry bootstrap stopped; private package admission did not pass (stage=${stage}, code=REFUSED).\n`,
+    );
+    assert.equal(result.stderr.includes(secret), false);
+  }
+});
+
+test('injected dependency failures retain their exact phase through successful cleanup', async (t) => {
+  const secret = 'synthetic-private-dependency-output';
+  const cases = [
+    { stage: 'login', code: 'DEPENDENCY_FAILED', failCommand: 'login', calls: ['login'], reads: 0 },
+    { stage: 'metadata-before', code: 'UNVERIFIED', failRead: 1, calls: ['login'], reads: 1 },
+    {
+      stage: 'metadata-before',
+      code: 'UNVERIFIED',
+      replies: [{ status: 403 }],
+      calls: ['login'],
+      reads: 1,
+    },
+    {
+      stage: 'metadata-before',
+      code: 'REGISTRY_PACKAGE_UNVERIFIED',
+      replies: [{ status: 200, body: null }],
+      calls: ['login'],
+      reads: 1,
+    },
+    {
+      stage: 'metadata-before',
+      code: 'REGISTRY_PACKAGE_PUBLIC',
+      replies: [response({ visibility: 'public' })],
+      calls: ['login'],
+      reads: 1,
+    },
+    {
+      stage: 'metadata-before',
+      code: 'REGISTRY_PACKAGE_NOT_PRIVATE',
+      replies: [response({ visibility: 'internal' })],
+      calls: ['login'],
+      reads: 1,
+    },
+    {
+      stage: 'metadata-before',
+      code: 'REGISTRY_PACKAGE_UNBOUND',
+      replies: [response({ repository: { id: 1, full_name: expected.repository } })],
+      calls: ['login'],
+      reads: 1,
+    },
+    {
+      stage: 'seed-build',
+      code: 'DEPENDENCY_FAILED',
+      failCommand: 'build',
+      replies: [{ status: 404 }],
+      calls: ['login', 'build'],
+      reads: 1,
+    },
+    {
+      stage: 'seed-push',
+      code: 'DEPENDENCY_FAILED',
+      failCommand: 'push',
+      replies: [{ status: 404 }],
+      calls: ['login', 'build', 'push'],
+      reads: 1,
+    },
+    {
+      stage: 'metadata-after',
+      code: 'UNVERIFIED',
+      failRead: 2,
+      replies: [{ status: 404 }],
+      calls: ['login', 'build', 'push'],
+      reads: 2,
+    },
+    {
+      stage: 'metadata-after',
+      code: 'UNVERIFIED',
+      replies: [{ status: 404 }, { status: 403 }],
+      calls: ['login', 'build', 'push'],
+      reads: 2,
+    },
+    {
+      stage: 'metadata-after',
+      code: 'REGISTRY_PACKAGE_PUBLIC',
+      replies: [{ status: 404 }, response({ visibility: 'public' })],
+      calls: ['login', 'build', 'push'],
+      reads: 2,
+    },
+  ];
+  for (const [index, scenario] of cases.entries()) {
+    await t.test(`${index + 1}: ${scenario.stage} ${scenario.code}`, async () => {
+      const token = 'synthetic_token_'.padEnd(40, 'x');
+      const calls = [];
+      const directories = new Set();
+      let reads = 0;
+      const diagnostic = await runBootstrap(environment({ GH_TOKEN: token }), [], {
+        execute: (binary, args, options) => {
+          assert.equal(binary, 'docker');
+          const command = args[0] === 'image' ? args[1] : args[0];
+          calls.push(command);
+          directories.add(options.env.DOCKER_CONFIG);
+          assert.equal(statSync(options.env.DOCKER_CONFIG).mode & 0o777, 0o700);
+          assert.equal(options.input, command === 'login' ? token : undefined);
+          if (command === 'build') directories.add(args.at(-1));
+          if (scenario.failCommand === command) throw new Error(secret);
+          return '';
+        },
+        request: async (url, options) => {
+          reads++;
+          assert.equal(
+            url,
+            'https://api.github.com/users/GameclubPro/packages/container/major-maksimov-release-api',
+          );
+          assert.equal(options.headers.authorization, `Bearer ${token}`);
+          assert.equal(options.redirect, 'error');
+          if (scenario.failRead === reads) throw new Error(secret);
+          const reply = scenario.replies?.[reads - 1];
+          assert.ok(reply, 'unexpected additional metadata request');
+          return new Response(JSON.stringify(reply.body ?? null), { status: reply.status });
+        },
+      }).then(
+        () => assert.fail('admission must remain blocked'),
+        (error) => error,
+      );
+      assert.equal(diagnostic.stage, scenario.stage);
+      assert.equal(diagnostic.code, scenario.code);
+      assert.deepEqual(calls, scenario.calls);
+      assert.equal(reads, scenario.reads);
+      assert.ok([...directories].every((directory) => !existsSync(directory)));
+      const message = bootstrapFailureMessage(diagnostic);
+      assert.equal(message.includes(secret), false);
+      assert.equal(message.includes(token), false);
+      assert.equal(Object.hasOwn(diagnostic, 'cause'), false);
+      assert.equal(diagnostic.message.includes(secret), false);
+      assert.equal(
+        message.includes('package is public; choose a new reserved name'),
+        scenario.code === 'REGISTRY_PACKAGE_PUBLIC',
+      );
+    });
+  }
+});
+
+test('diagnostics reject arbitrary stage and code text', () => {
+  assert.equal(
+    bootstrapFailureMessage({
+      stage: 'sensitive-stage',
+      code: 'sensitive-code',
+      message: 'sensitive-message',
+    }),
+    'Registry bootstrap stopped; private package admission did not pass (stage=unknown, code=INTERNAL).\n',
+  );
+});
+
+test('token shape admission is unchanged and refusals reach no dependency', async () => {
+  for (const token of [
+    undefined,
+    '',
+    'x'.repeat(19),
+    'x'.repeat(256),
+    `${'x'.repeat(20)}.`,
+    `${'x'.repeat(20)}-`,
+    `${'x'.repeat(20)}\n`,
+  ]) {
+    await assert.rejects(
+      runBootstrap(environment({ GH_TOKEN: token }), [], {
+        execute: () => assert.fail('invalid credential must not reach Docker'),
+        request: () => assert.fail('invalid credential must not reach metadata'),
+      }),
+      { stage: 'credential-shape', code: 'REFUSED' },
+    );
+  }
+  for (const token of ['x'.repeat(20), 'x'.repeat(255), 'synthetic_token_'.padEnd(40, 'x')]) {
+    await assert.rejects(
+      runBootstrap(environment({ GH_TOKEN: token }), [], {
+        execute: () => {
+          throw new Error('synthetic login failure');
+        },
+        request: () => assert.fail('failed login must not reach metadata'),
+      }),
+      { stage: 'login', code: 'DEPENDENCY_FAILED' },
+    );
+  }
+});
+
+test('cleanup failures retain existing precedence and expose only their fixed stage', () => {
+  for (const stage of ['seed-cleanup', 'auth-cleanup']) {
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { runBootstrap, bootstrapFailureMessage } from ${JSON.stringify(pathToFileURL(resolve('scripts/ci/registry-bootstrap.mjs')).href)};
+      const remove = fs.rmSync;
+      const directories = new Set();
+      fs.rmSync = (directory, options) => {
+        remove(directory, options);
+        if (directory.includes(${JSON.stringify(stage === 'seed-cleanup' ? 'maxim-inert-registry-seed-' : 'maxim-bootstrap-auth-')})) throw new Error('synthetic-private-cleanup-output');
+      };
+      syncBuiltinESMExports();
+      const error = await runBootstrap(${JSON.stringify(environment({ GH_TOKEN: 'x'.repeat(40) }))}, [], {
+        execute: (_binary, args, options) => {
+          directories.add(options.env.DOCKER_CONFIG);
+          if (args[0] === 'build') {
+            directories.add(args.at(-1));
+            throw new Error('synthetic-private-build-output');
+          }
+        },
+        request: async () => new Response('{}', { status: 404 }),
+      }).then(() => assert.fail('expected refusal'), (failure) => failure);
+      assert.ok([...directories].every((directory) => !fs.existsSync(directory)));
+      process.stdout.write(bootstrapFailureMessage(error));
+    `,
+      ],
+      { encoding: 'utf8', timeout: 5000 },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+    assert.equal(
+      result.stdout,
+      `Registry bootstrap stopped; private package admission did not pass (stage=${stage}, code=INTERNAL).\n`,
+    );
+  }
+});
+
+test('an existing private package still produces the same receipt after login and one lookup', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-bootstrap-receipt-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `
+    import assert from 'node:assert/strict';
+    import { existsSync } from 'node:fs';
+    import { runBootstrap } from ${JSON.stringify(pathToFileURL(resolve('scripts/ci/registry-bootstrap.mjs')).href)};
+    let auth;
+    const calls = [];
+    const result = await runBootstrap(${JSON.stringify(environment({ GH_TOKEN: 'x'.repeat(40) }))}, [], {
+      execute: (_binary, args, options) => { auth = options.env.DOCKER_CONFIG; calls.push(args[0]); },
+      request: async () => { calls.push('metadata'); return new Response(${JSON.stringify(JSON.stringify(response().body))}, { status: 200 }); },
+    });
+    assert.deepEqual(calls, ['login', 'metadata']);
+    assert.equal(existsSync(auth), false);
+    assert.equal(result.action, 'ALREADY_PRIVATE');
+  `,
+    ],
+    { cwd: directory, encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+  const receipt = join(directory, 'registry-bootstrap-api.json');
+  assert.equal(statSync(receipt).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(readFileSync(receipt, 'utf8')), {
+    schemaVersion: 1,
+    component: 'api',
+    package: 'ghcr.io/gameclubpro/major-maksimov-release-api',
+    action: 'ALREADY_PRIVATE',
+    visibility: 'private',
+    sourceSha: expected.sha,
+    runId: '123',
+    runAttempt: '1',
+  });
+});
 
 test('bootstrap accepts only its dedicated explicit trusted main GitHub-hosted invocation', () => {
   assert.deepEqual(bootstrapContext(environment()), expected);
