@@ -127,6 +127,23 @@ describe('independent commercial model pool classifier', () => {
     consultationFinished.mockReset().mockResolvedValue(undefined);
   });
 
+  it('confirms a 4B personal sale with 9B only when its explicit category policy requires it', async () => {
+    mailbox.available.mockResolvedValue(['pc-a-4b', 'pc-b-9b']);
+    const result = await client({ confirmPersonalSales: true }).classify('Личная продажа');
+    expect(result).toMatchObject({
+      classification: 'NOT_COMMERCIAL',
+      reasonCodes: ['PERSONAL_SALE'],
+      pool: {
+        nodeId: 'pc-b-9b',
+        route: 'consulted',
+        primaryClassification: 'NOT_COMMERCIAL',
+        consultationOutcome: 'completed',
+      },
+    });
+    expect(canStartConsultation).toHaveBeenCalledTimes(1);
+    expect(consultationFinished).toHaveBeenCalledTimes(1);
+  });
+
   it.each(POOL_NODE_IDS)(
     'routes directly to available %s and preserves its actual runtime identity',
     async (nodeId) => {

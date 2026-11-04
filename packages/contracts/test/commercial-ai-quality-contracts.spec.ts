@@ -149,6 +149,33 @@ describe('bounded commercial AI quality observation contracts', () => {
       ).toBe(false);
   });
 
+  it.each([
+    { sourceVersion: 1, protocolVersion: 1 },
+    { sourceVersion: 2, protocolVersion: 2 },
+    { sourceVersion: 3, protocolVersion: 1 },
+    { sourceVersion: 3, protocolVersion: 2 },
+  ] as const)(
+    'preserves source v$sourceVersion with classifier wire protocol v$protocolVersion',
+    ({ sourceVersion, protocolVersion }) => {
+      const classification = result({ protocolVersion });
+      if (protocolVersion === 1) delete classification.pool;
+      const original = attempt({
+        sourceVersion,
+        analysis: completed(classification),
+      });
+      const parsed = commercialAiQualityEnvelopeSchema.parse(envelope([original]));
+      expect(parsed.attempts[0]).toEqual(original);
+      expect(parsed.attempts[0]?.sourceVersion).toBe(sourceVersion);
+      expect(parsed.attempts[0]?.analysis.result?.protocolVersion).toBe(protocolVersion);
+    },
+  );
+
+  it.each([0, 4, '3', null])('rejects unsupported source version %s', (sourceVersion) => {
+    expect(
+      commercialAiQualityAttemptSchema.safeParse({ ...attempt(), sourceVersion }).success,
+    ).toBe(false);
+  });
+
   it('preserves actual synchronous KEEP and the separate detector baseline DELETE', () => {
     const parsed = commercialAiQualityEnvelopeSchema.parse(envelope());
     expect(parsed.attempts[0]?.actualSynchronousDecision.decision?.messageDisposition).toBe('KEEP');

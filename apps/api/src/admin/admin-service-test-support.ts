@@ -4,6 +4,7 @@ import {
   type ManagedEntityHeader,
 } from '@maxim/contracts';
 import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
+import { Prisma } from '../prisma/prisma-client';
 import { createChannelSettingsPrismaMock } from './admin-channel-settings-test-support';
 import { AdminService } from './admin.service';
 
@@ -1559,26 +1560,35 @@ export function wireManagedBroadcastOccurrenceStore(
 
 export function extractSqlText(arg: unknown): string {
   if (Array.isArray(arg)) {
+    const [query, ...values] = arg;
+    if (isSqlTemplateStrings(query)) {
+      return extractSqlText(Prisma.sql(query, ...values));
+    }
     return arg.map((part) => extractSqlText(part)).join(' ');
   }
 
-  if (arg && typeof arg === 'object' && 'strings' in arg) {
-    const sqlArg = arg as { strings?: unknown; values?: unknown };
-    const strings = sqlArg.strings;
-    const values = sqlArg.values;
-    const parts: string[] = [];
-    if (Array.isArray(strings)) {
-      parts.push(strings.map((part) => String(part)).join(' '));
-    }
-    if (Array.isArray(values)) {
-      parts.push(values.map((part) => extractSqlText(part)).join(' '));
-    }
-    if (parts.length > 0) {
-      return parts.filter(Boolean).join(' ');
-    }
+  if (hasSqlParts(arg)) {
+    return arg.strings
+      .map(
+        (part, index) =>
+          part + (index < arg.values.length ? extractSqlText(arg.values[index]) : ''),
+      )
+      .join('');
   }
 
   return String(arg);
+}
+
+function isSqlTemplateStrings(arg: unknown): arg is TemplateStringsArray {
+  if (!Array.isArray(arg) || !('raw' in arg)) return false;
+  return Array.isArray(arg.raw) && arg.every((part) => typeof part === 'string');
+}
+
+function hasSqlParts(arg: unknown): arg is Pick<Prisma.Sql, 'strings' | 'values'> {
+  if (!arg || typeof arg !== 'object') return false;
+  const { strings, values } = arg as Partial<Pick<Prisma.Sql, 'strings' | 'values'>>;
+  if (!Array.isArray(strings) || !Array.isArray(values)) return false;
+  return strings.every((part) => typeof part === 'string');
 }
 
 export function createDecimalLike(value: number) {

@@ -151,6 +151,7 @@ export {
 export * from './duplicate-diagnostics.js';
 export * from './duplicate-rules.js';
 export * from './commercial-settings.js';
+export * from './commercial-policy.js';
 export * from './stop-words.js';
 export * from './message-retention.js';
 export * from './stop-words-legacy-phrases.js';

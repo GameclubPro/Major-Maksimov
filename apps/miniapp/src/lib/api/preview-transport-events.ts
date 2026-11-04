@@ -199,6 +199,9 @@ export function matchesModerationFeedFilter(
     return true;
   }
 
+  if (filter === 'COMMERCIAL')
+    return item.ruleCode === 'COMMERCIAL_AD' || item.ruleCode === 'COMMERCIAL_LLM_DELETE';
+
   if (filter === 'UNBAN') {
     return item.ruleCode === 'MANUAL_UNBAN';
   }
@@ -443,7 +446,7 @@ export function createParticipantsItems(
     null,
     null,
     {
-      userId: 'preview-spammer-1',
+      userId: '100000004',
       userDisplayName: 'Сергей Маркет',
       username: 'sergey-market',
     },
@@ -529,14 +532,18 @@ export function createChatViolations(now: Date): LogsDashboardResponse['violatio
       id: 'violation-1',
       action: 'MUTE' as const,
       ruleCode: 'COMMERCIAL_AD',
-      userId: 'preview-spammer-1',
+      userId: '100000004',
       userDisplayName: 'Сергей Маркет',
       avatarUrl: buildPreviewAvatarDataUrl('Сергей Маркет', '#4d94ff', '#2b64dd'),
       profileUrl: buildPreviewProfileUrl('sergey-market'),
       profileHandoffUrl: buildPreviewProfileHandoffUrl('sergey-market'),
       createdAt: addHours(now, -1.5).toISOString(),
       maskedExcerpt: 'Переходите по ссылке и получайте скидку ***',
-      metadata: { muteDurationHours: 24, muteExpiresAt: addHours(now, 22.5).toISOString() },
+      metadata: {
+        muteDurationHours: 24,
+        muteExpiresAt: addHours(now, 22.5).toISOString(),
+        commercialCategories: ['BUSINESS'],
+      },
     },
     {
       id: 'violation-2',

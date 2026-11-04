@@ -60,6 +60,7 @@ export const CHAT_SECTION_FIELDS = {
   ],
   commercialFilter: [
     'commercialAdsFilterEnabled',
+    'commercialAdsPolicy',
     'commercialAdsSensitivity',
     'commercialAdsWarnThreshold',
     'commercialAdsDeleteThreshold',

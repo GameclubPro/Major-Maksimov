@@ -69,15 +69,35 @@ export async function selectModerationFeedReadModelRows(
   prisma: PrismaService,
   params: SelectModerationFeedRowsParams,
 ): Promise<ModerationFeedReadModelRow[]> {
-  const filterSql = buildModerationFeedFilterSql(params.filter);
+  const commercial = params.filter === 'COMMERCIAL';
+  const filterSql = commercial ? Prisma.empty : buildModerationFeedFilterSql(params.filter);
   const cursorSql = params.cursor
     ? Prisma.sql`
-        AND (
-          feed.created_at < ${params.cursor.createdAt}
-          OR (feed.created_at = ${params.cursor.createdAt} AND feed.id < ${params.cursor.id})
-        )
+        AND (feed.created_at, feed.id) < (${params.cursor.createdAt}, ${params.cursor.id})
       `
     : Prisma.empty;
+  // FLAG: Each commercial rule owns an indexed ordered head before merging. A single IN
+  // predicate may scan/sort the entire retained chat window even for a small page.
+  const feedSource = commercial
+    ? Prisma.sql`(
+        SELECT * FROM (
+          (SELECT * FROM chat_moderation_feed_items feed
+           WHERE feed.chat_id = ${params.chatId}
+             AND feed.rule_code = 'COMMERCIAL_AD'
+             AND feed.created_at >= ${params.from} AND feed.created_at <= ${params.to}
+             ${cursorSql}
+           ORDER BY feed.created_at DESC, feed.id DESC LIMIT ${params.limit})
+          UNION ALL
+          (SELECT * FROM chat_moderation_feed_items feed
+           WHERE feed.chat_id = ${params.chatId}
+             AND feed.rule_code = 'COMMERCIAL_LLM_DELETE'
+             AND feed.created_at >= ${params.from} AND feed.created_at <= ${params.to}
+             ${cursorSql}
+           ORDER BY feed.created_at DESC, feed.id DESC LIMIT ${params.limit})
+        ) commercial_heads
+        ORDER BY created_at DESC, id DESC LIMIT ${params.limit}
+      )`
+    : Prisma.sql`chat_moderation_feed_items`;
 
   return prisma.$queryRaw<ModerationFeedReadModelRow[]>`
     SELECT
@@ -100,7 +120,7 @@ export async function selectModerationFeedReadModelRows(
       NULL::TEXT AS "avatarUrl",
       NULL::TEXT AS "profileUrl",
       NULL::TEXT AS "profileHandoffUrl"
-    FROM chat_moderation_feed_items feed
+    FROM ${feedSource} feed
     WHERE feed.chat_id = ${params.chatId}
       AND feed.created_at >= ${params.from}
       AND feed.created_at <= ${params.to}

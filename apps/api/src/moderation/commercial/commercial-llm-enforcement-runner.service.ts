@@ -1,3 +1,4 @@
+import { CommercialAdsRuntimePolicyService } from './commercial-ads-runtime-policy.service';
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger, Optional, type OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -59,6 +60,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
     @Optional() private readonly observations?: CommercialAiObservationService,
     @Optional()
     private readonly observationGate: CommercialAiObservationGate = new CommercialAiObservationGate(),
+    @Optional() private readonly categoryPolicy?: CommercialAdsRuntimePolicyService,
   ) {}
 
   onModuleInit(): void {
@@ -249,7 +251,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
       ({ raw, request, deadlineAtMs }) => {
         const policy = this.admission.poolPolicy();
         if (policy) {
-          if (request.source.version !== 2 || request.source.poolPolicy !== policy)
+          if (!('poolPolicy' in request.source) || request.source.poolPolicy !== policy)
             throw new CommercialLlmError('INVALID_INPUT');
           const server = this.poolServer!;
           return new CommercialLlmPoolClient(
@@ -260,6 +262,8 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
               routingStats: this.poolRoutingStats,
               deadlineAtMs,
               policy,
+              confirmPersonalSales:
+                request.source.version === 3 && request.source.personalSaleBlocked,
               primaryFinished: async () => {
                 await mailbox.releasePrimary(raw, this.worker);
                 this.wake();
@@ -272,7 +276,11 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
             },
           );
         }
-        if (request.source.version !== 1) throw new CommercialLlmError('INVALID_INPUT');
+        if (
+          request.source.version !== 1 &&
+          !(request.source.version === 3 && !('poolPolicy' in request.source))
+        )
+          throw new CommercialLlmError('INVALID_INPUT');
         const trace = {
           ...this.observationIdentity(),
           traceId: request.source.nonce,
@@ -332,11 +340,13 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
             classify: (excerpt, signal, valid) =>
               withSecondary(() => secondary.classifyAudit(excerpt, signal, valid)),
           },
+          request.source.version === 3 && request.source.personalSaleBlocked,
         );
       },
       this.intents,
       () => this.mayRun(),
       this.observations ? { writer: this.observations, gate: this.observationGate } : undefined,
+      this.categoryPolicy,
     );
     const work = processor
       .run(this.worker, this.controller.signal)

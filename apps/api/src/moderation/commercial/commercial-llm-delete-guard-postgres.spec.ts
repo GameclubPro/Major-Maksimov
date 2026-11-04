@@ -1,3 +1,12 @@
+import {
+  createDefaultCommercialAdsPolicy,
+  type CommercialAdsPolicy,
+} from '@maxim/contracts/settings';
+import { COMMERCIAL_LLM_POOL_PROFILES } from './commercial-llm-pool.protocol';
+import {
+  COMMERCIAL_LLM_POLICY_VERSION,
+  type CommercialLlmObservationResult,
+} from './commercial-llm.protocol';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import type { MaxBotLinkService } from '../../max/max-bot-link.service';
@@ -16,6 +25,20 @@ import {
   COMMERCIAL_LLM_DELETE_RULE_CODE,
 } from './commercial-llm-enforcement.protocol';
 
+const positive: CommercialLlmObservationResult = {
+  ...COMMERCIAL_LLM_POOL_PROFILES['pc-b-9b'].identity,
+  classification: 'COMMERCIAL',
+  reasonCodes: ['COMMERCIAL_OFFER'],
+  policyVersion: COMMERCIAL_LLM_POLICY_VERSION,
+  durationMs: 1,
+  pool: {
+    version: 'commercial-pool-v2',
+    nodeId: 'pc-b-9b',
+    route: 'direct',
+    policy: 'confirm-positive',
+    attempts: 1,
+  },
+};
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 
 (databaseUrl ? describe : describe.skip)('commercial AI protection authority on PostgreSQL', () => {
@@ -45,17 +68,28 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     await prisma?.$disconnect();
   });
 
-  async function fixture(grant = true, pool = false) {
+  async function fixture(
+    grant = true,
+    pool = false,
+    policy?: CommercialAdsPolicy,
+    messageText?: string,
+    classified?: CommercialLlmObservationResult,
+  ) {
     const chatId = `commercial-ai-protection-${randomUUID()}`;
     const messageId = randomUUID();
-    const userId = 'synthetic-protected-user';
+    const userId = '10000007';
     const botId = 'synthetic-ai-bot';
     chats.add(chatId);
     await prisma.chat.create({
       data: {
         id: chatId,
         title: 'Commercial AI protection regression',
-        settings: { create: { commercialAdsFilterEnabled: true } },
+        settings: {
+          create: {
+            commercialAdsFilterEnabled: true,
+            ...(policy ? { commercialAdsPolicy: policy } : {}),
+          },
+        },
       },
     });
     const settings = await prisma.chatSettings.findUniqueOrThrow({ where: { chatId } });
@@ -69,7 +103,8 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
         },
       });
     const now = Date.now();
-    const text = 'Мастерская принимает заказы на ремонт мебели. Работаем по договору.';
+    const text =
+      messageText ?? 'Мастерская принимает заказы на ремонт мебели. Работаем по договору.';
     const offer = buildCommercialLlmOffer(
       {
         chatId,
@@ -145,7 +180,18 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
         {
           ruleCode: COMMERCIAL_LLM_DELETE_RULE_CODE,
           reasonKey,
-          metadata: { commercialLlmSource: source },
+          metadata: {
+            commercialLlmSource: source,
+            ...(policy
+              ? {
+                  commercialAdsDecision: {
+                    version: 1,
+                    result: classified ?? positive,
+                    categories: [],
+                  },
+                }
+              : {}),
+          },
         },
       ],
     };
@@ -272,4 +318,77 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
     },
   );
+  it('executes a fresh v3 blocked service using the real category detector and 9B identity', async () => {
+    const h = await fixture(false, true, createDefaultCommercialAdsPolicy());
+    expect(h.source.version).toBe(3);
+    await expect(h.guard.authorize(h.input)).resolves.toEqual({
+      deadlineAtMs: h.source.deadlineAtMs,
+      reasonKeys: [h.reasonKey],
+    });
+  });
+
+  it.each(['category_allowed', 'participant_exception'] as const)(
+    'revokes v3 authority when %s is saved during source lookup',
+    async (change) => {
+      const policy = createDefaultCommercialAdsPolicy();
+      const h = await fixture(false, true, policy);
+      h.state.onSourceRead = async () => {
+        const changed = structuredClone(policy);
+        if (change === 'category_allowed') changed.categories.SERVICES = 'ALLOW';
+        else
+          changed.exceptions.push({
+            id: randomUUID(),
+            userId: h.userId,
+            userName: 'Тест',
+            categories: ['SERVICES'],
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+        await prisma.chatSettings.update({
+          where: { chatId: h.chatId },
+          data: { commercialAdsPolicy: changed },
+        });
+      };
+      await expect(h.guard.authorize(h.input)).rejects.toBeInstanceOf(
+        CommercialLlmGuardRejectedError,
+      );
+      expect(h.consume).not.toHaveBeenCalled();
+    },
+  );
+
+  it('revokes a prepared DELETE when a participant exception is added before final dispatch', async () => {
+    const policy = createDefaultCommercialAdsPolicy();
+    const h = await fixture(false, true, policy);
+    const prepared = await h.guard.prepareForDispatch(h.input);
+    policy.exceptions.push({
+      id: randomUUID(),
+      userId: h.userId,
+      userName: 'Тест',
+      categories: ['SERVICES'],
+      expiresAt: null,
+    });
+    await prisma.chatSettings.update({
+      where: { chatId: h.chatId },
+      data: { commercialAdsPolicy: policy },
+    });
+    await expect(finalizeDeleteAuthority(prepared)).rejects.toBeInstanceOf(
+      CommercialLlmGuardRejectedError,
+    );
+    expect(h.max.getExactMessageRow).toHaveBeenCalledTimes(1);
+  });
+
+  it('permits an explicitly blocked personal sale only with its distinct v3 9B decision', async () => {
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.PERSONAL_SALE = 'BLOCK';
+    const h = await fixture(
+      false,
+      true,
+      policy,
+      'Продам свой старый велосипед после переезда, один, б/у.',
+      { ...positive, classification: 'NOT_COMMERCIAL', reasonCodes: ['PERSONAL_SALE'] },
+    );
+    await expect(h.guard.authorize(h.input)).resolves.toEqual({
+      deadlineAtMs: h.source.deadlineAtMs,
+      reasonKeys: [h.reasonKey],
+    });
+  });
 });

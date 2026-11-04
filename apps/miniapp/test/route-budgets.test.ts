@@ -50,6 +50,24 @@ test('cold comments budget includes authentication and prefetch without subtract
   assert.ok(budget.limits.cssGzipBytes <= 41984);
 });
 
+test('commercial lazy budgets include participant search in both complete editing flows', () => {
+  const entry = (name: string) => `src/pages/settings/commercial-policy-${name}.tsx`;
+  const expectedEntries = {
+    'commercial-filter-tools': ['tools'],
+    'commercial-filter-exceptions': ['tools', 'exceptions', 'exception-editor', 'author-picker'],
+    'commercial-filter-preview': ['tools', 'preview', 'author-picker'],
+    'commercial-filter-author-picker': ['author-picker'],
+  };
+  for (const [id, entries] of Object.entries(expectedEntries)) {
+    const budget = routeBudgets.budgets.find((item: { id: string }) => item.id === id);
+    assert.ok(budget, `${id} must measure the lazy surface`);
+    assert.equal(budget.baseline, 'commercial-filter-editor');
+    assert.deepEqual(budget.entries, entries.map(entry));
+    assert.ok(budget.limits.jsGzipBytes > 0);
+    assert.ok(budget.limits.cssGzipBytes > 0);
+  }
+});
+
 test('manifest asset collection deduplicates transitive chunks and supports baselines', () => {
   const manifest = {
     'index.html': {

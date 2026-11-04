@@ -2123,8 +2123,7 @@ describe('AdminService.getChatModerationFeed', () => {
     expect(firstSqlText).toContain('ORDER BY feed.created_at DESC, feed.id DESC');
 
     const secondSqlText = extractSqlText(prisma.$queryRaw.mock.calls[1]);
-    expect(secondSqlText).toContain('feed.created_at <');
-    expect(secondSqlText).toContain('feed.id <');
+    expect(secondSqlText).toContain('(feed.created_at, feed.id) < (');
   });
 
   it('reads moderation snapshot names inline without loading MAX member profiles', async () => {

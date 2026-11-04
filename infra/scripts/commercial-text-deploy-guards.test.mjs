@@ -47,6 +47,10 @@ function probe(t, mode, ai = false, pool = false, overrides = {}) {
     'ai-no-proof': ['ai', 'hasProof', 'removedProof'],
     'pool-no-v2': ['protocol', 'commercial-pool-v2', 'removed-pool-reader'],
     'pool-no-v1': ['protocol', 'legacyCommercialLlmSourceSchema', 'removedLegacyReader'],
+    'policy-no-v3': ['protocol', 'version: z.literal(3)', 'version: z.literal(999)'],
+    'policy-no-ai-check': ['ai', 'assertCategoryPolicy(', 'removedPolicyCheck('],
+    'policy-no-text-check': ['commercial', 'resolveCommercialAdsPolicy(', 'removedPolicyCheck('],
+    'policy-no-binding': ['binding', 'settings.commercialAdsPolicy == null ? []', '[]'],
   };
   if (mode in changes) {
     const [key, before, after] = changes[mode];
@@ -99,7 +103,14 @@ test('both API rollback paths require commercial binding and final dispatch guar
     );
   const current = probe(t, 'current');
   assert.equal(current.status, 0, current.stderr);
-  for (const mode of ['missing', 'unwired', 'old-authority', 'old-binding'])
+  for (const mode of [
+    'missing',
+    'unwired',
+    'old-authority',
+    'old-binding',
+    'policy-no-text-check',
+    'policy-no-binding',
+  ])
     assert.equal(probe(t, mode).status, 1);
 });
 
@@ -111,7 +122,14 @@ test('AI rollback floor retains fresh proof, original source and final dispatch 
     );
   const current = probe(t, 'current', true);
   assert.equal(current.status, 0, current.stderr);
-  for (const mode of ['missing', 'ai-unwired', 'ai-no-proof', 'ai-no-origin'])
+  for (const mode of [
+    'missing',
+    'ai-unwired',
+    'ai-no-proof',
+    'ai-no-origin',
+    'policy-no-v3',
+    'policy-no-ai-check',
+  ])
     assert.equal(probe(t, mode, true).status, 1);
 });
 

@@ -1,3 +1,4 @@
+import type { CommercialAdsRuntimePolicyService } from './commercial-ads-runtime-policy.service';
 import type { CommercialLlmClassifier } from './commercial-llm.protocol';
 import { createHash } from 'node:crypto';
 import type {
@@ -44,6 +45,7 @@ export class CommercialLlmEnforcementProcessor {
       writer: Pick<CommercialAiObservationService, 'update'>;
       gate: CommercialAiObservationGate;
     },
+    private readonly categoryPolicy?: Pick<CommercialAdsRuntimePolicyService, 'evaluateAi'>,
   ) {}
 
   async run(
@@ -109,6 +111,14 @@ export class CommercialLlmEnforcementProcessor {
           : this.classifier;
       const result = await classifier.classify(item.request.excerpt, workSignal, valid);
       analysisCompleted = true;
+      const categoryDecision =
+        source.version === 3
+          ? await this.categoryPolicy?.evaluateAi(source, item.request.excerpt, result)
+          : undefined;
+      const policyMayDelete =
+        source.version === 3
+          ? categoryDecision?.mayDelete === true
+          : commercialLlmMayDelete(result, source);
       // FLAG: Record the actual reply before any later source-authority veto.
       // A response and policy eligibility never establish a DELETE receipt.
       const abstention = result.pool?.consultationOutcome;
@@ -118,7 +128,7 @@ export class CommercialLlmEnforcementProcessor {
           state: 'COMPLETE',
           result,
           classificationOrigin: policyAbstention ? 'POLICY_ABSTENTION' : 'MODEL',
-          policyDeleteEligible: commercialLlmMayDelete(result, source),
+          policyDeleteEligible: policyMayDelete,
           observedAt: new Date().toISOString(),
           reason: policyAbstention
             ? abstention === 'no_capacity'
@@ -166,7 +176,7 @@ export class CommercialLlmEnforcementProcessor {
           ? { auditOutcome: 'capacity_skipped' }
           : {}),
       };
-      if (!commercialLlmMayDelete(result, source))
+      if (!policyMayDelete)
         return {
           outcome: result.classification === 'UNSURE' ? 'unsure' : 'kept',
           ...observation,
@@ -202,6 +212,15 @@ export class CommercialLlmEnforcementProcessor {
               score: 1,
               metadata: {
                 source: 'commercial_ai',
+                ...(source.version === 3
+                  ? {
+                      commercialAdsDecision: {
+                        version: 1,
+                        result,
+                        categories: categoryDecision?.categories ?? [],
+                      },
+                    }
+                  : {}),
                 commercialLlmSource: source,
                 commercialAiObservation: {
                   evidenceHash: commercialAiObservationEvidenceHash(source),
