@@ -6,6 +6,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { safetyDeskCommercialAiPoolResponseSchema } from '../packages/contracts/src/safety-desk-commercial-ai-pool.ts';
+import {
+  overviewFixture,
+  overviewTimingGapFixture,
+} from '../apps/admin/test/runtime-overview-fixture.ts';
+import { smokeRuntimeOverview } from '../apps/admin/test/runtime-overview.browser.mjs';
+
+const overviewOnly = process.argv.slice(2).includes('--runtime-overview');
+if (process.argv.slice(2).some((argument) => argument !== '--runtime-overview'))
+  throw new Error('Unknown Safety Desk smoke argument.');
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -136,7 +145,20 @@ try {
 async function smokeProfile(activeBrowser, profile) {
   const context = await activeBrowser.newContext({ viewport: profile.viewport, locale: 'ru-RU' });
   const page = await context.newPage();
+  await page.clock.install();
   const errors = [];
+  let overviewRequests = 0;
+  let overviewMode = 'fresh';
+  const overviewControls = {
+    readCount: () => overviewRequests,
+    setMode: (mode) => {
+      overviewMode = mode;
+    },
+    newOwner: () => {
+      expectedAccessCode = 'admin-smoke-overview-next-owner';
+      return expectedAccessCode;
+    },
+  };
   let cohortRequests = 0;
   let cohortUnavailable = false;
   let publicationRequests = 0;
@@ -463,6 +485,12 @@ async function smokeProfile(activeBrowser, profile) {
   page.on('console', (message) => {
     if (message.type() === 'error') {
       if (
+        overviewMode === 'denied' &&
+        message.location().url === `${baseUrl}api/v1/safety-desk/runtime/overview` &&
+        /^Failed to load resource: the server responded with a status of 403\b/.test(message.text())
+      )
+        return;
+      if (
         cohortUnavailable &&
         [
           'webhook-cohort',
@@ -610,6 +638,24 @@ async function smokeProfile(activeBrowser, profile) {
       );
       return;
     }
+    if (url.pathname.endsWith('/safety-desk/runtime/overview')) {
+      if (request.method() !== 'GET') throw new Error('Bot overview attempted a mutation.');
+      overviewRequests += 1;
+      await route.fulfill(
+        overviewMode === 'denied'
+          ? { status: 403, json: { message: 'Forbidden' } }
+          : {
+              status: 200,
+              json:
+                overviewMode === 'invalid'
+                  ? { schemaVersion: 1 }
+                  : (overviewMode === 'timing-gap' ? overviewTimingGapFixture : overviewFixture)(
+                      await page.evaluate(() => Date.now()),
+                    ),
+            },
+      );
+      return;
+    }
     if (url.pathname.endsWith('/safety-desk/runtime/publication-cohort')) {
       if (request.method() !== 'GET') throw new Error('Publication cohort attempted a mutation.');
       publicationRequests += 1;
@@ -712,6 +758,14 @@ async function smokeProfile(activeBrowser, profile) {
   await page.getByPlaceholder('Введите код').fill(accessCode);
   await page.getByRole('button', { name: 'Войти' }).click();
   await page.getByRole('button', { name: 'Публикации' }).waitFor();
+  if (overviewOnly) {
+    await page.getByRole('button', { name: 'Наблюдения', exact: true }).click();
+    await smokeRuntimeOverview(page, profile, overviewControls);
+    if (errors.length)
+      throw new Error(`${profile.name} overview smoke failed:\n${errors.join('\n')}`);
+    await context.close();
+    return;
+  }
   await page.getByRole('button', { name: 'Обращения' }).click();
   await page.getByRole('button', { name: 'Удаления' }).click();
   const evidencePanel = page.getByRole('region', { name: 'Подтверждения результата' });
@@ -753,6 +807,9 @@ async function smokeProfile(activeBrowser, profile) {
   if (cohortRequests !== 0 || publicationRequests !== 0)
     throw new Error('Closed cohort loaded before its view was opened.');
   await page.getByRole('button', { name: 'Наблюдения' }).click();
+  await smokeRuntimeOverview(page, profile, overviewControls);
+  const observationSelector = page.getByRole('navigation', { name: 'Вид наблюдений' });
+  await observationSelector.getByRole('button', { name: 'Входящие события', exact: true }).click();
   await page.getByText('За этот интервал события не наблюдались.', { exact: false }).waitFor();
   await page.getByText('Обработка события не подтверждает удаление', { exact: false }).waitFor();
   await page.getByText(/21:00:00 МСК — .*21:00:30 МСК/).waitFor();
@@ -764,7 +821,6 @@ async function smokeProfile(activeBrowser, profile) {
   cohort.rows[2].truncated = true;
   await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   await page.getByText('Неполная выборка: достигнут предел чтения', { exact: false }).waitFor();
-  const observationSelector = page.getByRole('navigation', { name: 'Вид наблюдений' });
   await observationSelector.getByRole('button', { name: 'Запуски Публика', exact: true }).click();
   const publicationPanel = page.getByRole('region', { name: 'Результаты запусков Публика' });
   await publicationPanel.getByText('Исход неизвестен', { exact: true }).first().waitFor();

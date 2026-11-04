@@ -62,15 +62,21 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 133 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 133);
-  assert.equal(new Set(nativePaths).size, 133);
+test('all 136 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 136);
+  assert.equal(new Set(nativePaths).size, 136);
   assert.ok(nativePaths.includes('src/admin/managed-giveaway-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/former-participant-sanctions-postgres.spec.ts'));
   assert.ok(
     nativePaths.includes('src/webhook/webhook-nonordered-mirror-quarantine-postgres.spec.ts'),
   );
   assert.ok(nativePaths.includes('src/publisher/publisher-auto-reply-recovery-postgres.spec.ts'));
+  for (const path of [
+    'src/admin/safety-desk-overview-pending-postgres.spec.ts',
+    'src/admin/safety-desk-overview-actions-postgres.spec.ts',
+    'src/admin/safety-desk-overview-redis.spec.ts',
+  ])
+    assert.ok(nativePaths.includes(path));
   assert.ok(nativePaths.includes('src/admin/vk-parsing-rate-limit.redis-integration.spec.ts'));
   const tests = makeTests();
   const baseline = await partitions(DefaultSequencer, tests);

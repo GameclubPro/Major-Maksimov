@@ -1,4 +1,8 @@
-import { AUXILIARY_QUEUE_NAMES, type AuxiliaryQueueName } from '../runtime/runtime-queue-inventory';
+import {
+  AUXILIARY_QUEUE_NAMES,
+  RETENTION_PRIORITY_ADDITIONAL_QUEUE_NAMES,
+  type AuxiliaryQueueName,
+} from '../runtime/runtime-queue-inventory';
 export { AUXILIARY_QUEUE_NAMES, type AuxiliaryQueueName } from '../runtime/runtime-queue-inventory';
 import { InjectQueue, getQueueToken } from '@nestjs/bullmq';
 import { Injectable, Optional } from '@nestjs/common';
@@ -52,6 +56,33 @@ export type QueueCounters = {
   failed: number;
   completed: number;
 };
+
+export type OverviewQueueCounters = QueueCounters & {
+  name: string;
+  family: 'webhook' | 'actions' | 'auxiliary';
+};
+
+export type OverviewCounterRedis = {
+  eval(script: string, numKeys: number, ...keys: string[]): Promise<unknown>;
+};
+export const READ_OVERVIEW_QUEUE_COUNTERS_LUA = `
+local result = {}
+local function waiting(key)
+  local count = redis.call('LLEN', key)
+  local marker = redis.call('LINDEX', key, -1)
+  if marker and string.sub(marker, 1, 2) == '0:' then count = math.max(0, count - 1) end
+  return count
+end
+for _, prefix in ipairs(KEYS) do
+  result[#result + 1] = {
+    waiting(prefix .. 'wait') + waiting(prefix .. 'paused'),
+    redis.call('ZCARD', prefix .. 'prioritized'), redis.call('LLEN', prefix .. 'active'),
+    redis.call('ZCARD', prefix .. 'delayed'), redis.call('ZCARD', prefix .. 'failed'),
+    redis.call('ZCARD', prefix .. 'completed')
+  }
+end
+return result
+`;
 
 export type WebhookStatusMetrics = {
   count: number;
@@ -300,6 +331,86 @@ export class QueueMetricsService {
     } catch {
       return undefined;
     }
+  }
+
+  async getOverviewCounters(
+    redis: OverviewCounterRedis,
+  ): Promise<{ observedAt: string; rows: OverviewQueueCounters[] }> {
+    const inventory: Array<{
+      name: string;
+      family: OverviewQueueCounters['family'];
+      queue: Queue | undefined;
+    }> = [
+      { name: WEBHOOK_QUEUE_CRITICAL, family: 'webhook', queue: this.webhookCriticalQueue },
+      { name: WEBHOOK_QUEUE_BACKGROUND, family: 'webhook', queue: this.webhookBackgroundQueue },
+      { name: LEGACY_WEBHOOK_QUEUE, family: 'webhook', queue: this.webhookLegacyQueue },
+      ...Object.entries(this.webhookJoinQueuesByName).map(([name, queue]) => ({
+        name,
+        family: 'webhook' as const,
+        queue,
+      })),
+      ...Object.entries(this.webhookDefaultQueuesByName).map(([name, queue]) => ({
+        name,
+        family: 'webhook' as const,
+        queue,
+      })),
+      ...Object.entries(this.actionQueuesByName).map(([name, queue]) => ({
+        name,
+        family: 'actions' as const,
+        queue,
+      })),
+      ...Object.entries(this.auxiliaryQueuesByName).map(([name, queue]) => ({
+        name,
+        family: 'auxiliary' as const,
+        queue,
+      })),
+      ...RETENTION_PRIORITY_ADDITIONAL_QUEUE_NAMES.map((name) => ({
+        name,
+        family: 'auxiliary' as const,
+        queue: this.resolveOptionalQueue(name),
+      })),
+      {
+        name: GLOBAL_SPAMMER_DENORM_QUEUE,
+        family: 'auxiliary',
+        queue: this.globalSpammerDenormQueue,
+      },
+    ];
+    // FLAG: Missing providers and Redis failures are missing evidence, never idle queues.
+    // Only fixed counters are read here; per-bot retained-history queries are forbidden.
+    const observedAt = new Date().toISOString();
+    const keys = inventory.map(({ queue }) => {
+      if (!queue) throw new Error('Overview queue counters unavailable');
+      return queue.toKey('');
+    });
+    // FLAG: BullMQ getJobCounts can mutate deprecated markers and wait indefinitely.
+    // This fixed Lua read uses the collector's fail-fast connection and never removes work.
+    const counts = await redis.eval(READ_OVERVIEW_QUEUE_COUNTERS_LUA, keys.length, ...keys);
+    if (!Array.isArray(counts) || counts.length !== inventory.length)
+      throw new Error('Invalid overview queue counters');
+    const rows = inventory.map(({ name, family }, index) => {
+      const values: unknown = counts[index];
+      if (
+        !Array.isArray(values) ||
+        values.length !== 6 ||
+        values.some(
+          (value: unknown) =>
+            typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0,
+        )
+      ) {
+        throw new Error('Invalid overview queue counters');
+      }
+      return {
+        name,
+        family,
+        waiting: values[0] as number,
+        prioritized: values[1] as number,
+        active: values[2] as number,
+        delayed: values[3] as number,
+        failed: values[4] as number,
+        completed: values[5] as number,
+      };
+    });
+    return { observedAt, rows };
   }
 
   async getSnapshot(options: QueueMetricsSnapshotOptions = {}): Promise<QueueMetricsSnapshot> {
