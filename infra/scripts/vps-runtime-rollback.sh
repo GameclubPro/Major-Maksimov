@@ -516,6 +516,59 @@ if [[ ! -s infra/scripts/release-manifest.mjs || ! -s scripts/smoke-http.mjs ]];
   exit 1
 fi
 acquire_deploy_lock
+
+# FLAG: An installed durable release service must remain paused after an operator rollback.
+# Absence of its root marker retains the legacy path; any present unsafe installation fails closed.
+if [[ -e /etc/maxim-release/installed || -L /etc/maxim-release/installed ]]; then
+  for release_policy_path in /etc /etc/maxim-release /usr /usr/local /usr/local/lib \
+    /usr/local/lib/maxim-release /usr/local/lib/maxim-release/infra /usr/local/lib/maxim-release/infra/scripts; do
+    if [[ ! -d "$release_policy_path" || -L "$release_policy_path" ]]; then
+      echo 'Unsafe installed release policy directory; rollback refused.' >&2
+      exit 1
+    fi
+    release_policy_owner="$(stat -c %u -- "$release_policy_path")"
+    release_policy_mode="$(stat -c %a -- "$release_policy_path")"
+    if [[ "$release_policy_owner" != 0 || ! "$release_policy_mode" =~ ^[0-7]{3,4}$ ]] || \
+      (( (8#$release_policy_mode & 0022) != 0 )); then
+      echo 'Unprotected installed release policy directory; rollback refused.' >&2
+      exit 1
+    fi
+  done
+  for release_policy_path in /etc/maxim-release/installed \
+    /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs \
+    /usr/local/lib/maxim-release/infra/scripts/release-service-boundary.mjs; do
+    if [[ ! -f "$release_policy_path" || -L "$release_policy_path" || \
+      "$(stat -c '%u:%h' -- "$release_policy_path")" != 0:1 ]]; then
+      echo 'Unsafe or missing installed release policy helper; rollback refused.' >&2
+      exit 1
+    fi
+    release_policy_mode="$(stat -c %a -- "$release_policy_path")"
+    if [[ ! "$release_policy_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$release_policy_mode & 0022) != 0 )); then
+      echo 'Writable installed release policy helper; rollback refused.' >&2
+      exit 1
+    fi
+  done
+  if [[ "$(stat -c %s /etc/maxim-release/installed)" != 41 ]] || \
+    ! IFS= read -r release_policy_installed_sha < /etc/maxim-release/installed || \
+    [[ ! "$release_policy_installed_sha" =~ ^[a-f0-9]{40}$ ]]; then
+    echo 'Invalid installed release policy marker; rollback refused.' >&2
+    exit 1
+  fi
+  release_policy_node="$(PATH=/usr/local/bin:/usr/bin:/bin command -v node)"
+  release_policy_node="$(readlink -e -- "$release_policy_node")"
+  if [[ ( "$release_policy_node" != /usr/bin/node && "$release_policy_node" != /usr/local/bin/node ) || \
+    ! -f "$release_policy_node" || "$(stat -c %u -- "$release_policy_node")" != 0 ]]; then
+    echo 'Reviewed system Node is unavailable; rollback refused.' >&2
+    exit 1
+  fi
+  release_policy_mode="$(stat -c %a -- "$release_policy_node")"
+  if [[ ! "$release_policy_mode" =~ ^[0-7]{3,4}$ ]] || (( (8#$release_policy_mode & 0022) != 0 )); then
+    echo 'Reviewed system Node is writable; rollback refused.' >&2
+    exit 1
+  fi
+  /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/maxim-release LANG=C.UTF-8 \
+    "$release_policy_node" /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs pause-rollback >/dev/null || exit $?
+fi
 trap cleanup EXIT
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 if ! MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \

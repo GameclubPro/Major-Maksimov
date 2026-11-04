@@ -1,0 +1,37 @@
+[Unit]
+Description=MAXIM durable release operation worker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=maximadmin
+Group=maxim-release-control
+SupplementaryGroups=docker
+WorkingDirectory=/var/www/Chat_bot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/var/lib/maxim-release
+Environment=LANG=C.UTF-8
+UMask=0077
+RuntimeDirectory=maxim-release
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/flock --nonblock --no-fork /run/maxim-release/daemon.lock @NODE@ /usr/local/lib/maxim-release/infra/scripts/release-service-daemon.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+# FLAG: Stop only the controller. An accepted executor must finish independently;
+# its unresolved persisted state blocks subsequent work after the controller restarts.
+KillMode=process
+# FLAG: The existing Lastik store reader uses sudo for fixed protected-path tests.
+# Preserve that user's reviewed sudo policy; installation adds no sudo permissions.
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+RestrictSUIDSGID=true
+LockPersonality=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

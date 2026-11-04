@@ -184,7 +184,9 @@ test('both rollback mechanisms require the hold floor before their release trans
 test('legacy activation is refused before normal deploy mutations', () => {
   const source = read('infra/scripts/vps-pull-build-up.sh');
   const refusal = source.indexOf('cold_activation_disabled');
-  assert.ok(refusal > 0 && refusal < source.indexOf('acquire_deploy_lock\ntrap cleanup'));
+  const admission = /^\s*(?:if\s+)?acquire_deploy_lock(?:;|\s|$)/mu.exec(source);
+  assert.ok(admission, 'normal deploy must acquire its protected lock');
+  assert.ok(refusal > 0 && refusal < admission.index);
   assert.match(source, /--legacy-order-preview=\*/u);
   assert.match(source, /--legacy-order-apply=\*/u);
   assert.doesNotMatch(source, /node infra\/scripts\/multibot-legacy-cold-recovery\.mjs/u);

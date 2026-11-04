@@ -46,7 +46,32 @@ maxim_pair_release_mode() {
 
 require_pair_release_admission_dispatch() {
   maxim_pair_release_required || return 0
-  local target="$1" candidate entry proof_source
+  local target="$1" candidate entry proof_source release_source_floor_sha release_source_floor_path release_source_floor_mode release_source_floor_node
+  # FLAG: The root-installed floor survives old rollback clients and every later checkout.
+  # Validate executable trust before calling it; candidate bytes are inspected without execution.
+  if [[ -e /etc/maxim-release/installed || -L /etc/maxim-release/installed ]]; then
+    for release_source_floor_path in /etc /etc/maxim-release /usr /usr/local /usr/local/lib \
+      /usr/local/lib/maxim-release /usr/local/lib/maxim-release/infra /usr/local/lib/maxim-release/infra/scripts; do
+      [[ -d "$release_source_floor_path" && ! -L "$release_source_floor_path" \
+        && "$(stat -c %u -- "$release_source_floor_path")" == 0 ]] || return 1
+      release_source_floor_mode="$(stat -c %a -- "$release_source_floor_path")" || return 1
+      [[ "$release_source_floor_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$release_source_floor_mode & 0022) == 0 )) || return 1
+    done
+    release_source_floor_path=/usr/local/lib/maxim-release/infra/scripts/release-service-source-floor.mjs
+    [[ -f "$release_source_floor_path" && ! -L "$release_source_floor_path" \
+      && "$(stat -c '%u:%h' -- "$release_source_floor_path")" == 0:1 ]] || return 1
+    release_source_floor_mode="$(stat -c %a -- "$release_source_floor_path")" || return 1
+    [[ "$release_source_floor_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$release_source_floor_mode & 0022) == 0 )) || return 1
+    release_source_floor_node="$(PATH=/usr/local/bin:/usr/bin:/bin command -v node)" || return 1
+    release_source_floor_node="$(readlink -e -- "$release_source_floor_node")" || return 1
+    [[ ( "$release_source_floor_node" == /usr/bin/node || "$release_source_floor_node" == /usr/local/bin/node ) \
+      && -f "$release_source_floor_node" && "$(stat -c %u -- "$release_source_floor_node")" == 0 ]] || return 1
+    release_source_floor_mode="$(stat -c %a -- "$release_source_floor_node")" || return 1
+    [[ "$release_source_floor_mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$release_source_floor_mode & 0022) == 0 )) || return 1
+    release_source_floor_sha="$(git rev-parse --verify --end-of-options "${target}^{commit}")" || return 1
+    /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/maxim-release LANG=C.UTF-8 \
+      "$release_source_floor_node" /usr/local/lib/maxim-release/infra/scripts/release-service-source-floor.mjs "$release_source_floor_sha" || return 1
+  fi
   # FLAG: Older local rollback bootstraps already call this remote boundary before
   # checkout. The installed proof floor must reject a target that would erase it.
   if [[ -e /var/lib/maxim-deploy/eraser-connection-proof-reader-version || -L /var/lib/maxim-deploy/eraser-connection-proof-reader-version ]]; then
