@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -15,6 +25,7 @@ import {
   MissingRegistryImageError,
   parseImagePreparationPlan,
   prepareMissingImages,
+  proofCredentialFile,
   verifyPreloadProof,
 } from './registry-preload.mjs';
 import { registryArtifactName } from './registry-preload-host.mjs';
@@ -52,7 +63,7 @@ function fixture({ dispatch = false, runAttempt = 1, codeqlConclusion = 'success
       sizeBytes: 1234,
     },
     registry: {
-      repository: 'ghcr.io/gameclubpro/major-maksimov-api',
+      repository: 'ghcr.io/gameclubpro/major-maksimov-release-api',
       digest: `sha256:${'c'.repeat(64)}`,
     },
   };
@@ -165,6 +176,7 @@ test('proof verification supplies the exact record to the pinned registry gate a
     {
       sha,
       component: 'api',
+      credentialFile: null,
       execute(binary, args, options) {
         assert.equal(binary, process.execPath);
         assert.deepEqual(args, ['scripts/ci/registry-images.mjs', 'verify-proof']);
@@ -178,6 +190,174 @@ test('proof verification supplies the exact record to the pinned registry gate a
   assert.equal(proof.schemaVersion, 1);
   assert.ok(Number.isFinite(Date.parse(proof.verifiedAt)));
   assert.throws(() => readFileSync(savedPath));
+});
+
+test('narrow private evidence credential is passed only to the proof child and never included in proof output', () => {
+  const value = fixture();
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-proof-credential-'));
+  const credentialFile = join(directory, 'ghcr-read.json');
+  const token = 'fixture_narrow_read_packages_token_123456';
+  writeFileSync(credentialFile, JSON.stringify({ username: 'package-reader', token }), {
+    mode: 0o600,
+  });
+  const originalEnv = { ...process.env };
+  let childResult;
+  let savedPath;
+  try {
+    const proof = verifyPreloadProof(
+      { record: value.record, artifact: value.artifact },
+      {
+        sha,
+        component: 'api',
+        credentialFile,
+        execute(binary, args, options) {
+          assert.equal(binary, process.execPath);
+          assert.deepEqual(args, ['scripts/ci/registry-images.mjs', 'verify-proof']);
+          assert.equal(options.env.GH_TOKEN, token);
+          assert.equal(options.env.GITHUB_ACTOR, 'package-reader');
+          assert.equal(Object.hasOwn(options.env, 'GITHUB_TOKEN'), false);
+          assert.equal(Object.hasOwn(options.env, 'GH_ENTERPRISE_TOKEN'), false);
+          savedPath = options.env.MAXIM_IMAGE_RECORD_PATH;
+          childResult = execFileSync(
+            process.execPath,
+            [
+              '-e',
+              `
+          const {createHash}=require('node:crypto');
+          process.stdout.write(JSON.stringify({actor:process.env.GITHUB_ACTOR,hash:createHash('sha256').update(process.env.GH_TOKEN).digest('hex')}));
+        `,
+            ],
+            options,
+          );
+        },
+      },
+    );
+    assert.deepEqual(JSON.parse(childResult), {
+      actor: 'package-reader',
+      hash: createHash('sha256').update(token).digest('hex'),
+    });
+    assert.deepEqual({ ...process.env }, originalEnv);
+    assert.ok(!JSON.stringify(proof).includes(token));
+    assert.throws(() => readFileSync(savedPath));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('configured missing, unsafe, empty or malformed credential never falls back to GitHub control auth', () => {
+  const value = fixture();
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-proof-invalid-'));
+  const credentialFile = join(directory, 'credential.json');
+  const good = JSON.stringify({
+    username: 'package-reader',
+    token: 'fixture_narrow_read_packages_token_123456',
+  });
+  let calls = 0;
+  const verify = (path) =>
+    assert.throws(
+      () =>
+        verifyPreloadProof(value, {
+          sha,
+          component: 'api',
+          credentialFile: path,
+          execute() {
+            calls += 1;
+          },
+        }),
+      (error) =>
+        error.code === 'REGISTRY_CREDENTIAL_INVALID' && !error.message.includes('fixture_'),
+    );
+  try {
+    verify(credentialFile);
+    for (const content of [
+      '',
+      '{invalid private secret',
+      '{}',
+      JSON.stringify({ username: 'package-reader', token: '' }),
+      JSON.stringify({ username: 'bad\n', token: 'fixture_narrow_read_packages_token_123456' }),
+      JSON.stringify({ username: 'package-reader', token: 'bad token private secret' }),
+      JSON.stringify({ username: 'package-reader', token: 'x'.repeat(256) }),
+      JSON.stringify({
+        username: 'package-reader',
+        token: 'fixture_narrow_read_packages_token_123456',
+        extra: true,
+      }),
+      ' '.repeat(4097),
+      Buffer.from([0xff]),
+    ]) {
+      writeFileSync(credentialFile, content, { mode: 0o600 });
+      verify(credentialFile);
+    }
+    writeFileSync(credentialFile, good);
+    chmodSync(credentialFile, 0o644);
+    verify(credentialFile);
+    chmodSync(credentialFile, 0o600);
+    const symlink = join(directory, 'link.json');
+    symlinkSync(credentialFile, symlink);
+    verify(symlink);
+    const hardlink = join(directory, 'hardlink.json');
+    linkSync(credentialFile, hardlink);
+    verify(hardlink);
+    verify(credentialFile);
+    verify(directory);
+    assert.equal(calls, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('default evidence credential is optional only when absent and explicit empty configuration is invalid', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-proof-default-'));
+  try {
+    assert.equal(proofCredentialFile({}, directory), null);
+    const explicit = join(directory, 'configured-but-missing.json');
+    assert.equal(
+      proofCredentialFile({ MAXIM_GHCR_READ_CREDENTIAL_FILE: explicit }, directory),
+      explicit,
+    );
+    assert.throws(
+      () => proofCredentialFile({ MAXIM_GHCR_READ_CREDENTIAL_FILE: '' }, directory),
+      (error) => error.code === 'REGISTRY_CREDENTIAL_INVALID',
+    );
+    const config = join(directory, '.config/maxim-delivery');
+    mkdirSync(config, { recursive: true, mode: 0o700 });
+    const path = join(config, 'ghcr-read.json');
+    writeFileSync(path, '', { mode: 0o600 });
+    assert.equal(proofCredentialFile({}, directory), path);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('public package proof failure cannot expose credential or raw child stderr', () => {
+  const value = fixture();
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-proof-redaction-'));
+  const credentialFile = join(directory, 'credential.json');
+  const token = 'fixture_narrow_read_packages_token_123456';
+  writeFileSync(credentialFile, JSON.stringify({ username: 'package-reader', token }), {
+    mode: 0o600,
+  });
+  try {
+    assert.throws(
+      () =>
+        verifyPreloadProof(value, {
+          sha,
+          component: 'api',
+          credentialFile,
+          execute() {
+            throw new Error(`public package raw private stderr ${token}`);
+          },
+        }),
+      (error) => {
+        assert.equal(error.code, 'REGISTRY_PROOF_FAILED');
+        assert.ok(!error.message.includes(token));
+        assert.ok(!error.message.includes('raw private stderr'));
+        return true;
+      },
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('an interrupted dispatch is correlated and resumed without launching another CI run', async () => {

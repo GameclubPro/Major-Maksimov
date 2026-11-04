@@ -1,0 +1,44 @@
+name: Private registry bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maxim-private-registry-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: Private seed (${{ matrix.component }})
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, miniapp, admin, eraser]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MAXIM_IMAGE_COMPONENT: ${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .nvmrc
+      # FLAG: Only a synthetic scratch config may cross this bootstrap boundary.
+      # Application archives and source-SHA tags remain behind the ordinary privacy gate.
+      - name: Prepare and prove only the inert private package seed
+        run: node scripts/ci/registry-bootstrap.mjs
+      - name: Save bootstrap metadata, without creating a release receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: registry-bootstrap-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: registry-bootstrap-${{ matrix.component }}.json
+          if-no-files-found: error
+          retention-days: 30

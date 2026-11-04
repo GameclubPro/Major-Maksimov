@@ -448,7 +448,8 @@ function validateRegistryProvenance(component) {
   const registry = proof?.record?.registry;
   const positiveId = /^[1-9][0-9]*$/u;
   // FLAG: This is persisted identity metadata, not a replacement for the pre-deploy
-  // OIDC/SBOM checks. Legacy rollback manifests remain readable without this field.
+  // OIDC/SBOM checks. Rollback readers accept both exact namespaces; new release admission
+  // separately requires the current private namespace, and manifests without this field remain readable.
   if (
     JSON.stringify(proof).length > 8192 ||
     proof?.schemaVersion !== 1 ||
@@ -470,7 +471,10 @@ function validateRegistryProvenance(component) {
     !Number.isSafeInteger(image.sizeBytes) ||
     image.sizeBytes < 1 ||
     image.sizeBytes > 64 * 1024 ** 3 ||
-    registry?.repository !== `ghcr.io/gameclubpro/major-maksimov-${imageComponent}` ||
+    ![
+      `ghcr.io/gameclubpro/major-maksimov-${imageComponent}`,
+      `ghcr.io/gameclubpro/major-maksimov-release-${imageComponent}`,
+    ].includes(registry?.repository) ||
     !/^sha256:[0-9a-f]{64}$/u.test(registry.digest ?? '') ||
     !Number.isSafeInteger(proof.artifact?.id) ||
     proof.artifact.id < 1 ||

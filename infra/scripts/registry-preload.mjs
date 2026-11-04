@@ -4,13 +4,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   closeSync,
+  constants,
   existsSync,
   fsyncSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -340,24 +343,129 @@ export async function prepareMissingImages({
   );
 }
 
-export function verifyPreloadProof(value, { sha, component, execute = execFileSync }) {
+function credentialFailure() {
+  const error = new Error(
+    'Invalid private GHCR evidence credential file. Provide a private 0600 regular file with a valid username and read:packages token.',
+  );
+  error.code = 'REGISTRY_CREDENTIAL_INVALID';
+  throw error;
+}
+
+export function proofCredentialFile(env = process.env, userDirectory = homedir()) {
+  if (Object.hasOwn(env, 'MAXIM_GHCR_READ_CREDENTIAL_FILE')) {
+    if (
+      typeof env.MAXIM_GHCR_READ_CREDENTIAL_FILE !== 'string' ||
+      !env.MAXIM_GHCR_READ_CREDENTIAL_FILE.trim()
+    )
+      credentialFailure();
+    return env.MAXIM_GHCR_READ_CREDENTIAL_FILE;
+  }
+  const path = join(userDirectory, '.config/maxim-delivery/ghcr-read.json');
+  try {
+    lstatSync(path);
+    return path;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    credentialFailure();
+  }
+}
+
+function readProofCredential(path) {
+  let descriptor;
+  try {
+    if (typeof path !== 'string' || !path) credentialFailure();
+    const before = lstatSync(path);
+    const safe = (stat) =>
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      stat.nlink === 1 &&
+      (stat.mode & 0o777) === 0o600 &&
+      [0, process.getuid()].includes(stat.uid) &&
+      stat.size > 0 &&
+      stat.size <= 4096;
+    if (!safe(before)) credentialFailure();
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = fstatSync(descriptor);
+    if (
+      !safe(opened) ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== before.size
+    )
+      credentialFailure();
+    const buffer = Buffer.alloc(opened.size + 1);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const count = readSync(descriptor, buffer, bytes, buffer.length - bytes, null);
+      if (count === 0) break;
+      bytes += count;
+    }
+    if (bytes !== opened.size) credentialFailure();
+    const value = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, bytes)),
+    );
+    if (
+      value === null ||
+      typeof value !== 'object' ||
+      Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'token,username' ||
+      typeof value.username !== 'string' ||
+      value.username.trim() !== value.username ||
+      !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(value.username) ||
+      typeof value.token !== 'string' ||
+      value.token.length < 20 ||
+      value.token.length > 255 ||
+      /[^A-Za-z0-9_]/u.test(value.token)
+    )
+      credentialFailure();
+    return value;
+  } catch {
+    credentialFailure();
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+export function verifyPreloadProof(
+  value,
+  { sha, component, execute = execFileSync, credentialFile = proofCredentialFile() },
+) {
+  const credential = credentialFile === null ? null : readProofCredential(credentialFile);
+  const proofEnv = { ...process.env };
+  if (credential !== null) {
+    // FLAG: The registry evidence child receives the narrow package credential only;
+    // the caller's GitHub control client and its environment retain their own identity.
+    delete proofEnv.GITHUB_TOKEN;
+    delete proofEnv.GH_ENTERPRISE_TOKEN;
+    delete proofEnv.GITHUB_ENTERPRISE_TOKEN;
+    proofEnv.GH_TOKEN = credential.token;
+    proofEnv.GITHUB_ACTOR = credential.username;
+  }
   const directory = mkdtempSync(join(tmpdir(), 'maxim-registry-proof-'));
   try {
     const path = join(directory, 'record.json');
     writeFileSync(path, `${JSON.stringify(value.record)}\n`, { mode: 0o600 });
-    execute(process.execPath, ['scripts/ci/registry-images.mjs', 'verify-proof'], {
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024,
-      timeout: 5 * 60_000,
-      env: {
-        ...process.env,
-        MAXIM_RELEASE_REPOSITORY: RELEASE_REPOSITORY,
-        MAXIM_RELEASE_SHA: sha,
-        MAXIM_IMAGE_COMPONENT: component,
-        MAXIM_IMAGE_RECORD_PATH: path,
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    try {
+      execute(process.execPath, ['scripts/ci/registry-images.mjs', 'verify-proof'], {
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024,
+        timeout: 5 * 60_000,
+        env: {
+          ...proofEnv,
+          MAXIM_RELEASE_REPOSITORY: RELEASE_REPOSITORY,
+          MAXIM_RELEASE_SHA: sha,
+          MAXIM_IMAGE_COMPONENT: component,
+          MAXIM_IMAGE_RECORD_PATH: path,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      const error = new Error(
+        'Private registry proof verification failed. Check package visibility, credential access and exact image evidence.',
+      );
+      error.code = 'REGISTRY_PROOF_FAILED';
+      throw error;
+    }
     return { schemaVersion: 1, ...value, verifiedAt: new Date().toISOString() };
   } finally {
     rmSync(directory, { recursive: true, force: true });

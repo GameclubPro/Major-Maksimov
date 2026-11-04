@@ -38,7 +38,7 @@ export function imageIdentity({ repository, sha, component }) {
   }
   return {
     alias: `${IMAGE_ALIASES[component]}:${sha}`,
-    repository: `ghcr.io/${repository.toLowerCase()}-${component}`,
+    repository: `ghcr.io/${repository.toLowerCase()}-release-${component}`,
   };
 }
 
@@ -220,7 +220,7 @@ function writeRecord(path, record) {
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
 }
 
-export function execute(binary, args, { env = process.env, input, allowMissing = false } = {}) {
+export function execute(binary, args, { env = process.env, input } = {}) {
   const executable = binary === 'gh' ? ensureGitHubCli(env) : binary;
   const result = spawnSync(executable, args, {
     env,
@@ -230,13 +230,75 @@ export function execute(binary, args, { env = process.env, input, allowMissing =
     timeout: 10 * 60_000,
   });
   if (result.status !== 0) {
-    if (allowMissing && /HTTP 404/u.test(result.stderr ?? '')) return null;
     // FLAG: Login credentials are supplied only through stdin; never render subprocess input or environment.
     throw new Error(
       `${binary} ${args[0]} failed (${result.status ?? result.error?.code ?? result.signal}).`,
     );
   }
   return result.stdout.trim();
+}
+
+export class RegistryPrivacyError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function privacyFailure(code) {
+  const messages = {
+    REGISTRY_PACKAGE_UNVERIFIED:
+      'Cannot verify private image package metadata. An administrator must bootstrap a private package, link the source repository and grant this workflow package access before publication. Missing packages and denied or unavailable API responses block publication.',
+    REGISTRY_PACKAGE_PUBLIC:
+      'Image package is public. Publication is blocked; an administrator must prepare a new private package and review the namespace migration. Existing public packages cannot be made private.',
+    REGISTRY_PACKAGE_NOT_PRIVATE:
+      'Image package is not private. Publication is blocked until an administrator prepares a private package with repository workflow access.',
+    REGISTRY_PACKAGE_UNBOUND:
+      'Private image package is not linked to the exact source repository. An administrator must verify the package repository binding and workflow access before publication.',
+  };
+  throw new RegistryPrivacyError(code, messages[code]);
+}
+
+export function verifyPrivatePackage(expected, run = execute) {
+  const identity = imageIdentity(expected);
+  const packageName = identity.repository.split('/').at(-1);
+  const packagePath = `users/${expected.repository.split('/')[0]}/packages/container/${packageName}`;
+  let metadata;
+  try {
+    const response = run('gh', [
+      'api',
+      packagePath,
+      '--header',
+      'Accept: application/vnd.github+json',
+      '--header',
+      'X-GitHub-Api-Version: 2022-11-28',
+    ]);
+    if (typeof response !== 'string' || Buffer.byteLength(response) > 65536) throw new Error();
+    metadata = JSON.parse(response);
+  } catch {
+    privacyFailure('REGISTRY_PACKAGE_UNVERIFIED');
+  }
+  if (
+    metadata === null ||
+    typeof metadata !== 'object' ||
+    Array.isArray(metadata) ||
+    metadata.name !== packageName ||
+    metadata.package_type !== 'container' ||
+    !['private', 'public', 'internal'].includes(metadata.visibility)
+  ) {
+    privacyFailure('REGISTRY_PACKAGE_UNVERIFIED');
+  }
+  if (metadata.visibility === 'public') privacyFailure('REGISTRY_PACKAGE_PUBLIC');
+  if (metadata.visibility !== 'private') privacyFailure('REGISTRY_PACKAGE_NOT_PRIVATE');
+  if (
+    !POSITIVE_ID.test(expected.repositoryId ?? '') ||
+    !Number.isSafeInteger(metadata.repository?.id) ||
+    metadata.repository.id < 1 ||
+    String(metadata.repository.id) !== expected.repositoryId ||
+    metadata.repository.full_name !== expected.repository
+  )
+    privacyFailure('REGISTRY_PACKAGE_UNBOUND');
+  return metadata;
 }
 
 function inspect(run, ref) {
@@ -253,15 +315,13 @@ export function publishImage(record, expected, run = execute) {
     imageId: record.image.imageId,
     sizeBytes: record.image.sizeBytes,
   });
-  const packagePath = `users/${expected.repository.split('/')[0]}/packages/container/${identity.repository.split('/').at(-1)}`;
-  const visibility = run('gh', ['api', packagePath, '--jq', '.visibility'], { allowMissing: true });
-  if (visibility !== null && visibility !== 'private')
-    throw new Error('Image package must be private before publication.');
+  // FLAG: A 404, denied lookup or malformed metadata never authorizes first publication.
+  // Existing private visibility and exact repository binding must be proved before any tag or push.
+  verifyPrivatePackage(expected, run);
   const tag = `${identity.repository}:${expected.sha}`;
   run('docker', ['image', 'tag', identity.alias, tag]);
   run('docker', ['image', 'push', tag]);
-  if (run('gh', ['api', packagePath, '--jq', '.visibility']) !== 'private')
-    throw new Error('Published image package is not private.');
+  verifyPrivatePackage(expected, run);
   const digests = inspect(run, tag).RepoDigests;
   const matches = Array.isArray(digests)
     ? [...new Set(digests.filter((value) => value.startsWith(`${identity.repository}@`)))]
@@ -289,6 +349,8 @@ export function verifyRegistryImage(record, expected, run = execute, { proofOnly
     expected.repositoryId ?? run('gh', ['api', `repos/${expected.repository}`, '--jq', '.id']);
   if (!POSITIVE_ID.test(repositoryId ?? '') || record.source.repositoryId !== repositoryId)
     throw new Error('Repository identity changed.');
+  // FLAG: Valid historical signatures cannot authorize an image whose package is public now.
+  verifyPrivatePackage({ ...expected, repositoryId }, run);
   for (const predicate of ['https://slsa.dev/provenance/v1', 'https://spdx.dev/Document']) {
     const results = JSON.parse(run('gh', provenanceArguments(record, expected, predicate)));
     assertVerifiedAttestation(results, record, { ...expected, repositoryId }, predicate);

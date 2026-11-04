@@ -10,11 +10,13 @@ import {
   assertImageRecord,
   assertRegistryRecord,
   assertVerifiedAttestation,
+  execute,
   imageIdentity,
   provenanceArguments,
   publishImage,
   trustedBuildContext,
   verifyRegistryImage,
+  verifyPrivatePackage,
 } from './registry-images.mjs';
 
 const sha = 'a'.repeat(40);
@@ -117,7 +119,7 @@ test('only exact main workflow on an allowed runner and trigger may publish imag
 });
 
 test('image identity never accepts a short SHA, injected path or unsupported component', () => {
-  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-api');
+  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-release-api');
   for (const delta of [
     { sha: sha.slice(0, 12) },
     { sha: `${sha}\n` },
@@ -164,6 +166,20 @@ test('image archives cannot be reused across attempts, sources, repositories or 
   invalid.registry.repository = identity.repository;
   invalid.image.sizeBytes = -1;
   assert.throws(() => assertRegistryRecord(invalid, expected));
+});
+
+test('legacy public registry records cannot authorize a release in the new private namespace', () => {
+  const legacy = record();
+  legacy.registry.repository = 'ghcr.io/gameclubpro/major-maksimov-api';
+  assert.throws(() => assertRegistryRecord(legacy, expected), /Registry digest or repository/u);
+  assert.throws(
+    () =>
+      verifyRegistryImage(legacy, expected, () => {
+        assert.fail('legacy record reached external verifier');
+      }),
+    /Registry digest or repository/u,
+  );
+  assert.equal(record().image.alias, `maxim-api:${sha}`);
 });
 
 test('each required OIDC certificate claim is checked after cryptographic verification', () => {
@@ -242,13 +258,37 @@ test('verifier command pins source, signer, issuer and runner policy', () => {
   assert.equal(args[2], `oci://${identity.repository}@${digest}`);
 });
 
-function publisher({ visibility = 'private', pulledId = imageId, firstMissing = false } = {}) {
+function packageMetadata(patch = {}) {
+  return {
+    name: 'major-maksimov-release-api',
+    package_type: 'container',
+    visibility: 'private',
+    repository: { id: Number(expected.repositoryId), full_name: repository },
+    ...patch,
+  };
+}
+
+function publisher({
+  visibility = 'private',
+  pulledId = imageId,
+  firstMissing = false,
+  metadata,
+  afterMetadata,
+} = {}) {
   const calls = [];
   let inspectCount = 0;
   let packageCount = 0;
   const run = (binary, args) => {
     calls.push([binary, ...args]);
-    if (binary === 'gh') return firstMissing && packageCount++ === 0 ? null : visibility;
+    if (binary === 'gh') {
+      const first = packageCount++ === 0;
+      if (firstMissing && first) return null;
+      return JSON.stringify(
+        first
+          ? (metadata ?? packageMetadata({ visibility }))
+          : (afterMetadata ?? metadata ?? packageMetadata({ visibility })),
+      );
+    }
     if (args[0] === 'image' && args[1] === 'inspect')
       return JSON.stringify([{ ...inspection(), Id: ++inspectCount === 3 ? pulledId : imageId }]);
     return '';
@@ -259,11 +299,11 @@ function publisher({ visibility = 'private', pulledId = imageId, firstMissing = 
 test('publishing rejects a pre-existing public package before any registry write', () => {
   const { run, calls } = publisher({ visibility: 'public' });
   assert.throws(() => publishImage(record(), expected, run), /private/u);
-  assert.ok(!calls.some(([, ...args]) => args[1] === 'push'));
+  assert.ok(!calls.some(([, ...args]) => ['push', 'tag'].includes(args[1])));
 });
 
 test('publication pulls the exact digest and rejects a changed Docker config ID', () => {
-  const good = publisher({ firstMissing: true });
+  const good = publisher();
   assert.equal(publishImage(record(), expected, good.run).registry.digest, digest);
   assert.ok(
     good.calls.some(
@@ -276,10 +316,169 @@ test('publication pulls the exact digest and rejects a changed Docker config ID'
   assert.throws(() => publishImage(record(), expected, bad.run), /Image ID/u);
 });
 
+test('missing first package is never permission to tag or publish an image', () => {
+  const missing = publisher({ firstMissing: true });
+  assert.throws(
+    () => publishImage(record(), expected, missing.run),
+    (error) => error.code === 'REGISTRY_PACKAGE_UNVERIFIED',
+  );
+  assert.ok(
+    !missing.calls.some(
+      ([binary, ...args]) => binary === 'docker' && ['tag', 'push'].includes(args[1]),
+    ),
+  );
+});
+
+test('private package requires typed metadata and exact source repository binding', () => {
+  assert.deepEqual(
+    verifyPrivatePackage(expected, () => JSON.stringify(packageMetadata())),
+    packageMetadata(),
+  );
+  for (const metadata of [
+    null,
+    [],
+    {},
+    { visibility: 'private' },
+    packageMetadata({ name: 'different-package' }),
+    packageMetadata({ package_type: 'npm' }),
+    packageMetadata({ visibility: '' }),
+    packageMetadata({ visibility: false }),
+  ]) {
+    assert.throws(
+      () => verifyPrivatePackage(expected, () => JSON.stringify(metadata)),
+      (error) => error.code === 'REGISTRY_PACKAGE_UNVERIFIED',
+    );
+  }
+  for (const binding of [
+    undefined,
+    null,
+    {},
+    { id: Number(expected.repositoryId), full_name: 'other/repository' },
+    { id: 42, full_name: repository },
+    { id: expected.repositoryId, full_name: repository },
+  ]) {
+    const invalid = publisher({ metadata: packageMetadata({ repository: binding }) });
+    assert.throws(
+      () => publishImage(record(), expected, invalid.run),
+      (error) => error.code === 'REGISTRY_PACKAGE_UNBOUND',
+    );
+    assert.ok(
+      !invalid.calls.some(
+        ([binary, ...args]) => binary === 'docker' && ['tag', 'push'].includes(args[1]),
+      ),
+    );
+  }
+});
+
+test('privacy is rechecked after publication before any digest or attestation receipt', () => {
+  for (const visibility of ['public', 'internal', '']) {
+    const changed = publisher({ afterMetadata: packageMetadata({ visibility }) });
+    assert.throws(() => publishImage(record(), expected, changed.run));
+    assert.ok(changed.calls.some(([binary, ...args]) => binary === 'docker' && args[1] === 'push'));
+    assert.ok(
+      !changed.calls.some(([binary, ...args]) => binary === 'docker' && args[1] === 'pull'),
+    );
+  }
+});
+
+test('actual process transport denies 403, 404, public and malformed package responses before all registry writes', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-package-transport-'));
+  const script = join(directory, 'transport.cjs');
+  const callsFile = join(directory, 'calls.jsonl');
+  writeFileSync(
+    script,
+    `
+    const fs=require('node:fs');
+    const [binary,...args]=process.argv.slice(2);
+    fs.appendFileSync(process.env.TEST_CALLS,JSON.stringify([binary,...args])+'\\n');
+    if(binary==='gh') {
+      if(['403','404'].includes(process.env.TEST_MODE)) {
+        process.stderr.write('private remote detail HTTP '+process.env.TEST_MODE+'\\n');
+        process.exit(1);
+      }
+      if(process.env.TEST_MODE==='empty') process.exit(0);
+      if(process.env.TEST_MODE==='malformed') { process.stdout.write('{bad private response'); process.exit(0); }
+      const metadata=JSON.parse(process.env.TEST_METADATA);
+      if(process.env.TEST_MODE==='public') metadata.visibility='public';
+      if(process.env.TEST_MODE==='unbound') metadata.repository.id=42;
+      process.stdout.write(JSON.stringify(metadata));
+    } else if(binary==='docker' && args[0]==='image' && args[1]==='inspect') {
+      process.stdout.write(process.env.TEST_INSPECTION);
+    }
+  `,
+    { mode: 0o600 },
+  );
+  try {
+    for (const [mode, code] of [
+      ['403', 'REGISTRY_PACKAGE_UNVERIFIED'],
+      ['404', 'REGISTRY_PACKAGE_UNVERIFIED'],
+      ['empty', 'REGISTRY_PACKAGE_UNVERIFIED'],
+      ['malformed', 'REGISTRY_PACKAGE_UNVERIFIED'],
+      ['public', 'REGISTRY_PACKAGE_PUBLIC'],
+      ['unbound', 'REGISTRY_PACKAGE_UNBOUND'],
+    ]) {
+      writeFileSync(callsFile, '', { mode: 0o600 });
+      const env = {
+        TEST_CALLS: callsFile,
+        TEST_MODE: mode,
+        TEST_METADATA: JSON.stringify(packageMetadata()),
+        TEST_INSPECTION: JSON.stringify([inspection()]),
+      };
+      const transport = (binary, args) =>
+        execute(process.execPath, [script, binary, ...args], { env });
+      assert.throws(
+        () => publishImage(record(), expected, transport),
+        (error) => {
+          assert.equal(error.code, code);
+          assert.ok(!error.message.includes('private remote detail'));
+          assert.ok(!error.message.includes('bad private response'));
+          return true;
+        },
+      );
+      const calls = readFileSync(callsFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      assert.equal(calls.filter(([binary]) => binary === 'gh').length, 1);
+      assert.ok(
+        !calls.some(
+          ([binary, ...args]) => binary === 'docker' && ['tag', 'push'].includes(args[1]),
+        ),
+        mode,
+      );
+      const lookup = calls.find(([binary]) => binary === 'gh');
+      assert.equal(lookup[2], 'users/GameclubPro/packages/container/major-maksimov-release-api');
+      assert.ok(!lookup.includes('--jq'));
+    }
+    writeFileSync(callsFile, '', { mode: 0o600 });
+    const env = {
+      TEST_CALLS: callsFile,
+      TEST_MODE: 'private',
+      TEST_METADATA: JSON.stringify(packageMetadata()),
+      TEST_INSPECTION: JSON.stringify([inspection()]),
+    };
+    const transport = (binary, args) =>
+      execute(process.execPath, [script, binary, ...args], { env });
+    assert.equal(publishImage(record(), expected, transport).registry.digest, digest);
+    const calls = readFileSync(callsFile, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const firstLookup = calls.findIndex(([binary]) => binary === 'gh');
+    const tag = calls.findIndex(([binary, ...args]) => binary === 'docker' && args[1] === 'tag');
+    const push = calls.findIndex(([binary, ...args]) => binary === 'docker' && args[1] === 'push');
+    assert.ok(firstLookup >= 0 && tag > firstLookup && push > tag);
+    assert.equal(calls.filter(([binary]) => binary === 'gh').length, 2);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('proof-only validates provenance and SBOM without a local Docker daemon', () => {
   const predicates = [];
   const run = (binary, args) => {
     assert.equal(binary, 'gh');
+    if (args[0] === 'api') return JSON.stringify(packageMetadata());
     const predicate = args[args.indexOf('--predicate-type') + 1];
     predicates.push(predicate);
     return JSON.stringify(attestation(predicate));
@@ -299,8 +498,28 @@ test('proof-only validates provenance and SBOM without a local Docker daemon', (
         },
         { proofOnly: true },
       ),
-    /unavailable/u,
+    (error) => error.code === 'REGISTRY_PACKAGE_UNVERIFIED',
   );
+});
+
+test('previously signed image cannot be consumed after its package becomes public or unreadable', () => {
+  for (const response of [JSON.stringify(packageMetadata({ visibility: 'public' })), '', 'null']) {
+    const calls = [];
+    assert.throws(() =>
+      verifyRegistryImage(
+        record(),
+        expected,
+        (binary, args) => {
+          calls.push([binary, ...args]);
+          assert.equal(binary, 'gh');
+          assert.equal(args[0], 'api');
+          return response;
+        },
+        { proofOnly: true },
+      ),
+    );
+    assert.equal(calls.length, 1);
+  }
 });
 
 test('CLI pin rejects corrupted binaries and symlinks before execution', () => {
