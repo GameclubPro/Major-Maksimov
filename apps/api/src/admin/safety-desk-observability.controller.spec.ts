@@ -2,6 +2,7 @@ import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/
 import { RequestMethod } from '@nestjs/common';
 import type { SafetyDeskCommercialAiService } from './safety-desk-commercial-ai.service';
 import type { SafetyDeskCommercialAiPoolService } from './safety-desk-commercial-ai-pool.service';
+import type { SafetyDeskOverviewService } from './safety-desk-overview.service';
 import { SafetyDeskAdminGuard } from './safety-desk-admin.guard';
 import { SafetyDeskObservabilityController } from './safety-desk-observability.controller';
 import type { SafetyDeskWebhookCohortService } from './safety-desk-webhook-cohort.service';
@@ -61,6 +62,7 @@ describe('closed observation routes', () => {
       deliveryEvidence,
       commercialAi,
       pool,
+      { getSnapshot: jest.fn<ReturnType<SafetyDeskOverviewService['getSnapshot']>, []>() },
     );
     expect(Reflect.getMetadata(GUARDS_METADATA, SafetyDeskObservabilityController)).toContain(
       SafetyDeskAdminGuard,
@@ -91,6 +93,7 @@ describe('closed observation routes', () => {
     expect(getEvidence).toHaveBeenCalledTimes(1);
     expect(getEvidence).toHaveBeenCalledWith('exact-intent');
     for (const [method, path] of [
+      [controller.getOverview, 'overview'],
       [controller.getCommercialAi, 'commercial-ai'],
       [controller.getCommercialAiPool, 'commercial-ai/pool'],
       [controller.getDeleteCohort, 'delete-cohort'],

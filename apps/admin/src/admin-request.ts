@@ -9,6 +9,8 @@ export type AdminApiResponseParser<T> = {
 export type AdminApiRequestOptions = {
   method?: 'GET' | 'POST';
   body?: unknown;
+  signal?: AbortSignal;
+  cache?: 'no-store';
 };
 
 export type AdminApiTransport = {
@@ -47,6 +49,8 @@ export function createAdminApiTransport(
         credentials: 'same-origin',
         headers: createAdminRequestHeaders(accessCode, { json: hasJsonBody }),
         ...(hasJsonBody ? { body: JSON.stringify(options.body) } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.cache ? { cache: options.cache } : {}),
       });
 
       return parser.parse(await readJsonResponse(response));

@@ -15,6 +15,7 @@ scripts. A configuration default or an earlier release report does not establish
 | Product UI decisions and settings navigation         | [Active decisions](development/miniapp-product-decisions.md) and [settings contract](miniapp-settings-overview-design.md)                   |
 | Production operations and incident response          | [Runbook](runbook.md), [operations reference](development/production-operations-reference.md) and [incident playbook](incident-playbook.md) |
 | Production host and shared resources                 | [REG.RU profile](operations/runbooks/reg-production-profile.md)                                                                             |
+| Safety Desk bots, queues and shared observations     | [Runtime overview](operations/runbooks/safety-desk-runtime-overview.md)                                                                     |
 | Publisher rights, preparation and access diagnostics | [Current access runbook](operations/runbooks/publisher-access-refresh-rollout.md)                                                           |
 | Refactoring an existing boundary                     | [Preserved contracts](refactor-safe-boundaries.md) and [candidate roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md)         |
 | Workspace and runtime overview                       | [Project description](project-description.md)                                                                                               |
