@@ -107,6 +107,10 @@ export class MessageLimitsDeleteGuardService {
     const userId = params.subjectUserId;
     if (!userId || this.bots.isKnownBotUserId(userId)) this.reject();
     const settings = await this.loadSettings(params.chatId, userId);
+    // FLAG: Known expired stateful authority cannot be renewed by a MAX read retry.
+    // A current-content reason or unproven expiry still requires ordinary preparation.
+    const now = Date.now();
+    if (owned.every((reason) => this.isExpiredStatefulReason(reason, settings, now))) this.reject();
     const options = {
       botId: params.botId,
       bypassCache: true,
@@ -270,6 +274,22 @@ export class MessageLimitsDeleteGuardService {
     return value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
+  }
+
+  private isExpiredStatefulReason(reason: Reason, settings: Settings, now: number): boolean {
+    if (!MESSAGE_LIMITS_STATEFUL_RULES.has(reason.ruleCode)) return false;
+    const proof = this.metadata(reason.metadata);
+    const eventAt = Number(proof.messageLimitEventTimestampMs);
+    const deadlineAt = Number(proof.messageLimitDeadlineAtMs);
+    return (
+      proof.messageLimitEvidenceVersion === 1 &&
+      proof.messageLimitPolicySha256 === fingerprintModerationSettings(settings, reason.ruleCode) &&
+      Number.isSafeInteger(eventAt) &&
+      eventAt > 0 &&
+      eventAt <= now &&
+      deadlineAt === eventAt + 5 * 60_000 &&
+      now >= deadlineAt
+    );
   }
 
   private matchesReason(reason: Reason, update: MaxUpdate, settings: Settings): boolean {

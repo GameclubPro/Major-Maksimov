@@ -380,6 +380,119 @@ describe('current message limit deletion authorization', () => {
       s.service.authorize({ ...input, reasons: [{ ...reason, metadata }] }),
     ).rejects.toMatchObject({ code: 'message_limits_delete_no_longer_authorized' });
   });
+
+  it.each(['MESSAGE_RATE_LIMIT', 'MESSAGE_COUNT_LIMIT', 'PHOTO_RATE_LIMIT', 'STICKER_RATE_LIMIT'])(
+    'rejects expired %s authority before unavailable MAX reads',
+    async (rule) => {
+      const s = fixture();
+      Object.assign(s.settings, {
+        antiSpamEnabled: true,
+        messageCountLimitEnabled: true,
+        messageCountLimitMessages: 2,
+        messageCountLimitWindowHours: 1,
+        photoMessageCooldownEnabled: true,
+        photoMessageCooldownHours: 1,
+        stickerMessageCooldownEnabled: true,
+        stickerMessageCooldownMinutes: 5,
+      });
+      const metadata = bindMessageLimitEvidence(s.settings as never, Date.now() - 360_000, rule);
+      s.max.getChatMemberAccess.mockRejectedValue(new Error('MAX author unavailable'));
+      s.max.getExactMessageRow.mockRejectedValue(new Error('MAX source unavailable'));
+      await expect(
+        s.service.authorize({
+          ...input,
+          reasons: [{ ruleCode: `${rule}_DELETE`, reasonKey: 'expired', metadata }],
+        }),
+      ).rejects.toMatchObject({ code: 'message_limits_delete_no_longer_authorized' });
+      expect(s.max.getChatMemberAccess).not.toHaveBeenCalled();
+      expect(s.max.getExactMessageRow).not.toHaveBeenCalled();
+      expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves current content and live stateful reasons beside expired authority', async () => {
+    const s = fixture();
+    Object.assign(s.settings, { antiSpamEnabled: true });
+    const expired = bindMessageLimitEvidence(
+      s.settings as never,
+      Date.now() - 360_000,
+      'MESSAGE_RATE_LIMIT',
+    );
+    const live = bindMessageLimitEvidence(s.settings as never, Date.now(), 'MESSAGE_RATE_LIMIT');
+    const expiredReason = {
+      ruleCode: 'MESSAGE_RATE_LIMIT_DELETE',
+      reasonKey: 'expired',
+      metadata: expired,
+    };
+    await expect(
+      s.service.authorize({ ...input, reasons: [expiredReason, ...input.reasons] }),
+    ).resolves.toEqual({ reasonKeys: ['length'] });
+    await expect(
+      s.service.authorize({
+        ...input,
+        reasons: [
+          expiredReason,
+          { ruleCode: 'MESSAGE_RATE_LIMIT_DELETE', reasonKey: 'live', metadata: live },
+        ],
+      }),
+    ).resolves.toEqual({
+      reasonKeys: ['live'],
+      deadlineAtMs: live.messageLimitDeadlineAtMs,
+      reasonDeadlines: [{ reasonKey: 'live', deadlineAtMs: live.messageLimitDeadlineAtMs }],
+    });
+    expect(s.max.getExactMessageRow).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechecks the original stateful deadline after preparation', async () => {
+    const s = fixture();
+    Object.assign(s.settings, { antiSpamEnabled: true });
+    const metadata = bindMessageLimitEvidence(
+      s.settings as never,
+      Date.now(),
+      'MESSAGE_RATE_LIMIT',
+    );
+    const clock = jest.spyOn(Date, 'now');
+    s.immunity.consumeForMessage.mockImplementation(async () => {
+      clock.mockReturnValue(metadata.messageLimitDeadlineAtMs);
+      return 'not_granted';
+    });
+    try {
+      await expect(
+        s.service.authorize({
+          ...input,
+          reasons: [{ ruleCode: 'MESSAGE_RATE_LIMIT_DELETE', reasonKey: 'rate', metadata }],
+        }),
+      ).rejects.toMatchObject({ code: 'message_limits_delete_no_longer_authorized' });
+      expect(s.max.getExactMessageRow).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(['malformed', 'changed-policy', 'future-event'] as const)(
+    'preserves unavailable-source handling for %s evidence',
+    async (kind) => {
+      const s = fixture();
+      Object.assign(s.settings, { antiSpamEnabled: true });
+      const metadata = bindMessageLimitEvidence(
+        s.settings as never,
+        Date.now() + (kind === 'future-event' ? 60_000 : -360_000),
+        'MESSAGE_RATE_LIMIT',
+      );
+      if (kind === 'malformed') metadata.messageLimitDeadlineAtMs += 1;
+      if (kind === 'changed-policy') metadata.messageLimitPolicySha256 = 'different-policy';
+      const unavailable = new Error('MAX source unavailable');
+      s.max.getExactMessageRow.mockRejectedValue(unavailable);
+      await expect(
+        s.service.authorize({
+          ...input,
+          reasons: [{ ruleCode: 'MESSAGE_RATE_LIMIT_DELETE', reasonKey: 'rate', metadata }],
+        }),
+      ).rejects.toBe(unavailable);
+      expect(s.max.getExactMessageRow).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each([1, 4, 9, 13])('uses the selected executor for %s receiving bots', async (count) => {
     const s = fixture();
     for (let receiver = 0; receiver < count; receiver++) {
