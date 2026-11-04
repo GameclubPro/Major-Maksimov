@@ -707,6 +707,8 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+      - name: Prepare standard Docker authentication for pinned attestations
+        run: node scripts/ci/registry-attestation-auth.mjs prepare
       - name: Attest the exact registry digest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
@@ -732,6 +734,7 @@ jobs:
       - name: Remove temporary publication credentials
         if: always()
         run: |
+          node scripts/ci/registry-attestation-auth.mjs cleanup
           node -e 'require("node:fs").rmSync(process.env.DOCKER_CONFIG, { recursive: true, force: true })'
 
   required:
