@@ -578,3 +578,25 @@ test('keeps legacy and scale entrypoints fail-closed before destructive work', (
       callIndex(scale, 'stop_conflicting_stacks'),
   );
 });
+
+test('scale validates independent host identity before lock and again after source sync', () => {
+  const scale = read('infra/scripts/vps-pull-build-up-scale.sh');
+  const migrations = functionBlock(scale, 'run_migrations');
+  const body = scale.slice(scale.indexOf(migrations) + migrations.length);
+  const admissions = callIndexes(body, 'maxim_scale_require_server_profile');
+  assert.equal(admissions.length, 3);
+  assert.ok(admissions[0] < callIndex(body, 'acquire_deploy_lock'));
+  assert.ok(callIndex(body, 'acquire_deploy_lock') < callIndex(body, 'sync_branch'));
+  assert.ok(callIndex(body, 'sync_branch') < admissions[1]);
+  assert.ok(admissions[1] < callIndex(body, 'maxim_scale_require_synchronized_source'));
+  assert.ok(
+    callIndex(body, 'maxim_scale_require_synchronized_source') <
+      callIndex(body, 'reexec_if_current_script_changed'),
+  );
+  assert.ok(callIndex(body, 'reexec_if_current_script_changed') < admissions[2]);
+  assert.ok(admissions[2] < callIndexes(body, 'ensure_compose_env')[0]);
+  assert.match(
+    functionBlock(scale, 'reexec_if_current_script_changed'),
+    /infra\/scripts\/lib\/scale-deploy-profile\.sh/u,
+  );
+});
