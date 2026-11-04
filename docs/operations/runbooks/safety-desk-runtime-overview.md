@@ -74,8 +74,8 @@ terminal history, tied heads, skew, legacy bot scope, saturation and index drift
 UI regressions include stale/denied states and access-scope polling boundaries.
 
 The overview uses existing components, CSS and inline SVG, with no chart dependency.
-Against the same-source pre-overview build, the measured feature adds about 26.3 KiB
-of JavaScript (6.5 KiB gzip) and 6.4 KiB of CSS (1.3 KiB gzip). The checked bundle
+Against the same-source pre-overview build, the measured feature adds about 27.5 KiB
+of JavaScript (6.8 KiB gzip) and 6.4 KiB of CSS (1.3 KiB gzip). The checked bundle
 budgets include these measured additions and retain the existing 320-byte tolerance;
 splitting chunks does not bypass their aggregate byte limits.
 
