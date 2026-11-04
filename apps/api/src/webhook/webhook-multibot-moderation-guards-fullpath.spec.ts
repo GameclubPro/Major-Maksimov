@@ -4477,6 +4477,137 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     expect(s.failures).toEqual([]);
   });
 
+  it('terminates expired stateful message-limit authority before unavailable MAX reads', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: true,
+    });
+    const sourceMessageAt = new Date(Date.now() - 360_000);
+    const retryUntilAt = new Date(Date.now() + 86_400_000);
+    const settings = await s.prisma.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    const binding = bindMessageLimitEvidence(
+      settings,
+      sourceMessageAt.getTime(),
+      'MESSAGE_RATE_LIMIT',
+    );
+    const author = jest
+      .spyOn(s.max, 'getChatMemberAccess')
+      .mockRejectedValue(new Error('MAX author unavailable'));
+    const lookup = jest
+      .spyOn(s.max, 'getExactMessageRow')
+      .mockRejectedValue(new MaxExactMessageLookupMissingIdError());
+    const messageId = `expired-stateful-limit-${randomUUID()}`;
+    const result = await s.intents.ensureAndAttempt({
+      chatId: chatId!,
+      messageId,
+      subjectUserId: 'fixture-user',
+      sourceMessageAt,
+      originBotId: s.bots[0]!.id,
+      routingPolicy: 'origin_first',
+      entityType: 'CHAT',
+      messageAuthorKind: 'user',
+      retryUntilAt,
+      reasonKey: 'expired-rate',
+      ruleCode: 'MESSAGE_RATE_LIMIT_DELETE',
+      event: { userId: 'fixture-user', eventType: 'MESSAGE', metadata: binding },
+    });
+    expect(result.kind).toBe('terminal');
+    expect(author).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
+    expect(s.effects).toEqual([]);
+    const intent = await s.prisma.moderationDeleteIntent.findUniqueOrThrow({
+      where: { chatId_messageId: { chatId: chatId!, messageId } },
+      include: { reasons: true },
+    });
+    expect(intent).toMatchObject({
+      status: 'FAILED_TERMINAL',
+      sourceMessageAt,
+      retryUntilAt,
+      deleteDispatchStartedAt: null,
+      remoteDeleteSucceededAt: null,
+      reasons: [{ metadata: binding }],
+    });
+    await s.intents.attemptIntent(intent.id);
+    expect(author).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
+    expect(s.effects).toEqual([]);
+    author.mockRestore();
+    lookup.mockRestore();
+    const nextId = await s.ingest({
+      chatId: chatId!,
+      messageId: `fresh-after-expired-stateful-${randomUUID()}`,
+      text: 'Next',
+    });
+    await s.drain();
+    expect((await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: nextId } })).status).toBe(
+      'PROCESSED',
+    );
+    expect(s.effects).toEqual([]);
+    expect(s.failures).toEqual([]);
+  });
+
+  it('preserves current length authority beside an expired stateful reason', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, { antiSpamEnabled: true });
+    const messageId = `expired-stateful-mixed-${randomUUID()}`;
+    source(s, chatId!, messageId);
+    const sourceMessageAt = new Date(Date.now() - 360_000);
+    const future = new Date(Date.now() + 60_000);
+    const settings = await s.prisma.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    const binding = bindMessageLimitEvidence(
+      settings,
+      sourceMessageAt.getTime(),
+      'MESSAGE_RATE_LIMIT',
+    );
+    const base = {
+      chatId: chatId!,
+      messageId,
+      subjectUserId: 'fixture-user',
+      sourceMessageAt,
+      originBotId: s.bots[0]!.id,
+      routingPolicy: 'origin_first' as const,
+      executeAt: future,
+      entityType: 'CHAT' as const,
+      messageAuthorKind: 'user' as const,
+    };
+    const expired = await s.intents.ensureIntent({
+      ...base,
+      reasonKey: 'expired-rate',
+      ruleCode: 'MESSAGE_RATE_LIMIT_DELETE',
+      event: { userId: 'fixture-user', eventType: 'MESSAGE', metadata: binding },
+    });
+    if (!expired.intentId) throw new Error('Expected durable mixed-reason intent');
+    await s.intents.ensureIntent({
+      ...base,
+      reasonKey: 'length:current',
+      ruleCode: 'MESSAGE_TOO_LONG_DELETE',
+      event: { userId: 'fixture-user', eventType: 'MESSAGE' },
+    });
+    await s.prisma.moderationDeleteIntent.update({
+      where: { id: expired.intentId },
+      data: { executeAt: new Date(0), nextAttemptAt: new Date(0) },
+    });
+    expect(await s.intents.attemptIntent(expired.intentId)).toMatchObject({
+      kind: 'confirmed',
+      verifiedReasonKeys: ['length:current'],
+    });
+    const intent = await s.prisma.moderationDeleteIntent.findUniqueOrThrow({
+      where: { id: expired.intentId },
+      include: { reasons: true },
+    });
+    expect(intent.status).toBe('SUCCEEDED');
+    expect(intent.sourceMessageAt).toEqual(sourceMessageAt);
+    expect(intent.reasons.find((reason) => reason.reasonKey === 'expired-rate')?.metadata).toEqual(
+      binding,
+    );
+    expect(
+      intent.reasons.find((reason) => reason.reasonKey === 'length:current')?.metadata,
+    ).toMatchObject({ moderationDeleteVerified: true });
+    expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+    expect(s.failures).toEqual([]);
+  });
+
   it('persists exact reason ownership: a rejected stopword cannot inherit a valid length DELETE', async () => {
     const s = await fixture();
     const [chatId] = await s.seedCatalog(1);
