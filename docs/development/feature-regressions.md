@@ -44,7 +44,8 @@ never fabricated or automatically restored.
 Source-evidence checks preserve the native row and block budgets on compact,
 retained and cleared source history. A small returned page must not hide repeated
 scans of unrelated history. Missing sources stay visible for review with no
-release action.
+release action. Native plans also cover a missing source followed by a long deleted-key
+gap: retain both bounds of its primary-key seek so absence never walks that gap.
 
 Release passes the selected sanction identity through the existing lock/fence checks.
 Preserve [current manual-sanction semantics](api-domain-reference.md#moderation-and-read-models),

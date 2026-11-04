@@ -30,20 +30,11 @@ import {
 } from './karavan-shop/setup-intent';
 import { readShopDraftRecovery } from './karavan-shop/setup-recovery';
 import { ShopFormatPicker, shopFormatLabel } from './karavan-shop/format-picker';
+import ShopStartup from './karavan-shop/startup';
 
 const defaultRules =
   'Продавец отвечает за описание, актуальность предложений и выполнение договорённостей. Размещение витрин — после проверки администратора. Запрещены товары и услуги, нарушающие закон и правила MAX.';
-export default function KaravanMarketplaceWizard({
-  api,
-  chatId,
-  chatTitle,
-  actorId,
-  intent,
-  onSubmit,
-  onCancel,
-  sellerBotUrl,
-  localOnlyRecovery = false,
-}: {
+type WizardProps = {
   api: ApiTransport;
   chatId: string;
   chatTitle: string;
@@ -53,7 +44,26 @@ export default function KaravanMarketplaceWizard({
   onCancel?: () => void;
   sellerBotUrl?: string;
   localOnlyRecovery?: boolean;
-}) {
+  flowVersion?: number;
+};
+export default function KaravanMarketplaceWizard(props: WizardProps) {
+  return props.intent.kind === 'create' && (props.flowVersion ?? 1) >= 2 ? (
+    <ShopStartup {...props} />
+  ) : (
+    <LegacyMarketplaceWizard {...props} />
+  );
+}
+function LegacyMarketplaceWizard({
+  api,
+  chatId,
+  chatTitle,
+  actorId,
+  intent,
+  onSubmit,
+  onCancel,
+  sellerBotUrl,
+  localOnlyRecovery = false,
+}: WizardProps) {
   const storageKey = shopSetupDraftKey(actorId, chatId, intent);
   const creating = intent.kind === 'create';
   const choosingMarketplace = intent.kind === 'connect_existing' || intent.kind === 'replace';

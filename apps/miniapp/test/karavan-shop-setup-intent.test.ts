@@ -22,6 +22,28 @@ const draft: ShopSetupDraft = {
   chatIds: ['-123'],
 };
 
+test('simple setup recovery preserves chosen admission, categories and the exact chat', () => {
+  for (const admissionPolicy of ['open', 'applications', 'selected'] as const) {
+    const saved = {
+      ...draft,
+      setupVersion: 2,
+      started: true,
+      format: 'community',
+      admissionPolicy,
+    };
+    assert.deepEqual(
+      restoreShopSetupDraft(JSON.stringify(saved), '-123', { kind: 'create' }),
+      saved,
+    );
+    assert.equal(restoreShopSetupDraft(JSON.stringify(saved), '-456', { kind: 'create' }), null);
+  }
+  const legacy = { ...draft, admissionPolicy: 'invitation' };
+  assert.deepEqual(
+    restoreShopSetupDraft(JSON.stringify(legacy), '-123', { kind: 'create' }),
+    legacy,
+  );
+});
+
 test('setup drafts are scoped to actor, chat, intention and fixed marketplace', () => {
   const keys = [
     shopSetupDraftKey('1', '-123', { kind: 'create' }),

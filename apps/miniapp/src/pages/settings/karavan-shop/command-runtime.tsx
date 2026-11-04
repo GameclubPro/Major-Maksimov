@@ -392,6 +392,12 @@ function commandLabel(command: ShopCommand, ui: ShopCommandUi): string {
       return 'Создать приглашение';
     case 'invitation_revoke':
       return 'Отозвать приглашение';
+    case 'seller_grant_create':
+      return 'Разрешить размещение';
+    case 'seller_grant_revoke':
+      return 'Отозвать доступ продавца';
+    case 'administration_store_change':
+      return 'Изменить витрины администрации';
     case 'decide':
       return command.input.decision === 'approve'
         ? 'Одобрить продавца'

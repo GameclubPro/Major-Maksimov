@@ -65,6 +65,8 @@ export const marketplaceContentListResponseSchema = /* @__PURE__ */ (() =>
           title: z.string(),
           imageUrl: z.string().url().nullable(),
           allowedCategory: z.boolean(),
+          priceLabel: z.string().optional(),
+          categoryLabel: z.string().optional(),
           restriction: marketplaceContentRestrictionSchema.nullable(),
         }),
       )
