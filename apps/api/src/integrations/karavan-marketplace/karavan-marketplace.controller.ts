@@ -11,7 +11,6 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import {
@@ -30,6 +29,7 @@ import {
 } from './karavan-marketplace-authority.service';
 import { KaravanMarketplaceHandoffService } from './karavan-marketplace-handoff.service';
 import { KaravanMarketplaceProxyService } from './karavan-marketplace-proxy.service';
+import { KaravanMarketplaceConnectionsService } from './karavan-marketplace-connections.service';
 
 type Request = FastifyRequest & { miniappAuth?: MiniappAuthContext };
 @Controller('v1')
@@ -41,6 +41,7 @@ export class KaravanMarketplaceController {
     private readonly proxy: KaravanMarketplaceProxyService,
     private readonly resolver: KaravanMarketplaceResolverService,
     private readonly handoffs: KaravanMarketplaceHandoffService,
+    private readonly connections: KaravanMarketplaceConnectionsService,
   ) {}
 
   @Get('chats/:chatId/karavan-marketplace')
@@ -109,6 +110,11 @@ export class KaravanMarketplaceController {
       publicationChoices: (await this.resolver.listChoices({ actorMaxUserId: user.userId, chatId }))
         .choices,
       setupOperation: await this.proxy.activeSetup(user.userId, chatId),
+      connection: await this.connections.snapshot(
+        chatId,
+        user.userId,
+        this.authority.principal(user, request.miniappAuth),
+      ),
     };
   }
 
@@ -167,7 +173,7 @@ export class KaravanMarketplaceController {
   }
 
   @Post('chats/:chatId/karavan-marketplace/setup')
-  setup(
+  async setup(
     @Param('chatId') rawChatId: string,
     @Body() body: unknown,
     @CurrentUser() user: AuthUser,
@@ -177,6 +183,14 @@ export class KaravanMarketplaceController {
     const input = karavanMarketplaceSetupSchema.parse(body);
     if (input.chatIds[0] !== chatId)
       throw new ForbiddenException('Текущий чат должен быть выбран для подключения.');
+    await this.authority.assertPrincipal(
+      this.authority.principal(user, request.miniappAuth),
+      user.userId,
+    );
+    await this.connections.settleBinding(
+      chatId,
+      input.existingMarketplaceId ? [input.existingMarketplaceId] : [],
+    );
     return this.proxy.setup(
       user.userId,
       input,
@@ -234,12 +248,85 @@ export class KaravanMarketplaceController {
       .strict()
       .parse(body);
     const { action, ...payload } = input;
-    return this.proxy.binding(
-      marketplaceId,
+    return this.connections.legacyBind(
+      chatId,
       user.userId,
-      { ...payload, chatId, ...(action === 'bind_chat' ? {} : { action }) },
+      { ...payload, action, marketplaceId },
       this.authority.principal(user, request.miniappAuth),
-      action !== 'bind_chat',
+    );
+  }
+
+  @Get('chats/:chatId/karavan-marketplace/connection')
+  connection(
+    @Param('chatId') rawChatId: string,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    return this.connections.snapshot(
+      karavanMarketplaceChatIdSchema.parse(rawChatId),
+      user.userId,
+      this.authority.principal(user, request.miniappAuth),
+    );
+  }
+
+  @Post('chats/:chatId/karavan-marketplace/connection/binding')
+  connectionBinding(
+    @Param('chatId') rawChatId: string,
+    @Body() body: unknown,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    return this.connections.bind(
+      karavanMarketplaceChatIdSchema.parse(rawChatId),
+      user.userId,
+      body,
+      this.authority.principal(user, request.miniappAuth),
+    );
+  }
+
+  @Post('chats/:chatId/karavan-marketplace/connection/import-binding')
+  importBinding(
+    @Param('chatId') rawChatId: string,
+    @Body() body: unknown,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    return this.connections.bind(
+      karavanMarketplaceChatIdSchema.parse(rawChatId),
+      user.userId,
+      body,
+      this.authority.principal(user, request.miniappAuth),
+      true,
+    );
+  }
+
+  @Get('chats/:chatId/karavan-marketplace/connection/operations/:operationId')
+  connectionStatus(
+    @Param('chatId') rawChatId: string,
+    @Param('operationId') operationId: string,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    return this.connections.status(
+      karavanMarketplaceChatIdSchema.parse(rawChatId),
+      user.userId,
+      z.string().uuid().parse(operationId),
+      this.authority.principal(user, request.miniappAuth),
+    );
+  }
+
+  @Post('chats/:chatId/karavan-marketplace/connection/operations/:operationId/resume')
+  connectionResume(
+    @Param('chatId') rawChatId: string,
+    @Param('operationId') operationId: string,
+    @CurrentUser() user: AuthUser,
+    @Req() request: Request,
+  ) {
+    return this.connections.resume(
+      karavanMarketplaceChatIdSchema.parse(rawChatId),
+      user.userId,
+      z.string().uuid().parse(operationId),
+      this.authority.principal(user, request.miniappAuth),
     );
   }
 
@@ -264,13 +351,11 @@ export class KaravanMarketplaceController {
     @Req() request: Request,
   ) {
     const chatId = karavanMarketplaceChatIdSchema.parse(rawChatId);
-    await this.proxy.module(
-      chatId,
-      user.userId,
+    await this.authority.assertPrincipal(
       this.authority.principal(user, request.miniappAuth),
-      randomUUID(),
+      user.userId,
     );
-    return this.proxy.status(z.string().uuid().parse(operationId), user.userId);
+    return this.proxy.inspectSetup(z.string().uuid().parse(operationId), user.userId, chatId);
   }
 
   @Post('chats/:chatId/karavan-marketplace/handoffs')

@@ -2,12 +2,35 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiRequestError } from '../src/lib/api-request-error';
 import {
+  isConfirmedShopCommandResult,
   isDefiniteFirstShopRejection,
   shopMutationFailureKind,
 } from '../src/pages/settings/karavan-shop/command-failure';
 
 const failure = (status: number, code: string) =>
   new ApiRequestError(status, JSON.stringify({ code }), 'Ошибка');
+
+test('an exact committed administration receipt is distinct from a rejected or uncertain command', () => {
+  const confirmed = failure(409, 'KARAVAN_COMMAND_RESULT_CONFIRMED');
+  assert.equal(isConfirmedShopCommandResult(confirmed, 'administration_store_change'), true);
+  assert.equal(isConfirmedShopCommandResult(confirmed, 'pins_save'), false);
+  assert.equal(
+    isConfirmedShopCommandResult(
+      failure(503, 'KARAVAN_COMMAND_RESULT_CONFIRMED'),
+      'administration_store_change',
+    ),
+    false,
+  );
+  assert.equal(
+    isConfirmedShopCommandResult(
+      failure(409, 'KARAVAN_COMMAND_UNKNOWN'),
+      'administration_store_change',
+    ),
+    false,
+  );
+  assert.equal(isDefiniteFirstShopRejection(confirmed, 1), false);
+  assert.equal(isDefiniteFirstShopRejection(confirmed, 2), false);
+});
 
 for (const [code, status] of [
   ['MARKETPLACE_FORMAT_LIMIT', 409],

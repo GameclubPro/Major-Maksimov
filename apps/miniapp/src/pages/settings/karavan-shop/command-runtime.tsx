@@ -22,6 +22,7 @@ import { describeUserFacingError } from '../../../lib/user-facing-error';
 import { useStorefrontDirty, useStorefrontWorkspace } from '../storefront-workspace';
 import {
   claimShopCommand,
+  confirmShopCommand,
   isShopWriteOperation,
   loadShopCommandJournal,
   releaseShopCommand,
@@ -33,7 +34,7 @@ import {
   type ShopCommandUi,
   type ShopJournalScope,
 } from './command-journal';
-import { isDefiniteFirstShopRejection } from './command-failure';
+import { isConfirmedShopCommandResult, isDefiniteFirstShopRejection } from './command-failure';
 
 export class ShopCommandRunRejectedError extends Error {
   constructor(
@@ -53,6 +54,11 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [storageError, setStorageError] = useState(false);
+  const [confirmation, setConfirmation] = useState<{
+    key: string;
+    owner: string;
+    commandId: string;
+  } | null>(null);
   const active = useRef({ key, epoch: 0 });
   const mounted = useRef(true);
   const working = useRef(false);
@@ -133,12 +139,14 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
   }, [key, reload, scope.actorMaxUserId, scope.chatId, scope.marketplaceId]);
 
   const stale = Boolean(journal && journal.key !== key);
-  const blocked = readOnly || loading || busy || storageError || stale || Boolean(journal?.pending);
+  const editingBlocked = loading || busy || storageError || stale || Boolean(journal?.pending);
+  const blocked = readOnly || editingBlocked;
   const perform = async (
     saved: ShopCommandJournal,
     identity: { key: string; epoch: number },
-  ): Promise<MarketplaceManagementResponse> => {
+  ): Promise<MarketplaceManagementResponse | null> => {
     let claimed: ShopCommandJournal | null = null;
+    let dispatchedRequest: MarketplaceManagementRequest | null = null;
     let dispatched = false;
     try {
       if (writeBlocked.current) throw new Error('Сначала повторите проверку подключения.');
@@ -157,6 +165,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
       )
         throw new Error('Сохранённое действие изменилось. Повторите загрузку.');
       const request = await restoreShopCommand(readback);
+      dispatchedRequest = request;
       if (!matches(identity)) throw new Error('Изменился магазин. Вернитесь к исходному чату.');
       // FLAG: Recovery can fail while journal reads are in flight. Keep the exact
       // pending command and block dispatch; already dispatched results still settle.
@@ -178,6 +187,41 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
       if (!matches(identity)) throw new Error('Результат сохранён в исходном чате.');
       return response;
     } catch (cause) {
+      if (
+        dispatched &&
+        claimed?.pending &&
+        dispatchedRequest &&
+        isConfirmedShopCommandResult(cause, dispatchedRequest.command.operation)
+      ) {
+        try {
+          const confirmed = await confirmShopCommand(claimed);
+          apply(confirmed, identity);
+          announce();
+          if (matches(identity)) {
+            setConfirmation({
+              key,
+              owner: claimed.pending.ui.owner,
+              commandId: dispatchedRequest.commandId,
+            });
+            setError(null);
+          }
+          try {
+            await Promise.all([
+              client.invalidateQueries({ queryKey: ['karavan-shop', scopeWithoutActor(scope)] }),
+              client.invalidateQueries({ queryKey: ['karavan-marketplace', scope.chatId] }),
+            ]);
+          } catch {
+            // FLAG: Current state can be refreshed again without replaying a committed action.
+          }
+          return null;
+        } catch (storageCause) {
+          if (matches(identity)) {
+            setStorageError(true);
+            setError(storageCause);
+          }
+          throw storageCause;
+        }
+      }
       if (claimed?.pending) {
         try {
           const retained =
@@ -209,6 +253,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
     working.current = true;
     setBusy(true);
     setError(null);
+    setConfirmation(null);
     let reserved = false;
     let request: MarketplaceManagementRequest | undefined;
     try {
@@ -221,7 +266,7 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
         throw new Error(
           'Изменился магазин. Сохранённое действие можно продолжить в исходном чате.',
         );
-      return (await perform(saved, identity)).data;
+      return (await perform(saved, identity))?.data;
     } catch (cause) {
       if (matches(identity)) {
         setError(cause);
@@ -292,10 +337,12 @@ function useCommandState(api: ApiTransport, scope: ShopJournalScope, readOnly: b
     loading,
     busy,
     blocked,
+    editingBlocked,
     readOnly,
     stale,
     storageError,
     error,
+    confirmation: confirmation?.key === key ? confirmation : null,
     reload,
     run,
     resume,
@@ -352,7 +399,7 @@ export function ShopCommandRecovery() {
       </div>
     );
   const pending = commands.journal?.pending;
-  if (!pending) return null;
+  if (!pending) return commands.confirmation ? <p role="status">Изменение сохранено.</p> : null;
   const command = pendingShopCommand(commands.journal, pending.ui.owner);
   const label = command ? commandLabel(command, pending.ui) : 'Изменить магазин';
   const reason =

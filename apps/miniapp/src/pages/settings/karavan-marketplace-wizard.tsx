@@ -1,3 +1,4 @@
+import { rememberShopDraft, recallShopDraft } from './karavan-shop/draft-memory';
 import { useEffect, useRef, useState } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import {
@@ -44,6 +45,7 @@ type WizardProps = {
   onCancel?: () => void;
   sellerBotUrl?: string;
   localOnlyRecovery?: boolean;
+  optionalDraftRecovery?: boolean;
   flowVersion?: number;
 };
 export default function KaravanMarketplaceWizard(props: WizardProps) {
@@ -63,6 +65,7 @@ function LegacyMarketplaceWizard({
   onCancel,
   sellerBotUrl,
   localOnlyRecovery = false,
+  optionalDraftRecovery = false,
 }: WizardProps) {
   const storageKey = shopSetupDraftKey(actorId, chatId, intent);
   const creating = intent.kind === 'create';
@@ -82,6 +85,7 @@ function LegacyMarketplaceWizard({
   });
   const [draft, setDraft] = useState<ShopSetupDraft>(freshDraft);
   const [hydrated, setHydrated] = useState(false);
+  const [persistDraft, setPersistDraft] = useState(true);
   const [draftRecoveryError, setDraftRecoveryError] = useState(false);
   const [draftRecoveryAttempt, setDraftRecoveryAttempt] = useState(0);
   const [checking, setChecking] = useState(false);
@@ -146,6 +150,16 @@ function LegacyMarketplaceWizard({
     let active = true;
     setHydrated(false);
     setDraftRecoveryError(false);
+    setPersistDraft(true);
+    const remembered = optionalDraftRecovery ? recallShopDraft(storageKey) : null;
+    if (remembered) {
+      setDraft(remembered.draft);
+      setPersistDraft(remembered.persist);
+      setHydrated(true);
+      return () => {
+        active = false;
+      };
+    }
     void readShopDraftRecovery(
       actorId,
       chatId,
@@ -155,7 +169,11 @@ function LegacyMarketplaceWizard({
       .then((state) => {
         if (!active) return;
         if (state.status === 'error') {
-          setDraftRecoveryError(true);
+          // FLAG: An unreadable optional draft never grants execution authority
+          // and must remain untouched while the user edits an in-memory draft.
+          setPersistDraft(false);
+          if (optionalDraftRecovery) setHydrated(true);
+          else setDraftRecoveryError(true);
           return;
         }
         // FLAG: Existing drafts predate the format choice and remain community shops.
@@ -168,12 +186,16 @@ function LegacyMarketplaceWizard({
         setHydrated(true);
       })
       .catch(() => {
-        if (active) setDraftRecoveryError(true);
+        if (active) {
+          setPersistDraft(false);
+          if (optionalDraftRecovery) setHydrated(true);
+          else setDraftRecoveryError(true);
+        }
       });
     return () => {
       active = false;
     };
-  }, [storageKey, actorId, chatId, draftRecoveryAttempt, localOnlyRecovery]);
+  }, [storageKey, actorId, chatId, draftRecoveryAttempt, localOnlyRecovery, optionalDraftRecovery]);
   useEffect(() => {
     if (!creating || !hydrated || draft.initialized || !options.data) return;
     setDraft((value) => ({
@@ -187,12 +209,14 @@ function LegacyMarketplaceWizard({
     }));
   }, [creating, hydrated, draft.initialized, options.data]);
   useEffect(() => {
-    if (hydrated)
+    if (!hydrated) return;
+    if (optionalDraftRecovery) rememberShopDraft(storageKey, draft, persistDraft);
+    if (persistDraft)
       (localOnlyRecovery ? writeLocalMirrorItem : saveMirroredItem)(
         storageKey,
         JSON.stringify(draft),
       );
-  }, [draft, hydrated, storageKey, localOnlyRecovery]);
+  }, [draft, hydrated, persistDraft, storageKey, localOnlyRecovery, optionalDraftRecovery]);
   const change = (patch: Partial<ShopSetupDraft>) => {
     setDraft((value) => ({ ...value, ...patch }));
     setNotice(null);
@@ -309,7 +333,7 @@ function LegacyMarketplaceWizard({
         setNotice('Проверьте настройки и повторите проверку подключений.');
         return;
       }
-      // FLAG: The parent persists the immutable submitted command before any request.
+      // FLAG: The parent freezes this request; server admission precedes every external effect.
       onSubmit(parsed.data);
     } catch (error) {
       setNotice(

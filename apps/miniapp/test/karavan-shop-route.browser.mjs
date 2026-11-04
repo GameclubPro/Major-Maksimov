@@ -73,7 +73,8 @@ try {
             const binding = {id, chatId, chatTitle: 'Соседи',
               state: 'verified', generation: 1, revision: 1, verifiedAt: new Date().toISOString()};
             return {enabled: true, actorMaxUserId: '777', sellerBotUrl: 'https://max.ru/synthetic_seller_bot',
-              setupOperation: null, publicationChoices: [], currentChatTitle: 'Соседи',
+              setupOperation: null, connection: {version: 2, revision: 0, blocked: false, operation: null},
+              publicationChoices: [], currentChatTitle: 'Соседи',
               marketplace: {id, networkId: id, publicSlug: 'synthetic-shop', name: 'Магазин соседей',
                 description: null, kind: 'chat', status: 'active', admissionPolicy: 'applications',
                 logoImageUrl: null, coverImageUrl: null, editRevision: 1, policyRevision: 1,
@@ -129,6 +130,9 @@ try {
         await publications.getByText('Изменить текст', { exact: true }).click();
         const message = publications.getByRole('textbox', { name: /^Текст ответа бота/ });
         await message.fill('Объявления нашего чата');
+        await message.evaluate((node) => {
+          window.__retainedPublicationInput = node;
+        });
         await page.evaluate(() => {
           Object.defineProperty(window.visualViewport, 'height', {
             configurable: true,
@@ -160,6 +164,20 @@ try {
           window.visualViewport.dispatchEvent(new Event('resize'));
         });
         await settleVisualFrame(page);
+        await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
+        await settings.waitFor();
+        await settings.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+        await message.waitFor();
+        assert.equal(
+          await message.inputValue(),
+          'Объявления нашего чата',
+          'Native Back retains the unsaved publication input',
+        );
+        assert.equal(
+          await message.evaluate((node) => node === window.__retainedPublicationInput),
+          true,
+          'Native Back keeps the editor mounted',
+        );
         await publications.getByRole('button', { name: 'Сохранить', exact: true }).click();
         await page.getByText('Блок «Магазин чата» сохранен', { exact: true }).waitFor();
         await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
@@ -213,7 +231,7 @@ document.body.dataset.miniappProfile='moderation';
 let recoveryDelay=0;
 const bridge=window.MAX?.WebApp??window.WebApp;
 bridge.DeviceStorage={getItem:async()=>{await new Promise(resolve=>setTimeout(resolve,recoveryDelay));return {value:null};}};
-let actor='777', generation=1, marketplaceId='a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';
+let actor='777', generation=1, connectionRevision=1, marketplaceId='a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';
 let permissions=['manage_marketplace','review_listing','bind_chat'];
 const request={operationId:'b0d9b7ce-0040-4c85-a7ec-e3cf6da94c10',chatIds:['-123','-456'],existingMarketplaceId:marketplaceId,expectedPolicyRevision:1};
 let operation={operationId:request.operationId,state:'partial',request,checkpoints:{marketplaceId,bindings:[{chatId:'-123',state:'connected',bindingId:marketplaceId,generation:1},{chatId:'-456',state:'failed',bindingId:null,generation:null}]}};
@@ -226,9 +244,9 @@ const api={request:async(path,init={})=>{
   window.__probeReads++;
   const chatId=decodeURIComponent(path.split('/')[2]);
   const binding={id:marketplaceId,chatId,chatTitle:'Соседи',state:'verified',generation,revision:1,verifiedAt:new Date().toISOString()};
-  return {enabled:true,actorMaxUserId:actor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:operation,publicationChoices:[],currentChatTitle:'Соседи',marketplace:{id:marketplaceId,networkId:marketplaceId,publicSlug:'scope-shop',name:'Проверка области',description:null,kind:'chat',status:'active',admissionPolicy:'applications',logoImageUrl:null,coverImageUrl:null,editRevision:1,policyRevision:1,orderRevision:1,visibilityRevision:1},binding,bindings:[binding],permissions,counts:{listings:2,readyListings:2,approvedListings:2,pendingApplications:0,chats:1},canManage:permissions.includes('manage_marketplace'),buyerUrl:'https://max.ru/synthetic_buyer_bot?startapp=m_scope-shop',previewUrl:null,publicationPreview:{mode:'chat_marketplace'}};
+  return {enabled:true,actorMaxUserId:actor,sellerBotUrl:'https://max.ru/synthetic_seller_bot',setupOperation:operation,connection:{version:2,revision:connectionRevision,blocked:false,operation:operation?{kind:'setup',operation}:null},publicationChoices:[],currentChatTitle:'Соседи',marketplace:{id:marketplaceId,networkId:marketplaceId,publicSlug:'scope-shop',name:'Проверка области',description:null,kind:'chat',status:'active',admissionPolicy:'applications',logoImageUrl:null,coverImageUrl:null,editRevision:1,policyRevision:1,orderRevision:1,visibilityRevision:1},binding,bindings:[binding],permissions,counts:{listings:2,readyListings:2,approvedListings:2,pendingApplications:0,chats:1},canManage:permissions.includes('manage_marketplace'),buyerUrl:'https://max.ru/synthetic_buyer_bot?startapp=m_scope-shop',previewUrl:null,publicationPreview:{mode:'chat_marketplace'}};
 },requestKeepalive:()=>{}};
-function Harness(){const[chatId,setChatId]=React.useState('-123');window.__changeProbeScope=async(kind)=>{if(kind==='actor')actor='888';else if(kind==='generation')generation++;else if(kind==='marketplace')marketplaceId='c0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';else if(kind==='chat'){setChatId('-789');return;}else if(kind==='complete'){operation=null;recoveryDelay=80;}else if(kind==='arrange')permissions=['arrange_listings'];await queryClient.invalidateQueries({queryKey:['karavan-marketplace']});};return <StorefrontWorkspace open onClose={()=>{}}><Panel api={api} chatId={chatId} publications={<span>Объявления</span>}/></StorefrontWorkspace>;}
+function Harness(){const[chatId,setChatId]=React.useState('-123');window.__changeProbeScope=async(kind)=>{connectionRevision++;if(kind==='actor')actor='888';else if(kind==='generation')generation++;else if(kind==='marketplace')marketplaceId='c0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';else if(kind==='chat'){setChatId('-789');return;}else if(kind==='complete'){operation=null;recoveryDelay=80;}else if(kind==='arrange')permissions=['arrange_listings'];await queryClient.invalidateQueries({queryKey:['karavan-marketplace']});};return <StorefrontWorkspace open onClose={()=>{}}><Panel api={api} chatId={chatId} publications={<span>Объявления</span>}/></StorefrontWorkspace>;}
 createRoot(document.getElementById('root')).render(<QueryClientProvider client={queryClient}><Harness/></QueryClientProvider>);
 `,
   );

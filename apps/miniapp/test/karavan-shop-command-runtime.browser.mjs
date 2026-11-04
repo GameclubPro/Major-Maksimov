@@ -70,7 +70,7 @@ function responseFor(request) {
     },
   };
 }
-async function newHarness(browser, name, base, { storage, hold } = {}) {
+async function newHarness(browser, name, base, { storage, hold, confirmedReceipt } = {}) {
   const context = await browser.newContext({
     viewport: { width: 360, height: 780 },
     isMobile: true,
@@ -106,6 +106,7 @@ async function newHarness(browser, name, base, { storage, hold } = {}) {
   const attempts = [];
   const committed = new Map();
   const errors = [];
+  let stateVersion = 1;
   let observeFirstAttempt;
   const firstAttempt = new Promise((resolve) => {
     observeFirstAttempt = resolve;
@@ -119,11 +120,22 @@ async function newHarness(browser, name, base, { storage, hold } = {}) {
   await context.route('**/*', async (route) => {
     const request = route.request();
     if (new URL(request.url()).origin !== new URL(base).origin) return route.abort();
+    if (new URL(request.url()).pathname === '/confirmed-shop-state')
+      return route.fulfill({ json: { version: stateVersion } });
     if (!new URL(request.url()).pathname.endsWith('/karavan-marketplace/manage'))
       return route.continue();
     const body = request.postData();
     assert.ok(body);
     const envelope = JSON.parse(body);
+    if (confirmedReceipt && envelope.command.operation === 'administration_store_change') {
+      attempts.push({ body, envelope });
+      stateVersion = 2;
+      observeFirstAttempt();
+      return route.fulfill({
+        status: 409,
+        json: { code: 'KARAVAN_COMMAND_RESULT_CONFIRMED' },
+      });
+    }
     const first = !committed.has(envelope.commandId);
     if (first) committed.set(envelope.commandId, { body, result: responseFor(envelope) });
     attempts.push({ body, envelope });
@@ -147,14 +159,14 @@ async function newHarness(browser, name, base, { storage, hold } = {}) {
   });
   return { context, attempts, committed, errors, firstAttempt, release: () => releaseHeld?.() };
 }
-async function assertAllBlocked(page) {
+async function assertAllBlocked(page, editingBlocked = true) {
   const current = await state(page);
   for (const owner of ['image', 'appearance', 'invitation']) {
     assert.equal(current[owner].blocked, true, `${owner} is blocked by the shared command`);
     assert.equal(
       current[owner].editingBlocked,
-      true,
-      `${owner} cannot edit while outcome is unknown`,
+      editingBlocked,
+      `${owner} editing follows the original pending-command gate`,
     );
   }
   for (const label of ['Загрузить изображение', 'Сохранить оформление', 'Пригласить продавца'])
@@ -385,7 +397,10 @@ async function readOnlyCheck(browser, name, base, url) {
     await settled(page);
     await page.getByRole('button', { name: 'Заблокировать изменения', exact: true }).click();
     await waitForState(page, (value) => value.readOnly && !value.loading && !value.busy);
-    await assertAllBlocked(page);
+    await assertAllBlocked(page, false);
+    const draft = page.getByRole('textbox', { name: 'Название черновика', exact: true });
+    assert.equal(await draft.isEnabled(), true);
+    await draft.fill('Черновик до проверки подключения');
     for (const action of ['tryImage', 'tryAppearance'])
       assert.ok(await page.evaluate((key) => window.__shopCommandRuntimeHarness[key](), action));
     assert.equal(
@@ -394,6 +409,7 @@ async function readOnlyCheck(browser, name, base, url) {
       'a direct blocked hook cannot reserve a command',
     );
     assert.equal(harness.attempts.length, 0, 'read-only entry prevents direct hook dispatch');
+    assert.equal((await state(page)).localDraft, 'Черновик до проверки подключения');
 
     await page.getByRole('button', { name: 'Разрешить изменения', exact: true }).click();
     await waitForState(page, (value) => !value.readOnly && !value.blocked);
@@ -406,6 +422,7 @@ async function readOnlyCheck(browser, name, base, url) {
     await page.getByRole('button', { name: 'Заблокировать изменения', exact: true }).click();
     await waitForState(page, (value) => value.readOnly);
     await assertAllBlocked(page);
+    assert.equal(await draft.isDisabled(), true, 'An unknown command still fences local edits');
     assert.equal(
       await page
         .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
@@ -435,6 +452,8 @@ async function readOnlyCheck(browser, name, base, url) {
     await waitForState(page, (value) => !value.busy && value.journal?.pending === null);
     await settleVisualFrame(page);
     const confirmed = await state(page);
+    assert.equal(confirmed.localDraft, 'Черновик до проверки подключения');
+    assert.equal(await draft.isEnabled(), true);
     assert.equal(harness.attempts.length, 2);
     assert.equal(harness.attempts[1].body, original.body);
     assert.equal(harness.committed.size, 1, 'explicit resume returns the original server receipt');
@@ -504,6 +523,51 @@ async function lateScopeCheck(browser, name, base, url) {
   }
 }
 
+async function confirmedAdministrationCheck(browser, name, base, url) {
+  const harness = await newHarness(browser, name, base, { confirmedReceipt: true });
+  try {
+    const page = await harness.context.newPage();
+    await page.goto(`${url}?confirmed=1`);
+    await settled(page);
+    await waitForState(page, (value) => value.currentStateVersion === 1);
+    await page.evaluate(() => window.__shopCommandRuntimeHarness.prepareConfirmedAdministration());
+    const before = await waitForState(
+      page,
+      (value) =>
+        value.journal?.pending?.request.command.operation === 'administration_store_change' &&
+        value.journal.pending.dispatchCount === 1,
+    );
+    const commandId = before.journal.pending.request.commandId;
+    assert.ok(before.journal.results['legacy-administration'], 'An earlier owner result exists');
+    await page.evaluate(() => window.__shopCommandRuntimeHarness.resume());
+    const after = await waitForState(
+      page,
+      (value) => !value.busy && !value.journal?.pending && value.currentStateVersion === 2,
+    );
+    assert.equal(after.confirmation.commandId, commandId);
+    assert.equal(after.journal.results['legacy-administration'], undefined);
+    assert.equal(after.blocked, false);
+    assert.deepEqual(after.callbacks, [], 'A committed marker does not invent a domain response');
+    assert.equal(
+      await page.evaluate(() => window.__shopCommandRuntimeHarness.entryAvailable()),
+      true,
+    );
+    assert.equal(harness.attempts.length, 1);
+    assert.equal(harness.attempts[0].envelope.commandId, commandId);
+    await page.evaluate(() => window.__shopCommandRuntimeHarness.resume());
+    await page.reload();
+    await settled(page);
+    const restored = await state(page);
+    assert.equal(restored.journal.pending, null);
+    assert.equal(restored.journal.results['legacy-administration'], undefined);
+    assert.equal(harness.attempts.length, 1, 'Later opens do not repeat the confirmed command');
+    assert.deepEqual(harness.errors, []);
+    console.log(`Shop command runtime confirmed administration (${name}): passed`);
+  } finally {
+    await harness.context.close();
+  }
+}
+
 export async function runShopCommandRuntimeChecks({ base, url }) {
   const selected = process.env.KARAVAN_SHOP_RUNTIME_SCENARIOS?.split(',').filter(Boolean);
   const known = [
@@ -515,6 +579,7 @@ export async function runShopCommandRuntimeChecks({ base, url }) {
     'second-owner',
     'read-only',
     'late-scope',
+    'confirmed-administration',
   ];
   if (selected?.some((scenario) => !known.includes(scenario)))
     throw new Error('Unknown shop command runtime scenario');
@@ -533,6 +598,8 @@ export async function runShopCommandRuntimeChecks({ base, url }) {
       if (includes('second-owner')) await secondOwnerSameDocumentCheck(browser, name, base, url);
       if (includes('read-only')) await readOnlyCheck(browser, name, base, url);
       if (includes('late-scope')) await lateScopeCheck(browser, name, base, url);
+      if (includes('confirmed-administration'))
+        await confirmedAdministrationCheck(browser, name, base, url);
     } finally {
       await browser.close();
     }
