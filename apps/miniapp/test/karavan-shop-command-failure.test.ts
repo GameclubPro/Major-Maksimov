@@ -67,3 +67,26 @@ test('unknown outcomes, arbitrary provider codes and lost authority keep their o
   assert.equal(shopMutationFailureKind(failure(409, 'MARKETPLACE_BINDING_CHANGED')), 'forbidden');
   assert.equal(shopMutationFailureKind(failure(409, 'MARKETPLACE_REVISION_CONFLICT')), 'refresh');
 });
+
+for (const [code, status, kind] of [
+  ['ADMINISTRATION_STORE_UNAVAILABLE', 409, 'refresh'],
+  ['MARKETPLACE_LISTING_LIMIT', 409, 'validation'],
+  ['MARKETPLACE_GRANTS_UNAVAILABLE', 409, 'refresh'],
+  ['MARKETPLACE_GRANT_ALREADY_CLAIMED', 409, 'refresh'],
+  ['MARKETPLACE_GRANT_REQUIRED', 403, 'forbidden'],
+  ['MARKETPLACE_GRANT_STORE_OWNER', 403, 'validation'],
+  ['MARKETPLACE_GRANT_UNAVAILABLE', 403, 'refresh'],
+  ['MARKETPLACE_INVITATION_EXPIRY', 400, 'validation'],
+  ['MARKETPLACE_INVITATION_LIMIT', 409, 'validation'],
+  ['MARKETPLACE_RULES_CHANGED', 409, 'refresh'],
+] as const) {
+  test(`${code} releases a first known rejection but cannot erase an earlier unknown outcome`, () => {
+    const error = failure(status, code);
+    assert.equal(shopMutationFailureKind(error), kind);
+    assert.equal(isDefiniteFirstShopRejection(error, 1), true);
+    assert.equal(isDefiniteFirstShopRejection(error, 2), false);
+    assert.equal(isDefiniteFirstShopRejection(error, 3), false);
+    assert.equal(isDefiniteFirstShopRejection(failure(503, code), 1), false);
+    assert.equal(shopMutationFailureKind(failure(503, code)), 'unknown');
+  });
+}

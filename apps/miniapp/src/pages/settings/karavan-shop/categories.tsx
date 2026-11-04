@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { StorefrontActions, useStorefrontDirty } from '../storefront-workspace';
+import { ShopCategoryPicker } from './category-picker';
 import { useQuery } from '@tanstack/react-query';
 import type { MarketplaceManagementOperation } from '@maxim/contracts/karavan-marketplace-management';
 import { getKaravanMarketplaceSetupOptions } from '../../../lib/api/karavan-marketplace-client';
@@ -27,7 +28,8 @@ type PreviewInput = Extract<
   { operation: 'rules_preview' }
 >['input'];
 export default function ShopCategories() {
-  const { api, scope } = useShop();
+  const { api, scope, module } = useShop();
+  const simple = (module.chatShopFlowVersion ?? 1) >= 2;
   const query = useShopQuery<'detail'>({ operation: 'detail' });
   const options = useQuery({
     queryKey: ['karavan-category-options', scope.chatId],
@@ -83,18 +85,18 @@ export default function ShopCategories() {
     setPreview(null);
     setError(null);
   };
-  const calculate = async () => {
-    if (checking || mutation.blocked || !changed) return;
+  const calculate = async (nextRules: Rules = value) => {
+    if (checking || mutation.blocked || sameShopRules(query.data.rules, nextRules)) return;
     const original = query.data.rules;
-    const requiresAcceptance = shopRulesRequireAcceptance(original, value);
+    const requiresAcceptance = shopRulesRequireAcceptance(original, nextRules);
     const delayed = requiresAcceptance && (query.data.counts.approvedListings ?? 1) > 0;
     const input: PreviewInput = {
       expectedPolicyRevision: query.data.marketplace.policyRevision,
       rules: {
-        text: value.text,
-        allowedCategoryIds: value.allowedCategoryIds,
-        allowedSubcategoryIds: value.allowedSubcategoryIds,
-        categoryOrder: value.categoryOrder,
+        text: nextRules.text,
+        allowedCategoryIds: nextRules.allowedCategoryIds,
+        allowedSubcategoryIds: nextRules.allowedSubcategoryIds,
+        categoryOrder: nextRules.categoryOrder,
       },
       requiresAcceptance,
       effectiveAt: new Date(Date.now() + (delayed ? 14 * 86400000 + 120000 : 0)).toISOString(),
@@ -152,128 +154,156 @@ export default function ShopCategories() {
           className="karavan-shop__form"
           disabled={mutation.editingBlocked || checking || !!scheduled}
         >
-          {options.data.categories.map((category) => {
-            const enabled = value.allowedCategoryIds.includes(category.id);
-            const subcategories = category.id === 'real_estate' ? [] : category.subcategories;
-            return (
-              <details key={category.id} className="karavan-shop__category">
-                <summary>
-                  <span>{category.label}</span>
-                  <span>{enabled ? 'Выбрано' : 'Не выбрано'}</span>
-                </summary>
-                <label className="karavan-shop__check">
-                  <input
-                    type="checkbox"
-                    checked={
-                      enabled &&
-                      subcategories.every((row) => value.allowedSubcategoryIds.includes(row.id))
-                    }
-                    ref={(input) => {
-                      if (input)
-                        input.indeterminate =
+          {simple ? (
+            <ShopCategoryPicker
+              options={options.data.categories}
+              value={{
+                categories: value.allowedCategoryIds,
+                subcategories: value.allowedSubcategoryIds,
+              }}
+              disabled={mutation.editingBlocked || checking || !!scheduled}
+              onChange={(selection) => {
+                const next: Rules = {
+                  ...value,
+                  allowedCategoryIds: selection.categories as Rules['allowedCategoryIds'],
+                  allowedSubcategoryIds: selection.subcategories,
+                  categoryOrder: selection.categories as Rules['categoryOrder'],
+                };
+                change(next);
+                void calculate(next);
+              }}
+            />
+          ) : (
+            <>
+              {options.data.categories.map((category) => {
+                const enabled = value.allowedCategoryIds.includes(category.id);
+                const subcategories = category.id === 'real_estate' ? [] : category.subcategories;
+                return (
+                  <details key={category.id} className="karavan-shop__category">
+                    <summary>
+                      <span>{category.label}</span>
+                      <span>{enabled ? 'Выбрано' : 'Не выбрано'}</span>
+                    </summary>
+                    <label className="karavan-shop__check">
+                      <input
+                        type="checkbox"
+                        checked={
                           enabled &&
-                          subcategories.some(
-                            (row) => !value.allowedSubcategoryIds.includes(row.id),
-                          );
-                    }}
-                    onChange={(event) => {
-                      const next = event.target.checked;
-                      change({
-                        ...value,
-                        allowedCategoryIds: next
-                          ? [...new Set([...value.allowedCategoryIds, category.id])]
-                          : value.allowedCategoryIds.filter((id) => id !== category.id),
-                        allowedSubcategoryIds: next
-                          ? [
-                              ...new Set([
-                                ...value.allowedSubcategoryIds,
-                                ...category.subcategories.map((row) => row.id),
-                              ]),
-                            ]
-                          : value.allowedSubcategoryIds.filter(
-                              (id) => !category.subcategories.some((row) => row.id === id),
-                            ),
-                        categoryOrder: next
-                          ? [...value.categoryOrder, category.id].filter(
-                              (id, index, all) => all.indexOf(id) === index,
-                            )
-                          : value.categoryOrder.filter((id) => id !== category.id),
-                      });
-                    }}
-                  />
-                  Вся категория
-                </label>
-                {subcategories.map((subcategory) => (
-                  <label className="karavan-shop__check" key={subcategory.id}>
-                    <input
-                      type="checkbox"
-                      checked={value.allowedSubcategoryIds.includes(subcategory.id)}
-                      onChange={(event) => {
-                        const subs = event.target.checked
-                          ? [...value.allowedSubcategoryIds, subcategory.id]
-                          : value.allowedSubcategoryIds.filter((id) => id !== subcategory.id);
-                        const hasAny = category.subcategories.some((row) => subs.includes(row.id));
-                        change({
-                          ...value,
-                          allowedSubcategoryIds: subs,
-                          allowedCategoryIds: hasAny
-                            ? [...new Set([...value.allowedCategoryIds, category.id])]
-                            : value.allowedCategoryIds.filter((id) => id !== category.id),
-                          categoryOrder: hasAny
-                            ? [...new Set([...value.categoryOrder, category.id])]
-                            : value.categoryOrder.filter((id) => id !== category.id),
-                        });
-                      }}
-                    />
-                    {subcategory.label}
-                  </label>
-                ))}
-              </details>
-            );
-          })}
-          {categoryOrder.length > 1 ? (
-            <div>
-              <button
-                type="button"
-                aria-pressed={arranging}
-                onClick={() => setArranging(!arranging)}
-              >
-                {arranging ? 'Готово' : 'Изменить порядок категорий'}
-              </button>
-              {arranging
-                ? categoryOrder.map((id, index) => {
-                    const label =
-                      options.data.categories.find((item) => item.id === id)?.label ?? id;
-                    const move = (offset: number) => {
-                      const next = [...categoryOrder];
-                      [next[index], next[index + offset]] = [next[index + offset]!, next[index]!];
-                      change({ ...value, categoryOrder: next });
-                    };
-                    return (
-                      <div className="karavan-shop__block" key={id}>
-                        <span>{label}</span>
-                        <button
-                          type="button"
-                          aria-label={`Выше: ${label}`}
-                          disabled={index === 0}
-                          onClick={() => move(-1)}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Ниже: ${label}`}
-                          disabled={index === categoryOrder.length - 1}
-                          onClick={() => move(1)}
-                        >
-                          ↓
-                        </button>
-                      </div>
-                    );
-                  })
-                : null}
-            </div>
-          ) : null}
+                          subcategories.every((row) => value.allowedSubcategoryIds.includes(row.id))
+                        }
+                        ref={(input) => {
+                          if (input)
+                            input.indeterminate =
+                              enabled &&
+                              subcategories.some(
+                                (row) => !value.allowedSubcategoryIds.includes(row.id),
+                              );
+                        }}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          change({
+                            ...value,
+                            allowedCategoryIds: next
+                              ? [...new Set([...value.allowedCategoryIds, category.id])]
+                              : value.allowedCategoryIds.filter((id) => id !== category.id),
+                            allowedSubcategoryIds: next
+                              ? [
+                                  ...new Set([
+                                    ...value.allowedSubcategoryIds,
+                                    ...category.subcategories.map((row) => row.id),
+                                  ]),
+                                ]
+                              : value.allowedSubcategoryIds.filter(
+                                  (id) => !category.subcategories.some((row) => row.id === id),
+                                ),
+                            categoryOrder: next
+                              ? [...value.categoryOrder, category.id].filter(
+                                  (id, index, all) => all.indexOf(id) === index,
+                                )
+                              : value.categoryOrder.filter((id) => id !== category.id),
+                          });
+                        }}
+                      />
+                      Вся категория
+                    </label>
+                    {subcategories.map((subcategory) => (
+                      <label className="karavan-shop__check" key={subcategory.id}>
+                        <input
+                          type="checkbox"
+                          checked={value.allowedSubcategoryIds.includes(subcategory.id)}
+                          onChange={(event) => {
+                            const subs = event.target.checked
+                              ? [...value.allowedSubcategoryIds, subcategory.id]
+                              : value.allowedSubcategoryIds.filter((id) => id !== subcategory.id);
+                            const hasAny = category.subcategories.some((row) =>
+                              subs.includes(row.id),
+                            );
+                            change({
+                              ...value,
+                              allowedSubcategoryIds: subs,
+                              allowedCategoryIds: hasAny
+                                ? [...new Set([...value.allowedCategoryIds, category.id])]
+                                : value.allowedCategoryIds.filter((id) => id !== category.id),
+                              categoryOrder: hasAny
+                                ? [...new Set([...value.categoryOrder, category.id])]
+                                : value.categoryOrder.filter((id) => id !== category.id),
+                            });
+                          }}
+                        />
+                        {subcategory.label}
+                      </label>
+                    ))}
+                  </details>
+                );
+              })}
+              {categoryOrder.length > 1 ? (
+                <div>
+                  <button
+                    type="button"
+                    aria-pressed={arranging}
+                    onClick={() => setArranging(!arranging)}
+                  >
+                    {arranging ? 'Готово' : 'Изменить порядок категорий'}
+                  </button>
+                  {arranging
+                    ? categoryOrder.map((id, index) => {
+                        const label =
+                          options.data.categories.find((item) => item.id === id)?.label ?? id;
+                        const move = (offset: number) => {
+                          const next = [...categoryOrder];
+                          [next[index], next[index + offset]] = [
+                            next[index + offset]!,
+                            next[index]!,
+                          ];
+                          change({ ...value, categoryOrder: next });
+                        };
+                        return (
+                          <div className="karavan-shop__block" key={id}>
+                            <span>{label}</span>
+                            <button
+                              type="button"
+                              aria-label={`Выше: ${label}`}
+                              disabled={index === 0}
+                              onClick={() => move(-1)}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Ниже: ${label}`}
+                              disabled={index === categoryOrder.length - 1}
+                              onClick={() => move(1)}
+                            >
+                              ↓
+                            </button>
+                          </div>
+                        );
+                      })
+                    : null}
+                </div>
+              ) : null}
+            </>
+          )}
           <details>
             <summary>Правила размещения</summary>
             <label className="karavan-module__field">

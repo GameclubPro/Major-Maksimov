@@ -32,11 +32,19 @@ export function useShop() {
   return value;
 }
 export function useShopPages<
-  K extends 'listings' | 'applications' | 'catalog' | 'invitations' | 'content',
+  K extends 'listings' | 'applications' | 'catalog' | 'invitations' | 'content' | 'seller_grants',
 >(
   command: Extract<
     ShopCommand,
-    { operation: 'listings' | 'applications' | 'catalog' | 'invitations' | 'content' }
+    {
+      operation:
+        | 'listings'
+        | 'applications'
+        | 'catalog'
+        | 'invitations'
+        | 'content'
+        | 'seller_grants';
+    }
   > & { operation: K },
   enabled = true,
 ) {
