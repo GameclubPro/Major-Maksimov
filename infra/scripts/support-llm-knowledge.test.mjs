@@ -262,12 +262,7 @@ test('Lastik progress uses the actual details labels without claiming live visib
     /import\s*\{[^}]*\bretentionHistoryLabel\b[^}]*\}\s*from '\.\/settings-message-retention-model'/u,
   );
   assert.match(ui, /<dd>\{retentionHistoryLabel\(state\)\}<\/dd>/u);
-  for (const label of [
-    'Ожидает очистки',
-    'Очищается',
-    'Проверена',
-    'Часть истории отложена',
-  ])
+  for (const label of ['Ожидает очистки', 'Очищается', 'Проверена', 'Часть истории отложена'])
     assert.ok(answer.includes(label) && model.includes(label), label);
   for (const label of [
     'История чата',
@@ -375,16 +370,34 @@ test('AI intents preserve their own limits instead of an entire mixed FAQ', () =
   const commercialUi = source(
     'apps/miniapp/src/pages/settings/shared-commercial-settings-fields.tsx',
   );
-  for (const label of [
-    'Реклама подтверждена',
-    'Удаление',
-    'Результат неоднозначен',
-    'Сохранение',
+  for (const [label, file] of [
+    ['Что разрешено', 'commercial-policy-fields.tsx'],
+    ['Исключения', 'commercial-policy-tools.tsx'],
   ]) {
-    assert.ok(commercialUi.includes(label), label);
-    assert.ok(aiPolicy.includes(label), label);
+    assert.ok(source(`apps/miniapp/src/pages/settings/${file}`).includes(label), label);
+    assert.ok(fact('commercial-ai-enable').includes(label), label);
   }
+  for (const statement of [
+    'Подтверждённая реклама удаляется по правилам чата',
+    'Другие фильтры работают независимо',
+  ])
+    assert.ok(commercialUi.includes(statement), statement);
+  assert.match(aiPolicy, /разрешённая категория.*действующее исключение.*сохраняют сообщение/u);
   assert.match(aiPolicy, /неоднозначном результате.*сообщение остаётся/u);
+  assert.match(aiPolicy, /другие включённые фильтры работают независимо/u);
+  for (const id of [
+    'commercial-text-filter',
+    'commercial-sanctions',
+    'commercial-ai-mode',
+    'commercial-ai-enable',
+    'commercial-ai-sensitivity',
+    'commercial-ai-double-check',
+  ])
+    assert.doesNotMatch(
+      fact(id),
+      /с подписью «ИИ-модерация текста»|В панели указано|«Реклама подтверждена»|«Результат неоднозначен»/u,
+      id,
+    );
   assert.doesNotMatch(fact('commercial-ai-model'), /Подпись «Сомнения проверяет/u);
   assert.match(fact('commercial-ai-model'), /нет выбора модели/u);
   assert.match(fact('commercial-ai-evidence'), /не подтверждает проверку или удаление/u);

@@ -32,6 +32,7 @@ import {
   selectLogsDashboardModerationSummary,
 } from './logs-dashboard-rollups';
 import { selectModerationFeedReadModelRows } from './stats-read-model-selectors';
+import { commercialAdsFeedbackId, COMMERCIAL_AD_FEED_RULE_CODES } from './commercial-ads-feedback';
 import {
   EVENTS_FEED_PAGE_CACHE_TTL_MS,
   EVENTS_FEED_HEAD_CACHE_TTL_MS,
@@ -282,9 +283,49 @@ export class AdminLogsDashboardRuntime {
 
     const now = new Date();
     const from = this.resolveLogsDashboardFrom(parsed.data.range, now);
-    return this.getCachedModerationFeedPage(chatId, user.userId, from, now, parsed.data, 'chat', {
-      allowRemoteLookup: false,
+    const page = await this.getCachedModerationFeedPage(
+      chatId,
+      user.userId,
+      from,
+      now,
+      parsed.data,
+      'chat',
+      {
+        allowRemoteLookup: false,
+      },
+    );
+    const ids = page.items
+      .filter((item) => COMMERCIAL_AD_FEED_RULE_CODES.has(item.ruleCode))
+      .map((item) => commercialAdsFeedbackId(chatId, user.userId, item.id));
+    if (!ids.length) return page;
+    // FLAG: Actor-specific acknowledgement stays outside the shared page cache. At most one
+    // bounded primary-key batch is read; another administrator's report is never exposed.
+    const reports = await this.prisma.auditLog.findMany({
+      where: {
+        id: { in: ids },
+        chatId,
+        actorUserId: user.userId,
+        action: 'REPORT_COMMERCIAL_AD_ERROR',
+      },
+      select: { id: true },
     });
+    const reported = new Set(reports.map((row) => row.id));
+    return {
+      ...page,
+      items: page.items.map((item) =>
+        COMMERCIAL_AD_FEED_RULE_CODES.has(item.ruleCode)
+          ? {
+              ...item,
+              metadata: {
+                ...item.metadata,
+                commercialFeedbackReported: reported.has(
+                  commercialAdsFeedbackId(chatId, user.userId, item.id),
+                ),
+              },
+            }
+          : item,
+      ),
+    };
   }
 
   resolveLogsDashboardFrom(range: LogsDashboardRange, to: Date): Date {
@@ -617,7 +658,7 @@ export class AdminLogsDashboardRuntime {
     profileOptions: ResolveUserProfilesOptions = {},
   ): Promise<ModerationFeedPage> {
     const limit = Math.max(1, Math.min(100, query.limit));
-    const cursor = this.decodeModerationFeedCursor(query.cursor);
+    const cursor = this.decodeModerationFeedCursor(query.cursor, { chatId, query });
     const rows = await selectModerationFeedReadModelRows(this.prisma, {
       chatId,
       from,
@@ -649,10 +690,13 @@ export class AdminLogsDashboardRuntime {
       hasMore: rows.length > limit,
       nextCursor:
         rows.length > limit && lastRow
-          ? this.encodeModerationFeedCursor({
-              createdAt: lastRow.createdAt,
-              id: lastRow.id,
-            })
+          ? this.encodeModerationFeedCursor(
+              {
+                createdAt: lastRow.createdAt,
+                id: lastRow.id,
+              },
+              { chatId, query },
+            )
           : null,
     });
   }
@@ -859,17 +903,26 @@ export class AdminLogsDashboardRuntime {
     };
   }
 
-  private encodeModerationFeedCursor(value: ModerationFeedCursor): string {
+  private encodeModerationFeedCursor(
+    value: ModerationFeedCursor,
+    scope: { chatId: string; query: ModerationFeedQuery },
+  ): string {
     return Buffer.from(
       JSON.stringify({
         createdAt: value.createdAt.toISOString(),
         id: value.id,
+        chatId: scope.chatId,
+        range: scope.query.range,
+        filter: scope.query.filter,
       }),
       'utf8',
     ).toString('base64url');
   }
 
-  private decodeModerationFeedCursor(cursor: string | undefined): ModerationFeedCursor | null {
+  private decodeModerationFeedCursor(
+    cursor: string | undefined,
+    scope: { chatId: string; query: ModerationFeedQuery },
+  ): ModerationFeedCursor | null {
     const normalizedCursor = cursor?.trim() ?? '';
     if (!normalizedCursor) {
       return null;
@@ -883,6 +936,17 @@ export class AdminLogsDashboardRuntime {
       const id = typeof parsed.id === 'string' ? parsed.id.trim() : '';
       const createdAt = new Date(createdAtIso);
 
+      // FLAG: A commercial page cannot borrow an unscoped legacy/action cursor. Scoped
+      // cursors remain tied to their chat, range and filter across every new page.
+      const hasScope = ['chatId', 'range', 'filter'].some((key) => Object.hasOwn(parsed, key));
+      if (
+        (hasScope || scope.query.filter === 'COMMERCIAL') &&
+        (parsed.chatId !== scope.chatId ||
+          parsed.range !== scope.query.range ||
+          parsed.filter !== scope.query.filter)
+      )
+        throw new BadRequestException('Обновите журнал перед загрузкой следующей страницы.');
+
       if (!id || !createdAtIso || !Number.isFinite(createdAt.getTime())) {
         return null;
       }
@@ -891,7 +955,8 @@ export class AdminLogsDashboardRuntime {
         createdAt,
         id,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
       return null;
     }
   }

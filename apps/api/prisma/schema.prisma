@@ -1359,6 +1359,7 @@ model ChatSettings {
   commercialAdsSensitivity                      CommercialAdsSensitivity  @default(BALANCED) @map("commercial_ads_sensitivity")
   commercialAdsWarnThreshold                    Int                       @default(45) @map("commercial_ads_warn_threshold")
   commercialAdsDeleteThreshold                  Int                       @default(65) @map("commercial_ads_delete_threshold")
+  commercialAdsPolicy                           Json?                     @map("commercial_ads_policy")
   profanityBotMessageText                       String                    @default("") @map("profanity_bot_message_text")
   profanityWarnMessageText                      String                    @default("") @map("profanity_warn_message_text")
   profanityBotMessageEnabled                    Boolean                   @default(false) @map("profanity_bot_message_enabled")

@@ -40,6 +40,7 @@ const LABELS: Record<string, string> = {
   russianProfanityFilterEnabled: 'Фильтр мата',
   profanitySensitivity: 'Чувствительность',
   commercialAdsFilterEnabled: 'Фильтр рекламы',
+  commercialAdsPolicy: 'Правила рекламы',
   commercialAdsSensitivity: 'Чувствительность распознавания',
   commercialAdsWarnThreshold: 'Порог предупреждения',
   commercialAdsDeleteThreshold: 'Порог удаления',
@@ -260,6 +261,7 @@ export function networkSettingsValueLabel(value: unknown, path?: string): string
       : 'Пустой список';
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
+    if (path === 'commercialAdsPolicy') return 'Правила и исключения рекламы';
     if ('base64' in record)
       return 'Изображение' + (record.fileName ? ' · ' + String(record.fileName) : '');
     if ('text' in record && 'url' in record)

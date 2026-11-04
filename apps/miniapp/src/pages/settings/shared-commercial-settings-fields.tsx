@@ -11,6 +11,8 @@ import {
 import { AppIcon } from '../../components/ui/app-icon';
 import { SharedNativeSettingsToggle } from './shared-native-settings-toggle';
 import './commercial-filter-studio.css';
+import { CommercialPolicyFields } from './commercial-policy-fields';
+import type { CommercialSettingsScope } from './commercial-policy-model';
 
 const profiles = [
   { value: 20, label: 'Мягко' },
@@ -22,10 +24,12 @@ export function SharedCommercialSettingsFields({
   fields,
   actions,
   mode,
+  scope,
 }: {
   fields: ChatSettingsFieldAdapter;
   actions: ReactNode;
   mode?: 'OFF' | 'OBSERVE' | 'DELETE_ONLY';
+  scope?: CommercialSettingsScope;
 }) {
   const aiDeletes = mode === 'DELETE_ONLY';
   const id = useId();
@@ -115,15 +119,11 @@ export function SharedCommercialSettingsFields({
           state={enabled}
           disabled={fields.readOnly}
           onChange={(next) => setChatBoolean(fields, 'commercialAdsFilterEnabled', next)}
-        >
-          <div className="commercial-studio__caption">
-            {aiDeletes ? 'ИИ-модерация текста' : 'Проверка текста сообщений'}
-          </div>
-        </SharedNativeSettingsToggle>
+        />
         {openHint === 'master' ? (
           <p id={`${id}-master`} className="commercial-studio__hint">
             {aiDeletes
-              ? 'Реклама и спорные сообщения проходят дополнительную проверку. Если результат неоднозначен, сообщение остаётся. Личные продажи и обычное общение стараемся пропускать. Блокировки и ограничения не применяются; другие фильтры работают независимо.'
+              ? 'Подтверждённая реклама удаляется по правилам чата. Неоднозначные сообщения остаются. Другие фильтры работают независимо.'
               : 'Фильтр ищет коммерческие предложения и удаляет подтверждённую рекламу. Разовые личные продажи старается пропускать.'}
           </p>
         ) : null}
@@ -146,21 +146,8 @@ export function SharedCommercialSettingsFields({
         </div>
       ) : null}
 
-      {aiDeletes ? (
-        <section className="commercial-studio__policy" aria-label="Правила ИИ-модерации">
-          <dl>
-            <div>
-              <dt>Реклама подтверждена</dt>
-              <dd>Удаление</dd>
-            </div>
-            <div>
-              <dt>Результат неоднозначен</dt>
-              <dd>Сохранение</dd>
-            </div>
-          </dl>
-          <p className="commercial-studio__hint">При сбое или занятости ИИ сообщение остаётся.</p>
-        </section>
-      ) : enabled.kind !== 'common' || enabled.value ? (
+      <CommercialPolicyFields fields={fields} scope={scope} aiActive={aiDeletes} />
+      {aiDeletes ? null : enabled.kind !== 'common' || enabled.value ? (
         <>
           <section
             className="commercial-studio__sensitivity"

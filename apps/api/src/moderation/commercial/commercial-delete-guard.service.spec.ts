@@ -1,4 +1,9 @@
 import { ConfigService } from '@nestjs/config';
+import {
+  createDefaultCommercialAdsPolicy,
+  type CommercialAdsPolicy,
+} from '@maxim/contracts/settings';
+import { finalizeDeleteAuthority } from '../moderation-delete-authority-preparation';
 import { CommercialAdDetector } from './commercial-ad.detector';
 import {
   buildCommercialTextDeleteBinding,
@@ -16,16 +21,17 @@ const input = {
   subjectUserId: 'user',
   botId: 'bot',
 };
-const message = (value = text) => ({
+const message = (value = text, userId = 'user') => ({
   body: { mid: 'message', text: value },
-  sender: { user_id: 'user' },
+  sender: { user_id: userId },
   recipient: { chat_id: 'chat', chat_type: 'chat' },
   timestamp: Date.now(),
 });
 
-function harness() {
+function harness(commercialPolicy: CommercialAdsPolicy | null = null, userId = 'user') {
   const settings = {
     commercialAdsFilterEnabled: true,
+    commercialAdsPolicy: commercialPolicy,
     commercialAdsSensitivity: 'BALANCED' as const,
     commercialAdsWarnThreshold: 45,
     commercialAdsDeleteThreshold: 65,
@@ -57,10 +63,8 @@ function harness() {
     },
   };
   const max = {
-    getExactMessageRow: jest.fn().mockResolvedValue(message()),
-    getChatMemberAccess: jest
-      .fn()
-      .mockResolvedValue({ userId: 'user', isAdmin: false, isOwner: false }),
+    getExactMessageRow: jest.fn().mockResolvedValue(message(text, userId)),
+    getChatMemberAccess: jest.fn().mockResolvedValue({ userId, isAdmin: false, isOwner: false }),
   };
   const botLink = { isKnownBotUserId: jest.fn().mockReturnValue(false) };
   const immunity = { consumeForMessage: jest.fn().mockResolvedValue('not_granted') };
@@ -106,6 +110,66 @@ describe('CommercialDeleteGuardService', () => {
       }),
     );
     expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
+    expect(h.prisma.chatSettings.findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a matching active category exception under an otherwise current bound intent', async () => {
+    const userId = '10000007';
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.exceptions.push({
+      id: '11111111-1111-4111-8111-111111111111',
+      userId,
+      userName: 'Участник',
+      categories: ['SERVICES'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const h = harness(policy, userId);
+    await expect(
+      h.service.assertIntentStillActionable({ ...input, subjectUserId: userId }),
+    ).rejects.toMatchObject({ code: 'commercial_text_violation_no_longer_present' });
+    expect(h.max.getExactMessageRow).toHaveBeenCalledTimes(1);
+    expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+
+  it('rechecks exact exception expiry without changing the bound settings fingerprint', async () => {
+    jest.useFakeTimers({ now: new Date('2026-11-04T09:00:00.000Z') });
+    const userId = '10000007';
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.exceptions.push({
+      id: '11111111-1111-4111-8111-111111111111',
+      userId,
+      userName: 'Участник',
+      categories: ['SERVICES'],
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+    const h = harness(policy, userId);
+    await expect(
+      h.service.assertIntentStillActionable({ ...input, subjectUserId: userId }),
+    ).rejects.toMatchObject({ code: 'commercial_text_violation_no_longer_present' });
+    jest.advanceTimersByTime(1_000);
+    await expect(
+      h.service.assertIntentStillActionable({ ...input, subjectUserId: userId }),
+    ).resolves.toEqual({ kind: 'allowed', reasonKeys: [h.reason.reasonKey] });
+    expect(h.reason.metadata.commercialTextBinding).toBe(h.binding);
+  });
+
+  it('revokes prepared dispatch when a matching exception is added before final authority', async () => {
+    const userId = '10000007';
+    const policy = createDefaultCommercialAdsPolicy();
+    const h = harness(policy, userId);
+    const prepared = await h.service.prepareForDispatch({ ...input, subjectUserId: userId });
+    policy.exceptions.push({
+      id: '11111111-1111-4111-8111-111111111111',
+      userId,
+      userName: 'Участник',
+      categories: ['SERVICES'],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await expect(finalizeDeleteAuthority(prepared)).rejects.toMatchObject({
+      code: 'commercial_text_binding_stale',
+      reasonFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(h.max.getExactMessageRow).toHaveBeenCalledTimes(1);
     expect(h.prisma.chatSettings.findUnique).toHaveBeenCalledTimes(2);
   });
 

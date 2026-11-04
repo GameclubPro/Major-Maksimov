@@ -24,6 +24,7 @@ export type CommercialLlmPoolClientOptions = {
   jobId: string;
   deadlineAtMs: number;
   policy: 'confirm-positive' | 'direct-4b';
+  confirmPersonalSales?: boolean;
   primaryFinished: () => Promise<void>;
   canStartConsultation: () => Promise<boolean>;
   consultationFinished?: () => Promise<void>;
@@ -184,6 +185,10 @@ export class CommercialLlmPoolClient implements CommercialLlmClassifier {
       const needsConsultation =
         primary.pool!.nodeId === 'pc-a-4b' &&
         (primary.classification === 'UNSURE' ||
+          (this.options.confirmPersonalSales === true &&
+            primary.classification === 'NOT_COMMERCIAL' &&
+            primary.reasonCodes.length === 1 &&
+            primary.reasonCodes[0] === 'PERSONAL_SALE') ||
           (this.options.policy === 'confirm-positive' && primary.classification === 'COMMERCIAL'));
       if (!needsConsultation) return { ...primary, durationMs: elapsed(startedAt) };
       if (this.options.deadlineAtMs - Date.now() < 1000)

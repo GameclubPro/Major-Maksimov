@@ -47,6 +47,7 @@ const participantRoleFilters = new Set<ChatParticipantsQuery['roleFilter']>([
 ]);
 const moderationFeedFilters = new Set<ModerationFeedQuery['filter']>([
   'ALL',
+  'COMMERCIAL',
   'WARN',
   'DELETE_MESSAGE',
   'MUTE',

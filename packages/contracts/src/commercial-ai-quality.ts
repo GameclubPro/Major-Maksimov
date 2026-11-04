@@ -298,7 +298,7 @@ export const commercialAiQualityAttemptSchema = z
     sourceKey: digest,
     inputSha256: digest,
     nonce: z.string().uuid(),
-    sourceVersion: z.union([z.literal(1), z.literal(2)]),
+    sourceVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     sourceSha256: digest,
     settingsSha256: digest,
     settingsProfileDigest: digest,

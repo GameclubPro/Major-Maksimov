@@ -1,3 +1,4 @@
+import { CommercialAdsRuntimePolicyService } from './commercial/commercial-ads-runtime-policy.service';
 import { AutomaticMuteCleanupService } from './automatic-mute-cleanup.service';
 import { ClosedChatDeleteGuardService } from './closed-chat-delete-guard.service';
 import { ModerationRuleSanctionGuardService } from './moderation-rule-sanction-guard.service';
@@ -83,6 +84,7 @@ const actionRoleProviders = roleRunsAction(getAppRole())
     CommercialLlmShadowRunnerService,
     CommercialLlmEnforcementService,
     CommercialLlmEnforcementRunnerService,
+    CommercialAdsRuntimePolicyService,
     CommercialLlmDeleteGuardService,
     StopWordsDeleteGuardService,
     TrafficProtectionDeleteGuardService,

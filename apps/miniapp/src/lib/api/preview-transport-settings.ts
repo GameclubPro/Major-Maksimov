@@ -89,6 +89,7 @@ import {
 import type { PreviewState } from './preview-transport-state';
 import { handlePreviewReports } from './preview-reports';
 import { getPreviewMessageRetention } from './preview-message-retention';
+import { handlePreviewCommercialAds } from './preview-commercial-ads';
 import { handlePreviewStopWords } from './preview-stop-words';
 
 function activePreviewDomains(state: PreviewState) {
@@ -639,6 +640,11 @@ export async function handleChatRequest(
           : state.chatSettings,
       );
     }
+  }
+
+  if (tail[0] === 'commercial-ads') {
+    assertPreviewSettingsScreenAvailable(state);
+    return handlePreviewCommercialAds(state, tail, method, init);
   }
 
   if (tail[0] === 'stop-words') {

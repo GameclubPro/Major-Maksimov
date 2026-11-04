@@ -500,6 +500,7 @@ function buildSettings(chatId: string): ChatSettings {
     russianProfanityFilterEnabled: true,
     profanitySensitivity: 'BALANCED',
     commercialAdsFilterEnabled: false,
+    commercialAdsPolicy: null,
     commercialAdsSensitivity: 'BALANCED',
     commercialAdsWarnThreshold: 45,
     commercialAdsDeleteThreshold: 65,

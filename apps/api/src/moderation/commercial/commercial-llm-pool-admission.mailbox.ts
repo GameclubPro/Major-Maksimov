@@ -151,7 +151,7 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
     },
     beforeAdmission?: (request: CommercialLlmRequest) => Promise<void>,
   ): Promise<CommercialLlmAdmissionResult> {
-    if (offer.source.version !== 2 || !commercialLlmSourceCurrent(offer.source))
+    if (!('poolPolicy' in offer.source) || !commercialLlmSourceCurrent(offer.source))
       return 'source_expired';
     const worker = await this.redis.get(this.keys.ready);
     const request = commercialLlmRequestSchema.parse({
@@ -240,7 +240,7 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
       /* Invalid input is discarded only by exact head CAS below. */
     }
     const reason =
-      !request || request.source.version !== 2
+      !request || !('poolPolicy' in request.source)
         ? 'invalid_pending'
         : request.worker !== worker
           ? 'foreign_worker'
@@ -413,7 +413,7 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
   private parseOwned(raw: string, worker?: string): CommercialLlmRequest | null {
     try {
       const request = commercialLlmRequestSchema.parse(JSON.parse(raw));
-      return request.source.version === 2 && (!worker || worker === request.worker)
+      return 'poolPolicy' in request.source && (!worker || worker === request.worker)
         ? request
         : null;
     } catch {

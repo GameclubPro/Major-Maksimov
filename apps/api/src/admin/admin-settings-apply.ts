@@ -22,11 +22,13 @@ import {
   stopWordsPolicySchema,
 } from '@maxim/contracts';
 import { BadRequestException, ConflictException, HttpException } from '@nestjs/common';
+import { commercialAdsPolicySchema } from '@maxim/contracts/settings';
 import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
-import { ChatCatalogKind, ChatEntityType } from '../prisma/prisma-client';
+import { ChatCatalogKind, ChatEntityType, Prisma } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import { mapWithConcurrencyLimit } from './admin-legacy-utils';
 import type { ChatSettingsReadSnapshot, ResolvedBotAssignmentData } from './admin-chat-settings';
+import { assertCommercialPersonalSalePolicyAvailable } from './commercial-ads-settings-policy';
 import {
   APPLY_SECTION_TARGET_PREVIEW_SAMPLE_LIMIT,
   APPLY_SETTINGS_TO_ALL_CHATS_CONCURRENCY,
@@ -304,6 +306,11 @@ export async function applySettingsToAllChats(params: {
   );
   const majorSettingsUpdatePayload = omitLegacyStopWordsSettings(legacySettingsUpdatePayload);
   delete majorSettingsUpdatePayload.settingsRevision;
+  if (!hasOwnSetting(params.body, 'commercialAdsPolicy'))
+    delete majorSettingsUpdatePayload.commercialAdsPolicy;
+  const { commercialAdsPolicy: copiedCommercialPolicy, ...majorSettingsUpdateData } =
+    majorSettingsUpdatePayload;
+  const copiesCommercialPolicy = Object.hasOwn(majorSettingsUpdatePayload, 'commercialAdsPolicy');
   const requestedLegacySettings = Object.fromEntries(
     LEGACY_STOP_WORD_SETTING_KEYS.filter(
       (key) => Object.hasOwn(legacySettingsUpdatePayload, key) && hasOwnSetting(params.body, key),
@@ -316,6 +323,12 @@ export async function applySettingsToAllChats(params: {
     ...DEFAULT_PUBLISHER_OWNED_CHAT_SETTINGS,
   };
   delete majorSettingsCreatePayload.settingsRevision;
+  const majorSettingsCreateBase: Partial<typeof majorSettingsCreatePayload> = {
+    ...majorSettingsCreatePayload,
+  };
+  delete majorSettingsCreateBase.commercialAdsPolicy;
+  const majorSettingsCreateData: Omit<typeof majorSettingsCreateBase, 'commercialAdsPolicy'> =
+    majorSettingsCreateBase;
 
   const requiresReportPolicyValidation = Object.keys(majorSettingsUpdatePayload).some(
     (key) => key.startsWith('reports') || /^admin.*Command/.test(key),
@@ -326,6 +339,7 @@ export async function applySettingsToAllChats(params: {
     Object.keys(majorSettingsUpdatePayload).some(
       (key) =>
         Object.hasOwn(CHAT_SETTINGS_BOT_CAPABILITY_SELECT, key) ||
+        key === 'commercialAdsPolicy' ||
         key === 'requiredSubscriptionChannelIds',
     );
   const capabilityPreflightConfirmedChatIds = new Set<string>();
@@ -503,7 +517,10 @@ export async function applySettingsToAllChats(params: {
               )
             : normalizedSettings.botSpeechMedia;
         const updatePayloadForChat = {
-          ...majorSettingsUpdatePayload,
+          ...majorSettingsUpdateData,
+          ...(copiesCommercialPolicy
+            ? { commercialAdsPolicy: copiedCommercialPolicy ?? Prisma.DbNull }
+            : {}),
           ...(copiedStopWordsPolicy
             ? {
                 ...stopWordsPolicyStorage(copiedStopWordsPolicy),
@@ -515,7 +532,19 @@ export async function applySettingsToAllChats(params: {
             : {}),
         };
         const createPayloadForChat = {
-          ...majorSettingsCreatePayload,
+          ...majorSettingsCreateData,
+          ...(copiesCommercialPolicy
+            ? {
+                commercialAdsPolicy:
+                  copiedCommercialPolicy == null
+                    ? Prisma.DbNull
+                    : {
+                        ...copiedCommercialPolicy,
+                        exceptions:
+                          chatId === params.sourceChatId ? copiedCommercialPolicy.exceptions : [],
+                      },
+              }
+            : {}),
           ...(copiedStopWordsPolicy
             ? { ...stopWordsPolicyStorage(copiedStopWordsPolicy), stopWordsRevision: 1 }
             : {}),
@@ -556,6 +585,31 @@ export async function applySettingsToAllChats(params: {
               lockedChat,
               requiredPurposesByChatId.get(chatId) ?? [],
             );
+            // FLAG: Bulk rules never transfer one chat's participant grants into another chat.
+            // Preserve the recipient's own exceptions under the same lock and revision CAS.
+            if (copiesCommercialPolicy && copiedCommercialPolicy) {
+              const targetPolicy = await tx.chatSettings.findUnique({
+                where: { chatId },
+                select: { commercialAdsPolicy: true },
+              });
+              const stored = targetPolicy?.commercialAdsPolicy;
+              const valid = stored == null ? null : commercialAdsPolicySchema.safeParse(stored);
+              if (valid && !valid.success) throw settingsApplyRevisionConflict(chatId, []);
+              assertCommercialPersonalSalePolicyAvailable({
+                currentPolicy: stored,
+                nextPolicy: copiedCommercialPolicy,
+                commercialAiDeleteOnly: params.commercialAiDeleteOnly,
+              });
+              updatePayloadForChat.commercialAdsPolicy = {
+                ...copiedCommercialPolicy,
+                exceptions:
+                  chatId === params.sourceChatId
+                    ? copiedCommercialPolicy.exceptions
+                    : valid?.success
+                      ? valid.data.exceptions
+                      : [],
+              };
+            }
             const baselineUpdatedAt = writeBaselineByChatId.get(chatId);
             if (baselineUpdatedAt) {
               const changed = await tx.chatSettings.updateMany({

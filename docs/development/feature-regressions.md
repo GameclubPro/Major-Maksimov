@@ -33,6 +33,9 @@ for light/dark, narrow screens, native Back and safe-area review.
 
 ## Sanctions And Participant Activity
 
+Commercial category settings, participant grants, text preview and advertising journal use
+the [commercial policy regression map](commercial-ads-policy.md#focused-verification).
+
 The sanctions register reads the maintained moderation feed with bounded candidates,
 not raw webhooks. Active sanctions are independent of the event journal's selected
 period; the archive covers the year after completion. Keep the last authoritative
