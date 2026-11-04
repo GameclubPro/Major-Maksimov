@@ -58,7 +58,30 @@ const ALERT_DEFINITIONS = Object.freeze({
       'source-topology singleton/running/exact-identity/exact-image roles; no duplicates or unexpected API containers',
     windowSec: 0,
   },
-  api_fleet_restarts: { severity: 'warning', threshold: 0, windowSec: 0 },
+  api_fleet_restarts: {
+    severity: 'warning',
+    threshold: 0,
+    windowSec: 0,
+    version: 2,
+    basis: 'container_generation_intervals',
+    restartClass: 'api',
+  },
+  ocr_native_restarts: {
+    severity: 'warning',
+    threshold: 0,
+    windowSec: 0,
+    version: 1,
+    basis: 'container_generation_intervals',
+    restartClass: 'ocr',
+  },
+  photo_native_restarts: {
+    severity: 'warning',
+    threshold: 0,
+    windowSec: 0,
+    version: 1,
+    basis: 'container_generation_intervals',
+    restartClass: 'photo',
+  },
 });
 
 function isRecord(value) {
@@ -117,6 +140,65 @@ function normalizeActionHealth(raw) {
   return { windowSec, total, success, failure, critical, errorRate, criticalRate };
 }
 
+function utcInstantOrNull(value) {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(value)
+  )
+    return null;
+  const instant = Date.parse(value);
+  const canonical = value.length === 20 ? value.slice(0, -1) + '.000Z' : value;
+  return Number.isFinite(instant) && new Date(instant).toISOString() === canonical
+    ? canonical
+    : null;
+}
+
+function normalizeRestartEvidence(raw, observedAt) {
+  if (
+    !isRecord(raw) ||
+    raw.version !== 1 ||
+    !['container_generation_intervals', 'historical_container_totals'].includes(raw.basis)
+  ) {
+    return null;
+  }
+  const current = utcInstantOrNull(raw.observedAt);
+  if (current === null || current !== observedAt) return null;
+  const historical = raw.basis === 'historical_container_totals';
+  const previous = historical ? null : utcInstantOrNull(raw.previousObservedAt);
+  const intervalMs = previous === null ? null : Date.parse(current) - Date.parse(previous);
+  const intervalValid = intervalMs !== null && intervalMs > 0 && intervalMs <= MAX_SAMPLE_GAP_MS;
+  const result = {
+    version: 1,
+    basis: raw.basis,
+    previousObservedAt: intervalMs !== null && intervalMs > 0 ? previous : null,
+    observedAt: current,
+  };
+  for (const name of ['api', 'ocr', 'photo']) {
+    const value = isRecord(raw[name]) ? raw[name] : {};
+    const total = integerOrNull(value.total, 0, 1_000_000_000);
+    const generationChanged =
+      total !== null && !historical && intervalMs > 0
+        ? booleanOrNull(value.generationChanged)
+        : null;
+    const delta = integerOrNull(value.delta, 0, 1_000_000_000);
+    // FLAG: Totals cannot certify an interval; replacements, gaps and malformed
+    // class evidence retain unknown deltas independently of the other classes.
+    result[name] = {
+      total,
+      delta:
+        total !== null &&
+        intervalValid &&
+        generationChanged === false &&
+        delta !== null &&
+        delta <= total
+          ? delta
+          : null,
+      generationChanged,
+    };
+  }
+  return result;
+}
+
 function emptyApiFleet(available = null) {
   return {
     available,
@@ -132,10 +214,11 @@ function emptyApiFleet(available = null) {
     unexpectedScaleContainerCount: null,
     unexpectedManualContainerCount: null,
     totalRestartCount: null,
+    restartEvidence: null,
   };
 }
 
-function normalizeApiFleet(raw) {
+function normalizeApiFleet(raw, observedAt) {
   if (!isRecord(raw)) return emptyApiFleet();
   const available = booleanOrNull(raw.available);
   if (available !== true) return emptyApiFleet(available);
@@ -154,7 +237,20 @@ function normalizeApiFleet(raw) {
     unexpectedManualContainerCount: integerOrNull(raw.unexpectedManualContainerCount, 0, 128),
     totalRestartCount: integerOrNull(raw.totalRestartCount, 0, 1_000_000_000),
   };
-  const counts = Object.values(fleet).slice(1);
+  const counts = [
+    fleet.expectedRoleCount,
+    fleet.observedRoleCount,
+    fleet.singletonRoleCount,
+    fleet.runningRoleCount,
+    fleet.identityRoleCount,
+    fleet.exactImageRoleCount,
+    fleet.duplicateContainerCount,
+    fleet.unexpectedApiContainerCount,
+    fleet.unexpectedMainContainerCount,
+    fleet.unexpectedScaleContainerCount,
+    fleet.unexpectedManualContainerCount,
+    fleet.totalRestartCount,
+  ];
   if (
     counts.some((value) => value === null) ||
     fleet.observedRoleCount > fleet.expectedRoleCount ||
@@ -170,7 +266,7 @@ function normalizeApiFleet(raw) {
   ) {
     return emptyApiFleet();
   }
-  return fleet;
+  return { ...fleet, restartEvidence: normalizeRestartEvidence(raw.restartEvidence, observedAt) };
 }
 
 function normalizeSnapshot(raw) {
@@ -266,7 +362,7 @@ function normalizeSnapshot(raw) {
       activeCount: integerOrNull(queueFence.activeCount, 0, 10_000_000),
       ownerPresent: booleanOrNull(queueFence.ownerPresent),
     },
-    apiFleet: normalizeApiFleet(apiFleet),
+    apiFleet: normalizeApiFleet(apiFleet, new Date(observedAtMs).toISOString()),
   };
 }
 
@@ -308,6 +404,13 @@ function immediateOutcome(value, predicate, definition) {
 
 function alertOutcome(definition, outcome, value, sustainedForSec) {
   return {
+    ...(definition.basis
+      ? {
+          version: definition.version,
+          basis: definition.basis,
+          restartClass: definition.restartClass,
+        }
+      : {}),
     outcome,
     severity: definition.severity,
     threshold: definition.threshold,
@@ -377,6 +480,10 @@ function evaluateAlerts(history, current) {
     current.queueFence.pausedCount === 0 &&
     current.queueFence.ownerPresent === false;
   const fleet = current.apiFleet;
+  const restarts =
+    fleet.available === true
+      ? normalizeRestartEvidence(fleet.restartEvidence, current.observedAt)
+      : null;
   const fleetTopologyHealthy =
     fleet.available === true &&
     [11, 12, 13, 14].includes(fleet.expectedRoleCount) &&
@@ -528,9 +635,19 @@ function evaluateAlerts(history, current) {
       ALERT_DEFINITIONS.api_fleet_topology,
     ),
     api_fleet_restarts: immediateOutcome(
-      fleet.available === true ? fleet.totalRestartCount : null,
+      restarts?.api.delta ?? null,
       (value) => value > ALERT_DEFINITIONS.api_fleet_restarts.threshold,
       ALERT_DEFINITIONS.api_fleet_restarts,
+    ),
+    ocr_native_restarts: immediateOutcome(
+      restarts?.ocr.delta ?? null,
+      (value) => value > ALERT_DEFINITIONS.ocr_native_restarts.threshold,
+      ALERT_DEFINITIONS.ocr_native_restarts,
+    ),
+    photo_native_restarts: immediateOutcome(
+      restarts?.photo.delta ?? null,
+      (value) => value > ALERT_DEFINITIONS.photo_native_restarts.threshold,
+      ALERT_DEFINITIONS.photo_native_restarts,
     ),
   };
 
@@ -586,14 +703,42 @@ function normalizeArchivedAlerts(raw) {
   return Object.fromEntries(
     Object.entries(ALERT_DEFINITIONS).map(([id, definition]) => {
       const value = isRecord(source[id]) ? source[id] : {};
+      const legacyRestart =
+        id === 'api_fleet_restarts' &&
+        ((value.version === undefined && value.basis === undefined) ||
+          (value.version === 1 &&
+            value.basis === 'historical_container_totals' &&
+            value.restartClass === 'fleet'));
+      const currentRestart =
+        definition.basis &&
+        value.version === definition.version &&
+        value.basis === definition.basis &&
+        value.restartClass === definition.restartClass;
+      const metadata = definition.basis
+        ? legacyRestart
+          ? {
+              version: 1,
+              basis: 'historical_container_totals',
+              restartClass: 'fleet',
+            }
+          : {
+              version: definition.version,
+              basis: definition.basis,
+              restartClass: definition.restartClass,
+            }
+        : {};
+      const compatible = !definition.basis || legacyRestart || currentRestart;
       return [
         id,
         {
-          outcome: safeToken(value.outcome, ['clear', 'pending', 'firing', 'unknown']),
+          ...metadata,
+          outcome: compatible
+            ? safeToken(value.outcome, ['clear', 'pending', 'firing', 'unknown'])
+            : 'unknown',
           severity: definition.severity,
           threshold: definition.threshold,
           windowSec: definition.windowSec,
-          value: alertValueOrNull(value.value),
+          value: compatible ? alertValueOrNull(value.value) : null,
           sustainedForSec: Math.floor(numberOrNull(value.sustainedForSec, 0) ?? 0),
         },
       ];
@@ -780,11 +925,28 @@ function runCli(argv = process.argv.slice(2)) {
       `unexpectedManual=${fleet.unexpectedManualContainerCount ?? 'unknown'} ` +
       `restarts=${fleet.totalRestartCount ?? 'unknown'}\n`,
   );
+  const restartEvidence = fleet.restartEvidence;
+  process.stdout.write(
+    `capacity-restarts version=1 basis=${restartEvidence?.basis ?? 'unknown'} ` +
+      ['api', 'ocr', 'photo']
+        .map(
+          (name) =>
+            `${name}Total=${restartEvidence?.[name].total ?? 'unknown'} ` +
+            `${name}Delta=${restartEvidence?.[name].delta ?? 'unknown'} ` +
+            `${name}GenerationChanged=${restartEvidence?.[name].generationChanged ?? 'unknown'}`,
+        )
+        .join(' ') +
+      '\n',
+  );
   for (const [id, alert] of Object.entries(result.alerts)) {
     process.stdout.write(
       `capacity-alert id=${id} outcome=${alert.outcome} severity=${alert.severity} ` +
         `value=${alert.value ?? 'unknown'} threshold=${alert.threshold} ` +
-        `windowSec=${alert.windowSec} sustainedForSec=${alert.sustainedForSec}\n`,
+        `windowSec=${alert.windowSec} sustainedForSec=${alert.sustainedForSec}` +
+        (alert.basis
+          ? ` version=${alert.version} basis=${alert.basis} restartClass=${alert.restartClass}`
+          : '') +
+        '\n',
     );
   }
 }

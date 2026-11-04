@@ -8,12 +8,14 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
+import { PassThrough, Writable } from 'node:stream';
 
 import archiveModule from './monitor-capacity-archive.cjs';
 import probeModule from './monitor-capacity-probe.cjs';
@@ -40,6 +42,8 @@ const {
   DEFAULT_BLOCK_DEVICE,
   DEFAULT_EXPECTED_API_SERVICES,
   calculateCounterRates,
+  collectCapacitySnapshot,
+  createRestartTracker,
   normalizeActionHealth: normalizeProbedActionHealth,
   normalizeQueueFence,
   normalizeReadyProbe,
@@ -53,6 +57,8 @@ const {
   resolveExpectedApiTopologyFromCompose,
   resolveExpectedApiServicesFromCompose,
   summarizeApiFleet,
+  runBounded,
+  runCapacityStream,
 } = probeModule;
 
 const apiImageSha = 'b'.repeat(40);
@@ -470,6 +476,62 @@ function waitForClose(child, timeoutMs) {
   });
 }
 
+function capacityStreamHarness(collect, options = {}) {
+  const input = new PassThrough();
+  const output = options.output ?? new PassThrough();
+  let stdout = '';
+  if (!options.output)
+    output.on('data', (chunk) => {
+      stdout += chunk.toString('utf8');
+    });
+  const finished = runCapacityStream({
+    input,
+    output,
+    collect,
+    listenSignals: false,
+    idleMs: 2_000,
+    lifetimeMs: 5_000,
+    ...options,
+  });
+  return {
+    input,
+    output,
+    finished,
+    stdout: () => stdout,
+    async request() {
+      const before = stdout.split('\n').length;
+      input.write('SNAPSHOT\n');
+      await waitForCondition(() => stdout.split('\n').length > before, 2_000);
+      await new Promise((resolvePromise) => setImmediate(resolvePromise));
+      return JSON.parse(stdout.trim().split('\n').at(-1));
+    },
+  };
+}
+
+function inspectedFleet() {
+  return [
+    ...DEFAULT_EXPECTED_API_SERVICES.map((_, index) => inspectedContainer(index)),
+    inspectedSandbox(80, { restartCount: 12 }),
+    inspectedPhotoSandbox(),
+  ];
+}
+
+function probeInspectedFleet(inspection, options = {}) {
+  return probeApiFleet(DEFAULT_EXPECTED_API_SERVICES, {
+    expectedImage: expectedApiImage,
+    ...options,
+    runBounded: async (command, args) => ({
+      ok: true,
+      output:
+        command === 'git'
+          ? productionComposeSource
+          : args[0] === 'ps'
+            ? inspection.map((container) => container.Id).join('\n')
+            : JSON.stringify(inspection),
+    }),
+  });
+}
+
 test('production disk counters select the REG RAID while legacy overrides remain explicit', () => {
   const diskstats = [
     '259 0 nvme0n1 10 0 20 30 40 0 50 60 0 11 12',
@@ -804,7 +866,10 @@ test('API fleet census checks runtime identity and exact-image roles without exp
         : { ok: true, output: JSON.stringify(inspection) };
     },
   });
-  assert.deepEqual(healthy, {
+  const { restartEvidence: historicalRestarts, ...healthyCounters } = healthy;
+  assert.equal(historicalRestarts.basis, 'historical_container_totals');
+  assert.deepEqual(historicalRestarts.api, { total: 0, delta: null, generationChanged: null });
+  assert.deepEqual(healthyCounters, {
     available: true,
     expectedRoleCount: 14,
     observedRoleCount: 14,
@@ -927,6 +992,434 @@ test('API fleet census checks runtime identity and exact-image roles without exp
     ).alerts.api_fleet_topology.outcome,
     'firing',
   );
+});
+
+test('resident capacity collector reuses exact generations and resets on a new process', async () => {
+  let inspection = inspectedFleet();
+  let index = 0;
+  const collect = async ({ restartTracker, signal }) => {
+    const observedAt = new Date(Date.UTC(2026, 8, 2, 12, 0, index * 15)).toISOString();
+    const apiFleet = await probeInspectedFleet(inspection, {
+      restartTracker,
+      signal,
+      observedAt,
+      clock: ++index * 15_000,
+    });
+    return { observedAt, apiFleet };
+  };
+  const stream = capacityStreamHarness(collect);
+  try {
+    const first = await stream.request();
+    assert.equal(first.observedAt, first.apiFleet.restartEvidence.observedAt);
+    assert.equal(first.apiFleet.totalRestartCount, 12, 'legacy protection total includes OCR');
+    assert.deepEqual(first.apiFleet.restartEvidence.api, {
+      total: 0,
+      delta: null,
+      generationChanged: null,
+    });
+    assert.deepEqual(first.apiFleet.restartEvidence.ocr, {
+      total: 12,
+      delta: null,
+      generationChanged: null,
+    });
+    assert.deepEqual(first.apiFleet.restartEvidence.photo, {
+      total: 0,
+      delta: null,
+      generationChanged: null,
+    });
+    inspection = structuredClone(inspection);
+    inspection[0].RestartCount = 1;
+    const second = await stream.request();
+    assert.equal(second.apiFleet.restartEvidence.previousObservedAt, first.observedAt);
+    assert.deepEqual(second.apiFleet.restartEvidence.api, {
+      total: 1,
+      delta: 1,
+      generationChanged: false,
+    });
+    assert.deepEqual(second.apiFleet.restartEvidence.ocr, {
+      total: 12,
+      delta: 0,
+      generationChanged: false,
+    });
+    inspection.at(-1).RestartCount = 2;
+    const third = await stream.request();
+    assert.deepEqual(third.apiFleet.restartEvidence.api, {
+      total: 1,
+      delta: 0,
+      generationChanged: false,
+    });
+    assert.deepEqual(third.apiFleet.restartEvidence.photo, {
+      total: 2,
+      delta: 2,
+      generationChanged: false,
+    });
+    assert.doesNotMatch(
+      stream.stdout(),
+      /[0-9a-f]{40}|sha256|api-|native-sandbox|PRIVATE_TOKEN|APP_ROLE|must-not-survive|OOM|timeoutReason/u,
+    );
+  } finally {
+    stream.input.end();
+    await stream.finished;
+  }
+  const restarted = capacityStreamHarness(collect);
+  try {
+    const first = await restarted.request();
+    assert.equal(first.apiFleet.restartEvidence.previousObservedAt, null);
+    for (const name of ['api', 'ocr', 'photo']) {
+      assert.equal(first.apiFleet.restartEvidence[name].delta, null);
+      assert.equal(first.apiFleet.restartEvidence[name].generationChanged, null);
+    }
+  } finally {
+    restarted.input.end();
+    await restarted.finished;
+  }
+});
+
+test('restart intervals detect equal-sum replacements, counter rollback, gaps and invalid classes', async () => {
+  const observedAt = (seconds) => new Date(Date.UTC(2026, 8, 2, 12, 0, seconds)).toISOString();
+  for (const [label, replacement, nextOtherCount] of [
+    ['equal total', 5, 0],
+    ['lower total', 0, 0],
+    ['offsetting changes', 0, 5],
+  ]) {
+    const tracker = createRestartTracker();
+    const inspection = inspectedFleet();
+    inspection[0].RestartCount = 5;
+    await probeInspectedFleet(inspection, {
+      restartTracker: tracker,
+      observedAt: observedAt(0),
+      clock: 0,
+    });
+    inspection[0].Id = 'e'.repeat(64);
+    inspection[0].RestartCount = replacement;
+    inspection[1].RestartCount = nextOtherCount;
+    const result = await probeInspectedFleet(inspection, {
+      restartTracker: tracker,
+      observedAt: observedAt(15),
+      clock: 15_000,
+    });
+    assert.equal(result.restartEvidence.api.generationChanged, true, label);
+    assert.equal(result.restartEvidence.api.delta, null, label);
+    assert.equal(result.restartEvidence.ocr.delta, 0, label);
+  }
+  const classes = {
+    api: [
+      { key: 'first', id: '1'.repeat(64), count: 5 },
+      { key: 'second', id: '2'.repeat(64), count: 0 },
+    ],
+    ocr: [{ key: 'ocr', id: '3'.repeat(64), count: 12 }],
+    photo: [{ key: 'photo', id: '4'.repeat(64), count: 0 }],
+  };
+  const tracker = createRestartTracker();
+  tracker.observe(classes, observedAt(0), 0);
+  classes.api[0].count = 0;
+  let current = tracker.observe(classes, observedAt(15), 15_000);
+  assert.deepEqual(current.api, { total: 0, delta: null, generationChanged: false });
+  current = tracker.observe(classes, observedAt(106), 106_000);
+  assert.equal(current.previousObservedAt, observedAt(15));
+  assert.deepEqual(current.api, { total: 0, delta: null, generationChanged: false });
+  current = tracker.observe(classes, observedAt(121), 121_000);
+  assert.equal(current.api.delta, 0, 'a gap does not permanently disable the next valid interval');
+  current = tracker.observe({ ...classes, ocr: null }, observedAt(136), 136_000);
+  assert.deepEqual(current.ocr, { total: null, delta: null, generationChanged: null });
+  assert.equal(current.api.delta, 0);
+  assert.equal(current.photo.delta, 0);
+  current = tracker.observe(classes, observedAt(151), 151_000);
+  assert.deepEqual(current.ocr, { total: 12, delta: null, generationChanged: null });
+  assert.equal(current.api.delta, 0);
+  for (const entries of [
+    undefined,
+    [null],
+    [{ key: 'api', count: 0 }],
+    [{ key: 'api', id: 'bad', count: 0 }],
+    [{ key: 'api', id: '1'.repeat(64), count: -1 }],
+    [{ key: 'api', id: '1'.repeat(64), count: '0' }],
+    [
+      { key: 'one', id: '1'.repeat(64), count: Number.MAX_SAFE_INTEGER },
+      { key: 'two', id: '2'.repeat(64), count: 1 },
+    ],
+    [...classes.api, classes.api[0]],
+  ]) {
+    const invalid = createRestartTracker().observe({ ...classes, api: entries }, observedAt(0), 0);
+    assert.deepEqual(invalid.api, { total: null, delta: null, generationChanged: null });
+    assert.equal(invalid.ocr.total, 12);
+  }
+});
+
+test('invalid native identity clears only its restart baseline and malformed inspection fails closed', async () => {
+  const tracker = createRestartTracker();
+  const inspection = inspectedFleet();
+  await probeInspectedFleet(inspection, {
+    restartTracker: tracker,
+    observedAt: '2026-09-02T12:00:00.000Z',
+    clock: 0,
+  });
+  const invalid = structuredClone(inspection);
+  invalid.at(-2).Config.Env.push('REDIS_URL=redis://private-secret');
+  const current = await probeInspectedFleet(invalid, {
+    restartTracker: tracker,
+    observedAt: '2026-09-02T12:00:15.000Z',
+    clock: 15_000,
+  });
+  assert.deepEqual(current.restartEvidence.ocr, {
+    total: null,
+    delta: null,
+    generationChanged: null,
+  });
+  assert.equal(current.restartEvidence.api.delta, 0);
+  assert.equal(current.restartEvidence.photo.delta, 0);
+  assert.doesNotMatch(JSON.stringify(current), /private-secret|REDIS_URL/u);
+  for (const defect of ['id', 'state', 'counter']) {
+    const broken = structuredClone(inspection);
+    if (defect === 'id') delete broken[0].Id;
+    if (defect === 'state') delete broken[0].State;
+    if (defect === 'counter') broken[0].RestartCount = '0';
+    const refused = await probeInspectedFleet(broken);
+    assert.equal(refused.available, false, defect);
+    for (const name of ['api', 'ocr', 'photo'])
+      assert.equal(refused.restartEvidence[name].total, null, defect);
+  }
+});
+
+test('resident capacity protocol refuses malformed, queued, overlapping and oversized work', async () => {
+  for (const payload of ['INVALID\n', 'SNAPSHOT\nSNAPSHOT\n', 'SNAPSHOT\r\n', 'x'.repeat(65_537)]) {
+    let calls = 0;
+    const stream = capacityStreamHarness(async () => {
+      calls += 1;
+      return {};
+    });
+    stream.input.write(payload);
+    assert.equal(await stream.finished, 1);
+    assert.equal(calls, 0);
+    assert.equal(stream.stdout(), '');
+    stream.input.destroy();
+  }
+  let aborted = false;
+  const overlapping = capacityStreamHarness(
+    ({ signal }) =>
+      new Promise((resolvePromise) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            aborted = true;
+            resolvePromise({});
+          },
+          { once: true },
+        );
+      }),
+  );
+  overlapping.input.write('SNAPSHOT\n');
+  overlapping.input.write('SNAPSHOT\n');
+  assert.equal(await overlapping.finished, 1);
+  assert.equal(aborted, true);
+  assert.equal(overlapping.stdout(), '');
+  overlapping.input.destroy();
+  const oversized = capacityStreamHarness(async () => ({ private: 'x'.repeat(65_537) }));
+  oversized.input.write('SNAPSHOT\n');
+  assert.equal(await oversized.finished, 1);
+  assert.equal(oversized.stdout(), '');
+  oversized.input.destroy();
+});
+
+test('resident stream cancels active collection on EOF, idle, TTL and EPIPE', async () => {
+  for (const [label, options, expected] of [
+    ['EOF', {}, 0],
+    ['idle', { idleMs: 30 }, 1],
+    ['TTL', { lifetimeMs: 30 }, 0],
+  ]) {
+    let aborted = false;
+    const stream = capacityStreamHarness(
+      ({ signal }) =>
+        new Promise((resolvePromise) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              resolvePromise({});
+            },
+            { once: true },
+          );
+        }),
+      options,
+    );
+    stream.input.write('SNAPSHOT\n');
+    if (label === 'EOF') stream.input.end();
+    assert.equal(await stream.finished, expected, label);
+    assert.equal(aborted, true, label);
+    assert.equal(stream.stdout(), '', label);
+    stream.input.destroy();
+  }
+  const brokenOutput = new Writable({
+    write(_chunk, _encoding, callback) {
+      const error = new Error('fixture closed pipe');
+      error.code = 'EPIPE';
+      callback(error);
+    },
+  });
+  const broken = capacityStreamHarness(async () => ({}), { output: brokenOutput });
+  broken.input.write('SNAPSHOT\n');
+  assert.equal(await broken.finished, 1);
+  broken.input.destroy();
+  let cancelled = false;
+  const blocked = capacityStreamHarness(async () => ({}), {
+    output: new Writable({
+      write() {
+        cancelled = true;
+      },
+    }),
+  });
+  blocked.input.write('SNAPSHOT\n');
+  await waitForCondition(() => cancelled, 1_000);
+  blocked.input.end();
+  assert.equal(await blocked.finished, 0, 'EOF cancels a blocked response write');
+});
+
+test(
+  'resident process reaps its exact active subprocess on EOF and termination signals',
+  { timeout: 20_000 },
+  async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'maxim-capacity-stream-children-'));
+    const childSource =
+      "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);";
+    const harnessSource = `
+    const { runCapacityStream, runBounded } = require(process.argv[1]);
+    runCapacityStream({ collect: async ({ signal }) => {
+      await runBounded(process.execPath, ['-e', ${JSON.stringify(childSource)}, process.argv[2]], { signal, timeoutMs: 10000 });
+      return {};
+    } }).then((code) => { process.exitCode = code; });
+  `;
+    try {
+      for (const [signal, expected] of [
+        [null, 0],
+        ['SIGTERM', 143],
+        ['SIGINT', 130],
+        ['SIGHUP', 129],
+      ]) {
+        const pidPath = join(directory, `${signal ?? 'EOF'}.pid`);
+        const child = spawn(process.execPath, ['-e', harnessSource, probePath, pidPath], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        let pid;
+        child.stdout.on('data', (chunk) => {
+          stdout += chunk.toString('utf8');
+        });
+        child.stderr.on('data', (chunk) => {
+          stderr += chunk.toString('utf8');
+        });
+        try {
+          child.stdin.write('SNAPSHOT\n');
+          await waitForCondition(
+            () => existsSync(pidPath) && readFileSync(pidPath, 'utf8').length > 0,
+            2_000,
+          );
+          pid = Number(readFileSync(pidPath, 'utf8'));
+          assert.ok(isProcessAlive(pid));
+          const closed = waitForClose(child, 2_000);
+          if (signal) child.kill(signal);
+          else child.stdin.end();
+          assert.deepEqual(await closed, { code: expected, signal: null }, stderr);
+          assert.equal(
+            existsSync(`/proc/${pid}`),
+            false,
+            `owned child was not reaped after ${signal ?? 'EOF'}`,
+          );
+          assert.equal(stdout, '');
+        } finally {
+          child.kill('SIGKILL');
+          if (pid && isProcessAlive(pid)) process.kill(pid, 'SIGKILL');
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test('bounded probe cancellation waits for child close on timeout and output overflow', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-capacity-bounded-'));
+  try {
+    for (const overflow of [false, true]) {
+      const pidPath = join(directory, `${overflow}.pid`);
+      const source =
+        "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); " +
+        (overflow ? "process.stdout.write('x'.repeat(10000)); " : '') +
+        'setInterval(() => {}, 1000);';
+      const result = await runBounded(process.execPath, ['-e', source, pidPath], {
+        timeoutMs: 500,
+        maxOutputBytes: 10,
+      });
+      assert.deepEqual(result, { ok: false, output: '' });
+      assert.equal(existsSync(`/proc/${Number(readFileSync(pidPath, 'utf8'))}`), false);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('failed host counter read drains active probe children before collection rejects', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-capacity-counter-failure-'));
+  const pidPath = join(directory, 'docker.pid');
+  const priorPath = process.env.PATH;
+  const controller = new AbortController();
+  let pid;
+  writeExecutable(
+    join(directory, 'docker'),
+    ['#!/usr/bin/env bash', `printf '%s' "$$" > '${pidPath}'`, 'exec sleep 30'].join('\n'),
+  );
+  process.env.PATH = `${directory}:${priorPath}`;
+  try {
+    let reads = 0;
+    let settled = false;
+    const result = collectCapacitySnapshot({
+      sampleMs: 250,
+      signal: controller.signal,
+      readHostCounters() {
+        if (++reads > 1) throw new Error('fixture counter read failed');
+        return {};
+      },
+    })
+      .then(
+        () => ({ success: true }),
+        (error) => ({ error }),
+      )
+      .finally(() => {
+        settled = true;
+      });
+    await waitForCondition(
+      () => existsSync(pidPath) && readFileSync(pidPath, 'utf8').length > 0 && reads === 2,
+      2_000,
+    );
+    pid = Number(readFileSync(pidPath, 'utf8'));
+    assert.ok(isProcessAlive(pid));
+    assert.equal(settled, false, 'counter failure must wait for pending probes');
+    controller.abort();
+    const rejected = await result;
+    assert.equal(rejected.error?.name, 'AbortError');
+    assert.equal(
+      existsSync(`/proc/${pid}`),
+      false,
+      'collection must reap the active probe before rejecting',
+    );
+  } finally {
+    controller.abort();
+    process.env.PATH = priorPath;
+    if (pid && isProcessAlive(pid)) process.kill(pid, 'SIGKILL');
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('invalid resident CLI arguments return a fixed diagnostic without reflecting input', () => {
+  for (const args of [
+    ['--stream', 'PRIVATE_TOKEN=private-argument'],
+    ['--stream', 'md2', 'private-service-name'],
+  ]) {
+    const refused = spawnSync(process.execPath, [probePath, ...args], { encoding: 'utf8' });
+    assert.equal(refused.status, 1);
+    assert.equal(refused.stdout, '');
+    assert.equal(refused.stderr, 'Capacity stream unavailable.\n');
+  }
 });
 
 test('API fleet expected roles fail closed on env, protected-label, and owned-name drift', () => {
@@ -1418,10 +1911,10 @@ test('immediate readiness, queue, fallback, mode, fence, and disk alerts fail cl
     'queue_lag_critical',
     'queue_fence',
     'api_fleet_topology',
-    'api_fleet_restarts',
   ]) {
     assert.equal(result.alerts[id].outcome, 'firing', id);
   }
+  assert.equal(result.alerts.api_fleet_restarts.outcome, 'unknown');
   assert.equal(result.overallStatus, 'critical');
 
   const lagHysteresis = normalizeSnapshot(
@@ -1553,7 +2046,10 @@ test('archive rejects a symlink directory and CLI prints explicit alert outcomes
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /capacity-summary status=ok/u);
+  assert.match(result.stdout, /capacity-summary status=warning/u);
+  assert.match(result.stdout, /capacity-alert id=api_fleet_restarts outcome=unknown/u);
+  assert.match(result.stdout, /capacity-alert id=ocr_native_restarts outcome=unknown/u);
+  assert.match(result.stdout, /capacity-alert id=photo_native_restarts outcome=unknown/u);
   assert.match(result.stdout, /capacity-action available=true windowSec=60 total=1659/u);
   assert.match(
     result.stdout,
@@ -1722,7 +2218,7 @@ test('capacity scheduler keeps its cadence through diagnostics beyond the nomina
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     result.stdout,
-    'sample=100\nsample=115\nsample=130\nsample=145\nsample=160\nsample=175\nsample=190\nsample=205\nsamples=8 clock=220\n',
+    'sample=100\nsample=115\nsample=130\nsample=145\nsample=160\nsample=175\nsample=190\nsample=205\nsamples=8 clock=206\n',
   );
   assert.doesNotMatch(shellFunction('sample_once'), /capacity-observability/u);
   assert.doesNotMatch(shellFunction('run_monitor'), /sample_capacity|capacity-observability/u);
@@ -2052,8 +2548,8 @@ test('readonly monitor archives only the allowlisted capacity probe outside raw 
   assert.match(monitor, /exec \{MONITOR_LOCK_FD\}>&-/u);
   assert.match(monitor, /flock -n "\$CAPACITY_SAMPLER_LOCK_FD"/u);
   assert.match(monitor, /MAXIM_MONITOR_CAPACITY_ARCHIVE_DIR must be an absolute path/u);
-  assert.match(monitor, /\)" \|\| probe_status=\$\?/u);
-  assert.match(monitor, /return "\$probe_status"/u);
+  assert.match(monitor, /read_capacity_stream_snapshot \|\| return \$\?/u);
+  assert.match(monitor, /--stream "\$CAPACITY_BLOCK_DEVICE"/u);
   assert.match(monitor, /"\$CAPACITY_BLOCK_DEVICE" "\$\{SERVICES\[@\]\}"/u);
   assert.match(
     monitor,

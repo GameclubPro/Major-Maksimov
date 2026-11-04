@@ -131,6 +131,55 @@ function percentiles(values) {
   };
 }
 
+function summarizeRestarts(samples, bounds, coverageComplete) {
+  const result = { version: 1, basis: 'container_generation_intervals' };
+  for (const name of ['api', 'ocr', 'photo']) {
+    let knownIntervals = 0;
+    let unknownIntervals = 0;
+    let generationChanges = 0;
+    let confirmedDelta = 0;
+    for (let index = 1; index < samples.length; index++) {
+      const current = samples[index];
+      const evidence = current.apiFleet.restartEvidence;
+      const previous = samples[index - 1].observedAt;
+      const intervalInsideWindow =
+        evidence?.basis === 'container_generation_intervals' &&
+        evidence.observedAt === current.observedAt &&
+        evidence.previousObservedAt === previous &&
+        Date.parse(previous) >= bounds.start &&
+        Date.parse(current.observedAt) < bounds.end &&
+        Date.parse(current.observedAt) - Date.parse(previous) <= MAX_GAP_MS;
+      // FLAG: A missing archived endpoint can hide its delta. Only complete,
+      // adjacent in-window generation intervals count; the first row is an anchor.
+      if (intervalInsideWindow && evidence[name].generationChanged === true) generationChanges++;
+      if (intervalInsideWindow && evidence[name].delta !== null) {
+        knownIntervals++;
+        confirmedDelta += evidence[name].delta;
+      } else {
+        unknownIntervals++;
+      }
+    }
+    const complete = coverageComplete && knownIntervals > 0 && unknownIntervals === 0;
+    result[name] = {
+      maxObservedTotal: percentiles(
+        samples.map((sample) => sample.apiFleet.restartEvidence?.[name].total ?? null),
+      ).max,
+      coverage: complete ? 'complete' : knownIntervals > 0 ? 'partial' : 'unavailable',
+      knownIntervals,
+      unknownIntervals,
+      generationChanges,
+      delta: complete ? confirmedDelta : null,
+      confirmedDeltaLowerBound: knownIntervals > 0 ? confirmedDelta : null,
+    };
+  }
+  result.coverage = ['api', 'ocr', 'photo'].every((name) => result[name].coverage === 'complete')
+    ? 'complete'
+    : ['api', 'ocr', 'photo'].some((name) => result[name].knownIntervals > 0)
+      ? 'partial'
+      : 'unavailable';
+  return result;
+}
+
 function summarizeWindow(samples, bounds) {
   const times = samples.map((sample) => Date.parse(sample.observedAt));
   if (new Set(times).size !== times.length) throw new Error('Duplicate sample timestamps.');
@@ -151,6 +200,7 @@ function summarizeWindow(samples, bounds) {
   const operationalLagSec = percentiles(
     samples.map((sample) => sample.readiness.operationalLagSec),
   );
+  const restarts = summarizeRestarts(samples, bounds, coverageComplete);
   const restartCounts = samples.map((sample) => sample.apiFleet.totalRestartCount);
   let restartCounterIncreases = 0;
   let restartCounterResets = 0;
@@ -164,11 +214,11 @@ function summarizeWindow(samples, bounds) {
   const unknown =
     !coverageComplete ||
     lagSec.samples !== samples.length ||
-    restartCounts.some((count) => count === null) ||
-    restartCounterResets > 0 ||
+    restarts.coverage !== 'complete' ||
     Object.values(checks).some((check) => check.unknown > 0);
   const failed =
-    restartCounterIncreases > 0 || Object.values(checks).some((check) => check.failing > 0);
+    ['api', 'ocr', 'photo'].some((name) => restarts[name].confirmedDeltaLowerBound > 0) ||
+    Object.values(checks).some((check) => check.failing > 0);
   return {
     from: new Date(bounds.start).toISOString(),
     to: new Date(bounds.end).toISOString(),
@@ -214,9 +264,13 @@ function summarizeWindow(samples, bounds) {
       ),
     ),
     iowaitPct: percentiles(samples.map((sample) => sample.host.cpuIowaitPct)),
-    maxObservedRestartCount: percentiles(restartCounts).max,
-    restartCounterIncreases,
-    restartCounterResets,
+    restarts,
+    historicalRestartDiagnostic: {
+      basis: 'legacy_total_counter_differences_not_generation_safe',
+      maxObservedTotal: percentiles(restartCounts).max,
+      counterIncreases: restartCounterIncreases,
+      counterResets: restartCounterResets,
+    },
     last: samples.length
       ? {
           observedAt: samples.at(-1).observedAt,
@@ -236,7 +290,11 @@ function buildReport(options, nowMs = Date.now()) {
   }
   const directory = resolve(options.directory);
   const current = summarizeWindow(readWindow(directory, currentBounds), currentBounds);
-  const report = { schemaVersion: 1, basis: 'sampled_oldest_queue_lag', current };
+  const report = {
+    schemaVersion: 2,
+    basis: 'sampled_oldest_queue_lag_and_container_generation_intervals',
+    current,
+  };
   if (options.compareFrom !== undefined || options.compareTo !== undefined) {
     const baselineBounds = windowBounds(options.compareFrom, options.compareTo);
     if (
@@ -253,8 +311,8 @@ function buildReport(options, nowMs = Date.now()) {
       report.baseline.coverage.status === 'complete' &&
       current.lagSec.samples === current.sampleCount &&
       report.baseline.lagSec.samples === report.baseline.sampleCount &&
-      current.restartCounterResets === 0 &&
-      report.baseline.restartCounterResets === 0 &&
+      current.restarts.coverage === 'complete' &&
+      report.baseline.restarts.coverage === 'complete' &&
       [current, report.baseline].every((window) =>
         Object.values(window.checks).every((check) => check.unknown === 0),
       );

@@ -107,6 +107,23 @@ is removed on exit. To retain it for a reviewed incident, set
 directory; the monitor creates it as `0600` and refuses existing targets. Remove a retained raw log
 as soon as the review is complete.
 
+Restart evidence separates API, OCR and photo container totals from changes between
+observations. One remote request-driven collector keeps at most the expected API and native
+container generations in memory; identities never enter its output or the local archive.
+The first observation, a new session, a gap over 90 seconds, an invalid/missing class,
+counter decrease or container replacement has unknown delta. A proved replacement is marked
+separately, even when total counts happen to match. Other classes retain their own evidence.
+Historical native totals alone do not establish a current API failure or a timeout cause.
+
+The stream accepts one bounded request at a time. The sampler checks its owner generation
+at least once per second while waiting, rejects partial/oversized/unsolicited replies and
+archives each complete JSON response separately. EOF, signals and connection failure cancel
+owned work; cleanup waits for children. Sessions have a 90-second idle lease and 3600-second
+TTL, with planned rotation before expiry. A new session begins with unknown deltas.
+Use synchronized exact-green tooling on the VPS before starting this stream; older remote
+tooling fails the sample rather than providing a one-shot baseline. The probe's one-shot CLI
+remains available for historical totals with unknown interval evidence.
+
 Summary files are private hourly `capacity-YYYYMMDDTHH.jsonl` files. Each update is written through
 a private temporary file, fsynced, and atomically renamed. Files older than 14 days are removed;
 the archive is additionally capped at 337 hourly files and 240 records per hour. Unknown files
@@ -130,8 +147,11 @@ Every sample prints explicit `clear`, `pending`, `firing`, or `unknown` outcomes
   `healthy|queue_backlog|max_api|mixed|stabilizing|manual|unknown` condition, queue lag above 10/30
   seconds, a paused or owned webhook queue fence, and a missing/stopped/duplicate/wrong-identity/
   wrong-image API role. Any unexpected main, scale, or manual/foreign MAXIM API container also fires
-  the topology alert. Any expected API container restart is a separate warning. The archive never
-  stores the free-form system-mode reason.
+  the topology alert. Version 2 `api_fleet_restarts` warns about confirmed API interval changes;
+  `ocr_native_restarts` and `photo_native_restarts` report their own changes. Each carries an
+  explicit interval basis. Legacy version 1 alerts retain their historical-total basis; they
+  cannot prove a current restart or a healthy interval. Unknown generation evidence stays
+  `unknown`. The archive never stores the free-form system-mode reason.
 
 Sustained alerts require a continuous series with no gap above 90 seconds. Full diagnostics cannot
 delay that series because the dedicated sampler runs in its own lifecycle-bound process group. The

@@ -213,6 +213,15 @@ Detailed constraints selected by the routing table in [infrastructure agent note
   as lower bounds; unavailable counts are `unknown`.
 - `monitor-readonly` runs one lifecycle-bound lightweight capacity sampler on an independent cadence alongside the heavier full diagnostics and archives only allowlisted capacity/readiness/queue-fence scalars, arithmetic-validated aggregate action-health counters, and identifier-free API fleet counts under the operator's local XDG state directory. Fleet health derives its expected topology from the release component's source Compose (normally 14 roles; supported pre-Publisher/OCR rollbacks have 11, 12, or 13), then requires exact `APP_SERVICE_NAME`/`APP_ROLE` mapping, protected image label, owned Compose container name, manifest image identity, singleton/running state, zero duplicates, and zero unexpected main, scale, or manual/foreign MAXIM API containers; restart totals are reported separately. When the source Compose declares `ocr-native-sandbox`, the sampler additionally requires exactly one healthy, same-image, no-network auxiliary with its complete safe environment and cgroup/mount boundary, without changing API role counts. The remote classifier may inspect bounded Docker metadata and only the allowlisted runtime identity keys, but only count aggregates split by main/scale/manual may leave the probe. Unrelated sibling-project API containers without a MAXIM runtime/image/protected/name signal are ignored. Never archive env values, container names or IDs, image refs, SHA values, or per-role names. Keep `MAXIM_MONITOR_CAPACITY_INTERVAL_SEC` between 15 and 60 seconds so the two-/five-minute alert windows remain continuous. The top-level monitor owns and reaps the isolated diagnostic worker, capacity sampler, and log `tee`; none may inherit the full-monitor lock. The sampler must never overlap itself, and archive writes stay serialized by their dedicated lock. Capacity sampling continues through the owning monitor’s final diagnostic pass, which may finish after the nominal duration; the existing supervisor deadline and process-group cleanup still apply. A stopped or interrupted final probe is missing evidence, not a healthy sample. The system-mode `condition` and readiness `softWarningCode` enums may be archived, but free-form reasons must not be. The private hourly JSONL archive is atomically replaced, capped at 240 records/hour, and rotated after 14 days; it must never receive raw monitor logs, request data, identifiers, URLs, payloads, or secrets.
 - Treat the full `monitor-readonly` stream as sensitive: its default `0600` random local file is removed on exit. Retention requires an explicit new absolute `MAXIM_MONITOR_LOG` path in an existing owner-private directory; never follow or overwrite an existing target, and remove the retained log after the reviewed incident.
+- Capacity restart evidence uses one resident remote collector with bounded requests and a
+  memory-only generation map for the expected API/OCR/photo containers. Split historical totals
+  remain separate from verified deltas. First/new sessions, gaps over 90 seconds, invalid classes,
+  counter resets and replacements leave the affected delta unknown; replacements are explicit.
+  EOF/signals cancel and reap owned work; the local SSH subtree has separate owned group cleanup.
+  A 90-second idle lease and 3600-second session TTL bound disconnected collectors; the sampler
+  rotates before expiry and preserves its original owner/cadence through the final diagnostic.
+  The nominal duration is not an absolute supervisor deadline. Synchronize exact-green tooling
+  before using the stream. One-shot and old archived samples retain unknown interval evidence.
 - The capacity census accepts the three mandatory release components with optional `eraser`.
   Unknown components, missing mandatory components and malformed descriptors remain errors.
   Lastik is outside the fourteen API roles; API fleet health does not attest its availability.
@@ -369,11 +378,21 @@ Missing files, sparse samples, stale/unknown data, reset counters and unfinished
 are not successful observations. `status` covers the entire interval; `last` is only
 its final snapshot. Retain the report's private-file, bounded-input and redaction rules.
 
-The basis is `sampled_oldest_queue_lag`. Raw `lagSec` and `operationalLagSec` percentiles
+Report schema 2 uses `sampled_oldest_queue_lag_and_container_generation_intervals`.
+Raw `lagSec` and `operationalLagSec` percentiles
 remain separate, with explicit `operationalLagCoverage`. Old records without operational
 values remain unavailable; never substitute zero or raw age. A lower p95 under different
 traffic is descriptive, not a causal speedup. Readiness, closed cohorts and actual action
 outcomes remain separate evidence, especially for waiting or quarantined events.
+
+API/OCR/photo restart deltas require adjacent archived observations of the same verified
+container generations, with both interval endpoints inside the selected window. The first
+in-window observation is only an anchor. Missing intermediate records, new sessions, resets,
+replacements and legacy totals cannot provide complete restart coverage or a healthy/comparable
+window. Positive confirmed deltas still report degradation when other evidence is unknown.
+`historicalRestartDiagnostic` retains old total-counter arithmetic explicitly as a diagnostic;
+equal totals never prove that no container restarted or was replaced. Restart causes remain
+unknown without independent evidence.
 
 [Report regressions](../../infra/scripts/monitor-capacity-report.test.mjs) cover bounded
 archives, coverage, redaction, counter resets and invalid comparison windows.
