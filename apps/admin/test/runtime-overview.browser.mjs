@@ -103,14 +103,12 @@ export async function smokeRuntimeOverview(page, profile, controls) {
     throw new Error('Navigation remount bypassed denied owner scope.');
 
   controls.setMode('fresh');
-  const nextCode = controls.newOwner();
   await page.reload();
-  await page.getByPlaceholder('Введите код').fill(nextCode);
-  await page.getByRole('button', { name: 'Войти' }).click();
+  await page.getByRole('button', { name: 'Публикации', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Наблюдения', exact: true }).click();
   await panel.getByText('Требует внимания', { exact: true }).waitFor();
   if (controls.readCount() !== before + 1)
-    throw new Error('New verified owner did not restart observations.');
+    throw new Error('A fresh browser session did not restart observations.');
   if (
     (await selector
       .getByRole('button', { name: 'Боты и очереди', exact: true })

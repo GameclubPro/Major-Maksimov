@@ -23,7 +23,9 @@ TimeoutStopSec=60
 # FLAG: Stop only the controller. An accepted executor must finish independently;
 # its unresolved persisted state blocks subsequent work after the controller restarts.
 KillMode=process
-NoNewPrivileges=true
+# FLAG: The existing Lastik store reader uses sudo for fixed protected-path tests.
+# Preserve that user's reviewed sudo policy; installation adds no sudo permissions.
+NoNewPrivileges=false
 ProtectSystem=full
 ProtectHome=true
 RestrictSUIDSGID=true

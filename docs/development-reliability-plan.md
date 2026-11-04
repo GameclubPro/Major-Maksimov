@@ -268,8 +268,11 @@ to be green. When the requested source is already active, read back its componen
 availability once and report that release instead of rebuilding it. Extra monitoring windows
 need an explicit request or a concrete runtime risk; routine smoke success ends routine delivery.
 
-CI uses the same impact classifier for the complete push range or the PR merge checkout against
-its recorded base. `Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
+CI uses the same impact classifier with [accumulated main coverage](development/ci-image-delivery.md#accumulated-main-coverage):
+a trusted main push selects changes since a proven green first-parent ancestor with a compatible
+certificate; the PR merge checkout uses its recorded base. Missing baseline evidence selects full
+coverage. `Required` reuses the frozen proof rather than selecting a newer baseline.
+`Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
 steps run only for full plans, including shared tooling/infra changes and the scheduled run.
 Permanent source-abandonment and legacy-disposition rollback floors belong to the mandatory core
 test inventory, so API-only changes also check compatibility with the deployed safety readers.

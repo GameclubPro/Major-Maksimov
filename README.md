@@ -92,7 +92,9 @@ API validation scripts serialize contracts/Prisma codegen; internal `*:unlocked`
 
 ## Submit Changes
 
-Work in a task worktree on a `codex/` branch; keep `main` clean at the verified production SHA.
+Work in a task worktree on a `codex/` branch; keep `main` clean and follow the
+[source synchronization rules](AGENTS.md#start-here) after release or a green merged change with
+no deployment impact.
 `local-commit-push.sh` uses the existing Git index by default: stage the intended paths first, then
 run the helper. It validates staged impact, commits, and pushes the exact resulting `HEAD`.
 

@@ -1,0 +1,123 @@
+{
+  "evidence": {
+    "verifier": "GitHub CLI 2.103.3, pinned binary checksum",
+    "workflow": "https://github.com/GameclubPro/Major-Maksimov/actions/runs/41812951076/attempts/1",
+    "jobId": "126520501600",
+    "projection": "Cryptographically verified metadata only; certificate, verified timestamps and signed statement subject/type. Signature bundles and predicate bodies omitted."
+  },
+  "expected": {
+    "repository": "GameclubPro/Major-Maksimov",
+    "repositoryId": "1168895008",
+    "sha": "d282e367391455bbef6d27dbacde6c6917265265",
+    "component": "eraser",
+    "runId": "41812951076",
+    "runAttempt": "1",
+    "event": "push"
+  },
+  "registry": {
+    "repository": "ghcr.io/gameclubpro/major-maksimov-private-v1-eraser",
+    "digest": "sha256:5b403242c8712164034d5245df7e90003a7fe29329b06a1c5277ecdec5d641e5"
+  },
+  "verifications": {
+    "provenance": [
+      {
+        "verificationResult": {
+          "signature": {
+            "certificate": {
+              "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+              "subjectAlternativeName": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "issuer": "https://token.actions.githubusercontent.com",
+              "githubWorkflowTrigger": "push",
+              "githubWorkflowSHA": "d282e367391455bbef6d27dbacde6c6917265265",
+              "githubWorkflowName": "CI",
+              "githubWorkflowRepository": "GameclubPro/Major-Maksimov",
+              "githubWorkflowRef": "refs/heads/main",
+              "buildSignerURI": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "buildSignerDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "runnerEnvironment": "github-hosted",
+              "sourceRepositoryURI": "https://github.com/GameclubPro/Major-Maksimov",
+              "sourceRepositoryDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "sourceRepositoryRef": "refs/heads/main",
+              "sourceRepositoryIdentifier": "1168895008",
+              "sourceRepositoryOwnerURI": "https://github.com/GameclubPro",
+              "sourceRepositoryOwnerIdentifier": "244674085",
+              "buildConfigURI": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "buildConfigDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "buildTrigger": "push",
+              "runInvocationURI": "https://github.com/GameclubPro/Major-Maksimov/actions/runs/41812951076/attempts/1",
+              "sourceRepositoryVisibilityAtSigning": "public"
+            }
+          },
+          "verifiedTimestamps": [
+            {
+              "type": "Tlog",
+              "uri": "https://rekor.sigstore.dev",
+              "timestamp": "2026-11-04T13:26:47+03:00"
+            }
+          ],
+          "statement": {
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+              {
+                "name": "ghcr.io/gameclubpro/major-maksimov-private-v1-eraser",
+                "digest": {
+                  "sha256": "5b403242c8712164034d5245df7e90003a7fe29329b06a1c5277ecdec5d641e5"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "sbom": [
+      {
+        "verificationResult": {
+          "signature": {
+            "certificate": {
+              "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+              "subjectAlternativeName": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "issuer": "https://token.actions.githubusercontent.com",
+              "githubWorkflowTrigger": "push",
+              "githubWorkflowSHA": "d282e367391455bbef6d27dbacde6c6917265265",
+              "githubWorkflowName": "CI",
+              "githubWorkflowRepository": "GameclubPro/Major-Maksimov",
+              "githubWorkflowRef": "refs/heads/main",
+              "buildSignerURI": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "buildSignerDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "runnerEnvironment": "github-hosted",
+              "sourceRepositoryURI": "https://github.com/GameclubPro/Major-Maksimov",
+              "sourceRepositoryDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "sourceRepositoryRef": "refs/heads/main",
+              "sourceRepositoryIdentifier": "1168895008",
+              "sourceRepositoryOwnerURI": "https://github.com/GameclubPro",
+              "sourceRepositoryOwnerIdentifier": "244674085",
+              "buildConfigURI": "https://github.com/GameclubPro/Major-Maksimov/.github/workflows/ci.yml@refs/heads/main",
+              "buildConfigDigest": "d282e367391455bbef6d27dbacde6c6917265265",
+              "buildTrigger": "push",
+              "runInvocationURI": "https://github.com/GameclubPro/Major-Maksimov/actions/runs/41812951076/attempts/1",
+              "sourceRepositoryVisibilityAtSigning": "public"
+            }
+          },
+          "verifiedTimestamps": [
+            {
+              "type": "Tlog",
+              "uri": "https://rekor.sigstore.dev",
+              "timestamp": "2026-11-04T13:26:53+03:00"
+            }
+          ],
+          "statement": {
+            "predicateType": "https://spdx.dev/Document/v2.3",
+            "subject": [
+              {
+                "name": "ghcr.io/gameclubpro/major-maksimov-private-v1-eraser",
+                "digest": {
+                  "sha256": "5b403242c8712164034d5245df7e90003a7fe29329b06a1c5277ecdec5d641e5"
+                }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

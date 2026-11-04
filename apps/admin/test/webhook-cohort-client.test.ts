@@ -17,14 +17,14 @@ test('cohort read uses the closed authenticated GET and rejects missing coverage
       );
     }),
   );
-  await assert.rejects(() => client.fetchWebhookCohort('private-code'));
+  await assert.rejects(() => client.fetchWebhookCohort());
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.url, '/api/v1/safety-desk/runtime/webhook-cohort');
   assert.equal(calls[0]!.init?.credentials, 'same-origin');
   assert.equal(calls[0]!.init?.method ?? 'GET', 'GET');
   assert.equal(
     (calls[0]!.init?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'private-code',
+    undefined,
   );
   assert.equal(calls[0]!.init?.body, undefined);
 });

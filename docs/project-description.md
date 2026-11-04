@@ -139,9 +139,10 @@ production origin включается только явным visual mode.
 
 - `admin-static` обслуживает UI на локальном порту 3004.
 - Nginx Basic Auth защищает сайт и проксирует same-origin `/api/v1/` в `api-admin`.
-- API guard проверяет admin forwarded host и `X-Remote-User`.
+- API guard проверяет совпадение admin host и forwarded host, `X-Remote-User` от nginx и origin запроса.
 - Public Major nginx sites явно запрещают Safety Desk/support endpoints.
-- `ADMIN_ACCESS_CODE` проверяется сервером и не попадает в Vite bundle.
+- По решению владельца от 4 ноября 2026 года дополнительного кода доступа нет:
+  после Basic Auth панель сразу загружает данные. Пароль не передаётся в приложение или Vite bundle.
 
 Safety Desk не использует MAX Bridge или mini app init data.
 
@@ -189,20 +190,24 @@ push-ит точный получившийся `HEAD`. Широкий staging �
 
 ```bash
 ./infra/scripts/vps-connect.sh doctor
-./infra/scripts/vps-connect.sh deploy main
+./infra/scripts/vps-connect.sh deploy main --auto
 ./infra/scripts/vps-connect.sh health
-./infra/scripts/vps-connect.sh monitor-readonly 300 15
 ```
 
-Локальный deploy wrapper требует успешный агрегат `Required` для точного выбранного commit SHA, а
+Локальный deploy wrapper требует успешные trusted main-push `Required` и
+`Analyze JavaScript and TypeScript` для точного выбранного SHA локального `main`, а
 VPS после синхронизации проверяет совпадение своего `HEAD` с этим SHA. Active components используют
 immutable full-SHA image refs. Манифесты в `/var/lib/maxim-deploy` хранят source SHA, image ref и
-image ID для `api-shared`, `miniapp-major-static` и `admin-static`; новый `current.json` записывается
+image ID для `api-shared`, `miniapp-major-static`, `admin-static` и установленного `eraser`; новый `current.json` записывается
 только после проверки image IDs и строгих smoke checks.
 
-Deploy script собирает shared API image один раз и расширяет запрос любого API role до всех
+Deploy wrapper готовит и загружает проверенные CI images из GHCR по digest. Сервер проверяет
+отдельные registry digest и Docker image ID, а затем расширяет запрос любого API role до всех
 shared-image roles. Prisma migrations запускаются только при выбранном API component; static-only
-deploy `miniapp-major-static` или `admin-static` их пропускает.
+deploy их пропускает. Явный service argument не исключает другие накопленные изменения компонентов.
+Команды и gates заданы [текущей процедурой](development/production-operations-reference.md#deploy-and-rollback),
+а доказательства образов — [CI image delivery](development/ci-image-delivery.md).
+Дополнительное окно `monitor-readonly` нужно по запросу пользователя или конкретному runtime-риску.
 
 Routine mini app deploy использует только `miniapp-major-static` и
 `https://major-maksimov.ru/app/`. CDN, Object Storage и app2 приостановлены и не являются fallback.

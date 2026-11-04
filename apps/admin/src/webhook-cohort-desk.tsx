@@ -35,13 +35,7 @@ function latency(value: number | null) {
   return value === null ? 'Нет измерений' : `${(value / 1000).toFixed(2)} с`;
 }
 
-export function WebhookCohortDesk({
-  accessCode,
-  refreshToken,
-}: {
-  accessCode: string;
-  refreshToken: number;
-}) {
+export function WebhookCohortDesk({ refreshToken }: { refreshToken: number }) {
   const [snapshot, setSnapshot] = useState<SafetyDeskWebhookCohortResponse | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -51,7 +45,7 @@ export function WebhookCohortDesk({
     setLoading(true);
     setError('');
     void safetyDeskApiClient
-      .fetchWebhookCohort(accessCode)
+      .fetchWebhookCohort()
       .then(
         (result) => {
           if (current) setSnapshot(result);
@@ -66,7 +60,7 @@ export function WebhookCohortDesk({
     return () => {
       current = false;
     };
-  }, [accessCode, refreshToken]);
+  }, [refreshToken]);
 
   return (
     <section className="cohort-desk" aria-label="Результаты обработки событий" aria-busy={loading}>

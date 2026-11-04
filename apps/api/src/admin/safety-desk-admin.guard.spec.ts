@@ -1,4 +1,5 @@
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SafetyDeskAdminGuard } from './safety-desk-admin.guard';
 
 function createContext(headers: Record<string, string>): ExecutionContext {
@@ -9,26 +10,13 @@ function createContext(headers: Record<string, string>): ExecutionContext {
   } as unknown as ExecutionContext;
 }
 
-function createGuard(
-  options: { accessCode?: string; allowedHosts?: string; nodeEnv?: string } = {},
-) {
-  return new SafetyDeskAdminGuard({
-    get: jest.fn((key: string) => {
-      if (key === 'SAFETY_DESK_ALLOWED_HOSTS') {
-        return options.allowedHosts;
-      }
-
-      if (key === 'NODE_ENV') {
-        return options.nodeEnv ?? 'production';
-      }
-
-      if (key === 'ADMIN_ACCESS_CODE') {
-        return options.accessCode ?? 'server-admin-code';
-      }
-
-      return undefined;
+function createGuard(options: { allowedHosts?: string; nodeEnv?: string } = {}) {
+  return new SafetyDeskAdminGuard(
+    new ConfigService({
+      SAFETY_DESK_ALLOWED_HOSTS: options.allowedHosts,
+      NODE_ENV: options.nodeEnv ?? 'production',
     }),
-  } as never);
+  );
 }
 
 function createAdminHeaders(host = 'admin.major-maksimov.ru') {
@@ -36,12 +24,11 @@ function createAdminHeaders(host = 'admin.major-maksimov.ru') {
     host,
     'x-forwarded-host': host,
     'x-remote-user': 'owner',
-    'x-admin-access-code': 'server-admin-code',
   };
 }
 
 describe('SafetyDeskAdminGuard', () => {
-  it('allows the closed admin host', () => {
+  it('allows the closed admin host with the nginx owner identity and no additional code', () => {
     const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
 
     expect(guard.canActivate(createContext(createAdminHeaders()))).toBe(true);
@@ -101,7 +88,18 @@ describe('SafetyDeskAdminGuard', () => {
     ).toThrow(ForbiddenException);
   });
 
-  it('rejects the public app host', () => {
+  it.each(['not-an-origin', 'null', 'https://', 'admin.major-maksimov.ru'])(
+    'rejects malformed production admin origins: %s',
+    (origin) => {
+      const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
+
+      expect(() => guard.canActivate(createContext({ ...createAdminHeaders(), origin }))).toThrow(
+        ForbiddenException,
+      );
+    },
+  );
+
+  it('rejects the public app host even with a forged owner identity', () => {
     const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
 
     expect(() => guard.canActivate(createContext(createAdminHeaders('major-maksimov.ru')))).toThrow(
@@ -128,8 +126,39 @@ describe('SafetyDeskAdminGuard', () => {
         createContext({
           host: 'admin.major-maksimov.ru',
           'x-forwarded-host': 'admin.major-maksimov.ru',
-          'x-admin-access-code': 'server-admin-code',
         }),
+      ),
+    ).toThrow(ForbiddenException);
+  });
+
+  it.each(['', ' ', '\t'])(
+    'rejects production admin requests with a blank nginx identity: %j',
+    (remoteUser) => {
+      const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
+
+      expect(() =>
+        guard.canActivate(createContext({ ...createAdminHeaders(), 'x-remote-user': remoteUser })),
+      ).toThrow(ForbiddenException);
+    },
+  );
+
+  it.each(['maxim-observer', ' maxim-observer ', 'maxim-observer\t'])(
+    'rejects the observation-only nginx identity on owner routes: %j',
+    (remoteUser) => {
+      const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
+
+      expect(() =>
+        guard.canActivate(createContext({ ...createAdminHeaders(), 'x-remote-user': remoteUser })),
+      ).toThrow(ForbiddenException);
+    },
+  );
+
+  it('rejects production admin requests without the forwarded host', () => {
+    const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
+
+    expect(() =>
+      guard.canActivate(
+        createContext({ host: 'admin.major-maksimov.ru', 'x-remote-user': 'owner' }),
       ),
     ).toThrow(ForbiddenException);
   });
@@ -149,18 +178,10 @@ describe('SafetyDeskAdminGuard', () => {
   });
 
   it('allows localhost in non-production for local development', () => {
-    const guard = createGuard({ accessCode: '', nodeEnv: 'development' });
+    const guard = createGuard({ nodeEnv: 'development' });
 
-    expect(
-      guard.canActivate(
-        createContext({ host: 'localhost:3002', 'x-admin-access-code': 'maxim-local' }),
-      ),
-    ).toBe(true);
-    expect(
-      guard.canActivate(
-        createContext({ host: '[::1]:3002', 'x-admin-access-code': 'maxim-local' }),
-      ),
-    ).toBe(true);
+    expect(guard.canActivate(createContext({ host: 'localhost:3002' }))).toBe(true);
+    expect(guard.canActivate(createContext({ host: '[::1]:3002' }))).toBe(true);
   });
 
   it('allows explicitly configured production hosts with admin proxy headers', () => {
@@ -177,34 +198,24 @@ describe('SafetyDeskAdminGuard', () => {
     );
   });
 
-  it('rejects a missing or incorrect server-side access code', () => {
-    const guard = createGuard({ accessCode: 'expected-admin-code' });
+  it('rejects an unapproved host during local development', () => {
+    const guard = createGuard({ nodeEnv: 'development' });
 
-    expect(() =>
+    expect(() => guard.canActivate(createContext({ host: 'unapproved.test' }))).toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it('ignores a retired access-code header after nginx has authenticated the owner', () => {
+    const guard = createGuard({ allowedHosts: 'admin.major-maksimov.ru' });
+
+    expect(
       guard.canActivate(
         createContext({
           ...createAdminHeaders(),
-          'x-admin-access-code': 'incorrect-admin-code',
+          'x-admin-access-code': 'retired-code',
         }),
       ),
-    ).toThrow(ForbiddenException);
-    expect(() =>
-      guard.canActivate(
-        createContext({
-          host: 'admin.major-maksimov.ru',
-          'x-forwarded-host': 'admin.major-maksimov.ru',
-          'x-remote-user': 'owner',
-        }),
-      ),
-    ).toThrow(ForbiddenException);
-  });
-
-  it('fails closed when the production access code is missing or left at its placeholder', () => {
-    for (const accessCode of ['', 'change-me', 'replace-with-random-admin-code']) {
-      const guard = createGuard({ accessCode });
-      expect(() => guard.canActivate(createContext(createAdminHeaders()))).toThrow(
-        ForbiddenException,
-      );
-    }
+    ).toBe(true);
   });
 });

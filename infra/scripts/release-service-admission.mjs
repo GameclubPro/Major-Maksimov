@@ -17,6 +17,7 @@ import {
 import { preloadRegistryImage, verifyPreloadedImage } from './registry-preload-host.mjs';
 import { proveGreenWorkflows } from '../../scripts/ci/green-workflow-proof.mjs';
 import { assertImageInspection, verifyRegistryImage } from '../../scripts/ci/registry-images.mjs';
+import { readRegistryCredential } from '../../scripts/ci/registry-credentials.mjs';
 import { ensureGitHubCli } from '../../scripts/ci/github-cli.mjs';
 import {
   RELEASE_PATHS,
@@ -90,6 +91,7 @@ function assertPolicy(request, paths = RELEASE_PATHS) {
 export function assertServiceOrigin(origin) {
   if (
     ![
+      'https://github.com/GameclubPro/Major-Maksimov.git',
       'git@github.com:GameclubPro/Major-Maksimov.git',
       'ssh://git@github.com/GameclubPro/Major-Maksimov.git',
       'ssh://git@ssh.github.com:443/GameclubPro/Major-Maksimov.git',
@@ -129,13 +131,17 @@ function requireCurrentMain(github, sha) {
   assertCurrentMain(github, sha);
 }
 
-function withEvidence(action) {
-  const credential = JSON.parse(privateBytes(RELEASE_PATHS.credential, { maxBytes: 65536 }));
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(credential.username ?? '') ||
-    !/^[A-Za-z0-9_]{20,255}$/u.test(credential.token ?? '')
-  )
+export function readServiceCredential(path = RELEASE_PATHS.credential, { floor = '/' } = {}) {
+  try {
+    assertDirectory(dirname(path), { floor });
+    return readRegistryCredential(path);
+  } catch {
     refuse('CREDENTIAL_UNAVAILABLE');
+  }
+}
+
+function withEvidence(action) {
+  const credential = readServiceCredential();
   const config = fs.mkdtempSync('/var/lib/maxim-release/evidence-');
   try {
     fs.chmodSync(config, 0o700);
@@ -620,11 +626,14 @@ export function runAdmission(argv) {
   if (command === 'preflight') {
     assertPolicy(operation.request);
     if (operation.summary.state !== 'ADMITTING') refuse('STALE_STATE');
-    assertServiceOrigin(
-      execute('git', ['remote', 'get-url', 'origin'], { cwd: RELEASE_PATHS.controller }).trim(),
-    );
-    privateBytes('/etc/maxim-deploy/git-read-key', { maxBytes: 16384 });
-    privateBytes('/etc/maxim-deploy/git-known-hosts', { maxBytes: 65536 });
+    const origin = execute('git', ['remote', 'get-url', 'origin'], {
+      cwd: RELEASE_PATHS.controller,
+    }).trim();
+    assertServiceOrigin(origin);
+    if (origin !== 'https://github.com/GameclubPro/Major-Maksimov.git') {
+      privateBytes('/etc/maxim-deploy/git-read-key', { maxBytes: 16384 });
+      privateBytes('/etc/maxim-deploy/git-known-hosts', { maxBytes: 65536 });
+    }
     withEvidence((evidence) => verifyRequestEvidence(operation.request, evidence));
   } else if (command === 'snapshot') snapshot(operation);
   else if (command === 'admit') admit(operation, root, fs.readFileSync(0).toString('utf8'));

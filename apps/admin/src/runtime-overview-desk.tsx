@@ -687,17 +687,15 @@ export function RuntimeOverviewSnapshot({
 }
 
 export function RuntimeOverviewDesk({
-  accessCode,
   refreshToken,
   accessScope,
   onEvidence,
 }: {
-  accessCode: string;
   refreshToken: number;
   accessScope: OverviewAccessScope;
   onEvidence: (family: EvidenceFamily) => void;
 }) {
-  const view = useRuntimeOverview(accessCode, refreshToken, accessScope);
+  const view = useRuntimeOverview(refreshToken, accessScope);
   return (
     <section
       className="cohort-desk runtime-desk"

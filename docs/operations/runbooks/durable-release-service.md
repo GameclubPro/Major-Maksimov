@@ -3,7 +3,9 @@
 The release service accepts a bounded request, saves it durably and executes it independently of
 the SSH connection. This boundary prepares operator delivery; automatic release activation remains
 a separate stage. A local test or merged change does not establish installation or production
-acceptance. Independent main backup/readback and isolated restore remain installation gates.
+acceptance. Backup installation and restore acceptance are outside this delivery stage; they do
+not gate service installation. Existing backup configuration and separate backup runbooks remain
+independent of the release service.
 
 ## Identities and restricted access
 
@@ -11,6 +13,13 @@ The service runs as the existing deploy user under `maxim-release.service`. A ro
 at `/usr/local/lib/maxim-release` contains its controller and admission code. It is independent of
 the mutable `/var/www/Chat_bot` controller checkout. Do not replace that bundle while the service,
 an executor or a protected release operation is active.
+
+The controller uses the canonical repository origin: `https://github.com/GameclubPro/Major-Maksimov.git`
+or one of the exact SSH forms admitted by `assertServiceOrigin`. Review and normalize a retained
+legacy repository alias before installation; preserve its transport and verify the canonical
+repository identity and main ref first. The public repository uses anonymous HTTPS reads when
+configured with canonical HTTPS. Preparation preserves that transport and `.git/config`.
+The immutable executor clones the local admitted controller and performs no remote Git reads.
 
 The dedicated `maxim-release-gateway` account has one ed25519 forced-command key. Its only accepted
 commands are exactly `inventory`, `submit` and `status UUID`. Forwarding, PTY, arbitrary arguments
@@ -61,12 +70,20 @@ and a private regular `.env` snapshot. The context binds the request, previous m
 component set and verified image proofs. An incomplete or pre-existing directory is retained for
 review. A retry never overwrites it.
 
-Service Git uses its fixed installed SSH wrapper, port 443, pinned host keys and a separately
-provisioned repository read key. Install `/etc/maxim-deploy/git-read-key` and
+Canonical public HTTPS needs no repository credential. For an admitted SSH origin, service Git
+uses its fixed installed SSH wrapper, port 443, pinned host keys and a separately provisioned
+repository read key. Only that transport requires `/etc/maxim-deploy/git-read-key` and
 `/etc/maxim-deploy/git-known-hosts` as private regular files readable by `maximadmin`. Neither the
 interactive user's home nor SSH agent is available in the service. The installer proves exact-main
-repository access as that user before creating the service. Verify that access again under the
-installed unit restrictions before activation; the submit key is unrelated to Git access.
+repository access with the configured transport as that user before creating the service. Verify
+access again under the installed unit restrictions before activation; the submit key is unrelated
+to Git access.
+
+The unit retains the deploy user's existing Docker and sudo authority. `NoNewPrivileges=false`
+is required by Lastik's existing fixed protected-store path checks; installation adds no sudo
+permissions. Keep `ProtectSystem=full`, `ProtectHome=true` and `RestrictSUIDSGID=true`. Before
+accepting Lastik delivery, prove those read-only store checks as the service user under the unit
+restrictions. A static or shared-API release does not establish that separate coverage.
 
 The immutable executor skips fetch, checkout, pull, stash and script re-execution. It preserves
 installed source/rollback floors, capacity checks, migration restrictions, all-role recreation,
@@ -104,12 +121,10 @@ application role and native auxiliary. A no-op preserves the previous manifest e
 ## Installation and operator controls
 
 Review `infra/scripts/install-release-service.sh --plan` first. The first-install apply path requires
-root, a clean canonical exact-green main, the existing shared locks, a separate registry credential
-and a private recovery acceptance receipt. The receipt
-`/etc/maxim-release-recovery-accepted.json` has schema version 1, profile `main`, `acceptedAt` and the
-three SHA-256 fields `backupEvidenceSha256`, `independentReadbackEvidenceSha256` and
-`isolatedRestoreEvidenceSha256`. Install it only after reviewing those actual complete receipts;
-the file cannot substitute for a backup or restore. Acceptance must be within the previous day.
+root, a clean canonical exact-green main, the existing shared locks, a complete component manifest,
+a separate read-only registry credential and the fixed Git read identity. Registry admission uses
+the same bounded opaque-credential reader as ordinary image delivery and runs as the actual
+service user. It cannot substitute a GitHub control token or relax the package/provenance checks.
 
 The installer takes `--apply EXACT_MAIN_SHA /private/gateway.pub`. It refuses unknown pre-existing
 users/directories instead of adopting them. It exports committed code only, installs the restricted
@@ -154,9 +169,9 @@ healthy containers. Until those proofs pass, the queue remains blocked.
 Local cases must cover duplicate/conflicting submits, fragmented/oversized socket requests, SSH
 disconnect, occupied/unknown locks, restart quarantine, READY/ACK ordering, child failure before
 and after runtime, and immutable executor inputs. Before production acceptance additionally prove
-real private-package pull/attestations, exact source and digest/config identity, a static-only
+real private-package pull/attestations, exact source, registry digest and Docker image ID, a static-only
 release, a shared API release covering all roles, and Lastik separately when affected. Injected
 local dependencies do not establish production migration, registry or host behavior.
 
-Automatic delivery remains disabled until recovery, service installation, these release cases,
+Automatic delivery remains disabled until operation recovery, service installation, these release cases,
 local runner fallback and the explicit automatic-release stage are accepted.

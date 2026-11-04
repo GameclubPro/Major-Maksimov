@@ -20,12 +20,18 @@ test('installation preview succeeds without privileges, host access or system mu
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /does not start or enable/u);
   assert.match(result.stdout, /automatic releases disabled/u);
-  assert.match(result.stdout, /backup\/restore acceptance/u);
+  assert.match(result.stdout, /existing shared deploy locks, complete manifest/u);
+  assert.doesNotMatch(result.stdout, /backup\/restore acceptance/u);
+  assert.doesNotMatch(
+    fs.readFileSync(script('install-release-service.sh'), 'utf8'),
+    /maxim-release-recovery-accepted|backupEvidenceSha256|isolatedRestoreEvidenceSha256/u,
+  );
   assert.match(result.stdout, /git-read-key/u);
 });
 
-test('service Git origin accepts only the exact repository SSH identity', () => {
+test('service Git origin accepts only the canonical HTTPS or exact repository SSH identity', () => {
   for (const origin of [
+    'https://github.com/GameclubPro/Major-Maksimov.git',
     'git@github.com:GameclubPro/Major-Maksimov.git',
     'ssh://git@github.com/GameclubPro/Major-Maksimov.git',
     'ssh://git@ssh.github.com:443/GameclubPro/Major-Maksimov.git',
@@ -33,7 +39,13 @@ test('service Git origin accepts only the exact repository SSH identity', () => 
     assertServiceOrigin(origin);
   for (const origin of [
     '',
-    'https://github.com/GameclubPro/Major-Maksimov.git',
+    'https://github.com/GameclubPro/MAXIM.git',
+    'git@github.com:GameclubPro/MAXIM.git',
+    'https://github.com/attacker/Major-Maksimov.git',
+    'https://github.com.evil/GameclubPro/Major-Maksimov.git',
+    'https://github.com/GameclubPro/Major-Maksimov.git/other',
+    'https://github.com/GameclubPro/Major-Maksimov.git?redirect=other',
+    'https://github.com/GameclubPro/Major-Maksimov.git\n',
     'git@github.com:attacker/repo.git',
     'ssh://git@github.com.evil/GameclubPro/Major-Maksimov.git',
     'git@github.com:GameclubPro/Major-Maksimov.git\n',
@@ -96,4 +108,6 @@ test('unit preserves global legacy-lock visibility and confines the administrati
   assert.match(source, /^ProtectHome=true$/mu);
   assert.match(source, /^KillMode=process$/mu);
   assert.match(source, /^RuntimeDirectory=maxim-release$/mu);
+  assert.match(source, /^NoNewPrivileges=false$/mu);
+  assert.match(source, /^RestrictSUIDSGID=true$/mu);
 });

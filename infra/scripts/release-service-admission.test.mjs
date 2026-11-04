@@ -11,6 +11,7 @@ import {
   evaluateAdmission,
   evaluateRecovery,
   evaluateResult,
+  readServiceCredential,
   verifyRequestEvidence,
 } from './release-service-admission.mjs';
 import { privateBytes, writePrivateJson, sha256 } from './release-service-boundary.mjs';
@@ -50,7 +51,7 @@ function fixture() {
       platform: 'linux/amd64',
     },
     registry: {
-      repository: 'ghcr.io/gameclubpro/major-maksimov-release-admin',
+      repository: 'ghcr.io/gameclubpro/major-maksimov-private-v1-admin',
       digest: `sha256:${'d'.repeat(64)}`,
     },
   };
@@ -126,6 +127,81 @@ function input(value) {
     now,
   };
 }
+
+test('service evidence reads private opaque credentials without imposing a provider token format', () => {
+  const root = fs.mkdtempSync(join(tmpdir(), 'maxim-admission-credential-'));
+  const path = join(root, 'credential.json');
+  try {
+    for (const token of [
+      'synthetic+credential/with=punctuation!?',
+      `synthetic_${'x'.repeat(320)}+`,
+      'x',
+    ]) {
+      const credential = { username: 'GameclubPro', token };
+      fs.writeFileSync(path, `${JSON.stringify(credential)}\n`, { mode: 0o600 });
+      const before = fs.readFileSync(path);
+      assert.deepEqual(readServiceCredential(path, { floor: root }), credential);
+      assert.deepEqual(fs.readFileSync(path), before);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('service credential refusal preserves protected file boundaries and redacts untrusted contents', () => {
+  const root = fs.mkdtempSync(join(tmpdir(), 'maxim-admission-credential-'));
+  const path = join(root, 'credential.json');
+  const valid = { username: 'GameclubPro', token: 'synthetic+credential/with=punctuation!?' };
+  const unavailable = (file = path) =>
+    assert.throws(() => readServiceCredential(file, { floor: root }), {
+      code: 'CREDENTIAL_UNAVAILABLE',
+      message: 'Release service CREDENTIAL_UNAVAILABLE.',
+    });
+  try {
+    unavailable();
+    for (const content of [
+      '',
+      '{"token":"sensitive malformed fixture',
+      'null',
+      '[]',
+      JSON.stringify({ ...valid, extra: 'untrusted field' }),
+      JSON.stringify({ ...valid, username: ' GameclubPro' }),
+      JSON.stringify({ ...valid, token: '' }),
+      JSON.stringify({ ...valid, token: 'sensitive fixture with whitespace' }),
+      JSON.stringify({ ...valid, token: 'sensitive\nfixture' }),
+      JSON.stringify({ ...valid, token: 'sensitive\u0000fixture' }),
+      JSON.stringify({ ...valid, token: 'sensitiveéfixture' }),
+      JSON.stringify({ ...valid, token: 'x'.repeat(4097) }),
+      Buffer.from([0xff, 0xfe]),
+    ]) {
+      fs.writeFileSync(path, content, { mode: 0o600 });
+      unavailable();
+    }
+    fs.writeFileSync(path, JSON.stringify(valid));
+    fs.chmodSync(path, 0o640);
+    unavailable();
+    fs.chmodSync(path, 0o600);
+    const linked = join(root, 'linked.json');
+    fs.linkSync(path, linked);
+    unavailable();
+    fs.unlinkSync(linked);
+    fs.symlinkSync(path, linked);
+    unavailable(linked);
+    fs.unlinkSync(linked);
+    const child = join(root, 'private');
+    fs.mkdirSync(child, { mode: 0o700 });
+    const childCredential = join(child, 'credential.json');
+    fs.writeFileSync(childCredential, JSON.stringify(valid), { mode: 0o600 });
+    fs.chmodSync(child, 0o770);
+    unavailable(childCredential);
+    fs.chmodSync(child, 0o700);
+    const alias = join(root, 'alias');
+    fs.symlinkSync(child, alias);
+    unavailable(join(alias, 'credential.json'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('fresh server evidence binds actual checks, current main, exact artifact and verified image', () => {
   const value = fixture();
@@ -354,7 +430,7 @@ function recoveryFixture({ unchanged = false } = {}) {
       platform: 'linux/amd64',
     },
     registry: {
-      repository: 'ghcr.io/gameclubpro/major-maksimov-release-admin',
+      repository: 'ghcr.io/gameclubpro/major-maksimov-private-v1-admin',
       digest: `sha256:${'d'.repeat(64)}`,
     },
   };

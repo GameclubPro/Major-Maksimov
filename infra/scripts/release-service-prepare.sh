@@ -29,8 +29,9 @@ maxim_release_prepare_finish() {
 
 maxim_release_prepare_main() {
   set -euo pipefail
-  local action id hash sha status image_plan expected_manifest
+  local action id hash sha status image_plan expected_manifest origin
   local -r bundle=/usr/local/lib/maxim-release
+  local -a controller_git_environment=()
   (($# == 4 || $# == 5)) || { echo 'Usage: release-service-prepare.sh prepare|result|reconcile UUID HASH SHA [MANIFEST_HASH]' >&2; return 64; }
   action="$1" id="$2" hash="$3" sha="$4" expected_manifest="${5:-}"
   [[ ( ( ( "$action" == prepare || "$action" == result ) && $# == 4 ) ||
@@ -52,7 +53,17 @@ maxim_release_prepare_main() {
     # FLAG: No canonical source synchronization or plan may run before exact
     # trusted-main/CI admission. The installed reader owns correlated refusals.
     node "$bundle/infra/scripts/release-service-admission.mjs" preflight "$id" "$hash" || return $?
-    GIT_SSH_COMMAND="$bundle/infra/scripts/release-service-git-ssh.sh" MAXIM_EXPECTED_DEPLOY_SHA="$sha" ./infra/scripts/vps-pull-build-up.sh main --plan || return $?
+    origin="$(git remote get-url origin)" || return $?
+    # FLAG: The public canonical HTTPS origin keeps anonymous HTTPS reads. Only
+    # admitted SSH origins use the fixed key/host wrapper, scoped to controller children.
+    case "$origin" in
+      https://github.com/GameclubPro/Major-Maksimov.git) ;;
+      git@github.com:GameclubPro/Major-Maksimov.git|ssh://git@github.com/GameclubPro/Major-Maksimov.git|ssh://git@ssh.github.com:443/GameclubPro/Major-Maksimov.git)
+        controller_git_environment=("GIT_SSH_COMMAND=$bundle/infra/scripts/release-service-git-ssh.sh")
+        ;;
+      *) echo 'Release preparation requires the exact canonical Git origin.' >&2; return 70 ;;
+    esac
+    env "${controller_git_environment[@]}" MAXIM_EXPECTED_DEPLOY_SHA="$sha" ./infra/scripts/vps-pull-build-up.sh main --plan || return $?
   fi
 
   # shellcheck source=infra/scripts/lib/deploy-lock.sh
@@ -96,7 +107,8 @@ maxim_release_prepare_main() {
   # FLAG: Keep this pair owner alive at its original cwd. The child inherits both
   # fences, rebinds only its product-FD owner, and closes only its own descriptors.
   # Capture all stdout; the installed reader validates the single bounded plan.
-  if image_plan="$(GIT_SSH_COMMAND="$bundle/infra/scripts/release-service-git-ssh.sh" MAXIM_EXPECTED_DEPLOY_SHA="$sha" /bin/bash -c '
+  # shellcheck disable=SC2016 # BASHPID must be evaluated by the child shell.
+  if image_plan="$(env "${controller_git_environment[@]}" MAXIM_EXPECTED_DEPLOY_SHA="$sha" /bin/bash -c '
     export MAXIM_DEPLOY_LOCK_OWNER_PID="$BASHPID"
     exec ./infra/scripts/vps-pull-build-up.sh main --image-plan
   ')"; then

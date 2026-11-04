@@ -7,7 +7,7 @@ import {
   useObservationSnapshot,
 } from './observation-view';
 
-const load = (code: string) => safetyDeskApiClient.fetchDeleteCohort(code);
+const load = () => safetyDeskApiClient.fetchDeleteCohort();
 const statuses: Record<SafetyDeskDeleteCohortRow['status'], string> = {
   OBSERVED: 'Наблюдение',
   PENDING: 'Ожидает',
@@ -31,8 +31,8 @@ const outcomes: Record<keyof SafetyDeskDeleteCohortRow['outcomeCounts'], string>
 };
 const outcomeKeys = Object.keys(outcomes) as Array<keyof typeof outcomes>;
 
-export function DeleteCohortDesk(props: { accessCode: string; refreshToken: number }) {
-  const view = useObservationSnapshot(load, props.accessCode, props.refreshToken);
+export function DeleteCohortDesk(props: { refreshToken: number }) {
+  const view = useObservationSnapshot(load, props.refreshToken);
   return (
     <ObservationPanel title="Намерения удаления" {...view}>
       {view.snapshot && (

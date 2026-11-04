@@ -7,12 +7,8 @@ const api = new SafetyDeskApiClient();
 
 export type OverviewAccessScope = { denied: boolean };
 
-export function useRuntimeOverview(
-  accessCode: string,
-  refreshToken: number,
-  accessScope: OverviewAccessScope,
-) {
-  const scope = useMemo(() => ({}), [accessCode, accessScope]);
+export function useRuntimeOverview(refreshToken: number, accessScope: OverviewAccessScope) {
+  const scope = useMemo(() => ({}), [accessScope]);
   const [result, setResult] = useState<{
     scope: object;
     state: OverviewPollState<SafetyDeskOverviewResponse>;
@@ -34,7 +30,7 @@ export function useRuntimeOverview(
       return;
     }
     const poll = startOverviewPolling(
-      (signal) => api.fetchRuntimeOverview(accessCode, signal),
+      (signal) => api.fetchRuntimeOverview(signal),
       (state) => {
         if (state.denied) accessScope.denied = true;
         setResult({ scope, state });
@@ -45,7 +41,7 @@ export function useRuntimeOverview(
       poll.stop();
       if (active.current === poll) active.current = null;
     };
-  }, [scope, accessCode, accessScope]);
+  }, [scope, accessScope]);
   useEffect(() => {
     if (previousRefresh.current === refreshToken) return;
     previousRefresh.current = refreshToken;

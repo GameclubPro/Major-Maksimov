@@ -141,6 +141,9 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
   private collecting: Promise<void> | null = null;
   private reading: Promise<SafetyDeskOverviewResponse> | null = null;
   private readCache: { at: number; snapshot: SafetyDeskOverviewResponse } | null = null;
+  private observerReading: Promise<SafetyDeskOverviewResponse | null> | null = null;
+  private observerReadCache: { at: number; snapshot: SafetyDeskOverviewResponse | null } | null =
+    null;
   private latest: SafetyDeskOverviewResponse | null = null;
   private lastExpensiveAt: number | null = null;
 
@@ -490,6 +493,44 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
     await this.store.write(valid, overviewHistoryPoint(valid));
     this.latest = valid;
     this.readCache = null;
+    this.observerReadCache = null;
+  }
+
+  async getObserverSnapshot(): Promise<SafetyDeskOverviewResponse> {
+    try {
+      const now = Date.now();
+      let stored: SafetyDeskOverviewResponse | null;
+      if (
+        this.observerReadCache &&
+        now >= this.observerReadCache.at &&
+        now - this.observerReadCache.at < 1000
+      ) {
+        stored = this.observerReadCache.snapshot;
+      } else {
+        const reading = this.observerReading ?? this.store.readSnapshot();
+        this.observerReading = reading;
+        try {
+          stored = await reading;
+          this.observerReadCache = { snapshot: stored, at: Date.now() };
+        } finally {
+          if (this.observerReading === reading) this.observerReading = null;
+        }
+      }
+      if (!stored) return this.empty();
+      // FLAG: Machine reads reuse bounded shared evidence; they never collect or read history.
+      return ageOverview(
+        {
+          ...stored,
+          history: { ...stored.history, availability: 'UNAVAILABLE', observedAt: null, points: [] },
+        },
+        Date.now(),
+      );
+    } catch (error) {
+      const unavailable = this.empty();
+      if (error instanceof OverviewInvalidEvidenceError)
+        unavailable.collector.availability = 'INVALID';
+      return unavailable;
+    }
   }
 
   getSnapshot(): Promise<SafetyDeskOverviewResponse> {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -21,6 +21,8 @@ const sha = 'a'.repeat(40);
 const manifestHash = 'c'.repeat(64);
 const admission = '/usr/local/lib/maxim-release/infra/scripts/release-service-admission.mjs';
 const bundle = '/usr/local/lib/maxim-release';
+const httpsOrigin = 'https://github.com/GameclubPro/Major-Maksimov.git';
+const sshOrigin = 'git@github.com:GameclubPro/Major-Maksimov.git';
 const plan = `before plan\nMAXIM_IMAGE_PLAN={"schemaVersion":1,"sourceSha":"${sha}","components":["api-shared"]}\nafter plan`;
 
 function quote(value) {
@@ -43,11 +45,83 @@ async function preparation({
   authorityStatus = 0,
   releaseStatus = 0,
   lock = 'none',
+  origin = sshOrigin,
+  gitRead = false,
   env = {},
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-release-prepare-'));
   const controller = join(directory, 'controller');
   mkdirSync(join(controller, 'infra/scripts'), { recursive: true });
+  const git = (args) => {
+    const result = spawnSync(
+      '/usr/bin/git',
+      ['-C', controller, '-c', 'core.hooksPath=/dev/null', ...args],
+      {
+        encoding: 'utf8',
+        timeout: 3000,
+        env: {
+          PATH: '/usr/bin:/bin',
+          HOME: directory,
+          LANG: 'C.UTF-8',
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_NO_REPLACE_OBJECTS: '1',
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const ssh = join(directory, 'git-read-ssh');
+  const gitHelpers = join(directory, 'git-helpers');
+  let originalConfig, remoteHead;
+  if (gitRead) {
+    const remote = join(directory, 'read-origin.git');
+    git(['init', '--initial-branch=main']);
+    git([
+      '-c',
+      'user.name=Release fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '--allow-empty',
+      '-qm',
+      'Read fixture',
+    ]);
+    remoteHead = git(['rev-parse', 'HEAD']);
+    git(['init', '--bare', '--initial-branch=main', remote]);
+    git(['push', remote, 'main']);
+    git(['remote', 'add', 'origin', origin]);
+    originalConfig = readFileSync(join(controller, '.git/config'));
+    writeFileSync(
+      ssh,
+      `#!/bin/bash
+set -euo pipefail
+printf '%s\\0' "$@" >>${quote(join(directory, 'ssh-arguments'))}
+[[ "$#" == 2 && "$1" == git@github.com && "$2" == ${quote("git-upload-pack 'GameclubPro/Major-Maksimov.git'")} ]] || exit 85
+exec /usr/bin/git upload-pack ${quote(remote)}
+`,
+      { mode: 0o700 },
+    );
+    mkdirSync(gitHelpers);
+    writeFileSync(
+      join(gitHelpers, 'git-remote-https'),
+      `#!/bin/bash
+set -euo pipefail
+printf '%s\\0' "$@" >>${quote(join(directory, 'https-arguments'))}
+[[ "$#" == 2 && "$1" == origin && "$2" == ${quote(httpsOrigin)} ]] || exit 84
+while IFS= read -r command; do
+  case "$command" in
+    capabilities) printf '\\n' ;;
+    list) printf '%s refs/heads/main\\n\\n' ${quote(remoteHead)} ;;
+    '') exit 0 ;;
+    *) exit 83 ;;
+  esac
+done
+`,
+      { mode: 0o700 },
+    );
+  }
   const fakeDeploy = join(controller, 'infra/scripts/vps-pull-build-up.sh');
   writeFileSync(
     fakeDeploy,
@@ -55,7 +129,21 @@ async function preparation({
 set -euo pipefail
 event() { printf '%s\\n' "$1" >>${quote(join(directory, 'events'))}; }
 [[ "$#" == 2 && "$1" == main && "$MAXIM_EXPECTED_DEPLOY_SHA" == ${quote(sha)} ]] || exit 90
-[[ "$GIT_SSH_COMMAND" == ${quote(`${bundle}/infra/scripts/release-service-git-ssh.sh`)} ]] || exit 89
+if [[ ${quote(origin)} == ${quote(httpsOrigin)} ]]; then
+  [[ -z "\${GIT_SSH_COMMAND:-}" ]] || exit 89
+else
+  [[ "$GIT_SSH_COMMAND" == ${quote(`${bundle}/infra/scripts/release-service-git-ssh.sh`)} ]] || exit 89
+fi
+[[ -z "\${GIT_CONFIG_COUNT:-}\${GIT_CONFIG_KEY_0:-}\${GIT_CONFIG_VALUE_0:-}" ]] || exit 88
+if [[ ${gitRead} == true ]]; then
+  [[ "$(/usr/bin/git remote get-url origin)" == ${quote(origin)} ]] || exit 87
+  [[ "$(/usr/bin/git config --local --get remote.origin.url)" == ${quote(origin)} ]] || exit 86
+  if [[ ${quote(origin)} == ${quote(httpsOrigin)} ]]; then
+    GIT_EXEC_PATH=${quote(gitHelpers)} /usr/bin/git ls-remote --exit-code origin refs/heads/main >>${quote(join(directory, 'git-readbacks'))}
+  else
+    GIT_SSH_COMMAND=${quote(ssh)} GIT_SSH_VARIANT=simple /usr/bin/git ls-remote --exit-code origin refs/heads/main >>${quote(join(directory, 'git-readbacks'))}
+  fi
+fi
 case "$2" in
   --plan)
     event SYNC_PLAN
@@ -116,6 +204,10 @@ cd() {
   builtin cd ${quote(controller)}
 }
 pwd() { printf '%s\\n' /var/www/Chat_bot; }
+git() {
+  [[ "$*" == 'remote get-url origin' ]] || return 84
+  if [[ ${gitRead} == true ]]; then /usr/bin/git "$@"; else printf '%s\\n' ${quote(origin)}; fi
+}
 source() {
   case "$1" in
     ${bundle}/infra/scripts/lib/deploy-lock.sh)
@@ -130,6 +222,7 @@ source() {
   esac
 }
 node() {
+  [[ -z "\${GIT_CONFIG_COUNT:-}\${GIT_CONFIG_KEY_0:-}\${GIT_CONFIG_VALUE_0:-}\${GIT_SSH_COMMAND:-}" ]] || return 85
   if [[ "$1" == -e ]]; then event NODE24; return ${nodeStatus}; fi
   [[ "$1" == ${quote(admission)} && "$3" == ${quote(id)} && "$4" == ${quote(requestHash)} ]] || return 87
   if [[ "$2" == reconcile ]]; then
@@ -214,6 +307,24 @@ maxim_release_prepare_main ${args.map(quote).join(' ')}
             .map((line) => JSON.parse(line))
         : [],
       input: existsSync(inputPath) ? readFileSync(inputPath, 'utf8') : undefined,
+      gitEvidence: gitRead
+        ? {
+            originalConfig,
+            finalConfig: readFileSync(join(controller, '.git/config')),
+            persistedOrigin: git(['config', '--local', '--get', 'remote.origin.url']),
+            parentOrigin: git(['remote', 'get-url', 'origin']),
+            remoteHead,
+            readbacks: existsSync(join(directory, 'git-readbacks'))
+              ? readFileSync(join(directory, 'git-readbacks'), 'utf8').trim().split('\n')
+              : [],
+            sshArguments: existsSync(join(directory, 'ssh-arguments'))
+              ? readFileSync(join(directory, 'ssh-arguments'), 'utf8').split('\0').slice(0, -1)
+              : [],
+            httpsArguments: existsSync(join(directory, 'https-arguments'))
+              ? readFileSync(join(directory, 'https-arguments'), 'utf8').split('\0').slice(0, -1)
+              : [],
+          }
+        : undefined,
     };
   } finally {
     clearTimeout(timeout);
@@ -240,6 +351,47 @@ test('preparation proves source before synchronization and snapshots the full pl
   assert.equal(result.input, plan);
   assert.deepEqual(result.control, [{ schemaVersion: 1, event: 'PREPARED', id, requestHash }]);
   assert.ok(!result.events.includes('RUNTIME'));
+});
+
+test('canonical HTTPS stays HTTPS and SSH uses the fixed transport without changing Git configuration', async () => {
+  for (const origin of [httpsOrigin, sshOrigin]) {
+    const result = await preparation({ gitRead: true, origin });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(result.gitEvidence.finalConfig, result.gitEvidence.originalConfig);
+    assert.equal(result.gitEvidence.persistedOrigin, origin);
+    assert.equal(result.gitEvidence.parentOrigin, origin);
+    assert.deepEqual(
+      result.gitEvidence.readbacks,
+      Array(2).fill(`${result.gitEvidence.remoteHead}\trefs/heads/main`),
+    );
+    assert.deepEqual(
+      result.gitEvidence.sshArguments,
+      origin === sshOrigin
+        ? Array(2)
+            .fill(['git@github.com', "git-upload-pack 'GameclubPro/Major-Maksimov.git'"])
+            .flat()
+        : [],
+    );
+    assert.deepEqual(
+      result.gitEvidence.httpsArguments,
+      origin === httpsOrigin ? Array(2).fill(['origin', httpsOrigin]).flat() : [],
+    );
+    assert.equal(result.events.filter((event) => event === 'SYNC_PLAN').length, 1);
+    assert.equal(result.events.filter((event) => event === 'IMAGE_PLAN').length, 1);
+    assert.ok(!result.events.includes('RUNTIME'));
+  }
+});
+
+test('legacy and foreign controller origins cannot enter either preparation plan', async () => {
+  for (const origin of [
+    'https://github.com/GameclubPro/MAXIM.git',
+    'git@github.com:attacker/repo.git',
+  ]) {
+    const result = await preparation({ origin });
+    assert.equal(result.exitCode, 70, result.stderr);
+    assert.deepEqual(result.events, ['NODE24', 'CWD', 'PREFLIGHT']);
+    assert.deepEqual(result.control, []);
+  }
 });
 
 test('preflight rejection preserves its correlation and prevents synchronization and lock acquisition', async () => {
@@ -372,6 +524,8 @@ test('invalid identity, arity, Node version and environment stop before installe
     { NODE_OPTIONS: '--trace-warnings' },
     { HOME: '/tmp/override' },
     { GIT_NO_REPLACE_OBJECTS: '0' },
+    { GIT_SSH_COMMAND: '/untrusted/git-ssh' },
+    { GIT_CONFIG_COUNT: '1' },
   ]) {
     const result = await preparation({ env });
     assert.equal(result.exitCode, 70, result.stderr);

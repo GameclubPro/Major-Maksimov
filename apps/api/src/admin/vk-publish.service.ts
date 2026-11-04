@@ -33,6 +33,7 @@ import {
   readBoundedResponseBuffer,
   ResponseByteLimitExceededError,
 } from '../common/bounded-response-buffer';
+import { fetchPublicHttpsMedia, PublicHttpsMediaError } from '../common/public-https-media';
 import {
   MediaByteAdmission,
   MediaByteAdmissionError,
@@ -5656,6 +5657,7 @@ export class VkPublishService {
     }
     if (
       cached?.status === VK_MEDIA_STATUS_FAILED &&
+      (cached.url === videoUrl || this.readUploadPayload(cached, botId) !== null) &&
       this.canReuseFailedVideoPreflightCache(cached)
     ) {
       return cached;
@@ -5688,7 +5690,10 @@ export class VkPublishService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), VK_VIDEO_FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(parsed, { method: 'HEAD', signal: controller.signal });
+      const response = await fetchPublicHttpsMedia(parsed, {
+        method: 'HEAD',
+        signal: controller.signal,
+      });
       await response.body?.cancel().catch(() => undefined);
       if (!response.ok) {
         if (this.isSoftVideoPreflightStatus(response.status)) {
@@ -5757,7 +5762,9 @@ export class VkPublishService {
           lastError:
             error instanceof Error && error.name === 'AbortError'
               ? 'VK не ответил на проверку видео вовремя.'
-              : formatVkParsingError(error),
+              : error instanceof PublicHttpsMediaError
+                ? 'Не удалось скачать видео из VK.'
+                : formatVkParsingError(error),
         },
         mediaIdentity,
       );
@@ -5850,7 +5857,10 @@ export class VkPublishService {
     const timeout = setTimeout(() => controller.abort(), VK_IMAGE_FETCH_TIMEOUT_MS);
     let response: Response | undefined;
     try {
-      response = await fetch(parsed, { signal: controller.signal });
+      response = await fetchPublicHttpsMedia(parsed, {
+        method: 'GET',
+        signal: controller.signal,
+      });
       if (!response.ok) {
         throw new BadRequestException('Не удалось скачать фото из VK.');
       }
@@ -5878,6 +5888,9 @@ export class VkPublishService {
         mimeType,
       };
     } catch (error: unknown) {
+      if (error instanceof PublicHttpsMediaError) {
+        throw new BadRequestException('Не удалось скачать фото из VK.', { cause: error });
+      }
       if (error instanceof ResponseByteLimitExceededError) {
         throw new BadRequestException('Фото из VK слишком большое.');
       }
@@ -5901,7 +5914,10 @@ export class VkPublishService {
     const timeout = setTimeout(() => controller.abort(), VK_VIDEO_FETCH_TIMEOUT_MS);
     let response: Response | undefined;
     try {
-      response = await fetch(parsed, { signal: controller.signal });
+      response = await fetchPublicHttpsMedia(parsed, {
+        method: 'GET',
+        signal: controller.signal,
+      });
       if (!response.ok) {
         throw new BadRequestException('Не удалось скачать видео из VK.');
       }
@@ -5940,6 +5956,9 @@ export class VkPublishService {
         mimeType: resolvedMimeType,
       };
     } catch (error: unknown) {
+      if (error instanceof PublicHttpsMediaError) {
+        throw new BadRequestException('Не удалось скачать видео из VK.', { cause: error });
+      }
       if (error instanceof ResponseByteLimitExceededError) {
         throw new BadRequestException('Видео из VK слишком большое. Максимум 250 МБ.');
       }

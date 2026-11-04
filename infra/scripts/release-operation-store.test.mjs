@@ -51,7 +51,7 @@ function imageProof(component = 'api') {
       sizeBytes: 123456,
     },
     registry: {
-      repository: `ghcr.io/gameclubpro/major-maksimov-release-${component}`,
+      repository: `ghcr.io/gameclubpro/major-maksimov-private-v1-${component}`,
       digest: `sha256:${'d'.repeat(64)}`,
     },
   };
@@ -163,6 +163,9 @@ test('request boundary rejects malformed, unknown, oversized and inconsistent da
     },
     (proof) => {
       proof.record.registry.repository = `ghcr.io/gameclubpro/major-maksimov-${proof.record.component}`;
+    },
+    (proof) => {
+      proof.record.registry.repository = `ghcr.io/gameclubpro/major-maksimov-release-${proof.record.component}`;
     },
     (proof) => {
       proof.artifact.id = 0;

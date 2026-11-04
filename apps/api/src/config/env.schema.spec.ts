@@ -19,6 +19,23 @@ function createValidEnv(overrides: Record<string, unknown> = {}) {
 }
 
 describe('validateEnv boolean parsing', () => {
+  it('keeps the machine overview reader disabled by default and accepts only a canonical digest', () => {
+    for (const value of [undefined, ''])
+      expect(
+        validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: value }))
+          .RUNTIME_OVERVIEW_READER_TOKEN_SHA256,
+      ).toBeUndefined();
+    const digest = 'a'.repeat(64);
+    expect(
+      validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: digest }))
+        .RUNTIME_OVERVIEW_READER_TOKEN_SHA256,
+    ).toBe(digest);
+    for (const value of ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), `${digest} `, ' ', 123])
+      expect(() =>
+        validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: value })),
+      ).toThrow(/RUNTIME_OVERVIEW_READER_TOKEN_SHA256/u);
+  });
+
   it('accepts zero token burst while preserving the 30 RPS ceiling', () => {
     expect(validateEnv(createValidEnv()).MAX_API_GLOBAL_BURST).toBeUndefined();
     expect(validateEnv(createValidEnv({ MAX_API_GLOBAL_BURST: '0' })).MAX_API_GLOBAL_BURST).toBe(0);
@@ -387,29 +404,35 @@ describe('validateEnv boolean parsing', () => {
     );
   });
 
-  it('retains the server-side Safety Desk access code', () => {
-    expect(
-      validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'server-admin-code' })).ADMIN_ACCESS_CODE,
-    ).toBe('server-admin-code');
-    expect(validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'abc123' })).ADMIN_ACCESS_CODE).toBe(
-      'abc123',
+  it('starts production without an additional Safety Desk access code', () => {
+    const env = validateEnv(
+      createValidEnv({
+        NODE_ENV: 'production',
+        MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
+        MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
+      }),
     );
-    expect(() => validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'short' }))).toThrow(
-      /ADMIN_ACCESS_CODE/u,
-    );
-    expect(() =>
-      validateEnv(createValidEnv({ ADMIN_ACCESS_CODE: 'replace-with-random-admin-code' })),
-    ).toThrow(/ADMIN_ACCESS_CODE/u);
-    expect(() =>
-      validateEnv(
+
+    expect(env.NODE_ENV).toBe('production');
+    expect(env).not.toHaveProperty('ADMIN_ACCESS_CODE');
+  });
+
+  it.each(['', 'short', 'replace-with-random-admin-code', 'server-admin-code'])(
+    'ignores a retired Safety Desk access code in the environment: %s',
+    (accessCode) => {
+      const env = validateEnv(
         createValidEnv({
           NODE_ENV: 'production',
           MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
           MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
+          ADMIN_ACCESS_CODE: accessCode,
         }),
-      ),
-    ).toThrow(/ADMIN_ACCESS_CODE is required in production/u);
-  });
+      );
+
+      expect(env.NODE_ENV).toBe('production');
+      expect(env).not.toHaveProperty('ADMIN_ACCESS_CODE');
+    },
+  );
 
   it('defaults durable webhook ingress persistence target to two seconds', () => {
     const defaults = validateEnv(createValidEnv());
@@ -1115,7 +1138,6 @@ describe('validateEnv boolean parsing', () => {
   it('requires production public origins to use https on the default port', () => {
     const productionSecrets = {
       NODE_ENV: 'production',
-      ADMIN_ACCESS_CODE: 'server-admin-code',
       MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
       MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
     };
@@ -1162,7 +1184,6 @@ describe('validateEnv boolean parsing', () => {
   it('rejects the deprecated MAX API host in production', () => {
     const productionSecrets = {
       NODE_ENV: 'production',
-      ADMIN_ACCESS_CODE: 'server-admin-code',
       MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
       MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
     };
@@ -1330,7 +1351,6 @@ describe('validateEnv boolean parsing', () => {
       validateEnv(
         createValidEnv({
           NODE_ENV: 'production',
-          ADMIN_ACCESS_CODE: 'server-admin-code',
           MAX_WEBHOOK_SECRET_PATH: 'prod-secret-path-1',
           MAX_WEBHOOK_HEADER_SECRET: 'prod-header-secret-1',
           KARAVAN_STOREFRONT_CATALOG_URL: 'http://example.com/catalog',

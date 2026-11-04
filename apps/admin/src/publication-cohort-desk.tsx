@@ -26,13 +26,7 @@ const clock = new Intl.DateTimeFormat('ru-RU', {
 });
 const time = (value: string) => `${clock.format(new Date(value))} МСК`;
 
-export function PublicationCohortDesk({
-  accessCode,
-  refreshToken,
-}: {
-  accessCode: string;
-  refreshToken: number;
-}) {
+export function PublicationCohortDesk({ refreshToken }: { refreshToken: number }) {
   const [snapshot, setSnapshot] = useState<SafetyDeskPublicationCohortResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -42,7 +36,7 @@ export function PublicationCohortDesk({
     setLoading(true);
     setFailed(false);
     void safetyDeskApiClient
-      .fetchPublicationCohort(accessCode)
+      .fetchPublicationCohort()
       .then(
         (result) => {
           if (current) setSnapshot(result);
@@ -57,7 +51,7 @@ export function PublicationCohortDesk({
     return () => {
       current = false;
     };
-  }, [accessCode, refreshToken]);
+  }, [refreshToken]);
   return (
     <section className="cohort-desk" aria-label="Результаты запусков Публика" aria-busy={loading}>
       <header>

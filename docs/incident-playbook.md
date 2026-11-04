@@ -265,7 +265,7 @@ still applies after short samples improve.
 
 - Separate Basic Auth/nginx failures from `api-admin` authorization or application errors.
 - Confirm public Major sites still deny Safety Desk/support endpoints.
-- Never print the Basic Auth password, `ADMIN_ACCESS_CODE`, forwarded authorization headers, or bot
+- Never print the Basic Auth password, forwarded authorization headers, or bot
   credentials while diagnosing.
 - For a confirmed Safety Desk static regression, restore its retained immutable component:
 

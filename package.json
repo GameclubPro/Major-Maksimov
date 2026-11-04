@@ -10,6 +10,7 @@
     "packages/*"
   ],
   "scripts": {
+    "observer": "node infra/scripts/local-observer.mjs",
     "build": "npm run build --workspace @maxim/contracts && npm run build --workspace @maxim/api && npm run build --workspace @maxim/miniapp && npm run build --workspace @maxim/admin && npm run build --workspace @maxim/eraser",
     "build:miniapp:production": "VITE_API_BASE=https://major-maksimov.ru/api/v1 npm run build --workspace @maxim/miniapp",
     "build:docker": "docker build -f apps/api/Dockerfile -t maxim-api-ci . && docker build -f apps/miniapp/Dockerfile -t maxim-miniapp-ci . && docker build -f apps/admin/Dockerfile -t maxim-admin-ci . && docker build -f apps/eraser/Dockerfile -t maxim-eraser-ci .",
@@ -106,5 +107,8 @@
     "qs": "6.16.0",
     "shell-quote": "1.9.0",
     "valibot": "1.4.2"
+  },
+  "dependencies": {
+    "nodemailer": "10.3.1"
   }
 }

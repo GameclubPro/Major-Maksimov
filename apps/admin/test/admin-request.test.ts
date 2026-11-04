@@ -6,22 +6,20 @@ import {
   type AdminApiFetch,
 } from '../src/admin-request';
 
-test('sends the access code only as a request header', () => {
-  assert.deepEqual(createAdminRequestHeaders('  server-secret  '), {
+test('uses the browser session without an extra access-code header', () => {
+  assert.deepEqual(createAdminRequestHeaders(), {
     Accept: 'application/json',
-    'X-Admin-Access-Code': 'server-secret',
   });
 });
 
 test('adds the JSON content type only for requests with JSON bodies', () => {
-  assert.deepEqual(createAdminRequestHeaders('server-secret', { json: true }), {
+  assert.deepEqual(createAdminRequestHeaders({ json: true }), {
     Accept: 'application/json',
-    'X-Admin-Access-Code': 'server-secret',
     'Content-Type': 'application/json',
   });
 });
 
-test('forwards cancellation and disables cached reads without changing owner authorization', async () => {
+test('forwards cancellation and disables cached reads while preserving the browser session', async () => {
   const controller = new AbortController();
   let options: RequestInit | undefined;
   await createAdminApiTransport(async (_input, init) => {
@@ -29,7 +27,6 @@ test('forwards cancellation and disables cached reads without changing owner aut
     return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json' } });
   }).request(
     '/api/v1/safety-desk/runtime/overview',
-    'owner-code',
     { parse: (value) => value },
     {
       signal: controller.signal,
@@ -39,10 +36,10 @@ test('forwards cancellation and disables cached reads without changing owner aut
   assert.equal(options?.signal, controller.signal);
   assert.equal(options?.cache, 'no-store');
   assert.equal(options?.credentials, 'same-origin');
-  assert.equal((options?.headers as Record<string, string>)['X-Admin-Access-Code'], 'owner-code');
+  assert.equal(new Headers(options?.headers).has('X-Admin-Access-Code'), false);
 });
 
-test('keeps access codes in request headers and out of URLs and browser storage', async () => {
+test('performs owner actions through the browser session without reading credential storage', async () => {
   const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
@@ -66,7 +63,6 @@ test('keeps access codes in request headers and out of URLs and browser storage'
   try {
     const result = await createAdminApiTransport(fetchImpl).request(
       '/api/v1/safety-desk/items/item%2F1/approve',
-      '  secret?code=leak  ',
       { parse: (value) => value as { ok: boolean } },
       { method: 'POST', body: {} },
     );
@@ -74,13 +70,11 @@ test('keeps access codes in request headers and out of URLs and browser storage'
     assert.deepEqual(result, { ok: true });
     assert.equal(requests.length, 1);
     assert.equal(String(requests[0]?.input), '/api/v1/safety-desk/items/item%2F1/approve');
-    assert.equal(String(requests[0]?.input).includes('secret'), false);
     assert.deepEqual(requests[0]?.init, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
         Accept: 'application/json',
-        'X-Admin-Access-Code': 'secret?code=leak',
         'Content-Type': 'application/json',
       },
       body: '{}',

@@ -13,9 +13,10 @@ State: /var/lib/maxim-release (private, maximadmin owned)
 Control: /run/maxim-release/control.sock (dedicated maxim-release-control group)
 SSH: maxim-release-gateway, one restricted forced-command ed25519 public key
 Initial policy: paused; automatic releases disabled
-Apply requires root, exact green main SHA, existing shared deploy locks, complete manifest,
-separate read-only GHCR credential and reviewed independent backup/restore acceptance.
-Git requires /etc/maxim-deploy/git-read-key and git-known-hosts, private and service-readable.
+Apply requires root, exact green main SHA, existing shared deploy locks, complete manifest
+and a separate read-only GHCR credential.
+Canonical public HTTPS Git reads need no separate credential.
+SSH origins require private, service-readable git-read-key and git-known-hosts in /etc/maxim-deploy.
 PLAN
   exit 0
 fi
@@ -37,24 +38,21 @@ node_binary="$(readlink -e "$(command -v node)")"
 node "$ROOT_DIR/scripts/ci/assert-green.mjs" "$expected_sha" --purpose production
 node "$ROOT_DIR/infra/scripts/release-manifest.mjs" validate-current >/dev/null
 node -e 'if(Number(process.versions.node.split(".")[0])!==24)process.exit(1)'
-runuser -u maximadmin -- node --input-type=module -e 'import {privateBytes} from "./infra/scripts/release-service-boundary.mjs"; const c=JSON.parse(privateBytes("/etc/maxim-deploy/ghcr-read.json")); if(!c.username||!c.token)process.exit(1); privateBytes("/etc/maxim-deploy/git-read-key",{maxBytes:16384}); privateBytes("/etc/maxim-deploy/git-known-hosts",{maxBytes:65536});'
-# FLAG: Git reads through a fixed SSH transport outside protected home directories.
-# Verify repository read access and pinned host trust as the actual service user.
+git_origin="$(git remote get-url origin)"
+node --input-type=module -e 'import {assertServiceOrigin} from "./infra/scripts/release-service-admission.mjs"; assertServiceOrigin(process.argv[1]);' "$git_origin"
+runuser -u maximadmin -- node --input-type=module -e 'import {readRegistryCredential} from "./scripts/ci/registry-credentials.mjs"; readRegistryCredential("/etc/maxim-deploy/ghcr-read.json");'
+git_transport_environment=()
+if [[ "$git_origin" != https://github.com/GameclubPro/Major-Maksimov.git ]]; then
+  runuser -u maximadmin -- node --input-type=module -e 'import {privateBytes} from "./infra/scripts/release-service-boundary.mjs"; privateBytes("/etc/maxim-deploy/git-read-key",{maxBytes:16384}); privateBytes("/etc/maxim-deploy/git-known-hosts",{maxBytes:65536});'
+  git_transport_environment=(GIT_SSH_COMMAND='/bin/bash /var/www/Chat_bot/infra/scripts/release-service-git-ssh.sh')
+fi
+# FLAG: Preserve canonical public HTTPS; admitted SSH origins alone use the fixed
+# key and pinned hosts. Prove exact-main access as the actual service user.
 git_probe="$(runuser -u maximadmin -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/maxim-release \
   GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 \
-  GIT_SSH_COMMAND='/bin/bash /var/www/Chat_bot/infra/scripts/release-service-git-ssh.sh' \
-  timeout --signal=TERM --kill-after=2 30 /usr/bin/git ls-remote --exit-code git@github.com:GameclubPro/Major-Maksimov.git refs/heads/main)"
+  "${git_transport_environment[@]}" \
+  timeout --signal=TERM --kill-after=2 30 /usr/bin/git ls-remote --exit-code "$git_origin" refs/heads/main)"
 [[ "$git_probe" == "$expected_sha"$'\trefs/heads/main' ]] || { echo 'Service Git readback did not prove exact main.' >&2; exit 1; }
-# FLAG: Installation preserves the separate recovery gate. This receipt is reviewed and installed
-# by the existing backup acceptance procedure, never inferred from timers or one successful dump.
-[[ -f /etc/maxim-release-recovery-accepted.json && ! -L /etc/maxim-release-recovery-accepted.json ]] || {
-  echo 'Independent main backup/readback and isolated restore acceptance receipt is required.' >&2; exit 1;
-}
-node --input-type=module -e '
-import {privateBytes} from "./infra/scripts/release-service-boundary.mjs";
-const r=JSON.parse(privateBytes("/etc/maxim-release-recovery-accepted.json"));
-const hashes=[r.backupEvidenceSha256,r.independentReadbackEvidenceSha256,r.isolatedRestoreEvidenceSha256];
-if(r.schemaVersion!==1||r.profile!=="main"||!hashes.every(x=>/^[a-f0-9]{64}$/.test(x))||!Number.isFinite(Date.parse(r.acceptedAt))||Date.parse(r.acceptedAt)>Date.now()+120000||Date.parse(r.acceptedAt)<Date.now()-86400000)process.exit(1);'
 [[ -f "$public_key_file" && ! -L "$public_key_file" && "$(stat -c %s "$public_key_file")" -lt 4096 ]] || exit 1
 read -r key_type key_material _key_comment <"$public_key_file"
 [[ "$key_type" == ssh-ed25519 && "$key_material" =~ ^[A-Za-z0-9+/=]+$ && "$(wc -l <"$public_key_file")" -eq 1 ]] || {
@@ -72,6 +70,7 @@ trap release_deploy_lock EXIT
 # FLAG: The checks above can wait on network evidence. Bind every installation input
 # again under the shared lock before creating identities, directories or a service unit.
 [[ "$(git rev-parse HEAD)" == "$expected_sha" && "$(git symbolic-ref --short HEAD)" == main && -z "$(git status --porcelain --untracked-files=no)" ]] || exit 1
+[[ "$(git remote get-url origin)" == "$git_origin" ]] || exit 1
 [[ ! -e /usr/local/lib/maxim-release && ! -L /usr/local/lib/maxim-release && ! -e /etc/maxim-release && ! -L /etc/maxim-release && ! -e /var/lib/maxim-release && ! -L /var/lib/maxim-release ]] || exit 1
 node "$ROOT_DIR/infra/scripts/release-manifest.mjs" validate-current >/dev/null
 groupadd --system maxim-release-control

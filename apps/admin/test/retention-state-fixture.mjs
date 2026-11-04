@@ -10,7 +10,6 @@ export function mountRetentionStateFixture() {
 
   function Desk({ controls }) {
     const desk = useRetentionDesk({
-      accessCode: 'admin-test-access',
       refreshToken: controls.refreshToken,
       onSnapshot: controls.onSnapshot,
       onBusyChange: controls.onBusyChange,
