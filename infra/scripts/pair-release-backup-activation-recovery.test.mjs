@@ -65,9 +65,10 @@ const argv = (value) =>
   `{ path=${value.split(' ')[0]}; argv[]=${value}; ignore_errors=no; start_time=[n/a]; stop_time=[n/a]; pid=0; code=(null); status=0/0 }`;
 
 async function unitsFixture() {
-  // Interpret only the installer’s literal unit templates; never execute the installer.
+  // FLAG: This incident proof pins the installed units from 377c3ef9. Later installer
+  // capabilities must not rewrite its historical evidence or its production hashes.
   const source = await readFile(
-    new URL('./vps-install-postgres-backup-timers.sh', import.meta.url),
+    new URL('./test-fixtures/postgres-backup-activation-installer-v1.txt', import.meta.url),
     'utf8',
   );
   const units = {};

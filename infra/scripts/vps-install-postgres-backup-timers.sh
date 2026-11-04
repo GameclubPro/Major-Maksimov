@@ -93,6 +93,8 @@ Type=oneshot
 WorkingDirectory=$ROOT_DIR
 EnvironmentFile=-/etc/maxim-postgres-backup.env
 $PROFILE_PRECHECK
+ExecStartPre=/usr/bin/test -f $ROOT_DIR/infra/scripts/lib/postgres-restore-volume.sh
+ExecStartPre=/usr/bin/test -f $ROOT_DIR/infra/scripts/lib/postgres-restore-volume.mjs
 ExecStartPre=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE node $ROOT_DIR/infra/scripts/postgres-backup-schedule.mjs capability
 ExecStart=/usr/bin/env MAXIM_BACKUP_PROFILE=$MAXIM_BACKUP_PROFILE $ROOT_DIR/infra/scripts/restore-postgres-backup-smoke.sh
 TimeoutStartSec=12h15m

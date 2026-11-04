@@ -742,7 +742,16 @@ esac
             0,
           );
           assert.doesNotMatch(service, /^ConditionPathExists=.*postgres-backup-profile/m);
+        } else if (name.endsWith('-restore-smoke.service')) {
+          assert.equal(precheck, join(root, 'infra/scripts/lib/postgres-restore-volume.sh'));
         } else assert.equal(precheck, undefined);
+        if (name.endsWith('-restore-smoke.service')) {
+          for (const extension of ['sh', 'mjs']) {
+            const capability = join(root, `infra/scripts/lib/postgres-restore-volume.${extension}`);
+            assert.ok(service.includes(`ExecStartPre=/usr/bin/test -f ${capability}`));
+            assert.equal(spawnSync('/usr/bin/test', ['-f', capability]).status, 0);
+          }
+        }
       }
       const commands = readFileSync(log, 'utf8');
       if (profile === 'eraser')
