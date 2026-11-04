@@ -13,6 +13,10 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
+import {
+  scaleHostEnvironment,
+  scaleHostIdentityFixture,
+} from './test-fixtures/scale-deploy-profile.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -148,6 +152,7 @@ function fixture({ missingHelper = false, rejectAfter = 0, localBranchExists = t
   const log = join(directory, 'calls.log');
   mkdirSync(bin);
   cpSync(join(root, 'infra/scripts'), join(directory, 'infra/scripts'), { recursive: true });
+  scaleHostIdentityFixture(directory);
   // FLAG: Target-source floors are separate compatibility tests. Permit their
   // read-only preflight here so every wrapper reaches the rejecting admission boundary.
   const topology = join(directory, 'infra/scripts/lib/deploy-topology.sh');
@@ -249,6 +254,11 @@ exit 98
     `#!/usr/bin/env bash
 set -euo pipefail
 printf 'docker:%s\\n' "$*" >>"$COLD_ENTRY_TEST_LOG"
+case "$*" in
+  'context show') printf '%s\\n' default; exit 0 ;;
+  'context inspect default --format {{.Endpoints.docker.Host}}')
+    printf '%s\\n' unix:///var/run/docker.sock; exit 0 ;;
+esac
 case " $* " in
   *' ps '*|*' inspect '*|*' config '*|*' system df ')
     if [[ "$*" == *' ps '*'-q api-admin'* ]]; then printf '%064d\\n' 1; fi
@@ -259,10 +269,20 @@ exit 98
 `,
   );
   writeFileSync(
+    join(bin, 'hostname'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == -I ]] || exit 98
+printf '%s\\n' hostname-read >>"$COLD_ENTRY_TEST_LOG"
+printf '%s\\n' 192.0.2.40
+`,
+  );
+  writeFileSync(
     join(bin, 'npm'),
     '#!/bin/sh\nprintf "npm:%s\\n" "$*" >>"$COLD_ENTRY_TEST_LOG"\nexit 98\n',
   );
-  for (const command of ['git', 'node', 'docker', 'npm']) chmodSync(join(bin, command), 0o755);
+  for (const command of ['git', 'node', 'docker', 'hostname', 'npm'])
+    chmodSync(join(bin, command), 0o755);
   const env = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
@@ -290,7 +310,11 @@ exit 98
     run: (name, args = [], extra = {}) =>
       spawnSync('bash', [join(directory, 'infra/scripts', name), ...args], {
         cwd: directory,
-        env: { ...env, ...extra },
+        env: {
+          ...env,
+          ...(name === 'vps-pull-build-up-scale.sh' ? scaleHostEnvironment(directory) : {}),
+          ...extra,
+        },
         encoding: 'utf8',
         timeout: 15_000,
       }),
