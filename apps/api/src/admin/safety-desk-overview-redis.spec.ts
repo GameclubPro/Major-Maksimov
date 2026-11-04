@@ -16,6 +16,9 @@ import { READ_OVERVIEW_QUEUE_COUNTERS_LUA } from '../system/queue-metrics.servic
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { projectOverviewActions } from './safety-desk-overview-actions.service';
 import { randomUUID } from 'node:crypto';
+import type { QueueMetricsService } from '../system/queue-metrics.service';
+import type { SafetyDeskOverviewPendingService } from './safety-desk-overview-pending.service';
+import type { SafetyDeskOverviewActionsService } from './safety-desk-overview-actions.service';
 
 const url = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
 const native = url ? describe : describe.skip;
@@ -63,6 +66,70 @@ native('Safety Desk shared history on native Redis', () => {
   });
   afterAll(async () => {
     await redis.quit();
+  });
+
+  it('reads the bounded machine snapshot even when history is unavailable, without collection or writes', async () => {
+    const at = Date.now();
+    const sample = snapshot(at);
+    await writeOverview(redis, sample, overviewHistoryPoint(sample));
+    await redis.del(OVERVIEW_HISTORY_KEY);
+    await redis.set(OVERVIEW_HISTORY_KEY, 'unavailable-history-fixture');
+    const store = new SafetyDeskOverviewStore(new ConfigService({ REDIS_URL: url }));
+    const registry = new MaxBotRegistryService(
+      new ConfigService({
+        MAX_BOT_TOKEN: 'test-token',
+        MAX_BOT_ID: 'major',
+        MAX_WEBHOOK_SECRET_PATH: 'test-path',
+        MAX_WEBHOOK_HEADER_SECRET: 'test-header',
+      }),
+    );
+    const queues = {
+      getOverviewCounters: jest.fn<
+        ReturnType<QueueMetricsService['getOverviewCounters']>,
+        Parameters<QueueMetricsService['getOverviewCounters']>
+      >(),
+    } satisfies Pick<QueueMetricsService, 'getOverviewCounters'>;
+    const pending = {
+      getSnapshot: jest.fn<
+        ReturnType<SafetyDeskOverviewPendingService['getSnapshot']>,
+        Parameters<SafetyDeskOverviewPendingService['getSnapshot']>
+      >(),
+    } satisfies Pick<SafetyDeskOverviewPendingService, 'getSnapshot'>;
+    const actions = {
+      getSnapshot: jest.fn<
+        ReturnType<SafetyDeskOverviewActionsService['getSnapshot']>,
+        Parameters<SafetyDeskOverviewActionsService['getSnapshot']>
+      >(),
+    } satisfies Pick<SafetyDeskOverviewActionsService, 'getSnapshot'>;
+    const service = () => new SafetyDeskOverviewService(store, queues, registry, pending, actions);
+    const history = jest.spyOn(store, 'readHistory');
+    const write = jest.spyOn(store, 'write');
+    try {
+      const reader = service();
+      const [a, b] = await Promise.all([
+        reader.getObserverSnapshot(),
+        reader.getObserverSnapshot(),
+      ]);
+      expect({ ...a, generatedAt: b.generatedAt }).toEqual(b);
+      expect(a.collector.availability).toBe('FRESH');
+      expect(a.collector.observedAt).toBe(sample.collector.observedAt);
+      expect(a.history).toEqual({
+        ...sample.history,
+        availability: 'UNAVAILABLE',
+        observedAt: null,
+        points: [],
+      });
+      expect(await redis.get(OVERVIEW_HISTORY_KEY)).toBe('unavailable-history-fixture');
+      await redis.set(OVERVIEW_SNAPSHOT_KEY, 'x'.repeat(250001));
+      expect((await service().getObserverSnapshot()).collector.availability).toBe('INVALID');
+      expect(history).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(queues.getOverviewCounters).not.toHaveBeenCalled();
+      expect(pending.getSnapshot).not.toHaveBeenCalled();
+      expect(actions.getSnapshot).not.toHaveBeenCalled();
+    } finally {
+      store.onModuleDestroy();
+    }
   });
 
   it('replaces the current minute, retains exactly 1440 points, expires after 24h and shares the same snapshot across restarts', async () => {

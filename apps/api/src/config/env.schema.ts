@@ -255,6 +255,13 @@ const envSchema = z.object({
   SYSTEM_ADMIN_USER_IDS: z.string().optional(),
   MAJOR_NETWORKS_ROLLOUT: z.enum(['off', 'test', 'on']).default('off'),
   SAFETY_DESK_ALLOWED_HOSTS: z.string().optional(),
+  RUNTIME_OVERVIEW_READER_TOKEN_SHA256: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
+  ),
   ADMIN_ACCESS_CODE: z
     .string()
     .trim()

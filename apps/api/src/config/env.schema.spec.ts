@@ -19,6 +19,23 @@ function createValidEnv(overrides: Record<string, unknown> = {}) {
 }
 
 describe('validateEnv boolean parsing', () => {
+  it('keeps the machine overview reader disabled by default and accepts only a canonical digest', () => {
+    for (const value of [undefined, ''])
+      expect(
+        validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: value }))
+          .RUNTIME_OVERVIEW_READER_TOKEN_SHA256,
+      ).toBeUndefined();
+    const digest = 'a'.repeat(64);
+    expect(
+      validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: digest }))
+        .RUNTIME_OVERVIEW_READER_TOKEN_SHA256,
+    ).toBe(digest);
+    for (const value of ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), `${digest} `, ' ', 123])
+      expect(() =>
+        validateEnv(createValidEnv({ RUNTIME_OVERVIEW_READER_TOKEN_SHA256: value })),
+      ).toThrow(/RUNTIME_OVERVIEW_READER_TOKEN_SHA256/u);
+  });
+
   it('accepts zero token burst while preserving the 30 RPS ceiling', () => {
     expect(validateEnv(createValidEnv()).MAX_API_GLOBAL_BURST).toBeUndefined();
     expect(validateEnv(createValidEnv({ MAX_API_GLOBAL_BURST: '0' })).MAX_API_GLOBAL_BURST).toBe(0);
