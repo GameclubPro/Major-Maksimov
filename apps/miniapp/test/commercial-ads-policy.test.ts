@@ -170,3 +170,22 @@ test('emulator preview uses draft policy and expiry without mutating saved setti
   });
   assert.equal(refreshed.items[0].metadata?.commercialFeedbackReported, true);
 });
+
+test('mixed offer explanations preserve the scope of allowed and blocked categories', () => {
+  assert.equal(
+    commercialPreviewExplanation({
+      decision: 'KEEP',
+      categories: ['SERVICES', 'BUSINESS'],
+      reason: 'CATEGORY_ALLOWED',
+    }),
+    'Эти категории разрешены.',
+  );
+  assert.equal(
+    commercialPreviewExplanation({
+      decision: 'DELETE',
+      categories: ['SERVICES', 'BUSINESS'],
+      reason: 'BLOCKED_CATEGORY',
+    }),
+    'Есть запрещённая категория.',
+  );
+});

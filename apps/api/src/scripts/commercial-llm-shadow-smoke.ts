@@ -140,11 +140,13 @@ export async function runCommercialLlmShadowSmoke({ redis, lease, client }: Smok
       {
         name: 'commercial-service',
         expected: 'COMMERCIAL',
+        expectedReason: 'SERVICE_OFFER',
         text: 'Наша компания ремонтирует стиральные машины. Мастера работают ежедневно, гарантия, принимаем заказы: [phone].',
       },
       {
         name: 'personal-used-item',
         expected: 'NOT_COMMERCIAL',
+        expectedReason: 'PERSONAL_SALE',
         text: 'Продам свой старый холодильник после переезда, один, б/у. Служил нашей семье десять лет.',
       },
     ] as const) {
@@ -168,7 +170,11 @@ export async function runCommercialLlmShadowSmoke({ redis, lease, client }: Smok
         classification: result.classification,
         durationMs: result.durationMs,
       });
-      if (result.classification !== sample.expected)
+      if (
+        result.classification !== sample.expected ||
+        result.reasonCodes.length !== 1 ||
+        result.reasonCodes[0] !== sample.expectedReason
+      )
         throw new CommercialLlmShadowSmokeError('UNEXPECTED_CLASSIFICATION');
     }
   } catch (error: unknown) {

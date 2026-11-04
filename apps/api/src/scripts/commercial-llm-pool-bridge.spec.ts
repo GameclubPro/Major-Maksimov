@@ -6,7 +6,11 @@ import { setTimeout as pause } from 'node:timers/promises';
 import type Redis from 'ioredis';
 import { createCommercialLlmRedis } from '../moderation/commercial/commercial-llm-shadow.lease';
 import { CommercialLlmPoolMailbox } from '../moderation/commercial/commercial-llm-pool.mailbox';
-import { buildCommercialLlmRequest } from '../moderation/commercial/commercial-llm.protocol';
+import {
+  buildCommercialLlmRequest,
+  COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256,
+  COMMERCIAL_LLM_SYSTEM_PROMPT,
+} from '../moderation/commercial/commercial-llm.protocol';
 import {
   COMMERCIAL_LLM_POOL_FRAMES_PER_MINUTE,
   COMMERCIAL_LLM_POOL_PROFILES,
@@ -82,13 +86,16 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     }
     throw new Error('pool_bridge_test_deadline');
   };
-  const connected = async (nodeId: CommercialLlmPoolBridgeNodeId) => {
+  const connected = async (nodeId: CommercialLlmPoolBridgeNodeId, previousPrompt = false) => {
     const state = launch(nodeId);
     state.child.stdin.write(
       JSON.stringify({
         type: 'hello',
         nodeId,
-        identity: COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity,
+        identity: {
+          ...COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity,
+          ...(previousPrompt ? { promptSha256: COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256 } : {}),
+        },
       }) + '\n',
     );
     await waitFor(
@@ -161,6 +168,38 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
       (await Promise.all([mailbox.wait(first), mailbox.wait(second)])).map((r) => r.outcome),
     ).toEqual(['COMPLETE', 'COMPLETE']);
   });
+
+  it.each(['pc-a-4b', 'pc-b-9b'] as const)(
+    'forwards the current prompt to reviewed previous %s workers',
+    async (nodeId) => {
+      const state = await connected(nodeId, true);
+      expect(state.frames[0]).toMatchObject({
+        identity: { promptSha256: COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256 },
+      });
+      expect(
+        JSON.parse((await redis.get(commercialLlmPoolNodeKeys(nodeId).heartbeat))!).identity,
+      ).toEqual(COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity);
+      const reservation = await reserve(nodeId);
+      await waitFor(
+        async () => state.frames,
+        (frames) => frames.some((frame) => frame.type === 'request'),
+      );
+      const frame = state.frames.find((entry) => entry.type === 'request')!;
+      expect(JSON.parse(String(frame.body)).messages[0].content).toBe(COMMERCIAL_LLM_SYSTEM_PROMPT);
+      const reply = answer(nodeId, reservation.id);
+      const body = JSON.parse(reply.body);
+      body.choices[0].message.content = JSON.stringify({
+        classification: 'COMMERCIAL',
+        reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER'],
+      });
+      reply.body = JSON.stringify(body);
+      state.child.stdin.write(JSON.stringify(reply) + '\n');
+      expect(await new CommercialLlmPoolMailbox(redis).wait(reservation)).toEqual({
+        outcome: 'COMPLETE',
+        body: reply.body,
+      });
+    },
+  );
 
   it('EOF removes only its own session and fences in-flight replies while another PC remains ready', async () => {
     const a = await connected('pc-a-4b');

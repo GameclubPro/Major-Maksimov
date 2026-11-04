@@ -39,6 +39,7 @@ export function CommercialPreviewSheet({
   );
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const controller = useRef<AbortController | null>(null);
+  const resultElement = useRef<HTMLDivElement | null>(null);
   const key = JSON.stringify([scope.chatId, text, author?.userId ?? null, enabled, policy]);
   const activeKey = useRef(key);
   activeKey.current = key;
@@ -76,12 +77,18 @@ export function CommercialPreviewSheet({
     setBusy(false);
   }, [key]);
   useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => {
+    if (visibleResult)
+      resultElement.current?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  }, [visibleResult]);
   const title =
     visibleResult?.decision === 'DELETE'
       ? 'Удалить'
       : visibleResult?.decision === 'UNAVAILABLE'
         ? 'Не удалось проверить'
-        : 'Оставить';
+        : visibleResult?.decision === 'UNSURE'
+          ? 'Недостаточно данных'
+          : 'Оставить';
   return (
     <>
       <SettingsDrilldownPanel
@@ -136,6 +143,7 @@ export function CommercialPreviewSheet({
           ) : null}
           {visibleResult ? (
             <div
+              ref={resultElement}
               className="commercial-policy__result"
               data-decision={visibleResult.decision}
               role="status"
@@ -146,7 +154,8 @@ export function CommercialPreviewSheet({
                   icon={
                     visibleResult.decision === 'DELETE'
                       ? 'ShieldAlert'
-                      : visibleResult.decision === 'UNAVAILABLE'
+                      : visibleResult.decision === 'UNAVAILABLE' ||
+                          visibleResult.decision === 'UNSURE'
                         ? 'WarningTriangle'
                         : 'ShieldCheck'
                   }

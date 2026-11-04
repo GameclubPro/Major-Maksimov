@@ -108,7 +108,7 @@ describe('commercial preview without moderation effects', () => {
     ).toEqual({ decision: 'UNAVAILABLE', categories: [], reason: 'CLASSIFIER_UNAVAILABLE' });
   });
 
-  it('uses the same below-threshold category evidence as actual AI moderation', async () => {
+  it('uses semantic categories and scoped grants consistently with actual AI moderation', async () => {
     const redis = shadowLease.createCommercialLlmRedis('redis://127.0.0.1:1');
     jest.spyOn(redis, 'connect').mockResolvedValue(undefined);
     jest.spyOn(redis, 'disconnect').mockImplementation(() => undefined);
@@ -118,7 +118,7 @@ describe('commercial preview without moderation effects', () => {
     const result: CommercialLlmObservationResult = {
       ...COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity,
       classification: 'COMMERCIAL',
-      reasonCodes: ['COMMERCIAL_OFFER'],
+      reasonCodes: ['SERVICE_OFFER'],
       policyVersion: COMMERCIAL_LLM_POLICY_VERSION,
       durationMs: 1,
     };
@@ -136,5 +136,32 @@ describe('commercial preview without moderation effects', () => {
     expect(
       await service.preview({ text: shortOffer, policy, enabled: true }, settings),
     ).toMatchObject({ decision: 'KEEP', categories: ['SERVICES'] });
+    jest.spyOn(CommercialLlmSecondaryScheduler.prototype, 'classifyAudit').mockResolvedValue({
+      ...result,
+      reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER'],
+    });
+    expect(
+      await service.preview({ text: shortOffer, policy, enabled: true }, settings),
+    ).toMatchObject({ decision: 'DELETE', categories: ['SERVICES', 'BUSINESS'] });
+    policy.exceptions.push({
+      id: '9860f156-edc1-4c09-a42b-c3a6f44ea53b',
+      userId: '123',
+      userName: 'Участник',
+      categories: ['BUSINESS'],
+      expiresAt: null,
+    });
+    expect(
+      await service.preview({ text: shortOffer, policy, enabled: true, userId: '123' }, settings),
+    ).toMatchObject({ decision: 'KEEP', reason: 'PARTICIPANT_EXCEPTION' });
+    expect(
+      await service.preview({ text: shortOffer, policy, enabled: true, userId: '124' }, settings),
+    ).toMatchObject({ decision: 'DELETE' });
+    jest.spyOn(CommercialLlmSecondaryScheduler.prototype, 'classifyAudit').mockResolvedValue({
+      ...result,
+      reasonCodes: ['COMMERCIAL_OFFER'],
+    });
+    expect(
+      await service.preview({ text: shortOffer, policy, enabled: true }, settings),
+    ).toMatchObject({ decision: 'UNSURE', reason: 'INSUFFICIENT_CONTEXT', categories: [] });
   });
 });
