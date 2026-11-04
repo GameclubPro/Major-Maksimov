@@ -242,7 +242,7 @@ jobs:
         env:
           MAXIM_TEST_POSTGRES_URL: ${{ env.DATABASE_URL }}
           TZ: UTC
-        run: node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs
+        run: node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs
       - name: Shared statistics with native PostgreSQL
         if: matrix.shard == 'compatibility'
         env:

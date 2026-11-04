@@ -3216,12 +3216,61 @@ test('monitor signal audit bounds both indexed source samples before aggregation
   assert.match(sql, /recent_webhooks AS MATERIALIZED/u);
   assert.match(sql, /moderation_sample AS MATERIALIZED/u);
   assert.match(sql, /bounded_moderation AS MATERIALIZED/u);
-  assert.equal([...sql.matchAll(/>= statement_timestamp\(\) - make_interval/gu)].length, 2);
-  assert.equal([...sql.matchAll(/LIMIT 2001/gu)].length, 2);
+  assert.equal([...sql.matchAll(/>= statement_timestamp\(\) - make_interval/gu)].length, 9);
+  assert.equal([...sql.matchAll(/LIMIT 2001/gu)].length, 9);
   assert.match(sql, /LIMIT 2000/u);
   assert.doesNotMatch(
     sql.slice(sql.indexOf('WITH webhook_statuses(status) AS')),
     /raw_payload|normalized_payload|error_message|source_ip|user_id|masked_excerpt/u,
+  );
+});
+
+test('monitor signal audit includes every status and makes rejected metadata and partial coverage explicit', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  const result = runAudit(data, ['monitor-signals', '30']);
+  assert.equal(result.status, 0, result.stderr);
+  const sql = readFileSync(data.sql, 'utf8');
+  const expectedStatuses = schema
+    .match(/enum WebhookStatus \{([^}]+)\}/u)[1]
+    .trim()
+    .split(/\s+/u);
+  const statusSql = sql.slice(
+    sql.indexOf('WITH webhook_statuses(status) AS'),
+    sql.indexOf('), recent_webhooks'),
+  );
+  assert.deepEqual(
+    [...statusSql.matchAll(/\('([A-Z_]+)'::"WebhookStatus"\)/gu)].map((match) => match[1]),
+    expectedStatuses,
+  );
+  const recentSql = sql.slice(sql.indexOf('), recent_webhooks'), sql.indexOf('), webhook_summary'));
+  assert.deepEqual(
+    [...recentSql.matchAll(/WHERE status = '([A-Z_]+)'::"WebhookStatus"/gu)].map(
+      (match) => match[1],
+    ),
+    expectedStatuses,
+  );
+  assert.doesNotMatch(recentSql, /JOIN LATERAL/u);
+  const moderationSql = sql.slice(sql.indexOf('WITH moderation_sample AS MATERIALIZED'));
+  const candidateProjection = moderationSql.slice(
+    0,
+    moderationSql.indexOf('FROM moderation_events'),
+  );
+  assert.match(candidateProjection, /pg_column_compression\(metadata\)/u);
+  assert.match(candidateProjection, /pg_column_size\(metadata\) <= 32768/u);
+  assert.match(candidateProjection, /AS metadata_admission/u);
+  assert.match(candidateProjection, /AS session_key/u);
+  assert.match(candidateProjection, /AS original_event_id/u);
+  assert.doesNotMatch(candidateProjection, /message_id, metadata, created_at/u);
+  assert.match(moderationSql, /PARTIAL_GLOBAL_COHORT/u);
+  assert.match(moderationSql, /'metadata_admission'/u);
+  assert.match(moderationSql, /'duplicate_classification_complete'/u);
+  assert.match(moderationSql, /'observed_sample_count'/u);
+  assert.match(moderationSql, /'oldest_sample_at'/u);
+  assert.match(moderationSql, /'newest_sample_at'/u);
+  assert.doesNotMatch(
+    moderationSql.slice(moderationSql.indexOf('), bounded_moderation')),
+    /metadata->/u,
   );
 });
 
