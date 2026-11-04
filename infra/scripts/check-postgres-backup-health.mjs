@@ -81,9 +81,9 @@ export async function checkPostgresBackupHealth(directory, now = Date.now(), pro
   const restoreDataAgeMs = age(restoreReceipt, 'generatedAt');
   const independentAgeMs = age(independentReceipt);
   const restoreAgeMs = age(restoreReceipt);
-  if (independentAgeMs === null || independentAgeMs > 28 * 60 * 60_000)
+  if (independentAgeMs === null || independentAgeMs > 24 * 60 * 60_000)
     problems.push('independent_backup_overdue');
-  if (independentDataAgeMs === null || independentDataAgeMs > 28 * 60 * 60_000)
+  if (independentDataAgeMs === null || independentDataAgeMs > 24 * 60 * 60_000)
     problems.push('independent_backup_data_overdue');
   if (restoreAgeMs === null || restoreAgeMs > 8 * 24 * 60 * 60_000)
     problems.push('restore_overdue');
