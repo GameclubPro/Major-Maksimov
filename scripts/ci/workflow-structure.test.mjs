@@ -9,6 +9,42 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+test('registry attestations receive standard Docker auth and always restore it before source cleanup', () => {
+  const jobs = parse(workflow).jobs;
+  assert.equal(jobs.registry['runs-on'], 'ubuntu-latest');
+  const steps = jobs.registry.steps;
+  const prepare = steps.findIndex(
+    (step) => step.run === 'node scripts/ci/registry-attestation-auth.mjs prepare',
+  );
+  const cleanup = steps.findIndex(
+    (step) => step.name === 'Remove temporary publication credentials',
+  );
+  const attestations = steps
+    .map((step, index) =>
+      /^actions\/attest-(?:build-provenance|sbom)@/u.test(step.uses ?? '') ? index : -1,
+    )
+    .filter((index) => index >= 0);
+  assert.equal(attestations.length, 2);
+  assert.ok(prepare > steps.findIndex((step) => step.id === 'publish'));
+  assert.ok(prepare < attestations[0], 'the pinned actions read os.homedir()/.docker/config.json');
+  assert.ok(cleanup > attestations.at(-1));
+  assert.equal(steps[prepare].if, undefined);
+  assert.equal(steps[cleanup].if, 'always()');
+  assert.equal(steps[prepare]['continue-on-error'], undefined);
+  assert.equal(steps[cleanup]['continue-on-error'], undefined);
+  const cleanupCommands = steps[cleanup].run.trim().split('\n');
+  assert.equal(cleanupCommands[0], 'node scripts/ci/registry-attestation-auth.mjs cleanup');
+  assert.equal(cleanupCommands.length, 2);
+  assert.match(cleanupCommands[1], /rmSync\(process\.env\.DOCKER_CONFIG/u);
+  assert.doesNotMatch(steps[cleanup].run, /(?:\|\||;|set \+e)/u);
+  for (const step of steps) assert.equal(step.env?.HOME, undefined);
+  assert.equal(jobs.registry.env.HOME, undefined);
+  for (const index of attestations) {
+    assert.equal(steps[index].with['push-to-registry'], true);
+    assert.equal(steps[index]['continue-on-error'], undefined);
+  }
+});
+
 function assertBoundedHttpsAptPolicy(run) {
   for (const path of [
     '/etc/apt/apt-mirrors.txt',
