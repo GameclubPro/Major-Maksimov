@@ -1,7 +1,7 @@
 import {
   safetyDeskOverviewResponseSchema,
   type SafetyDeskOverviewResponse,
-} from '@maxim/contracts/safety-desk';
+} from '../../../packages/contracts/src/safety-desk-overview.ts';
 
 export function overviewFixture(now = Date.now()): SafetyDeskOverviewResponse {
   const at = new Date(now).toISOString();
