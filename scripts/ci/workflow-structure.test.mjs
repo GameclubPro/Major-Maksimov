@@ -9,6 +9,50 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+test('image build and publication normalize the same default Docker store before any image work', () => {
+  const jobs = parse(workflow).jobs;
+  for (const [id, firstWork] of [
+    ['docker', 'Create isolated image builder'],
+    ['registry', 'Load the exact smoke-tested image'],
+  ]) {
+    const steps = jobs[id].steps;
+    const setup = steps.findIndex(
+      (step) => step.name === 'Normalize the default Docker image store',
+    );
+    assert.ok(setup > steps.findIndex((step) => step.uses?.startsWith('actions/setup-node@')));
+    assert.ok(setup < steps.findIndex((step) => step.name === firstWork));
+    assert.equal(steps[setup].if, undefined);
+    assert.equal(steps[setup]['continue-on-error'], undefined);
+    assert.equal(steps[setup]['timeout-minutes'], 2);
+    assert.match(steps[setup].run, /sudo -n env/u);
+    assert.match(steps[setup].run, /"GITHUB_ACTIONS=\$GITHUB_ACTIONS"/u);
+    assert.match(steps[setup].run, /"RUNNER_ENVIRONMENT=\$RUNNER_ENVIRONMENT"/u);
+    assert.match(steps[setup].run, /"DOCKER_HOST=\$\{DOCKER_HOST:-\}"/u);
+    assert.match(steps[setup].run, /"DOCKER_CONTEXT=\$\{DOCKER_CONTEXT:-\}"/u);
+    assert.match(
+      steps[setup].run,
+      /"\$\(command -v node\)" scripts\/ci\/prepare-docker-store\.mjs prepare/u,
+    );
+    assert.equal(
+      steps[setup].run.trim().split('\n').at(-1),
+      'node scripts/ci/prepare-docker-store.mjs verify',
+    );
+    assert.equal(jobs[id].env?.DOCKER_HOST, undefined);
+    assert.equal(jobs[id].env?.DOCKER_CONTEXT, undefined);
+  }
+  for (const path of [
+    'infra/scripts/smoke-photo-native-ci.sh',
+    'infra/scripts/smoke-multibot-online-client-ci.sh',
+    'infra/scripts/smoke-outcome-cohort-online-client-ci.sh',
+    'infra/scripts/smoke-backlog-cancellation-v2-ci.sh',
+  ]) {
+    const smoke = readFileSync(resolve(root, path), 'utf8');
+    assert.ok(smoke.includes('unix:///var/run/docker.sock'));
+    assert.ok(smoke.includes('"${DOCKER_HOST:-}"'));
+    assert.ok(smoke.includes('"${DOCKER_CONTEXT:-}"'));
+  }
+});
+
 test('registry attestations receive standard Docker auth and always restore it before source cleanup', () => {
   const jobs = parse(workflow).jobs;
   assert.equal(jobs.registry['runs-on'], 'ubuntu-latest');
