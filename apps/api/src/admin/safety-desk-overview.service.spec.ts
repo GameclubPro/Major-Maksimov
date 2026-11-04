@@ -22,6 +22,7 @@ import {
 } from '../system/storage-runtime-metrics.service';
 import { RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 import type { AppRole } from '../runtime/app-role';
+import { safetyDeskOverviewResponseSchema } from '@maxim/contracts/safety-desk';
 
 const now = new Date('2026-11-04T12:00:00.000Z');
 
@@ -228,6 +229,131 @@ describe('Safety Desk shared bounded overview', () => {
     expect(f.queues.getOverviewCounters).not.toHaveBeenCalled();
     expect(f.pending.getSnapshot).not.toHaveBeenCalled();
     expect(f.actions.getSnapshot).not.toHaveBeenCalled();
+    f.redis.disconnect();
+  });
+
+  it('serves machine reads from one coalesced snapshot without history, SQL or counter collection', async () => {
+    const f = fixture();
+    await f.service.collect();
+    const stored = structuredClone(f.store.write.mock.calls[0]![0]);
+    stored.history = {
+      ...stored.history,
+      availability: 'FRESH',
+      observedAt: now.toISOString(),
+      points: [overviewHistoryPoint(stored)],
+    };
+    f.store.readSnapshot.mockClear().mockResolvedValue(stored);
+    f.store.write.mockClear();
+    f.store.connection.mockClear();
+    f.queues.getOverviewCounters.mockClear();
+    f.pending.getSnapshot.mockClear();
+    f.actions.getSnapshot.mockClear();
+    const [a, b] = await Promise.all([
+      f.service.getObserverSnapshot(),
+      f.service.getObserverSnapshot(),
+    ]);
+    expect(a).toEqual(b);
+    expect(safetyDeskOverviewResponseSchema.safeParse(a).success).toBe(true);
+    expect(a.collector.availability).toBe('FRESH');
+    expect(a.history).toEqual({
+      ...stored.history,
+      availability: 'UNAVAILABLE',
+      observedAt: null,
+      points: [],
+    });
+    expect(stored.history.points).toHaveLength(1);
+    await f.service.getObserverSnapshot();
+    expect(f.store.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(f.store.readHistory).not.toHaveBeenCalled();
+    expect(f.store.connection).not.toHaveBeenCalled();
+    expect(f.store.write).not.toHaveBeenCalled();
+    expect(f.queues.getOverviewCounters).not.toHaveBeenCalled();
+    expect(f.pending.getSnapshot).not.toHaveBeenCalled();
+    expect(f.actions.getSnapshot).not.toHaveBeenCalled();
+    jest.setSystemTime(new Date(now.getTime() + 1000));
+    await f.service.getObserverSnapshot();
+    expect(f.store.readSnapshot).toHaveBeenCalledTimes(2);
+    f.redis.disconnect();
+  });
+
+  it('ages every source at response time after a slow machine read without renewing its evidence', async () => {
+    const f = fixture();
+    await f.service.collect();
+    const stored = structuredClone(f.store.write.mock.calls[0]![0]);
+    stored.workers = {
+      availability: 'FRESH',
+      observedAt: now.toISOString(),
+      value: {
+        expectedCount: 1,
+        freshCount: 1,
+        rows: [{ service: 'api-admin', observedAt: now.toISOString() }],
+      },
+    };
+    for (const bot of stored.bots) {
+      bot.subscription = {
+        availability: 'FRESH',
+        observedAt: now.toISOString(),
+        value: { configured: true, subscribed: true, lastIncomingAt: null },
+      };
+      if (bot.kind === 'publisher')
+        bot.publisher = {
+          availability: 'FRESH',
+          observedAt: now.toISOString(),
+          value: { dispatchEnabled: true, blocker: null },
+        };
+    }
+    let release!: (value: typeof stored) => void;
+    f.store.readSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const reading = f.service.getObserverSnapshot();
+    jest.setSystemTime(new Date(now.getTime() + 180000));
+    release(stored);
+    const response = await reading;
+    expect(response.generatedAt).toBe(new Date(now.getTime() + 180000).toISOString());
+    expect(response.collector).toEqual({ ...stored.collector, availability: 'STALE' });
+    for (const key of ['queues', 'workers', 'receipts', 'unfinishedActions', 'actions'] as const) {
+      expect(response[key].availability).toBe('STALE');
+      expect(response[key].observedAt).toBe(stored[key].observedAt);
+    }
+    for (const bot of response.bots) {
+      for (const key of [
+        'subscription',
+        'pendingReceipts',
+        'unfinishedActions',
+        'actionLatency',
+        'lastTerminalAt',
+        'outcomes',
+      ] as const)
+        expect(bot[key].availability).toBe('STALE');
+      if (bot.publisher) expect(bot.publisher.availability).toBe('STALE');
+    }
+    expect(f.store.readHistory).not.toHaveBeenCalled();
+    f.redis.disconnect();
+  });
+
+  it('returns missing or invalid machine evidence without local zero fallbacks or private errors', async () => {
+    const f = fixture();
+    const missing = await f.service.getObserverSnapshot();
+    expect(missing.collector.availability).toBe('UNAVAILABLE');
+    expect(missing.queues.value).toBeNull();
+    jest.setSystemTime(new Date(now.getTime() + 1000));
+    f.store.readSnapshot.mockRejectedValueOnce(new Error('private Redis credentials'));
+    const failed = await f.service.getObserverSnapshot();
+    expect(failed.collector.availability).toBe('UNAVAILABLE');
+    expect(JSON.stringify(failed)).not.toContain('private');
+    f.store.readSnapshot.mockRejectedValueOnce(new OverviewInvalidEvidenceError());
+    const invalid = await f.service.getObserverSnapshot();
+    expect(invalid.collector.availability).toBe('INVALID');
+    expect(invalid.history.availability).toBe('UNAVAILABLE');
+    expect(invalid.receipts.value).toBeNull();
+    expect(f.store.readHistory).not.toHaveBeenCalled();
+    expect(f.pending.getSnapshot).not.toHaveBeenCalled();
+    expect(f.actions.getSnapshot).not.toHaveBeenCalled();
+    expect(f.queues.getOverviewCounters).not.toHaveBeenCalled();
     f.redis.disconnect();
   });
 
