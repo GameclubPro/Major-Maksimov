@@ -47,7 +47,7 @@ export function preloadFixture(component = 'api') {
       event: 'push',
     },
     image: { alias: `${alias}:${sha}`, imageId, platform: 'linux/amd64', sizeBytes: 123456 },
-    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-${component}`, digest },
+    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-release-${component}`, digest },
   };
   return {
     schemaVersion: 1,
@@ -231,6 +231,9 @@ test('fresh requests bind the exact artifact/run attempt and repository', () => 
     },
     (value) => {
       value.record.registry.repository = 'ghcr.io/other/image';
+    },
+    (value) => {
+      value.record.registry.repository = 'ghcr.io/gameclubpro/major-maksimov-api';
     },
     (value) => {
       value.verifiedAt = new Date(now - 30 * 60_000 - 1).toISOString();

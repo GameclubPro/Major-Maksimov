@@ -38,8 +38,12 @@ the tested image and a bounded identity record. Their artifact name includes SHA
 A separate GitHub-hosted registry job consumes that exact artifact after Docker succeeds. It:
 
 1. Loads the checksummed archive and compares source labels, platform, config ID and image size.
-2. Publishes to the private `ghcr.io/gameclubpro/major-maksimov-COMPONENT` package and pulls the
-   returned digest to compare it with the tested config ID. An existing public package fails closed.
+2. Reads full package metadata for `ghcr.io/gameclubpro/major-maksimov-release-COMPONENT` using
+   the publication workflow's package credential. Before any Docker tag or push, it requires the
+   exact container package name, private visibility and source repository ID/name binding.
+   Missing packages, HTTP 403/404, empty or malformed metadata and unavailable evidence block
+   publication. A verified public package produces a separate refusal. It checks privacy and
+   binding again after push, then pulls the returned digest to compare it with the tested config ID.
 3. Generates an SPDX SBOM from the same local image and attests both provenance and SBOM for
    the exact registry digest through GitHub OIDC.
 4. Verifies signatures and signed certificate claims for repository identity, source SHA/ref,
@@ -53,11 +57,87 @@ Linux amd64 GitHub CLI pinned in `scripts/ci/github-cli.mjs`; both its release a
 have fixed SHA-256 checksums. It does not replace the user's installed CLI. Download or checksum
 failure stops verification.
 
-The operator's `verify-proof` command checks both attestations without a local Docker daemon.
+The operator's `verify-proof` command first rechecks current private package metadata and the
+exact repository binding, then checks both attestations without a local Docker daemon. An image
+whose package later becomes public cannot be accepted from historical signatures alone.
 It also requires successful trusted main-push `Required` and `Analyze JavaScript and TypeScript`
 for the exact SHA, plus the successful current attempt of the image's publication run. A failed
 rerun cannot reuse an earlier attempt's image. Manual preparation cannot substitute for main-push
 checks.
+
+## Private package bootstrap and namespace migration
+
+The publication namespace is `ghcr.io/gameclubpro/major-maksimov-release-COMPONENT`, for
+`api`, `miniapp`, `admin` and `eraser`. Local full-SHA Docker aliases and receipt artifact names
+retain their existing formats. Target image proofs accept only this publication namespace.
+Rollback manifest readers also accept the exact former
+`ghcr.io/gameclubpro/major-maksimov-COMPONENT` identities so historical manifests remain readable;
+that compatibility does not authorize a new release from a former registry record.
+
+The former package names are public and are retired as publication targets. Their creation cause
+has not been established. GitHub documents that initial package publication defaults to private,
+that inherited repository permissions do not determine package visibility, and that a public
+package cannot be made private again. Do not delete or reconfigure the former packages as part
+of an ordinary release. See GitHub's
+[container publication documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images)
+and [package visibility rules](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+
+Each new package requires a separate, explicitly dispatched bootstrap before application
+publication. Ordinary CI deliberately cannot create a missing package as a fallback:
+
+1. Review the four exact target names and dispatch
+   `.github/workflows/registry-bootstrap.yml` from trusted `main`. This dedicated workflow uses
+   its temporary GitHub workflow credential with `packages: write`; no owner token is required
+   for its ordinary path. Known public metadata blocks bootstrap and requires a reviewed
+   namespace decision. Bootstrap never deletes packages or changes their visibility.
+2. The bootstrap builds only a tiny inert `FROM scratch` seed with a bootstrap label and the source
+   repository label. It contains no application bytes, environment files or credentials and is
+   never tagged with a production SHA alias. HTTP 404 can hide an inaccessible package and does
+   not prove absence. Only this explicitly dispatched seed operation permits a bounded 404
+   response as a reason to attempt the reserved `bootstrap-private-v1` seed tag; it never permits
+   application bytes or application image tags. Known public metadata, HTTP 403 and unavailable
+   metadata block writes. The seed still requires positive private metadata after publication.
+3. After each seed publication, require private visibility and the exact source repository
+   binding under the workflow credential. If GitHub access or linking needs administration,
+   verify package settings, connect `GameclubPro/Major-Maksimov`, and grant its Actions package
+   access. Package metadata must report repository ID `1168895008` and the matching full name.
+   Permission inheritance alone does not prove visibility.
+4. Complete these checks for all four components before normal image delivery. The ordinary
+   publication gate independently rereads private, correctly bound metadata before any
+   application image tag or push. A bootstrap start, successful seed push or owner-only lookup
+   does not establish that this gate passes.
+5. Install the separate production pull credential with only `read:packages` through the
+   existing guarded credential procedure. The operator's GitHub control token remains separate
+   and never travels to production. Temporary bootstrap authentication is removed after use.
+
+The inert bootstrap is not a release image and has no accepted release receipt. Namespace
+migration is complete only after all four private packages have workflow access, a trusted main
+run publishes and verifies the tested images, and the normal receipt/provenance gates pass.
+Until then, registry publication remains an external prerequisite; merging the privacy fix does
+not establish successful image delivery.
+
+## Local package evidence credential
+
+Local GitHub control access for dispatch and workflow observation is separate from package
+evidence access. A GitHub control token without `read:packages` cannot prove private package
+metadata or read private attestation subjects. Configure a separate credential at
+`~/.config/maxim-delivery/ghcr-read.json`, or select its exact path with
+`MAXIM_GHCR_READ_CREDENTIAL_FILE`. The file contains only
+`{"username":"PACKAGE_READER","token":"READ_PACKAGES_TOKEN"}` and must be a regular file owned
+by root or the current user with mode `0600`, one hard link, no symlink and a bounded valid
+configuration. Its token needs `read:packages` access to all four private release packages.
+Keep the token out of chat, source control, logs and ordinary GitHub control configuration.
+
+`registry-preload.mjs` passes this credential only to its local proof-verification child as
+`GH_TOKEN` and uses its validated username as `GITHUB_ACTOR`. It leaves the caller's GitHub
+control client unchanged. This local file is not forwarded to production; the production pull
+credential retains its separate guarded installation and path.
+
+If the conventional default file does not exist and no explicit path is configured, existing
+GitHub authentication may supply package evidence. A configured missing file, an existing empty
+template, invalid credentials or unsafe file permissions fail closed; they never fall back to the
+control token. Fill the private template before package verification. Even a correctly formatted
+file does not establish actual package access until the metadata and attestation gates succeed.
 
 ## Missing images and deployment boundary
 
@@ -85,7 +165,12 @@ establish registry publication, installed credentials or production acceptance.
 - `scripts/ci/main-baseline.test.mjs` and `green-workflow-proof.test.mjs`: accumulated scope,
   unavailable evidence, workflow identities, reruns and frozen baseline evidence.
 - `scripts/ci/impact.test.mjs` and `assert-green.test.mjs`: selected lanes and exact operational gates.
-- `scripts/ci/registry-images.test.mjs`: source/runner/invocation/subject rejection, private package,
-  separate config/digest identities, SBOM proof, archive layout and permission boundaries.
+- `scripts/ci/registry-images.test.mjs`: source/runner/invocation/subject rejection, process-backed
+  package API failures with zero tag/push calls, private repository binding before and after
+  publication and at consumption, namespace rejection, separate config/digest identities, SBOM
+  proof, archive layout and permission boundaries.
 - `infra/scripts/registry-preload.test.mjs` and `registry-preload-host.test.mjs`: operator preparation
-  and production admission. Native stores and production acceptance are recorded separately.
+  and production admission, including rejection of former namespace records.
+- `infra/scripts/release-manifest.test.mjs`: current namespace provenance and continued reading
+  of historical namespace manifests for rollback. Native stores and production acceptance are
+  recorded separately.
