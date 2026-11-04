@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261103190200_index_auto_reply_upload_recovery",
-  "baselineNamesSha256": "e92bfef32055c585a77e50c084a673626ef1d6d826c96fb6636a00cab2d82659",
-  "baselineContentsSha256": "c9432bd4cd8021ae0cc4974e6cb917f4ed6040131ed5314fb63615026b88f41b",
+  "baselineThrough": "20261104123500_index_karavan_active_market_existing",
+  "baselineNamesSha256": "c8498e905cca4d24f7f12b020f677594e51f3a8d1084a039c1330a2adbe3345b",
+  "baselineContentsSha256": "34030d961e4f1dffddecbb05657f9b9d12584c52064a2aef51ac50904055bf2c",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -303,6 +303,9 @@
     },
     "20261031120000_add_required_subscription_candidates": {
       "reason": "All indexes belong only to the new empty candidate owner table in this additive migration. No retained source, violation, event or DELETE history is scanned, indexed or backfilled."
+    },
+    "20261104123000_karavan_connection_journal": {
+      "reason": "Both ordinary indexes belong only to the new empty karavan_marketplace_connection_scopes table created in this additive migration. Existing operation history is not indexed or backfilled here; its five partial indexes are isolated in separate CONCURRENTLY migrations."
     }
   }
 }

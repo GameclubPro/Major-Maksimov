@@ -3,24 +3,49 @@ import { ConfigService } from '@nestjs/config';
 import { HttpException } from '@nestjs/common';
 import { z } from 'zod';
 import type { PrismaService } from '../../prisma/prisma.service';
+import type { Prisma } from '../../prisma/prisma-client';
 import type {
   KaravanMarketplaceAuthorityService,
   KaravanPrincipal,
 } from './karavan-marketplace-authority.service';
 import { KaravanMarketplaceProxyService } from './karavan-marketplace-proxy.service';
+import { ManagementJournal } from './karavan-management-journal';
 const principal: KaravanPrincipal = {
   source: 'session',
   principalKey: 'a'.repeat(64),
   launchBotId: 'synthetic',
 };
 describe('native Major shop commands', () => {
+  beforeEach(() => {
+    // The native journal suite owns persistence/races; these cases exercise the
+    // provider transport and its typed error/response boundary through that port.
+    jest
+      .spyOn(ManagementJournal.prototype, 'run')
+      .mockImplementation(async (_actor, _request, dispatch) => dispatch(async () => {}));
+  });
   afterEach(() => jest.restoreAllMocks());
   function setup() {
     const authority = {
       issue: jest.fn().mockResolvedValue({ proofId: 'synthetic' }),
-    } satisfies Pick<KaravanMarketplaceAuthorityService, 'issue'>;
+      assertPrincipal: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<KaravanMarketplaceAuthorityService, 'issue' | 'assertPrincipal'>;
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(1),
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      karavanMarketplaceConnectionScope: { findUnique: jest.fn().mockResolvedValue(null) },
+    } satisfies Pick<Prisma.TransactionClient, '$executeRaw' | '$queryRaw'> & {
+      karavanMarketplaceConnectionScope: Pick<
+        Prisma.TransactionClient['karavanMarketplaceConnectionScope'],
+        'findUnique'
+      >;
+    };
+    const prisma = {
+      $transaction: jest.fn(async (work: (client: Prisma.TransactionClient) => Promise<unknown>) =>
+        work(tx as unknown as Prisma.TransactionClient),
+      ),
+    };
     const service = new KaravanMarketplaceProxyService(
-      {} as PrismaService,
+      prisma as unknown as PrismaService,
       authority as unknown as KaravanMarketplaceAuthorityService,
       new ConfigService({
         KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.test/karavan',
@@ -47,6 +72,7 @@ describe('native Major shop commands', () => {
     await expect(service.manage('-123', '777', payload, principal)).resolves.toMatchObject({
       operation: 'pins',
     });
+    expect(ManagementJournal.prototype.run).not.toHaveBeenCalled();
     expect(authority.issue).toHaveBeenCalledWith(
       expect.objectContaining({
         chatId: '-123',
@@ -62,6 +88,36 @@ describe('native Major shop commands', () => {
     );
     expect(JSON.parse(init!.body as string).payload.chatId).toBe('-123');
     expect(init!.redirect).toBe('error');
+  });
+  it('routes a daily write through durable admission with its original command identity', async () => {
+    const { service, authority, fetchMock, payload } = setup();
+    const command = {
+      operation: 'pins_save',
+      input: {
+        commandId: payload.commandId,
+        expectedRevision: 1,
+        offers: [],
+      },
+    };
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          operation: 'pins_save',
+          data: { revision: 2, offers: [] },
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      service.manage('-123', '777', { ...payload, command }, principal),
+    ).resolves.toMatchObject({ operation: 'pins_save' });
+    expect(authority.assertPrincipal).toHaveBeenCalledWith(principal, '777');
+    expect(ManagementJournal.prototype.run).toHaveBeenCalledWith(
+      '777',
+      expect.objectContaining({ commandId: payload.commandId, chatId: '-123', command }),
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
   it('preserves safe conflicts without exposing remote diagnostics', async () => {
     const { service, fetchMock, payload } = setup();

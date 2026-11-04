@@ -104,6 +104,11 @@ export function useShopMutation(
   const pending = pendingShopCommand(journal, ui.owner);
   const receipt = journal?.results[ui.owner] ?? null;
   useEffect(() => {
+    if (commands.confirmation?.owner !== ui.owner) return;
+    setError(null);
+    setLastCommand(null);
+  }, [commands.confirmation, ui.owner]);
+  useEffect(() => {
     if (!receipt || pending || commands.loading || commands.busy || commands.stale) return;
     const id = receipt.request.commandId;
     const expected =
@@ -157,7 +162,7 @@ export function useShopMutation(
     isSuccess: Boolean(receipt) && !pending && !commands.busy && !error,
     failure,
     blocked: commands.blocked || Boolean(error && failure !== 'validation'),
-    editingBlocked: commands.blocked || failure === 'unknown' || failure === 'forbidden',
+    editingBlocked: commands.editingBlocked || failure === 'unknown' || failure === 'forbidden',
     uncertain: commands.busy || Boolean(commands.journal?.pending),
     sharedRecovery: commands.storageError || Boolean(commands.journal?.pending),
   };

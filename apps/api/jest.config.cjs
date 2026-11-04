@@ -50,6 +50,8 @@ module.exports = {
       '<rootDir>/../../packages/contracts/src/karavan-marketplace.ts',
     '^@maxim/contracts/karavan-marketplace-management$':
       '<rootDir>/../../packages/contracts/src/karavan-marketplace-management.ts',
+    '^@maxim/contracts/karavan-marketplace-connection$':
+      '<rootDir>/../../packages/contracts/src/karavan-marketplace-connection.ts',
     '^@maxim/contracts/karavan-storefront$':
       '<rootDir>/../../packages/contracts/src/karavan-storefront.ts',
     '^@maxim/contracts/managed-entities$':

@@ -121,6 +121,11 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
   });
   afterEach(async () => {
     jest.restoreAllMocks();
+    await db.karavanMarketplaceConnectionScope.deleteMany({
+      where: {
+        OR: [{ activeOperation: { actorMaxUserId } }, { lastOperation: { actorMaxUserId } }],
+      },
+    });
     await db.karavanMarketplaceConnectionOperation.deleteMany({ where: { actorMaxUserId } });
     await db.karavanMarketplaceChatEnrollment.deleteMany({ where: { chatId } });
     await db.karavanMarketplaceBindingWitness.deleteMany({ where: { chatId } });
@@ -142,6 +147,13 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
       expectedBindingGeneration: null,
       payloadHash: karavanHash({ chatId }),
     };
+  }
+
+  function missingReceipt(init?: RequestInit) {
+    const request = JSON.parse(String(init?.body)) as { commandId: string };
+    return new Response(JSON.stringify({ status: 'not_found', commandId: request.commandId }), {
+      status: 200,
+    });
   }
 
   it('replays exact proof without consumption but rejects changed actor/payload and revoked session', async () => {
@@ -908,6 +920,49 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     ).toEqual({ activeScopeKey: null, leaseId: null });
   });
 
+  it('does not dispatch marketplace creation after its execution lease was replaced during authority preparation', async () => {
+    const input = {
+      operationId: randomUUID(),
+      chatIds: [chatId],
+      create: {
+        name: 'Synthetic',
+        rules: { text: 'Rules', allowedCategoryIds: ['services'], allowedSubcategoryIds: [] },
+      },
+    };
+    const proxy = new KaravanMarketplaceProxyService(
+      db as PrismaService,
+      service,
+      new ConfigService({
+        KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.invalid',
+        KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
+      }),
+    );
+    const issue = service.issue.bind(service);
+    const replacementLease = randomUUID();
+    jest.spyOn(service, 'issue').mockImplementation(async (...args) => {
+      const proof = await issue(...args);
+      await db.karavanMarketplaceConnectionOperation.update({
+        where: { id: input.operationId },
+        data: { leaseId: replacementLease, leaseUntil: new Date(Date.now() + 90_000) },
+      });
+      return proof;
+    });
+    const fetchMock = jest
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('Unexpected dispatch'));
+    await expect(proxy.setup(actorMaxUserId, input, principal)).rejects.toThrow('другой вкладке');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(
+      await db.karavanMarketplaceConnectionOperation.findUniqueOrThrow({
+        where: { id: input.operationId },
+      }),
+    ).toMatchObject({
+      state: 'unknown',
+      leaseId: replacementLease,
+      activeScopeKey: `${actorMaxUserId}:${chatId}`,
+    });
+  });
+
   it('keeps an unknown create fenced when Major denies before a later dispatch', async () => {
     const input = {
       operationId: randomUUID(),
@@ -925,7 +980,10 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
         KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
       }),
     );
-    const fetchMock = jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Response lost'));
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/command-status')) return missingReceipt(init);
+      throw new Error('Response lost');
+    });
     expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
     max.getChatMemberAccess.mockResolvedValue({
       isAdmin: false,
@@ -944,7 +1002,12 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
 
     expect(collect).toHaveBeenCalledWith(chatId, actorMaxUserId);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => !String(url).endsWith('/command-status')),
+    ).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/command-status')),
+    ).toHaveLength(1);
     expect(await proxy.activeSetup(actorMaxUserId, chatId)).toMatchObject({
       operationId: input.operationId,
       state: 'unknown',
@@ -974,21 +1037,30 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
         KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
       }),
     );
-    const fetchMock = jest.spyOn(globalThis, 'fetch');
-    if (priorUnknown) {
-      fetchMock.mockRejectedValueOnce(new Error('Response lost'));
-      expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
-    }
-    fetchMock.mockResolvedValueOnce(
-      new Response(
+    let loseResponse = priorUnknown;
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/command-status')) return missingReceipt(init);
+      if (loseResponse) {
+        loseResponse = false;
+        throw new Error('Response lost');
+      }
+      return new Response(
         JSON.stringify({ error: 'MARKETPLACE_FORMAT_LIMIT', message: 'private diagnostics' }),
         { status: 409 },
-      ),
-    );
+      );
+    });
+    if (priorUnknown) {
+      expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe('unknown');
+    }
 
     expect((await proxy.setup(actorMaxUserId, input, principal)).state).toBe(state);
 
-    expect(fetchMock).toHaveBeenCalledTimes(priorUnknown ? 2 : 1);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => !String(url).endsWith('/command-status')),
+    ).toHaveLength(priorUnknown ? 2 : 1);
+    expect(
+      fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/command-status')),
+    ).toHaveLength(priorUnknown ? 1 : 0);
     if (priorUnknown) {
       expect(await proxy.activeSetup(actorMaxUserId, chatId)).toMatchObject({
         operationId: input.operationId,
@@ -1041,7 +1113,8 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
       payload: unknown;
     }> = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = jest.fn(async (_url, init) => {
+    globalThis.fetch = jest.fn(async (url, init) => {
+      if (String(url).endsWith('/command-status')) return missingReceipt(init);
       calls.push(JSON.parse(String(init?.body)));
       if (calls.length === 1) throw new Error('Synthetic response lost after remote commit');
       if (calls.length === 2) return new Response('{}', { status: 403 });
@@ -1281,8 +1354,15 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     const proxy = new KaravanMarketplaceProxyService(
       db as PrismaService,
       service,
-      new ConfigService(),
+      new ConfigService({
+        KARAVAN_MARKETPLACE_API_BASE_URL: 'https://synthetic.invalid',
+        KARAVAN_MARKETPLACE_COMMAND_TOKEN: 'synthetic-only',
+      }),
     );
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (!String(url).endsWith('/command-status')) throw new Error('Only receipt lookup expected');
+      return missingReceipt(init);
+    });
     jest
       .spyOn(proxy, 'binding')
       .mockImplementationOnce(async () => {
@@ -1297,6 +1377,7 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     expect(
       (await proxy.setup(actorMaxUserId, input, principal)).checkpoints.bindings[0]?.state,
     ).toBe('unknown');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     await expect(proxy.cancelSetup(input.operationId, actorMaxUserId, chatId)).rejects.toThrow(
       'Сначала проверьте',
     );

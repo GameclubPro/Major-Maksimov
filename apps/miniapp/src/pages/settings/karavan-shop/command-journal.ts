@@ -517,6 +517,18 @@ export async function releaseShopCommand(journal: ShopCommandJournal): Promise<S
     pending: { ...current.pending!, lease: null },
   }));
 }
+export async function confirmShopCommand(journal: ShopCommandJournal): Promise<ShopCommandJournal> {
+  const request = await restoreShopCommand(journal);
+  if (request.command.operation !== 'administration_store_change')
+    throw new Error('Результат действия не подтверждён. Продолжите сохранённое действие.');
+  // FLAG: The exact committed receipt proves completion, not a current-state
+  // response. Remove an older owner response without inventing a replacement.
+  return updatePending(journal, (current) => {
+    const results = { ...current.results };
+    delete results[current.pending!.ui.owner];
+    return { ...current, revision: current.revision + 1, pending: null, results };
+  });
+}
 export async function settleShopCommand(
   journal: ShopCommandJournal,
   input: MarketplaceManagementResponse | null,

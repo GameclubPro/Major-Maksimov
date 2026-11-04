@@ -212,6 +212,7 @@ export default function ShopAppearance({ onView }: { onView?: () => void }) {
                 <input
                   type="file"
                   accept="image/*"
+                  disabled={imageMutation.blocked}
                   aria-label={key === 'coverImageUrl' ? 'Загрузить обложку' : 'Загрузить логотип'}
                   onChange={(event) => {
                     const file = event.target.files?.[0];

@@ -2,6 +2,7 @@ import { KaravanMarketplaceBindingStatusService } from './karavan-marketplace-bi
 import { KaravanMarketplaceActorAccessService } from './karavan-marketplace-actor-access.service';
 import { KaravanMarketplaceController } from './karavan-marketplace.controller';
 import { KaravanMarketplaceProxyService } from './karavan-marketplace-proxy.service';
+import { KaravanMarketplaceConnectionsService } from './karavan-marketplace-connections.service';
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
 import { MaxModule } from '../../max/max.module';
@@ -19,6 +20,7 @@ import {
     KaravanMarketplaceBindingStatusService,
     KaravanMarketplaceActorAccessService,
     KaravanMarketplaceProxyService,
+    KaravanMarketplaceConnectionsService,
     KaravanMarketplaceHandoffService,
     KaravanMarketplaceIntegrationGuard,
   ],

@@ -1,3 +1,4 @@
+import { rememberShopDraft, recallShopDraft } from './draft-memory';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -30,6 +31,7 @@ export default function ShopStartup({
   actorId,
   onSubmit,
   localOnlyRecovery = false,
+  optionalDraftRecovery = false,
 }: {
   api: ApiTransport;
   chatId: string;
@@ -37,6 +39,7 @@ export default function ShopStartup({
   actorId: string;
   onSubmit: (input: KaravanMarketplaceSetup) => void;
   localOnlyRecovery?: boolean;
+  optionalDraftRecovery?: boolean;
 }) {
   const client = useQueryClient();
   const key = shopSetupDraftKey(actorId, chatId, intent);
@@ -57,6 +60,7 @@ export default function ShopStartup({
   });
   const [draft, setDraft] = useState(fresh);
   const [hydrated, setHydrated] = useState(false);
+  const [persistDraft, setPersistDraft] = useState(true);
   const [recoveryError, setRecoveryError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
@@ -73,6 +77,16 @@ export default function ShopStartup({
     const current = ++epoch.current;
     setHydrated(false);
     setRecoveryError(false);
+    setPersistDraft(true);
+    const remembered = optionalDraftRecovery ? recallShopDraft(key) : null;
+    if (remembered) {
+      setDraft(remembered.draft);
+      setPersistDraft(remembered.persist);
+      setHydrated(true);
+      return () => {
+        epoch.current++;
+      };
+    }
     void readShopDraftRecovery(
       actorId,
       chatId,
@@ -82,7 +96,11 @@ export default function ShopStartup({
       .then((state) => {
         if (current !== epoch.current) return;
         if (state.status === 'error') {
-          setRecoveryError(true);
+          // FLAG: Preserve an unreadable saved draft and allow a volatile form;
+          // submitted operations come from the server, independently of storage.
+          setPersistDraft(false);
+          if (optionalDraftRecovery) setHydrated(true);
+          else setRecoveryError(true);
           return;
         }
         if (state.draft) {
@@ -98,12 +116,16 @@ export default function ShopStartup({
         setHydrated(true);
       })
       .catch(() => {
-        if (current === epoch.current) setRecoveryError(true);
+        if (current === epoch.current) {
+          setPersistDraft(false);
+          if (optionalDraftRecovery) setHydrated(true);
+          else setRecoveryError(true);
+        }
       });
     return () => {
       epoch.current++;
     };
-  }, [key, actorId, chatId, attempt, localOnlyRecovery]);
+  }, [key, actorId, chatId, attempt, localOnlyRecovery, optionalDraftRecovery]);
   useEffect(() => {
     if (!hydrated || draft.initialized || !options.data) return;
     setDraft((current) => ({
@@ -114,9 +136,11 @@ export default function ShopStartup({
     }));
   }, [hydrated, draft.initialized, options.data]);
   useEffect(() => {
-    if (hydrated)
+    if (!hydrated) return;
+    if (optionalDraftRecovery) rememberShopDraft(key, draft, persistDraft);
+    if (persistDraft)
       (localOnlyRecovery ? writeLocalMirrorItem : saveMirroredItem)(key, JSON.stringify(draft));
-  }, [draft, hydrated, key, localOnlyRecovery]);
+  }, [draft, hydrated, persistDraft, key, localOnlyRecovery, optionalDraftRecovery]);
   const change = (patch: Partial<ShopSetupDraft>) => {
     setDraft((current) => ({ ...current, ...patch }));
     setNotice(null);
@@ -170,7 +194,7 @@ export default function ShopStartup({
         },
         bindingExpectations: [{ chatId, generation: null, action: 'bind_chat' }],
       });
-      // FLAG: Parent recovery persists this exact command before its first request.
+      // FLAG: Parent freezes the request; durable server admission precedes provider effects.
       onSubmit(request);
     } catch (error) {
       if (requestEpoch === epoch.current)

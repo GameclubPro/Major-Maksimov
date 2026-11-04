@@ -11,6 +11,8 @@ const shards = ['1/4', '2/4', '3/4', '4/4'];
 const browserFiles = [
   'karavan-shop-formats',
   'karavan-shop-simple',
+  'karavan-server-recovery',
+  'karavan-binding-hook',
   'personal-access-entry',
   'entity-presentation',
   'moderator-choice',

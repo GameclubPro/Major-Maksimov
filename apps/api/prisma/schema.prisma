@@ -5079,13 +5079,35 @@ model KaravanMarketplaceConnectionOperation {
   request               Json
   checkpoints           Json
   state                 String    @default("pending")
+  kind                  String    @default("setup")
+  result                Json?
+  errorCode             String?   @map("error_code")
   leaseId               String?   @map("lease_id") @db.Uuid
   leaseUntil            DateTime? @map("lease_until") @db.Timestamptz(3)
   createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  activeConnectionScopes KaravanMarketplaceConnectionScope[] @relation("ActiveKaravanConnection")
+  lastConnectionScopes   KaravanMarketplaceConnectionScope[] @relation("LastKaravanConnection")
 
   @@index([actorMaxUserId, createdAt], map: "karavan_marketplace_operation_actor_idx")
   @@map("karavan_marketplace_connection_operations")
+}
+
+// FLAG: A scope belongs to the chat across administrators and devices. Unknown
+// operation effects retain this reservation independently of an execution lease.
+model KaravanMarketplaceConnectionScope {
+  /// FLAG: Internal scope key: a numeric chat ID or marketplace:<canonical UUID>.
+  chatId                String    @id @map("chat_id")
+  revision              Int       @default(0)
+  activeOperationId     String?   @map("active_operation_id") @db.Uuid
+  lastOperationId       String?   @map("last_operation_id") @db.Uuid
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  activeOperation       KaravanMarketplaceConnectionOperation? @relation("ActiveKaravanConnection", fields: [activeOperationId], references: [id], onDelete: Restrict, map: "karavan_connection_scope_active_operation_fkey")
+  lastOperation         KaravanMarketplaceConnectionOperation? @relation("LastKaravanConnection", fields: [lastOperationId], references: [id], onDelete: Restrict, map: "karavan_connection_scope_last_operation_fkey")
+
+  @@index([activeOperationId], map: "karavan_connection_scope_active_operation_idx")
+  @@index([lastOperationId], map: "karavan_connection_scope_last_operation_idx")
+  @@map("karavan_marketplace_connection_scopes")
 }
 
 // Binding provenance outlives short grants; public reads never reuse human permissions.

@@ -188,6 +188,38 @@ test('simple chat shop runs every isolated group in the complete blocking mobile
   assert.ok(config.jobs.required.needs.includes('miniapp'));
 });
 
+test('server shop recovery and binding races remain blocking with complete scenario selection', () => {
+  const config = parse(workflow);
+  const miniapp = config.jobs.miniapp;
+  const webkit = miniapp.steps.find(
+    (step) => step.run === 'npx playwright install --with-deps webkit',
+  );
+  const contracts = miniapp.steps.find((step) => step.name === 'Build browser contracts');
+  for (const [file, selectors] of [
+    [
+      'karavan-server-recovery.browser.mjs',
+      ['KARAVAN_RECOVERY_SCENARIOS', 'KARAVAN_RECOVERY_ENGINE', 'KARAVAN_RECOVERY_THEME'],
+    ],
+    ['karavan-binding-hook.browser.mjs', ['KARAVAN_BINDING_SCENARIOS']],
+  ]) {
+    const path = `apps/miniapp/test/${file}`;
+    const selected = miniapp.steps.filter((step) => step.run === `node ${path}`);
+    assert.equal(selected.length, 1, `${file} must have one complete CI owner`);
+    const step = selected[0];
+    assert.equal(step.if, "matrix.shard == '3/4'");
+    assert.equal(step['continue-on-error'], undefined);
+    assert.equal(webkit.if, step.if);
+    assert.ok(miniapp.steps.indexOf(webkit) < miniapp.steps.indexOf(step));
+    assert.ok(miniapp.steps.indexOf(contracts) < miniapp.steps.indexOf(step));
+    assert.ok(statSync(resolve(root, path)).isFile());
+    for (const env of [config.env, miniapp.env, step.env])
+      for (const selector of selectors)
+        assert.equal(env?.[selector], undefined, `CI cannot narrow recovery evidence: ${selector}`);
+  }
+  assert.equal(miniapp['continue-on-error'], undefined);
+  assert.ok(config.jobs.required.needs.includes('miniapp'));
+});
+
 test('keeps the functional API lane separate from the median commercial benchmark', () => {
   const api = jobBody('api', 'postgres-races');
   const benchmark = jobBody('commercial-benchmark', 'miniapp');
