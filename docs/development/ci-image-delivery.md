@@ -52,7 +52,15 @@ A separate GitHub-hosted registry job consumes that exact artifact after Docker 
    `maxim-registry-COMPONENT-SHA-RUNID-ATTEMPT`. The SBOM is attached through its attestation.
 
 Registry writes, OIDC and attestation permissions belong only to that publication job. Temporary
-registry authentication files are private and removed after use. Verification uses the reviewed
+registry authentication files are private and removed after use. The pinned attestation actions
+read `os.homedir()/.docker/config.json` and ignore `DOCKER_CONFIG`. Immediately before those
+actions, `scripts/ci/registry-attestation-auth.mjs prepare` exposes only the job's inline GHCR
+credential at that standard path. It keeps a private restoration journal in the isolated source
+config directory, rejects unsafe filesystem entries and preserves any prior config bytes and mode.
+The `always()` cleanup restores the standard config before deleting the source credentials; a
+failed restoration fails the job and preserves the journal. This bridge is limited to disposable
+GitHub-hosted publication jobs; it does not change `HOME` or relax image verification.
+Verification uses the reviewed
 Linux amd64 GitHub CLI pinned in `scripts/ci/github-cli.mjs`; both its release archive and binary
 have fixed SHA-256 checksums. It does not replace the user's installed CLI. Download or checksum
 failure stops verification.
@@ -189,8 +197,8 @@ server. Source changes, migration rules, smoke checks, role topology, rollback r
 the component manifest retain their own gates. See the
 [production delivery procedure](production-operations-reference.md#deploy-and-rollback).
 
-These mechanisms do not enable automatic deployment. Independent backup readback and isolated
-restore, durable server operations, candidate revalidation and explicit automatic-release
+These mechanisms do not enable automatic deployment. Durable server operations, candidate
+revalidation and explicit automatic-release
 activation remain separate requirements. A merged change or local fixture test alone does not
 establish registry publication, installed credentials or production acceptance.
 
@@ -203,6 +211,9 @@ establish registry publication, installed credentials or production acceptance.
   package API failures with zero tag/push calls, private repository binding before and after
   publication and at consumption, namespace rejection, separate config/digest identities, SBOM
   proof, archive layout and permission boundaries.
+- `scripts/ci/registry-attestation-auth.test.mjs` and `workflow-structure.test.mjs`: the pinned
+  actions' standard Docker config path, private GHCR-only exposure, safe restoration and cleanup
+  after preparation failures, with real disposable filesystem entries.
 - `infra/scripts/registry-preload.test.mjs` and `registry-preload-host.test.mjs`: operator preparation
   and production admission, including rejection of former namespace records.
 - `infra/scripts/release-manifest.test.mjs`: current namespace provenance and continued reading
