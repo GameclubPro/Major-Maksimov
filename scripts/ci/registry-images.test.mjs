@@ -14,6 +14,7 @@ import {
   imageIdentity,
   isOpaqueGitHubCredential,
   parseImageInspection,
+  packageRepository,
   provenanceArguments,
   publishImage,
   trustedBuildContext,
@@ -121,7 +122,7 @@ test('only exact main workflow on an allowed runner and trigger may publish imag
 });
 
 test('image identity never accepts a short SHA, injected path or unsupported component', () => {
-  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-release-api');
+  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-private-v1-api');
   for (const delta of [
     { sha: sha.slice(0, 12) },
     { sha: `${sha}\n` },
@@ -131,6 +132,13 @@ test('image identity never accepts a short SHA, injected path or unsupported com
   ]) {
     assert.throws(() => imageIdentity({ ...expected, ...delta }));
   }
+});
+
+test('package metadata identity needs no fabricated source SHA and cannot produce a runtime alias', () => {
+  assert.equal(packageRepository({ repository, component: 'api' }), identity.repository);
+  assert.throws(() => imageIdentity({ repository, component: 'api' }));
+  assert.throws(() => packageRepository({ repository, component: 'postgres' }));
+  assert.throws(() => packageRepository({ repository: '../injected/repo', component: 'api' }));
 });
 
 test('the smoke-tested Docker ID and registry manifest digest remain separate', () => {
@@ -279,17 +287,22 @@ test('image archives cannot be reused across attempts, sources, repositories or 
 });
 
 test('legacy public registry records cannot authorize a release in the new private namespace', () => {
-  const legacy = record();
-  legacy.registry.repository = 'ghcr.io/gameclubpro/major-maksimov-api';
-  assert.throws(() => assertRegistryRecord(legacy, expected), /Registry digest or repository/u);
-  assert.throws(
-    () =>
-      verifyRegistryImage(legacy, expected, () => {
-        assert.fail('legacy record reached external verifier');
-      }),
-    /Registry digest or repository/u,
-  );
-  assert.equal(record().image.alias, `maxim-api:${sha}`);
+  for (const retired of [
+    'ghcr.io/gameclubpro/major-maksimov-api',
+    'ghcr.io/gameclubpro/major-maksimov-release-api',
+  ]) {
+    const legacy = record();
+    legacy.registry.repository = retired;
+    assert.throws(() => assertRegistryRecord(legacy, expected), /Registry digest or repository/u);
+    assert.throws(
+      () =>
+        verifyRegistryImage(legacy, expected, () => {
+          assert.fail('legacy record reached external verifier');
+        }),
+      /Registry digest or repository/u,
+    );
+    assert.equal(record().image.alias, `maxim-api:${sha}`);
+  }
 });
 
 test('each required OIDC certificate claim is checked after cryptographic verification', () => {
@@ -370,7 +383,7 @@ test('verifier command pins source, signer, issuer and runner policy', () => {
 
 function packageMetadata(patch = {}) {
   return {
-    name: 'major-maksimov-release-api',
+    name: 'major-maksimov-private-v1-api',
     package_type: 'container',
     visibility: 'private',
     repository: { id: Number(expected.repositoryId), full_name: repository },
@@ -557,7 +570,7 @@ test('actual process transport denies 403, 404, public and malformed package res
         mode,
       );
       const lookup = calls.find(([binary]) => binary === 'gh');
-      assert.equal(lookup[2], 'users/GameclubPro/packages/container/major-maksimov-release-api');
+      assert.equal(lookup[2], 'users/GameclubPro/packages/container/major-maksimov-private-v1-api');
       assert.ok(!lookup.includes('--jq'));
     }
     writeFileSync(callsFile, '', { mode: 0o600 });

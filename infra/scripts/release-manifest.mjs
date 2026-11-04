@@ -474,6 +474,7 @@ function validateRegistryProvenance(component) {
     ![
       `ghcr.io/gameclubpro/major-maksimov-${imageComponent}`,
       `ghcr.io/gameclubpro/major-maksimov-release-${imageComponent}`,
+      `ghcr.io/gameclubpro/major-maksimov-private-v1-${imageComponent}`,
     ].includes(registry?.repository) ||
     !/^sha256:[0-9a-f]{64}$/u.test(registry.digest ?? '') ||
     !Number.isSafeInteger(proof.artifact?.id) ||
