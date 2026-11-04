@@ -2,8 +2,10 @@
 
 GitHub owns required checks, release image evidence and source history. Production consumes a
 tested `linux/amd64` image by registry digest. The existing full-SHA local image aliases remain
-the interface for Compose, rollback and image retention. A Docker image ID identifies its config;
-it is distinct from the registry manifest digest. Both identities are recorded and compared.
+the interface for Compose, rollback and image retention. The observed Docker image ID and the
+registry manifest digest are recorded and compared separately. Their interpretation depends on
+the Docker image store; the containerd inspect ID may identify a manifest or index. Neither field
+substitutes for verification of the other at the publication and preload boundaries.
 
 ## Accumulated main coverage
 
@@ -37,13 +39,14 @@ the tested image and a bounded identity record. Their artifact name includes SHA
 
 A separate GitHub-hosted registry job consumes that exact artifact after Docker succeeds. It:
 
-1. Loads the checksummed archive and compares source labels, platform, config ID and image size.
+1. Loads the checksummed archive and compares source labels, platform, Docker image ID and size.
 2. Reads full package metadata for `ghcr.io/gameclubpro/major-maksimov-private-v1-COMPONENT` using
    the publication workflow's package credential. Before any Docker tag or push, it requires the
    exact container package name, private visibility and source repository ID/name binding.
    Missing packages, HTTP 403/404, empty or malformed metadata and unavailable evidence block
    publication. A verified public package produces a separate refusal. It checks privacy and
-   binding again after push, then pulls the returned digest to compare it with the tested config ID.
+   binding again after push, then pulls the returned digest to compare its Docker image ID with
+   the tested image.
 3. Generates an SPDX SBOM from the same local image and attests both provenance and SBOM for
    the exact registry digest through GitHub OIDC.
 4. Verifies signatures and signed certificate claims for repository identity, source SHA/ref,
@@ -53,6 +56,16 @@ A separate GitHub-hosted registry job consumes that exact artifact after Docker 
    matching or substituting invocation fields from the predicate body.
 5. Uploads only `registry-record-COMPONENT.json` in the bounded receipt artifact
    `maxim-registry-COMPONENT-SHA-RUNID-ATTEMPT`. The SBOM is attached through its attestation.
+
+Both image jobs verify the default Docker daemon uses the containerd image store before building
+or loading an image. Docker's reported size depends on its image-store backend, so producer and
+consumer require the same representation. `scripts/ci/prepare-docker-store.mjs` is restricted to
+disposable GitHub-hosted Linux runners. It preserves the default Unix socket and refuses host or
+context overrides. Before changing the existing daemon configuration or restarting Docker, it
+requires an empty container inventory; it preserves unrelated configuration fields and verifies
+the resulting backend from both root and the runner account. The native image smokes retain
+their existing default-socket guards. Exact image ID and size comparisons remain mandatory;
+matching backends alone do not establish image identity or successful delivery.
 
 Registry writes, OIDC and attestation permissions belong only to that publication job. Temporary
 registry authentication files are private and removed after use. The pinned attestation actions
@@ -146,12 +159,12 @@ file budget remains 65536 bytes. Neither file budget is a provider token format.
 identity, authenticated access and private package metadata with the exact repository binding
 remain the authority checks.
 
-Release image inspection failures retain every config ID, platform, source/protection label and
+Release image inspection failures retain every Docker image ID, platform, source/protection label and
 size check. They report `IMAGE_INSPECTION_REFUSED` with a fixed `reason` identifying the first
 failed comparison. Malformed Docker JSON and incorrect inspection cardinality have separate
 fixed reasons. These diagnostics omit raw Docker output, expected/actual fields and original
 parse errors. A reported mismatch blocks publication or preload; it never authorizes replacing
-the tested identity. Registry manifest digest and Docker config ID remain separate.
+the tested identity. Registry manifest digest and observed Docker image ID remain separate.
 
 Provisioning failures report only fixed `stage` and `code` fields, separating local credential/owner
 admission, registry login, metadata reads and seed build/push. Workflow-access diagnostics retain
@@ -194,7 +207,7 @@ instead of submitting again. A moved main candidate requires a new decision befo
 
 The production pull uses a separately installed read-only package credential. The operator's
 GitHub control token never travels to production. The shared deploy lock, clean controller,
-capacity floors, digest/config/size/label checks and image receipt all precede runtime mutation.
+capacity floors, digest/image-ID/size/label checks and image receipt all precede runtime mutation.
 Normal release paths require these verified preloads and do not rebuild an absent image on the
 server. Source changes, migration rules, smoke checks, role topology, rollback reader floors and
 the component manifest retain their own gates. See the
@@ -212,7 +225,7 @@ establish registry publication, installed credentials or production acceptance.
 - `scripts/ci/impact.test.mjs` and `assert-green.test.mjs`: selected lanes and exact operational gates.
 - `scripts/ci/registry-images.test.mjs`: source/runner/invocation/subject rejection, process-backed
   package API failures with zero tag/push calls, private repository binding before and after
-  publication and at consumption, namespace rejection, separate config/digest identities, SBOM
+  publication and at consumption, namespace rejection, separate Docker/digest identities, SBOM
   proof, archive layout and permission boundaries. The projected verified metadata in
   `scripts/ci/test/registry-verified-attestations.fixture.json` covers the pinned CLI's actual
   provenance and SPDX 2.3 output; it contains no predicate body or signature bundle and does not
