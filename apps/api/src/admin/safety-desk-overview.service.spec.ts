@@ -16,6 +16,12 @@ import { ConfigService } from '@nestjs/config';
 import type { SafetyDeskOverviewPendingService } from './safety-desk-overview-pending.service';
 import type { SafetyDeskOverviewActionsService } from './safety-desk-overview-actions.service';
 import { projectOverviewActions } from './safety-desk-overview-actions.service';
+import {
+  STORAGE_RUNTIME_COUNTERS,
+  STORAGE_RUNTIME_METRICS_PREFIX,
+} from '../system/storage-runtime-metrics.service';
+import { RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
+import type { AppRole } from '../runtime/app-role';
 
 const now = new Date('2026-11-04T12:00:00.000Z');
 
@@ -121,6 +127,23 @@ function fixture() {
   };
 }
 
+function reportWorkers(redis: Redis, services: readonly string[]): void {
+  const present = new Set(services);
+  const report = JSON.stringify({
+    schemaVersion: 1,
+    startedAt: now.getTime() - 1000,
+    observedAt: now.getTime(),
+    counters: Object.fromEntries(STORAGE_RUNTIME_COUNTERS.map((name) => [name, 0])),
+  });
+  jest
+    .mocked(redis.mget)
+    .mockImplementation(async (...keys) =>
+      keys.map((key) =>
+        present.has(String(key).slice(STORAGE_RUNTIME_METRICS_PREFIX.length)) ? report : null,
+      ),
+    );
+}
+
 describe('Safety Desk shared bounded overview', () => {
   const originalRole = process.env.APP_ROLE;
   beforeEach(() => {
@@ -131,6 +154,69 @@ describe('Safety Desk shared bounded overview', () => {
     jest.useRealTimers();
     if (originalRole === undefined) delete process.env.APP_ROLE;
     else process.env.APP_ROLE = originalRole;
+  });
+
+  it.each([
+    {
+      role: 'admin',
+      name: 'all fourteen distributed reports',
+      reported: RUNTIME_SERVICE_NAMES.filter((service) => service !== 'api-all'),
+      expectedCount: 14,
+      freshCount: 14,
+      missingService: null,
+    },
+    {
+      role: 'all',
+      name: 'one all-in-one report despite other reports',
+      reported: RUNTIME_SERVICE_NAMES,
+      expectedCount: 1,
+      freshCount: 1,
+      missingService: null,
+    },
+    {
+      role: 'admin',
+      name: 'a missing distributed report despite an all-in-one report',
+      reported: RUNTIME_SERVICE_NAMES.filter((service) => service !== 'api-action'),
+      expectedCount: 14,
+      freshCount: 13,
+      missingService: 'api-action',
+    },
+    {
+      role: 'all',
+      name: 'a missing all-in-one report despite distributed reports',
+      reported: RUNTIME_SERVICE_NAMES.filter((service) => service !== 'api-all'),
+      expectedCount: 1,
+      freshCount: 0,
+      missingService: 'api-all',
+    },
+  ] satisfies {
+    role: AppRole;
+    name: string;
+    reported: readonly string[];
+    expectedCount: number;
+    freshCount: number;
+    missingService: string | null;
+  }[])('selects the explicit $role topology: $name', async (scenario) => {
+    process.env.APP_ROLE = scenario.role;
+    const f = fixture();
+    reportWorkers(f.redis, scenario.reported);
+    await f.service.collect();
+    const workers = f.store.write.mock.calls[0]![0].workers;
+    expect(workers.availability).toBe('FRESH');
+    expect(workers.value).toMatchObject({
+      expectedCount: scenario.expectedCount,
+      freshCount: scenario.freshCount,
+    });
+    const expected = RUNTIME_SERVICE_NAMES.filter((service) =>
+      scenario.role === 'all' ? service === 'api-all' : service !== 'api-all',
+    );
+    expect(workers.value?.rows.map((row) => row.service)).toEqual(expected);
+    if (scenario.missingService)
+      expect(workers.value?.rows.find((row) => row.service === scenario.missingService)).toEqual({
+        service: scenario.missingService,
+        observedAt: null,
+      });
+    f.redis.disconnect();
   });
 
   it('does no SQL or counter collection on browser GET and coalesces concurrent reads', async () => {

@@ -17,8 +17,11 @@ changes abort earlier requests, and a denied session clears its displayed eviden
 Each source retains its own observation time and availability. A new HTTP response
 does not refresh an older source observation. Redis failure, invalid clocks,
 missing providers/indexes and incomplete samples cannot establish healthy zeros.
-Worker reports establish process observation, not successful bot actions. A quiet
-bot has no invented activity deadline. Publisher uses its own runtime heartbeat;
+Worker reports establish process observation, not successful bot actions.
+Worker coverage follows the explicit role: `APP_ROLE=all` expects only `api-all`,
+while `APP_ROLE=admin` expects fourteen distributed API roles; present heartbeats
+never determine the expected set. A quiet bot has no invented activity deadline.
+Publisher uses its own runtime heartbeat;
 the overview does not infer Lastik or Birzhik health from Major's measurements.
 
 The separate `safety-desk:overview:v1:*` Redis namespace contains no message text,

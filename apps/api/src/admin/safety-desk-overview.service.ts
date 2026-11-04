@@ -308,13 +308,20 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
         ? observed({ rows: counters.value.rows }, counters.value.observedAt)
         : failed(snapshot.queues);
     const workers = cheap[1];
+    const allInOne = getAppRole() === 'all';
+    const workerServices =
+      workers.status === 'fulfilled'
+        ? workers.value.services.filter((row) =>
+            allInOne ? row.service === 'api-all' : row.service !== 'api-all',
+          )
+        : [];
     snapshot.workers =
       workers.status === 'fulfilled' && workers.value.available
         ? observed(
             {
-              expectedCount: workers.value.services.length,
-              freshCount: workers.value.services.filter((row) => row.snapshot !== null).length,
-              rows: workers.value.services.map((row) => ({
+              expectedCount: workerServices.length,
+              freshCount: workerServices.filter((row) => row.snapshot !== null).length,
+              rows: workerServices.map((row) => ({
                 service: row.service,
                 observedAt: row.snapshot ? new Date(row.snapshot.observedAt).toISOString() : null,
               })),
