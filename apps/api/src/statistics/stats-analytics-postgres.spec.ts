@@ -65,13 +65,15 @@ native('analytics native snapshots, authorization, pagination and resource deadl
     db = new PrismaClient({
       adapter: createPrismaAdapter(databaseUrl, {
         max: 6,
-        connectionTimeoutMillis: 100,
+        // FLAG: Fixture setup uses the ordinary pool budget; deadline cases own separate limits.
+        connectionTimeoutMillis: 5000,
         statement_timeout: 5000,
         application_name: 'analytics-native-test',
       }),
     });
     verifier = new Pool({ connectionString: databaseUrl, max: 1 });
     await db.$connect();
+    await db.$queryRaw`SELECT 1`;
   });
   beforeEach(async () => {
     entity = {
@@ -115,6 +117,10 @@ native('analytics native snapshots, authorization, pagination and resource deadl
       requestId: randomUUID(),
       operations: [source, consumer],
     });
+    expect(result.results).toMatchObject([
+      { id: source.id, status: 'APPLIED', state: 'ACTIVE', epoch: '1', errorCode: null },
+      { id: consumer.id, status: 'APPLIED', state: 'ACTIVE', epoch: '1', errorCode: null },
+    ]);
     sourceEpoch = result.results[0]!.epoch;
     context = {
       contextId: randomUUID(),
