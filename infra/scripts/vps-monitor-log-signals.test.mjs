@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
@@ -119,10 +120,7 @@ test('uses successful remote cursors and reports bounded log saturation', () => 
   assert.match(monitor, /exit "\\\$failed"/u);
   assert.doesNotMatch(monitor, /logs --since "\$\{INTERVAL_SEC\}s"/u);
   assert.match(monitor, /LOG_REQUEST_LINES=\$\(\(TAIL_LINES \+ 1\)\)/u);
-  assert.equal(
-    [...monitor.matchAll(/log scan saturated=true service=\\\$service/gu)].length,
-    2,
-  );
+  assert.equal([...monitor.matchAll(/log scan saturated=true service=\\\$service/gu)].length, 2);
   for (const [functionName, cursor] of [
     ['scan_service_logs', 'LAST_SERVICE_LOG_SCAN_AT_SEC'],
     ['summarize_static_services', 'LAST_STATIC_LOG_SCAN_AT_SEC'],
@@ -161,7 +159,10 @@ test('adds privacy-safe semantic, Publisher, and media-analysis readiness to eve
   assert.match(monitor, /bot_id_parity/u);
   assert.match(monitor, /admin_bot_id="\$\(read_bot_id api-admin\)" \|\| exit 1/u);
   assert.match(monitor, /publisher_bot_id="\$\(read_bot_id api-publisher\)" \|\| exit 1/u);
-  assert.match(monitor, /\[\[ -n "\$admin_bot_id" && "\$admin_bot_id" == "\$publisher_bot_id" \]\]/u);
+  assert.match(
+    monitor,
+    /\[\[ -n "\$admin_bot_id" && "\$admin_bot_id" == "\$publisher_bot_id" \]\]/u,
+  );
   assert.doesNotMatch(monitor, /exec -T -e MAX_PUBLISHER_BOT_ID=/u);
   assert.match(monitor, /run_step media-analysis-ready summarize_media_analysis_ready/u);
   assert.match(monitor, /monitor-media-ready\.cjs/u);
@@ -191,4 +192,182 @@ test('reports the hard deploy free-space floor independently from percentage war
   assert.match(command, /API_BUILD_DISK_BLOCKED/u);
   assert.match(command, /disk_available_bytes < deploy_disk_hard_minimum_free_bytes/u);
   assert.doesNotMatch(command, /MAXIM_ALLOW_CRITICAL_DISK_DEPLOY/u);
+});
+
+function summaryFixture(t, dockerSource) {
+  const directory = mkdtempSync(resolve(tmpdir(), 'maxim-log-summary-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(resolve(directory, 'infra/scripts'), { recursive: true });
+  mkdirSync(resolve(directory, 'bin'));
+  writeFileSync(
+    resolve(directory, 'infra/scripts/vps-connect.sh'),
+    '#!/usr/bin/env bash\n[[ "$1" == exec ]] || exit 99\nshift\nexec bash -c "$1"\n',
+    { mode: 0o700 },
+  );
+  writeFileSync(resolve(directory, 'bin/docker'), `#!/usr/bin/env bash\n${dockerSource}\n`, {
+    mode: 0o700,
+  });
+  return spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+LOG_SERVICES=(broken empty healthy capped)
+TAIL_LINES=2
+SIGNAL_WINDOW_MIN=30
+${readFunction('summarize_log_signal_counts')}
+summarize_log_signal_counts
+`,
+    ],
+    {
+      cwd: directory,
+      env: { ...process.env, PATH: `${directory}/bin:${process.env.PATH}` },
+      encoding: 'utf8',
+    },
+  );
+}
+
+test('log summary distinguishes read failures, empty success and capped observations', (t) => {
+  const result = summaryFixture(
+    t,
+    `case "\${*: -1}" in
+  broken) echo 'private error details' >&2; exit 7 ;;
+  empty) exit 0 ;;
+  healthy) echo '{"level":40,"msg":"internal limiter"}' ;;
+  capped) printf '%s\\n' '{"level":40}' '{"level":40}' '{"level":50}' ;;
+esac`,
+  );
+  assert.equal(result.status, 1, result.stderr);
+  const [header, ...rows] = result.stdout
+    .trim()
+    .split('\n')
+    .map((line) => line.split('\t'));
+  const values = Object.fromEntries(
+    rows.map((row) => [row[0], Object.fromEntries(header.map((key, i) => [key, row[i]]))]),
+  );
+  assert.equal(values.broken.level40_50, 'unknown');
+  assert.equal(values.broken.read_status, 'read_failed');
+  assert.equal(values.empty.level40_50, '0');
+  assert.equal(values.empty.read_status, 'collected');
+  assert.equal(values.empty.truncated, 'false');
+  assert.equal(values.healthy.rate_limit, '1');
+  assert.equal(values.capped.level40_50, '2');
+  assert.equal(values.capped.truncated, 'true');
+  assert.equal(values.capped.counts_are_lower_bounds, 'true');
+  assert.doesNotMatch(result.stdout + result.stderr, /private error details/u);
+});
+
+test('full samples retain later steps and explicitly report incomplete collection', () => {
+  const functions = [
+    'summarize_local_ready_health',
+    'summarize_publisher_runtime',
+    'summarize_media_analysis_ready',
+    'summarize_real_chat_signals',
+    'summarize_bullmq_state',
+    'summarize_redis_runtime',
+    'summarize_runtime_pressure',
+    'summarize_static_services',
+    'summarize_log_signal_counts',
+    'scan_service_logs',
+    'summarize_public_app_assets',
+    'summarize_public_access_guards',
+  ];
+  const result = spawnSync(
+    'bash',
+    [
+      '-c',
+      `set -euo pipefail
+SAMPLE_STEP_COUNT=0
+SAMPLE_STEP_FAILURES=0
+EXPECTED_SAMPLE_STEPS=16
+PUBLIC_URL=https://example.invalid
+${readFunction('run_step')}
+${readFunction('sample_once')}
+${functions.map((name) => `${name}() { return 0; }`).join('\n')}
+function ./infra/scripts/vps-connect.sh { [[ "$1" != health ]]; }
+curl() { return 0; }
+sample_once 4
+`,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /monitor_step label=health phase=end exit=1 complete=false/u);
+  assert.match(
+    result.stdout,
+    /monitor_step label=public-access-guards phase=end exit=0 complete=true/u,
+  );
+  assert.match(
+    result.stdout,
+    /monitor_sample index=4 steps=16 expected_steps=16 failed_steps=1 complete=false/u,
+  );
+});
+
+test('actual signal caller preserves partial observations and both command and collection failures', (t) => {
+  const directory = mkdtempSync(resolve(tmpdir(), 'maxim-signal-collection-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(resolve(directory, 'infra/scripts'), { recursive: true });
+  const first = {
+    schema_version: 2,
+    audit: 'recent_webhook_statuses',
+    rows: [
+      'RECEIVED',
+      'QUEUED',
+      'PROCESSED',
+      'DUPLICATE',
+      'FAILED',
+      'NO_REPLAY_HELD',
+      'CANCELLED',
+      'QUARANTINED',
+    ].map((status) => ({ status, count_lower_bound: 0, saturated: false, newest_age_seconds: 0 })),
+  };
+  const second = { schema_version: 2, audit: 'recent_night_mode_signals', rows: [] };
+  const outputFile = resolve(directory, 'reports.jsonl');
+  writeFileSync(
+    resolve(directory, 'infra/scripts/vps-connect.sh'),
+    '#!/usr/bin/env bash\ncat "$MOCK_SIGNAL_OUTPUT"\nexit "$MOCK_SIGNAL_EXIT"\n',
+    { mode: 0o700 },
+  );
+  for (const [input, commandExit, expectedExit] of [
+    [[first], 7, 7],
+    [[first], 0, 1],
+    [[first, second], 0, 0],
+  ]) {
+    writeFileSync(outputFile, input.map((value) => JSON.stringify(value)).join('\n') + '\n');
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+SIGNAL_WINDOW_MIN=30
+${readFunction('summarize_real_chat_signals')}
+summarize_real_chat_signals
+`,
+      ],
+      {
+        cwd: directory,
+        env: {
+          ...process.env,
+          ROOT_DIR: root,
+          MOCK_SIGNAL_OUTPUT: outputFile,
+          MOCK_SIGNAL_EXIT: String(commandExit),
+        },
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(result.status, expectedExit, result.stderr);
+    const records = result.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(records.slice(0, -1), input);
+    const envelope = records.at(-1);
+    assert.equal(envelope.audit, 'monitor_signal_collection');
+    assert.equal(envelope.complete, expectedExit === 0);
+    assert.equal(envelope.command_exit_code, commandExit);
+    assert.deepEqual(
+      envelope.stages.map((stage) => stage.status),
+      ['collected', input.length === 2 ? 'collected' : 'missing'],
+    );
+  }
 });
