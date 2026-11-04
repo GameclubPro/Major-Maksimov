@@ -4,11 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=infra/scripts/lib/postgres-backup-profile.sh
 source "$ROOT_DIR/infra/scripts/lib/postgres-backup-profile.sh"
-BACKUP_CALENDAR="*-*-* 03:20:00"
+BACKUP_CALENDAR="*-*-* 03,15:20:00"
 RESTORE_CALENDAR="Sun *-*-* 05:30:00"
 PROFILE_PRECHECK=""
 if [[ "$MAXIM_BACKUP_PROFILE" == eraser ]]; then
-  BACKUP_CALENDAR="*-*-* 01:20:00"
+  BACKUP_CALENDAR="*-*-* 01,13:20:00"
   RESTORE_CALENDAR="Sun *-*-* 02:30:00"
   # FLAG: Units survive checkout rollbacks. Old tooling ignores ERASER's profile and
   # would select the main database; a missing tracked capability must fail the service.
@@ -50,7 +50,7 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 EOF
 
-# The retry service shares the coordinator flock with the daily request.
+# The retry service shares the coordinator flock with each scheduled request.
 sed 's/postgres-backup-schedule.sh request/postgres-backup-schedule.sh tick/' \
   "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup.service" > "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup-retry.service"
 
@@ -69,7 +69,7 @@ EOF
 
 cat > "$TEMP_DIR/${MAXIM_BACKUP_UNIT_PREFIX}-backup.timer" <<EOF
 [Unit]
-Description=Run MAXIM PostgreSQL backup daily
+Description=Request MAXIM PostgreSQL backup twice daily
 
 [Timer]
 OnCalendar=$BACKUP_CALENDAR
