@@ -54,7 +54,7 @@ function registryComponent() {
       sizeBytes: 1234,
     },
     registry: {
-      repository: 'ghcr.io/gameclubpro/major-maksimov-release-api',
+      repository: 'ghcr.io/gameclubpro/major-maksimov-private-v1-api',
       digest: imageId('c'),
     },
   };
@@ -97,32 +97,36 @@ test('registry manifest metadata keeps registry digest distinct from Docker ID t
   );
 });
 
-test('historical manifest provenance in the legacy namespace remains readable for rollback', () => {
-  const api = registryComponent();
-  api.registryProvenance.record.registry.repository = 'ghcr.io/gameclubpro/major-maksimov-api';
-  const stateDir = mkdtempSync(join(tmpdir(), 'maxim-registry-legacy-manifest-'));
-  const manifest = buildReleaseManifest({
-    releaseId: 'legacy-registry',
-    targetSha: api.sourceSha,
-    components: [api],
+for (const legacyRepository of [
+  'ghcr.io/gameclubpro/major-maksimov-api',
+  'ghcr.io/gameclubpro/major-maksimov-release-api',
+])
+  test(`historical manifest provenance ${legacyRepository} remains readable for rollback`, () => {
+    const api = registryComponent();
+    api.registryProvenance.record.registry.repository = legacyRepository;
+    const stateDir = mkdtempSync(join(tmpdir(), 'maxim-registry-legacy-manifest-'));
+    const manifest = buildReleaseManifest({
+      releaseId: 'legacy-registry',
+      targetSha: api.sourceSha,
+      components: [api],
+    });
+    commitReleaseManifest({ stateDir, manifest });
+    const saved = readReleaseManifest(stateDir, 'legacy-registry');
+    assert.equal(
+      saved.components['api-shared'].registryProvenance.record.registry.repository,
+      legacyRepository,
+    );
+    const next = buildReleaseManifest({
+      releaseId: 'new-registry-static',
+      targetSha: sha('e'),
+      current: saved,
+      components: [component('admin-static', 'e')],
+    });
+    assert.equal(
+      next.components['api-shared'].registryProvenance.record.registry.repository,
+      legacyRepository,
+    );
   });
-  commitReleaseManifest({ stateDir, manifest });
-  const saved = readReleaseManifest(stateDir, 'legacy-registry');
-  assert.equal(
-    saved.components['api-shared'].registryProvenance.record.registry.repository,
-    'ghcr.io/gameclubpro/major-maksimov-api',
-  );
-  const next = buildReleaseManifest({
-    releaseId: 'new-registry-static',
-    targetSha: sha('e'),
-    current: saved,
-    components: [component('admin-static', 'e')],
-  });
-  assert.equal(
-    next.components['api-shared'].registryProvenance.record.registry.repository,
-    'ghcr.io/gameclubpro/major-maksimov-api',
-  );
-});
 
 test('registry provenance must agree with the component alias, source and tested image ID', () => {
   for (const mutate of [

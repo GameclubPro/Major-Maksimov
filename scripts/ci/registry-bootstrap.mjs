@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import {
   imageIdentity,
   isOpaqueGitHubCredential,
+  packageRepository,
   verifyPrivatePackage,
 } from './registry-images.mjs';
 
@@ -51,7 +51,7 @@ export function bootstrapFailureMessage(error) {
   const code = CODES.has(error?.code) ? error.code : 'INTERNAL';
   const reason =
     code === 'REGISTRY_PACKAGE_PUBLIC'
-      ? ': package is public; choose a new reserved name'
+      ? ': package is public; provision reviewed private targets locally'
       : '; private package admission did not pass';
   return `Registry bootstrap stopped${reason} (stage=${stage}, code=${code}).\n`;
 }
@@ -110,7 +110,7 @@ export async function bootstrapPrivatePackage(
   expected,
   { getPackage, run, temporaryRoot = tmpdir(), onStage = () => {} },
 ) {
-  const identity = imageIdentity(expected);
+  const identity = { repository: packageRepository(expected) };
   onStage('metadata-before');
   const before = await getPackage(identity.repository.split('/').at(-1));
   if (before?.status === 200) {
@@ -153,80 +153,67 @@ export async function bootstrapPrivatePackage(
   }
 }
 
-async function executeBootstrap(env, argv, { execute = execFileSync, request = fetch }, onStage) {
-  if (argv.length) throw new Error('Registry bootstrap accepts no command-line overrides.');
+async function executeBootstrap(
+  env,
+  argv,
+  { request = fetch, writeReceipt = writeFileSync },
+  onStage,
+) {
+  if (argv.length)
+    throw new Error('Registry access verification accepts no command-line overrides.');
   onStage('context');
   const expected = bootstrapContext(env);
   onStage('credential-shape');
   const token = env.GH_TOKEN;
-  // FLAG: Bound an opaque printable ASCII credential for stdin and the Bearer header, never a vendor token format.
-  // The trusted workflow, authenticated login and exact private package binding establish access.
   if (!isOpaqueGitHubCredential(token))
     throw new Error('The isolated workflow package credential is required.');
-  onStage('auth');
-  const auth = mkdtempSync(join(tmpdir(), 'maxim-bootstrap-auth-'));
-  chmodSync(auth, 0o700);
-  const childEnv = { ...env, DOCKER_CONFIG: auth };
-  const run = (binary, args, input) => {
-    try {
-      return execute(binary, args, {
-        env: childEnv,
-        input,
-        encoding: 'utf8',
-        timeout: 120_000,
-        maxBuffer: 1024 * 1024,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch {
-      throw new Error('Registry bootstrap dependency failed; credential and output are withheld.');
-    }
-  };
-  let requests = 0;
-  const getPackage = async (name) => {
-    if (++requests > 2 || !/^major-maksimov-release-(?:api|miniapp|admin|eraser)$/u.test(name))
-      throw new Error('Bootstrap API budget or package identity refused.');
-    const response = await request(
-      `https://api.github.com/users/GameclubPro/packages/container/${name}`,
-      {
-        method: 'GET',
-        redirect: 'error',
-        signal: AbortSignal.timeout(30_000),
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
+  // FLAG: GITHUB_TOKEN created packages inherit a public workflow repository's
+  // visibility. This workflow only proves access to already-private packages;
+  // even a 404 must never trigger Docker login, seed creation or a registry write.
+  onStage('metadata-before');
+  const repository = packageRepository(expected);
+  const packageName = repository.split('/').at(-1);
+  const response = await request(
+    `https://api.github.com/users/GameclubPro/packages/container/${packageName}`,
+    {
+      method: 'GET',
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
       },
-    );
-    let bytes = 0;
-    const chunks = [];
-    for await (const chunk of response.body) {
-      bytes += chunk.length;
-      if (bytes > 65536) throw new Error('Bootstrap metadata response exceeded its bound.');
-      chunks.push(chunk);
-    }
-    let body = null;
-    try {
-      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    } catch {
-      /* malformed metadata stays unproved */
-    }
-    return { status: response.status, body };
-  };
-  try {
-    onStage('login');
-    run('docker', ['login', 'ghcr.io', '--username', 'GameclubPro', '--password-stdin'], token);
-    const result = await bootstrapPrivatePackage(expected, { getPackage, run, onStage });
-    onStage('receipt');
-    writeFileSync(
-      `registry-bootstrap-${expected.component}.json`,
-      `${JSON.stringify({ ...result, sourceSha: expected.sha, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT })}\n`,
-      { mode: 0o600 },
-    );
-    return result;
-  } finally {
-    removeTemporaryDirectory(auth, onStage, 'auth-cleanup');
+    },
+  );
+  let bytes = 0;
+  const chunks = [];
+  for await (const chunk of response.body) {
+    bytes += chunk.length;
+    if (bytes > 65536) throw new Error('Package metadata response exceeded its bound.');
+    chunks.push(chunk);
   }
+  let body = null;
+  try {
+    body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+  } catch {
+    /* Invalid metadata cannot prove access. */
+  }
+  verifiedMetadata(expected, { status: response.status, body });
+  const result = {
+    schemaVersion: 1,
+    component: expected.component,
+    package: repository,
+    action: 'WORKFLOW_ACCESS_VERIFIED',
+    visibility: 'private',
+  };
+  onStage('receipt');
+  writeReceipt(
+    `registry-bootstrap-${expected.component}.json`,
+    `${JSON.stringify({ ...result, sourceSha: expected.sha, runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT })}\n`,
+    { mode: 0o600, flag: 'wx' },
+  );
+  return result;
 }
 
 export async function runBootstrap(
