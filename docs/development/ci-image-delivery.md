@@ -47,7 +47,10 @@ A separate GitHub-hosted registry job consumes that exact artifact after Docker 
 3. Generates an SPDX SBOM from the same local image and attests both provenance and SBOM for
    the exact registry digest through GitHub OIDC.
 4. Verifies signatures and signed certificate claims for repository identity, source SHA/ref,
-   workflow path/digest, allowed runner and the exact run invocation/attempt.
+   workflow path/digest, allowed runner and the exact run invocation/attempt. The pinned actions
+   emit exact predicate types `https://slsa.dev/provenance/v1` and
+   `https://spdx.dev/Document/v2.3`; the verifier checks those full identifiers without prefix
+   matching or substituting invocation fields from the predicate body.
 5. Uploads only `registry-record-COMPONENT.json` in the bounded receipt artifact
    `maxim-registry-COMPONENT-SHA-RUNID-ATTEMPT`. The SBOM is attached through its attestation.
 
@@ -210,7 +213,10 @@ establish registry publication, installed credentials or production acceptance.
 - `scripts/ci/registry-images.test.mjs`: source/runner/invocation/subject rejection, process-backed
   package API failures with zero tag/push calls, private repository binding before and after
   publication and at consumption, namespace rejection, separate config/digest identities, SBOM
-  proof, archive layout and permission boundaries.
+  proof, archive layout and permission boundaries. The projected verified metadata in
+  `scripts/ci/test/registry-verified-attestations.fixture.json` covers the pinned CLI's actual
+  provenance and SPDX 2.3 output; it contains no predicate body or signature bundle and does not
+  replace cryptographic verification.
 - `scripts/ci/registry-attestation-auth.test.mjs` and `workflow-structure.test.mjs`: the pinned
   actions' standard Docker config path, private GHCR-only exposure, safe restoration and cleanup
   after preparation failures, with real disposable filesystem entries.
