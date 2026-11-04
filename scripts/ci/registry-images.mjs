@@ -402,6 +402,7 @@ export function verifyRegistryImage(record, expected, run = execute, { proofOnly
     throw new Error('Repository identity changed.');
   // FLAG: Valid historical signatures cannot authorize an image whose package is public now.
   verifyPrivatePackage({ ...expected, repositoryId }, run);
+  // FLAG: The pinned attest-sbom action signs SPDX 2.3; require its exact predicate URI.
   for (const predicate of ['https://slsa.dev/provenance/v1', 'https://spdx.dev/Document/v2.3']) {
     const results = JSON.parse(run('gh', provenanceArguments(record, expected, predicate)));
     assertVerifiedAttestation(results, record, { ...expected, repositoryId }, predicate);

@@ -305,6 +305,55 @@ test('legacy public registry records cannot authorize a release in the new priva
   }
 });
 
+test('the pinned verifier accepts the observed signed SPDX 2.3 publication', () => {
+  const observed = JSON.parse(
+    readFileSync(new URL('./test/registry-verified-attestations.fixture.json', import.meta.url)),
+  );
+  const observedIdentity = imageIdentity(observed.expected);
+  // FLAG: The projected fixture exercises the verified metadata boundary; it does not prove a Docker image ID.
+  const observedRecord = {
+    ...record(),
+    component: observed.expected.component,
+    source: {
+      ...observed.expected,
+      workflow: '.github/workflows/ci.yml',
+      workflowRef: `${repository}/.github/workflows/ci.yml@refs/heads/main`,
+      runnerEnvironment: 'github-hosted',
+    },
+    image: { ...record().image, alias: observedIdentity.alias },
+    registry: observed.registry,
+  };
+  const predicates = [];
+  const reference = verifyRegistryImage(
+    observedRecord,
+    observed.expected,
+    (binary, args) => {
+      assert.equal(binary, 'gh');
+      if (args[0] === 'api') {
+        return JSON.stringify(packageMetadata({ name: 'major-maksimov-private-v1-eraser' }));
+      }
+      assert.deepEqual(args.slice(0, 2), ['attestation', 'verify']);
+      const predicate = args[args.indexOf('--predicate-type') + 1];
+      predicates.push(predicate);
+      return JSON.stringify(
+        predicate === provenance ? observed.verifications.provenance : observed.verifications.sbom,
+      );
+    },
+    { proofOnly: true },
+  );
+  assert.equal(reference, `${observed.registry.repository}@${observed.registry.digest}`);
+  assert.deepEqual(predicates, [provenance, 'https://spdx.dev/Document/v2.3']);
+  for (const wrongType of [
+    'https://spdx.dev/Document',
+    'https://spdx.dev/Document/v2.2',
+    'https://spdx.dev/Document/v2.3/other',
+  ]) {
+    const wrong = structuredClone(observed.verifications.sbom);
+    wrong[0].verificationResult.statement.predicateType = wrongType;
+    assert.throws(() => assertVerifiedAttestation(wrong, observedRecord, observed.expected, spdx));
+  }
+});
+
 test('each required OIDC certificate claim is checked after cryptographic verification', () => {
   assert.doesNotThrow(() =>
     assertVerifiedAttestation(attestation(), record(), expected, provenance),
@@ -623,33 +672,6 @@ test('proof-only validates provenance and SBOM without a local Docker daemon', (
       ),
     (error) => error.code === 'REGISTRY_PACKAGE_UNVERIFIED',
   );
-});
-
-test('release proofs require the exact SPDX 2.3 predicate emitted by the pinned SBOM action', () => {
-  const verify = (sbomPredicate) => {
-    const requested = [];
-    const run = (binary, args) => {
-      assert.equal(binary, 'gh');
-      if (args[0] === 'api') return JSON.stringify(packageMetadata());
-      const predicate = args[args.indexOf('--predicate-type') + 1];
-      requested.push(predicate);
-      return JSON.stringify(attestation(predicate === provenance ? provenance : sbomPredicate));
-    };
-    const reference = verifyRegistryImage(record(), expected, run, { proofOnly: true });
-    return { reference, requested };
-  };
-  assert.deepEqual(verify(spdx), {
-    reference: `${identity.repository}@${digest}`,
-    requested: [provenance, 'https://spdx.dev/Document/v2.3'],
-  });
-  for (const rejected of [
-    'https://spdx.dev/Document',
-    'https://spdx.dev/Document/v2.2',
-    'https://spdx.dev/Document/v3.0',
-    'https://cyclonedx.org/bom',
-  ]) {
-    assert.throws(() => verify(rejected), /Verified attestation does not bind/u, rejected);
-  }
 });
 
 test('previously signed image cannot be consumed after its package becomes public or unreadable', () => {
