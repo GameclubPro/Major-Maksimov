@@ -10,6 +10,7 @@ import {
   pausePolicy,
   readPolicy,
   resumePolicy,
+  runPolicyCommand,
   withPolicyMutationLock,
 } from './release-service-policy.mjs';
 
@@ -320,6 +321,156 @@ test('CLI exposes no resume or caller-selected path and prints no raw input on r
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, 'Release policy refused: INVALID_POLICY_COMMAND.\n');
   }
+});
+
+function delegatedPolicy() {
+  const value = {
+    schemaVersion: 1,
+    revision: 2,
+    paused: true,
+    autoEnabled: false,
+    reason: 'ROLLBACK',
+    updatedAt: '1970-01-01T00:00:00.000Z',
+  };
+  return { ...value, policySha256: sha256(stableJson(value)) };
+}
+
+test('root rollback CLI delegates only to the fixed installed deploy user and helper', () => {
+  const expected = delegatedPolicy();
+  let calls = 0;
+  const runner = (binary, args, options) => {
+    calls += 1;
+    assert.equal(binary, '/usr/sbin/runuser');
+    assert.deepEqual(args, [
+      '--user',
+      'maximadmin',
+      '--',
+      '/usr/bin/env',
+      '-i',
+      'PATH=/usr/local/bin:/usr/bin:/bin',
+      'HOME=/var/lib/maxim-release',
+      'LANG=C.UTF-8',
+      '/usr/bin/node',
+      '/usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs',
+      'pause-rollback',
+    ]);
+    assert.deepEqual(options, {
+      env: {
+        PATH: '/usr/local/bin:/usr/bin:/bin',
+        HOME: '/var/lib/maxim-release',
+        LANG: 'C.UTF-8',
+        GIT_NO_REPLACE_OBJECTS: '1',
+        GIT_TERMINAL_PROMPT: '0',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      maxBuffer: 4096,
+    });
+    return { status: 0, signal: null, stdout: Buffer.from(`${JSON.stringify(expected)}\n`) };
+  };
+  assert.deepEqual(
+    runPolicyCommand(['pause-rollback'], { uid: 0, node: '/usr/bin/node', runner }),
+    expected,
+  );
+  assert.equal(calls, 1);
+  for (const args of [
+    ['pause-rollback', '/private/path'],
+    ['pause-rollback', '--user', 'other-user'],
+    ['resume'],
+  ]) {
+    assert.throws(
+      () => runPolicyCommand(args, { uid: 0, node: '/usr/bin/node', runner }),
+      code('INVALID_POLICY_COMMAND'),
+    );
+  }
+  assert.equal(calls, 1);
+});
+
+test('root delegation refuses unreviewed Node, child failure, timeout and unproved output without leaking diagnostics', () => {
+  let called = false;
+  assert.throws(
+    () =>
+      runPolicyCommand(['pause-rollback'], {
+        uid: 0,
+        node: '/private/node',
+        runner: () => {
+          called = true;
+        },
+      }),
+    code('POLICY_DELEGATION_UNAVAILABLE'),
+  );
+  assert.equal(called, false);
+  const valid = { status: 0, signal: null, stdout: Buffer.from(JSON.stringify(delegatedPolicy())) };
+  for (const result of [
+    { ...valid, status: 1, stderr: Buffer.from('private child diagnostic') },
+    { ...valid, status: null, signal: 'SIGTERM', error: new Error('private timeout') },
+    { ...valid, stdout: Buffer.alloc(4097, 120) },
+    { ...valid, stdout: Buffer.from([255]) },
+    { ...valid, stdout: Buffer.from('private malformed receipt') },
+    {
+      ...valid,
+      stdout: Buffer.from(JSON.stringify({ ...delegatedPolicy(), policySha256: 'a'.repeat(64) })),
+    },
+    { ...valid, stdout: Buffer.from(JSON.stringify({ ...delegatedPolicy(), paused: false })) },
+    {
+      ...valid,
+      stdout: Buffer.from(JSON.stringify({ ...delegatedPolicy(), extra: 'private input' })),
+    },
+  ]) {
+    assert.throws(
+      () =>
+        runPolicyCommand(['pause-rollback'], {
+          uid: 0,
+          node: '/usr/bin/node',
+          runner: () => result,
+        }),
+      { code: 'POLICY_DELEGATION_UNPROVED', message: 'POLICY_DELEGATION_UNPROVED' },
+    );
+  }
+  assert.throws(
+    () =>
+      runPolicyCommand(['pause-rollback'], {
+        uid: 0,
+        node: '/usr/bin/node',
+        runner: () => {
+          throw new Error('private NSS diagnostic');
+        },
+      }),
+    { code: 'POLICY_DELEGATION_UNPROVED', message: 'POLICY_DELEGATION_UNPROVED' },
+  );
+});
+
+test('native same-user rollback pause preserves private policy/lock ownership and the persistent lock inode', () => {
+  fixture(({ root, path }) => {
+    initializePolicy({ directory: root });
+    const lock = join(root, 'policy.lock');
+    const lockInode = fs.statSync(lock).ino;
+    const source = `
+      import * as fs from 'node:fs';
+      import {pausePolicy} from ${JSON.stringify(new URL('./release-service-policy.mjs', import.meta.url).href)};
+      const directory=process.argv[1];
+      const policy=pausePolicy({directory,reason:'ROLLBACK'});
+      const info=path=>{const stat=fs.statSync(path);return {uid:stat.uid,mode:stat.mode&0o777,ino:stat.ino};};
+      process.stdout.write(JSON.stringify({uid:process.getuid(),policy,policyFile:info(directory+'/policy.json'),lock:info(directory+'/policy.lock')}));
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', source, root], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 5000,
+      maxBuffer: 4096,
+    });
+    assert.equal(result.status, 0, result.stderr.toString('utf8'));
+    const actual = JSON.parse(result.stdout.toString('utf8'));
+    assert.equal(actual.uid, process.getuid());
+    assert.equal(actual.policy.paused, true);
+    assert.equal(actual.policy.reason, 'ROLLBACK');
+    assert.equal(actual.policy.autoEnabled, false);
+    for (const stat of [actual.policyFile, actual.lock]) {
+      assert.equal(stat.uid, process.getuid());
+      assert.equal(stat.mode, 0o600);
+    }
+    assert.equal(actual.lock.ino, lockInode);
+    assert.equal(fs.statSync(path).uid, process.getuid());
+  });
 });
 
 test('all rollback routes pause the root-installed service after lock and before mutations or retained dispatch', () => {

@@ -274,17 +274,81 @@ export function resumePolicy({ expectedPolicySha256, ...options } = {}) {
   });
 }
 
+function delegatedRollbackPause({ runner, node }) {
+  if (!['/usr/bin/node', '/usr/local/bin/node'].includes(node))
+    fail('POLICY_DELEGATION_UNAVAILABLE');
+  try {
+    const stat = fs.lstatSync(node);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || stat.mode & 0o022)
+      fail('POLICY_DELEGATION_UNPROVED');
+    // FLAG: Root maintenance must pause as the fixed installed deploy user. Never
+    // relax state ownership or replace its private policy/lock with root-owned files.
+    const result = runner(
+      '/usr/sbin/runuser',
+      [
+        '--user',
+        'maximadmin',
+        '--',
+        '/usr/bin/env',
+        '-i',
+        'PATH=/usr/local/bin:/usr/bin:/bin',
+        'HOME=/var/lib/maxim-release',
+        'LANG=C.UTF-8',
+        node,
+        '/usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs',
+        'pause-rollback',
+      ],
+      {
+        env: cleanEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10_000,
+        maxBuffer: MAX_POLICY_BYTES,
+      },
+    );
+    if (
+      result.error ||
+      result.status !== 0 ||
+      result.signal !== null ||
+      !Buffer.isBuffer(result.stdout) ||
+      result.stdout.length > MAX_POLICY_BYTES
+    )
+      fail('POLICY_DELEGATION_UNPROVED');
+    const { policySha256, ...value } = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(result.stdout),
+    );
+    validate(value, settings());
+    const proved = projection(value);
+    if (value.reason !== 'ROLLBACK' || policySha256 !== proved.policySha256)
+      fail('POLICY_DELEGATION_UNPROVED');
+    return proved;
+  } catch {
+    // FLAG: NSS/PAM, child stderr and process errors are private diagnostics, never CLI output.
+    fail('POLICY_DELEGATION_UNPROVED');
+  }
+}
+
+export function runPolicyCommand(
+  args,
+  { uid = process.getuid(), runner = spawnSync, node = process.execPath } = {},
+) {
+  if (
+    !Array.isArray(args) ||
+    args.length !== 1 ||
+    !['read', 'initialize', 'pause-rollback'].includes(args[0]) ||
+    !Number.isSafeInteger(uid) ||
+    uid < 0
+  )
+    fail('INVALID_POLICY_COMMAND');
+  if (args[0] === 'pause-rollback')
+    return uid === 0
+      ? delegatedRollbackPause({ runner, node })
+      : pausePolicy({ reason: 'ROLLBACK' });
+  return args[0] === 'initialize' ? initializePolicy() : readPolicy();
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const args = process.argv.slice(2);
-    if (args.length !== 1 || !['read', 'initialize', 'pause-rollback'].includes(args[0]))
-      fail('INVALID_POLICY_COMMAND');
-    const result =
-      args[0] === 'initialize'
-        ? initializePolicy()
-        : args[0] === 'pause-rollback'
-          ? pausePolicy({ reason: 'ROLLBACK' })
-          : readPolicy();
+    const result = runPolicyCommand(process.argv.slice(2));
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
     const code = /^[A-Z][A-Z0-9_]{0,63}$/u.test(error.code ?? '')
