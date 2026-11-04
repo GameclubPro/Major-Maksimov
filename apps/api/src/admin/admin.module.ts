@@ -174,6 +174,8 @@ import { SafetyDeskObservabilityController } from './safety-desk-observability.c
 import { SafetyDeskCommercialAiService } from './safety-desk-commercial-ai.service';
 import { SafetyDeskCommercialAiPoolService } from './safety-desk-commercial-ai-pool.service';
 import { SafetyDeskOverviewService } from './safety-desk-overview.service';
+import { RuntimeOverviewReaderController } from './runtime-overview-reader.controller';
+import { RuntimeOverviewReaderGuard } from './runtime-overview-reader.guard';
 import { SafetyDeskOverviewStore } from './safety-desk-overview-store';
 import { SafetyDeskOverviewPendingService } from './safety-desk-overview-pending.service';
 import { SafetyDeskOverviewActionsService } from './safety-desk-overview-actions.service';
@@ -267,6 +269,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     SafetyDeskController,
     SafetyDeskRetentionController,
     SafetyDeskObservabilityController,
+    RuntimeOverviewReaderController,
     SupportRequestsController,
   ],
   providers: [
@@ -395,6 +398,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     VkParsingService,
     VkBotReviewService,
     SafetyDeskAdminGuard,
+    RuntimeOverviewReaderGuard,
     SafetyDeskService,
     SafetyDeskRetentionService,
     SafetyDeskCommercialAiService,
