@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
+import { fetchPublicHttpsMedia, PublicHttpsMediaError } from '../common/public-https-media';
 import { isPrismaUniqueConflict, formatVkParsingError } from './vk-parsing-errors';
 
 export type VkParsingMediaCacheRow = Prisma.VkParsingMediaCacheGetPayload<Record<string, never>>;
@@ -149,7 +150,9 @@ export class VkParsingMediaCacheService {
           lastError:
             error instanceof Error && error.name === 'AbortError'
               ? 'VK не ответил на проверку фото вовремя.'
-              : formatVkParsingError(error),
+              : error instanceof PublicHttpsMediaError
+                ? 'Не удалось скачать фото из VK.'
+                : formatVkParsingError(error),
         },
         mediaIdentity,
       );
@@ -224,15 +227,15 @@ export class VkParsingMediaCacheService {
   }
 
   private async fetchMediaPreflightResponse(url: URL, signal: AbortSignal): Promise<Response> {
-    const headResponse = await fetch(url, { method: 'HEAD', signal });
+    const headResponse = await fetchPublicHttpsMedia(url, { method: 'HEAD', signal });
     if (headResponse.ok || !this.shouldFallbackMediaPreflight(headResponse.status)) {
       return headResponse;
     }
 
     await headResponse.body?.cancel().catch(() => undefined);
-    const rangeResponse = await fetch(url, {
+    const rangeResponse = await fetchPublicHttpsMedia(url, {
       method: 'GET',
-      headers: { Range: 'bytes=0-0' },
+      range: 'bytes=0-0',
       signal,
     });
     await rangeResponse.body?.cancel().catch(() => undefined);

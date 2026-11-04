@@ -6,9 +6,11 @@ import {
   VkParsingOwnerProfile,
 } from '../prisma/prisma-client';
 import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
+import * as publicHttpsMedia from '../common/public-https-media';
 import {
   VK_MEDIA_CACHE_UPLOAD_BOT_ID_FIELD,
   VkParsingMediaCacheService,
+  type VkParsingMediaCacheRow,
 } from './vk-parsing-media-cache.service';
 import { VkParsingPostImportRepository } from './vk-parsing-post-import.repository';
 import { VkParsingAccessService } from './vk-parsing-access.service';
@@ -105,11 +107,27 @@ function readQueryRawSql(prisma: { $queryRaw: jest.Mock }): string {
 
 describe('VkParsingService', () => {
   const originalFetch = global.fetch;
+  let mediaFetch: jest.SpyInstance<
+    ReturnType<typeof publicHttpsMedia.fetchPublicHttpsMedia>,
+    Parameters<typeof publicHttpsMedia.fetchPublicHttpsMedia>
+  >;
+  let unexpectedMediaRequests = 0;
+
+  beforeEach(() => {
+    unexpectedMediaRequests = 0;
+    mediaFetch = jest
+      .spyOn(publicHttpsMedia, 'fetchPublicHttpsMedia')
+      .mockImplementation(async () => {
+        unexpectedMediaRequests += 1;
+        throw new Error('Unexpected VK media request in test');
+      });
+  });
 
   afterEach(() => {
     jest.useRealTimers();
     global.fetch = originalFetch;
     jest.restoreAllMocks();
+    expect(unexpectedMediaRequests).toBe(0);
   });
 
   function createFixture(
@@ -2675,7 +2693,8 @@ describe('VkParsingService', () => {
   });
 
   it('imports modern VK attachment facts from src photos, copy history, ads and unsupported types', async () => {
-    const { service, prisma } = createFixture();
+    const { service, prisma, mediaCache } = createFixture();
+    const preflightSpy = jest.spyOn(mediaCache, 'preflightMediaUrl');
     const source = createSource();
     prisma.vkParsingSource.findUnique.mockResolvedValue(source);
     prisma.vkParsingPost.findMany.mockResolvedValue([]);
@@ -2719,7 +2738,27 @@ describe('VkParsingService', () => {
       }),
     ) as unknown as typeof fetch;
 
+    mediaFetch.mockResolvedValueOnce(
+      new Response(null, {
+        headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+      }),
+    );
+
     await service.processSyncSourceJob('source-1', 'scheduled');
+
+    expect(preflightSpy).toHaveBeenCalledTimes(1);
+    const preflight = preflightSpy.mock.results[0];
+    if (!preflight || preflight.type !== 'return') {
+      throw new Error('Expected the imported photo preflight to start');
+    }
+    await preflight.value;
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mediaFetch).toHaveBeenCalledTimes(1);
+    expect(mediaFetch).toHaveBeenCalledWith(new URL('https://sun2.example/src.jpg'), {
+      method: 'HEAD',
+      signal: expect.any(AbortSignal),
+    });
 
     const rawValues = readExecuteRawValues(prisma);
     expect(rawValues).toContain(JSON.stringify(['https://sun2.example/src.jpg']));
@@ -7544,6 +7583,7 @@ describe('VkParsingService', () => {
       idempotencyKey: 'publish-key-1',
     });
 
+    expect(mediaFetch).not.toHaveBeenCalled();
     expect(maxClient.uploadImage).not.toHaveBeenCalled();
     const sendOptions = maxClient.sendMessageImmediateWithResolvedLink.mock.calls[0]?.[2];
     expect(sendOptions).not.toHaveProperty('imagePayload');
@@ -7627,19 +7667,18 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: new Response(new Uint8Array([1, 2, 3])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      );
 
     await service.processPublishPostJob({
       postId: 'post-1',
@@ -7648,7 +7687,7 @@ describe('VkParsingService', () => {
       idempotencyKey: 'publish-key-1',
     });
 
-    expect(global.fetch).toHaveBeenCalledWith(new URL(smallUrl), expect.any(Object));
+    expect(mediaFetch).toHaveBeenCalledWith(new URL(smallUrl), expect.any(Object));
     expect(maxClient.uploadImage).toHaveBeenCalledWith(
       Buffer.from([1, 2, 3]),
       'small.jpg',
@@ -7660,6 +7699,293 @@ describe('VkParsingService', () => {
       },
     );
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalled();
+  });
+
+  describe('public HTTPS media transport failures', () => {
+    function createMediaPublishFixture(kind: 'photo' | 'video', withAlternate = true) {
+      const fixture = createFixture();
+      const extension = kind === 'photo' ? 'jpg' : 'mp4';
+      const primaryUrl = `https://vk-media.example/primary.${extension}`;
+      const alternateUrl = `https://vk-media.example/alternate.${extension}`;
+      const mediaIdentity = `vk-${kind}:-36819802:11:media-key`;
+      const attachment =
+        kind === 'photo'
+          ? {
+              type: 'photo',
+              photo: {
+                id: 11,
+                owner_id: -36819802,
+                access_key: 'media-key',
+                sizes: [
+                  { width: 1280, height: 960, url: primaryUrl },
+                  ...(withAlternate ? [{ width: 320, height: 240, url: alternateUrl }] : []),
+                ],
+              },
+            }
+          : {
+              type: 'video',
+              video: {
+                id: 11,
+                owner_id: -36819802,
+                access_key: 'media-key',
+                files: {
+                  mp4_720: primaryUrl,
+                  ...(withAlternate ? { mp4_360: alternateUrl } : {}),
+                },
+              },
+            };
+      const post = createPostRow({
+        photoUrls: kind === 'photo' ? [primaryUrl] : [],
+        videoUrls: kind === 'video' ? [primaryUrl] : [],
+        attachmentTypes: [kind],
+        attachments: [attachment],
+        ...createFreshQueuedPublishTimes(),
+        publishIdempotencyKey: 'media-transport-key',
+        publishReason: 'manual-retry',
+      });
+      fixture.prisma.vkParsingPost.findFirst.mockResolvedValue(post);
+      fixture.prisma.vkParsingPost.updateMany.mockResolvedValue({ count: 1 });
+      fixture.prisma.vkParsingPost.update.mockResolvedValue({
+        ...post,
+        status: 'PUBLISHED',
+        publishedMessageId: 'mid-1',
+        publishedUrl: 'https://max.ru/channels/channel-1/message/mid-1',
+        publishedAtMax: new Date(),
+      });
+      fixture.maxClient.uploadImage.mockResolvedValue({ token: 'image-token' });
+      fixture.maxClient.uploadVideo.mockResolvedValue({ token: 'video-token' });
+      fixture.maxClient.sendMessageImmediateWithResolvedLink.mockResolvedValue({
+        messageId: 'mid-1',
+        url: 'https://max.ru/channels/channel-1/message/mid-1',
+      });
+      let cached: VkParsingMediaCacheRow | null = null;
+      const persist = fixture.mediaCache.writeMediaCache.bind(fixture.mediaCache);
+      const write = jest
+        .spyOn(fixture.mediaCache, 'writeMediaCache')
+        .mockImplementation(async (...args) => {
+          cached = await persist(...args);
+          return cached;
+        });
+      jest.spyOn(fixture.mediaCache, 'findMediaCache').mockImplementation(async (url, identity) => {
+        if (cached?.url === url || (identity && cached?.mediaIdentity === identity)) {
+          return cached;
+        }
+        return null;
+      });
+      const publish = () =>
+        fixture.service.processPublishPostJob({
+          postId: 'post-1',
+          chatId: 'channel-1',
+          reason: 'manual-retry',
+          idempotencyKey: 'media-transport-key',
+        });
+      return { ...fixture, primaryUrl, alternateUrl, mediaIdentity, write, publish };
+    }
+
+    function mediaResponse(kind: 'photo' | 'video', body = false): Response {
+      return new Response(body ? new Uint8Array([1, 2, 3]) : null, {
+        headers: {
+          'content-type': kind === 'photo' ? 'image/jpeg' : 'video/mp4',
+          'content-length': '3',
+        },
+      });
+    }
+
+    it.each(['HEAD', 'GET'] as const)(
+      'tries an independent photo candidate after a typed %s destination rejection',
+      async (rejectedMethod) => {
+        const { primaryUrl, alternateUrl, mediaIdentity, write, publish, maxClient } =
+          createMediaPublishFixture('photo');
+        if (rejectedMethod === 'GET') {
+          mediaFetch.mockResolvedValueOnce(mediaResponse('photo'));
+        }
+        mediaFetch
+          .mockRejectedValueOnce(new publicHttpsMedia.PublicHttpsMediaError('destination_denied'))
+          .mockResolvedValueOnce(mediaResponse('photo'))
+          .mockResolvedValueOnce(mediaResponse('photo', true));
+
+        await publish();
+
+        expect(
+          mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method]),
+        ).toEqual([
+          [primaryUrl, 'HEAD'],
+          ...(rejectedMethod === 'GET' ? [[primaryUrl, 'GET']] : []),
+          [alternateUrl, 'HEAD'],
+          [alternateUrl, 'GET'],
+        ]);
+        expect(write).toHaveBeenCalledWith(
+          primaryUrl,
+          expect.objectContaining({
+            status: 'FAILED',
+            lastError: 'Не удалось скачать фото из VK.',
+          }),
+          mediaIdentity,
+        );
+        expect(maxClient.uploadImage).toHaveBeenCalledTimes(1);
+        expect(maxClient.uploadImage).toHaveBeenCalledWith(
+          Buffer.from([1, 2, 3]),
+          'alternate.jpg',
+          'image/jpeg',
+          expect.objectContaining({ botId: 'publisher-bot' }),
+        );
+        expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('retains photo candidate fallback after the typed error becomes a cached string', async () => {
+      const { primaryUrl, alternateUrl, mediaIdentity, mediaCache, publish, maxClient } =
+        createMediaPublishFixture('photo');
+      mediaFetch.mockRejectedValueOnce(
+        new publicHttpsMedia.PublicHttpsMediaError('destination_denied'),
+      );
+      const failed = await mediaCache.preflightMediaUrl(primaryUrl, mediaIdentity, 'publisher-bot');
+      expect(failed).toMatchObject({
+        status: 'FAILED',
+        lastError: 'Не удалось скачать фото из VK.',
+      });
+      mediaFetch.mockClear();
+      mediaFetch
+        .mockResolvedValueOnce(mediaResponse('photo'))
+        .mockResolvedValueOnce(mediaResponse('photo', true));
+
+      await publish();
+
+      expect(mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method])).toEqual([
+        [alternateUrl, 'HEAD'],
+        [alternateUrl, 'GET'],
+      ]);
+      expect(maxClient.uploadImage).toHaveBeenCalledTimes(1);
+      expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledTimes(1);
+    });
+
+    it('caches a denied video HEAD as failed and tries the independent video candidate', async () => {
+      const { primaryUrl, alternateUrl, mediaIdentity, write, publish, maxClient } =
+        createMediaPublishFixture('video');
+      mediaFetch
+        .mockRejectedValueOnce(new publicHttpsMedia.PublicHttpsMediaError('destination_denied'))
+        .mockResolvedValueOnce(mediaResponse('video'))
+        .mockResolvedValueOnce(mediaResponse('video', true));
+
+      await publish();
+
+      expect(mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method])).toEqual([
+        [primaryUrl, 'HEAD'],
+        [alternateUrl, 'HEAD'],
+        [alternateUrl, 'GET'],
+      ]);
+      expect(write).toHaveBeenCalledWith(
+        primaryUrl,
+        expect.objectContaining({
+          status: 'FAILED',
+          lastError: 'Не удалось скачать видео из VK.',
+        }),
+        mediaIdentity,
+      );
+      expect(
+        write.mock.calls.filter(([url, data]) => url === primaryUrl && data.status === 'READY'),
+      ).toHaveLength(0);
+      expect(maxClient.uploadVideo).toHaveBeenCalledTimes(1);
+      expect(maxClient.uploadVideo).toHaveBeenCalledWith(
+        Buffer.from([1, 2, 3]),
+        'alternate.mp4',
+        'video/mp4',
+        expect.objectContaining({ botId: 'publisher-bot', timeoutMs: 120_000 }),
+      );
+      expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledTimes(1);
+    });
+
+    it('reuses a same-bot video upload from a failed cache at another signed URL', async () => {
+      const { mediaCache, mediaIdentity, write, publish, maxClient } = createMediaPublishFixture(
+        'video',
+        false,
+      );
+      await mediaCache.writeMediaCache(
+        'https://vk-media.example/old-signed.mp4',
+        {
+          status: 'FAILED',
+          lastError: 'Не удалось скачать видео из VK.',
+          maxUploadPayload: {
+            token: 'cached-video-token',
+            [VK_MEDIA_CACHE_UPLOAD_BOT_ID_FIELD]: 'publisher-bot',
+          },
+          maxUploadToken: 'cached-video-token',
+          maxUploadedAt: new Date(),
+        },
+        mediaIdentity,
+      );
+      write.mockClear();
+
+      await publish();
+
+      expect(mediaFetch).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(maxClient.uploadVideo).not.toHaveBeenCalled();
+      expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledWith(
+        'channel-1',
+        expect.any(String),
+        expect.objectContaining({
+          attachments: [{ type: 'video', payload: { token: 'cached-video-token' } }],
+        }),
+        expect.objectContaining({ botId: 'publisher-bot' }),
+      );
+    });
+
+    it('downloads the current video URL when a failed identity cache upload belongs to another bot', async () => {
+      const { primaryUrl, mediaCache, mediaIdentity, publish, maxClient } =
+        createMediaPublishFixture('video', false);
+      await mediaCache.writeMediaCache(
+        'https://vk-media.example/old-signed.mp4',
+        {
+          status: 'FAILED',
+          lastError: 'Не удалось скачать видео из VK.',
+          maxUploadPayload: {
+            token: 'other-bot-token',
+            [VK_MEDIA_CACHE_UPLOAD_BOT_ID_FIELD]: 'other-bot',
+          },
+          maxUploadToken: 'other-bot-token',
+          maxUploadedAt: new Date(),
+        },
+        mediaIdentity,
+      );
+      mediaFetch
+        .mockResolvedValueOnce(mediaResponse('video'))
+        .mockResolvedValueOnce(mediaResponse('video', true));
+
+      await publish();
+
+      expect(mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method])).toEqual([
+        [primaryUrl, 'HEAD'],
+        [primaryUrl, 'GET'],
+      ]);
+      expect(maxClient.uploadVideo).toHaveBeenCalledTimes(1);
+      expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledWith(
+        'channel-1',
+        expect.any(String),
+        expect.objectContaining({
+          attachments: [{ type: 'video', payload: { token: 'video-token' } }],
+        }),
+        expect.objectContaining({ botId: 'publisher-bot' }),
+      );
+    });
+
+    it('never downloads or sends a video after a denied HEAD without an alternate', async () => {
+      const { primaryUrl, write, publish, maxClient } = createMediaPublishFixture('video', false);
+      mediaFetch.mockRejectedValueOnce(
+        new publicHttpsMedia.PublicHttpsMediaError('destination_denied'),
+      );
+
+      await expect(publish()).rejects.toThrow('Не удалось скачать видео из VK.');
+
+      expect(mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method])).toEqual([
+        [primaryUrl, 'HEAD'],
+      ]);
+      expect(
+        write.mock.calls.filter(([url, data]) => url === primaryUrl && data.status === 'READY'),
+      ).toHaveLength(0);
+      expect(maxClient.uploadVideo).not.toHaveBeenCalled();
+      expect(maxClient.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
+    });
   });
 
   it('reuses cached MAX media payloads even when the VK CDN preflight is failed', async () => {
@@ -7736,6 +8062,7 @@ describe('VkParsingService', () => {
     });
 
     expect(global.fetch).toBe(originalFetch);
+    expect(mediaFetch).not.toHaveBeenCalled();
     expect(maxClient.uploadImage).not.toHaveBeenCalled();
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledWith(
       'channel-1',
@@ -7816,19 +8143,18 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'video/mp4', 'content-length': '4' }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'video/mp4', 'content-length': '4' }),
-        body: new Response(new Uint8Array([1, 2, 3, 4])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'video/mp4', 'content-length': '4' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3, 4]), {
+          headers: { 'content-type': 'video/mp4', 'content-length': '4' },
+        }),
+      );
 
     await service.processPublishPostJob({
       postId: 'post-1',
@@ -7921,20 +8247,12 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 405,
-        headers: new Headers(),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
+    mediaFetch.mockResolvedValueOnce(new Response(null, { status: 405 })).mockResolvedValueOnce(
+      new Response(new Uint8Array([1, 2, 3, 4]), {
         status: 200,
-        headers: new Headers({ 'content-type': 'video/mp4' }),
-        body: new Response(new Uint8Array([1, 2, 3, 4])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+        headers: { 'content-type': 'video/mp4' },
+      }),
+    );
 
     await service.processPublishPostJob({
       postId: 'post-1',
@@ -7943,6 +8261,11 @@ describe('VkParsingService', () => {
       idempotencyKey: 'publish-key-1',
     });
 
+    expect(mediaFetch.mock.calls.map(([url, options]) => [String(url), options.method])).toEqual([
+      [videoUrl, 'HEAD'],
+      [videoUrl, 'GET'],
+    ]);
+    expect(mediaFetch.mock.calls.every(([, options]) => options.range === undefined)).toBe(true);
     expect(maxClient.uploadVideo).toHaveBeenCalledWith(
       Buffer.from([1, 2, 3, 4]),
       'video-720.mp4',
@@ -8000,20 +8323,11 @@ describe('VkParsingService', () => {
       createdAt: new Date('2026-05-25T10:00:00.000Z'),
       updatedAt: new Date('2026-05-25T10:00:00.000Z'),
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 405,
-        headers: new Headers(),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'text/html' }),
-        body: new Response('<html></html>').body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(new Response(null, { status: 405 }))
+      .mockResolvedValueOnce(
+        new Response('<html></html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+      );
 
     await expect(
       service.processPublishPostJob({
@@ -8071,19 +8385,18 @@ describe('VkParsingService', () => {
     maxClient.uploadImage.mockRejectedValue(
       new Error('MAX API background rate limit exceeded for bot publisher-bot'),
     );
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: new Response(new Uint8Array([1, 2, 3])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      );
 
     await expect(
       service.processPublishPostJob({
@@ -8210,19 +8523,18 @@ describe('VkParsingService', () => {
     maxClient.uploadImage.mockRejectedValue(
       new Error('MAX API background rate limit exceeded for bot publisher-bot'),
     );
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: new Response(new Uint8Array([1, 2, 3])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      );
 
     await expect(
       service.processPublishPostJob({
@@ -9753,11 +10065,6 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-      body: new Response(new Uint8Array([1, 2, 3])).body!,
-    } satisfies MockFetchResponse) as unknown as typeof fetch;
 
     const result = await service.publishPost(
       'channel-1',
@@ -9770,6 +10077,7 @@ describe('VkParsingService', () => {
       },
     );
 
+    expect(mediaFetch).not.toHaveBeenCalled();
     expect(maxClient.uploadImage).not.toHaveBeenCalled();
     expect(maxClient.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
     expect(publishQueue.add).toHaveBeenCalledWith(
@@ -10833,6 +11141,7 @@ describe('VkParsingService', () => {
         idempotencyKey: 'manual-media-key',
       }),
     ).rejects.toThrow('Фото 1');
+    expect(mediaFetch).not.toHaveBeenCalled();
     expect(maxClient.uploadImage).not.toHaveBeenCalled();
     expect(maxClient.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
     expect(prisma.vkParsingPost.updateMany).toHaveBeenCalledWith(
@@ -10883,19 +11192,18 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: new Response(new Uint8Array([1, 2, 3])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+    mediaFetch
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 200,
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      );
 
     await service.processPublishPostJob({
       postId: 'post-1',
@@ -11080,28 +11388,19 @@ describe('VkParsingService', () => {
       messageId: 'mid-1',
       url: 'https://max.ru/channels/channel-1/message/mid-1',
     });
-    global.fetch = jest
-      .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 405,
-        headers: new Headers(),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 206,
-        headers: new Headers({
-          'content-type': 'image/jpeg',
-          'content-range': 'bytes 0-0/3',
+    mediaFetch
+      .mockResolvedValueOnce(new Response(null, { status: 405 }))
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 206,
+          headers: { 'content-type': 'image/jpeg', 'content-range': 'bytes 0-0/3' },
         }),
-        body: { cancel: async () => undefined },
-      } satisfies MockFetchResponse)
-      .mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'image/jpeg', 'content-length': '3' }),
-        body: new Response(new Uint8Array([1, 2, 3])).body!,
-      } satisfies MockFetchResponse) as unknown as typeof fetch;
+      )
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'image/jpeg', 'content-length': '3' },
+        }),
+      );
 
     await service.processPublishPostJob({
       postId: 'post-1',
@@ -11110,12 +11409,12 @@ describe('VkParsingService', () => {
       idempotencyKey: 'ranged-media-key',
     });
 
-    expect(global.fetch).toHaveBeenNthCalledWith(
+    expect(mediaFetch).toHaveBeenNthCalledWith(
       2,
       new URL('https://sun1.example/large.jpg'),
       expect.objectContaining({
         method: 'GET',
-        headers: { Range: 'bytes=0-0' },
+        range: 'bytes=0-0',
       }),
     );
     expect(prisma.vkParsingMediaCache.upsert).toHaveBeenCalledWith(
