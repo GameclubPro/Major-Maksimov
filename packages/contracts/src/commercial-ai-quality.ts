@@ -14,6 +14,8 @@ export const COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES = 128 * 1024;
 const classification = z.enum(['COMMERCIAL', 'NOT_COMMERCIAL', 'UNSURE']);
 const node = z.enum(['server-9b', 'pc-a-4b', 'pc-b-9b']);
 const reason = z.enum([
+  'SERVICE_OFFER',
+  'BUSINESS_OFFER',
   'COMMERCIAL_OFFER',
   'CUSTOMER_ACQUISITION',
   'COMMERCIAL_COMMUNITY',
@@ -73,7 +75,13 @@ export const commercialAiQualityResultSchema = z
   .superRefine((value, context) => {
     const allowed =
       value.classification === 'COMMERCIAL'
-        ? ['COMMERCIAL_OFFER', 'CUSTOMER_ACQUISITION', 'COMMERCIAL_COMMUNITY']
+        ? [
+            'SERVICE_OFFER',
+            'BUSINESS_OFFER',
+            'COMMERCIAL_OFFER',
+            'CUSTOMER_ACQUISITION',
+            'COMMERCIAL_COMMUNITY',
+          ]
         : value.classification === 'UNSURE'
           ? ['INSUFFICIENT_CONTEXT']
           : [

@@ -48,6 +48,11 @@ process and requires one idle slot with `id=0`, `n_ctx=4096` and the exact boole
 `is_processing=false`, alongside the pinned template, alias and slots capability.
 Unknown, malformed, oversized or timed-out observations do not establish readiness.
 The existing first-PC legacy launcher keeps its own unchanged profile and lifecycle.
+The category prompt is server-owned per request. The one reviewed prior prompt pin
+is accepted only in worker hello with all other profile fields exact, then echoed.
+Server heartbeats, request grammar, observations and effect proofs retain the current
+prompt identity; an old result never inherits this transport compatibility. See the
+[category contract](../../development/commercial-ads-policy.md#ai-worker-compatibility).
 A missing PC reduces total capacity without blocking the other workers. Reduced capacity can still produce admission skips; three machines
 do not guarantee zero queues or complete traffic coverage under arbitrary load.
 

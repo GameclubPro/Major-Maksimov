@@ -25,7 +25,7 @@ type Dependencies = Parameters<typeof runCommercialLlmShadowSmoke>[0];
 function result(classification: CommercialLlmResult['classification']): CommercialLlmResult {
   return {
     classification,
-    reasonCodes: classification === 'COMMERCIAL' ? ['COMMERCIAL_OFFER'] : ['PERSONAL_SALE'],
+    reasonCodes: classification === 'COMMERCIAL' ? ['SERVICE_OFFER'] : ['PERSONAL_SALE'],
     modelAlias: COMMERCIAL_LLM_MODEL_ALIAS,
     modelSha256: COMMERCIAL_LLM_MODEL_SHA256,
     promptSha256: COMMERCIAL_LLM_PROMPT_SHA256,
@@ -61,6 +61,17 @@ function fixture() {
 }
 
 describe('closed CPU smoke safety and finite diagnostics', () => {
+  it('refuses a coarse positive that does not prove the expected semantic category', async () => {
+    const f = fixture();
+    f.client.classify
+      .mockReset()
+      .mockResolvedValue({ ...result('COMMERCIAL'), reasonCodes: ['COMMERCIAL_OFFER'] });
+    await expect(runCommercialLlmShadowSmoke(f)).rejects.toMatchObject({
+      code: 'UNEXPECTED_CLASSIFICATION',
+    });
+    expect(f.lease.release).toHaveBeenCalledWith('owned-token');
+  });
+
   it('preserves successful results and retains physical ownership before both HTTP handoffs', async () => {
     const f = fixture();
     await expect(runCommercialLlmShadowSmoke(f)).resolves.toEqual({

@@ -19,8 +19,15 @@ rules, immunity, source identity or deadlines. Bulk category application preserv
 recipient chat's own grants; it cannot copy another chat's participant permissions.
 Settings revision checks serialize concurrent writes.
 
-Category evidence reuses the commercial detector's established subtypes and safe context.
-AI prompts and model profiles remain pinned. Source version 3 binds explicit category
+Deterministic category evidence reuses the commercial detector's subtypes and safe context.
+The pinned `commercial-categories-v2` AI prompt reports `SERVICE_OFFER`, `BUSINESS_OFFER`
+and `COMMERCIAL_COMMUNITY` directly. Mixed offers retain every reported category;
+incidental delivery, material or contact language does not add another category.
+Generic historical commercial reasons remain readable but supply no explicit-policy
+category authority. Existing buyer, quoted-discussion and private-sale protection stays
+in the resolver. Unknown categories stay unresolved. Model weights, budgets and the
+4B confirmation policy are unchanged; prompt identity advances and old observations
+cannot authorize current effects. Source version 3 binds explicit category
 policy and personal-sale blocking while retaining v1/v2 readers. A confirmed personal
 sale requires the pinned server confirmation before deletion. A new personal-sale BLOCK
 cannot be enabled while that runtime is unavailable; existing stored policy stays intact
@@ -39,6 +46,10 @@ Preview authorizes the exact chat, validates bounded draft text and applies an a
 It uses actual classification and current draft settings. AI preview uses immediate shared
 server admission and yields to moderation work; pressure/unavailability is a distinct result.
 It creates no deletion, strike, reputation change, durable enforcement source or text log.
+Preview uses the same semantic categories and actor grants as enforcement. `UNSURE`
+is displayed as «Недостаточно данных» with a warning icon, independently from `KEEP`;
+mixed-category explanations never imply that every category is blocked.
+Completed results scroll into view above the action footer on small phones.
 
 COMMERCIAL journal filtering happens before pagination using bounded indexed heads for
 `COMMERCIAL_AD` and `COMMERCIAL_LLM_DELETE`. New cursors bind chat, period and filter.
@@ -77,3 +88,17 @@ bounded cost for the approved policy feature after removing unrelated initial lo
   exceptions, preview, journal, widths 320–430, light/dark and keyboard/short viewports.
 - Rollback: `infra/scripts/commercial-text-deploy-guards.test.mjs` refuses sources missing
   the policy and v3 readers. Browser evidence does not prove behavior in a physical MAX client.
+
+## AI worker compatibility
+
+The request contains the complete server-owned prompt and JSON grammar. The reviewed
+previous Windows worker generation forwards that request without rewriting either.
+Bridge hello accepts only the exact current profile or its one frozen previous prompt
+hash, with the same model, template, runtime, support and protocol fields. It echoes
+the accepted wire identity; internal mailbox identity and results use the current
+prompt. Strict result/source checks do not use this hello compatibility path.
+This lets already-installed 4B and 9B workers serve the new prompt after reconnecting
+without changing model processes or replaying requests. Native bridge tests prove the
+old hello/current request boundary. Closed CPU smoke checks the exact service and
+personal-sale reason, not just the coarse classification; it is diagnostic evidence,
+not a model accuracy certificate.

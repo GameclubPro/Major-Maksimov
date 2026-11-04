@@ -43,7 +43,7 @@ describe('bounded commercial LLM HTTP client', () => {
       promptSha256: COMMERCIAL_LLM_PROMPT_SHA256,
       runtimeImageSha256: COMMERCIAL_LLM_RUNTIME_IMAGE_SHA256,
       runtimeVersion: 'llama.cpp-b11804',
-      policyVersion: 'commercial-llm-shadow-v1',
+      policyVersion: 'commercial-categories-v2',
       durationMs: expect.any(Number),
     });
     expect(result).not.toHaveProperty('content');

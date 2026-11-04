@@ -28,7 +28,7 @@ import {
 const positive: CommercialLlmObservationResult = {
   ...COMMERCIAL_LLM_POOL_PROFILES['pc-b-9b'].identity,
   classification: 'COMMERCIAL',
-  reasonCodes: ['COMMERCIAL_OFFER'],
+  reasonCodes: ['SERVICE_OFFER'],
   policyVersion: COMMERCIAL_LLM_POLICY_VERSION,
   durationMs: 1,
   pool: {
@@ -318,7 +318,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
     },
   );
-  it('executes a fresh v3 blocked service using the real category detector and 9B identity', async () => {
+  it('executes a fresh v3 blocked service using semantic category evidence and 9B identity', async () => {
     const h = await fixture(false, true, createDefaultCommercialAdsPolicy());
     expect(h.source.version).toBe(3);
     await expect(h.guard.authorize(h.input)).resolves.toEqual({
@@ -326,6 +326,33 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       reasonKeys: [h.reasonKey],
     });
   });
+
+  it.each([false, true])(
+    'checks every mixed-offer category at the final guard (business exempt: %s)',
+    async (businessExempt) => {
+      const policy = createDefaultCommercialAdsPolicy();
+      policy.exceptions.push({
+        id: randomUUID(),
+        userId: '10000007',
+        userName: 'Тест',
+        categories: businessExempt ? ['SERVICES', 'BUSINESS'] : ['SERVICES'],
+        expiresAt: null,
+      });
+      const h = await fixture(false, true, policy, 'Продаём краску. Отдельно выполняем покраску.', {
+        ...positive,
+        reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER'],
+      });
+      if (businessExempt)
+        await expect(h.guard.authorize(h.input)).rejects.toBeInstanceOf(
+          CommercialLlmGuardRejectedError,
+        );
+      else
+        await expect(h.guard.authorize(h.input)).resolves.toEqual({
+          deadlineAtMs: h.source.deadlineAtMs,
+          reasonKeys: [h.reasonKey],
+        });
+    },
+  );
 
   it.each(['category_allowed', 'participant_exception'] as const)(
     'revokes v3 authority when %s is saved during source lookup',

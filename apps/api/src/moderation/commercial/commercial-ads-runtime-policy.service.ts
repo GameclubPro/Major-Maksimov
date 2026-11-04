@@ -14,7 +14,6 @@ import {
 } from './commercial-normalization';
 import { collectCommercialSignals } from './commercial-features';
 import { deriveCommercialSafeContextBucket } from './commercial-safe-context';
-import { classifyCommercialDetection } from './commercial-subtypes';
 import {
   fingerprintCommercialDeleteSettings,
   type CommercialDeleteSettings,
@@ -75,49 +74,34 @@ export function detectCommercialAdsCategories(
     settings: settings as ChatSettings,
     commercialCampaignContext: null,
   });
-  const categories = commercialAdsDetectionCategories(detection, result);
-  if (categories.length > 0 || result?.classification !== 'COMMERCIAL') return categories;
+  if (result?.classification !== 'COMMERCIAL')
+    return commercialAdsDetectionCategories(detection, result);
 
-  // FLAG: AI supplies commercial authority; existing signals supply only its category.
-  // Detector effect thresholds cannot erase a recognized subtype, or authorize a new effect.
-  const appliedThresholds = resolveCommercialThresholds(settings);
+  // FLAG: The model names every actual offer category. Incidental lexical subtypes cannot
+  // widen that result and turn an allowed offer into a blocked service or community.
+  const categories: CommercialAdCategory[] = [];
+  if (result.reasonCodes.includes('SERVICE_OFFER')) categories.push('SERVICES');
+  if (result.reasonCodes.includes('BUSINESS_OFFER')) categories.push('BUSINESS');
+  if (result.reasonCodes.includes('COMMERCIAL_COMMUNITY')) categories.push('COMMUNITIES');
+  if (!categories.length) return [];
+
   const state = collectCommercialSignals({
     normalizedText,
     rawLoweredText,
-    profile: appliedThresholds,
+    profile: resolveCommercialThresholds(settings),
     commercialCampaignContext: null,
   });
-  if (
+  const safeContext =
+    detection?.safeContextBucket ??
     deriveCommercialSafeContextBucket({
       text: rawLoweredText,
       matchedSignals: state.matchedSignals,
       negativeSignals: state.negativeSignals,
-      // FLAG: A coarse AI label cannot erase protected context absent a detector hit.
+      // FLAG: Semantic categories do not remove existing buyer, quote or private-sale protection.
       hasCommercialHit: detection !== null,
-    }) !== 'none'
-  ) {
-    return [];
-  }
-  const confidenceScore = Math.round(Math.max(0, Math.min(100, state.score)));
-  const classification = classifyCommercialDetection({
-    state,
-    confidenceScore,
-    decisionBand:
-      confidenceScore >= appliedThresholds.deleteThreshold
-        ? 'HIGH'
-        : confidenceScore >= appliedThresholds.warnThreshold
-          ? 'MEDIUM'
-          : 'LOW',
-    appliedThresholds,
-    hasCampaignDependentEvidence: false,
-  });
-  return [
-    ...new Set(
-      [classification.primarySubtype, ...classification.supportingSubtypes]
-        .map((subtype) => CATEGORY_BY_SUBTYPE[subtype])
-        .filter((category): category is CommercialAdCategory => category !== undefined),
-    ),
-  ];
+    });
+  if (safeContext === 'private_one_off_sale') return ['PERSONAL_SALE'];
+  return safeContext === 'none' ? categories : [];
 }
 
 export function evaluateCommercialAdsAiPolicy(input: {

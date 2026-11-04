@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { commercialLlmWorkerHelloMatches } from '../moderation/commercial/commercial-llm.protocol';
 import { once } from 'node:events';
 import { setTimeout as pause } from 'node:timers/promises';
 import { CommercialLlmPoolMailbox } from '../moderation/commercial/commercial-llm-pool.mailbox';
@@ -9,7 +10,6 @@ import {
   COMMERCIAL_LLM_POOL_HEARTBEAT_MS,
   COMMERCIAL_LLM_POOL_PROFILES,
   COMMERCIAL_LLM_POOL_RESPONSE_BYTES,
-  commercialLlmPoolIdentityMatches,
   type CommercialLlmPoolBridgeNodeId,
 } from '../moderation/commercial/commercial-llm-pool.protocol';
 
@@ -82,11 +82,11 @@ export async function commercialLlmPoolBridge(
               frame.type !== 'hello' ||
               Object.keys(frame).length !== 3 ||
               frame.nodeId !== trustedNodeId ||
-              !commercialLlmPoolIdentityMatches(trustedNodeId, frame.identity)
+              !commercialLlmWorkerHelloMatches(identity, frame.identity)
             )
               throw new Error('pool_identity_refused');
             hello = true;
-            await send({ type: 'hello', nodeId: trustedNodeId, identity });
+            await send({ type: 'hello', nodeId: trustedNodeId, identity: frame.identity });
           } else if (
             frame.type === 'ready' &&
             Object.keys(frame).length === 2 &&

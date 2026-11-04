@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { commercialLlmWorkerHelloMatches } from '../moderation/commercial/commercial-llm.protocol';
 import { setTimeout as pause } from 'node:timers/promises';
 import { once } from 'node:events';
 import { createCommercialLlmRedis } from '../moderation/commercial/commercial-llm-shadow.lease';
@@ -10,7 +11,6 @@ import {
   COMMERCIAL_LLM_WORKSTATION_FRAME_BYTES,
   COMMERCIAL_LLM_WORKSTATION_HEARTBEAT_MS,
   COMMERCIAL_LLM_WORKSTATION_IDENTITY,
-  commercialLlmWorkstationIdentityMatches,
 } from '../moderation/commercial/commercial-llm-workstation.protocol';
 
 // FLAG: Thirty starts emit 90 control frames, plus 40 periodic readiness frames and hello.
@@ -101,11 +101,11 @@ export async function commercialLlmWorkstationBridge(): Promise<void> {
             if (
               value.type !== 'hello' ||
               Object.keys(value).length !== 2 ||
-              !commercialLlmWorkstationIdentityMatches(value.identity)
+              !commercialLlmWorkerHelloMatches(COMMERCIAL_LLM_WORKSTATION_IDENTITY, value.identity)
             )
               throw new Error('workstation_identity_refused');
             hello = true;
-            await send({ type: 'hello', identity: COMMERCIAL_LLM_WORKSTATION_IDENTITY });
+            await send({ type: 'hello', identity: value.identity });
           } else if (
             value.type === 'ready' &&
             typeof value.ready === 'boolean' &&

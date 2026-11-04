@@ -7,7 +7,11 @@ import type Redis from 'ioredis';
 import { createCommercialLlmRedis } from '../moderation/commercial/commercial-llm-shadow.lease';
 import { CommercialLlmWorkstationMailbox } from '../moderation/commercial/commercial-llm-workstation.mailbox';
 import { CommercialLlmPoolMailbox } from '../moderation/commercial/commercial-llm-pool.mailbox';
-import { buildCommercialLlmRequest } from '../moderation/commercial/commercial-llm.protocol';
+import {
+  buildCommercialLlmRequest,
+  COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256,
+  COMMERCIAL_LLM_SYSTEM_PROMPT,
+} from '../moderation/commercial/commercial-llm.protocol';
 import {
   COMMERCIAL_LLM_POOL_PROFILES,
   commercialLlmPoolJobKey,
@@ -292,13 +296,19 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
   }
   const send = (state: ReturnType<typeof launch>, frame: unknown) =>
     state.child.stdin.write(JSON.stringify(frame) + '\n');
-  async function connected(nodeId?: CommercialLlmPoolBridgeNodeId) {
+  async function connected(nodeId?: CommercialLlmPoolBridgeNodeId, previousPrompt = false) {
     const state = launch(nodeId);
     send(
       state,
       nodeId
         ? { type: 'hello', nodeId, identity: COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity }
-        : { type: 'hello', identity },
+        : {
+            type: 'hello',
+            identity: {
+              ...identity,
+              ...(previousPrompt ? { promptSha256: COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256 } : {}),
+            },
+          },
     );
     await waitFor(
       async () => state.frames,
@@ -372,6 +382,26 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     state.child.stdin.end();
     await state.closed;
     expect(await redis.exists(...stateKeys)).toBe(0);
+  });
+
+  it('retains the deployed v1 hello while forwarding the new category prompt into the pool', async () => {
+    const state = await connected(undefined, true);
+    expect(state.frames[0]).toEqual({
+      type: 'hello',
+      identity: { ...identity, promptSha256: COMMERCIAL_LLM_PREVIOUS_PROMPT_SHA256 },
+    });
+    const reservation = await reserve('pc-a-4b');
+    const frame = await requestFrame(state);
+    expect(JSON.parse(String(frame.body)).messages[0].content).toBe(COMMERCIAL_LLM_SYSTEM_PROMPT);
+    expect(JSON.parse((await redis.get(firstKeys.heartbeat))!).identity).toEqual(
+      COMMERCIAL_LLM_POOL_PROFILES['pc-a-4b'].identity,
+    );
+    const body = responseBody('pc-a-4b');
+    send(state, { type: 'response', id: reservation.id, body });
+    expect(await new CommercialLlmPoolMailbox(redis).wait(reservation)).toEqual({
+      outcome: 'COMPLETE',
+      body,
+    });
   });
 
   it('runs the unchanged first-PC wire beside the second-PC v2 worker without a shared slot', async () => {

@@ -181,6 +181,34 @@ try {
         await page.screenshot({ path: join(screenshots, `${device}-${theme}-preview.png`) });
         await preview
           .getByRole('textbox', { name: 'Сообщение для проверки' })
+          .fill('Можно заказать?');
+        await preview.getByRole('button', { name: 'Проверить', exact: true }).click();
+        await preview.locator('.commercial-policy__result[data-decision="UNSURE"]').waitFor();
+        await settleVisualFrame(page);
+        const resultBounds = await preview.locator('.commercial-policy__result').boundingBox();
+        const bodyBounds = await preview.locator('.settings-drilldown__body').boundingBox();
+        assert.ok(
+          resultBounds &&
+            bodyBounds &&
+            resultBounds.y >= bodyBounds.y - 2 &&
+            resultBounds.y + resultBounds.height <= bodyBounds.y + bodyBounds.height + 2,
+          `${device}/${theme}: completed result must be visible above the footer without scrolling`,
+        );
+        assert.equal(
+          await preview.locator('.commercial-policy__result strong').innerText(),
+          'Недостаточно данных',
+        );
+        assert.doesNotMatch(
+          await preview.locator('.commercial-policy__result').innerText(),
+          /Оставить/u,
+        );
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          true,
+        );
+        await page.screenshot({ path: join(screenshots, `${device}-${theme}-unsure.png`) });
+        await preview
+          .getByRole('textbox', { name: 'Сообщение для проверки' })
           .fill('Обычное сообщение');
         assert.equal(
           await preview.locator('.commercial-policy__result').count(),

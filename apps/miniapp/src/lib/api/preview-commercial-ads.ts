@@ -36,6 +36,12 @@ export function handlePreviewCommercialAds(
   // This local fixture only drives the emulator. Production always calls the server classifier.
   const categories: CommercialAdCategory[] = [];
   const text = input.text.toLocaleLowerCase('ru-RU');
+  if (text.trim() === 'можно заказать?')
+    return commercialAdsPreviewResponseSchema.parse({
+      decision: 'UNSURE',
+      categories: [],
+      reason: 'INSUFFICIENT_CONTEXT',
+    });
   if (/продам\s+(?:сво[йюеи]|личн)|отдам\s+даром/u.test(text)) categories.push('PERSONAL_SALE');
   if (/предлагаю\s+услуги|выполняю\s+ремонт|ремонт\s+под\s+ключ/u.test(text))
     categories.push('SERVICES');

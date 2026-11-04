@@ -522,3 +522,26 @@ describe('bounded commercial AI quality observation contracts', () => {
     ).toBe(false);
   });
 });
+
+it('retains mixed semantic category evidence and rejects cross-class or duplicate reasons', () => {
+  const mixed = result({
+    classification: 'COMMERCIAL',
+    reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER', 'COMMERCIAL_COMMUNITY'],
+  });
+  expect(commercialAiQualityResultSchema.parse(mixed).reasonCodes).toEqual(mixed.reasonCodes);
+  expect(
+    commercialAiQualityResultSchema.safeParse({ ...mixed, classification: 'NOT_COMMERCIAL' })
+      .success,
+  ).toBe(false);
+  expect(
+    commercialAiQualityResultSchema.safeParse({
+      ...mixed,
+      reasonCodes: ['SERVICE_OFFER', 'SERVICE_OFFER'],
+    }).success,
+  ).toBe(false);
+  expect(
+    commercialAiQualityResultSchema.safeParse(
+      result({ classification: 'COMMERCIAL', reasonCodes: ['COMMERCIAL_OFFER'] }),
+    ).success,
+  ).toBe(true);
+});

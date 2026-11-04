@@ -2,7 +2,7 @@ export const WORKSTATION_IDENTITY = Object.freeze({
   protocolVersion: 1,
   modelAlias: 'qwen35-4b-commercial-primary',
   modelSha256: '8814232b85594dcd46c50e5b8b29324a7efe9e746edbe8a3d1df3d3fce7aad39',
-  promptSha256: '67aee2db688b67368346a246448c885585d5abcc4ce2b7d3bcd3e77963059aec',
+  promptSha256: '72bbf26f1becc2103002088c0d89383895daf6462d28f4caecd974a242c426bc',
   chatTemplateSha256: '7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67',
   runtimeVersion: 'llama.cpp-b11804',
   runtimeArtifactSha256: '0ed79c7a8ce3a5bead13b7c84c2524bb04d3027bcf36047a2ba4c2be5c8ce55c',

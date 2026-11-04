@@ -24,7 +24,7 @@ const text = 'Мастерская принимает заказы на ремо
 const positive: CommercialLlmObservationResult = {
   ...COMMERCIAL_LLM_POOL_PROFILES['pc-b-9b'].identity,
   classification: 'COMMERCIAL',
-  reasonCodes: ['COMMERCIAL_OFFER'],
+  reasonCodes: ['SERVICE_OFFER'],
   policyVersion: COMMERCIAL_LLM_POLICY_VERSION,
   durationMs: 1,
   pool: {
@@ -138,6 +138,72 @@ describe('category policy on the actual commercial detector and pinned AI respon
     });
   });
 
+  it('uses semantic categories for an offer without lexical service signals', () => {
+    const input = fixture(undefined, 'За 1800 подготовлю персональную колыбельную вашему малышу.');
+    expect(detectCommercialAdsCategories(input.text, input.settings)).toEqual([]);
+    expect(evaluateCommercialAdsAiPolicy(input)).toMatchObject({
+      mayDelete: true,
+      categories: ['SERVICES'],
+    });
+    expect(
+      evaluateCommercialAdsAiPolicy({
+        ...input,
+        result: {
+          ...positive,
+          promptSha256: '67aee2db688b67368346a246448c885585d5abcc4ce2b7d3bcd3e77963059aec',
+        },
+      }).mayDelete,
+    ).toBe(false);
+  });
+
+  it('does not widen a business offer with incidental service or contact language', () => {
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.BUSINESS = 'ALLOW';
+    const input = fixture(
+      policy,
+      'Наш магазин продаёт краску. Поможем подобрать цвет, доставка включена.',
+    );
+    expect(
+      evaluateCommercialAdsAiPolicy({
+        ...input,
+        result: { ...positive, reasonCodes: ['BUSINESS_OFFER'] },
+      }),
+    ).toMatchObject({ mayDelete: false, decision: 'KEEP', categories: ['BUSINESS'] });
+  });
+
+  it('requires all blocked semantic categories to be covered by participant grants', () => {
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.COMMUNITIES = 'ALLOW';
+    const result: CommercialLlmObservationResult = {
+      ...positive,
+      reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER', 'COMMERCIAL_COMMUNITY'],
+    };
+    policy.exceptions.push({
+      id: randomUUID(),
+      userId: '10000007',
+      userName: 'Участник',
+      categories: ['SERVICES'],
+      expiresAt: null,
+    });
+    const input = () => ({
+      ...fixture(
+        policy,
+        'Продаём краску. Отдельно выполняем покраску. Вступайте в наш канал с каталогом.',
+      ),
+      result,
+    });
+    expect(evaluateCommercialAdsAiPolicy(input())).toMatchObject({
+      mayDelete: true,
+      categories: ['SERVICES', 'BUSINESS', 'COMMUNITIES'],
+      blockedCategories: ['BUSINESS'],
+    });
+    policy.exceptions[0]!.categories.push('BUSINESS');
+    expect(evaluateCommercialAdsAiPolicy(input())).toMatchObject({
+      mayDelete: false,
+      reason: 'PARTICIPANT_EXCEPTION',
+    });
+  });
+
   it('applies category-specific exceptions only until their exact expiry', () => {
     const policy = createDefaultCommercialAdsPolicy();
     policy.exceptions.push({
@@ -162,7 +228,12 @@ describe('category policy on the actual commercial detector and pinned AI respon
 
   it('keeps unknown categories and ordinary discussion without borrowing a generic commercial label', () => {
     const uncertain = fixture(undefined, 'Пишите мне, есть предложение.');
-    expect(evaluateCommercialAdsAiPolicy(uncertain)).toMatchObject({
+    expect(
+      evaluateCommercialAdsAiPolicy({
+        ...uncertain,
+        result: { ...positive, reasonCodes: ['COMMERCIAL_OFFER'] },
+      }),
+    ).toMatchObject({
       mayDelete: false,
       decision: 'UNSURE',
     });
