@@ -335,9 +335,25 @@ function delegatedPolicy() {
   return { ...value, policySha256: sha256(stableJson(value)) };
 }
 
+function trustedNodeStat(overrides = {}) {
+  return {
+    isFile: () => true,
+    isSymbolicLink: () => false,
+    uid: 0,
+    mode: 0o100755,
+    ...overrides,
+  };
+}
+
 test('root rollback CLI delegates only to the fixed installed deploy user and helper', () => {
   const expected = delegatedPolicy();
   let calls = 0;
+  let metadataCalls = 0;
+  const lstat = (path) => {
+    metadataCalls += 1;
+    assert.equal(path, '/usr/bin/node');
+    return trustedNodeStat();
+  };
   const runner = (binary, args, options) => {
     calls += 1;
     assert.equal(binary, '/usr/sbin/runuser');
@@ -369,30 +385,36 @@ test('root rollback CLI delegates only to the fixed installed deploy user and he
     return { status: 0, signal: null, stdout: Buffer.from(`${JSON.stringify(expected)}\n`) };
   };
   assert.deepEqual(
-    runPolicyCommand(['pause-rollback'], { uid: 0, node: '/usr/bin/node', runner }),
+    runPolicyCommand(['pause-rollback'], { uid: 0, node: '/usr/bin/node', runner, lstat }),
     expected,
   );
   assert.equal(calls, 1);
+  assert.equal(metadataCalls, 1);
   for (const args of [
     ['pause-rollback', '/private/path'],
     ['pause-rollback', '--user', 'other-user'],
     ['resume'],
   ]) {
     assert.throws(
-      () => runPolicyCommand(args, { uid: 0, node: '/usr/bin/node', runner }),
+      () => runPolicyCommand(args, { uid: 0, node: '/usr/bin/node', runner, lstat }),
       code('INVALID_POLICY_COMMAND'),
     );
   }
   assert.equal(calls, 1);
+  assert.equal(metadataCalls, 1);
 });
 
-test('root delegation refuses unreviewed Node, child failure, timeout and unproved output without leaking diagnostics', () => {
+test('root delegation refuses unreviewed Node before filesystem or child access', () => {
   let called = false;
+  let metadataCalled = false;
   assert.throws(
     () =>
       runPolicyCommand(['pause-rollback'], {
         uid: 0,
         node: '/private/node',
+        lstat: () => {
+          metadataCalled = true;
+        },
         runner: () => {
           called = true;
         },
@@ -400,6 +422,45 @@ test('root delegation refuses unreviewed Node, child failure, timeout and unprov
     code('POLICY_DELEGATION_UNAVAILABLE'),
   );
   assert.equal(called, false);
+  assert.equal(metadataCalled, false);
+});
+
+test('root delegation refuses unsafe Node metadata without calling the child or leaking diagnostics', () => {
+  const expected = delegatedPolicy();
+  for (const metadata of [
+    { isFile: () => false },
+    { isSymbolicLink: () => true },
+    { uid: 1000 },
+    { mode: 0o100775 },
+    { mode: 0o100757 },
+    new Error('private filesystem diagnostic'),
+  ]) {
+    let metadataCalls = 0;
+    let runnerCalls = 0;
+    assert.throws(
+      () =>
+        runPolicyCommand(['pause-rollback'], {
+          uid: 0,
+          node: '/usr/bin/node',
+          lstat(path) {
+            metadataCalls += 1;
+            assert.equal(path, '/usr/bin/node');
+            if (metadata instanceof Error) throw metadata;
+            return trustedNodeStat(metadata);
+          },
+          runner() {
+            runnerCalls += 1;
+            return { status: 0, signal: null, stdout: Buffer.from(JSON.stringify(expected)) };
+          },
+        }),
+      { code: 'POLICY_DELEGATION_UNPROVED', message: 'POLICY_DELEGATION_UNPROVED' },
+    );
+    assert.equal(metadataCalls, 1);
+    assert.equal(runnerCalls, 0);
+  }
+});
+
+test('root delegation checks child failure, timeout and unproved output after trusted metadata', () => {
   const valid = { status: 0, signal: null, stdout: Buffer.from(JSON.stringify(delegatedPolicy())) };
   for (const result of [
     { ...valid, status: 1, stderr: Buffer.from('private child diagnostic') },
@@ -417,27 +478,43 @@ test('root delegation refuses unreviewed Node, child failure, timeout and unprov
       stdout: Buffer.from(JSON.stringify({ ...delegatedPolicy(), extra: 'private input' })),
     },
   ]) {
+    let runnerCalls = 0;
+    let metadataCalls = 0;
     assert.throws(
       () =>
         runPolicyCommand(['pause-rollback'], {
           uid: 0,
           node: '/usr/bin/node',
-          runner: () => result,
+          lstat(path) {
+            metadataCalls += 1;
+            assert.equal(path, '/usr/bin/node');
+            return trustedNodeStat();
+          },
+          runner() {
+            runnerCalls += 1;
+            return result;
+          },
         }),
       { code: 'POLICY_DELEGATION_UNPROVED', message: 'POLICY_DELEGATION_UNPROVED' },
     );
+    assert.equal(metadataCalls, 1);
+    assert.equal(runnerCalls, 1);
   }
+  let thrownRunnerCalls = 0;
   assert.throws(
     () =>
       runPolicyCommand(['pause-rollback'], {
         uid: 0,
         node: '/usr/bin/node',
+        lstat: () => trustedNodeStat(),
         runner: () => {
+          thrownRunnerCalls += 1;
           throw new Error('private NSS diagnostic');
         },
       }),
     { code: 'POLICY_DELEGATION_UNPROVED', message: 'POLICY_DELEGATION_UNPROVED' },
   );
+  assert.equal(thrownRunnerCalls, 1);
 });
 
 test('native same-user rollback pause preserves private policy/lock ownership and the persistent lock inode', () => {

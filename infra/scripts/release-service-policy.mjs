@@ -274,11 +274,11 @@ export function resumePolicy({ expectedPolicySha256, ...options } = {}) {
   });
 }
 
-function delegatedRollbackPause({ runner, node }) {
+function delegatedRollbackPause({ runner, node, lstat }) {
   if (!['/usr/bin/node', '/usr/local/bin/node'].includes(node))
     fail('POLICY_DELEGATION_UNAVAILABLE');
   try {
-    const stat = fs.lstatSync(node);
+    const stat = lstat(node);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== 0 || stat.mode & 0o022)
       fail('POLICY_DELEGATION_UNPROVED');
     // FLAG: Root maintenance must pause as the fixed installed deploy user. Never
@@ -329,7 +329,7 @@ function delegatedRollbackPause({ runner, node }) {
 
 export function runPolicyCommand(
   args,
-  { uid = process.getuid(), runner = spawnSync, node = process.execPath } = {},
+  { uid = process.getuid(), runner = spawnSync, node = process.execPath, lstat = fs.lstatSync } = {},
 ) {
   if (
     !Array.isArray(args) ||
@@ -341,7 +341,7 @@ export function runPolicyCommand(
     fail('INVALID_POLICY_COMMAND');
   if (args[0] === 'pause-rollback')
     return uid === 0
-      ? delegatedRollbackPause({ runner, node })
+      ? delegatedRollbackPause({ runner, node, lstat })
       : pausePolicy({ reason: 'ROLLBACK' });
   return args[0] === 'initialize' ? initializePolicy() : readPolicy();
 }
