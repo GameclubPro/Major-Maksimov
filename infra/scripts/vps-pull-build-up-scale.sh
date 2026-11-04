@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_PATH="$(readlink -e -- "${BASH_SOURCE[0]}")" || exit 2
+ROOT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/../.." && pwd -P)"
 cd "$ROOT_DIR"
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 SCRIPT_REL_PATH="${SCRIPT_PATH#"$ROOT_DIR"/}"
 ORIGINAL_ARGS=("$@")
+SCALE_CONTINUATION_TARGET="${MAXIM_SCALE_REEXEC_TARGET_SHA:-}"
+unset MAXIM_SCALE_REEXEC_TARGET_SHA
+SCALE_EXPECTED_SYNC_SHA=""
 
 # shellcheck source=infra/scripts/lib/deploy-topology.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
@@ -15,6 +18,10 @@ source "$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"
 source "$ROOT_DIR/infra/scripts/lib/legacy-cold-maintenance.sh" || exit $?
 # shellcheck source=infra/scripts/lib/deploy-disk-capacity.sh
 source "$ROOT_DIR/infra/scripts/lib/deploy-disk-capacity.sh"
+# shellcheck source=infra/scripts/lib/scale-deploy-profile.sh
+source "$ROOT_DIR/infra/scripts/lib/scale-deploy-profile.sh" || exit $?
+MAXIM_SCALE_TRUSTED_CONTROLLER_SOURCE="$(maxim_scale_source_bytes "$SCRIPT_PATH")" || exit 2
+readonly MAXIM_SCALE_TRUSTED_CONTROLLER_SOURCE
 
 SCALE_PROJECT_NAME="infra-scale"
 MAIN_PROJECT_NAME="infra"
@@ -25,7 +32,7 @@ SCALE_REDIS_VOLUME="${SCALE_PROJECT_NAME}_redis_data"
 REDIS_DATA_COPY_IMAGE="${MAXIM_REDIS_VOLUME_COPY_IMAGE:-redis:7-alpine}"
 BRANCH="${1:-main}"
 PRE_PULL_HEAD=""
-PUBLIC_HEALTH_URL="${MAXIM_VPS_PUBLIC_URL:-${MAXIM_PUBLIC_HEALTH_URL:-https://major-maksimov.ru}}"
+PUBLIC_HEALTH_URL="${MAXIM_VPS_PUBLIC_URL:-}"
 PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL%/}"
 
 if [[ $# -ge 2 ]]; then
@@ -135,21 +142,20 @@ diff_in_paths() {
 }
 
 reexec_if_current_script_changed() {
-  if [[ "${MAXIM_DEPLOY_SCRIPT_REEXECED:-0}" == "1" ]]; then
-    return 0
-  fi
-
-  if ! diff_in_paths \
+  if [[ "$(maxim_scale_source_bytes "$SCRIPT_PATH")" == "$MAXIM_SCALE_TRUSTED_CONTROLLER_SOURCE" ]] && ! diff_in_paths \
     "$SCRIPT_REL_PATH" \
     "infra/scripts/lib/deploy-disk-capacity.sh" \
     "infra/scripts/lib/deploy-lock.sh" \
     "infra/scripts/lib/legacy-cold-maintenance.sh" \
+    "infra/scripts/lib/scale-deploy-profile.sh" \
     "infra/scripts/lib/deploy-topology.sh"; then
     return 0
   fi
 
-  echo "Deploy script changed during git pull. Re-executing updated $SCRIPT_REL_PATH..."
+  echo "Deploy script or dependencies changed. Re-executing updated $SCRIPT_REL_PATH..."
+  maxim_scale_require_synchronized_source "$ROOT_DIR" "$SCALE_EXPECTED_SYNC_SHA" || exit $?
   export MAXIM_DEPLOY_SCRIPT_REEXECED=1
+  export MAXIM_SCALE_REEXEC_TARGET_SHA="$SCALE_EXPECTED_SYNC_SHA"
   exec "$SCRIPT_PATH" "${ORIGINAL_ARGS[@]}"
 }
 
@@ -224,24 +230,40 @@ EOF
 sync_branch() {
   local stash_name
   local tracked_status
+  local target_sha local_sha
 
-  git fetch origin "$BRANCH"
-
-  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    git checkout "$BRANCH"
-  else
-    git checkout -b "$BRANCH" "origin/$BRANCH"
+  if [[ -n "$SCALE_CONTINUATION_TARGET" ]]; then
+    [[ "$SCALE_CONTINUATION_TARGET" =~ ^[0-9a-f]{40}$ ]] || return 2
+    target_sha="$(git rev-parse --verify --end-of-options 'HEAD^{commit}')" || return 2
+    [[ "$target_sha" == "$SCALE_CONTINUATION_TARGET" ]] || return 2
+    maxim_scale_require_candidate_source "$target_sha" || return
+    SCALE_EXPECTED_SYNC_SHA="$target_sha"
+    PRE_PULL_HEAD="$target_sha"
+    return 0
   fi
 
+  git fetch origin "$BRANCH"
+  target_sha="$(git rev-parse --verify --end-of-options "origin/${BRANCH}^{commit}")" || return 2
+  maxim_scale_require_candidate_source "$target_sha" || return
+  SCALE_EXPECTED_SYNC_SHA="$target_sha"
   PRE_PULL_HEAD="$(git rev-parse HEAD)"
+
+  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    local_sha="$(git rev-parse --verify --end-of-options "refs/heads/${BRANCH}^{commit}")" || return 2
+    maxim_scale_require_candidate_source "$local_sha" || return
+    git checkout "$BRANCH"
+  else
+    git checkout -b "$BRANCH" "$target_sha"
+  fi
+
   tracked_status="$(git status --porcelain --untracked-files=no)"
 
   if [[ -n "$tracked_status" ]]; then
-    if git diff --quiet "origin/$BRANCH" -- && git diff --cached --quiet "origin/$BRANCH" --; then
+    if git diff --quiet "$target_sha" -- && git diff --cached --quiet "$target_sha" --; then
       stash_name="codex-sync-${BRANCH}-$(date +%Y%m%d-%H%M%S)"
       echo "Worktree matches origin/$BRANCH but blocks ff-only pull. Stashing snapshot: $stash_name"
       git stash push -m "$stash_name" >/dev/null
-      git pull --ff-only origin "$BRANCH"
+      git merge --ff-only "$target_sha"
       git stash drop "stash@{0}" >/dev/null || true
       return 0
     fi
@@ -252,7 +274,7 @@ sync_branch() {
     return 1
   fi
 
-  git pull --ff-only origin "$BRANCH"
+  git merge --ff-only "$target_sha"
 }
 
 wait_for_url() {
@@ -507,12 +529,23 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-require_scale_deploy_confirmation
-acquire_deploy_lock
-maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
-sync_branch
-reexec_if_current_script_changed
-maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
+# FLAG: Parse the entire admission continuation before sync can replace this file.
+{
+  require_scale_deploy_confirmation
+  maxim_scale_require_server_profile "$ROOT_DIR" || exit $?
+  # FLAG: Only a validated inherited protected lock admits an internal re-exec pin.
+  if [[ -n "$SCALE_CONTINUATION_TARGET" ]]; then
+    require_deploy_lock || exit 2
+  fi
+  acquire_deploy_lock
+  maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
+  sync_branch
+  maxim_scale_require_server_profile "$ROOT_DIR" || exit $?
+  maxim_scale_require_synchronized_source "$ROOT_DIR" "$SCALE_EXPECTED_SYNC_SHA" || exit $?
+  reexec_if_current_script_changed
+  maxim_scale_require_server_profile "$ROOT_DIR" || exit $?
+  maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
+}
 ensure_compose_env
 warn_postgres_password_fallback
 warn_legacy_miniapp_static_target
@@ -670,10 +703,10 @@ fi
 curl -i "$PUBLIC_HEALTH_URL/api/health/live"
 
 if contains_service "miniapp-static" "${SERVICES[@]}"; then
-  curl -i https://maxim.play-team.ru/app/
+  curl -i "$PUBLIC_HEALTH_URL/app/"
 fi
 if contains_service "miniapp-major-static" "${SERVICES[@]}"; then
-  curl -i https://major-maksimov.ru/app/
+  curl -i "$PUBLIC_HEALTH_URL/app/"
 fi
 
 echo "Done: branch=$BRANCH services=${SERVICES[*]}"

@@ -21,6 +21,7 @@ source "$ROOT_DIR/infra/scripts/lib/deploy-git-transport.sh"
 export YC_CLI_INITIALIZATION_SILENCE="${YC_CLI_INITIALIZATION_SILENCE:-true}"
 
 ENV_FILE="${MAXIM_VPS_ENV_FILE:-$ROOT_DIR/.env.vps}"
+readonly SCALE_ENV_FILE_FROM_CALLER="${MAXIM_VPS_ENV_FILE:-}"
 DATABASE_BREAK_GLASS_FROM_CALLER="${MAXIM_VPS_DATABASE_BREAK_GLASS:-}"
 DATABASE_BREAK_GLASS_REASON_FROM_CALLER="${MAXIM_VPS_DATABASE_BREAK_GLASS_REASON:-}"
 DEPLOY_DISK_MIN_FREE_BYTES_FROM_CALLER="${MAXIM_DEPLOY_DISK_MIN_FREE_BYTES:-}"
@@ -52,6 +53,9 @@ STATISTICS_EXCHANGE_V3_ENABLED="$STATISTICS_EXCHANGE_V3_FROM_CALLER"
 MAXIM_STATISTICS_CENTRAL_EPOCH="$STATISTICS_CENTRAL_EPOCH_FROM_CALLER"
 PAIR_RELEASE_EXPECTED_STATE_SHA256="$PAIR_RELEASE_EXPECTED_STATE_FROM_CALLER"
 
+readonly SCALE_SSH_TARGET_FROM_PROFILE="${MAXIM_VPS_SSH_TARGET:-}"
+readonly SCALE_REPO_DIR_FROM_PROFILE="${MAXIM_VPS_REPO_DIR:-}"
+readonly SCALE_PUBLIC_URL_FROM_PROFILE="${MAXIM_VPS_PUBLIC_URL:-}"
 MAXIM_VPS_SSH_TARGET="${MAXIM_VPS_SSH_TARGET:-maxim-vps}"
 MAXIM_VPS_REPO_DIR="${MAXIM_VPS_REPO_DIR:-/var/www/Chat_bot}"
 MAXIM_VPS_PUBLIC_URL="${MAXIM_VPS_PUBLIC_URL:-https://major-maksimov.ru}"
@@ -102,8 +106,8 @@ Commands:
   commercial-llm workstation-bridge
   commercial-llm workstation-pool-bridge pc-a-4b|pc-b-9b
                               Inspect the model or run closed transport/client probes
-  deploy-scale [branch] [...] Run the split/load-testing deploy script on the VPS.
-                              Requires MAXIM_ALLOW_SCALE_DEPLOY=1.
+  deploy-scale [branch] [...] Run only on an explicitly identified isolated test host.
+                              Requires a separate profile file and MAXIM_ALLOW_SCALE_DEPLOY=1.
   rollback-runtime <ref> [...] Rebuild/recreate API roles from a previous git ref
   rollback-release <release-id> [components...]
                               Recreate immutable API/miniapp/admin release images
@@ -1746,7 +1750,19 @@ deploy_scale() {
       ;;
   esac
 
-  remote_exec "MAXIM_ALLOW_SCALE_DEPLOY=1 $(shell_quote_args ./infra/scripts/vps-pull-build-up-scale.sh "$branch" "$@")"
+  # shellcheck source=infra/scripts/lib/scale-deploy-profile.sh
+  source "$ROOT_DIR/infra/scripts/lib/scale-deploy-profile.sh" || return
+  maxim_scale_require_connection_profile \
+    "$SCALE_ENV_FILE_FROM_CALLER" "$ROOT_DIR/.env.vps" \
+    "$SCALE_SSH_TARGET_FROM_PROFILE" "$SCALE_REPO_DIR_FROM_PROFILE" "$SCALE_PUBLIC_URL_FROM_PROFILE" || return
+  local MAXIM_VPS_AUTO_AUTHORIZE_SSH=0
+  remote_exec "$(shell_quote_args env \
+    MAXIM_ALLOW_SCALE_DEPLOY=1 \
+    "MAXIM_SCALE_DEPLOY_PROFILE=$MAXIM_SCALE_DEPLOY_PROFILE" \
+    "MAXIM_SCALE_EXPECTED_MACHINE_ID=$MAXIM_SCALE_EXPECTED_MACHINE_ID" \
+    "MAXIM_SCALE_EXPECTED_REPO_DIR=$SCALE_REPO_DIR_FROM_PROFILE" \
+    "MAXIM_VPS_PUBLIC_URL=$SCALE_PUBLIC_URL_FROM_PROFILE" \
+    ./infra/scripts/vps-pull-build-up-scale.sh "$branch" "$@")"
 }
 
 rollback_runtime() {
