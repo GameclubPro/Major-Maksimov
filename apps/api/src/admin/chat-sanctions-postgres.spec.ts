@@ -97,8 +97,8 @@ function assertBoundedSanctionsPlan(
     // Parent buffer totals are inclusive; do not sum them with child totals.
     expect(blocks(root)).toBeLessThanOrEqual(512);
     if (sourceHistoryPhase) {
-      // FLAG: Read retained and sparse source history once through the bounded
-      // candidate id array; a small live-row count cannot justify a full heap scan.
+      // FLAG: Retained and sparse source history stays behind closed candidate
+      // key ranges. Missing evidence must not scan the deleted-key gap after it.
       const originals = physicalScans
         .filter(({ alias }) => alias === 'original')
         .map(({ node }) => node);
@@ -119,35 +119,35 @@ function assertBoundedSanctionsPlan(
         expect(['Index Scan', 'Index Only Scan']).toContain(original['Node Type']);
       }
       expect(index['Index Name']).toBe('moderation_events_pkey');
-      const candidateArray = index['Index Cond']?.match(/id = ANY \((\$\d+)\)/u)?.[1];
-      expect(candidateArray).toMatch(/^\$\d+$/u);
+      expect(index['Index Cond']).toMatch(/id >= feed(?:_\d+)?\.id/u);
+      expect(index['Index Cond']).toMatch(/id <= feed(?:_\d+)?\.id/u);
       if (original['Node Type'] === 'Bitmap Heap Scan') {
-        expect(original['Recheck Cond']).toContain(`id = ANY (${candidateArray})`);
+        expect(original['Recheck Cond']).toMatch(/id >= feed(?:_\d+)?\.id/u);
+        expect(original['Recheck Cond']).toMatch(/id <= feed(?:_\d+)?\.id/u);
       }
-      const arrayPlans = visit(root)
-        .map(({ node }) => node)
-        .filter(
-          (node) =>
-            node['Parent Relationship'] === 'InitPlan' &&
-            node['Subplan Name']?.startsWith('InitPlan ') &&
-            node['Subplan Name'].endsWith(`(returns ${candidateArray})`),
-        );
-      expect(arrayPlans).toHaveLength(1);
-      const candidateReads = visit(arrayPlans[0]!)
-        .map(({ node }) => node)
-        .filter((node) => node['Node Type'] === 'CTE Scan' && node['CTE Name'] === 'candidates');
-      expect(candidateReads).toHaveLength(1);
-      expect(candidateReads[0]!['Actual Rows']).toBe(candidateCount);
-      expect(candidateReads[0]!['Actual Loops']).toBe(1);
       for (const node of originals) {
         expect(
           node['Actual Rows'] +
             (node['Rows Removed by Filter'] ?? 0) +
             (node['Rows Removed by Index Recheck'] ?? 0),
-        ).toBeLessThanOrEqual(candidateCount);
-        expect(node['Actual Loops']).toBe(1);
+        ).toBeLessThanOrEqual(1);
+        expect(node['Actual Loops']).toBe(candidateCount);
       }
     }
+    console.info('Sanctions source probe bounds', {
+      phase: sourceHistoryPhase ?? 'compact',
+      candidateCount,
+      blocks: blocks(root),
+      sources: physicalScans
+        .filter(({ alias }) => alias === 'original')
+        .map(({ node }) => ({
+          type: node['Node Type'],
+          index: node['Index Name'],
+          rows: node['Actual Rows'],
+          loops: node['Actual Loops'],
+          blocks: blocks(node),
+        })),
+    });
   } catch (error: unknown) {
     throw new Error(
       `Sanctions registry exceeded work bounds (${sourceHistoryPhase ?? 'feed history'}): ${JSON.stringify(plan)}`,
@@ -332,7 +332,7 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
     }
   });
 
-  it('bounds exact source probes through retained and cleared history without losing missing sources', async () => {
+  it('bounds exact source probes through retained history and deleted-key gaps without losing missing sources', async () => {
     const planChatId = `${chatId}-source-plan`;
     const historyChatId = `${chatId}-source-history`;
     const ownedChats = [planChatId, historyChatId];
@@ -357,16 +357,23 @@ describePostgres('PostgreSQL sanctions registry and retention', () => {
         async (tx) => {
           // FLAG: Hold insertion, deletion and both plans in the same transaction.
           // Uncommitted history cannot be vacuumed away between the sparse-heap
-          // fixture and its measurement; no global planner or vacuum changes apply.
+          // fixture and its measurement. Place every deleted key after the missing
+          // source and before its next live key; an open seek must cross that gap.
           expect(
             await tx.$executeRaw(Prisma.sql`
               INSERT INTO moderation_events
                 (id, chat_id, user_id, event_type, rule_code, action, created_at)
-              SELECT ${historyChatId} || '-ordinary-' || n, ${historyChatId}, 'history-user',
+              SELECT ${missingSourceId} || '-ordinary-' || n, ${historyChatId}, 'history-user',
                 'SYSTEM'::"EventType", 'PLAN_HISTORY', 'NONE'::"SanctionAction", NOW()
               FROM generate_series(1, 20000) n
             `),
           ).toBe(20_000);
+          const [gap] = await tx.$queryRaw<{ count: bigint }[]>(Prisma.sql`
+            SELECT count(*) AS count FROM moderation_events
+            WHERE chat_id = ${historyChatId}
+              AND id > ${missingSourceId} AND id < ${`${planChatId}-ban-1`}
+          `);
+          expect(gap!.count).toBe(20_000n);
           const transactionFence = new ModerationSanctionStateFenceService(tx as never);
           for (const phase of ['retained', 'cleared'] as const) {
             if (phase === 'cleared') {
