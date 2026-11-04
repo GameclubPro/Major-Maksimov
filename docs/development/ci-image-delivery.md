@@ -7,6 +7,34 @@ registry manifest digest are recorded and compared separately. Their interpretat
 the Docker image store; the containerd inspect ID may identify a manifest or index. Neither field
 substitutes for verification of the other at the publication and preload boundaries.
 
+## Routine release
+
+1. Implement in the configured `workspace` task checkout. Select checks from the actual diff,
+   run affected focused cases while editing, then stage owned paths and submit through the
+   repository commit helper. The helper runs the final aggregate once.
+2. Merge the PR after its required checks pass. For a runtime release, require successful
+   `Required` and `Analyze JavaScript and TypeScript` on the exact selected main SHA.
+3. From a clean release checkout with configured VPS access, run:
+
+   ```bash
+   ./infra/scripts/vps-connect.sh deploy main --auto
+   ```
+
+   This command owns controller synchronization, cumulative component selection, image proof
+   verification, missing-image preparation in GitHub and GHCR preload before the locked rollout.
+   Separate manual proof/preload commands are optional operational tools. The rollout preserves
+   migrations, all-role API replacement, store identity, capacity and rollback reader floors.
+4. Require a successful exit, strict smokes and the immutable component manifest, then read back
+   active component identities and availability once. If the requested source is already active,
+   use that readback to finish delivery. Additional monitoring needs an explicit request or a
+   concrete runtime risk.
+
+Documentation, tests and tooling changes finish after green PR checks and merge when cumulative
+impact contains no runtime change; they need neither a second main CI wait nor an application
+deploy. The [development workflow](../development-reliability-plan.md#boundaries-and-follow-up)
+defines check selection; the [production procedure](production-operations-reference.md#deploy-and-rollback)
+owns detailed runtime and recovery guards.
+
 ## Accumulated main coverage
 
 `scripts/ci/impact.mjs plan` freezes the scope and its evidence once. For a trusted main push it
@@ -215,10 +243,12 @@ server. Source changes, migration rules, smoke checks, role topology, rollback r
 the component manifest retain their own gates. See the
 [production delivery procedure](production-operations-reference.md#deploy-and-rollback).
 
-These mechanisms do not enable automatic deployment. Durable server operations, candidate
-revalidation and explicit automatic-release
-activation remain separate requirements. A merged change or local fixture test alone does not
-establish registry publication, installed credentials or production acceptance.
+The routine command works independently of `maxim-release.service`. Its installation, accepted
+server operations and any later automatic-release activation follow the separate
+[release-service procedure](../operations/runbooks/durable-release-service.md); they are not
+prerequisites for the routine command. Preserve installed source and rollback floors even while
+the service is stopped. A merged change or local fixture test alone does not establish registry
+publication, installed credentials or production acceptance.
 
 ## Regression evidence
 
