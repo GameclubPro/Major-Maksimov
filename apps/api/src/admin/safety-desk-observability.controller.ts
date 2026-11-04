@@ -8,6 +8,7 @@ import { SafetyDeskPublicationCohortService } from './safety-desk-publication-co
 import { SafetyDeskDeleteCohortService } from './safety-desk-delete-cohort.service';
 import { SafetyDeskPublicationDeliveryCohortService } from './safety-desk-publication-delivery-cohort.service';
 import { SafetyDeskPublicationDeliveryEvidenceService } from './safety-desk-publication-delivery-evidence.service';
+import { SafetyDeskOverviewService } from './safety-desk-overview.service';
 
 @Controller('v1/safety-desk/runtime')
 @UseGuards(SafetyDeskAdminGuard)
@@ -35,7 +36,14 @@ export class SafetyDeskObservabilityController {
     private readonly commercialAi: Pick<SafetyDeskCommercialAiService, 'getSnapshot'>,
     @Inject(SafetyDeskCommercialAiPoolService)
     private readonly commercialAiPool: Pick<SafetyDeskCommercialAiPoolService, 'getSnapshot'>,
+    @Inject(SafetyDeskOverviewService)
+    private readonly overview: Pick<SafetyDeskOverviewService, 'getSnapshot'>,
   ) {}
+
+  @Get('overview')
+  getOverview() {
+    return this.overview.getSnapshot();
+  }
 
   @Get('commercial-ai')
   getCommercialAi() {

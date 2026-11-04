@@ -3,9 +3,12 @@ import { WebhookCohortDesk } from './webhook-cohort-desk';
 import { DeleteCohortDesk } from './delete-cohort-desk';
 import { PublicationDeliveryCohortDesk } from './publication-delivery-cohort-desk';
 import { CommercialAiDesk } from './commercial-ai-desk';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { RuntimeOverviewDesk } from './runtime-overview-desk';
+import type { OverviewAccessScope } from './use-runtime-overview';
 
 const families = {
+  overview: 'Боты и очереди',
   webhook: 'Входящие события',
   deletion: 'Намерения удаления',
   publication: 'Запуски Публика',
@@ -13,8 +16,13 @@ const families = {
   commercialAi: 'Рекламный ИИ',
 } as const;
 
-export function ObservabilityDesk(props: { accessCode: string; refreshToken: number }) {
-  const [family, setFamily] = useState<keyof typeof families>('webhook');
+export function ObservabilityDesk(props: {
+  accessCode: string;
+  refreshToken: number;
+  accessScope?: OverviewAccessScope;
+}) {
+  const [family, setFamily] = useState<keyof typeof families>('overview');
+  const fallbackScope = useMemo(() => ({ denied: false }), [props.accessCode]);
   return (
     <div className="observation-panels">
       <nav className="observation-selector" aria-label="Вид наблюдений">
@@ -30,6 +38,13 @@ export function ObservabilityDesk(props: { accessCode: string; refreshToken: num
           </button>
         ))}
       </nav>
+      {family === 'overview' && (
+        <RuntimeOverviewDesk
+          {...props}
+          accessScope={props.accessScope ?? fallbackScope}
+          onEvidence={setFamily}
+        />
+      )}
       {family === 'webhook' && <WebhookCohortDesk {...props} />}
       {family === 'publication' && <PublicationCohortDesk {...props} />}
       {family === 'deletion' && <DeleteCohortDesk {...props} />}

@@ -21,6 +21,27 @@ test('adds the JSON content type only for requests with JSON bodies', () => {
   });
 });
 
+test('forwards cancellation and disables cached reads without changing owner authorization', async () => {
+  const controller = new AbortController();
+  let options: RequestInit | undefined;
+  await createAdminApiTransport(async (_input, init) => {
+    options = init;
+    return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json' } });
+  }).request(
+    '/api/v1/safety-desk/runtime/overview',
+    'owner-code',
+    { parse: (value) => value },
+    {
+      signal: controller.signal,
+      cache: 'no-store',
+    },
+  );
+  assert.equal(options?.signal, controller.signal);
+  assert.equal(options?.cache, 'no-store');
+  assert.equal(options?.credentials, 'same-origin');
+  assert.equal((options?.headers as Record<string, string>)['X-Admin-Access-Code'], 'owner-code');
+});
+
 test('keeps access codes in request headers and out of URLs and browser storage', async () => {
   const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');

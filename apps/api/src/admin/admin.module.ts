@@ -173,6 +173,10 @@ import { SafetyDeskService } from './safety-desk.service';
 import { SafetyDeskObservabilityController } from './safety-desk-observability.controller';
 import { SafetyDeskCommercialAiService } from './safety-desk-commercial-ai.service';
 import { SafetyDeskCommercialAiPoolService } from './safety-desk-commercial-ai-pool.service';
+import { SafetyDeskOverviewService } from './safety-desk-overview.service';
+import { SafetyDeskOverviewStore } from './safety-desk-overview-store';
+import { SafetyDeskOverviewPendingService } from './safety-desk-overview-pending.service';
+import { SafetyDeskOverviewActionsService } from './safety-desk-overview-actions.service';
 import { SafetyDeskWebhookCohortService } from './safety-desk-webhook-cohort.service';
 import { SafetyDeskDeleteEvidenceService } from './safety-desk-delete-evidence.service';
 import { SafetyDeskPublicationCohortService } from './safety-desk-publication-cohort.service';
@@ -395,6 +399,10 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     SafetyDeskRetentionService,
     SafetyDeskCommercialAiService,
     SafetyDeskCommercialAiPoolService,
+    SafetyDeskOverviewService,
+    SafetyDeskOverviewStore,
+    SafetyDeskOverviewPendingService,
+    SafetyDeskOverviewActionsService,
     SafetyDeskWebhookCohortService,
     SafetyDeskDeleteEvidenceService,
     SafetyDeskPublicationCohortService,
