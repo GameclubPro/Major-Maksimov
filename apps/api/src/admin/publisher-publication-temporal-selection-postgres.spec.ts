@@ -480,8 +480,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
       let previousContent: { id: string };
       let ready: Envelope;
 
-      // FLAG: Parent and recipient fixtures have independent 30-second hooks.
-      // Their combined setup allowance is 60 seconds; selection retains 30 seconds.
+      // FLAG: Parent fixture setup has a 60-second hook; recipient setup retains 30 seconds.
+      // Selection and its plan assertions retain the independent 30-second test budget.
       beforeEach(async () => {
         const seedStarted = performance.now();
         const stageTimingsMs: Record<string, number> = {};
@@ -546,7 +546,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             }),
           );
         }
-      });
+      }, 60_000);
 
       beforeEach(async () => {
         const seedStarted = performance.now();

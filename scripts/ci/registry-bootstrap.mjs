@@ -4,7 +4,11 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { imageIdentity, verifyPrivatePackage } from './registry-images.mjs';
+import {
+  imageIdentity,
+  isOpaqueGitHubCredential,
+  verifyPrivatePackage,
+} from './registry-images.mjs';
 
 export const BOOTSTRAP_WORKFLOW = '.github/workflows/registry-bootstrap.yml';
 const REPOSITORY = 'GameclubPro/Major-Maksimov';
@@ -155,7 +159,9 @@ async function executeBootstrap(env, argv, { execute = execFileSync, request = f
   const expected = bootstrapContext(env);
   onStage('credential-shape');
   const token = env.GH_TOKEN;
-  if (typeof token !== 'string' || !/^[A-Za-z0-9_]{20,255}$/u.test(token))
+  // FLAG: Bound an opaque printable ASCII credential for stdin and the Bearer header, never a vendor token format.
+  // The trusted workflow, authenticated login and exact private package binding establish access.
+  if (!isOpaqueGitHubCredential(token))
     throw new Error('The isolated workflow package credential is required.');
   onStage('auth');
   const auth = mkdtempSync(join(tmpdir(), 'maxim-bootstrap-auth-'));

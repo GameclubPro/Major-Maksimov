@@ -196,7 +196,7 @@ test('narrow private evidence credential is passed only to the proof child and n
   const value = fixture();
   const directory = mkdtempSync(join(tmpdir(), 'maxim-proof-credential-'));
   const credentialFile = join(directory, 'ghcr-read.json');
-  const token = 'fixture_narrow_read_packages_token_123456';
+  const token = `synthetic.header-${'x'.repeat(300)}.signature=`;
   writeFileSync(credentialFile, JSON.stringify({ username: 'package-reader', token }), {
     mode: 0o600,
   });
@@ -276,7 +276,10 @@ test('configured missing, unsafe, empty or malformed credential never falls back
       JSON.stringify({ username: 'package-reader', token: '' }),
       JSON.stringify({ username: 'bad\n', token: 'fixture_narrow_read_packages_token_123456' }),
       JSON.stringify({ username: 'package-reader', token: 'bad token private secret' }),
-      JSON.stringify({ username: 'package-reader', token: 'x'.repeat(256) }),
+      JSON.stringify({ username: 'package-reader', token: 'x'.repeat(4097) }),
+      ...['x\n', 'x\0', 'x\x7f', 'xé'].map((token) =>
+        JSON.stringify({ username: 'package-reader', token }),
+      ),
       JSON.stringify({
         username: 'package-reader',
         token: 'fixture_narrow_read_packages_token_123456',

@@ -116,6 +116,21 @@ run publishes and verifies the tested images, and the normal receipt/provenance 
 Until then, registry publication remains an external prerequisite; merging the privacy fix does
 not establish successful image delivery.
 
+Package credentials are opaque: their prefix, punctuation and length do not prove GitHub
+authority. Bootstrap, publication/proof and local/server preload use the same transport check:
+1–4096 printable ASCII characters with no whitespace or control characters, passed unchanged.
+The local evidence JSON still has its independent 4096-byte file budget, and the server private
+file budget remains 65536 bytes. Neither file budget is a provider token format. Trusted workflow
+identity, authenticated access and private package metadata with the exact repository binding
+remain the authority checks.
+
+Release image inspection failures retain every config ID, platform, source/protection label and
+size check. They report `IMAGE_INSPECTION_REFUSED` with a fixed `reason` identifying the first
+failed comparison. Malformed Docker JSON and incorrect inspection cardinality have separate
+fixed reasons. These diagnostics omit raw Docker output, expected/actual fields and original
+parse errors. A reported mismatch blocks publication or preload; it never authorizes replacing
+the tested identity. Registry manifest digest and Docker config ID remain separate.
+
 Bootstrap failures report only a fixed `stage` and `code`, separating context/credential refusal,
 registry login, metadata reads, seed build/push and receipt persistence. They never print the
 credential, environment, dependency output or raw error. A failure at `seed-push` or a subsequent

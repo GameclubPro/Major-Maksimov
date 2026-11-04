@@ -54,7 +54,7 @@ test('CLI distinguishes context and credential refusals without rendering suppli
   const secret = 'synthetic-sensitive-marker';
   for (const [patch, stage] of [
     [{ GITHUB_REF: `refs/heads/${secret}`, GH_TOKEN: 'x'.repeat(40) }, 'context'],
-    [{ GH_TOKEN: `${secret}.invalid` }, 'credential-shape'],
+    [{ GH_TOKEN: `${secret} invalid` }, 'credential-shape'],
   ]) {
     const result = spawnSync(process.execPath, ['scripts/ci/registry-bootstrap.mjs'], {
       env: environment(patch),
@@ -214,15 +214,29 @@ test('diagnostics reject arbitrary stage and code text', () => {
   );
 });
 
-test('token shape admission is unchanged and refusals reach no dependency', async () => {
+test('empty, oversized and non-printable ASCII credentials reach no dependency', async () => {
   for (const token of [
     undefined,
+    null,
+    123,
+    false,
+    {},
     '',
-    'x'.repeat(19),
-    'x'.repeat(256),
-    `${'x'.repeat(20)}.`,
-    `${'x'.repeat(20)}-`,
-    `${'x'.repeat(20)}\n`,
+    'x'.repeat(4097),
+    ' x',
+    'x ',
+    'x y',
+    'x\t',
+    'x\r',
+    'x\n',
+    'x\0',
+    'x\x1f',
+    'x\x7f',
+    'x\x80',
+    'x\u00a0',
+    'x\u200b',
+    'x\u2028',
+    'x\ufeff',
   ]) {
     await assert.rejects(
       runBootstrap(environment({ GH_TOKEN: token }), [], {
@@ -232,10 +246,22 @@ test('token shape admission is unchanged and refusals reach no dependency', asyn
       { stage: 'credential-shape', code: 'REFUSED' },
     );
   }
-  for (const token of ['x'.repeat(20), 'x'.repeat(255), 'synthetic_token_'.padEnd(40, 'x')]) {
+});
+
+test('bounded printable ASCII credentials reach injected login without normalization', async () => {
+  for (const token of [
+    'x',
+    'x'.repeat(19),
+    'x'.repeat(20),
+    'x'.repeat(255),
+    'x'.repeat(256),
+    'x'.repeat(4096),
+    Array.from({ length: 94 }, (_, index) => String.fromCharCode(33 + index)).join(''),
+  ]) {
     await assert.rejects(
       runBootstrap(environment({ GH_TOKEN: token }), [], {
-        execute: () => {
+        execute: (_binary, _args, options) => {
+          assert.equal(options.input, token);
           throw new Error('synthetic login failure');
         },
         request: () => assert.fail('failed login must not reach metadata'),
@@ -243,6 +269,59 @@ test('token shape admission is unchanged and refusals reach no dependency', asyn
       { stage: 'login', code: 'DEPENDENCY_FAILED' },
     );
   }
+});
+
+test('an opaque printable workflow token longer than 255 characters reaches only injected login', async () => {
+  const token = `synthetic.header-${'x'.repeat(300)}.signature=`;
+  let logins = 0;
+  await assert.rejects(
+    runBootstrap(environment({ GH_TOKEN: token }), [], {
+      execute: (binary, args, options) => {
+        logins++;
+        assert.equal(binary, 'docker');
+        assert.deepEqual(args, [
+          'login',
+          'ghcr.io',
+          '--username',
+          'GameclubPro',
+          '--password-stdin',
+        ]);
+        assert.equal(options.input, token);
+        throw new Error('synthetic login refusal');
+      },
+      request: () => assert.fail('failed login must not reach metadata'),
+    }),
+    { stage: 'login', code: 'DEPENDENCY_FAILED' },
+  );
+  assert.equal(logins, 1);
+});
+
+test('opaque credentials reach metadata unchanged and denied metadata still blocks seed writes', async () => {
+  const token = `synthetic.header-${'x'.repeat(300)}.signature=`;
+  const calls = [];
+  let auth;
+  const diagnostic = await runBootstrap(environment({ GH_TOKEN: token }), [], {
+    execute: (binary, args, options) => {
+      calls.push(args[0]);
+      assert.equal(binary, 'docker');
+      assert.equal(args[0], 'login', 'denied metadata must prevent build and push');
+      assert.equal(options.input, token);
+      auth = options.env.DOCKER_CONFIG;
+    },
+    request: async (_url, options) => {
+      calls.push('metadata');
+      assert.equal(options.headers.authorization, `Bearer ${token}`);
+      return new Response('{}', { status: 403 });
+    },
+  }).then(
+    () => assert.fail('denied metadata must refuse admission'),
+    (error) => error,
+  );
+  assert.equal(diagnostic.stage, 'metadata-before');
+  assert.equal(diagnostic.code, 'UNVERIFIED');
+  assert.deepEqual(calls, ['login', 'metadata']);
+  assert.equal(existsSync(auth), false);
+  assert.equal(bootstrapFailureMessage(diagnostic).includes(token), false);
 });
 
 test('cleanup failures retain existing precedence and expose only their fixed stage', () => {
