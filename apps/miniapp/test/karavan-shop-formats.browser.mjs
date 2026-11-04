@@ -137,6 +137,19 @@ try {
             continue;
           }
 
+          await begin('format_setup_unsupported');
+          await home
+            .getByText('Обновите приложение, чтобы изменить подключение.', { exact: true })
+            .waitFor();
+          assert.equal(
+            await home
+              .getByRole('heading', { name: 'Каким будет ваш магазин?', exact: true })
+              .count(),
+            0,
+            'missing Major capability cannot authorize setup',
+          );
+          assert.equal((await requests('setup')).length, 0);
+
           await begin('format_setup');
           await home
             .getByRole('heading', { name: 'Каким будет ваш магазин?', exact: true })
@@ -215,6 +228,40 @@ try {
           assert.equal(
             await home.getByRole('button', { name: 'Посмотреть витрину', exact: true }).count(),
             0,
+          );
+          const connection = await page.evaluate(() => window.__readShopConnection());
+          assert.equal(connection.version, 2);
+          assert.equal(connection.blocked, false);
+          assert.equal(connection.operation.kind, 'setup');
+          assert.equal(connection.operation.operation.state, 'complete');
+          assert.deepEqual(connection.operation.operation.request, created[0].body);
+          assert.deepEqual(
+            await page.evaluate((id) => window.__readShopSetup(id), created[0].body.operationId),
+            connection.operation.operation,
+            'explicit status reads the original committed setup receipt',
+          );
+          assert.equal((await requests('setup')).length, 1, 'receipt reads never dispatch setup');
+          await page.reload();
+          await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
+          await home.getByText('Закрыт для покупателей', { exact: true }).waitFor();
+          const restored = await page.evaluate(() => window.__readShopConnection());
+          assert.deepEqual(
+            restored,
+            connection,
+            'reopening observes the same authoritative receipt',
+          );
+          assert.equal((await requests('setup')).length, 0, 'reopening never repeats setup');
+          assert.equal(
+            await page.evaluate(
+              () =>
+                window.__shopRequests.filter((row) =>
+                  /\/(?:bindings\/|connection\/(?:binding|import-binding|operations\/.*\/resume))/u.test(
+                    row.path,
+                  ),
+                ).length,
+            ),
+            0,
+            'reopening a completed setup never starts or resumes a binding',
           );
 
           await begin('format_setup_terms');

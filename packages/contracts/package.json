@@ -187,6 +187,10 @@
       "types": "./dist/karavan-marketplace.d.ts",
       "default": "./dist/karavan-marketplace.js"
     },
+    "./karavan-marketplace-connection": {
+      "types": "./dist/karavan-marketplace-connection.d.ts",
+      "default": "./dist/karavan-marketplace-connection.js"
+    },
     "./karavan-marketplace-management": {
       "types": "./dist/karavan-marketplace-management.d.ts",
       "default": "./dist/karavan-marketplace-management.js"

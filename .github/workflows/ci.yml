@@ -366,6 +366,12 @@ jobs:
           SHOP_SIMPLE_ONLY=categories node apps/miniapp/test/karavan-shop-simple.browser.mjs
           SHOP_SIMPLE_ONLY=boundaries node apps/miniapp/test/karavan-shop-simple.browser.mjs
           SHOP_SIMPLE_ONLY=queue node apps/miniapp/test/karavan-shop-simple.browser.mjs
+      - name: Server shop recovery without phone storage on Android and iOS
+        if: matrix.shard == '3/4'
+        run: node apps/miniapp/test/karavan-server-recovery.browser.mjs
+      - name: Binding status, explicit continuation and stale actor responses
+        if: matrix.shard == '3/4'
+        run: node apps/miniapp/test/karavan-binding-hook.browser.mjs
       - name: Saved catalogs and selected settings access on mobile
         if: matrix.shard == '1/4'
         run: node apps/miniapp/test/personal-access-entry.browser.mjs

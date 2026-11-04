@@ -1,11 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import type { MarketplaceAppearance } from '@maxim/contracts/karavan-marketplace-management';
 import type { ApiTransport } from '../src/lib/api/transport';
-import type { ShopCommand } from '../src/lib/api/karavan-shop-client';
+import { prepareShopRequest, type ShopCommand } from '../src/lib/api/karavan-shop-client';
+import { ApiRequestError } from '../src/lib/api-request-error';
 import {
+  assertShopEntryWriteAvailable,
+  claimShopCommand,
   loadShopCommandJournal,
+  releaseShopCommand,
+  reserveShopCommand,
+  settleShopCommand,
   type ShopJournalScope,
 } from '../src/pages/settings/karavan-shop/command-journal';
 import {
@@ -61,7 +67,12 @@ const api: ApiTransport = {
     const result: unknown = await response.json();
     if (response.headers.get('X-Simulated-Lost-Response') === '1')
       throw new Error('Connection lost after commit');
-    if (!response.ok) throw new Error(`Unexpected fixture response: ${response.status}`);
+    if (!response.ok)
+      throw new ApiRequestError(
+        response.status,
+        JSON.stringify(result),
+        'Не удалось выполнить действие.',
+      );
     return result;
   },
   requestKeepalive() {},
@@ -113,6 +124,8 @@ type HarnessActions = {
   tryAppearance(): Promise<string | null>;
   resume(): Promise<void>;
   changeOriginalInputs(): void;
+  prepareConfirmedAdministration(): Promise<void>;
+  entryAvailable(): Promise<boolean>;
   readOriginalJournal: typeof readOriginalJournal;
 };
 async function readOriginalJournal() {
@@ -125,9 +138,24 @@ declare global {
 }
 
 function Owners() {
-  const { scope } = useShop();
+  const { scope, module } = useShop();
+  const journalScope: ShopJournalScope = { ...scope, actorMaxUserId: module.actorMaxUserId };
   const commands = useShopCommands();
   const seller = useSellerAccess();
+  const [localDraft, setLocalDraft] = useState('Исходный черновик');
+  const currentState = useQuery<{ version: number }>({
+    queryKey: [
+      'karavan-shop',
+      {
+        chatId: scope.chatId,
+        marketplaceId: scope.marketplaceId,
+        expectedBindingGeneration: scope.expectedBindingGeneration,
+      },
+      'confirmed-fixture-state',
+    ],
+    enabled: new URLSearchParams(location.search).has('confirmed'),
+    queryFn: async () => (await api.request('/confirmed-shop-state')) as { version: number },
+  });
   const [callbacks, setCallbacks] = useState<
     { owner: string; commandId: string; chatId: string }[]
   >([]);
@@ -196,6 +224,44 @@ function Owners() {
         appearanceCommand.current.input.appearance.blocks.reverse();
       },
       readOriginalJournal,
+      async prepareConfirmedAdministration() {
+        const ui = { owner: 'legacy-administration', page: 'home' as const };
+        const previous = prepareShopRequest(scope, {
+          operation: 'pins_save',
+          input: { commandId: crypto.randomUUID(), expectedRevision: 1, offers: [] },
+        });
+        const reserved = await reserveShopCommand(journalScope, previous, ui);
+        await settleShopCommand(await claimShopCommand(reserved), {
+          operation: 'pins_save',
+          data: { revision: 2, offers: [] },
+        });
+        const original = prepareShopRequest(scope, {
+          operation: 'administration_store_change',
+          input: {
+            commandId: crypto.randomUUID(),
+            expectedRevision: 1,
+            expectedChatBinding: {
+              id: '44444444-4444-4444-8444-444444444444',
+              chatId: scope.chatId,
+              botId: 'synthetic-major-bot',
+              generation: scope.expectedBindingGeneration,
+            },
+            action: 'attach',
+            storeId: '55555555-5555-4555-8555-555555555555',
+          },
+        });
+        const pending = await reserveShopCommand(journalScope, original, ui);
+        await releaseShopCommand(await claimShopCommand(pending));
+        await commands.reload();
+      },
+      async entryAvailable() {
+        await assertShopEntryWriteAvailable(
+          module.actorMaxUserId,
+          scope.chatId,
+          scope.marketplaceId,
+        );
+        return true;
+      },
     };
     return () => {
       delete window.__shopCommandRuntimeHarness;
@@ -212,6 +278,15 @@ function Owners() {
     <>
       <ShopCommandRecovery />
       <SellerAccessAction />
+      <label>
+        Название черновика
+        <input
+          aria-label="Название черновика"
+          disabled={appearance.editingBlocked}
+          value={localDraft}
+          onChange={(event) => setLocalDraft(event.target.value)}
+        />
+      </label>
       <button
         type="button"
         disabled={image.blocked}
@@ -238,10 +313,14 @@ function Owners() {
           loading: commands.loading,
           busy: commands.busy,
           blocked: commands.blocked,
+          editingBlocked: commands.editingBlocked,
           readOnly: commands.readOnly,
           stale: commands.stale,
           storageError: commands.storageError,
           journal: commands.journal,
+          confirmation: commands.confirmation,
+          currentStateVersion: currentState.data?.version ?? null,
+          localDraft,
           image: ownerState(image),
           appearance: ownerState(appearance),
           invitation: ownerState(seller.mutation),

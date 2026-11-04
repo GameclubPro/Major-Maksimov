@@ -12,6 +12,12 @@ import {
   type KaravanMarketplaceSetup,
   type KaravanMarketplaceHandoffDestination,
 } from '@maxim/contracts/karavan-marketplace';
+import {
+  karavanConnectionBindingInputSchema,
+  karavanConnectionBindingOperationSchema,
+  karavanConnectionSnapshotSchema,
+  type KaravanConnectionBindingInput,
+} from '@maxim/contracts/karavan-marketplace-connection';
 import type { ApiTransport } from './transport';
 const moduleSchema = z.union([
   z.object({ enabled: z.literal(false) }),
@@ -20,6 +26,7 @@ const moduleSchema = z.union([
     actorMaxUserId: z.string(),
     sellerBotUrl: z.string().url(),
     setupOperation: karavanMarketplaceOperationSchema.nullable(),
+    connection: karavanConnectionSnapshotSchema.optional(),
     publicationChoices: z.array(karavanPublicationChoiceSchema).max(20).optional().default([]),
   }),
 ]);
@@ -124,6 +131,87 @@ export async function changeKaravanChatBinding(
       body: JSON.stringify(payload),
       retryMutationOnTransportError: false,
     }),
+  );
+}
+
+export async function getKaravanConnection(
+  api: ApiTransport,
+  chatId: string,
+  signal?: AbortSignal,
+) {
+  return karavanConnectionSnapshotSchema.parse(
+    await api.request(`${path(chatId)}/connection`, { signal }),
+  );
+}
+
+function bindingOperation(
+  value: unknown,
+  commandId: string,
+  input?: KaravanConnectionBindingInput,
+) {
+  const operation = karavanConnectionBindingOperationSchema.parse(value);
+  if (
+    operation.operationId !== commandId ||
+    operation.request.commandId !== commandId ||
+    (input && JSON.stringify(operation.request) !== JSON.stringify(input))
+  )
+    throw new Error('Сохранённое подключение изменилось. Обновите состояние магазина.');
+  return operation;
+}
+
+async function admitKaravanBinding(
+  api: ApiTransport,
+  chatId: string,
+  input: KaravanConnectionBindingInput,
+  action: 'binding' | 'import-binding',
+) {
+  const request = karavanConnectionBindingInputSchema.parse(input);
+  return bindingOperation(
+    await api.request(`${path(chatId)}/connection/${action}`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+      retryMutationOnTransportError: false,
+      timeoutMs: 180_000,
+    }),
+    request.commandId,
+    request,
+  );
+}
+
+export function startKaravanBinding(
+  api: ApiTransport,
+  chatId: string,
+  input: KaravanConnectionBindingInput,
+) {
+  return admitKaravanBinding(api, chatId, input, 'binding');
+}
+
+export function importKaravanBinding(
+  api: ApiTransport,
+  chatId: string,
+  input: KaravanConnectionBindingInput,
+) {
+  return admitKaravanBinding(api, chatId, input, 'import-binding');
+}
+
+export async function getKaravanBindingOperation(
+  api: ApiTransport,
+  chatId: string,
+  operationId: string,
+) {
+  return bindingOperation(
+    await api.request(`${path(chatId)}/connection/operations/${encodeURIComponent(operationId)}`),
+    operationId,
+  );
+}
+
+export async function resumeKaravanBinding(api: ApiTransport, chatId: string, operationId: string) {
+  return bindingOperation(
+    await api.request(
+      `${path(chatId)}/connection/operations/${encodeURIComponent(operationId)}/resume`,
+      { method: 'POST', retryMutationOnTransportError: false, timeoutMs: 180_000 },
+    ),
+    operationId,
   );
 }
 

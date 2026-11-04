@@ -54,6 +54,9 @@
         "packages/contracts/src/karavan-marketplace-management.ts"
       ],
       "@maxim/contracts/karavan-marketplace": ["packages/contracts/src/karavan-marketplace.ts"],
+      "@maxim/contracts/karavan-marketplace-connection": [
+        "packages/contracts/src/karavan-marketplace-connection.ts"
+      ],
       "@maxim/contracts/managed-entities": ["packages/contracts/src/managed-entities.ts"],
       "@maxim/contracts/manual-moderation": ["packages/contracts/src/manual-moderation.ts"],
       "@maxim/contracts/max-capabilities": ["packages/contracts/src/max-capabilities.ts"],

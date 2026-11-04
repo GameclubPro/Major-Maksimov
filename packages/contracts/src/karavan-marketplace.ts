@@ -342,6 +342,7 @@ export const karavanMarketplaceCreateSchema = z
 export const karavanMarketplaceSetupSchema = z
   .object({
     operationId: z.string().uuid(),
+    expectedConnectionRevision: z.number().int().nonnegative().optional(),
     chatIds: z
       .array(karavanMarketplaceChatIdSchema)
       .min(1)

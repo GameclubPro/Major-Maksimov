@@ -748,6 +748,9 @@ describe('MiniappMutationTunnelController', () => {
 
   it.each([
     ['POST', '/chats/-123/karavan-marketplace/setup'],
+    ['POST', '/chats/-123/karavan-marketplace/connection/binding'],
+    ['POST', '/chats/-123/karavan-marketplace/connection/import-binding'],
+    ['POST', '/chats/-123/karavan-marketplace/connection/operations/operation-1/resume'],
     ['POST', '/chats/-123/karavan-marketplace/handoffs'],
     ['POST', '/chats/-123/karavan-marketplace/bindings/marketplace-1'],
     ['POST', '/chats/chat-1/broadcast/handoff'],
