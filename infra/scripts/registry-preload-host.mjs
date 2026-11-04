@@ -18,7 +18,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { assertImageInspection, assertRegistryRecord } from '../../scripts/ci/registry-images.mjs';
+import {
+  assertImageInspection,
+  assertRegistryRecord,
+  isOpaqueGitHubCredential,
+  parseImageInspection,
+} from '../../scripts/ci/registry-images.mjs';
 
 export const RELEASE_REPOSITORY = 'GameclubPro/Major-Maksimov';
 export const RELEASE_REPOSITORY_ID = '1168895008';
@@ -113,10 +118,7 @@ function run(binary, args, { env = process.env, input, allowMissingImage = false
 function inspect(runCommand, reference, options) {
   const output = runCommand('docker', ['image', 'inspect', reference], options);
   if (output === null) return null;
-  const images = JSON.parse(output);
-  if (!Array.isArray(images) || images.length !== 1)
-    throw new Error('Expected one registry image.');
-  return images[0];
+  return parseImageInspection(output);
 }
 
 function writeReceipt(path, request) {
@@ -186,11 +188,19 @@ export function preloadRegistryImage(
     );
   }
   assertPrivateFile(credentialFile);
-  const credentials = JSON.parse(readFileSync(credentialFile, 'utf8'));
+  let credentials;
+  try {
+    credentials = JSON.parse(readFileSync(credentialFile, 'utf8'));
+  } catch {
+    // FLAG: JSON parse diagnostics may quote the credential; render only this fixed refusal.
+    throw new Error('Invalid read-only GHCR credential configuration.');
+  }
   if (
+    credentials === null ||
+    typeof credentials !== 'object' ||
+    Array.isArray(credentials) ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(credentials.username ?? '') ||
-    typeof credentials.token !== 'string' ||
-    !/^[A-Za-z0-9_]{20,255}$/u.test(credentials.token)
+    !isOpaqueGitHubCredential(credentials.token)
   ) {
     throw new Error('Invalid read-only GHCR credential configuration.');
   }
