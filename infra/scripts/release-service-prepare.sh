@@ -106,11 +106,12 @@ maxim_release_prepare_main() {
   maxim_require_ordinary_effect_authority "$bundle" || return $?
   # FLAG: Keep this pair owner alive at its original cwd. The child inherits both
   # fences, rebinds only its product-FD owner, and closes only its own descriptors.
-  # Capture all stdout; the installed reader validates the single bounded plan.
+  # Match the executor's cumulative --auto selection. Capture all stdout; the
+  # installed reader validates the single bounded plan.
   # shellcheck disable=SC2016 # BASHPID must be evaluated by the child shell.
   if image_plan="$(env "${controller_git_environment[@]}" MAXIM_EXPECTED_DEPLOY_SHA="$sha" /bin/bash -c '
     export MAXIM_DEPLOY_LOCK_OWNER_PID="$BASHPID"
-    exec ./infra/scripts/vps-pull-build-up.sh main --image-plan
+    exec ./infra/scripts/vps-pull-build-up.sh main --auto --image-plan
   ')"; then
     :
   else

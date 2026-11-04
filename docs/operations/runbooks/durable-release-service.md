@@ -70,6 +70,12 @@ and a private regular `.env` snapshot. The context binds the request, previous m
 component set and verified image proofs. An incomplete or pre-existing directory is retained for
 review. A retry never overwrites it.
 
+Image preparation uses `main --auto --image-plan`, matching the executor's cumulative `--auto`
+selection. Preserve the mode when changing either caller: bare `main --image-plan` defaults to
+the manual full selection and can demand unrelated images. Cover the real argument parser and
+image-plan output for no-op, static, shared API and Lastik changes; a fixed plan test double does
+not establish agreement between preparation and execution.
+
 Canonical public HTTPS needs no repository credential. For an admitted SSH origin, service Git
 uses its fixed installed SSH wrapper, port 443, pinned host keys and a separately provisioned
 repository read key. Only that transport requires `/etc/maxim-deploy/git-read-key` and

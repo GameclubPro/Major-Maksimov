@@ -13,8 +13,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { parseImagePreparationPlan } from './registry-preload.mjs';
 
 const scriptPath = fileURLToPath(new URL('./release-service-prepare.sh', import.meta.url));
+const deployScript = readFileSync(new URL('./vps-pull-build-up.sh', import.meta.url), 'utf8');
 const id = '12345678-1234-4234-8234-123456789abc';
 const requestHash = 'b'.repeat(64);
 const sha = 'a'.repeat(40);
@@ -27,6 +29,41 @@ const plan = `before plan\nMAXIM_IMAGE_PLAN={"schemaVersion":1,"sourceSha":"${sh
 
 function quote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function deployFunction(name, next) {
+  const start = deployScript.indexOf(`${name}() {\n`);
+  const end = deployScript.indexOf(`\n${next}() {`, start);
+  assert.ok(start >= 0 && end > start, `Missing deploy function: ${name}`);
+  return deployScript.slice(start, end);
+}
+
+function actualImagePlanner(impact, controller, directory) {
+  const components = ['api-shared', 'miniapp-major-static', 'admin-static', 'eraser'];
+  assert.ok(impact.every((component) => components.includes(component)));
+  const start = deployScript.indexOf('DEPLOY_MODE="manual"\n');
+  const end = deployScript.indexOf('\nAPI_SERVICES=', start);
+  assert.ok(start >= 0 && end > start, 'Missing real deploy argument parser');
+  return `ROOT_DIR=${quote(controller)}
+${deployScript.slice(start, end)}
+printf '%s\\n' "$DEPLOY_MODE" "$IMAGE_PLAN_ONLY" "\${#SERVICES[@]}" >${quote(join(directory, 'planner-state'))}
+${deployFunction('contains_service', 'validate_requested_services')}
+${deployFunction('print_image_preparation_plan', 'has_requested_api_service')}
+RELEASE_COMPONENTS=(${components.map(quote).join(' ')})
+fixture_impact=(${impact.map(quote).join(' ')})
+impact_plan_selects_component() {
+  local component
+  for component in "\${fixture_impact[@]}"; do
+    if [[ "$1" == "$component" ]]; then return 0; fi
+  done
+  return 1
+}
+git() {
+  [[ "$#" == 2 && "$1" == rev-parse && "$2" == HEAD ]] || return 83
+  printf '%s\\n' ${quote(sha)}
+}
+node() { ${quote(process.execPath)} "$@"; }
+print_image_preparation_plan`;
 }
 
 async function preparation({
@@ -47,6 +84,7 @@ async function preparation({
   lock = 'none',
   origin = sshOrigin,
   gitRead = false,
+  imagePlanImpact,
   env = {},
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-release-prepare-'));
@@ -128,7 +166,7 @@ done
     `#!/bin/bash
 set -euo pipefail
 event() { printf '%s\\n' "$1" >>${quote(join(directory, 'events'))}; }
-[[ "$#" == 2 && "$1" == main && "$MAXIM_EXPECTED_DEPLOY_SHA" == ${quote(sha)} ]] || exit 90
+[[ "$1" == main && "$MAXIM_EXPECTED_DEPLOY_SHA" == ${quote(sha)} ]] || exit 90
 if [[ ${quote(origin)} == ${quote(httpsOrigin)} ]]; then
   [[ -z "\${GIT_SSH_COMMAND:-}" ]] || exit 89
 else
@@ -144,19 +182,20 @@ if [[ ${gitRead} == true ]]; then
     GIT_SSH_COMMAND=${quote(ssh)} GIT_SSH_VARIANT=simple /usr/bin/git ls-remote --exit-code origin refs/heads/main >>${quote(join(directory, 'git-readbacks'))}
   fi
 fi
-case "$2" in
-  --plan)
+case "$*" in
+  'main --plan')
     event SYNC_PLAN
     [[ -z "\${MAXIM_DEPLOY_LOCK_FD:-}\${PAIR_RELEASE_ADMISSION_FD:-}" ]] || exit 91
     exit ${planStatus}
     ;;
-  --image-plan)
+  'main --image-plan'|'main --auto --image-plan')
     event IMAGE_PLAN
+    printf '%s\\0' "$@" >${quote(join(directory, 'image-plan-arguments'))}
     [[ "$MAXIM_DEPLOY_LOCK_OWNER_PID" == "$BASHPID" && "$PAIR_RELEASE_ADMISSION_OWNER_PID" != "$BASHPID" ]] || exit 92
     [[ -e "/proc/$BASHPID/fd/$MAXIM_DEPLOY_LOCK_FD" && -e "/proc/$BASHPID/fd/$PAIR_RELEASE_ADMISSION_FD" ]] || exit 93
     if flock -n -E 75 ${quote(join(directory, 'product.lock'))} true; then exit 94; else [[ "$?" == 75 ]] || exit 95; fi
     if flock -n -E 75 ${quote(join(directory, 'pair.lock'))} true; then exit 96; else [[ "$?" == 75 ]] || exit 97; fi
-    printf '%s\\n' ${quote(plan)}
+    ${imagePlanImpact === undefined ? `printf '%s\\n' ${quote(plan)}` : actualImagePlanner(imagePlanImpact, controller, directory)}
     exit ${imageStatus}
     ;;
   *) event RUNTIME; exit 98 ;;
@@ -245,7 +284,7 @@ node() {
       local input
       input="$(cat)" || return
       printf '%s' "$input" >${quote(join(directory, 'snapshot-input'))}
-      [[ "$input" == ${quote(plan)} ]] || return 90
+      ${imagePlanImpact === undefined ? `[[ "$input" == ${quote(plan)} ]] || return 90` : ':'}
       return ${snapshotStatus}
       ;;
     result)
@@ -295,6 +334,8 @@ maxim_release_prepare_main ${args.map(quote).join(' ')}
     });
     const eventsPath = join(directory, 'events');
     const inputPath = join(directory, 'snapshot-input');
+    const imageArgumentsPath = join(directory, 'image-plan-arguments');
+    const plannerStatePath = join(directory, 'planner-state');
     return {
       exitCode,
       stdout,
@@ -307,6 +348,12 @@ maxim_release_prepare_main ${args.map(quote).join(' ')}
             .map((line) => JSON.parse(line))
         : [],
       input: existsSync(inputPath) ? readFileSync(inputPath, 'utf8') : undefined,
+      imageArguments: existsSync(imageArgumentsPath)
+        ? readFileSync(imageArgumentsPath, 'utf8').split('\0').slice(0, -1)
+        : undefined,
+      plannerState: existsSync(plannerStatePath)
+        ? readFileSync(plannerStatePath, 'utf8').trim().split('\n')
+        : undefined,
       gitEvidence: gitRead
         ? {
             originalConfig,
@@ -352,6 +399,26 @@ test('preparation proves source before synchronization and snapshots the full pl
   assert.deepEqual(result.control, [{ schemaVersion: 1, event: 'PREPARED', id, requestHash }]);
   assert.ok(!result.events.includes('RUNTIME'));
 });
+
+for (const { name, impact } of [
+  { name: 'no-op', impact: [] },
+  { name: 'mini app only', impact: ['miniapp-major-static'] },
+  { name: 'admin only', impact: ['admin-static'] },
+  { name: 'shared API only', impact: ['api-shared'] },
+  { name: 'Lastik only', impact: ['eraser'] },
+  { name: 'mixed API, admin and Lastik', impact: ['api-shared', 'admin-static', 'eraser'] },
+]) {
+  test(`preparation snapshots the real cumulative image plan for ${name}`, async () => {
+    const result = await preparation({ imagePlanImpact: impact, origin: httpsOrigin });
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.deepEqual(parseImagePreparationPlan(result.input, sha), impact);
+    assert.deepEqual(result.imageArguments, ['main', '--auto', '--image-plan']);
+    assert.deepEqual(result.plannerState, ['auto', '1', '0']);
+    assert.deepEqual(result.control, [{ schemaVersion: 1, event: 'PREPARED', id, requestHash }]);
+    assert.equal(result.events.at(-1), 'RELEASE');
+    assert.ok(!result.events.includes('RUNTIME'));
+  });
+}
 
 test('canonical HTTPS stays HTTPS and SSH uses the fixed transport without changing Git configuration', async () => {
   for (const origin of [httpsOrigin, sshOrigin]) {

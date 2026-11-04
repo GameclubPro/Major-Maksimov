@@ -3,6 +3,7 @@ import {
   type Prisma,
   type PublisherAutoReplyDelivery,
 } from '../prisma/prisma-client';
+import type { PrismaService } from '../prisma/prisma.service';
 import type {
   PublisherAutoReplyJobEnsureResult,
   PublisherAutoReplyQueueService,
@@ -83,12 +84,29 @@ function fixture(rows: Delivery[] = []) {
   const uploadQuery = jest
     .fn<Promise<PublisherAutoReplyUploadRecoveryRow[]>, [Prisma.Sql]>()
     .mockResolvedValue(uploadResult());
+  const executeRaw = jest
+    .fn<
+      ReturnType<Prisma.TransactionClient['$executeRaw']>,
+      Parameters<Prisma.TransactionClient['$executeRaw']>
+    >()
+    .mockResolvedValue(0);
+  const transaction = jest
+    .fn<ReturnType<PrismaService['$transaction']>, Parameters<PrismaService['$transaction']>>()
+    .mockImplementation(async (operation) =>
+      operation({
+        $executeRaw: executeRaw,
+        $queryRaw: (query: Prisma.Sql) => deliveryQuery(query),
+      } as unknown as Prisma.TransactionClient),
+    );
   const prisma = {
     publisherAutoReplyDelivery: { updateMany },
-    $queryRaw: (query: Prisma.Sql) =>
-      query.text.includes('publisher_auto_reply_asset_uploads')
-        ? uploadQuery(query)
-        : deliveryQuery(query),
+    $transaction: transaction,
+    $queryRaw: (query: Prisma.Sql) => {
+      if (!query.text.includes('publisher_auto_reply_asset_uploads')) {
+        throw new Error('Delivery reads require the page transaction');
+      }
+      return uploadQuery(query);
+    },
   };
   const queue = {
     ensureDeliveryJob: jest
@@ -99,7 +117,7 @@ function fixture(rows: Delivery[] = []) {
       .mockResolvedValue({ outcome: 'add_acknowledged' }),
   } satisfies Pick<PublisherAutoReplyQueueService, 'ensureDeliveryJob'>;
   const service = new PublisherAutoReplyRecoveryService(
-    prisma as never,
+    prisma as unknown as PrismaService,
     queue as never,
     { dispatchEnabled: true } as never,
     { isGloballyPaused: jest.fn().mockResolvedValue(false) } as never,
@@ -110,7 +128,7 @@ function fixture(rows: Delivery[] = []) {
       ),
     } as never,
   );
-  return { service, rows, deliveryQuery, updateMany, uploadQuery, queue };
+  return { service, rows, deliveryQuery, updateMany, uploadQuery, queue, executeRaw, transaction };
 }
 function pendingSelections(h: ReturnType<typeof fixture>): Prisma.Sql[] {
   return h.deliveryQuery.mock.calls
@@ -122,6 +140,25 @@ describe('PublisherAutoReplyRecoveryService', () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+  });
+
+  it('refuses an unprotected delivery read without effects or cursor progress when planner setup fails', async () => {
+    const h = fixture([delivery('first')]);
+    const failure = new Error('Planner setup refused');
+    h.executeRaw.mockRejectedValueOnce(failure);
+    await expect(h.service.recoverOnce(now)).rejects.toBe(failure);
+    expect(h.deliveryQuery).not.toHaveBeenCalled();
+    expect(h.updateMany).not.toHaveBeenCalled();
+    expect(h.queue.ensureDeliveryJob).not.toHaveBeenCalled();
+    expect(h.uploadQuery).not.toHaveBeenCalled();
+
+    await expect(h.service.recoverOnce(now)).resolves.toMatchObject({
+      scanned: 1,
+      addAcknowledged: 1,
+      errors: 0,
+    });
+    expect(pendingSelections(h)[0]!.values).toEqual([now, 100]);
+    expect(h.queue.ensureDeliveryJob).toHaveBeenCalledWith('first', dueAt);
   });
 
   it('requeues pending/pre-send work and quarantines a stale send fence', async () => {
