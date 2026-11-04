@@ -357,7 +357,11 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
 
   async hasProof(source: CommercialLlmSource): Promise<boolean> {
     // FLAG: A retained v2 proof cannot outlive its configured routing/4B authority.
-    if (!this.enabled() || (source.version === 2 && source.poolPolicy !== this.poolPolicy()))
+    if (
+      !this.enabled() ||
+      (source.version !== 1 &&
+        ('poolPolicy' in source ? source.poolPolicy : undefined) !== this.poolPolicy())
+    )
       return false;
     return (await this.mailbox()).hasProof(source);
   }

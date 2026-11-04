@@ -4,26 +4,7 @@ import {
   selectChannelStatsMembershipBucketRows,
   selectModerationFeedReadModelRows,
 } from './stats-read-model-selectors';
-
-function extractSqlText(arg: unknown): string {
-  if (Array.isArray(arg)) {
-    return arg.map((part) => extractSqlText(part)).join(' ');
-  }
-
-  if (arg && typeof arg === 'object' && 'strings' in arg) {
-    const sqlArg = arg as { strings?: unknown; values?: unknown };
-    const parts: string[] = [];
-    if (Array.isArray(sqlArg.strings)) {
-      parts.push(sqlArg.strings.map((part) => String(part)).join(' '));
-    }
-    if (Array.isArray(sqlArg.values)) {
-      parts.push(sqlArg.values.map((part) => extractSqlText(part)).join(' '));
-    }
-    return parts.filter(Boolean).join(' ');
-  }
-
-  return String(arg);
-}
+import { extractSqlText } from './admin-service-test-support';
 
 describe('stats read model selectors', () => {
   it('reads moderation snapshot names through bounded primary-key lookups', async () => {

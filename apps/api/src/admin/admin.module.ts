@@ -95,6 +95,9 @@ import { AdminDialogLinkService } from './admin-dialog-link.service';
 import { AdminSettingsService } from './admin-settings.service';
 import { AdminStopWordsService } from './admin-stop-words.service';
 import { AdminStopWordsController } from './admin-stop-words.controller';
+import { AdminCommercialAdsController } from './admin-commercial-ads.controller';
+import { AdminCommercialAdsService } from './admin-commercial-ads.service';
+import { CommercialAdsPreviewService } from '../moderation/commercial/commercial-ads-preview.service';
 import { AdminMessageRetentionController } from './admin-message-retention.controller';
 import { AdminMessageRetentionService } from './admin-message-retention.service';
 import { EraserControlService } from '../message-retention/eraser-control.service';
@@ -253,6 +256,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     ManagedModeratorController,
     AdminSettingsController,
     AdminStopWordsController,
+    AdminCommercialAdsController,
     PublisherVkParsingController,
     PublisherVkBotReviewController,
     AdminDialogController,
@@ -318,6 +322,8 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     AdminDuplicateDiagnosticsService,
     AdminSettingsService,
     AdminStopWordsService,
+    AdminCommercialAdsService,
+    CommercialAdsPreviewService,
     ChannelDialogService,
     CommentModerationService,
     ChannelPostSignatureService,

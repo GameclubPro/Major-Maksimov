@@ -24,6 +24,9 @@ export function buildSettingsSectionPatch(current: ChatSettings, body: unknown):
   const unknown = Object.keys(changes).filter((key) => !allowed.has(key));
   if (unknown.length > 0) throw new BadRequestException('Изменения содержат поля другого блока.');
   const next = { ...current, ...changes, settingsRevision: expectedRevision } as ChatSettings;
+  // FLAG: Merging a section must not author or clear an unrelated commercial policy.
+  if (!Object.hasOwn(changes, 'commercialAdsPolicy'))
+    delete (next as Partial<ChatSettings>).commercialAdsPolicy;
   if (Object.hasOwn(changes, 'botSpeechMedia')) {
     const media = changes.botSpeechMedia;
     if (!media || typeof media !== 'object' || Array.isArray(media)) {

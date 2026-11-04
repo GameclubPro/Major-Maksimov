@@ -1,3 +1,5 @@
+import type { ModerationFeedFilter } from '@maxim/contracts';
+
 export type StatisticsRouteRange = '24h' | '7d' | '30d';
 export type ChannelStatisticsSection = 'overview' | 'events';
 export type ChatStatisticsSection = 'activity' | 'moderation' | 'participants';
@@ -52,4 +54,17 @@ export function buildStatisticsRouteSearch(
 
   const serialized = params.toString();
   return serialized ? `?${serialized}` : '';
+}
+
+export function readModerationRouteFilter(search: string): ModerationFeedFilter {
+  const value = new URLSearchParams(search).get('filter');
+  return value === 'COMMERCIAL' ||
+    value === 'WARN' ||
+    value === 'DELETE_MESSAGE' ||
+    value === 'MUTE' ||
+    value === 'BAN' ||
+    value === 'UNMUTE' ||
+    value === 'UNBAN'
+    ? value
+    : 'ALL';
 }

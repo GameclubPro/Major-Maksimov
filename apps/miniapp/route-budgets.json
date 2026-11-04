@@ -150,8 +150,8 @@
       ],
       "baseline": "startup",
       "limits": {
-        "jsGzipBytes": 225792,
-        "cssGzipBytes": 102400
+        "jsGzipBytes": 226816,
+        "cssGzipBytes": 103424
       }
     },
     {
@@ -304,6 +304,59 @@
       "limits": {
         "jsGzipBytes": 6144,
         "cssGzipBytes": 3072
+      }
+    },
+    {
+      "id": "commercial-filter-tools",
+      "label": "Commercial advertisement chat tools",
+      "entries": ["src/pages/settings/commercial-policy-tools.tsx"],
+      "baseline": "commercial-filter-editor",
+      "coversRouteEntry": false,
+      "limits": {
+        "jsGzipBytes": 1536,
+        "cssGzipBytes": 512
+      }
+    },
+    {
+      "id": "commercial-filter-exceptions",
+      "label": "Commercial advertisement complete exception flow",
+      "entries": [
+        "src/pages/settings/commercial-policy-tools.tsx",
+        "src/pages/settings/commercial-policy-exceptions.tsx",
+        "src/pages/settings/commercial-policy-exception-editor.tsx",
+        "src/pages/settings/commercial-policy-author-picker.tsx"
+      ],
+      "baseline": "commercial-filter-editor",
+      "coversRouteEntry": false,
+      "limits": {
+        "jsGzipBytes": 22528,
+        "cssGzipBytes": 6656
+      }
+    },
+    {
+      "id": "commercial-filter-preview",
+      "label": "Commercial advertisement complete preview flow",
+      "entries": [
+        "src/pages/settings/commercial-policy-tools.tsx",
+        "src/pages/settings/commercial-policy-preview.tsx",
+        "src/pages/settings/commercial-policy-author-picker.tsx"
+      ],
+      "baseline": "commercial-filter-editor",
+      "coversRouteEntry": false,
+      "limits": {
+        "jsGzipBytes": 15360,
+        "cssGzipBytes": 2560
+      }
+    },
+    {
+      "id": "commercial-filter-author-picker",
+      "label": "Commercial advertisement participant search",
+      "entries": ["src/pages/settings/commercial-policy-author-picker.tsx"],
+      "baseline": "commercial-filter-editor",
+      "coversRouteEntry": false,
+      "limits": {
+        "jsGzipBytes": 10240,
+        "cssGzipBytes": 2048
       }
     }
   ]

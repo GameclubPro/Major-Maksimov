@@ -1028,6 +1028,7 @@ export type LogsDashboardQuery = z.infer<typeof logsDashboardQuerySchema>;
 
 export const moderationFeedFilterSchema = z.enum([
   'ALL',
+  'COMMERCIAL',
   'WARN',
   'DELETE_MESSAGE',
   'MUTE',

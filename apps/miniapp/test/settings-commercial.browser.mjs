@@ -13,6 +13,7 @@ import {
   captureBrowserLaunchOptions,
   resolveCaptureDevice,
   settleVisualFrame,
+  setPhoneKeyboard,
 } from '../../../scripts/miniapp-smartphone.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
 import {
@@ -59,14 +60,17 @@ try {
         );
         assert.equal(await panel.locator('details').count(), 0);
         assert.equal(await panel.locator('.commercial-studio__profiles').count(), 0);
-        assert.match(
-          await panel.locator('.commercial-studio__policy').innerText(),
-          /При сбое или занятости ИИ сообщение остаётся/u,
+        assert.equal(await panel.locator('.commercial-policy__category').count(), 4);
+        assert.equal(await panel.getByRole('switch').count(), 4);
+        assert.equal(await panel.locator('textarea').count(), 0);
+        assert.doesNotMatch(
+          await panel.innerText(),
+          /Продам свой|Ищу электрика|Выполняю электромонтаж/u,
         );
         await panel.getByRole('button', { name: 'Как работает фильтр рекламы' }).click();
         assert.match(
           await panel.locator('.commercial-studio__hero').innerText(),
-          /дополнительную проверку/u,
+          /Неоднозначные сообщения остаются/u,
         );
         await panel.getByRole('button', { name: 'Как работает фильтр рекламы' }).click();
         await page.screenshot({ path: join(screenshots, `${device}-${theme}.png`) });
@@ -105,15 +109,252 @@ try {
         await panel.waitFor({ state: 'hidden' });
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         assert.equal(await toggle.isChecked(), true);
+        const services = panel.getByRole('switch', { name: 'Разрешить: Услуги', exact: true });
+        assert.equal(await services.getAttribute('aria-checked'), 'false');
+        await services.click();
+        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.waitFor({ state: 'hidden' });
+        await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
+        assert.equal(await services.getAttribute('aria-checked'), 'true');
+        await services.click();
+        await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+        await page.getByRole('button', { name: 'Не сохранять', exact: true }).click();
+        await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
+        assert.equal(await services.getAttribute('aria-checked'), 'true');
+
+        await panel.getByRole('button', { name: 'Исключения', exact: true }).click();
+        const exceptions = page.getByRole('dialog', { name: 'Исключения', exact: true });
+        await exceptions.getByRole('button', { name: 'Добавить', exact: true }).first().click();
+        const editor = page.getByRole('dialog', { name: 'Новое исключение', exact: true });
+        await editor.getByRole('button', { name: 'Выбрать участника', exact: true }).click();
+        const authorPicker = page.getByRole('dialog', { name: 'Выбрать участника', exact: true });
+        await authorPicker.getByRole('searchbox', { name: 'Поиск участника' }).fill('Сергей');
+        await authorPicker.getByRole('button', { name: 'Сергей Маркет', exact: true }).click();
+        await editor.getByRole('checkbox', { name: 'Магазины и бизнес', exact: true }).check();
+        await editor.getByRole('button', { name: 'До даты', exact: true }).click();
+        await page.screenshot({ path: join(screenshots, `${device}-${theme}-exception.png`) });
+        await editor.getByRole('button', { name: 'Добавить', exact: true }).click();
+        await editor.waitFor({ state: 'hidden' });
+        assert.match(await exceptions.innerText(), /Сергей Маркет/u);
+        assert.match(await exceptions.innerText(), /Магазины и бизнес/u);
+        assert.match(await exceptions.innerText(), /До /u);
+        await exceptions.getByRole('button', { name: 'Готово', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.waitFor({ state: 'hidden' });
+        await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
+        await panel.getByRole('button', { name: 'Исключения', exact: true }).click();
+        assert.match(await exceptions.innerText(), /Сергей Маркет/u);
+        await exceptions.getByRole('button', { name: /Сергей Маркет.*Магазины и бизнес/u }).click();
+        const editSaved = page.getByRole('dialog', { name: 'Изменить исключение', exact: true });
+        await editSaved.getByRole('checkbox', { name: 'Услуги', exact: true }).check();
+        await editSaved.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+        await page.getByRole('button', { name: 'Не сохранять', exact: true }).click();
+        assert.doesNotMatch(
+          await exceptions.locator('.commercial-policy__exceptions').innerText(),
+          /Услуги/u,
+        );
+        await exceptions.getByRole('button', { name: 'Готово', exact: true }).click();
+
+        await panel.getByRole('button', { name: 'Проверить сообщение', exact: true }).click();
+        const preview = page.getByRole('dialog', { name: 'Проверить сообщение', exact: true });
+        await preview
+          .getByRole('textbox', { name: 'Сообщение для проверки' })
+          .fill('Товары в наличии');
+        await preview.getByRole('button', { name: 'Проверить', exact: true }).click();
+        await preview.locator('.commercial-policy__result').waitFor();
+        assert.match(await preview.locator('.commercial-policy__result').innerText(), /Удалить/u);
+        await preview.getByRole('button', { name: 'Выбрать участника', exact: true }).click();
+        await authorPicker.getByRole('searchbox', { name: 'Поиск участника' }).fill('Сергей');
+        await authorPicker.getByRole('button', { name: 'Сергей Маркет', exact: true }).click();
+        assert.equal(
+          await preview.locator('.commercial-policy__result').count(),
+          0,
+          'Changed author invalidates preview',
+        );
+        await preview.getByRole('button', { name: 'Проверить', exact: true }).click();
+        await preview.locator('.commercial-policy__result').waitFor();
+        assert.match(await preview.locator('.commercial-policy__result').innerText(), /Оставить/u);
+        assert.match(
+          await preview.locator('.commercial-policy__result').innerText(),
+          /действует исключение/u,
+        );
+        await page.screenshot({ path: join(screenshots, `${device}-${theme}-preview.png`) });
+        await preview
+          .getByRole('textbox', { name: 'Сообщение для проверки' })
+          .fill('Обычное сообщение');
+        assert.equal(
+          await preview.locator('.commercial-policy__result').count(),
+          0,
+          'Changed text invalidates preview',
+        );
+        await preview.getByRole('textbox', { name: 'Сообщение для проверки' }).focus();
+        await setPhoneKeyboard(page, { height: 250, mode: 'visual', open: true });
+        await settleVisualFrame(page);
+        const geometry = await preview
+          .getByRole('button', { name: 'Проверить', exact: true })
+          .boundingBox();
+        const keyboardTop = await page.evaluate(
+          () => (visualViewport?.offsetTop ?? 0) + (visualViewport?.height ?? innerHeight),
+        );
+        assert.ok(
+          geometry && geometry.y + geometry.height <= keyboardTop + 2,
+          `${device}/${theme}: keyboard covers preview action`,
+        );
+        await page.screenshot({ path: join(screenshots, `${device}-${theme}-keyboard.png`) });
+        await setPhoneKeyboard(page, { open: false });
+        await preview.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+        await panel.getByRole('button', { name: 'Журнал', exact: true }).click();
+        await page.locator('.events-feed').waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('filter'), 'COMMERCIAL');
+        assert.equal(
+          await page.getByRole('combobox', { name: 'Тип события' }).inputValue(),
+          'COMMERCIAL',
+        );
+        await page
+          .getByRole('button', { name: /Показать детали нарушения:/u })
+          .first()
+          .click();
+        await page.getByRole('button', { name: 'Ошибка распознавания', exact: true }).click();
+        await page.getByRole('button', { name: 'Отметка отправлена', exact: true }).waitFor();
+        await page.getByRole('link', { name: 'Добавить исключение', exact: true }).click();
+        await page.getByRole('dialog', { name: 'Новое исключение', exact: true }).waitFor();
+        assert.match(
+          await page.getByRole('dialog', { name: 'Новое исключение', exact: true }).innerText(),
+          /Сергей Маркет/u,
+        );
         assert.deepEqual(errors, []);
         await context.close();
         console.log(
-          `PASS ${device}/${theme}: AI mode, unchanged open, save/reopen, discard, toggle, layout`,
+          `PASS ${device}/${theme}: categories, exceptions, expiry form, preview, keyboard, filtered journal, feedback and layout`,
         );
       }
     } finally {
       await browser.close();
     }
+  }
+  const narrowBrowser = await chromium.launch({ headless: true });
+  try {
+    for (const width of [320, 360, 375, 390, 414, 430]) {
+      for (const theme of ['light', 'dark']) {
+        const context = await narrowBrowser.newContext({
+          viewport: { width, height: 640 },
+          colorScheme: theme,
+          isMobile: true,
+          hasTouch: true,
+          locale: 'ru-RU',
+        });
+        await installNativeVisualModeInitScript(context);
+        await installMaxBridgeShimInitScript(
+          context,
+          { ...presets.android, safeTop: 0, safeBottom: 0 },
+          { colorScheme: theme },
+        );
+        const page = await context.newPage();
+        await page.goto(`${base}chat/preview-chat/settings?preview=1&device=android`);
+        await applyNativeVisualMode(page, presets.android);
+        await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
+        await page.locator('.commercial-policy__categories').waitFor();
+        await settleVisualFrame(page);
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+          true,
+          `${width}/${theme}: document overflow`,
+        );
+        const clipped = await page
+          .locator(
+            '.commercial-policy__category-name, .commercial-policy__permission, .commercial-policy__tools button',
+          )
+          .evaluateAll((nodes) =>
+            nodes
+              .filter((node) => node.scrollWidth > node.clientWidth + 2)
+              .map((node) => node.textContent),
+          );
+        assert.deepEqual(clipped, [], `${width}/${theme}: clipped policy controls`);
+        await page.screenshot({ path: join(screenshots, `width-${width}-${theme}.png`) });
+        await context.close();
+      }
+    }
+  } finally {
+    await narrowBrowser.close();
+  }
+  const smallIos = await webkit.launch(captureBrowserLaunchOptions('webkit', base));
+  try {
+    for (const theme of ['light', 'dark']) {
+      const capture = resolveCaptureDevice(presets['iphone-se']);
+      const context = await smallIos.newContext({
+        ...capture.contextOptions,
+        viewport: { width: 320, height: 600 },
+        screen: { width: 320, height: 664 },
+        colorScheme: theme,
+        locale: 'ru-RU',
+      });
+      await installNativeVisualModeInitScript(context);
+      await installMaxBridgeShimInitScript(context, capture.profile, { colorScheme: theme });
+      const page = await context.newPage();
+      await page.goto(`${base}chat/preview-chat/settings?preview=1&device=iphone-se`);
+      await applyNativeVisualMode(page, capture.profile);
+      await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
+      const panel = page.locator('.settings-drilldown__panel--commercial');
+      await panel.locator('.commercial-policy__categories').waitFor();
+      await panel.getByRole('button', { name: 'Проверить сообщение', exact: true }).click();
+      const preview = page.getByRole('dialog', { name: 'Проверить сообщение', exact: true });
+      await preview.getByRole('textbox', { name: 'Сообщение для проверки' }).fill('Текст проверки');
+      await preview.getByRole('textbox', { name: 'Сообщение для проверки' }).focus();
+      await setPhoneKeyboard(page, { height: 240, mode: 'visual', open: true });
+      await settleVisualFrame(page);
+      const action = await preview
+        .getByRole('button', { name: 'Проверить', exact: true })
+        .boundingBox();
+      const viewportBottom = await page.evaluate(
+        () => (visualViewport?.offsetTop ?? 0) + (visualViewport?.height ?? innerHeight),
+      );
+      assert.ok(
+        action && action.y + action.height <= viewportBottom + 2,
+        `WebKit320/${theme}: keyboard hides action`,
+      );
+      const body = preview.locator('.settings-drilldown__body');
+      await body.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      assert.ok(
+        await body.evaluate((element) => element.scrollTop > 0),
+        `WebKit320/${theme}: form must scroll above keyboard`,
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      );
+      await page.screenshot({ path: join(screenshots, `webkit-320-${theme}-keyboard.png`) });
+      await setPhoneKeyboard(page, { open: false });
+      await preview.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+      await panel.getByRole('button', { name: 'Исключения', exact: true }).click();
+      await page
+        .getByRole('dialog', { name: 'Исключения', exact: true })
+        .getByRole('button', { name: 'Добавить', exact: true })
+        .first()
+        .click();
+      const editor = page.getByRole('dialog', { name: 'Новое исключение', exact: true });
+      await editor.getByRole('button', { name: 'До даты', exact: true }).click();
+      await settleVisualFrame(page);
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+        true,
+      );
+      const controls = await editor
+        .locator('button, .commercial-policy__choice, .date-field')
+        .evaluateAll((nodes) =>
+          nodes
+            .filter(
+              (node) => node.getClientRects().length && node.scrollWidth > node.clientWidth + 2,
+            )
+            .map((node) => node.textContent),
+        );
+      assert.deepEqual(controls, [], `WebKit320/${theme}: clipped exception form`);
+      await page.screenshot({ path: join(screenshots, `webkit-320-${theme}-exception.png`) });
+      await context.close();
+    }
+  } finally {
+    await smallIos.close();
   }
   const browser = await chromium.launch({ headless: true });
   try {
@@ -149,6 +390,20 @@ try {
           );
           if (mode !== 'loading')
             fields.commercialAdsFilterEnabled = { kind: 'common', value: true };
+          if (mode === 'custom' || mode === 'readonly')
+            fields.commercialAdsPolicy = {
+              kind: 'common',
+              value: {
+                version: 1,
+                categories: {
+                  PERSONAL_SALE: 'ALLOW',
+                  SERVICES: 'BLOCK',
+                  BUSINESS: 'BLOCK',
+                  COMMUNITIES: 'BLOCK',
+                },
+                exceptions: [],
+              },
+            };
           if (mode === 'custom' || mode === 'readonly')
             Object.assign(
               fields,
@@ -188,6 +443,13 @@ try {
       await page.getByRole('button', { name: 'Мягко', exact: true }).waitFor();
       await settleVisualFrame(page);
       assert.deepEqual(await page.evaluate(() => window.__commercialChanges), []);
+      assert.equal(
+        await page
+          .getByRole('switch', { name: 'Разрешить: Личные продажи', exact: true })
+          .isDisabled(),
+        true,
+        'AI-off cannot introduce a private-sales block',
+      );
       assert.equal(
         await page.locator('.commercial-studio__profiles [aria-pressed="true"]').count(),
         0,

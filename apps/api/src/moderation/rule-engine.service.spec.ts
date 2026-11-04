@@ -1,4 +1,5 @@
 import { LinkPolicy, type ChatSettings } from '../prisma/prisma-client';
+import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import {
   COMMERCIAL_REAL_WORLD_NEGATIVE_CASES,
   COMMERCIAL_REAL_WORLD_POSITIVE_CASES,
@@ -231,6 +232,7 @@ function buildSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
     russianProfanityFilterEnabled: true,
     profanitySensitivity: 'BALANCED',
     commercialAdsFilterEnabled: false,
+    commercialAdsPolicy: null,
     commercialAdsSensitivity: 'BALANCED',
     commercialAdsWarnThreshold: 45,
     commercialAdsDeleteThreshold: 65,
@@ -1800,6 +1802,46 @@ describe('RuleEngineService', () => {
 
     expect(result.violations.some((item) => item.ruleCode === 'COMMERCIAL_AD')).toBe(true);
   });
+
+  it.each(['ALLOW', 'BLOCK'] as const)(
+    'applies the explicit %s services rule while preserving independent blocked-word detection',
+    async (action) => {
+      const policy = createDefaultCommercialAdsPolicy();
+      policy.categories.SERVICES = action;
+      const result = await createRuleEngine().detect({
+        chatId: 'chat-1',
+        userId: '10000007',
+        text: 'Ремонтируем стиральные машины. Выезд ежедневно, гарантия. Принимаем заказы, запись по телефону +7 900 000 10 42.',
+        settings: buildSettings({
+          commercialAdsFilterEnabled: true,
+          commercialAdsPolicy: policy,
+          messageLimitsBlockedWords: ['гарантия'],
+        }),
+        domainAllowlist: [],
+      });
+      const commercial = result.violations.find((item) => item.ruleCode === 'COMMERCIAL_AD');
+      expect(commercial?.metadata).toMatchObject({
+        commercialAdsCategories: ['SERVICES'],
+        commercialAdsPolicyReason: action === 'ALLOW' ? 'CATEGORY_ALLOWED' : 'BLOCKED_CATEGORY',
+        messageDisposition: action === 'ALLOW' ? 'KEEP' : 'DELETE',
+        actionable: action === 'BLOCK',
+      });
+      if (action === 'ALLOW') {
+        expect(commercial?.metadata).toMatchObject({
+          actionBand: 'REVIEW_ONLY',
+          recordable: false,
+        });
+      }
+      expect(result.violations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ruleCode: 'MESSAGE_BLOCKED_WORD',
+            metadata: expect.objectContaining({ blockedWord: 'гарантия' }),
+          }),
+        ]),
+      );
+    },
+  );
 
   it('classifies COMMERCIAL_AD as HIGH with price and contact combo', async () => {
     const service = new RuleEngineService(new MockRedisCounterService() as never);

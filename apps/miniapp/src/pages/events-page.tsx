@@ -1,3 +1,5 @@
+import { readModerationRouteFilter } from '../lib/statistics-route-query';
+import type { CommercialJournalActions as CommercialJournalActionsComponent } from '../components/commercial-journal-actions';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import { useExpandedText } from '../lib/use-expanded-text';
 import { isMaxMemberRestoreAvailable } from '@maxim/contracts/max-capabilities';
@@ -146,6 +148,10 @@ function ActionConfirmSheet(props: ComponentProps<typeof ActionConfirmSheetCompo
 
 type ViolationItem = LogsDashboardViolation;
 type DisplayAction = 'WARN' | 'DELETE_MESSAGE' | 'MUTE' | 'BAN' | 'UNMUTE' | 'UNBAN';
+const CommercialJournalActions = recoverableLazyNamedComponent<
+  ComponentProps<typeof CommercialJournalActionsComponent>
+>(() => import('../components/commercial-journal-actions'), 'CommercialJournalActions');
+
 type EventsFilter = ModerationFeedFilter;
 type EventsSection = 'activity' | 'moderation' | 'participants';
 type ManualModerationScopeChoice = Extract<ManualModerationScope, 'current_chat' | 'all_chats'>;
@@ -2135,7 +2141,12 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     () => parseChatStatisticsRouteQuery(location.search),
     [location.search],
   );
-  const [eventsFilter, setEventsFilter] = useState<EventsFilter>('ALL');
+  const [eventsFilter, setEventsFilter] = useState<EventsFilter>(() =>
+    readModerationRouteFilter(location.search),
+  );
+  useEffect(() => {
+    setEventsFilter(readModerationRouteFilter(location.search));
+  }, [location.search]);
   const [expandedViolationId, setExpandedViolationId] = useState<string | null>(null);
   const [spammerReviewOpen, setSpammerReviewOpen] = useState(false);
   const [participantTarget, setParticipantTarget] = useState<ParticipantCardTarget | null>(null);
@@ -2905,10 +2916,11 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     },
   });
   const filterOptions = useMemo<
-    Array<{ value: EventsFilter; label: string; count: number }>
+    Array<{ value: EventsFilter; label: string; count: number | null }>
   >(() => {
-    const options: Array<{ value: EventsFilter; label: string; count: number }> = [
+    const options: Array<{ value: EventsFilter; label: string; count: number | null }> = [
       { value: 'ALL', label: 'Все', count: violationsSummary.total },
+      { value: 'COMMERCIAL', label: 'Коммерческая реклама', count: null },
       { value: 'WARN', label: 'Предупр.', count: violationsSummary.warn },
       {
         value: 'DELETE_MESSAGE',
@@ -3047,6 +3059,13 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     startTransition(() => {
       setEventsFilter(nextFilter);
     });
+    const params = new URLSearchParams(location.search);
+    if (nextFilter === 'ALL') params.delete('filter');
+    else params.set('filter', nextFilter);
+    navigate(
+      { pathname: location.pathname, search: `?${params}`, hash: location.hash },
+      { replace: true, state: location.state },
+    );
   };
   const handleSpammerDiagnosticsReview = (userId: string, action: GlobalSpammerReviewAction) => {
     const normalizedUserId = userId.trim();
@@ -3524,7 +3543,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                       {filterOptions
                         .slice(1)
                         .map((item) =>
-                          item.count > 0 ? (
+                          item.count !== null && item.count > 0 ? (
                             <span
                               key={item.value}
                               data-action={item.value}
@@ -3556,7 +3575,10 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                 <span>Тип события</span>
                 <span className="events-filter-menu__control">
                   <span className="events-filter-menu__value" aria-hidden="true">
-                    {selectedEventFilter?.label} · {selectedEventFilter?.count}
+                    {selectedEventFilter?.label}
+                    {selectedEventFilter?.count !== null
+                      ? ` · ${selectedEventFilter?.count ?? ''}`
+                      : ''}
                   </span>
                   <select
                     aria-label="Тип события"
@@ -3567,7 +3589,8 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                   >
                     {filterOptions.map((option) => (
                       <option key={option.value} value={option.value}>
-                        {option.label} · {dashboard ? option.count : '...'}
+                        {option.label}
+                        {option.count !== null ? ` · ${dashboard ? option.count : '...'}` : ''}
                       </option>
                     ))}
                   </select>
@@ -3866,6 +3889,16 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                             </div>
                           ) : null}
 
+                          {violation.ruleCode === 'COMMERCIAL_AD' ||
+                          violation.ruleCode === 'COMMERCIAL_LLM_DELETE' ? (
+                            <Suspense fallback={null}>
+                              <CommercialJournalActions
+                                api={api}
+                                chatId={chatId}
+                                violation={violation}
+                              />
+                            </Suspense>
+                          ) : null}
                           <ViolationModerationControls
                             api={api}
                             chatId={chatId}

@@ -40,6 +40,7 @@ import {
 } from './broadcast-common.js';
 import * as dupe from './duplicate-settings.js';
 import { stopWordsPolicySchema } from './stop-words.js';
+import { commercialAdsPolicySchema } from './commercial-policy.js';
 import {
   DELETE_BOT_MESSAGES_DELAY_DEFAULT_MINUTES,
   DELETE_BOT_MESSAGES_DELAY_MAX_MINUTES,
@@ -398,6 +399,7 @@ export const chatSettingsFieldsSchema = z.object({
   commercialAdsSensitivity: commercialAdsSensitivitySchema.default('BALANCED'),
   commercialAdsWarnThreshold: z.number().int().min(10).max(90).default(45),
   commercialAdsDeleteThreshold: z.number().int().min(20).max(100).default(65),
+  commercialAdsPolicy: commercialAdsPolicySchema.nullable().default(null),
   settingsRevision: z.string().datetime().optional(),
   profanityBotMessageEnabled: z.boolean().default(false),
   profanityBotMessageText: botMessageTextSchema,

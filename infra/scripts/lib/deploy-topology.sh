@@ -1467,6 +1467,8 @@ maxim_topology_require_commercial_text_delete_guard() {
       guard.includes("createSanctionPermit(") &&
       guard.includes("async authorizeSanction(") &&
       binding.includes("textRuntimeRevision") &&
+      binding.includes("settings.commercialAdsPolicy == null ? []") &&
+      guard.includes("resolveCommercialAdsPolicy(") && guard.includes("commercialAdsPolicy: true") &&
       (boundary.includes("Commercial delete guard unavailable") || independent) &&
       executor.includes("commercialVerifiedReasonKeys.length > 0") &&
       executor.includes("Prisma.join(commercialVerifiedReasonKeys)");
@@ -2699,9 +2701,9 @@ maxim_topology_require_commercial_ai_delete_guard() {
       const path = process.argv[1];
       if (source.length > 2 * 1024 * 1024) process.exit(1);
       const required = path.endsWith("enforcement.protocol.ts")
-        ? ["COMMERCIAL_LLM_DELETE", "COMMERCIAL_LLM_EFFECT_MAX_AGE_MS = 60_000", "classifierSha256", "sourceWebhookEventId"]
+        ? ["COMMERCIAL_LLM_DELETE", "COMMERCIAL_LLM_EFFECT_MAX_AGE_MS = 60_000", "classifierSha256", "sourceWebhookEventId", "version: z.literal(3)", "personalSaleBlocked", "commercialLlmPolicyMayDeletePersonalSale"]
         : path.endsWith("delete-guard.service.ts")
-          ? ["CommercialLlmDeleteGuardService", "hasProof(source)", "getExactMessageRow(", "commercialLlmSourceCurrent(source)", "settingsSha256"]
+          ? ["CommercialLlmDeleteGuardService", "hasProof(source)", "getExactMessageRow(", "commercialLlmSourceCurrent(source)", "settingsSha256", "assertCategoryPolicy(", "commercialAdsPolicy: true", "evaluateCommercialAdsAiPolicy("]
           : path.endsWith("effect-origin.ts")
             ? ["withCommercialLlmEffectOrigin", "readCommercialLlmEffectOrigin", "scope.active = false", "await hasProof()"]
             : ["commercialLlmGuard!.authorize(", "Commercial AI guard unavailable", "CommercialLlmGuardRejectedError", "readCommercialLlmEffectOrigin(", "verifiedReasonDeadlines"];

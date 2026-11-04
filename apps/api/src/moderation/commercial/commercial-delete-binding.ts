@@ -26,7 +26,7 @@ export type CommercialDeleteSettings = Pick<
   | 'textFiltersBanEnabled'
   | 'textFiltersMuteDurationHours'
   | 'textFiltersBotMessageEnabled'
->;
+> & { commercialAdsPolicy?: unknown };
 
 const counter = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const campaignSchema = z
@@ -81,6 +81,8 @@ export function fingerprintCommercialDeleteSettings(settings: CommercialDeleteSe
         settings.textFiltersBanEnabled,
         settings.textFiltersMuteDurationHours,
         settings.textFiltersBotMessageEnabled,
+        // FLAG: Null policy retains the exact legacy digest; explicit policy revokes older proofs.
+        ...(settings.commercialAdsPolicy == null ? [] : [settings.commercialAdsPolicy]),
       ]),
     )
     .digest('hex');

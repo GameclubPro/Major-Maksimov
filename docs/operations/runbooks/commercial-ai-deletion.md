@@ -7,6 +7,12 @@ an explicit 4B policy and durable source version 2; see the
 the legacy cascade below remains selected. Rollback retains both source readers
 regardless of flags.
 
+Explicit category policies additionally use source version 3, with personal-sale blocking
+bound to pinned server confirmation. Preserve legacy readers and the final policy/participant
+recheck in every shared API role and both rollback paths. See the
+[category policy contract](../../development/commercial-ads-policy.md) for settings, preview,
+feedback and focused verification. Disabling the feature does not relax this reader floor.
+
 `COMMERCIAL_LLM_ENFORCEMENT_ENABLED=true` replaces only `COMMERCIAL_AD` text-rule
 verdicts in opted-in chats. The local workstation 4B model runs first. Commercial
 and uncertain answers require the pinned server 9B model; unavailable primary also

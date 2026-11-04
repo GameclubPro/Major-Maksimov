@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
+import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import {
   bindCommercialTextDeleteIntent,
   buildCommercialTextDeleteBinding,
   COMMERCIAL_TEXT_DELETE_MAX_AGE_MS,
   commercialTextDeleteReasonKey,
   fingerprintCommercialDeleteText,
+  fingerprintCommercialDeleteSettings,
   isCommercialTextDeleteBindingCurrent,
 } from './commercial-delete-binding';
 import { COMMERCIAL_ENGINE_CONFIG } from './commercial-config';
@@ -26,6 +29,36 @@ const settings = {
 };
 
 describe('commercial text decision binding', () => {
+  it('preserves the exact null-policy legacy digest and revokes it after explicit category changes', () => {
+    const legacy = createHash('sha256')
+      .update(
+        JSON.stringify([
+          settings.commercialAdsFilterEnabled,
+          settings.commercialAdsSensitivity,
+          settings.commercialAdsWarnThreshold,
+          settings.commercialAdsDeleteThreshold,
+          settings.nightModeTimezone,
+          settings.textFiltersWarnEnabled,
+          settings.textFiltersMuteEnabled,
+          settings.textFiltersBanEnabled,
+          settings.textFiltersMuteDurationHours,
+          settings.textFiltersBotMessageEnabled,
+        ]),
+      )
+      .digest('hex');
+    expect(fingerprintCommercialDeleteSettings(settings)).toBe(legacy);
+    expect(fingerprintCommercialDeleteSettings({ ...settings, commercialAdsPolicy: null })).toBe(
+      legacy,
+    );
+    const commercialAdsPolicy = createDefaultCommercialAdsPolicy();
+    const first = fingerprintCommercialDeleteSettings({ ...settings, commercialAdsPolicy });
+    expect(first).not.toBe(legacy);
+    commercialAdsPolicy.categories.SERVICES = 'ALLOW';
+    expect(fingerprintCommercialDeleteSettings({ ...settings, commercialAdsPolicy })).not.toBe(
+      first,
+    );
+  });
+
   it('preserves assertion layout in the fingerprint without persisting plaintext', () => {
     const text = 'Такси\n+7 900 000 10 42';
     const binding = buildCommercialTextDeleteBinding({
