@@ -48,7 +48,7 @@ test('recipient evidence keeps an exact encoded authenticated GET without effect
       return Response.json(snapshot(id));
     }),
   );
-  const result = await client.fetchPublicationDeliveryEvidence(id, 'private-code');
+  const result = await client.fetchPublicationDeliveryEvidence(id);
   assert.equal(result.action.state, 'unknown');
   assert.equal(result.automaticRetryAllowed, false);
   assert.equal(calls.length, 1);
@@ -61,7 +61,7 @@ test('recipient evidence keeps an exact encoded authenticated GET without effect
   assert.equal(calls[0]!.init?.credentials, 'same-origin');
   assert.equal(
     (calls[0]!.init?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'private-code',
+    undefined,
   );
 });
 
@@ -78,7 +78,7 @@ test('another recipient, missing uncertainty or invented retry permission fails 
         return Response.json(payload);
       }),
     );
-    await assert.rejects(() => client.fetchPublicationDeliveryEvidence('selected', 'private-code'));
+    await assert.rejects(() => client.fetchPublicationDeliveryEvidence('selected'));
     assert.equal(requests, 1);
   }
 });
@@ -91,8 +91,8 @@ test('new cohorts reject a partial success envelope and make no fallback request
       return Response.json({ sampleComplete: true, totalCountLowerBound: 0, rows: [] });
     }),
   );
-  await assert.rejects(() => client.fetchDeleteCohort('private-code'));
-  await assert.rejects(() => client.fetchPublicationDeliveryCohort('private-code'));
+  await assert.rejects(() => client.fetchDeleteCohort());
+  await assert.rejects(() => client.fetchPublicationDeliveryCohort());
   assert.deepEqual(calls, [
     '/api/v1/safety-desk/runtime/delete-cohort',
     '/api/v1/safety-desk/runtime/publication-delivery-cohort',

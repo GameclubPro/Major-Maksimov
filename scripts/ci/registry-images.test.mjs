@@ -73,7 +73,7 @@ const environment = () => ({
   MAXIM_IMAGE_COMPONENT: 'api',
 });
 const provenance = 'https://slsa.dev/provenance/v1';
-const spdx = 'https://spdx.dev/Document';
+const spdx = 'https://spdx.dev/Document/v2.3';
 const attestation = (predicate = provenance) => [
   {
     verificationResult: {
@@ -302,6 +302,55 @@ test('legacy public registry records cannot authorize a release in the new priva
       /Registry digest or repository/u,
     );
     assert.equal(record().image.alias, `maxim-api:${sha}`);
+  }
+});
+
+test('the pinned verifier accepts the observed signed SPDX 2.3 publication', () => {
+  const observed = JSON.parse(
+    readFileSync(new URL('./test/registry-verified-attestations.fixture.json', import.meta.url)),
+  );
+  const observedIdentity = imageIdentity(observed.expected);
+  // FLAG: The projected fixture exercises the verified metadata boundary; it does not prove a Docker image ID.
+  const observedRecord = {
+    ...record(),
+    component: observed.expected.component,
+    source: {
+      ...observed.expected,
+      workflow: '.github/workflows/ci.yml',
+      workflowRef: `${repository}/.github/workflows/ci.yml@refs/heads/main`,
+      runnerEnvironment: 'github-hosted',
+    },
+    image: { ...record().image, alias: observedIdentity.alias },
+    registry: observed.registry,
+  };
+  const predicates = [];
+  const reference = verifyRegistryImage(
+    observedRecord,
+    observed.expected,
+    (binary, args) => {
+      assert.equal(binary, 'gh');
+      if (args[0] === 'api') {
+        return JSON.stringify(packageMetadata({ name: 'major-maksimov-private-v1-eraser' }));
+      }
+      assert.deepEqual(args.slice(0, 2), ['attestation', 'verify']);
+      const predicate = args[args.indexOf('--predicate-type') + 1];
+      predicates.push(predicate);
+      return JSON.stringify(
+        predicate === provenance ? observed.verifications.provenance : observed.verifications.sbom,
+      );
+    },
+    { proofOnly: true },
+  );
+  assert.equal(reference, `${observed.registry.repository}@${observed.registry.digest}`);
+  assert.deepEqual(predicates, [provenance, 'https://spdx.dev/Document/v2.3']);
+  for (const wrongType of [
+    'https://spdx.dev/Document',
+    'https://spdx.dev/Document/v2.2',
+    'https://spdx.dev/Document/v2.3/other',
+  ]) {
+    const wrong = structuredClone(observed.verifications.sbom);
+    wrong[0].verificationResult.statement.predicateType = wrongType;
+    assert.throws(() => assertVerifiedAttestation(wrong, observedRecord, observed.expected, spdx));
   }
 });
 

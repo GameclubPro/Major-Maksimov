@@ -2,6 +2,30 @@ import pino from 'pino';
 import { HTTP_LOG_REDACT_PATHS } from './http-log-redaction';
 
 describe('HTTP log redaction', () => {
+  it('redacts the machine overview token from requests and nested transport failures', () => {
+    const output: string[] = [];
+    const logger = pino(
+      { base: null, timestamp: false, redact: HTTP_LOG_REDACT_PATHS },
+      {
+        write: (chunk: string) => {
+          output.push(chunk);
+        },
+      },
+    );
+    const token = 'machine-overview-token-must-remain-private';
+    const headers = {
+      'X-Runtime-Overview-Reader-Token': token,
+      'x-runtime-overview-reader-token': token,
+    };
+    logger.info({
+      req: { method: 'GET', headers: { 'x-runtime-overview-reader-token': token } },
+      err: { config: { headers }, response: { config: { headers } } },
+    });
+    expect(output.join('')).not.toContain(token);
+    expect(output.join('')).toContain('[Redacted]');
+    expect(output.join('')).toContain('GET');
+  });
+
   it('never logs preview text or encoded mutation payloads', () => {
     const output: string[] = [];
     const logger = pino(

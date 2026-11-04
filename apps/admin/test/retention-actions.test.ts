@@ -82,11 +82,11 @@ test('retention API encodes chat/cursor and sends an exact POST snapshot without
       });
     }),
   );
-  await client.fetchRetentionRuntime('unit-access', 'chat/1?after=other');
-  await client.fetchRetentionPreview('chat/1', 'unit-access', 'opaque/+?cursor=1');
+  await client.fetchRetentionRuntime('chat/1?after=other');
+  await client.fetchRetentionPreview('chat/1', 'opaque/+?cursor=1');
   const request = buildRetentionRetryRequest(preview, candidate);
   assert.ok(request);
-  await client.retryRetention('chat/1', request, 'unit-access');
+  await client.retryRetention('chat/1', request);
   assert.deepEqual(
     calls.map((call) => call.path),
     [
@@ -98,7 +98,7 @@ test('retention API encodes chat/cursor and sends an exact POST snapshot without
   assert.equal(calls[2]?.init?.method, 'POST');
   assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), request);
   assert.equal(String(calls[2]?.init?.body).includes('unit-access'), false);
-  assert.equal(new Headers(calls[2]?.init?.headers).get('X-Admin-Access-Code'), 'unit-access');
+  assert.equal(new Headers(calls[2]?.init?.headers).get('X-Admin-Access-Code'), null);
 });
 
 test('review metadata never enters the exact retry body and microseconds remain unchanged', () => {
@@ -134,7 +134,7 @@ test('retention API rejects an oversized diagnostics response', async () => {
         }),
     ),
   );
-  await assert.rejects(() => client.fetchRetentionPreview('chat-1', 'unit-access'));
+  await assert.rejects(() => client.fetchRetentionPreview('chat-1'));
 });
 
 test('API conflicts preserve HTTP status for explicit reload behavior', async () => {

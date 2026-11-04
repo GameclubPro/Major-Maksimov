@@ -9,6 +9,86 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+test('image build and publication normalize the same default Docker store before any image work', () => {
+  const jobs = parse(workflow).jobs;
+  for (const [id, firstWork] of [
+    ['docker', 'Create isolated image builder'],
+    ['registry', 'Load the exact smoke-tested image'],
+  ]) {
+    const steps = jobs[id].steps;
+    const setup = steps.findIndex(
+      (step) => step.name === 'Normalize the default Docker image store',
+    );
+    assert.ok(setup > steps.findIndex((step) => step.uses?.startsWith('actions/setup-node@')));
+    assert.ok(setup < steps.findIndex((step) => step.name === firstWork));
+    assert.equal(steps[setup].if, undefined);
+    assert.equal(steps[setup]['continue-on-error'], undefined);
+    assert.equal(steps[setup]['timeout-minutes'], 2);
+    assert.match(steps[setup].run, /sudo -n env/u);
+    assert.match(steps[setup].run, /"GITHUB_ACTIONS=\$GITHUB_ACTIONS"/u);
+    assert.match(steps[setup].run, /"RUNNER_ENVIRONMENT=\$RUNNER_ENVIRONMENT"/u);
+    assert.match(steps[setup].run, /"DOCKER_HOST=\$\{DOCKER_HOST:-\}"/u);
+    assert.match(steps[setup].run, /"DOCKER_CONTEXT=\$\{DOCKER_CONTEXT:-\}"/u);
+    assert.match(
+      steps[setup].run,
+      /"\$\(command -v node\)" scripts\/ci\/prepare-docker-store\.mjs prepare/u,
+    );
+    assert.equal(
+      steps[setup].run.trim().split('\n').at(-1),
+      'node scripts/ci/prepare-docker-store.mjs verify',
+    );
+    assert.equal(jobs[id].env?.DOCKER_HOST, undefined);
+    assert.equal(jobs[id].env?.DOCKER_CONTEXT, undefined);
+  }
+  for (const path of [
+    'infra/scripts/smoke-photo-native-ci.sh',
+    'infra/scripts/smoke-multibot-online-client-ci.sh',
+    'infra/scripts/smoke-outcome-cohort-online-client-ci.sh',
+    'infra/scripts/smoke-backlog-cancellation-v2-ci.sh',
+  ]) {
+    const smoke = readFileSync(resolve(root, path), 'utf8');
+    assert.ok(smoke.includes('unix:///var/run/docker.sock'));
+    assert.ok(smoke.includes('"${DOCKER_HOST:-}"'));
+    assert.ok(smoke.includes('"${DOCKER_CONTEXT:-}"'));
+  }
+});
+
+test('registry attestations receive standard Docker auth and always restore it before source cleanup', () => {
+  const jobs = parse(workflow).jobs;
+  assert.equal(jobs.registry['runs-on'], 'ubuntu-latest');
+  const steps = jobs.registry.steps;
+  const prepare = steps.findIndex(
+    (step) => step.run === 'node scripts/ci/registry-attestation-auth.mjs prepare',
+  );
+  const cleanup = steps.findIndex(
+    (step) => step.name === 'Remove temporary publication credentials',
+  );
+  const attestations = steps
+    .map((step, index) =>
+      /^actions\/attest-(?:build-provenance|sbom)@/u.test(step.uses ?? '') ? index : -1,
+    )
+    .filter((index) => index >= 0);
+  assert.equal(attestations.length, 2);
+  assert.ok(prepare > steps.findIndex((step) => step.id === 'publish'));
+  assert.ok(prepare < attestations[0], 'the pinned actions read os.homedir()/.docker/config.json');
+  assert.ok(cleanup > attestations.at(-1));
+  assert.equal(steps[prepare].if, undefined);
+  assert.equal(steps[cleanup].if, 'always()');
+  assert.equal(steps[prepare]['continue-on-error'], undefined);
+  assert.equal(steps[cleanup]['continue-on-error'], undefined);
+  const cleanupCommands = steps[cleanup].run.trim().split('\n');
+  assert.equal(cleanupCommands[0], 'node scripts/ci/registry-attestation-auth.mjs cleanup');
+  assert.equal(cleanupCommands.length, 2);
+  assert.match(cleanupCommands[1], /rmSync\(process\.env\.DOCKER_CONFIG/u);
+  assert.doesNotMatch(steps[cleanup].run, /(?:\|\||;|set \+e)/u);
+  for (const step of steps) assert.equal(step.env?.HOME, undefined);
+  assert.equal(jobs.registry.env.HOME, undefined);
+  for (const index of attestations) {
+    assert.equal(steps[index].with['push-to-registry'], true);
+    assert.equal(steps[index]['continue-on-error'], undefined);
+  }
+});
+
 function assertBoundedHttpsAptPolicy(run) {
   for (const path of [
     '/etc/apt/apt-mirrors.txt',

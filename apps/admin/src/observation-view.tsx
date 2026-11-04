@@ -1,12 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AdminApiError } from './api-response';
 
-export function useObservationSnapshot<T>(
-  load: (accessCode: string) => Promise<T>,
-  accessCode: string,
-  refreshToken: number,
-) {
-  const scope = useMemo(() => ({}), [load, accessCode, refreshToken]);
+export function useObservationSnapshot<T>(load: () => Promise<T>, refreshToken: number) {
+  const scope = useMemo(() => ({}), [load, refreshToken]);
   const [result, setResult] = useState<{
     scope: object;
     snapshot: T | null;
@@ -14,7 +10,7 @@ export function useObservationSnapshot<T>(
   } | null>(null);
   useEffect(() => {
     let current = true;
-    void load(accessCode).then(
+    void load().then(
       (snapshot) => {
         if (current) setResult({ scope, snapshot, error: '' });
       },
@@ -32,7 +28,7 @@ export function useObservationSnapshot<T>(
     return () => {
       current = false;
     };
-  }, [scope, load, accessCode]);
+  }, [scope, load]);
   // FLAG: A new request scope must never display the previous owner's or entity's evidence.
   return result?.scope === scope
     ? { snapshot: result.snapshot, error: result.error, loading: false }

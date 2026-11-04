@@ -513,6 +513,18 @@ jobs:
         with:
           path: ${{ runner.temp }}/maxim-buildx-cache
           key: maxim-buildx-main-v1-${{ matrix.component }}-${{ runner.os }}-amd64-${{ hashFiles('package.json', 'package-lock.json', 'apps/*/package.json', 'packages/*/package.json', matrix.dockerfile, 'infra/certs/*.pem') }}
+      # FLAG: Normalize before the first container; native smokes retain their
+      # default Unix-socket and no-override guards.
+      - name: Normalize the default Docker image store
+        timeout-minutes: 2
+        run: |
+          sudo -n env \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "DOCKER_HOST=${DOCKER_HOST:-}" \
+            "DOCKER_CONTEXT=${DOCKER_CONTEXT:-}" \
+            "$(command -v node)" scripts/ci/prepare-docker-store.mjs prepare
+          node scripts/ci/prepare-docker-store.mjs verify
       - name: Create isolated image builder
         run: docker buildx create --name maxim-ci --driver docker-container --use
       - name: Build ${{ matrix.component }} image
@@ -690,6 +702,16 @@ jobs:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: maxim-image-${{ matrix.component }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Normalize the default Docker image store
+        timeout-minutes: 2
+        run: |
+          sudo -n env \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "DOCKER_HOST=${DOCKER_HOST:-}" \
+            "DOCKER_CONTEXT=${DOCKER_CONTEXT:-}" \
+            "$(command -v node)" scripts/ci/prepare-docker-store.mjs prepare
+          node scripts/ci/prepare-docker-store.mjs verify
       - name: Load the exact smoke-tested image
         run: |
           sha256sum --check maxim-image.tar.gz.sha256
@@ -713,6 +735,8 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+      - name: Prepare standard Docker authentication for pinned attestations
+        run: node scripts/ci/registry-attestation-auth.mjs prepare
       - name: Attest the exact registry digest
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
@@ -738,6 +762,7 @@ jobs:
       - name: Remove temporary publication credentials
         if: always()
         run: |
+          node scripts/ci/registry-attestation-auth.mjs cleanup
           node -e 'require("node:fs").rmSync(process.env.DOCKER_CONFIG, { recursive: true, force: true })'
 
   required:

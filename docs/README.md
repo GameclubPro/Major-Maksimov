@@ -20,6 +20,7 @@ scripts. A configuration default or an earlier release report does not establish
 | Publisher rights, preparation and access diagnostics | [Current access runbook](operations/runbooks/publisher-access-refresh-rollout.md)                                                           |
 | Refactoring an existing boundary                     | [Preserved contracts](refactor-safe-boundaries.md) and [candidate roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md)         |
 | Workspace and runtime overview                       | [Project description](project-description.md)                                                                                               |
+| Read-only local observation and email alerts         | [Local runtime observer](operations/runbooks/local-runtime-observer.md)                                                                     |
 
 Independent Lastik work starts with [its scoped instructions](../apps/eraser/AGENTS.md).
 Advertising buttons and Birzhik profiles use the [marketplace contract](development/marketplace-integration.md);

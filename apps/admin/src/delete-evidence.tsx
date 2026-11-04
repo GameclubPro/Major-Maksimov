@@ -41,12 +41,12 @@ export function deleteEvidenceErrorMessage(error: unknown): string {
   return 'Не удалось загрузить подтверждения. Повторите загрузку позже.';
 }
 
-export function DeleteEvidence({ intentId, accessCode }: { intentId: string; accessCode: string }) {
+export function DeleteEvidence({ intentId }: { intentId: string }) {
   const [snapshot, setSnapshot] = useState<SafetyDeskDeleteEvidenceResponse | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const sequence = useRef(0);
-  const scope = useMemo(() => ({}), [intentId, accessCode]);
+  const scope = useMemo(() => ({}), [intentId]);
   const currentScope = useRef(scope);
   currentScope.current = scope;
 
@@ -68,7 +68,7 @@ export function DeleteEvidence({ intentId, accessCode }: { intentId: string; acc
     setSnapshot(null);
     setError('');
     try {
-      const result = await safetyDeskApiClient.fetchDeleteEvidence(intentId, accessCode);
+      const result = await safetyDeskApiClient.fetchDeleteEvidence(intentId);
       if (current()) setSnapshot(result);
     } catch (cause) {
       if (current()) setError(deleteEvidenceErrorMessage(cause));

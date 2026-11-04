@@ -43,12 +43,6 @@ const DISALLOWED_PRODUCTION_WEBHOOK_SECRETS = new Set([
   'replace-me',
   'replace-with-random-url-safe-secret',
 ]);
-const DISALLOWED_ADMIN_ACCESS_CODES = new Set([
-  'change-me',
-  'changeme',
-  'replace-me',
-  'replace-with-random-admin-code',
-]);
 
 const BOOLEAN_TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const BOOLEAN_FALSE_VALUES = new Set(['0', 'false', 'no', 'off']);
@@ -255,15 +249,13 @@ const envSchema = z.object({
   SYSTEM_ADMIN_USER_IDS: z.string().optional(),
   MAJOR_NETWORKS_ROLLOUT: z.enum(['off', 'test', 'on']).default('off'),
   SAFETY_DESK_ALLOWED_HOSTS: z.string().optional(),
-  ADMIN_ACCESS_CODE: z
-    .string()
-    .trim()
-    .min(6)
-    .max(256)
-    .refine((value) => !DISALLOWED_ADMIN_ACCESS_CODES.has(value.toLowerCase()), {
-      message: 'ADMIN_ACCESS_CODE must not use a documented placeholder',
-    })
-    .optional(),
+  RUNTIME_OVERVIEW_READER_TOKEN_SHA256: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
+  ),
 
   WEBHOOK_GLOBAL_RPS_LIMIT: z.coerce.number().int().positive().default(300),
   WEBHOOK_BURST_LIMIT: z.coerce.number().int().positive().default(450),
@@ -1001,10 +993,6 @@ export function validateEnv(config: Record<string, unknown>): EnvSchema {
       parsed.data.KARAVAN_STOREFRONT_CREATE_URL,
     );
     assertProductionCurrentMaxApiHost(parsed.data.MAX_API_BASE_URL);
-
-    if (!parsed.data.ADMIN_ACCESS_CODE) {
-      throw new Error('Environment validation failed: ADMIN_ACCESS_CODE is required in production');
-    }
 
     for (const [key, value] of [
       ['MAX_WEBHOOK_SECRET_PATH', parsed.data.MAX_WEBHOOK_SECRET_PATH],

@@ -6,8 +6,8 @@
 - Production is `https://admin.major-maksimov.ru/`, protected by nginx Basic Auth and served by `admin-static` on `127.0.0.1:3004`.
 - Browser API calls are same-origin `/api/v1/...`; admin nginx proxies them to `api-admin`.
 - API guards require the admin forwarded host plus Basic Auth `X-Remote-User`. Public nginx sites must deny `/api/v1/safety-desk` and `/api/v1/support-requests` before their generic `/api/v1/` proxies.
-- `ADMIN_ACCESS_CODE` is validated server-side. Never place it in Vite env, bundle output, screenshots, logs, or docs.
-- The server Basic Auth password remains VPS-only. Never read or print it during ordinary UI work.
+- Basic Auth is the owner login; do not add another access-code prompt. Preserve the server host/user and origin checks. See the [owner access decision](../../docs/project-description.md#7-safety-desk).
+- Never read or print the Basic Auth password during ordinary UI work. Retrieve credentials only for an explicit owner request, into a private file outside Git.
 
 ## Workflow
 

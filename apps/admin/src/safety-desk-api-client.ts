@@ -47,14 +47,12 @@ export class SafetyDeskApiClient {
   constructor(private readonly transport: AdminApiTransport = createAdminApiTransport()) {}
 
   fetchCommercialReview(
-    accessCode: string,
     cursor?: string,
     status: 'PENDING' | 'REVIEWED' | 'ALL' = 'PENDING',
   ): Promise<CommercialReviewQueueResponse> {
     const query = new URLSearchParams({ limit: '50', status, ...(cursor ? { cursor } : {}) });
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/commercial/review?${query}`,
-      accessCode,
       commercialReviewQueueResponseSchema,
     );
   }
@@ -63,7 +61,6 @@ export class SafetyDeskApiClient {
     item: CommercialReviewItem,
     label: CommercialReviewLabel,
     reason: string,
-    accessCode: string,
     expectedDisposition: 'KEEP' | 'DELETE' | null = label === 'COMMERCIAL'
       ? 'DELETE'
       : label === 'NOT_COMMERCIAL'
@@ -73,7 +70,6 @@ export class SafetyDeskApiClient {
   ): Promise<CommercialReviewItem> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/commercial/review/${encodeURIComponent(item.id)}/label`,
-      accessCode,
       commercialReviewItemSchema,
       {
         method: 'POST',
@@ -92,13 +88,11 @@ export class SafetyDeskApiClient {
     item: CommercialReviewItem,
     label: CommercialReviewLabel,
     reason: string,
-    accessCode: string,
     expectedDisposition: 'KEEP' | 'DELETE' | null,
     semanticAnnotation?: CommercialReviewSemanticAnnotationRequest,
   ): Promise<CommercialReviewItem> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/commercial/review/${encodeURIComponent(item.id)}/adjudicate`,
-      accessCode,
       commercialReviewItemSchema,
       {
         method: 'POST',
@@ -113,57 +107,42 @@ export class SafetyDeskApiClient {
     );
   }
 
-  fetchQueue(accessCode: string): Promise<SafetyDeskQueueResponse> {
-    return this.transport.request(
-      `${SAFETY_DESK_API_BASE}/queue`,
-      accessCode,
-      safetyDeskQueueResponseSchema,
-    );
+  fetchQueue(): Promise<SafetyDeskQueueResponse> {
+    return this.transport.request(`${SAFETY_DESK_API_BASE}/queue`, safetyDeskQueueResponseSchema);
   }
 
-  fetchDeleteRuntime(accessCode: string): Promise<SafetyDeskDeleteRuntimeResponse> {
+  fetchDeleteRuntime(): Promise<SafetyDeskDeleteRuntimeResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/deletes`,
-      accessCode,
       safetyDeskDeleteRuntimeResponseSchema,
     );
   }
 
-  fetchRuntimeOverview(
-    accessCode: string,
-    signal?: AbortSignal,
-  ): Promise<SafetyDeskOverviewResponse> {
+  fetchRuntimeOverview(signal?: AbortSignal): Promise<SafetyDeskOverviewResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/overview`,
-      accessCode,
       safetyDeskOverviewResponseSchema,
       { signal, cache: 'no-store' },
     );
   }
 
-  fetchCommercialAiRuntime(accessCode: string): Promise<SafetyDeskCommercialAiResponse> {
+  fetchCommercialAiRuntime(): Promise<SafetyDeskCommercialAiResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/commercial-ai`,
-      accessCode,
       safetyDeskCommercialAiResponseSchema,
     );
   }
 
-  fetchCommercialAiPoolRuntime(accessCode: string): Promise<SafetyDeskCommercialAiPoolResponse> {
+  fetchCommercialAiPoolRuntime(): Promise<SafetyDeskCommercialAiPoolResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/commercial-ai/pool`,
-      accessCode,
       safetyDeskCommercialAiPoolResponseSchema,
     );
   }
 
-  async fetchDeleteEvidence(
-    intentId: string,
-    accessCode: string,
-  ): Promise<SafetyDeskDeleteEvidenceResponse> {
+  async fetchDeleteEvidence(intentId: string): Promise<SafetyDeskDeleteEvidenceResponse> {
     const snapshot = await this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/deletes/${encodeURIComponent(intentId)}/evidence`,
-      accessCode,
       safetyDeskDeleteEvidenceResponseSchema,
     );
     if (snapshot.intentId !== intentId)
@@ -171,47 +150,39 @@ export class SafetyDeskApiClient {
     return snapshot;
   }
 
-  fetchWebhookCohort(accessCode: string): Promise<SafetyDeskWebhookCohortResponse> {
+  fetchWebhookCohort(): Promise<SafetyDeskWebhookCohortResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/webhook-cohort`,
-      accessCode,
       safetyDeskWebhookCohortResponseSchema,
     );
   }
 
-  fetchPublicationCohort(accessCode: string): Promise<SafetyDeskPublicationCohortResponse> {
+  fetchPublicationCohort(): Promise<SafetyDeskPublicationCohortResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/publication-cohort`,
-      accessCode,
       safetyDeskPublicationCohortResponseSchema,
     );
   }
 
-  fetchDeleteCohort(accessCode: string): Promise<SafetyDeskDeleteCohortResponse> {
+  fetchDeleteCohort(): Promise<SafetyDeskDeleteCohortResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/delete-cohort`,
-      accessCode,
       safetyDeskDeleteCohortResponseSchema,
     );
   }
 
-  fetchPublicationDeliveryCohort(
-    accessCode: string,
-  ): Promise<SafetyDeskPublicationDeliveryCohortResponse> {
+  fetchPublicationDeliveryCohort(): Promise<SafetyDeskPublicationDeliveryCohortResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/publication-delivery-cohort`,
-      accessCode,
       safetyDeskPublicationDeliveryCohortResponseSchema,
     );
   }
 
   async fetchPublicationDeliveryEvidence(
     deliveryId: string,
-    accessCode: string,
   ): Promise<SafetyDeskPublicationDeliveryEvidenceResponse> {
     const snapshot = await this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/publication-deliveries/${encodeURIComponent(deliveryId)}/evidence`,
-      accessCode,
       safetyDeskPublicationDeliveryEvidenceResponseSchema,
     );
     if (snapshot.deliveryId !== deliveryId)
@@ -219,27 +190,21 @@ export class SafetyDeskApiClient {
     return snapshot;
   }
 
-  fetchRetentionRuntime(
-    accessCode: string,
-    after: string | null = null,
-  ): Promise<SafetyDeskRetentionRuntimeResponse> {
+  fetchRetentionRuntime(after: string | null = null): Promise<SafetyDeskRetentionRuntimeResponse> {
     const cursor = after ? `?after=${encodeURIComponent(after)}` : '';
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/retention${cursor}`,
-      accessCode,
       safetyDeskRetentionRuntimeResponseSchema,
     );
   }
 
   fetchRetentionPreview(
     chatId: string,
-    accessCode: string,
     after: string | null = null,
   ): Promise<SafetyDeskRetentionPreviewResponse> {
     const cursor = after ? `?after=${encodeURIComponent(after)}` : '';
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/retention/${encodeURIComponent(chatId)}/preview${cursor}`,
-      accessCode,
       safetyDeskRetentionPreviewResponseSchema,
     );
   }
@@ -247,11 +212,9 @@ export class SafetyDeskApiClient {
   retryRetention(
     chatId: string,
     request: SafetyDeskRetryRetentionRequest,
-    accessCode: string,
   ): Promise<SafetyDeskRetentionPreviewResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/retention/${encodeURIComponent(chatId)}/retry`,
-      accessCode,
       safetyDeskRetentionPreviewResponseSchema,
       { method: 'POST', body: safetyDeskRetryRetentionRequestSchema.parse(request) },
     );
@@ -259,11 +222,9 @@ export class SafetyDeskApiClient {
 
   allowAmbiguousSendRetry(
     item: SafetyDeskDeleteRuntimeResponse['ambiguousSends'][number],
-    accessCode: string,
   ): Promise<SafetyDeskDeleteRuntimeResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/ambiguous-sends/${encodeURIComponent(item.id)}/allow-retry`,
-      accessCode,
       safetyDeskDeleteRuntimeResponseSchema,
       {
         method: 'POST',
@@ -279,11 +240,9 @@ export class SafetyDeskApiClient {
     item: Pick<SafetyDeskDeleteIntentItem, 'id' | 'status' | 'updatedAt' | 'attemptCount'> & {
       status: 'EXPIRED' | 'FAILED_TERMINAL';
     },
-    accessCode: string,
   ): Promise<SafetyDeskDeleteRuntimeResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/runtime/deletes/${encodeURIComponent(item.id)}/retry`,
-      accessCode,
       safetyDeskDeleteRuntimeResponseSchema,
       {
         method: 'POST',
@@ -296,23 +255,17 @@ export class SafetyDeskApiClient {
     );
   }
 
-  decide(
-    itemId: string,
-    action: SafetyDeskDecisionAction,
-    accessCode: string,
-  ): Promise<SafetyDeskDecisionResponse> {
+  decide(itemId: string, action: SafetyDeskDecisionAction): Promise<SafetyDeskDecisionResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/items/${encodeURIComponent(itemId)}/${action}`,
-      accessCode,
       safetyDeskDecisionResponseSchema,
       { method: 'POST', body: {} },
     );
   }
 
-  approveAll(itemIds: string[], accessCode: string): Promise<SafetyDeskDecisionResponse> {
+  approveAll(itemIds: string[]): Promise<SafetyDeskDecisionResponse> {
     return this.transport.request(
       `${SAFETY_DESK_API_BASE}/queue/approve-all`,
-      accessCode,
       safetyDeskDecisionResponseSchema,
       { method: 'POST', body: { itemIds } },
     );

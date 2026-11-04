@@ -57,7 +57,7 @@ test('commercial AI reads the closed same-origin GET and validates the observati
       return Response.json(snapshot());
     }),
   );
-  assert.deepEqual(await client.fetchCommercialAiRuntime('test-access-code'), snapshot());
+  assert.deepEqual(await client.fetchCommercialAiRuntime(), snapshot());
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.url, '/api/v1/safety-desk/runtime/commercial-ai');
   assert.equal(calls[0]!.init?.method ?? 'GET', 'GET');
@@ -66,7 +66,7 @@ test('commercial AI reads the closed same-origin GET and validates the observati
   assert.equal(calls[0]!.url.includes('test-access-code'), false);
   assert.equal(
     (calls[0]!.init?.headers as Record<string, string>)['X-Admin-Access-Code'],
-    'test-access-code',
+    undefined,
   );
 });
 
@@ -81,7 +81,7 @@ test('commercial AI refuses invented deletion evidence, missing coverage basis a
     const client = new SafetyDeskApiClient(
       createAdminApiTransport(async () => Response.json(payload)),
     );
-    await assert.rejects(() => client.fetchCommercialAiRuntime('test-access-code'));
+    await assert.rejects(() => client.fetchCommercialAiRuntime());
   }
 });
 
@@ -170,13 +170,13 @@ test('admission status carries its own observation time, including pressure paus
   assert.match(render(snapshot({ admission: 'HEADROOM_PAUSED' })), /нехватки свободных ресурсов/);
 });
 
-test('initial loading reveals no access code and the AI panel is absent from the default family', () => {
-  const props = { accessCode: 'test-access-code', refreshToken: 0 };
+test('initial loading shows no AI metrics and the panel is absent from the default family', () => {
+  const props = { refreshToken: 0 };
   const loading = renderToStaticMarkup(createElement(CommercialAiDesk, props));
   assert.match(loading, /aria-busy="true"/);
   assert.match(loading, /Читаю сохранённые наблюдения/);
-  assert.doesNotMatch(loading, /test-access-code|Накопленные результаты процесса/);
+  assert.doesNotMatch(loading, /Накопленные результаты процесса/);
   const defaultFamily = renderToStaticMarkup(createElement(ObservabilityDesk, props));
   assert.match(defaultFamily, /Рекламный ИИ<\/button>/);
-  assert.doesNotMatch(defaultFamily, /aria-label="Рекламный ИИ"|test-access-code/);
+  assert.doesNotMatch(defaultFamily, /aria-label="Рекламный ИИ"/);
 });

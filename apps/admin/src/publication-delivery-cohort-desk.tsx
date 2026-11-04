@@ -13,11 +13,11 @@ import {
   deliveryWaitLabels,
 } from './publication-delivery-evidence';
 
-const load = (code: string) => safetyDeskApiClient.fetchPublicationDeliveryCohort(code);
+const load = () => safetyDeskApiClient.fetchPublicationDeliveryCohort();
 
-export function PublicationDeliveryCohortDesk(props: { accessCode: string; refreshToken: number }) {
-  const view = useObservationSnapshot(load, props.accessCode, props.refreshToken);
-  const ownerScope = useMemo(() => ({}), [props.accessCode]);
+export function PublicationDeliveryCohortDesk(props: { refreshToken: number }) {
+  const view = useObservationSnapshot(load, props.refreshToken);
+  const ownerScope = useMemo(() => ({}), []);
   const [input, setInput] = useState({ scope: ownerScope, id: '' });
   const inputId = input.scope === ownerScope ? input.id : '';
   const [selection, setSelected] = useState<{ scope: object; id: string; request: number } | null>(
@@ -194,7 +194,6 @@ export function PublicationDeliveryCohortDesk(props: { accessCode: string; refre
           key={props.refreshToken}
           deliveryId={selected.id}
           request={selected.request}
-          accessCode={props.accessCode}
         />
       )}
     </>

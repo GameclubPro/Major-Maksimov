@@ -77,6 +77,6 @@ test('pool GET stays independent of the existing process status endpoint', async
       return Response.json(snapshot);
     }),
   );
-  assert.deepEqual(await client.fetchCommercialAiPoolRuntime('test-access-code'), snapshot);
+  assert.deepEqual(await client.fetchCommercialAiPoolRuntime(), snapshot);
   assert.equal(path, '/api/v1/safety-desk/runtime/commercial-ai/pool');
 });
