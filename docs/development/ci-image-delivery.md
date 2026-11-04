@@ -116,6 +116,11 @@ run publishes and verifies the tested images, and the normal receipt/provenance 
 Until then, registry publication remains an external prerequisite; merging the privacy fix does
 not establish successful image delivery.
 
+The temporary workflow credential is opaque: its prefix, punctuation and length do not prove
+GitHub authority. Bootstrap accepts a bounded nonempty printable ASCII value and rejects
+whitespace and control characters before login. Trusted workflow identity, registry login and
+private package metadata with the exact repository binding remain the authority checks.
+
 Bootstrap failures report only a fixed `stage` and `code`, separating context/credential refusal,
 registry login, metadata reads, seed build/push and receipt persistence. They never print the
 credential, environment, dependency output or raw error. A failure at `seed-push` or a subsequent
