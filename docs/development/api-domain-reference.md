@@ -202,6 +202,8 @@ Statistics exchange does not grant advertising or shop authority.
 
 - Access-loss mutation requires the exact bot identity and explicit loss evidence; bare 403/404 and failed survivor reads cannot authorize entity-wide cleanup. Publish invalidation after a local access mutation even when survivor verification fails. Background channel reads require an explicit eligible bot route.
 
+- Background channel polling keeps bare 403/404 as unknown access. Remaining per-channel failures use the existing bounded scoped backoff while independent due channels continue. Typed scoped waits retain Retry-After; shared transport failures retain their global backoff. A pause changes neither access evidence nor retained message/effect progress.
+
 - Exact-user privilege refresh preserves confirmed human grants when a negative MAX response lacks explicit nonadministrator evidence. A lone `is_admin=false` does not exclude ownership. Require the parsed explicit nonprivilege proof before revoking human access; an explicitly identified bot remains ineligible for human administrator access. Cover this boundary in `managed-entity-actor-probe.spec.ts` and `managed-access-demand-postgres.spec.ts`.
 
 - The fleet has six moderation bots (two Major, two Majorsha and two Rex) plus a separate Publisher that works alongside them. Publisher never replaces a moderator: keep its configured identity outside the non-Publisher runtime route registry and moderation candidate pool, and keep its lifecycle in `PublisherEntityBinding` without assigning `Chat.botId`, `primaryBotId` or `ChatBotMembership`.

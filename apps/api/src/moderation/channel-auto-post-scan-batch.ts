@@ -42,6 +42,9 @@ export async function runChannelAutoPostScanBatch(input: {
         );
         return true;
       }
+      // FLAG: An unknown channel failure postpones this source without changing
+      // access evidence, message progress or independent channels' admission.
+      input.manager.recordTransientThrottle(chatId, true);
     }
   }
   return false;
