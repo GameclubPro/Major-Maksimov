@@ -47,7 +47,7 @@ export function preloadFixture(component = 'api') {
       event: 'push',
     },
     image: { alias: `${alias}:${sha}`, imageId, platform: 'linux/amd64', sizeBytes: 123456 },
-    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-release-${component}`, digest },
+    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-private-v1-${component}`, digest },
   };
   return {
     schemaVersion: 1,
@@ -57,15 +57,21 @@ export function preloadFixture(component = 'api') {
   };
 }
 
-function withHost(callback, { component = 'api', inspectionPatch = {}, previous = null } = {}) {
+function withHost(
+  callback,
+  {
+    component = 'api',
+    inspectionPatch = {},
+    previous = null,
+    token = 'fixture_token_not_a_real_secret_123456',
+  } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-registry-host-test-'));
   const credentialFile = join(directory, 'credential.json');
   const stateDir = join(directory, 'state');
-  writeFileSync(
-    credentialFile,
-    JSON.stringify({ username: 'deploy-user', token: 'fixture_token_not_a_real_secret_123456' }),
-    { mode: 0o600 },
-  );
+  writeFileSync(credentialFile, JSON.stringify({ username: 'deploy-user', token }), {
+    mode: 0o600,
+  });
   const request = preloadFixture(component);
   const calls = [];
   let alias = previous;
@@ -90,7 +96,7 @@ function withHost(callback, { component = 'api', inspectionPatch = {}, previous 
       calls.push({ binary, args, options: input });
       assert.equal(binary, 'docker');
       if (args[0] === 'login') {
-        assert.equal(input.input, 'fixture_token_not_a_real_secret_123456');
+        assert.equal(input.input, token);
         return 'Login Succeeded';
       }
       if (args[1] === 'pull') return 'pulled';
@@ -259,6 +265,81 @@ test('read credentials must be a private regular file; unsafe files trigger no D
       } else chmodSync(credentialFile, 0o644);
       assert.throws(() => preloadRegistryImage(request, options), /private regular file/u);
       assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('host preload accepts opaque printable credentials unchanged and removes temporary auth', () => {
+  for (const token of ['x', `synthetic.header-${'x'.repeat(300)}.signature=`, 'x'.repeat(4096)]) {
+    withHost(
+      ({ request, options, calls }) => {
+        preloadRegistryImage(request, options);
+        assert.equal(calls[0].options.input, token);
+        assert.equal(existsSync(calls[0].options.env.DOCKER_CONFIG), false);
+      },
+      { token },
+    );
+  }
+});
+
+test('host credential refusals never print supplied content or call Docker', () => {
+  const marker = 'private-credential-content';
+  for (const content of [
+    `{"${marker}"`,
+    ...[
+      null,
+      {},
+      '',
+      'x'.repeat(4097),
+      `${marker}\n`,
+      `${marker}\0`,
+      `${marker}\x7f`,
+      `${marker}é`,
+    ].map((token) => JSON.stringify({ username: 'deploy-user', token })),
+  ]) {
+    withHost(({ request, options, calls, credentialFile }) => {
+      writeFileSync(credentialFile, content);
+      assert.throws(
+        () => preloadRegistryImage(request, options),
+        (error) => {
+          assert.match(error.message, /Invalid read-only GHCR credential configuration/u);
+          assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(marker), false);
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test('host Docker inspection decoding refuses raw content before aliases or receipts', () => {
+  const marker = 'private-docker-response';
+  for (const [output, reason] of [
+    [`{"${marker}"`, 'INSPECTION_JSON_INVALID'],
+    ['[]', 'INSPECTION_CARDINALITY'],
+  ]) {
+    withHost(({ request, options, calls, stateDir }) => {
+      assert.throws(
+        () =>
+          preloadRegistryImage(request, {
+            ...options,
+            runCommand(binary, args, settings) {
+              return args[1] === 'inspect' ? output : options.runCommand(binary, args, settings);
+            },
+          }),
+        (error) => {
+          assert.equal(error.code, 'IMAGE_INSPECTION_REFUSED');
+          assert.equal(error.reason, reason);
+          assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(marker), false);
+          return true;
+        },
+      );
+      assert.equal(
+        calls.some(({ args }) => args[1] === 'tag'),
+        false,
+      );
+      assert.equal(existsSync(receiptPath(stateDir, 'api-shared', sha)), false);
+      assert.equal(existsSync(calls[0].options.env.DOCKER_CONFIG), false);
     });
   }
 });

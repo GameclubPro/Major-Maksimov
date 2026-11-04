@@ -12,6 +12,9 @@ import {
   assertVerifiedAttestation,
   execute,
   imageIdentity,
+  isOpaqueGitHubCredential,
+  parseImageInspection,
+  packageRepository,
   provenanceArguments,
   publishImage,
   trustedBuildContext,
@@ -119,7 +122,7 @@ test('only exact main workflow on an allowed runner and trigger may publish imag
 });
 
 test('image identity never accepts a short SHA, injected path or unsupported component', () => {
-  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-release-api');
+  assert.equal(identity.repository, 'ghcr.io/gameclubpro/major-maksimov-private-v1-api');
   for (const delta of [
     { sha: sha.slice(0, 12) },
     { sha: `${sha}\n` },
@@ -129,6 +132,13 @@ test('image identity never accepts a short SHA, injected path or unsupported com
   ]) {
     assert.throws(() => imageIdentity({ ...expected, ...delta }));
   }
+});
+
+test('package metadata identity needs no fabricated source SHA and cannot produce a runtime alias', () => {
+  assert.equal(packageRepository({ repository, component: 'api' }), identity.repository);
+  assert.throws(() => imageIdentity({ repository, component: 'api' }));
+  assert.throws(() => packageRepository({ repository, component: 'postgres' }));
+  assert.throws(() => packageRepository({ repository: '../injected/repo', component: 'api' }));
 });
 
 test('the smoke-tested Docker ID and registry manifest digest remain separate', () => {
@@ -146,6 +156,114 @@ test('the smoke-tested Docker ID and registry manifest digest remain separate', 
     assert.throws(() => assertImageInspection({ ...inspection(), ...delta }, { sha, imageId }));
   }
   assert.throws(() => assertImageInspection(inspection(), { sha, sizeBytes: sizeBytes - 1 }));
+});
+
+test('opaque package credentials use a transport budget, without a provider format or normalization', () => {
+  for (const token of [
+    'x',
+    'x'.repeat(256),
+    'x'.repeat(4096),
+    '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~',
+  ])
+    assert.equal(isOpaqueGitHubCredential(token), true);
+  for (const token of [
+    undefined,
+    null,
+    false,
+    42,
+    {},
+    '',
+    'x'.repeat(4097),
+    ' x',
+    'x ',
+    'x y',
+    'x\n',
+    'x\r',
+    'x\t',
+    'x\0',
+    'x\x1f',
+    'x\x7f',
+    'xé',
+    'x\u200b',
+  ])
+    assert.equal(isOpaqueGitHubCredential(token), false);
+});
+
+test('image inspection refusals identify the failed comparison without rendering image content', () => {
+  const marker = 'private-inspection-content';
+  for (const [value, wanted, reason] of [
+    [null, {}, 'INSPECTION_MISSING'],
+    [{ ...inspection(), Id: marker }, {}, 'IMAGE_ID_INVALID'],
+    [{ ...inspection(), Os: marker }, {}, 'OS_MISMATCH'],
+    [{ ...inspection(), Architecture: marker }, {}, 'ARCHITECTURE_MISMATCH'],
+    [
+      { ...inspection(), Config: { Labels: { 'org.opencontainers.image.revision': marker } } },
+      {},
+      'SOURCE_REVISION_MISMATCH',
+    ],
+    [{ ...inspection(), Config: null }, {}, 'SOURCE_REVISION_MISMATCH'],
+    [
+      {
+        ...inspection(),
+        Config: {
+          Labels: {
+            'org.opencontainers.image.revision': sha,
+            'com.maxim.release-protected': marker,
+          },
+        },
+      },
+      {},
+      'RELEASE_PROTECTION_MISMATCH',
+    ],
+    ...[0, -1, 1.5, '128', null, 64 * 1024 ** 3 + 1].map((Size) => [
+      { ...inspection(), Size },
+      {},
+      'SIZE_INVALID',
+    ]),
+    [inspection(), { imageId: digest }, 'IMAGE_ID_MISMATCH'],
+    [inspection(), { sizeBytes: sizeBytes - 1 }, 'SIZE_MISMATCH'],
+  ]) {
+    assert.throws(
+      () => assertImageInspection(value, { sha, ...wanted }),
+      (error) => {
+        assert.equal(error.code, 'IMAGE_INSPECTION_REFUSED');
+        assert.equal(error.reason, reason);
+        assert.equal(error.cause, undefined);
+        assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(marker), false);
+        return true;
+      },
+    );
+  }
+  assert.equal(assertImageInspection({ ...inspection(), Size: 64 * 1024 ** 3 }, { sha }), imageId);
+});
+
+test('malformed Docker inspections never expose raw stdout and block all registry writes', () => {
+  const marker = 'private-docker-response';
+  for (const [output, reason] of [
+    [`{"${marker}"`, 'INSPECTION_JSON_INVALID'],
+    [JSON.stringify({ [marker]: 'value' }), 'INSPECTION_CARDINALITY'],
+    ['[]', 'INSPECTION_CARDINALITY'],
+    [JSON.stringify([inspection(), inspection()]), 'INSPECTION_CARDINALITY'],
+  ]) {
+    assert.throws(() => parseImageInspection(output), { code: 'IMAGE_INSPECTION_REFUSED', reason });
+    let inspections = 0;
+    assert.throws(
+      () =>
+        publishImage(record(), expected, (binary, args) => {
+          inspections++;
+          assert.equal(binary, 'docker');
+          assert.deepEqual(args, ['image', 'inspect', identity.alias]);
+          return output;
+        }),
+      (error) => {
+        assert.equal(error.reason, reason);
+        assert.equal(error.cause, undefined);
+        assert.equal(`${error.stack}${JSON.stringify(error)}`.includes(marker), false);
+        return true;
+      },
+    );
+    assert.equal(inspections, 1);
+  }
 });
 
 test('image archives cannot be reused across attempts, sources, repositories or triggers', () => {
@@ -169,17 +287,22 @@ test('image archives cannot be reused across attempts, sources, repositories or 
 });
 
 test('legacy public registry records cannot authorize a release in the new private namespace', () => {
-  const legacy = record();
-  legacy.registry.repository = 'ghcr.io/gameclubpro/major-maksimov-api';
-  assert.throws(() => assertRegistryRecord(legacy, expected), /Registry digest or repository/u);
-  assert.throws(
-    () =>
-      verifyRegistryImage(legacy, expected, () => {
-        assert.fail('legacy record reached external verifier');
-      }),
-    /Registry digest or repository/u,
-  );
-  assert.equal(record().image.alias, `maxim-api:${sha}`);
+  for (const retired of [
+    'ghcr.io/gameclubpro/major-maksimov-api',
+    'ghcr.io/gameclubpro/major-maksimov-release-api',
+  ]) {
+    const legacy = record();
+    legacy.registry.repository = retired;
+    assert.throws(() => assertRegistryRecord(legacy, expected), /Registry digest or repository/u);
+    assert.throws(
+      () =>
+        verifyRegistryImage(legacy, expected, () => {
+          assert.fail('legacy record reached external verifier');
+        }),
+      /Registry digest or repository/u,
+    );
+    assert.equal(record().image.alias, `maxim-api:${sha}`);
+  }
 });
 
 test('each required OIDC certificate claim is checked after cryptographic verification', () => {
@@ -260,7 +383,7 @@ test('verifier command pins source, signer, issuer and runner policy', () => {
 
 function packageMetadata(patch = {}) {
   return {
-    name: 'major-maksimov-release-api',
+    name: 'major-maksimov-private-v1-api',
     package_type: 'container',
     visibility: 'private',
     repository: { id: Number(expected.repositoryId), full_name: repository },
@@ -447,7 +570,7 @@ test('actual process transport denies 403, 404, public and malformed package res
         mode,
       );
       const lookup = calls.find(([binary]) => binary === 'gh');
-      assert.equal(lookup[2], 'users/GameclubPro/packages/container/major-maksimov-release-api');
+      assert.equal(lookup[2], 'users/GameclubPro/packages/container/major-maksimov-private-v1-api');
       assert.ok(!lookup.includes('--jq'));
     }
     writeFileSync(callsFile, '', { mode: 0o600 });
