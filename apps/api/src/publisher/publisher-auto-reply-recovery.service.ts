@@ -60,15 +60,29 @@ function deliveryRecoveryQuery(
       : family === 'sending'
         ? Prisma.sql`AND (locked_at, id) > (${cursor.at}, ${cursor.id})`
         : Prisma.sql`AND id > ${cursor.id}`;
+  const cursorAt = family === 'pending' ? Prisma.sql`due_at` : Prisma.sql`locked_at`;
   // FLAG: Each family seeks its own indexed eligibility range. A single dueAt
   // cursor cannot fairly seek stale leases with unrelated due dates.
+  // FLAG: Select covered keys before fetching metadata: a wide projection can make
+  // PostgreSQL prefer an old prefix index and sort an entire timestamp tie.
   return Prisma.sql`
-    SELECT id, status, due_at AS "dueAt", locked_at AS "lockedAt",
-      lock_token AS "lockToken", dispatch_started_at AS "dispatchStartedAt"
-    FROM publisher_auto_reply_deliveries
-    WHERE ${eligibility} ${after}
-    ORDER BY ${order}
-    LIMIT ${take}`;
+    WITH candidates AS MATERIALIZED (
+      SELECT id, ${cursorAt} AS "cursorAt"
+      FROM publisher_auto_reply_deliveries
+      WHERE ${eligibility} ${after}
+      ORDER BY ${order}
+      LIMIT ${take}
+    )
+    SELECT delivery.*
+    FROM candidates
+    CROSS JOIN LATERAL (
+      SELECT id, status, due_at AS "dueAt", locked_at AS "lockedAt",
+        lock_token AS "lockToken", dispatch_started_at AS "dispatchStartedAt"
+      FROM publisher_auto_reply_deliveries
+      WHERE id = candidates.id
+      LIMIT 1
+    ) AS delivery
+    ORDER BY candidates."cursorAt", candidates.id`;
 }
 
 export type PublisherAutoReplyRecoveryResult = {
