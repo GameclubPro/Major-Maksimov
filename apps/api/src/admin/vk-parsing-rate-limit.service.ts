@@ -1,15 +1,29 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { readVkRetryAtMs, VK_API_MAX_RETRY_AT_MS, VkApiRequestError } from './vk-parsing-errors';
 
 const VK_API_RATE_LIMIT_SLOT_TTL_MS = 2_000;
 const VK_API_METRICS_TTL_SEC = 6 * 60 * 60;
 const VK_API_METRICS_MAX_WINDOW_SEC = 900;
-const VK_API_RATE_LIMIT_RESERVATION_SCRIPT = `
-local ttlMs = tonumber(ARGV[#ARGV])
-local keyCount = #KEYS
+export type VkApiAdmissionOptions = {
+  credentialScope: string;
+  deadlineAtMs: number;
+};
 
-for index = 1, keyCount do
+const VK_API_RATE_LIMIT_RESERVATION_SCRIPT = `
+local ttlMs = tonumber(ARGV[3])
+local clock = redis.call('TIME')
+local nowMs = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local cooldownUntil = tonumber(redis.call('GET', KEYS[3]) or '0')
+if cooldownUntil == nil or cooldownUntil < 0 or cooldownUntil > ${VK_API_MAX_RETRY_AT_MS} or cooldownUntil ~= math.floor(cooldownUntil) then
+  return redis.error_reply('Invalid VK provider cooldown')
+end
+if cooldownUntil > nowMs then
+  return {0, 3, cooldownUntil - nowMs, cooldownUntil}
+end
+
+for index = 1, 2 do
   local limit = tonumber(ARGV[index])
   local count = tonumber(redis.call('GET', KEYS[index]) or '0')
   if count >= limit then
@@ -17,11 +31,11 @@ for index = 1, keyCount do
     if ttl == nil or ttl < 1 then
       ttl = ttlMs
     end
-    return {0, index, ttl}
+    return {0, index, ttl, 0}
   end
 end
 
-for index = 1, keyCount do
+for index = 1, 2 do
   local nextCount = redis.call('INCR', KEYS[index])
   if nextCount == 1 then
     redis.call('PEXPIRE', KEYS[index], ttlMs)
@@ -33,7 +47,22 @@ for index = 1, keyCount do
   end
 end
 
-return {1, 0, 0}
+return {1, 0, 0, 0}
+`;
+
+const VK_API_PROVIDER_COOLDOWN_SCRIPT = `
+local requestedUntil = tonumber(ARGV[1])
+local existingUntil = tonumber(redis.call('GET', KEYS[1]) or '0')
+if existingUntil == nil or existingUntil < 0 or existingUntil > ${VK_API_MAX_RETRY_AT_MS} or existingUntil ~= math.floor(existingUntil) then
+  return redis.error_reply('Invalid VK provider cooldown')
+end
+local clock = redis.call('TIME')
+local nowMs = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local effectiveUntil = math.max(requestedUntil, existingUntil)
+if effectiveUntil <= nowMs then return 0 end
+local exactUntil = string.format('%.0f', effectiveUntil)
+redis.call('SET', KEYS[1], exactUntil, 'PXAT', exactUntil)
+return effectiveUntil
 `;
 
 @Injectable()
@@ -43,6 +72,8 @@ export class VkParsingRateLimitService implements OnModuleDestroy {
   private readonly rpsLimit: number;
   private readonly maxWaitMs: number;
   private lastMetricFailureLogAtMs = 0;
+  private lastCooldownFailureLogAtMs: number | undefined;
+  private readonly localProviderCooldowns = new Map<string, number>();
 
   constructor(configService: ConfigService) {
     this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'), {
@@ -63,21 +94,107 @@ export class VkParsingRateLimitService implements OnModuleDestroy {
     await this.redis.quit();
   }
 
-  async reserveVkApiSlot(method: string): Promise<void> {
+  async reserveVkApiSlot(method: string, options: VkApiAdmissionOptions): Promise<void> {
+    this.assertCredentialScope(options.credentialScope);
+    if (readVkRetryAtMs(options.deadlineAtMs) === undefined) {
+      throw new Error('Invalid VK API request deadline');
+    }
     const startedAtMs = Date.now();
     while (true) {
-      const reservation = await this.tryReserveVkApiSlot(method);
+      this.assertRequestBudget(options.deadlineAtMs);
+      const localUntil = this.localProviderCooldowns.get(options.credentialScope) ?? 0;
+      if (localUntil <= Date.now()) this.localProviderCooldowns.delete(options.credentialScope);
+      let reservation =
+        localUntil > Date.now()
+          ? {
+              ok: false as const,
+              reason: 'provider' as const,
+              retryAfterMs: localUntil - Date.now(),
+              retryAtMs: localUntil,
+            }
+          : await this.tryReserveVkApiSlot(method, options.credentialScope);
+      const newlyObservedUntil = this.localProviderCooldowns.get(options.credentialScope) ?? 0;
+      // FLAG: An HTTP response may retain a longer pause while this Redis acknowledgement is pending.
+      if (
+        newlyObservedUntil > Date.now() &&
+        (reservation.ok ||
+          reservation.reason === 'quota' ||
+          newlyObservedUntil > reservation.retryAtMs)
+      ) {
+        reservation = {
+          ok: false,
+          reason: 'provider',
+          retryAfterMs: newlyObservedUntil - Date.now(),
+          retryAtMs: newlyObservedUntil,
+        };
+      }
       if (reservation.ok) {
+        this.assertRequestBudget(options.deadlineAtMs);
         return;
       }
 
-      const remainingWaitMs = this.maxWaitMs - (Date.now() - startedAtMs);
+      const remainingWaitMs = Math.min(
+        this.maxWaitMs - (Date.now() - startedAtMs),
+        options.deadlineAtMs - Date.now(),
+      );
+      if (reservation.reason === 'provider') {
+        this.rememberProviderCooldown(options.credentialScope, reservation.retryAtMs);
+        const delayMs = Math.max(1, reservation.retryAfterMs, reservation.retryAtMs - Date.now());
+        if (remainingWaitMs <= 0 || delayMs >= remainingWaitMs) {
+          throw new VkApiRequestError(
+            'VK API временно ограничил запросы.',
+            'provider_cooldown',
+            true,
+            reservation.retryAtMs,
+          );
+        }
+        await this.sleep(delayMs);
+        continue;
+      }
       if (remainingWaitMs <= 0) {
+        this.assertRequestBudget(options.deadlineAtMs);
         throw new Error(`VK API rate limit exceeded for ${method}`);
       }
 
       const nextWindowMs = 1_000 - (Date.now() % 1_000);
       await this.sleep(Math.min(reservation.retryAfterMs, nextWindowMs, remainingWaitMs));
+    }
+  }
+
+  async publishVkApiCooldown(credentialScope: string, retryAtMs: number): Promise<void> {
+    this.assertCredentialScope(credentialScope);
+    if (readVkRetryAtMs(retryAtMs) === undefined) {
+      throw new Error('Invalid VK API provider deadline');
+    }
+    // FLAG: Keep the originating instance paused even if Redis rejects the write or loses its ACK.
+    // Only an acknowledged atomic max-until publication establishes coverage for other instances.
+    this.rememberProviderCooldown(credentialScope, retryAtMs);
+    try {
+      const effectiveUntil = await this.redis.eval(
+        VK_API_PROVIDER_COOLDOWN_SCRIPT,
+        1,
+        this.providerCooldownKey(credentialScope),
+        String(retryAtMs),
+      );
+      if (effectiveUntil === 0 && retryAtMs <= Date.now()) return;
+      const acknowledgedUntil = readVkRetryAtMs(effectiveUntil);
+      if (acknowledgedUntil === undefined || acknowledgedUntil < retryAtMs) {
+        throw new Error('Failed to acknowledge VK API provider cooldown');
+      }
+      this.rememberProviderCooldown(credentialScope, acknowledgedUntil);
+    } catch (error) {
+      const nowMs = Date.now();
+      if (
+        this.lastCooldownFailureLogAtMs === undefined ||
+        nowMs - this.lastCooldownFailureLogAtMs >= 10_000
+      ) {
+        this.lastCooldownFailureLogAtMs = nowMs;
+        this.logger.warn(
+          { code: 'vk_provider_cooldown_unconfirmed' },
+          'VK provider cooldown publication was not acknowledged',
+        );
+      }
+      throw error;
     }
   }
 
@@ -155,16 +272,22 @@ export class VkParsingRateLimitService implements OnModuleDestroy {
     };
   }
 
-  private async tryReserveVkApiSlot(method: string): Promise<
+  private async tryReserveVkApiSlot(
+    method: string,
+    credentialScope: string,
+  ): Promise<
     | { ok: true }
-    | {
-        ok: false;
-        retryAfterMs: number;
-      }
+    | { ok: false; reason: 'quota'; retryAfterMs: number }
+    | { ok: false; reason: 'provider'; retryAfterMs: number; retryAtMs: number }
   > {
     const nowSec = Math.floor(Date.now() / 1_000);
     const methodKey = this.normalizeMetricPart(method) || 'unknown';
-    const keys = [`vkapi:rps:global:${nowSec}`, `vkapi:rps:method:${methodKey}:${nowSec}`];
+    // FLAG: Provider admission is atomic with the two existing shared quotas; cooldown is never a quota slot.
+    const keys = [
+      `vkapi:rps:global:${nowSec}`,
+      `vkapi:rps:method:${methodKey}:${nowSec}`,
+      this.providerCooldownKey(credentialScope),
+    ];
     const raw = await this.redis.eval(
       VK_API_RATE_LIMIT_RESERVATION_SCRIPT,
       keys.length,
@@ -183,13 +306,46 @@ export class VkParsingRateLimitService implements OnModuleDestroy {
     if (ok !== 0) {
       throw new Error('Failed to execute VK API rate limit reservation script');
     }
+    if (result?.[1] === 3) {
+      const retryAtMs = readVkRetryAtMs(result[3]);
+      if (retryAtMs === undefined || !Number.isSafeInteger(retryAfterMs) || retryAfterMs < 1) {
+        throw new Error('Invalid VK API provider admission response');
+      }
+      return { ok: false, reason: 'provider', retryAfterMs, retryAtMs };
+    }
+    if (result?.[1] !== 1 && result?.[1] !== 2) {
+      throw new Error('Invalid VK API quota admission response');
+    }
 
     return {
       ok: false,
+      reason: 'quota',
       retryAfterMs: Number.isFinite(retryAfterMs)
         ? Math.max(1, Math.trunc(retryAfterMs))
         : VK_API_RATE_LIMIT_SLOT_TTL_MS,
     };
+  }
+
+  private providerCooldownKey(credentialScope: string): string {
+    return `vkapi:provider-cooldown:v1:${credentialScope}`;
+  }
+
+  private assertCredentialScope(credentialScope: string): void {
+    if (!/^[a-f0-9]{64}$/u.test(credentialScope))
+      throw new Error('Invalid VK API credential scope');
+  }
+
+  private assertRequestBudget(deadlineAtMs: number): void {
+    if (Date.now() >= deadlineAtMs) {
+      throw new VkApiRequestError('VK API не ответил вовремя.', 'timeout', true);
+    }
+  }
+
+  private rememberProviderCooldown(credentialScope: string, retryAtMs: number): void {
+    this.localProviderCooldowns.set(
+      credentialScope,
+      Math.max(this.localProviderCooldowns.get(credentialScope) ?? 0, retryAtMs),
+    );
   }
 
   private normalizeMetricPart(value: string): string {

@@ -1,12 +1,31 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { formatVkParsingError, VkApiRequestError } from './vk-parsing-errors';
-import { VkParsingRateLimitService } from './vk-parsing-rate-limit.service';
+import { createHash } from 'node:crypto';
+import { formatVkParsingError, readVkRetryAtMs, VkApiRequestError } from './vk-parsing-errors';
+import {
+  type VkApiAdmissionOptions,
+  VkParsingRateLimitService,
+} from './vk-parsing-rate-limit.service';
 
 const VK_API_RATE_LIMIT_ERROR_CODE = 6;
 const VK_API_RETRYABLE_ERROR_CODES = new Set([VK_API_RATE_LIMIT_ERROR_CODE, 9, 10, 29]);
 const VK_API_TERMINAL_ERROR_CODES = new Set([5, 14, 15, 18, 19, 30, 100, 203, 210]);
 const VK_API_REQUEST_BUDGET_MS = 20_000;
+const HTTP_MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+const HTTP_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 @Injectable()
 export class VkApiClientService {
@@ -34,19 +53,25 @@ export class VkApiClientService {
     }
 
     const deadlineAt = Date.now() + VK_API_REQUEST_BUDGET_MS;
+    const admission: VkApiAdmissionOptions = {
+      credentialScope: createHash('sha256')
+        .update(new URL(this.vkApiBaseUrl).origin)
+        .update('\0')
+        .update(token)
+        .digest('hex'),
+      deadlineAtMs: deadlineAt,
+    };
     for (let attempt = 1; attempt <= this.vkApiMaxAttempts; attempt += 1) {
       try {
-        await this.vkRateLimitService.reserveVkApiSlot(method);
+        if (Date.now() >= deadlineAt) {
+          throw new VkApiRequestError('VK API не ответил вовремя.', 'timeout', true);
+        }
+        await this.vkRateLimitService.reserveVkApiSlot(method, admission);
         const remainingMs = deadlineAt - Date.now();
         if (remainingMs <= 0) {
           throw new VkApiRequestError('VK API не ответил вовремя.', 'timeout', true);
         }
-        const payload = await this.fetchVkApi(
-          method,
-          params,
-          token,
-          Math.min(this.vkApiTimeoutMs, remainingMs),
-        );
+        const payload = await this.fetchVkApi(method, params, token, admission);
         const record = this.asRecord(payload);
 
         const error = this.asRecord(record?.error);
@@ -66,18 +91,27 @@ export class VkApiClientService {
         if (!record || record.response === undefined || record.response === null) {
           throw new VkApiRequestError('VK API вернул неполный ответ.', 'invalid_response', true);
         }
-        await this.vkRateLimitService.recordVkApiOutcome({ method, outcome: 'success' });
+        await this.vkRateLimitService
+          .recordVkApiOutcome({ method, outcome: 'success' })
+          .catch(() => undefined);
         return record.response;
       } catch (error) {
         const classified = this.classifyVkRequestError(error);
-        await this.vkRateLimitService.recordVkApiOutcome({
-          method,
-          outcome: 'error',
-          code: classified.code,
-        });
-        const retryDelayMs = this.resolveVkRequestRetryDelayMs(attempt, classified.code);
+        await this.vkRateLimitService
+          .recordVkApiOutcome({
+            method,
+            outcome: 'error',
+            code: classified.code,
+          })
+          .catch(() => undefined);
+        const retryAtMs = readVkRetryAtMs(classified.error.retryAtMs);
+        const retryDelayMs = Math.max(
+          this.resolveVkRequestRetryDelayMs(attempt, classified.code),
+          retryAtMs === undefined ? 0 : retryAtMs - Date.now(),
+        );
         if (
           !classified.retryable ||
+          classified.code === 'provider_cooldown' ||
           attempt >= this.vkApiMaxAttempts ||
           Date.now() + retryDelayMs >= deadlineAt
         ) {
@@ -95,14 +129,19 @@ export class VkApiClientService {
     method: string,
     params: Record<string, string>,
     token: string,
-    timeoutMs: number,
+    admission: VkApiAdmissionOptions,
   ): Promise<unknown> {
     const search = new URLSearchParams({
       ...params,
       v: this.vkApiVersion,
     });
+    const timeoutMs = Math.min(this.vkApiTimeoutMs, admission.deadlineAtMs - Date.now());
+    if (timeoutMs <= 0) {
+      throw new VkApiRequestError('VK API не ответил вовремя.', 'timeout', true);
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let httpError: VkApiRequestError | undefined;
     try {
       const response = await fetch(`${this.vkApiBaseUrl}/method/${method}?${search.toString()}`, {
         headers: {
@@ -111,15 +150,33 @@ export class VkApiClientService {
         signal: controller.signal,
       });
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        throw new VkApiRequestError(
+        const receivedAtMs = Date.now();
+        const retryable =
+          response.status === 408 || response.status === 429 || response.status >= 500;
+        const retryAtMs = retryable
+          ? this.readRetryAfter(response.headers?.get('retry-after'), receivedAtMs)
+          : undefined;
+        // FLAG: Capture provider evidence before asynchronous bookkeeping/cleanup.
+        // A late abort cannot erase an observed HTTP status or its retry deadline.
+        httpError = new VkApiRequestError(
           `VK API вернул статус ${response.status}.`,
           `http_${response.status}`,
-          response.status === 408 || response.status === 429 || response.status >= 500,
+          retryable,
+          retryAtMs,
         );
+        if (retryAtMs !== undefined) {
+          // FLAG: Only actual HTTP responses publish provider cooldown. The limiter
+          // retains its local deadline before Redis; a failed ACK is not peer coverage.
+          await this.vkRateLimitService
+            .publishVkApiCooldown(admission.credentialScope, retryAtMs)
+            .catch(() => undefined);
+        }
+        await response.body?.cancel().catch(() => undefined);
+        throw httpError;
       }
       return await this.readVkResponsePayload(response);
     } catch (error) {
+      if (httpError) throw httpError;
       if (controller.signal.aborted) {
         throw new VkApiRequestError('VK API не ответил вовремя.', 'timeout', true);
       }
@@ -135,6 +192,71 @@ export class VkApiClientService {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private readRetryAfter(
+    value: string | null | undefined,
+    receivedAtMs: number,
+  ): number | undefined {
+    const header = value?.trim();
+    if (!header) return undefined;
+    if (/^\d+$/u.test(header)) {
+      const retryAtMs = readVkRetryAtMs(receivedAtMs + Number(header) * 1_000);
+      return retryAtMs !== undefined && retryAtMs > receivedAtMs ? retryAtMs : undefined;
+    }
+
+    const modern =
+      /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat), (\d{2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$/iu.exec(
+        header,
+      );
+    const obsolete =
+      /^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday), (\d{2})-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/iu.exec(
+        header,
+      );
+    const asctime =
+      /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( \d|\d{2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/iu.exec(
+        header,
+      );
+    const parts =
+      modern ??
+      obsolete ??
+      (asctime && [
+        asctime[0],
+        asctime[1],
+        asctime[3],
+        asctime[2],
+        asctime[7],
+        asctime[4],
+        asctime[5],
+        asctime[6],
+      ]);
+    if (!parts) return undefined;
+    const weekday = HTTP_WEEKDAYS.indexOf(parts[1]!.slice(0, 3).toLowerCase());
+    const day = Number(parts[2]);
+    const month = HTTP_MONTHS.indexOf(parts[3]!.toLowerCase());
+    let year = Number(parts[4]);
+    const hour = Number(parts[5]);
+    const minute = Number(parts[6]);
+    const second = Number(parts[7]);
+    if (obsolete) {
+      const currentYear = new Date(receivedAtMs).getUTCFullYear();
+      year += Math.floor(currentYear / 100) * 100;
+      const futureLimit = new Date(receivedAtMs);
+      futureLimit.setUTCFullYear(currentYear + 50);
+      if (Date.UTC(year, month, day, hour, minute, second) > futureLimit.getTime()) year -= 100;
+    }
+    const retryAtMs = readVkRetryAtMs(Date.UTC(year, month, day, hour, minute, second));
+    if (retryAtMs === undefined || retryAtMs <= receivedAtMs) return undefined;
+    const date = new Date(retryAtMs);
+    return date.getUTCFullYear() === year &&
+      date.getUTCMonth() === month &&
+      date.getUTCDate() === day &&
+      date.getUTCDay() === weekday &&
+      date.getUTCHours() === hour &&
+      date.getUTCMinutes() === minute &&
+      date.getUTCSeconds() === second
+      ? retryAtMs
+      : undefined;
   }
 
   private async readVkResponsePayload(response: Response): Promise<unknown> {
