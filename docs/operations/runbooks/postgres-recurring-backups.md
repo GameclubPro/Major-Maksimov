@@ -68,6 +68,66 @@ isolation and the existing socket authentication used by the restore commands.
 An operator should also periodically decrypt a downloaded independent copy with the
 off-host key and run a recovery rehearsal from that copy.
 
+### Disposable sparse restore filesystem
+
+When the existing restore filesystem cannot admit a full database, an operator can
+opt in to a separate temporary ext4 loop filesystem through the same guarded restore
+service. The default remains the existing directory mode for both profiles.
+The temporary loop shares its backing RAID failure domain and is not an independent
+backup copy. Set
+`MAXIM_RESTORE_SMOKE_MAXIM_LOOP_BYTES=700000000000` for the main profile after capacity
+review; `MAXIM_RESTORE_SMOKE_ERASER_LOOP_BYTES=0` keeps Lastik on its existing volume.
+The value is exact decimal bytes, not GiB. The private root defaults to
+`/var/lib/maxim-restore-volumes`; it and every parent must be root-owned, without
+symlinks or group/other write access. The private root has mode 0700. Its filesystem
+must match `MAXIM_BACKUP_BACKING_FILESYSTEM_PATH`; never place it on nested cold
+storage while counting free space on the backing root.
+
+The existing `--preflight-only` still requires a completed checksum-valid dump and
+reads the authoritative full `pg_database_size` through the fixed profile. It creates
+no large file, filesystem, loop, mount or container. A missing dump or database size
+is a refusal, not zero data. Its virtual result is an estimate: the real capacity
+check runs again after mounting the new filesystem.
+
+Loop admission uses at least 125% of the full database size. Virtual admission adds
+the configured restore reserve; physical admission independently adds the greater
+of that reserve and 40 GiB, plus a 1 GiB bound for filesystem metadata. It does not
+require the full sparse file size to be physically allocated. Formatting uses
+`largefile4`, zero reserved-block percentage and a bounded 128 MiB journal; actual
+allocated metadata must fit its 1 GiB allowance. Both budgets are checked after
+formatting/mounting. The existing watchdog keeps the configured virtual reserve and
+at least 40 GiB on the backing filesystem throughout restoration. Existing readiness,
+two-failure, duration, CPU/memory, network isolation and deployment-lock guards remain.
+
+Each operation exclusively creates one private image, formats only that new regular
+file, verifies its inode and exact loop association, then mounts ext4 with
+`nosuid,nodev,noexec`. No fstab entry or production store is changed. The write-ahead
+`<root>/<profile>/active/state.json` records operation and resource identities.
+The watchdog records its heartbeat and last successful sample separately; missing
+or stale samples do not establish a running restore or healthy production. A gap
+during loop attachment or mounting, unknown container identity, changed mount/file,
+or busy unmount preserves the resources as `needs_review`; the next run refuses
+the existing active directory. Do not remove that directory, reuse an existing file,
+force/lazy-unmount, globally detach loops, or bypass the capacity/readiness guard.
+Review the exact operation and its missing observations before a separate recovery.
+
+Successful cleanup proves the exact container label/ID/bind and terminal state before
+removing its data. It then verifies and removes only that mount, loop and image.
+The image deletion releases its physical allocation. The restore verification receipt
+is published only after this cleanup succeeds. A bounded `completed.json` retains
+the last eight completed operation records; successful weekly invocations allocate
+a new image. New restore units require both tracked `postgres-restore-volume.sh` and
+`postgres-restore-volume.mjs` capabilities in `ExecStartPre`, so an incompatible source
+rollback fails before silently ignoring the mode. Timer enablement still requires
+the original independent-copy and restore-health evidence.
+
+The focused filesystem acceptance is opt in and requires root on a disposable Linux
+host: `MAXIM_RESTORE_VOLUME_NATIVE=1 node scripts/agent/focused.mjs --test
+infra/scripts/postgres-restore-volume.test.mjs`. It creates an 8 GiB sparse ext4 loop
+under a unique private `/var/lib` directory, verifies actual mount/capacity/cleanup,
+and runs no PostgreSQL or production container. Mock cases separately cover container
+identity, uncertain results and refusal paths; this test does not prove a full restore.
+
 After both manual services and independent readback pass:
 
 ```bash

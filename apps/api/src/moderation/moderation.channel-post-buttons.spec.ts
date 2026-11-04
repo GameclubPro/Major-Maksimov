@@ -4494,7 +4494,13 @@ describe('ModerationService channel auto post buttons', () => {
       error: new MaxApiInternalRateLimitError('cooldown', 60_000, 'external_cooldown'),
       isolated: true,
     },
-  ])('isolates only scoped channel polling waits: $isolated', async ({ error, isolated }) => {
+    ...[403, 404].map((status) => ({
+      error: Object.assign(new Error('Request failed'), {
+        response: { status, data: { message: 'Request failed' } },
+      }),
+      isolated: true,
+    })),
+  ])('isolates channel-local failures and scoped waits: $isolated', async ({ error, isolated }) => {
     jest.useFakeTimers({ advanceTimers: true }).setSystemTime(new Date('2026-03-30T02:00:00.000Z'));
     const prisma = {
       ...createChannelMutationGuardPrismaMock(),
@@ -4572,8 +4578,8 @@ describe('ModerationService channel auto post buttons', () => {
     configureChannelAutoPostScanRoute(service);
     await (service as any).processChannelAutoPostButtons();
 
-    expect(prisma.channelSettings.findMany).toHaveBeenCalledTimes(isolated ? 3 : 2);
     expect(maxClient.listMessages).toHaveBeenCalledTimes(isolated ? 2 : 1);
+    expect(prisma.channelSettings.findMany).toHaveBeenCalledTimes(isolated ? 3 : 2);
     if (isolated)
       expect(maxClient.listMessages).toHaveBeenNthCalledWith(2, 'channel-2', expect.anything());
     expect(maxClient.listMessages).toHaveBeenCalledWith('channel-1', {
@@ -4582,6 +4588,10 @@ describe('ModerationService channel auto post buttons', () => {
       sourceTag: 'channel_auto_post',
       botId: '777000_bot',
     });
+    expect(maxClient.editMessageInlineKeyboard).not.toHaveBeenCalled();
+    expect(maxClient.deleteMessage).not.toHaveBeenCalled();
+    expect(maxClient.sendMessage).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('applies idle backoff to channel polling when no new posts appear', async () => {

@@ -1,4 +1,15 @@
 import { z } from 'zod';
+export {
+  safetyDeskOverviewResponseSchema,
+  safetyDeskOverviewPendingSchema,
+  safetyDeskOverviewPercentilesSchema,
+  safetyDeskOverviewHistoryPointSchema,
+  type SafetyDeskOverviewResponse,
+  type SafetyDeskOverviewPending,
+  type SafetyDeskOverviewPercentiles,
+  type SafetyDeskOverviewHistoryPoint,
+  type SafetyDeskOverviewObservation,
+} from './safety-desk-overview.js';
 import {
   commercialReviewSemanticAnnotationRequestSchema,
   commercialReviewSemanticAnnotationSchema,

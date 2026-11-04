@@ -22,8 +22,11 @@ for (const profile of ['maxim', 'eraser']) {
     'foreign-checksum',
     'initialization-restart',
     'socket-only-never-ready',
+    'loop-volume',
+    'loop-cleanup-unknown',
   ]) {
-    const valid = scenario === 'valid' || scenario === 'initialization-restart';
+    const valid = ['valid', 'initialization-restart', 'loop-volume'].includes(scenario);
+    const loop = scenario.startsWith('loop-');
     const foreignChecksum = scenario === 'foreign-checksum';
     test(`restore is isolated, cleaned and receipts require authority schema; profile=${profile}, scenario=${scenario}`, (t) => {
       const dir = mkdtempSync(join(tmpdir(), 'maxim-restore-test-'));
@@ -33,11 +36,33 @@ for (const profile of ['maxim', 'eraser']) {
       const backup = join(dir, 'backup');
       const archiveDirectory = profile === 'eraser' ? join(backup, 'eraser') : backup;
       const data = join(dir, 'restore');
+      const volumeLog = join(dir, 'volume-actions.log');
+      const volumeRoot = join(dir, 'loop-mount');
       for (const path of [bin, backup, data]) mkdirSync(path);
       if (profile === 'eraser') mkdirSync(archiveDirectory);
       writeFileSync(
         join(bin, 'node'),
-        `#!/usr/bin/env bash\nif [[ "$1" == *check-eraser-backup-readiness.mjs ]]; then exit 0; fi\nexec '${process.execPath}' "$@"\n`,
+        `#!/usr/bin/env bash
+if [[ "$1" == *check-eraser-backup-readiness.mjs ]]; then exit 0; fi
+if [[ "$1" == *lib/postgres-restore-volume.mjs ]]; then
+  printf '%s\\n' "$2" >> "$TEST_VOLUME_LOG"
+  case "$2" in
+    preflight) echo '{}' ;;
+    prepare)
+      mkdir -p "$TEST_VOLUME_ROOT/data"
+      echo '{"mount":"'"$TEST_VOLUME_ROOT"'","data":"'"$TEST_VOLUME_ROOT"'/data"}' ;;
+    container-starting)
+      echo '{"containerName":"owned-volume-fixture","cidfile":"'"$TEST_VOLUME_ROOT"'/container.cid"}' ;;
+    cleanup)
+      if [[ "$TEST_STARTUP_SCENARIO" == loop-cleanup-unknown ]]; then exit 1; fi
+      rm -rf -- "$TEST_VOLUME_ROOT/data"
+      echo '{"cleaned":true}' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exec '${process.execPath}' "$@"
+`,
         { mode: 0o700 },
       );
       const log = join(dir, 'docker.log');
@@ -113,22 +138,29 @@ esac
       const env = deployLockEnvironment({
         PATH: `${bin}:${process.env.PATH}`,
         MAXIM_BACKUP_DIR: backup,
+        MAXIM_BACKUP_BACKING_FILESYSTEM_PATH: dir,
         MAXIM_BACKUP_PROFILE: profile,
         MAXIM_RESTORE_SMOKE_DATA_ROOT: data,
         MAXIM_RESTORE_SMOKE_MIN_FREE_BYTES: '1024',
         MAXIM_RESTORE_SMOKE_REQUIRE_DEDICATED_FILESYSTEM: '0',
+        MAXIM_RESTORE_SMOKE_MAXIM_LOOP_BYTES: loop && profile === 'maxim' ? '8000000000' : '0',
+        MAXIM_RESTORE_SMOKE_ERASER_LOOP_BYTES: loop && profile === 'eraser' ? '8000000000' : '0',
         MAXIM_BACKUP_POSTGRES_IMAGE: 'sha256:fixture',
         MAXIM_BACKUP_COMPOSE_FILE: join(dir, 'group-backup', 'docker-compose.yml'),
         TEST_DOCKER_LOG: log,
         TEST_TCP_PROBES: probes,
         TEST_STARTUP_SCENARIO: scenario,
-        TEST_SCHEMA_VALID: valid ? '1' : '0',
+        TEST_SCHEMA_VALID: valid || scenario === 'loop-cleanup-unknown' ? '1' : '0',
+        TEST_VOLUME_LOG: volumeLog,
+        TEST_VOLUME_ROOT: volumeRoot,
       });
       const result = spawnSync('bash', [script], { env, encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status === 0, valid, result.stderr);
       assert.equal(existsSync(`${dump}.restore-verified.json`), valid);
       assert.deepEqual(
-        readdirSync(profile === 'eraser' && !foreignChecksum ? join(data, 'eraser') : data),
+        readdirSync(
+          profile === 'eraser' && !foreignChecksum && !loop ? join(data, 'eraser') : data,
+        ),
         [],
       );
       if (foreignChecksum) {
@@ -147,11 +179,20 @@ esac
         assert.doesNotMatch(operations, /^exec[^\n]*\s(?:createdb|pg_restore|psql)(?:\s|$)/mu);
       }
       assert.match(operations, /--network none --cpus 2 --memory 4g --pids-limit 128/u);
-      assert.ok(
-        operations.includes(
-          `rm -f ${profile === 'eraser' ? 'maxim-eraser' : 'maxim'}-postgres-restore-smoke-`,
-        ),
-      );
+      if (loop) {
+        assert.match(operations, /--cidfile .* --label maxim.restore.operation=/);
+        assert.doesNotMatch(operations, /^rm -f /m);
+        const actions = readFileSync(volumeLog, 'utf8').trim().split('\n');
+        assert.deepEqual(actions.slice(0, 3), ['preflight', 'prepare', 'container-starting']);
+        assert.ok(actions.includes('cleanup'));
+        assert.equal(existsSync(`${dump}.restore-verified.json`), scenario === 'loop-volume');
+      } else {
+        assert.ok(
+          operations.includes(
+            `rm -f ${profile === 'eraser' ? 'maxim-eraser' : 'maxim'}-postgres-restore-smoke-`,
+          ),
+        );
+      }
       if (profile === 'eraser') assert.match(operations, /exec -T eraser-postgres/);
       assert.doesNotMatch(
         operations,

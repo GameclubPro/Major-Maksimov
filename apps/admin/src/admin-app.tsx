@@ -44,6 +44,7 @@ export function AdminApp() {
   const [unlocked, setUnlocked] = useState(false);
   const [code, setCode] = useState('');
   const [verifiedAccessCode, setVerifiedAccessCode] = useState('');
+  const overviewAccessScope = useMemo(() => ({ denied: false }), [verifiedAccessCode]);
   const [view, setView] = useState<DeskView>('review');
   const [filter, setFilter] = useState<'all' | QueueStatus>('all');
   const [supportFilter, setSupportFilter] = useState<'all' | SupportStatus>('new');
@@ -518,7 +519,11 @@ export function AdminApp() {
       ) : view === 'retention' ? (
         <RetentionDeskPane accessCode={verifiedAccessCode} controls={retention} />
       ) : view === 'observations' ? (
-        <ObservabilityDesk accessCode={verifiedAccessCode} refreshToken={observationRefreshToken} />
+        <ObservabilityDesk
+          accessCode={verifiedAccessCode}
+          refreshToken={observationRefreshToken}
+          accessScope={overviewAccessScope}
+        />
       ) : (
         <DeleteDesk
           accessCode={verifiedAccessCode}
