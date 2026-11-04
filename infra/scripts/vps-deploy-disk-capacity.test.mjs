@@ -101,6 +101,7 @@ function runSelectedImageCapacityPreflight({
   adminImage = `maxim-admin:${targetSha}`,
   legacyImage = `maxim-miniapp-legacy:${targetSha}`,
   invalidLabelImage = '',
+  invalidReceiptImage = '',
   buildApi = services.some((service) => service.startsWith('api-')) ? 1 : 0,
   usedPercent = 79,
   minimumOverride,
@@ -132,6 +133,7 @@ API_SERVICES=("api-ingress")
 EXPECTED_DEPLOY_SHA="$EXPECTED_SHA"
 TARGET_SHA="$TARGET_SHA_VALUE"
 BUILD_API_IMAGE="$BUILD_API"
+RELEASE_STATE_DIR=/unused-test-state
 MAXIM_API_IMAGE="$API_IMAGE"
 MAXIM_MINIAPP_MAJOR_IMAGE="$MINIAPP_IMAGE"
 MAXIM_ADMIN_IMAGE="$ADMIN_IMAGE"
@@ -144,7 +146,9 @@ docker() {
   fi
   grep -Fxq -- "$image_ref" <<< "$LOCAL_IMAGES" || return 1
   if [[ "$3" == "--format" ]]; then
-    if [[ "$image_ref" == "$INVALID_LABEL_IMAGE" ]]; then
+    if [[ "$4" == "{{.Id}}" ]]; then
+      printf 'sha256:%064d\\n' 0
+    elif [[ "$image_ref" == "$INVALID_LABEL_IMAGE" ]]; then
       printf 'wrong-revision|false\\n'
     else
       printf '%s|true\\n' "$TARGET_SHA_VALUE"
@@ -156,8 +160,13 @@ df() {
   printf 'Filesystem 1-blocks Used Available Capacity Mounted on\\n'
   printf '/dev/fake 107374182400 1 %s %s%% /\\n' "$AVAILABLE_BYTES" "$USED_PERCENT"
 }
+node() {
+  [[ "$1" == infra/scripts/registry-preload-host.mjs && "$2" == verify ]]
+  [[ "$4" == "$TARGET_SHA_VALUE" && "$6" == sha256:* ]]
+  [[ "$5" != "$INVALID_RECEIPT_IMAGE" ]]
+}
 prepare_deploy_disk_capacity
-printf 'reuse-only=%s\\n' "$REUSE_PRELOADED_TARGET_IMAGES_ONLY"
+printf 'capacity-admitted\\n'
 `;
 
   return spawnSync('bash', ['-c', probe], {
@@ -170,6 +179,7 @@ printf 'reuse-only=%s\\n' "$REUSE_PRELOADED_TARGET_IMAGES_ONLY"
       BUILD_API: String(buildApi),
       EXPECTED_SHA: expectedSha,
       INVALID_LABEL_IMAGE: invalidLabelImage,
+      INVALID_RECEIPT_IMAGE: invalidReceiptImage,
       LEGACY_IMAGE: legacyImage,
       LOCAL_IMAGES: localImages.join('\n'),
       MINIAPP_IMAGE: miniappImage,
@@ -358,13 +368,13 @@ test('exact-SHA API image reuse enforces the same 10 GiB reserve as a build', ()
   assert.equal(below.status, 1);
   assert.match(below.stderr, /at least 10737418240 bytes are required/u);
   assert.match(below.stderr, /not bypassed by MAXIM_ALLOW_CRITICAL_DISK_DEPLOY/u);
-  assert.doesNotMatch(below.stdout, /reuse-only=1/u);
+  assert.doesNotMatch(below.stdout, /capacity-admitted/u);
   assert.equal(equal.status, 0, equal.stderr);
   assert.match(equal.stdout, /Reusing every selected exact immutable target image/u);
   assert.match(equal.stdout, /components=api\+static/u);
   assert.match(equal.stdout, /minimum-free=10737418240B/u);
   assert.match(equal.stdout, /mode=reuse/u);
-  assert.match(equal.stdout, /reuse-only=1/u);
+  assert.match(equal.stdout, /capacity-admitted/u);
   assert.match(equal.stderr, /CRITICAL: deploy host disk utilization is 95%/u);
 });
 
@@ -387,12 +397,12 @@ test('exact-SHA static image reuse still enforces the smaller 6 GiB reserve', ()
 
   assert.equal(below.status, 1);
   assert.match(below.stderr, /at least 6442450944 bytes are required/u);
-  assert.doesNotMatch(below.stdout, /reuse-only=1/u);
+  assert.doesNotMatch(below.stdout, /capacity-admitted/u);
   assert.equal(equal.status, 0, equal.stderr);
   assert.match(equal.stdout, /components=static/u);
   assert.match(equal.stdout, /minimum-free=6442450944B/u);
   assert.match(equal.stdout, /mode=reuse/u);
-  assert.match(equal.stdout, /reuse-only=1/u);
+  assert.match(equal.stdout, /capacity-admitted/u);
 });
 
 test('reuse reserve configuration may raise but never lower the component floor', () => {
@@ -425,7 +435,7 @@ test('reuse reserve configuration may raise but never lower the component floor'
   assert.match(raisedBelow.stderr, /at least 10737419264 bytes are required/u);
   assert.equal(raisedEqual.status, 0, raisedEqual.stderr);
   assert.match(raisedEqual.stdout, /minimum-free=10737419264B/u);
-  assert.match(raisedEqual.stdout, /reuse-only=1/u);
+  assert.match(raisedEqual.stdout, /capacity-admitted/u);
 });
 
 test('reuse capacity helper keeps exact decimal comparisons and rejects malformed thresholds', () => {
@@ -454,7 +464,7 @@ test('reuse capacity helper keeps exact decimal comparisons and rejects malforme
   );
 });
 
-test('missing selected images receive the component-aware floor', () => {
+test('missing selected images stop before runtime with no production build fallback', () => {
   const targetSha = 'b'.repeat(40);
   const mixedResult = runSelectedImageCapacityPreflight({
     availableBytes: apiMinimumFreeBytes - 1,
@@ -471,11 +481,11 @@ test('missing selected images receive the component-aware floor', () => {
   });
 
   assert.equal(mixedResult.status, 1);
-  assert.match(mixedResult.stderr, /requires a build: maxim-miniapp-major:/u);
-  assert.match(mixedResult.stderr, /at least 10737418240 bytes are required/u);
-  assert.equal(staticResult.status, 0, staticResult.stderr);
-  assert.match(staticResult.stdout, /components=static/u);
-  assert.match(staticResult.stdout, /reuse-only=0/u);
+  assert.match(mixedResult.stderr, /prepare and preload it from CI\/GHCR: maxim-miniapp-major:/u);
+  assert.match(mixedResult.stderr, /Release image coverage is incomplete/u);
+  assert.equal(staticResult.status, 1, staticResult.stderr);
+  assert.match(staticResult.stderr, /Release image coverage is incomplete/u);
+  assert.doesNotMatch(staticResult.stdout, /capacity-admitted/u);
 });
 
 test('wrong-SHA and unknown targets cannot bypass the API floor', () => {
@@ -499,10 +509,10 @@ test('wrong-SHA and unknown targets cannot bypass the API floor', () => {
 
   assert.equal(wrongShaResult.status, 1);
   assert.match(wrongShaResult.stderr, /non-target image ref/u);
-  assert.match(wrongShaResult.stderr, /at least 10737418240 bytes are required/u);
+  assert.match(wrongShaResult.stderr, /Release image coverage is incomplete/u);
   assert.equal(unknownResult.status, 1);
   assert.match(unknownResult.stderr, /unknown target: manual-unknown-static/u);
-  assert.match(unknownResult.stderr, /at least 10737418240 bytes are required/u);
+  assert.match(unknownResult.stderr, /Release image coverage is incomplete/u);
 });
 
 test('an exact-SHA tag with unverified release labels cannot bypass the API floor', () => {
@@ -518,7 +528,20 @@ test('an exact-SHA tag with unverified release labels cannot bypass the API floo
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unverified release labels/u);
-  assert.match(result.stderr, /at least 10737418240 bytes are required/u);
+  assert.match(result.stderr, /Release image coverage is incomplete/u);
+});
+
+test('missing registry receipts cannot authorize reuse from labels alone', () => {
+  const targetSha = 'f'.repeat(40);
+  const imageRef = `maxim-api:${targetSha}`;
+  const result = runSelectedImageCapacityPreflight({
+    availableBytes: apiMinimumFreeBytes,
+    expectedSha: targetSha,
+    localImages: [imageRef],
+    invalidReceiptImage: imageRef,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Release image coverage is incomplete/u);
 });
 
 test('runtime and scale builds run capacity checks before destructive work', () => {

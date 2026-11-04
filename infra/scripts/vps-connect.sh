@@ -95,7 +95,7 @@ Commands:
   eraser-webhook
   eraser-nginx [--apply]       Preview or apply only Lastik routes in the existing nginx site
   preload-ci-image <component> [git-ref]
-                              Stream a green CI exact-SHA MAXIM image to the VPS
+                              Pull a proven exact-SHA GHCR image into the VPS
   commercial-llm install|replace|upgrade-slots|enable|disable|stop [--apply]
   commercial-llm recover-cpu-quarantine <operation-uuid> [--apply <preview-sha256>]
   commercial-llm status|smoke|check-client|check-workstation|check-workstation-offline
@@ -1502,10 +1502,10 @@ deploy_main() {
         echo "MAXIM_DEPLOY_EMERGENCY_REASON is required with MAXIM_DEPLOY_EMERGENCY_BYPASS=1." >&2
         exit 2
       fi
-      echo "WARNING: bypassing the green-CI deploy gate: $MAXIM_DEPLOY_EMERGENCY_REASON" >&2
+      echo "Initial source gate exception: $MAXIM_DEPLOY_EMERGENCY_REASON. Registry delivery and the final production gate remain required." >&2
       ;;
     *)
-      node scripts/ci/assert-green.mjs "$expected_sha"
+      node scripts/ci/assert-green.mjs "$expected_sha" --purpose production || return
       ;;
   esac
 
@@ -1553,7 +1553,39 @@ deploy_main() {
   prepend_deploy_disk_floor_env remote_command
   prepend_deploy_ready_timeout_env remote_command
   maxim_prepend_git_ssh_transport remote_command "${MAXIM_DEPLOY_GIT_SSH_PORT:-default}"
+  if [[ " $* " != *' --plan '* ]]; then
+    prepare_registry_release_images "$branch" "$expected_sha" "$remote_command" || return
+    node scripts/ci/assert-green.mjs "$expected_sha" --purpose production || return
+  fi
   remote_exec "$remote_command"
+}
+
+prepare_registry_release_images() {
+  local branch="$1" expected_sha="$2" runtime_command="$3"
+  local sync_command plan_output plan_file component
+  local components=()
+  # FLAG: Synchronize through the existing guarded plan/re-exec path before using
+  # the new planner. Each SSH command must finish before its checkout may change.
+  sync_command="MAXIM_EXPECTED_DEPLOY_SHA=$(printf '%q' "$expected_sha") $(shell_quote_args ./infra/scripts/vps-pull-build-up.sh "$branch" --plan)"
+  if [[ "$branch" != main ]]; then
+    case "${MAXIM_ALLOW_NON_MAIN_DEPLOY:-0}" in
+      1|true|TRUE|yes|YES) sync_command="MAXIM_ALLOW_NON_MAIN_DEPLOY=1 $sync_command" ;;
+      *) echo 'Non-main image preparation requires the existing explicit deploy opt-in.' >&2; return 2 ;;
+    esac
+  fi
+  maxim_prepend_git_ssh_transport sync_command "${MAXIM_DEPLOY_GIT_SSH_PORT:-default}"
+  remote_exec "$sync_command" || return
+  plan_output="$(remote_exec "$runtime_command --image-plan")" || return
+  plan_file="$(mktemp /tmp/maxim-release-image-plan.XXXXXX)" || return
+  if ! printf '%s\n' "$plan_output" | node infra/scripts/registry-preload.mjs plan "$expected_sha" >"$plan_file"; then
+    rm -f "$plan_file"
+    return 1
+  fi
+  mapfile -t components <"$plan_file"
+  rm -f "$plan_file"
+  for component in "${components[@]}"; do
+    preload_ci_image "$component" "$expected_sha" || return
+  done
 }
 
 finalize_release_recovery() {
@@ -1656,229 +1688,49 @@ preload_ci_image() (
   local component="${1:-}"
   local ref="${2:-HEAD}"
   local artifact_component
-  local artifact_name
-  local artifact_run_id
-  local artifact_run_metadata
-  local archive_path
-  local archive_uncompressed_bytes
-  local checksum_path
-  local download_dir
   local exact_sha
-  local image_ref
-  local image_repository
-  local preload_min_remaining_free_bytes="4294967296"
-  local remote_load_command
-  local remote_load_script
-  local repository
-  local args=()
+  local request_file
+  local preload_command
+  local remote_script
 
   case "$component" in
-    api|api-shared)
-      artifact_component="api"
-      image_repository="maxim-api"
-      ;;
-    miniapp|miniapp-major-static)
-      artifact_component="miniapp"
-      image_repository="maxim-miniapp-major"
-      ;;
-    admin|admin-static)
-      artifact_component="admin"
-      image_repository="maxim-admin"
-      ;;
-    eraser)
-      artifact_component="eraser"
-      image_repository="maxim-eraser"
-      ;;
-    *)
-      echo "Component must be one of: api, miniapp, admin, eraser." >&2
-      exit 2
-      ;;
+    api|api-shared) artifact_component="api" ;;
+    miniapp|miniapp-major-static) artifact_component="miniapp" ;;
+    admin|admin-static) artifact_component="admin" ;;
+    eraser) artifact_component="eraser" ;;
+    *) echo "Component must be one of: api, miniapp, admin, eraser." >&2; exit 2 ;;
   esac
-
   if ! command -v gh >/dev/null 2>&1; then
     echo "gh not found" >&2
     exit 1
   fi
-  if ! command -v sha256sum >/dev/null 2>&1; then
-    echo "sha256sum not found" >&2
-    exit 1
-  fi
-  if ! command -v gzip >/dev/null 2>&1; then
-    echo "gzip not found" >&2
-    exit 1
-  fi
   if ! exact_sha="$(git rev-parse --verify --end-of-options "${ref}^{commit}" 2>/dev/null)" ||
     [[ ! "$exact_sha" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "Cannot resolve CI image ref to an exact commit: $ref" >&2
+    echo "Cannot resolve registry image ref to an exact commit: $ref" >&2
     exit 2
   fi
+  request_file="$(mktemp /tmp/maxim-registry-preload.XXXXXX)" || exit $?
+  trap 'rm -f "$request_file"' EXIT
+  # FLAG: The caller invokes this function in an OR-list, which disables errexit
+  # inside the subshell. Proof and pull failures must explicitly stop delivery.
+  node infra/scripts/registry-preload.mjs "$artifact_component" "$exact_sha" --prepare-missing >"$request_file" || exit $?
 
-  node scripts/ci/assert-green.mjs "$exact_sha"
-  repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-  if [[ ! "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-    echo "Could not resolve the GitHub repository for the CI image." >&2
-    exit 1
-  fi
-
-  artifact_name="maxim-image-${artifact_component}-${exact_sha}"
-  artifact_run_id="$(
-    gh api --method GET "repos/${repository}/actions/artifacts" \
-      -f "name=${artifact_name}" \
-      -f per_page=100 \
-      --jq ".artifacts | map(select(.expired == false and .workflow_run.head_sha == \"${exact_sha}\")) | sort_by(.created_at) | last | .workflow_run.id // empty"
-  )"
-  if [[ ! "$artifact_run_id" =~ ^[0-9]+$ ]]; then
-    echo "No unexpired exact-SHA CI image artifact found: $artifact_name" >&2
-    exit 1
-  fi
-  artifact_run_metadata="$(
-    gh run view "$artifact_run_id" \
-      --repo "$repository" \
-      --json workflowName,headSha,headBranch,conclusion,event \
-      --jq '[.workflowName, .headSha, .headBranch, .conclusion, .event] | join("|")'
-  )"
-  if [[ "$artifact_run_metadata" != "CI|${exact_sha}|main|success|push" ]]; then
-    echo "Image artifact did not come from the successful main CI push: $artifact_run_metadata" >&2
-    exit 1
-  fi
-
-  download_dir="$(mktemp -d /tmp/maxim-ci-image.XXXXXX)"
-  # Also invoked by the EXIT trap when preload exits before explicit cleanup.
-  cleanup_download_dir() {
-    if [[ "$download_dir" == /tmp/maxim-ci-image.* && -d "$download_dir" ]]; then
-      find "$download_dir" -mindepth 1 -delete
-      rmdir "$download_dir"
-    fi
-  }
-  trap cleanup_download_dir EXIT
-
-  gh run download "$artifact_run_id" \
-    --repo "$repository" \
-    --name "$artifact_name" \
-    --dir "$download_dir"
-  archive_path="$download_dir/maxim-image.tar.gz"
-  checksum_path="$download_dir/maxim-image.tar.gz.sha256"
-  if [[ ! -f "$archive_path" || ! -f "$checksum_path" ]]; then
-    echo "CI image artifact is incomplete: $artifact_name" >&2
-    exit 1
-  fi
-  (cd "$download_dir" && sha256sum --check "$(basename "$checksum_path")")
-  archive_uncompressed_bytes="$(gzip -dc "$archive_path" | wc -c)"
-  archive_uncompressed_bytes="${archive_uncompressed_bytes//[[:space:]]/}"
-  if [[ ! "$archive_uncompressed_bytes" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Could not determine the uncompressed CI image archive size: $artifact_name" >&2
-    exit 1
-  fi
-
-  image_ref="${image_repository}:${exact_sha}"
-  maybe_allow_ssh_current_ip
-  mapfile -d '' -t args < <(ssh_args)
-  echo "Streaming verified CI image to $MAXIM_VPS_SSH_TARGET: $image_ref"
-  remote_load_script=$(cat <<'REMOTE'
+  remote_script=$(cat <<'REMOTE'
 set -euo pipefail
 source infra/scripts/lib/deploy-lock.sh
 acquire_deploy_lock
-if [[ ! "$MAXIM_PRELOAD_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "Invalid exact SHA for CI image preload." >&2
+require_deploy_lock
+if [[ "$(git rev-parse HEAD)" != "$MAXIM_PRELOAD_EXPECTED_SHA" ]] || ! git diff --quiet || ! git diff --cached --quiet; then
+  echo 'Registry preload needs the clean exact reviewed controller; synchronize it with deploy --plan first.' >&2
   exit 1
 fi
-case "$MAXIM_PRELOAD_IMAGE_REF" in
-  "maxim-api:${MAXIM_PRELOAD_EXPECTED_SHA}"|\
-  "maxim-miniapp-major:${MAXIM_PRELOAD_EXPECTED_SHA}"|\
-  "maxim-admin:${MAXIM_PRELOAD_EXPECTED_SHA}"|\
-  "maxim-eraser:${MAXIM_PRELOAD_EXPECTED_SHA}")
-    ;;
-  *)
-    echo "Refusing unsafe CI image preload target: $MAXIM_PRELOAD_IMAGE_REF" >&2
-    exit 1
-    ;;
-esac
-if [[ ! "$MAXIM_PRELOAD_ARCHIVE_BYTES" =~ ^[1-9][0-9]*$ ]] ||
-   [[ ! "$MAXIM_PRELOAD_MIN_REMAINING_FREE_BYTES" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Invalid CI image preload capacity values." >&2
-  exit 1
-fi
-disk_path="/var/lib/docker"
-if [[ ! -d "$disk_path" ]]; then
-  disk_path="/"
-fi
-available_bytes="$(df -P -B1 "$disk_path" | awk 'NR == 2 { print $4 }')"
-if [[ ! "$available_bytes" =~ ^[0-9]+$ ]]; then
-  echo "Failed to read free space for CI image preload: $disk_path" >&2
-  exit 1
-fi
-required_bytes=$((MAXIM_PRELOAD_ARCHIVE_BYTES + MAXIM_PRELOAD_MIN_REMAINING_FREE_BYTES))
-echo "CI image preload disk preflight: path=$disk_path available=${available_bytes}B archive=${MAXIM_PRELOAD_ARCHIVE_BYTES}B reserve=${MAXIM_PRELOAD_MIN_REMAINING_FREE_BYTES}B"
-if (( available_bytes < required_bytes )); then
-  echo "Refusing CI image preload: ${available_bytes}B available, ${required_bytes}B required." >&2
-  exit 1
-fi
-previous_image_id="$(
-  docker image inspect --format '{{.Id}}' "$MAXIM_PRELOAD_IMAGE_REF" 2>/dev/null || true
-)"
-if [[ -n "$previous_image_id" && ! "$previous_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "Could not verify the existing CI image preload target: $MAXIM_PRELOAD_IMAGE_REF" >&2
-  exit 1
-fi
-docker image load >/dev/null
-loaded_image_id="$(
-  docker image inspect --format '{{.Id}}' "$MAXIM_PRELOAD_IMAGE_REF" 2>/dev/null || true
-)"
-if [[ ! "$loaded_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "CI image archive did not load the expected target: $MAXIM_PRELOAD_IMAGE_REF" >&2
-  exit 1
-fi
-
-cleanup_invalid_loaded_tag() {
-  local current_image_id
-
-  current_image_id="$(
-    docker image inspect --format '{{.Id}}' "$MAXIM_PRELOAD_IMAGE_REF" 2>/dev/null || true
-  )"
-  if [[ "$current_image_id" != "$loaded_image_id" ||
-        "$loaded_image_id" == "$previous_image_id" ]]; then
-    echo "Leaving the preload target untouched because it is not a newly loaded invalid tag: $MAXIM_PRELOAD_IMAGE_REF" >&2
-    return 0
-  fi
-
-  echo "Removing newly loaded invalid MAXIM tag: $MAXIM_PRELOAD_IMAGE_REF" >&2
-  docker image rm "$MAXIM_PRELOAD_IMAGE_REF" >/dev/null
-  if [[ -n "$previous_image_id" ]]; then
-    docker image tag "$previous_image_id" "$MAXIM_PRELOAD_IMAGE_REF"
-    echo "Restored previous MAXIM tag after rejected preload: $MAXIM_PRELOAD_IMAGE_REF" >&2
-  fi
-}
-
-labels="$(
-  docker image inspect \
-    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.maxim.release-protected"}}' \
-    "$MAXIM_PRELOAD_IMAGE_REF" 2>/dev/null || true
-)"
-if [[ "$labels" != "${MAXIM_PRELOAD_EXPECTED_SHA}|true" ]]; then
-  echo "Loaded image metadata does not match the exact reviewed commit: $MAXIM_PRELOAD_IMAGE_REF ($labels)" >&2
-  if ! cleanup_invalid_loaded_tag; then
-    echo "Failed to remove the newly loaded invalid MAXIM tag: $MAXIM_PRELOAD_IMAGE_REF" >&2
-  fi
-  exit 1
-fi
+node infra/scripts/registry-preload-host.mjs pull "$MAXIM_PRELOAD_COMPONENT" "$MAXIM_PRELOAD_EXPECTED_SHA"
 REMOTE
   )
-  printf -v remote_load_command \
-    'cd %q && MAXIM_PRELOAD_ARCHIVE_BYTES=%q MAXIM_PRELOAD_MIN_REMAINING_FREE_BYTES=%q MAXIM_PRELOAD_IMAGE_REF=%q MAXIM_PRELOAD_EXPECTED_SHA=%q bash -c %q' \
-    "$MAXIM_VPS_REPO_DIR" \
-    "$archive_uncompressed_bytes" \
-    "$preload_min_remaining_free_bytes" \
-    "$image_ref" \
-    "$exact_sha" \
-    "$remote_load_script"
-  # The command is composed and shell-escaped locally before the remote shell parses it.
-  # shellcheck disable=SC2029
-  ssh "${args[@]}" "$MAXIM_VPS_SSH_TARGET" \
-    "bash -lc $(printf '%q' "$remote_load_command")" <"$archive_path"
-
-  cleanup_download_dir
+  preload_command="$(shell_quote_args env "MAXIM_PRELOAD_COMPONENT=$artifact_component" "MAXIM_PRELOAD_EXPECTED_SHA=$exact_sha" bash -c "$remote_script")" || exit $?
+  remote_exec "$preload_command" <"$request_file" || exit $?
+  rm -f "$request_file" || exit $?
   trap - EXIT
-  echo "Preloaded immutable MAXIM image: $image_ref"
 )
 
 deploy_scale() {

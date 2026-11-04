@@ -25,6 +25,7 @@ ${body}`,
       helper,
     ],
     {
+      cwd: root,
       encoding: 'utf8',
       env: {
         ...process.env,
@@ -100,13 +101,84 @@ test('ordinary deploy retains exact-SHA CI before selecting remote transport', (
   const wrapper = readFileSync(resolve(root, 'infra/scripts/vps-connect.sh'), 'utf8');
   const deploy = wrapper.slice(
     wrapper.indexOf('deploy_main() {'),
-    wrapper.indexOf('\nfinalize_release_recovery()'),
+    wrapper.indexOf('\nprepare_registry_release_images()'),
   );
   assert.ok(
     deploy.indexOf('node scripts/ci/assert-green.mjs') <
       deploy.indexOf('maxim_prepend_git_ssh_transport'),
   );
   assert.match(deploy, /MAXIM_EXPECTED_DEPLOY_SHA/u);
+  assert.match(deploy, /assert-green\.mjs "\$expected_sha" --purpose production/u);
   assert.match(deploy, /maxim_prepend_git_ssh_transport remote_command/u);
+  assert.ok(
+    deploy.indexOf('prepare_registry_release_images "$branch" "$expected_sha" "$remote_command"') <
+      deploy.lastIndexOf('remote_exec "$remote_command"'),
+  );
   assert.equal(deploy.match(/remote_exec /gu)?.length, 1);
+});
+
+function releasePreparationProbe(env = {}) {
+  const wrapper = readFileSync(resolve(root, 'infra/scripts/vps-connect.sh'), 'utf8');
+  const preparation = wrapper.slice(
+    wrapper.indexOf('prepare_registry_release_images() {'),
+    wrapper.indexOf('\nfinalize_release_recovery()'),
+  );
+  const quoteStart = wrapper.indexOf('shell_quote_args() {');
+  const quoteEnd = wrapper.indexOf('\n}\n', quoteStart) + 2;
+  assert.ok(quoteStart >= 0 && quoteEnd > quoteStart);
+  return probe(
+    `${wrapper.slice(quoteStart, quoteEnd)}
+${preparation}
+MAXIM_DEPLOY_GIT_SSH_PORT=443
+remote_exec() {
+  [[ "$1" == *'maxim_configure_git_ssh_transport 443 &&'* ]] || return 98
+  if [[ "$1" == *' --image-plan'* ]]; then
+    printf 'SSH|image-plan|443\\n' >&2
+    printf 'MAXIM_IMAGE_PLAN={"schemaVersion":1,"sourceSha":"%s","components":["api-shared","admin-static"]}\\n' "$TEST_PLAN_SHA"
+  elif [[ "$1" == *' --plan'* ]]; then
+    printf 'SSH|sync|443\\n' >&2
+  else
+    printf 'SSH|runtime|443\\n' >&2
+  fi
+}
+preload_ci_image() {
+  [[ "$2" == "$TEST_RELEASE_SHA" ]] || return 97
+  printf 'PULL|%s|%s\\n' "$1" "$2" >&2
+  [[ "$1" != "$TEST_REJECT_COMPONENT" ]] || return 44
+}
+runtime_command="MAXIM_EXPECTED_DEPLOY_SHA=$TEST_RELEASE_SHA ./infra/scripts/vps-pull-build-up.sh main --auto"
+maxim_prepend_git_ssh_transport runtime_command 443
+prepare_registry_release_images main "$TEST_RELEASE_SHA" "$runtime_command"
+remote_exec "$runtime_command"`,
+    {
+      TEST_RELEASE_SHA: 'a'.repeat(40),
+      TEST_PLAN_SHA: 'a'.repeat(40),
+      TEST_REJECT_COMPONENT: '',
+      ...env,
+    },
+  );
+}
+
+test('the selected transport spans synchronized planning, immutable image preload and the final executor in order', () => {
+  const result = releasePreparationProbe();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stderr.trim().split('\n'), [
+    'SSH|sync|443',
+    'SSH|image-plan|443',
+    `PULL|api-shared|${'a'.repeat(40)}`,
+    `PULL|admin-static|${'a'.repeat(40)}`,
+    'SSH|runtime|443',
+  ]);
+  assert.equal(result.stdout, '');
+});
+
+test('a stale image plan or failed preload prevents the final runtime SSH command', () => {
+  const stale = releasePreparationProbe({ TEST_PLAN_SHA: 'b'.repeat(40) });
+  assert.equal(stale.status, 1, stale.stderr);
+  assert.match(stale.stderr, /source or components differ/u);
+  assert.doesNotMatch(stale.stderr, /PULL\||SSH\|runtime/u);
+  const failed = releasePreparationProbe({ TEST_REJECT_COMPONENT: 'admin-static' });
+  assert.equal(failed.status, 44, failed.stderr);
+  assert.match(failed.stderr, /PULL\|admin-static/u);
+  assert.doesNotMatch(failed.stderr, /SSH\|runtime/u);
 });

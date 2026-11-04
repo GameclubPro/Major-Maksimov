@@ -79,12 +79,20 @@ function assertBoundedSanctionsPlan(
         (node['Rows Removed by Filter'] ?? 0) +
         (node['Rows Removed by Index Recheck'] ?? 0);
       expect(perLoop).toBeLessThanOrEqual(alias === 'later' ? 8 : 64);
+      // FLAG: Only compact source history may repeat a tiny table scan. Bound
+      // each iteration and its loop count; retained/cleared history stays indexed.
+      const compactSourceScan =
+        sourceHistoryPhase === undefined &&
+        alias === 'original' &&
+        node['Relation Name'] === 'moderation_events' &&
+        node['Node Type'] === 'Seq Scan';
+      if (compactSourceScan) expect(node['Actual Loops']).toBeLessThanOrEqual(candidateCount);
       expect(perLoop * node['Actual Loops']).toBeLessThanOrEqual(
-        alias === 'later' ? candidateCount * 8 : 64,
+        alias === 'later' ? candidateCount * 8 : compactSourceScan ? candidateCount * 64 : 64,
       );
       // FLAG: Point-lookup buffers vary with B-tree depth and visibility work.
       // Grant a per-candidate budget only to bounded source index probes;
-      // compact hashed source scans retain the ordinary row/block ceilings.
+      // repeated compact source scans retain the fixed physical-buffer ceiling.
       const sourcePointProbe =
         alias === 'original' &&
         ['Index Scan', 'Index Only Scan'].includes(node['Node Type']) &&
@@ -155,6 +163,164 @@ function assertBoundedSanctionsPlan(
     );
   }
 }
+
+describe('Sanctions query plan work bounds', () => {
+  const candidateCount = 32;
+  const createPlan = ({
+    source = {},
+    candidate = {},
+    successor = {},
+    rootBlocks = 169,
+  }: {
+    source?: Partial<SanctionsPlanNode>;
+    candidate?: Partial<SanctionsPlanNode>;
+    successor?: Partial<SanctionsPlanNode>;
+    rootBlocks?: number;
+  } = {}): SanctionsPlan => [
+    {
+      'QUERY PLAN': [
+        {
+          Plan: {
+            'Node Type': 'Nested Loop',
+            'Actual Rows': candidateCount,
+            'Actual Loops': 1,
+            'Shared Hit Blocks': rootBlocks,
+            Plans: [
+              {
+                'Node Type': 'Bitmap Heap Scan',
+                'Relation Name': 'chat_moderation_feed_items',
+                Alias: 'feed_1',
+                'Actual Rows': candidateCount,
+                'Actual Loops': 1,
+                'Shared Hit Blocks': 9,
+                ...candidate,
+              },
+              {
+                'Node Type': 'Seq Scan',
+                'Relation Name': 'moderation_events',
+                Alias: 'original',
+                'Actual Rows': 1,
+                'Rows Removed by Filter': 37,
+                'Actual Loops': candidateCount,
+                'Shared Hit Blocks': 64,
+                ...source,
+              },
+              {
+                'Node Type': 'Index Scan',
+                'Relation Name': 'chat_moderation_feed_items',
+                'Index Name': 'chat_moderation_feed_sanction_user_state_idx',
+                Alias: 'later',
+                'Actual Rows': 0,
+                'Actual Loops': candidateCount,
+                'Shared Hit Blocks': 96,
+                ...successor,
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ];
+
+  it('accepts the observed compact 38-row source scan repeated for 32 candidates', () => {
+    expect(() => assertBoundedSanctionsPlan(createPlan(), candidateCount)).not.toThrow();
+  });
+
+  it('accepts the compact per-iteration and aggregate row boundaries', () => {
+    expect(() =>
+      assertBoundedSanctionsPlan(
+        createPlan({ source: { 'Rows Removed by Filter': 63, 'Shared Hit Blocks': 128 } }),
+        candidateCount,
+      ),
+    ).not.toThrow();
+  });
+
+  it.each([
+    {
+      name: 'a compact scan examining 65 rows in one iteration',
+      source: { 'Rows Removed by Filter': 64, 'Actual Loops': 1 },
+    },
+    { name: 'more compact source loops than candidates', source: { 'Actual Loops': 33 } },
+    { name: 'compact source buffers above 128', source: { 'Shared Hit Blocks': 129 } },
+    { name: 'root buffers above 512', rootBlocks: 513 },
+    { name: 'the compact allowance on a different relation', source: { 'Relation Name': 'other' } },
+    { name: 'the compact allowance on an index scan', source: { 'Node Type': 'Index Scan' } },
+    { name: 'candidate per-iteration work above 64', candidate: { 'Actual Rows': 65 } },
+    { name: 'candidate aggregate work above 64', candidate: { 'Actual Loops': 3 } },
+    {
+      name: 'successor per-iteration work above 8',
+      successor: { 'Actual Rows': 9, 'Actual Loops': 1 },
+    },
+    {
+      name: 'successor aggregate work above its candidate budget',
+      successor: { 'Actual Rows': 8, 'Actual Loops': 33 },
+    },
+    {
+      name: 'successor buffers above its candidate budget',
+      successor: { 'Shared Hit Blocks': 257 },
+      rootBlocks: 512,
+    },
+    {
+      name: 'source point-probe buffers above its candidate budget',
+      source: {
+        'Node Type': 'Index Only Scan',
+        'Rows Removed by Filter': 0,
+        'Shared Hit Blocks': 257,
+      },
+      rootBlocks: 512,
+    },
+  ])('rejects $name', ({ name: _name, ...overrides }) => {
+    expect(() => assertBoundedSanctionsPlan(createPlan(overrides), candidateCount)).toThrow(
+      'Sanctions registry exceeded work bounds',
+    );
+  });
+
+  describe.each(['retained', 'cleared'] as const)('%s source history', (phase) => {
+    const pointProbe: Partial<SanctionsPlanNode> = {
+      'Node Type': 'Index Only Scan',
+      'Index Name': 'moderation_events_pkey',
+      'Index Cond': '((id >= feed.id) AND (id <= feed.id))',
+      'Rows Removed by Filter': 0,
+      'Shared Hit Blocks': 128,
+    };
+
+    it('accepts the closed primary-key probe once per candidate', () => {
+      expect(() =>
+        assertBoundedSanctionsPlan(createPlan({ source: pointProbe }), candidateCount, phase),
+      ).not.toThrow();
+    });
+
+    it('rejects even a one-row sequential source scan', () => {
+      expect(() =>
+        assertBoundedSanctionsPlan(
+          createPlan({ source: { 'Rows Removed by Filter': 0 } }),
+          candidateCount,
+          phase,
+        ),
+      ).toThrow('Sanctions registry exceeded work bounds');
+    });
+
+    it('rejects an open source key range', () => {
+      expect(() =>
+        assertBoundedSanctionsPlan(
+          createPlan({ source: { ...pointProbe, 'Index Cond': '(id >= feed.id)' } }),
+          candidateCount,
+          phase,
+        ),
+      ).toThrow('Sanctions registry exceeded work bounds');
+    });
+
+    it('requires exactly one source probe per candidate', () => {
+      expect(() =>
+        assertBoundedSanctionsPlan(
+          createPlan({ source: { ...pointProbe, 'Actual Loops': candidateCount - 1 } }),
+          candidateCount,
+          phase,
+        ),
+      ).toThrow('Sanctions registry exceeded work bounds');
+    });
+  });
+});
 
 describePostgres('PostgreSQL sanctions registry and retention', () => {
   let prisma: PrismaClient;

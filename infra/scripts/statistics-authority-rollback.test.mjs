@@ -219,12 +219,15 @@ test('both API rollback paths enforce the authority lifecycle floor before any r
   }
 });
 
-test('normal API deploy verifies lifecycle compatibility before building or applying migrations', () => {
+test('normal API deploy verifies lifecycle compatibility before accepting the image or applying migrations', () => {
   const source = read('infra/scripts/vps-pull-build-up.sh');
   const call = `${marker} "$TARGET_SHA"`;
   const position = source.indexOf(call);
   assert.ok(position > source.indexOf('TARGET_SHA="$(git rev-parse HEAD)"'));
-  assert.ok(position < source.indexOf('\n    maxim_topology_build_shared_api_image'));
+  const imageAdmission = source.indexOf('\n  require_preloaded_target_image "$MAXIM_API_IMAGE"');
+  const runtimeTransition = source.indexOf('\n  begin_release_runtime_transition', imageAdmission);
+  assert.ok(imageAdmission > position && runtimeTransition > imageAdmission);
+  assert.doesNotMatch(source, /maxim_topology_build_shared_api_image|docker compose[^\n]* build/u);
   assert.ok(position < source.indexOf('\n  if ! run_migrations; then'));
   const before = source.lastIndexOf('if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then', position);
   const end = source.indexOf('\nfi\n', position);
