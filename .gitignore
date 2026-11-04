@@ -42,6 +42,7 @@ npm-debug.log*
 .codex
 .codex/
 infra/data/
+/.release-executors/
 autorinok-users.txt
 rostov-*
 TEST_COMMIT.txt
