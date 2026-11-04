@@ -13,8 +13,9 @@
   urgent incidents and independent read-only monitoring may overlap it.
 - During an incident, name the next user-visible recovery result and its blocking gate. Defer
   unrelated refactoring and diagnostics; use the [incident delivery rules](docs/development-reliability-plan.md#incident-delivery).
-- Keep `main` clean at the verified production SHA; use task worktrees and fast-forward
-  after release. Preserve inherited work; stage owned paths. Never mutate an active wrapper's checkout.
+- Keep `main` clean; use task worktrees. Fast-forward after runtime acceptance, or green
+  merged docs/tests/tooling with no cumulative deploy impact. Preserve inherited work; stage
+  owned paths. Never mutate an active wrapper's checkout.
 - Continue authorized reversible work without repeated permission requests. Approval for one
   destructive recovery does not authorize another source or a fleet-wide operation.
 

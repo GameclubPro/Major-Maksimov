@@ -34,16 +34,18 @@ before enabling capture or deletion. It never shares the critical moderation del
    ./infra/scripts/vps-connect.sh doctor
    ```
 
-4. Deploy the default production set:
+4. Deploy the manifest-selected production components:
 
    ```bash
-   ./infra/scripts/vps-connect.sh deploy main
+   ./infra/scripts/vps-connect.sh deploy main --auto
    ```
 
    The local wrapper requires successful `Required` and `Analyze JavaScript and TypeScript` checks
-   from GitHub Actions for the exact local commit and requires the synchronized VPS `HEAD` to match that SHA. The default set builds the shared API
-   image once, applies Prisma migrations, builds both active static components, force-recreates the
-   application containers, and runs strict health/smoke checks before recording the release.
+   from trusted main-push GitHub Actions for the exact selected local `main` SHA and requires the
+   synchronized VPS `HEAD` to match. It prepares and preloads the selected CI-tested GHCR images,
+   applies Prisma migrations only when API is selected, recreates the selected application
+   containers, and runs strict health/smoke checks before recording the release. Follow the
+   [current deploy and preload procedure](development/production-operations-reference.md#deploy-and-rollback).
 
 5. Let the ingress reconciler create MAX webhook subscriptions from `MAX_WEBHOOK_BASE_URL`. The
    canonical webhook shape is
@@ -346,8 +348,9 @@ explicit broad-staging option. All root/scoped `AGENTS.md` files are excluded fr
 
 The routine local deploy path resolves the requested branch to a full SHA and queries GitHub for
 successful `Required` and `Analyze JavaScript and TypeScript` checks from GitHub Actions on that exact commit. The same SHA is passed to the VPS, which refuses
-the rollout if its post-sync `HEAD` differs. An emergency bypass is not routine: it requires both
-`MAXIM_DEPLOY_EMERGENCY_BYPASS=1` and a non-empty `MAXIM_DEPLOY_EMERGENCY_REASON`.
+the rollout if its post-sync `HEAD` differs. The legacy initial source-gate exception requires both
+`MAXIM_DEPLOY_EMERGENCY_BYPASS=1` and a non-empty `MAXIM_DEPLOY_EMERGENCY_REASON`; registry evidence
+and the final production gate remain required.
 
 ## Focused Deployment
 
@@ -358,10 +361,10 @@ the rollout if its post-sync `HEAD` differs. An emergency bypass is not routine:
 # Deploy every component selected since its recorded source SHA
 ./infra/scripts/vps-connect.sh deploy main --auto
 
-# Canonical mini app only
+# Request the canonical mini app
 ./infra/scripts/vps-connect.sh deploy main miniapp-major-static
 
-# Closed Safety Desk UI only
+# Request the closed Safety Desk UI
 ./infra/scripts/vps-connect.sh deploy main admin-static
 
 # Any API role request expands to every shared-image API role
@@ -370,9 +373,12 @@ the rollout if its post-sync `HEAD` differs. An emergency bypass is not routine:
 
 Contract changes normally require all API roles plus affected public/admin clients. Do not deploy
 `miniapp-static` for ordinary Major work.
+Explicit service arguments are not exclusion lists: cumulative manifest reconciliation can also
+select pending components. Inspect `--plan` and follow the
+[component-selection rules](development/production-operations-reference.md#deploy-and-rollback).
 
-Any API role expands to all fourteen roles. Static-only `miniapp-major-static` or `admin-static`
-deploys do not start the API build or run Prisma migrations. The deploy compares each active
+Any API role expands to all fourteen roles and both native auxiliaries. A genuinely static-only
+deploy reuses its verified image without running API migrations. The deploy compares each active
 component's recorded source SHA with the target and adds unreleased affected components, so an
 explicit service list cannot silently leave known component impact behind.
 
@@ -787,10 +793,11 @@ deliberately changes the rollout control.
 
 ## Release Inventory
 
-Active release components are `api-shared`, `miniapp-major-static`, and `admin-static`. Successful
-builds use full-SHA image refs (`maxim-api`, `maxim-miniapp-major`, or `maxim-admin` plus the full Git
-SHA tag). The default inventory under `/var/lib/maxim-deploy` stores each component's source SHA,
-image ref, and exact Docker image ID, together with applied migrations and successful smokes.
+Mandatory release components are `api-shared`, `miniapp-major-static`, and `admin-static`;
+installed Lastik adds the optional `eraser` component. Their immutable local image refs use
+`maxim-api`, `maxim-miniapp-major`, `maxim-admin`, and `maxim-eraser` with the full source SHA tag.
+The inventory under `/var/lib/maxim-deploy` stores each component's source SHA, image ref, exact
+Docker image ID and registry provenance, together with applied migrations and successful smokes.
 
 Unchanged component records carry forward into the next manifest. `current.json` is replaced
 atomically only after every selected service runs the expected image ID and all selected strict
@@ -897,8 +904,8 @@ The helper holds the deploy lock, validates every retained manifest, preserves i
 those manifests and every container, and removes only old unused immutable MAXIM release refs. It
 does not prune shared BuildKit cache, generic images, containers, or volumes.
 
-The shared component-aware preflight requires 10 GiB free for a clean API build and 6 GiB for a
-static-only build; mixed builds use 10 GiB. The API floor is 10,737,418,240 bytes. Percentage
+The shared component-aware preflight preserves 10 GiB free for an API rollout and 6 GiB for a
+static-only rollout; mixed releases use 10 GiB. The API floor is 10,737,418,240 bytes. Percentage
 thresholds report warning or critical storage pressure but do not block a sufficient absolute
 reserve. When every selected local image ref exactly matches the verified target commit
 (`maxim-api:<sha>`, `maxim-miniapp-major:<sha>`, and/or `maxim-admin:<sha>`), the normal deploy uses
@@ -921,22 +928,9 @@ attempt; old API roles stay live and failed receipts/partial indexes are preserv
 The reserve is sampled, not a guarantee against disk exhaustion between checks.
 See [multibot preparation](operations/runbooks/multibot-reliability-rollout.md).
 
-When the VPS cannot satisfy the build floor, wait for green CI on the exact main commit and stream
-only the required immutable MAXIM images from the one-day CI artifacts before the normal deploy:
-
-```bash
-DEPLOY_SHA="$(git rev-parse HEAD)"
-./infra/scripts/vps-connect.sh preload-ci-image api "$DEPLOY_SHA"
-# Add only when selected by the impact plan:
-./infra/scripts/vps-connect.sh preload-ci-image miniapp "$DEPLOY_SHA"
-./infra/scripts/vps-connect.sh preload-ci-image admin "$DEPLOY_SHA"
-./infra/scripts/vps-connect.sh deploy main --auto
-```
-
-The preload helper requires the successful `CI` push run and production-required checks for the
-same full SHA, verifies the artifact checksum and embedded image labels, and streams the archive
-directly to `docker image load`. The remote load holds the shared deploy lock and requires enough
-free space for the uncompressed archive plus a fixed 4 GiB reserve before writing Docker layers. It
-does not build, prune, stop, or recreate any service. The normal deploy revalidates the exact-SHA
-image labels, verifies the synchronized Git SHA, runs migrations when API is selected, recreates
-only the selected MAXIM components, performs strict smokes, and records the release manifest.
+Normal deploy prepares missing exact-main images in CI and preloads verified GHCR digests under
+the shared deploy lock before runtime changes. Pull admission requires the component rollout
+reserve plus twice the tested image size; preload does not bypass that reserve. The
+[deploy and preload procedure](development/production-operations-reference.md#deploy-and-rollback)
+owns the commands and admission gates; [CI image delivery](development/ci-image-delivery.md)
+defines exact-SHA CI, publication, provenance/SBOM and separate digest/image-ID evidence.
