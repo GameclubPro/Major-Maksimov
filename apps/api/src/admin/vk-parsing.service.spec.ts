@@ -19,6 +19,8 @@ import {
 } from './vk-autopublish-policy';
 import { computeVkParsingPostContentHash } from './vk-parsing-content';
 import { VkParsingFeedService } from './vk-parsing-feed.service';
+import { VkApiRequestError } from './vk-parsing-errors';
+import { VkParsingRateLimitService } from './vk-parsing-rate-limit.service';
 import { VkParsingService } from './vk-parsing.service';
 import { VkParsingOwnershipService } from './vk-parsing-ownership.service';
 import { VkPublishService } from './vk-publish.service';
@@ -283,8 +285,14 @@ describe('VkParsingService', () => {
       sendMessageImmediateWithResolvedLink: jest.fn(),
       getChatSnapshot: jest.fn(),
     };
-    const vkRateLimitService = {
+    const vkRateLimitService: jest.Mocked<
+      Pick<
+        VkParsingRateLimitService,
+        'reserveVkApiSlot' | 'publishVkApiCooldown' | 'recordVkApiOutcome' | 'getRecentVkApiMetrics'
+      >
+    > = {
       reserveVkApiSlot: jest.fn().mockResolvedValue(undefined),
+      publishVkApiCooldown: jest.fn().mockResolvedValue(undefined),
       recordVkApiOutcome: jest.fn().mockResolvedValue(undefined),
       getRecentVkApiMetrics: jest.fn().mockResolvedValue({
         rps: 0,
@@ -8860,6 +8868,189 @@ describe('VkParsingService', () => {
       method: 'wall.get',
       outcome: 'success',
     });
+  });
+
+  it.each([120, 7_200])(
+    'persists the full %is HTTP Retry-After without an early retry',
+    async (retryAfterSeconds) => {
+      const now = new Date('2026-11-04T10:00:00.000Z');
+      jest.useFakeTimers().setSystemTime(now);
+      const { service, prisma, publishQueue } = createFixture();
+      prisma.vkParsingSource.findUnique.mockResolvedValue(createSource());
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        headers: new Headers({ 'Retry-After': String(retryAfterSeconds) }),
+        body: { cancel: jest.fn().mockResolvedValue(undefined) },
+      }) as unknown as typeof fetch;
+
+      await expect(service.processSyncSourceJob('source-1', 'scheduled')).resolves.toBe(0);
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(prisma.vkParsingSource.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 'source-1',
+            ownerProfile: VkParsingOwnerProfile.PUBLISHER,
+            ownerBotId: 'publisher-bot',
+            syncStatus: 'SYNCING',
+            syncLockedBy: expect.any(String),
+          }),
+          data: expect.objectContaining({
+            syncStatus: 'BACKOFF',
+            nextSyncAt: new Date(now.getTime() + retryAfterSeconds * 1_000),
+            consecutiveFailures: 1,
+            terminalFailureCount: 0,
+            circuitOpenedAt: null,
+            circuitRetryAt: null,
+            syncLockedBy: null,
+            syncLockDeadlineAt: null,
+            lastErrorCode: 'vk_api.http_429',
+          }),
+        }),
+      );
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
+      expect(publishQueue.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['missing', undefined],
+    ['zero', 0],
+    ['negative', -1],
+    ['fractional', 1_793_779_320_000.5],
+    ['nonfinite', Number.POSITIVE_INFINITY],
+    ['NaN', Number.NaN],
+    ['year 10000', 253_402_300_800_000],
+    ['maximum JS Date', 8_640_000_000_000_000],
+    ['outside Date range', 8_640_000_000_000_001],
+    ['string', '1793779320000'],
+    ['past', 1],
+    ['earlier than backoff', new Date('2026-11-04T10:00:30.000Z').getTime()],
+  ])('preserves ordinary source backoff for a %s retry deadline', async (_label, retryAtMs) => {
+    const now = new Date('2026-11-04T10:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    jest.spyOn(Math, 'random').mockReturnValue(0);
+    const { service, prisma, vkRateLimitService } = createFixture({ VK_API_MAX_ATTEMPTS: 1 });
+    prisma.vkParsingSource.findUnique.mockResolvedValue(createSource());
+    vkRateLimitService.reserveVkApiSlot.mockRejectedValueOnce(
+      Object.assign(new VkApiRequestError('Synthetic VK throttle', 'http_429', true), {
+        retryAtMs,
+      }),
+    );
+    global.fetch = jest.fn() as unknown as typeof fetch;
+
+    await expect(service.processSyncSourceJob('source-1', 'scheduled')).resolves.toBe(0);
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(prisma.vkParsingSource.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          syncStatus: 'BACKOFF',
+          nextSyncAt: new Date(now.getTime() + 60_000),
+          terminalFailureCount: 0,
+          circuitOpenedAt: null,
+          lastErrorCode: 'vk_api.http_429',
+        }),
+      }),
+    );
+  });
+
+  it.each([401, 403, 404])('keeps HTTP %i terminal despite Retry-After', async (status) => {
+    const { service, prisma, vkRateLimitService } = createFixture();
+    prisma.vkParsingSource.findUnique.mockResolvedValue(createSource());
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status,
+      headers: new Headers({ 'Retry-After': '7200' }),
+      body: { cancel: jest.fn().mockResolvedValue(undefined) },
+    }) as unknown as typeof fetch;
+
+    await service.processSyncSourceJob('source-1', 'scheduled');
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(vkRateLimitService.publishVkApiCooldown).not.toHaveBeenCalled();
+    expect(prisma.vkParsingSource.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          syncStatus: 'ERROR',
+          nextSyncAt: null,
+          terminalFailureCount: 1,
+          circuitOpenedAt: expect.any(Date),
+          circuitRetryAt: null,
+          lastErrorCode: `vk_api.http_${status}`,
+        }),
+      }),
+    );
+  });
+
+  it('ignores a provider deadline during the configured terminal verification retry', async () => {
+    const now = new Date('2026-11-04T10:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(now);
+    jest.spyOn(Math, 'random').mockReturnValue(0);
+    const { service, prisma, vkRateLimitService } = createFixture({
+      VK_PARSING_SOURCE_CIRCUIT_TERMINAL_FAILURE_THRESHOLD: 2,
+    });
+    prisma.vkParsingSource.findUnique.mockResolvedValue(createSource());
+    vkRateLimitService.reserveVkApiSlot.mockRejectedValueOnce(
+      new VkApiRequestError(
+        'Synthetic terminal VK refusal',
+        'http_403',
+        false,
+        now.getTime() + 7_200_000,
+      ),
+    );
+
+    await service.processSyncSourceJob('source-1', 'scheduled');
+
+    expect(prisma.vkParsingSource.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          syncStatus: 'BACKOFF',
+          nextSyncAt: new Date(now.getTime() + 60_000),
+          terminalFailureCount: 1,
+          circuitOpenedAt: null,
+          circuitRetryAt: new Date(now.getTime() + 60_000),
+          lastErrorCode: 'vk_api.http_403',
+        }),
+      }),
+    );
+  });
+
+  it('does not persist an old throttle after losing the source lease during fetch', async () => {
+    const { service, prisma, publishQueue } = createFixture();
+    prisma.vkParsingSource.findUnique.mockResolvedValue(createSource());
+    let enteredFetch!: () => void;
+    const fetching = new Promise<void>((resolve) => {
+      enteredFetch = resolve;
+    });
+    let completeFetch!: (response: MockFetchResponse) => void;
+    global.fetch = jest.fn().mockImplementation(
+      () =>
+        new Promise<MockFetchResponse>((resolve) => {
+          completeFetch = resolve;
+          enteredFetch();
+        }),
+    ) as unknown as typeof fetch;
+    const processing = service.processSyncSourceJob('source-1', 'scheduled');
+    await fetching;
+    prisma.$queryRaw.mockResolvedValue([]);
+    completeFetch({
+      ok: false,
+      status: 429,
+      headers: new Headers({ 'Retry-After': '7200' }),
+      body: { cancel: async () => undefined },
+    });
+
+    await expect(processing).resolves.toBe(0);
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(prisma.vkParsingSource.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.vkParsingSource.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ syncStatus: 'BACKOFF' }) }),
+    );
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    expect(publishQueue.add).not.toHaveBeenCalled();
   });
 
   it.each([6, 9, 10, 29])('retries retryable VK error code %i', async (code) => {

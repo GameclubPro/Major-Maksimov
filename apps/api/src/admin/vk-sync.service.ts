@@ -20,6 +20,7 @@ import {
 import {
   classifyVkParsingMediaPreflightError,
   classifyVkParsingSyncError,
+  readVkRetryAtMs,
   VkApiRequestError,
 } from './vk-parsing-errors';
 import { VK_AUTOPUBLISH_PENDING_SCHEDULE_FINGERPRINT } from './vk-autopublish-policy';
@@ -249,7 +250,13 @@ export class VkSyncService {
         classified.retryable || retryTerminalBeforeCircuit
           ? this.resolveSyncBackoffMs(failureCount)
           : null;
-      const nextRetryAt = backoffMs === null ? null : new Date(completedAt.getTime() + backoffMs);
+      const providerRetryAtMs = classified.retryable
+        ? readVkRetryAtMs(classified.retryAtMs)
+        : undefined;
+      const nextRetryAt =
+        backoffMs === null
+          ? null
+          : new Date(Math.max(completedAt.getTime() + backoffMs, providerRetryAtMs ?? 0));
       const failed = await this.runWithSourceLease(source, (tx) =>
         tx.vkParsingSource.updateMany({
           where: this.buildOwnedSourceLeaseWhere(source),

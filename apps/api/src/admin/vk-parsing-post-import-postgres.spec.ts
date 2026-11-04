@@ -16,6 +16,8 @@ import {
   type PublisherDialogContextService,
 } from './publisher-dialog-context.service';
 import { VkParsingFeedService } from './vk-parsing-feed.service';
+import { VkApiClientService } from './vk-api-client.service';
+import { VkApiRequestError } from './vk-parsing-errors';
 import { VkParsingOwnershipService } from './vk-parsing-ownership.service';
 import {
   VkParsingPostImportRepository,
@@ -605,6 +607,10 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
   >;
   type RoutedPublish = MaxRoutedPublicationService['publish'];
   const remote = jest.fn<ReturnType<RoutedPublish>, Parameters<RoutedPublish>>();
+  type VkReadRequest = VkApiClientService['request'];
+  const sourceApi = {
+    request: jest.fn<ReturnType<VkReadRequest>, Parameters<VkReadRequest>>(),
+  } satisfies Pick<VkApiClientService, 'request'>;
   const importedPost = (changed = false) => ({
     vkOwnerId: -123,
     vkPostId: 1,
@@ -652,6 +658,20 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
       new Date('2026-09-01T00:05:00Z'),
       'scheduled',
     );
+  const unlockSourceForSync = async () => {
+    source = await writer.vkParsingSource.update({
+      where: { id: source.id },
+      data: {
+        syncStatus: 'IDLE',
+        nextSyncAt: new Date(Date.now() - 1_000),
+        syncStartedAt: null,
+        syncLockedAt: null,
+        syncLockedBy: null,
+        syncLockDeadlineAt: null,
+        syncHeartbeatAt: null,
+      },
+    });
+  };
 
   beforeAll(async () => {
     const url = new URL(databaseUrl);
@@ -670,6 +690,7 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     remote.mockReset();
+    sourceApi.request.mockReset();
     runtime.assertDispatchEnabled.mockReset();
     chatId = `vk-import-result-chat-${randomUUID()}`;
     await writer.chat.create({ data: { id: chatId, title: 'Synthetic VK result race' } });
@@ -774,7 +795,7 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
     repository = new VkParsingPostImportRepository(importer as never);
     sync = new VkSyncService(
       importer as never,
-      {} as never,
+      sourceApi as never,
       service,
       {} as never,
       repository,
@@ -792,6 +813,177 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
   afterAll(async () => {
     await writer?.$disconnect();
     await importer?.$disconnect();
+  });
+
+  it.each([
+    { label: '120s', resolveRetryAtMs: () => Date.now() + 120_000 },
+    { label: '2h', resolveRetryAtMs: () => Date.now() + 7_200_000 },
+    { label: '9999-12-31T23:59:59.999Z', resolveRetryAtMs: () => 253_402_300_799_999 },
+  ])(
+    'persists the $label provider deadline through the public source worker',
+    async ({ resolveRetryAtMs }) => {
+      await unlockSourceForSync();
+      const retryAtMs = resolveRetryAtMs();
+      sourceApi.request.mockRejectedValue(
+        new VkApiRequestError('Synthetic VK throttle', 'http_429', true, retryAtMs),
+      );
+
+      await expect(
+        withinImportDeadline(sync.processSyncSourceJob(source.id, 'scheduled')),
+      ).resolves.toBe(0);
+
+      expect(sourceApi.request).toHaveBeenCalledTimes(1);
+      expect(await writer.vkParsingSource.findUniqueOrThrow({ where: { id: source.id } })).toEqual(
+        expect.objectContaining({
+          syncStatus: 'BACKOFF',
+          nextSyncAt: new Date(retryAtMs),
+          syncAttemptCount: source.syncAttemptCount + 1,
+          syncLockedAt: null,
+          syncLockedBy: null,
+          syncLockDeadlineAt: null,
+          syncHeartbeatAt: null,
+          consecutiveFailures: 1,
+          terminalFailureCount: 0,
+          circuitOpenedAt: null,
+          circuitRetryAt: null,
+          lastErrorCode: 'vk_api.http_429',
+        }),
+      );
+      expect(remote).not.toHaveBeenCalled();
+      expect(publisherQueue.add).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    253_402_300_800_000,
+    8_640_000_000_000_000,
+    8_640_000_000_000_001,
+  ])('retains durable ordinary backoff for invalid retry deadline %s', async (retryAtMs) => {
+    await unlockSourceForSync();
+    jest.spyOn(Math, 'random').mockReturnValue(0);
+    sourceApi.request.mockRejectedValue(
+      Object.assign(new VkApiRequestError('Synthetic invalid throttle', 'http_429', true), {
+        retryAtMs,
+      }),
+    );
+
+    await expect(
+      withinImportDeadline(sync.processSyncSourceJob(source.id, 'scheduled')),
+    ).resolves.toBe(0);
+
+    const persisted = await writer.vkParsingSource.findUniqueOrThrow({
+      where: { id: source.id },
+    });
+    expect(persisted).toEqual(
+      expect.objectContaining({
+        syncStatus: 'BACKOFF',
+        consecutiveFailures: 1,
+        terminalFailureCount: 0,
+        circuitOpenedAt: null,
+        syncLockedBy: null,
+        lastSyncAt: expect.any(Date),
+        lastErrorCode: 'vk_api.http_429',
+      }),
+    );
+    expect(persisted.nextSyncAt?.getTime()).toBe(persisted.lastSyncAt!.getTime() + 60_000);
+    expect(remote).not.toHaveBeenCalled();
+  });
+
+  it('preserves the durable terminal circuit decision despite a retry deadline', async () => {
+    await unlockSourceForSync();
+    sourceApi.request.mockRejectedValue(
+      new VkApiRequestError(
+        'Synthetic terminal VK refusal',
+        'http_403',
+        false,
+        Date.now() + 7_200_000,
+      ),
+    );
+
+    await expect(
+      withinImportDeadline(sync.processSyncSourceJob(source.id, 'scheduled')),
+    ).resolves.toBe(0);
+
+    expect(await writer.vkParsingSource.findUniqueOrThrow({ where: { id: source.id } })).toEqual(
+      expect.objectContaining({
+        syncStatus: 'ERROR',
+        nextSyncAt: null,
+        terminalFailureCount: 1,
+        circuitOpenedAt: expect.any(Date),
+        circuitRetryAt: null,
+        syncLockedBy: null,
+        lastErrorCode: 'vk_api.http_403',
+      }),
+    );
+    expect(sourceApi.request).toHaveBeenCalledTimes(1);
+    expect(remote).not.toHaveBeenCalled();
+  });
+
+  it('does not replace the new source generation deadline with an old in-flight throttle', async () => {
+    await unlockSourceForSync();
+    const enteredRequest = gate();
+    const finishOldRequest = gate();
+    const oldRetryAtMs = Date.now() + 7_200_000;
+    const newRetryAtMs = Date.now() + 14_400_000;
+    sourceApi.request
+      .mockImplementationOnce(async () => {
+        enteredRequest.resolve();
+        await finishOldRequest.promise;
+        throw new VkApiRequestError('Synthetic old VK throttle', 'http_429', true, oldRetryAtMs);
+      })
+      .mockRejectedValueOnce(
+        new VkApiRequestError('Synthetic current VK throttle', 'http_429', true, newRetryAtMs),
+      );
+    const oldSync = sync.processSyncSourceJob(source.id, 'scheduled').then(
+      (result) => ({ result, error: null }),
+      (error: unknown) => ({ result: null, error }),
+    );
+    try {
+      await withinImportDeadline(enteredRequest.promise);
+      const oldGeneration = await writer.vkParsingSource.findUniqueOrThrow({
+        where: { id: source.id },
+      });
+      expect(oldGeneration).toEqual(
+        expect.objectContaining({
+          syncStatus: 'SYNCING',
+          syncLockedBy: expect.any(String),
+          syncAttemptCount: source.syncAttemptCount + 1,
+        }),
+      );
+      await writer.vkParsingSource.update({
+        where: { id: source.id },
+        data: { syncLockDeadlineAt: new Date(Date.now() - 1_000) },
+      });
+      await expect(
+        withinImportDeadline(sync.processSyncSourceJob(source.id, 'scheduled')),
+      ).resolves.toBe(0);
+      const replacement = await writer.vkParsingSource.findUniqueOrThrow({
+        where: { id: source.id },
+      });
+      expect(replacement).toEqual(
+        expect.objectContaining({
+          syncStatus: 'BACKOFF',
+          syncAttemptCount: source.syncAttemptCount + 2,
+          nextSyncAt: new Date(newRetryAtMs),
+          lastError: 'Synthetic current VK throttle',
+        }),
+      );
+
+      finishOldRequest.resolve();
+      await expect(withinImportDeadline(oldSync)).resolves.toEqual({ result: 0, error: null });
+
+      expect(await writer.vkParsingSource.findUniqueOrThrow({ where: { id: source.id } })).toEqual(
+        replacement,
+      );
+      expect(sourceApi.request).toHaveBeenCalledTimes(2);
+      expect(remote).not.toHaveBeenCalled();
+      expect(publisherQueue.add).not.toHaveBeenCalled();
+    } finally {
+      finishOldRequest.resolve();
+      await withinImportDeadline(oldSync);
+    }
   });
 
   it.each(['ambiguous', 'published', 'published-changed'] as const)(
