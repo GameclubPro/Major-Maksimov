@@ -49,6 +49,9 @@ if [[ "$REQUIRE_DEDICATED_FILESYSTEM" != "0" && "$REQUIRE_DEDICATED_FILESYSTEM" 
   echo "MAXIM_RESTORE_SMOKE_REQUIRE_DEDICATED_FILESYSTEM must be 0 or 1." >&2
   exit 2
 fi
+# shellcheck source=infra/scripts/lib/postgres-restore-volume.sh
+source "$ROOT_DIR/infra/scripts/lib/postgres-restore-volume.sh"
+MAXIM_RESTORE_VOLUME_ACTIVE=0
 
 # FLAG: A restore competes for the same disks as production. Serialize it with the
 # producer and deployments, and never start without healthy production readiness.
@@ -93,18 +96,45 @@ EXPECTED_SHA="${CHECKSUM_LINE:0:64}"
   sha256sum --check --status "$(basename "$CHECKSUM_PATH")"
 )
 
-mkdir -p "$RESTORE_DATA_ROOT"
+DATABASE_BYTES="$(
+  docker compose -f "$COMPOSE_FILE" exec -T "$MAXIM_BACKUP_SERVICE" \
+    psql -U "$MAXIM_BACKUP_DATABASE" -d "$MAXIM_BACKUP_DATABASE" -Atqc 'SELECT pg_database_size(current_database())'
+)"
+DATABASE_BYTES="${DATABASE_BYTES//[[:space:]]/}"
+if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
+  maxim_restore_volume_action preflight >/dev/null
+  if [[ "$MODE" == --preflight-only ]]; then
+    echo 'PostgreSQL restore archive and physical capacity preflight passed; sparse virtual capacity is an estimate until mounted.'
+    exit 0
+  fi
+  # FLAG: This owner keeps the existing protected lock and the only cleanup trap.
+  # A missing write-ahead result is retained for review, never automatically adopted.
+  cleanup_volume_prepare() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if [[ "$MAXIM_RESTORE_VOLUME_ACTIVE" == 1 ]]; then
+      maxim_restore_volume_action cleanup >/dev/null || status=1
+    fi
+    release_deploy_lock || status=1
+    exit "$status"
+  }
+  trap cleanup_volume_prepare EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  MAXIM_RESTORE_VOLUME_ACTIVE=1
+  VOLUME_RESULT="$(maxim_restore_volume_action prepare)"
+  RESTORE_DATA_ROOT="$(maxim_restore_volume_value "$VOLUME_RESULT" mount)"
+  RESTORE_DATA_DIR="$(maxim_restore_volume_value "$VOLUME_RESULT" data)"
+else
+  mkdir -p "$RESTORE_DATA_ROOT"
+fi
 if [[ "$REQUIRE_DEDICATED_FILESYSTEM" == "1" ]] && \
   [[ "$(stat -c %d "$RESTORE_DATA_ROOT")" == "$(stat -c %d "$ROOT_DIR")" ]]; then
   echo "Refusing to restore a full PostgreSQL backup on the production application filesystem." >&2
   echo "Mount a separate disposable volume at MAXIM_RESTORE_SMOKE_DATA_ROOT." >&2
   exit 1
 fi
-DATABASE_BYTES="$(
-  docker compose -f "$COMPOSE_FILE" exec -T "$MAXIM_BACKUP_SERVICE" \
-    psql -U "$MAXIM_BACKUP_DATABASE" -d "$MAXIM_BACKUP_DATABASE" -Atqc 'SELECT pg_database_size(current_database())'
-)"
-DATABASE_BYTES="${DATABASE_BYTES//[[:space:]]/}"
 AVAILABLE_BYTES="$(df -PB1 "$RESTORE_DATA_ROOT" | awk 'NR == 2 { print $4 }')"
 if [[ ! "$DATABASE_BYTES" =~ ^[0-9]+$ || ! "$AVAILABLE_BYTES" =~ ^[0-9]+$ ]]; then
   echo "Could not determine PostgreSQL size or restore filesystem capacity." >&2
@@ -127,7 +157,9 @@ if [[ "$MODE" == "--preflight-only" ]]; then
 fi
 
 CONTAINER_NAME="${MAXIM_BACKUP_UNIT_PREFIX}-restore-smoke-$$-$RANDOM"
-RESTORE_DATA_DIR="$(mktemp -d "$RESTORE_DATA_ROOT/${MAXIM_BACKUP_PREFIX}-restore-smoke.XXXXXX")"
+if [[ "$MAXIM_RESTORE_VOLUME_BYTES" == 0 ]]; then
+  RESTORE_DATA_DIR="$(mktemp -d "$RESTORE_DATA_ROOT/${MAXIM_BACKUP_PREFIX}-restore-smoke.XXXXXX")"
+fi
 WATCHDOG_PID=""
 ABORT_MARKER="$RESTORE_DATA_DIR/.watchdog-aborted"
 cleanup() {
@@ -137,8 +169,12 @@ cleanup() {
     kill "$WATCHDOG_PID" 2>/dev/null || true
     wait "$WATCHDOG_PID" 2>/dev/null || true
   fi
-  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-  rm -rf -- "$RESTORE_DATA_DIR" || status=1
+  if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
+    maxim_restore_volume_action cleanup >/dev/null || status=1
+  else
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    rm -rf -- "$RESTORE_DATA_DIR" || status=1
+  fi
   release_deploy_lock || status=1
   exit "$status"
 }
@@ -148,7 +184,14 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 probe_ready
-docker run --detach --rm \
+CONTAINER_LIFECYCLE=(--rm)
+if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
+  VOLUME_RESULT="$(maxim_restore_volume_action container-starting)"
+  CONTAINER_NAME="$(maxim_restore_volume_value "$VOLUME_RESULT" containerName)"
+  CONTAINER_CIDFILE="$(maxim_restore_volume_value "$VOLUME_RESULT" cidfile)"
+  CONTAINER_LIFECYCLE=(--cidfile "$CONTAINER_CIDFILE" --label "maxim.restore.operation=$MAXIM_RESTORE_VOLUME_OPERATION")
+fi
+docker run --detach "${CONTAINER_LIFECYCLE[@]}" \
   --name "$CONTAINER_NAME" \
   --network none --cpus 2 --memory 4g --pids-limit 128 --shm-size 256m \
   --env POSTGRES_PASSWORD=restore-smoke-only \
@@ -156,7 +199,7 @@ docker run --detach --rm \
   "$POSTGRES_IMAGE" >/dev/null
 
 watch_restore() {
-  local failures=0 free backing started=$SECONDS sleeper=""
+  local failures=0 free backing started=$SECONDS sleeper="" sample_ready
   # FLAG: The watchdog owns its sleep child, which inherits the deploy lock.
   # Reap it on shutdown so completion never leaves a live lock holder behind.
   trap - EXIT
@@ -169,12 +212,17 @@ watch_restore() {
     free="$(df -PB1 "$RESTORE_DATA_ROOT" | awk 'NR==2 {print $4}')"
     backing="$(df -PB1 "$BACKING_FILESYSTEM_PATH" | awk 'NR==2 {print $4}')"
     if [[ ! "$free" =~ ^[0-9]+$ || ! "$backing" =~ ^[0-9]+$ ]] ||
-      (( free < MIN_FREE_BYTES || backing < MIN_FREE_BYTES || SECONDS - started >= MAX_DURATION_SEC )); then
+      (( free < MIN_FREE_BYTES || backing < BACKING_MIN_FREE_BYTES || SECONDS - started >= MAX_DURATION_SEC )); then
       failures=2
     elif probe_ready; then
       failures=0
     else
       failures=$((failures + 1))
+    fi
+    if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
+      sample_ready=0
+      if ((failures == 0)); then sample_ready=1; fi
+      maxim_restore_volume_action sample "$sample_ready" "$free" "$backing" >/dev/null || failures=2
     fi
     if (( failures >= 2 )); then
       touch "$ABORT_MARKER"
@@ -241,6 +289,13 @@ INVARIANTS="$(docker exec "$CONTAINER_NAME" psql -U postgres -d "${MAXIM_BACKUP_
 fi
 [[ "$INVARIANTS" == 1 && ! -e "$ABORT_MARKER" ]]
 probe_ready
+if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
+  # FLAG: A schema result cannot publish green evidence while disposable resources leak.
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
+  maxim_restore_volume_action cleanup >/dev/null
+fi
 RECEIPT_TMP="$(mktemp "$DUMP_PATH.restore-verified.XXXXXX.tmp")"
 node - "$DUMP_PATH" "$POSTGRES_IMAGE" "$MAXIM_BACKUP_PROFILE" "$MAXIM_BACKUP_RESTORE_VERIFICATION" "$SCHEMA_DIGEST" >"$RECEIPT_TMP" <<'JS'
 const fs=require('node:fs');
