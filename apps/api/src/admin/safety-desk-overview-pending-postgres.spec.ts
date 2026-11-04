@@ -76,7 +76,15 @@ describePostgres('Safety Desk bounded unfinished work on native PostgreSQL', () 
       ('a1',NULL,'ENQUEUED',false,now()-interval '4 minutes','{"secret":"private"}'),
       ('a2','second','AMBIGUOUS',false,now()-interval '2 minutes','{}'),
       ('done','second','SUCCEEDED',true,now()-interval '1 day','{}');`);
+    const before = await client.query<{ oldestAt: string; observedAt: string }>(
+      `SELECT to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "oldestAt",
+        to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "observedAt"
+      FROM webhook_events WHERE id='r2'`,
+    );
     const result = await snapshot();
+    const after = await client.query<{ observedAt: string }>(
+      `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "observedAt"`,
+    );
     expect(result.invalidClocks).toBe(false);
     expect(result.unfinishedActions).toMatchObject({ countLowerBound: 2, truncated: false });
     expect(result.bots[0]).toMatchObject({
@@ -90,9 +98,13 @@ describePostgres('Safety Desk bounded unfinished work on native PostgreSQL', () 
       queued: { countLowerBound: 1 },
       unfinishedActions: { countLowerBound: 1 },
     });
-    expect(
-      Date.parse(result.observedAt) - Date.parse(result.bots[0]!.received.oldestAt!),
-    ).toBeCloseTo(600_000, -2);
+    expect(result.bots[0]!.received.oldestAt).toBe(before.rows[0]!.oldestAt);
+    expect(Date.parse(result.observedAt)).toBeGreaterThanOrEqual(
+      Date.parse(before.rows[0]!.observedAt),
+    );
+    expect(Date.parse(result.observedAt)).toBeLessThanOrEqual(
+      Date.parse(after.rows[0]!.observedAt),
+    );
     const withoutDefault = await snapshot(null);
     expect(withoutDefault.bots[0]?.received.countLowerBound).toBe(1);
     expect(withoutDefault.bots[0]?.unfinishedActions.countLowerBound).toBe(0);
