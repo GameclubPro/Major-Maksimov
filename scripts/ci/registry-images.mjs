@@ -77,17 +77,20 @@ export function parseImageInspection(output) {
   return records[0];
 }
 
-export function imageIdentity({ repository, sha, component }) {
-  if (
-    !REPOSITORY.test(repository ?? '') ||
-    !SHA.test(sha ?? '') ||
-    !Object.hasOwn(IMAGE_ALIASES, component)
-  ) {
-    throw new Error('Expected an exact repository, source SHA and supported image component.');
+export function packageRepository({ repository, component }) {
+  if (!REPOSITORY.test(repository ?? '') || !Object.hasOwn(IMAGE_ALIASES, component)) {
+    throw new Error('Expected an exact repository and supported image component.');
   }
+  return `ghcr.io/${repository.toLowerCase()}-private-v1-${component}`;
+}
+
+export function imageIdentity({ repository, sha, component }) {
+  const registryRepository = packageRepository({ repository, component });
+  if (!SHA.test(sha ?? ''))
+    throw new Error('Expected an exact repository, source SHA and supported image component.');
   return {
     alias: `${IMAGE_ALIASES[component]}:${sha}`,
-    repository: `ghcr.io/${repository.toLowerCase()}-release-${component}`,
+    repository: registryRepository,
   };
 }
 
@@ -312,8 +315,7 @@ function privacyFailure(code) {
 }
 
 export function verifyPrivatePackage(expected, run = execute) {
-  const identity = imageIdentity(expected);
-  const packageName = identity.repository.split('/').at(-1);
+  const packageName = packageRepository(expected).split('/').at(-1);
   const packagePath = `users/${expected.repository.split('/')[0]}/packages/container/${packageName}`;
   let metadata;
   try {

@@ -47,7 +47,7 @@ export function preloadFixture(component = 'api') {
       event: 'push',
     },
     image: { alias: `${alias}:${sha}`, imageId, platform: 'linux/amd64', sizeBytes: 123456 },
-    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-release-${component}`, digest },
+    registry: { repository: `ghcr.io/gameclubpro/major-maksimov-private-v1-${component}`, digest },
   };
   return {
     schemaVersion: 1,
