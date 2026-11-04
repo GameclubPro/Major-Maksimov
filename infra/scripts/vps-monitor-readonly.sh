@@ -26,6 +26,14 @@ MONITOR_LOG_FD=""
 MONITOR_TEE_PID=""
 MONITOR_WORKER_PID=""
 CAPACITY_SAMPLE_INDEX=0
+CAPACITY_STREAM_PID=""
+CAPACITY_STREAM_READ_FD=""
+CAPACITY_STREAM_WRITE_FD=""
+CAPACITY_STREAM_STARTED_AT=0
+CAPACITY_STREAM_SNAPSHOT=""
+CAPACITY_STREAM_OWNER_PID=""
+CAPACITY_STREAM_OWNER_START_TICKS=""
+CAPACITY_STREAM_LOCK_FD=""
 SAMPLE_STEP_COUNT=0
 SAMPLE_STEP_FAILURES=0
 EXPECTED_SAMPLE_STEPS=16
@@ -79,21 +87,156 @@ run_step() {
   return 0
 }
 
+capacity_owner_valid() {
+  kill -0 "$CAPACITY_STREAM_OWNER_PID" 2>/dev/null &&
+    [[ "$(read_capacity_owner_start_ticks "$CAPACITY_STREAM_OWNER_PID")" == "$CAPACITY_STREAM_OWNER_START_TICKS" ]]
+}
+
+capacity_stream_running() {
+  local running_pid
+  [[ -n "$CAPACITY_STREAM_PID" ]] || return 1
+  while IFS= read -r running_pid; do
+    if [[ "$running_pid" == "$CAPACITY_STREAM_PID" ]]; then return 0; fi
+  done < <(jobs -pr)
+  return 1
+}
+
+stop_capacity_stream() {
+  local stream_pid="$CAPACITY_STREAM_PID"
+  local grace_attempts="${1:-50}"
+  local status=0
+  local attempt
+
+  if [[ -n "$CAPACITY_STREAM_WRITE_FD" ]]; then
+    exec {CAPACITY_STREAM_WRITE_FD}>&-
+    CAPACITY_STREAM_WRITE_FD=""
+  fi
+  # FLAG: EOF cancels the remote probe and reaps its children. Only the owned,
+  # unreaped SSH job may be signalled; a recycled PID never grants authority.
+  if [[ -n "$stream_pid" ]]; then
+    for ((attempt = 0; attempt < grace_attempts; attempt++)); do
+      capacity_stream_running || break
+      sleep 0.1
+    done
+    if capacity_stream_running; then
+      kill -TERM -- "-$stream_pid" 2>/dev/null || kill -TERM "$stream_pid" 2>/dev/null || true
+      for ((attempt = 0; attempt < 20; attempt++)); do
+        capacity_stream_running || break
+        sleep 0.1
+      done
+    fi
+    if capacity_stream_running; then
+      kill -KILL -- "-$stream_pid" 2>/dev/null || kill -KILL "$stream_pid" 2>/dev/null || true
+    fi
+    wait "$stream_pid" 2>/dev/null || status=$?
+  fi
+  if [[ -n "$CAPACITY_STREAM_READ_FD" ]]; then
+    exec {CAPACITY_STREAM_READ_FD}<&-
+    CAPACITY_STREAM_READ_FD=""
+  fi
+  CAPACITY_STREAM_PID=""
+  CAPACITY_STREAM_STARTED_AT=0
+  return "$status"
+}
+
+start_capacity_stream() {
+  local remote_read_fd
+  local remote_write_fd
+  local stream_status=0
+
+  capacity_owner_valid || return 3
+  coproc CAPACITY_REMOTE {
+    if [[ -n "$CAPACITY_STREAM_LOCK_FD" ]]; then exec {CAPACITY_STREAM_LOCK_FD}>&-; fi
+    # The connector owns an SSH child. Give this complete subtree its own group
+    # so bounded teardown cannot leave SSH alive after its wrapper exits.
+    exec setsid ./infra/scripts/vps-connect.sh exec node infra/scripts/monitor-capacity-probe.cjs \
+      --stream "$CAPACITY_BLOCK_DEVICE" "${SERVICES[@]}"
+  }
+  CAPACITY_STREAM_PID=$!
+  remote_read_fd="${CAPACITY_REMOTE[0]:-}"
+  remote_write_fd="${CAPACITY_REMOTE[1]:-}"
+  if [[ -z "$remote_read_fd" || -z "$remote_write_fd" ]]; then
+    stop_capacity_stream 50 || stream_status=$?
+    if ((stream_status == 0)); then stream_status=2; fi
+    return "$stream_status"
+  fi
+  exec {CAPACITY_STREAM_READ_FD}<&"$remote_read_fd"
+  exec {CAPACITY_STREAM_WRITE_FD}>&"$remote_write_fd"
+  # Close the original coproc descriptors: the duplicate writer is the single
+  # request-channel owner, so closing it really delivers EOF remotely.
+  exec {remote_read_fd}<&-
+  exec {remote_write_fd}>&-
+  CAPACITY_STREAM_STARTED_AT=$(date +%s)
+}
+
+read_capacity_stream_snapshot() {
+  local chunk=""
+  local read_status
+  local stream_status=0
+  local response_deadline
+  local LC_ALL=C
+
+  response_deadline=$(($(date +%s) + 45))
+  CAPACITY_STREAM_SNAPSHOT=""
+  if ! capacity_owner_valid; then stop_capacity_stream 50 || true; return 3; fi
+  if ! capacity_stream_running ||
+    { [[ -n "$CAPACITY_STREAM_READ_FD" ]] && IFS= read -r -t 0 -u "$CAPACITY_STREAM_READ_FD"; }; then
+    stop_capacity_stream 50 || stream_status=$?
+    if ((stream_status == 0)); then stream_status=2; fi
+    return "$stream_status"
+  fi
+  if ! printf 'SNAPSHOT\n' >&"$CAPACITY_STREAM_WRITE_FD"; then
+    stop_capacity_stream 50 || stream_status=$?
+    if ((stream_status == 0)); then stream_status=2; fi
+    return "$stream_status"
+  fi
+  while capacity_owner_valid; do
+    if (($(date +%s) >= response_deadline)); then stop_capacity_stream 50 || true; return 124; fi
+    read_status=0
+    chunk=""
+    IFS= read -r -t 1 -n "$((65537 - ${#CAPACITY_STREAM_SNAPSHOT}))" \
+      -u "$CAPACITY_STREAM_READ_FD" chunk || read_status=$?
+    CAPACITY_STREAM_SNAPSHOT+="$chunk"
+    if ((${#CAPACITY_STREAM_SNAPSHOT} > 65536)); then stop_capacity_stream 50 || true; return 2; fi
+    if ((read_status == 0)); then
+      if [[ -z "$CAPACITY_STREAM_SNAPSHOT" ]]; then stop_capacity_stream 50 || true; return 2; fi
+      if IFS= read -r -t 0 -u "$CAPACITY_STREAM_READ_FD"; then
+        read_status=0
+        chunk=""
+        IFS= read -r -t 0.01 -n 1 -u "$CAPACITY_STREAM_READ_FD" chunk || read_status=$?
+        stop_capacity_stream 50 || stream_status=$?
+        if ((read_status == 1 && stream_status != 0)); then return "$stream_status"; fi
+        return 2
+      fi
+      return 0
+    fi
+    if ((read_status <= 128)); then
+      stop_capacity_stream 50 || stream_status=$?
+      if ((stream_status == 0)); then stream_status=2; fi
+      return "$stream_status"
+    fi
+  done
+  stop_capacity_stream 50 || true
+  return 3
+}
+
 summarize_capacity_observability() {
   local archive_status=0
-  local probe_status=0
-  local snapshot
+  local now
 
-  snapshot="$(
-    ./infra/scripts/vps-connect.sh exec node - "$CAPACITY_BLOCK_DEVICE" "${SERVICES[@]}" \
-      <"$CAPACITY_PROBE"
-  )" || probe_status=$?
-  printf '%s\n' "$snapshot" |
-    node "$CAPACITY_ARCHIVER" --archive-dir "$CAPACITY_ARCHIVE_DIR" || archive_status=$?
-  if ((archive_status != 0)); then
-    return "$archive_status"
+  now=$(date +%s)
+  # Rotate before the remote 3600-second TTL, allowing a full bounded response.
+  # Every new collector starts with unknown deltas; historical totals never bridge it.
+  if [[ -n "$CAPACITY_STREAM_PID" ]] && ((now - CAPACITY_STREAM_STARTED_AT >= 3540)); then
+    stop_capacity_stream 50 || true
   fi
-  return "$probe_status"
+  if [[ -z "$CAPACITY_STREAM_PID" ]]; then start_capacity_stream || return $?; fi
+  read_capacity_stream_snapshot || return $?
+  printf '%s\n' "$CAPACITY_STREAM_SNAPSHOT" |
+    node "$CAPACITY_ARCHIVER" --archive-dir "$CAPACITY_ARCHIVE_DIR" || archive_status=$?
+  CAPACITY_STREAM_SNAPSHOT=""
+  if ((archive_status != 0)); then stop_capacity_stream 50 || true; fi
+  return "$archive_status"
 }
 
 sample_capacity_once() {
@@ -144,6 +287,9 @@ run_capacity_sampler() {
   fi
 
   next_sample_at=$(date +%s)
+  CAPACITY_STREAM_OWNER_PID="$monitor_pid"
+  CAPACITY_STREAM_OWNER_START_TICKS="$owner_start_ticks"
+  CAPACITY_STREAM_LOCK_FD="$lock_fd"
   while kill -0 "$monitor_pid" 2>/dev/null &&
     [[ "$(read_capacity_owner_start_ticks "$monitor_pid")" == "$owner_start_ticks" ]]; do
     now=$(date +%s)
@@ -151,6 +297,7 @@ run_capacity_sampler() {
     # owning monitor finishes; existing supervision and group cleanup still apply.
     if ((now < next_sample_at)); then
       sleep_for=$((next_sample_at - now))
+      if ((sleep_for > 1)); then sleep_for=1; fi
       sleep "$sleep_for"
       continue
     fi
@@ -169,6 +316,11 @@ if [[ "${1:-}" == "--internal-capacity-sampler" ]]; then
     echo "Capacity sampler invocation is invalid." >&2
     exit 2
   fi
+  trap 'stop_capacity_stream 5 || true' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap '' PIPE
   run_capacity_sampler "$2" "$3" "$4"
   exit $?
 fi

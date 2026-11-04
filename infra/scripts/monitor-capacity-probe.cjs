@@ -9,7 +9,9 @@ const readyMonitorPath =
   __filename === '[stdin]'
     ? resolve(process.cwd(), 'infra/scripts/monitor-ready-status.cjs')
     : resolve(__dirname, 'monitor-ready-status.cjs');
-const { ADMIN_READY_URL, INGRESS_READY_URL, probeReadyEndpoint } = require(readyMonitorPath);
+const { ADMIN_READY_URL, INGRESS_READY_URL, probeReadyEndpoint, readBoundedResponseBody } = require(
+  readyMonitorPath,
+);
 const photoBoundaryPath =
   __filename === '[stdin]'
     ? resolve(process.cwd(), 'infra/scripts/photo-native-runtime-boundary.cjs')
@@ -28,6 +30,9 @@ const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
 const MAX_DOCKER_INSPECT_BYTES = 16 * 1024 * 1024;
 const MAX_DOCKER_CONTAINER_COUNT = 128;
 const PROCESS_TIMEOUT_MS = 5_000;
+const RESTART_SAMPLE_GAP_MS = 90_000;
+const STREAM_IDLE_MS = 90_000;
+const STREAM_LIFETIME_MS = 3_600_000;
 const QUEUE_CONTROL_HELPER = 'infra/scripts/webhook-queue-rollout-control.cjs';
 const RELEASE_MANIFEST_PATH = resolve(
   process.env.MAXIM_RELEASE_STATE_DIR || '/var/lib/maxim-deploy',
@@ -359,9 +364,11 @@ function normalizeQueueFence(raw) {
 
 function runBounded(command, args, options = {}) {
   return new Promise((resolve) => {
+    if (options.signal?.aborted) return resolve({ ok: false, output: '' });
     let output = '';
     let outputBytes = 0;
     let settled = false;
+    let refused = false;
     const child = spawn(command, args, {
       cwd: options.cwd ?? process.cwd(),
       stdio: ['pipe', 'pipe', 'ignore'],
@@ -370,29 +377,40 @@ function runBounded(command, args, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abort);
       resolve(result);
     };
-    const timeout = setTimeout(() => {
+    const abort = () => {
+      refused = true;
       child.kill('SIGKILL');
-      finish({ ok: false, output: '' });
+    };
+    const timeout = setTimeout(() => {
+      abort();
     }, options.timeoutMs ?? PROCESS_TIMEOUT_MS);
-    child.once('error', () => finish({ ok: false, output: '' }));
+    options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
+    child.once('error', () => {
+      if (child.pid === undefined) finish({ ok: false, output: '' });
+      else abort();
+    });
     child.stdin.on('error', () => undefined);
     child.stdout.on('data', (chunk) => {
       outputBytes += chunk.byteLength;
       if (outputBytes > (options.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES)) {
-        child.kill('SIGKILL');
-        finish({ ok: false, output: '' });
+        abort();
         return;
       }
       output += chunk.toString('utf8');
     });
-    child.once('close', (code) => finish({ ok: code === 0, output }));
+    // FLAG: Cancellation resolves only after the exact child has closed and is reaped.
+    child.once('close', (code) =>
+      finish({ ok: !refused && code === 0, output: refused ? '' : output }),
+    );
     child.stdin.end(options.input ?? '');
   });
 }
 
-async function probeQueueFence() {
+async function probeQueueFence(options = {}) {
   let helper;
   try {
     helper = readFileSync(QUEUE_CONTROL_HELPER, 'utf8');
@@ -416,7 +434,7 @@ async function probeQueueFence() {
       '-',
       'status',
     ],
-    { input: helper },
+    { input: helper, signal: options.signal },
   );
   if (!result.ok) return { available: false };
   try {
@@ -894,11 +912,115 @@ function isApiFleetCandidate(container, expectedImage) {
   );
 }
 
+function validRestartEntries(entries, name) {
+  return (
+    Array.isArray(entries) &&
+    entries.length <= (name === 'api' ? 14 : 1) &&
+    entries.every(
+      (entry) =>
+        isRecord(entry) &&
+        typeof entry.key === 'string' &&
+        /^[0-9a-f]{64}$/u.test(entry.id) &&
+        Number.isSafeInteger(entry.count) &&
+        entry.count >= 0,
+    ) &&
+    new Set(entries.map((entry) => entry.key)).size === entries.length &&
+    new Set(entries.map((entry) => entry.id)).size === entries.length &&
+    Number.isSafeInteger(entries.reduce((sum, entry) => sum + entry.count, 0))
+  );
+}
+
+function createRestartTracker() {
+  let previous = null;
+  let previousAt = null;
+  let previousClock = null;
+  return {
+    observe(classes, observedAt, clock = performance.now()) {
+      const at = Date.parse(observedAt);
+      const priorAt = previousAt === null ? NaN : Date.parse(previousAt);
+      const ordered = Number.isFinite(priorAt) && at > priorAt;
+      const continuous =
+        ordered &&
+        at - priorAt <= RESTART_SAMPLE_GAP_MS &&
+        clock > previousClock &&
+        clock - previousClock <= RESTART_SAMPLE_GAP_MS;
+      const result = {
+        version: 1,
+        basis: 'container_generation_intervals',
+        previousObservedAt: ordered ? previousAt : null,
+        observedAt,
+      };
+      const next = {};
+      for (const name of ['api', 'ocr', 'photo']) {
+        const entries = classes?.[name];
+        const valid = validRestartEntries(entries, name);
+        const current = valid
+          ? new Map(entries.map((entry) => [entry.key, { id: entry.id, count: entry.count }]))
+          : null;
+        const total = valid ? entries.reduce((sum, entry) => sum + entry.count, 0) : null;
+        const before = previous?.[name];
+        let generationChanged = null;
+        let delta = null;
+        if (current && before && ordered) {
+          generationChanged =
+            current.size !== before.size ||
+            [...current].some(([key, entry]) => before.get(key)?.id !== entry.id);
+          if (
+            continuous &&
+            !generationChanged &&
+            [...current].every(([key, entry]) => entry.count >= before.get(key).count)
+          ) {
+            delta = [...current].reduce(
+              (sum, [key, entry]) => sum + entry.count - before.get(key).count,
+              0,
+            );
+          }
+        }
+        result[name] = {
+          total: Number.isSafeInteger(total) ? total : null,
+          delta: Number.isSafeInteger(delta) ? delta : null,
+          generationChanged,
+        };
+        next[name] = current;
+      }
+      // FLAG: Only these <=14+2 exact identities survive in remote RAM. Never serialize the map.
+      previous = next;
+      previousAt = observedAt;
+      previousClock = clock;
+      return result;
+    },
+  };
+}
+
+function restartEvidence(classes, options = {}) {
+  const observedAt = options.observedAt ?? new Date().toISOString();
+  if (options.restartTracker)
+    return options.restartTracker.observe(classes, observedAt, options.clock);
+  const result = {
+    version: 1,
+    basis: 'historical_container_totals',
+    previousObservedAt: null,
+    observedAt,
+  };
+  for (const name of ['api', 'ocr', 'photo']) {
+    const total = validRestartEntries(classes[name], name)
+      ? classes[name].reduce((sum, entry) => sum + entry.count, 0)
+      : null;
+    result[name] = {
+      total: Number.isSafeInteger(total) ? total : null,
+      delta: null,
+      generationChanged: null,
+    };
+  }
+  return result;
+}
+
 function summarizeApiFleet(
   expectedServices,
   expectedImage,
   containers,
   expectedAuxiliaryService = null,
+  options = null,
 ) {
   const expected = normalizeExpectedApiServices(expectedServices);
   if (
@@ -953,13 +1075,19 @@ function summarizeApiFleet(
     }
   }
 
+  const unexpectedOrdinaryApiContainerCount = unexpectedApiContainerCount;
   let acceptedAuxiliaryRestartCount = 0;
+  let ocrEntries = expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE) ? null : [];
+  let photoEntries = expectedAuxiliaries.has(PHOTO_NATIVE_SANDBOX_SERVICE) ? null : [];
   if (
     expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE) &&
     auxiliaryContainers.length === 1 &&
     isReviewedOcrNativeSandbox(auxiliaryContainers[0], expectedImage, 'infra')
   ) {
     acceptedAuxiliaryRestartCount = auxiliaryContainers[0].restartCount;
+    ocrEntries = [
+      { key: 'ocr', id: auxiliaryContainers[0].id, count: auxiliaryContainers[0].restartCount },
+    ];
   } else if (
     auxiliaryContainers.length === 0 &&
     expectedAuxiliaries.has(OCR_NATIVE_SANDBOX_SERVICE)
@@ -967,6 +1095,7 @@ function summarizeApiFleet(
     unexpectedApiContainerCount += 1;
     unexpectedMainContainerCount += 1;
   } else {
+    if (auxiliaryContainers.length) ocrEntries = null;
     for (const container of auxiliaryContainers) {
       unexpectedApiContainerCount += 1;
       if (container.project === 'infra') {
@@ -991,6 +1120,13 @@ function summarizeApiFleet(
     )
   ) {
     acceptedAuxiliaryRestartCount += photoAuxiliaryContainers[0].restartCount;
+    photoEntries = [
+      {
+        key: 'photo',
+        id: photoAuxiliaryContainers[0].id,
+        count: photoAuxiliaryContainers[0].restartCount,
+      },
+    ];
   } else if (
     photoAuxiliaryContainers.length === 0 &&
     expectedAuxiliaries.has(PHOTO_NATIVE_SANDBOX_SERVICE)
@@ -998,6 +1134,7 @@ function summarizeApiFleet(
     unexpectedApiContainerCount += 1;
     unexpectedMainContainerCount += 1;
   } else {
+    if (photoAuxiliaryContainers.length) photoEntries = null;
     for (const container of photoAuxiliaryContainers) {
       unexpectedApiContainerCount += 1;
       if (container.project === 'infra') unexpectedMainContainerCount += 1;
@@ -1013,6 +1150,7 @@ function summarizeApiFleet(
   let exactImageRoleCount = 0;
   let duplicateContainerCount = 0;
   let totalRestartCount = acceptedAuxiliaryRestartCount;
+  const apiEntries = [];
   for (const service of expected) {
     const matches = byService.get(service);
     if (matches.length > 0) observedRoleCount += 1;
@@ -1037,6 +1175,17 @@ function summarizeApiFleet(
     ) {
       exactImageRoleCount += 1;
     }
+    if (
+      container.identityInvalid === false &&
+      container.appServiceName === service &&
+      container.appRole === EXPECTED_APP_ROLE_BY_SERVICE[service] &&
+      container.releaseProtected === true &&
+      isExpectedComposeServiceContainerName(container.name, service) &&
+      container.imageId === expectedImage.imageId &&
+      container.imageRef === expectedImage.imageRef
+    ) {
+      apiEntries.push({ key: service, id: container.id, count: container.restartCount });
+    }
   }
 
   return {
@@ -1053,38 +1202,65 @@ function summarizeApiFleet(
     unexpectedScaleContainerCount,
     unexpectedManualContainerCount,
     totalRestartCount,
+    ...(options
+      ? {
+          restartEvidence: restartEvidence(
+            {
+              api:
+                apiEntries.length === expected.length && unexpectedOrdinaryApiContainerCount === 0
+                  ? apiEntries
+                  : null,
+              ocr: ocrEntries,
+              photo: photoEntries,
+            },
+            options,
+          ),
+        }
+      : {}),
   };
 }
 
 async function probeApiFleet(expectedServices, options = {}) {
+  const unavailable = () => ({
+    available: false,
+    restartEvidence: restartEvidence({ api: null, ocr: null, photo: null }, options),
+  });
   try {
     const currentExpected = normalizeExpectedApiServices(expectedServices);
     const expectedImage = options.expectedImage ?? readExpectedApiImage(options.manifestPath);
-    const run = options.runBounded ?? runBounded;
+    const baseRun = options.runBounded ?? runBounded;
+    const run = (command, args, settings = {}) =>
+      baseRun(command, args, { ...settings, signal: options.signal });
     const sourceCompose = await run('git', [
       'show',
       `${expectedImage.sourceSha}:infra/docker-compose.yml`,
     ]);
-    if (!sourceCompose.ok) return { available: false };
+    if (!sourceCompose.ok) return unavailable();
     const topology = resolveExpectedApiTopologyFromCompose(currentExpected, sourceCompose.output);
     const expected = topology.services;
     const list = await run('docker', ['ps', '-a', '--no-trunc', '--format', '{{.ID}}']);
-    if (!list.ok) return { available: false };
+    if (!list.ok) return unavailable();
     const ids = list.output.trim() ? list.output.trim().split(/\s+/u) : [];
     if (
       ids.length > MAX_DOCKER_CONTAINER_COUNT ||
       new Set(ids).size !== ids.length ||
       ids.some((id) => !/^[0-9a-f]{64}$/u.test(id))
     ) {
-      return { available: false };
+      return unavailable();
     }
     if (ids.length === 0) {
-      return summarizeApiFleet(expected, expectedImage, [], topology.expectedAuxiliaryService);
+      return summarizeApiFleet(
+        expected,
+        expectedImage,
+        [],
+        topology.expectedAuxiliaryService,
+        options,
+      );
     }
     const inspection = await run('docker', ['inspect', ...ids], {
       maxOutputBytes: MAX_DOCKER_INSPECT_BYTES,
     });
-    if (!inspection.ok) return { available: false };
+    if (!inspection.ok) return unavailable();
     const containers = parseApiFleetInspection(inspection.output);
     const inspectedIds = containers.map((container) => container.id);
     if (
@@ -1092,21 +1268,31 @@ async function probeApiFleet(expectedServices, options = {}) {
       new Set(inspectedIds).size !== inspectedIds.length ||
       inspectedIds.some((id) => !ids.includes(id))
     ) {
-      return { available: false };
+      return unavailable();
     }
     return summarizeApiFleet(
       expected,
       expectedImage,
       containers,
       topology.expectedAuxiliaryService,
+      options,
     );
   } catch {
-    return { available: false };
+    return unavailable();
   }
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function wait(ms, signal) {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+    if (signal?.aborted) done();
+  });
 }
 
 function normalizeDevice(value) {
@@ -1126,18 +1312,56 @@ async function collectCapacitySnapshot(options = {}) {
   if (!Number.isSafeInteger(sampleMs) || sampleMs < 250 || sampleMs > 5_000) {
     throw new Error('Capacity sample duration must be between 250 and 5000 milliseconds.');
   }
-  const before = readHostCounters(device);
+  const readCounters = options.readHostCounters ?? readHostCounters;
+  const before = readCounters(device);
   const startedAt = performance.now();
-  const probesPromise = Promise.all([
-    probeReadyEndpoint(INGRESS_READY_URL),
-    probeReadyEndpoint(ADMIN_READY_URL),
-    probeQueueFence(),
-    probeApiFleet(expectedApiServices),
+  const ready = options.signal
+    ? async (url) => {
+        let response;
+        try {
+          response = await fetch(url, {
+            redirect: 'error',
+            signal: AbortSignal.any([options.signal, AbortSignal.timeout(15_000)]),
+          });
+        } catch {
+          return { httpStatus: null, body: null };
+        }
+        try {
+          return {
+            httpStatus: response.status,
+            body: JSON.parse(await readBoundedResponseBody(response)),
+          };
+        } catch {
+          return { httpStatus: response.status, body: null };
+        }
+      }
+    : probeReadyEndpoint;
+  const probesPromise = Promise.allSettled([
+    ready(INGRESS_READY_URL),
+    ready(ADMIN_READY_URL),
+    probeQueueFence(options),
+    probeApiFleet(expectedApiServices, {
+      restartTracker: options.restartTracker,
+      signal: options.signal,
+    }),
   ]);
-  await wait(sampleMs);
-  const after = readHostCounters(device);
+  await wait(sampleMs, options.signal);
+  let after;
+  let counterError;
+  try {
+    after = readCounters(device);
+  } catch (error) {
+    counterError = error;
+  }
   const elapsedMs = performance.now() - startedAt;
-  const [ingressProbe, adminProbe, queueFence, apiFleet] = await probesPromise;
+  // FLAG: A failed counter read or probe must not let active subprocesses escape teardown.
+  const probes = await probesPromise;
+  options.signal?.throwIfAborted();
+  if (counterError) throw counterError;
+  const [ingressProbe, adminProbe, queueFence, apiFleet] = probes.map((result) => {
+    if (result.status === 'rejected') throw result.reason;
+    return result.value;
+  });
   const rates = calculateCounterRates(before, after, elapsedMs);
   const memory = parseMeminfo(readFileSync('/proc/meminfo', 'utf8'));
   let filesystem;
@@ -1151,7 +1375,7 @@ async function collectCapacitySnapshot(options = {}) {
 
   return {
     schemaVersion: 1,
-    observedAt: new Date().toISOString(),
+    observedAt: apiFleet.restartEvidence.observedAt,
     host: {
       cpuCount: os.cpus().length,
       load1: finiteNonNegative(os.loadavg()[0]),
@@ -1173,12 +1397,111 @@ async function collectCapacitySnapshot(options = {}) {
   };
 }
 
+async function runCapacityStream(options = {}) {
+  const input = options.input ?? process.stdin;
+  const output = options.output ?? process.stdout;
+  const collect = options.collect ?? collectCapacitySnapshot;
+  const controller = new AbortController();
+  const tracker = createRestartTracker();
+  let active = null;
+  let buffer = '';
+  let stopped = false;
+  let idle;
+  let lifetime;
+  let finish;
+  const finished = new Promise((resolve) => {
+    finish = resolve;
+  });
+  const stop = (code) => {
+    if (stopped) return;
+    stopped = true;
+    controller.abort();
+    clearTimeout(idle);
+    clearTimeout(lifetime);
+    input.pause();
+    void Promise.resolve(active)
+      .catch(() => undefined)
+      .then(() => {
+        input.removeListener('data', data);
+        input.removeListener('end', ended);
+        input.removeListener('error', failed);
+        output.removeListener('error', failed);
+        process.removeListener('SIGTERM', terminated);
+        process.removeListener('SIGINT', interrupted);
+        process.removeListener('SIGHUP', hungup);
+        finish(code);
+      });
+  };
+  const armIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => stop(1), options.idleMs ?? STREAM_IDLE_MS);
+  };
+  const failed = () => stop(1);
+  const ended = () => stop(0);
+  const terminated = () => stop(143);
+  const interrupted = () => stop(130);
+  const hungup = () => stop(129);
+  const data = (chunk) => {
+    // FLAG: The protocol admits one literal request, no queued/catch-up work or raw diagnostics.
+    if (stopped) return;
+    if (Buffer.byteLength(chunk) > 9 - Buffer.byteLength(buffer)) return stop(1);
+    buffer += chunk.toString('utf8');
+    if (Buffer.byteLength(buffer) > 9 || !'SNAPSHOT\n'.startsWith(buffer)) return stop(1);
+    if (buffer !== 'SNAPSHOT\n') return;
+    buffer = '';
+    if (active) return stop(1);
+    armIdle();
+    active = (async () => {
+      const snapshot = await collect({
+        device: options.device,
+        expectedApiServices: options.expectedApiServices,
+        restartTracker: tracker,
+        signal: controller.signal,
+      });
+      if (stopped) return;
+      const line = JSON.stringify(snapshot) + '\n';
+      if (Buffer.byteLength(line) > MAX_PROCESS_OUTPUT_BYTES)
+        throw new Error('Capacity response exceeded its bound.');
+      await new Promise((resolve, reject) => {
+        const aborted = () => reject(new Error('Capacity output cancelled.'));
+        controller.signal.addEventListener('abort', aborted, { once: true });
+        output.write(line, (error) => {
+          controller.signal.removeEventListener('abort', aborted);
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    })().then(
+      () => {
+        active = null;
+      },
+      () => {
+        active = null;
+        stop(1);
+      },
+    );
+  };
+  input.on('data', data);
+  input.once('end', ended);
+  input.once('error', failed);
+  output.on('error', failed);
+  if (options.listenSignals !== false) {
+    process.once('SIGTERM', terminated);
+    process.once('SIGINT', interrupted);
+    process.once('SIGHUP', hungup);
+  }
+  armIdle();
+  lifetime = setTimeout(() => stop(0), options.lifetimeMs ?? STREAM_LIFETIME_MS);
+  return finished;
+}
+
 module.exports = {
   DEFAULT_BLOCK_DEVICE,
   DEFAULT_DISK_PATH,
   DEFAULT_EXPECTED_API_SERVICES,
   calculateCounterRates,
   collectCapacitySnapshot,
+  createRestartTracker,
   normalizeActionHealth,
   normalizeQueueFence,
   normalizeReadyProbe,
@@ -1192,21 +1515,35 @@ module.exports = {
   resolveExpectedApiTopologyFromCompose,
   resolveExpectedApiServicesFromCompose,
   summarizeApiFleet,
+  runBounded,
+  runCapacityStream,
 };
 
 if (require.main === module || __filename === '[stdin]') {
-  void collectCapacitySnapshot({
-    device: process.argv[2],
-    expectedApiServices:
-      process.argv.length > 3 ? process.argv.slice(3) : DEFAULT_EXPECTED_API_SERVICES,
-  })
-    .then((snapshot) => {
-      process.stdout.write(`${JSON.stringify(snapshot)}\n`);
-    })
-    .catch(() => {
+  const streaming = process.argv[2] === '--stream';
+  void (async () => {
+    if (streaming) {
+      process.exitCode = await runCapacityStream({
+        device: normalizeDevice(process.argv[3]),
+        expectedApiServices: normalizeExpectedApiServices(
+          process.argv.length > 4 ? process.argv.slice(4) : DEFAULT_EXPECTED_API_SERVICES,
+        ),
+      });
+      return;
+    }
+    const snapshot = await collectCapacitySnapshot({
+      device: process.argv[2],
+      expectedApiServices:
+        process.argv.length > 3 ? process.argv.slice(3) : DEFAULT_EXPECTED_API_SERVICES,
+    });
+    process.stdout.write(`${JSON.stringify(snapshot)}\n`);
+  })().catch(() => {
+    if (streaming) process.stderr.write('Capacity stream unavailable.\n');
+    else {
       process.stdout.write(
         `${JSON.stringify({ schemaVersion: 1, observedAt: new Date().toISOString(), unavailable: true })}\n`,
       );
-      process.exitCode = 1;
-    });
+    }
+    process.exitCode = 1;
+  });
 }

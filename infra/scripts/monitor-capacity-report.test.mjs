@@ -70,6 +70,15 @@ function sample(observedAt, lag = 0.5) {
       unexpectedScaleContainerCount: 0,
       unexpectedManualContainerCount: 0,
       totalRestartCount: 0,
+      restartEvidence: {
+        version: 1,
+        basis: 'container_generation_intervals',
+        previousObservedAt: new Date(Date.parse(observedAt) - 15_000).toISOString(),
+        observedAt,
+        api: { total: 0, delta: 0, generationChanged: false },
+        ocr: { total: 0, delta: 0, generationChanged: false },
+        photo: { total: 0, delta: 0, generationChanged: false },
+      },
     },
     token: 'private-token-sentinel',
     chatId: 'private-chat-sentinel',
@@ -106,7 +115,8 @@ test('reports a continuous cross-hour window without changing files or exposing 
   const { directory, files } = fixture(t);
   const before = files.map((path) => [readFileSync(path, 'utf8'), statSync(path).mtimeMs]);
   const result = report.buildReport({ directory, from, to });
-  assert.equal(result.basis, 'sampled_oldest_queue_lag');
+  assert.equal(result.schemaVersion, 2);
+  assert.equal(result.basis, 'sampled_oldest_queue_lag_and_container_generation_intervals');
   assert.equal(result.current.status, 'healthy');
   assert.equal(result.current.coverage.status, 'complete');
   assert.equal(result.current.sampleCount, 20);
@@ -266,24 +276,225 @@ test('does not compare incomplete or partly unknown baselines', (t) => {
   });
 });
 
-test('separates historic restart totals, observed increases, and counter resets', (t) => {
+test('old archive totals never prove generation-safe restart coverage', (t) => {
   const rows = series();
-  for (const row of rows) row.apiFleet.totalRestartCount = 5;
+  for (const row of rows) {
+    row.apiFleet.totalRestartCount = 5;
+    delete row.apiFleet.restartEvidence;
+  }
   const stable = fixture(t, rows);
   assert.equal(
     report.buildReport({ directory: stable.directory, from, to }).current.status,
-    'healthy',
+    'unknown',
   );
   rows.at(-1).apiFleet.totalRestartCount = 6;
   const increased = fixture(t, rows);
   const increase = report.buildReport({ directory: increased.directory, from, to }).current;
-  assert.equal(increase.status, 'degraded');
-  assert.equal(increase.restartCounterIncreases, 1);
+  assert.equal(increase.status, 'unknown');
+  assert.equal(increase.historicalRestartDiagnostic.counterIncreases, 1);
+  assert.equal(increase.restarts.api.delta, null);
+  assert.equal(increase.restarts.api.coverage, 'unavailable');
   rows.at(-1).apiFleet.totalRestartCount = 0;
   const reset = fixture(t, rows);
   const changed = report.buildReport({ directory: reset.directory, from, to }).current;
   assert.equal(changed.status, 'unknown');
-  assert.equal(changed.restartCounterResets, 1);
+  assert.equal(changed.historicalRestartDiagnostic.counterResets, 1);
+});
+
+test('historical native restarts stay separate from confirmed current API intervals', (t) => {
+  const rows = series();
+  for (const row of rows) {
+    row.apiFleet.totalRestartCount = 12;
+    row.apiFleet.restartEvidence.ocr.total = 12;
+  }
+  const { directory } = fixture(t, rows);
+  const current = report.buildReport({ directory, from, to }).current;
+  assert.equal(current.status, 'healthy');
+  assert.equal(current.restarts.coverage, 'complete');
+  assert.equal(current.restarts.api.maxObservedTotal, 0);
+  assert.equal(current.restarts.ocr.maxObservedTotal, 12);
+  assert.equal(current.restarts.api.delta, 0);
+  assert.equal(current.restarts.ocr.delta, 0);
+  assert.equal(current.restarts.api.knownIntervals, 19);
+  const { alerts } = archive.evaluateAlerts([], archive.normalizeSnapshot(rows.at(-1)));
+  assert.equal(alerts.api_fleet_restarts.outcome, 'clear');
+  assert.equal(alerts.api_fleet_restarts.version, 2);
+  assert.equal(alerts.api_fleet_restarts.basis, 'container_generation_intervals');
+  assert.equal(alerts.ocr_native_restarts.outcome, 'clear');
+  assert.equal(alerts.photo_native_restarts.outcome, 'clear');
+});
+
+test('confirmed API and photo deltas remain separate and degrade their window', (t) => {
+  const rows = series();
+  const last = rows.at(-1);
+  last.apiFleet.totalRestartCount = 3;
+  last.apiFleet.restartEvidence.api = { total: 1, delta: 1, generationChanged: false };
+  last.apiFleet.restartEvidence.photo = { total: 2, delta: 2, generationChanged: false };
+  const { directory } = fixture(t, rows);
+  const current = report.buildReport({ directory, from, to }).current;
+  assert.equal(current.status, 'degraded');
+  assert.equal(current.restarts.api.delta, 1);
+  assert.equal(current.restarts.photo.delta, 2);
+  assert.equal(current.restarts.ocr.delta, 0);
+  const { alerts } = archive.evaluateAlerts([], archive.normalizeSnapshot(last));
+  assert.equal(alerts.api_fleet_restarts.outcome, 'firing');
+  assert.equal(alerts.photo_native_restarts.outcome, 'firing');
+  assert.equal(alerts.ocr_native_restarts.outcome, 'clear');
+});
+
+test('replacement with equal aggregate totals cannot certify a stable window', (t) => {
+  const rows = series();
+  for (const row of rows) {
+    row.apiFleet.totalRestartCount = 5;
+    row.apiFleet.restartEvidence.api.total = 5;
+  }
+  rows.at(-1).apiFleet.restartEvidence.api.generationChanged = true;
+  const { directory } = fixture(t, rows);
+  const current = report.buildReport({ directory, from, to }).current;
+  assert.equal(current.status, 'unknown');
+  assert.equal(current.historicalRestartDiagnostic.counterIncreases, 0);
+  assert.equal(current.historicalRestartDiagnostic.counterResets, 0);
+  assert.equal(current.restarts.api.generationChanges, 1);
+  assert.equal(current.restarts.api.delta, null);
+  assert.equal(current.restarts.api.coverage, 'partial');
+  assert.equal(current.restarts.ocr.coverage, 'complete');
+});
+
+test('prewindow deltas are excluded and cannot substitute for an in-window endpoint', (t) => {
+  const rows = series();
+  for (const row of rows) {
+    row.apiFleet.totalRestartCount = 2;
+    row.apiFleet.restartEvidence.photo.total = 2;
+  }
+  rows[0].apiFleet.restartEvidence.photo.delta = 2;
+  const anchor = fixture(t, rows);
+  const excluded = report.buildReport({ directory: anchor.directory, from, to }).current;
+  assert.equal(excluded.status, 'healthy');
+  assert.equal(excluded.restarts.photo.delta, 0);
+  rows[1].apiFleet.restartEvidence.previousObservedAt =
+    rows[0].apiFleet.restartEvidence.previousObservedAt;
+  rows[1].apiFleet.restartEvidence.photo.delta = 2;
+  const crossing = fixture(t, rows);
+  const unknown = report.buildReport({ directory: crossing.directory, from, to }).current;
+  assert.equal(unknown.status, 'unknown');
+  assert.equal(unknown.restarts.photo.delta, null);
+  assert.equal(unknown.restarts.photo.confirmedDeltaLowerBound, 0);
+  assert.equal(unknown.restarts.photo.unknownIntervals, 1);
+});
+
+test('missing archived endpoint and independent class gaps retain unknown coverage', (t) => {
+  const rows = series();
+  rows[5].apiFleet.restartEvidence.ocr = { total: null, delta: null, generationChanged: null };
+  const partial = fixture(t, rows);
+  const independent = report.buildReport({ directory: partial.directory, from, to }).current;
+  assert.equal(independent.status, 'unknown');
+  assert.equal(independent.restarts.api.coverage, 'complete');
+  assert.equal(independent.restarts.photo.coverage, 'complete');
+  assert.equal(independent.restarts.ocr.coverage, 'partial');
+  assert.equal(independent.restarts.ocr.delta, null);
+  const missing = fixture(
+    t,
+    rows.filter((_row, index) => index !== 5),
+  );
+  const gap = report.buildReport({ directory: missing.directory, from, to }).current;
+  assert.equal(gap.coverage.status, 'complete');
+  assert.equal(gap.status, 'unknown');
+  assert.equal(gap.restarts.api.unknownIntervals, 1);
+});
+
+test('restart evidence admits only versioned timestamps and bounded independent class scalars', () => {
+  const raw = sample('2026-09-14T11:00:00.000Z');
+  raw.apiFleet.restartEvidence.privateId = 'private-container-id';
+  raw.apiFleet.restartEvidence.api.privateCause = 'private-timeout-guess';
+  raw.apiFleet.restartEvidence.ocr.delta = '0';
+  let normalized = archive.normalizeSnapshot(raw);
+  assert.equal(normalized.apiFleet.available, true);
+  assert.equal(normalized.apiFleet.restartEvidence.api.delta, 0);
+  assert.equal(normalized.apiFleet.restartEvidence.ocr.delta, null);
+  assert.equal(normalized.apiFleet.restartEvidence.photo.delta, 0);
+  assert.doesNotMatch(JSON.stringify(normalized), /private-/u);
+  for (const [field, value] of [
+    ['version', 2],
+    ['basis', 'private-invalid'],
+    ['observedAt', '2026-09-14T11:00:01.000Z'],
+  ]) {
+    const invalid = structuredClone(raw);
+    invalid.apiFleet.restartEvidence[field] = value;
+    normalized = archive.normalizeSnapshot(invalid);
+    assert.equal(normalized.apiFleet.restartEvidence, null);
+    assert.equal(normalized.apiFleet.available, true);
+    assert.equal(normalized.apiFleet.totalRestartCount, 0);
+  }
+  raw.apiFleet.restartEvidence.previousObservedAt = '2026-09-14T10:58:00.000Z';
+  normalized = archive.normalizeSnapshot(raw);
+  assert.equal(normalized.apiFleet.restartEvidence.api.total, 0);
+  assert.equal(normalized.apiFleet.restartEvidence.api.delta, null);
+  assert.equal(normalized.apiFleet.restartEvidence.previousObservedAt, '2026-09-14T10:58:00.000Z');
+  raw.apiFleet.restartEvidence.basis = 'historical_container_totals';
+  normalized = archive.normalizeSnapshot(raw);
+  assert.equal(normalized.apiFleet.restartEvidence.api.delta, null);
+  assert.equal(normalized.apiFleet.restartEvidence.api.generationChanged, null);
+  assert.equal(normalized.apiFleet.restartEvidence.previousObservedAt, null);
+});
+
+test('legacy baseline with equal totals is not comparable to a proven current window', (t) => {
+  const compareFrom = '2026-09-14T10:54:00Z';
+  const baseline = series(compareFrom);
+  for (const row of baseline) delete row.apiFleet.restartEvidence;
+  const { directory } = fixture(t, [...baseline, ...series()]);
+  const result = report.buildReport({ directory, from, to, compareFrom, compareTo: from });
+  assert.equal(result.current.status, 'healthy');
+  assert.equal(result.baseline.status, 'unknown');
+  assert.equal(result.comparison.comparable, false);
+  assert.equal(result.comparison.p95LagChangeSec, null);
+});
+
+test('archive rewriting retains explicit historical and current restart alert meanings', (t) => {
+  const { directory } = fixture(t, []);
+  const first = sample('2026-09-14T10:59:00.000Z');
+  delete first.apiFleet.restartEvidence;
+  const path = join(directory, archive.archiveFilename(first.observedAt));
+  writeFileSync(
+    path,
+    JSON.stringify({
+      schemaVersion: 1,
+      sample: first,
+      overallStatus: 'ok',
+      alerts: { api_fleet_restarts: { outcome: 'clear', value: 0 } },
+    }) + '\n',
+    { mode: 0o600 },
+  );
+  for (const observedAt of ['2026-09-14T10:59:15.000Z', '2026-09-14T10:59:30.000Z']) {
+    archive.archiveSnapshot(sample(observedAt), { directory, nowMs: Date.parse(observedAt) });
+  }
+  const records = readFileSync(path, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(records[0].sample.apiFleet.restartEvidence, null);
+  assert.equal(records[0].alerts.api_fleet_restarts.version, 1);
+  assert.equal(records[0].alerts.api_fleet_restarts.basis, 'historical_container_totals');
+  assert.equal(records[0].alerts.ocr_native_restarts.outcome, 'unknown');
+  assert.equal(records[1].alerts.api_fleet_restarts.version, 2);
+  assert.equal(records[1].alerts.api_fleet_restarts.basis, 'container_generation_intervals');
+  assert.equal(records[1].alerts.api_fleet_restarts.outcome, 'clear');
+});
+
+test('a proved class restart remains visible when another class is unknown', (t) => {
+  const rows = series();
+  rows.at(-1).apiFleet.totalRestartCount = 1;
+  rows.at(-1).apiFleet.restartEvidence.api = { total: 1, delta: 1, generationChanged: false };
+  rows.at(-1).apiFleet.restartEvidence.photo = {
+    total: null,
+    delta: null,
+    generationChanged: null,
+  };
+  const { directory } = fixture(t, rows);
+  const current = report.buildReport({ directory, from, to }).current;
+  assert.equal(current.status, 'degraded');
+  assert.equal(current.restarts.api.delta, 1);
+  assert.equal(current.restarts.photo.delta, null);
+  assert.equal(current.restarts.coverage, 'partial');
 });
 
 test('rejects excessive, reversed, malformed, timezone-free, and overlapping windows', (t) => {
