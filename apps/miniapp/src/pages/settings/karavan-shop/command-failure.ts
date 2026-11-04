@@ -1,5 +1,28 @@
 import { ApiRequestError } from '../../../lib/api-request-error';
 
+type ShopFailureKind = 'validation' | 'refresh' | 'forbidden' | 'unknown';
+const accessRejections = {
+  ADMINISTRATION_STORE_UNAVAILABLE: { status: 409, kind: 'refresh' },
+  MARKETPLACE_LISTING_LIMIT: { status: 409, kind: 'validation' },
+  MARKETPLACE_GRANTS_UNAVAILABLE: { status: 409, kind: 'refresh' },
+  MARKETPLACE_GRANT_ALREADY_CLAIMED: { status: 409, kind: 'refresh' },
+  MARKETPLACE_GRANT_REQUIRED: { status: 403, kind: 'forbidden' },
+  MARKETPLACE_GRANT_STORE_OWNER: { status: 403, kind: 'validation' },
+  MARKETPLACE_GRANT_UNAVAILABLE: { status: 403, kind: 'refresh' },
+  MARKETPLACE_INVITATION_EXPIRY: { status: 400, kind: 'validation' },
+  MARKETPLACE_INVITATION_LIMIT: { status: 409, kind: 'validation' },
+  MARKETPLACE_RULES_CHANGED: { status: 409, kind: 'refresh' },
+} as const satisfies Record<
+  string,
+  { status: 400 | 403 | 409; kind: Exclude<ShopFailureKind, 'unknown'> }
+>;
+
+function knownAccessRejection(error: ApiRequestError) {
+  if (!error.code || !Object.hasOwn(accessRejections, error.code)) return null;
+  const rejection = accessRejections[error.code as keyof typeof accessRejections];
+  return error.status === rejection.status ? rejection : null;
+}
+
 const editableShopRejectionCodes = new Set([
   'MARKETPLACE_FORMAT_LIMIT',
   'ADMINISTRATION_STORE_OWNER_REQUIRED',
@@ -14,13 +37,13 @@ const editableShopRejectionCodes = new Set([
   'MARKETPLACE_RULES_ACCEPTANCE_REQUIRED',
 ]);
 
-export function shopMutationFailureKind(
-  error: unknown,
-): 'validation' | 'refresh' | 'forbidden' | 'unknown' {
+export function shopMutationFailureKind(error: unknown): ShopFailureKind {
   if (!(error instanceof ApiRequestError)) return 'unknown';
   if (error.code === 'KARAVAN_COMMAND_UNKNOWN') return 'unknown';
   if (error.code === 'KARAVAN_COMMAND_REJECTED') return 'refresh';
   if (error.status >= 500) return 'unknown';
+  const accessRejection = knownAccessRejection(error);
+  if (accessRejection) return accessRejection.kind;
   if (
     [400, 403, 409, 422].includes(error.status) &&
     error.code &&
@@ -44,6 +67,7 @@ export function isDefiniteFirstShopRejection(error: unknown, dispatchCount: numb
   if (error.code === 'KARAVAN_COMMAND_UNKNOWN' || error.code === 'MARKETPLACE_COMMAND_CONFLICT')
     return false;
   if (error.code === 'KARAVAN_COMMAND_REJECTED') return true;
+  if (knownAccessRejection(error)) return true;
   if (![400, 401, 403, 404, 409, 422].includes(error.status)) return false;
   if (!error.code) return error.status === 400 || error.status === 422;
   if (editableShopRejectionCodes.has(error.code)) return true;

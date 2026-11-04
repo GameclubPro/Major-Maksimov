@@ -4,13 +4,30 @@ export type VkParsingErrorClass = {
   code: string;
   message: string;
   retryable: boolean;
+  retryAtMs?: number;
 };
 
+// FLAG: The current PostgreSQL/Prisma timestamp adapter round-trips only four-digit years.
+// Reject larger deadlines before they reach admission or durable source scheduling.
+export const VK_API_MAX_RETRY_AT_MS = 253_402_300_799_999;
+
+export function readVkRetryAtMs(value: unknown): number | undefined {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= VK_API_MAX_RETRY_AT_MS
+    ? value
+    : undefined;
+}
+
 export class VkApiRequestError extends ServiceUnavailableException {
+  readonly retryAtMs?: number;
+
   constructor(
     message: string,
     readonly code: string,
     readonly retryable: boolean,
+    retryAtMs?: number,
   ) {
     super({
       statusCode: 503,
@@ -19,15 +36,18 @@ export class VkApiRequestError extends ServiceUnavailableException {
       retryable,
     });
     this.name = 'VkApiRequestError';
+    this.retryAtMs = readVkRetryAtMs(retryAtMs);
   }
 }
 
 export function classifyVkParsingSyncError(error: unknown): VkParsingErrorClass {
   if (error instanceof VkApiRequestError) {
+    const retryAtMs = readVkRetryAtMs(error.retryAtMs);
     return {
       code: `vk_api.${error.code}`,
       message: error.message,
       retryable: error.retryable,
+      ...(retryAtMs === undefined ? {} : { retryAtMs }),
     };
   }
   if (isPrismaTransactionTimeout(error)) {

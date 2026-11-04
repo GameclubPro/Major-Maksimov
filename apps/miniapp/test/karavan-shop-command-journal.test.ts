@@ -69,6 +69,10 @@ test('reads are excluded from the product-write journal and mismatched responses
     'applications',
     'content',
     'rules_preview',
+    'format_preview',
+    'administration_stores',
+    'seller_grant_target',
+    'seller_grants',
   ] as const)
     assert.equal(isShopWriteOperation(operation), false);
   for (const operation of [
@@ -80,6 +84,10 @@ test('reads are excluded from the product-write journal and mismatched responses
     'rules_update',
     'settings',
     'status',
+    'format_update',
+    'administration_store_change',
+    'seller_grant_create',
+    'seller_grant_revoke',
   ] as const)
     assert.equal(isShopWriteOperation(operation), true);
   let sent = '';

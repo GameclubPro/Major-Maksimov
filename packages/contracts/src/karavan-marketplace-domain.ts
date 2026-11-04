@@ -1,6 +1,11 @@
 // Versioned Karavan domain wire schemas; no shared database or runtime dependency.
 import { z } from 'zod';
-import { karavanMarketplaceCategories, karavanShopFormatSchema } from './karavan-marketplace.js';
+import {
+  karavanMarketplaceCategories,
+  karavanShopFormatSchema,
+  karavanAdmissionModeSchema,
+  karavanAdministrationStoreSchema,
+} from './karavan-marketplace.js';
 const catalogTaxonomyCategoryIdSchema = z.enum(karavanMarketplaceCategories.map(([id]) => id));
 const catalogTaxonomySubcategoryIdSchema = z
   .string()
@@ -112,10 +117,12 @@ export const marketplaceSummarySchema = /* @__PURE__ */ (() =>
     description: z.string().max(2000).nullable(),
     kind: z.enum(['chat', 'legacy']),
     format: karavanShopFormatSchema.optional(),
+    shopFormat: karavanShopFormatSchema.optional(),
     administrationStoreId: id.nullable().optional(),
     formatRevision: revision.optional(),
     status: marketplaceStatusSchema,
     admissionPolicy: z.enum(['applications', 'invitation']),
+    admissionMode: karavanAdmissionModeSchema.optional(),
     logoImageUrl: z.string().url().nullable(),
     coverImageUrl: z.string().url().nullable(),
     editRevision: revision,
@@ -126,6 +133,9 @@ export const marketplaceSummarySchema = /* @__PURE__ */ (() =>
 export const marketplacePublicResponseSchema = /* @__PURE__ */ (() =>
   z.object({
     marketplace: marketplaceSummarySchema,
+    administrationStore: karavanAdministrationStoreSchema.nullable().optional(),
+    administrationStores: z.array(karavanAdministrationStoreSchema).max(100).optional(),
+    administrationStoreCount: z.number().int().nonnegative().optional(),
     rules: marketplaceRulesVersionSchema,
     scheduledRules: marketplaceRulesVersionSchema.nullable(),
   }))();
@@ -156,6 +166,7 @@ export const marketplaceChatBindingSchema = /* @__PURE__ */ (() =>
   }))();
 export const marketplaceDetailResponseSchema = /* @__PURE__ */ (() =>
   marketplacePublicResponseSchema.extend({
+    actorMaxUserId: z.string().min(1).max(80).optional(),
     permissions: z.array(marketplacePermissionSchema),
     counts: z.object({
       approvedListings: z.number().int().nonnegative().optional(),
@@ -172,7 +183,10 @@ export const marketplaceCreateRequestSchema = /* @__PURE__ */ (() =>
       networkId: id.nullable().optional().default(null),
       name: z.string().trim().min(1).max(120),
       description: z.string().trim().max(2000).nullable().optional().default(null),
-      admissionPolicy: z.enum(['applications', 'invitation']).optional().default('applications'),
+      admissionPolicy: karavanAdmissionModeSchema.optional().default('applications'),
+      setupVersion: z.literal(2).optional(),
+      format: karavanShopFormatSchema.optional(),
+      administrationStoreId: id.nullable().optional(),
       rules: marketplaceRulesInputSchema,
     })
     .strict())();
@@ -184,7 +198,7 @@ export const marketplaceSettingsRequestSchema = /* @__PURE__ */ (() =>
       description: z.string().trim().max(2000).nullable().optional(),
       logoImageUrl: z.string().url().max(2048).nullable().optional(),
       coverImageUrl: z.string().url().max(2048).nullable().optional(),
-      admissionPolicy: z.enum(['applications', 'invitation']).optional(),
+      admissionPolicy: karavanAdmissionModeSchema.optional(),
     })
     .strict())();
 export const marketplaceStatusRequestSchema = /* @__PURE__ */ (() =>
@@ -296,6 +310,8 @@ export const marketplaceApplicationSchema = /* @__PURE__ */ (() =>
     submittedAt: instant,
     decidedAt: instant.nullable(),
     reason: z.string().nullable(),
+    sellerName: z.string().optional(),
+    categoryLabel: z.string().optional(),
     canReview: z.boolean(),
     canPublishOwn: z.boolean().optional(),
   }))();

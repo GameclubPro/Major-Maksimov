@@ -14,11 +14,15 @@ import {
   karavanMarketplaceModuleSchema,
   type KaravanMarketplaceModule,
 } from '@maxim/contracts/karavan-marketplace';
-import type { MarketplaceManagementResponse } from '@maxim/contracts/karavan-marketplace-management';
+import type {
+  MarketplaceApplication,
+  MarketplaceManagementResponse,
+} from '@maxim/contracts/karavan-marketplace-management';
 import '../src/pages/settings-page';
 import '../src/styles/moderation-workspace.css';
 const params = new URLSearchParams(location.search);
 const scenario = params.get('scenario') ?? '';
+const simple = scenario.startsWith('simple_');
 const providerResponse = (window as Window & { __shopProviderModule?: unknown })
   .__shopProviderModule;
 const providerModule = providerResponse
@@ -31,7 +35,7 @@ document.body.classList.add('settings-home-page-open');
 const id = 'a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10';
 const second = 'bb669048-0279-4a35-987c-60f94593163e';
 const administrationStoreId = 'cc669048-0279-4a35-987c-60f94593163e';
-let formatConnected = !scenario.startsWith('format_setup');
+let formatConnected = !scenario.startsWith('format_setup') && !scenario.startsWith('simple_setup');
 let sellerTermsAccepted = scenario !== 'format_setup_terms';
 const market: NonNullable<KaravanMarketplaceModule['marketplace']> =
   providerModule?.marketplace ?? {
@@ -56,7 +60,7 @@ const market: NonNullable<KaravanMarketplaceModule['marketplace']> =
     orderRevision: 1,
     visibilityRevision: 1,
   };
-if (scenario.startsWith('format_storefront')) {
+if (scenario.startsWith('format_storefront') || scenario.startsWith('simple_admin')) {
   market.format = 'storefront';
   market.administrationStoreId = administrationStoreId;
   market.formatRevision = 1;
@@ -71,6 +75,24 @@ let administrationStore: KaravanMarketplaceModule['administrationStore'] =
     status: scenario === 'format_storefront_closed' ? 'DRAFT' : 'ACTIVE',
     editRevision: 1,
   };
+let administrationStores =
+  simple && scenario.startsWith('simple_admin')
+    ? scenario.includes('_0')
+      ? []
+      : scenario.includes('_many')
+        ? [
+            administrationStore!,
+            { ...administrationStore!, id: second, slug: 'second-store', name: 'Вторая витрина' },
+          ]
+        : [administrationStore!]
+    : [];
+if (scenario === 'simple_admin_paused') market.status = 'paused';
+if (simple)
+  market.admissionMode = scenario.includes('_selected')
+    ? 'selected'
+    : scenario.includes('_open')
+      ? 'open'
+      : 'applications';
 const formatReceipts = new Map<string, { marketplace: typeof market }>();
 let lostFormatResponse = false;
 let handoffFailed = false;
@@ -129,6 +151,15 @@ if (scenario === 'format_storefront_ready')
     approvedListings: 0,
     pendingApplications: 2,
   });
+if (simple) {
+  counts.pendingApplications = scenario.includes('_pending') ? 2 : 0;
+  if (
+    scenario.includes('_empty') ||
+    scenario.startsWith('simple_setup') ||
+    scenario.includes('admin_0')
+  )
+    Object.assign(counts, { listings: 0, readyListings: 0, approvedListings: 0 });
+}
 const detailCounts =
   (window as Window & { __shopProviderDetailCounts?: typeof counts }).__shopProviderDetailCounts ??
   counts;
@@ -171,6 +202,37 @@ const allowedUsers = Array.from({ length: 102 }, (_, index) => ({
 let catalogReads = 0;
 let detailReads = 0;
 let pendingApplication = true;
+const simpleApplications: MarketplaceApplication[] =
+  simple && scenario.includes('_pending')
+    ? [id, administrationStoreId].map((applicationId, index) => ({
+        id: applicationId,
+        listingId: index ? administrationStoreId : second,
+        marketplaceId: id,
+        storeId: index ? administrationStoreId : second,
+        storeName: index ? 'Цветы у дома' : 'Мастерская',
+        revision: 1,
+        attempt: 1,
+        state: 'pending',
+        profileVersionId: applicationId,
+        profile: {
+          name: index ? 'Цветы у дома' : 'Мастерская',
+          description: index ? 'Букеты на заказ' : 'Ремонт техники',
+          logoImageUrl: null,
+          coverImageUrl: null,
+        },
+        publishedProfile: null,
+        rulesVersion: rules,
+        submittedAt: new Date().toISOString(),
+        decidedAt: null,
+        reason: null,
+        canReview: !(scenario.includes('_self') && index === 0),
+        sellerName: index ? 'Анна Цветкова' : 'Иван Петров',
+        categoryLabel: index ? 'Цветы' : 'Услуги',
+      }))
+    : [];
+let grant:
+  | Extract<MarketplaceManagementResponse, { operation: 'seller_grant_create' }>['data']
+  | null = null;
 let applicationRevision = 1;
 let rulesConflict = !params.get('scenario')?.startsWith('daily_');
 let admissionFailure = true;
@@ -195,6 +257,8 @@ const state = window as Window & {
   WebApp: unknown;
   __shopSaves: unknown[];
   __shopClipboard: string[];
+  __setAdministrationStores?: (count: number) => Promise<unknown>;
+  __setShopStatus?: (status: 'active' | 'paused') => Promise<unknown>;
   __finishShopImage?: () => void;
   __dropShopInvitationUrl?: boolean;
   __setShopResponseError?: () => void;
@@ -253,6 +317,20 @@ const api = {
         nextCursor: cursor ? null : 'page2',
       };
     }
+    if (path.includes('/members?'))
+      return {
+        items: [
+          {
+            userId: '888',
+            userDisplayName: 'Анна Цветкова',
+            username: 'anna',
+            isBot: false,
+            role: 'member',
+          },
+        ],
+        hasMore: false,
+        nextCursor: null,
+      };
     if (path.includes('/available')) return { marketplaces: [], nextCursor: null };
     if (path.endsWith('/preview'))
       return {
@@ -280,13 +358,19 @@ const api = {
     }
     if (path.endsWith('/setup')) {
       formatConnected = true;
-      market.status = 'draft';
+      market.status = body.create.setupVersion === 2 ? 'active' : 'draft';
+      market.name = body.create.name;
+      market.admissionMode = body.create.admissionPolicy;
       market.format = body.create.format;
       market.administrationStoreId =
         body.create.format === 'storefront'
           ? (body.create.administrationStoreId ?? administrationStoreId)
           : null;
       market.formatRevision = 1;
+      if (body.create.setupVersion === 2) {
+        market.administrationStoreId = null;
+        administrationStores = [];
+      }
       if (administrationStore) administrationStore = { ...administrationStore, status: 'DRAFT' };
       return {
         operationId: body.operationId,
@@ -308,6 +392,7 @@ const api = {
     if (path.endsWith('/setup-options'))
       return {
         chatTitle: 'Соседи',
+        ...(simple ? { chatShopFlowVersion: 2 } : {}),
         ...(scenario === 'format_setup_legacy'
           ? {}
           : {
@@ -357,7 +442,45 @@ const api = {
         );
       }
       let data;
-      if (operation === 'format_preview') {
+      if (operation === 'seller_grant_target') {
+        data = {
+          target: scenario.includes('_new_seller')
+            ? null
+            : { maxUserId: input.targetMaxUserId, name: 'Анна Цветкова', username: 'anna' },
+          stores: scenario.includes('_new_seller') ? [] : [administrationStore],
+        };
+      } else if (operation === 'seller_grants')
+        data = { grants: grant ? [grant.grant] : [], nextCursor: null };
+      else if (operation === 'seller_grant_create') {
+        const previous = scenario.includes('_unknown')
+          ? sessionStorage.getItem(`grant-receipt:${input.commandId}`)
+          : null;
+        if (previous) {
+          grant = JSON.parse(previous);
+          return { operation, data: grant };
+        }
+        grant = {
+          grant: {
+            id: crypto.randomUUID(),
+            marketplaceId: id,
+            targetMaxUserId: input.targetMaxUserId,
+            storeId: input.storeId,
+            revision: 1,
+            expiresAt: input.expiresAt,
+            revokedAt: null,
+            claimedAt: input.storeId ? new Date().toISOString() : null,
+          },
+          url: 'https://max.ru/synthetic_seller_bot?startapp=placement_recipient_grant',
+        };
+        data = grant;
+        if (scenario.includes('_unknown')) {
+          sessionStorage.setItem(`grant-receipt:${input.commandId}`, JSON.stringify(grant));
+          throw new Error('Ответ потерян');
+        }
+      } else if (operation === 'seller_grant_revoke') {
+        if (grant) grant.grant.revokedAt = new Date().toISOString();
+        data = { revoked: true };
+      } else if (operation === 'format_preview') {
         data = {
           fingerprint: 'a'.repeat(64),
           expectedRevision: input.expectedRevision,
@@ -370,7 +493,7 @@ const api = {
       } else if (operation === 'format_update') {
         const receipt = formatReceipts.get(input.commandId);
         if (receipt) return { operation, data: receipt };
-        if (market.status === 'active') market.status = 'paused';
+        if (market.status === 'active' && input.setupVersion !== 2) market.status = 'paused';
         market.format = input.format;
         market.administrationStoreId =
           input.format === 'storefront'
@@ -441,7 +564,22 @@ const api = {
                   allowedCategory,
                   restriction,
                 }))
-              : [{ id: offerId, kind, title, imageUrl, allowedCategory, restriction }],
+              : simple
+                ? input.kind === 'property'
+                  ? []
+                  : [
+                      {
+                        id: offerId,
+                        kind,
+                        title,
+                        imageUrl,
+                        allowedCategory,
+                        restriction,
+                        priceLabel: 'от 1 500 ₽',
+                        categoryLabel: 'Ремонт',
+                      },
+                    ]
+                : [{ id: offerId, kind, title, imageUrl, allowedCategory, restriction }],
           nextCursor:
             scenario === 'daily_content_pages' && Number(input.cursor ?? 0) < 2
               ? String(Number(input.cursor ?? 0) + 1)
@@ -449,11 +587,14 @@ const api = {
           storeId: second,
         };
       } else if (operation === 'settings') {
-        if (admissionFailure) {
+        if (admissionFailure && !simple) {
           admissionFailure = false;
           throw new Error('Offline');
         }
-        market.admissionPolicy = input.admissionPolicy;
+        market.admissionMode = input.admissionPolicy;
+        market.admissionPolicy = ['invitation', 'selected'].includes(input.admissionPolicy)
+          ? 'invitation'
+          : 'applications';
         market.editRevision++;
         data = { marketplace: market };
       } else if (operation === 'status') {
@@ -545,41 +686,62 @@ const api = {
         data = design;
       } else if (operation === 'applications')
         data = {
-          applications: pendingApplication
-            ? [
-                {
-                  id,
-                  listingId: second,
-                  marketplaceId: id,
-                  storeId: second,
-                  storeName: 'Мастерская',
-                  revision: applicationRevision,
-                  attempt: 1,
-                  state: 'pending',
-                  profileVersionId: id,
-                  profile: {
-                    name: 'Мастерская',
-                    description: 'Ремонт техники',
-                    logoImageUrl: null,
-                    coverImageUrl: null,
+          applications: simple
+            ? simpleApplications.filter(
+                (application) => input.state === 'all' || application.state === input.state,
+              )
+            : pendingApplication
+              ? [
+                  {
+                    id,
+                    listingId: second,
+                    marketplaceId: id,
+                    storeId: second,
+                    storeName: 'Мастерская',
+                    revision: applicationRevision,
+                    attempt: 1,
+                    state: 'pending',
+                    profileVersionId: id,
+                    profile: {
+                      name: 'Мастерская',
+                      description: 'Ремонт техники',
+                      logoImageUrl: null,
+                      coverImageUrl: null,
+                    },
+                    publishedProfile: null,
+                    rulesVersion: rules,
+                    submittedAt: new Date().toISOString(),
+                    decidedAt: null,
+                    reason: null,
+                    canReview: !['daily_self_review', 'own_profile'].includes(
+                      params.get('scenario') ?? '',
+                    ),
+                    canPublishOwn: params.get('scenario') === 'own_profile',
                   },
-                  publishedProfile: null,
-                  rulesVersion: rules,
-                  submittedAt: new Date().toISOString(),
-                  decidedAt: null,
-                  reason: null,
-                  canReview: !['daily_self_review', 'own_profile'].includes(
-                    params.get('scenario') ?? '',
-                  ),
-                  canPublishOwn: params.get('scenario') === 'own_profile',
-                },
-              ]
-            : [],
+                ]
+              : [],
           nextCursor: null,
         };
       else if (operation === 'decide') {
         pendingApplication = false;
         counts.pendingApplications = 0;
+        if (simple) {
+          const decided = simpleApplications.find(
+            (application) => application.id === body.command.applicationId,
+          )!;
+          decided.state =
+            input.decision === 'approve'
+              ? 'approved'
+              : input.decision === 'reject'
+                ? 'rejected'
+                : 'changes_requested';
+          decided.reason = input.reason;
+          decided.decidedAt = new Date().toISOString();
+          decided.canReview = false;
+          counts.pendingApplications = simpleApplications.filter(
+            (application) => application.state === 'pending',
+          ).length;
+        }
         data = {
           listing: {
             id: second,
@@ -595,7 +757,8 @@ const api = {
                   ? 'changes_requested'
                   : 'rejected',
             sellerState: 'enabled',
-            publicationReason: 'published',
+            publicationReason:
+              simple && scenario.includes('_not_ready') ? 'no_published_offers' : 'published',
             rank: '1',
             approvedProfileVersionId: id,
             pendingApplicationId: null,
@@ -665,18 +828,32 @@ const api = {
     if (path.endsWith('/karavan-marketplace'))
       return {
         ...providerModule,
+        ...(simple
+          ? {
+              chatShopFlowVersion: 2,
+              administrationStores,
+              administrationStoreCount: administrationStores.length,
+            }
+          : {}),
         enabled: true,
         actorMaxUserId: '777',
         sellerBotUrl: 'https://max.ru/synthetic_seller_bot',
         marketplace: params.get('scenario') === 'unbound' || !formatConnected ? null : market,
         binding: params.get('scenario') === 'unbound' || !formatConnected ? null : binding,
-        administrationStore: market.format === 'storefront' ? administrationStore : null,
+        administrationStore:
+          market.format === 'storefront'
+            ? simple
+              ? (administrationStores[0] ?? null)
+              : administrationStore
+            : null,
+        access: { reason: !formatConnected ? 'unbound' : 'allowed', canRecover: false },
         currentChatTitle: 'Соседи',
         permissions,
         counts,
         canManage: true,
-        buyerUrl:
-          market.format === 'storefront'
+        buyerUrl: simple
+          ? 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop'
+          : market.format === 'storefront'
             ? market.status === 'active' && administrationStore?.status === 'ACTIVE'
               ? 'https://max.ru/synthetic_buyer_bot?startapp=store_administration-store'
               : null
@@ -776,6 +953,19 @@ function Harness() {
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
 });
+state.__setAdministrationStores = async (count) => {
+  administrationStores = Array.from({ length: count }, (_, index) => ({
+    ...administrationStore!,
+    id: index ? second : administrationStoreId,
+    name: index ? 'Вторая витрина' : 'Первая витрина',
+  }));
+  await queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', fixtureChatId] });
+};
+state.__setShopStatus = async (status) => {
+  market.status = status;
+  market.editRevision++;
+  await queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', fixtureChatId] });
+};
 state.__loseShopManage = () => {
   permissions.splice(0, permissions.length, 'bind_chat');
   return queryClient.invalidateQueries({ queryKey: ['karavan-marketplace', fixtureChatId] });

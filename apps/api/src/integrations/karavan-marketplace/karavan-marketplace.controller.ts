@@ -59,6 +59,15 @@ export class KaravanMarketplaceController {
     );
     // FLAG: Use the relay's durable enrollment decision; a lost binding never previews legacy buttons.
     const scoped = await this.resolver.shouldUseScopedRelay(chatId);
+    const administrationStores =
+      module.administrationStores ??
+      (module.administrationStore ? [module.administrationStore] : []);
+    const connectedStoreCount = module.administrationStoreCount ?? administrationStores.length;
+    const hasPublishedAdministrationStore = administrationStores.some(
+      (store) =>
+        store.status === 'ACTIVE' &&
+        (!store.publicationReason || store.publicationReason === 'published'),
+    );
     const publicationPreview: KaravanPublicationPreview = !scoped
       ? module.marketplace?.format === 'storefront'
         ? { mode: 'unavailable', reason: 'connection' }
@@ -70,11 +79,23 @@ export class KaravanMarketplaceController {
           : module.marketplace.status !== 'active'
             ? { mode: 'unavailable', reason: 'closed' }
             : module.marketplace.format === 'storefront'
-              ? module.administrationStore?.id === module.marketplace.administrationStoreId &&
-                module.administrationStore?.status === 'ACTIVE' &&
-                !!module.buyerUrl
-                ? { mode: 'administration_storefront' }
-                : { mode: 'unavailable', reason: 'closed' }
+              ? module.chatShopFlowVersion === 2
+                ? connectedStoreCount > 0 &&
+                  (module.counts.readyListings ?? 0) > 0 &&
+                  hasPublishedAdministrationStore &&
+                  !!module.buyerUrl
+                  ? {
+                      mode:
+                        connectedStoreCount === 1
+                          ? 'administration_storefront'
+                          : 'chat_marketplace',
+                    }
+                  : { mode: 'unavailable', reason: 'closed' }
+                : module.administrationStore?.id === module.marketplace.administrationStoreId &&
+                    module.administrationStore?.status === 'ACTIVE' &&
+                    !!module.buyerUrl
+                  ? { mode: 'administration_storefront' }
+                  : { mode: 'unavailable', reason: 'closed' }
               : { mode: 'chat_marketplace' };
     return {
       enabled: true as const,
@@ -285,8 +306,9 @@ export class KaravanMarketplaceController {
       input.destination === 'storefront' &&
       (module.marketplace.format !== 'storefront' ||
         module.access?.reason !== 'allowed' ||
-        !module.administrationStore ||
-        module.administrationStore.id !== module.marketplace.administrationStoreId)
+        (module.chatShopFlowVersion !== 2 &&
+          (!module.administrationStore ||
+            module.administrationStore.id !== module.marketplace.administrationStoreId)))
     )
       throw new ForbiddenException('Общая витрина не подтверждена.');
     if (

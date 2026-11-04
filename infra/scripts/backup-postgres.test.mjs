@@ -760,6 +760,21 @@ esac
       const retry = readFileSync(join(units, unitPrefix + '-backup-retry.service'), 'utf8');
       assert.match(backup, /postgres-backup-schedule.sh request/);
       assert.match(retry, /postgres-backup-schedule.sh tick/);
+      assert.match(backup, /^Restart=no$/m);
+      const timer = readFileSync(join(units, unitPrefix + '-backup.timer'), 'utf8');
+      assert.equal(
+        timer.match(/^OnCalendar=(.+)$/m)?.[1],
+        profile === 'eraser' ? '*-*-* 01,13:20:00' : '*-*-* 03,15:20:00',
+      );
+      assert.match(timer, /^RandomizedDelaySec=20m$/m);
+      assert.match(timer, /^Persistent=true$/m);
+      const retryTimer = readFileSync(join(units, unitPrefix + '-backup-retry.timer'), 'utf8');
+      assert.match(retryTimer, /^OnCalendar=\*:0\/15$/m);
+      const restoreTimer = readFileSync(join(units, unitPrefix + '-restore-smoke.timer'), 'utf8');
+      assert.equal(
+        restoreTimer.match(/^OnCalendar=(.+)$/m)?.[1],
+        profile === 'eraser' ? 'Sun *-*-* 02:30:00' : 'Sun *-*-* 05:30:00',
+      );
       if (scenario === 'healthy')
         assert.match(commands, new RegExp(unitPrefix + '-backup-retry.timer'));
       assert.equal(commands.includes('systemctl enable --now'), scenario === 'healthy');
