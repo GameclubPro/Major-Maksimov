@@ -162,20 +162,43 @@ if [[ "$MAXIM_RESTORE_VOLUME_BYTES" == 0 ]]; then
 fi
 WATCHDOG_PID=""
 ABORT_MARKER="$RESTORE_DATA_DIR/.watchdog-aborted"
-cleanup() {
-  local status=$?
-  trap - EXIT HUP INT TERM
+RECEIPT_TMP=""
+RESTORE_CLEANUP_STATUS=pending
+RESTORE_RELEASE_STATUS=pending
+RESTORE_CONTAINER_ATTEMPTED=0
+cleanup_restore_resources() {
+  # FLAG: Keep the first cleanup result; EXIT must not hide a failure by retrying it.
+  if [[ "$RESTORE_CLEANUP_STATUS" != pending ]]; then return "$RESTORE_CLEANUP_STATUS"; fi
+  RESTORE_CLEANUP_STATUS=1
   if [[ -n "$WATCHDOG_PID" ]]; then
     kill "$WATCHDOG_PID" 2>/dev/null || true
     wait "$WATCHDOG_PID" 2>/dev/null || true
+    WATCHDOG_PID=""
   fi
   if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
-    maxim_restore_volume_action cleanup >/dev/null || status=1
+    maxim_restore_volume_action cleanup >/dev/null || return 1
   else
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    rm -rf -- "$RESTORE_DATA_DIR" || status=1
+    # FLAG: Only a run attempt can give a container ownership of this private directory.
+    if [[ "$RESTORE_CONTAINER_ATTEMPTED" == 1 ]] && ! docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1; then
+      echo "Could not remove disposable container $CONTAINER_NAME; preserving $RESTORE_DATA_DIR for review." >&2
+      return 1
+    fi
+    rm -rf -- "$RESTORE_DATA_DIR" || return 1
   fi
-  release_deploy_lock || status=1
+  RESTORE_CLEANUP_STATUS=0
+}
+release_restore_lock() {
+  if [[ "$RESTORE_RELEASE_STATUS" != pending ]]; then return "$RESTORE_RELEASE_STATUS"; fi
+  RESTORE_RELEASE_STATUS=1
+  release_deploy_lock || return 1
+  RESTORE_RELEASE_STATUS=0
+}
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  cleanup_restore_resources || status=1
+  if [[ -n "$RECEIPT_TMP" ]]; then rm -f -- "$RECEIPT_TMP" || status=1; fi
+  release_restore_lock || status=1
   exit "$status"
 }
 trap cleanup EXIT
@@ -191,6 +214,7 @@ if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
   CONTAINER_CIDFILE="$(maxim_restore_volume_value "$VOLUME_RESULT" cidfile)"
   CONTAINER_LIFECYCLE=(--cidfile "$CONTAINER_CIDFILE" --label "maxim.restore.operation=$MAXIM_RESTORE_VOLUME_OPERATION")
 fi
+RESTORE_CONTAINER_ATTEMPTED=1
 docker run --detach "${CONTAINER_LIFECYCLE[@]}" \
   --name "$CONTAINER_NAME" \
   --network none --cpus 2 --memory 4g --pids-limit 128 --shm-size 256m \
@@ -289,13 +313,8 @@ INVARIANTS="$(docker exec "$CONTAINER_NAME" psql -U postgres -d "${MAXIM_BACKUP_
 fi
 [[ "$INVARIANTS" == 1 && ! -e "$ABORT_MARKER" ]]
 probe_ready
-if [[ "$MAXIM_RESTORE_VOLUME_BYTES" != 0 ]]; then
-  # FLAG: A schema result cannot publish green evidence while disposable resources leak.
-  kill "$WATCHDOG_PID" 2>/dev/null || true
-  wait "$WATCHDOG_PID" 2>/dev/null || true
-  WATCHDOG_PID=""
-  maxim_restore_volume_action cleanup >/dev/null
-fi
+# FLAG: Neither profile may publish green evidence before resource cleanup and lock release.
+cleanup_restore_resources
 RECEIPT_TMP="$(mktemp "$DUMP_PATH.restore-verified.XXXXXX.tmp")"
 node - "$DUMP_PATH" "$POSTGRES_IMAGE" "$MAXIM_BACKUP_PROFILE" "$MAXIM_BACKUP_RESTORE_VERIFICATION" "$SCHEMA_DIGEST" >"$RECEIPT_TMP" <<'JS'
 const fs=require('node:fs');
@@ -304,6 +323,8 @@ process.stdout.write(JSON.stringify({ schemaVersion:1, verifiedAt:new Date().toI
   dump:require('node:path').basename(dump), dumpSha256:fs.readFileSync(dump+'.sha256','utf8').split(/\s+/)[0],
   postgresImage, profile, verification, ...(schemaDigest ? {schemaDigest} : {}), network:'none' })+'\n');
 JS
+release_restore_lock
 mv "$RECEIPT_TMP" "$DUMP_PATH.restore-verified.json"
+RECEIPT_TMP=""
 
 echo "PostgreSQL restore smoke passed for $DUMP_PATH"

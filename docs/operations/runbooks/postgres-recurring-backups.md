@@ -61,6 +61,10 @@ readiness and both storage reserves, and has a 12-hour deadline. It restores the
 checksum-verified local archive and verifies migration completion plus critical
 webhook, authority, action-ledger and publication primary indexes. Its receipt describes
 this schema check, not an end-to-end business exercise or a decrypted S3 restore.
+Both directory and loop modes publish a new receipt only after disposable-resource
+cleanup and deploy-lock release succeed. Either failure leaves any previous receipt
+unchanged and exits unsuccessfully. A directory-mode container-removal failure
+preserves its data directory for review; EXIT does not retry failed cleanup or release.
 Wait for PostgreSQL readiness on `127.0.0.1` inside that container. The image's temporary
 initialization server accepts Unix-socket connections before it stops; that socket
 must not satisfy the restore admission check. Loopback readiness retains network
