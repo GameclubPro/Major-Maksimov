@@ -405,10 +405,10 @@ persist_retention_deploy_mode
   const verify = deploy.indexOf('\n  verify_retention_deploy_mode\n');
   assert.ok(verify > persist);
   assert.ok(verify < deploy.indexOf('\n  maxim_webhook_resume_after_api_fence COMPOSE_FILES\n'));
-  assert.ok(
-    deploy.indexOf('\nvalidate_retention_deploy_mode\n') <
-      deploy.indexOf('\nacquire_deploy_lock\n'),
-  );
+  const admission = /^\s*(?:if\s+)?acquire_deploy_lock(?:;|\s|$)/mu.exec(deploy);
+  assert.ok(admission, 'normal deploy must acquire its protected lock');
+  const validation = deploy.indexOf('\nvalidate_retention_deploy_mode\n');
+  assert.ok(validation >= 0 && validation < admission.index);
 });
 
 test('runtime verification covers every actual role and refuses duplicates or stale modes', () => {

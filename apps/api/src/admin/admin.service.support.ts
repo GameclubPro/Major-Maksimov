@@ -683,6 +683,7 @@ export const SETTINGS_SECTION_KEYS = {
   ],
   commercialFilter: [
     'commercialAdsFilterEnabled',
+    'commercialAdsPolicy',
     'commercialAdsSensitivity',
     'commercialAdsWarnThreshold',
     'commercialAdsDeleteThreshold',

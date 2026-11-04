@@ -22,6 +22,7 @@ export class CommercialLlmCascadeClient implements CommercialLlmClassifier {
     private readonly auditNegative: () => boolean = () => randomInt(10) === 0,
     private readonly primaryFinished: () => Promise<void> = async () => undefined,
     private readonly auditSecondary: CommercialLlmClassifier = secondary,
+    private readonly confirmPersonalSales = false,
   ) {}
 
   async classify(
@@ -42,7 +43,12 @@ export class CommercialLlmCascadeClient implements CommercialLlmClassifier {
     }
     if (signal?.aborted) throw new CommercialLlmError('ABORTED');
     const primary = first.outcome === 'COMPLETE' ? first.result : null;
-    const audit = primary?.classification === 'NOT_COMMERCIAL' && this.auditNegative();
+    const audit =
+      primary?.classification === 'NOT_COMMERCIAL' &&
+      ((this.confirmPersonalSales &&
+        primary.reasonCodes.length === 1 &&
+        primary.reasonCodes[0] === 'PERSONAL_SALE') ||
+        this.auditNegative());
     const cascade = {
       version: COMMERCIAL_LLM_CASCADE_VERSION,
       primaryModelSha256: COMMERCIAL_LLM_WORKSTATION_IDENTITY.modelSha256,

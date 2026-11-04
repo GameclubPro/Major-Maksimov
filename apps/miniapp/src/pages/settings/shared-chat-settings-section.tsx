@@ -11,6 +11,7 @@ import type {
   DuplicatePhotoEffectivePolicy,
   StopWordsStorageStatus,
 } from '@maxim/contracts/settings';
+import type { CommercialSettingsScope } from './commercial-policy-model';
 import type { StopWordsFocusRequest } from './stop-words-settings-feedback';
 
 export type SharedChatSettingsContext = {
@@ -38,6 +39,7 @@ export type SharedChatSettingsContext = {
   runtimeNotes?: Partial<Record<ApplySectionKey, ReactNode>>;
   invitationActivationAvailable?: boolean;
   reportsActivationAvailable?: boolean;
+  commercialScope?: CommercialSettingsScope;
   commercialAiModerationMode?: 'OFF' | 'OBSERVE' | 'DELETE_ONLY';
   limitsRuntime?: {
     deleteSpammersStatus: string;

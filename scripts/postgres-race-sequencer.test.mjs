@@ -62,9 +62,10 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 139 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 139);
-  assert.equal(new Set(nativePaths).size, 139);
+test('all 140 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 140);
+  assert.equal(new Set(nativePaths).size, 140);
+  assert.ok(nativePaths.includes('src/admin/admin-commercial-ads-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/managed-giveaway-postgres.spec.ts'));
   for (const path of [
     'src/integrations/karavan-marketplace/karavan-connection-journal-postgres.spec.ts',

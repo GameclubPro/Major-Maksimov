@@ -1,3 +1,5 @@
+import { resolveCommercialAdsPolicy } from '@maxim/contracts/settings';
+import { commercialAdsDetectionCategories } from './commercial/commercial-ads-runtime-policy.service';
 import { Injectable, Optional } from '@nestjs/common';
 import { TrafficProtectionDetector } from './traffic-protection.detector';
 import {
@@ -1153,11 +1155,21 @@ export class RuleEngineService {
           authority?.promotedPolicyCohorts ?? COMMERCIAL_TEXT_BASELINE_POLICY_COHORTS,
       });
       if (commercial) {
+        const categories = commercialAdsDetectionCategories(commercial);
+        const categoryPolicy = resolveCommercialAdsPolicy({
+          policy: settings.commercialAdsPolicy,
+          categories,
+          userId,
+        });
+        const categoryActionable =
+          categoryPolicy.decision === 'LEGACY' || categoryPolicy.decision === 'BLOCK';
         violations.push({
           ruleCode: 'COMMERCIAL_AD',
           score: commercial.confidenceScore / 100,
           reason: 'Detected Russian commercial ad pattern',
           metadata: {
+            commercialAdsCategories: categories,
+            commercialAdsPolicyReason: categoryPolicy.reason,
             confidenceScore: commercial.confidenceScore,
             decisionBand: commercial.decisionBand,
             matchedSignals: commercial.matchedSignals,
@@ -1181,17 +1193,23 @@ export class RuleEngineService {
             evidenceTier: commercial.evidenceTier,
             subtype: commercial.subtype,
             actionBand:
-              authority?.baselineAllowed === false ? 'REVIEW_ONLY' : commercial.actionBand,
+              authority?.baselineAllowed === false || !categoryActionable
+                ? 'REVIEW_ONLY'
+                : commercial.actionBand,
             messageDisposition:
-              authority?.baselineAllowed === false ? 'KEEP' : commercial.messageDisposition,
+              authority?.baselineAllowed === false || !categoryActionable
+                ? 'KEEP'
+                : commercial.messageDisposition,
             commercialTextRuntimeRevision: authority?.revision ?? 0,
             commercialTextRuntimeMode: authority?.mode ?? 'baseline',
             requiredPolicyCohorts: commercial.requiredPolicyCohorts ?? [],
             reviewPriority: commercial.reviewPriority,
             campaignStrength: commercial.campaignStrength,
             safeContextBucket: commercial.safeContextBucket,
-            actionable: authority?.baselineAllowed !== false && commercial.actionable,
-            recordable: authority?.baselineAllowed !== false && commercial.recordable,
+            actionable:
+              authority?.baselineAllowed !== false && categoryActionable && commercial.actionable,
+            recordable:
+              authority?.baselineAllowed !== false && categoryActionable && commercial.recordable,
             deleteSuppressed: commercial.deleteSuppressed,
             suppressionReasons: commercial.suppressionReasons,
             reasonCodes: commercial.reasonCodes,

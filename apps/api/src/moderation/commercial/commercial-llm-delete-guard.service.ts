@@ -1,3 +1,5 @@
+import { evaluateCommercialAdsAiPolicy } from './commercial-ads-runtime-policy.service';
+import type { CommercialLlmObservationResult } from './commercial-llm.protocol';
 import {
   prepareDeleteAuthority,
   finalizeDeleteAuthority,
@@ -31,9 +33,9 @@ export class CommercialLlmGuardRejectedError extends Error {
     super('Commercial AI delete authority expired or changed');
   }
 }
-const reject = (): never => {
+function reject(): never {
   throw new CommercialLlmGuardRejectedError();
-};
+}
 type Reason = { ruleCode: string; reasonKey: string; metadata: unknown };
 type AuthorizationInput = {
   chatId: string;
@@ -126,6 +128,18 @@ export class CommercialLlmDeleteGuardService {
       !commercialLlmSourceCurrent(source)
     )
       reject();
+    const policyMetadata = selected[sources.indexOf(source)]!.metadata as Record<
+      string,
+      unknown
+    > | null;
+    const policyDecision = policyMetadata?.commercialAdsDecision as
+      | Record<string, unknown>
+      | undefined;
+    const policyResult =
+      source.version === 3 && policyDecision?.version === 1
+        ? (policyDecision.result as CommercialLlmObservationResult)
+        : undefined;
+    if (source.version === 3 && (!policyResult || typeof policyResult !== 'object')) reject();
     await this.currentSettings(source);
     const options = {
       botId: params.botId,
@@ -168,6 +182,7 @@ export class CommercialLlmDeleteGuardService {
     // FLAG: Remote source/access reads can outlive AI authority. Revalidate before
     // spending the logical message's daily protection; final dispatch checks still apply.
     const settings = await this.currentSettings(source);
+    this.assertCategoryPolicy(settings, source, message.text, policyResult);
     if (
       (await this.immunity.consumeForMessage({
         chatId: params.chatId,
@@ -181,7 +196,8 @@ export class CommercialLlmDeleteGuardService {
     // FLAG: Recheck after all remote work. A cached model answer cannot override a changed
     // policy, expiry, immune author or missing proof at the actual DELETE attempt.
     return prepareDeleteAuthority(async () => {
-      await this.currentSettings(source);
+      const finalSettings = await this.currentSettings(source);
+      this.assertCategoryPolicy(finalSettings, source, message.text, policyResult);
       return {
         deadlineAtMs: source.deadlineAtMs,
         reasonKeys: selected
@@ -189,6 +205,17 @@ export class CommercialLlmDeleteGuardService {
           .map((reason) => reason.reasonKey),
       };
     });
+  }
+
+  private assertCategoryPolicy(
+    settings: import('./commercial-delete-binding').CommercialDeleteSettings,
+    source: CommercialLlmSource,
+    text: string,
+    result?: CommercialLlmObservationResult,
+  ) {
+    if (settings.commercialAdsPolicy == null && source.version !== 3) return;
+    if (!result || !evaluateCommercialAdsAiPolicy({ settings, source, text, result }).mayDelete)
+      reject();
   }
 
   private async currentSettings(source: CommercialLlmSource) {
@@ -209,6 +236,7 @@ export class CommercialLlmDeleteGuardService {
       where: { chatId },
       select: {
         commercialAdsFilterEnabled: true,
+        commercialAdsPolicy: true,
         commercialAdsSensitivity: true,
         commercialAdsWarnThreshold: true,
         commercialAdsDeleteThreshold: true,

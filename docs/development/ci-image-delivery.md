@@ -182,8 +182,10 @@ metadata or read private attestation subjects. Configure a separate credential a
 `~/.config/maxim-delivery/ghcr-read.json`, or select its exact path with
 `MAXIM_GHCR_READ_CREDENTIAL_FILE`. The file contains only
 `{"username":"PACKAGE_READER","token":"READ_PACKAGES_TOKEN"}` and must be a regular file owned
-by root or the current user with mode `0600`, one hard link, no symlink and a bounded valid
-configuration. Its token needs `read:packages` access to all four private release packages.
+and readable by the current process user with mode `0600`, one hard link, no symlink and a bounded
+valid configuration. Parent directories must permit traversal by that user; root-owned `0600`
+requires a process running as root. Its token needs `read:packages` access to all four private
+release packages.
 Keep the token out of chat, source control, logs and ordinary GitHub control configuration.
 
 `registry-preload.mjs` passes this credential only to its local proof-verification child as

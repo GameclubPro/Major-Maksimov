@@ -1,3 +1,5 @@
+import { resolveCommercialAdsPolicy } from '@maxim/contracts/settings';
+import { commercialAdsDetectionCategories } from './commercial-ads-runtime-policy.service';
 import {
   prepareDeleteAuthority,
   finalizeDeleteAuthority,
@@ -311,7 +313,7 @@ export class CommercialDeleteGuardService {
       evidence.binding.sourceSha256 !== fingerprintCommercialDeleteText(message.text)
     )
       throw new CommercialDeleteGuardRejectedError('commercial_text_message_changed');
-    this.assertDetection(message.text, settings, evidence, authority);
+    this.assertDetection(message.text, settings, evidence, authority, userId);
     if (
       (await this.immunity.consumeForMessage({
         chatId: params.chatId,
@@ -330,7 +332,7 @@ export class CommercialDeleteGuardService {
         finalEvidence,
         finalSettings,
       );
-      this.assertDetection(message.text, finalSettings, finalEvidence, finalAuthority);
+      this.assertDetection(message.text, finalSettings, finalEvidence, finalAuthority, userId);
       return { kind: 'allowed', reasonKeys: finalEvidence.reasonKeys };
     });
   }
@@ -402,6 +404,7 @@ export class CommercialDeleteGuardService {
     settings: CommercialDeleteSettings,
     evidence: ReturnType<CommercialDeleteGuardService['resolveEvidence']>,
     authority: CommercialTextAuthority,
+    userId: string,
   ) {
     const detection = this.detector.detect({
       normalizedText: '',
@@ -410,7 +413,13 @@ export class CommercialDeleteGuardService {
       settings: settings as import('../../prisma/prisma-client').ChatSettings,
       commercialCampaignContext: evidence.campaignContext,
     });
+    const policy = resolveCommercialAdsPolicy({
+      policy: settings.commercialAdsPolicy,
+      categories: commercialAdsDetectionCategories(detection),
+      userId,
+    });
     if (
+      (policy.decision !== 'LEGACY' && policy.decision !== 'BLOCK') ||
       !detection ||
       detection.confidenceScore / 100 < evidence.minimumScore ||
       !isCommercialMessageDeleteEligible(
@@ -427,6 +436,7 @@ export class CommercialDeleteGuardService {
       where: { chatId },
       select: {
         commercialAdsFilterEnabled: true,
+        commercialAdsPolicy: true,
         commercialAdsSensitivity: true,
         commercialAdsWarnThreshold: true,
         commercialAdsDeleteThreshold: true,

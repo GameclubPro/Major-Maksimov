@@ -182,9 +182,14 @@ export class PublisherAutoReplyRecoveryService implements OnModuleInit, OnModule
         cursor: null,
       });
       const take = RECOVERY_BATCH_SIZE - result.scanned;
-      const deliveries = await this.prisma.$queryRaw<DeliveryRecoveryRow[]>(
-        deliveryRecoveryQuery(family, cycle, take),
-      );
+      // FLAG: An incremental sort on the old prefix index can read a whole tied
+      // backlog before LIMIT. Keep both planner preferences local to this page;
+      // release the read transaction before lease changes or queue admission.
+      const deliveries = await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw(Prisma.sql`SET LOCAL enable_incremental_sort = off`);
+        await tx.$executeRaw(Prisma.sql`SET LOCAL enable_bitmapscan = off`);
+        return tx.$queryRaw<DeliveryRecoveryRow[]>(deliveryRecoveryQuery(family, cycle, take));
+      });
       let considered = 0;
 
       for (const delivery of deliveries) {

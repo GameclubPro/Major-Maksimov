@@ -27,6 +27,7 @@ import {
   type ChatSettings,
 } from '@maxim/contracts';
 import {
+  commercialAdsPolicySchema,
   stopWordsMediaSchema,
   stopWordsPolicySchema,
   type StopWordsStorageStatus,
@@ -48,6 +49,7 @@ import type { ChatContextCacheService } from '../chat-context/chat-context-cache
 import {
   ChatCatalogKind,
   ChatEntityType,
+  Prisma,
   type ChatSettings as StoredChatSettings,
 } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -69,6 +71,7 @@ import {
 } from './chat-settings-bot-capability';
 import { assertReportsActivationAvailable } from './report-settings-availability';
 import { advanceChatMutationOrder } from '../common/group-command-authority.service';
+import { assertCommercialPersonalSalePolicyAvailable } from './commercial-ads-settings-policy';
 
 function readLegacyPrimaryAdminCommandName(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
@@ -495,6 +498,18 @@ export function sanitizeStoredChatSettings(settings: unknown): unknown {
   }
 
   let normalizedSettings = settings as Record<string, unknown>;
+  // FLAG: Invalid commercial policy disables only the returned commercial filter. A GET
+  // never repairs storage or resets unrelated settings; runtime readers independently reject it.
+  if (
+    normalizedSettings.commercialAdsPolicy != null &&
+    !commercialAdsPolicySchema.safeParse(normalizedSettings.commercialAdsPolicy).success
+  ) {
+    normalizedSettings = {
+      ...normalizedSettings,
+      commercialAdsPolicy: null,
+      commercialAdsFilterEnabled: false,
+    };
+  }
   // FLAG: Normalize only legacy window values before parsing. Otherwise one old seven-day
   // value would reset all unrelated settings to defaults. Persist through the existing CAS.
   for (const key of DUPLICATE_WINDOW_SETTING_KEYS) {
@@ -763,7 +778,9 @@ export type ChatSettingsReadSnapshot = {
 type ChatSettingsReadRepair = Partial<ChatSettings> &
   Partial<Pick<StoredChatSettings, 'stopWordsMedia'>>;
 
-const STOP_WORDS_READ_PRESERVED_SETTING_KEYS = [
+const READ_PRESERVED_SETTING_KEYS = [
+  'commercialAdsPolicy',
+  'commercialAdsFilterEnabled',
   'stopWordsPolicy',
   'stopWordsMedia',
   'stopWordsRevision',
@@ -787,14 +804,14 @@ const STOP_WORDS_READ_PRESERVED_SETTING_KEYS = [
   'rulesAttachViolationsEnabled',
 ] as const satisfies readonly (keyof ChatSettingsReadRepair)[];
 
-function preserveStopWordsOnSettingsRead(
+function preservePoliciesOnSettingsRead(
   changes: ChatSettingsReadRepair,
   storedSettings: StoredChatSettings,
-): Partial<ChatSettings> {
-  // FLAG: Read repairs own unrelated settings only. Legacy rules and sanctions, like typed
-  // policies, are normalized on copies until an administrator explicitly replaces the policy.
+): Partial<Omit<ChatSettings, 'commercialAdsPolicy'>> {
+  // FLAG: Read repairs own unrelated settings only. Commercial policy and activation, legacy
+  // rules and sanctions are normalized on copies until an administrator explicitly replaces them.
   const repair = { ...changes };
-  for (const key of STOP_WORDS_READ_PRESERVED_SETTING_KEYS) delete repair[key];
+  for (const key of READ_PRESERVED_SETTING_KEYS) delete repair[key];
   const media = storedSettings.botSpeechMedia;
   if (
     media &&
@@ -884,7 +901,7 @@ export async function readChatSettingsSnapshot(params: {
   if (parsed.success) {
     let normalizedSettings = normalizeChatSettings(parsed.data, undefined, params.chatId);
     let responseStoredSettings = chat.settings;
-    const normalizationChanges = preserveStopWordsOnSettingsRead(
+    const normalizationChanges = preservePoliciesOnSettingsRead(
       {
         ...getStoredChatSettingsSanitizationChanges(chat.settings, parsed.data),
         ...getChatSettingsNormalizationChanges(parsed.data, normalizedSettings),
@@ -937,7 +954,7 @@ export async function readChatSettingsSnapshot(params: {
   );
 
   const fallback = DEFAULT_CHAT_SETTINGS;
-  const fallbackRepair = preserveStopWordsOnSettingsRead(fallback, chat.settings);
+  const fallbackRepair = preservePoliciesOnSettingsRead(fallback, chat.settings);
   const repaired = await params.prisma.chatSettings.updateMany({
     where: { chatId: params.chatId, updatedAt: chat.settings.updatedAt },
     data: fallbackRepair,
@@ -1036,6 +1053,7 @@ export async function saveChatSettings(params: {
       updatedAt: true,
       profanityBotMessageText: true,
       profanityWarnMessageText: true,
+      commercialAdsPolicy: true,
     },
   });
   // FLAG: Compare the revision observed by the caller, not just the server read during this save.
@@ -1045,8 +1063,27 @@ export async function saveChatSettings(params: {
     parsed.data.settingsRevision !== currentSettings?.updatedAt?.toISOString()
   )
     throw chatSettingsRevisionConflict();
+  if (
+    hasOwnSetting(params.body, 'commercialAdsPolicy') &&
+    (!params.networkWrite?.authoredKeys ||
+      params.networkWrite.authoredKeys.includes('commercialAdsPolicy'))
+  ) {
+    assertCommercialPersonalSalePolicyAvailable({
+      currentPolicy: currentSettings?.commercialAdsPolicy,
+      nextPolicy: parsed.data.commercialAdsPolicy,
+      commercialAiDeleteOnly: params.commercialAiDeleteOnly,
+    });
+  }
+  const storedCommercialPolicy = commercialAdsPolicySchema.safeParse(
+    currentSettings?.commercialAdsPolicy,
+  );
   const settingsInput = {
     ...parsed.data,
+    commercialAdsPolicy: hasOwnSetting(params.body, 'commercialAdsPolicy')
+      ? parsed.data.commercialAdsPolicy
+      : storedCommercialPolicy.success
+        ? storedCommercialPolicy.data
+        : null,
     profanityBotMessageText: hasOwnSetting(params.body, 'profanityBotMessageText')
       ? parsed.data.profanityBotMessageText
       : (currentSettings?.profanityBotMessageText ?? ''),
@@ -1222,6 +1259,7 @@ export async function saveChatSettings(params: {
     current: {
       ...DEFAULT_CHAT_SETTINGS,
       ...(currentSettings ?? {}),
+      commercialAdsPolicy: storedCommercialPolicy.success ? storedCommercialPolicy.data : null,
       requiredSubscriptionChannelIds: [...savedSubscriptionIds],
       // FLAG: Raw media is only the write-comparison baseline; capability checks
       // retain their previous typed default and never receive unsanitized JSONB.
@@ -1258,6 +1296,9 @@ export async function saveChatSettings(params: {
     omitStopWordsPolicy(omitPublisherOwnedChatSettings(normalizedSettings)),
   );
   delete majorOwnedSettings.settingsRevision;
+  // FLAG: Older clients cannot clear category permissions by omitting this newer field.
+  if (!hasOwnSetting(params.body, 'commercialAdsPolicy'))
+    delete majorOwnedSettings.commercialAdsPolicy;
   if (params.networkWrite?.authoredKeys) {
     const authored = new Set(params.networkWrite.authoredKeys);
     if (
@@ -1276,17 +1317,24 @@ export async function saveChatSettings(params: {
     for (const key of Object.keys(majorOwnedSettings) as Array<keyof typeof majorOwnedSettings>)
       if (!authored.has(key)) delete majorOwnedSettings[key];
   }
+  const { commercialAdsPolicy, ...majorSettingsWithoutCommercialPolicy } = majorOwnedSettings;
+  const storedMajorSettings = {
+    ...majorSettingsWithoutCommercialPolicy,
+    ...(Object.hasOwn(majorOwnedSettings, 'commercialAdsPolicy')
+      ? { commercialAdsPolicy: commercialAdsPolicy ?? Prisma.DbNull }
+      : {}),
+  };
   const createSettings = {
-    ...majorOwnedSettings,
+    ...storedMajorSettings,
     ...DEFAULT_PUBLISHER_OWNED_CHAT_SETTINGS,
   };
-  const { botSpeechMedia, ...majorOwnedSettingsWithoutMedia } = majorOwnedSettings;
+  const { botSpeechMedia, ...majorOwnedSettingsWithoutMedia } = storedMajorSettings;
   // FLAG: Compare the raw media at the same updatedAt used by the write CAS;
   // malformed stored media must still be normalized and explicit clears must persist.
   const updateSettings =
     currentSettings && areBotSpeechMediaEqual(currentSettings.botSpeechMedia, botSpeechMedia)
       ? majorOwnedSettingsWithoutMedia
-      : majorOwnedSettings;
+      : storedMajorSettings;
 
   let savedRevision: string | undefined;
   try {

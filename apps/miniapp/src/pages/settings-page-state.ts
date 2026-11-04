@@ -253,6 +253,7 @@ export const SECTION_SETTING_KEYS: Record<ApplySectionKey, readonly (keyof ChatS
   ],
   commercialFilter: [
     'commercialAdsFilterEnabled',
+    'commercialAdsPolicy',
     'commercialAdsSensitivity',
     'commercialAdsWarnThreshold',
     'commercialAdsDeleteThreshold',

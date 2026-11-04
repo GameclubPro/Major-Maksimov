@@ -4,6 +4,7 @@ import {
   SettingsOverviewGroups,
 } from '../components/ui/settings-overview-groups';
 import { getNetworkSettingsSectionPresentation } from './settings/settings-workspace-sections';
+import { readCommercialExceptionPrefill } from '../lib/commercial-ads-policy';
 import { SharedChatSettingsSection } from './settings/shared-chat-settings-section';
 import { createChatSettingsFieldAdapter } from '../features/network-settings/settings-field-bindings';
 import { settingsSectionPaths } from '../features/network-settings/field-paths';
@@ -596,6 +597,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       focusSection !== 'rules' &&
       focusSection !== 'comments' &&
       focusSection !== 'stopWords' &&
+      focusSection !== 'commercialFilter' &&
       focusSection !== 'giveaway' &&
       focusSection !== 'polls' &&
       focusSection !== 'broadcast' &&
@@ -613,17 +615,19 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           ? { rules: true }
           : focusSection === 'comments'
             ? { comments: true }
-            : focusSection === 'stopWords'
-              ? { stopWords: true }
-              : focusSection === 'giveaway'
-                ? { giveaway: true }
-                : focusSection === 'polls'
-                  ? { polls: true }
-                  : focusSection === 'requiredSubscription'
-                    ? { requiredSubscription: true }
-                    : focusSection === 'storefront'
-                      ? { storefront: true }
-                      : { mailing: true }),
+            : focusSection === 'commercialFilter'
+              ? { commercialFilter: true }
+              : focusSection === 'stopWords'
+                ? { stopWords: true }
+                : focusSection === 'giveaway'
+                  ? { giveaway: true }
+                  : focusSection === 'polls'
+                    ? { polls: true }
+                    : focusSection === 'requiredSubscription'
+                      ? { requiredSubscription: true }
+                      : focusSection === 'storefront'
+                        ? { storefront: true }
+                        : { mailing: true }),
     });
   }, [focusSection]);
 
@@ -3183,12 +3187,20 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       (section === 'giveaway' && focusSection === 'giveaway') ||
       (section === 'polls' && focusSection === 'polls') ||
       (section === 'requiredSubscription' && focusSection === 'requiredSubscription') ||
-      (section === 'storefront' && focusSection === 'storefront')
+      (section === 'storefront' && focusSection === 'storefront') ||
+      (section === 'commercialFilter' && focusSection === 'commercialFilter')
     ) {
       const nextSearchParams = new URLSearchParams(location.search);
-      ['focus', 'handoff', 'workspace', 'legacyKind', 'legacyId'].forEach((key) =>
-        nextSearchParams.delete(key),
-      );
+      [
+        'focus',
+        'handoff',
+        'workspace',
+        'legacyKind',
+        'legacyId',
+        'commercialUser',
+        'commercialName',
+        'commercialCategory',
+      ].forEach((key) => nextSearchParams.delete(key));
       navigate(
         {
           pathname: location.pathname,
@@ -5065,6 +5077,18 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           hasPublishedRules,
           api,
           commercialAiModerationMode: settingsScreenQuery.data?.commercialAiModerationMode,
+          commercialScope:
+            section === 'commercialFilter' && chatId
+              ? {
+                  api,
+                  chatId,
+                  prefill: readCommercialExceptionPrefill(location.search),
+                  onOpenJournal: () =>
+                    navigate(
+                      `/chat/${encodeURIComponent(chatId)}/events?section=moderation&moderationView=history&filter=COMMERCIAL`,
+                    ),
+                }
+              : undefined,
           stopWordsTools:
             section === 'stopWords'
               ? {

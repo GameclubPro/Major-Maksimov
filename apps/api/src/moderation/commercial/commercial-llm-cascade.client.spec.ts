@@ -68,6 +68,34 @@ describe('bounded commercial model cascade', () => {
       primaryFinished,
       auditSecondary,
     );
+  it('requires a 9B confirmation only for personal sales when the explicit policy blocks them', async () => {
+    const confirmPersonal = new CommercialLlmCascadeClient(
+      primary,
+      secondary,
+      pressure,
+      () => false,
+      primaryFinished,
+      auditSecondary,
+      true,
+    );
+    expect((await confirmPersonal.classify('synthetic', undefined, lease)).cascade?.route).toBe(
+      'secondary_audit',
+    );
+    expect(auditSecondary.classify).toHaveBeenCalledTimes(1);
+    primary.classify.mockResolvedValue({
+      outcome: 'COMPLETE',
+      result: {
+        ...primaryResult,
+        reasonCodes: ['ORDINARY_DISCUSSION'],
+      },
+    });
+    auditSecondary.classify.mockClear();
+    expect((await confirmPersonal.classify('synthetic', undefined, lease)).cascade?.route).toBe(
+      'primary',
+    );
+    expect(auditSecondary.classify).not.toHaveBeenCalled();
+  });
+
   it('keeps actual primary attribution without invoking secondary for an unaudited negative', async () => {
     const result = await client().classify('synthetic', undefined, lease);
     expect(result.modelAlias).toBe(COMMERCIAL_LLM_WORKSTATION_IDENTITY.modelAlias);

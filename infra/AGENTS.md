@@ -56,13 +56,16 @@ an operation; its detailed guards, recovery protocols and rollback floors remain
   Roll back with `rollback-release release-id` (component-scoped) or the API `rollback-runtime`
   fallback only after reading the procedure. Preserve all installed reader/version floors;
   disabling a feature does not make an old image safe.
-- If host build is unavailable, use `preload-ci-image` for an exact green SHA, then the normal
-  guarded deploy. GitHub port 443 is supported with caller-only `MAXIM_DEPLOY_GIT_SSH_PORT=443`;
-  preserve trusted host keys and the reviewed identity. Do not repeat a partial deploy blindly.
+- Ordinary deploy prepares and preloads CI-tested GHCR digests before runtime changes; missing
+  image proof stops delivery. See [CI image delivery](../docs/development/ci-image-delivery.md).
+  Use the configured Git transport. Only a GitHub SSH origin accepts the caller-only
+  `MAXIM_DEPLOY_GIT_SSH_PORT=443` override; HTTPS origins keep their normal transport.
+  Preserve trusted host keys and the reviewed identity. Do not repeat a partial deploy blindly.
 - All production mutations serialize through the persistent protected deploy lock. Backup,
   deploy, preload and recovery must not bypass it. Never unlink/reset the lock or journal.
-- Disk floors remain 10 GiB for a clean shared API build and 6 GiB for static-only builds;
-  overrides may raise, never lower. Online migration preparation separately preserves 10 GiB
+- Rollout reserves remain 10 GiB for API and 6 GiB for static-only releases; GHCR pull additionally
+  requires twice the tested image size. Overrides may raise, never lower. Online migration
+  preparation preserves 10 GiB
   on every involved filesystem throughout work. Prefer manifest-aware MAXIM image reclaim,
   capacity expansion or immutable preload; never run host-wide Docker GC.
 - A rollout timeout requires inspection of exact runtime, queue fence, progress, DB/host pressure

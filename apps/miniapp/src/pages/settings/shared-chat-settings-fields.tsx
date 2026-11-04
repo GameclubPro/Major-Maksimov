@@ -43,6 +43,7 @@ const LazySharedCommercialSettingsFields = recoverableLazyNamedComponent<{
   fields: ChatSettingsFieldAdapter;
   actions: ReactNode;
   mode?: 'OFF' | 'OBSERVE' | 'DELETE_ONLY';
+  scope?: import('./commercial-policy-model').CommercialSettingsScope;
 }>(() => import('./shared-commercial-settings-fields'), 'SharedCommercialSettingsFields');
 import './shared-chat-settings.css';
 
@@ -390,6 +391,7 @@ function Commercial(props: BodyProps) {
       <LazySharedCommercialSettingsFields
         fields={props.fields}
         mode={props.context.commercialAiModerationMode}
+        scope={props.context.commercialScope}
         actions={<Sanctions {...props} prefix="textFilters" warningText buttons header={false} />}
       />
     </Suspense>
