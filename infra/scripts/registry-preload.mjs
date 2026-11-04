@@ -29,7 +29,10 @@ import {
   proveGreenWorkflows,
 } from '../../scripts/ci/green-workflow-proof.mjs';
 import { readSingleJsonZip } from '../../scripts/ci/main-baseline.mjs';
-import { assertRegistryRecord } from '../../scripts/ci/registry-images.mjs';
+import {
+  assertRegistryRecord,
+  isOpaqueGitHubCredential,
+} from '../../scripts/ci/registry-images.mjs';
 import {
   registryArtifactName,
   RELEASE_REPOSITORY,
@@ -412,10 +415,7 @@ function readProofCredential(path) {
       typeof value.username !== 'string' ||
       value.username.trim() !== value.username ||
       !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(value.username) ||
-      typeof value.token !== 'string' ||
-      value.token.length < 20 ||
-      value.token.length > 255 ||
-      /[^A-Za-z0-9_]/u.test(value.token)
+      !isOpaqueGitHubCredential(value.token)
     )
       credentialFailure();
     return value;

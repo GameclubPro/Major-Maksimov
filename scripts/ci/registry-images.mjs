@@ -28,6 +28,55 @@ const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/u;
 const POSITIVE_ID = /^[1-9][0-9]*$/u;
 const TRUSTED_EVENTS = ['push', 'workflow_dispatch'];
 
+export function isOpaqueGitHubCredential(value) {
+  // FLAG: This is a transport bound, not a provider token format or proof of access.
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 4096 &&
+    !/[^\x21-\x7E]/u.test(value)
+  );
+}
+
+const INSPECTION_REASONS = new Set([
+  'INSPECTION_MISSING',
+  'INSPECTION_JSON_INVALID',
+  'INSPECTION_CARDINALITY',
+  'IMAGE_ID_INVALID',
+  'OS_MISMATCH',
+  'ARCHITECTURE_MISMATCH',
+  'SOURCE_REVISION_MISMATCH',
+  'RELEASE_PROTECTION_MISMATCH',
+  'SIZE_INVALID',
+  'IMAGE_ID_MISMATCH',
+  'SIZE_MISMATCH',
+]);
+
+export class ImageInspectionError extends Error {
+  constructor(reason) {
+    const fixedReason = INSPECTION_REASONS.has(reason) ? reason : 'UNKNOWN';
+    // FLAG: Never render actual/expected image fields or attach raw Docker/JSON errors.
+    super(
+      `Image ID, platform or immutable source validation refused (code=IMAGE_INSPECTION_REFUSED, reason=${fixedReason}).`,
+    );
+    this.code = 'IMAGE_INSPECTION_REFUSED';
+    this.reason = fixedReason;
+  }
+}
+
+export function parseImageInspection(output) {
+  let records;
+  try {
+    if (typeof output !== 'string') throw new Error();
+    records = JSON.parse(output);
+  } catch {
+    throw new ImageInspectionError('INSPECTION_JSON_INVALID');
+  }
+  if (!Array.isArray(records) || records.length !== 1)
+    throw new ImageInspectionError('INSPECTION_CARDINALITY');
+  return records[0];
+}
+
 export function imageIdentity({ repository, sha, component }) {
   if (
     !REPOSITORY.test(repository ?? '') ||
@@ -76,21 +125,24 @@ export function trustedBuildContext(env) {
 }
 
 export function assertImageInspection(inspection, { sha, imageId, sizeBytes }) {
+  if (!inspection) throw new ImageInspectionError('INSPECTION_MISSING');
+  if (!DIGEST.test(inspection.Id ?? '')) throw new ImageInspectionError('IMAGE_ID_INVALID');
+  if (inspection.Os !== 'linux') throw new ImageInspectionError('OS_MISMATCH');
+  if (inspection.Architecture !== 'amd64') throw new ImageInspectionError('ARCHITECTURE_MISMATCH');
+  if (inspection.Config?.Labels?.['org.opencontainers.image.revision'] !== sha)
+    throw new ImageInspectionError('SOURCE_REVISION_MISMATCH');
+  if (inspection.Config?.Labels?.['com.maxim.release-protected'] !== 'true')
+    throw new ImageInspectionError('RELEASE_PROTECTION_MISMATCH');
   if (
-    !inspection ||
-    !DIGEST.test(inspection.Id ?? '') ||
-    inspection.Os !== 'linux' ||
-    inspection.Architecture !== 'amd64' ||
-    inspection.Config?.Labels?.['org.opencontainers.image.revision'] !== sha ||
-    inspection.Config?.Labels?.['com.maxim.release-protected'] !== 'true' ||
     !Number.isSafeInteger(inspection.Size) ||
     inspection.Size <= 0 ||
-    inspection.Size > 64 * 1024 ** 3 ||
-    (imageId !== undefined && inspection.Id !== imageId) ||
-    (sizeBytes !== undefined && inspection.Size !== sizeBytes)
-  ) {
-    throw new Error('Image ID, platform or immutable source labels do not match the tested image.');
-  }
+    inspection.Size > 64 * 1024 ** 3
+  )
+    throw new ImageInspectionError('SIZE_INVALID');
+  if (imageId !== undefined && inspection.Id !== imageId)
+    throw new ImageInspectionError('IMAGE_ID_MISMATCH');
+  if (sizeBytes !== undefined && inspection.Size !== sizeBytes)
+    throw new ImageInspectionError('SIZE_MISMATCH');
   return inspection.Id;
 }
 
@@ -302,10 +354,7 @@ export function verifyPrivatePackage(expected, run = execute) {
 }
 
 function inspect(run, ref) {
-  const records = JSON.parse(run('docker', ['image', 'inspect', ref]));
-  if (!Array.isArray(records) || records.length !== 1)
-    throw new Error('Expected exactly one inspected image.');
-  return records[0];
+  return parseImageInspection(run('docker', ['image', 'inspect', ref]));
 }
 
 export function publishImage(record, expected, run = execute) {
@@ -368,7 +417,8 @@ export function verifyRegistryImage(record, expected, run = execute, { proofOnly
 
 function withRegistryLogin(env, action) {
   const token = env.GH_TOKEN || env.GITHUB_TOKEN || execute('gh', ['auth', 'token'], { env });
-  if (!token || /\s/u.test(token)) throw new Error('A registry token is required.');
+  if (!isOpaqueGitHubCredential(token))
+    throw new Error('A bounded registry credential is required.');
   const directory = mkdtempSync(join(tmpdir(), 'maxim-ghcr-'));
   chmodSync(directory, 0o700);
   const childEnv = { ...env, GH_TOKEN: token, DOCKER_CONFIG: directory };
