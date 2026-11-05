@@ -1,10 +1,19 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { MaxClientService, type MaxActionDispatchOptions } from '../max/max-client.service';
+import { wasMaxPreDispatchGuardRejected } from '../max/max-action-pre-dispatch-guard';
+import { wasMaxMemberMutationAttempted } from '../max/max-member-error.util';
+import {
+  isMaxMutationOutcomeAmbiguous,
+  wasMaxMessageSendAttempted,
+} from '../max/max-mutation-outcome.util';
 import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ModerationDeleteIntentService } from '../moderation/moderation-delete-intent.service';
-import type { ModerationSanctionStateLeaseGuard } from '../moderation/moderation-sanction-state-lock.service';
+import {
+  ModerationSanctionStateLockError,
+  type ModerationSanctionStateLeaseGuard,
+} from '../moderation/moderation-sanction-state-lock.service';
 import { extractMaxApiErrorMessage, isMaxMessageMissingError } from './admin-chat-rules';
 import {
   MANUAL_BAN_RECENT_MESSAGE_DELETE_LIMIT,
@@ -158,6 +167,7 @@ export class AdminManualMessageCleanupService {
       leaseGuard?: ModerationSanctionStateLeaseGuard;
     } = {},
   ): Promise<AdminManualMessageCleanupResult> {
+    const { leaseGuard } = options;
     const candidateMessageIds = await this.findRecentTrackedMessageIds(chatId, targetUserId);
     const deletedMessageIds: string[] = [];
     const pendingMessageIds: string[] = [];
@@ -168,7 +178,7 @@ export class AdminManualMessageCleanupService {
         await sleepIfNeeded(options.spacingMs ?? 0);
       }
 
-      await options.leaseGuard?.assertOwned();
+      await leaseGuard?.assertOwned();
       try {
         const outcome = await this.deleteWithDurableIntent({
           chatId,
@@ -184,7 +194,11 @@ export class AdminManualMessageCleanupService {
           directOptions: {
             immediate: true,
             ...(options.botId ? { botId: options.botId } : {}),
+            ...(leaseGuard
+              ? { beforeImmediateDeleteMutation: () => leaseGuard.assertOwned() }
+              : {}),
           },
+          beforeDirectExecutorProofRetry: async () => leaseGuard?.assertOwned(),
         });
         if (outcome === 'confirmed') {
           deletedMessageIds.push(messageId);
@@ -194,6 +208,9 @@ export class AdminManualMessageCleanupService {
           failedMessageIds.push(messageId);
         }
       } catch (error: unknown) {
+        // FLAG: A final lease check can fail on the last message too; preserve the
+        // caller's ordering failure instead of returning a partial cleanup result.
+        if (error instanceof ModerationSanctionStateLockError) throw error;
         if (this.isExecutionEnabled(chatId, 'MANUAL_ACTION_RECENT_MESSAGE_CLEANUP')) {
           this.logger.error(
             { chatId, targetUserId, messageId, err: this.formatError(error) },
@@ -279,6 +296,7 @@ export class AdminManualMessageCleanupService {
       routingPolicy?: 'delete_capable' | 'origin_first' | 'origin_only';
       metadata: Prisma.InputJsonObject;
       directOptions: MaxActionDispatchOptions;
+      beforeDirectExecutorProofRetry?: () => Promise<void>;
     },
     persistBeforeAttempt = false,
   ): Promise<ManualDeleteOutcome> {
@@ -334,7 +352,26 @@ export class AdminManualMessageCleanupService {
       }
     }
 
-    await this.maxClient.deleteMessage(params.chatId, params.messageId, params.directOptions);
+    try {
+      await this.maxClient.deleteMessage(params.chatId, params.messageId, params.directOptions);
+    } catch (error: unknown) {
+      // FLAG: Only a certified no-effect executor rejection may requalify the same
+      // explicitly selected bot once. Never repeat durable persistence or an unknown
+      // DELETE, choose a peer, or relax the fresh proof, quota and final lease guards.
+      if (
+        !params.beforeDirectExecutorProofRetry ||
+        !params.directOptions.botId?.trim() ||
+        !wasMaxPreDispatchGuardRejected(error) ||
+        (error as { code?: unknown }).code !== 'max_action_executor_proof_rejected' ||
+        wasMaxMessageSendAttempted(error) ||
+        wasMaxMemberMutationAttempted(error) ||
+        isMaxMutationOutcomeAmbiguous(error)
+      ) {
+        throw error;
+      }
+      await params.beforeDirectExecutorProofRetry();
+      await this.maxClient.deleteMessage(params.chatId, params.messageId, params.directOptions);
+    }
     return 'confirmed';
   }
 
