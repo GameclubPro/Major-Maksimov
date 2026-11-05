@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -23,6 +24,48 @@ const paths = [
   'infra/scripts/vps-runtime-rollback.sh',
   'infra/scripts/vps-connect.sh',
 ];
+
+const DISPATCH_END =
+  '"$release_source_floor_node" /usr/local/lib/maxim-release/infra/scripts/release-service-source-floor.mjs "$release_source_floor_sha" || return 1\n  fi\n';
+const PAUSE_END =
+  '"$release_policy_node" /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs pause-rollback >/dev/null || exit $?\nfi\n';
+
+// FLAG: These immutable hashes come from the committed prefixes at the reviewed installed SHA,
+// proved by a read-only /etc/maxim-release/installed readback. Updating this snapshot requires
+// a separately reviewed installed bundle floor upgrade; never regenerate it from current source.
+const installedSourceSha = '5d12f6267d6193ee4be9e949e01dacf68dc826e0';
+const installedProtectedPrefixSha256 = Object.freeze({
+  'infra/scripts/lib/deploy-lock.sh':
+    '5cd6ce6681cbb5ebeeeb7aca9b4ba463634ebb63368b67508d455ce7e0c8eb66',
+  'infra/scripts/vps-release-rollback.sh':
+    '341a59d3a4a8eefee44e6c1b02acfcfb02d6faf01e279c5e70ea087ee2a6e36e',
+  'infra/scripts/vps-runtime-rollback.sh':
+    'b9ccfc5c092da445a13c97965e574b62436b202c7f7a73a23626f419c9fa7a9e',
+  'infra/scripts/vps-connect.sh':
+    '09119f7297804d105076d8e39ac62d5768ee123a8e278182a8c9405e84f7da45',
+});
+
+test('repository source preserves the reviewed installed protected prefixes', () => {
+  for (const path of paths) {
+    const source = readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+    const end = path === paths[0] ? DISPATCH_END : PAUSE_END;
+    const index = source.indexOf(end);
+    assert.ok(index >= 0, `${path}: protected boundary must remain present`);
+    assert.equal(
+      source.indexOf(end, index + end.length),
+      -1,
+      `${path}: protected boundary must remain unique`,
+    );
+    const observedSha256 = createHash('sha256')
+      .update(source.slice(0, index + end.length), 'utf8')
+      .digest('hex');
+    assert.equal(
+      observedSha256,
+      installedProtectedPrefixSha256[path],
+      `${path}: preserve the installed ${installedSourceSha} prefix; new commands belong after its protected boundary`,
+    );
+  }
+});
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-release-source-floor-'));

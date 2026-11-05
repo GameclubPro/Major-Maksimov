@@ -113,7 +113,6 @@ maxim_topology_require_network_settings_v2 "$TARGET_FULL_SHA"
 maxim_topology_require_exact_statistics_rollup_reader "$TARGET_FULL_SHA"
 maxim_topology_require_statistics_and_night_mode_recovery "$TARGET_FULL_SHA"
 maxim_topology_require_local_chat_ban_reader "$TARGET_FULL_SHA"
-maxim_topology_require_night_open_notice_cleanup_reader "$TARGET_FULL_SHA"
 if maxim_topology_git_compose_has_service "$TARGET_FULL_SHA" "$MAXIM_MEDIA_ANALYSIS_SERVICE"; then
   TARGET_HAS_MEDIA_ANALYSIS=1
   if maxim_topology_git_has_commercial_ocr_raster_smoke "$TARGET_FULL_SHA"; then
@@ -571,6 +570,9 @@ if [[ -e /etc/maxim-release/installed || -L /etc/maxim-release/installed ]]; the
     "$release_policy_node" /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs pause-rollback >/dev/null || exit $?
 fi
 trap cleanup EXIT
+# FLAG: Preserve the installed release-service prefix through its durable pause. New reader
+# floors run after that boundary and before any rollback environment, store or runtime work.
+maxim_topology_require_night_open_notice_cleanup_reader "$TARGET_FULL_SHA"
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 if ! MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
   node infra/scripts/release-manifest.mjs validate-current >/dev/null; then
