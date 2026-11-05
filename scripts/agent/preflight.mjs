@@ -6,11 +6,13 @@ import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { assertHttpInputBoundaries } from '../check-api-http-inputs.mjs';
 import { findContractsArchitectureViolations } from '../check-contract-exports.mjs';
+import { assertRefactorFileSizeGuards } from '../check-refactor-guards.mjs';
 import { assertCommercialOcrDetectorSourceIdentityCurrent } from '../generate-commercial-ocr-detector-source.mjs';
 import { renderDeployImpactBash } from './generate-deploy-impact-bash.mjs';
 
 export function runPreflight(root, log = console.log) {
   const checks = [
+    ['refactor file size ceilings', () => assertRefactorFileSizeGuards(root)],
     [
       'contracts source/export mappings',
       () => {

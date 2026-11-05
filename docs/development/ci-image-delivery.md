@@ -24,6 +24,7 @@ substitutes for verification of the other at the publication and preload boundar
    verification, missing-image preparation in GitHub and GHCR preload before the locked rollout.
    Separate manual proof/preload commands are optional operational tools. The rollout preserves
    migrations, all-role API replacement, store identity, capacity and rollback reader floors.
+
 4. Require a successful exit, strict smokes and the immutable component manifest, then read back
    active component identities and availability once. If the requested source is already active,
    use that readback to finish delivery. Additional monitoring needs an explicit request or a
@@ -58,6 +59,19 @@ succeeds. Concurrent runs can finish in any order without changing a plan alread
 Ordinary CodeQL runs continue analysis, SARIF upload and the high-severity alert gate. Database
 upload runs on the weekly schedule. Compare durations on equivalent runs before claiming a
 measured improvement.
+
+The exact reviewed host release paths in `HOST_RELEASE_TOOLING_PATHS` select core and both
+infrastructure shards through the frozen plan's `staticInfra` field. The shards retain actionlint,
+ShellCheck and private Redis fixtures. A mixed change also selects its affected application and
+image lanes. The Docker context guard requires a new review if these host paths become image
+inputs. Other shared tooling, build inputs, CI policy and unknown paths retain full coverage.
+`Required` recomputes the entire frozen plan and requires the selected static matrix to succeed.
+
+Preparation failures report a fixed phase and exit status before returning the original failure.
+Admission refusals retain the bounded known reason or `unknown`; captured remote output remains
+private. Establish the current source, manifest and failed phase before continuing an interrupted
+release. The [November 5 release review](../operations/incidents/2026-11-05-release-validation-rework.md)
+records the defects and the limits of the retained evidence.
 
 ## Image publication and verification
 

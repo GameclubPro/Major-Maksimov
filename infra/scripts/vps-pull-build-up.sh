@@ -1542,6 +1542,13 @@ if acquire_deploy_lock; then
   :
 else
   lock_status=$?
+  # FLAG: A refusal label is observation only; preserve the original admission and
+  # durable-executor decisions, and never print arbitrary inherited marker values.
+  case "${MAXIM_DEPLOY_ADMISSION_REFUSAL:-unknown}" in
+    pair_lock_busy|product_lock_busy) deploy_admission_refusal="$MAXIM_DEPLOY_ADMISSION_REFUSAL" ;;
+    *) deploy_admission_refusal=unknown ;;
+  esac
+  printf 'Deploy admission refused: MAXIM_DEPLOY_ADMISSION_REFUSAL=%s exit=%s\n' "$deploy_admission_refusal" "$lock_status" >&2
   if maxim_durable_executor_requested; then
     maxim_durable_executor_lock_refusal "$lock_status" || exit $?
     exit 70

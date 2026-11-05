@@ -96,6 +96,14 @@ const LOCAL_TOOLING_PATHS = new Set([
   'scripts/check-docs.test.mjs',
 ]);
 
+// FLAG: Reviewed host-only release inputs stay outside every image context and
+// require both infrastructure shards. Shared callers and new paths still run full CI.
+export const HOST_RELEASE_TOOLING_PATHS = Object.freeze([
+  'infra/scripts/vps-runtime-rollback.sh',
+  'infra/scripts/night-mode-recovery-rollback.test.mjs',
+  'infra/scripts/release-service-source-floor.test.mjs',
+]);
+
 function git(cwd, args) {
   return execFileSync('git', args, {
     cwd,
@@ -121,6 +129,7 @@ function fullPlan(head, reason, base = null, changedFileCount = null) {
     base,
     head,
     changedFileCount,
+    staticInfra: true,
     lanes: Object.fromEntries(CI_LANES.map((lane) => [lane, true])),
     dockerComponents: DOCKER_COMPONENTS.map(({ component }) => component),
   };
@@ -128,7 +137,7 @@ function fullPlan(head, reason, base = null, changedFileCount = null) {
 
 export function selectCiLanes(impact, { base, head }) {
   const count = impact.changedFiles.length;
-  // FLAG: Shared CI/workflow/tooling changes must exercise the whole graph.
+  // FLAG: Unreviewed shared CI/workflow/tooling changes exercise the whole graph.
   // Unknown paths or newly introduced check kinds cannot silently reduce coverage.
   if (impact.unknownPaths.length || impact.checks.some((check) => !KNOWN_CHECKS.has(check))) {
     return fullPlan(head, 'unknown-impact', base, count);
@@ -139,6 +148,7 @@ export function selectCiLanes(impact, { base, head }) {
       (path) =>
         !path.endsWith('.md') &&
         !LOCAL_TOOLING_PATHS.has(path) &&
+        !HOST_RELEASE_TOOLING_PATHS.includes(path) &&
         (/^(?:\.github|scripts|config|infra)\//u.test(path) || !path.includes('/')),
     )
   ) {
@@ -159,6 +169,7 @@ export function selectCiLanes(impact, { base, head }) {
     base,
     head,
     changedFileCount: count,
+    staticInfra: checks.has('infra'),
     lanes: {
       static: true,
       contracts: checks.has('contracts'),

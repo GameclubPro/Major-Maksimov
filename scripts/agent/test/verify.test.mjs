@@ -3,6 +3,8 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 import { parseVerifyArgs, selectVerificationScripts } from '../verify.mjs';
+import { loadImpactConfig } from '../impact-config.mjs';
+import { createImpactPlan } from '../impact-plan.mjs';
 
 const config = {
   checkById: {
@@ -28,6 +30,24 @@ test('selects mapped checks in plan order', () => {
       { id: 'api', script: 'check:api' },
     ],
   );
+});
+
+test('a scoped mixed plan runs the existing public API aggregate once before infrastructure', async () => {
+  const repositoryConfig = await loadImpactConfig();
+  const changedPaths = ['apps/api/src/main.ts', 'infra/scripts/vps-connect.sh'];
+  const plan = createImpactPlan({
+    config: repositoryConfig,
+    changeSet: {
+      source: { mode: 'worktree', base: null, head: null },
+      changedPaths,
+      changes: changedPaths.map((path) => ({ status: 'M', path, paths: [path] })),
+    },
+  });
+  assert.deepEqual(selectVerificationScripts({ config: repositoryConfig, plan }), [
+    { id: 'repo-static', script: 'check:static:ci' },
+    { id: 'api', script: 'check:api' },
+    { id: 'infra', script: 'check:infra' },
+  ]);
 });
 
 test('full check supersedes narrower checks but retains the browser smoke', () => {
