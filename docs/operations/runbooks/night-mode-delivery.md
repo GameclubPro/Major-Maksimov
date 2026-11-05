@@ -136,3 +136,7 @@ Opening-notice DELETE obligations additionally require the
 `maxim_topology_require_night_open_notice_cleanup_reader` source capability in both API rollback
 paths and connector bootstrap. Retain the binding reader and both final cleanup policy checkpoints;
 turning the new option off does not permit rolling back to a worker that ignores its stored reason.
+In the ref rollback script, this additional reader check runs just after the durable release
+pause and cleanup trap, before environment, store, Git or runtime work. Preserve the installed
+[release-service prefixes](durable-release-service.md#installation-and-operator-controls);
+new reader floors must not change those protected bytes.

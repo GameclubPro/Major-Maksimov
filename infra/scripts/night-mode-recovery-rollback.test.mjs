@@ -135,5 +135,11 @@ test('both API rollback paths check recovery before beginning a runtime transiti
       'maxim_topology_require_night_open_notice_cleanup_reader',
     );
     assert.ok(openingCleanupGate >= 0 && openingCleanupGate < transition, path);
+    if (path === 'infra/scripts/vps-runtime-rollback.sh') {
+      const protectedPauseEnd = source.indexOf('\nfi\n', source.indexOf('pause-rollback')) + 4;
+      const firstRollbackWork = source.indexOf('\nmaxim_require_ordinary_effect_authority');
+      assert.ok(protectedPauseEnd > 4 && protectedPauseEnd < openingCleanupGate, path);
+      assert.ok(openingCleanupGate < firstRollbackWork, path);
+    }
   }
 });

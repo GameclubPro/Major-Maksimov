@@ -144,7 +144,8 @@ try {
 async function smokeProfile(activeBrowser, profile) {
   const context = await activeBrowser.newContext({ viewport: profile.viewport, locale: 'ru-RU' });
   const page = await context.newPage();
-  await page.clock.install();
+  // FLAG: Keep browser time ahead of host time so overview polling rejects host-clock pause targets.
+  await page.clock.install({ time: new Date(Date.now() + 30_000) });
   const errors = [];
   let startupDenied = true;
   let startupRequests = 0;
