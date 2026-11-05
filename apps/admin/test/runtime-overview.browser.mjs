@@ -44,7 +44,9 @@ export async function smokeRuntimeOverview(page, profile, controls) {
     });
   }
 
-  await page.clock.pauseAt(new Date(Date.now() + 1000));
+  // FLAG: Earlier fast-forwards put browser time ahead of host time. Keep the pause
+  // target and its margin in the browser clock's time domain.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
   let before = controls.readCount();
   const poll = page.waitForResponse((response) => response.url().endsWith('/runtime/overview'));
   await page.clock.fastForward(16_000);
