@@ -341,6 +341,7 @@ export class CommercialLlmPoolClient implements CommercialLlmClassifier {
       if (outcome.outcome !== 'COMPLETE')
         throw new CommercialLlmError(
           outcome.outcome === 'FAILED' ? 'INVALID_RESPONSE' : outcome.outcome,
+          outcome.outcome === 'FAILED' ? outcome.responseIssue : undefined,
         );
       const identity = COMMERCIAL_LLM_POOL_PROFILES[reservation.nodeId].identity;
       const decision = parseCommercialLlmEnvelope(JSON.parse(outcome.body), identity.modelAlias);

@@ -123,6 +123,25 @@ const response = JSON.stringify({
       },
     );
 
+    it('releases completed CPU work while rejecting a semantically invalid decision', async () => {
+      const invalid = JSON.parse(response);
+      invalid.choices[0].message.content =
+        '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}';
+      const client = await serve((request, reply) => {
+        request.resume();
+        reply.writeHead(200, { 'content-type': 'application/json' });
+        reply.end(JSON.stringify(invalid));
+      });
+      await expect(
+        new CommercialLlmBudgetedSecondary(lease, client).classify(text),
+      ).rejects.toMatchObject({
+        kind: 'INVALID_RESPONSE',
+        responseIssue: 'decision',
+      });
+      expect(await redis.exists(COMMERCIAL_LLM_LEASE_KEY)).toBe(0);
+      expect(await redis.pttl(COMMERCIAL_LLM_COOLDOWN_KEY)).toBeGreaterThan(0);
+    });
+
     it('rejects a completed result after source revocation but releases its physical token', async () => {
       let current = true;
       const client = await serve((request, reply) => {

@@ -254,6 +254,27 @@ describe('bounded commercial LLM HTTP client', () => {
     expect(events).toEqual(['pin', 'dispatch', 'fetch', 'complete']);
   });
 
+  it.each([
+    '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+    '{"classification":"UNSURE","reasonCodes":["INSUFFICIENT_CONTEXT","INSUFFICIENT_CONTEXT"]}',
+    '{"classification":',
+  ])(
+    'acknowledges terminal HTTP completion while rejecting unusable decision %#',
+    async (content) => {
+      const payload = completion();
+      payload.choices[0]!.message.content = content;
+      const completed = jest.fn();
+      await expect(
+        clientWith(async () => jsonResponse(payload)).classifyWithLifecycle('Привет', undefined, {
+          beforeDispatch: async () => {},
+          dispatched: () => {},
+          completed,
+        }),
+      ).rejects.toMatchObject({ kind: 'INVALID_RESPONSE' });
+      expect(completed).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('never dispatches when persistent pinning fails or cancellation arrives while pinning', async () => {
     for (const gate of ['pin', 'abort'] as const) {
       const controller = new AbortController();

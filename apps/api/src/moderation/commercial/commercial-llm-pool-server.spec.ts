@@ -122,6 +122,55 @@ describe('pool server physical capacity containment', () => {
     expect(release).toHaveBeenCalledWith(lease);
     expect(mailbox.releaseUndispatched).not.toHaveBeenCalled();
   });
+  it.each([
+    '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+    '{"classification":"UNSURE","reasonCodes":["INSUFFICIENT_CONTEXT","INSUFFICIENT_CONTEXT"]}',
+    '{"classification":',
+  ])(
+    'rejects unusable decision without quarantining a completed CPU request %#',
+    async (content) => {
+      const payload = JSON.parse(reply);
+      payload.choices[0].message.content = content;
+      fetchImpl.mockResolvedValueOnce(Response.json(payload));
+      await expect(server.dispatch(reservation())).rejects.toMatchObject({
+        kind: 'INVALID_RESPONSE',
+      });
+      expect(mailbox.respond).toHaveBeenCalledWith(
+        'server-9b',
+        session,
+        expect.any(String),
+        JSON.stringify(payload),
+      );
+      expect(release).toHaveBeenCalledWith(lease);
+      now += 1_001;
+      await server.tick();
+      expect(mailbox.refreshWorker).toHaveBeenLastCalledWith('server-9b', session, true);
+      await server.dispatch(reservation());
+      expect(mailbox.respond).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    { model: 'wrong-model' },
+    { choices: [{ finish_reason: 'length', message: { role: 'assistant', content: '{}' } }] },
+    { choices: [{ finish_reason: null, message: { role: 'assistant', content: '{}' } }] },
+    {
+      choices: [
+        { finish_reason: 'stop', message: { role: 'assistant', content: '{}', tool_calls: [{}] } },
+      ],
+    },
+  ])('retains physical uncertainty for an unverified completion envelope %#', async (change) => {
+    fetchImpl.mockResolvedValueOnce(Response.json({ ...JSON.parse(reply), ...change }));
+    await expect(server.dispatch(reservation())).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+    });
+    expect(mailbox.respond).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    now += 1_001;
+    await server.tick();
+    expect(mailbox.refreshWorker).toHaveBeenLastCalledWith('server-9b', session, false);
+  });
+
   it('does not send HTTP or strand capacity when the legacy CPU lease is occupied', async () => {
     lease = null;
     const request = reservation();

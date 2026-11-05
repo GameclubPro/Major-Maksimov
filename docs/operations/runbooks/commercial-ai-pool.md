@@ -71,14 +71,27 @@ not establish that the existing CPU container supports slots.
 
 An idle slot observation does not acknowledge cancellation of a pending HTTP request.
 Immediately before a CPU pool handoff, an owner-checked operation removes the lease's
-expiry. A complete validated response releases its own lease. An ambiguous failure
-retains the lease and withdraws CPU capacity, including across an API restart while
+expiry. A bounded, exact-model terminal envelope (`finish_reason=stop`, one assistant
+message, no reasoning, refusal or tools) proves the physical request finished and
+releases only its own lease. Decision JSON and classification/reason consistency are
+validated separately: an invalid decision still fails, supplies no accepted result or deletion
+authority, and does not quarantine completed CPU work. Wrong model identity, malformed
+envelopes, non-stop finishes and ambiguous transport failures retain the lease and
+withdraw CPU capacity, including across an API restart while
 Redis retains the key. Neither a later idle observation nor the former 120-second
 TTL may release that hold. Other nodes remain independently schedulable. Recovery
 requires quiescing the CPU dispatcher and proving the captured model generation
 stopped before any exact-token release; never manually delete the key to restore
 readiness. Redis data loss and independently initiated legacy requests retain their
 existing limitations; this lease is not durable across loss of Redis state.
+
+Rejected model decisions may expose only the finite `responseIssue` codes `envelope`,
+`finish`, `message`, `content_json` and `decision` alongside the existing failure kind.
+They contain no model response or source text. A response-store outage is `UNAVAILABLE`,
+not evidence of malformed model output. These diagnostics do not prove eligible-input
+coverage or final MAX effects. Existing persistent CPU holds have no saved terminal
+proof and remain subject to the recovery protocol below; a new API image cannot
+retroactively release them.
 
 ### Recovering a quarantined CPU generation
 

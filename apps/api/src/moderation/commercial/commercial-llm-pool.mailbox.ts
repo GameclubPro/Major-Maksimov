@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import type Redis from 'ioredis';
-import { CommercialLlmError, parseCommercialLlmEnvelope } from './commercial-llm.client';
+import {
+  CommercialLlmError,
+  parseCommercialLlmEnvelope,
+  type CommercialLlmResponseIssue,
+} from './commercial-llm.client';
 import { buildCommercialLlmRequest } from './commercial-llm.protocol';
 import {
   COMMERCIAL_LLM_POOL_HEARTBEAT_MS,
@@ -35,7 +39,8 @@ export type CommercialLlmPoolReservation = Readonly<{
 export type CommercialLlmPoolRequest = { id: string; body: string; remainingMs: number };
 export type CommercialLlmPoolOutcome =
   | { outcome: 'COMPLETE'; body: string }
-  | { outcome: 'UNAVAILABLE' | 'TIMEOUT' | 'FAILED' };
+  | { outcome: 'UNAVAILABLE' | 'TIMEOUT' }
+  | { outcome: 'FAILED'; responseIssue?: CommercialLlmResponseIssue };
 const tokenPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const decodeLua = `local function decode(raw)
   if not raw then return nil end
@@ -471,9 +476,16 @@ export class CommercialLlmPoolMailbox {
         });
       }
       return { outcome: 'TIMEOUT' };
-    } catch {
+    } catch (error) {
       if (signal?.aborted) throw new CommercialLlmError('ABORTED');
-      return { outcome: 'FAILED' };
+      if (error instanceof CommercialLlmError)
+        return {
+          outcome: 'FAILED',
+          ...(error.responseIssue ? { responseIssue: error.responseIssue } : {}),
+        };
+      if (error instanceof SyntaxError) return { outcome: 'FAILED', responseIssue: 'envelope' };
+      // FLAG: A store/transport failure proves no malformed model answer.
+      return { outcome: 'UNAVAILABLE' };
     } finally {
       await this.release(reservation).catch(() => undefined);
     }
