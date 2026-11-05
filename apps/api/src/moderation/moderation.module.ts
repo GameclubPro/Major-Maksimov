@@ -67,6 +67,7 @@ import { RedisCounterModule } from './redis-counter.module';
 import { RuleEngineModule } from './rule-engine.module';
 import { SanctionService } from './sanction.service';
 import { BotSpeechMediaService } from './bot-speech-media.service';
+import { NightModeOpenNoticeCleanupService } from './night-mode-open-notice-cleanup.service';
 import { NightModeTransitionEventService } from './night-mode-transition-event.service';
 import { WebhookCanonicalExecutionService } from './webhook-canonical-execution.service';
 import { ModerationDeleteIntentModule } from './moderation-delete-intent.module';
@@ -129,6 +130,7 @@ const moderationProviders = [
   KaravanStorefrontRelayService,
   BotSpeechMediaService,
   NightModeTransitionEventService,
+  NightModeOpenNoticeCleanupService,
   NightModeTransitionDeliveryService,
   NightModeRouteVerificationService,
   NightModeTransitionRuntimeService,

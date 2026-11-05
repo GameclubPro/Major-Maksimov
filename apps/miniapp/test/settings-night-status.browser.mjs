@@ -92,6 +92,12 @@ try {
       let responseStatus = 200;
       let savedStart = 1260;
       let savedClosure = closure();
+      let settingsRevision = timestamp;
+      let savedNightFields = {
+        nightModeOpenMessageEnabled: false,
+        nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
+      };
+      const patches = [];
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));
       await context.route('**/api/chats/*/settings-screen', (route) => {
@@ -106,7 +112,8 @@ try {
                     nightModeStartTimeMinutes: savedStart,
                     nightModeEndTimeMinutes: 420,
                     nightModeTimezone: 'Europe/Berlin',
-                    settingsRevision: timestamp,
+                    ...savedNightFields,
+                    settingsRevision,
                   },
                   closure: savedClosure,
                   rules: {},
@@ -121,6 +128,18 @@ try {
                 }
               : { code: 'UPSTREAM_UNAVAILABLE' },
         });
+      });
+      await context.route('**/api/chats/*/settings/section', async (route) => {
+        const body = route.request().postDataJSON();
+        patches.push(body);
+        savedNightFields = {
+          nightModeOpenMessageEnabled: body.changes.nightModeOpenMessageEnabled,
+          nightModeOpenMessageDeleteOnFirstMessageEnabled:
+            body.changes.nightModeOpenMessageDeleteOnFirstMessageEnabled,
+        };
+        savedStart = body.changes.nightModeStartTimeMinutes;
+        settingsRevision = '2026-10-30T20:01:00.000Z';
+        await route.fulfill({ json: { ...body.changes, settingsRevision } });
       });
       const settle = async () => {
         const deadline = Date.now() + 15_000;
@@ -147,7 +166,7 @@ try {
       await page.evaluate((theme) => {
         document.documentElement.dataset.maxTheme = theme;
       }, colorScheme);
-      await page.getByRole('region', { name: 'Уведомление о закрытии' }).waitFor();
+      await page.locator('.night-status__heading').waitFor();
       await settle();
       assert.equal(
         await page.getByLabel('Часовой пояс', { exact: true }).inputValue(),
@@ -175,7 +194,10 @@ try {
         '1234',
         'Focus refresh preserves dirty draft',
       );
-      await page.getByText('Результат отправки неизвестен', { exact: true }).waitFor();
+      assert.doesNotMatch(
+        await page.locator('.night-status').innerText(),
+        /отправки|восстановлен/iu,
+      );
       savedClosure = { ...savedClosure, restriction: 'night' };
       savedClosure.notices.close = observation('2026-10-30T20:00:00.000Z', 'sent');
       const beforeBoundary = reads;
@@ -187,7 +209,7 @@ try {
         '1234',
         'Boundary refresh preserves dirty draft',
       );
-      assert.equal(await page.locator('.night-status__result[data-outcome="sent"]').count(), 2);
+      assert.match(await page.locator('.night-status__heading').innerText(), /Чат закрыт/);
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1),
         false,
@@ -205,14 +227,12 @@ try {
           return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
         };
         const background = luminance(getComputedStyle(card).backgroundColor);
-        return ['.night-status__heading', '.night-status__date', '.night-status__result'].map(
-          (selector) => {
-            const foreground = luminance(getComputedStyle(card.querySelector(selector)).color);
-            return (
-              (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05)
-            );
-          },
-        );
+        return ['.night-status__heading'].map((selector) => {
+          const foreground = luminance(getComputedStyle(card.querySelector(selector)).color);
+          return (
+            (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05)
+          );
+        });
       });
       assert.ok(
         contrast.every((ratio) => ratio >= 4.5),
@@ -258,28 +278,26 @@ try {
         'Collapsed section neither polls nor refreshes on focus',
       );
       await page.getByRole('button', { name: 'Открыть раздел', exact: true }).click();
-      await page.getByRole('region', { name: 'Уведомление о закрытии' }).waitFor();
+      await page.locator('.night-status__heading').waitFor();
       await settle();
       responseStatus = 503;
       await focus();
       await page
-        .getByText('Не удалось обновить статус. Показаны данные последней проверки.', {
+        .getByText('Не удалось обновить состояние. Обновите экран.', {
           exact: true,
         })
         .waitFor();
-      assert.equal(await page.locator('.night-status__result[data-outcome="sent"]').count(), 2);
+      assert.match(await page.locator('.night-status__heading').innerText(), /Чат закрыт/);
       responseStatus = 200;
       delete savedClosure.notices;
       savedClosure.notice = 'delivered';
       await focus();
-      await page
-        .getByText('Данные об уведомлении об открытии пока недоступны.', { exact: true })
-        .waitFor();
+      assert.match(await page.locator('.night-status__heading').innerText(), /Чат закрыт/);
       assert.equal(await page.getByLabel('Начало в минутах').inputValue(), '1234');
       assert.equal(
         await page.locator('.night-status__notice').count(),
         0,
-        'Old API does not fabricate OPEN evidence',
+        'Old API does not add delivery diagnostics',
       );
       responseStatus = 403;
       await focus();
@@ -308,7 +326,33 @@ try {
       await screen.getByRole('button', { name: 'Ночной режим', exact: true }).click();
       const panel = screen.locator('.settings-drilldown__panel--night');
       await panel.waitFor({ state: 'visible' });
-      await panel.getByRole('region', { name: 'Уведомление об открытии' }).waitFor();
+      await panel.locator('.night-status__heading').waitFor();
+      assert.equal(await panel.locator('.night-status').innerText(), 'Чат открыт');
+      assert.doesNotMatch(
+        await panel.innerText(),
+        /Последние даты|Уведомление о закрытии|Уведомление об открытии|Проверено:|подтвержден|восстановлен|отправки/iu,
+      );
+      const cleanup = panel.getByRole('checkbox', {
+        name: 'Удалять сообщение об открытии после первого сообщения участника',
+        exact: true,
+      });
+      assert.equal(await cleanup.count(), 0, 'Cleanup setting waits for opening notice activation');
+      const opening = panel.getByRole('checkbox', {
+        name: 'Включить сообщение об открытии группы после ночного режима',
+        exact: true,
+      });
+      await opening.check();
+      await cleanup.waitFor();
+      assert.equal(await cleanup.isChecked(), false, 'Cleanup is opt-in');
+      await cleanup.check();
+      await opening.uncheck();
+      assert.equal(await cleanup.count(), 0);
+      await opening.check();
+      assert.equal(
+        await cleanup.isChecked(),
+        true,
+        'Temporarily hiding the option keeps its draft',
+      );
       const timezone = panel.getByRole('combobox');
       assert.equal(
         await timezone.inputValue(),
@@ -345,7 +389,10 @@ try {
       const realFocusResponse = screen.waitForResponse('**/api/chats/*/settings-screen');
       await screen.evaluate(() => window.dispatchEvent(new Event('focus')));
       await realFocusResponse;
-      await panel.getByText('Результат отправки неизвестен', { exact: true }).waitFor();
+      assert.doesNotMatch(
+        await panel.locator('.night-status').innerText(),
+        /отправки|восстановлен/iu,
+      );
       assert.match(
         await start.innerText(),
         /21:59/,
@@ -361,6 +408,25 @@ try {
         path: path.join(screenshots, `${name}-screen-dirty.png`),
         animations: 'disabled',
       });
+      const saved = screen.waitForResponse('**/api/chats/*/settings/section');
+      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await saved;
+      assert.equal(patches.length, 1);
+      assert.equal(patches[0].section, 'night');
+      assert.equal(patches[0].expectedRevision, timestamp);
+      assert.equal(patches[0].changes.nightModeOpenMessageDeleteOnFirstMessageEnabled, true);
+      assert.equal(patches[0].changes.nightModeOpenMessageEnabled, true);
+      assert.equal(patches[0].changes.nightModeStartTimeMinutes, 1319);
+      assert.equal(Object.hasOwn(patches[0].changes, 'linkPolicy'), false);
+      await screen.reload();
+      await screen.getByRole('button', { name: 'Ночной режим', exact: true }).click();
+      await cleanup.waitFor();
+      assert.equal(await cleanup.isChecked(), true, 'Saved cleanup setting survives a fresh read');
+      assert.match(
+        await start.innerText(),
+        /21:59/,
+        'Saved opening schedule survives a fresh read',
+      );
       assert.deepEqual(errors, [], `${name}: actual settings page has no browser errors`);
       console.log(`${name}: passed`);
     } catch (error) {

@@ -12,6 +12,24 @@ closing-message deletion must not prevent an otherwise authorized opening notice
 separate stored notification switches and the two-hour maximum opening catch-up age. Never
 retry an uncertain SEND to make a transition appear complete.
 
+Opening-notice cleanup is separately opt-in through
+`nightModeOpenMessageDeleteOnFirstMessageEnabled`, defaulting to false. A fresh human
+`message_created` after the exact successful opening SEND creates a durable origin-only DELETE
+intent for that bot's notice. Bot messages, edits, delayed pre-opening messages and uncertain SENDs
+cannot nominate a target. The SEND receipt can restore a missing opening event without sending
+another notice. Concurrent participant messages share the existing unique DELETE intent.
+
+The final DELETE boundary rechecks the saved opt-in, effective open session, original bot,
+successful SEND and exact event. A disabled setting, manual closure or changed session refuses
+the old obligation. Cleanup never deletes the triggering participant message. Because the
+transport result does not retain MAX's message creation timestamp, the conservative boundary is
+the local successful SEND completion: a human message during an unconfirmed SEND does not count;
+the next eligible human message can nominate cleanup. This does not authorize replaying SEND.
+If cleanup was refused while the option was off, a fresh eligible human message after re-enabling
+can rearm only that unattempted policy refusal. Preserve its original binding and deadline;
+successful or potentially attempted DELETEs remain fenced. Cleanup handoff failures are logged
+internally and must not prevent ordinary participant moderation.
+
 ## Durable obligations
 
 - An ordinary stale transition persists reconciliation before completing and removing its SQL
@@ -76,9 +94,11 @@ Scheduling coverage is not notification intent or delivery proof. `sendRouteNow`
 fixed moderator independently of legacy per-membership health counters. SQL registry coverage
 does not inspect Redis payloads. Historical incidents may predate the current container logs.
 
-The settings screen shows both observations and separately scoped recovery work. Event repair or
-closing-message cleanup cannot downgrade a successful opening. Delayed reconciliation and work
-requiring intervention have distinct states. Focus, visibility and the next saved boundary
+The settings screen shows a concise effective open/closed state and actionable availability
+errors. Detailed receipt history and recovery work belong to operator diagnostics, as required by
+[the miniapp product decision](../../development/miniapp-product-decisions.md#miniapp-night-01-ночной-режим-без-технической-диагностики).
+Event repair or closing-message cleanup cannot downgrade a successful opening. Diagnostics retain
+distinct delayed and intervention-required states. Focus, visibility and the next saved boundary
 refresh the status without replacing unsaved edits.
 
 ## Calendar boundaries
@@ -111,3 +131,8 @@ deployment boundary installs compatible readers before new recovery work execute
 rollback paths and connector bootstrap require the independent night-mode recovery reader;
 turning notifications off does not make an older reader safe. Recheck the selected image across
 all API roles and native auxiliaries, strict smokes and the bounded audit after deployment.
+
+Opening-notice DELETE obligations additionally require the
+`maxim_topology_require_night_open_notice_cleanup_reader` source capability in both API rollback
+paths and connector bootstrap. Retain the binding reader and both final cleanup policy checkpoints;
+turning the new option off does not permit rolling back to a worker that ignores its stored reason.

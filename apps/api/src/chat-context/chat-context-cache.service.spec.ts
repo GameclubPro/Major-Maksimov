@@ -535,6 +535,7 @@ function buildSettings(chatId: string): ChatSettings {
     nightModeBotMessageText: '',
     nightModeCommentsEnabled: false,
     nightModeOpenMessageEnabled: true,
+    nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
     nightModeOpenMessageText: '',
     nightModeBotButtonEnabled: false,
     nightModeBotButtonUrl: '',

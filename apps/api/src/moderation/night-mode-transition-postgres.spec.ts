@@ -1,3 +1,11 @@
+import { NightModeOpenNoticeCleanupService } from './night-mode-open-notice-cleanup.service';
+import { NightModeOpenNoticeCleanupGuardService } from './night-mode-open-notice-cleanup-guard.service';
+import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import { NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE } from './night-mode-open-notice-cleanup-binding';
+import {
+  MODERATION_DELETE_INTENT_QUEUE,
+  type ModerationDeleteIntentJob,
+} from './moderation-delete-intent.queue';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { Queue, Worker, type ConnectionOptions, type Job } from 'bullmq';
@@ -30,6 +38,7 @@ import {
 import {
   resolveNextNightModeTransitionOccurrences,
   resolveCurrentNightModeOpenOccurrence,
+  resolveNightModeTransitionSnapshot,
 } from './night-mode-transition-time.util';
 import { buildNightModeNoticeIdempotencyKey } from '../max/max-action-idempotency.util';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -1234,3 +1243,365 @@ describeNative('night mode durable handoffs with PostgreSQL and BullMQ', () => {
     },
   );
 });
+
+(databaseUrl && localRedis ? describe : describe.skip)(
+  'opening notice cleanup with PostgreSQL and Redis',
+  () => {
+    let prisma: PrismaClient;
+    let queue: Queue<ModerationDeleteIntentJob>;
+    const chatIds: string[] = [];
+    beforeAll(async () => {
+      assertDisposableDatabaseUrl(databaseUrl);
+      prisma = createPrismaClient(databaseUrl, { max: 8 });
+      await prisma.$connect();
+      queue = new Queue(MODERATION_DELETE_INTENT_QUEUE, {
+        prefix: `night-opening-${randomUUID()}`,
+        connection: { url: redisUrl, maxRetriesPerRequest: 1 },
+      });
+      await queue.waitUntilReady();
+    });
+    afterAll(async () => {
+      // FLAG: This random queue namespace belongs only to the disposable local test stores.
+      if (queue) {
+        await queue.obliterate();
+        await queue.close();
+      }
+      if (prisma) {
+        await prisma.maxActionLedgerEntry.deleteMany({ where: { chatId: { in: chatIds } } });
+        await prisma.chat.deleteMany({ where: { id: { in: chatIds } } });
+        await prisma.$disconnect();
+      }
+    });
+
+    async function fixture() {
+      const chatId = `night-opening-${randomUUID()}`;
+      chatIds.push(chatId);
+      const now = new Date();
+      const minute = now.getUTCHours() * 60 + now.getUTCMinutes();
+      await prisma.chat.create({ data: { id: chatId, title: 'Opening cleanup fixture' } });
+      const settings = await prisma.chatSettings.create({
+        data: {
+          chatId,
+          nightModeEnabled: true,
+          nightModeStartTimeMinutes: (minute + 120) % 1440,
+          nightModeEndTimeMinutes: (minute + 1380) % 1440,
+          nightModeTimezone: 'UTC',
+          nightModeOpenMessageEnabled: true,
+          nightModeOpenMessageDeleteOnFirstMessageEnabled: true,
+        },
+      });
+      const snapshot = resolveNightModeTransitionSnapshot(settings, now)!;
+      expect(snapshot.status).toBe('open');
+      const jobId = buildNightModeNoticeIdempotencyKey('open', chatId, snapshot.sessionKey);
+      const completedAt = new Date(now.getTime() - 10_000);
+      await prisma.maxActionLedgerEntry.create({
+        data: {
+          jobId,
+          actionType: 'SEND_MESSAGE',
+          chatId,
+          sourceTag: 'night_mode_transition',
+          status: 'SUCCEEDED',
+          terminal: true,
+          ambiguous: false,
+          dispatchBotId: 'original-sender',
+          remoteMessageId: 'opening',
+          completedAt,
+        },
+      });
+      const deletes = new ModerationDeleteIntentService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        queue,
+        new ConfigService({ MODERATION_DELETE_INTENT_MODE: 'off' }),
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      const makeObserver = () =>
+        new NightModeOpenNoticeCleanupService(
+          prisma as unknown as PrismaService,
+          new MaxActionLedgerService(prisma as unknown as PrismaService),
+          new NightModeTransitionEventService(prisma as unknown as PrismaService),
+          deletes,
+        );
+      const source = {
+        type: 'message_created',
+        messageId: 'first-human',
+        userId: 'human',
+        createdAt: new Date(now.getTime() - 1_000).toISOString(),
+        isBot: false,
+      };
+      return { chatId, settings, snapshot, jobId, completedAt, deletes, makeObserver, source };
+    }
+
+    it('recovers a missing opening event and gives concurrent humans one durable cleanup across restart', async () => {
+      const f = await fixture();
+      expect(await prisma.moderationEvent.count({ where: { chatId: f.chatId } })).toBe(0);
+      await Promise.all([
+        f.makeObserver().observeHumanMessage(f.settings, f.source),
+        f
+          .makeObserver()
+          .observeHumanMessage(f.settings, { ...f.source, messageId: 'second-human' }),
+      ]);
+      const intent = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: f.chatId, messageId: 'opening' } },
+        include: { reasons: true },
+      });
+      expect(intent).toMatchObject({
+        status: 'PENDING',
+        originBotId: 'original-sender',
+        routingPolicy: 'origin_only',
+        messageAuthorKind: 'bot',
+        subjectUserId: null,
+      });
+      expect(intent.reasons).toHaveLength(1);
+      expect(intent.reasons[0]!.ruleCode).toBe(NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE);
+      const savedMetadata = intent.reasons[0]!.metadata;
+      expect(await queue.getJob(`mdi-${intent.id}`)).not.toBeNull();
+      expect(
+        await prisma.moderationEvent.count({
+          where: {
+            chatId: f.chatId,
+            ruleCode: 'NIGHT_MODE_OPEN_NOTICE',
+            messageId: 'opening',
+            botId: 'original-sender',
+          },
+        }),
+      ).toBe(1);
+      await f
+        .makeObserver()
+        .observeHumanMessage(f.settings, { ...f.source, messageId: 'after-restart' });
+      expect(
+        await prisma.moderationDeleteIntentReason.findMany({
+          where: { intentId: intent.id },
+          select: { metadata: true },
+        }),
+      ).toEqual([{ metadata: savedMetadata }]);
+      expect(await prisma.moderationDeleteIntent.count({ where: { chatId: f.chatId } })).toBe(1);
+      expect(
+        await prisma.moderationDeleteIntent.findUnique({
+          where: { chatId_messageId: { chatId: f.chatId, messageId: f.source.messageId } },
+        }),
+      ).toBeNull();
+      const internals = f.deletes as unknown as {
+        loadIntent(id: string): Promise<unknown>;
+        selectDueIntentIds(): Promise<Array<{ id: string }>>;
+        assertNightModeOpenNoticeCleanupStillAuthorized(intent: unknown): Promise<void>;
+      };
+      expect(await internals.selectDueIntentIds()).toEqual(
+        expect.arrayContaining([{ id: intent.id }]),
+      );
+      const loaded = await internals.loadIntent(intent.id);
+      expect(loaded).toMatchObject({
+        nightModeOpenNoticeCleanupReason: true,
+        nightModeOpenNoticeCleanupOnly: true,
+      });
+      await expect(
+        internals.assertNightModeOpenNoticeCleanupStillAuthorized(loaded),
+      ).resolves.toBeUndefined();
+      await prisma.chatSettings.update({
+        where: { chatId: f.chatId },
+        data: { nightModeOpenMessageDeleteOnFirstMessageEnabled: false },
+      });
+      await expect(
+        internals.assertNightModeOpenNoticeCleanupStillAuthorized(loaded),
+      ).rejects.toMatchObject({ code: 'night_mode_open_notice_cleanup_stale' });
+    });
+
+    it('rearms only an unattempted policy refusal without renewing its original deadline', async () => {
+      const f = await fixture();
+      await f.makeObserver().observeHumanMessage(f.settings, f.source);
+      const original = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: f.chatId, messageId: 'opening' } },
+        include: { reasons: true },
+      });
+      await prisma.moderationDeleteIntent.update({
+        where: { id: original.id },
+        data: { status: 'FAILED_TERMINAL', lastErrorCode: 'night_mode_open_notice_cleanup_stale' },
+      });
+      await f
+        .makeObserver()
+        .observeHumanMessage(f.settings, { ...f.source, messageId: 'new-human' });
+      const rearmed = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { id: original.id },
+        include: { reasons: true },
+      });
+      expect(rearmed).toMatchObject({
+        status: 'PENDING',
+        retryUntilAt: original.retryUntilAt,
+        originBotId: original.originBotId,
+      });
+      expect(rearmed.reasons[0]!.metadata).toEqual(original.reasons[0]!.metadata);
+      for (const change of [
+        {
+          status: 'FAILED_TERMINAL' as const,
+          deleteDispatchStartedAt: new Date(),
+          deleteDispatchStartedBotId: 'original-sender',
+        },
+        {
+          status: 'SUCCEEDED' as const,
+          deleteDispatchStartedAt: null,
+          deleteDispatchStartedBotId: null,
+        },
+      ]) {
+        await prisma.moderationDeleteIntent.update({
+          where: { id: original.id },
+          data: { ...change, lastErrorCode: 'night_mode_open_notice_cleanup_stale' },
+        });
+        await f
+          .makeObserver()
+          .observeHumanMessage(f.settings, { ...f.source, messageId: 'later-human' });
+        expect(
+          await prisma.moderationDeleteIntent.findUnique({ where: { id: original.id } }),
+        ).toMatchObject(change);
+      }
+    });
+
+    it('rearms a retained trigger after an expired later manual closure without renewing authority', async () => {
+      const f = await fixture();
+      await f.makeObserver().observeHumanMessage(f.settings, f.source);
+      const original = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: f.chatId, messageId: 'opening' } },
+        include: { reasons: true },
+      });
+      const binding = (original.reasons[0]!.metadata as Record<string, unknown>)
+        .nightModeOpenNoticeCleanup;
+      const guard = new NightModeOpenNoticeCleanupGuardService(prisma as unknown as PrismaService);
+      await prisma.chatSettings.update({
+        where: { chatId: f.chatId },
+        data: {
+          nightModeForceCloseEnabled: true,
+          nightModeForceCloseForever: false,
+          nightModeForceCloseUntil: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+      await expect(guard.assertAllowed(original, binding)).rejects.toMatchObject({
+        code: 'night_mode_open_notice_cleanup_stale',
+      });
+      await prisma.moderationDeleteIntent.update({
+        where: { id: original.id },
+        data: { status: 'FAILED_TERMINAL', lastErrorCode: 'night_mode_open_notice_cleanup_stale' },
+      });
+      const expiredUntil = new Date(Date.parse(f.source.createdAt) + 500);
+      expect(expiredUntil.getTime()).toBeLessThan(Date.now());
+      const reopenedSettings = await prisma.chatSettings.update({
+        where: { chatId: f.chatId },
+        data: { nightModeForceCloseUntil: expiredUntil.toISOString() },
+      });
+      expect(Date.parse(f.source.createdAt)).toBeLessThan(
+        Date.parse(reopenedSettings.nightModeForceCloseUntil),
+      );
+      await f.makeObserver().observeHumanMessage(reopenedSettings, {
+        ...f.source,
+        messageId: 'fresh-human-after-manual-reopening',
+        createdAt: new Date().toISOString(),
+      });
+      const rearmed = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { id: original.id },
+        include: { reasons: true },
+      });
+      expect(rearmed).toMatchObject({
+        status: 'PENDING',
+        retryUntilAt: original.retryUntilAt,
+        originBotId: original.originBotId,
+      });
+      expect(rearmed.reasons[0]!.metadata).toEqual(original.reasons[0]!.metadata);
+      await expect(guard.assertAllowed(rearmed, binding)).resolves.toBeUndefined();
+    });
+
+    it('never manufactures opening evidence for an uncertain SEND or an earlier/edited/bot source', async () => {
+      const f = await fixture();
+      for (const source of [
+        { ...f.source, isBot: true },
+        { ...f.source, type: 'message_edited' },
+        { ...f.source, createdAt: new Date(f.completedAt.getTime() - 1).toISOString() },
+      ])
+        await f.makeObserver().observeHumanMessage(f.settings, source);
+      await prisma.maxActionLedgerEntry.update({
+        where: { jobId: f.jobId },
+        data: { ambiguous: true, status: 'FAILED_RETRYABLE', terminal: false },
+      });
+      await f.makeObserver().observeHumanMessage(f.settings, f.source);
+      expect(await prisma.moderationEvent.count({ where: { chatId: f.chatId } })).toBe(0);
+      expect(await prisma.moderationDeleteIntent.count({ where: { chatId: f.chatId } })).toBe(0);
+    });
+
+    it('does not let generic bot auto-delete waive the opening notice policy guard', async () => {
+      const f = await fixture();
+      await f.makeObserver().observeHumanMessage(f.settings, f.source);
+      const intent = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: f.chatId, messageId: 'opening' } },
+      });
+      await prisma.moderationDeleteIntentReason.create({
+        data: {
+          id: randomUUID(),
+          intentId: intent.id,
+          reasonKey: 'BOT_MESSAGE_AUTO_DELETE',
+          ruleCode: 'BOT_MESSAGE_AUTO_DELETE',
+          eventType: 'SYSTEM',
+        },
+      });
+      const internals = f.deletes as unknown as {
+        loadIntent(id: string): Promise<unknown>;
+        assertNightModeOpenNoticeCleanupStillAuthorized(intent: unknown): Promise<void>;
+      };
+      const loaded = await internals.loadIntent(intent.id);
+      expect(loaded).toMatchObject({
+        nightModeOpenNoticeCleanupReason: true,
+        nightModeOpenNoticeCleanupOnly: true,
+        botMessageAutoDeleteReason: true,
+      });
+      await expect(
+        internals.assertNightModeOpenNoticeCleanupStillAuthorized(loaded),
+      ).resolves.toBeUndefined();
+      await prisma.chatSettings.update({
+        where: { chatId: f.chatId },
+        data: { nightModeOpenMessageDeleteOnFirstMessageEnabled: false },
+      });
+      await expect(
+        internals.assertNightModeOpenNoticeCleanupStillAuthorized(loaded),
+      ).rejects.toMatchObject({
+        code: 'night_mode_open_notice_cleanup_stale',
+      });
+      await prisma.moderationDeleteIntentReason.create({
+        data: {
+          id: randomUUID(),
+          intentId: intent.id,
+          reasonKey: 'EXPLICIT_CLEANUP',
+          ruleCode: 'EXPLICIT_CLEANUP',
+          eventType: 'SYSTEM',
+        },
+      });
+      expect(await internals.loadIntent(intent.id)).toMatchObject({
+        nightModeOpenNoticeCleanupOnly: false,
+      });
+    });
+
+    it('rejects another bot and a changed session while preserving the original persisted intent', async () => {
+      const f = await fixture();
+      await f.makeObserver().observeHumanMessage(f.settings, f.source);
+      const intent = await prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: f.chatId, messageId: 'opening' } },
+        include: { reasons: true },
+      });
+      const binding = (intent.reasons[0]!.metadata as Record<string, unknown>)
+        .nightModeOpenNoticeCleanup;
+      const guard = new NightModeOpenNoticeCleanupGuardService(prisma as unknown as PrismaService);
+      await expect(
+        guard.assertAllowed({ ...intent, originBotId: 'replacement-moderator' }, binding),
+      ).rejects.toMatchObject({ code: 'night_mode_open_notice_cleanup_stale' });
+      await prisma.chatSettings.update({
+        where: { chatId: f.chatId },
+        data: { nightModeStartTimeMinutes: (f.settings.nightModeStartTimeMinutes + 1) % 1440 },
+      });
+      await expect(guard.assertAllowed(intent, binding)).rejects.toMatchObject({
+        code: 'night_mode_open_notice_cleanup_stale',
+      });
+      expect(
+        await prisma.moderationDeleteIntent.findUnique({ where: { id: intent.id } }),
+      ).toMatchObject({ status: 'PENDING', originBotId: 'original-sender' });
+    });
+  },
+);

@@ -2564,7 +2564,7 @@ const scenarioBehaviors = [
     name: 'chat-settings-night',
     beforeShot: async (page) => {
       await openSettingsSection(page, 'Ночной режим', '.settings-drilldown__panel--night');
-      await page.getByText('Сейчас группа открыта', { exact: true }).waitFor({ state: 'visible' });
+      await page.getByText('Чат открыт', { exact: true }).waitFor({ state: 'visible' });
     },
   },
   {

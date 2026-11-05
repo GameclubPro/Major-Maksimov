@@ -642,6 +642,7 @@ import {
   type BotSpeechMediaUploadOptions,
   type BotSpeechResolvedMedia,
 } from './bot-speech-media.service';
+import { NightModeOpenNoticeCleanupService } from './night-mode-open-notice-cleanup.service';
 import { NightModeTransitionEventService } from './night-mode-transition-event.service';
 import {
   KARAVAN_STOREFRONT_RELAY_AUDIT_ACTION,
@@ -968,6 +969,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly nightModeTransitionScheduler?: NightModeTransitionSchedulerService,
     @Optional()
     private readonly requiredSubscriptionCandidateStore?: RequiredSubscriptionCandidateStore,
+    @Optional() private readonly nightModeOpenNoticeCleanup?: NightModeOpenNoticeCleanupService,
   ) {
     this.requiredSubscriptionNoticePlans = new RequiredSubscriptionNoticePlanStore(
       prisma.moderationEvent,
@@ -1893,6 +1895,14 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         (await this.legacyHolds?.isMemberHeld(chatId, senderId))
       )
         return;
+
+      await this.nightModeOpenNoticeCleanup?.observeHumanMessage(settings, {
+        isBot: senderIsBot,
+        type: updateType,
+        messageId,
+        userId: senderId,
+        createdAt,
+      });
 
       const mediaFlags = detectMediaFlags(update);
       const requiredSubscriptionMediaNoticeScope = resolveRequiredSubscriptionMediaNoticeScope({

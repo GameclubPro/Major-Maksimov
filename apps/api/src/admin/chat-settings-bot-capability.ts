@@ -93,6 +93,10 @@ const WRITE_SUBFEATURES = [
   ['nightModeBotMessageEnabled', (settings: ChatSettings) => settings.nightModeEnabled],
   ['nightModeOpenMessageEnabled', (settings: ChatSettings) => settings.nightModeEnabled],
   [
+    'nightModeOpenMessageDeleteOnFirstMessageEnabled',
+    (settings: ChatSettings) => settings.nightModeEnabled && settings.nightModeOpenMessageEnabled,
+  ],
+  [
     'requiredSubscriptionBotMessageEnabled',
     (settings: ChatSettings) => settings.requiredSubscriptionEnabled,
   ],
@@ -206,6 +210,7 @@ export const CHAT_SETTINGS_BOT_CAPABILITY_SELECT = {
   phoneNumbersMuteEnabled: true,
   nightModeBotMessageEnabled: true,
   nightModeOpenMessageEnabled: true,
+  nightModeOpenMessageDeleteOnFirstMessageEnabled: true,
   requiredSubscriptionBotMessageEnabled: true,
   requiredSubscriptionWarnEnabled: true,
   requiredSubscriptionMuteEnabled: true,

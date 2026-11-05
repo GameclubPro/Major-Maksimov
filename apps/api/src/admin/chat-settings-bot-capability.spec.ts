@@ -15,6 +15,16 @@ function resolveRequirements(
 }
 
 describe('resolveChatSettingsBotCapabilityRequirements', () => {
+  it('requires message rights for opening-notice cleanup only while its parent is active', () => {
+    const update = { nightModeOpenMessageDeleteOnFirstMessageEnabled: true };
+    expect(
+      resolveRequirements({ nightModeEnabled: true, nightModeOpenMessageEnabled: true }, update),
+    ).toEqual([
+      { permission: 'write', featureKeys: ['nightModeOpenMessageDeleteOnFirstMessageEnabled'] },
+    ]);
+    expect(resolveRequirements({}, update)).toEqual([]);
+  });
+
   it('requires only message rights for AI deletion despite retained legacy sanctions', () => {
     const current = chatSettingsSchema.parse({
       commercialAdsFilterEnabled: false,

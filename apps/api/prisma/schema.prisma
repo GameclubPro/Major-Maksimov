@@ -1391,6 +1391,7 @@ model ChatSettings {
   nightModeBotMessageText                       String                    @default("") @map("night_mode_bot_message_text")
   nightModeCommentsEnabled                      Boolean                   @default(false) @map("night_mode_comments_enabled")
   nightModeOpenMessageEnabled                   Boolean                   @default(false) @map("night_mode_open_message_enabled")
+  nightModeOpenMessageDeleteOnFirstMessageEnabled Boolean                  @default(false) @map("night_mode_open_message_delete_on_first_message_enabled")
   nightModeOpenMessageText                      String                    @default("") @map("night_mode_open_message_text")
   nightModeBotButtonEnabled                     Boolean                   @default(false) @map("night_mode_bot_button_enabled")
   nightModeBotButtonUrl                         String                    @default("") @map("night_mode_bot_button_url")

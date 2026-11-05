@@ -173,6 +173,7 @@ export const CHAT_SECTION_FIELDS = {
     'nightModeBotMessageText',
     'nightModeCommentsEnabled',
     'nightModeOpenMessageEnabled',
+    'nightModeOpenMessageDeleteOnFirstMessageEnabled',
     'nightModeOpenMessageText',
     'nightModeBotButtons',
     'nightModeBotButtonEnabled',

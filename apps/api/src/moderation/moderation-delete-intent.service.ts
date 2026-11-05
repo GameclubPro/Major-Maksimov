@@ -1,4 +1,9 @@
 import {
+  NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE,
+  NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE,
+} from './night-mode-open-notice-cleanup-binding';
+import { NightModeOpenNoticeCleanupGuardService } from './night-mode-open-notice-cleanup-guard.service';
+import {
   finalizeDeleteAuthority,
   prepareDeleteAuthority,
   prepareDeleteAuthorityRecheck,
@@ -403,6 +408,9 @@ type IntentRow = {
   messageDuplicateOwned?: boolean;
   imageTextStopListDeleteReason?: boolean;
   imageTextStopListDeleteOnly?: boolean;
+  nightModeOpenNoticeCleanupReason?: boolean;
+  nightModeOpenNoticeCleanupOnly?: boolean;
+  nightModeOpenNoticeCleanupBinding?: unknown;
   nightModeCloseNoticeCleanupReason?: boolean;
   nightModeCloseNoticeCleanupOnly?: boolean;
   nightModeCloseNoticeCleanupBinding?: unknown;
@@ -944,6 +952,7 @@ export class ModerationDeleteIntentService {
     ruleCodes: readonly string[],
   ): ModerationDeleteIntentRollout {
     const normalizedRuleCodes = ruleCodes.map((ruleCode) => ruleCode.trim());
+    if (normalizedRuleCodes.includes(NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE)) return 'execute';
     if (normalizedRuleCodes.some((rule) => DURABLE_USER_DELETE_RULES.has(rule))) return 'execute';
     if (normalizedRuleCodes.includes(SUGGESTION_SUBSCRIPTION_DELETE_RULE)) return 'execute';
     // FLAG: Counter ownership survives admission disable; sanctions use their own exact-chat ceiling.
@@ -1010,6 +1019,36 @@ export class ModerationDeleteIntentService {
     options?: { enqueue?: boolean },
   ): Promise<EnsureModerationDeleteIntentResult> {
     return this.persistIntent(input, options?.enqueue !== false);
+  }
+
+  async rearmNightModeOpenNoticeCleanup(intentId: string): Promise<void> {
+    const intent = await this.loadRequiredIntent(intentId);
+    if (
+      intent.status !== 'FAILED_TERMINAL' ||
+      intent.lastErrorCode !== NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE ||
+      intent.nightModeOpenNoticeCleanupOnly !== true ||
+      intent.retryUntilAt.getTime() <= Date.now() ||
+      this.hasDeleteMutationEvidence(intent)
+    )
+      return;
+    await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
+    // FLAG: A new eligible human message can rearm only a proven unattempted policy refusal.
+    // Keep the first trigger, original retry deadline and every unknown/success fence intact.
+    const changed = await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "moderation_delete_intents"
+      SET "status" = CAST('PENDING' AS "ModerationDeleteIntentStatus"),
+          "next_attempt_at" = CURRENT_TIMESTAMP,
+          "last_error_code" = NULL, "last_status_code" = NULL, "last_error" = NULL,
+          "completed_at" = NULL, "updated_at" = CURRENT_TIMESTAMP
+      WHERE "id" = ${intentId}
+        AND "status" = CAST('FAILED_TERMINAL' AS "ModerationDeleteIntentStatus")
+        AND "last_error_code" = ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE}
+        AND "retry_until_at" > CURRENT_TIMESTAMP
+        AND "lease_token" IS NULL AND "lease_expires_at" IS NULL
+        AND "remote_delete_succeeded_at" IS NULL AND "remote_delete_succeeded_bot_id" IS NULL
+        AND "delete_dispatch_started_at" IS NULL AND "delete_dispatch_started_bot_id" IS NULL
+    `);
+    if (changed === 1) await this.enqueueCurrentWakeup(intentId);
   }
 
   // FLAG: A target is linked durably before mute; its final guard waits for the persisted mute decision.
@@ -4078,6 +4117,7 @@ export class ModerationDeleteIntentService {
       // FLAG: A delayed close-notice cleanup is bound to the exact open session, settings
       // generation and persisted notice event. Re-check all three at the transport-final boundary.
       await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
+      await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
       const commercialOcrGuardRequired = await this.resolveDeleteIntentCommercialOcrGuard(intent);
       // FLAG: A durable photo-only retry must regain authorization from current chat settings and
       // a fresh shared runtime control immediately before every remote DELETE mutation.
@@ -4176,6 +4216,7 @@ export class ModerationDeleteIntentService {
               throw new ModerationDeleteGuardedMessageAbsentError('guarded_report_absence');
             await this.assertChannelAutoPostCleanupLocalAuthority(intent);
             await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
+            await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
           },
         );
         independentVerified = proof.independentVerified;
@@ -4748,7 +4789,8 @@ export class ModerationDeleteIntentService {
       code === 'photo_duplicate_legacy_evidence_retired' ||
       code === CHANNEL_AUTO_POST_CLEANUP_ENTITY_MISMATCH_ERROR_CODE ||
       code === CHANNEL_AUTO_POST_CLEANUP_SENDER_REJECTED_ERROR_CODE ||
-      code === NIGHT_MODE_CLOSE_NOTICE_CLEANUP_STALE_ERROR_CODE
+      code === NIGHT_MODE_CLOSE_NOTICE_CLEANUP_STALE_ERROR_CODE ||
+      code === NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE
     ) {
       return true;
     }
@@ -4779,6 +4821,18 @@ export class ModerationDeleteIntentService {
       code === 'image_text_stop_list_participant_immune' ||
       code === 'image_text_stop_list_policy_changed' ||
       code === 'image_text_stop_list_deadline_expired'
+    );
+  }
+
+  private async assertNightModeOpenNoticeCleanupStillAuthorized(intent: IntentRow): Promise<void> {
+    if (
+      intent.nightModeOpenNoticeCleanupReason !== true ||
+      intent.nightModeOpenNoticeCleanupOnly !== true
+    )
+      return;
+    await new NightModeOpenNoticeCleanupGuardService(this.prisma).assertAllowed(
+      intent,
+      intent.nightModeOpenNoticeCleanupBinding,
     );
   }
 
@@ -6349,6 +6403,9 @@ export class ModerationDeleteIntentService {
         persisted.channelAutoPostCleanupReason === true ||
         normalized.ruleCode === CHANNEL_AUTO_POST_FORWARD_REPLACEMENT_CLEANUP_RULE_CODE;
     }
+    persisted.nightModeOpenNoticeCleanupReason =
+      persisted.nightModeOpenNoticeCleanupReason === true ||
+      normalized.ruleCode === NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE;
     persisted.botMessageAutoDeleteReason =
       persisted.botMessageAutoDeleteReason === true ||
       normalized.ruleCode === BOT_MESSAGE_AUTO_DELETE_RULE_CODE;
@@ -6734,6 +6791,8 @@ export class ModerationDeleteIntentService {
         const channelCleanupGuardRejected =
           details.errorCode === CHANNEL_AUTO_POST_CLEANUP_ENTITY_MISMATCH_ERROR_CODE ||
           details.errorCode === CHANNEL_AUTO_POST_CLEANUP_SENDER_REJECTED_ERROR_CODE;
+        const nightModeOpenCleanupGuardRejected =
+          details.errorCode === NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE;
         const nightModeCleanupGuardRejected =
           details.errorCode === NIGHT_MODE_CLOSE_NOTICE_CLEANUP_STALE_ERROR_CODE;
         // FLAG: A rejected complete reason set can retry only if a concurrent writer changed
@@ -6804,13 +6863,16 @@ export class ModerationDeleteIntentService {
                       })) !== null
                     : channelCleanupGuardRejected
                       ? this.hasExecutableReasonIgnoringChannelAutoPostCleanup(latest)
-                      : nightModeCleanupGuardRejected
-                        ? latest.nightModeCloseNoticeCleanupReason === true &&
-                          latest.nightModeCloseNoticeCleanupOnly !== true
-                        : details.errorCode === 'photo_duplicate_legacy_evidence_retired'
-                          ? latest.photoDuplicateDeleteOnly !== true &&
-                            this.hasExecutableNonCommercialOcrReason(latest)
-                          : this.hasExecutableNonCommercialOcrReason(latest)));
+                      : nightModeOpenCleanupGuardRejected
+                        ? latest.nightModeOpenNoticeCleanupReason === true &&
+                          latest.nightModeOpenNoticeCleanupOnly !== true
+                        : nightModeCleanupGuardRejected
+                          ? latest.nightModeCloseNoticeCleanupReason === true &&
+                            latest.nightModeCloseNoticeCleanupOnly !== true
+                          : details.errorCode === 'photo_duplicate_legacy_evidence_retired'
+                            ? latest.photoDuplicateDeleteOnly !== true &&
+                              this.hasExecutableNonCommercialOcrReason(latest)
+                            : this.hasExecutableNonCommercialOcrReason(latest)));
         const now = Date.now();
         // A fresh independent reason does not inherit the obsolete OCR guard failure or its
         // backoff. Requeue it immediately; the next attempt reloads the mixed durable classifiers.
@@ -8492,6 +8554,12 @@ export class ModerationDeleteIntentService {
         OFFSET 0
       )
       OR ${this.durableUserDeleteReasonSql(Prisma.sql`intent."id"`)}
+      OR EXISTS (
+        SELECT 1 FROM "moderation_delete_intent_reasons" night_open_reason
+        WHERE night_open_reason."intent_id" = intent."id"
+          AND night_open_reason."rule_code" = ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE}
+        OFFSET 0
+      )
       ${replacementCleanupFilter}
       ${requiredSubscriptionDeleteFilter}
       ${imageTextStopListFilter}
@@ -8617,6 +8685,7 @@ export class ModerationDeleteIntentService {
       | 'imageTextStopListDeleteReason'
       | 'imageTextStopListDeleteOnly'
       | 'messageDuplicateOwned'
+      | 'nightModeOpenNoticeCleanupReason'
     >,
   ): boolean {
     if (intent.retentionOwned) {
@@ -8679,9 +8748,14 @@ export class ModerationDeleteIntentService {
       | 'nonCommercialOcrDeleteReason'
       | 'durableUserDeleteReason'
       | 'messageDuplicateOwned'
+      | 'nightModeOpenNoticeCleanupReason'
     >,
   ): boolean {
-    if (intent.messageDuplicateOwned === true || intent.durableUserDeleteReason === true)
+    if (
+      intent.nightModeOpenNoticeCleanupReason === true ||
+      intent.messageDuplicateOwned === true ||
+      intent.durableUserDeleteReason === true
+    )
       return true;
     if (
       intent.reportCounterCleanupReason === true ||
@@ -8722,6 +8796,7 @@ export class ModerationDeleteIntentService {
       | 'nonCommercialOcrDeleteReason'
       | 'durableUserDeleteReason'
       | 'messageDuplicateOwned'
+      | 'nightModeOpenNoticeCleanupReason'
     >,
   ): boolean {
     if (this.hasExecutableNonCommercialOcrReason(intent)) {
@@ -9767,7 +9842,34 @@ export class ModerationDeleteIntentService {
           AND night_cleanup_reason."rule_code" = ${NIGHT_MODE_CLOSE_NOTICE_CLEANUP_RULE_CODE}
         ORDER BY night_cleanup_reason."created_at" ASC, night_cleanup_reason."id" ASC
         LIMIT 1
-      ) AS "nightModeCloseNoticeCleanupBinding"
+      ) AS "nightModeCloseNoticeCleanupBinding",
+      EXISTS (
+        SELECT 1 FROM "moderation_delete_intent_reasons" night_open_reason
+        WHERE night_open_reason."intent_id" = ${intentIdColumn}
+          AND night_open_reason."rule_code" = ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE}
+      ) AS "nightModeOpenNoticeCleanupReason",
+      (
+        EXISTS (
+          SELECT 1 FROM "moderation_delete_intent_reasons" night_open_reason
+          WHERE night_open_reason."intent_id" = ${intentIdColumn}
+            AND night_open_reason."rule_code" = ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM "moderation_delete_intent_reasons" independent_reason
+          WHERE independent_reason."intent_id" = ${intentIdColumn}
+            AND independent_reason."rule_code" NOT IN (
+              ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE}, ${BOT_MESSAGE_AUTO_DELETE_RULE_CODE}
+            )
+        )
+      ) AS "nightModeOpenNoticeCleanupOnly",
+      (
+        SELECT night_open_reason."metadata"->'nightModeOpenNoticeCleanup'
+        FROM "moderation_delete_intent_reasons" night_open_reason
+        WHERE night_open_reason."intent_id" = ${intentIdColumn}
+          AND night_open_reason."rule_code" = ${NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE}
+        ORDER BY night_open_reason."created_at" ASC, night_open_reason."id" ASC
+        LIMIT 1
+      ) AS "nightModeOpenNoticeCleanupBinding"
     `;
   }
 

@@ -323,6 +323,7 @@ test('style refresh cannot bless a conflicting custom message or image with the 
 test('mergeNightSectionSettings syncs nightModeRulesButtonEnabled as part of section save', () => {
   assert.ok(NIGHT_SECTION_SETTING_KEYS.includes('nightModeRulesButtonEnabled'));
   assert.ok(NIGHT_SECTION_SETTING_KEYS.includes('nightModeBotButtons'));
+  assert.ok(NIGHT_SECTION_SETTING_KEYS.includes('nightModeOpenMessageDeleteOnFirstMessageEnabled'));
 
   const current = createSettings({
     linkPolicy: 'BLOCKLIST_ONLY',
@@ -337,11 +338,13 @@ test('mergeNightSectionSettings syncs nightModeRulesButtonEnabled as part of sec
       { text: 'Кнопка 2', url: 'https://max.ru/channel/night-2' },
     ],
     nightModeRulesButtonEnabled: true,
+    nightModeOpenMessageDeleteOnFirstMessageEnabled: true,
   });
 
   const merged = mergeNightSectionSettings(current, saved);
   assert.deepEqual(merged.nightModeBotButtons, saved.nightModeBotButtons);
   assert.equal(merged.nightModeRulesButtonEnabled, true);
+  assert.equal(merged.nightModeOpenMessageDeleteOnFirstMessageEnabled, true);
   assert.equal(merged.nightModeBotMessageEnabled, true);
   assert.equal(merged.linkPolicy, 'BLOCKLIST_ONLY');
 });

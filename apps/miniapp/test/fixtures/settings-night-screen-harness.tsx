@@ -15,7 +15,11 @@ import '../../src/styles/moderation-workspace.css';
 const preview = createPreviewApiTransport();
 const api: ApiTransport = {
   async request(path, init) {
-    if (!path.startsWith('/chats/chat-a/settings-screen')) return preview.request(path, init);
+    if (
+      !path.startsWith('/chats/chat-a/settings-screen') &&
+      !path.startsWith('/chats/chat-a/settings/section')
+    )
+      return preview.request(path, init);
     const response = await fetch(`/api${path}`, init);
     const body = await response.text();
     if (!response.ok) throw new ApiRequestError(response.status, body, 'Ошибка запроса');

@@ -50,10 +50,10 @@ const guardedFiles = [
   },
   {
     path: 'apps/api/src/moderation/moderation.service.legacy.ts',
-    maxLines: 18714,
+    maxLines: 18724,
     targetLines: 17000,
     reason:
-      'ModerationService remains a legacy hotspot; this ceiling includes crash-fenced webhook timeout settlement, the Karavan policy handoff, ordered predecessor deferral, thin participant-report admission/counter hooks, the voice-source evidence binding call and local-ban join/message/selected-executor bindings. Local-ban state, source, role and dispatch authorization stay in the focused local-chat-ban helper alongside the existing focused report and voice services.',
+      'ModerationService remains a legacy hotspot; this ceiling includes crash-fenced webhook timeout settlement, the Karavan policy handoff, ordered predecessor deferral, thin participant-report admission/counter hooks, the voice-source evidence binding call, local-ban join/message/selected-executor bindings and the optional human-message opening-notice cleanup handoff. Opening-notice binding, persistence and final dispatch authorization stay in focused cleanup services. Local-ban state, source, role and dispatch authorization stay in the focused local-chat-ban helper alongside the existing focused report and voice services.',
   },
   {
     path: 'apps/api/src/moderation/private-control.service.legacy.ts',

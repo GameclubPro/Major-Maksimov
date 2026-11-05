@@ -587,6 +587,7 @@ function nightModeCleanupSettings(overrides: Record<string, unknown> = {}) {
     nightModeBotMessageText: '',
     nightModeCommentsEnabled: false,
     nightModeOpenMessageEnabled: true,
+    nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
     nightModeOpenMessageText: '',
     nightModeForceCloseEnabled: false,
     nightModeForceCloseForever: false,
@@ -6739,6 +6740,98 @@ describe('ModerationDeleteIntentService', () => {
     expect(transitionEventLookup).toHaveBeenCalledTimes(3);
     expect(deleteMessage).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'executes exact opening cleanup and blocks final policy disable=%s',
+    async (disableAtFinal) => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-05-31T06:12:00.000Z'));
+      const settings = nightModeCleanupSettings({
+        nightModeOpenMessageDeleteOnFirstMessageEnabled: true,
+      });
+      const completedAt = new Date('2026-05-31T06:11:00.000Z');
+      const binding = {
+        version: 1,
+        sessionKey: 'v1:Europe/Moscow:23:00:08:00:2026-05-30',
+        eventId: 'night-open-event',
+        messageId: baseIntent.messageId,
+        botId: 'bot-1',
+        sendCompletedAt: completedAt.toISOString(),
+        trigger: {
+          messageId: 'human-after-opening',
+          userId: 'human',
+          createdAt: '2026-05-31T06:11:30.000Z',
+        },
+      };
+      const cleanupIntent = {
+        ...baseIntent,
+        messageAuthorKind: 'bot',
+        routingPolicy: 'origin_only',
+        botMessageAutoDeleteOnly: false,
+        nightModeOpenNoticeCleanupReason: true,
+        nightModeOpenNoticeCleanupOnly: true,
+        nightModeOpenNoticeCleanupBinding: binding,
+      };
+      const finalIntent = {
+        ...cleanupIntent,
+        status: disableAtFinal ? 'FAILED_TERMINAL' : 'SUCCEEDED',
+        lastBotId: 'bot-1',
+        succeededBotId: disableAtFinal ? null : 'bot-1',
+        leaseToken: null,
+        leaseExpiresAt: null,
+      };
+      const queryRaw = jest
+        .fn()
+        .mockResolvedValue([finalIntent])
+        .mockResolvedValueOnce([cleanupIntent]);
+      const deleteMessage = jest.fn().mockResolvedValue(undefined);
+      let policyReads = 0;
+      const { service } = createService(
+        {},
+        {
+          $queryRaw: queryRaw,
+          $executeRaw: jest.fn().mockResolvedValue(1),
+          moderationEvent: { findFirst: jest.fn().mockResolvedValue({ id: binding.eventId }) },
+          maxActionLedgerEntry: {
+            findUnique: jest.fn().mockResolvedValue({
+              actionType: 'SEND_MESSAGE',
+              chatId: baseIntent.chatId,
+              sourceTag: 'night_mode_transition',
+              status: 'SUCCEEDED',
+              terminal: true,
+              ambiguous: false,
+              completedAt,
+              dispatchBotId: 'bot-1',
+              remoteMessageId: baseIntent.messageId,
+              metadata: {},
+            }),
+          },
+          chatSettings: {
+            findUnique: jest.fn(async () => ({
+              ...settings,
+              nightModeOpenMessageDeleteOnFirstMessageEnabled: !(
+                disableAtFinal && ++policyReads >= 2
+              ),
+            })),
+          },
+        },
+        { deleteMessage },
+        { resolveDeleteMessageBotRoute: jest.fn().mockResolvedValue(confirmedRoute) },
+      );
+      const outcome = await service.executeLeasedIntent('intent-1', 'lease-1');
+      if (disableAtFinal) {
+        expect(outcome.confirmed).toBe(false);
+        expect(deleteMessage).not.toHaveBeenCalled();
+      } else {
+        expect(outcome).toMatchObject({ confirmed: true, status: 'SUCCEEDED' });
+        expect(deleteMessage).toHaveBeenCalledTimes(1);
+        expect(deleteMessage).toHaveBeenCalledWith(
+          baseIntent.chatId,
+          baseIntent.messageId,
+          expect.objectContaining({ botId: 'bot-1' }),
+        );
+      }
+    },
+  );
 
   it('reconstructs and CAS-persists an exact legacy unbound night cleanup binding once', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-05-31T06:12:00.000Z'));
