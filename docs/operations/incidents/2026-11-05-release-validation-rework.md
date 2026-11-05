@@ -89,3 +89,24 @@ duplicate-flow and recompression test files without skips. The 55,000-parent pha
 2.47 seconds, including 1.16 seconds for broadcasts; recipient setup took 1.75 seconds and selection
 assertions 0.72 seconds. The public runner confirmed owned-store cleanup. These local timings
 establish coverage within the retained budgets, not a comparison against a different CI machine.
+
+The next CI run on `f842c23a87c9ff3d8c39d2ddbab5e720f8e06d7c` passed the complete Redis
+photo suite, but exposed an omitted boundary in the new batched PostgreSQL fixture: Prisma's
+default five-second transaction budget. Three 50,000-row phases rolled back at that boundary;
+the existing statement and hook budgets had not expired. Give fixture transactions an explicit
+20-second budget within the unchanged hook limits. A real PostgreSQL fixture statement taking
+more than five seconds must commit and restore local settings; later failure must still roll
+back the full batch. Keep this fixture-only budget separate from production transaction limits.
+
+That run also caught `publication-list.browser.mjs` reading one page immediately after a second
+response, where it expected two. Its response helper relied on a fixed 50 ms pause before reading
+the DOM. Wait for the exact rendered state instead. The browser harness deliberately delays
+query notifications by 100 ms and exposes pending notifications and completed list-cache entries.
+The stale-response check waits for the old query to settle and notifications to drain before
+asserting that the current filters and cursor remain intact. The editor's negative no-request
+window still exceeds its search debounce; the production UI and polling policy stay unchanged.
+
+With that notification precondition, the unchanged old browser script reproduced the same
+one-versus-two assertion; the corrected public browser case passed pagination, stale-response and
+editor/calendar sections. The complete PostgreSQL file passed 52 native cases without skips;
+its same-connection transaction/rollback regression took 5.22 seconds, crossing the old boundary.

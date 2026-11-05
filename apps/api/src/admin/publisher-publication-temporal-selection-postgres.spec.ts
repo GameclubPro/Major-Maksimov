@@ -26,6 +26,7 @@ import {
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const postgres = databaseUrl ? describe : describe.skip;
 jest.setTimeout(30_000);
+const FIXTURE_TRANSACTION_TIMEOUT_MS = 20_000;
 
 type PlanNode = {
   Plans?: PlanNode[];
@@ -132,14 +133,19 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
     // FLAG: Limit planner changes to fixture inserts; preserve initial table statistics
     // and restore session settings before selection and plan assertions. Reuse indexed
     // trigger lookup plans and one transaction across the bounded statements of a phase.
-    const [settings, ...inserted] = await client.$transaction([
-      client.$queryRaw<Array<{ seq: string; jit: string; cache: string }>>(Prisma.sql`
+    // The fixture phase may exceed Prisma's 5s default; its 20s total remains inside
+    // the recipient hook's 30s budget, with the separate 10s cap on each SQL statement.
+    const [settings, ...inserted] = await client.$transaction(
+      [
+        client.$queryRaw<Array<{ seq: string; jit: string; cache: string }>>(Prisma.sql`
         SELECT set_config('enable_seqscan', 'off', true) AS seq,
           set_config('jit', 'off', true) AS jit,
           set_config('plan_cache_mode', 'force_generic_plan', true) AS cache
       `),
-      ...statements.map((sql) => client.$executeRaw(sql)),
-    ]);
+        ...statements.map((sql) => client.$executeRaw(sql)),
+      ],
+      { timeout: FIXTURE_TRANSACTION_TIMEOUT_MS },
+    );
     expect(settings).toEqual([{ seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
     return inserted.reduce<number>((total, count) => {
       if (typeof count !== 'number') throw new Error('Fixture insert did not return a row count');
@@ -1781,15 +1787,22 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         ),
       ).toEqual([{ ...fixtureBefore[0]!, seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
       expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
+      const slowFixtureStarted = performance.now();
       expect(
         await seedIndexedBatches(
           [
-            Prisma.sql`INSERT INTO fixture_seed_planner_probe ${settings}`,
+            // FLAG: Real PostgreSQL work crosses Prisma's default transaction deadline.
+            // Materialization retains the wait while the SQL statement stays below 10s.
+            Prisma.sql`
+              WITH fixture_wait AS MATERIALIZED (SELECT pg_sleep(5.1))
+              INSERT INTO fixture_seed_planner_probe ${settings} FROM fixture_wait
+            `,
             Prisma.sql`INSERT INTO fixture_seed_planner_probe ${settings}`,
           ],
           connection,
         ),
       ).toBe(2);
+      expect(performance.now() - slowFixtureStarted).toBeGreaterThan(5_000);
       const fixtureRows = await connection.$queryRaw<Settings[]>(
         Prisma.sql`SELECT * FROM fixture_seed_planner_probe`,
       );
