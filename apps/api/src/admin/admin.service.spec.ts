@@ -2483,6 +2483,7 @@ describe('AdminService.applyManualModerationAction', () => {
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(prisma.moderationEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3546,12 +3547,15 @@ describe('AdminService.applyManualModerationAction', () => {
     );
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(1, 'chat-1', 'mid-source-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(2, 'chat-1', 'mid-source-2', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(3, 'chat-2', 'mid-fanout-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(maxClient.banMember.mock.invocationCallOrder[0]).toBeLessThan(
       maxClient.deleteMessage.mock.invocationCallOrder[0],
@@ -4979,12 +4983,15 @@ describe('AdminService.applyManualSystemBan', () => {
     );
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-2', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-2', 'mid-fanout-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
     });
     expect(prisma.moderationEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -5100,10 +5107,12 @@ describe('AdminService.applyManualSystemBan', () => {
     );
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
       botId: 'bot-1',
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-2', 'mid-fanout-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
       botId: 'bot-2',
     });
   });
@@ -6899,6 +6908,7 @@ describe('AdminService.applyManualSystemBan', () => {
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-2', 'mid-fanout-1', {
       immediate: true,
+      beforeImmediateDeleteMutation: expect.any(Function),
       botId: 'bot-2',
     });
   });
