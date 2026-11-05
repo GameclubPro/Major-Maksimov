@@ -197,6 +197,14 @@ describe('independent commercial model pool classifier', () => {
     ]);
   });
 
+  it('preserves the finite invalid-response reason across both failed primary attempts', async () => {
+    mailbox.wait.mockResolvedValue({ outcome: 'FAILED', responseIssue: 'decision' });
+    await expect(client().classify('Привет')).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+      responseIssue: 'decision',
+    });
+  });
+
   it.each(['UNAVAILABLE', 'FAILED'] as const)(
     'retries %s once on a different node with the original input and deadline',
     async (outcome) => {

@@ -303,6 +303,9 @@ export class CommercialLlmEnforcementProcessor {
             ? 'secondary_capacity_skipped'
             : 'unavailable_skipped',
         failureKind: error instanceof CommercialLlmError ? error.kind : 'UNAVAILABLE',
+        ...(error instanceof CommercialLlmError && error.responseIssue
+          ? { responseIssue: error.responseIssue }
+          : {}),
       };
     } finally {
       await this.mailbox.finish(item.raw, worker).catch(() => undefined);

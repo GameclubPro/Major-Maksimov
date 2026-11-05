@@ -5,6 +5,7 @@ import {
   commercialLlmCompletionUrl,
   CommercialLlmError,
   parseCommercialLlmEnvelope,
+  parseCommercialLlmCompletionContent,
 } from './commercial-llm.client';
 import {
   CommercialLlmPoolMailbox,
@@ -140,20 +141,24 @@ export class CommercialLlmPoolServer {
         workSignal,
       );
       const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-      parseCommercialLlmEnvelope(
-        JSON.parse(body),
-        COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity.modelAlias,
-      );
+      const envelope = JSON.parse(body);
+      const modelAlias = COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity.modelAlias;
+      parseCommercialLlmCompletionContent(envelope, modelAlias);
       completed = true;
+      // FLAG: Retain the actual terminal response before decision validation, as GPU workers do.
+      // It lets exact-attempt cleanup release the pool slot even for an invalid decision;
+      // mailbox readers still validate the decision before marking any job complete.
       if (!workSignal.aborted && (await this.lease.owns(token)))
         await this.mailbox.respond('server-9b', reservation.session, reservation.id, body);
+      parseCommercialLlmEnvelope(envelope, modelAlias);
     } catch (error) {
       if (error instanceof CommercialLlmError) throw error;
       throw new CommercialLlmError(signal?.aborted ? 'ABORTED' : 'UNAVAILABLE');
     } finally {
       // FLAG: An aborted HTTP request is not evidence that llama.cpp stopped computing.
       // /slots can overtake queued inference. Keep the pinned lease until managed recovery;
-      // only a complete validated response or a definite non-dispatch may release it here.
+      // only an exact-model terminal envelope or a definite non-dispatch may release it here.
+      // Invalid decision content still fails classification; it does not keep completed CPU work busy.
       if (!dispatched) await this.mailbox.releaseUndispatched(reservation).catch(() => false);
       if (token) {
         if (!dispatched || completed) await this.lease.release(token).catch(() => undefined);

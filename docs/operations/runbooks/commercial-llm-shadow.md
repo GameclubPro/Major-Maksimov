@@ -250,7 +250,10 @@ retain the existing successful result format, while unstructured failures become
 `PROCESS_FAILED` without exposing their exception text.
 
 The closed classifier smoke pins its own physical lease before HTTP. Only a
-complete validated response or a definite no-HTTP refusal permits its release.
+complete validated terminal envelope or a definite no-HTTP refusal permits its release.
+An invalid decision inside a complete, exact-model terminal envelope is still rejected,
+but that verified HTTP completion releases its own physical lease. Malformed envelopes,
+non-stop finishes and unknown HTTP outcomes supply no such proof.
 A timed-out or failed HTTP attempt retains the persistent fence and needs the
 same named CPU recovery procedure as pool work. Neither diagnostics nor an idle
 slot observation clears it. The existing inference and process time budgets are

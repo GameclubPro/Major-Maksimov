@@ -31,8 +31,18 @@ export type CommercialLlmFailureKind =
   | 'ABORTED'
   | 'UNAVAILABLE';
 
+export type CommercialLlmResponseIssue =
+  | 'envelope'
+  | 'finish'
+  | 'message'
+  | 'content_json'
+  | 'decision';
+
 export class CommercialLlmError extends Error {
-  constructor(readonly kind: CommercialLlmFailureKind) {
+  constructor(
+    readonly kind: CommercialLlmFailureKind,
+    readonly responseIssue?: CommercialLlmResponseIssue,
+  ) {
     super(`Commercial LLM ${kind}`);
     this.name = 'CommercialLlmError';
   }
@@ -213,18 +223,19 @@ export class CommercialLlmClient {
     } catch {
       throw new CommercialLlmError('INVALID_RESPONSE');
     }
-    const decision = parseCommercialLlmEnvelope(envelope, COMMERCIAL_LLM_MODEL_ALIAS);
-    // FLAG: Only a complete bounded, validated response proves the physical request finished.
-    // This hook belongs to the real request promise, even if its caller lost Promise.race.
+    parseCommercialLlmCompletionContent(envelope, COMMERCIAL_LLM_MODEL_ALIAS);
+    // FLAG: The bounded, exact-model terminal envelope proves this HTTP computation finished.
+    // Its decision may still be invalid and must never authorize an effect. Unknown transport,
+    // wrong identity and non-stop finishes retain uncertainty, including after caller timeout.
     lifecycle?.completed();
-    return decision;
+    return parseCommercialLlmEnvelope(envelope, COMMERCIAL_LLM_MODEL_ALIAS);
   }
 }
 
-export function parseCommercialLlmEnvelope(
+export function parseCommercialLlmCompletionContent(
   envelope: Record<string, unknown>,
   expectedAlias: string,
-): CommercialLlmDecision {
+): string {
   if (
     !envelope ||
     typeof envelope !== 'object' ||
@@ -233,13 +244,13 @@ export function parseCommercialLlmEnvelope(
     !Array.isArray(envelope.choices) ||
     envelope.choices.length !== 1
   )
-    throw new CommercialLlmError('INVALID_RESPONSE');
+    throw new CommercialLlmError('INVALID_RESPONSE', 'envelope');
   const choice = object(envelope.choices[0]);
   const message = object(choice.message);
   // FLAG: A token-limit response, reasoning, refusal or tool request is incomplete
   // classification, even when its visible content happens to be valid JSON.
+  if (choice.finish_reason !== 'stop') throw new CommercialLlmError('INVALID_RESPONSE', 'finish');
   if (
-    choice.finish_reason !== 'stop' ||
     message.role !== 'assistant' ||
     typeof message.content !== 'string' ||
     (message.refusal !== undefined && message.refusal !== null) ||
@@ -250,14 +261,22 @@ export function parseCommercialLlmEnvelope(
       message.reasoning_content !== '') ||
     message.function_call !== undefined
   )
-    throw new CommercialLlmError('INVALID_RESPONSE');
+    throw new CommercialLlmError('INVALID_RESPONSE', 'message');
+  return message.content;
+}
+
+export function parseCommercialLlmEnvelope(
+  envelope: Record<string, unknown>,
+  expectedAlias: string,
+): CommercialLlmDecision {
+  const content = parseCommercialLlmCompletionContent(envelope, expectedAlias);
   let decision: CommercialLlmDecision | null;
   try {
-    decision = parseCommercialLlmDecision(JSON.parse(message.content));
+    decision = parseCommercialLlmDecision(JSON.parse(content));
   } catch {
-    throw new CommercialLlmError('INVALID_RESPONSE');
+    throw new CommercialLlmError('INVALID_RESPONSE', 'content_json');
   }
-  if (!decision) throw new CommercialLlmError('INVALID_RESPONSE');
+  if (!decision) throw new CommercialLlmError('INVALID_RESPONSE', 'decision');
   return decision;
 }
 

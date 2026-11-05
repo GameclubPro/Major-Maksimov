@@ -332,12 +332,50 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     await complete(second);
   });
 
+  it('does not label an unavailable response store as an invalid model answer', async () => {
+    await ready('pc-b-9b');
+    const reservation = await reserved('pc-b-9b');
+    const read = jest
+      .spyOn(redis, 'mget')
+      .mockRejectedValueOnce(new Error('private transport detail'));
+    try {
+      expect(await mailbox.wait(reservation)).toEqual({ outcome: 'UNAVAILABLE' });
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('retains only a finite validation reason for a completed but inconsistent model answer', async () => {
+    await ready('pc-b-9b');
+    const reservation = await reserved('pc-b-9b');
+    const body = JSON.stringify({
+      model: COMMERCIAL_LLM_POOL_PROFILES['pc-b-9b'].identity.modelAlias,
+      choices: [
+        {
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+          },
+        },
+      ],
+    });
+    expect(
+      await mailbox.respond(reservation.nodeId, reservation.session, reservation.id, body),
+    ).toBe(true);
+    expect(await mailbox.wait(reservation)).toEqual({
+      outcome: 'FAILED',
+      responseIssue: 'decision',
+    });
+    expect(await redis.exists(commercialLlmPoolNodeKeys('pc-b-9b').slot)).toBe(0);
+  });
+
   it('rejects malformed answers and source-contract drift without classifying failure as negative', async () => {
     await ready('pc-b-9b');
     const request = job('pc-b-9b');
     const value = await reserved('pc-b-9b', request);
     expect(await mailbox.respond(value.nodeId, value.session, value.id, 'null')).toBe(true);
-    expect(await mailbox.wait(value)).toEqual({ outcome: 'FAILED' });
+    expect(await mailbox.wait(value)).toEqual({ outcome: 'FAILED', responseIssue: 'envelope' });
     await expect(
       mailbox.reserve('pc-b-9b', {
         ...job('pc-b-9b'),
@@ -397,7 +435,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
   let endpoint: string;
   let now: number;
   let processing: boolean;
-  let completionMode: 'disconnect' | 'complete';
+  let completionMode: 'disconnect' | 'complete' | 'invalid-decision';
   let leaseTtlAtPost: number | undefined;
   let slotsMode: 'valid' | 'missing' | 'malformed' | 'timeout';
   let jobKey: string;
@@ -483,7 +521,9 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
                         message: {
                           role: 'assistant',
                           content:
-                            '{"classification":"NOT_COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+                            completionMode === 'invalid-decision'
+                              ? '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}'
+                              : '{"classification":"NOT_COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
                         },
                       },
                     ],
@@ -589,6 +629,40 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBeNull();
     expect(await redis.exists(COMMERCIAL_LLM_COOLDOWN_KEY)).toBe(1);
     expect(await mailbox.wait(reservation)).toMatchObject({ outcome: 'COMPLETE' });
+  });
+
+  it('rejects an invalid decision, releases only completed physical work and accepts the next request', async () => {
+    completionMode = 'invalid-decision';
+    const rejected = await reserve();
+    await expect(server.dispatch(rejected)).rejects.toMatchObject({
+      kind: 'INVALID_RESPONSE',
+      responseIssue: 'decision',
+    });
+    expect(leaseTtlAtPost).toBe(-1);
+    expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBeNull();
+    expect(await redis.get(keys.response)).not.toBeNull();
+    expect(JSON.parse((await redis.get(jobKey))!).state).toBe('pending');
+    expect(await redis.exists(COMMERCIAL_LLM_COOLDOWN_KEY)).toBe(1);
+    await mailbox.release(rejected);
+    expect(JSON.parse((await redis.get(jobKey))!).state).toBe('released');
+    expect(await redis.get(keys.response)).toBeNull();
+    // The fixture advances admission only; the failed source never receives a result or replay.
+    await redis.del(COMMERCIAL_LLM_COOLDOWN_KEY);
+    // Keep the next source deadline aligned with Redis TIME, not an advanced JS-only clock.
+    await new Promise((resolve) => setTimeout(resolve, 1_010));
+    now = new Date().getTime();
+    await server.tick();
+    expect(await mailbox.available()).toContain('server-9b');
+    completionMode = 'complete';
+    const previousJobKey = jobKey;
+    jobKey = commercialLlmPoolJobKey(randomUUID());
+    try {
+      const next = await reserve();
+      await server.dispatch(next);
+      expect(await mailbox.wait(next)).toMatchObject({ outcome: 'COMPLETE' });
+    } finally {
+      await redis.del(previousJobKey);
+    }
   });
 
   it('cannot retain or release a replacement owner and never posts after losing ownership', async () => {
