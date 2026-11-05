@@ -60,3 +60,32 @@ evidence does not justify reducing security scope or removing the exact-SHA gate
 The preventive CI-policy change itself requires full CI and a new compatible main baseline.
 Future reviewed host-only changes can omit unrelated application lanes. That selected scope is
 testable immediately; a measured total release-time improvement requires a later comparable run.
+
+## Native fixture costs exposed by the preventive checks
+
+The first complete preventive CI run on `642f406c8870c35d4bfa4f96fccef833a33a65bd`
+retained both infrastructure shards and all application/native/image lanes. CodeQL and the
+other selected jobs passed, but `Required` correctly refused two existing test timeouts:
+
+- The cross-author recompressed-photo Redis scenario exceeded its five-second test budget.
+  Its log does not identify the expensive phase. The fixture rendered the same image corpus
+  repeatedly and opened Redis/BullMQ objects before asynchronous image preparation completed.
+  Prepare the unchanged synthetic bytes once in bounded suite setup, before allocating clients;
+  preserve fresh per-case state, real image verification and the five-second scenario budget.
+- The PostgreSQL temporal-selection fixture exceeded its 60-second parent setup hook before
+  selection assertions began. Preparing 50,000 stale parents and 5000 retained parents took
+  4.51 seconds for occurrences and 57.40 seconds for broadcasts. The existing 500-row statement
+  batches opened 110 transactions and repeated local planner settings. Execute the same bounded
+  statements in one transaction per phase, preserving all rows, triggers, constraints, initial
+  statistics and statement/hook/selection budgets. Native multi-statement success and rollback
+  cases verify that local planner settings do not escape into selection.
+
+These changes remove demonstrated repeated fixture work. The retained logs do not establish
+which operation exhausted the photo budget or why the broadcast phase cost 57 seconds on that
+runner. Keep those limits of the diagnosis separate from subsequent local and CI results.
+
+The focused local PostgreSQL 16/Redis 7 run passed all 140 cases in the complete temporal-selection,
+duplicate-flow and recompression test files without skips. The 55,000-parent phase completed in
+2.47 seconds, including 1.16 seconds for broadcasts; recipient setup took 1.75 seconds and selection
+assertions 0.72 seconds. The public runner confirmed owned-store cleanup. These local timings
+establish coverage within the retained budgets, not a comparison against a different CI machine.

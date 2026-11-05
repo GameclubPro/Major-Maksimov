@@ -122,19 +122,29 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
   >;
 
   async function seedIndexedRows(sql: Prisma.Sql, client: PrismaClient = db): Promise<number> {
+    return seedIndexedBatches([sql], client);
+  }
+
+  async function seedIndexedBatches(
+    statements: readonly Prisma.Sql[],
+    client: PrismaClient = db,
+  ): Promise<number> {
     // FLAG: Limit planner changes to fixture inserts; preserve initial table statistics
     // and restore session settings before selection and plan assertions. Reuse indexed
-    // trigger lookup plans instead of replanning them for every synthetic row.
-    const [settings, inserted] = await client.$transaction([
+    // trigger lookup plans and one transaction across the bounded statements of a phase.
+    const [settings, ...inserted] = await client.$transaction([
       client.$queryRaw<Array<{ seq: string; jit: string; cache: string }>>(Prisma.sql`
         SELECT set_config('enable_seqscan', 'off', true) AS seq,
           set_config('jit', 'off', true) AS jit,
           set_config('plan_cache_mode', 'force_generic_plan', true) AS cache
       `),
-      client.$executeRaw(sql),
+      ...statements.map((sql) => client.$executeRaw(sql)),
     ]);
     expect(settings).toEqual([{ seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
-    return inserted;
+    return inserted.reduce<number>((total, count) => {
+      if (typeof count !== 'number') throw new Error('Fixture insert did not return a row count');
+      return total + count;
+    }, 0);
   }
 
   beforeAll(async () => {
@@ -514,9 +524,9 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
           stageStarted = performance.now();
           // FLAG: Bound row-triggered inserts without reducing the retained parent history.
           const broadcastBatchSize = 500;
-          let insertedBroadcasts = 0;
+          const broadcastStatements: Prisma.Sql[] = [];
           for (let first = 1; first <= parents + retained; first += broadcastBatchSize) {
-            insertedBroadcasts += await seedIndexedRows(Prisma.sql`
+            broadcastStatements.push(Prisma.sql`
             INSERT INTO "managed_broadcasts" (
               "id", "source_chat_id", "actor_user_id", "target_chat_ids", "buttons", "status",
               "publication_occurrence_id", "publication_content_revision_id", "dispatch_profile", "required_bot_id", "next_send_at", "updated_at"
@@ -529,6 +539,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             FROM generate_series(${first}::integer, ${Math.min(first + broadcastBatchSize - 1, parents + retained)}::integer) AS n
           `);
           }
+          const insertedBroadcasts = await seedIndexedBatches(broadcastStatements);
           expect(insertedBroadcasts).toBe(parents + retained);
           completed = true;
         } finally {
@@ -539,6 +550,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               parents,
               retained,
               phase: 'seed-parents',
+              expectedRows: parents + retained,
+              plannedBroadcastBatches: Math.ceil((parents + retained) / 500),
               completed,
               seedStage,
               stageTimingsMs,
@@ -557,8 +570,9 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         try {
           // FLAG: Keep the same full fixture, but bound each synthetic recipient insert.
           // CI shares CPU with other jobs; seed timeouts must not replace query-plan checks.
+          const deliveryStatements: Prisma.Sql[] = [];
           for (let first = 1; first <= parents + retained; first += 2_000) {
-            await seedIndexedRows(Prisma.sql`
+            deliveryStatements.push(Prisma.sql`
             INSERT INTO "managed_broadcast_deliveries" (
               "id", "broadcast_id", "occurrence_index", "target_chat_id", "publication_occurrence_id",
               "content_revision_id", "dispatch_profile", "required_bot_id", "dialog_bot_id",
@@ -578,6 +592,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             FROM generate_series(${first}::integer, ${Math.min(first + 1_999, parents + retained)}::integer) AS n
           `);
           }
+          expect(await seedIndexedBatches(deliveryStatements)).toBe(parents + retained);
           stageTimingsMs.deliveries = performance.now() - stageStarted;
           seedStage = 'ready';
           stageStarted = performance.now();
@@ -591,6 +606,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               parents,
               retained,
               phase: 'seed-recipients',
+              expectedRows: parents + retained,
+              plannedDeliveryBatches: Math.ceil((parents + retained) / 2_000),
               completed,
               seedStage,
               stageTimingsMs,
@@ -1764,9 +1781,45 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         ),
       ).toEqual([{ ...fixtureBefore[0]!, seq: 'off', jit: 'off', cache: 'force_generic_plan' }]);
       expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
+      expect(
+        await seedIndexedBatches(
+          [
+            Prisma.sql`INSERT INTO fixture_seed_planner_probe ${settings}`,
+            Prisma.sql`INSERT INTO fixture_seed_planner_probe ${settings}`,
+          ],
+          connection,
+        ),
+      ).toBe(2);
+      const fixtureRows = await connection.$queryRaw<Settings[]>(
+        Prisma.sql`SELECT * FROM fixture_seed_planner_probe`,
+      );
+      expect(fixtureRows).toHaveLength(3);
+      for (const row of fixtureRows)
+        expect(row).toEqual({
+          ...fixtureBefore[0]!,
+          seq: 'off',
+          jit: 'off',
+          cache: 'force_generic_plan',
+        });
+      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
       await expect(seedIndexedRows(Prisma.sql`SELECT 1 / 0`, connection)).rejects.toThrow(
         /division by zero/u,
       );
+      expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
+      await expect(
+        seedIndexedBatches(
+          [
+            Prisma.sql`INSERT INTO fixture_seed_planner_probe ${settings}`,
+            Prisma.sql`SELECT 1 / 0`,
+          ],
+          connection,
+        ),
+      ).rejects.toThrow(/division by zero/u);
+      expect(
+        await connection.$queryRaw<Settings[]>(
+          Prisma.sql`SELECT * FROM fixture_seed_planner_probe`,
+        ),
+      ).toEqual(fixtureRows);
       expect(await connection.$queryRaw<Settings[]>(settings)).toEqual(fixtureBefore);
     } finally {
       await connection.$disconnect();
@@ -1827,8 +1880,9 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
       const deliverySeedStarted = performance.now();
       let deliverySeedCompleted = false;
       try {
+        const deliveryStatements: Prisma.Sql[] = [];
         for (let first = 0; first < audience; first += 2_000) {
-          await seedIndexedRows(Prisma.sql`
+          deliveryStatements.push(Prisma.sql`
       INSERT INTO "managed_broadcast_deliveries" (
         "id", "broadcast_id", "occurrence_index", "target_chat_id",
         "publication_occurrence_id", "content_revision_id", "dispatch_profile", "required_bot_id",
@@ -1843,6 +1897,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
       FROM generate_series(${first}::integer, ${Math.min(first + 1_999, audience - 1)}::integer) AS n
     `);
         }
+        expect(await seedIndexedBatches(deliveryStatements)).toBe(audience);
         deliverySeedCompleted = true;
       } finally {
         console.info(
@@ -1851,6 +1906,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             audience,
             statistics,
             phase: 'seed-deliveries',
+            expectedRows: audience,
+            plannedDeliveryBatches: Math.ceil(audience / 2_000),
             completed: deliverySeedCompleted,
             wallMs: performance.now() - deliverySeedStarted,
           }),
