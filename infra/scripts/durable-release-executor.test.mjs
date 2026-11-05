@@ -53,7 +53,11 @@ async function executor({
   writeFileSync(realSnapshot, 'A_PRIVATE_SETTING=fixture\n', { mode: envMode });
   chmodSync(realSnapshot, envMode);
   if (envSymlink) symlinkSync(realSnapshot, snapshot);
-  else writeFileSync(snapshot, readFileSync(realSnapshot), { mode: envMode });
+  else {
+    writeFileSync(snapshot, readFileSync(realSnapshot), { mode: envMode });
+    // FLAG: Preserve the requested permission case under restrictive agent umasks.
+    chmodSync(snapshot, envMode);
+  }
   const environment = { ...process.env };
   // The installed daemon supplies an allowlisted environment. Fixtures must not
   // inherit a developer's Docker/Node/rollout overrides as implicit authorization.
