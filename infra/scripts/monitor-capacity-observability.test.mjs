@@ -994,6 +994,136 @@ test('API fleet census checks runtime identity and exact-image roles without exp
   );
 });
 
+test('fleet observation failures retain finite stages and causes without retrying or raw errors', async () => {
+  const inspection = inspectedFleet();
+  const ids = inspection.map((container) => container.Id).join('\n');
+  const commandFailed = { ok: false, output: 'private-command-output' };
+  const cases = [
+    { stage: 'expected_services', code: 'invalid_data', services: [], calls: 0 },
+    {
+      stage: 'release_manifest',
+      code: 'invalid_data',
+      manifestPath: '/missing/manifest',
+      calls: 0,
+    },
+    {
+      stage: 'git_source',
+      code: 'nonzero_exit',
+      git: { ...commandFailed, failureCode: 'nonzero_exit' },
+      calls: 1,
+    },
+    { stage: 'git_source', code: 'command_failed', git: commandFailed, calls: 1 },
+    {
+      stage: 'git_source',
+      code: 'command_failed',
+      git: { ...commandFailed, failureCode: 'private-error-code' },
+      calls: 1,
+    },
+    { stage: 'git_source', code: 'unexpected_error', throws: true, calls: 1 },
+    {
+      stage: 'source_topology',
+      code: 'invalid_data',
+      git: { ok: true, output: 'invalid-compose' },
+      calls: 1,
+    },
+    {
+      stage: 'docker_list',
+      code: 'timeout',
+      list: { ...commandFailed, failureCode: 'timeout' },
+      calls: 2,
+    },
+    {
+      stage: 'docker_list',
+      code: 'invalid_data',
+      list: { ok: true, output: 'private-container-id' },
+      calls: 2,
+    },
+    {
+      stage: 'docker_inspect',
+      code: 'signal_exit',
+      inspect: { ...commandFailed, failureCode: 'signal_exit' },
+      calls: 3,
+    },
+    {
+      stage: 'inspection_parse',
+      code: 'invalid_data',
+      inspect: { ok: true, output: '{private-malformed' },
+      calls: 3,
+    },
+    {
+      stage: 'inspection_census',
+      code: 'census_mismatch',
+      inspect: { ok: true, output: JSON.stringify(inspection.slice(1)) },
+      calls: 3,
+    },
+    {
+      stage: 'fleet_summary',
+      code: 'invalid_data',
+      image: { ...expectedApiImage, imageId: 'private-image-id' },
+      calls: 3,
+    },
+  ];
+  for (const fixture of cases) {
+    let calls = 0;
+    let observations = 0;
+    const tracker = createRestartTracker();
+    const result = await probeApiFleet(fixture.services ?? DEFAULT_EXPECTED_API_SERVICES, {
+      ...(fixture.manifestPath
+        ? { manifestPath: fixture.manifestPath }
+        : { expectedImage: fixture.image ?? expectedApiImage }),
+      restartTracker: {
+        observe(...args) {
+          observations++;
+          return tracker.observe(...args);
+        },
+      },
+      runBounded: async (command, args) => {
+        calls++;
+        if (fixture.throws) throw new Error('private-exception-message');
+        if (command === 'git') return fixture.git ?? { ok: true, output: productionComposeSource };
+        return args[0] === 'ps'
+          ? (fixture.list ?? { ok: true, output: ids })
+          : (fixture.inspect ?? { ok: true, output: JSON.stringify(inspection) });
+      },
+    });
+    assert.equal(result.available, false, fixture.stage);
+    assert.deepEqual(result.observationFailure, {
+      version: 1,
+      stage: fixture.stage,
+      code: fixture.code,
+    });
+    assert.equal(calls, fixture.calls, 'failed inventories are not retried');
+    assert.equal(observations, 1, 'unavailable updates the restart tracker exactly once');
+    for (const name of ['api', 'ocr', 'photo'])
+      assert.equal(result.restartEvidence[name].delta, null);
+    assert.doesNotMatch(JSON.stringify(result), /private-|stack|stderr|stdout/u);
+    assert.deepEqual(normalizeApiFleet(result).observationFailure, result.observationFailure);
+  }
+});
+
+test('a diagnosed fleet failure clears all baselines for both neighboring intervals', async () => {
+  const tracker = createRestartTracker();
+  const options = (second) => ({
+    restartTracker: tracker,
+    observedAt: new Date(Date.parse('2026-09-02T12:00:00.000Z') + second * 1_000).toISOString(),
+    clock: second * 1_000,
+  });
+  await probeInspectedFleet(inspectedFleet(), options(0));
+  const refused = await probeApiFleet(DEFAULT_EXPECTED_API_SERVICES, {
+    ...options(15),
+    expectedImage: expectedApiImage,
+    runBounded: async () => ({ ok: false, output: '', failureCode: 'timeout' }),
+  });
+  const recovered = await probeInspectedFleet(inspectedFleet(), options(30));
+  const next = await probeInspectedFleet(inspectedFleet(), options(45));
+  for (const name of ['api', 'ocr', 'photo']) {
+    assert.equal(refused.restartEvidence[name].delta, null);
+    assert.equal(recovered.restartEvidence[name].delta, null);
+    assert.equal(next.restartEvidence[name].delta, 0);
+  }
+  assert.equal(Object.hasOwn(recovered, 'observationFailure'), false);
+});
+
 test('resident capacity collector reuses exact generations and resets on a new process', async () => {
   let inspection = inspectedFleet();
   let index = 0;
@@ -1350,11 +1480,40 @@ test('bounded probe cancellation waits for child close on timeout and output ove
         timeoutMs: 500,
         maxOutputBytes: 10,
       });
-      assert.deepEqual(result, { ok: false, output: '' });
+      assert.deepEqual(result, {
+        ok: false,
+        output: '',
+        failureCode: overflow ? 'output_limit' : 'timeout',
+      });
       assert.equal(existsSync(`/proc/${Number(readFileSync(pidPath, 'utf8'))}`), false);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('bounded probe reports owned finite exit, spawn and cancellation causes', async () => {
+  assert.deepEqual(await runBounded(process.execPath, ['-e', "process.stdout.write('ok')"]), {
+    ok: true,
+    output: 'ok',
+  });
+  const aborted = new AbortController();
+  aborted.abort();
+  const cases = [
+    [process.execPath, ['-e', 'process.exit(7)'], {}, 'nonzero_exit'],
+    [process.execPath, ['-e', "process.kill(process.pid, 'SIGTERM')"], {}, 'signal_exit'],
+    ['/missing/private-command', [], {}, 'spawn_error'],
+    [process.execPath, ['-e', 'process.exit(0)'], { signal: aborted.signal }, 'aborted'],
+    [
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1000)'],
+      { signal: AbortSignal.timeout(100) },
+      'aborted',
+    ],
+  ];
+  for (const [command, args, options, failureCode] of cases) {
+    const result = await runBounded(command, args, options);
+    assert.deepEqual(result, { ok: false, output: '', failureCode });
   }
 });
 
@@ -2020,6 +2179,75 @@ test('archive is private, atomic, rotated, bounded, and excludes unknown input f
     readdirSync(directory).some((name) => name.includes('.tmp-')),
     false,
   );
+});
+
+test('fleet failure diagnostics survive private archive rewrites and CLI with only allowed fields', (t) => {
+  const failure = { version: 1, stage: 'docker_inspect', code: 'nonzero_exit' };
+  const rawFailure = { ...failure, stderr: 'private-stderr', nested: { token: 'private-token' } };
+  assert.deepEqual(
+    normalizeApiFleet({ available: false, observationFailure: rawFailure }).observationFailure,
+    failure,
+  );
+  for (const malformed of [
+    undefined,
+    { ...failure, version: 2 },
+    { ...failure, stage: 'private-stage' },
+    { ...failure, code: 'private-code' },
+  ]) {
+    assert.equal(
+      Object.hasOwn(
+        normalizeApiFleet({ available: false, observationFailure: malformed }),
+        'observationFailure',
+      ),
+      false,
+    );
+  }
+  assert.equal(
+    Object.hasOwn(
+      normalizeApiFleet({ available: null, observationFailure: rawFailure }),
+      'observationFailure',
+    ),
+    false,
+  );
+  const healthy = normalizeSnapshot(sample('2026-09-02T12:00:00.000Z')).apiFleet;
+  assert.equal(
+    Object.hasOwn(
+      normalizeApiFleet({ ...healthy, observationFailure: rawFailure }),
+      'observationFailure',
+    ),
+    false,
+  );
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-capacity-failure-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = archiveAt(
+    directory,
+    sample('2026-09-02T12:00:00.000Z', {
+      apiFleet: { available: false, observationFailure: rawFailure },
+    }),
+  );
+  const path = join(directory, first.filename);
+  const prior = JSON.parse(readFileSync(path, 'utf8'));
+  prior.sample.apiFleet.observationFailure = rawFailure;
+  writeFileSync(path, `${JSON.stringify(prior)}\n`);
+  archiveAt(directory, sample('2026-09-02T12:00:15.000Z'));
+  const records = readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(records[0].sample.apiFleet.observationFailure, failure);
+  assert.doesNotMatch(JSON.stringify(records), /private-|stderr|nested/u);
+  const result = spawnSync(process.execPath, [archivePath, '--archive-dir', directory], {
+    input: JSON.stringify(
+      sample(new Date().toISOString(), {
+        apiFleet: { available: false, observationFailure: rawFailure },
+      }),
+    ),
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(
+    result.stdout,
+    /capacity-api-fleet-observation-failure version=1 stage=docker_inspect code=nonzero_exit/u,
+  );
+  assert.match(result.stdout, /capacity-alert id=api_fleet_topology outcome=firing/u);
+  assert.doesNotMatch(result.stdout, /private-|stderr|nested/u);
 });
 
 test('archive rejects an existing non-private directory without changing its mode', () => {
