@@ -135,6 +135,72 @@ test('reports a continuous cross-hour window without changing files or exposing 
   );
 });
 
+test('reports finite fleet failure buckets while preserving unknown causes and restart intervals', (t) => {
+  const rows = series();
+  rows[2].apiFleet = {
+    available: false,
+    observationFailure: {
+      version: 1,
+      stage: 'docker_inspect',
+      code: 'timeout',
+      stderr: 'private-stderr',
+    },
+  };
+  rows[5].apiFleet = { available: false };
+  rows[7].apiFleet = {
+    available: false,
+    observationFailure: {
+      version: 1,
+      stage: 'private-stage',
+      code: 'private-code',
+    },
+  };
+  rows[9].apiFleet = {
+    available: null,
+    observationFailure: {
+      version: 1,
+      stage: 'docker_inspect',
+      code: 'timeout',
+    },
+  };
+  for (const index of [3, 6, 8, 10]) {
+    for (const name of ['api', 'ocr', 'photo']) {
+      rows[index].apiFleet.restartEvidence[name].delta = null;
+      rows[index].apiFleet.restartEvidence[name].generationChanged = null;
+    }
+  }
+  const { directory } = fixture(t, rows);
+  const result = report.buildReport({ directory, from, to }).current;
+  assert.deepEqual(result.fleetObservationFailures, {
+    version: 1,
+    failedSamples: 3,
+    diagnosedSamples: 1,
+    unknownCauseSamples: 2,
+    missingSamples: 1,
+    byStageAndCode: [{ stage: 'docker_inspect', code: 'timeout', samples: 1 }],
+  });
+  for (const name of ['api', 'ocr', 'photo']) {
+    assert.equal(result.restarts[name].unknownIntervals, 8);
+    assert.equal(result.restarts[name].coverage, 'partial');
+    assert.equal(result.restarts[name].delta, null);
+  }
+  assert.equal(result.status, 'degraded');
+  assert.deepEqual(result.checks.api_fleet_topology, { failing: 3, unknown: 1 });
+  assert.doesNotMatch(JSON.stringify(result), /private-|stderr/u);
+  const legacy = fixture(t);
+  assert.deepEqual(
+    report.buildReport({ directory: legacy.directory, from, to }).current.fleetObservationFailures,
+    {
+      version: 1,
+      failedSamples: 0,
+      diagnosedSamples: 0,
+      unknownCauseSamples: 0,
+      missingSamples: 0,
+      byStageAndCode: [],
+    },
+  );
+});
+
 test('reports exact nearest-rank percentiles and does not count unknown lag as zero', () => {
   assert.deepEqual(
     report.percentiles([null, ...Array.from({ length: 100 }, (_, index) => index + 1)]),

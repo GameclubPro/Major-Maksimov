@@ -39,6 +39,14 @@ const RELEASE_MANIFEST_PATH = resolve(
   'current.json',
 );
 const MAX_RELEASE_MANIFEST_BYTES = 64 * 1024;
+const COMMAND_FAILURE_CODES = new Set([
+  'aborted',
+  'timeout',
+  'output_limit',
+  'spawn_error',
+  'nonzero_exit',
+  'signal_exit',
+]);
 const DEFAULT_EXPECTED_API_SERVICES = Object.freeze([
   'api-ingress',
   'api-admin',
@@ -364,15 +372,20 @@ function normalizeQueueFence(raw) {
 
 function runBounded(command, args, options = {}) {
   return new Promise((resolve) => {
-    if (options.signal?.aborted) return resolve({ ok: false, output: '' });
+    if (options.signal?.aborted) return resolve({ ok: false, output: '', failureCode: 'aborted' });
     let output = '';
     let outputBytes = 0;
     let settled = false;
-    let refused = false;
-    const child = spawn(command, args, {
-      cwd: options.cwd ?? process.cwd(),
-      stdio: ['pipe', 'pipe', 'ignore'],
-    });
+    let failureCode = null;
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd: options.cwd ?? process.cwd(),
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
+    } catch {
+      return resolve({ ok: false, output: '', failureCode: 'spawn_error' });
+    }
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -380,32 +393,35 @@ function runBounded(command, args, options = {}) {
       options.signal?.removeEventListener('abort', abort);
       resolve(result);
     };
-    const abort = () => {
-      refused = true;
+    const refuse = (code) => {
+      // FLAG: Retain the first owned reason; teardown must not relabel a timeout or output cap.
+      failureCode ??= code;
       child.kill('SIGKILL');
     };
-    const timeout = setTimeout(() => {
-      abort();
-    }, options.timeoutMs ?? PROCESS_TIMEOUT_MS);
+    const abort = () => refuse('aborted');
+    const timeout = setTimeout(() => refuse('timeout'), options.timeoutMs ?? PROCESS_TIMEOUT_MS);
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) abort();
-    child.once('error', () => {
-      if (child.pid === undefined) finish({ ok: false, output: '' });
-      else abort();
-    });
+    child.once('error', () => refuse('spawn_error'));
     child.stdin.on('error', () => undefined);
     child.stdout.on('data', (chunk) => {
       outputBytes += chunk.byteLength;
       if (outputBytes > (options.maxOutputBytes ?? MAX_PROCESS_OUTPUT_BYTES)) {
-        abort();
+        refuse('output_limit');
         return;
       }
-      output += chunk.toString('utf8');
+      if (failureCode === null) output += chunk.toString('utf8');
     });
     // FLAG: Cancellation resolves only after the exact child has closed and is reaped.
-    child.once('close', (code) =>
-      finish({ ok: !refused && code === 0, output: refused ? '' : output }),
-    );
+    child.once('close', (code, signal) => {
+      const forced = failureCode !== null;
+      failureCode ??= signal ? 'signal_exit' : code === 0 ? null : 'nonzero_exit';
+      finish({
+        ok: failureCode === null,
+        output: forced ? '' : output,
+        ...(failureCode === null ? {} : { failureCode }),
+      });
+    });
     child.stdin.end(options.input ?? '');
   });
 }
@@ -1221,34 +1237,51 @@ function summarizeApiFleet(
 }
 
 async function probeApiFleet(expectedServices, options = {}) {
-  const unavailable = () => ({
+  let stage = 'expected_services';
+  let exceptionCode = 'invalid_data';
+  const unavailable = (code) => ({
     available: false,
+    observationFailure: { version: 1, stage, code },
     restartEvidence: restartEvidence({ api: null, ocr: null, photo: null }, options),
   });
+  const commandFailure = (result) =>
+    unavailable(
+      COMMAND_FAILURE_CODES.has(result.failureCode) ? result.failureCode : 'command_failed',
+    );
   try {
     const currentExpected = normalizeExpectedApiServices(expectedServices);
+    stage = 'release_manifest';
     const expectedImage = options.expectedImage ?? readExpectedApiImage(options.manifestPath);
     const baseRun = options.runBounded ?? runBounded;
     const run = (command, args, settings = {}) =>
       baseRun(command, args, { ...settings, signal: options.signal });
+    stage = 'git_source';
+    exceptionCode = 'unexpected_error';
     const sourceCompose = await run('git', [
       'show',
       `${expectedImage.sourceSha}:infra/docker-compose.yml`,
     ]);
-    if (!sourceCompose.ok) return unavailable();
+    if (!sourceCompose.ok) return commandFailure(sourceCompose);
+    stage = 'source_topology';
+    exceptionCode = 'invalid_data';
     const topology = resolveExpectedApiTopologyFromCompose(currentExpected, sourceCompose.output);
     const expected = topology.services;
+    stage = 'docker_list';
+    exceptionCode = 'unexpected_error';
     const list = await run('docker', ['ps', '-a', '--no-trunc', '--format', '{{.ID}}']);
-    if (!list.ok) return unavailable();
+    if (!list.ok) return commandFailure(list);
+    if (typeof list.output !== 'string') return unavailable('invalid_data');
     const ids = list.output.trim() ? list.output.trim().split(/\s+/u) : [];
     if (
       ids.length > MAX_DOCKER_CONTAINER_COUNT ||
       new Set(ids).size !== ids.length ||
       ids.some((id) => !/^[0-9a-f]{64}$/u.test(id))
     ) {
-      return unavailable();
+      return unavailable('invalid_data');
     }
     if (ids.length === 0) {
+      stage = 'fleet_summary';
+      exceptionCode = 'invalid_data';
       return summarizeApiFleet(
         expected,
         expectedImage,
@@ -1257,19 +1290,26 @@ async function probeApiFleet(expectedServices, options = {}) {
         options,
       );
     }
+    stage = 'docker_inspect';
     const inspection = await run('docker', ['inspect', ...ids], {
       maxOutputBytes: MAX_DOCKER_INSPECT_BYTES,
     });
-    if (!inspection.ok) return unavailable();
+    if (!inspection.ok) return commandFailure(inspection);
+    stage = 'inspection_parse';
+    exceptionCode = 'invalid_data';
     const containers = parseApiFleetInspection(inspection.output);
+    stage = 'inspection_census';
+    exceptionCode = 'unexpected_error';
     const inspectedIds = containers.map((container) => container.id);
     if (
       inspectedIds.length !== ids.length ||
       new Set(inspectedIds).size !== inspectedIds.length ||
       inspectedIds.some((id) => !ids.includes(id))
     ) {
-      return unavailable();
+      return unavailable('census_mismatch');
     }
+    stage = 'fleet_summary';
+    exceptionCode = 'invalid_data';
     return summarizeApiFleet(
       expected,
       expectedImage,
@@ -1278,7 +1318,7 @@ async function probeApiFleet(expectedServices, options = {}) {
       options,
     );
   } catch {
-    return unavailable();
+    return unavailable(exceptionCode);
   }
 }
 

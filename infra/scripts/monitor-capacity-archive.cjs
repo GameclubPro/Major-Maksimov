@@ -199,9 +199,43 @@ function normalizeRestartEvidence(raw, observedAt) {
   return result;
 }
 
-function emptyApiFleet(available = null) {
+function normalizeFleetObservationFailure(raw) {
+  // FLAG: Only owned finite metadata crosses the private archive/report boundary; never raw errors.
+  if (
+    !isRecord(raw) ||
+    raw.version !== 1 ||
+    ![
+      'expected_services',
+      'release_manifest',
+      'git_source',
+      'source_topology',
+      'docker_list',
+      'docker_inspect',
+      'inspection_parse',
+      'inspection_census',
+      'fleet_summary',
+    ].includes(raw.stage) ||
+    ![
+      'aborted',
+      'timeout',
+      'output_limit',
+      'spawn_error',
+      'nonzero_exit',
+      'signal_exit',
+      'command_failed',
+      'invalid_data',
+      'census_mismatch',
+      'unexpected_error',
+    ].includes(raw.code)
+  )
+    return null;
+  return { version: 1, stage: raw.stage, code: raw.code };
+}
+
+function emptyApiFleet(available = null, observationFailure = null) {
   return {
     available,
+    ...(available === false && observationFailure !== null ? { observationFailure } : {}),
     expectedRoleCount: null,
     observedRoleCount: null,
     singletonRoleCount: null,
@@ -221,7 +255,8 @@ function emptyApiFleet(available = null) {
 function normalizeApiFleet(raw, observedAt) {
   if (!isRecord(raw)) return emptyApiFleet();
   const available = booleanOrNull(raw.available);
-  if (available !== true) return emptyApiFleet(available);
+  if (available !== true)
+    return emptyApiFleet(available, normalizeFleetObservationFailure(raw.observationFailure));
   const fleet = {
     available: true,
     expectedRoleCount: integerOrNull(raw.expectedRoleCount, 1, 128),
@@ -926,6 +961,13 @@ function runCli(argv = process.argv.slice(2)) {
       `restarts=${fleet.totalRestartCount ?? 'unknown'}\n`,
   );
   const restartEvidence = fleet.restartEvidence;
+  if (fleet.available === false) {
+    const failure = fleet.observationFailure;
+    process.stdout.write(
+      `capacity-api-fleet-observation-failure version=${failure?.version ?? 'unknown'} ` +
+        `stage=${failure?.stage ?? 'unknown'} code=${failure?.code ?? 'unknown'}\n`,
+    );
+  }
   process.stdout.write(
     `capacity-restarts version=1 basis=${restartEvidence?.basis ?? 'unknown'} ` +
       ['api', 'ocr', 'photo']
@@ -963,6 +1005,7 @@ module.exports = {
   evaluateAlerts,
   normalizeActionHealth,
   normalizeApiFleet,
+  normalizeFleetObservationFailure,
   normalizeSnapshot,
   rotateArchive,
 };

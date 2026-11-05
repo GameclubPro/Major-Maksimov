@@ -397,5 +397,19 @@ window. Positive confirmed deltas still report degradation when other evidence i
 equal totals never prove that no container restarted or was replaced. Restart causes remain
 unknown without independent evidence.
 
+Unavailable fleet observations may include `observationFailure` version 1 with an
+allowlisted `stage` and `code`. Stages identify expected services, release manifest,
+source Git/topology, Docker list/inspection, inspection parsing/census or fleet summary.
+Command codes distinguish cancellation, timeout, output cap, spawn, nonzero exit and
+signal exit; validation and census failures remain separate. These are collector
+failure observations, not evidence of a restart or its cause. Raw commands, output,
+errors and container identities are never archived or printed. Healthy fleet results
+retain their existing shape; old or invalid diagnostics retain an unknown cause.
+`fleetObservationFailures` counts finite stage/code buckets and separates failed
+observations without a known cause from missing fleet metadata. Diagnostics do not
+change alerts, sampling bounds, retry policy, coverage or restart interval rules.
+`missingSamples` counts archived snapshots without valid fleet metadata; absent
+sample timestamps remain separate coverage gaps.
+
 [Report regressions](../../infra/scripts/monitor-capacity-report.test.mjs) cover bounded
 archives, coverage, redaction, counter resets and invalid comparison windows.

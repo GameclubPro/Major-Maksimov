@@ -6,6 +6,7 @@ const { join, resolve } = require('node:path');
 const {
   archiveFilename,
   evaluateAlerts,
+  normalizeFleetObservationFailure,
   normalizeSnapshot,
 } = require('./monitor-capacity-archive.cjs');
 
@@ -189,13 +190,41 @@ function summarizeWindow(samples, bounds) {
     times.length >= Math.max(2, Math.floor((bounds.end - bounds.start) / 60_000)) &&
     maxGapMs <= MAX_GAP_MS;
   const checks = Object.fromEntries(CHECKS.map((id) => [id, { failing: 0, unknown: 0 }]));
+  const fleetObservationFailures = {
+    version: 1,
+    failedSamples: 0,
+    diagnosedSamples: 0,
+    unknownCauseSamples: 0,
+    missingSamples: 0,
+    byStageAndCode: [],
+  };
+  const failureBuckets = new Map();
   for (const sample of samples) {
+    if (sample.apiFleet.available === false) {
+      fleetObservationFailures.failedSamples++;
+      const failure = normalizeFleetObservationFailure(sample.apiFleet.observationFailure);
+      if (failure === null) fleetObservationFailures.unknownCauseSamples++;
+      else {
+        fleetObservationFailures.diagnosedSamples++;
+        const key = `${failure.stage}:${failure.code}`;
+        const bucket = failureBuckets.get(key) ?? {
+          stage: failure.stage,
+          code: failure.code,
+          samples: 0,
+        };
+        bucket.samples++;
+        failureBuckets.set(key, bucket);
+      }
+    } else if (sample.apiFleet.available !== true) fleetObservationFailures.missingSamples++;
     const { alerts } = evaluateAlerts([], sample);
     for (const id of CHECKS) {
       if (alerts[id].outcome === 'firing') checks[id].failing++;
       if (alerts[id].outcome === 'unknown') checks[id].unknown++;
     }
   }
+  fleetObservationFailures.byStageAndCode = [...failureBuckets.values()].sort((left, right) =>
+    `${left.stage}:${left.code}`.localeCompare(`${right.stage}:${right.code}`),
+  );
   const lagSec = percentiles(samples.map((sample) => sample.readiness.queueLagSec));
   const operationalLagSec = percentiles(
     samples.map((sample) => sample.readiness.operationalLagSec),
@@ -256,6 +285,7 @@ function summarizeWindow(samples, bounds) {
       knownSamples: samples.length - checks.quarantined_receipts.unknown,
     },
     checks,
+    fleetObservationFailures,
     loadPerCpu: percentiles(
       samples.map((sample) =>
         sample.host.cpuCount && sample.host.load1 !== null
