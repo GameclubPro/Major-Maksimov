@@ -447,6 +447,33 @@ export function SettingsNightSection(props: SettingsNightSectionProps) {
                             onClose={() => setOpenBotEditorKey(null)}
                           />
                         ) : null}
+                        {draft.nightModeOpenMessageEnabled ? (
+                          <div className="settings-native-toggle settings-native-toggle--nested">
+                            <div className="settings-native-toggle__row">
+                              <span className="settings-native-toggle__title">
+                                Удалять после первого сообщения
+                              </span>
+                              <label
+                                className="settings-native-switch"
+                                aria-label="Удалять сообщение об открытии после первого сообщения участника"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={draft.nightModeOpenMessageDeleteOnFirstMessageEnabled}
+                                  onChange={(event) =>
+                                    setFieldValue(
+                                      'nightModeOpenMessageDeleteOnFirstMessageEnabled',
+                                      event.target.checked,
+                                    )
+                                  }
+                                />
+                                <span className="toggle-switch" aria-hidden>
+                                  <span className="toggle-switch__thumb" />
+                                </span>
+                              </label>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
 
                       {draft.nightModeBotMessageEnabled ? (

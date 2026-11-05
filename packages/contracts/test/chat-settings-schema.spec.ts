@@ -62,6 +62,27 @@ describe('duplicate daily schedule settings', () => {
 });
 
 describe('night mode settings update validation', () => {
+  it('keeps opening notice cleanup opt-in and preserves explicit updates', () => {
+    expect(chatSettingsSchema.parse({}).nightModeOpenMessageDeleteOnFirstMessageEnabled).toBe(
+      false,
+    );
+    expect(
+      updateSettingsRequestSchema.parse({}).nightModeOpenMessageDeleteOnFirstMessageEnabled,
+    ).toBe(false);
+    for (const enabled of [true, false]) {
+      expect(
+        updateSettingsRequestSchema.parse({
+          nightModeOpenMessageDeleteOnFirstMessageEnabled: enabled,
+        }),
+      ).toMatchObject({ nightModeOpenMessageDeleteOnFirstMessageEnabled: enabled });
+    }
+    expect(
+      updateSettingsRequestSchema.safeParse({
+        nightModeOpenMessageDeleteOnFirstMessageEnabled: 'true',
+      }).success,
+    ).toBe(false);
+  });
+
   it.each(['nightModeBotMessageEnabled', 'nightModeOpenMessageEnabled'] as const)(
     'keeps an equal-time legacy row readable but rejects saving it with %s',
     (noticeField) => {

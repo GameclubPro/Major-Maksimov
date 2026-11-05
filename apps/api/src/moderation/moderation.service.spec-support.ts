@@ -937,6 +937,7 @@ function createSettings(overrides: Record<string, unknown> = {}) {
     nightModeBotMessageText: '',
     nightModeCommentsEnabled: false,
     nightModeOpenMessageEnabled: true,
+    nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
     nightModeOpenMessageText: '',
     nightModeBotButtonEnabled: false,
     nightModeBotButtonUrl: '',

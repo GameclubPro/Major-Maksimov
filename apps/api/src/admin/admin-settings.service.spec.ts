@@ -1089,6 +1089,29 @@ describe('AdminSettingsService chat rules', () => {
     );
   });
 
+  it('persists and returns explicit opening-notice cleanup without changing other settings', async () => {
+    const current = createPersistedChatSettings({
+      nightModeEnabled: true,
+      nightModeOpenMessageEnabled: true,
+    });
+    const { prisma, service } = createService({
+      currentSettings: current,
+      persistedSettings: current,
+    });
+
+    const result = await service.patchSettingsSection('chat-1', user as never, {
+      section: 'night',
+      expectedRevision: current.updatedAt.toISOString(),
+      changes: { nightModeOpenMessageDeleteOnFirstMessageEnabled: true },
+    });
+
+    expect(result.nightModeOpenMessageDeleteOnFirstMessageEnabled).toBe(true);
+    expect(result.nightModeOpenMessageEnabled).toBe(true);
+    expect(findChatSettingsWritePayload(prisma)).toEqual(
+      expect.objectContaining({ nightModeOpenMessageDeleteOnFirstMessageEnabled: true }),
+    );
+  });
+
   it('updates chat settings without routing through legacy updateSettings', async () => {
     const { chatContextCache, legacyAdminService, nightModeTransitionScheduler, prisma, service } =
       createService({

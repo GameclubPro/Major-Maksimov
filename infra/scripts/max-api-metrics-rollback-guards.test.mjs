@@ -13,7 +13,7 @@ const paths = {
   keys: 'apps/api/src/max/max-api-metrics-key.util.ts',
 };
 const minuteReaderMarker = 'maxim_topology_require_max_api_metrics_minute_reader';
-const apiAuthorityMarker = 'maxim_topology_require_local_chat_ban_reader';
+const apiAuthorityMarker = 'maxim_topology_require_night_open_notice_cleanup_reader';
 const apiRecoveryMarker = 'maxim_topology_require_statistics_and_night_mode_recovery';
 const previousReleaseMarker = 'select_release_recovery_base';
 const connect = readFileSync(resolve(root, 'infra/scripts/vps-connect.sh'), 'utf8');
@@ -374,6 +374,7 @@ for (const [name, args] of [
   for (const [description, previousMarker] of [
     ['lifecycle-only', 'maxim_topology_require_statistics_authority_lifecycle'],
     ['night-mode-only', 'maxim_topology_require_night_mode_recovery_reader'],
+    ['local-ban-only', 'maxim_topology_require_local_chat_ban_reader'],
   ]) {
     test(`${name} upgrades ${description} tooling before either recovery floor can be bypassed`, (t) => {
       const probe = bootstrapProbe(t, { name, args, previousMarker });

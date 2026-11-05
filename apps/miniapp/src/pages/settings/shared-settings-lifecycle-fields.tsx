@@ -469,6 +469,7 @@ export function SharedNightFields({ fields, context }: LifecycleProps) {
   const hints = useHint();
   const enabled = fields.read('nightModeEnabled');
   const message = fields.read('nightModeBotMessageEnabled');
+  const openMessage = fields.read('nightModeOpenMessageEnabled');
   const start = fields.read('nightModeStartTimeMinutes');
   const end = fields.read('nightModeEndTimeMinutes');
   const timezone = fields.read('nightModeTimezone');
@@ -599,6 +600,15 @@ export function SharedNightFields({ fields, context }: LifecycleProps) {
             titleAction={<HintButton hint={openHint} hints={hints} />}
             hint={<HintText hint={openHint} hints={hints} />}
           />
+          {visible(openMessage) ? (
+            <Toggle
+              fields={fields}
+              path="nightModeOpenMessageDeleteOnFirstMessageEnabled"
+              title="Удалять после первого сообщения"
+              nested
+              ariaLabel="Удалять сообщение об открытии после первого сообщения участника"
+            />
+          ) : null}
           {visible(message) ? (
             <>
               <Toggle

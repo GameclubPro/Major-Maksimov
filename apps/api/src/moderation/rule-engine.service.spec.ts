@@ -267,6 +267,7 @@ function buildSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
     nightModeBotMessageText: '',
     nightModeCommentsEnabled: false,
     nightModeOpenMessageEnabled: true,
+    nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
     nightModeOpenMessageText: '',
     nightModeBotButtonEnabled: false,
     nightModeBotButtonUrl: '',

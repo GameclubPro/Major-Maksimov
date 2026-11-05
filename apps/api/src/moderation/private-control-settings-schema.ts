@@ -337,6 +337,11 @@ export const SECTION_FIELDS: Record<PrivateSectionKey, SettingFieldConfig[]> = {
       type: 'boolean',
     },
     { key: 'nightModeOpenMessageText', label: 'Текст сообщения об открытии', type: 'text' },
+    {
+      key: 'nightModeOpenMessageDeleteOnFirstMessageEnabled',
+      label: 'Удалять сообщение об открытии после первого сообщения',
+      type: 'boolean',
+    },
     { key: 'nightModeBotButtonEnabled', label: 'Показывать кнопку', type: 'boolean' },
     { key: 'nightModeBotButtonUrl', label: 'Ссылка кнопки', type: 'url' },
     { key: 'nightModeBotButtonText', label: 'Текст кнопки', type: 'text' },

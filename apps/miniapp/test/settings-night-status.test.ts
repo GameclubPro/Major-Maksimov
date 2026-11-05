@@ -53,99 +53,71 @@ function render(value: ChatClosureStatus, refreshFailed = false) {
     createElement(SettingsChatClosureStatus, { status: value, refreshFailed }),
   );
 }
-test('CLOSE and OPEN receipts retain their own dates when current schedule, switches and access are off', () => {
+test('night status shows the current chat state without delivery or recovery diagnostics', () => {
   const value = status();
-  value.scheduleEnabled = false;
-  value.notices!.sendRouteNow = 'unavailable';
-  value.notices!.close.enabledNow = false;
-  value.notices!.open.enabledNow = false;
-  const html = render(value);
-  assert.match(html, /Уведомление о закрытии/);
-  assert.match(html, /Уведомление об открытии/);
-  assert.match(html, /29 октября.*22:00/);
-  assert.match(html, /30 октября.*07:00/);
-  assert.equal((html.match(/data-outcome="sent"/gu) ?? []).length, 2);
-  assert.match(html, /расписание сейчас выключено/);
-  assert.match(html, /Отправка сейчас недоступна/);
-  assert.doesNotMatch(html, /Время для отложенной отправки истекло/);
-});
-test('missing expired evidence and an ambiguous outcome do not claim a proven failed send', () => {
-  const value = status();
+  value.recovery = 'action_required';
   value.notices!.close.latest!.delivery = {
     outcome: 'not_recorded',
     reason: 'ledger_missing',
     sentAt: null,
   };
   value.notices!.open.latest!.delivery = { outcome: 'unknown', reason: 'ambiguous', sentAt: null };
+  value.notices!.recovery.observation = 'partial';
   const html = render(value);
-  assert.match(html, /Нет подтверждения отправки/);
-  assert.match(html, /Результат отправки неизвестен/);
-  assert.match(html, /Время для отложенной отправки истекло/);
-  assert.doesNotMatch(html, /Не отправлено — ошибка до отправки|Отправлено ·/);
+  assert.match(html, /Чат открыт/);
+  assert.doesNotMatch(
+    html,
+    /Уведомление о закрытии|Уведомление об открытии|подтвержден|По расписанию|отправки|восстановлен|Проверено|data-outcome/iu,
+  );
 });
-test('a certified pre-dispatch failure is distinct from pending and ambiguous outcomes', () => {
+test('closed chat shows its next opening in the saved timezone', () => {
   const value = status();
-  value.notices!.close.latest!.delivery = {
-    outcome: 'not_sent',
-    reason: 'proven_pre_dispatch_failure',
-    sentAt: null,
-  };
-  value.notices!.open.latest!.delivery = {
-    outcome: 'pending',
-    reason: 'awaiting_first_attempt',
-    sentAt: null,
-  };
-  value.notices!.open.latest!.catchUp.state = 'within_window';
+  value.restriction = 'night';
+  value.opensAt = '2026-10-31T04:00:00.000Z';
   const html = render(value);
-  assert.match(html, /Не отправлено — ошибка до отправки/);
-  assert.match(html, /Ожидает первой попытки/);
-  assert.doesNotMatch(html, /Результат отправки неизвестен/);
+  assert.match(html, /Чат закрыт/);
+  assert.match(html, /Открытие: 31 октября.*07:00/);
 });
-test('cleanup recovery does not overwrite a successful OPEN receipt; delayed and action-required differ', () => {
+test('missing bot permissions keep an actionable error for deletion and enabled notices', () => {
   const value = status();
-  value.recovery = 'delayed';
-  assert.match(render(value), /Восстановление задерживается/);
-  value.recovery = 'action_required';
-  value.notices!.recovery.obligations = [
-    {
-      kind: 'close_notice_cleanup',
-      sessionKey: 'close',
-      scheduledFor: value.observedAt,
-      state: 'action_required',
-    },
-  ];
+  value.deleteRoute = 'unavailable';
+  value.notices!.sendRouteNow = 'unavailable';
   const html = render(value);
-  assert.match(html, /Нужна проверка удаления прежнего сообщения о закрытии/);
-  assert.equal((html.match(/data-outcome="sent"/gu) ?? []).length, 2);
-  assert.doesNotMatch(html, /Восстановление задерживается|восстановления уведомления об открытии/);
+  assert.match(html, /Бот не может удалять сообщения/);
+  assert.match(html, /Бот не может отправлять уведомления/);
+  assert.match(html, /Проверьте его права администратора/);
+  value.notices!.close.enabledNow = false;
+  value.notices!.open.enabledNow = false;
+  assert.doesNotMatch(render(value), /Бот не может отправлять уведомления/);
 });
-test('continuous schedules do not invent daily sends, and old payloads do not invent OPEN evidence', () => {
+test('failed refresh marks the retained state as old and offers a retry', () => {
+  const html = render(status(), true);
+  assert.match(html, /Не удалось обновить состояние/);
+  assert.match(html, /Обновите экран/);
+  assert.match(html, /Последнее состояние: Чат открыт/);
+});
+test('old payloads and continuous schedules do not add technical copy', () => {
   const value = status();
   value.notices!.boundary = 'continuous';
   value.notices!.close.latest = null;
   value.notices!.open.latest = null;
-  const html = render(value);
-  assert.match(html, /время начала и окончания совпадает/);
-  assert.equal((html.match(/нет ежедневного перехода/gu) ?? []).length, 2);
-  assert.doesNotMatch(html, /data-outcome/);
+  assert.equal(render(value), render(status()));
   delete value.notices;
-  assert.match(render(value), /Уведомление о закрытии: доставлено/);
-  assert.match(render(value), /Данные об уведомлении об открытии пока недоступны/);
-});
-test('failed refresh marks retained data as old while retaining proven historical receipts', () => {
-  const html = render(status(), true);
-  assert.match(html, /Не удалось обновить статус/);
-  assert.match(html, /На момент проверки/);
-  assert.doesNotMatch(html, /Сейчас группа открыта/);
-  assert.equal((html.match(/data-outcome="sent"/gu) ?? []).length, 2);
+  assert.equal(render(value), render(status()));
 });
 test('saved international timezones remain selectable and never receive Moscow labels', () => {
-  for (const timezone of ['Europe/Berlin', 'America/New_York']) {
+  for (const [timezone, openingTime] of [
+    ['Europe/Berlin', '05:00'],
+    ['America/New_York', '00:00'],
+  ]) {
     const options = getNightTimezoneOptions(timezone);
     assert.equal(options[0].value, timezone);
     assert.doesNotMatch(options[0].label, /Москва|Московское/);
     const value = status();
     value.timezone = timezone;
+    value.restriction = 'night';
+    value.opensAt = '2026-10-31T04:00:00.000Z';
+    assert.ok(render(value).includes(openingTime));
     assert.doesNotMatch(render(value), /Московское время/);
   }
   assert.equal(getNightTimezoneOptions('Europe/Moscow'), RUSSIAN_TIMEZONE_OPTIONS);

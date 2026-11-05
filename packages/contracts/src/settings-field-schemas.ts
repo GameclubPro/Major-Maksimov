@@ -445,6 +445,7 @@ export const chatSettingsFieldsSchema = z.object({
   nightModeBotMessageText: botMessageTextSchema,
   nightModeCommentsEnabled: z.boolean().default(false),
   nightModeOpenMessageEnabled: z.boolean().default(false),
+  nightModeOpenMessageDeleteOnFirstMessageEnabled: z.boolean().default(false),
   nightModeOpenMessageText: botMessageTextSchema,
   nightModeBotButtonEnabled: z.boolean().default(false),
   nightModeBotButtonUrl: botButtonUrlSchema,

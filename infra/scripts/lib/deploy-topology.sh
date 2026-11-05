@@ -456,6 +456,13 @@ maxim_topology_require_night_mode_recovery_reader() {
   node "$(dirname "${BASH_SOURCE[0]}")/../assert-night-mode-recovery-source.mjs" "$commit_sha"
 }
 
+maxim_topology_require_night_open_notice_cleanup_reader() {
+  local commit_sha="$1"
+  # FLAG: Retained opening-notice DELETE intents need fresh opt-in, session and exact SEND
+  # authority at final dispatch. This capability also forces reviewed rollback tooling.
+  maxim_topology_require_night_mode_recovery_reader "$commit_sha"
+}
+
 maxim_topology_require_statistics_and_night_mode_recovery() {
   local commit_sha="$1"
   # FLAG: Either earlier tooling branch lacks the other's permanent recovery floor.

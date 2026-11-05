@@ -102,6 +102,8 @@ const LABELS: Record<string, string> = {
   nightModeBotMessageEnabled: 'Сообщение о закрытии',
   nightModeCommentsEnabled: 'Комментарии к сообщению о закрытии',
   nightModeOpenMessageEnabled: 'Сообщение об открытии',
+  nightModeOpenMessageDeleteOnFirstMessageEnabled:
+    'Удалять сообщение об открытии после первого сообщения',
   nightModeOpenMessageText: 'Ночной режим · Текст сообщения об открытии',
   nightModeRulesButtonEnabled: 'Добавить кнопку правил',
   nightModeForceCloseEnabled: 'Закрыть чат сейчас',

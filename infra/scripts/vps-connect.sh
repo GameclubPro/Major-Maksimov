@@ -1224,6 +1224,11 @@ build_guarded_rollback_command() {
   if [[ "$capability_marker" == maxim_topology_require_statistics_and_night_mode_recovery ]]; then
     capability_marker=maxim_topology_require_local_chat_ban_reader
   fi
+  # FLAG: Promote the retained selector again so old local-ban tooling cannot execute
+  # opening-notice cleanup after its policy reader has been rolled back.
+  if [[ "$capability_marker" == maxim_topology_require_local_chat_ban_reader ]]; then
+    capability_marker=maxim_topology_require_night_open_notice_cleanup_reader
+  fi
 
   if ! tooling_sha="$(git rev-parse --verify --end-of-options 'main^{commit}' 2>/dev/null)"; then
     echo "Cannot resolve local main to the reviewed rollback tooling SHA." >&2

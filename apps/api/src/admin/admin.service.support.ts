@@ -796,6 +796,7 @@ export const SETTINGS_SECTION_KEYS = {
     'nightModeBotMessageText',
     'nightModeCommentsEnabled',
     'nightModeOpenMessageEnabled',
+    'nightModeOpenMessageDeleteOnFirstMessageEnabled',
     'nightModeOpenMessageText',
     'nightModeBotButtons',
     'nightModeBotButtonEnabled',
