@@ -22,12 +22,20 @@ const functions = [
   shellFunction('preload_ci_image', 'deploy_scale'),
 ].join('\n');
 
-function runConnector({ proofStatus = 0, pullStatus = 0, context = 'deploy' } = {}) {
+function runConnector({
+  syncStatus = 0,
+  planStatus = 0,
+  parseStatus = 0,
+  proofStatus = 0,
+  pullStatus = 0,
+  context = 'deploy',
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-preload-connector-'));
   const invocation = {
     deploy: 'deploy_main main --auto',
     deploy_or: 'deploy_main main --auto || exit "$?"',
     deploy_if: 'if deploy_main main --auto; then exit 0; else exit "$?"; fi',
+    direct: 'preload_ci_image api "$FIXTURE_SHA"',
     or: 'preload_ci_image api "$FIXTURE_SHA" || exit "$?"',
     if: 'if preload_ci_image api "$FIXTURE_SHA"; then exit 0; else exit "$?"; fi',
   }[context];
@@ -60,7 +68,7 @@ node() {
       if [[ "$2" == plan ]]; then
         cat >/dev/null
         printf 'api-shared\\n'
-        return 0
+        return "$FIXTURE_PARSE_STATUS"
       fi
       printf 'proof|%s\\n' "$(stat -c %a "$FIXTURE_DIRECTORY"/request.*)" >>"$FIXTURE_DIRECTORY/events"
       printf '{"privateProof":true}\\n'
@@ -78,9 +86,14 @@ remote_exec() {
       ;;
     *--image-plan*)
       printf 'plan\\n' >>"$FIXTURE_DIRECTORY/events"
+      printf 'private-machine-output-do-not-log\\n'
       printf 'MAXIM_IMAGE_PLAN={"schemaVersion":1,"sourceSha":"%s","components":["api-shared"]}\\n' "$FIXTURE_SHA"
+      return "$FIXTURE_PLAN_STATUS"
       ;;
-    *--plan*) printf 'sync\\n' >>"$FIXTURE_DIRECTORY/events" ;;
+    *--plan*)
+      printf 'sync\\n' >>"$FIXTURE_DIRECTORY/events"
+      return "$FIXTURE_SYNC_STATUS"
+      ;;
     *) printf 'runtime\\n' >>"$FIXTURE_DIRECTORY/events" ;;
   esac
 }
@@ -100,6 +113,9 @@ ${invocation}
           ...process.env,
           FIXTURE_DIRECTORY: directory,
           FIXTURE_SHA: sha,
+          FIXTURE_SYNC_STATUS: String(syncStatus),
+          FIXTURE_PLAN_STATUS: String(planStatus),
+          FIXTURE_PARSE_STATUS: String(parseStatus),
           FIXTURE_PROOF_STATUS: String(proofStatus),
           FIXTURE_PULL_STATUS: String(pullStatus),
         },
@@ -121,7 +137,7 @@ ${invocation}
   }
 }
 
-for (const context of ['or', 'if']) {
+for (const context of ['direct', 'or', 'if']) {
   test(`failed local image proof stops preload in ${context} context before SSH`, () => {
     const result = runConnector({ context, proofStatus: 41 });
     assert.equal(result.status, 41, result.stderr);
@@ -140,15 +156,26 @@ for (const context of ['or', 'if']) {
 }
 
 for (const context of ['deploy', 'deploy_or', 'deploy_if']) {
-  for (const [failure, statuses, expectedEvents] of [
-    ['local proof', { proofStatus: 41 }, ['sync', 'plan', 'proof|600']],
-    ['remote pull', { pullStatus: 42 }, ['sync', 'plan', 'proof|600', 'pull']],
+  for (const [failure, statuses, phase, expectedEvents] of [
+    ['source sync', { syncStatus: 31 }, 'source-sync', ['sync']],
+    ['machine plan', { planStatus: 32 }, 'image-plan', ['sync', 'plan']],
+    ['plan parse', { parseStatus: 33 }, 'plan-parse', ['sync', 'plan']],
+    ['local proof', { proofStatus: 41 }, 'image-preload', ['sync', 'plan', 'proof|600']],
+    ['remote pull', { pullStatus: 42 }, 'image-preload', ['sync', 'plan', 'proof|600', 'pull']],
   ]) {
     test(`deployment in ${context} stops after a failed ${failure} without launching runtime`, () => {
       const result = runConnector({ ...statuses, context });
-      assert.equal(result.status, statuses.proofStatus ?? statuses.pullStatus, result.stderr);
+      const failureStatus = Object.values(statuses)[0];
+      assert.equal(result.status, failureStatus, result.stderr);
       assert.deepEqual(result.events, expectedEvents);
       assert.deepEqual(result.remainingRequests, []);
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `Release preparation: phase=${phase} status=failed exit=${failureStatus}(?: |\\n)`,
+        ),
+      );
+      assert.doesNotMatch(result.stdout + result.stderr, /private-machine-output|privateProof/u);
     });
   }
 }
@@ -158,4 +185,7 @@ test('normal deployment launches runtime once after successful private image del
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.events, ['sync', 'plan', 'proof|600', 'pull', 'runtime']);
   assert.deepEqual(result.remainingRequests, []);
+  for (const phase of ['source-sync', 'image-plan', 'plan-parse', 'image-preload'])
+    assert.match(result.stderr, new RegExp(`Release preparation: phase=${phase} status=complete`));
+  assert.doesNotMatch(result.stdout + result.stderr, /private-machine-output|privateProof/u);
 });

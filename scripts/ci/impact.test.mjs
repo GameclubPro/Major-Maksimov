@@ -6,7 +6,13 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { CI_LANES, ciOutputs, createCiPlan, verifyCiResults } from './impact.mjs';
+import {
+  CI_LANES,
+  HOST_RELEASE_TOOLING_PATHS,
+  ciOutputs,
+  createCiPlan,
+  verifyCiResults,
+} from './impact.mjs';
 import { REPOSITORY, REPOSITORY_ID } from './green-workflow-proof.mjs';
 
 const cli = fileURLToPath(new URL('./impact.mjs', import.meta.url));
@@ -78,6 +84,7 @@ test('miniapp-only Git changes select its browser validation and exact productio
     const head = commit(['apps/miniapp/src/pages/networks-page.tsx']);
     const plan = await rangePlan(cwd, base, head);
     assert.equal(plan.mode, 'scoped');
+    assert.equal(plan.staticInfra, false);
     assert.deepEqual(selected(plan), ['static', 'miniapp', 'docker']);
     assert.deepEqual(JSON.parse(ciOutputs(plan).docker_matrix).include, [
       {
@@ -101,6 +108,7 @@ test('test-only and documentation changes do not build unrelated runtime images'
     await repository(async ({ cwd, base, commit }) => {
       const plan = await rangePlan(cwd, base, commit([path]));
       assert.deepEqual(selected(plan), expected, path);
+      assert.equal(plan.staticInfra, false, path);
       assert.deepEqual(JSON.parse(ciOutputs(plan).docker_matrix), { include: [] });
     });
   }
@@ -145,6 +153,43 @@ test('reviewed local agent tools need Static without unrelated application suite
   }
 });
 
+test('reviewed host release tools retain both infrastructure shards without application suites or images', async () => {
+  for (const paths of [
+    ...HOST_RELEASE_TOOLING_PATHS.map((path) => [path]),
+    [...HOST_RELEASE_TOOLING_PATHS, 'docs/operations/runbooks/night-mode-delivery.md'],
+  ]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const plan = await rangePlan(cwd, base, commit(paths));
+      assert.equal(plan.mode, 'scoped');
+      assert.equal(plan.staticInfra, true);
+      assert.deepEqual(selected(plan), ['static']);
+      assert.deepEqual(JSON.parse(ciOutputs(plan).docker_matrix), { include: [] });
+      assert.doesNotThrow(() => verifyCiResults(plan, results(plan)));
+    });
+  }
+});
+
+test('host release exceptions preserve API native coverage and affected UI images in mixed changes', async () => {
+  for (const [path, lanes, component] of [
+    [
+      'apps/api/src/feature.ts',
+      ['static', 'api', 'postgres-races', 'commercial-benchmark', 'docker'],
+      'api',
+    ],
+    ['apps/miniapp/src/feature.ts', ['static', 'miniapp', 'docker'], 'miniapp'],
+    ['apps/admin/src/feature.ts', ['static', 'admin', 'docker'], 'admin'],
+  ]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const plan = await rangePlan(cwd, base, commit([HOST_RELEASE_TOOLING_PATHS[0], path]));
+      assert.equal(plan.mode, 'scoped');
+      assert.equal(plan.staticInfra, true);
+      assert.deepEqual(selected(plan), lanes, path);
+      assert.deepEqual(plan.dockerComponents, [component]);
+      assert.doesNotThrow(() => verifyCiResults(plan, results(plan)));
+    });
+  }
+});
+
 test('a local tool exception never hides shared callers, new tools or a rename into runtime', async () => {
   for (const path of [
     'scripts/agent/verify.mjs',
@@ -170,20 +215,71 @@ test('a local tool exception never hides shared callers, new tools or a rename i
   });
 });
 
-test('shared contracts, tooling, dependency inputs and unknown paths retain full coverage', async () => {
+test('shared contracts preserve every consumer and image with or without reviewed host tools', async () => {
+  for (const hostPaths of [[], [HOST_RELEASE_TOOLING_PATHS[0]]]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const plan = await rangePlan(
+        cwd,
+        base,
+        commit(['packages/contracts/src/networks.ts', ...hostPaths]),
+      );
+      assert.equal(plan.mode, 'scoped');
+      assert.equal(plan.staticInfra, hostPaths.length > 0);
+      assert.deepEqual(selected(plan), validationLanes);
+      assert.deepEqual(plan.dockerComponents, ['eraser', 'api', 'miniapp', 'admin']);
+      assert.doesNotThrow(() => verifyCiResults(plan, results(plan)));
+    });
+  }
+});
+
+test('shared tooling, dependency inputs and unknown paths retain the full plan', async () => {
   for (const path of [
-    'packages/contracts/src/networks.ts',
     '.github/workflows/ci.yml',
     'scripts/ci/impact.mjs',
     'config/change-impact.json',
     'infra/scripts/vps-connect.sh',
+    'infra/scripts/check-infra.sh',
+    'infra/scripts/vps-runtime-rollback.sh.backup',
+    'infra/scripts/new-release-helper.mjs',
+    'infra/scripts/outcome-cohort-online-state.mjs',
+    'infra/certs/russian-trusted-root-ca.pem',
+    '.dockerignore',
     'package-lock.json',
     'unknown/source.ts',
   ]) {
     await repository(async ({ cwd, base, commit }) => {
-      const plan = await rangePlan(cwd, base, commit([path]));
+      const plan = await rangePlan(cwd, base, commit([HOST_RELEASE_TOOLING_PATHS[0], path]));
+      assert.equal(plan.mode, 'full', path);
+      assert.equal(plan.staticInfra, true);
       assert.deepEqual(selected(plan), validationLanes, path);
       assert.deepEqual(plan.dockerComponents, ['eraser', 'api', 'miniapp', 'admin']);
+    });
+  }
+});
+
+test('renaming a reviewed host tool preserves the old infrastructure scope and checks its destination', async () => {
+  for (const destination of ['apps/api/src/renamed.ts', 'infra/scripts/new-release-helper.mjs']) {
+    await repository(async ({ cwd, commit, git }) => {
+      const source = HOST_RELEASE_TOOLING_PATHS[0];
+      const base = commit([source]);
+      mkdirSync(dirname(join(cwd, destination)), { recursive: true });
+      git('mv', source, destination);
+      const plan = await rangePlan(cwd, base, commit([]));
+      assert.equal(plan.staticInfra, true);
+      if (destination.startsWith('apps/api/')) {
+        assert.equal(plan.mode, 'scoped');
+        assert.deepEqual(selected(plan), [
+          'static',
+          'api',
+          'postgres-races',
+          'commercial-benchmark',
+          'docker',
+        ]);
+        assert.deepEqual(plan.dockerComponents, ['api']);
+      } else {
+        assert.equal(plan.mode, 'full');
+        assert.deepEqual(selected(plan), validationLanes);
+      }
     });
   }
 });
@@ -239,17 +335,21 @@ test('missing bases, rewritten history, manual and scheduled events run all lane
   await repository(async ({ cwd, base, commit, git }) => {
     const sha = commit(['apps/miniapp/src/feature.ts']);
     for (const before of ['0'.repeat(40), 'b'.repeat(40), undefined]) {
-      assert.deepEqual(selected(await rangePlan(cwd, before, sha)), validationLanes);
+      const plan = await rangePlan(cwd, before, sha);
+      assert.deepEqual(selected(plan), validationLanes);
+      assert.equal(plan.staticInfra, true);
     }
     git('switch', '-c', 'unrelated', base);
     const unrelated = commit(['docs/unrelated.md']);
     git('switch', 'main');
     assert.deepEqual(selected(await rangePlan(cwd, unrelated, sha)), validationLanes);
     for (const eventName of ['schedule', 'workflow_dispatch', 'unsupported']) {
+      const plan = await planFor({ cwd, sha, eventName, event: {} });
       assert.deepEqual(
-        selected(await planFor({ cwd, sha, eventName, event: {} })),
+        selected(plan),
         eventName === 'workflow_dispatch' ? CI_LANES : validationLanes,
       );
+      assert.equal(plan.staticInfra, true);
     }
     await assert.rejects(
       planFor({ cwd, sha: base, eventName: 'push', event: {} }),
@@ -296,55 +396,72 @@ test('Required rejects failed classification, selected skips, cancellation and a
   });
 });
 
-test('real CLI emits bounded job outputs and independently rejects a substituted result plan', async () => {
+test('Required rejects unsuccessful infrastructure aggregates and substituted shard selection', async () => {
   await repository(async ({ cwd, base, commit }) => {
-    const sha = commit(['apps/miniapp/src/feature.ts']);
-    const eventPath = join(cwd, 'event.json');
-    const outputPath = join(cwd, 'outputs');
-    writeFileSync(
-      eventPath,
-      JSON.stringify({ pull_request: { base: { sha: base }, head: { sha } } }),
-    );
-    const env = {
-      ...process.env,
-      GITHUB_SHA: sha,
-      GITHUB_EVENT_NAME: 'pull_request',
-      GITHUB_REPOSITORY: REPOSITORY,
-      GITHUB_REPOSITORY_ID: String(REPOSITORY_ID),
-      GITHUB_RUN_ID: '100',
-      GITHUB_RUN_ATTEMPT: '1',
-      GITHUB_REF: 'refs/pull/1/merge',
-      GITHUB_EVENT_PATH: eventPath,
-      GITHUB_OUTPUT: outputPath,
-    };
-    const run = (command, extra = {}) =>
-      spawnSync(process.execPath, [cli, command], {
-        cwd,
-        env: { ...env, ...extra },
-        encoding: 'utf8',
-      });
-    const planned = run('plan');
-    assert.equal(planned.status, 0, planned.stderr);
-    const plan = JSON.parse(planned.stdout);
-    const outputs = Object.fromEntries(
-      readFileSync(outputPath, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => {
-          const separator = line.indexOf('=');
-          return [line.slice(0, separator), line.slice(separator + 1)];
-        }),
-    );
-    assert.deepEqual(outputs, ciOutputs(plan));
-    const needs = results(plan);
-    const accepted = run('verify', { CI_NEEDS: JSON.stringify(needs) });
-    assert.equal(accepted.status, 0, accepted.stderr);
-    needs.impact.outputs.miniapp = 'false';
-    needs.miniapp.result = 'skipped';
-    const rejected = run('verify', { CI_NEEDS: JSON.stringify(needs) });
-    assert.equal(rejected.status, 1);
-    assert.match(rejected.stderr, /independently computed plan/u);
+    const plan = await rangePlan(cwd, base, commit([HOST_RELEASE_TOOLING_PATHS[0]]));
+    for (const state of ['failure', 'cancelled', 'skipped', 'neutral', undefined]) {
+      const needs = results(plan);
+      needs.static.result = state;
+      assert.throws(() => verifyCiResults(plan, needs), /CI lane static/u);
+    }
+    for (const value of [false, undefined]) {
+      const needs = results(plan);
+      needs.impact.outputs.plan = JSON.stringify({ ...plan, staticInfra: value });
+      assert.throws(() => verifyCiResults(plan, needs), /independently computed plan/u);
+    }
   });
+});
+
+test('real CLI emits bounded job outputs and independently rejects a substituted result plan', async () => {
+  for (const path of ['apps/miniapp/src/feature.ts', HOST_RELEASE_TOOLING_PATHS[0]]) {
+    await repository(async ({ cwd, base, commit }) => {
+      const sha = commit([path]);
+      const eventPath = join(cwd, 'event.json');
+      const outputPath = join(cwd, 'outputs');
+      writeFileSync(
+        eventPath,
+        JSON.stringify({ pull_request: { base: { sha: base }, head: { sha } } }),
+      );
+      const env = {
+        ...process.env,
+        GITHUB_SHA: sha,
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_REPOSITORY: REPOSITORY,
+        GITHUB_REPOSITORY_ID: String(REPOSITORY_ID),
+        GITHUB_RUN_ID: '100',
+        GITHUB_RUN_ATTEMPT: '1',
+        GITHUB_REF: 'refs/pull/1/merge',
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_OUTPUT: outputPath,
+      };
+      const run = (command, extra = {}) =>
+        spawnSync(process.execPath, [cli, command], {
+          cwd,
+          env: { ...env, ...extra },
+          encoding: 'utf8',
+        });
+      const planned = run('plan');
+      assert.equal(planned.status, 0, planned.stderr);
+      const plan = JSON.parse(planned.stdout);
+      const outputs = Object.fromEntries(
+        readFileSync(outputPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => {
+            const separator = line.indexOf('=');
+            return [line.slice(0, separator), line.slice(separator + 1)];
+          }),
+      );
+      assert.deepEqual(outputs, ciOutputs(plan));
+      const needs = results(plan);
+      const accepted = run('verify', { CI_NEEDS: JSON.stringify(needs) });
+      assert.equal(accepted.status, 0, accepted.stderr);
+      needs.impact.outputs.plan = JSON.stringify({ ...plan, staticInfra: !plan.staticInfra });
+      const rejected = run('verify', { CI_NEEDS: JSON.stringify(needs) });
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, /independently computed plan/u);
+    });
+  }
 });
 
 test('workflow consumes the verified plan without weakening individual lane steps', () => {

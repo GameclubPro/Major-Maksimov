@@ -4,9 +4,9 @@
     { "id": "repo-static", "label": "Repository static checks", "script": "check:static:ci" },
     { "id": "agent-tools", "label": "Agent tooling tests", "script": "test:agent-tools" },
     { "id": "docs", "label": "Documentation checks", "script": "check:docs" },
-    { "id": "infra", "label": "Infrastructure checks", "script": "check:infra" },
     { "id": "contracts", "label": "Shared contracts validation", "script": "check:contracts" },
     { "id": "api", "label": "API validation", "script": "check:api" },
+    { "id": "infra", "label": "Infrastructure checks", "script": "check:infra" },
     { "id": "prisma", "label": "Prisma validation", "script": "check:prisma" },
     { "id": "eraser", "label": "Independent Lastik validation", "script": "check:eraser" },
     {

@@ -1624,7 +1624,7 @@ deploy_main() {
 
 prepare_registry_release_images() {
   local branch="$1" expected_sha="$2" runtime_command="$3"
-  local sync_command plan_output plan_file component
+  local sync_command plan_output plan_file component preparation_status
   local components=()
   # FLAG: Synchronize through the existing guarded plan/re-exec path before using
   # the new planner. Each SSH command must finish before its checkout may change.
@@ -1636,17 +1636,56 @@ prepare_registry_release_images() {
     esac
   fi
   maxim_prepend_git_ssh_transport sync_command "${MAXIM_DEPLOY_GIT_SSH_PORT:-default}"
-  remote_exec "$sync_command" || return
-  plan_output="$(remote_exec "$runtime_command --image-plan")" || return
-  plan_file="$(mktemp /tmp/maxim-release-image-plan.XXXXXX)" || return
-  if ! printf '%s\n' "$plan_output" | node infra/scripts/registry-preload.mjs plan "$expected_sha" >"$plan_file"; then
-    rm -f "$plan_file"
-    return 1
+  # FLAG: Report fixed phase names and exit statuses only. Captured machine output,
+  # commands and environment may contain private data and must never enter diagnostics.
+  printf 'Release preparation: phase=source-sync status=started\n' >&2
+  if remote_exec "$sync_command"; then
+    printf 'Release preparation: phase=source-sync status=complete\n' >&2
+  else
+    preparation_status=$?
+    printf 'Release preparation: phase=source-sync status=failed exit=%s\n' "$preparation_status" >&2
+    return "$preparation_status"
   fi
-  mapfile -t components <"$plan_file"
-  rm -f "$plan_file"
+  printf 'Release preparation: phase=image-plan status=started\n' >&2
+  if plan_output="$(remote_exec "$runtime_command --image-plan")"; then
+    printf 'Release preparation: phase=image-plan status=complete\n' >&2
+  else
+    preparation_status=$?
+    printf 'Release preparation: phase=image-plan status=failed exit=%s\n' "$preparation_status" >&2
+    return "$preparation_status"
+  fi
+  printf 'Release preparation: phase=plan-parse status=started\n' >&2
+  if plan_file="$(mktemp /tmp/maxim-release-image-plan.XXXXXX)"; then
+    :
+  else
+    preparation_status=$?
+    printf 'Release preparation: phase=plan-parse status=failed exit=%s\n' "$preparation_status" >&2
+    return "$preparation_status"
+  fi
+  if printf '%s\n' "$plan_output" | node infra/scripts/registry-preload.mjs plan "$expected_sha" >"$plan_file" &&
+    mapfile -t components <"$plan_file"; then
+    if rm -f "$plan_file"; then
+      printf 'Release preparation: phase=plan-parse status=complete\n' >&2
+    else
+      preparation_status=$?
+      printf 'Release preparation: phase=plan-parse status=failed exit=%s\n' "$preparation_status" >&2
+      return "$preparation_status"
+    fi
+  else
+    preparation_status=$?
+    rm -f "$plan_file" || true
+    printf 'Release preparation: phase=plan-parse status=failed exit=%s\n' "$preparation_status" >&2
+    return "$preparation_status"
+  fi
   for component in "${components[@]}"; do
-    preload_ci_image "$component" "$expected_sha" || return
+    printf 'Release preparation: phase=image-preload status=started component=%s\n' "$component" >&2
+    if preload_ci_image "$component" "$expected_sha"; then
+      printf 'Release preparation: phase=image-preload status=complete component=%s\n' "$component" >&2
+    else
+      preparation_status=$?
+      printf 'Release preparation: phase=image-preload status=failed exit=%s component=%s\n' "$preparation_status" "$component" >&2
+      return "$preparation_status"
+    fi
   done
 }
 

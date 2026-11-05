@@ -48,6 +48,52 @@ test('maps API runtime changes to the shared API component', () => {
   assert.equal(plan.migration.required, false);
 });
 
+test('scoped API and contracts validation precede infrastructure without expanding scope', () => {
+  const infrastructure = { status: 'M', path: 'infra/scripts/vps-connect.sh' };
+  const api = planFor([{ status: 'M', path: 'apps/api/src/main.ts' }, infrastructure]);
+  assert.deepEqual(api.checks, ['repo-static', 'api', 'infra']);
+  assert.deepEqual(api.deploy.components, ['api-shared']);
+  assert.deepEqual(api.deploy.manualOperations, ['review-deploy-tooling']);
+
+  const contracts = planFor([
+    { status: 'M', path: 'packages/contracts/src/settings-field-schemas.ts' },
+    infrastructure,
+  ]);
+  assert.ok(contracts.checks.indexOf('contracts') < contracts.checks.indexOf('api'));
+  assert.ok(contracts.checks.indexOf('api') < contracts.checks.indexOf('infra'));
+  assert.deepEqual(contracts.deploy.components, [
+    'api-shared',
+    'miniapp-major-static',
+    'admin-static',
+    'eraser',
+  ]);
+  assert.ok(!contracts.checks.includes('full'));
+});
+
+test('early API validation retains Prisma migration review and policy-only scope', () => {
+  const infrastructure = { status: 'M', path: 'infra/scripts/vps-connect.sh' };
+  const schema = { status: 'M', path: 'apps/api/prisma/schema.prisma' };
+  const missingMigration = planFor([schema, infrastructure]);
+  assert.deepEqual(missingMigration.checks, ['repo-static', 'api', 'infra', 'prisma']);
+  assert.equal(missingMigration.migration.reviewRequired, true);
+
+  const withMigration = planFor([
+    schema,
+    infrastructure,
+    { status: 'A', path: 'apps/api/prisma/migrations/20261105000000_example/migration.sql' },
+  ]);
+  assert.deepEqual(withMigration.checks, missingMigration.checks);
+  assert.deepEqual(withMigration.deploy.components, ['api-shared']);
+  assert.equal(withMigration.migration.reviewRequired, false);
+
+  const policy = planFor([
+    { status: 'M', path: 'config/prisma-migration-policy.json' },
+    infrastructure,
+  ]);
+  assert.deepEqual(policy.checks, ['repo-static', 'infra', 'prisma']);
+  assert.deepEqual(policy.deploy.components, []);
+});
+
 test('maps Lastik runtime and tests to its independent validation boundary', () => {
   const runtime = planFor([{ status: 'M', path: 'apps/eraser/src/runtime.ts' }]);
   assert.deepEqual(runtime.deploy.components, ['eraser']);
@@ -65,7 +111,7 @@ test('deploys and validates the exact migration preparer copied into the API ima
     const plan = planFor([{ status, path: 'scripts/agent/multibot-online-prepare.mjs' }]);
 
     assert.deepEqual(plan.deploy.components, ['api-shared']);
-    assert.deepEqual(plan.checks, ['repo-static', 'agent-tools', 'infra', 'api', 'prisma']);
+    assert.deepEqual(plan.checks, ['repo-static', 'agent-tools', 'api', 'infra', 'prisma']);
     assert.deepEqual(plan.unknownPaths, []);
     assert.equal(plan.migration.required, false);
     assert.equal(plan.migration.reviewRequired, false);

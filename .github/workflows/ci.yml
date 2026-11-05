@@ -62,8 +62,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.impact.outputs.plan).mode == 'full' && fromJSON('[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]') || fromJSON('[{"part":"core"}]') }}
-    # FLAG: Full plans require core and both infrastructure shards through needs.static in Required.
+        include: ${{ fromJSON(needs.impact.outputs.plan).staticInfra && fromJSON('[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]') || fromJSON('[{"part":"core"}]') }}
+    # FLAG: Full and selected host-tool plans require both infra shards through needs.static in Required.
     # Keep their test inventories disjoint and preserve the per-job time budget.
     # FLAG: Public test commands bound file concurrency. Native/WASM fixtures keep
     # Node's default runtime pools, independently of that process concurrency limit.

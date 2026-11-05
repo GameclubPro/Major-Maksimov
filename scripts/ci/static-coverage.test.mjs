@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { CI_LANES } from './impact.mjs';
+import { CI_LANES, DOCKER_COMPONENTS, HOST_RELEASE_TOOLING_PATHS } from './impact.mjs';
 import { validateImpactConfig } from '../agent/impact-config.mjs';
 import { selectVerificationScripts } from '../agent/verify.mjs';
 
@@ -98,12 +98,48 @@ test('Static gives core and infrastructure independent bounded jobs without drop
     'fail-fast': false,
     matrix: {
       include:
-        '${{ fromJSON(needs.impact.outputs.plan).mode == \'full\' && fromJSON(\'[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]\') || fromJSON(\'[{"part":"core"}]\') }}',
+        '${{ fromJSON(needs.impact.outputs.plan).staticInfra && fromJSON(\'[{"part":"core"},{"part":"infra","shard":"1/2"},{"part":"infra","shard":"2/2"}]\') || fromJSON(\'[{"part":"core"}]\') }}',
     },
   });
   assert.equal(job['timeout-minutes'], 12);
   assert.equal(job['continue-on-error'], undefined);
   assert.equal(job.if, undefined);
+});
+
+test('reviewed host release tools remain excluded from every Docker image context', () => {
+  const patterns = read('.dockerignore')
+    .split(/\r?\n/u)
+    .map((line) => line.trim());
+  const excluded = patterns.indexOf('infra/**');
+  assert.ok(excluded >= 0, 'Host infrastructure must stay outside the image context');
+  const exceptions = [
+    '!infra/certs/',
+    '!infra/certs/**',
+    '!infra/scripts/outcome-cohort-online-state.mjs',
+  ];
+  assert.deepEqual(
+    patterns.filter((line) => line.startsWith('!')),
+    exceptions,
+  );
+  assert.ok(exceptions.every((pattern) => patterns.indexOf(pattern) > excluded));
+  assert.ok(Object.isFrozen(HOST_RELEASE_TOOLING_PATHS));
+  for (const path of HOST_RELEASE_TOOLING_PATHS) {
+    assert.match(path, /^infra\/scripts\//u);
+    assert.notEqual(path, 'infra/scripts/outcome-cohort-online-state.mjs');
+    read(path);
+  }
+  for (const { dockerfile } of DOCKER_COMPONENTS) {
+    assert.equal(
+      existsSync(resolve(root, `${dockerfile}.dockerignore`)),
+      false,
+      `${dockerfile}: an alternate ignore policy needs host-tool scope review`,
+    );
+  }
+  const build = parse(workflow).jobs.docker.steps.find(
+    (step) => step.name === 'Build ${{ matrix.component }} image',
+  );
+  assert.match(build.run, /\n\s+\.\s*$/u, 'Image builds must use the reviewed repository context');
+  assert.doesNotMatch(build.run, /--build-context/u);
 });
 
 test('CI core and standalone infrastructure select the full inventory exactly once', () => {

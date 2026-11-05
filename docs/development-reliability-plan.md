@@ -255,6 +255,8 @@ coverage when selected, without duplicate execution. The root `check` uses `chec
 for core tests, then `check:infra` for infrastructure; the standalone `check:static` remains
 the complete tooling aggregate and must not be nested into `check` again. Native PostgreSQL/Redis
 cases remain mandatory for the affected invariant; skipped store cases are missing coverage.
+Preflight rejects guarded file growth before these checks. Scoped plans run selected contracts
+and API validation before infrastructure; the public full aggregate retains its existing order.
 
 Miniapp-only UI changes need no API, Prisma, admin or native-store suites unless a changed boundary
 or concrete regression requires them. Do not repeat green suites without changed inputs, failure
@@ -273,7 +275,8 @@ a trusted main push selects changes since a proven green first-parent ancestor w
 certificate; the PR merge checkout uses its recorded base. Missing baseline evidence selects full
 coverage. `Required` reuses the frozen proof rather than selecting a newer baseline.
 `Static` stays mandatory; its infrastructure, ShellCheck and workflow-lint
-steps run only for full plans, including shared tooling/infra changes and the scheduled run.
+steps run for full plans and the exact reviewed host-tool scope, selected by the frozen
+`staticInfra` field. The scheduled run retains full coverage.
 Permanent source-abandonment and legacy-disposition rollback floors belong to the mandatory core
 test inventory, so API-only changes also check compatibility with the deployed safety readers.
 Miniapp changes select all four miniapp browser shards
@@ -289,8 +292,10 @@ partitions preserve each browser command once, with per-job dependency setup and
 only the complete Android/iOS shop partition installs WebKit. Keep long settings-draft, shop-format
 and publication-editor scenarios in separate jobs. Measure durations before changing assignments.
 
-Workflow, shared tooling, infrastructure, root build inputs, unknown files/check kinds, unproved
-Git history and manual/scheduled runs select full CI. The exact local-only entrypoints in
+Workflow, unreviewed shared tooling and infrastructure, root build inputs, unknown files/check
+kinds, unproved Git history and manual/scheduled runs select full CI. The exact host paths in
+`HOST_RELEASE_TOOLING_PATHS` retain core and both infrastructure shards; a permanent Docker
+context guard verifies that they remain excluded from image inputs. The exact local-only entrypoints in
 `LOCAL_TOOLING_PATHS` in `scripts/ci/impact.mjs` (context, doctor, focused checks, task ownership
 and documentation checks, with their reviewed tests) select Static. Static includes their tests,
 lint, refactor guards, dependency audit and documentation validation. New helpers and modified
