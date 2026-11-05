@@ -51,6 +51,87 @@ const redisUrl = process.env.MAXIM_TEST_REDIS_URL ?? '';
 const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisUrl);
 const shortHash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 
+const recompressionPoster = (phone = '8-902-009-99-49', price = 'Price 1000') =>
+  Buffer.from(`<svg width="512" height="512"><rect width="512" height="512" fill="#253b53"/>
+        <circle cx="180" cy="200" r="110" fill="#d0a040"/><circle cx="180" cy="200" r="60" fill="#253b53"/>
+        <path d="M0 330L512 290L512 380L0 420Z" fill="#e5e1d7"/>
+        <text x="30" y="60" font-family="DejaVu Sans" font-size="34" fill="white">TYRE SERVICE</text>
+        <text x="30" y="445" font-family="DejaVu Sans" font-size="28" fill="white">${phone}</text>
+        <text x="30" y="485" font-family="DejaVu Sans" font-size="28" fill="white">${price}</text></svg>`);
+
+async function prepareSyntheticImages() {
+  const png = await sharp(
+    Buffer.from(Array.from({ length: 32 * 24 * 3 }, (_, index) => (index * 17) % 256)),
+    { raw: { width: 32, height: 24, channels: 3 } },
+  )
+    .png()
+    .toBuffer();
+  const webp = await sharp(png).webp({ lossless: true }).toBuffer();
+  const different = await sharp(png).negate().png().toBuffer();
+  const variants = await Promise.all(
+    [0, 1, 2, 3].map(async (index) => {
+      const image = await sharp(png)
+        .rotate(index * 90)
+        .png()
+        .toBuffer();
+      return Object.freeze({
+        png: image,
+        webp: await sharp(image).webp({ lossless: true }).toBuffer(),
+        different: await sharp(image).negate().png().toBuffer(),
+      });
+    }),
+  );
+  const posters: Record<string, Readonly<{ quality92: Buffer; quality89: Buffer }>> = {};
+  for (const [phone, price] of [
+    ['8-902-009-99-49', 'Price 1000'],
+    ['8-902-009-99-48', 'Price 1000'],
+    ['8-902-009-99-49', 'Price 1009'],
+  ]) {
+    const source = recompressionPoster(phone, price);
+    posters[JSON.stringify([phone, price])] = Object.freeze({
+      quality92: await sharp(source).webp({ quality: 92 }).toBuffer(),
+      quality89: await sharp(source).webp({ quality: 89 }).toBuffer(),
+    });
+  }
+  const grayImage = (gray: number) =>
+    sharp({
+      create: {
+        width: 128,
+        height: 128,
+        channels: 3,
+        background: { r: gray, g: gray, b: gray },
+      },
+    })
+      .png()
+      .toBuffer();
+  const grayscale = Object.freeze({
+    128: await grayImage(128),
+    129: await grayImage(129),
+    130: await grayImage(130),
+  });
+  return Object.freeze({
+    png,
+    webp,
+    different,
+    variants: Object.freeze(variants),
+    posters: Object.freeze(posters),
+    grayscale,
+  });
+}
+
+let syntheticImages: Awaited<ReturnType<typeof prepareSyntheticImages>> | undefined;
+
+function preparedSyntheticImages() {
+  if (!syntheticImages) throw new Error('Synthetic duplicate images must be prepared before Redis');
+  return syntheticImages;
+}
+
+function recompressionPosterImages(phone = '8-902-009-99-49', price = 'Price 1000') {
+  const images = preparedSyntheticImages().posters[JSON.stringify([phone, price])];
+  if (!images) throw new Error('Unknown synthetic duplicate poster');
+  return images;
+}
+
 type SanctionDeleteReceipt = Pick<
   ModerationDeleteIntent,
   | 'id'
@@ -69,6 +150,7 @@ type SanctionDeleteReceipt = Pick<
 };
 
 async function createFlow(overrides: Partial<ChatSettings> = {}) {
+  const { png, webp, different, variants } = preparedSyntheticImages();
   const suffix = randomUUID();
   const chatId = `-${randomBytes(6).readUIntBE(0, 6)}`;
   const config = new ConfigService({ REDIS_URL: redisUrl });
@@ -378,27 +460,6 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     new MessageDuplicateEnqueueService(queue, ordering, admission),
     authorization,
   );
-  const png = await sharp(
-    Buffer.from(Array.from({ length: 32 * 24 * 3 }, (_, index) => (index * 17) % 256)),
-    { raw: { width: 32, height: 24, channels: 3 } },
-  )
-    .png()
-    .toBuffer();
-  const webp = await sharp(png).webp({ lossless: true }).toBuffer();
-  const different = await sharp(png).negate().png().toBuffer();
-  const variants = await Promise.all(
-    [0, 1, 2, 3].map(async (index) => {
-      const image = await sharp(png)
-        .rotate(index * 90)
-        .png()
-        .toBuffer();
-      return {
-        png: image,
-        webp: await sharp(image).webp({ lossless: true }).toBuffer(),
-        different: await sharp(image).negate().png().toBuffer(),
-      };
-    }),
-  );
   let next = 0;
   const prepare = (
     options: {
@@ -560,6 +621,11 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
   'message duplicate flow with real Redis, ordering and image fingerprints',
   () => {
     let flow: Awaited<ReturnType<typeof createFlow>>;
+    // FLAG: Cold rendering belongs to bounded suite setup, before any Redis clients.
+    // Cases share read-only bytes while retaining fresh state and their 5-second budget.
+    beforeAll(async () => {
+      syntheticImages = await prepareSyntheticImages();
+    }, 30_000);
     afterEach(async () => {
       jest.restoreAllMocks();
       await flow?.close();
@@ -950,25 +1016,17 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       expect(flow.downloads).toHaveBeenCalledTimes(2);
     });
 
-    const recompressionPoster = (phone = '8-902-009-99-49', price = 'Price 1000') =>
-      Buffer.from(`<svg width="512" height="512"><rect width="512" height="512" fill="#253b53"/>
-        <circle cx="180" cy="200" r="110" fill="#d0a040"/><circle cx="180" cy="200" r="60" fill="#253b53"/>
-        <path d="M0 330L512 290L512 380L0 420Z" fill="#e5e1d7"/>
-        <text x="30" y="60" font-family="DejaVu Sans" font-size="34" fill="white">TYRE SERVICE</text>
-        <text x="30" y="445" font-family="DejaVu Sans" font-size="28" fill="white">${phone}</text>
-        <text x="30" y="485" font-family="DejaVu Sans" font-size="28" fill="white">${price}</text></svg>`);
-
     it('deletes a cross-author recompressed copy after unrelated photos, retaining both exact identities', async () => {
       flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
       const original = flow.prepare({
         photo: 'webp',
-        imageBytes: await sharp(recompressionPoster()).webp({ quality: 92 }).toBuffer(),
+        imageBytes: recompressionPosterImages().quality92,
       });
       const filler = flow.prepare({ photo: 'different' });
       const repeat = flow.prepare({
         photo: 'webp',
         userId: 456,
-        imageBytes: await sharp(recompressionPoster()).webp({ quality: 89 }).toBuffer(),
+        imageBytes: recompressionPosterImages().quality89,
       });
       for (const item of [original, filler, repeat])
         await flow.processor.process((await flow.ingest(item))!);
@@ -992,8 +1050,8 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       'keeps changed %s buttons separate for recompressed photos while ignoring captions',
       async (type) => {
         flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
-        const originalBytes = await sharp(recompressionPoster()).webp({ quality: 92 }).toBuffer();
-        const repeatedBytes = await sharp(recompressionPoster()).webp({ quality: 89 }).toBuffer();
+        const originalBytes = recompressionPosterImages().quality92;
+        const repeatedBytes = recompressionPosterImages().quality89;
         const buttons = (value: string) => [
           [
             {
@@ -1041,8 +1099,8 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       'uses a fresh exact original for recompressed copies after the previous source is fenced by %s',
       async (change) => {
         flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
-        const originalBytes = await sharp(recompressionPoster()).webp({ quality: 92 }).toBuffer();
-        const repeatedBytes = await sharp(recompressionPoster()).webp({ quality: 89 }).toBuffer();
+        const originalBytes = recompressionPosterImages().quality92;
+        const repeatedBytes = recompressionPosterImages().quality89;
         const original = flow.prepare({ photo: 'webp', imageBytes: originalBytes });
         const filler = flow.prepare({ photo: 'different' });
         for (const item of [original, filler])
@@ -1084,21 +1142,17 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
         flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
         const original = flow.prepare({
           photo: 'webp',
-          imageBytes: await sharp(recompressionPoster()).webp({ quality: 92 }).toBuffer(),
+          imageBytes: recompressionPosterImages().quality92,
         });
         const changed = flow.prepare({
           photo: 'webp',
           userId: 456,
-          imageBytes: await sharp(recompressionPoster(phone, price))
-            .webp({ quality: 89 })
-            .toBuffer(),
+          imageBytes: recompressionPosterImages(phone, price).quality89,
         });
         const repeat = flow.prepare({
           photo: 'webp',
           userId: 789,
-          imageBytes: await sharp(recompressionPoster(phone, price))
-            .webp({ quality: 92 })
-            .toBuffer(),
+          imageBytes: recompressionPosterImages(phone, price).quality92,
         });
         for (const item of [original, changed, repeat])
           await flow.processor.process((await flow.ingest(item))!);
@@ -1112,27 +1166,17 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
 
     it('always verifies recompressed copies against the original instead of chaining small changes', async () => {
       flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
-      const image = (gray: number) =>
-        sharp({
-          create: {
-            width: 128,
-            height: 128,
-            channels: 3,
-            background: { r: gray, g: gray, b: gray },
-          },
-        })
-          .png()
-          .toBuffer();
-      const original = flow.prepare({ photo: 'png', imageBytes: await image(128) });
-      const firstCopy = flow.prepare({ photo: 'png', userId: 456, imageBytes: await image(129) });
-      const drifted = flow.prepare({ photo: 'png', userId: 789, imageBytes: await image(130) });
+      const { grayscale } = preparedSyntheticImages();
+      const original = flow.prepare({ photo: 'png', imageBytes: grayscale[128] });
+      const firstCopy = flow.prepare({ photo: 'png', userId: 456, imageBytes: grayscale[129] });
+      const drifted = flow.prepare({ photo: 'png', userId: 789, imageBytes: grayscale[130] });
       for (const item of [original, firstCopy, drifted])
         await flow.processor.process((await flow.ingest(item))!);
       expect(flow.deleted).toEqual([firstCopy.id]);
       const actualRepeat = flow.prepare({
         photo: 'png',
         userId: 456,
-        imageBytes: await image(130),
+        imageBytes: grayscale[130],
       });
       await flow.processor.process((await flow.ingest(actualRepeat))!);
       expect(flow.deleted).toEqual([firstCopy.id, actualRepeat.id]);

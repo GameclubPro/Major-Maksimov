@@ -1,5 +1,6 @@
 import { dirname, relative, resolve } from 'node:path';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { findContractsArchitectureViolations } from './check-contract-exports.mjs';
 import { assertRuntimeContextBoundaries } from './check-runtime-contexts.mjs';
 
@@ -464,79 +465,97 @@ const runtimeEntrypointBoundaryGuards = [
   },
 ];
 
-let failed = false;
+export function findRefactorFileSizeViolations(directory, readFile = readFileSync) {
+  const violations = [];
+  for (const guard of guardedFiles) {
+    const lines = countLines(readFile(resolve(directory, guard.path), 'utf8'));
+    if (lines > guard.maxLines) violations.push({ ...guard, lines });
+  }
+  return violations;
+}
 
-for (const guard of guardedFiles) {
-  const contents = readFileSync(resolve(root, guard.path), 'utf8');
-  const lines = countLines(contents);
-  if (lines <= guard.maxLines) {
-    continue;
+export function assertRefactorFileSizeGuards(directory) {
+  const violations = findRefactorFileSizeViolations(directory);
+  if (violations.length) {
+    throw new Error(violations.map(formatRefactorFileSizeViolation).join('\n'));
+  }
+}
+
+function formatRefactorFileSizeViolation(violation) {
+  return [
+    `${violation.path} has ${violation.lines} lines, over the ${violation.maxLines} refactor guard.`,
+    violation.reason,
+    `Next target: ${violation.targetLines} lines or fewer.`,
+    'If this growth is intentional, update the guard in the same change with the architectural reason.',
+  ].join('\n');
+}
+
+function runRefactorGuards() {
+  let failed = false;
+
+  for (const violation of findRefactorFileSizeViolations(root)) {
+    failed = true;
+    console.error(formatRefactorFileSizeViolation(violation));
   }
 
-  failed = true;
-  console.error(
-    [
-      `${guard.path} has ${lines} lines, over the ${guard.maxLines} refactor guard.`,
-      guard.reason,
-      `Next target: ${guard.targetLines} lines or fewer.`,
-      'If this growth is intentional, update the guard in the same change with the architectural reason.',
-    ].join('\n'),
-  );
+  for (const violation of findLegacyImportViolations(root)) {
+    failed = true;
+    console.error(
+      [
+        `${violation.path} imports a *.legacy module directly.`,
+        'Legacy modules must stay hidden behind their thin facade files so future extraction work has one stable boundary.',
+        `Allowed facade files: ${Array.from(allowedLegacyImportFiles).join(', ')}`,
+      ].join('\n'),
+    );
+  }
+
+  for (const violation of findRuntimeEntrypointBoundaryViolations(root)) {
+    failed = true;
+    console.error(
+      [
+        `${violation.path} bypasses ${violation.boundary}.`,
+        violation.reason,
+        'Route new runtime/admin hot-path code through the focused boundary service before touching legacy implementations.',
+      ].join('\n'),
+    );
+  }
+
+  for (const violation of findImportCycleViolations(root)) {
+    failed = true;
+    console.error(
+      [
+        `Import cycle detected: ${violation.cycle.join(' -> ')}`,
+        'Production modules should stay acyclic so extraction work can move code behind stable boundaries.',
+        `Allowed temporary facade cycles: ${allowedImportCycles.map((cycle) => cycle.name).join(', ')}`,
+      ].join('\n'),
+    );
+  }
+
+  for (const violation of findContractsArchitectureViolations(root)) {
+    failed = true;
+    console.error(
+      [
+        violation.message,
+        'Keep packages/contracts package exports, root TS paths, and API Jest mappers exact and aligned.',
+        'Generated contract JS must live under dist/, not tracked src/.',
+      ].join('\n'),
+    );
+  }
+
+  try {
+    assertRuntimeContextBoundaries(root);
+  } catch (error) {
+    failed = true;
+    console.error(error.message);
+  }
+
+  if (failed) {
+    process.exitCode = 1;
+  }
 }
 
-for (const violation of findLegacyImportViolations(root)) {
-  failed = true;
-  console.error(
-    [
-      `${violation.path} imports a *.legacy module directly.`,
-      'Legacy modules must stay hidden behind their thin facade files so future extraction work has one stable boundary.',
-      `Allowed facade files: ${Array.from(allowedLegacyImportFiles).join(', ')}`,
-    ].join('\n'),
-  );
-}
-
-for (const violation of findRuntimeEntrypointBoundaryViolations(root)) {
-  failed = true;
-  console.error(
-    [
-      `${violation.path} bypasses ${violation.boundary}.`,
-      violation.reason,
-      'Route new runtime/admin hot-path code through the focused boundary service before touching legacy implementations.',
-    ].join('\n'),
-  );
-}
-
-for (const violation of findImportCycleViolations(root)) {
-  failed = true;
-  console.error(
-    [
-      `Import cycle detected: ${violation.cycle.join(' -> ')}`,
-      'Production modules should stay acyclic so extraction work can move code behind stable boundaries.',
-      `Allowed temporary facade cycles: ${allowedImportCycles.map((cycle) => cycle.name).join(', ')}`,
-    ].join('\n'),
-  );
-}
-
-for (const violation of findContractsArchitectureViolations(root)) {
-  failed = true;
-  console.error(
-    [
-      violation.message,
-      'Keep packages/contracts package exports, root TS paths, and API Jest mappers exact and aligned.',
-      'Generated contract JS must live under dist/, not tracked src/.',
-    ].join('\n'),
-  );
-}
-
-try {
-  assertRuntimeContextBoundaries(root);
-} catch (error) {
-  failed = true;
-  console.error(error.message);
-}
-
-if (failed) {
-  process.exitCode = 1;
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  runRefactorGuards();
 }
 
 function countLines(value) {

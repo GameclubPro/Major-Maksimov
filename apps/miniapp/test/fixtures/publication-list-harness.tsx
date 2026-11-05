@@ -1,11 +1,59 @@
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import {
+  QueryClient,
+  QueryClientProvider,
+  notifyManager,
+  type InfiniteData,
+} from '@tanstack/react-query';
 import { usePublicationList } from '../../src/features/publications/use-publication-list';
 import { usePublicationCalendar } from '../../src/features/publications/use-publication-calendar';
 import { createEmptyPublicationDraft } from '../../src/features/publications/publication-model';
 import type { ApiTransport } from '../../src/lib/api/transport';
+declare global {
+  interface Window {
+    readPublicationListHarness: () => {
+      pendingNotifications: number;
+      queries: Array<{
+        key: readonly unknown[];
+        status: string;
+        fetchStatus: string;
+        marker: string | null;
+      }>;
+    };
+  }
+}
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+let pendingNotifications = 0;
+// FLAG: Delay only this fixture's notifications beyond the old 50 ms response sleep.
+// Browser assertions must observe the committed state and drain pending notifications.
+notifyManager.setScheduler((callback) => {
+  pendingNotifications += 1;
+  window.setTimeout(() => {
+    try {
+      callback();
+    } finally {
+      pendingNotifications -= 1;
+    }
+  }, 100);
+});
+window.readPublicationListHarness = () => ({
+  pendingNotifications,
+  queries: queryClient
+    .getQueryCache()
+    .getAll()
+    .filter((query) => query.queryKey[0] === 'publications' && query.queryKey[1] === 'list')
+    .map((query) => ({
+      key: query.queryKey,
+      status: query.state.status,
+      fetchStatus: query.state.fetchStatus,
+      marker:
+        queryClient
+          .getQueryData<InfiniteData<{ nextCursor: string | null }>>(query.queryKey)
+          ?.pages.at(-1)?.nextCursor ?? null,
+    })),
+});
 const api: ApiTransport = {
   async request(path, init) {
     const response = await fetch(`/api${path}`, init);
@@ -69,7 +117,7 @@ function Harness() {
   );
 }
 createRoot(document.getElementById('root')!).render(
-  <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+  <QueryClientProvider client={queryClient}>
     <BrowserRouter>
       <Harness />
     </BrowserRouter>

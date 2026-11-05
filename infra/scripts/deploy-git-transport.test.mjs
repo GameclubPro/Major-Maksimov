@@ -162,13 +162,19 @@ remote_exec "$runtime_command"`,
 test('the selected transport spans synchronized planning, immutable image preload and the final executor in order', () => {
   const result = releasePreparationProbe();
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(result.stderr.trim().split('\n'), [
-    'SSH|sync|443',
-    'SSH|image-plan|443',
-    `PULL|api-shared|${'a'.repeat(40)}`,
-    `PULL|admin-static|${'a'.repeat(40)}`,
-    'SSH|runtime|443',
-  ]);
+  assert.deepEqual(
+    result.stderr
+      .trim()
+      .split('\n')
+      .filter((line) => !line.startsWith('Release preparation: ')),
+    [
+      'SSH|sync|443',
+      'SSH|image-plan|443',
+      `PULL|api-shared|${'a'.repeat(40)}`,
+      `PULL|admin-static|${'a'.repeat(40)}`,
+      'SSH|runtime|443',
+    ],
+  );
   assert.equal(result.stdout, '');
 });
 

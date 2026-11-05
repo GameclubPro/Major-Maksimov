@@ -263,7 +263,10 @@ deploy_main main --auto
     assert.equal(result.status, status, result.stderr);
     assert.equal(result.stdout, '');
     assert.deepEqual(
-      result.stderr.trim().split('\n'),
+      result.stderr
+        .trim()
+        .split('\n')
+        .filter((line) => !line.startsWith('Release preparation: ')),
       connectorStages.slice(0, connectorStages.indexOf(event) + 1),
     );
   }

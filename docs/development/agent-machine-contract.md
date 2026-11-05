@@ -83,8 +83,15 @@ A command may pass while overall verification fails its subsequent staged snapsh
 
 Dry-run checks script mappings and migration requirements but starts neither preflight nor tests.
 An execution runs public npm scripts sequentially and preserves the existing staged guards.
+In scoped plans, selected contracts and API validation run before infrastructure checks. The API
+aggregate retains its public generator lock and performs code generation and typechecking once.
+The full aggregate follows the order of the public `npm run check` script.
 These outputs introduce no verification cache and do not replace the commit helper, exact-SHA CI,
 guarded deployment, component manifests or production acceptance.
+
+Preflight checks guarded file sizes through the same limits used by `check:refactor-guards`, before
+expensive validation begins. The full refactor check continues to verify imports, cycles and its
+other invariants during the submission aggregate.
 
 ## Focused Checks Before Submission
 

@@ -76,6 +76,7 @@ function greenBase(cwd, base, { policy = baselinePolicy({ cwd, sha: base }), id 
   );
   const certificate = createMainGreenCertificate({
     mode: 'full',
+    staticInfra: true,
     baselineProof: { context: context(base, id), policy },
   });
   return {
@@ -136,6 +137,28 @@ test('Required validates its frozen baseline when a closer run becomes green out
   });
 });
 
+test('a compatible green baseline preserves scoped host infrastructure coverage through docs follow-ups', async () => {
+  await repository(async ({ cwd, base, commit }) => {
+    const host = commit(['infra/scripts/vps-runtime-rollback.sh']);
+    const sha = commit(['docs/followup.md']);
+    const good = greenBase(cwd, base);
+    const github = githubEvidence({ runs: good.runs, artifacts: [good.artifact] });
+    const plan = await mainPlan(cwd, sha, host, github);
+    assert.equal(plan.base, base);
+    assert.equal(plan.mode, 'scoped');
+    assert.equal(plan.staticInfra, true);
+    assert.deepEqual(
+      Object.entries(plan.lanes)
+        .filter(([, enabled]) => enabled)
+        .map(([lane]) => lane),
+      ['static'],
+    );
+    assert.deepEqual(plan.dockerComponents, []);
+    const verified = await mainPlan(cwd, sha, host, github, { frozenProof: plan.baselineProof });
+    assert.deepEqual(verified, plan);
+  });
+});
+
 test('policy bootstrap, missing certificates and unavailable GitHub evidence retain full validation', async () => {
   await repository(async ({ cwd, base, commit }) => {
     const sha = commit(['docs/followup.md']);
@@ -151,6 +174,7 @@ test('policy bootstrap, missing certificates and unavailable GitHub evidence ret
     ]) {
       const plan = await mainPlan(cwd, sha, base, github);
       assert.equal(plan.mode, 'full');
+      assert.equal(plan.staticInfra, true);
       assert.deepEqual(plan.dockerComponents, ['eraser', 'api', 'miniapp', 'admin']);
       assert.equal(plan.baselineProof.base, null);
     }
@@ -162,6 +186,7 @@ test('policy bootstrap, missing certificates and unavailable GitHub evidence ret
       githubEvidence({ runs: good.runs, artifacts: [good.artifact] }),
     );
     assert.equal(plan.mode, 'full');
+    assert.equal(plan.staticInfra, true);
     assert.equal(plan.baselineProof.base, null);
   });
 });
@@ -291,9 +316,14 @@ test('manual preparation publishes only from main and cannot produce a baseline 
 
 test('certificate creation binds exact source, run attempt, policy and complete plan digest', () => {
   const policy = { id: 'policy', fingerprint: 'a'.repeat(64) };
-  const plan = { mode: 'full', baselineProof: { context: context('a'.repeat(40)), policy } };
+  const plan = {
+    mode: 'full',
+    staticInfra: true,
+    baselineProof: { context: context('a'.repeat(40)), policy },
+  };
   const certificate = createMainGreenCertificate(plan);
   assert.equal(certificate.planDigest, evidenceDigest(plan));
+  assert.notEqual(certificate.planDigest, evidenceDigest({ ...plan, staticInfra: false }));
   assert.equal(certificate.context.runAttempt, 1);
   assert.deepEqual(certificate.policy, policy);
   assert.equal(
