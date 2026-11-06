@@ -100,6 +100,9 @@ describe('ProfanityDeleteGuardService', () => {
 
   it.each([
     'Спасибо, всё исправил',
+    'blyaha na remne',
+    'В зоопарке живет п.е.т.у.х.',
+    'В детском центре а у т и с т пишет рассказ.',
     'Лечение педикулеза: как удалить гнид',
     'Открыт набор в арт-студию. ЧЕТВЕРГ: 16:00 - группа 3-6 л. для детей',
     'Занятия для детей 3-6лет',
@@ -113,6 +116,15 @@ describe('ProfanityDeleteGuardService', () => {
     });
     expect(harness.immunity.consumeForMessage).not.toHaveBeenCalled();
   });
+
+  it.each(['отъебись', 'спиздил', 'Питомник продаёт щенков. Ты сука!'])(
+    'keeps corrected detection actionable at dispatch: %s',
+    async (text) => {
+      const harness = buildHarness();
+      harness.maxClient.getExactMessageRow.mockResolvedValue(buildMessage(text));
+      await expect(harness.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+    },
+  );
 
   it('accepts edited text that still violates current policy', async () => {
     const harness = buildHarness();
