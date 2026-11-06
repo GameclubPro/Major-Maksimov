@@ -1,4 +1,4 @@
-export const PROFANITY_DETECTOR_VERSION = 'profanity-structured-v3';
+export const PROFANITY_DETECTOR_VERSION = 'profanity-structured-v4';
 
 export const PROFANITY_SENSITIVITIES = ['CORE_ONLY', 'BALANCED', 'STRICT'] as const;
 

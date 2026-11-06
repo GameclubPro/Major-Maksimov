@@ -8,6 +8,41 @@ export type ProfanitySourceCandidate = {
   rawEnd?: number;
 };
 
+export function getProfanityCandidateContext(
+  source: string,
+  candidate: ProfanitySourceCandidate,
+  canonicalToken: string,
+  normalize: (text: string) => string,
+): string {
+  if (candidate.rawIndex === undefined || candidate.rawEnd === undefined) return normalize(source);
+  const raw = source.slice(candidate.rawIndex, candidate.rawEnd);
+  const leading = raw.match(/^[^\p{L}\p{N}]*/u)?.[0] ?? '';
+  const trailing = raw.match(/[^\p{L}\p{N}]*$/u)?.[0] ?? '';
+  // FLAG: Address evidence belongs to the original occurrence. Replace only its spelling,
+  // retaining sentence boundaries; dots inside a split insult are not sentence boundaries.
+  return [
+    normalize(source.slice(0, candidate.rawIndex) + leading),
+    canonicalToken,
+    normalize(trailing + source.slice(candidate.rawEnd)),
+  ].join(' ');
+}
+
+export function isEmbeddedShortProfanityFragment(
+  source: string,
+  candidate: ProfanitySourceCandidate,
+): boolean {
+  if (!candidate.joined || candidate.rawIndex === undefined || candidate.rawEnd === undefined) {
+    return false;
+  }
+  const before = source
+    .slice(0, candidate.rawIndex)
+    .match(/(?:^|[^\p{L}\p{N}])(\p{L})[\s._*-]+$/u)?.[1];
+  const after = source.slice(candidate.rawEnd).match(/^[\s._*-]+(\p{L})(?![\p{L}\p{N}])/u)?.[1];
+  // FLAG: Short forms must not match inside «х л е б у» / «т р е б у е т с я».
+  // Ordinary one-letter words still delimit «я е б у» and «е б у я».
+  return [before, after].some((letter) => letter && !/^[яиавксоуiavksou]$/iu.test(letter));
+}
+
 const EMAIL_PATTERN =
   /(?<![\p{L}\p{N}._%+-])[a-z0-9._%+-]{1,64}@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?![\p{L}\p{N}-])/giu;
 const LITERAL_LATIN_TERM =
