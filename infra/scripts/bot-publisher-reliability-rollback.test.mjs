@@ -164,6 +164,23 @@ const protectedSources = [
   ],
   ['apps/api/src/common/group-command-notice-delivery.ts', 'await revalidateRoute?.()'],
   [
+    'apps/api/src/admin/admin-manual-command.queue.ts',
+    "export const ADMIN_MANUAL_COMMAND_QUEUE = 'admin-manual-commands';",
+  ],
+  [
+    'apps/api/src/admin/admin-manual-command.processor.ts',
+    'await this.manualModerationService.processManualModerationFanoutJob(job.data);',
+  ],
+  ['apps/api/src/admin/admin-manual-fanout.queue.ts', '| AdminManualGroupModerationCommandJob;'],
+  [
+    'apps/api/src/admin/admin-manual-fanout.processor.ts',
+    'await this.manualModerationService.processManualModerationFanoutJob(job.data);',
+  ],
+  [
+    'apps/api/src/admin/admin.module.ts',
+    '...(roleRunsAction(getAppRole()) ? [AdminManualCommandProcessor] : [])',
+  ],
+  [
     'apps/api/src/admin/admin-manual-moderation-runtime.ts',
     'this.context.assertManualGroupCommandSuccessNoticeAuthority(',
   ],
@@ -174,6 +191,27 @@ const protectedSources = [
   [
     'apps/api/src/moderation/night-mode-transition-delivery.service.ts',
     'await revalidateRoute?.()',
+  ],
+  ['apps/api/src/scripts/legacy-recovery-live-registry.ts', "'admin-manual-commands',"],
+  [
+    'infra/scripts/source-abandonment-session-queues.cjs',
+    'function isSupportedSourceAbandonmentQueueInventory(queueNames)',
+  ],
+  [
+    'infra/scripts/source-abandonment-session-host.mjs',
+    'isSupportedSourceAbandonmentQueueInventory(queueNames),',
+  ],
+  [
+    'infra/scripts/source-abandonment-session-inventory.mjs',
+    'isSupportedSourceAbandonmentQueueInventory(queueNames),',
+  ],
+  [
+    'infra/scripts/source-abandonment-session-protocol.mjs',
+    'value.queueCount === value.queues.length',
+  ],
+  [
+    'infra/scripts/source-abandonment-session-journal.mjs',
+    'baseline.queueCount === baseline.queues.length',
   ],
 ];
 
@@ -301,6 +339,76 @@ const unbanAttemptMutations = [
   },
 ];
 
+const manualReaderMutations = [
+  {
+    path: 'apps/api/src/admin/admin-manual-fanout.processor.ts',
+    name: 'legacy processor queue import points at the dedicated namespace module',
+    mutate: (source) =>
+      source.replace("from './admin-manual-fanout.queue'", "from './admin-manual-command.queue'"),
+  },
+  {
+    path: 'apps/api/src/admin/admin-manual-moderation-runtime.ts',
+    name: 'legacy reader loses the command executor branch but retains its payload and notice markers',
+    mutate: (source) =>
+      source.replace(
+        /if \(job\.kind === 'manual_group_moderation_command'\) \{\s*await this\.processManualGroupModerationCommandJob\(job\);\s*return;\s*\}/u,
+        '',
+      ),
+  },
+  {
+    path: 'apps/api/src/admin/admin-manual-command.processor.ts',
+    name: 'new command processor listens to the legacy namespace',
+    mutate: (source) =>
+      source.replace(
+        '@Processor(ADMIN_MANUAL_COMMAND_QUEUE,',
+        '@Processor(ADMIN_MANUAL_FANOUT_QUEUE,',
+      ),
+  },
+  ...['command', 'fanout'].map((kind) => ({
+    path: `apps/api/src/admin/admin-manual-${kind}.processor.ts`,
+    name: `${kind} processor exceeds the shared manual concurrency cap`,
+    mutate: (source) => source.replace('concurrency: 1,', 'concurrency: 2,'),
+  })),
+  {
+    path: 'apps/api/src/admin/admin-manual-command.processor.ts',
+    name: 'command handler call survives only in a comment',
+    mutate: (source) =>
+      source.replace(
+        'await this.manualModerationService.processManualModerationFanoutJob(job.data);',
+        'return; // await this.manualModerationService.processManualModerationFanoutJob(job.data);',
+      ),
+  },
+  {
+    path: 'apps/api/src/admin/admin-manual-command.processor.ts',
+    name: 'command processor rejects the persisted command kind',
+    mutate: (source) =>
+      source.replace(
+        "job.data.kind !== 'manual_group_moderation_command'",
+        "job.data.kind !== 'manual_ban_fanout'",
+      ),
+  },
+  {
+    path: 'apps/api/src/admin/admin-manual-fanout.processor.ts',
+    name: 'legacy reader silently drops retained group commands',
+    mutate: (source) =>
+      source.replace(
+        'await this.manualModerationService.processManualModerationFanoutJob(job.data);',
+        "if (job.data.kind === 'manual_group_moderation_command') return;\n    await this.manualModerationService.processManualModerationFanoutJob(job.data);",
+      ),
+  },
+  ...['COMMAND', 'FANOUT'].map((kind) => ({
+    path: 'apps/api/src/admin/admin.module.ts',
+    name: `${kind} queue registration is missing despite retained imports`,
+    mutate: (source) => source.replace(`...registerRuntimeQueues(ADMIN_MANUAL_${kind}_QUEUE),`, ''),
+  })),
+  {
+    path: 'apps/api/src/admin/admin.module.ts',
+    name: 'legacy processor is imported but not registered in action',
+    mutate: (source) =>
+      source.replace('...(roleRunsAction(getAppRole()) ? [AdminManualFanoutProcessor] : []),', ''),
+  },
+];
+
 test('both API rollback paths retain shared member and immutable Publisher effect protections', () => {
   const fixture = mkdtempSync(resolve(tmpdir(), 'maxim-bot-publisher-rollback-'));
   const git = (...args) =>
@@ -381,7 +489,7 @@ test('both API rollback paths retain shared member and immutable Publisher effec
       assert.equal(check(commit()).status, 1, `Rollback erased ${guard}`);
       writeFileSync(resolve(fixture, path), source);
     }
-    for (const { path, name, mutate } of unbanAttemptMutations) {
+    for (const { path, name, mutate } of [...unbanAttemptMutations, ...manualReaderMutations]) {
       const source = readFileSync(resolve(root, path), 'utf8');
       const changed = mutate(source);
       assert.notEqual(changed, source, `Fixture mutation had no effect: ${name}`);

@@ -51,6 +51,7 @@ export const LEGACY_RECOVERY_LIVE_QUEUE_NAMES = Object.freeze([
   'marketplace-publisher-access',
   'admin-managed-entities-refresh',
   'admin-manual-fanout',
+  'admin-manual-commands',
   'admin-super-ban',
   'admin-suggestion-delivery',
   'message-retention',

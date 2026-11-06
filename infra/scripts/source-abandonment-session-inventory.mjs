@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import sessionQueues from './source-abandonment-session-queues.cjs';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalLegacyColdDigest as canonical } from './legacy-cold-store-adapter.mjs';
@@ -24,6 +25,7 @@ import {
 } from './webhook-frozen-ordered-anchor-inventory.mjs';
 
 const hash = /^[a-f0-9]{64}$/u;
+const { isSupportedSourceAbandonmentQueueInventory } = sessionQueues;
 const encode = (value) => Buffer.from(`${JSON.stringify(value)}\n`);
 const bytesDigest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const fact = (value, code = 'session_inventory_refused') => {
@@ -444,9 +446,7 @@ export async function planSourceAbandonmentSessionChildren({
       new Set(majorBotIds).size === majorBotIds.length &&
       /^[a-zA-Z0-9_-]{1,128}$/u.test(publisherBotId ?? '') &&
       !majorBotIds.includes(publisherBotId) &&
-      Array.isArray(queueNames) &&
-      queueNames.length === 53 &&
-      new Set(queueNames).size === 53,
+      isSupportedSourceAbandonmentQueueInventory(queueNames),
     'session_inventory_plan_context_refused',
   );
   const children = [],

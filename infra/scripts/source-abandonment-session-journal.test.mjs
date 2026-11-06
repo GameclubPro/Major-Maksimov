@@ -167,13 +167,16 @@ function fixture(t, options = {}) {
     version: 1,
     complete: true,
     registryDigest: plan.registryDigest,
-    queueCount: 53,
+    queueCount: options.legacyQueues ? 53 : 54,
     ownerAbsent: true,
     queues: Array.from({ length: 53 }, (_, index) => ({
       name: `queue_${index}`,
       paused: index % 3 === 0,
     })),
   };
+  if (!options.legacyQueues)
+    queueBaseline.queues.push({ name: 'admin-manual-commands', paused: true });
+  if (options.adjustQueueBaseline) options.adjustQueueBaseline(queueBaseline);
   const admission = proof({ admission: true, queueBaseline });
   const seed = () => store.seed(plan, admission);
   if (options.seed !== false) seed();
@@ -202,8 +205,8 @@ function fixture(t, options = {}) {
   const drain = () =>
     store.recordPreDrain(store.read().digest, {
       preDrainInventory: proof({
-        queueCount: 53,
-        pausedCount: 53,
+        queueCount: queueBaseline.queueCount,
+        pausedCount: queueBaseline.queueCount,
         activeCount: 0,
         queueWorkDrained: true,
         ownerNonce: plan.controllerNonce,
@@ -868,12 +871,12 @@ test('seed cannot refer to an unstored admission or substitute byte-ordered sele
   const definition = f.plan.children[0];
   assert.notEqual(digest(definition.selection), digest(canonical(definition.selection)));
 });
-test('durable queue baseline precedes pausing and all 53 queues must be drained', (t) => {
+test('durable queue baseline precedes pausing and all 54 queues must be drained', (t) => {
   const f = fixture(t);
   f.store.beginStopping(f.store.read().digest);
   assert.equal(
     f.store.readEvidence(f.store.read().journal.proofs.hostAdmission).queueBaseline.queueCount,
-    53,
+    54,
   );
   assert.throws(() => f.store.markStopped(f.store.read().digest, f.stopProofs()));
   assert.throws(
@@ -893,6 +896,75 @@ test('durable queue baseline precedes pausing and all 53 queues must be drained'
   f.store.markStopped(f.store.read().digest, f.stopProofs());
   assert.equal(f.store.read().journal.phase, 'STOPPED');
 });
+test('retained 53-queue journal and evidence reopen without byte or digest rewrites', (t) => {
+  const f = fixture(t, { legacyQueues: true });
+  const journalPath = join(f.directory, journalName);
+  const evidencePath = join(f.directory, 'evidence', `${f.admission}.json`);
+  const originalJournal = readFileSync(journalPath);
+  const originalEvidence = readFileSync(evidencePath);
+  const before = f.store.read();
+  const reopened = createSourceAbandonmentSessionStore({ directory: f.directory, assertLock() {} });
+  const readback = reopened.read();
+  assert.equal(readback.digest, before.digest);
+  assert.deepEqual(readFileSync(journalPath), originalJournal);
+  assert.deepEqual(readFileSync(evidencePath), originalEvidence);
+  const baseline = reopened.readEvidence(readback.journal.proofs.hostAdmission).queueBaseline;
+  assert.equal(baseline.queueCount, 53);
+  assert.deepEqual(baseline, f.queueBaseline);
+  assert.equal(
+    baseline.queues.some(({ name }) => name === 'admin-manual-commands'),
+    false,
+  );
+  f.stop();
+  assert.equal(f.store.read().journal.phase, 'STOPPED');
+  assert.deepEqual(readFileSync(evidencePath), originalEvidence);
+});
+for (const [label, adjustQueueBaseline] of [
+  [
+    '52 names',
+    (value) => {
+      value.queues = value.queues.slice(0, 52);
+      value.queueCount = 52;
+    },
+  ],
+  [
+    '55 names',
+    (value) => {
+      value.queues.push({ name: 'unreviewed-extra', paused: false });
+      value.queueCount = 55;
+    },
+  ],
+  [
+    '54 without command',
+    (value) => {
+      value.queues.at(-1).name = 'unreviewed-replacement';
+    },
+  ],
+  [
+    '53 retaining command',
+    (value) => {
+      value.queues.splice(0, 1);
+      value.queueCount = 53;
+    },
+  ],
+  [
+    'duplicate',
+    (value) => {
+      value.queues[0].name = value.queues[1].name;
+    },
+  ],
+  [
+    'count drift',
+    (value) => {
+      value.queueCount = 53;
+    },
+  ],
+])
+  test(`journal refuses unsupported queue baseline ${label}`, (t) => {
+    const f = fixture(t, { seed: false, adjustQueueBaseline });
+    assert.throws(f.seed, /session_/u);
+    assert.equal(f.store.read().journal, null);
+  });
 test('blocked attempted reconciliation reserves bounded materialization without permitting new inventory', (t) => {
   const f = fixture(t);
   f.stop();

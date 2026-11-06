@@ -1,4 +1,5 @@
 import { assertLegacyColdStopped } from './legacy-cold-protocol.mjs';
+import sessionQueues from './source-abandonment-session-queues.cjs';
 import { legacyColdDigest } from './legacy-cold-journal.mjs';
 import { canonicalLegacyColdDigest } from './legacy-cold-store-adapter.mjs';
 import { runSourceAbandonmentSessionChild } from './source-abandonment-session-child.mjs';
@@ -25,6 +26,7 @@ export const SOURCE_ABANDONMENT_MATERIALIZATION_RESERVATION = Object.freeze({
   materializationPages: 200,
 });
 const workKeys = Object.keys(SOURCE_ABANDONMENT_COLLECTOR_RESERVATION);
+const { isSupportedSourceAbandonmentQueueInventory } = sessionQueues;
 const hash = /^[a-f0-9]{64}$/u;
 const parentMethods = [
   'inspectRuntime',
@@ -170,16 +172,15 @@ function queueBaselineProof(value, manifest) {
       value.complete === true &&
       value.registryDigest === manifest.registryDigest &&
       value.ownerAbsent === true &&
-      value.queueCount === 53 &&
       Array.isArray(value.queues) &&
-      value.queues.length === 53 &&
+      value.queueCount === value.queues.length &&
       value.queues.every(
         (row) =>
           typeof row.name === 'string' &&
           /^[a-z0-9][a-z0-9:_-]{0,127}$/u.test(row.name) &&
           typeof row.paused === 'boolean',
       ) &&
-      new Set(value.queues.map((row) => row.name)).size === 53,
+      isSupportedSourceAbandonmentQueueInventory(value.queues.map((row) => row.name)),
     'session_queue_baseline_unproved',
   );
   return value;
@@ -300,7 +301,7 @@ function result(journal, extra = {}) {
   };
 }
 
-// FLAG: All 53 original pause states are durable before the first pause; the full
+// FLAG: All original pause states are durable before the first pause; the full
 // frozen traversal must match the admitted finite authority plan before any child.
 export async function prepareSourceAbandonmentSession({
   store,

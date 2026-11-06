@@ -343,6 +343,33 @@ test('planner creates exact finite children in sequential stock admission calls'
   assert.ok(result.admissionDurationMs >= 0);
 });
 
+test('planner accepts current and retained source inventories without changing their names', async (t) => {
+  const enumeration = writeWalk(t, [row(1)]).read();
+  for (const names of [queueNames, queueNames.filter((name) => name !== 'admin-manual-commands')]) {
+    const h = planner(enumeration);
+    h.options.queueNames = Object.freeze([...names]);
+    const result = await planSourceAbandonmentSessionChildren(h.options);
+    assert.equal(result.feasible, true);
+    assert.equal(result.children.length, 1);
+    assert.deepEqual(h.options.queueNames, names);
+  }
+});
+test('unsupported queue inventory refuses before any admission call or proof', async (t) => {
+  const enumeration = writeWalk(t, [row(1)]).read();
+  for (const names of [
+    queueNames.slice(0, 52),
+    [...queueNames, 'unreviewed-extra'],
+    queueNames.map((name) => (name === 'admin-manual-commands' ? 'unreviewed-replacement' : name)),
+    queueNames.filter((name) => name !== 'message-retention'),
+    queueNames.map((name, index) => (index === 0 ? queueNames[1] : name)),
+  ]) {
+    const h = planner(enumeration);
+    h.options.queueNames = names;
+    await assert.rejects(planSourceAbandonmentSessionChildren(h.options), /context_refused/u);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.proofs.length, 0);
+  }
+});
 test('planner retains exact online admission proofs when active namespace counts move', async (t) => {
   const enumeration = writeWalk(t, [row(1)]).read();
   const h = planner(enumeration, (value) => {

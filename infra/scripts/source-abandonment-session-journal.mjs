@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
+import sessionQueues from './source-abandonment-session-queues.cjs';
 
 export const SOURCE_ABANDONMENT_SESSION_DIRECTORY =
   '/var/lib/maxim-deploy/source-abandonment-session';
@@ -45,6 +46,7 @@ export const SOURCE_ABANDONMENT_SESSION_LIMITS = Object.freeze({
   materializationPages: maximumChildren * 200,
 });
 const limits = SOURCE_ABANDONMENT_SESSION_LIMITS;
+const { QUEUE_LIMITS, isSupportedSourceAbandonmentQueueInventory } = sessionQueues;
 const hashPattern = /^[0-9a-f]{64}$/u;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -622,13 +624,13 @@ function validateEvidence(journal, read) {
     baseline?.version === 1 &&
       baseline.complete === true &&
       baseline.registryDigest === journal.manifest.registryDigest &&
-      baseline.queueCount === 53 &&
       baseline.ownerAbsent === true,
     'session_queue_baseline_required',
   );
-  boundedArray(baseline.queues, 53, 53);
+  boundedArray(baseline.queues, QUEUE_LIMITS.queueCount, QUEUE_LIMITS.legacyQueueCount);
   fail(
-    new Set(baseline.queues.map((row) => row.name)).size === 53,
+    baseline.queueCount === baseline.queues.length &&
+      isSupportedSourceAbandonmentQueueInventory(baseline.queues.map((row) => row?.name)),
     'session_queue_baseline_required',
   );
   for (const row of baseline.queues) {

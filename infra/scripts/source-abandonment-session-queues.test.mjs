@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,14 +16,16 @@ import stock from './webhook-queue-rollout-control.cjs';
 const {
   CONNECTION_OPTIONS,
   QUEUE_LIMITS,
+  isSupportedSourceAbandonmentQueueInventory,
   buildQueueReadScripts,
   createQueueClient,
   createSessionQueueAdapters,
 } = queuesModule;
-const queueNames = [
+const legacyQueueNames = [
   ...stock.WEBHOOK_QUEUE_NAMES,
   ...Array.from({ length: 29 }, (_, i) => `session-aux-${i}`),
 ];
+const queueNames = [...legacyQueueNames, 'admin-manual-commands'];
 const nonce = '11111111-1111-4111-8111-111111111111';
 const connectionName = `maxim-source-session:${nonce}`;
 const manifest = {
@@ -34,7 +36,7 @@ const manifest = {
 };
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-function fakeTransport() {
+function fakeTransport(names = queueNames) {
   const redis = new EventEmitter();
   redis.status = 'ready';
   redis.options = { ...CONNECTION_OPTIONS, connectionName };
@@ -47,7 +49,7 @@ function fakeTransport() {
     connections: [],
     readiness: [],
     owner: null,
-    rows: queueNames.map((name) => ({ name, paused: false, active: 0 })),
+    rows: names.map((name) => ({ name, paused: false, active: 0 })),
   };
   class FakeQueue extends EventEmitter {
     constructor(name, options) {
@@ -96,8 +98,8 @@ function fakeTransport() {
   const ready = () => state.readiness.forEach((resolve) => resolve());
   return { redis, state, FakeQueue, ready };
 }
-function fakeAdapter({ previous = null } = {}) {
-  const rows = queueNames.map((name, index) => ({ name, paused: index === 24, active: 0 }));
+function fakeAdapter({ previous = null, names = queueNames } = {}) {
+  const rows = names.map((name, index) => ({ name, paused: index === 24, active: 0 }));
   const events = [],
     state = { owner: null, previousPresent: false, time: 0, reads: 0, closeCount: 0 };
   let saved = previous;
@@ -161,7 +163,7 @@ function fakeAdapter({ previous = null } = {}) {
   };
   const adapters = createSessionQueueAdapters({
     redisUrl: 'redis://127.0.0.1:1',
-    queueNames,
+    queueNames: names,
     manifest,
     connectionLedger: ledger,
     openClient: async () => client,
@@ -185,14 +187,50 @@ test('registry is host supplied, complete, bounded and includes the exact stock 
   ])
     assert.throws(() => buildQueueReadScripts(names), /registry/u);
 });
-test('all 53 readiness acknowledgements precede requested operations on one shared connection', async () => {
+test('only the current command inventory and retained legacy inventory are supported without mutation', () => {
+  for (const names of [legacyQueueNames, queueNames]) {
+    const immutable = Object.freeze([...names]);
+    assert.equal(isSupportedSourceAbandonmentQueueInventory(immutable), true);
+    assert.deepEqual(immutable, names);
+    assert.doesNotThrow(() => buildQueueReadScripts(immutable));
+  }
+  const sparse = [...queueNames];
+  delete sparse[0];
+  for (const names of [
+    legacyQueueNames.slice(1),
+    [...queueNames, 'unsupported-extra'],
+    [...legacyQueueNames, 'unsupported-replacement'],
+    queueNames.slice(1),
+    queueNames.map((name, index) => (index === 0 ? queueNames[1] : name)),
+    sparse,
+    null,
+  ])
+    assert.equal(isSupportedSourceAbandonmentQueueInventory(names), false);
+});
+test('current declared registry includes the dedicated command queue in all 54 session reads', () => {
+  const text = readFileSync(
+    new URL('../../apps/api/src/scripts/legacy-recovery-live-registry.ts', import.meta.url),
+    'utf8',
+  );
+  const declaration = text.match(
+    /export const LEGACY_RECOVERY_LIVE_QUEUE_NAMES = Object\.freeze\(\[([\s\S]*?)\] as const\);/u,
+  );
+  assert(declaration);
+  const current = [...declaration[1].matchAll(/'([a-z0-9-]+)'/gu)].map((match) => match[1]);
+  assert.equal(current.length, 54);
+  assert.equal(current.filter((name) => name === 'admin-manual-commands').length, 1);
+  const scripts = buildQueueReadScripts(current);
+  assert.match(scripts.queues, /'admin-manual-commands'/u);
+  assert.match(scripts.fence, /return \{1,24,paused,active/u);
+});
+test('all 54 readiness acknowledgements precede requested operations on one shared connection', async () => {
   const f = fakeTransport(),
     client = createQueueClient(f.redis, f.FakeQueue, { queueNames });
   const mutation = client.pause('session-aux-1');
-  f.state.readiness.slice(0, 52).forEach((resolve) => resolve());
+  f.state.readiness.slice(0, queueNames.length - 1).forEach((resolve) => resolve());
   await delay(10);
   assert.deepEqual(f.state.calls, []);
-  assert.equal(f.state.connections.length, 53);
+  assert.equal(f.state.connections.length, 54);
   assert(f.state.connections.every((connection) => connection === f.redis));
   f.ready();
   await mutation;
@@ -307,6 +345,41 @@ test('durable identity and old-client absence precede all mutations, original au
   assert.equal(f.rows.filter((row) => row.paused).length, 1);
   await f.adapters.close();
 });
+test('retained 53-queue baselines restore exact original pause states without adding the command queue', async () => {
+  const f = fakeAdapter({ names: legacyQueueNames });
+  const baseline = await f.adapters.inspectQueueBaseline(manifest);
+  const before = JSON.stringify(baseline);
+  assert.equal(baseline.queueCount, 53);
+  assert.equal(
+    baseline.queues.some(({ name }) => name === 'admin-manual-commands'),
+    false,
+  );
+  await f.adapters.preDrainRuntime(manifest, baseline);
+  await f.adapters.resumeWebhookQueues(manifest);
+  await f.adapters.restoreAuxiliaryQueues(manifest, baseline);
+  assert.equal(JSON.stringify(baseline), before);
+  assert.deepEqual(
+    f.rows.map(({ name, paused }) => ({ name, paused })),
+    baseline.queues,
+  );
+  assert.equal(
+    f.events.some((event) => event.includes('admin-manual-commands')),
+    false,
+  );
+  await f.adapters.close();
+});
+test('a current 54-queue adapter refuses a baseline with the new queue dropped', async () => {
+  const f = fakeAdapter();
+  const baseline = await f.adapters.inspectQueueBaseline(manifest);
+  const changed = {
+    ...baseline,
+    queueCount: 53,
+    queues: baseline.queues.filter(({ name }) => name !== 'admin-manual-commands'),
+  };
+  await assert.rejects(f.adapters.preDrainRuntime(manifest, changed), /baseline_changed/u);
+  assert.equal(f.events.includes('pause24'), false);
+  await f.adapters.close();
+});
 test('old live connection and lost ledger acknowledgement prevent all queue mutations', async () => {
   const f = fakeAdapter({ previous: { clientId: 7, connectionName } });
   f.state.previousPresent = true;
@@ -351,7 +424,7 @@ test('baseline drift, foreign ownership and lost original pause block restoratio
   );
   await f.adapters.close();
 });
-test('stop-first containment can reassert all 53 after partial auxiliary restoration', async () => {
+test('stop-first containment can reassert all 54 after partial auxiliary restoration', async () => {
   const f = fakeAdapter(),
     baseline = await f.adapters.inspectQueueBaseline(manifest);
   await f.adapters.preDrainRuntime(manifest, baseline);
@@ -422,6 +495,16 @@ test(
     const q = new Queue('session-aux-1', { connection: { url: redisUrl }, skipMetasUpdate: true });
     t.after(() => q.close());
     await q.add('retained', { fixture: 'private' }, { jobId: 'retained-job' });
+    const commands = new Queue('admin-manual-commands', {
+      connection: { url: redisUrl },
+      skipMetasUpdate: true,
+    });
+    t.after(() => commands.close());
+    await commands.add(
+      'retained-command',
+      { fixture: 'private' },
+      { jobId: 'retained-command-job' },
+    );
     let saved = null;
     const ledger = {
       read: () => saved,
@@ -434,12 +517,16 @@ test(
     const first = createSessionQueueAdapters(options);
     t.after(() => first.close());
     const baseline = await first.inspectQueueBaseline(manifest);
+    assert.equal(baseline.queueCount, 54);
+    assert.equal(baseline.queues.filter(({ name }) => name === 'admin-manual-commands').length, 1);
     const collision = createSessionQueueAdapters(options);
     t.after(() => collision.close());
     await assert.rejects(collision.inspectQueueBaseline(manifest), /failed_closed/u);
     assert.equal(await admin.get(stock.WEBHOOK_ROLLOUT_OWNER_KEY), null);
     const result = await first.preDrainRuntime(manifest, baseline);
     assert.equal(result.queueWorkDrained, true);
+    assert.equal(await commands.isPaused(), true);
+    assert.equal((await commands.getJob('retained-command-job')).id, 'retained-command-job');
     assert.equal((await q.getJob('retained-job')).id, 'retained-job');
     assert.equal(await q.getWaitingCount(), 1);
     const firstId = saved.clientId;
@@ -454,6 +541,8 @@ test(
     assert.equal(await admin.get(stock.WEBHOOK_ROLLOUT_OWNER_KEY), null);
     assert.equal(await admin.hget('bull:session-aux-0:meta', 'paused'), '1');
     assert.equal(await q.isPaused(), false);
+    assert.equal(await commands.isPaused(), false);
+    assert.equal((await commands.getJob('retained-command-job')).id, 'retained-command-job');
     assert.equal((await q.getJob('retained-job')).id, 'retained-job');
     // A real active handler prevents zero-count acceptance until it finishes normally.
     let release, began;

@@ -81,6 +81,8 @@ import { MaxFixedModeratorAssignmentService } from '../max/max-fixed-moderator-a
 import { ADMIN_MANAGED_ENTITIES_REFRESH_QUEUE } from './admin-managed-entities-refresh.queue';
 import { AdminManualFanoutProcessor } from './admin-manual-fanout.processor';
 import { ADMIN_MANUAL_FANOUT_QUEUE } from './admin-manual-fanout.queue';
+import { AdminManualCommandProcessor } from './admin-manual-command.processor';
+import { ADMIN_MANUAL_COMMAND_QUEUE } from './admin-manual-command.queue';
 import { AdminManualMessageCleanupService } from './admin-manual-message-cleanup.service';
 import { AdminSuggestionDeliveryProcessor } from './admin-suggestion-delivery.processor';
 import { ADMIN_SUGGESTION_DELIVERY_QUEUE } from './admin-suggestion-delivery.queue';
@@ -216,6 +218,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     MessageRetentionStateModule,
     ...registerRuntimeQueues(ADMIN_MANAGED_ENTITIES_REFRESH_QUEUE),
     ...registerRuntimeQueues(ADMIN_MANUAL_FANOUT_QUEUE),
+    ...registerRuntimeQueues(ADMIN_MANUAL_COMMAND_QUEUE),
     ...registerRuntimeQueues(ADMIN_SUPER_BAN_QUEUE),
     ...registerRuntimeQueues(ADMIN_SUGGESTION_DELIVERY_QUEUE),
     ...registerRuntimeQueues(VK_PARSING_SYNC_QUEUE),
@@ -425,6 +428,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     ...(roleRunsPublisher(getAppRole()) ? [VkParsingPublisherProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminManagedEntitiesRefreshProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminManualFanoutProcessor] : []),
+    ...(roleRunsAction(getAppRole()) ? [AdminManualCommandProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminSuperBanProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminSuggestionDeliveryProcessor] : []),
     ...(roleRunsAction(getAppRole()) ? [AdminSuggestionDeliveryRecoveryService] : []),

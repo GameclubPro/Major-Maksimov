@@ -841,6 +841,7 @@ queues=(
   max-chat-admin-roster-sync
   admin-suggestion-delivery
   admin-manual-fanout
+  admin-manual-commands
   admin-super-ban
   publisher-binding-refresh
   publisher-chat-comments

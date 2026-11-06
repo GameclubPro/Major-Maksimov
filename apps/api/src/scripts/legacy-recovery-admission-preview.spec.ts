@@ -258,7 +258,7 @@ describe('live read-only admission preview', () => {
       selectionSha256: legacyRecoveryLiveDigest(parsed.selection),
       issues: [],
     });
-    expect(result.queueCounts).toHaveLength(53);
+    expect(result.queueCounts).toHaveLength(LEGACY_RECOVERY_LIVE_QUEUE_NAMES.length);
     expect(redis.eval_ro).toHaveBeenCalledTimes(1);
     expect(mockSql).toHaveBeenCalledTimes(1);
     expect(mockSql.mock.calls[0][0]).toBe(tx);
@@ -266,7 +266,7 @@ describe('live read-only admission preview', () => {
     expect(mockSql.mock.calls[0][1]).not.toHaveProperty('binding');
     expect(mockSql.mock.calls[0][2]).toMatchObject({
       pages: LEGACY_RECOVERY_LIVE_BUDGET.pages - 1,
-      probes: LEGACY_RECOVERY_LIVE_BUDGET.probes - 53 * 8,
+      probes: LEGACY_RECOVERY_LIVE_BUDGET.probes - LEGACY_RECOVERY_LIVE_QUEUE_NAMES.length * 8,
     });
     const [script, keyCount, names] = redis.eval_ro.mock.calls[0];
     expect(keyCount).toBe(0);

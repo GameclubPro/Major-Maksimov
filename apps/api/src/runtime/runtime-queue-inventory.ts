@@ -19,6 +19,7 @@ export const AUXILIARY_QUEUE_NAMES = [
   'night-mode-transitions',
   'max-chat-admin-roster-sync',
   'admin-manual-fanout',
+  'admin-manual-commands',
   'admin-super-ban',
   'admin-suggestion-delivery',
   'moderation-delete-intents',

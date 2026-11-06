@@ -320,7 +320,7 @@ function fixture(t) {
                 version: 1,
                 complete: true,
                 registryDigest: manifest.registryDigest,
-                queueCount: 53,
+                queueCount: registry.queueNames.length,
                 ownerAbsent: true,
                 queues: registry.queueNames.map((name) => ({ name, paused: false })),
               }
@@ -1043,13 +1043,24 @@ test('remaining work time clamps real store subprocess; final readback remains a
   child.readSeal();
   await host.close();
 });
-test('literal registry requires exact pinned source and complete 53 names', () => {
+test('literal registry binds current 54 or retained 53 names to the exact requested source', () => {
   let requested;
   readSourceAbandonmentSessionQueueRegistry(sourceSha, (_cmd, args) => {
     requested = args;
     return registryText;
   });
   assert.equal(requested[1], `${sourceSha}:apps/api/src/scripts/legacy-recovery-live-registry.ts`);
+  assert.equal(registry.queueNames.length, 54);
+  const legacyText = registryText.replace("  'admin-manual-commands',\n", '');
+  const legacySha = 'c'.repeat(40);
+  const legacy = readSourceAbandonmentSessionQueueRegistry(legacySha, (_cmd, args) => {
+    assert.equal(args[1], `${legacySha}:apps/api/src/scripts/legacy-recovery-live-registry.ts`);
+    return legacyText;
+  });
+  assert.equal(legacy.queueNames.length, 53);
+  assert.equal(legacy.queueNames.includes('admin-manual-commands'), false);
+  assert.equal(legacy.queueRegistrySha256, sha256(legacyText));
+  assert.notEqual(legacy.queueRegistrySha256, registry.queueRegistrySha256);
   assert.throws(
     () =>
       readSourceAbandonmentSessionQueueRegistry(sourceSha, () =>
@@ -1057,6 +1068,16 @@ test('literal registry requires exact pinned source and complete 53 names', () =
       ),
     /registry/,
   );
+  for (const changed of [
+    legacyText.replace("  'message-retention',", ''),
+    registryText.replace("  'message-retention',", "  'message-retention',\n  'unreviewed-extra',"),
+    registryText.replace("  'admin-manual-commands',", "  'unreviewed-replacement',"),
+    registryText.replace("  'admin-super-ban',", "  'admin-manual-commands',"),
+  ])
+    assert.throws(
+      () => readSourceAbandonmentSessionQueueRegistry(sourceSha, () => changed),
+      /registry/u,
+    );
 });
 
 function redisFixture() {

@@ -19,7 +19,8 @@ const CONNECTION_OPTIONS = Object.freeze({
   enableOfflineQueue: false,
 });
 const QUEUE_LIMITS = Object.freeze({
-  queueCount: 53,
+  queueCount: 54,
+  legacyQueueCount: 53,
   operationMs: 1500,
   drainMs: 60000,
   restoreMs: 30000,
@@ -41,11 +42,24 @@ const ownerToken = (nonce) => {
   );
   return `rollout:${createHash('sha256').update(nonce).digest('hex')}`;
 };
+// FLAG: Retained baselines keep their exact names, count and pause states. Only
+// the reviewed command-queue addition distinguishes the current and legacy shapes.
+function isSupportedSourceAbandonmentQueueInventory(queueNames) {
+  return (
+    Array.isArray(queueNames) &&
+    ((queueNames.length === QUEUE_LIMITS.queueCount &&
+      queueNames.includes('admin-manual-commands')) ||
+      (queueNames.length === QUEUE_LIMITS.legacyQueueCount &&
+        !queueNames.includes('admin-manual-commands'))) &&
+    new Set(queueNames).size === queueNames.length &&
+    Array.from(queueNames).every(
+      (name) => typeof name === 'string' && /^[a-z0-9][a-z0-9:_-]{0,127}$/u.test(name),
+    )
+  );
+}
 function registry(queueNames) {
   requireFact(
-    Array.isArray(queueNames) &&
-      queueNames.length === QUEUE_LIMITS.queueCount &&
-      new Set(queueNames).size === queueNames.length &&
+    isSupportedSourceAbandonmentQueueInventory(queueNames) &&
       queueNames.every(
         (name) => typeof name === 'string' && /^[a-z0-9][a-z0-9_-]{0,127}$/u.test(name),
       ) &&
@@ -628,6 +642,7 @@ function createSessionQueueAdapters({
 module.exports = {
   CONNECTION_OPTIONS,
   QUEUE_LIMITS,
+  isSupportedSourceAbandonmentQueueInventory,
   buildQueueReadScripts,
   createQueueClient,
   openQueueClient,
