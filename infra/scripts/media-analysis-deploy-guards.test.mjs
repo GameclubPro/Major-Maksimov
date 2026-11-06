@@ -1149,6 +1149,8 @@ test('read-only BullMQ monitor batches counters and includes every Publisher que
   assert.equal([...queueBlock.matchAll(/^ {2}moderation-default$/gmu)].length, 1);
 
   for (const queue of [
+    'admin-manual-fanout',
+    'admin-manual-commands',
     'publisher-binding-refresh',
     'publisher-chat-comments',
     'publisher-auto-replies',

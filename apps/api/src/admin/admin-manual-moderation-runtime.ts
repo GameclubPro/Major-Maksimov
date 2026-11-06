@@ -138,6 +138,10 @@ export class AdminManualModerationRuntime {
     return this.context.adminManualFanoutQueue;
   }
 
+  private get adminManualCommandQueue() {
+    return this.context.adminManualCommandQueue;
+  }
+
   private get logger() {
     return this.context.logger;
   }
@@ -1454,12 +1458,21 @@ export class AdminManualModerationRuntime {
   }
 
   async enqueueManualModerationFanout(job: AdminManualFanoutJob): Promise<boolean> {
-    if (!this.adminManualFanoutQueue) {
+    const isCommand = job.kind === 'manual_group_moderation_command';
+    const queue = isCommand ? this.adminManualCommandQueue : this.adminManualFanoutQueue;
+    if (!queue) {
       return false;
     }
 
     try {
-      await this.adminManualFanoutQueue.add('execute-admin-manual-fanout', job, {
+      if (isCommand) {
+        // FLAG: Queue namespaces do not share BullMQ dedupe. Retained legacy jobs
+        // keep their original state and timing; an unavailable lookup is not absence.
+        if (!this.adminManualFanoutQueue) return false;
+        const retained = await this.adminManualFanoutQueue.getJob(job.jobId);
+        if (retained) return true;
+      }
+      await queue.add('execute-admin-manual-fanout', job, {
         jobId: job.jobId,
         priority: this.resolveManualModerationFanoutQueuePriority(job),
         attempts: 5,

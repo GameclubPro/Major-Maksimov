@@ -23,7 +23,7 @@ const uuid = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`;
 const hash = 'a'.repeat(64);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const proofDigest = (value) => digest(`${JSON.stringify(value)}\n`);
-function fixture(t, count = 2) {
+function fixture(t, count = 2, queueCount = 54) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-session-protocol-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const state = {
@@ -152,12 +152,13 @@ function fixture(t, count = 2) {
     name: `queue_${index}`,
     paused: index >= 24 && index % 3 === 0,
   }));
+  if (queueCount === 54) originalQueues.push({ name: 'admin-manual-commands', paused: true });
   state.queues = clone(originalQueues);
   const queueBaseline = {
     version: 1,
     complete: true,
     registryDigest: manifest.registryDigest,
-    queueCount: 53,
+    queueCount: originalQueues.length,
     ownerAbsent: true,
     queues: clone(originalQueues),
   };
@@ -192,8 +193,8 @@ function fixture(t, count = 2) {
       );
       for (const row of state.queues) row.paused = true;
       return parent({
-        queueCount: 53,
-        pausedCount: 53,
+        queueCount: originalQueues.length,
+        pausedCount: originalQueues.length,
         activeCount: 0,
         queueWorkDrained: true,
         ownerNonce: manifest.controllerNonce,
@@ -351,7 +352,7 @@ function fixture(t, count = 2) {
         state.queues.slice(0, 24).some((row) => row.paused),
         false,
       );
-      for (let index = 24; index < 53; index++)
+      for (let index = 24; index < baseline.queues.length; index++)
         state.queues[index].paused = baseline.queues[index].paused;
       return parent({ restored: true, queueBaselineDigest: digest(baseline) });
     },
@@ -453,6 +454,73 @@ test('two actual journal children run within one stop/start and restore every or
     /private_owner|private_chat|private_message|private_bot/,
   );
 });
+test('a retained 53-queue session completes with the original baseline and no synthesized command queue', async (t) => {
+  const h = fixture(t, 1, 53);
+  const baselineBytes = JSON.stringify(h.queueBaseline);
+  await h.prepare();
+  const outcome = await h.apply();
+  assert.equal(outcome.phase, 'COMPLETE');
+  assert.equal(h.queueBaseline.queueCount, 53);
+  assert.equal(JSON.stringify(h.queueBaseline), baselineBytes);
+  assert.deepEqual(h.state.queues, h.queueBaseline.queues);
+  assert.equal(
+    h.state.queues.some(({ name }) => name === 'admin-manual-commands'),
+    false,
+  );
+  assert.deepEqual(
+    h.store.readEvidence(h.store.read().journal.proofs.hostAdmission).queueBaseline,
+    h.queueBaseline,
+  );
+});
+for (const [label, change] of [
+  [
+    '52 names',
+    (value) => {
+      value.queues = value.queues.slice(0, 52);
+      value.queueCount = 52;
+    },
+  ],
+  [
+    '55 names',
+    (value) => {
+      value.queues.push({ name: 'unreviewed-extra', paused: false });
+      value.queueCount = 55;
+    },
+  ],
+  [
+    '54 without command',
+    (value) => {
+      value.queues.at(-1).name = 'unreviewed-replacement';
+    },
+  ],
+  [
+    '53 retaining command',
+    (value) => {
+      value.queues.splice(0, 1);
+      value.queueCount = 53;
+    },
+  ],
+  [
+    'duplicate',
+    (value) => {
+      value.queues[0].name = value.queues[1].name;
+    },
+  ],
+  [
+    'count drift',
+    (value) => {
+      value.queueCount = 53;
+    },
+  ],
+])
+  test(`unsupported queue baseline ${label} refuses before stopping`, async (t) => {
+    const h = fixture(t, 1);
+    change(h.queueBaseline);
+    await assert.rejects(h.prepare(), /session_queue_baseline_unproved/u);
+    assert.equal(h.store.read().journal, null);
+    assert.equal(h.state.running, true);
+    assert.equal(h.state.events.includes('preDrainRuntime'), false);
+  });
 test('infeasible measured duration or cumulative work refuses before admission and pause', async (t) => {
   for (const type of ['duration', 'work']) {
     const h = fixture(t);

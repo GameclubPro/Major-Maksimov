@@ -5,7 +5,7 @@ import { ADMIN_MANUAL_FANOUT_QUEUE, type AdminManualFanoutJob } from './admin-ma
 import { ManualModerationService } from './manual-moderation.service';
 
 @Processor(ADMIN_MANUAL_FANOUT_QUEUE, {
-  concurrency: 2,
+  concurrency: 1,
 })
 export class AdminManualFanoutProcessor extends WorkerHost {
   constructor(private readonly manualModerationService: ManualModerationService) {

@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { isIP } from 'node:net';
+import sessionQueues from './source-abandonment-session-queues.cjs';
 import {
   readLegacyColdStoreConnection,
   isLegacyColdStoreEnvironment,
@@ -42,6 +43,7 @@ import {
 } from './source-abandonment-session-store-adapter.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
+const { isSupportedSourceAbandonmentQueueInventory } = sessionQueues;
 const hash = /^[a-f0-9]{64}$/u;
 const sha = /^[a-f0-9]{40}$/u;
 const requireFact = (value, code) => {
@@ -171,7 +173,7 @@ export function readSourceAbandonmentSessionQueueRegistry(sourceSha, run = execu
     .map((match) => match[1])
     .sort();
   requireFact(
-    queueNames.length === 53 && new Set(queueNames).size === 53,
+    isSupportedSourceAbandonmentQueueInventory(queueNames),
     'session_host_registry_unproved',
   );
   return { queueNames, queueRegistrySha256: bytesDigest(text) };

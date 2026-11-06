@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
+import { ADMIN_MANUAL_COMMAND_QUEUE } from '../admin/admin-manual-command.queue';
 import { MAX_API_RATE_LIMIT_RESERVATION_SCRIPT } from './max-client.service';
 import {
   buildRetentionPriorityQueueDescriptors,
@@ -144,6 +145,27 @@ describeRedis('retention final priority admission against actual Redis', () => {
       ]);
       await expectNoSlots();
       await peer.del(key);
+      await publish();
+      expect(await reserve()).toEqual([1, 0, 0]);
+    },
+  );
+
+  it.each(['wait', 'active'] as const)(
+    'blocks retention transport while manual commands are %s without consuming a slot',
+    async (state) => {
+      const commands = queueKeys.find(({ name }) => name === ADMIN_MANUAL_COMMAND_QUEUE);
+      expect(commands).toBeDefined();
+      await publish();
+      await peer.lpush(commands![state], 'manual-command');
+
+      expect(await reserve()).toEqual([
+        0,
+        -1,
+        1000,
+        state === 'active' ? 'higher_priority_active' : 'higher_priority_ready',
+      ]);
+      await expectNoSlots();
+      await peer.del(commands![state]);
       await publish();
       expect(await reserve()).toEqual([1, 0, 0]);
     },

@@ -252,6 +252,7 @@ import {
   type AdminManagedEntitiesRefreshJob,
 } from './admin-managed-entities-refresh.queue';
 import { ADMIN_MANUAL_FANOUT_QUEUE, type AdminManualFanoutJob } from './admin-manual-fanout.queue';
+import { ADMIN_MANUAL_COMMAND_QUEUE } from './admin-manual-command.queue';
 import { AdminManualMessageCleanupService } from './admin-manual-message-cleanup.service';
 import { ADMIN_SUPER_BAN_QUEUE, type AdminSuperBanJob } from './admin-super-ban.queue';
 import {
@@ -1009,6 +1010,9 @@ export class AdminService implements OnModuleDestroy {
         get adminManualFanoutQueue(): Queue<AdminManualFanoutJob> | undefined {
           return owner.adminManualFanoutQueue;
         },
+        get adminManualCommandQueue(): Queue<AdminManualFanoutJob> | undefined {
+          return owner.adminManualCommandQueue;
+        },
         enqueueManualModerationFanout: (job) => owner.enqueueManualModerationFanout(job),
         isKnownRuntimeBotUserId: (userId) => owner.isKnownRuntimeBotUserId(userId),
         isSuperBanDeveloperUserId: (userId) => owner.isSuperBanDeveloperUserId(userId),
@@ -1337,6 +1341,9 @@ export class AdminService implements OnModuleDestroy {
     private readonly publisherCommentNotifications?: PublisherCommentNotificationService,
     @Optional() private readonly entityPresentation?: ManagedEntityPresentationService,
     @Optional() private readonly statisticsExchange?: StatisticsExchangeAudienceService,
+    @Optional()
+    @InjectQueue(ADMIN_MANUAL_COMMAND_QUEUE)
+    private readonly adminManualCommandQueue?: Queue<AdminManualFanoutJob>,
   ) {
     this.publisherCommentKeyboardRouting = new PublisherCommentKeyboardRouting(
       this.maxBotRegistry,

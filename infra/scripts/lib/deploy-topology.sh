@@ -532,7 +532,18 @@ maxim_topology_require_bot_publisher_reliability() {
     apps/api/src/admin/manual-member-unban-attempt.ts \
     apps/api/src/moderation/voice-webhook-source.ts \
     apps/api/src/moderation/message-limits-delete-guard.service.ts \
-    apps/api/src/webhook/webhook.service.ts; do
+    apps/api/src/webhook/webhook.service.ts \
+    apps/api/src/admin/admin-manual-command.queue.ts \
+    apps/api/src/admin/admin-manual-command.processor.ts \
+    apps/api/src/admin/admin-manual-fanout.queue.ts \
+    apps/api/src/admin/admin-manual-fanout.processor.ts \
+    apps/api/src/admin/admin.module.ts \
+    apps/api/src/scripts/legacy-recovery-live-registry.ts \
+    infra/scripts/source-abandonment-session-queues.cjs \
+    infra/scripts/source-abandonment-session-host.mjs \
+    infra/scripts/source-abandonment-session-inventory.mjs \
+    infra/scripts/source-abandonment-session-protocol.mjs \
+    infra/scripts/source-abandonment-session-journal.mjs; do
     if ! source="$(git show "${commit_sha}:${path}" 2>/dev/null)"; then
       echo "Rollback target predates shared member and Publisher reliability: $path" >&2
       return 1
@@ -544,6 +555,10 @@ maxim_topology_require_bot_publisher_reliability() {
   # Unverified unban attempts remain crash-fenced and require the final live route proof;
   # their unknown outcomes cannot become safe terminal failures or queued recovery.
   # Diagnostic modes or a compatible schema alone cannot certify the executor.
+  # FLAG: Saved manual commands require both queue readers after rollback. Neither
+  # a currently empty queue nor an older producer removes that compatibility floor.
+  # FLAG: JavaScript quote/backtick literals must reach Node without shell expansion.
+  # shellcheck disable=SC2016
   if ! printf '%s\0' "${sources[@]}" | node -e '
     const [member, intents, moderation, callbacks, authority, notices, client, maxModule,
       subscriptionNotices, subscriptionAuthority, subscriptionPlans,
@@ -554,7 +569,10 @@ maxim_topology_require_bot_publisher_reliability() {
       followupService, followupSanction, followupExecution, moderationModule,
       commercialAuthority, sanctionNoticeDelivery, commandNoticeDelivery,
       manualRuntime, manualAuthority, nightDelivery, watchdog, manualUnban,
-      voiceSource, voiceGuard, voiceIngress] =
+      voiceSource, voiceGuard, voiceIngress,
+      manualCommandQueue, manualCommandProcessor, manualFanoutQueue, manualFanoutProcessor,
+      adminModule, liveRegistry, sessionQueueSource, sessionHost, sessionInventory,
+      sessionProtocol, sessionJournal] =
       require("node:fs").readFileSync(0).toString("utf8").split("\0");
     const readNamedSet = (source, name) =>
       new RegExp("const\\s+" + name + "\\b[^=;]*=\\s*new Set\\(\\s*\\[([^\\]]*)\\]\\s*\\)", "u")
@@ -571,7 +589,56 @@ maxim_topology_require_bot_publisher_reliability() {
     const finalUnbanGuard =
       /beforeImmediateMemberMutation:\s*async \(revalidateRoute\) => \{[\s\S]*?if \(await readTargetAccess\(\)\) throw new ModerationSanctionStateChangedError\(\);\s*await leaseGuard\.assertOwned\(\);\s*(?:\/\/[^\n]*\n\s*)*await revalidateRoute\?\.\(\);\s*(?:\/\/[^\n]*\n\s*)*\},/u.test(manualUnban) ||
       squash(manualUnban).includes("beforeImmediateMemberMutation: withMaxFinalAuthorityCheckpoint(async (beforeFinalAuthority) => { await leaseGuard.assertOwned(); if (await readTargetAccess()) throw new ModerationSanctionStateChangedError(); await beforeFinalAuthority?.(); await assertSanctionState({ chatId, targetUserId, releaseAction: \u0027UNBAN\u0027, expectedSanctionEventId, }); await leaseGuard.assertOwned(); }),");
-    const valid = voiceSource.includes("persistVoiceSource(") &&
+    const readerSource = (source) => squash(source.replace(/("(?:\\.|[^"\\])*"|\u0027(?:\\.|[^\u0027\\])*\u0027|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/gu,
+      (match, literal) => literal ?? ""));
+    const commandReader = readerSource(manualCommandProcessor);
+    const fanoutReader = readerSource(manualFanoutProcessor);
+    const manualModule = readerSource(adminModule);
+    const manualReaders =
+      readerSource(manualCommandQueue).includes("export const ADMIN_MANUAL_COMMAND_QUEUE = \u0027admin-manual-commands\u0027;") &&
+      readerSource(manualFanoutQueue).includes("export const ADMIN_MANUAL_FANOUT_QUEUE = \u0027admin-manual-fanout\u0027;") &&
+      readerSource(manualFanoutQueue).includes("kind: \u0027manual_group_moderation_command\u0027;") &&
+      /export type AdminManualFanoutJob\s*=[\s\S]*?\|\s*AdminManualGroupModerationCommandJob;/u.test(readerSource(manualFanoutQueue)) &&
+      /if \(job\.kind === \u0027manual_group_moderation_command\u0027\) \{ await this\.processManualGroupModerationCommandJob\(job\); return; \}/u.test(readerSource(manualRuntime)) &&
+      commandReader.includes("from \u0027./admin-manual-command.queue\u0027") &&
+      commandReader.includes("@Processor(ADMIN_MANUAL_COMMAND_QUEUE, { concurrency: 1, })") &&
+      commandReader.includes("export class AdminManualCommandProcessor extends WorkerHost") &&
+      /if \(job\.data\.kind !== \u0027manual_group_moderation_command\u0027\) \{ throw new UnrecoverableError\(/u.test(commandReader) &&
+      commandReader.includes("await this.manualModerationService.processManualModerationFanoutJob(job.data);") &&
+      fanoutReader.includes("from \u0027./admin-manual-fanout.queue\u0027") &&
+      fanoutReader.includes("@Processor(ADMIN_MANUAL_FANOUT_QUEUE, { concurrency: 1, })") &&
+      fanoutReader.includes("export class AdminManualFanoutProcessor extends WorkerHost") &&
+      !fanoutReader.includes("job.data.kind") &&
+      fanoutReader.includes("await this.manualModerationService.processManualModerationFanoutJob(job.data);") &&
+      manualModule.includes("...registerRuntimeQueues(ADMIN_MANUAL_COMMAND_QUEUE)") &&
+      manualModule.includes("...registerRuntimeQueues(ADMIN_MANUAL_FANOUT_QUEUE)") &&
+      manualModule.includes("...(roleRunsAction(getAppRole()) ? [AdminManualCommandProcessor] : [])") &&
+      manualModule.includes("...(roleRunsAction(getAppRole()) ? [AdminManualFanoutProcessor] : [])");
+    // FLAG: Retained cold journals preserve their original inventory. A rollback
+    // must read both the old 53 queues and the current 54 without dropping pause states.
+    const coldQueues = readerSource(sessionQueueSource);
+    const coldConsumers = [sessionHost, sessionInventory, sessionProtocol, sessionJournal]
+      .map(readerSource);
+    const coldReaders =
+      readerSource(liveRegistry).includes("\u0027admin-manual-commands\u0027,") &&
+      coldQueues.includes("queueCount: 54,") &&
+      coldQueues.includes("legacyQueueCount: 53,") &&
+      coldQueues.includes("function isSupportedSourceAbandonmentQueueInventory(queueNames)") &&
+      coldQueues.includes("queueNames.length === QUEUE_LIMITS.queueCount && queueNames.includes(\u0027admin-manual-commands\u0027)") &&
+      coldQueues.includes("queueNames.length === QUEUE_LIMITS.legacyQueueCount && !queueNames.includes(\u0027admin-manual-commands\u0027)") &&
+      coldQueues.includes("new Set(queueNames).size === queueNames.length") &&
+      coldQueues.includes("isSupportedSourceAbandonmentQueueInventory(queueNames) &&") &&
+      coldQueues.includes("module.exports = { CONNECTION_OPTIONS, QUEUE_LIMITS, isSupportedSourceAbandonmentQueueInventory,") &&
+      coldConsumers.every((source) =>
+        source.includes("import sessionQueues from \u0027./source-abandonment-session-queues.cjs\u0027;") &&
+        /const \{[^}]*isSupportedSourceAbandonmentQueueInventory[^}]*\} = sessionQueues;/u.test(source)) &&
+      coldConsumers[0].includes("isSupportedSourceAbandonmentQueueInventory(queueNames),") &&
+      coldConsumers[1].includes("isSupportedSourceAbandonmentQueueInventory(queueNames),") &&
+      coldConsumers[2].includes("value.queueCount === value.queues.length") &&
+      coldConsumers[2].includes("isSupportedSourceAbandonmentQueueInventory(value.queues.map((row) => row.name))") &&
+      coldConsumers[3].includes("baseline.queueCount === baseline.queues.length") &&
+      coldConsumers[3].includes("isSupportedSourceAbandonmentQueueInventory(baseline.queues.map((row) => row?.name))");
+    const valid = manualReaders && coldReaders && voiceSource.includes("persistVoiceSource(") &&
       voiceSource.includes("input.kind === \u0027invalidate\u0027") &&
       voiceSource.includes("VOICE_SOURCE_LIFETIME_MS = 5 * 60_000") &&
       voiceIngress.includes("await persistVoiceSource(tx, voiceSourceInput, webhookEventId)") &&
@@ -685,7 +752,7 @@ maxim_topology_require_bot_publisher_reliability() {
       /\[\s*(?:\/\/[^\n]*\n\s*)*\u0027nightModeEnabled\u0027,\s*\u0027nightModeStartTimeMinutes\u0027,\s*\u0027nightModeEndTimeMinutes\u0027,\s*\u0027nightModeTimezone\u0027,[\s\S]*?advanceChatMutationOrder\(tx, params.chatId, \u0027CHAT_CONTROL\u0027\)/u.test(settings);
     process.exit(valid ? 0 : 1);
   ' >/dev/null 2>&1; then
-    echo "Rollback target lacks member-effect, final-policy or immutable Publisher receipt fences." >&2
+    echo "Rollback target lacks member-effect, final-policy, manual-command readers or immutable Publisher receipt fences." >&2
     return 1
   fi
 }

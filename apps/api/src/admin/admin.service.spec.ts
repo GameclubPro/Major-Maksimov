@@ -17,6 +17,8 @@ import { buildDeveloperForcedGlobalSpammerCacheKey } from '../moderation/develop
 import { buildActiveMuteStateKey } from '../moderation/moderation-state.util';
 import { buildCompactProfileMentionStartPayload } from '../max/max-deep-link.util';
 import type { MaxClientService } from '../max/max-client.service';
+import type { Queue } from 'bullmq';
+import type { AdminManualFanoutJob } from './admin-manual-fanout.queue';
 import { AdminService } from './admin.service';
 import { createGroupCommandPermitFixture } from '../common/group-command-authority.spec-support';
 import { resolveAdminManagedEntitiesRefreshJitterMs } from './admin-managed-entities-refresh.queue';
@@ -5210,7 +5212,11 @@ describe('AdminService.applyManualSystemBan', () => {
     };
     const adminManualFanoutQueue = {
       add: jest.fn().mockResolvedValue(undefined),
-    };
+      getJob: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<Queue<AdminManualFanoutJob>, 'add' | 'getJob'>;
+    const adminManualCommandQueue = {
+      add: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<Queue<AdminManualFanoutJob>, 'add'>;
 
     const service = new AdminService(
       prisma as never,
@@ -5221,6 +5227,7 @@ describe('AdminService.applyManualSystemBan', () => {
       undefined,
       adminManualFanoutQueue as never,
     );
+    Reflect.set(service, 'adminManualCommandQueue', adminManualCommandQueue);
 
     const queued = await service.enqueueManualGroupModerationCommand({
       sourceChatId: 'chat-1',
@@ -5243,7 +5250,7 @@ describe('AdminService.applyManualSystemBan', () => {
     });
 
     expect(queued).toBe(true);
-    expect(adminManualFanoutQueue.add).toHaveBeenCalledWith(
+    expect(adminManualCommandQueue.add).toHaveBeenCalledWith(
       'execute-admin-manual-fanout',
       expect.objectContaining({
         kind: 'manual_group_moderation_command',
@@ -5270,6 +5277,10 @@ describe('AdminService.applyManualSystemBan', () => {
         removeOnFail: false,
       }),
     );
+    expect(adminManualFanoutQueue.getJob).toHaveBeenCalledWith(
+      expect.stringMatching(/^manual_group_moderation_command__/u),
+    );
+    expect(adminManualFanoutQueue.add).not.toHaveBeenCalled();
     expect(maxClient.deleteMessage).not.toHaveBeenCalled();
     expect(maxClient.sendMessage).not.toHaveBeenCalled();
   });
@@ -5282,7 +5293,11 @@ describe('AdminService.applyManualSystemBan', () => {
     };
     const adminManualFanoutQueue = {
       add: jest.fn().mockResolvedValue(undefined),
-    };
+      getJob: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<Queue<AdminManualFanoutJob>, 'add' | 'getJob'>;
+    const adminManualCommandQueue = {
+      add: jest.fn().mockResolvedValue(undefined),
+    } satisfies Pick<Queue<AdminManualFanoutJob>, 'add'>;
 
     const service = new AdminService(
       prisma as never,
@@ -5293,6 +5308,7 @@ describe('AdminService.applyManualSystemBan', () => {
       undefined,
       adminManualFanoutQueue as never,
     );
+    Reflect.set(service, 'adminManualCommandQueue', adminManualCommandQueue);
 
     const queued = await service.enqueueManualGroupModerationCommand({
       sourceChatId: 'chat-1',
@@ -5315,7 +5331,7 @@ describe('AdminService.applyManualSystemBan', () => {
     });
 
     expect(queued).toBe(true);
-    expect(adminManualFanoutQueue.add).toHaveBeenCalledWith(
+    expect(adminManualCommandQueue.add).toHaveBeenCalledWith(
       'execute-admin-manual-fanout',
       expect.objectContaining({
         kind: 'manual_group_moderation_command',
@@ -5329,6 +5345,7 @@ describe('AdminService.applyManualSystemBan', () => {
         priority: 1,
       }),
     );
+    expect(adminManualFanoutQueue.add).not.toHaveBeenCalled();
   });
 
   it('queues developer super ban commands with the highest group-command priority', async () => {

@@ -132,8 +132,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
   ): Promise<number> {
     // FLAG: Limit planner changes to fixture inserts; preserve initial table statistics
     // and restore session settings before selection and plan assertions. Reuse indexed
-    // trigger lookup plans and one transaction across the bounded statements of a phase.
-    // The fixture phase may exceed Prisma's 5s default; its 20s total remains inside
+    // trigger lookup plans and one transaction across the supplied bounded statements.
+    // The fixture transaction may exceed Prisma's 5s default; its 20s total remains inside
     // the recipient hook's 30s budget, with the separate 10s cap on each SQL statement.
     const [settings, ...inserted] = await client.$transaction(
       [
@@ -492,6 +492,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
     'bounds delivery probes behind %i stale execution parents and retained terminal history',
     (parents) => {
       const retained = Math.floor(parents / 10);
+      const broadcastBatchSize = 500;
+      const broadcastStatementsPerTransaction = 10;
       let prefix: string;
       let previousContent: { id: string };
       let ready: Envelope;
@@ -504,6 +506,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         let seedStage = 'prepare';
         let stageStarted = seedStarted;
         let completed = false;
+        let insertedBroadcasts = 0;
+        let completedBroadcastTransactions = 0;
         try {
           prefix = `execution-parent-${randomUUID()}`;
           previousContent = await db.publicationContentRevision.create({
@@ -529,7 +533,6 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
           seedStage = 'broadcasts';
           stageStarted = performance.now();
           // FLAG: Bound row-triggered inserts without reducing the retained parent history.
-          const broadcastBatchSize = 500;
           const broadcastStatements: Prisma.Sql[] = [];
           for (let first = 1; first <= parents + retained; first += broadcastBatchSize) {
             broadcastStatements.push(Prisma.sql`
@@ -545,7 +548,18 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             FROM generate_series(${first}::integer, ${Math.min(first + broadcastBatchSize - 1, parents + retained)}::integer) AS n
           `);
           }
-          const insertedBroadcasts = await seedIndexedBatches(broadcastStatements);
+          // FLAG: Bound each fixture transaction while retaining all parent history.
+          // Committed groups remain publication-owned and are removed by fixture cleanup.
+          for (
+            let first = 0;
+            first < broadcastStatements.length;
+            first += broadcastStatementsPerTransaction
+          ) {
+            insertedBroadcasts += await seedIndexedBatches(
+              broadcastStatements.slice(first, first + broadcastStatementsPerTransaction),
+            );
+            completedBroadcastTransactions += 1;
+          }
           expect(insertedBroadcasts).toBe(parents + retained);
           completed = true;
         } finally {
@@ -557,7 +571,12 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               retained,
               phase: 'seed-parents',
               expectedRows: parents + retained,
-              plannedBroadcastBatches: Math.ceil((parents + retained) / 500),
+              plannedBroadcastBatches: Math.ceil((parents + retained) / broadcastBatchSize),
+              plannedBroadcastTransactions: Math.ceil(
+                (parents + retained) / (broadcastBatchSize * broadcastStatementsPerTransaction),
+              ),
+              completedBroadcastTransactions,
+              insertedBroadcasts,
               completed,
               seedStage,
               stageTimingsMs,

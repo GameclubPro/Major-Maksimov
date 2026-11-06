@@ -16,10 +16,10 @@ const guardedFiles = [
   },
   {
     path: 'apps/api/src/admin/admin.service.legacy.ts',
-    maxLines: 22807,
+    maxLines: 22814,
     targetLines: 22500,
     reason:
-      'AdminService remains a legacy hotspot; the three-line lazy dialog-context bridge keeps per-target preparation in a focused helper; this ceiling includes the shared crash-safe Major/Publisher suggestion delivery ledger, sanction lock/fence guards and former-participant capability/transition bindings at existing side-effect boundaries. Former-participant history, local persistence and release policy stay in focused helpers; unrelated domains should keep moving out.',
+      'AdminService remains a legacy hotspot; the seven added lines only import, inject and expose the dedicated manual-command queue to its focused runtime. Queue scheduling and processing stay outside this owner. The three-line lazy dialog-context bridge keeps per-target preparation in a focused helper; this ceiling includes the shared crash-safe Major/Publisher suggestion delivery ledger, sanction lock/fence guards and former-participant capability/transition bindings at existing side-effect boundaries. Former-participant history, local persistence and release policy stay in focused helpers; unrelated domains should keep moving out.',
   },
   {
     path: 'apps/api/src/admin/admin-managed-broadcast-runtime.ts',

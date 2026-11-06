@@ -197,6 +197,7 @@ export type AdminManualModerationRuntimeContext = {
   readonly logger: Logger;
   readonly adminSuperBanQueue?: Queue<AdminSuperBanJob>;
   readonly adminManualFanoutQueue?: Queue<AdminManualFanoutJob>;
+  readonly adminManualCommandQueue?: Queue<AdminManualFanoutJob>;
   enqueueManualModerationFanout(job: AdminManualFanoutJob): Promise<boolean>;
   isKnownRuntimeBotUserId(userId: string | null | undefined): boolean;
   isSuperBanDeveloperUserId(userId: string | null | undefined): boolean;

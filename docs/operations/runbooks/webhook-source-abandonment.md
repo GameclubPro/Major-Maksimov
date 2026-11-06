@@ -270,8 +270,12 @@ each plan retains its actual phase estimates, 128 MiB evidence limit and reserve
 restoration time. Online admission has its own separate 60-minute maximum and
 never consumes or extends the maintenance clock.
 
-One durable session preserves all 53 original queue pause states, drains work and
-stops the exact fourteen API and two native generations once. A full frozen
+One new durable session preserves all 54 original queue pause states, including
+`admin-manual-commands`, drains work and stops the exact fourteen API and two
+native generations once. Readers also accept retained source-pinned 53-queue
+sessions without that namespace; preserve their original journal, inventory and
+all captured pause states without rewriting them. Both inventories retain the
+exact 24 webhook queues and their owner fence. A full frozen
 inventory repeats the ordered scope before any child installation. Every child
 keeps its own certificate, selection, actual admission and stopped inventory;
 source, claim, semantic and chat/message authority cannot overlap between children.
