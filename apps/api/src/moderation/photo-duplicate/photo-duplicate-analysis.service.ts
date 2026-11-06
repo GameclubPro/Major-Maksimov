@@ -81,17 +81,28 @@ export class PhotoDuplicateAnalysisService {
       return null;
     // FLAG: Both independent downloads and the native pair share the original attempt deadline.
     // A candidate hash/cache entry never substitutes for either current source or exact SHA.
-    const original = await this.downloader.download(params.originalUrl, {
-      deadlineAtMs: params.deadlineAtMs,
-    });
-    const current = await this.downloader.download(params.currentUrl, {
-      deadlineAtMs: params.deadlineAtMs,
-    });
+    const original = await measureDuplicatePhase(this.metrics, 'download', () =>
+      measureDuplicatePhase(this.metrics, 'photo_download', async () => {
+        const original = await this.downloader.download(params.originalUrl, {
+          deadlineAtMs: params.deadlineAtMs,
+        });
+        return original;
+      }),
+    );
+    const current = await measureDuplicatePhase(this.metrics, 'download', () =>
+      measureDuplicatePhase(this.metrics, 'photo_download', async () => {
+        const current = await this.downloader.download(params.currentUrl, {
+          deadlineAtMs: params.deadlineAtMs,
+        });
+        return current;
+      }),
+    );
     const result = await this.fingerprintService.verifyRecompression(
       original.bytes,
       current.bytes,
       {
         deadlineAtMs: params.deadlineAtMs,
+        timings: this.metrics,
       },
     );
     if (

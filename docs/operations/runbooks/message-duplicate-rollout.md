@@ -345,6 +345,16 @@ The following fixed phases narrow those aggregate timings; overlapping phases mu
 - `decode_wait`: local fingerprint-slot acquisition, including capacity/deadline rejection.
 - `native_roundtrip`: sandbox IPC, process startup, decoding and reply; it is not CPU decode time.
   `local_fingerprint` measures the local development fallback, including hashing.
+- `recompression_decode_wait`: pair-comparison slot acquisition, including capacity/deadline
+  rejection. `recompression_native_roundtrip` measures actual native pair requests, including
+  failures; `local_recompression` measures the development fallback. These pair phases remain
+  separate from fingerprint phases. Both fresh source downloads also contribute to `download`
+  and `photo_download`, even when a subsequent comparison reuses native computation.
+- `recompression_reuse`: successful native pair memo lookup and validation, excluding byte-key
+  hashing and slot wait. Each returned memo result adds one sample, including a second lookup
+  after slot acquisition. It adds no native-roundtrip sample. These process-local attempt counts
+  describe observed reuse, not unique messages, successful deletes or fleet-wide cache efficiency.
+  Pair phases cover all admitted formats; they do not identify the internal JPEG proof branch.
 - `ordering_acquire`: one ordering acquisition attempt up to entry into the execution callback,
   or its deferral/error. It excludes execution and durable waits between retries; `worker.age_*`
   remains the total age since enqueue, including all earlier deferrals.

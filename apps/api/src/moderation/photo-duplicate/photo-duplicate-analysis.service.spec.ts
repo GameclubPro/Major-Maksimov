@@ -132,6 +132,13 @@ describe('PhotoDuplicateAnalysisService', () => {
       Parameters<PhotoFingerprintService['verifyRecompression']>
     >((...args) => fingerprintService.verifyRecompression(...args));
     Object.assign(s.fingerprintService, { verifyRecompression });
+    const metrics = { recordPhase: jest.fn() };
+    const service = new PhotoDuplicateAnalysisService(
+      s.downloader as never,
+      s.fingerprintService as never,
+      s.historyStore as never,
+      metrics as never,
+    );
     const params = {
       originalUrl: 'https://i.oneme.ru/original',
       currentUrl: 'https://i.oneme.ru/current',
@@ -139,8 +146,8 @@ describe('PhotoDuplicateAnalysisService', () => {
       expectedCurrentHash: proof.currentHash,
       deadlineAtMs: Date.now() + 10_000,
     };
-    await expect(s.service.verifyRecompression(params)).resolves.toEqual(proof);
-    await expect(s.service.verifyRecompression(params)).resolves.toEqual(proof);
+    await expect(service.verifyRecompression(params)).resolves.toEqual(proof);
+    await expect(service.verifyRecompression(params)).resolves.toEqual(proof);
     expect(s.downloader.download.mock.calls.map(([url]) => url)).toEqual([
       params.originalUrl,
       params.currentUrl,
@@ -149,6 +156,26 @@ describe('PhotoDuplicateAnalysisService', () => {
     ]);
     expect(verifyRecompression).toHaveBeenCalledTimes(2);
     expect(nativePair).toHaveBeenCalledTimes(1);
+    const phases = metrics.recordPhase.mock.calls.map(([phase]) => phase);
+    expect(phases.filter((phase) => phase === 'download')).toHaveLength(4);
+    expect(phases.filter((phase) => phase === 'photo_download')).toHaveLength(4);
+    expect(phases.filter((phase) => phase === 'recompression_native_roundtrip')).toHaveLength(1);
+    expect(phases.filter((phase) => phase === 'recompression_decode_wait')).toHaveLength(1);
+    expect(phases.filter((phase) => phase === 'recompression_reuse')).toHaveLength(1);
+    expect(phases).not.toContain('native_roundtrip');
+
+    const unavailable = new Error('current source unavailable');
+    s.downloader.download
+      .mockResolvedValueOnce({ bytes: Buffer.from(params.originalUrl), format: 'jpeg' })
+      .mockRejectedValueOnce(unavailable);
+    metrics.recordPhase.mockImplementation(() => {
+      throw new Error('observer unavailable');
+    });
+    await expect(service.verifyRecompression(params)).rejects.toBe(unavailable);
+    expect(nativePair).toHaveBeenCalledTimes(1);
+    expect(metrics.recordPhase.mock.calls.filter(([phase]) => phase === 'download')).toHaveLength(
+      6,
+    );
   });
 
   it('requires independent sources, both expected SHA values and a native pair match', async () => {
@@ -185,7 +212,7 @@ describe('PhotoDuplicateAnalysisService', () => {
     expect(verifyRecompression).toHaveBeenCalledWith(
       Buffer.from(params.originalUrl),
       Buffer.from(params.currentUrl),
-      { deadlineAtMs: params.deadlineAtMs },
+      { deadlineAtMs: params.deadlineAtMs, timings: undefined },
     );
     await expect(
       s.service.verifyRecompression({ ...params, expectedCurrentHash: 'c'.repeat(64) }),

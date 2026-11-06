@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import {
   MESSAGE_DUPLICATE_METRIC_COUNTERS,
+  MESSAGE_DUPLICATE_PHASES,
   MessageDuplicateMetricsService,
   type MessageDuplicateMetricCounter,
   measureDuplicatePhase,
@@ -141,6 +142,18 @@ describe('privacy-safe message duplicate diagnostics', () => {
         throw original;
       }),
     ).rejects.toBe(original);
+  });
+
+  it('aggregates every fixed phase including pair work and rejects private phase labels', () => {
+    for (const phase of MESSAGE_DUPLICATE_PHASES) service.recordPhase(phase, 6);
+    service.recordPhase('private-image-url' as (typeof MESSAGE_DUPLICATE_PHASES)[number], 6);
+    jest.advanceTimersByTime(30_000);
+    const phases = log.mock.calls[0]?.[0].phases;
+    expect(Object.keys(phases).sort()).toEqual([...MESSAGE_DUPLICATE_PHASES].sort());
+    for (const phase of MESSAGE_DUPLICATE_PHASES) {
+      expect(phases[phase]).toMatchObject({ count: 1, totalMs: 6, maxMs: 6 });
+      expect(phases[phase].buckets.reduce((sum: number, count: number) => sum + count, 0)).toBe(1);
+    }
   });
 
   it('keeps absence, failure and zero coverage distinct across distributed buckets', async () => {
