@@ -394,12 +394,26 @@ test('a partial atomic write leaves the original file intact and never restarts 
     ...fs,
     writeSync(descriptor, bytes, offset, length) {
       fs.writeSync(descriptor, bytes, offset, Math.min(length, 7));
-      throw new Error('PRIVATE_WRITE_ERROR');
+      throw Object.assign(new Error('PRIVATE_WRITE_ERROR', { cause: 'PRIVATE_WRITE_CAUSE' }), {
+        code: 'EACCES',
+        phase: 'FORGED_PHASE',
+        command: 'FORGED_COMMAND',
+        outcome: 'FORGED_OUTCOME',
+        exitCode: 99,
+      });
     },
   };
   assert.throws(
     () => prepareDockerStore({ ...data.options, run: commands.run, fileSystem }),
-    failure,
+    (error) => {
+      assert.ok(failure(error));
+      assert.equal(error.phase, 'config_install');
+      assert.equal(error.command, 'none');
+      assert.equal(error.outcome, 'unknown');
+      assert.equal(error.exitCode, null);
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|FORGED_|EACCES|cause/u);
+      return true;
+    },
   );
   assert.deepEqual(fs.readFileSync(data.configPath), before);
   assert.equal(fs.statSync(data.configPath).mode & 0o777, 0o640);
@@ -442,7 +456,12 @@ test('a restart failure is not accepted and never falls back to another endpoint
   });
   assert.throws(
     () => prepareDockerStore({ ...data.options, run: commands.run }),
-    (error) => failure(error) && error.backend === 'other',
+    (error) =>
+      failure(error) &&
+      error.backend === 'other' &&
+      error.phase === 'service_restart' &&
+      error.command === 'docker_service_restart' &&
+      error.outcome === 'dependency_failed',
   );
   assert.equal(commands.calls.length, 5);
   assert.deepEqual(JSON.parse(fs.readFileSync(data.configPath, 'utf8')), {
@@ -455,9 +474,107 @@ test('a successful restart with the wrong observed backend still fails acceptanc
   const commands = runner({ information: [classic(), classic()] });
   assert.throws(
     () => prepareDockerStore({ ...data.options, run: commands.run }),
-    (error) => failure(error) && error.backend === 'other',
+    (error) =>
+      failure(error) &&
+      error.backend === 'other' &&
+      error.phase === 'post_restart_policy' &&
+      error.command === 'none' &&
+      error.outcome === 'guard_rejected' &&
+      error.exitCode === null,
   );
   assert.equal(commands.calls.length, 8);
+});
+
+test('a post-restart backend failure retains its actual phase without trusting dependency fields', (t) => {
+  const data = fixture(t);
+  const commands = runner();
+  let informationReads = 0;
+  const run = (binary, args, options) => {
+    const output = commands.run(binary, args, options);
+    if (binary === 'docker' && args[0] === 'info' && ++informationReads === 2) {
+      throw Object.assign(new Error('PRIVATE_POST_RESTART_OUTPUT'), {
+        phase: 'FORGED_PHASE',
+        command: 'FORGED_COMMAND',
+        outcome: 'FORGED_OUTCOME',
+        exitCode: 99,
+      });
+    }
+    return output;
+  };
+  assert.throws(
+    () => prepareDockerStore({ ...data.options, run }),
+    (error) => {
+      assert.ok(failure(error));
+      assert.equal(error.serverVersion, 'unknown');
+      assert.equal(error.backend, 'unverified');
+      assert.equal(error.phase, 'post_restart_backend');
+      assert.equal(error.command, 'docker_info');
+      assert.equal(error.outcome, 'dependency_failed');
+      assert.equal(error.exitCode, null);
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|FORGED_/u);
+      return true;
+    },
+  );
+  assert.equal(commands.calls.length, 8);
+  assert.equal(commands.calls.filter(({ binary }) => binary === 'systemctl').length, 1);
+});
+
+test('the actual CLI retains a failed Docker child outcome without exposing its private stderr', (t) => {
+  const data = fixture(t);
+  const bin = join(data.root, 'bin');
+  const calls = join(data.root, 'calls.jsonl');
+  fs.mkdirSync(bin, { mode: 0o700 });
+  fs.writeFileSync(
+    join(bin, 'docker'),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.MAXIM_DOCKER_DIAGNOSTIC_CALLS, JSON.stringify(args) + '\\n');
+if (args[0] === 'context' && args[1] === 'show') process.stdout.write('default\\n');
+else if (args[0] === 'context' && args[1] === 'inspect') process.stdout.write('unix:///var/run/docker.sock\\n');
+else if (args[0] === 'info') {
+  process.stderr.write('PRIVATE_DOCKER_STDERR https://private.invalid/token\\n');
+  process.exitCode = 17;
+} else process.exitCode = 99;
+`,
+    { mode: 0o700 },
+  );
+  const cli = new URL('./prepare-docker-store.mjs', import.meta.url).pathname;
+  const output = spawnSync(process.execPath, [cli, 'verify'], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      ...hosted,
+      DOCKER_HOST: '',
+      DOCKER_CONTEXT: '',
+      PATH: `${bin}:${process.env.PATH}`,
+      MAXIM_DOCKER_DIAGNOSTIC_CALLS: calls,
+    },
+  });
+  assert.equal(output.status, 1);
+  assert.equal(output.stdout, '');
+  assert.deepEqual(JSON.parse(output.stderr), {
+    error: 'DOCKER_STORE_INVALID',
+    message: dockerStoreFailureMessage,
+    serverVersion: 'unknown',
+    backend: 'unverified',
+    phase: 'verify_backend',
+    command: 'docker_info',
+    outcome: 'nonzero_exit',
+    exitCode: 17,
+  });
+  assert.doesNotMatch(output.stderr, /PRIVATE_|private\.invalid|cause|stack/u);
+  const executed = fs.readFileSync(calls, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(executed.length, 3);
+  assert.deepEqual(
+    executed.map((args) => args.slice(0, 2)),
+    [
+      ['context', 'show'],
+      ['context', 'inspect'],
+      ['info', '--format'],
+    ],
+  );
 });
 
 test('CLI errors expose only the typed fixed diagnostic, never raw dependency or caller content', () => {
@@ -474,6 +591,10 @@ test('CLI errors expose only the typed fixed diagnostic, never raw dependency or
       message: dockerStoreFailureMessage,
       serverVersion: 'unknown',
       backend: 'unverified',
+      phase: args[0] === 'verify' ? 'verify_context' : 'arguments',
+      command: 'none',
+      outcome: 'guard_rejected',
+      exitCode: null,
     });
   }
 });
