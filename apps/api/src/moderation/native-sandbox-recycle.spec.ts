@@ -95,4 +95,33 @@ describe('bounded native sandbox recycle diagnostic', () => {
     ).rejects.toThrow('exceeds its bound');
     expect(write).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { operation: 'recognize', psm: 11, preprocessPass: 'unavailable' },
+    { operation: 'preprocess', psm: 'unavailable', preprocessPass: 'confirmation' },
+  ] as const)(
+    'keeps maximal OCR $operation attribution within the existing byte bound',
+    async (attribution) => {
+      const diagnostic = {
+        event: 'native_ocr_sandbox_recycle',
+        reason: 'process_group_teardown_failed',
+        ...attribution,
+        payloadBytes: Number.MAX_SAFE_INTEGER,
+        queueDepth: Number.MAX_SAFE_INTEGER,
+        pendingBytes: Number.MAX_SAFE_INTEGER,
+        requestedTimeoutMs: Number.MAX_SAFE_INTEGER,
+        executionBudgetMs: Number.MAX_SAFE_INTEGER,
+        queueWaitMs: Number.MAX_SAFE_INTEGER,
+        operationElapsedMs: Number.MAX_SAFE_INTEGER,
+      };
+      const line = `${JSON.stringify(diagnostic)}\n`;
+      expect(Buffer.byteLength(line)).toBeLessThanOrEqual(512);
+      const pending = writeNativeSandboxLifecycleEvent(diagnostic);
+      const writeMock = write as unknown as jest.Mock;
+      expect(writeMock).toHaveBeenCalledWith(2, line, expect.any(Function));
+      const callback = writeMock.mock.calls[0]![2] as (error: Error | null) => void;
+      callback(null);
+      await expect(pending).resolves.toBeUndefined();
+    },
+  );
 });
