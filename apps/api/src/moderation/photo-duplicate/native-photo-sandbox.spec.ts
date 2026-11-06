@@ -91,56 +91,62 @@ describe('native photo proof transport', () => {
 describe('native photo process lifecycle', () => {
   jest.setTimeout(20_000);
 
-  it('returns hash-bound recompression evidence through the isolated worker', async () => {
-    const raw = Buffer.alloc(128 * 128 * 3);
-    for (let y = 0; y < 128; y += 1)
-      for (let x = 0; x < 128; x += 1) {
-        const offset = (y * 128 + x) * 3;
-        raw[offset] = 30 + x;
-        raw[offset + 1] = 40 + y;
-        raw[offset + 2] = 80;
-      }
-    const source = () => sharp(raw, { raw: { width: 128, height: 128, channels: 3 } });
-    const original = await source().webp({ quality: 92 }).toBuffer();
-    const current = await source().webp({ quality: 89 }).toBuffer();
-    const actual = await runNativePhotoWorker(
-      { ...request(), operation: 'verify_recompression', originalBytes: original.length },
-      Buffer.concat([original, current]),
-      new AbortController().signal,
-      workerOptions,
-    );
-    expect(actual).toMatchObject({
-      kind: 'recompression',
-      matched: true,
-      proof: {
-        version: PHOTO_RECOMPRESSION_VERSION,
-        originalHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-        currentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
-      },
-      decodeCost: { encodedBytes: original.length + current.length, pixels: 128 * 128 * 2 },
-    });
-    expect(
-      await runNativePhotoWorker(
-        {
-          ...request(),
-          operation: 'verify_recompression',
-          originalBytes: original.length,
-          remainingPixels: 128 * 128,
-        },
+  it.each(['webp', 'jpeg'] as const)(
+    'returns hash-bound %s recompression evidence through the isolated worker',
+    async (format) => {
+      const raw = Buffer.alloc(128 * 128 * 3);
+      for (let y = 0; y < 128; y += 1)
+        for (let x = 0; x < 128; x += 1) {
+          const offset = (y * 128 + x) * 3;
+          raw[offset] = 30 + x;
+          raw[offset + 1] = 40 + y;
+          raw[offset + 2] = 80;
+        }
+      const source = () => sharp(raw, { raw: { width: 128, height: 128, channels: 3 } });
+      const original = await source()[format]({ quality: 92 }).toBuffer();
+      const current =
+        format === 'jpeg'
+          ? await sharp(original).jpeg({ quality: 50 }).toBuffer()
+          : await source().webp({ quality: 89 }).toBuffer();
+      const actual = await runNativePhotoWorker(
+        { ...request(), operation: 'verify_recompression', originalBytes: original.length },
         Buffer.concat([original, current]),
         new AbortController().signal,
         workerOptions,
-      ),
-    ).toEqual({ kind: 'rejected', reason: 'album_decode_budget_exceeded' });
-    expect(
-      await runNativePhotoWorker(
-        { ...request(), operation: 'verify_recompression', originalBytes: original.length },
-        Buffer.concat([original, Buffer.from('not an image')]),
-        new AbortController().signal,
-        workerOptions,
-      ),
-    ).toEqual({ kind: 'rejected', reason: 'unsupported_image' });
-  });
+      );
+      expect(actual).toMatchObject({
+        kind: 'recompression',
+        matched: true,
+        proof: {
+          version: PHOTO_RECOMPRESSION_VERSION,
+          originalHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          currentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+        decodeCost: { encodedBytes: original.length + current.length, pixels: 128 * 128 * 2 },
+      });
+      expect(
+        await runNativePhotoWorker(
+          {
+            ...request(),
+            operation: 'verify_recompression',
+            originalBytes: original.length,
+            remainingPixels: 128 * 128,
+          },
+          Buffer.concat([original, current]),
+          new AbortController().signal,
+          workerOptions,
+        ),
+      ).toEqual({ kind: 'rejected', reason: 'album_decode_budget_exceeded' });
+      expect(
+        await runNativePhotoWorker(
+          { ...request(), operation: 'verify_recompression', originalBytes: original.length },
+          Buffer.concat([original, Buffer.from('not an image')]),
+          new AbortController().signal,
+          workerOptions,
+        ),
+      ).toEqual({ kind: 'rejected', reason: 'unsupported_image' });
+    },
+  );
 
   it('preserves exact native raster hashes across format, alpha, orientation and dimensions', async () => {
     const source = sharp({

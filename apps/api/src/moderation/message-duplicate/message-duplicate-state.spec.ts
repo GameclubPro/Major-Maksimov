@@ -1,5 +1,6 @@
 import {
   exactImageSettingsDigest,
+  hasValidImageComparisonEvidence,
   messageDuplicateSettingsDigest,
 } from './message-duplicate-state';
 import {
@@ -17,6 +18,39 @@ import {
 } from './message-duplicate-test-fixtures';
 
 describe('safe text evidence compatibility', () => {
+  it('accepts the v2 recompression reader and rejects retained v1 proof', () => {
+    const evidence = {
+      compareMode: 'IMAGE',
+      mediaHashes: ['b'.repeat(64)],
+      original: { mediaHashes: ['a'.repeat(64)] },
+      imageRecompression: {
+        version: 'native-recompression-v2',
+        originalHash: 'a'.repeat(64),
+        currentHash: 'b'.repeat(64),
+      },
+    };
+    expect(hasValidImageComparisonEvidence(evidence)).toBe(true);
+    expect(
+      hasValidImageComparisonEvidence({
+        ...evidence,
+        imageRecompression: { ...evidence.imageRecompression, version: 'native-recompression-v1' },
+      }),
+    ).toBe(false);
+  });
+
+  it('revokes IMAGE settings recorded by the v1 recompression reader', () => {
+    const settings = duplicateSettings({
+      duplicateWindowMode: 'INTERVAL',
+      duplicateWarnWindowSec: 3600,
+      duplicatePhotoScope: 'SAME_AUTHOR',
+      duplicateHistoryRevision: 0,
+    });
+    // Recorded from the image-recompression-fixed-window-v1 digest at ffc24f5f0.
+    expect(exactImageSettingsDigest(settings)).not.toBe(
+      '1230b6121332223aaab76371abc640ed406ae0e40a04d302da171c52c20be950',
+    );
+  });
+
   it('uses the same text and image policy for both retained comparison settings', () => {
     const message = duplicateSettings({ duplicateCompareMode: 'MESSAGE' });
     const text = duplicateSettings({ duplicateCompareMode: 'TEXT' });

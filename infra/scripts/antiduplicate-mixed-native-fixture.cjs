@@ -49,6 +49,69 @@ function resources() {
   return { cpuUsec: Number(cpu.usage_usec), memoryPeakBytes: Number(read('memory.peak')) };
 }
 
+async function prepareJpegRecompressionFixture(sharp, algorithmVersion) {
+  const width = 2000,
+    height = 2000;
+  const raw = Buffer.alloc(width * height * 3);
+  let value = 0x1234abcd;
+  for (let index = 0; index < raw.length; index += 3) {
+    value ^= value << 13;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    raw[index] = value & 255;
+    raw[index + 1] = (value >>> 8) & 255;
+    raw[index + 2] = (value >>> 16) & 255;
+  }
+  const original = await sharp(raw, { raw: { width, height, channels: 3 } })
+    .jpeg({ quality: 92, chromaSubsampling: '4:2:0' })
+    .toBuffer();
+  const current = await sharp(original)
+    .jpeg({ quality: 50, chromaSubsampling: '4:2:0' })
+    .toBuffer();
+  const encodedBytes = original.length + current.length;
+  assert.ok(encodedBytes <= 16777216);
+  const decode = async (input) => {
+    const decoded = await sharp(input, { failOn: 'warning', limitInputPixels: width * height })
+      .rotate()
+      .toColourspace('srgb')
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(decoded.info.width, width);
+    assert.equal(decoded.info.height, height);
+    assert.equal(decoded.info.channels, 4);
+    assert.equal(decoded.data.length, width * height * 4);
+    return decoded;
+  };
+  const a = await decode(original);
+  const b = await decode(current);
+  const hash = (data) =>
+    createHash('sha256')
+      .update(`${algorithmVersion}\0${width}x${height}x4\0`)
+      .update(data)
+      .digest('hex');
+  const originalHash = hash(a.data);
+  const currentHash = hash(b.data);
+  assert.notEqual(originalHash, currentHash);
+  // FLAG: Independent client oracles must force the new JPEG path, not merely
+  // pass the old grayscale residual. All preparation stays outside timed work.
+  const gray = (data) =>
+    sharp(data, { raw: { width, height, channels: 4 } })
+      .removeAlpha()
+      .greyscale()
+      .raw()
+      .toBuffer();
+  const grayA = await gray(a.data);
+  const grayB = await gray(b.data);
+  assert.equal(grayA.length, width * height);
+  assert.equal(grayB.length, grayA.length);
+  let squared = 0;
+  for (let index = 0; index < grayA.length; index += 1)
+    squared += (grayA[index] - grayB[index]) ** 2;
+  assert.ok(squared > grayA.length * 3.5 ** 2);
+  return { original, current, originalHash, currentHash, encodedBytes, pixels: width * height * 2 };
+}
+
 async function workload(mode) {
   assert.ok(['warmup', 'photo', 'ocr', 'mixed'].includes(mode));
   const { NativePhotoSandboxClient } = require(
@@ -62,6 +125,22 @@ async function workload(mode) {
   );
   const client = new NativePhotoSandboxClient('/run/maxim-photo/native-photo.sock');
   await client.probe();
+  const { PhotoFingerprintService } = require(
+    `${runtime}/moderation/photo-duplicate/photo-fingerprint.js`,
+  );
+  let jpegNativeRequests = 0;
+  const nativeRecompression = client.verifyRecompression.bind(client);
+  client.verifyRecompression = (...args) => {
+    jpegNativeRequests += 1;
+    return nativeRecompression(...args);
+  };
+  const jpegVerifier = new PhotoFingerprintService({
+    canonicalOnly: true,
+    nativeDecoder: client,
+    maxInputBytes: 16777216,
+    maxInputPixels: 40000000,
+  });
+  const sharp = require('/app/node_modules/sharp');
   // Synthetic uncompressed pixels are the independent exact-hash oracle. Fixture
   // encoding is outside the timed work and occurs only in this isolated CI client.
   const width = 1024,
@@ -73,7 +152,7 @@ async function workload(mode) {
     raw[i + 2] = 87;
     raw[i + 3] = 255;
   }
-  const input = await require('/app/node_modules/sharp')(raw, {
+  const input = await sharp(raw, {
     raw: { width, height, channels: 4 },
   })
     .png()
@@ -82,8 +161,45 @@ async function workload(mode) {
     .update(`${PHOTO_FINGERPRINT_ALGORITHM_VERSION}\0${width}x${height}x4\0`)
     .update(raw)
     .digest('hex');
+  const jpegFixture =
+    mode === 'photo' || mode === 'mixed'
+      ? await prepareJpegRecompressionFixture(sharp, PHOTO_FINGERPRINT_ALGORITHM_VERSION)
+      : null;
+  const jpegRecompressionMs = [];
+  const jpegContentMemoMs = [];
   const photo = async (count) => {
     const latencies = [];
+    if (jpegFixture) {
+      assert.equal(count, 10);
+      const started = performance.now();
+      const result = await jpegVerifier.verifyRecompression(
+        jpegFixture.original,
+        jpegFixture.current,
+        { deadlineAtMs: Date.now() + 10000 },
+      );
+      assert.deepEqual(result, {
+        kind: 'recompression',
+        matched: true,
+        proof: {
+          version: 'native-recompression-v2',
+          originalHash: jpegFixture.originalHash,
+          currentHash: jpegFixture.currentHash,
+        },
+        decodeCost: { encodedBytes: jpegFixture.encodedBytes, pixels: jpegFixture.pixels },
+      });
+      jpegRecompressionMs.push(performance.now() - started);
+      // FLAG: Fresh independent byte buffers may reuse computation only after exact
+      // hashing. The native call counter proves no second process handled this pair.
+      const repeatedOriginal = Buffer.from(jpegFixture.original);
+      const repeatedCurrent = Buffer.from(jpegFixture.current);
+      const memoStarted = performance.now();
+      const repeated = await jpegVerifier.verifyRecompression(repeatedOriginal, repeatedCurrent, {
+        deadlineAtMs: Date.now() + 10000,
+      });
+      jpegContentMemoMs.push(performance.now() - memoStarted);
+      assert.deepEqual(repeated, result);
+      assert.equal(jpegNativeRequests, 1);
+    }
     for (let i = 0; i < count; i++) {
       const started = performance.now();
       const result = await client.fingerprint(input, {
@@ -114,6 +230,9 @@ async function workload(mode) {
     mode === 'warmup'
       ? [await photo(1), await ocr(1)]
       : await Promise.all([mode === 'ocr' ? [] : photo(10), mode === 'photo' ? [] : ocr(3)]);
+  assert.equal(jpegRecompressionMs.length, jpegFixture ? 1 : 0);
+  assert.equal(jpegContentMemoMs.length, jpegFixture ? 1 : 0);
+  assert.equal(jpegNativeRequests, jpegFixture ? 1 : 0);
   return {
     schemaVersion: 1,
     mode,
@@ -124,6 +243,13 @@ async function workload(mode) {
     elapsedMs: performance.now() - started,
     photoEncodedBytes: input.length,
     photoPixels: width * height,
+    jpegRecompressionRequests: jpegRecompressionMs.length,
+    jpegRecompressionMs,
+    jpegNativeRequests,
+    jpegContentMemoRequests: jpegContentMemoMs.length,
+    jpegContentMemoMs,
+    jpegRecompressionEncodedBytes: jpegFixture?.encodedBytes ?? 0,
+    jpegRecompressionPixels: jpegFixture?.pixels ?? 0,
   };
 }
 

@@ -233,7 +233,7 @@ describe('scheduled duplicate final action guard', () => {
 });
 
 describe('message duplicate final delete guard', () => {
-  it.each(['missing', 'original', 'current', 'version'] as const)(
+  it.each(['missing', 'original', 'current', 'version', 'legacy_version'] as const)(
     'rejects %s recompression evidence before qualification or external reads',
     async (change) => {
       const s = setup();
@@ -244,13 +244,15 @@ describe('message duplicate final delete guard', () => {
       s.binding.mediaHashes = ['b'.repeat(64)];
       s.binding.original!.mediaHashes = ['a'.repeat(64)];
       s.binding.imageRecompression = {
-        version: 'native-recompression-v1',
+        version: 'native-recompression-v2',
         originalHash: 'a'.repeat(64),
         currentHash: 'b'.repeat(64),
       };
       if (change === 'missing') delete s.binding.imageRecompression;
       else if (change === 'original') s.binding.imageRecompression.originalHash = 'c'.repeat(64);
       else if (change === 'current') s.binding.imageRecompression.currentHash = 'c'.repeat(64);
+      else if (change === 'legacy_version')
+        (s.binding.imageRecompression as { version: string }).version = 'native-recompression-v1';
       else (s.binding.imageRecompression as { version: string }).version = 'old';
       await expect(
         s.service.assertQualificationAuthority(s.params.chatId, s.binding),

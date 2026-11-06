@@ -36,6 +36,8 @@ const paths = {
   photoAnalysis: 'apps/api/src/moderation/photo-duplicate/photo-duplicate-analysis.service.ts',
   photoFingerprint: 'apps/api/src/moderation/photo-duplicate/photo-fingerprint.ts',
   photoRecompression: 'apps/api/src/moderation/photo-duplicate/photo-recompression.ts',
+  photoJpegRecompression: 'apps/api/src/moderation/photo-duplicate/photo-jpeg-recompression.ts',
+  photoResidualWindows: 'apps/api/src/moderation/photo-duplicate/photo-residual-windows.ts',
   recompressionVersion: 'apps/api/src/moderation/photo-duplicate/photo-recompression-version.ts',
   counters: 'apps/api/src/moderation/redis-counter.service.ts',
   service: 'apps/api/src/moderation/message-duplicate/message-duplicate.service.ts',
@@ -82,6 +84,12 @@ test('requires the message-v3 reader, durable admission and last action permit o
   const legacy = probe(t, { authorization: null });
   assert.notEqual(legacy.status, 0);
   assert.match(legacy.stderr, /predates the message duplicate v3 action guard/u);
+  const withoutJpegReader = probe(t, { photoJpegRecompression: null });
+  assert.notEqual(withoutJpegReader.status, 0);
+  assert.match(withoutJpegReader.stderr, /predates the message duplicate v3 action guard/u);
+  const withoutResidualReader = probe(t, { photoResidualWindows: null });
+  assert.notEqual(withoutResidualReader.status, 0);
+  assert.match(withoutResidualReader.stderr, /predates the message duplicate v3 action guard/u);
 });
 
 const mutations = [
@@ -93,7 +101,8 @@ const mutations = [
   ['media', "comparison: 'TEXT'", "comparison: 'MESSAGE'"],
   ['content', "(content.media.length > 0 || content.reason === 'unsupported_attachment')", 'false'],
   ['state', '.refine(hasValidImageComparisonEvidence)', '.refine(() => true)'],
-  ['state', 'image-recompression-fixed-window-v1', 'image-fixed-window-v2'],
+  ['state', 'image-recompression-fixed-window-v2', 'image-recompression-fixed-window-v1'],
+  ['state', 'recompressionVersion: PHOTO_RECOMPRESSION_VERSION,', ''],
   ['state', 'original.length === 1', 'original.length > 0'],
   ['state', 'value.mediaHashes.length === 1', 'value.mediaHashes.length > 0'],
   ['state', 'proof.originalHash === original[0]', 'true'],
@@ -131,14 +140,124 @@ const mutations = [
   ['photoAnalysis', 'result.proof.currentHash !== params.expectedCurrentHash', 'false'],
   [
     'photoFingerprint',
-    '.verifyRecompression(original, current, request)',
-    '.acceptUnverifiedSimilarity(original, current, request)',
+    '.verifyRecompression(nativeOriginal, nativeCurrent, request)',
+    '.acceptUnverifiedSimilarity(nativeOriginal, nativeCurrent, request)',
+  ],
+  [
+    'photoFingerprint',
+    'const nativeOriginal = Buffer.from(original);',
+    'const nativeOriginal = original;',
+  ],
+  [
+    'photoFingerprint',
+    'const nativeCurrent = Buffer.from(current);',
+    'const nativeCurrent = current;',
+  ],
+  [
+    'photoFingerprint',
+    'const key = nativePairKey(nativeOriginal, nativeCurrent);',
+    'const key = nativePairKey(original, current);',
+  ],
+  [
+    'photoFingerprint',
+    "return createHash('sha256').update(bytes).digest('hex');",
+    "return createHash('sha256').update(bytes.subarray(0, 64)).digest('hex');",
+  ],
+  [
+    'photoFingerprint',
+    '${encodedPhotoHash(original)}\\0${encodedPhotoHash(current)}',
+    '${encodedPhotoHash(current)}\\0${encodedPhotoHash(original)}',
+  ],
+  ['photoFingerprint', '${PHOTO_RECOMPRESSION_VERSION}\\0', 'legacy-recompression\\0'],
+  ['photoFingerprint', 'requirePhotoDeadline(deadlineAtMs);', ''],
+  ['photoFingerprint', 'this.validateNativeRecompression(cached, encodedBytes);', ''],
+  ['photoFingerprint', 'result.proof.version !== PHOTO_RECOMPRESSION_VERSION', 'false'],
+  [
+    'photoFingerprint',
+    'if (result.matched) this.nativeRecompressionMemo.set(key, result);',
+    'this.nativeRecompressionMemo.set(key, result);',
   ],
   ['photoRecompression', 'a.info.width !== b.info.width', 'false'],
   ['photoRecompression', 'a.info.height !== b.info.height', 'false'],
   ['photoRecompression', 'Math.abs(difference) > limits.maximum', 'false'],
-  ['photoRecompression', 'square > count * limits.tileRms ** 2', 'false'],
-  ['recompressionVersion', 'native-recompression-v1', 'unsafe-similarity-v0'],
+  ['photoResidualWindows', 'square > count * limits.tileRms ** 2', 'false'],
+  ['photoResidualWindows', 'Math.abs(sum) > count * limits.tileMean', 'false'],
+  ['photoResidualWindows', 'top < height', 'top + TILE <= height'],
+  ['photoResidualWindows', 'left < width', 'left + TILE <= width'],
+  ['photoResidualWindows', 'Math.min(TILE, height - top)', 'TILE'],
+  ['photoResidualWindows', 'Math.min(left + TILE, width)', 'left + TILE'],
+  ['photoResidualWindows', 'if (y % 64 === 0) assertTime();', ''],
+  ['photoResidualWindows', 'if (top % 64 === 0) assertTime();', ''],
+  [
+    'photoRecompression',
+    'return photoResidualWindowsWithinBounds(original, current, width, height, channels, limits, () =>',
+    'return true; photoResidualWindowsWithinBounds(original, current, width, height, channels, limits, () =>',
+  ],
+  [
+    'photoRecompression',
+    'const recipe = readStandardJpegRecompressionRecipe(current);',
+    'const recipe = readStandardJpegRecompressionRecipe(original);',
+  ],
+  ['photoRecompression', 'if (!recipe) return false;', 'if (!recipe) return true;'],
+  [
+    'photoRecompression',
+    'encoded = await sharp(a.data, { raw })',
+    'encoded = await sharp(b.data, { raw })',
+  ],
+  ['photoRecompression', 'if (encoded.length > limits.maxInputBytes) return false;', ''],
+  [
+    'photoRecompression',
+    'if (encoded.equals(Buffer.from(current.buffer, current.byteOffset, current.byteLength)))',
+    'if (encoded.length === current.byteLength)',
+  ],
+  [
+    'photoRecompression',
+    'requireTime(limits.deadlineAtMs);\n    if (encoded.length > limits.maxInputBytes)',
+    'if (encoded.length > limits.maxInputBytes)',
+  ],
+  [
+    'photoRecompression',
+    'if (await verifyStandardJpeg()) return result(true);',
+    'if (true) return result(true);',
+  ],
+  [
+    'photoRecompression',
+    'const reconstructed = await decode(image(encoded));',
+    'const reconstructed = b;',
+  ],
+  ['photoRecompression', 'reconstructed.info.width === raw.width', 'true'],
+  ['photoRecompression', 'reconstructed.info.height === raw.height', 'true'],
+  ['photoRecompression', 'reconstructed.info.channels === 4', 'true'],
+  [
+    'photoRecompression',
+    'canonicalHash(reconstructed.data, raw.width, raw.height) === proof.currentHash',
+    'true',
+  ],
+  ['recompressionVersion', 'native-recompression-v2', 'native-recompression-v1'],
+  ['photoJpegRecompression', 'MAX_JPEG_HEADER_BYTES = 65_536', 'MAX_JPEG_HEADER_BYTES = 655_360'],
+  ['photoJpegRecompression', 'MAX_JPEG_HEADER_MARKERS = 64', 'MAX_JPEG_HEADER_MARKERS = 640'],
+  ['photoJpegRecompression', 'length < 2 || length > headerLimit - offset', 'length < 2'],
+  [
+    'photoJpegRecompression',
+    'cursor + 65 > end || (table !== 0 && table !== 1) || tables[table]',
+    'cursor + 65 > end',
+  ],
+  [
+    'photoJpegRecompression',
+    'marker === 0xc0 || marker === 0xc2',
+    'marker === 0xc0 || marker === 0xc3',
+  ],
+  ['photoJpegRecompression', 'if (frame) return undefined;', ''],
+  ['photoJpegRecompression', 'bytes[start] !== 8', 'false'],
+  ['photoJpegRecompression', 'bytes[start + 5] !== 3', 'false'],
+  ['photoJpegRecompression', 'sampling !== 0x22 && sampling !== 0x11', 'false'],
+  ['photoJpegRecompression', 'for (let quality = 50;', 'for (let quality = 1;'],
+  ['photoJpegRecompression', 'index < 64', 'index < 1'],
+  [
+    'photoJpegRecompression',
+    'luminance[index] !== expectedLuminance || chrominance[index] !== expectedChrominance',
+    'false',
+  ],
   ['recompressionIndex', '#decoded>8', '#decoded>800'],
   ['recompressionIndex', 'math.min(expires,r.expiresAtMs)', 'expires'],
   ['recompressionIndex', 'r.expiresAtMs>p.atMs', 'true'],

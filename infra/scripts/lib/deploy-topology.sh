@@ -788,6 +788,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
     apps/api/src/moderation/photo-duplicate/photo-duplicate-analysis.service.ts
     apps/api/src/moderation/photo-duplicate/photo-fingerprint.ts
     apps/api/src/moderation/photo-duplicate/photo-recompression.ts
+    apps/api/src/moderation/photo-duplicate/photo-jpeg-recompression.ts
+    apps/api/src/moderation/photo-duplicate/photo-residual-windows.ts
     apps/api/src/moderation/photo-duplicate/photo-recompression-version.ts
     apps/api/src/moderation/redis-counter.service.ts
     apps/api/src/moderation/message-duplicate/message-duplicate.service.ts
@@ -801,6 +803,7 @@ maxim_topology_require_message_duplicate_delete_guard() {
   # exact/near matching and lifecycle identity.
   # FLAG: Retained single-image recompression grants require both exact hashes, independent
   # native proof and the accepted original anchor. A candidate hash never becomes authority.
+  # The v2 reader also retains bounded JPEG recipe parsing and exact reconstructed-raster proof.
   # FLAG: Unified comparison grants require explicit TEXT admission/retry readers and
   # IMAGE independent of the retired selector, even after a rollback or feature downgrade.
   for source_path in "${source_paths[@]}"; do
@@ -816,8 +819,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
     const input = require("node:fs").readFileSync(0);
     if (input.length > 4 * 1024 * 1024) process.exit(1);
     const parts = input.toString("utf8").split("\0");
-    if (parts.length !== 29 || parts.pop() !== "") process.exit(1);
-    const [guard, executor, state, authorization, module, enforcement, schema, migration, admission, queue, detector, phones, content, history, window, settings, semantic, publicationTime, semanticKey, executionDeadline, media, recompressionIndex, photoAnalysis, photoFingerprint, photoRecompression, recompressionVersion, counters, service] = parts;
+    if (parts.length !== 31 || parts.pop() !== "") process.exit(1);
+    const [guard, executor, state, authorization, module, enforcement, schema, migration, admission, queue, detector, phones, content, history, window, settings, semantic, publicationTime, semanticKey, executionDeadline, media, recompressionIndex, photoAnalysis, photoFingerprint, photoRecompression, photoJpegRecompression, photoResidualWindows, recompressionVersion, counters, service] = parts;
     const stripComments = (source) => source.replace(/("(?:\\.|[^"\\])*"|\u0027(?:\\.|[^\u0027\\])*\u0027|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/gu,
       (match, literal) => literal ?? "");
     const method = (source, marker) => {
@@ -900,8 +903,86 @@ maxim_topology_require_message_duplicate_delete_guard() {
     const imageOriginal = squash(method(media, "private async findRecompression("));
     const imageDownload = squash(classMethod(photoAnalysis, "async verifyRecompression("));
     const imageNativeCall = squash(classMethod(photoFingerprint, "async verifyRecompression(")).replace(/\s+(?=\.)/gu, "");
-    const imageNative = squash(topLevelFunction(photoRecompression, "export async function verifyNativePhotoRecompression("));
+    const imageNativeGateStart = imageNativeCall.indexOf("return await this.decodeGate.run(async () => {");
+    const imageNativeGate = imageNativeGateStart >= 0 ? imageNativeCall.slice(imageNativeGateStart) : "";
+    const imagePairKey = squash(topLevelFunction(photoFingerprint, "function nativePairKey("));
+    const imageEncodedHash = squash(topLevelFunction(photoFingerprint, "function encodedPhotoHash("));
+    const imageMemoRead = squash(classMethod(photoFingerprint, "private cachedNativeRecompression("));
+    const imageMemoValidation = squash(classMethod(photoFingerprint, "private validateNativeRecompression("));
+    const directNativePair = !photoFingerprint.includes("nativeRecompressionMemo") &&
+      imageNativeCall.includes("await this.nativeDecoder.verifyRecompression(original, current, request)");
+    const snapshotNativePair =
+      imageNativeGate.includes("const nativeOriginal = Buffer.from(original);") &&
+      imageNativeGate.includes("const nativeCurrent = Buffer.from(current);") &&
+      imageNativeGate.includes("this.validateNativePairBytes(nativeOriginal, nativeCurrent);") &&
+      imageNativeGate.includes("const key = nativePairKey(nativeOriginal, nativeCurrent);") &&
+      imageNativeGate.indexOf("const key = nativePairKey(nativeOriginal, nativeCurrent);") > imageNativeGate.indexOf("const nativeCurrent = Buffer.from(current);") &&
+      imageNativeGate.includes("requirePhotoDeadline(request.deadlineAtMs);") &&
+      imageNativeGate.includes("const cached = this.cachedNativeRecompression( key, nativeOriginal.byteLength + nativeCurrent.byteLength, request.deadlineAtMs, );") &&
+      imageNativeGate.includes("await this.nativeDecoder.verifyRecompression(nativeOriginal, nativeCurrent, request)") &&
+      imageNativeGate.indexOf("const key = nativePairKey(nativeOriginal, nativeCurrent);") < imageNativeGate.indexOf("await this.nativeDecoder.verifyRecompression(nativeOriginal, nativeCurrent, request)") &&
+      imageNativeGate.includes("if (result.matched) this.nativeRecompressionMemo.set(key, result);") &&
+      imageEncodedHash.includes("return createHash(\u0027sha256\u0027).update(bytes).digest(\u0027hex\u0027);") &&
+      imagePairKey.includes("${PHOTO_FINGERPRINT_ALGORITHM_VERSION}\\0${PHOTO_RECOMPRESSION_VERSION}\\0${encodedPhotoHash(original)}\\0${encodedPhotoHash(current)}") &&
+      imageMemoRead.includes("requirePhotoDeadline(deadlineAtMs);") &&
+      imageMemoRead.includes("this.validateNativeRecompression(cached, encodedBytes);") &&
+      imageMemoValidation.includes("result.proof.version !== PHOTO_RECOMPRESSION_VERSION") &&
+      imageMemoValidation.includes("Math.min(this.maxInputPixels, MAX_RECOMPRESSION_PAIR_PIXELS)");
+    const imageNativeSource = topLevelFunction(photoRecompression, "export async function verifyNativePhotoRecompression(");
+    const imageNative = squash(imageNativeSource);
+    const imageJpegStart = imageNativeSource.indexOf("const verifyStandardJpeg = async (): Promise<boolean> => {");
+    const imageJpegEnd = imageNativeSource.indexOf("\n  };", imageJpegStart);
+    const imageJpeg = imageJpegStart >= 0 && imageJpegEnd > imageJpegStart
+      ? squash(imageNativeSource.slice(imageJpegStart, imageJpegEnd)) : "";
+    const jpegHeader = squash(stripComments(topLevelFunction(photoJpegRecompression, "export function readStandardJpegRecompressionRecipe(")));
+    const jpegFrame = squash(stripComments(topLevelFunction(photoJpegRecompression, "function readStandardFrame(")));
+    const jpegQuality = squash(stripComments(topLevelFunction(photoJpegRecompression, "function findStandardQuality(")));
+    const boundedJpegRecipe =
+      photoJpegRecompression.includes("const MAX_JPEG_HEADER_BYTES = 65_536;") &&
+      photoJpegRecompression.includes("const MAX_JPEG_HEADER_MARKERS = 64;") &&
+      jpegHeader.includes("const headerLimit = Math.min(bytes.length, MAX_JPEG_HEADER_BYTES);") &&
+      jpegHeader.includes("while (offset < headerLimit && markers < MAX_JPEG_HEADER_MARKERS)") &&
+      jpegHeader.includes("if (length < 2 || length > headerLimit - offset) return undefined;") &&
+      jpegHeader.includes("if (cursor + 65 > end || (table !== 0 && table !== 1) || tables[table]) return undefined;") &&
+      jpegHeader.includes("tables[table] = bytes.subarray(cursor + 1, cursor + 65);") &&
+      jpegHeader.includes("marker === 0xc0 || marker === 0xc2") &&
+      jpegHeader.includes("if (frame) return undefined;") &&
+      jpegHeader.includes("frame = readStandardFrame(bytes, start, end, marker === 0xc2);") &&
+      jpegHeader.includes("if (!frame) return undefined;") &&
+      jpegHeader.includes("if (!frame || !tables[0] || !tables[1] || !validFirstScan(bytes, start, end, frame)) return undefined;") &&
+      jpegHeader.includes("const quality = findStandardQuality(tables[0], tables[1]);") &&
+      jpegHeader.includes("quality === undefined ? undefined : { quality, chromaSubsampling: frame.chromaSubsampling }") &&
+      ["end - start !== 15", "bytes[start] !== 8", "bytes[start + 5] !== 3",
+        "bytes[start + 6] !== 1", "bytes[start + 8] !== 0", "bytes[start + 9] !== 2",
+        "bytes[start + 10] !== 0x11", "bytes[start + 11] !== 1", "bytes[start + 12] !== 3",
+        "bytes[start + 13] !== 0x11", "bytes[start + 14] !== 1"].every((guard) => jpegFrame.includes(guard)) &&
+      jpegFrame.includes("if (sampling !== 0x22 && sampling !== 0x11) return undefined;") &&
+      jpegQuality.includes("for (let quality = 50; quality <= 100; quality += 1)") &&
+      jpegQuality.includes("const scale = 200 - quality * 2;") &&
+      jpegQuality.includes("for (let index = 0; index < 64; index += 1)") &&
+      jpegQuality.includes("const natural = JPEG_ZIGZAG_TO_NATURAL[index]!;") &&
+      jpegQuality.includes("Math.floor((STANDARD_LUMINANCE_TABLE[natural]! * scale + 50) / 100)") &&
+      jpegQuality.includes("Math.floor((STANDARD_CHROMINANCE_TABLE[natural]! * scale + 50) / 100)") &&
+      jpegQuality.includes("if (luminance[index] !== expectedLuminance || chrominance[index] !== expectedChrominance)") &&
+      jpegQuality.includes("matched = false; break;") && jpegQuality.includes("if (matched) return quality;");
     const imageResidual = squash(topLevelFunction(photoRecompression, "function residualWithinBounds("));
+    const imageResidualWindows = squash(topLevelFunction(photoResidualWindows, "export function photoResidualWindowsWithinBounds("));
+    const boundedResidualWindows =
+      photoRecompression.includes("import { photoResidualWindowsWithinBounds } from \u0027./photo-residual-windows\u0027") &&
+      imageResidual.includes("return photoResidualWindowsWithinBounds(original, current, width, height, channels, limits, () => requireTime(deadlineAtMs), );") &&
+      photoResidualWindows.includes("const TILE = 8;") && photoResidualWindows.includes("const STRIDE = 4;") &&
+      imageResidualWindows.includes("if (y % 64 === 0) assertTime();") &&
+      imageResidualWindows.includes("if (top % 64 === 0) assertTime();") &&
+      imageResidualWindows.includes("for (let top = 0; top < height; top += STRIDE)") &&
+      imageResidualWindows.includes("for (let left = 0; left < width; left += STRIDE)") &&
+      imageResidualWindows.includes("updateRows(0, Math.min(TILE, height), 1);") &&
+      imageResidualWindows.includes("updateRows(top - STRIDE, top, -1);") &&
+      imageResidualWindows.includes("updateRows(Math.min(top - STRIDE + TILE, height), Math.min(top + TILE, height), 1);") &&
+      imageResidualWindows.includes("const rows = Math.min(TILE, height - top);") &&
+      imageResidualWindows.includes("const right = Math.min(left + TILE, width);") &&
+      imageResidualWindows.includes("const count = rows * (right - left) * channels;") &&
+      imageResidualWindows.includes("square > count * limits.tileRms ** 2") &&
+      imageResidualWindows.includes("limits.tileMean !== undefined && Math.abs(sum) > count * limits.tileMean");
     const imageIndexRead = classMethod(recompressionIndex, "async read(");
     const imageIndexRemember = classMethod(recompressionIndex, "async remember(");
     const imageIndexLua = recompressionIndex.match(/export const DUPLICATE_RECOMPRESSION_INDEX_SCRIPT = `([\s\S]*?)`;/u)?.[1] ?? "";
@@ -925,7 +1006,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
       imageAtomicOriginal.includes("p.at >= original.expiresAtMs") &&
       imageAtomicOriginal.includes("or (p.periodStart and original.publishedAtMs < p.periodStart) then return cjson.encode({ kind = \u0027stale\u0027 }) end end");
     const recompressionReader =
-      recompressionVersion.includes("PHOTO_RECOMPRESSION_VERSION = \u0027native-recompression-v1\u0027") &&
+      boundedJpegRecipe && boundedResidualWindows &&
+      recompressionVersion.includes("PHOTO_RECOMPRESSION_VERSION = \u0027native-recompression-v2\u0027") &&
       state.includes(".refine(hasValidImageComparisonEvidence)") &&
       permit.includes("!hasValidImageComparisonEvidence(binding)") &&
       imageHistoryRevision.includes("hasValidImageComparisonEvidence(binding)") &&
@@ -935,7 +1017,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
       imageEvidence.includes("original.length === 1") && imageEvidence.includes("value.mediaHashes.length === 1") &&
       imageEvidence.includes("proof.originalHash === original[0]") &&
       imageEvidence.includes("proof.currentHash === value.mediaHashes[0]") &&
-      imageSettings.includes("version: \u0027image-recompression-fixed-window-v1\u0027") &&
+      imageSettings.includes("version: \u0027image-recompression-fixed-window-v2\u0027") &&
+      imageSettings.includes("recompressionVersion: PHOTO_RECOMPRESSION_VERSION") &&
       imageHistory.includes("const anchorIdentity = recompression") &&
       imageHistory.includes("[recompression.originalHash]") &&
       imageHistory.includes("recompression.currentHash !== mediaHashes[0]") &&
@@ -964,14 +1047,31 @@ maxim_topology_require_message_duplicate_delete_guard() {
       imageDownload.includes("const current = await this.downloader.download(params.currentUrl,") &&
       imageDownload.includes("result.proof.originalHash !== params.expectedOriginalHash") &&
       imageDownload.includes("result.proof.currentHash !== params.expectedCurrentHash") &&
-      imageNativeCall.includes("await this.nativeDecoder.verifyRecompression(original, current, request)") &&
+      (directNativePair || snapshotNativePair) &&
       imageNative.includes("a.info.width !== b.info.width") && imageNative.includes("a.info.height !== b.info.height") &&
       imageNative.includes("originalHash: canonicalHash(a.data, a.info.width, a.info.height)") &&
       imageNative.includes("currentHash: canonicalHash(b.data, b.info.width, b.info.height)") &&
+      photoRecompression.includes("import { readStandardJpegRecompressionRecipe } from \u0027./photo-jpeg-recompression\u0027") &&
+      imageJpeg.includes("const recipe = readStandardJpegRecompressionRecipe(current);") &&
+      imageJpeg.includes("if (!recipe) return false;") &&
+      imageJpeg.includes("encoded = await sharp(a.data, { raw }) .removeAlpha() .jpeg({ ...recipe,") &&
+      imageJpeg.includes("progressive: false") && imageJpeg.includes("quantisationTable: 0") &&
+      imageJpeg.includes("if (encoded.length > limits.maxInputBytes) return false;") &&
+      imageJpeg.includes("const reconstructed = await decode(image(encoded));") &&
+      imageJpeg.includes("if (encoded.equals(Buffer.from(current.buffer, current.byteOffset, current.byteLength))) return true;") &&
+      imageJpeg.indexOf("if (encoded.length > limits.maxInputBytes) return false;") < imageJpeg.indexOf("if (encoded.equals(") &&
+      imageJpeg.indexOf("if (encoded.equals(") < imageJpeg.indexOf("const reconstructed = await decode(image(encoded));") &&
+      count(imageJpeg, "requireTime(limits.deadlineAtMs);") === 3 &&
+      imageJpeg.includes("reconstructed.info.width === raw.width") &&
+      imageJpeg.includes("reconstructed.info.height === raw.height") &&
+      imageJpeg.includes("reconstructed.info.channels === 4") &&
+      imageJpeg.includes("canonicalHash(reconstructed.data, raw.width, raw.height) === proof.currentHash") &&
+      count(imageNative, "await verifyStandardJpeg()") === 1 &&
+      imageNative.includes("if (await verifyStandardJpeg()) return result(true);") &&
+      imageNative.indexOf("if (await verifyStandardJpeg()) return result(true);") < imageNative.indexOf("const grayA =") &&
       /residualWithinBounds\(\s*blurredA, blurredB/u.test(imageNative) &&
       /residualWithinBounds\(\s*colorA, colorB/u.test(imageNative) &&
       imageResidual.includes("Math.abs(difference) > limits.maximum") &&
-      imageResidual.includes("square > count * limits.tileRms ** 2") &&
       imageIndexRead.includes("await this.redis.duplicateRecompressionIndex(") &&
       imageIndexRemember.includes("await this.redis.duplicateRecompressionIndex(") &&
       imageIndexLua.includes("redis.call(\u0027TIME\u0027)") &&

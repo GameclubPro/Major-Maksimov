@@ -1,6 +1,7 @@
 import { MaxBotContextService } from '../../max/max-bot-context.service';
 import {
   parseMessageDuplicateBinding,
+  exactImageSettingsDigest,
   type MessageDuplicateBinding,
 } from './message-duplicate-state';
 import {
@@ -8,6 +9,7 @@ import {
   digestDuplicateContent,
 } from './message-duplicate-content';
 import { ConfigService } from '@nestjs/config';
+import type { MaxClientService } from '../../max/max-client.service';
 import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -24,6 +26,10 @@ import type { DuplicateModerationActionRequest } from '../duplicate-moderation.a
 import type { EnsureModerationDeleteIntentInput } from '../moderation-delete-intent.types';
 import { PhotoDuplicateAnalysisService } from '../photo-duplicate/photo-duplicate-analysis.service';
 import { PhotoDuplicateHistoryStore } from '../photo-duplicate/photo-duplicate-history.store';
+import {
+  PhotoDownloadHttpError,
+  type SecurePhotoDownloader,
+} from '../photo-duplicate/secure-photo-downloader';
 import {
   PHOTO_FINGERPRINT_ALGORITHM_VERSION,
   PhotoFingerprintService,
@@ -46,6 +52,10 @@ import {
   MessageDuplicateAuthorizationService,
 } from './message-duplicate-authorization.service';
 import { MessageDuplicateAdmissionService } from './message-duplicate-admission.service';
+import {
+  MessageDuplicateRecompressionIndex,
+  type MessageDuplicateRecompressionCandidate,
+} from './message-duplicate-recompression-index';
 
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL ?? '';
 const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisUrl);
@@ -81,16 +91,22 @@ async function prepareSyntheticImages() {
       });
     }),
   );
-  const posters: Record<string, Readonly<{ quality92: Buffer; quality89: Buffer }>> = {};
+  const posters: Record<
+    string,
+    Readonly<{ quality92: Buffer; quality89: Buffer; jpeg92: Buffer; jpeg65: Buffer }>
+  > = {};
   for (const [phone, price] of [
     ['8-902-009-99-49', 'Price 1000'],
     ['8-902-009-99-48', 'Price 1000'],
     ['8-902-009-99-49', 'Price 1009'],
   ]) {
     const source = recompressionPoster(phone, price);
+    const jpeg92 = await sharp(source).jpeg({ quality: 92 }).toBuffer();
     posters[JSON.stringify([phone, price])] = Object.freeze({
       quality92: await sharp(source).webp({ quality: 92 }).toBuffer(),
       quality89: await sharp(source).webp({ quality: 89 }).toBuffer(),
+      jpeg92,
+      jpeg65: await sharp(jpeg92).jpeg({ quality: 65 }).toBuffer(),
     });
   }
   const grayImage = (gray: number) =>
@@ -105,6 +121,10 @@ async function prepareSyntheticImages() {
       .png()
       .toBuffer();
   const grayscale = Object.freeze({
+    0: await grayImage(0),
+    32: await grayImage(32),
+    64: await grayImage(64),
+    96: await grayImage(96),
     128: await grayImage(128),
     129: await grayImage(129),
     130: await grayImage(130),
@@ -218,6 +238,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
   const rows = new Map<string, MaxUpdate>();
   const remote = new Map<string, Record<string, unknown>>();
   const images = new Map<string, Buffer>();
+  const downloadFailures = new Map<string, Error>();
   const deleted: string[] = [];
   const sanctions: Array<{ messageId: string; action: string }> = [];
   const records = new Map<
@@ -277,9 +298,10 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       isAdmin: false,
       isOwner: false,
     })),
-    getExactMessageRow: jest.fn(
-      async (_chatId: string, messageId: string) => remote.get(messageId) ?? null,
-    ),
+    getExactMessageRow: jest.fn<
+      ReturnType<MaxClientService['getExactMessageRow']>,
+      Parameters<MaxClientService['getExactMessageRow']>
+    >(async (_chatId: string, messageId: string) => remote.get(messageId) ?? null),
     deleteMessage: jest.fn(async (_chatId: string, messageId: string) => {
       remote.delete(messageId);
       deleted.push(messageId);
@@ -398,10 +420,19 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     policy as never,
     guard,
   );
-  const downloads = jest.fn(async (url: string) => {
+  const downloads = jest.fn<
+    ReturnType<SecurePhotoDownloader['download']>,
+    Parameters<SecurePhotoDownloader['download']>
+  >(async (url) => {
+    const failure = downloadFailures.get(url);
+    if (failure) throw failure;
     const bytes = images.get(url);
     if (!bytes) throw new Error('Synthetic photo source unavailable');
-    return { bytes, format: new URL(url).pathname.endsWith('.webp') ? 'webp' : 'png' };
+    const pathname = new URL(url).pathname;
+    return {
+      bytes,
+      format: pathname.endsWith('.webp') ? 'webp' : pathname.endsWith('.jpeg') ? 'jpeg' : 'png',
+    };
   });
   const photos = new PhotoDuplicateAnalysisService(
     { download: downloads } as never,
@@ -469,6 +500,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       buttons?: Record<string, unknown>[][];
       photo?: 'png' | 'webp' | 'different';
       imageBytes?: Buffer;
+      imageFormat?: 'png' | 'webp' | 'jpeg';
       photoId?: string;
       photoCount?: number;
       reversePhotos?: boolean;
@@ -483,7 +515,8 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     const id = options.id ?? `message-${++next}`;
     const time = options.time ?? start + next * 100;
     const photoId = `${suffix}:${options.photoId ?? id}`;
-    const url = `https://i.oneme.ru/${suffix}:${id}.${options.photo === 'webp' ? 'webp' : 'png'}`;
+    const imageFormat = options.imageFormat ?? (options.photo === 'webp' ? 'webp' : 'png');
+    const url = `https://i.oneme.ru/${suffix}:${id}.${imageFormat}`;
     const attachments = options.photo
       ? Array.from({ length: options.photoCount ?? 1 }, (_, index) => ({
           type: 'image',
@@ -581,6 +614,8 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     prepare,
     ingest,
     service,
+    media,
+    photos,
     remote,
     redis,
     chatId,
@@ -589,6 +624,8 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     deleted,
     sanctions,
     downloads,
+    downloadFailures,
+    images,
     intents,
     claimedMessages,
     records,
@@ -630,6 +667,68 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       jest.restoreAllMocks();
       await flow?.close();
     });
+
+    const prepareStaleRecompressionOriginal = async (
+      format: 'webp' | 'jpeg',
+      failure: number | 'missing',
+      currentMissingUrl = false,
+    ) => {
+      flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
+      const poster = recompressionPosterImages();
+      const originalBytes = format === 'jpeg' ? poster.jpeg92 : poster.quality92;
+      const repeatedBytes = format === 'jpeg' ? poster.jpeg65 : poster.quality89;
+      const original = flow.prepare({
+        photo: 'webp',
+        imageFormat: format,
+        imageBytes: originalBytes,
+        missingUrl: failure === 'missing',
+      });
+      const filler = flow.prepare({ photo: 'different' });
+      for (const item of [original, filler])
+        await flow.processor.process((await flow.ingest(item))!);
+      const buckets = await Promise.all(
+        [...flow.keys]
+          .filter((key) => key.startsWith('dup:recompression:v1:'))
+          .map((key) => flow.inspector.get(key)),
+      );
+      const anchor = buckets
+        .flatMap((raw) => JSON.parse(raw ?? '[]') as MessageDuplicateRecompressionCandidate[])
+        .find((candidate) => candidate.messageId === original.id);
+      expect(anchor).toBeDefined();
+      const renewed = structuredClone(flow.remote.get(original.id)!);
+      const body = renewed.body as {
+        attachments: Array<{ type: string; payload: { photo_id: string; url: string } }>;
+      };
+      const originalUrl = body.attachments[0]!.payload.url;
+      expect(flow.downloads.mock.calls.filter(([url]) => url === originalUrl)).toHaveLength(1);
+      const freshUrl = `${originalUrl}&renewed=1`;
+      body.attachments[0]!.payload.url = freshUrl;
+      flow.remote.set(original.id, renewed);
+      flow.images.set(freshUrl, originalBytes);
+      flow.downloadFailures.set(
+        originalUrl,
+        new PhotoDownloadHttpError(failure === 'missing' ? 403 : failure),
+      );
+      flow.downloads.mockClear();
+      flow.max.getExactMessageRow.mockClear();
+      const repeat = flow.prepare({
+        photo: 'webp',
+        imageFormat: format,
+        imageBytes: repeatedBytes,
+        userId: 456,
+        missingUrl: currentMissingUrl,
+      });
+      return {
+        original,
+        repeat,
+        originalUrl,
+        freshUrl,
+        renewed,
+        body,
+        repeatedBytes,
+        anchor: anchor!,
+      };
+    };
 
     it.each(['MESSAGE', 'TEXT', 'IMAGE'] as const)(
       'deletes an identical announcement from a parser-supported array envelope (%s)',
@@ -1122,6 +1221,162 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       expect(flow.downloads).toHaveBeenCalledTimes(2);
     });
 
+    const prepareExactCandidatePriority = async (nearCount: 0 | 1 | 4 = 4) => {
+      flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
+      const candidates = new MessageDuplicateRecompressionIndex(flow.redis);
+      const scope = digestDuplicateContent([
+        flow.chatId,
+        null,
+        1,
+        exactImageSettingsDigest(flow.settings),
+        undefined,
+      ]);
+      const levels = [0, 32, 64, 96] as const;
+      const originals = [];
+      for (const level of [...levels.slice(0, nearCount), 128] as const) {
+        const item = flow.prepare({
+          photo: 'png',
+          imageBytes: preparedSyntheticImages().grayscale[level],
+        });
+        await flow.service.observeLifecycle(item.update);
+        const content = extractDuplicateMessageContent(item.update.raw);
+        const fingerprint = await flow.photos.fingerprintAlbum(
+          {
+            receiptId: item.receipt,
+            chatId: flow.chatId,
+            senderId: item.update.message!.senderId,
+            messageId: item.id,
+            createdAtMs: item.time,
+            caption: content.text,
+            images: content.media.map((image) => ({
+              source: 'direct' as const,
+              photoId: image.photoId,
+              downloadUrl: image.url,
+            })),
+          },
+          3600,
+          Date.now() + 30_000,
+          true,
+        );
+        if (fingerprint.kind !== 'complete') throw new Error('Exact priority fixture incomplete');
+        const image = fingerprint.fingerprint.images[0]!;
+        const observation = {
+          chatId: flow.chatId,
+          userId: item.update.message!.senderId,
+          messageId: item.id,
+          eventTimestampMs: item.time,
+          publishedAtMs: item.time,
+          controlRevision: 1,
+          settings: flow.settings,
+          content,
+          mediaHashes: [image.canonicalHash],
+          imageScope: 'CHAT' as const,
+        };
+        await flow.history.observeWithOutcome(observation);
+        const original = await flow.history.findImageOriginal(observation);
+        expect(original?.messageId).toBe(item.id);
+        expect(image.recompressionHash).toBe('0000000000000000');
+        const candidate: MessageDuplicateRecompressionCandidate = {
+          webhookEventId: item.receipt,
+          messageId: item.id,
+          eventTimestampMs: item.time,
+          publishedAtMs: item.time,
+          canonicalHash: image.canonicalHash,
+          recompressionHash: image.recompressionHash!,
+          expiresAtMs: item.time + 3_600_000,
+        };
+        await candidates.remember(digestDuplicateContent([scope, content.actions]), candidate);
+        for (const key of flow.history.candidateKeys(content, flow.settings, true))
+          await flow.redis.setStringWithTtl(
+            `message-duplicate:candidate:v1:${scope}:${key}`,
+            JSON.stringify({
+              webhookEventId: item.receipt,
+              messageId: item.id,
+              eventTimestampMs: item.time,
+            }),
+            3600,
+          );
+        originals.push({ item, candidate, original: original! });
+      }
+      const exact = originals.at(-1)!;
+      const repeat = flow.prepare({
+        photo: 'png',
+        userId: 456,
+        imageBytes: preparedSyntheticImages().grayscale[128],
+      });
+      const job = (await flow.ingest(repeat))!;
+      const content = extractDuplicateMessageContent(repeat.update.raw);
+      const input: Parameters<MessageDuplicateMediaService['findRecompression']>[0] = {
+        scope,
+        job: job.data,
+        source: { update: repeat.update, botId: 'bot', eventTimestampMs: repeat.time },
+        settings: flow.settings,
+        verified: { content, hashes: [exact.candidate.canonicalHash] },
+        hash: exact.candidate.recompressionHash,
+        deadlineAtMs: Date.now() + 30_000,
+        budget: { remaining: 20 },
+        lease: { assertOwned: jest.fn(), resolveActionEligibility: async () => true },
+        heavyWorkAdmitted: true,
+        refreshedPhotoSources: new Map(),
+      };
+      const nativePair = jest.spyOn(flow.photos, 'verifyRecompression');
+      return {
+        exact,
+        repeat,
+        job,
+        input,
+        nativePair,
+        lookup: () => flow.media['findRecompression'](input),
+      };
+    };
+
+    it('prefers exact canonical history beyond four colliding near candidates without native pairs', async () => {
+      const { exact, repeat, job, nativePair } = await prepareExactCandidatePriority();
+      await flow.processor.process(job);
+      expect(flow.deleted).toEqual([repeat.id]);
+      const binding = parseMessageDuplicateBinding(
+        flow.records.get(`intent:${repeat.id}`)!.input.event!.metadata,
+      )!;
+      expect(binding.original).toEqual(exact.original);
+      expect(binding.mediaHashes).toEqual(binding.original!.mediaHashes);
+      expect(binding.imageRecompression).toBeUndefined();
+      expect(await flow.history.qualified(flow.chatId, binding)).toBe(1);
+      expect(nativePair).not.toHaveBeenCalled();
+    });
+
+    it('does not require or consume the native pair budget for exact canonical history', async () => {
+      const { exact, input, lookup, nativePair } = await prepareExactCandidatePriority(1);
+      input.budget.remaining = 0;
+      const result = await lookup();
+      expect(result.anchor).toEqual(exact.candidate);
+      expect(result.proof).toBeUndefined();
+      expect(input.budget.remaining).toBe(0);
+      expect(input.lease.assertOwned).toHaveBeenCalled();
+      expect(nativePair).not.toHaveBeenCalled();
+    });
+
+    it('respects the existing deadline even for exact canonical history', async () => {
+      const { input, lookup, nativePair } = await prepareExactCandidatePriority(0);
+      input.deadlineAtMs = Date.now() - 1;
+      await expect(lookup()).rejects.toMatchObject({ reason: 'proof_budget' });
+      expect(input.budget.remaining).toBe(20);
+      expect(nativePair).not.toHaveBeenCalled();
+    });
+
+    it.each(['removed', 'reset', 'source_chat'] as const)(
+      'keeps exact canonical candidates fenced after their original is %s',
+      async (change) => {
+        const { exact, lookup, nativePair } = await prepareExactCandidatePriority(0);
+        if (change === 'removed') await flow.history.remove(flow.chatId, exact.item.id);
+        else if (change === 'reset')
+          await flow.redis.resetDuplicateWindow(flow.chatId, exact.item.update.message!.senderId);
+        else exact.item.update.message!.chatId = '-999999';
+        expect((await lookup()).anchor).toBeUndefined();
+        expect(nativePair).not.toHaveBeenCalled();
+        expect(flow.deleted).toEqual([]);
+      },
+    );
+
     it('deletes a cross-author recompressed copy after unrelated photos, retaining both exact identities', async () => {
       flow = await createFlow({ duplicatePhotoScope: 'CHAT' });
       const original = flow.prepare({
@@ -1141,7 +1396,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       const binding = parseMessageDuplicateBinding(record.input.event!.metadata)!;
       expect(binding.original?.messageId).toBe(original.id);
       expect(binding.imageRecompression).toEqual({
-        version: 'native-recompression-v1',
+        version: 'native-recompression-v2',
         originalHash: binding.original!.mediaHashes[0],
         currentHash: binding.mediaHashes[0],
       });
@@ -1150,6 +1405,160 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       await flow.processor.process((await flow.ingest(repeat))!);
       expect(flow.deleted).toEqual([repeat.id]);
       expect(flow.downloads).toHaveBeenCalledTimes(downloads);
+    });
+
+    it.each([
+      ['webp', 403],
+      ['webp', 404],
+      ['webp', 410],
+      ['webp', 'missing'],
+      ['jpeg', 403],
+    ] as const)(
+      'renews a cached original %s source after %s and verifies the recompressed copy once',
+      async (format, failure) => {
+        const { original, repeat, originalUrl, freshUrl, anchor } =
+          await prepareStaleRecompressionOriginal(format, failure);
+        const job = (await flow.ingest(repeat))!;
+        await flow.processor.process(job);
+        expect(flow.deleted).toEqual([repeat.id]);
+        const binding = parseMessageDuplicateBinding(
+          flow.records.get(`intent:${repeat.id}`)!.input.event!.metadata,
+        )!;
+        expect(binding.original).toEqual(
+          expect.objectContaining({
+            messageId: original.id,
+            publishedAtMs: anchor.publishedAtMs,
+            expiresAtMs: anchor.expiresAtMs,
+            mediaHashes: [anchor.canonicalHash],
+          }),
+        );
+        expect(binding.imageRecompression).toEqual({
+          version: 'native-recompression-v2',
+          originalHash: anchor.canonicalHash,
+          currentHash: binding.mediaHashes[0],
+        });
+        expect(binding.mediaHashes[0]).not.toBe(anchor.canonicalHash);
+        expect(flow.downloads.mock.calls.filter(([url]) => url === originalUrl)).toHaveLength(
+          failure === 'missing' ? 0 : 1,
+        );
+        expect(flow.downloads.mock.calls.filter(([url]) => url === freshUrl)).toHaveLength(1);
+        const refreshes = flow.max.getExactMessageRow.mock.calls.filter(
+          ([, , options]) =>
+            typeof options === 'object' && options.sourceTag === 'message_duplicate_media',
+        );
+        expect(refreshes.filter(([, messageId]) => messageId === original.id)).toHaveLength(1);
+        expect(
+          refreshes.filter(([, messageId]) => messageId === repeat.id).length,
+        ).toBeLessThanOrEqual(1);
+        expect(
+          refreshes.every(
+            ([chatId, , options]) =>
+              chatId === flow.chatId &&
+              typeof options === 'object' &&
+              options.botId === 'bot' &&
+              options.bypassCache === true &&
+              options.trafficClass === 'background',
+          ),
+        ).toBe(true);
+        const downloads = flow.downloads.mock.calls.length;
+        const lookups = flow.max.getExactMessageRow.mock.calls.length;
+        await flow.processor.process(job);
+        expect(flow.deleted).toEqual([repeat.id]);
+        expect(flow.downloads).toHaveBeenCalledTimes(downloads);
+        expect(flow.max.getExactMessageRow).toHaveBeenCalledTimes(lookups);
+      },
+    );
+
+    it('reuses the current fingerprint source renewal when recovering an expired original pair', async () => {
+      const { original, repeat, freshUrl, anchor } = await prepareStaleRecompressionOriginal(
+        'webp',
+        403,
+        true,
+      );
+      const currentUrl = extractDuplicateMessageContent(flow.remote.get(repeat.id)!, false)
+        .media[0]!.url!;
+      const job = (await flow.ingest(repeat))!;
+      await flow.processor.process(job);
+      expect(flow.deleted).toEqual([repeat.id]);
+      const binding = parseMessageDuplicateBinding(
+        flow.records.get(`intent:${repeat.id}`)!.input.event!.metadata,
+      )!;
+      expect(binding.original).toEqual(
+        expect.objectContaining({
+          messageId: original.id,
+          publishedAtMs: anchor.publishedAtMs,
+          expiresAtMs: anchor.expiresAtMs,
+          mediaHashes: [anchor.canonicalHash],
+        }),
+      );
+      expect(binding.imageRecompression).toEqual({
+        version: 'native-recompression-v2',
+        originalHash: anchor.canonicalHash,
+        currentHash: binding.mediaHashes[0],
+      });
+      expect(binding.mediaHashes[0]).not.toBe(anchor.canonicalHash);
+      const refreshes = flow.max.getExactMessageRow.mock.calls.filter(
+        ([, , options]) =>
+          typeof options === 'object' && options.sourceTag === 'message_duplicate_media',
+      );
+      expect(refreshes.map(([, messageId]) => messageId)).toEqual([repeat.id, original.id]);
+      expect(flow.downloads.mock.calls.filter(([url]) => url === freshUrl)).toHaveLength(1);
+      expect(flow.downloads.mock.calls.filter(([url]) => url === currentUrl)).toHaveLength(2);
+      const downloads = flow.downloads.mock.calls.length;
+      const lookups = flow.max.getExactMessageRow.mock.calls.length;
+      await flow.processor.process(job);
+      expect(flow.deleted).toEqual([repeat.id]);
+      expect(flow.downloads).toHaveBeenCalledTimes(downloads);
+      expect(flow.max.getExactMessageRow).toHaveBeenCalledTimes(lookups);
+    });
+
+    it.each(['pixels', 'sender', 'photoId'] as const)(
+      'preserves a recompressed copy when the renewed cached original changes its %s',
+      async (change) => {
+        const { original, repeat, freshUrl, renewed, body, repeatedBytes } =
+          await prepareStaleRecompressionOriginal('webp', 403);
+        if (change === 'pixels') flow.images.set(freshUrl, repeatedBytes);
+        if (change === 'sender') renewed.sender = { user_id: 789, name: 'Changed author' };
+        if (change === 'photoId') body.attachments[0]!.payload.photo_id += ':changed';
+        const job = (await flow.ingest(repeat))!;
+        await flow.processor.process(job);
+        expect(flow.deleted).toEqual([]);
+        expect(flow.sanctions).toEqual([]);
+        expect(flow.intents.ensureIntentWithMessageActionClaim).not.toHaveBeenCalled();
+        expect(
+          flow.max.getExactMessageRow.mock.calls.filter(
+            ([, messageId, options]) =>
+              messageId === original.id &&
+              typeof options === 'object' &&
+              options.sourceTag === 'message_duplicate_media',
+          ),
+        ).toHaveLength(1);
+        expect(flow.downloads.mock.calls.filter(([url]) => url === freshUrl)).toHaveLength(
+          change === 'pixels' ? 1 : 0,
+        );
+      },
+    );
+
+    it('stops after one source renewal when the cached original locator is still expired', async () => {
+      const { original, repeat, originalUrl, freshUrl } = await prepareStaleRecompressionOriginal(
+        'webp',
+        403,
+      );
+      flow.downloadFailures.set(freshUrl, new PhotoDownloadHttpError(410));
+      await flow.processor.process((await flow.ingest(repeat))!);
+      expect(flow.deleted).toEqual([]);
+      expect(flow.sanctions).toEqual([]);
+      expect(flow.intents.ensureIntentWithMessageActionClaim).not.toHaveBeenCalled();
+      expect(flow.downloads.mock.calls.filter(([url]) => url === originalUrl)).toHaveLength(1);
+      expect(flow.downloads.mock.calls.filter(([url]) => url === freshUrl)).toHaveLength(1);
+      const refreshes = flow.max.getExactMessageRow.mock.calls.filter(
+        ([, , options]) =>
+          typeof options === 'object' && options.sourceTag === 'message_duplicate_media',
+      );
+      expect(refreshes.filter(([, messageId]) => messageId === original.id)).toHaveLength(1);
+      expect(
+        refreshes.filter(([, messageId]) => messageId === repeat.id).length,
+      ).toBeLessThanOrEqual(1);
     });
 
     it.each(['callback', 'link'] as const)(

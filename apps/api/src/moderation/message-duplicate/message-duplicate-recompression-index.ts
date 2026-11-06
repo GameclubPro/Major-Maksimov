@@ -141,6 +141,7 @@ local function newerSource(a,b)
 end
 local queryHash=''
 for i=1,8 do queryHash=queryHash..string.sub(KEYS[i],-2) end
+local distances={}
 local function withinHamming(hash)
   local distance=0
   for i=1,16,2 do
@@ -151,6 +152,7 @@ local function withinHamming(hash)
       differing=bit.band(differing,differing-1)
     end
   end
+  distances[hash]=distance
   return true
 end
 local all={}
@@ -200,7 +202,16 @@ for i=1,8 do
   if encoded[i]=='' then redis.call('DEL',KEYS[i])
   else redis.call('SET',KEYS[i],encoded[i],'PXAT',deadlines[i]) end
 end
-table.sort(all,earlier)
+-- FLAG: Select the nearest retained sources before either bounded proof-attempt cap.
+-- Distance only orders candidates; every match still requires independent native proof.
+table.sort(all,function(a,b)
+  if p.op=='read' then
+    local left=distances[a.recompressionHash]
+    local right=distances[b.recompressionHash]
+    if left~=right then return left<right end
+  end
+  return earlier(a,b)
+end)
 local result={}
 for i=1,math.min(8,#all) do result[i]=all[i] end
 if #result==0 then return '[]' end
