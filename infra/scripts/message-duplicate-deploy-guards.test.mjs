@@ -38,6 +38,7 @@ const paths = {
   photoRecompression: 'apps/api/src/moderation/photo-duplicate/photo-recompression.ts',
   recompressionVersion: 'apps/api/src/moderation/photo-duplicate/photo-recompression-version.ts',
   counters: 'apps/api/src/moderation/redis-counter.service.ts',
+  service: 'apps/api/src/moderation/message-duplicate/message-duplicate.service.ts',
 };
 function probe(t, overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-duplicate-floor-'));
@@ -84,6 +85,13 @@ test('requires the message-v3 reader, durable admission and last action permit o
 });
 
 const mutations = [
+  ['state', "comparisonPolicy: 'text-or-image-v1'", "comparisonPolicy: 'split-text-image-v0'"],
+  ['service', "comparison: 'TEXT'", "comparison: 'MESSAGE'"],
+  ['history', 'input.comparison ??', 'undefined ??'],
+  ['queue', "comparison?: 'TEXT' | 'IMAGE'", "comparison?: 'IMAGE'"],
+  ['media', "job.comparison === 'TEXT'", 'false'],
+  ['media', "comparison: 'TEXT'", "comparison: 'MESSAGE'"],
+  ['content', "(content.media.length > 0 || content.reason === 'unsupported_attachment')", 'false'],
   ['state', '.refine(hasValidImageComparisonEvidence)', '.refine(() => true)'],
   ['state', 'image-recompression-fixed-window-v1', 'image-fixed-window-v2'],
   ['state', 'original.length === 1', 'original.length > 0'],
@@ -604,6 +612,50 @@ const mutations = [
   ['migration', 'OLD."duplicate_policy_revision" +', 'NEW."duplicate_policy_revision" +'],
   ['migration', 'BEFORE INSERT OR UPDATE ON "chat_settings"', 'BEFORE INSERT ON "chat_settings"'],
 ];
+
+for (const [name, key, before, after] of [
+  [
+    'text settings digest',
+    'state',
+    "comparisonPolicy: 'text-or-image-v1',",
+    "comparisonPolicy: 'text-or-image-v1', legacyMode: settings.duplicateCompareMode,",
+  ],
+  [
+    'image settings digest',
+    'state',
+    'enabled: settings.antiDuplicateEnabled,\n    scope: settings.duplicatePhotoScope,',
+    "enabled: settings.antiDuplicateEnabled && settings.duplicateCompareMode !== 'TEXT',\n    scope: settings.duplicatePhotoScope,",
+  ],
+  [
+    'inline admission',
+    'service',
+    'const content = extractDuplicateMessageContent(params.update.raw);',
+    "if (params.settings.duplicateCompareMode !== 'TEXT') return finish('OFF');\n      const content = extractDuplicateMessageContent(params.update.raw);",
+  ],
+  [
+    'deferred image admission',
+    'media',
+    'const content = extractDuplicateMessageContent(source.update.raw);',
+    "if (imageOnly && settings.duplicateCompareMode === 'TEXT') return finish('SETTINGS_CHANGED');\n      const content = extractDuplicateMessageContent(source.update.raw);",
+  ],
+  [
+    'final settings guard',
+    'guard',
+    'settings.duplicatePolicyRevision !== binding.policyRevision ||',
+    "settings.duplicatePolicyRevision !== binding.policyRevision ||\n      (binding.compareMode === 'IMAGE' && settings.duplicateCompareMode === 'TEXT') ||",
+  ],
+]) {
+  test(`rejects rollback restoring the retired comparison selector in ${name}`, (t) => {
+    const source = readFileSync(resolve(root, paths[key]), 'utf8');
+    assert.ok(source.includes(before), `Missing selector mutation anchor: ${before}`);
+    const result = probe(t, { [key]: source.replace(before, after) });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /lacks the message duplicate v3 lifecycle\/revocation\/pre-dispatch/u,
+    );
+  });
+}
 test('rejects an original pin moved behind the observe mutation boundary', (t) => {
   const source = readFileSync(resolve(root, paths.window), 'utf8');
   const start = source.indexOf('if p.recompressionOriginal then');

@@ -7,6 +7,42 @@ import {
 } from './network-settings-patch';
 
 describe('source-free network settings patches', () => {
+  it('omits the retired comparison selector while preserving legacy recipient settings', () => {
+    const paths = networkSettingsPaths('chat', 'duplicates');
+    expect(paths).not.toContain('duplicateCompareMode');
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'antiDuplicateEnabled',
+        'duplicatePhotoScope',
+        'duplicateWarnWindowSec',
+        'duplicateWarnMaxCount',
+      ]),
+    );
+    const current = chatSettingsSchema.parse({ duplicateCompareMode: 'TEXT' });
+    const next = buildNetworkSettingsPatch(current, 'chat', 'duplicates', [
+      { path: 'duplicatePhotoScope', op: 'set', value: 'CHAT' },
+    ]);
+    expect(next.duplicatePhotoScope).toBe('CHAT');
+    expect(next.duplicateCompareMode).toBe('TEXT');
+    expect(commonNetworkSettingsFields(paths, [next])).not.toHaveProperty('duplicateCompareMode');
+  });
+
+  it('continues retained operations containing the retired selector without exposing it in new drafts', () => {
+    const current = chatSettingsSchema.parse({
+      duplicateCompareMode: 'MESSAGE',
+      duplicatePhotoScope: 'SAME_AUTHOR',
+    });
+    const next = buildNetworkSettingsPatch(current, 'chat', 'duplicates', [
+      { path: 'duplicateCompareMode', op: 'set', value: 'TEXT' },
+      { path: 'duplicatePhotoScope', op: 'set', value: 'CHAT' },
+    ]);
+    expect(next.duplicateCompareMode).toBe('TEXT');
+    expect(next.duplicatePhotoScope).toBe('CHAT');
+    const paths = networkSettingsPaths('chat', 'duplicates');
+    expect(paths).not.toContain('duplicateCompareMode');
+    expect(commonNetworkSettingsFields(paths, [next])).not.toHaveProperty('duplicateCompareMode');
+  });
+
   it('changes speech style without copying individual messages or media', () => {
     const current = chatSettingsSchema.parse({
       botSpeechStyle: 'FRIENDLY',

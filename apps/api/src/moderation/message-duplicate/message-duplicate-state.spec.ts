@@ -17,6 +17,12 @@ import {
 } from './message-duplicate-test-fixtures';
 
 describe('safe text evidence compatibility', () => {
+  it('uses the same text and image policy for both retained comparison settings', () => {
+    const message = duplicateSettings({ duplicateCompareMode: 'MESSAGE' });
+    const text = duplicateSettings({ duplicateCompareMode: 'TEXT' });
+    expect(messageDuplicateSettingsDigest(message)).toBe(messageDuplicateSettingsDigest(text));
+    expect(exactImageSettingsDigest(message)).toBe(exactImageSettingsDigest(text));
+  });
   it.each([
     ['STANDARD', {}],
     ['STRICT', { duplicateDetectionPreset: 'STRICT' }],

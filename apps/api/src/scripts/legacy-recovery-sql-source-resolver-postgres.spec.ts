@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
 import { buildCommercialOcrJobId } from '../moderation/commercial-ocr/commercial-ocr.queue';
 import { buildPhotoDuplicateJobId } from '../moderation/photo-duplicate/photo-duplicate.queue';
-import { buildMessageDuplicateJobId } from '../moderation/message-duplicate/message-duplicate.queue';
+import {
+  buildMessageDuplicateJobId,
+  MESSAGE_DUPLICATE_JOB_VERSION,
+  type MessageDuplicateJob,
+} from '../moderation/message-duplicate/message-duplicate.queue';
 import { legacySnapshotDigest } from '../webhook/webhook-legacy-source';
 import { buildWebhookSemanticEventKey } from '../webhook/webhook-semantic-event-key';
 import { WebhookParser } from '../webhook/webhook.parser';
@@ -98,6 +102,7 @@ native('exact queue source resolver on PostgreSQL', () => {
     queueName: LegacyRecoverySqlSourceInput['queueName'] = 'message-duplicates',
     userId = 'independent-user',
     media = queueName !== 'message-duplicates',
+    comparison?: MessageDuplicateJob['comparison'],
   ) {
     const at = Date.now() - 10_000,
       chatId = '-ordinary-chat',
@@ -172,15 +177,16 @@ native('exact queue source resolver on PostgreSQL', () => {
         idempotencyKey: jobId,
       };
     } else {
-      jobId = buildMessageDuplicateJobId(chatId, messageId, at + 100);
+      jobId = buildMessageDuplicateJobId(chatId, messageId, at + 100, comparison);
       data = {
         ...common,
-        version: 2,
+        version: MESSAGE_DUPLICATE_JOB_VERSION,
         eventTimestampMs: at + 100,
         controlRevision: 1,
         policyRevision: 1,
         settingsDigest: 'a'.repeat(64),
         deadlineAtMs: at + 60_000,
+        ...(comparison ? { comparison } : {}),
         idempotencyKey: jobId,
       };
     }
@@ -195,10 +201,17 @@ native('exact queue source resolver on PostgreSQL', () => {
     reader.$transaction((tx) => resolveLegacyRecoverySqlSource(tx, input, scopes, budget), {
       isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
     });
-  it.each(['message-duplicates', 'photo-duplicates', 'commercial-image-ocr'] as const)(
-    'proves the complete independent %s source using one PK despite 10k unrelated receipts',
-    async (family) => {
-      const f = await fixture(family);
+  it.each([
+    ['message-duplicates', undefined, false],
+    ['message-duplicates', 'TEXT', false],
+    ['message-duplicates', 'TEXT', true],
+    ['message-duplicates', 'IMAGE', true],
+    ['photo-duplicates', undefined, true],
+    ['commercial-image-ocr', undefined, true],
+  ] as const)(
+    'proves the independent %s/%s source with media=%s using one PK despite 10k unrelated receipts',
+    async (family, comparison, media) => {
+      const f = await fixture(family, 'independent-user', media, comparison);
       const result = await resolve(f.input);
       expect(result.issues).toEqual([]);
       expect(result.decision).toBe('INDEPENDENT');

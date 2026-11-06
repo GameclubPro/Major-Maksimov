@@ -62,8 +62,8 @@ export function buildDuplicateRulesTextItems(
       : `Не отправляйте ${subject}: бот среагирует после ${allowedCount} ${allowedCount === 1 ? 'дубля' : 'дублей'}.`,
   );
 
-  // FLAG: IMAGE enforcement requires FULL and MESSAGE; retired photo toggles have no authority.
-  if (settings.duplicateCompareMode !== 'TEXT' && photoModerationMode === 'FULL') {
+  // FLAG: Verified images supplement text in the unified rule; retired selectors have no authority.
+  if (photoModerationMode === 'FULL') {
     items.push(
       settings.duplicatePhotoScope === 'CHAT'
         ? 'Одинаковые картинки считаются повтором независимо от автора и подписи. Действует общая цепочка антидубля; счётчик отдельный для каждого участника.'

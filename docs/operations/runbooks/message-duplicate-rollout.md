@@ -15,22 +15,39 @@ of `MODERATION_DELETE_INTENT_MODE` and its legacy canary IDs. Admission, persist
 final dispatch must agree on this distinction. Do not widen the base delete rollout to enable
 message duplicates: that would also promote unrelated historical moderation work.
 
-`duplicateCompareMode=MESSAGE` compares text, navigation/actions and independently verified
-non-photo media. Complete photo messages use the explicit IMAGE path: exact canonical image
+The user decision of 2026-11-06 replaces the TEXT/MESSAGE choice with one rule: a confirmed
+text repeat is sufficient, and a verified image repeat is an additional independent reason.
+New admissions compare text/captions and navigation/actions through explicit TEXT evidence,
+regardless of the retained `duplicateCompareMode` value. Different or unavailable pictures do
+not cancel a text match. The mini app exposes the common period, allowed repeats, scope and
+reaction ladder without a comparison selector or technical recognition details.
+
+Complete photo messages additionally use the explicit IMAGE path: exact canonical image
 sets and separately verified recompression of a single photo, independent of captions,
-with administrator-selected SAME_AUTHOR or CHAT scope and the
-same configured reaction ladder. CHAT counts escalation per author, never across participants.
-`TEXT` compares text/captions and navigation/actions without media. Known media
-without a usable URL/photo identity remain comparable in TEXT, including through edits;
-unknown attachments, invalid buttons and split albums remain unverified in every mode. Known media
-without a retrievable original remain unverified in MESSAGE mode; filenames, sizes, previews,
-platform IDs and download URLs are not equality evidence. Unsupported attachments and split
-albums are skipped when the whole message cannot be verified. Complete attachment arrays are
-one logical occurrence. Full mode v3 IMAGE bindings carry imageScope and exact media/source
+with administrator-selected SAME_AUTHOR or CHAT scope and the same configured reaction ladder.
+CHAT counts escalation per author, never across participants. Text enforcement accepted or
+durably deferred does not enqueue a second image action; the shared message action claim and
+Redis qualification fence prevent two penalties for the same message through different evidence.
+Independently verified non-photo media retain their additional MESSAGE comparison path.
+
+Known media without a usable URL/photo identity remain comparable in TEXT, including through
+edits; unknown attachments, invalid buttons and split albums remain unverified in every mode.
+Media without a retrievable original supply no IMAGE/MESSAGE evidence; filenames, sizes,
+previews, platform IDs and download URLs are not equality evidence. Complete attachment arrays
+are one logical occurrence. Full mode v3 IMAGE bindings carry imageScope and exact media/source
 proof. Old message bindings with photos are rejected; they cannot acquire the new policy.
 The separate perceptual/photo-only filter is retired, its authority is permanently OFF and its
 queue consumer only abandons old ordering entries. Never infer equality from media IDs or
 bypass content verification. Legacy storage fields remain for rollback-safe schema compatibility.
+
+Deferred text qualification now writes `comparison=TEXT` in the existing queue job; its base
+job identity and absorbing action eligibility remain unchanged. `comparison=IMAGE` retains
+its separate job identity. An absent comparison retains MESSAGE media semantics; the worker
+never infers TEXT from an old saved chat selector. Both settings digest envelopes include
+`comparisonPolicy=text-or-image-v1`, ignore `duplicateCompareMode` and fence older grants/jobs
+without clearing history, queues or durable claims. Existing v14 text normalization and image
+algorithm versions remain unchanged. Both rollback paths require the explicit TEXT readers and
+writers, the new digest policy and IMAGE availability independent of the old saved selector.
 
 ## Single-photo recompression evidence
 
@@ -61,7 +78,8 @@ pins its member, revision, original identity, epoch, content and live publicatio
 any lifecycle or counter write. Removal, reset, edit or expiry during native decoding returns
 stale; a previously accepted source cannot recreate a new approximate baseline in that race.
 
-The IMAGE settings fence is `image-recompression-fixed-window-v1`. A non-exact single-image
+The IMAGE algorithm fence remains `image-recompression-fixed-window-v1`, alongside the common
+`comparisonPolicy=text-or-image-v1` settings fence. A non-exact single-image
 binding carries `imageRecompression` with the native version and both exact raster hashes;
 schema, history and final dispatch reject unbound or inconsistent evidence. Old IMAGE grants
 fail closed while the new history warms from accepted observations. Both rollback routes

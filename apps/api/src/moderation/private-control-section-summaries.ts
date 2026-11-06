@@ -55,7 +55,7 @@ export function buildPrivateSectionSummaryLines(
           : `окно ${duplicateWindowSec}с`;
       return [
         `Антидубли: ${format.boolean(settings.antiDuplicateEnabled)} • ${duplicateAllowedCount === 0 ? 'с первого дубля' : `после ${duplicateAllowedCount} дубл.`} • ${period}`,
-        `Одинаковые картинки: ${format.boolean(settings.duplicateCompareMode !== 'TEXT')} • ${formatPrivateControlEnumValue(settings.duplicatePhotoScope)} • общая цепочка действий`,
+        `Чьи картинки сравнивать: ${formatPrivateControlEnumValue(settings.duplicatePhotoScope)}`,
         `Этапы: объяснение ${format.boolean(settings.duplicateBotMessageEnabled)} • WARN ${format.boolean(settings.duplicateWarnEnabled)} • MUTE ${format.boolean(settings.duplicateMuteEnabled)} (${settings.duplicateMuteDurationHours}ч) • BAN ${format.boolean(settings.duplicateBanEnabled)}`,
         `Кнопка: ${format.boolean(settings.duplicateBotButtonEnabled)}`,
       ];

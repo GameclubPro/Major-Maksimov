@@ -28,6 +28,8 @@ const DERIVED_CHAT_PATHS = new Set<string>([
   'nightModeForceCloseUntil',
   ...CHAT_SETTINGS_BUTTON_GROUPS.flatMap((group) => [group.url, group.text]),
 ]);
+// FLAG: Keep the retired selector readable by old clients without authoring it in network drafts.
+const RETIRED_CHAT_PATHS = new Set<string>(['duplicateCompareMode']);
 
 const CHAT_SUPPLEMENTAL_SECTIONS = {
   speechStyle: ['botSpeechStyle'],
@@ -109,7 +111,9 @@ export function networkSettingsPaths(
   if (section === 'stopWords') return STOP_WORD_PATHS.map((path) => `stopWordsPolicy.${path}`);
   const chatSection = section as keyof typeof SETTINGS_SECTION_KEYS;
   return [
-    ...SETTINGS_SECTION_KEYS[chatSection].filter((key) => !DERIVED_CHAT_PATHS.has(key)),
+    ...SETTINGS_SECTION_KEYS[chatSection].filter(
+      (key) => !DERIVED_CHAT_PATHS.has(key) && !RETIRED_CHAT_PATHS.has(key),
+    ),
     ...SETTINGS_SECTION_BOT_SPEECH_MEDIA_KEYS[chatSection].map((key) => `botSpeechMedia.${key}`),
   ];
 }
@@ -150,6 +154,8 @@ export function buildNetworkSettingsPatch<T extends object>(
   changes: readonly NetworkSettingsChange[],
 ): T {
   const allowed = new Set(networkSettingsPaths(entityType, section));
+  // FLAG: New previews reject the retired selector; accepted operations retain their original writes.
+  if (entityType === 'chat' && section === 'duplicates') allowed.add('duplicateCompareMode');
   const next = structuredClone(current) as Record<string, unknown>;
   for (const change of changes) {
     if (!allowed.has(change.path))

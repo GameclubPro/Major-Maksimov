@@ -194,11 +194,11 @@ export function messageDuplicateSettingsDigest(settings: ChatSettings): string {
     // FLAG: Old text grants/jobs, including exact-only, must fail the fresh guard after
     // electrical quantity-unit and numeric/phone protection. IMAGE has independent settings/raster semantics.
     version: safeTextMatchingEnabled ? 'text-fixed-window-safe-text-v14' : 'text-fixed-window-v14',
+    comparisonPolicy: 'text-or-image-v1',
     historyStorageVersion: MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION,
     historyRevision: settings.duplicateHistoryRevision ?? 0,
     schedule: duplicateScheduleDigestInput(settings),
     enabled: settings.antiDuplicateEnabled,
-    mode: settings.duplicateCompareMode ?? 'MESSAGE',
     fingerprint:
       settings.duplicateDetectionPreset === 'CUSTOM'
         ? [
@@ -232,10 +232,11 @@ export function messageDuplicateSanctionSettingsDigest(
 export function exactImageSettingsDigest(settings: ChatSettings): string {
   return digestDuplicateContent({
     version: 'image-recompression-fixed-window-v1',
+    comparisonPolicy: 'text-or-image-v1',
     historyStorageVersion: MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION,
     historyRevision: settings.duplicateHistoryRevision ?? 0,
     schedule: duplicateScheduleDigestInput(settings),
-    enabled: settings.antiDuplicateEnabled && settings.duplicateCompareMode !== 'TEXT',
+    enabled: settings.antiDuplicateEnabled,
     scope: settings.duplicatePhotoScope,
     window: resolveDuplicateFlowConfig(settings).windowSec,
     allowed: resolveDuplicateFlowConfig(settings).allowedCount,

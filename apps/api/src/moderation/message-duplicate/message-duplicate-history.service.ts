@@ -41,6 +41,7 @@ export type MessageDuplicateObservation = {
   publishedAtMs?: number;
   controlRevision: number;
   settings: ChatSettings;
+  comparison?: 'TEXT' | 'MESSAGE';
   mediaHashes?: readonly string[];
   imageScope?: 'SAME_AUTHOR' | 'CHAT';
   imageRecompression?: PhotoRecompressionProof;
@@ -119,9 +120,7 @@ export class MessageDuplicateHistoryService {
   ): Promise<MessageDuplicateHistoryObservation> {
     const mode = input.imageScope
       ? 'IMAGE'
-      : input.settings.duplicateCompareMode === 'TEXT'
-        ? 'TEXT'
-        : 'MESSAGE';
+      : (input.comparison ?? (input.settings.duplicateCompareMode === 'TEXT' ? 'TEXT' : 'MESSAGE'));
     const dailyWindow = resolveDuplicateDailyWindow(input.settings, input.eventTimestampMs);
     if (dailyWindow === null) {
       await this.window(input.chatId, {

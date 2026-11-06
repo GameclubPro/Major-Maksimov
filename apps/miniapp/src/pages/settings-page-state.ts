@@ -279,7 +279,6 @@ export const SECTION_SETTING_KEYS: Record<ApplySectionKey, readonly (keyof ChatS
     'duplicateEndTimeMinutes',
     'duplicateTimezone',
     'duplicateDetectionPreset',
-    'duplicateCompareMode',
     'duplicatePhotoScope',
     'duplicateIgnoreLinksEnabled',
     'duplicateIgnorePhonesEnabled',

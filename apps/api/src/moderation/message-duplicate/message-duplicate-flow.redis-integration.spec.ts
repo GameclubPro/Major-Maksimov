@@ -1000,6 +1000,112 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       expect(flow.sanctions).toEqual([]);
     });
 
+    it.each(['MESSAGE', 'TEXT'] as const)(
+      'deletes a repeated caption without waiting for image recognition under retained %s settings',
+      async (duplicateCompareMode) => {
+        flow = await createFlow({
+          duplicateCompareMode,
+          duplicateWarnEnabled: true,
+          duplicateMuteEnabled: true,
+        });
+        const original = flow.prepare({ photo: 'png', text: 'Selling the same aquarium today' });
+        await flow.ingest(original);
+        flow.downloads.mockRejectedValue(new Error('Image recognition unavailable'));
+        const repeat = flow.prepare({
+          photo: 'different',
+          text: 'Selling the same aquarium today',
+        });
+        expect(await flow.ingest(repeat)).toBeUndefined();
+        expect(flow.deleted).toEqual([repeat.id]);
+        expect(flow.sanctions).toEqual([{ messageId: repeat.id, action: 'WARN' }]);
+        expect(flow.downloads).not.toHaveBeenCalled();
+        await flow.ingest(repeat);
+        expect(flow.deleted).toEqual([repeat.id]);
+        expect(flow.sanctions.map((entry) => entry.action)).toEqual(['WARN', 'WARN']);
+        const next = flow.prepare({ photo: 'different', text: 'Selling the same aquarium today' });
+        await flow.ingest(next);
+        expect(flow.sanctions.at(-1)?.action).toBe('MUTE');
+      },
+    );
+
+    it.each(['MESSAGE', 'TEXT'] as const)(
+      'still recognizes a repeated image with changed text under retained %s settings',
+      async (duplicateCompareMode) => {
+        flow = await createFlow({ duplicateCompareMode });
+        await flow.processor.process(
+          (await flow.ingest(flow.prepare({ photo: 'png', text: 'First offer' })))!,
+        );
+        const repeat = flow.prepare({ photo: 'webp', text: 'A completely different caption' });
+        await flow.processor.process((await flow.ingest(repeat))!);
+        expect(flow.deleted).toEqual([repeat.id]);
+        expect(flow.downloads).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each(['MESSAGE', 'TEXT'] as const)(
+      'resumes deferred caption qualification with photos under retained %s settings',
+      async (duplicateCompareMode) => {
+        flow = await createFlow({ duplicateCompareMode });
+        await flow.processor.process(
+          (await flow.ingest(flow.prepare({ photo: 'png', text: 'Repeated offer with a photo' })))!,
+        );
+        const repeat = flow.prepare({ photo: 'different', text: 'Repeated offer with a photo' });
+        flow.max.getExactMessageRow.mockRejectedValueOnce(
+          Object.assign(new Error('Exact source temporarily unavailable'), {
+            response: { status: 404, data: {} },
+          }),
+        );
+        const job = (await flow.ingest(repeat))!;
+        expect(job.data.comparison).toBe('TEXT');
+        expect(flow.deleted).toEqual([]);
+        expect(flow.downloads).not.toHaveBeenCalled();
+        await flow.processor.process(job);
+        expect(flow.deleted).toEqual([repeat.id]);
+        expect(flow.downloads).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['callback', 'link'] as const)(
+      'preserves different captionless photos with the same %s keyboard and deletes a real image repeat',
+      async (type) => {
+        flow = await createFlow();
+        const buttons = [
+          [
+            {
+              type,
+              text: 'Open',
+              ...(type === 'link' ? { url: 'https://example.com' } : { payload: 'open' }),
+            },
+          ],
+        ];
+        const original = flow.prepare({ photo: 'png', buttons });
+        const different = flow.prepare({ photo: 'different', buttons });
+        for (const item of [original, different])
+          await flow.processor.process((await flow.ingest(item))!);
+        expect(flow.deleted).toEqual([]);
+        expect(flow.sanctions).toEqual([]);
+        const repeat = flow.prepare({ photo: 'different', buttons });
+        await flow.processor.process((await flow.ingest(repeat))!);
+        expect(flow.deleted).toEqual([repeat.id]);
+      },
+    );
+
+    it('counts one violation when both caption and image repeat, including replay', async () => {
+      flow = await createFlow({ duplicateWarnEnabled: true, duplicateMuteEnabled: true });
+      await flow.processor.process(
+        (await flow.ingest(flow.prepare({ photo: 'png', text: 'Same offer' })))!,
+      );
+      const repeat = flow.prepare({ photo: 'webp', text: 'Same offer' });
+      expect(await flow.ingest(repeat)).toBeUndefined();
+      await flow.ingest(repeat);
+      expect(flow.deleted).toEqual([repeat.id]);
+      expect(flow.sanctions.map((entry) => entry.action)).toEqual(['WARN', 'WARN']);
+      const next = flow.prepare({ photo: 'webp', text: 'Same offer' });
+      await flow.ingest(next);
+      expect(flow.sanctions.at(-1)).toEqual({ messageId: next.id, action: 'MUTE' });
+      expect(flow.downloads).not.toHaveBeenCalled();
+    });
+
     it('deletes the second photo-only message, even with a new ID and lossless encoding', async () => {
       flow = await createFlow();
       const first = flow.prepare({ photo: 'png' });
@@ -1390,7 +1496,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       const second = flow.prepare({ photo: 'png', text: 'https://second.example/item' });
       const repeat = flow.prepare({
         photo: 'webp',
-        text: 'https://first.example/item https://second.example/item',
+        text: 'https://third.example/item',
       });
       await flow.processor.process((await flow.ingest(first))!);
       await flow.processor.process((await flow.ingest(second))!);
@@ -1800,7 +1906,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
         photo: 'webp',
         photoCount: 4,
         reversePhotos: true,
-        text: 'Selling a complete aquarium. Contact in private.',
+        text: 'Second caption for the same album.',
       });
       await flow.processor.process((await flow.ingest(first))!);
       const job = (await flow.ingest(repeat))!;
@@ -1818,7 +1924,12 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       );
       await flow.processor.process(
         (await flow.ingest(
-          flow.prepare({ photo: 'png', photoCount: 4, changedPhotoIndex: 2, text: 'same caption' }),
+          flow.prepare({
+            photo: 'png',
+            photoCount: 4,
+            changedPhotoIndex: 2,
+            text: 'different caption',
+          }),
         ))!,
       );
       expect(flow.deleted).toEqual([]);
@@ -1830,7 +1941,10 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       const items = Array.from({ length: 3 }, () =>
         flow.prepare({ photo: 'png', photoCount: 4, text: 'same caption' }),
       );
-      for (const item of items) await flow.processor.process((await flow.ingest(item))!);
+      for (const item of items) {
+        const job = await flow.ingest(item);
+        if (job) await flow.processor.process(job);
+      }
       expect(flow.deleted).toEqual([items[2]!.id]);
     });
 

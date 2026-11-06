@@ -389,6 +389,14 @@ export function buildMessageDuplicateIdentity(
     });
   }
   if (!isDuplicateContentComparable(content, mode)) return null;
+  // FLAG: A shared keyboard is not a repeated caption. Media without text needs its
+  // own verified evidence; retain action bindings when actual caption text is present.
+  if (
+    mode === 'TEXT' &&
+    !content.text &&
+    (content.media.length > 0 || content.reason === 'unsupported_attachment')
+  )
+    return null;
   if (
     !content.text &&
     content.navigation.length === 0 &&

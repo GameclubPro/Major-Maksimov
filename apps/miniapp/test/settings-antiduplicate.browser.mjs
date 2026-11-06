@@ -229,7 +229,7 @@ try {
             saved = {
               ...saved,
               settingsRevision: '2026-10-04T01:00:00.000Z',
-              duplicateCompareMode: 'MESSAGE',
+              duplicatePhotoScope: 'SAME_AUTHOR',
             };
           await route.fulfill({
             status: responseStatus,
@@ -300,9 +300,11 @@ try {
       );
       await diagnostics.getByText('Проверка и история', { exact: true }).click();
       const compare = panel.getByRole('combobox', { name: 'Сравнение сообщений' });
+      assert.equal(await compare.count(), 0);
+      const scope = panel.getByRole('radiogroup', { name: 'Чьи картинки сравнивать' });
       const master = panel.locator('label[aria-label="Включить антидубль"] input');
       await master.uncheck();
-      assert.equal(await compare.count(), 0);
+      assert.equal(await scope.count(), 0);
       await master.check();
       await panel.getByRole('button', { name: 'Применить к другим чатам', exact: true }).click();
       const currentTarget = page.getByRole('button', { name: 'Этот чат', exact: true });
@@ -315,41 +317,21 @@ try {
       );
       await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
       await currentTarget.waitFor({ state: 'hidden' });
-      assert.equal(await compare.isVisible(), true);
+      assert.equal(await scope.isVisible(), true);
       assert.equal(writes.length, 0);
-      const scope = panel.getByRole('radiogroup', { name: 'Чьи картинки сравнивать' });
-      const comparisonStatus = panel
-        .locator('.duplicate-photo-settings dl > div')
-        .filter({
-          has: page.locator('dt', { hasText: /^Поиск повторов$/u }),
-        })
-        .locator('dd');
-      await comparisonStatus.getByText('У одного участника', { exact: true }).waitFor();
-      await scope.getByRole('radio', { name: 'Всех участников', exact: true }).click();
-      await comparisonStatus.getByText('Среди всех участников', { exact: true }).waitFor();
-      await panel.getByText(/даже если её прислал другой участник/u).waitFor();
-      const individualActions = panel.locator('.duplicate-photo-settings dl > div').filter({
-        has: page.locator('dt', { hasText: /^Предупреждения и ограничения$/u }),
-      });
-      await individualActions
-        .getByText('Отдельно для каждого участника', { exact: true })
-        .waitFor();
-      await comparisonStatus.scrollIntoViewIfNeeded();
-      await assertReachable(comparisonStatus);
+      const allParticipants = scope.getByRole('radio', { name: 'Всех участников', exact: true });
+      const sameAuthor = scope.getByRole('radio', { name: 'Одного участника', exact: true });
+      assert.equal(await sameAuthor.getAttribute('aria-checked'), 'true');
+      await allParticipants.click();
+      assert.equal(await allParticipants.getAttribute('aria-checked'), 'true');
+      assert.equal(await panel.getByText('Подпись', { exact: true }).count(), 0);
+      assert.equal(await panel.getByText('Как для текста', { exact: true }).count(), 0);
+      await scope.scrollIntoViewIfNeeded();
+      await assertReachable(scope);
       await page.screenshot({ path: path.join(screenshots, `${name}-all-participants.png`) });
-      await scope.getByRole('radio', { name: 'Одного участника', exact: true }).click();
-      await comparisonStatus.getByText('У одного участника', { exact: true }).waitFor();
-      assert.equal(await panel.getByText(/даже если её прислал другой участник/u).count(), 0);
-      await scope.getByRole('radio', { name: 'Всех участников', exact: true }).click();
-      await compare.selectOption('TEXT');
-      assert.equal(await scope.count(), 0);
-      await compare.selectOption('MESSAGE');
-      assert.equal(
-        await scope
-          .getByRole('radio', { name: 'Всех участников', exact: true })
-          .getAttribute('aria-checked'),
-        'true',
-      );
+      await sameAuthor.click();
+      assert.equal(await sameAuthor.getAttribute('aria-checked'), 'true');
+      await allParticipants.click();
       const interval = panel.getByRole('spinbutton', { name: 'Период проверки дублей, часы' });
       // Emulate keyboard viewport shrink; this is a browser check, not a physical device run.
       const fullViewport = page.viewportSize();
@@ -395,7 +377,7 @@ try {
       await discardPrompt.waitFor({ state: 'hidden' });
       assert.equal(await panel.isVisible(), true);
       assert.equal(await interval.inputValue(), '13');
-      assert.equal(await compare.inputValue(), 'MESSAGE');
+      assert.equal(await compare.count(), 0);
       assert.equal(
         await scope
           .getByRole('radio', { name: 'Всех участников', exact: true })
@@ -420,7 +402,6 @@ try {
         .click();
       await page.getByRole('button', { name: 'Применить', exact: true }).click();
       await panel.getByRole('combobox', { name: 'Часовой пояс' }).selectOption('Asia/Vladivostok');
-      await compare.selectOption('TEXT');
       await panel
         .getByText('Ежедневно, с переходом на следующий день.', { exact: false })
         .waitFor();
@@ -440,16 +421,13 @@ try {
         }
       };
       await submit();
-      assert.equal(await compare.inputValue(), 'TEXT');
-      await compare.selectOption('MESSAGE');
-      await comparisonStatus.getByText('Среди всех участников', { exact: true }).waitFor();
+      assert.equal(await allParticipants.getAttribute('aria-checked'), 'true');
       assert.equal(
         await scope
           .getByRole('radio', { name: 'Всех участников', exact: true })
           .getAttribute('aria-checked'),
         'true',
       );
-      await compare.selectOption('TEXT');
       assert.equal(
         await panel.getByRole('button', { name: 'С: 23:00', exact: true }).isVisible(),
         true,
@@ -460,9 +438,9 @@ try {
       while (await closeToast.count()) await closeToast.first().click();
       await page.screenshot({ path: path.join(screenshots, `${name}-conflict.png`) });
       await panel.getByRole('button', { name: 'Сравнить с сохранённым', exact: true }).click();
-      assert.equal(await compare.inputValue(), 'MESSAGE');
+      assert.equal(await sameAuthor.getAttribute('aria-checked'), 'true');
       await panel.getByRole('button', { name: 'Показать мой черновик', exact: true }).click();
-      assert.equal(await compare.inputValue(), 'TEXT');
+      assert.equal(await allParticipants.getAttribute('aria-checked'), 'true');
       responseStatus = 200;
       const succeeded = page.waitForResponse(
         (response) => response.url().endsWith('/settings/section') && response.status() === 200,
@@ -484,7 +462,7 @@ try {
       const final = writes.at(-1).body;
       assert.equal(final.section, 'duplicates');
       assert.equal(final.expectedRevision, '2026-10-04T01:00:00.000Z');
-      assert.equal(final.changes.duplicateCompareMode, 'TEXT');
+      assert.equal(Object.hasOwn(final.changes, 'duplicateCompareMode'), false);
       assert.equal(final.changes.duplicatePhotoScope, 'CHAT');
       assert.equal(final.changes.duplicateWindowMode, 'DAILY');
       assert.equal(final.changes.duplicateStartTimeMinutes, 1380);
@@ -525,15 +503,8 @@ try {
 
       // Full-page bulk application must save the edited source before copying it.
       await page.getByRole('button', { name: 'Антидубль', exact: true }).click();
-      assert.equal(await compare.inputValue(), 'TEXT');
-      await compare.selectOption('MESSAGE');
-      await comparisonStatus.getByText('Среди всех участников', { exact: true }).waitFor();
-      assert.equal(
-        await scope
-          .getByRole('radio', { name: 'Всех участников', exact: true })
-          .getAttribute('aria-checked'),
-        'true',
-      );
+      assert.equal(await allParticipants.getAttribute('aria-checked'), 'true');
+      await sameAuthor.click();
       await panel.getByRole('button', { name: 'Применить к другим чатам', exact: true }).click();
       const targetSheet = page
         .getByRole('dialog', { name: 'Антидубль', exact: true })
@@ -571,7 +542,8 @@ try {
       const sourceWrite = writes.at(-2).body;
       assert.equal(sourceWrite.section, 'duplicates');
       assert.equal(sourceWrite.expectedRevision, '2026-10-04T02:00:00.000Z');
-      assert.equal(sourceWrite.changes.duplicateCompareMode, 'MESSAGE');
+      assert.equal(Object.hasOwn(sourceWrite.changes, 'duplicateCompareMode'), false);
+      assert.equal(sourceWrite.changes.duplicatePhotoScope, 'SAME_AUTHOR');
       assert.equal(sourceWrite.changes.duplicateWindowMode, 'DAILY');
       assert.deepEqual(writes.at(-1).body, {
         section: 'duplicates',
@@ -579,7 +551,7 @@ try {
       });
       assert.equal(bulkSources.length, 1);
       assert.equal(bulkSources[0].settingsRevision, nextRevision);
-      assert.equal(bulkSources[0].duplicateCompareMode, 'MESSAGE');
+      assert.equal(bulkSources[0].duplicatePhotoScope, 'SAME_AUTHOR');
       assert.equal(bulkSources[0].duplicateStartTimeMinutes, 1380);
       assert.equal(bulkSources[0].duplicateEndTimeMinutes, 1080);
       assert.equal(bulkSources[0].duplicateTimezone, 'Asia/Vladivostok');
@@ -629,7 +601,7 @@ try {
       // A late source-chat receipt cannot replace the next chat's unsaved draft or revision.
       while (await closeToast.count()) await closeToast.first().click();
       await page.getByRole('button', { name: 'Антидубль', exact: true }).click();
-      await compare.selectOption('TEXT');
+      await allParticipants.click();
       holdSectionSave = true;
       const heldRequest = page.waitForRequest('**/api/chats/chat-a/settings/section');
       await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
@@ -653,7 +625,7 @@ try {
       await lateReceipt;
       await page.waitForTimeout(100);
       assert.equal(await interval.inputValue(), '7');
-      assert.equal(await compare.inputValue(), 'MESSAGE');
+      assert.equal(await compare.count(), 0);
       assert.equal(
         await panel
           .getByRole('radio', { name: 'По времени', exact: true })
@@ -666,7 +638,7 @@ try {
       const secondBody = (await secondSaved).request().postDataJSON();
       assert.equal(secondBody.expectedRevision, '2026-10-04T06:00:00.000Z');
       assert.equal(secondBody.changes.duplicateWarnWindowSec, 25200);
-      assert.equal(secondBody.changes.duplicateCompareMode, 'MESSAGE');
+      assert.equal(Object.hasOwn(secondBody.changes, 'duplicateCompareMode'), false);
       await panel.waitFor({ state: 'hidden' });
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
@@ -674,7 +646,7 @@ try {
       );
       assert.deepEqual(errors, []);
       console.log(
-        `PASS ${name}: reactive author scope and saved API readback, individual actions, emulated keyboard input visibility, native Back draft protection, 500/409 drafts, current default, explicit all-chat PATCH→POST, overnight generated rules PUT→publish, late-chat draft isolation and truthful coverage`,
+        `PASS ${name}: unified comparison with no mode selector, author scope and saved API readback, emulated keyboard input visibility, native Back draft protection, 500/409 drafts, current default, explicit all-chat PATCH→POST, overnight generated rules PUT→publish, late-chat draft isolation and truthful coverage`,
       );
     } finally {
       await context.close();

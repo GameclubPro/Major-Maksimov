@@ -36,6 +36,14 @@ test('settings summary uses the same message numbering as the controls and keeps
     }),
     'удаление с сообщения №3 • 12 ч • картинки включены',
   );
+  assert.equal(
+    formatDuplicateSettingsSummary({ ...settings, duplicateCompareMode: 'TEXT' }, 12, {
+      moderationMode: 'FULL',
+      actionCeiling: 'BAN',
+      allowedMatchKinds: ['canonical_sha256'],
+    }),
+    'удаление с сообщения №3 • 12 ч • картинки включены',
+  );
 });
 function render(
   state: 'CONFIRMED' | 'MISSING' | 'UNKNOWN',

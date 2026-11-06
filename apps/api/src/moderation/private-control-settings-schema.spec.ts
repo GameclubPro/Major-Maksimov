@@ -85,6 +85,7 @@ describe('private control settings schema', () => {
       duplicateFields.find((field) => field.key === 'duplicatePhotoMatchPreset'),
     ).toBeUndefined();
     expect(duplicateFields.find((field) => field.key === 'duplicatePhotoEnabled')).toBeUndefined();
+    expect(duplicateFields.find((field) => field.key === 'duplicateCompareMode')).toBeUndefined();
     expect(duplicateFields.find((field) => field.key === 'duplicatePhotoScope')).toEqual(
       expect.objectContaining({
         type: 'enum',

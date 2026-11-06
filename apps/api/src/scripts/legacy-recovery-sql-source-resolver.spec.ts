@@ -1,5 +1,9 @@
 import { Prisma } from '../prisma/prisma-client';
 import { buildPhotoDuplicateJobId } from '../moderation/photo-duplicate/photo-duplicate.queue';
+import {
+  buildMessageDuplicateJobId,
+  MESSAGE_DUPLICATE_JOB_VERSION,
+} from '../moderation/message-duplicate/message-duplicate.queue';
 import { legacySnapshotDigest } from '../webhook/webhook-legacy-source';
 import {
   resolveLegacyRecoverySqlSource,
@@ -72,6 +76,40 @@ describe('exact SQL source input and query admission', () => {
         ...request,
         data,
         jobPayloadDigest: fault === 'digest' ? '0'.repeat(64) : legacySnapshotDigest(data),
+      },
+      scopes,
+      budget(),
+    );
+    expect(result.decision).toBe('DENY');
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('rejects an unknown message comparison before any SQL', async () => {
+    const eventTimestampMs = Date.parse(at);
+    const jobId = buildMessageDuplicateJobId('-fixture', 'm', eventTimestampMs, 'TEXT');
+    const data = {
+      webhookEventId: 'receipt',
+      chatId: '-fixture',
+      messageId: 'm',
+      sourceCreatedAt: at,
+      createdAt: at,
+      actionEligible: true,
+      idempotencyKey: jobId,
+      version: MESSAGE_DUPLICATE_JOB_VERSION,
+      eventTimestampMs,
+      controlRevision: 1,
+      policyRevision: 1,
+      settingsDigest: 'a'.repeat(64),
+      deadlineAtMs: eventTimestampMs + 60_000,
+      comparison: 'UNKNOWN',
+    };
+    const read = jest.fn();
+    const result = await resolveLegacyRecoverySqlSource(
+      { $queryRaw: read } as unknown as Prisma.TransactionClient,
+      {
+        queueName: 'message-duplicates',
+        jobId,
+        data,
+        jobPayloadDigest: legacySnapshotDigest(data),
       },
       scopes,
       budget(),

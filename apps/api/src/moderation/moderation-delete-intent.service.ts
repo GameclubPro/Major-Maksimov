@@ -188,7 +188,10 @@ import {
   isBoundMessageDuplicateDelete,
 } from './message-duplicate/message-duplicate-state';
 import { duplicateRevocationKey } from './message-duplicate/message-duplicate-authorization.service';
-import { buildMessageDuplicateJobId } from './message-duplicate/message-duplicate.queue';
+import {
+  buildMessageDuplicateJobId,
+  type MessageDuplicateJob,
+} from './message-duplicate/message-duplicate.queue';
 import { digestDuplicateContent } from './message-duplicate/message-duplicate-content';
 import {
   PROFANITY_DELETE_RULE_CODE,
@@ -1921,7 +1924,7 @@ export class ModerationDeleteIntentService {
     eventTimestampMs: number;
     deadlineAtMs: number;
     idempotencyKey: string;
-    comparison?: 'IMAGE';
+    comparison?: MessageDuplicateJob['comparison'];
   }): Promise<boolean> {
     if (
       input.idempotencyKey !==

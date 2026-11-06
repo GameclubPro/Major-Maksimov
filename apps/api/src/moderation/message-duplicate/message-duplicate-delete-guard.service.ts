@@ -713,9 +713,7 @@ export class MessageDuplicateDeleteGuardService {
       (binding.compareMode === 'IMAGE'
         ? exactImageSettingsDigest(settings)
         : messageDuplicateSettingsDigest(settings)) !== binding.settingsDigest ||
-      (binding.compareMode === 'IMAGE' &&
-        (settings.duplicateCompareMode === 'TEXT' ||
-          settings.duplicatePhotoScope !== binding.imageScope)) ||
+      (binding.compareMode === 'IMAGE' && settings.duplicatePhotoScope !== binding.imageScope) ||
       resolveDuplicateFlowConfig(settings).allowedCount + 2 !== binding.requiredCount
     ) {
       throw new MessageDuplicateGuardRejectedError('message_duplicate_settings_changed');
