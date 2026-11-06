@@ -180,6 +180,11 @@ acquire_deploy_lock() {
 require_market_statistics_lock_dispatch() {
   printf '%s\\n' market-statistics-source-checked >>"$COLD_ENTRY_TEST_LOG"
 }
+require_major_market_release_dispatch() {
+  require_deploy_lock || return
+  [[ "$#" == 1 && ( "$1" == origin/main || "$1" == refs/heads/main || "$1" == "$COLD_ENTRY_TEST_SHA" ) ]] || return 94
+  printf 'major-market-source-checked:%s\\n' "$1" >>"$COLD_ENTRY_TEST_LOG"
+}
 require_pair_release_admission_dispatch() {
   [[ "$#" == 1 && ( "$1" == origin/main || "$1" == refs/heads/main || "$1" == "$COLD_ENTRY_TEST_SHA" ) ]] || return 93
   printf 'pair-admission-source-checked:%s\\n' "$1" >>"$COLD_ENTRY_TEST_LOG"
@@ -394,6 +399,17 @@ for (const localBranchExists of [true, false]) {
         (log.match(/pair-admission-source-checked:/gu) ?? []).length,
         localBranchExists ? 2 : 1,
       );
+      const checkedRefs = localBranchExists ? ['origin/main', 'refs/heads/main'] : ['origin/main'];
+      assert.deepEqual(
+        [...log.matchAll(/^major-market-source-checked:(.+)$/gmu)].map((match) => match[1]),
+        checkedRefs,
+      );
+      for (const ref of checkedRefs) {
+        assert.ok(
+          log.indexOf(`major-market-source-checked:${ref}\n`) < log.indexOf('git:checkout '),
+          `Major/Market source ${ref} must be checked before checkout`,
+        );
+      }
       assert.match(log, /pair-admission-source-checked:origin\/main\n/u);
       assert.match(
         log,

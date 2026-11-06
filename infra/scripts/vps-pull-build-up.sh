@@ -1046,6 +1046,7 @@ sync_branch() {
   PRE_PULL_HEAD="$(git rev-parse --verify HEAD)" || return 2
   git fetch origin "$BRANCH"
   require_market_statistics_lock_dispatch "origin/$BRANCH" || return 2
+  require_major_market_release_dispatch "origin/$BRANCH" || return 2
   require_pair_release_admission_dispatch "origin/$BRANCH" || return 2
   maxim_topology_require_statistics_authority_lifecycle "$(git rev-parse "origin/$BRANCH")" || return 2
   maxim_topology_require_eraser_bridge "$(git rev-parse "origin/$BRANCH")" || return 2
@@ -1053,6 +1054,7 @@ sync_branch() {
 
   if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
     require_market_statistics_lock_dispatch "refs/heads/$BRANCH" || return 2
+    require_major_market_release_dispatch "refs/heads/$BRANCH" || return 2
     require_pair_release_admission_dispatch "refs/heads/$BRANCH" || return 2
     maxim_topology_require_statistics_authority_lifecycle "$(git rev-parse "refs/heads/$BRANCH")" || return 2
     maxim_topology_require_eraser_bridge "$(git rev-parse "refs/heads/$BRANCH")" || return 2
@@ -1696,6 +1698,8 @@ if contains_service "miniapp-static" "${SERVICES[@]}"; then
   export MAXIM_MINIAPP_LEGACY_IMAGE="maxim-miniapp-legacy:${TARGET_SHA}"
 fi
 
+major_market_release_verify before-build
+
 if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   require_stateful_services_ready
   maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES
@@ -1713,6 +1717,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   maxim_topology_require_ocr_native_sandbox_image_capability \
     "$MAXIM_API_IMAGE" "$TARGET_HAS_OCR_NATIVE_SANDBOX"
   maxim_topology_require_photo_native_image_capability "${MAXIM_API_IMAGE}"
+  major_market_release_verify after-image-validation
   begin_release_runtime_transition
   DEPLOY_RUNTIME_STARTED=1
   verify_inherited_release_components
@@ -1743,6 +1748,7 @@ done
 
 ensure_compose_env
 if [[ "${#DEPLOYED_COMPONENTS[@]}" -gt 0 ]]; then
+  major_market_release_verify after-image-validation
   begin_release_runtime_transition
   DEPLOY_RUNTIME_STARTED=1
   verify_inherited_release_components
@@ -1752,6 +1758,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   expected_api_image_id="$(docker image inspect --format '{{.Id}}' "$MAXIM_API_IMAGE")"
   maxim_webhook_prepare_multibot_before_quiescence COMPOSE_FILES
   maxim_outcome_cohort_prepare
+  major_market_release_verify before-quiesce
   maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES
   maxim_webhook_quiesce_legacy_ingress_for_multibot_cutover COMPOSE_FILES
   # FLAG: The first command-authority migration is an effects cutoff only after every
