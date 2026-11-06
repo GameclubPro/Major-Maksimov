@@ -9,17 +9,46 @@ const maximumBytes = 65_536;
 const infoFormat =
   '{"serverVersion":{{json .ServerVersion}},"driver":{{json .Driver}},"driverStatus":{{json .DriverStatus}}}';
 const backendType = 'io.containerd.snapshotter.v1';
+const phases = new Set([
+  'arguments',
+  'prepare_admission',
+  'prepare_context',
+  'prepare_backend',
+  'container_inventory',
+  'config_install',
+  'service_restart',
+  'post_restart_context',
+  'post_restart_backend',
+  'post_restart_policy',
+  'verify_context',
+  'verify_backend',
+  'verify_policy',
+]);
+// FLAG: Only owned child results supply command outcomes. Never copy diagnostic
+// fields, dependency output or causes from an arbitrary caught error.
+const commandFailures = new WeakMap();
 const requireFact = (fact) => {
   if (!fact) throw new Error(dockerStoreFailureMessage);
 };
 
 export class DockerStoreError extends Error {
-  constructor(info) {
+  constructor(info, phase = 'unknown', error) {
     super(dockerStoreFailureMessage);
+    const diagnostic = commandFailures.get(error);
     this.code = 'DOCKER_STORE_INVALID';
     this.serverVersion = info?.serverVersion ?? 'unknown';
     this.backend = info ? (requiredBackend(info) ? 'required' : 'other') : 'unverified';
+    this.phase = phases.has(phase) ? phase : 'unknown';
+    this.command = diagnostic?.command ?? 'none';
+    this.outcome = diagnostic?.outcome ?? 'guard_rejected';
+    this.exitCode = diagnostic?.exitCode ?? null;
   }
+}
+
+function commandFailure(command, outcome, exitCode = null) {
+  const error = new Error(dockerStoreFailureMessage);
+  commandFailures.set(error, { command, outcome, exitCode });
+  return error;
 }
 
 function execute(binary, args, options) {
@@ -28,13 +57,47 @@ function execute(binary, args, options) {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  requireFact(!result.error && result.status === 0);
+  if (result.error || result.status !== 0) {
+    const outcome = result.error
+      ? result.error.code === 'ETIMEDOUT'
+        ? 'timeout'
+        : result.error.code === 'ENOBUFS'
+          ? 'output_limit'
+          : 'spawn_failed'
+      : result.signal
+        ? 'signal'
+        : 'nonzero_exit';
+    const exitCode =
+      Number.isInteger(result.status) && result.status > 0 && result.status <= 255
+        ? result.status
+        : null;
+    throw commandFailure('none', outcome, exitCode);
+  }
   return result.stdout;
 }
 
 function command(run, env, binary, args, timeout = 20_000) {
-  const output = run(binary, args, { env, timeout, maxBuffer: maximumBytes });
-  requireFact(typeof output === 'string' && Buffer.byteLength(output) <= maximumBytes);
+  const identity =
+    {
+      'docker context show': 'docker_context_show',
+      'docker context inspect': 'docker_context_inspect',
+      'docker info --format': 'docker_info',
+      'docker container ls': 'docker_container_list',
+      'systemctl restart docker.service': 'docker_service_restart',
+    }[[binary, ...args.slice(0, 2)].join(' ')] ?? 'none';
+  let output;
+  try {
+    output = run(binary, args, { env, timeout, maxBuffer: maximumBytes });
+  } catch (error) {
+    const diagnostic = commandFailures.get(error);
+    throw commandFailure(
+      identity,
+      diagnostic?.outcome ?? 'dependency_failed',
+      diagnostic?.exitCode ?? null,
+    );
+  }
+  if (typeof output !== 'string' || Buffer.byteLength(output) > maximumBytes)
+    throw commandFailure(identity, 'invalid_response');
   return output.trim();
 }
 
@@ -61,7 +124,13 @@ function hostedDefaultContext({ env, run }) {
 }
 
 function backendInformation({ env, run }) {
-  const value = JSON.parse(command(run, env, 'docker', ['info', '--format', infoFormat]));
+  const output = command(run, env, 'docker', ['info', '--format', infoFormat]);
+  let value;
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw commandFailure('docker_info', 'invalid_response');
+  }
   requireFact(
     value !== null &&
       typeof value === 'object' &&
@@ -95,16 +164,23 @@ function result(info) {
   return { serverVersion: info.serverVersion, driver: 'overlayfs', driverType: backendType };
 }
 
-export function verifyDockerStore({ env = process.env, run = execute } = {}) {
+function verifyStore({ env, run }, afterRestart = false) {
   let info;
+  let phase = afterRestart ? 'post_restart_context' : 'verify_context';
   try {
     hostedDefaultContext({ env, run });
+    phase = afterRestart ? 'post_restart_backend' : 'verify_backend';
     info = backendInformation({ env, run });
+    phase = afterRestart ? 'post_restart_policy' : 'verify_policy';
     requireFact(requiredBackend(info));
     return result(info);
-  } catch {
-    throw new DockerStoreError(info);
+  } catch (error) {
+    throw new DockerStoreError(info, phase, error);
   }
+}
+
+export function verifyDockerStore({ env = process.env, run = execute } = {}) {
+  return verifyStore({ env, run });
 }
 
 function optionalStat(fileSystem, path) {
@@ -261,18 +337,24 @@ export function prepareDockerStore({
   ownerUid = 0,
 } = {}) {
   let info;
+  let phase = 'prepare_admission';
   try {
     requireFact(uid === 0);
+    phase = 'prepare_context';
     hostedDefaultContext({ env, run });
+    phase = 'prepare_backend';
     info = backendInformation({ env, run });
     if (requiredBackend(info)) return result(info);
+    phase = 'container_inventory';
     requireFact(command(run, env, 'docker', ['container', 'ls', '--all', '--quiet']) === '');
+    phase = 'config_install';
     installConfig({ fileSystem, configDirectory, ownerUid });
+    phase = 'service_restart';
     command(run, env, 'systemctl', ['restart', 'docker.service'], 60_000);
-    return verifyDockerStore({ env, run });
+    return verifyStore({ env, run }, true);
   } catch (error) {
     if (error instanceof DockerStoreError) throw error;
-    throw new DockerStoreError(info);
+    throw new DockerStoreError(info, phase, error);
   }
 }
 
@@ -282,13 +364,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const info = process.argv[2] === 'prepare' ? prepareDockerStore() : verifyDockerStore();
     process.stdout.write(`${JSON.stringify(info)}\n`);
   } catch (error) {
-    const failure = error instanceof DockerStoreError ? error : new DockerStoreError();
+    const failure =
+      error instanceof DockerStoreError
+        ? error
+        : new DockerStoreError(undefined, 'arguments', error);
     process.stderr.write(
       `${JSON.stringify({
         error: failure.code,
         message: failure.message,
         serverVersion: failure.serverVersion,
         backend: failure.backend,
+        phase: failure.phase,
+        command: failure.command,
+        outcome: failure.outcome,
+        exitCode: failure.exitCode,
       })}\n`,
     );
     process.exitCode = 1;
