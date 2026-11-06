@@ -105,6 +105,10 @@ describe('structured profanity rule-engine decision', () => {
           'Группа 3-6 л. для детей',
           'хуууй',
           'привет,блять',
+          'съебал',
+          'blyaha na remne',
+          'Питомник продаёт щенков. Ты сука!',
+          'ты д у р а к',
         ]) {
           const settings = { ...BASE_SETTINGS, profanitySensitivity } as never;
           const pure = service.detectProfanityForSettings(text, settings);
@@ -162,7 +166,7 @@ describe('structured profanity rule-engine decision', () => {
     expect(service.detectProfanityForSettings('хуууй', BASE_SETTINGS as never)).toMatchObject({
       matchedVariant: 'хуй',
       evidence: ['REPEATED_LETTERS'],
-      detectorVersion: 'profanity-structured-v3',
+      detectorVersion: 'profanity-structured-v4',
     });
     expect(
       service.detectProfanityForSettings('ебанный', BASE_SETTINGS as never)?.evidence,
@@ -207,7 +211,7 @@ describe('structured profanity rule-engine decision', () => {
           matchKind: 'EXACT_VARIANT',
           matchedVariant: 'скотина',
           evidence: ['TARGET_CONTEXT'],
-          detectorVersion: 'profanity-structured-v3',
+          detectorVersion: 'profanity-structured-v4',
         },
       },
     ]);

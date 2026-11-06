@@ -10,7 +10,9 @@ import { isValidMaxBotStartPayload } from '../max/max-deep-link.util';
 import type { ChatSettings } from '../prisma/prisma-client';
 import {
   excludeProtectedProfanitySpans,
+  getProfanityCandidateContext,
   getMeasurementLiteralContext,
+  isEmbeddedShortProfanityFragment,
   isLiteralLatinProfanityException,
   prepareProfanitySource,
   tokenizeProfanityContext,
@@ -81,7 +83,10 @@ type ProfanityCorePattern = {
 // should come from the exact lexicon so names/surnames with the same prefix do not match.
 const PROFANITY_CORE_TOKEN_PATTERNS: readonly ProfanityCorePattern[] = [
   { familyId: 'core:blyad', pattern: /^бля(?:[дт][а-я0-9]*)?$/u },
-  { familyId: 'core:pizd', pattern: /^пизд[а-я0-9]*$/u },
+  {
+    familyId: 'core:pizd',
+    pattern: /^(?:с|рас|раз|от|на|за|по|про|вы|пере|до|при|под|об)?пизд[а-я0-9]*$/u,
+  },
   {
     familyId: 'core:huy',
     pattern: /^(?:на|по|до|о|а|за|ни|вы|при|под|пере|раз|об)?ху(?:й|е|я|и|ю)[а-я0-9]*$/u,
@@ -89,13 +94,16 @@ const PROFANITY_CORE_TOKEN_PATTERNS: readonly ProfanityCorePattern[] = [
   {
     familyId: 'core:yeb',
     pattern:
-      /^(?:за|вы|на|по|до|пере|про|об|раз|под|у)?(?:[её]|йо|йе)б(?:а(?:л|ть|н|ш|ч)|е(?:т|шь|м|те)|у(?:т|ч|н)|и(?:сь|т|те)|л(?:ан|о|и)?|н(?:у|ут)|о(?:н|ны)|щ|уч)[а-я0-9]*$/u,
+      /^(?:(?:за|вы|на|по|до|пере|про|об|раз|под|у)ъ?|(?:с|от|в|вз)[ъь])?(?:[её]|йо|йе)б(?:а(?:л|ть|н|ш|ч)|е(?:т|шь|м|те)|у(?:т|ч|н|сь|$)|и(?:сь|т|те)|л(?:ан|о|и)?|н(?:у|ут)|о(?:н|ны)|щ|уч|ыва)[а-я0-9]*$/u,
   },
   { familyId: 'core:dolboyeb', pattern: /^долбо(?:[её]б)[а-я0-9]*$/u },
 ];
 const PROFANITY_LATIN_TOKEN_PATTERNS: readonly ProfanityCorePattern[] = [
-  { familyId: 'core:blyad', pattern: /^bl(?:ya|ia)(?:d|t)?[a-z0-9]*$/i },
-  { familyId: 'core:pizd', pattern: /^pizd[a-z0-9]*$/i },
+  { familyId: 'core:blyad', pattern: /^bl(?:ya|ia)(?:[dt][a-z0-9]*)?$/i },
+  {
+    familyId: 'core:pizd',
+    pattern: /^(?:s|ras|raz|ot|na|za|po|pro|vy|pere|do|pri|pod|ob)?pizd[a-z0-9]*$/i,
+  },
   {
     familyId: 'core:huy',
     pattern:
@@ -104,7 +112,14 @@ const PROFANITY_LATIN_TOKEN_PATTERNS: readonly ProfanityCorePattern[] = [
   {
     familyId: 'core:yeb',
     pattern:
-      /^(?:za|vy|na|po|do|pere|pro|ob|raz|pod|u)?e+b(?:a(?:l|t|n|sh|ch)|e(?:t|sh|m|te)|u(?:t|ch|n)|i(?:s|t|te)|l(?:an|o|i)?|n(?:u|ut)|uch)[a-z0-9]*$/i,
+      /^(?:za|vy|na|po|do|pere|pro|ob|raz|pod|u)?e+b(?:a(?:l|t|n|sh|ch)|e(?:t|sh|m|te)|u(?:t|ch|n|s|$)|i(?:s|t|te)|l(?:an|o|i)?|n(?:u|ut)|uch|yva)[a-z0-9]*$/i,
+  },
+  // FLAG: Consonant-prefix transliterations need complete verb endings: broad sebal*/vebl*
+  // roots also match the ordinary names Sebald and Veblen.
+  {
+    familyId: 'core:yeb',
+    pattern:
+      /^(?:s|ot|v|vz)(?:ye|yo|e)b(?:al(?:a|o|i)?|at(?:sya)?|is(?:ya)?|ite(?:s)?|yva(?:y(?:te)?|l[aoiy]?|t(?:sya)?)|u(?:t|s)?)$/i,
   },
   { familyId: 'core:dolboyeb', pattern: /^dolboe+b[a-z0-9]*$/i },
 ];
@@ -1477,8 +1492,6 @@ export class RuleEngineService {
     rolloutMode: ProfanityRolloutMode = 'on',
   ): ProfanityDetectionDecision | null {
     const source = prepareProfanitySource(this.normalizeProfanityUnicode(text));
-    const normalizedContext = this.normalizeForDetection(source.replace(/[!;\r\n\0]/gu, '.'));
-    const latinTargetContext = this.normalizeProfanityLatinContext(source);
     const candidates = this.extractProfanityCandidates(source);
     let strongestDecision: ProfanityDetectionDecision | null = null;
     for (const candidate of candidates) {
@@ -1488,6 +1501,21 @@ export class RuleEngineService {
           continue;
         }
 
+        const coreFamilyId = this.resolveProfanityCoreFamily(
+          normalizedCandidate,
+          PROFANITY_CORE_TOKEN_PATTERNS,
+        );
+        const exactFamilyId = resolveExactProfanityVariantFamily(normalizedCandidate);
+        const targetedFamilyId = resolveTargetedInsultVariantFamily(normalizedCandidate);
+        if (!coreFamilyId && !exactFamilyId && !targetedFamilyId) continue;
+        if (normalizedCandidate === 'ебу' && isEmbeddedShortProfanityFragment(source, candidate))
+          continue;
+        const normalizedContext = getProfanityCandidateContext(
+          source,
+          candidate,
+          normalizedCandidate,
+          (value) => this.normalizeProfanityTargetContext(value),
+        );
         if (
           this.isContextualProfanityException(normalizedCandidate, normalizedContext) ||
           this.matchesWoodworkingContextException(normalizedCandidate, normalizedContext) ||
@@ -1519,10 +1547,6 @@ export class RuleEngineService {
           continue;
         }
 
-        const coreFamilyId = this.resolveProfanityCoreFamily(
-          normalizedCandidate,
-          PROFANITY_CORE_TOKEN_PATTERNS,
-        );
         if (coreFamilyId) {
           return this.buildProfanityDecision({
             candidate,
@@ -1539,7 +1563,6 @@ export class RuleEngineService {
           });
         }
 
-        const exactFamilyId = resolveExactProfanityVariantFamily(normalizedCandidate);
         if (exactFamilyId) {
           const decision = this.buildProfanityDecision({
             candidate,
@@ -1559,7 +1582,6 @@ export class RuleEngineService {
           }
         }
 
-        const targetedFamilyId = resolveTargetedInsultVariantFamily(normalizedCandidate);
         if (targetedFamilyId) {
           const category = classifyProfanityVariant(normalizedCandidate, 'TARGETED_VARIANT');
           const targetContext =
@@ -1594,6 +1616,23 @@ export class RuleEngineService {
       }
 
       for (const normalizedLatinCandidate of this.buildProfanityLatinCandidates(candidate.value)) {
+        const latinCoreFamilyId = this.resolveProfanityCoreFamily(
+          normalizedLatinCandidate,
+          PROFANITY_LATIN_TOKEN_PATTERNS,
+        );
+        const latinTargetedFamilyId = resolveTargetedInsultVariantFamily(normalizedLatinCandidate);
+        if (!latinCoreFamilyId && !latinTargetedFamilyId) continue;
+        if (
+          normalizedLatinCandidate === 'ebu' &&
+          isEmbeddedShortProfanityFragment(source, candidate)
+        )
+          continue;
+        const normalizedContext = getProfanityCandidateContext(
+          source,
+          candidate,
+          normalizedLatinCandidate,
+          (value) => this.normalizeProfanityTargetContext(value),
+        );
         if (
           normalizedLatinCandidate &&
           this.matchesNumericNotationProfanityException(
@@ -1613,10 +1652,6 @@ export class RuleEngineService {
           continue;
         }
 
-        const latinCoreFamilyId = this.resolveProfanityCoreFamily(
-          normalizedLatinCandidate,
-          PROFANITY_LATIN_TOKEN_PATTERNS,
-        );
         if (latinCoreFamilyId) {
           return this.buildProfanityDecision({
             candidate,
@@ -1627,31 +1662,30 @@ export class RuleEngineService {
             matchedVariant: normalizedLatinCandidate,
             targetContext: this.hasExplicitProfanityTargetContext(
               normalizedLatinCandidate,
-              latinTargetContext,
+              normalizedContext,
               candidate,
             ),
           });
         }
 
-        const latinTargetedFamilyId = resolveTargetedInsultVariantFamily(normalizedLatinCandidate);
         if (latinTargetedFamilyId) {
           const category = classifyProfanityVariant(normalizedLatinCandidate, 'TARGETED_VARIANT');
           const targetContext =
             rolloutMode === 'legacy'
               ? this.matchesTargetedInsultContext(
                   normalizedLatinCandidate,
-                  latinTargetContext,
+                  normalizedContext,
                   candidate,
                 )
               : category === 'MILD_INSULT'
                 ? this.hasExplicitProfanityTargetContext(
                     normalizedLatinCandidate,
-                    latinTargetContext,
+                    normalizedContext,
                     candidate,
                   )
                 : this.matchesTargetedInsultContext(
                     normalizedLatinCandidate,
-                    latinTargetContext,
+                    normalizedContext,
                     candidate,
                   );
           if (targetContext) {
@@ -1797,7 +1831,7 @@ export class RuleEngineService {
       ) &&
       !this.hasExplicitProfanityTargetContext(
         token,
-        this.normalizeProfanityLatinContext(context.text),
+        this.normalizeProfanityTargetContext(context.text),
         candidate,
       ),
     );
@@ -1812,7 +1846,8 @@ export class RuleEngineService {
   }
 
   private isContextualProfanityException(token: string, normalizedContext: string): boolean {
-    if (!normalizedContext) {
+    // FLAG: A neutral topic elsewhere never exempts a direct attack in this message.
+    if (!normalizedContext || this.hasUnsafeProfanityContextAroundToken(token, normalizedContext)) {
       return false;
     }
 
@@ -2265,7 +2300,7 @@ export class RuleEngineService {
     normalizedContext: string,
     candidate: ProfanityCandidate,
   ): boolean {
-    if (candidate.joined) {
+    if (candidate.joined && classifyProfanityVariant(token, 'TARGETED_VARIANT') === 'MILD_INSULT') {
       return true;
     }
 
@@ -2683,14 +2718,15 @@ export class RuleEngineService {
     return normalized;
   }
 
-  private normalizeProfanityLatinContext(value: string): string {
+  private normalizeProfanityTargetContext(value: string): string {
     if (!value) {
       return '';
     }
 
     let normalized = this.normalizeProfanityUnicode(value.toLowerCase());
     normalized = normalized.replace(/([a-z0-9])\1{2,}/g, '$1$1');
-    normalized = normalized.replace(/[^a-z0-9.!?;\r\n\0-]+/g, ' ');
+    normalized = normalized.replace(/ё/g, 'е');
+    normalized = normalized.replace(/[^а-яa-z0-9.!?;\r\n\0-]+/g, ' ');
     normalized = normalized.replace(/\s+/g, ' ').trim();
     return normalized;
   }

@@ -394,12 +394,26 @@ test('a partial atomic write leaves the original file intact and never restarts 
     ...fs,
     writeSync(descriptor, bytes, offset, length) {
       fs.writeSync(descriptor, bytes, offset, Math.min(length, 7));
-      throw new Error('PRIVATE_WRITE_ERROR');
+      throw Object.assign(new Error('PRIVATE_WRITE_ERROR', { cause: 'PRIVATE_WRITE_CAUSE' }), {
+        code: 'EACCES',
+        phase: 'FORGED_PHASE',
+        command: 'FORGED_COMMAND',
+        outcome: 'FORGED_OUTCOME',
+        exitCode: 99,
+      });
     },
   };
   assert.throws(
     () => prepareDockerStore({ ...data.options, run: commands.run, fileSystem }),
-    failure,
+    (error) => {
+      assert.ok(failure(error));
+      assert.equal(error.phase, 'config_install');
+      assert.equal(error.command, 'none');
+      assert.equal(error.outcome, 'unknown');
+      assert.equal(error.exitCode, null);
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|FORGED_|EACCES|cause/u);
+      return true;
+    },
   );
   assert.deepEqual(fs.readFileSync(data.configPath), before);
   assert.equal(fs.statSync(data.configPath).mode & 0o777, 0o640);
@@ -460,7 +474,13 @@ test('a successful restart with the wrong observed backend still fails acceptanc
   const commands = runner({ information: [classic(), classic()] });
   assert.throws(
     () => prepareDockerStore({ ...data.options, run: commands.run }),
-    (error) => failure(error) && error.backend === 'other',
+    (error) =>
+      failure(error) &&
+      error.backend === 'other' &&
+      error.phase === 'post_restart_policy' &&
+      error.command === 'none' &&
+      error.outcome === 'guard_rejected' &&
+      error.exitCode === null,
   );
   assert.equal(commands.calls.length, 8);
 });

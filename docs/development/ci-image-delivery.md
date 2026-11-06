@@ -111,7 +111,8 @@ matching backends alone do not establish image identity or successful delivery.
 Failures report a fixed phase and command outcome, including a bounded child exit code. Initial
 Docker checks, service restart and post-restart verification remain distinguishable without raw
 dependency output or causes. These diagnostics do not retry commands or establish that a runner
-failure was transient.
+failure was transient. Only a witnessed helper guard reports `guard_rejected`; unclassified
+filesystem or parsing failures report `unknown` without copying arbitrary error fields.
 
 Registry writes, OIDC and attestation permissions belong only to that publication job. Temporary
 registry authentication files are private and removed after use. The pinned attestation actions

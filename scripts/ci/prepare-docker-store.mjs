@@ -28,7 +28,7 @@ const phases = new Set([
 // fields, dependency output or causes from an arbitrary caught error.
 const commandFailures = new WeakMap();
 const requireFact = (fact) => {
-  if (!fact) throw new Error(dockerStoreFailureMessage);
+  if (!fact) throw commandFailure('none', 'guard_rejected');
 };
 
 export class DockerStoreError extends Error {
@@ -40,7 +40,7 @@ export class DockerStoreError extends Error {
     this.backend = info ? (requiredBackend(info) ? 'required' : 'other') : 'unverified';
     this.phase = phases.has(phase) ? phase : 'unknown';
     this.command = diagnostic?.command ?? 'none';
-    this.outcome = diagnostic?.outcome ?? 'guard_rejected';
+    this.outcome = diagnostic?.outcome ?? 'unknown';
     this.exitCode = diagnostic?.exitCode ?? null;
   }
 }
