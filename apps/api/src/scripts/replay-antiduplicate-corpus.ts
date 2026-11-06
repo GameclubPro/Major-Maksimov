@@ -18,7 +18,10 @@ import {
   type AntiduplicateCorpusManifest,
   type AntiduplicateCorpusLabel,
 } from './antiduplicate-corpus';
-import { MessageDuplicateHistoryService } from '../moderation/message-duplicate/message-duplicate-history.service';
+import {
+  MessageDuplicateHistoryService,
+  type MessageDuplicateHistoryObservation,
+} from '../moderation/message-duplicate/message-duplicate-history.service';
 import {
   MESSAGE_DUPLICATE_WINDOW_SCRIPT,
   type DuplicateWindowResult,
@@ -312,26 +315,20 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
           ...(event.publishedAt ? { publishedAtMs: Date.parse(event.publishedAt) } : {}),
           content,
         });
-      const image =
-        settings.duplicateCompareMode === 'MESSAGE' &&
-        content.media.some((item) => item.kind === 'photo');
-      const mode = image ? 'IMAGE' : settings.duplicateCompareMode === 'TEXT' ? 'TEXT' : 'MESSAGE';
+      const image = content.media.some((item) => item.kind === 'photo');
+      const mediaMode = image ? 'IMAGE' : 'MESSAGE';
       const proofValid =
-        event.mediaProof?.sourceDigest === duplicateSourceDigest(content, mode) &&
+        event.mediaProof?.sourceDigest === duplicateSourceDigest(content, mediaMode) &&
         event.mediaProof.hashes.length === content.media.length &&
         event.mediaProof.algorithmVersion ===
           (image ? PHOTO_FINGERPRINT_ALGORITHM_VERSION : MESSAGE_DUPLICATE_MEDIA_VERSION);
-      const requiresProof = mode !== 'TEXT' && content.media.length > 0;
-      const unsupportedProof = requiresProof && !proofValid;
-      const comparable =
-        isDuplicateContentComparable(content, mode) &&
+      const mediaComparable =
+        content.media.length > 0 &&
+        isDuplicateContentComparable(content, mediaMode) &&
         (image ? isExactImageContent(content) : true);
       const publicationKnown = event.publishedAt !== null;
-      const observedContent = comparable
-        ? content
-        : { ...content, complete: false, reason: 'invalid_content' as const };
       const comparison = {
-        content: observedContent,
+        content,
         chatId: event.chatId,
         userId: event.userId!,
         messageId: event.messageId,
@@ -339,8 +336,6 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
         ...(event.publishedAt ? { publishedAtMs: Date.parse(event.publishedAt) } : {}),
         controlRevision: 1,
         settings,
-        ...(proofValid ? { mediaHashes: event.mediaProof!.hashes } : {}),
-        ...(image ? { imageScope: settings.duplicatePhotoScope } : {}),
       };
       window.candidates = [];
       window.lastMutationKind = undefined;
@@ -355,10 +350,31 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
               ? 172800
               : resolveDuplicateFlowConfig(settings).windowSec,
         }) !== null;
-      const observation =
-        publicationKnown && scheduleOpen && !eventTimeRejected
-          ? await history.observeWithOutcome(comparison)
-          : { outcome: 'CONTENT_UNVERIFIED' as const, match: null };
+      let mode: 'TEXT' | 'MESSAGE' | 'IMAGE' = 'TEXT';
+      let comparable = isDuplicateContentComparable(content, 'TEXT');
+      let observation: MessageDuplicateHistoryObservation = {
+        outcome: 'CONTENT_UNVERIFIED',
+        match: null,
+      };
+      const candidates: Candidate[] = [];
+      if (publicationKnown && scheduleOpen && !eventTimeRejected) {
+        // FLAG: Replay the current text-first policy, independent of the captured selector.
+        // Missing optional media proof cannot invalidate an independently proved text repeat.
+        observation = await history.observeWithOutcome({ ...comparison, comparison: 'TEXT' });
+        candidates.push(...window.candidates);
+        if (!observation.match && mediaComparable) {
+          mode = mediaMode;
+          comparable = true;
+          observation = await history.observeWithOutcome({
+            ...comparison,
+            comparison: 'MESSAGE',
+            ...(proofValid ? { mediaHashes: event.mediaProof!.hashes } : {}),
+            ...(image ? { imageScope: settings.duplicatePhotoScope } : {}),
+          });
+          candidates.push(...window.candidates);
+        }
+      }
+      const unsupportedProof = mode !== 'TEXT' && !proofValid;
       const actionCandidate =
         !unsupportedProof &&
         settings.antiDuplicateEnabled &&
@@ -378,14 +394,9 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
             ? 'DEVELOPMENT'
             : 'HOLDOUT';
       // FLAG: Coverage cohorts describe input content, independently of matcher predictions.
-      const kind = image
-        ? 'image'
-        : mode === 'TEXT'
-          ? 'text'
-          : content.media.length
-            ? 'other_media'
-            : 'text';
-      const predictedDuplicate = window.candidates.length > 0 || Boolean(observation.match);
+      const kind = image ? 'image' : content.media.length ? 'other_media' : 'text';
+      const cohortMode = content.media.length ? mediaMode : 'TEXT';
+      const predictedDuplicate = candidates.length > 0 || Boolean(observation.match);
       const outcome = !scheduleOpen
         ? 'SCHEDULE_CLOSED'
         : eventTimeRejected
@@ -408,7 +419,7 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
         window.lastMutationKind !== 'replayed' &&
         ['COMPARED_NO_MATCH', 'MATCHED'].includes(observation.outcome);
       const stratum = policyStratum(settings);
-      const groupKey = `${partition}:${stratum}:${mode}:${kind}`;
+      const groupKey = `${partition}:${stratum}:${cohortMode}:${kind}`;
       if (partition === 'HOLDOUT') {
         expectedHoldoutGroups.add(groupKey);
         holdoutGroupEvents.set(groupKey, (holdoutGroupEvents.get(groupKey) ?? 0) + 1);
@@ -453,7 +464,7 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
           predictedAction,
           originalMessageId:
             observation.match?.binding.original?.messageId ??
-            window.candidates[0]?.original.messageId ??
+            candidates[0]?.original.messageId ??
             null,
           scorable,
           reviewedOriginalMessageId: labels.get(event.id)?.originalMessageId ?? null,
@@ -477,6 +488,7 @@ export async function replayAntiduplicateCorpus(argv: string[]) {
     const sourceComplete = end.sourceComplete === true && end.saturated === false;
     const summary = {
       version: 'antiduplicate-evaluation/v1',
+      comparisonPolicy: 'text-or-image-v1',
       corpusSha256,
       labelsSha256,
       sourceSnapshotAt: manifest.sourceSnapshotAt,

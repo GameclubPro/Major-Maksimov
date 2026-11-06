@@ -34,7 +34,6 @@ import {
   formatDuplicateClockTime,
 } from './settings-duplicate-flow';
 import { resolveDuplicatePhotoPresentationPolicy } from './settings-duplicate-photo-status';
-import SettingsDuplicateMessageControls from './settings-duplicate-message-controls';
 import SettingsDuplicatePhotoControls from './settings-duplicate-photo-controls';
 import SettingsDuplicateWindowControls from './settings-duplicate-window-controls';
 import { buildDuplicateTextActionPreview } from './settings-duplicate-action-preview';
@@ -126,7 +125,6 @@ export function SharedDuplicateSettingsFields({ fields, context }: Props) {
   const [editorOpen, setEditorOpen] = useState(false);
   const [windowBuffer, setWindowBuffer] = useState<string | null>(null);
   const master = fields.read('antiDuplicateEnabled');
-  const compare = fields.read('duplicateCompareMode');
   const preset = fields.read('duplicateDetectionPreset');
   const flow = readCommonDuplicateFlow(fields);
   const stages = commonValues(fields, stagePaths);
@@ -207,39 +205,36 @@ export function SharedDuplicateSettingsFields({ fields, context }: Props) {
         hint={hint(
           'antiDuplicate',
           'Пояснение для антидубля',
-          'Повторы текста ищутся у одного участника в этом чате. Первое сообщение не является дублем. Проверяются также короткие сообщения, пересылки и подписи. Действия зависят от настроек ниже и текущего режима проверки.',
+          'Первое сообщение остаётся. Бот реагирует на повторы по настройкам ниже. Администраторы, боты и участники с иммунитетом исключены.',
         )}
       />
-      <dl className="duplicate-diagnostics__facts duplicate-scope">
-        <div>
-          <dt>Повторы текста</dt>
-          <dd>У одного участника в этом чате</dd>
-        </div>
-        <div>
-          <dt>Исключения</dt>
-          <dd>Администраторы, боты и участники с иммунитетом</dd>
-        </div>
-      </dl>
       {shown(master) ? (
         <>
-          <h3 className="duplicate-settings-group__title">Что проверять</h3>
-          <SettingsDuplicateMessageControls
-            mode={context.duplicatePresentation?.messageMode}
-            value={value(compare)}
-            disabled={fields.readOnly}
-            onChange={(next) => fields.setScalar('duplicateCompareMode', next)}
-          />
+          {context.duplicatePresentation?.messageMode === 'OFF' ? (
+            <p className="policy-mode-hint" role="status">
+              Антидубль сейчас недоступен
+            </p>
+          ) : context.duplicatePresentation?.messageMode === 'OBSERVE' ? (
+            <p className="policy-mode-hint" role="status">
+              Проверка работает без удаления
+            </p>
+          ) : context.duplicatePresentation?.messageMode === 'DELETE_ONLY' ? (
+            <p className="policy-mode-hint" role="status">
+              Доступно только удаление
+            </p>
+          ) : null}
+          <h3 className="duplicate-settings-group__title">Совпадения</h3>
           <div className="settings-policy">
             <div className="settings-policy__label-row">
-              <span className="field__label">Текст</span>
+              <span className="field__label">Как искать повторы</span>
               {hint(
                 'duplicateTextMode',
-                'Пояснение для режима сравнения текста',
+                'Пояснение для поиска повторов',
                 preset.kind === 'common' && preset.value === 'STANDARD'
-                  ? 'Одинаковый текст без учёта регистра и пробелов. Числа, слова и ссылки должны совпадать.'
+                  ? 'Одинаковый текст без учёта регистра и пробелов.'
                   : preset.kind === 'common' && preset.value === 'STRICT'
-                    ? 'Также проверяется длинный текст с изменённой пунктуацией или заменёнными открытыми ссылками и телефонами. Порядок слов и числа сохраняются; скрытые ссылки и кнопки сравниваются точно.'
-                    : 'Точное сравнение всегда включено. Дополнительные совпадения по ссылке, телефону или длинному тексту выбираются ниже.',
+                    ? 'Находить повторы даже с небольшими изменениями длинного текста.'
+                    : 'Выберите, какие совпадения считать повторами.',
               )}
             </div>
             <SegmentedControl
@@ -253,7 +248,7 @@ export function SharedDuplicateSettingsFields({ fields, context }: Props) {
                   setChatDuplicatePreset(fields, next);
               }}
               className="settings-mode-segments"
-              ariaLabel="Как сравнивать текст"
+              ariaLabel="Как искать повторы"
             />
             {preset.kind !== 'common' ? <p className="field__hint">Разные значения</p> : null}
           </div>
@@ -279,14 +274,12 @@ export function SharedDuplicateSettingsFields({ fields, context }: Props) {
               )}
             </>
           ) : null}
-          {compare.kind !== 'common' || compare.value !== 'TEXT' ? (
-            <SettingsDuplicatePhotoControls
-              moderationPolicy={photoPolicy}
-              scope={value(fields.read('duplicatePhotoScope'))}
-              disabled={fields.readOnly}
-              onScopeChange={(next) => fields.setScalar('duplicatePhotoScope', next)}
-            />
-          ) : null}
+          <SettingsDuplicatePhotoControls
+            moderationPolicy={photoPolicy}
+            scope={value(fields.read('duplicatePhotoScope'))}
+            disabled={fields.readOnly}
+            onScopeChange={(next) => fields.setScalar('duplicatePhotoScope', next)}
+          />
           <h3 className="duplicate-settings-group__title">Когда срабатывать</h3>
           <article
             className={`duplicate-stage${fields.error('duplicateWarnWindowSec') || fields.error('duplicateWarnMaxCount') ? ' field--error' : ''}`}

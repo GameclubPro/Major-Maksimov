@@ -113,7 +113,7 @@ const messageSchema = z
     settingsDigest: sha256,
     deadlineAtMs: z.number().int().positive().safe(),
     cleanupOnly: z.enum(['completed', 'terminated']).optional(),
-    comparison: z.literal('IMAGE').optional(),
+    comparison: z.enum(['TEXT', 'IMAGE']).optional(),
   })
   .strict();
 function parseJob(input: LegacyRecoverySqlSourceInput) {

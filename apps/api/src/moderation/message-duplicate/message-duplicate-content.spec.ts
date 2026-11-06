@@ -391,6 +391,39 @@ describe('message duplicate canonical contents', () => {
     );
     expect(buildMessageDuplicateIdentity(a, 'TEXT')).toBe(buildMessageDuplicateIdentity(b, 'TEXT'));
   });
+  it.each(['callback', 'link'] as const)(
+    'requires caption text before using a shared %s keyboard as text evidence for media',
+    (type) => {
+      const keyboard = {
+        type: 'inline_keyboard',
+        payload: {
+          buttons: [
+            [
+              {
+                type,
+                text: 'Open',
+                ...(type === 'link' ? { url: 'https://example.com' } : { payload: 'open' }),
+              },
+            ],
+          ],
+        },
+      };
+      for (const attachment of [photo('a'), { type: 'file', payload: {} }]) {
+        expect(
+          buildMessageDuplicateIdentity(content({ attachments: [attachment, keyboard] }), 'TEXT'),
+        ).toBeNull();
+        expect(
+          buildMessageDuplicateIdentity(
+            content({ text: 'Actual caption', attachments: [attachment, keyboard] }),
+            'TEXT',
+          ),
+        ).not.toBeNull();
+      }
+      expect(
+        buildMessageDuplicateIdentity(content({ attachments: [keyboard] }), 'TEXT'),
+      ).not.toBeNull();
+    },
+  );
   it('compares complete albums as one object, never a subset or split package', () => {
     const album = content({ attachments: [photo('a'), photo('b')] });
     expect(buildMessageDuplicateIdentity(album, 'MESSAGE', ['a'.repeat(64)])).toBeNull();

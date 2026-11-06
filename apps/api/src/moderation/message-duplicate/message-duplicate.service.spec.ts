@@ -112,6 +112,22 @@ describe('message duplicate main-path admission', () => {
     );
     expect(s.queue.enqueue).not.toHaveBeenCalled();
   });
+  it.each(['MESSAGE', 'TEXT'] as const)(
+    'enforces a repeated caption before image analysis with retained %s settings',
+    async (duplicateCompareMode) => {
+      const s = setup();
+      s.params.settings.duplicateCompareMode = duplicateCompareMode;
+      s.params.update = duplicateUpdate('photo', s.params.eventTimestampMs, 'same offer', [
+        { type: 'image', payload: { photo_id: 'new-photo', url: 'https://i.oneme.ru/new' } },
+      ]);
+      expect(await s.service.observe(s.params)).toBe('ENFORCEMENT_REQUESTED');
+      expect(s.history.observeWithOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ comparison: 'TEXT' }),
+      );
+      expect(s.enforcement.enqueue).toHaveBeenCalledTimes(1);
+      expect(s.queue.enqueue).not.toHaveBeenCalled();
+    },
+  );
   it('distinguishes stale/unverified history from a verified non-match and keeps action failures separate', async () => {
     const s = setup();
     s.history.observeWithOutcome.mockResolvedValue({ outcome: 'STALE', match: null });
@@ -148,21 +164,36 @@ describe('message duplicate main-path admission', () => {
     await expect(s.service.observe(s.params)).resolves.toBe('ENFORCEMENT_REQUESTED');
     expect(s.enforcement.enqueue).toHaveBeenCalledTimes(1);
   });
-  it('uses durable media jobs only for MESSAGE and compares captions inline in TEXT mode', async () => {
+  it.each(['MESSAGE', 'TEXT'] as const)(
+    'queues optional media only when text has no match with retained %s settings',
+    async (duplicateCompareMode) => {
+      const s = setup();
+      s.params.settings.duplicateCompareMode = duplicateCompareMode;
+      s.history.observe.mockResolvedValue(null);
+      s.params.update = duplicateUpdate('m2', s.params.eventTimestampMs, 'new caption', [
+        { type: 'image', payload: { photo_id: 'photo', url: 'https://i.oneme.ru/photo' } },
+      ]);
+      expect(await s.service.observe(s.params)).toBe('MEDIA_QUEUED');
+      expect(s.queue.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          webhookEventId: 'receipt',
+          comparison: 'IMAGE',
+          actionEligible: false,
+        }),
+      );
+      expect(s.enforcement.enqueue).not.toHaveBeenCalled();
+    },
+  );
+  it('retains non-photo media comparison as a fallback after text', async () => {
     const s = setup();
-    s.params.update = duplicateUpdate('m2', s.params.eventTimestampMs, 'caption', [
+    s.history.observe.mockResolvedValue(null);
+    s.params.update = duplicateUpdate('file', s.params.eventTimestampMs, '', [
       { type: 'file', payload: { url: 'https://fd.oneme.ru/file' } },
     ]);
-    await s.service.observe(s.params);
+    expect(await s.service.observe(s.params)).toBe('MEDIA_QUEUED');
     expect(s.queue.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({ webhookEventId: 'receipt', actionEligible: true }),
     );
-    expect(s.enforcement.enqueue).not.toHaveBeenCalled();
-    expect(s.metrics.record).toHaveBeenCalledWith('admission.media_queued');
-    s.params.settings.duplicateCompareMode = 'TEXT';
-    await s.service.observe(s.params);
-    expect(s.queue.enqueue).toHaveBeenCalledTimes(1);
-    expect(s.enforcement.enqueue).toHaveBeenCalledTimes(1);
   });
   it('observes shadow and competing legacy outcomes without new actions', async () => {
     const s = setup();

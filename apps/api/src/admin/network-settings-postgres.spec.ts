@@ -1,12 +1,13 @@
 import { NetworkNavigationAllowlist } from './network-navigation-allowlist';
-import { randomUUID } from 'node:crypto';
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { channelSettingsSchema, chatSettingsSchema, type ChannelSettings } from '@maxim/contracts';
 import type {
   NetworkSettingsRecipient,
   NetworkSettingsTarget,
 } from '@maxim/contracts/network-settings';
-import { createPrismaAdapter, PrismaClient } from '../prisma/prisma-client';
+import { networkSettingsPreviewRequestSchema } from '@maxim/contracts/network-settings';
+import { createPrismaAdapter, PrismaClient, type Prisma } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { buildResolvedMaxBotConfigs } from '../max/max-bot-config.util';
@@ -198,6 +199,70 @@ integration('network settings durable writes with PostgreSQL', () => {
     expect((await service.status(user, operationId)).status).toBe('PREPARED');
     return preview;
   }
+
+  it('replays an accepted preview with a retired selector but rejects a new operation containing it', async () => {
+    const operationId = randomUUID();
+    ownedOperations.push(operationId);
+    const request = networkSettingsPreviewRequestSchema.parse({
+      operationId,
+      entityType: 'chat',
+      section: 'duplicates',
+      target: { mode: 'selected', entityIds: [chatId] },
+      compositionVersion: 'retained-composition',
+      recipients: [{ entityId: chatId, title: chatId, revision: 1 }],
+      changes: [
+        { path: 'duplicateCompareMode', op: 'set', value: 'TEXT' },
+        { path: 'duplicatePhotoScope', op: 'set', value: 'CHAT' },
+      ],
+    });
+    const ordered = (value: unknown): unknown =>
+      Array.isArray(value)
+        ? value.map(ordered)
+        : value && typeof value === 'object'
+          ? Object.fromEntries(
+              Object.entries(value)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([key, child]) => [key, ordered(child)]),
+            )
+          : value;
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify(ordered(request)))
+      .digest('hex');
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const stored = await db.networkSettingsOperation.create({
+      data: {
+        id: operationId,
+        actorUserId: user.userId,
+        entityType: 'CHAT',
+        section: 'duplicates',
+        status: 'PREPARED',
+        requestHash,
+        payload: { readerVersion: 1, request, expiresAt } as unknown as Prisma.InputJsonValue,
+      },
+    });
+    await expect(service.preview(user, request)).resolves.toEqual(
+      expect.objectContaining({
+        operationId,
+        previewHash: requestHash,
+        status: 'PREPARED',
+        changes: request.changes,
+      }),
+    );
+    await expect(
+      service.preview({ ...user, userId: `${actor}-other` }, request),
+    ).rejects.toBeInstanceOf(ConflictException);
+    await expect(
+      service.preview(user, { ...request, changes: request.changes.slice(0, 1) }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(await db.networkSettingsOperation.findUnique({ where: { id: operationId } })).toEqual(
+      stored,
+    );
+    const newId = randomUUID();
+    await expect(service.preview(user, { ...request, operationId: newId })).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(await db.networkSettingsOperation.findUnique({ where: { id: newId } })).toBeNull();
+  });
 
   it('pages a full category and rejects stale composition before confirmation', async () => {
     await db.managedEntityFavorite.createMany({

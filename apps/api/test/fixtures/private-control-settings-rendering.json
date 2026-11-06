@@ -128,7 +128,7 @@
       "expected": {
         "summary": [
           "Антидубли: выкл • после 1 дубл. • окно 43200с",
-          "Одинаковые картинки: вкл • У одного автора • общая цепочка действий",
+          "Чьи картинки сравнивать: У одного автора",
           "Этапы: объяснение выкл • WARN выкл • MUTE выкл (6ч) • BAN выкл",
           "Кнопка: выкл"
         ],
@@ -230,35 +230,11 @@
       "expected": {
         "summary": [
           "Антидубли: вкл • после 1 дубл. • ежедневно 08:00–20:00 (Europe/Moscow)",
-          "Одинаковые картинки: вкл • У одного автора • общая цепочка действий",
+          "Чьи картинки сравнивать: У одного автора",
           "Этапы: объяснение выкл • WARN выкл • MUTE выкл (6ч) • BAN выкл",
           "Кнопка: выкл"
         ],
         "buttons": [
-          [
-            {
-              "type": "callback",
-              "text": "🎚 Что проверять: Сообщение целиком",
-              "payload": "pc2|noop",
-              "intent": "default"
-            }
-          ],
-          [
-            {
-              "type": "callback",
-              "text": "✅ Сообщение целиком",
-              "payload": "pc2|set_enum|duplicates|duplicateCompareMode|MESSAGE",
-              "intent": "default"
-            }
-          ],
-          [
-            {
-              "type": "callback",
-              "text": "◻️ Текст и подпись",
-              "payload": "pc2|set_enum|duplicates|duplicateCompareMode|TEXT",
-              "intent": "default"
-            }
-          ],
           [
             {
               "type": "callback",

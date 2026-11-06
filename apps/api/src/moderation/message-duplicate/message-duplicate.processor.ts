@@ -54,7 +54,7 @@ export const messageDuplicateJobSchema = z
     deadlineAtMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     actionEligible: z.boolean(),
     cleanupOnly: z.enum(['completed', 'terminated']).optional(),
-    comparison: z.literal('IMAGE').optional(),
+    comparison: z.enum(['TEXT', 'IMAGE']).optional(),
     idempotencyKey: z.string().regex(/^message-duplicate__[a-f0-9]{64}$/),
   })
   .strict()

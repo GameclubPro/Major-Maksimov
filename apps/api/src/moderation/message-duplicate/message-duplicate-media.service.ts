@@ -299,7 +299,6 @@ export class MessageDuplicateMediaService {
       });
       if (
         !settings?.antiDuplicateEnabled ||
-        (imageOnly && settings.duplicateCompareMode === 'TEXT') ||
         settings.chat.entityType !== 'CHAT' ||
         settings.chat.admins.some((admin) => admin.userId === message.senderId) ||
         settings.duplicatePolicyRevision !== job.policyRevision ||
@@ -329,8 +328,7 @@ export class MessageDuplicateMediaService {
         return finish('EVENT_TIME_REJECTED');
       }
       const content = extractDuplicateMessageContent(source.update.raw);
-      const textOnly =
-        !imageOnly && (settings.duplicateCompareMode === 'TEXT' || content.media.length === 0);
+      const textOnly = job.comparison === 'TEXT' || (!imageOnly && content.media.length === 0);
       const enforce = async (observation: MessageDuplicateHistoryObservation) => {
         const result = observation.match;
         if (observation.outcome === 'MATCHED') comparedOutcome = 'MATCHED_ACTION_FAILED';
@@ -382,13 +380,11 @@ export class MessageDuplicateMediaService {
       if (textOnly) {
         // FLAG: Deferred text qualification reuses the immutable receipt and existing history.
         // It needs no media downloads/candidate cache; final guards still read both MAX sources.
-        supported = isDuplicateContentComparable(
-          content,
-          settings.duplicateCompareMode === 'TEXT' ? 'TEXT' : 'MESSAGE',
-        );
+        supported = isDuplicateContentComparable(content, 'TEXT');
         const observation = await measureDuplicatePhase(this.metrics, 'history', () =>
           this.history.observeWithOutcome({
             content,
+            comparison: 'TEXT',
             chatId: job.chatId,
             userId: message.senderId,
             messageId: job.messageId,
@@ -554,6 +550,7 @@ export class MessageDuplicateMediaService {
               await measureDuplicatePhase(this.metrics, 'history', () =>
                 this.history.observe({
                   content: verified.content,
+                  comparison: 'MESSAGE',
                   chatId: job.chatId,
                   userId: baselineMessage.senderId,
                   messageId: baselineMessage.messageId,
@@ -642,6 +639,7 @@ export class MessageDuplicateMediaService {
       const observation = await measureDuplicatePhase(this.metrics, 'history', () =>
         this.history.observeWithOutcome({
           content: verified.content,
+          comparison: 'MESSAGE',
           chatId: job.chatId,
           userId: message.senderId,
           messageId: job.messageId,

@@ -159,20 +159,15 @@ export class MessageDuplicateService {
       if (!content.complete) this.metrics?.recordContentRejection(content.reason);
       const hasPhotos = content.media.some((media) => media.kind === 'photo');
       const invalidContent = { ...content, complete: false, reason: 'invalid_content' as const };
-      const imageMode = params.settings.duplicateCompareMode !== 'TEXT' && hasPhotos;
-      const imageOnly = imageMode && isExactImageContent(content);
-      supported =
-        params.track &&
-        isDuplicateContentComparable(
-          content,
-          params.settings.duplicateCompareMode === 'TEXT' ? 'TEXT' : 'MESSAGE',
-        ) &&
-        !imageMode &&
-        (params.settings.duplicateCompareMode === 'TEXT' || content.media.length === 0);
-      const observedContent = params.track && !imageMode ? content : invalidContent;
+      const imageOnly = isExactImageContent(content);
+      // FLAG: Text is independent evidence for every message. Optional image analysis must
+      // never delay or suppress a caption match, including for retained legacy settings.
+      supported = params.track && isDuplicateContentComparable(content, 'TEXT');
+      const observedContent = params.track ? content : invalidContent;
       const observation = await measureDuplicatePhase(this.metrics, 'history', () =>
         this.history.observeWithOutcome({
           content: observedContent,
+          comparison: 'TEXT',
           chatId: message.chatId,
           userId: message.senderId,
           messageId: message.messageId,
@@ -207,40 +202,6 @@ export class MessageDuplicateService {
         this.metrics?.record('admission.untracked');
         return finish('UNTRACKED');
       }
-      if (imageMode && !imageOnly) return finish('UNSUPPORTED_CONTENT');
-      if (
-        (imageOnly || params.settings.duplicateCompareMode !== 'TEXT') &&
-        content.complete &&
-        content.media.length > 0
-      ) {
-        if (!params.webhookEventId) {
-          this.metrics?.record('admission.missing_receipt');
-          this.logger.debug(
-            { chatId: message.chatId },
-            'Message duplicate media skipped: missing durable receipt',
-          );
-          return finish('SOURCE_UNAVAILABLE');
-        }
-        await this.queue.enqueue({
-          webhookEventId: params.webhookEventId,
-          chatId: message.chatId,
-          messageId: message.messageId,
-          eventTimestampMs,
-          sourceCreatedAt: new Date(eventTimestampMs).toISOString(),
-          controlRevision: policy.revision,
-          policyRevision: params.settings.duplicatePolicyRevision,
-          settingsDigest: imageOnly
-            ? exactImageSettingsDigest(params.settings)
-            : messageDuplicateSettingsDigest(params.settings),
-          ...(imageOnly ? { comparison: 'IMAGE' as const } : {}),
-          actionEligible:
-            params.actionEligible &&
-            (imageOnly ? policy.mode === 'full' : messageDuplicateActionsEnabled(policy.mode)),
-          deadlineAtMs: eventTimestampMs + DUPLICATE_JOB_MAX_LIFETIME_MS,
-        });
-        this.metrics?.record('admission.media_queued');
-        return finish('MEDIA_QUEUED');
-      }
       if (!content.complete && !result)
         this.logger.debug(
           { chatId: message.chatId, reason: content.reason },
@@ -268,6 +229,7 @@ export class MessageDuplicateService {
               ? () =>
                   this.queue.enqueue({
                     webhookEventId: params.webhookEventId!,
+                    comparison: 'TEXT',
                     chatId: message.chatId,
                     messageId: message.messageId,
                     eventTimestampMs,
@@ -289,6 +251,35 @@ export class MessageDuplicateService {
           params.actionEligible ? 'admission.shadow' : 'admission.action_ineligible',
         );
         return finish(params.actionEligible ? 'MATCHED_OBSERVE' : 'MATCHED_INELIGIBLE');
+      }
+      if ((imageOnly || !hasPhotos) && content.complete && content.media.length > 0) {
+        if (!params.webhookEventId) {
+          this.metrics?.record('admission.missing_receipt');
+          this.logger.debug(
+            { chatId: message.chatId },
+            'Message duplicate media skipped: missing durable receipt',
+          );
+          return finish('SOURCE_UNAVAILABLE');
+        }
+        await this.queue.enqueue({
+          webhookEventId: params.webhookEventId,
+          chatId: message.chatId,
+          messageId: message.messageId,
+          eventTimestampMs,
+          sourceCreatedAt: new Date(eventTimestampMs).toISOString(),
+          controlRevision: policy.revision,
+          policyRevision: params.settings.duplicatePolicyRevision,
+          settingsDigest: imageOnly
+            ? exactImageSettingsDigest(params.settings)
+            : messageDuplicateSettingsDigest(params.settings),
+          ...(imageOnly ? { comparison: 'IMAGE' as const } : {}),
+          actionEligible:
+            params.actionEligible &&
+            (imageOnly ? policy.mode === 'full' : messageDuplicateActionsEnabled(policy.mode)),
+          deadlineAtMs: eventTimestampMs + DUPLICATE_JOB_MAX_LIFETIME_MS,
+        });
+        this.metrics?.record('admission.media_queued');
+        return finish('MEDIA_QUEUED');
       }
       return finish(observation.outcome === 'MATCHED' ? 'CONTENT_UNVERIFIED' : observation.outcome);
     } catch (error) {

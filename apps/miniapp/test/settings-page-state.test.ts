@@ -29,11 +29,11 @@ function createSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
   };
 }
 
-test('message comparison mode is saved and merged only within the duplicate section', () => {
+test('retired message comparison mode does not dirty or overwrite the duplicate section', () => {
   const saved = createSettings({ duplicateCompareMode: 'MESSAGE' });
   const draft = createSettings({ duplicateCompareMode: 'TEXT' });
-  assert.equal(hasSectionSettingChanges(draft, saved, 'duplicates'), true);
-  assert.equal(mergeSectionSettings(saved, draft, 'duplicates').duplicateCompareMode, 'TEXT');
+  assert.equal(hasSectionSettingChanges(draft, saved, 'duplicates'), false);
+  assert.equal(mergeSectionSettings(saved, draft, 'duplicates').duplicateCompareMode, 'MESSAGE');
   assert.equal(mergeSectionSettings(saved, draft, 'links').duplicateCompareMode, 'MESSAGE');
 });
 
