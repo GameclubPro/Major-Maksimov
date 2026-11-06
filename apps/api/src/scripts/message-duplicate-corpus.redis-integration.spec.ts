@@ -19,6 +19,7 @@ import { extractDuplicateMessageContent } from '../moderation/message-duplicate/
 import { duplicateSettings } from '../moderation/message-duplicate/message-duplicate-test-fixtures';
 import { PHOTO_FINGERPRINT_ALGORITHM_VERSION } from '../moderation/photo-duplicate/photo-fingerprint-version';
 import { MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION } from '../moderation/message-duplicate/message-duplicate-window.script';
+import { MESSAGE_DUPLICATE_MEDIA_VERSION } from '../moderation/message-duplicate/message-duplicate-state';
 import type { RedisCounterService } from '../moderation/redis-counter.service';
 
 const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
@@ -274,9 +275,78 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/u.test(url);
     expect(summary.acceptance).toBe('INCOMPLETE');
   });
 
+  it.each(['MESSAGE', 'TEXT'] as const)(
+    'scores a repeated caption with different unverified photos under retained %s settings',
+    async (duplicateCompareMode) => {
+      const first = event('caption-a', '2026-08-25T11:00:00Z', 'repeated caption');
+      const copy = event('caption-b', '2026-08-25T11:00:00.100Z', 'repeated caption');
+      for (const item of [first, copy]) {
+        const message = item.raw.message as Record<string, unknown>;
+        message.body = {
+          ...(message.body as object),
+          attachments: [
+            {
+              type: 'image',
+              payload: { url: `https://i.oneme.ru/${item.messageId}`, photo_id: item.messageId },
+            },
+          ],
+        };
+      }
+      const { summary, decisions } = await run(
+        [first, copy],
+        duplicateSettings({ duplicateCompareMode }),
+        [{ index: 1, duplicate: true, actionAllowed: true }],
+      );
+      expect(decisions[1]).toMatchObject({
+        mode: 'TEXT',
+        kind: 'image',
+        outcome: 'MATCHED',
+        predictedDuplicate: true,
+        predictedAction: true,
+        originalMessageId: first.messageId,
+        scorable: true,
+      });
+      expect(summary.holdout).toMatchObject({ humanLabels: 1, content: { tp: 1, fn: 0, fp: 0 } });
+      expect(summary.unscorableHumanLabels).toBe(0);
+    },
+  );
+
+  it.each(['MESSAGE', 'TEXT'] as const)(
+    'retains verified non-photo media fallback under retained %s settings',
+    async (duplicateCompareMode) => {
+      const first = event('file-a', '2026-08-25T11:00:00Z', '');
+      const copy = event('file-b', '2026-08-25T11:00:00.100Z', '');
+      for (const item of [first, copy]) {
+        const message = item.raw.message as Record<string, unknown>;
+        message.body = {
+          ...(message.body as object),
+          attachments: [
+            { type: 'file', payload: { url: `https://fd.oneme.ru/${item.messageId}` } },
+          ],
+        };
+        item.mediaProof = {
+          sourceDigest: duplicateSourceDigest(extractDuplicateMessageContent(item.raw), 'MESSAGE'),
+          algorithmVersion: MESSAGE_DUPLICATE_MEDIA_VERSION,
+          hashes: ['b'.repeat(64)],
+        };
+      }
+      const { decisions } = await run([first, copy], duplicateSettings({ duplicateCompareMode }), [
+        { index: 1, duplicate: true, actionAllowed: true },
+      ]);
+      expect(decisions[1]).toMatchObject({
+        mode: 'MESSAGE',
+        kind: 'other_media',
+        predictedDuplicate: true,
+        predictedAction: true,
+        originalMessageId: first.messageId,
+        scorable: true,
+      });
+    },
+  );
+
   it('counts known unavailable media text, excludes unverified photo labels and requires exact IMAGE source/version binding', async () => {
-    const first = event('image-a', '2026-08-25T11:00:00Z', 'caption');
-    const copy = event('image-b', '2026-08-25T11:00:00.100Z', 'caption');
+    const first = event('image-a', '2026-08-25T11:00:00Z', 'original caption');
+    const copy = event('image-b', '2026-08-25T11:00:00.100Z', 'changed caption');
     for (const item of [first, copy]) {
       const message = item.raw.message as Record<string, unknown>;
       message.body = {

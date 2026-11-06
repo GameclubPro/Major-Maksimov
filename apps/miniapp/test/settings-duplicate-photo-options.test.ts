@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { registerHooks } from 'node:module';
 import test from 'node:test';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   DUPLICATE_PHOTO_SCOPE_OPTIONS,
   formatDuplicatePhotoScopeSummary,
@@ -13,6 +16,18 @@ import {
 } from '../src/pages/settings/settings-duplicate-photo-status';
 import { buildChatSettingsScreen } from '../src/lib/api/preview-transport-settings';
 import { createPreviewState } from '../src/lib/api/preview-transport-state';
+import { settingsSectionPaths } from '../src/features/network-settings/field-registry';
+
+const cssHook = registerHooks({
+  load(url, context, nextLoad) {
+    return url.endsWith('.css')
+      ? { format: 'module', source: '', shortCircuit: true }
+      : nextLoad(url, context);
+  },
+});
+const { default: SettingsDuplicatePhotoControls } =
+  await import('../src/pages/settings/settings-duplicate-photo-controls');
+cssHook.deregister();
 
 const source = (name: string) =>
   readFileSync(new URL(`../src/pages/${name}`, import.meta.url), 'utf8');
@@ -40,22 +55,27 @@ test('image comparison offers only the administrator-selected author scope', () 
   assert.doesNotMatch(section, /duplicatePhotoEnabled|duplicatePhotoMatchPreset/u);
 });
 
-test('the main comparison mode owns images without an independent hidden toggle', () => {
+test('unified duplicate settings have no text/image choice or hidden comparison field', () => {
   assert.match(section, /const master = fields\.read\('antiDuplicateEnabled'\)/u);
-  assert.match(section, /const compare = fields\.read\('duplicateCompareMode'\)/u);
-  assert.match(section, /\{shown\(master\) \? \([\s\S]*<SettingsDuplicateMessageControls/u);
-  assert.match(
-    section,
-    /\{compare\.kind !== 'common' \|\| compare\.value !== 'TEXT' \? \(\s*<SettingsDuplicatePhotoControls/u,
-  );
-  assert.match(section, /value=\{value\(compare\)\}/u);
-  assert.match(
-    section,
-    /onChange=\{\(next\) => fields\.setScalar\('duplicateCompareMode', next\)\}/u,
-  );
-  const message = source('settings/settings-duplicate-message-controls.tsx');
-  assert.match(message, /value="MESSAGE"/u);
-  assert.match(message, /value="TEXT"/u);
+  assert.doesNotMatch(section, /duplicateCompareMode|SettingsDuplicateMessageControls/u);
+  assert.doesNotMatch(state, /'duplicateCompareMode'/u);
+  assert.equal(settingsSectionPaths('chat', 'duplicates').includes('duplicateCompareMode'), false);
+});
+
+test('image scope keeps useful choices and availability without implementation details', () => {
+  const render = (moderationMode: 'FULL' | 'OFF') =>
+    renderToStaticMarkup(
+      createElement(SettingsDuplicatePhotoControls, {
+        scope: 'CHAT',
+        moderationPolicy: { ...full, moderationMode },
+        onScopeChange() {},
+      }),
+    );
+  const available = render('FULL');
+  assert.match(available, /Чьи картинки сравнивать/u);
+  assert.match(available, /Всех участников/u);
+  assert.doesNotMatch(available, /Подпись|Не учитывается|Как для текста|недоступна/u);
+  assert.match(render('OFF'), /Проверка картинок сейчас недоступна/u);
 });
 
 test('exact images share full reactions and never promote a perceptual-only response', () => {
@@ -77,7 +97,6 @@ test('exact images share full reactions and never promote a perceptual-only resp
 test('the action summary retains warnings, mute and ban for shared image moderation', () => {
   const summary = formatDuplicateActionSummary(
     {
-      duplicateCompareMode: 'MESSAGE',
       duplicatePhotoScope: 'CHAT',
       duplicateBotMessageEnabled: true,
       duplicateWarnEnabled: true,
@@ -90,18 +109,15 @@ test('the action summary retains warnings, mute and ban for shared image moderat
   );
   assert.match(summary, /№3/u);
   assert.match(summary, /12/u);
-  assert.match(summary, /Поиск повторов: среди всех участников/u);
+  assert.match(summary, /Поиск повторов картинок: среди всех участников/u);
   assert.doesNotMatch(summary, /дополнительн.*санкц|Без предупреждений и блокировок/u);
 });
 
-test('image status distinguishes shared comparison from individual allowances and actions', () => {
+test('image status describes the selected scope without implementation details', () => {
   assert.match(formatDuplicatePhotoModerationHint(full, 'CHAT'), /среди всех участников/u);
   assert.match(formatDuplicatePhotoModerationHint(full, 'SAME_AUTHOR'), /у одного участника/u);
   for (const scope of ['CHAT', 'SAME_AUTHOR'] as const) {
-    assert.match(
-      formatDuplicatePhotoModerationHint(full, scope),
-      /Допуск повторов, предупреждения и ограничения учитываются отдельно для каждого участника/u,
-    );
+    assert.doesNotMatch(formatDuplicatePhotoModerationHint(full, scope), /Подписи|цепочк|санкц/u);
   }
 });
 
@@ -116,7 +132,7 @@ test('the preview uses the same exact full policy for both author scopes', () =>
 
 test('disabling the master switch does not rewrite the configured reaction ladder', () => {
   const start = section.indexOf('title="Включить антидубль"');
-  const end = section.indexOf('>Что проверять</h3>');
+  const end = section.indexOf('>Совпадения</h3>');
   const master = section.slice(start, end);
   assert.ok(start >= 0 && end > start);
   assert.match(master, /state=\{master\}/u);

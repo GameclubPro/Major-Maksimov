@@ -354,9 +354,6 @@ export class NetworkSettingsService {
 
   async preview(user: AuthUser, body: unknown): Promise<NetworkSettingsPreviewResponse> {
     const request = parse(networkSettingsPreviewRequestSchema, body);
-    const allowed = networkSettingsPaths(request.entityType, request.section);
-    if (request.changes.some((change) => !allowed.includes(change.path)))
-      throw new BadRequestException('Поле не входит в выбранный раздел.');
     if (request.navigationAllowlist)
       request.navigationAllowlist = normalizeNetworkAllowlistIntent(request.navigationAllowlist);
     const requestHash = digest(request);
@@ -364,6 +361,10 @@ export class NetworkSettingsService {
       where: { id: request.operationId },
     });
     if (!existing) {
+      // FLAG: Accepted operations retain their exact payload/hash after an authored field is retired.
+      const allowed = networkSettingsPaths(request.entityType, request.section);
+      if (request.changes.some((change) => !allowed.includes(change.path)))
+        throw new BadRequestException('Поле не входит в выбранный раздел.');
       this.assertSelection(request, await this.selection(user, request));
       const expiresAt = new Date(Date.now() + PREVIEW_TTL_MS).toISOString();
       try {

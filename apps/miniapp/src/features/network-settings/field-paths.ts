@@ -88,7 +88,6 @@ export const CHAT_SECTION_FIELDS = {
     'duplicatePhotoMatchPreset',
     'duplicatePhotoScope',
     'duplicateDetectionPreset',
-    'duplicateCompareMode',
     'duplicateIgnoreLinksEnabled',
     'duplicateIgnorePhonesEnabled',
     'duplicateNearMatchEnabled',

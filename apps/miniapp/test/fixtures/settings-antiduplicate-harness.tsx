@@ -12,6 +12,7 @@ import { ManagedEntityNavigationProvider } from '../../src/lib/managed-entity-na
 import { HomeEntityFavoritesProvider } from '../../src/lib/home-entity-favorites-context';
 import { getPreviewApiPrincipalUserId } from '../../src/lib/api/preview-principal';
 import '../../src/styles.css';
+import '../../src/styles/moderation-workspace.css';
 
 const preview = createPreviewApiTransport();
 const verifiedUserId = getPreviewApiPrincipalUserId(preview)!;
@@ -21,7 +22,7 @@ const screen = (await preview.request(
 screen.settings = chatSettingsSchema.parse({
   settingsRevision: '2026-10-04T00:00:00.000Z',
   antiDuplicateEnabled: true,
-  duplicateCompareMode: 'MESSAGE',
+  duplicateCompareMode: 'TEXT',
   duplicateWindowMode: 'INTERVAL',
   duplicateStartTimeMinutes: 540,
   duplicateEndTimeMinutes: 1080,

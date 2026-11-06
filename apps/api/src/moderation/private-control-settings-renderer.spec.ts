@@ -29,6 +29,29 @@ const fixture = JSON.parse(
 };
 
 describe('private settings rendering compatibility', () => {
+  it.each(['MESSAGE', 'TEXT'] as const)(
+    'renders the unified duplicate rule for a retained %s setting',
+    (duplicateCompareMode) => {
+      const settings = chatSettingsSchema.parse({
+        antiDuplicateEnabled: true,
+        duplicateCompareMode,
+        duplicatePhotoScope: 'CHAT',
+      });
+      const summary = renderer.buildSectionSummaryLines('duplicates', settings, 'advanced');
+      expect(summary).toContain('Чьи картинки сравнивать: Во всём чате');
+      expect(summary.join('\n')).not.toMatch(/Одинаковые картинки:|общая цепочка/u);
+      expect(
+        renderer
+          .buildSectionActionRows('duplicates', settings, 'advanced')
+          .flat()
+          .some(
+            (button) =>
+              button.type === 'callback' && button.payload.includes('duplicateCompareMode'),
+          ),
+      ).toBe(false);
+    },
+  );
+
   it('keeps independent stop-word policy out of the legacy limits summary', () => {
     const summary = renderer.buildSectionSummaryLines(
       'limits',

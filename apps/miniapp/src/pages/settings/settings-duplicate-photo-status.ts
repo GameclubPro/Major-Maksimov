@@ -23,12 +23,9 @@ export function formatDuplicateSettingsSummary(
 ): string {
   if (!settings?.antiDuplicateEnabled) return 'Выключено';
   const photo =
-    settings.duplicateCompareMode !== 'TEXT'
-      ? photoPolicy &&
-        resolveDuplicatePhotoPresentationPolicy(photoPolicy).moderationMode === 'FULL'
-        ? ' • картинки включены'
-        : ' • картинки недоступны'
-      : '';
+    photoPolicy && resolveDuplicatePhotoPresentationPolicy(photoPolicy).moderationMode === 'FULL'
+      ? ' • картинки включены'
+      : ' • картинки недоступны';
   return `${formatDuplicateAllowanceLabel(resolveDuplicateAllowedCount(settings))} • ${formatDuplicateWindowLabel(settings, windowHours)}${photo}`;
 }
 
@@ -74,14 +71,13 @@ export function formatDuplicatePhotoModerationHint(
   scope: DuplicatePhotoScope,
 ): string {
   return policy.moderationMode === 'FULL'
-    ? `Для одинаковых картинок действует общая цепочка антидубля. Поиск повторов: ${formatDuplicatePhotoScopeSummary(scope).toLowerCase()}. Подписи не учитываются. Допуск повторов, предупреждения и ограничения учитываются отдельно для каждого участника.`
+    ? `Поиск повторов картинок: ${formatDuplicatePhotoScopeSummary(scope).toLowerCase()}.`
     : 'Удаление одинаковых картинок сейчас недоступно.';
 }
 
 export function formatDuplicateActionSummary(
   settings: Pick<
     ChatSettings,
-    | 'duplicateCompareMode'
     | 'duplicatePhotoScope'
     | 'duplicateBotMessageEnabled'
     | 'duplicateWarnEnabled'
@@ -102,14 +98,12 @@ export function formatDuplicateActionSummary(
     );
   if (settings.duplicateBanEnabled) actions.push(`блокировка с №${next}`);
   return [
-    `Текст удаляется с сообщения №${firstRemoved}.`,
+    `Повторы удаляются с сообщения №${firstRemoved}.`,
     settings.duplicateBotMessageEnabled ? 'Бот объясняет первое удаление.' : '',
     actions.length
       ? `Дальнейшие действия: ${actions.join('; ')}.`
-      : 'Предупреждения и ограничения для текста выключены.',
-    settings.duplicateCompareMode !== 'TEXT'
-      ? formatDuplicatePhotoModerationHint(photoPolicy, settings.duplicatePhotoScope)
-      : '',
+      : 'Предупреждения и ограничения выключены.',
+    formatDuplicatePhotoModerationHint(photoPolicy, settings.duplicatePhotoScope),
   ]
     .filter(Boolean)
     .join(' ');

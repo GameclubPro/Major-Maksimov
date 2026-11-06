@@ -698,35 +698,49 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       expect(s.history.qualify).not.toHaveBeenCalled();
     });
 
-    it('reconciles a terminated worker without releasing a newer reservation', async () => {
-      const eventTimestampMs = Date.now();
-      const own = claim('terminated');
-      own.dedupeKey = `message-duplicate-action:v1:${digestDuplicateContent([chatId, own.userId, own.messageId])}`;
-      expect(await preclaim(intents, own)).toBe('claimed');
-      const job = {
-        chatId,
-        messageId: own.messageId,
-        eventTimestampMs,
-        deadlineAtMs: eventTimestampMs + 600000,
-        idempotencyKey: buildMessageDuplicateJobId(chatId, own.messageId, eventTimestampMs),
-      };
-      expect(await intents.releaseTerminatedMessageDuplicateAction(job)).toBe(true);
-      expect(await preclaim(intents, claim(own.messageId, 'OTHER'))).toBe('claimed');
-      const fresh = claim('fresh');
-      fresh.dedupeKey = `message-duplicate-action:v1:${digestDuplicateContent([chatId, fresh.userId, fresh.messageId])}`;
-      expect(await preclaim(intents, fresh)).toBe('claimed');
-      const oldTimestamp = eventTimestampMs - 720000;
-      expect(
-        await intents.releaseTerminatedMessageDuplicateAction({
-          ...job,
-          messageId: fresh.messageId,
-          eventTimestampMs: oldTimestamp,
-          deadlineAtMs: oldTimestamp + 600000,
-          idempotencyKey: buildMessageDuplicateJobId(chatId, fresh.messageId, oldTimestamp),
-        }),
-      ).toBe(false);
-      expect(await preclaim(intents, fresh)).toBe('resumed');
-    });
+    it.each([undefined, 'TEXT', 'IMAGE'] as const)(
+      'reconciles a terminated %s worker without releasing a newer reservation',
+      async (comparison) => {
+        const eventTimestampMs = Date.now();
+        const own = claim(`terminated-${comparison ?? 'legacy'}`);
+        own.dedupeKey = `message-duplicate-action:v1:${digestDuplicateContent([chatId, own.userId, own.messageId])}`;
+        expect(await preclaim(intents, own)).toBe('claimed');
+        const job = {
+          chatId,
+          messageId: own.messageId,
+          eventTimestampMs,
+          deadlineAtMs: eventTimestampMs + 600000,
+          comparison,
+          idempotencyKey: buildMessageDuplicateJobId(
+            chatId,
+            own.messageId,
+            eventTimestampMs,
+            comparison,
+          ),
+        };
+        expect(await intents.releaseTerminatedMessageDuplicateAction(job)).toBe(true);
+        expect(await preclaim(intents, claim(own.messageId, 'OTHER'))).toBe('claimed');
+        const fresh = claim(`fresh-${comparison ?? 'legacy'}`);
+        fresh.dedupeKey = `message-duplicate-action:v1:${digestDuplicateContent([chatId, fresh.userId, fresh.messageId])}`;
+        expect(await preclaim(intents, fresh)).toBe('claimed');
+        const oldTimestamp = eventTimestampMs - 720000;
+        expect(
+          await intents.releaseTerminatedMessageDuplicateAction({
+            ...job,
+            messageId: fresh.messageId,
+            eventTimestampMs: oldTimestamp,
+            deadlineAtMs: oldTimestamp + 600000,
+            idempotencyKey: buildMessageDuplicateJobId(
+              chatId,
+              fresh.messageId,
+              oldTimestamp,
+              comparison,
+            ),
+          }),
+        ).toBe(false);
+        expect(await preclaim(intents, fresh)).toBe('resumed');
+      },
+    );
 
     it('retains a materialized or foreign owner during terminal cleanup', async () => {
       const own = canonicalClaim('materialized');

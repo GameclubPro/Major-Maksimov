@@ -1,7 +1,6 @@
 import { SegmentedControl } from '../../components/ui/segmented-control';
 import {
   DUPLICATE_PHOTO_SCOPE_OPTIONS,
-  formatDuplicatePhotoScopeSummary,
   type DuplicatePhotoScope,
 } from './settings-duplicate-photo-options';
 import type { DuplicatePhotoPresentationPolicy } from './settings-duplicate-photo-status';
@@ -19,18 +18,6 @@ export default function SettingsDuplicatePhotoControls({
 }) {
   return (
     <>
-      <div className="settings-native-toggle duplicate-photo-toggle">
-        <div className="settings-native-toggle__row">
-          <span className="settings-native-toggle__title">Одинаковые картинки</span>
-        </div>
-        {moderationPolicy?.moderationMode !== 'FULL' ? (
-          <p className="policy-mode-hint" role="status">
-            {moderationPolicy
-              ? 'Проверка картинок сейчас недоступна'
-              : 'Доступность проверки зависит от каждого чата'}
-          </p>
-        ) : null}
-      </div>
       <div
         className="duplicate-photo-settings"
         role="group"
@@ -49,28 +36,11 @@ export default function SettingsDuplicatePhotoControls({
           />
           {scope === null ? <p className="field__hint">Разные значения</p> : null}
         </div>
-        <dl className="duplicate-diagnostics__facts">
-          <div>
-            <dt>Поиск повторов</dt>
-            <dd>{formatDuplicatePhotoScopeSummary(scope)}</dd>
-          </div>
-          <div>
-            <dt>Подпись</dt>
-            <dd>Не учитывается</dd>
-          </div>
-          <div>
-            <dt>Действия</dt>
-            <dd>Как для текста</dd>
-          </div>
-          <div>
-            <dt>Предупреждения и ограничения</dt>
-            <dd>Отдельно для каждого участника</dd>
-          </div>
-        </dl>
-        {scope === 'CHAT' ? (
-          <p className="field__hint">
-            Одинаковая картинка считается повтором, даже если её прислал другой участник. Допуск
-            повторов и дальнейшие действия учитываются отдельно для отправителя.
+        {moderationPolicy?.moderationMode !== 'FULL' ? (
+          <p className="policy-mode-hint" role="status">
+            {moderationPolicy
+              ? 'Проверка картинок сейчас недоступна'
+              : 'Доступность проверки зависит от каждого чата'}
           </p>
         ) : null}
       </div>

@@ -26,7 +26,7 @@ export type MessageDuplicateJob = {
   deadlineAtMs: number;
   actionEligible: boolean;
   cleanupOnly?: 'completed' | 'terminated';
-  comparison?: 'IMAGE';
+  comparison?: 'TEXT' | 'IMAGE';
   idempotencyKey: string;
 };
 
@@ -42,7 +42,7 @@ export function buildMessageDuplicateJobId(
   chatId: string,
   messageId: string,
   eventTimestampMs: number,
-  comparison?: 'IMAGE',
+  comparison?: 'TEXT' | 'IMAGE',
 ): string {
   return `message-duplicate__${digestDuplicateContent([chatId, messageId, eventTimestampMs, MESSAGE_DUPLICATE_JOB_VERSION, ...(comparison === 'IMAGE' ? ['image-v1'] : [])])}`;
 }

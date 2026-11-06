@@ -723,6 +723,7 @@ maxim_topology_require_message_duplicate_delete_guard() {
     apps/api/src/moderation/photo-duplicate/photo-recompression.ts
     apps/api/src/moderation/photo-duplicate/photo-recompression-version.ts
     apps/api/src/moderation/redis-counter.service.ts
+    apps/api/src/moderation/message-duplicate/message-duplicate.service.ts
   )
 
   # FLAG: Pending v3 decisions outlive environment downgrades. Both rollback paths
@@ -733,6 +734,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
   # exact/near matching and lifecycle identity.
   # FLAG: Retained single-image recompression grants require both exact hashes, independent
   # native proof and the accepted original anchor. A candidate hash never becomes authority.
+  # FLAG: Unified comparison grants require explicit TEXT admission/retry readers and
+  # IMAGE independent of the retired selector, even after a rollback or feature downgrade.
   for source_path in "${source_paths[@]}"; do
     if ! source="$(git show "${commit_sha}:${source_path}" 2>/dev/null)"; then
       echo "Rollback target predates the message duplicate v3 action guard." >&2
@@ -746,8 +749,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
     const input = require("node:fs").readFileSync(0);
     if (input.length > 4 * 1024 * 1024) process.exit(1);
     const parts = input.toString("utf8").split("\0");
-    if (parts.length !== 28 || parts.pop() !== "") process.exit(1);
-    const [guard, executor, state, authorization, module, enforcement, schema, migration, admission, queue, detector, phones, content, history, window, settings, semantic, publicationTime, semanticKey, executionDeadline, media, recompressionIndex, photoAnalysis, photoFingerprint, photoRecompression, recompressionVersion, counters] = parts;
+    if (parts.length !== 29 || parts.pop() !== "") process.exit(1);
+    const [guard, executor, state, authorization, module, enforcement, schema, migration, admission, queue, detector, phones, content, history, window, settings, semantic, publicationTime, semanticKey, executionDeadline, media, recompressionIndex, photoAnalysis, photoFingerprint, photoRecompression, recompressionVersion, counters, service] = parts;
     const stripComments = (source) => source.replace(/("(?:\\.|[^"\\])*"|\u0027(?:\\.|[^\u0027\\])*\u0027|`(?:\\.|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/gu,
       (match, literal) => literal ?? "");
     const method = (source, marker) => {
@@ -803,6 +806,29 @@ maxim_topology_require_message_duplicate_delete_guard() {
     const imageEvidence = squash(topLevelFunction(state, "export function hasValidImageComparisonEvidence("));
     const imageSettings = topLevelFunction(state, "export function exactImageSettingsDigest(");
     const imageHistory = classMethod(history, "async observeWithOutcome(");
+    const textSettingsCode = squash(stripComments(topLevelFunction(state, "export function messageDuplicateSettingsDigest(")));
+    const imageSettingsCode = squash(stripComments(imageSettings));
+    const historyCode = squash(stripComments(imageHistory));
+    const admissionCode = squash(stripComments(classMethod(service, "async observe(")));
+    const mediaCode = squash(stripComments(classMethod(media, "async process(")));
+    const settingsGuardCode = squash(stripComments(classMethod(guard, "private async loadSettings(")));
+    const queueCode = squash(stripComments(queue));
+    const identityCode = squash(stripComments(topLevelFunction(content, "export function buildMessageDuplicateIdentity(")));
+    const unifiedComparison =
+      textSettingsCode.includes("comparisonPolicy: \u0027text-or-image-v1\u0027") &&
+      imageSettingsCode.includes("comparisonPolicy: \u0027text-or-image-v1\u0027") &&
+      !textSettingsCode.includes("duplicateCompareMode") &&
+      !imageSettingsCode.includes("duplicateCompareMode") &&
+      historyCode.includes("input.comparison ??") &&
+      count(admissionCode, "comparison: \u0027TEXT\u0027") >= 2 &&
+      !admissionCode.includes("duplicateCompareMode") &&
+      queueCode.includes("comparison?: \u0027TEXT\u0027 | \u0027IMAGE\u0027") &&
+      mediaCode.includes("job.comparison === \u0027TEXT\u0027") &&
+      mediaCode.includes("comparison: \u0027TEXT\u0027") &&
+      !mediaCode.includes("duplicateCompareMode") &&
+      identityCode.includes("if ( mode === \u0027TEXT\u0027 && !content.text && (content.media.length > 0 || content.reason === \u0027unsupported_attachment\u0027) ) return null;") &&
+      settingsGuardCode.includes("settings.duplicatePolicyRevision !== binding.policyRevision") &&
+      !settingsGuardCode.includes("duplicateCompareMode");
     const imageHistoryRevision = method(history, "private hasCurrentRevision(");
     const imageOriginal = squash(method(media, "private async findRecompression("));
     const imageDownload = squash(classMethod(photoAnalysis, "async verifyRecompression("));
@@ -964,7 +990,7 @@ maxim_topology_require_message_duplicate_delete_guard() {
       const evidence = phoneExtraction.indexOf("const phone = phoneEvidence(");
       return ranges >= 0 && exclusion > ranges && evidence > exclusion;
     };
-    const valid = recompressionReader && start >= 0 && end > start &&
+    const valid = unifiedComparison && recompressionReader && start >= 0 && end > start &&
       guard.includes("class MessageDuplicateDeleteGuardService") &&
       check.includes("await this.history.stillMatches(") &&
       check.includes("message_duplicate_content_changed") &&

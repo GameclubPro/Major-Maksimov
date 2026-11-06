@@ -70,8 +70,13 @@ independently and preserve the reviewed label file with the corpus.
 Replay again with `--labels <private-reviewed-labels.jsonl>` and new output paths. Reports
 separate development/holdout results, matching/action predictions, infrastructure unknowns and
 confirmed historical receipts, with sample sizes and Wilson 95% intervals. Missing binary hashes
-are unknowns, never negative content examples. Media proofs must bind the exact source digest,
-hash count and algorithm version; this evaluator does not fetch historical media from MAX.
+are unknowns for media comparison, never negative content examples. Replay follows the common
+`text-or-image-v1` policy: it compares text/captions first regardless of the captured legacy
+selector, then considers independently proved images or non-photo media when text has no match.
+A confirmed text repeat remains scorable without image proof. Media proofs must bind the exact
+source digest, hash count and algorithm version; this evaluator does not fetch historical media
+from MAX. Captured selector values remain cohort metadata, and input-content cohorts stay
+independent of which evidence produced the prediction.
 
 ## Interpret evidence and release gates
 

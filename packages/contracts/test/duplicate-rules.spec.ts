@@ -20,10 +20,24 @@ describe('duplicate rules presentation', () => {
     expect(settings).toEqual(before);
   });
 
+  it('describes one active rule regardless of the retained comparison selector', () => {
+    const message = chatSettingsSchema.parse({
+      antiDuplicateEnabled: true,
+      duplicateCompareMode: 'MESSAGE',
+    });
+    const text = chatSettingsSchema.parse({ ...message, duplicateCompareMode: 'TEXT' });
+    expect(buildDuplicateRulesTextItems(text, 'FULL')).toEqual(
+      buildDuplicateRulesTextItems(message, 'FULL'),
+    );
+    expect(buildDuplicateRulesTextItems(text, 'FULL')).toEqual(
+      expect.arrayContaining([expect.stringContaining('Одинаковые картинки')]),
+    );
+  });
+
   it('keeps root and settings exports compatible without promising unknown photo authority', () => {
     expect(rootFormatter).toBe(buildDuplicateRulesTextItems);
-    expect(rootFormatter(chatSettingsSchema.parse({ antiDuplicateEnabled: true }))).not.toContain(
-      expect.stringContaining('картинки'),
+    expect(rootFormatter(chatSettingsSchema.parse({ antiDuplicateEnabled: true }))).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('картинки')]),
     );
   });
   it.each([
