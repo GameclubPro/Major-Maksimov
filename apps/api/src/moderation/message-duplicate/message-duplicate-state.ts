@@ -231,7 +231,8 @@ export function messageDuplicateSanctionSettingsDigest(
 
 export function exactImageSettingsDigest(settings: ChatSettings): string {
   return digestDuplicateContent({
-    version: 'image-recompression-fixed-window-v1',
+    version: 'image-recompression-fixed-window-v2',
+    recompressionVersion: PHOTO_RECOMPRESSION_VERSION,
     comparisonPolicy: 'text-or-image-v1',
     historyStorageVersion: MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION,
     historyRevision: settings.duplicateHistoryRevision ?? 0,

@@ -496,6 +496,7 @@ export class MessageDuplicateMediaService {
       if (heavyWorkRequired) await this.admitHeavyWork(job, deadlineAtMs);
       else this.metrics?.record('media.cache_only');
       const budget = { remaining: MAX_UNCACHED_MEDIA_PER_ATTEMPT };
+      const refreshedPhotoSources = new Map<string, DuplicateMessageContent | null>();
       let baselineUnverified = false;
       // FLAG: Materialize every distinct predecessor before freezing the current replay count.
       // Proof caches retain progress across bounded deferrals; baseline hits never authorize actions.
@@ -544,6 +545,7 @@ export class MessageDuplicateMediaService {
                   baselineHashes.get(previous.webhookEventId),
                   budget,
                   previous.webhookEventId,
+                  refreshedPhotoSources,
                 ),
               );
               lease.assertOwned();
@@ -610,6 +612,7 @@ export class MessageDuplicateMediaService {
           currentCached,
           budget,
           job.webhookEventId,
+          refreshedPhotoSources,
         ),
       );
       if (Date.now() >= deadlineAtMs) throw new MessageDuplicateMediaDeferredError('proof_budget');
@@ -632,6 +635,7 @@ export class MessageDuplicateMediaService {
               budget,
               lease,
               heavyWorkAdmitted: heavyWorkRequired,
+              refreshedPhotoSources,
             })
           : { unverified: false };
       if (recompression.anchor) ownPointer.recompressionAnchor = recompression.anchor;
@@ -990,6 +994,7 @@ export class MessageDuplicateMediaService {
     cachedHashes?: readonly (string | null)[],
     budget = { remaining: MAX_UNCACHED_MEDIA_PER_ATTEMPT },
     receiptId = update.updateId,
+    refreshedPhotoSources?: Map<string, DuplicateMessageContent | null>,
   ): Promise<{ content: DuplicateMessageContent; hashes: string[]; recompressionHash?: string }> {
     const originalMedia = content.media;
     const hashes = cachedHashes ? [...cachedHashes] : await this.readHashes(content, update);
@@ -1045,7 +1050,9 @@ export class MessageDuplicateMediaService {
           throw error;
       }
       if (!result || (result.kind === 'incomplete' && result.reason === 'missing_download_url')) {
+        refreshedPhotoSources?.set(receiptId, null);
         content = await this.refreshPhotoSources(content, update, botId, deadlineAtMs);
+        refreshedPhotoSources?.set(receiptId, content);
         try {
           result = await fingerprint();
         } catch (error) {
@@ -1154,6 +1161,7 @@ export class MessageDuplicateMediaService {
     budget: { remaining: number };
     lease: PhotoDuplicateOrderingLease;
     heavyWorkAdmitted: boolean;
+    refreshedPhotoSources: Map<string, DuplicateMessageContent | null>;
   }): Promise<{
     unverified: boolean;
     anchor?: MessageDuplicateRecompressionCandidate;
@@ -1172,11 +1180,17 @@ export class MessageDuplicateMediaService {
       }
       return differentBits <= 6;
     });
+    // FLAG: Prefer an exact verified raster before spending the bounded pair attempts.
+    // Keep source, accepted-original and lifecycle checks for every selected candidate.
+    const orderedCandidates = [
+      ...candidates.filter((candidate) => candidate.canonicalHash === input.verified.hashes[0]),
+      ...candidates.filter((candidate) => candidate.canonicalHash !== input.verified.hashes[0]),
+    ];
     let unverified = candidates.length > 4;
-    for (const candidate of candidates.slice(0, 4)) {
+    for (const candidate of orderedCandidates.slice(0, 4)) {
       input.lease.assertOwned();
       if (candidate.messageId === input.job.messageId) continue;
-      if (Date.now() >= input.deadlineAtMs || input.budget.remaining < 2)
+      if (Date.now() >= input.deadlineAtMs)
         throw new MessageDuplicateMediaDeferredError('proof_budget');
       const baseline = await this.loadSource(candidate.webhookEventId);
       const message = baseline?.update.message;
@@ -1203,40 +1217,107 @@ export class MessageDuplicateMediaService {
       }
       let proof: PhotoRecompressionProof | undefined;
       if (candidate.canonicalHash !== input.verified.hashes[0]) {
-        const originalUrl = content.media[0]?.url;
-        const currentUrl = input.verified.content.media[0]?.url;
-        if (!originalUrl || !currentUrl) {
+        if (input.budget.remaining < 2)
+          throw new MessageDuplicateMediaDeferredError('proof_budget');
+        if (
+          input.refreshedPhotoSources.get(candidate.webhookEventId) === null ||
+          input.refreshedPhotoSources.get(input.job.webhookEventId) === null
+        ) {
           unverified = true;
           continue;
         }
-        if (!input.heavyWorkAdmitted) {
-          await this.admitHeavyWork(input.job, input.deadlineAtMs);
-          input.heavyWorkAdmitted = true;
-        }
-        input.budget.remaining -= 2;
-        let result;
-        try {
-          result = await this.photos.verifyRecompression({
-            originalUrl,
-            currentUrl,
-            expectedOriginalHash: candidate.canonicalHash,
-            expectedCurrentHash: input.verified.hashes[0]!,
-            deadlineAtMs: input.deadlineAtMs,
-          });
-        } catch (error) {
-          // FLAG: An unsupported approximate pair is missing tolerant coverage, not
-          // evidence against independently available exact comparison or permission to delete.
-          if (
-            (error instanceof PhotoFingerprintRejectedError &&
-              !['decode_deadline_exceeded', 'decode_capacity_exceeded'].includes(error.reason)) ||
-            (error instanceof PhotoDownloadHttpError && [403, 404, 410].includes(error.statusCode))
-          ) {
-            unverified = true;
-            continue;
+        let originalContent = input.refreshedPhotoSources.get(candidate.webhookEventId) ?? content;
+        let currentContent =
+          input.refreshedPhotoSources.get(input.job.webhookEventId) ?? input.verified.content;
+        const assertPairBudget = () => {
+          input.lease.assertOwned();
+          if (Date.now() >= input.deadlineAtMs || input.budget.remaining < 2)
+            throw new MessageDuplicateMediaDeferredError('proof_budget');
+        };
+        const refreshSource = async (
+          receiptId: string,
+          source: typeof input.source,
+          original: DuplicateMessageContent,
+        ) => {
+          assertPairBudget();
+          if (input.refreshedPhotoSources.has(receiptId)) {
+            const refreshed = input.refreshedPhotoSources.get(receiptId);
+            if (!refreshed) throw new MessageDuplicateMediaRejectedError('source_unavailable');
+            return refreshed;
           }
-          throw error;
+          // FLAG: Each immutable receipt gets at most one exact source refresh per attempt,
+          // including earlier fingerprint work. A failed refresh cannot repeat across candidates.
+          input.refreshedPhotoSources.set(receiptId, null);
+          const refreshed = await this.refreshPhotoSources(
+            original,
+            source.update,
+            source.botId,
+            input.deadlineAtMs,
+          );
+          assertPairBudget();
+          input.refreshedPhotoSources.set(receiptId, refreshed);
+          return refreshed;
+        };
+        let renewed = false;
+        let result: PhotoRecompressionProof | null = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            if (attempt === 1 || !originalContent.media[0]?.url || !currentContent.media[0]?.url) {
+              renewed = true;
+              originalContent = await refreshSource(candidate.webhookEventId, baseline, content);
+              currentContent = await refreshSource(
+                input.job.webhookEventId,
+                input.source,
+                input.verified.content,
+              );
+            }
+            const originalUrl = originalContent.media[0]?.url;
+            const currentUrl = currentContent.media[0]?.url;
+            if (!originalUrl || !currentUrl) {
+              unverified = true;
+              break;
+            }
+            assertPairBudget();
+            if (!input.heavyWorkAdmitted) {
+              await this.admitHeavyWork(input.job, input.deadlineAtMs);
+              input.heavyWorkAdmitted = true;
+            }
+            assertPairBudget();
+            input.budget.remaining -= 2;
+            // FLAG: Renewed locators grant no equality. Both downloads must retain the exact
+            // canonical hashes proved before renewal; neither the anchor nor its expiry changes.
+            result = await this.photos.verifyRecompression({
+              originalUrl,
+              currentUrl,
+              expectedOriginalHash: candidate.canonicalHash,
+              expectedCurrentHash: input.verified.hashes[0]!,
+              deadlineAtMs: input.deadlineAtMs,
+            });
+            input.lease.assertOwned();
+            if (Date.now() >= input.deadlineAtMs)
+              throw new MessageDuplicateMediaDeferredError('proof_budget');
+            break;
+          } catch (error) {
+            this.recordSourceRejection(error);
+            const unavailableSource =
+              error instanceof PhotoDownloadSourceRejectedError ||
+              (error instanceof PhotoDownloadHttpError &&
+                [403, 404, 410].includes(error.statusCode));
+            if (unavailableSource && !renewed) continue;
+            // FLAG: Missing/changed sources and unsupported approximate pairs leave a coverage
+            // gap. They cannot authorize deletion or disprove independent exact comparison.
+            if (
+              unavailableSource ||
+              error instanceof MessageDuplicateMediaRejectedError ||
+              (error instanceof PhotoFingerprintRejectedError &&
+                !['decode_deadline_exceeded', 'decode_capacity_exceeded'].includes(error.reason))
+            ) {
+              unverified = true;
+              break;
+            }
+            throw error;
+          }
         }
-        input.lease.assertOwned();
         if (!result) continue;
         proof = result;
       }

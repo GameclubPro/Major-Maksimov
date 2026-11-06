@@ -3496,6 +3496,42 @@ test('duplicate audit uses fixed windows and bounds every source before aggregat
   );
 });
 
+test('duplicate saved IMAGE eligibility ignores legacy comparison and photo controls', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+
+  const result = runAudit(data, ['duplicate']);
+  assert.equal(result.status, 0, result.stderr);
+  const sql = readFileSync(data.sql, 'utf8');
+  const savedSettings = sql.slice(
+    sql.indexOf('saved_settings AS MATERIALIZED'),
+    sql.indexOf('), settings_state AS ('),
+  );
+  assert.match(savedSettings, /AS image_configuration_valid/u);
+  assert.match(savedSettings, /duplicate_photo_scope::text IN \('SAME_AUTHOR', 'CHAT'\)/u);
+  assert.match(savedSettings, /duplicate_window_mode = 'INTERVAL'/u);
+  assert.match(savedSettings, /duplicate_window_mode = 'DAILY'/u);
+  assert.match(savedSettings, /duplicate_start_time_minutes <> duplicate_end_time_minutes/u);
+  assert.doesNotMatch(
+    savedSettings,
+    /duplicate_compare_mode|duplicate_photo_enabled|duplicate_photo_match_preset/u,
+  );
+  const currentEligibilityCounts = sql.slice(
+    sql.indexOf(
+      'count(*) FILTER (\n      WHERE anti_duplicate_enabled AND image_configuration_valid',
+    ),
+    sql.indexOf('count(*) FILTER (WHERE duplicate_photo_enabled)'),
+  );
+  assert.match(currentEligibilityCounts, /AS saved_image_eligible/u);
+  assert.match(currentEligibilityCounts, /0::bigint AS saved_text_only/u);
+  assert.match(
+    currentEligibilityCounts,
+    /WHERE anti_duplicate_enabled AND NOT image_configuration_valid/u,
+  );
+  assert.doesNotMatch(currentEligibilityCounts, /duplicate_compare_mode/u);
+  assert.match(sql, /'basis', 'master_scope_schedule'/u);
+});
+
 test('duplicate explain plans only the fixed intent query and forwards no operator SQL', (t) => {
   const data = fixture();
   t.after(() => rmSync(data.directory, { force: true, recursive: true }));
@@ -4201,18 +4237,18 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
     ) VALUES
       ('settings-new-image', TRUE, FALSE, 'CUSTOM', 'MINOR_EDITS', 'SAME_AUTHOR',
         'MESSAGE', 'INTERVAL', 540, 1080, 'Europe/Moscow'),
-      ('settings-text-only', TRUE, TRUE, 'STRICT', 'MINOR_EDITS', 'CHAT',
+      ('settings-legacy-text-mode', TRUE, TRUE, 'STRICT', 'MINOR_EDITS', 'CHAT',
         'TEXT', 'INTERVAL', 540, 1080, 'Europe/Moscow'),
       ('settings-daily-image', TRUE, FALSE, 'STRICT', 'MINOR_EDITS', 'CHAT',
         'MESSAGE', 'DAILY', 1080, 540, 'Europe/Moscow'),
       ('settings-daily-equal', TRUE, FALSE, 'STRICT', 'SAME_IMAGE', 'CHAT',
         'MESSAGE', 'DAILY', 540, 540, 'Europe/Moscow'),
       ('settings-daily-invalid-zone', TRUE, FALSE, 'STRICT', 'SAME_IMAGE', 'CHAT',
-        'MESSAGE', 'DAILY', 540, 1080, 'invalid/zone'),
+        'TEXT', 'DAILY', 540, 1080, 'invalid/zone'),
       ('settings-off-photo', FALSE, TRUE, 'STRICT', 'SAME_IMAGE', 'CHAT',
         'MESSAGE', 'INTERVAL', 540, 1080, 'Europe/Moscow'),
-      ('settings-invalid-compare', TRUE, FALSE, 'STRICT', 'SAME_IMAGE', 'CHAT',
-        'INVALID', 'INTERVAL', 540, 1080, 'Europe/Moscow'),
+      ('settings-daily-out-of-range', TRUE, FALSE, 'STRICT', 'SAME_IMAGE', 'CHAT',
+        'MESSAGE', 'DAILY', 1440, 1080, 'Europe/Moscow'),
       ('settings-invalid-window', TRUE, FALSE, 'STRICT', 'SAME_IMAGE', 'CHAT',
         'MESSAGE', 'INVALID', 540, 1080, 'Europe/Moscow');
     SET SESSION AUTHORIZATION maxim_audit;
@@ -4223,14 +4259,15 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
   );
   await database.exec('SET SESSION AUTHORIZATION postgres;');
   assert.deepEqual(updatedSettingsReport.saved_eligibility, {
-    basis: 'master_compare_mode_scope_schedule',
+    basis: 'master_scope_schedule',
     master_enabled_count_lower_bound: 8,
-    image_eligible_count_lower_bound: 3,
-    text_only_count_lower_bound: 1,
+    image_eligible_count_lower_bound: 4,
+    text_only_count_lower_bound: 0,
     invalid_image_configuration_count_lower_bound: 4,
     daily_current_period: 'not_evaluated',
     image_policies: [
       { scope: 'CHAT', window_mode: 'DAILY', count_lower_bound: 1 },
+      { scope: 'CHAT', window_mode: 'INTERVAL', count_lower_bound: 1 },
       { scope: 'SAME_AUTHOR', window_mode: 'INTERVAL', count_lower_bound: 2 },
     ],
   });
@@ -4260,7 +4297,7 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
     await database.exec('SET SESSION AUTHORIZATION maxim_audit;');
     const report = JSON.parse((await database.query(settingsReportSql)).rows[0].json_build_object);
     await database.exec('SET SESSION AUTHORIZATION postgres;');
-    assert.equal(report.saved_eligibility.image_eligible_count_lower_bound, 3, timezone);
+    assert.equal(report.saved_eligibility.image_eligible_count_lower_bound, 4, timezone);
   }
 
   await database.exec('REVOKE SELECT (duplicate_compare_mode) ON chat_settings FROM maxim_audit;');
@@ -4283,7 +4320,7 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
   assert.equal(saturatedSettingsReport.sampled_count, 5000);
   assert.equal(saturatedSettingsReport.sample_saturated, true);
   assert.equal(saturatedSettingsReport.complete, false);
-  assert.equal(saturatedSettingsReport.saved_eligibility.image_eligible_count_lower_bound, 4993);
+  assert.equal(saturatedSettingsReport.saved_eligibility.image_eligible_count_lower_bound, 4994);
 
   await database.exec(`
     INSERT INTO moderation_delete_intents (id, status, updated_at)

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 import { PHOTO_FINGERPRINT_ALGORITHM_VERSION } from './photo-fingerprint-version';
+import { readStandardJpegRecompressionRecipe } from './photo-jpeg-recompression';
+import { photoResidualWindowsWithinBounds } from './photo-residual-windows';
 import {
   PHOTO_RECOMPRESSION_VERSION,
   type PhotoRecompressionProof,
@@ -59,8 +61,6 @@ export type PhotoRecompressionLimits = Readonly<{
 // FLAG: The pair uses the existing total native budget, never two independent maxima.
 // A smaller approximate lane limits simultaneous raw/blurred raster memory in the 1 GiB cgroup.
 const MAX_PAIR_PIXELS = 8_000_000;
-const TILE = 8;
-const STRIDE = 4;
 
 function requireTime(deadlineAtMs: number): void {
   if (Date.now() >= deadlineAtMs)
@@ -105,33 +105,9 @@ function residualWithinBounds(
     signed.some((sum) => Math.abs(sum) > width * height * limits.meanDrift!)
   )
     return false;
-  // FLAG: Overlapping full-resolution windows protect small text and digits that a global
-  // distance, thumbnail or fixed non-overlapping tile boundary could hide.
-  for (let top = 0; top < height; top += STRIDE) {
-    if (top % 64 === 0) requireTime(deadlineAtMs);
-    for (let left = 0; left < width; left += STRIDE) {
-      let sum = 0;
-      let square = 0;
-      let count = 0;
-      for (let y = top; y < Math.min(top + TILE, height); y += 1) {
-        for (let x = left; x < Math.min(left + TILE, width); x += 1) {
-          for (let channel = 0; channel < channels; channel += 1) {
-            const index = (y * width + x) * channels + channel;
-            const difference = original[index]! - current[index]!;
-            square += difference * difference;
-            sum += difference;
-            count += 1;
-          }
-        }
-      }
-      if (
-        square > count * limits.tileRms ** 2 ||
-        (limits.tileMean !== undefined && Math.abs(sum) > count * limits.tileMean)
-      )
-        return false;
-    }
-  }
-  return true;
+  return photoResidualWindowsWithinBounds(original, current, width, height, channels, limits, () =>
+    requireTime(deadlineAtMs),
+  );
 }
 
 export async function verifyNativePhotoRecompression(
@@ -225,6 +201,49 @@ export async function verifyNativePhotoRecompression(
   for (let index = 3; index < a.data.length; index += 4)
     if (a.data[index] !== 255 || b.data[index] !== 255) return result(false);
   const raw = { width: a.info.width, height: a.info.height, channels: 4 as const };
+  const verifyStandardJpeg = async (): Promise<boolean> => {
+    const recipe = readStandardJpegRecompressionRecipe(current);
+    if (!recipe) return false;
+    requireTime(limits.deadlineAtMs);
+    // FLAG: One known encoder recipe may explain stronger JPEG artifacts. The recipe
+    // never proves equality: its entire decoded RGBA raster must match the independently
+    // downloaded current image. No quality search, resize, relaxed residual or new anchor.
+    let encoded: Buffer;
+    try {
+      encoded = await sharp(a.data, { raw })
+        .removeAlpha()
+        .jpeg({
+          ...recipe,
+          progressive: false,
+          trellisQuantisation: false,
+          overshootDeringing: false,
+          optimiseScans: false,
+          optimiseCoding: true,
+          quantisationTable: 0,
+        })
+        .toBuffer();
+    } catch {
+      throw new PhotoRecompressionRejectedError('unsupported_image');
+    }
+    requireTime(limits.deadlineAtMs);
+    if (encoded.length > limits.maxInputBytes) return false;
+    // FLAG: The current input already has an independently decoded full RGBA proof.
+    // Exact encoded equality makes a third decode redundant; differing encodings
+    // still require the full canonical-raster check below.
+    if (encoded.equals(Buffer.from(current.buffer, current.byteOffset, current.byteLength)))
+      return true;
+    const reconstructed = await decode(image(encoded));
+    requireTime(limits.deadlineAtMs);
+    return (
+      reconstructed.info.width === raw.width &&
+      reconstructed.info.height === raw.height &&
+      reconstructed.info.channels === 4 &&
+      canonicalHash(reconstructed.data, raw.width, raw.height) === proof.currentHash
+    );
+  };
+  // FLAG: Exact reproduction is sufficient on its own. Run it before allocating
+  // grayscale/blur planes; a refusal still uses every existing residual guard.
+  if (await verifyStandardJpeg()) return result(true);
   const grayA = await sharp(a.data, { raw }).removeAlpha().greyscale().raw().toBuffer();
   const grayB = await sharp(b.data, { raw }).removeAlpha().greyscale().raw().toBuffer();
   if (
@@ -263,15 +282,14 @@ export async function verifyNativePhotoRecompression(
     return result(false);
   const colorA = await sharp(a.data, { raw }).removeAlpha().blur(1).raw().toBuffer();
   const colorB = await sharp(b.data, { raw }).removeAlpha().blur(1).raw().toBuffer();
-  return result(
-    residualWithinBounds(
-      colorA,
-      colorB,
-      raw.width,
-      raw.height,
-      3,
-      { rms: 3.5, maximum: 56, tileRms: 18, meanDrift: 1 },
-      limits.deadlineAtMs,
-    ),
+  const colorMatched = residualWithinBounds(
+    colorA,
+    colorB,
+    raw.width,
+    raw.height,
+    3,
+    { rms: 3.5, maximum: 56, tileRms: 18, meanDrift: 1 },
+    limits.deadlineAtMs,
   );
+  return result(colorMatched);
 }

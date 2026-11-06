@@ -9,6 +9,7 @@ import {
 } from './photo-fingerprint';
 import { PhotoDownloadTimeoutError } from './secure-photo-downloader';
 import { PHOTO_RECOMPRESSION_VERSION } from './photo-recompression-version';
+import { NativePhotoSandboxClient } from './native-photo-sandbox.client';
 
 const authorizationConfigDigest = 'f'.repeat(64);
 const actionConfigDigest = 'e'.repeat(64);
@@ -106,6 +107,50 @@ function createService(cache: Array<PhotoFingerprint | null>) {
 }
 
 describe('PhotoDuplicateAnalysisService', () => {
+  it('downloads both independent sources again while identical bytes reuse only native computation', async () => {
+    const s = createService([]);
+    const client = new NativePhotoSandboxClient('/tmp/photo-analysis-content-memo.sock');
+    const proof = {
+      version: PHOTO_RECOMPRESSION_VERSION,
+      originalHash: 'a'.repeat(64),
+      currentHash: 'b'.repeat(64),
+    };
+    const nativePair = jest
+      .spyOn(client, 'verifyRecompression')
+      .mockImplementation(async (original, current) => ({
+        kind: 'recompression',
+        matched: true,
+        proof,
+        decodeCost: { encodedBytes: original.byteLength + current.byteLength, pixels: 200 },
+      }));
+    const fingerprintService = new PhotoFingerprintService({
+      canonicalOnly: true,
+      nativeDecoder: client,
+    });
+    const verifyRecompression = jest.fn<
+      ReturnType<PhotoFingerprintService['verifyRecompression']>,
+      Parameters<PhotoFingerprintService['verifyRecompression']>
+    >((...args) => fingerprintService.verifyRecompression(...args));
+    Object.assign(s.fingerprintService, { verifyRecompression });
+    const params = {
+      originalUrl: 'https://i.oneme.ru/original',
+      currentUrl: 'https://i.oneme.ru/current',
+      expectedOriginalHash: proof.originalHash,
+      expectedCurrentHash: proof.currentHash,
+      deadlineAtMs: Date.now() + 10_000,
+    };
+    await expect(s.service.verifyRecompression(params)).resolves.toEqual(proof);
+    await expect(s.service.verifyRecompression(params)).resolves.toEqual(proof);
+    expect(s.downloader.download.mock.calls.map(([url]) => url)).toEqual([
+      params.originalUrl,
+      params.currentUrl,
+      params.originalUrl,
+      params.currentUrl,
+    ]);
+    expect(verifyRecompression).toHaveBeenCalledTimes(2);
+    expect(nativePair).toHaveBeenCalledTimes(1);
+  });
+
   it('requires independent sources, both expected SHA values and a native pair match', async () => {
     const s = createService([]);
     const proof = {

@@ -51,7 +51,7 @@ writers, the new digest policy and IMAGE availability independent of the old sav
 
 ## Single-photo recompression evidence
 
-`native-recompression-v1` adds a bounded comparison of independently downloaded single-photo
+`native-recompression-v2` adds a bounded comparison of independently downloaded single-photo
 sources in the isolated photo sandbox. Candidate dHash bands only locate source pointers;
 they never establish equality. The native verifier retains both full-resolution canonical
 SHA-256 identities and checks dimensions, alpha and global/local pixel residuals, including
@@ -60,13 +60,22 @@ require exact equality of the whole photo set. Price, phone-number and text chan
 negative regressions; those fixtures do not establish protection against every arbitrarily
 small edit or a corpus-wide false-deletion rate.
 
+A supported standard JPEG recipe first attempts to reproduce the original once at the current
+quality and sampling. Both independently decoded inputs retain their exact canonical identities.
+The generated file must equal the current bytes or its entire decoded raster must equal the
+current full raster hash. Exact byte equality avoids a redundant third decode. A refusal still
+uses every existing residual guard; rolling window sums preserve all overlapping and clipped
+edge windows. This bounded path does not resize images or relax the residual thresholds.
+
 An accepted copy retains its original anchor and cannot become a new approximate anchor.
 Source identity, original publication expiry, lifecycle, SAME_AUTHOR/CHAT scope and final
 authority remain mandatory. A missing or invalid source/index record supplies no action
 authority. Candidate buckets and returned results are capped; saturation can reduce recall.
-The read filters candidates to dHash distance at most six before the global result cap, so
-distant collisions in one band do not consume the entire bounded candidate list. Remembering
-an original never applies this query filter.
+The read filters candidates to dHash distance at most six and sorts the retained candidates by
+distance before the global result and proof caps. Equal distances retain the deterministic
+original order. Among returned candidates, exact canonical identities precede approximate
+candidates and do not consume native pair budget. Source, lifecycle and accepted-original
+checks remain mandatory. Remembering an original never applies this query filter.
 Replay never extends the original expiry, and Redis TIME bounds physical retention to 48 hours.
 Candidate scopes include the exact button actions; captions remain outside IMAGE equality.
 A newer source with the same exact canonical SHA-256 can replace a retired source pointer;
@@ -78,7 +87,8 @@ pins its member, revision, original identity, epoch, content and live publicatio
 any lifecycle or counter write. Removal, reset, edit or expiry during native decoding returns
 stale; a previously accepted source cannot recreate a new approximate baseline in that race.
 
-The IMAGE algorithm fence remains `image-recompression-fixed-window-v1`, alongside the common
+The IMAGE algorithm fence is `image-recompression-fixed-window-v2`, with the explicit native
+recompression version alongside the common
 `comparisonPolicy=text-or-image-v1` settings fence. A non-exact single-image
 binding carries `imageRecompression` with the native version and both exact raster hashes;
 schema, history and final dispatch reject unbound or inconsistent evidence. Old IMAGE grants
@@ -459,8 +469,9 @@ diagnostics. Re-provision the reviewed audit role after synchronizing this catal
 settings/intent/reason group has 38 column SELECT grants: the original 17 plus 21 bounded
 owner-proof metadata columns. It never grants table SELECT on settings or delete intents;
 identities, lease tokens and reason metadata are check-only and must not appear in reports.
-The `duplicate_settings` schema-v2 report separates `saved_eligibility` (master switch, MESSAGE
-comparison, scope and valid schedule) from `legacy_compatibility` (retired toggle/presets).
+The `duplicate_settings` schema-v2 report separates `saved_eligibility` (master switch, scope and
+valid schedule) from `legacy_compatibility` (retired toggle/presets). Legacy comparison mode does
+not control IMAGE eligibility; `text_only_count_lower_bound` remains zero under the unified policy.
 `image_eligible_count_lower_bound` describes only the capped settings sample; it does not prove
 current DAILY admission, runtime permission or fresh bot capability. SQL reports those runtime
 facts as unobserved. Pair it with a separately dated runtime-control `get` and authenticated

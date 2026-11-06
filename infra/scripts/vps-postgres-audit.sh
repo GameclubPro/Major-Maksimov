@@ -2127,8 +2127,7 @@ WITH settings_sample_plus AS MATERIALIZED (
   SELECT lower(name) AS name FROM pg_timezone_names
 ), saved_settings AS MATERIALIZED (
   SELECT *,
-    duplicate_compare_mode = 'MESSAGE'
-      AND duplicate_photo_scope::text IN ('SAME_AUTHOR', 'CHAT')
+    duplicate_photo_scope::text IN ('SAME_AUTHOR', 'CHAT')
       AND (
         duplicate_window_mode = 'INTERVAL'
         OR (
@@ -2154,12 +2153,10 @@ WITH settings_sample_plus AS MATERIALIZED (
     count(*) FILTER (
       WHERE anti_duplicate_enabled AND image_configuration_valid
     )::bigint AS saved_image_eligible,
+    -- FLAG: Preserve the schema-v2 field for the unified policy with no saved text-only mode.
+    0::bigint AS saved_text_only,
     count(*) FILTER (
-      WHERE anti_duplicate_enabled AND duplicate_compare_mode = 'TEXT'
-    )::bigint AS saved_text_only,
-    count(*) FILTER (
-      WHERE anti_duplicate_enabled AND duplicate_compare_mode <> 'TEXT'
-        AND NOT image_configuration_valid
+      WHERE anti_duplicate_enabled AND NOT image_configuration_valid
     )::bigint AS invalid_saved_image_configuration,
     count(*) FILTER (WHERE duplicate_photo_enabled)::bigint AS photo_toggle_enabled,
     count(*) FILTER (
@@ -2202,7 +2199,7 @@ SELECT json_build_object(
   'runtime_authority', 'not_observed_by_sql',
   'capability_freshness', 'not_observed_by_sql',
   'saved_eligibility', json_build_object(
-    'basis', 'master_compare_mode_scope_schedule',
+    'basis', 'master_scope_schedule',
     'master_enabled_count_lower_bound', settings_state.master_enabled,
     'image_eligible_count_lower_bound', settings_state.saved_image_eligible,
     'text_only_count_lower_bound', settings_state.saved_text_only,

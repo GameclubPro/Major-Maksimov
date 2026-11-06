@@ -47,6 +47,48 @@ describe('native photo recompression evidence', () => {
     );
   });
 
+  it.each([50, 65, 80, 90])(
+    'recognizes an unchanged JPEG after another encode at quality %i',
+    async (quality) => {
+      const original = await sharp(poster()).jpeg({ quality: 92 }).toBuffer();
+      const current = await sharp(original).jpeg({ quality }).toBuffer();
+      const result = await verifyNativePhotoRecompression(original, current, limits());
+      expect(result.matched).toBe(true);
+      expect(result.proof.originalHash).not.toBe(result.proof.currentHash);
+    },
+  );
+
+  it.each(
+    [50, 80, 95, 100].flatMap((quality) =>
+      (['4:2:0', '4:4:4'] as const).flatMap((chromaSubsampling) =>
+        [false, true].map((progressive) => ({ quality, chromaSubsampling, progressive })),
+      ),
+    ),
+  )(
+    'verifies the full raster for a standard JPEG $quality/$chromaSubsampling/$progressive',
+    async (recipe) => {
+      const original = await sharp(poster()).png().toBuffer();
+      const current = await sharp(original).jpeg(recipe).toBuffer();
+      const result = await verifyNativePhotoRecompression(original, current, limits());
+      expect(result.matched).toBe(true);
+      expect(result.decodeCost).toEqual({
+        encodedBytes: original.length + current.length,
+        pixels: 2 * width * height,
+      });
+    },
+  );
+
+  it.each([
+    ['phone', { phone: '8-902-009-99-48' }],
+    ['price', { price: 'Price 1009' }],
+    ['small text', { smallText: 'Model 1239' }],
+    ['color', { color: '#40a0d0' }],
+  ])('preserves changed %s after stronger JPEG compression', async (_name, change) => {
+    const original = await sharp(poster()).jpeg({ quality: 92 }).toBuffer();
+    const current = await sharp(poster(change)).jpeg({ quality: 65 }).toBuffer();
+    expect((await verifyNativePhotoRecompression(original, current, limits())).matched).toBe(false);
+  });
+
   it.each([
     ['one phone digit', { phone: '8-902-009-99-48' }],
     ['one price digit', { price: 'Price 1009' }],
@@ -77,6 +119,36 @@ describe('native photo recompression evidence', () => {
       await sharp(poster()).removeAlpha().ensureAlpha(0.99).png().toBuffer(),
       await sharp(poster()).resize(511, 512).png().toBuffer(),
       await sharp(poster()).extract({ left: 1, top: 0, width: 511, height: 512 }).png().toBuffer(),
+    ];
+    for (const current of alternatives)
+      expect((await verifyNativePhotoRecompression(original, current, limits())).matched).toBe(
+        false,
+      );
+  });
+
+  it('preserves different content despite a shared poster template and lossy JPEG encoding', async () => {
+    const original = await sharp(poster()).jpeg({ quality: 92 }).toBuffer();
+    for (const source of [
+      poster({ price: 'Price 9000', phone: '8-902-009-99-48' }),
+      poster({ smallText: 'Model 9999', color: '#d0a099' }),
+    ]) {
+      const current = await sharp(source).jpeg({ quality: 50, progressive: true }).toBuffer();
+      expect((await verifyNativePhotoRecompression(original, current, limits())).matched).toBe(
+        false,
+      );
+    }
+  });
+
+  it('does not treat rotations, reflections or added borders as JPEG recompression evidence', async () => {
+    const original = await sharp(poster()).jpeg({ quality: 92 }).toBuffer();
+    const alternatives = [
+      await sharp(original).rotate(90).jpeg({ quality: 65 }).toBuffer(),
+      await sharp(original).rotate(180).jpeg({ quality: 65 }).toBuffer(),
+      await sharp(original).flop().jpeg({ quality: 65 }).toBuffer(),
+      await sharp(original)
+        .extend({ top: 1, bottom: 1, left: 1, right: 1 })
+        .jpeg({ quality: 65 })
+        .toBuffer(),
     ];
     for (const current of alternatives)
       expect((await verifyNativePhotoRecompression(original, current, limits())).matched).toBe(

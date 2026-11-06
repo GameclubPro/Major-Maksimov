@@ -1428,7 +1428,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
       ...input,
       mediaHashes: ['b'.repeat(64)],
       imageRecompression: {
-        version: 'native-recompression-v1' as const,
+        version: 'native-recompression-v2' as const,
         originalHash: 'a'.repeat(64),
         currentHash: 'b'.repeat(64),
       },
@@ -1492,7 +1492,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
           mediaHashes: ['b'.repeat(64)],
           imageOriginal,
           imageRecompression: {
-            version: 'native-recompression-v1',
+            version: 'native-recompression-v2',
             originalHash: 'a'.repeat(64),
             currentHash: 'b'.repeat(64),
           },
