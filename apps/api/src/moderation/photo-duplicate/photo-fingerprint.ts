@@ -287,7 +287,7 @@ export class PhotoFingerprintService implements OnModuleInit {
   async verifyRecompression(
     original: Uint8Array,
     current: Uint8Array,
-    options: { deadlineAtMs: number },
+    options: { deadlineAtMs: number; timings?: DuplicatePhaseRecorder },
   ): Promise<PhotoRecompressionResult> {
     const request = {
       deadlineAtMs: options.deadlineAtMs,
@@ -296,21 +296,43 @@ export class PhotoFingerprintService implements OnModuleInit {
       remainingEncodedBytes: this.maxInputBytes,
       remainingPixels: this.maxInputPixels,
     };
+    let waitingSince = performance.now();
+    let requestedSlot = false;
+    let enteredSlot = false;
     try {
       if (this.nativeDecoder) {
         requirePhotoDeadline(request.deadlineAtMs);
         this.validateNativePairBytes(original, current);
         const key = nativePairKey(original, current);
         requirePhotoDeadline(request.deadlineAtMs);
+        const cacheStarted = performance.now();
         const cached = this.cachedNativeRecompression(
           key,
           original.byteLength + current.byteLength,
           request.deadlineAtMs,
         );
-        if (cached) return cached;
+        if (cached) {
+          recordDuplicatePhase(
+            options.timings,
+            'recompression_reuse',
+            performance.now() - cacheStarted,
+          );
+          return cached;
+        }
       }
+      requestedSlot = true;
+      waitingSince = performance.now();
       return await this.decodeGate.run(async () => {
-        if (!this.nativeDecoder) return verifyNativePhotoRecompression(original, current, request);
+        enteredSlot = true;
+        recordDuplicatePhase(
+          options.timings,
+          'recompression_decode_wait',
+          performance.now() - waitingSince,
+        );
+        if (!this.nativeDecoder)
+          return measureDuplicatePhase(options.timings, 'local_recompression', () =>
+            verifyNativePhotoRecompression(original, current, request),
+          );
         // FLAG: A memo hit requires independently supplied bytes, never a URL, receipt,
         // candidate hash or authorization. Rehash both snapshots after bounded slot admission.
         const nativeOriginal = Buffer.from(original);
@@ -318,16 +340,32 @@ export class PhotoFingerprintService implements OnModuleInit {
         this.validateNativePairBytes(nativeOriginal, nativeCurrent);
         const key = nativePairKey(nativeOriginal, nativeCurrent);
         requirePhotoDeadline(request.deadlineAtMs);
+        const cacheStarted = performance.now();
         const cached = this.cachedNativeRecompression(
           key,
           nativeOriginal.byteLength + nativeCurrent.byteLength,
           request.deadlineAtMs,
         );
-        if (cached) return cached;
+        if (cached) {
+          recordDuplicatePhase(
+            options.timings,
+            'recompression_reuse',
+            performance.now() - cacheStarted,
+          );
+          return cached;
+        }
+        const nativeStarted = performance.now();
         const result = await this.nativeDecoder
           .verifyRecompression(nativeOriginal, nativeCurrent, request)
           .catch((cause: unknown) => {
             throw new PhotoNativeUnavailableError({ cause });
+          })
+          .finally(() => {
+            recordDuplicatePhase(
+              options.timings,
+              'recompression_native_roundtrip',
+              performance.now() - nativeStarted,
+            );
           });
         if (result.kind === 'rejected') {
           if (result.reason === 'native_unavailable') throw new PhotoNativeUnavailableError();
@@ -349,6 +387,13 @@ export class PhotoFingerprintService implements OnModuleInit {
       if (error instanceof PhotoDecodePipelineCapacityError)
         throw new PhotoFingerprintRejectedError('decode_capacity_exceeded', { cause: error });
       throw error;
+    } finally {
+      if (requestedSlot && !enteredSlot)
+        recordDuplicatePhase(
+          options.timings,
+          'recompression_decode_wait',
+          performance.now() - waitingSince,
+        );
     }
   }
 

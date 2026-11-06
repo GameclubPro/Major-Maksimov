@@ -431,7 +431,9 @@ function nativePairResult(original: Uint8Array, current: Uint8Array): PhotoRecom
   };
 }
 
-function nativeContentService(limits: { maxInputBytes?: number; maxInputPixels?: number } = {}) {
+function nativeContentService(
+  limits: { maxInputBytes?: number; maxInputPixels?: number; maxQueuedPipelines?: number } = {},
+) {
   const client = new NativePhotoSandboxClient('/tmp/photo-content-memo.sock');
   const fingerprint = jest
     .spyOn(client, 'fingerprint')
@@ -459,6 +461,59 @@ function deferredContentWork() {
 }
 
 describe('native photo content memoization', () => {
+  it('measures pair waiting, rejected admission and reuse separately from native work despite observer faults', async () => {
+    const s = nativeContentService({ maxQueuedPipelines: 1 });
+    const blocked = deferredContentWork();
+    const entered = deferredContentWork();
+    const a = Buffer.from('a');
+    const b = Buffer.from('b');
+    let now = 0;
+    const clock = jest.spyOn(performance, 'now').mockImplementation(() => now);
+    const timings = {
+      recordPhase: jest.fn(() => {
+        throw new Error('observer unavailable');
+      }),
+    };
+    s.pair.mockImplementationOnce(async (original, current) => {
+      entered.resolve();
+      await blocked.promise;
+      return nativePairResult(original, current);
+    });
+    try {
+      const first = s.service.verifyRecompression(a, b, { ...contentDeadline(), timings });
+      await entered.promise;
+      now = 10;
+      const second = s.service.verifyRecompression(a, b, { ...contentDeadline(), timings });
+      await expect(
+        s.service.verifyRecompression(Buffer.from('c'), b, { ...contentDeadline(), timings }),
+      ).rejects.toMatchObject({ reason: 'decode_capacity_exceeded' });
+      now = 60;
+      blocked.resolve();
+      await expect(first).resolves.toEqual(nativePairResult(a, b));
+      await expect(second).resolves.toEqual(nativePairResult(a, b));
+      expect(timings.recordPhase.mock.calls).toEqual([
+        ['recompression_decode_wait', 0],
+        ['recompression_decode_wait', 0],
+        ['recompression_native_roundtrip', 60],
+        ['recompression_decode_wait', 50],
+        ['recompression_reuse', 0],
+      ]);
+      expect(s.pair).toHaveBeenCalledTimes(1);
+      expect(s.pair.mock.calls[0]![2]).not.toHaveProperty('timings');
+      s.pair.mockRejectedValueOnce(new Error('native transport unavailable'));
+      await expect(
+        s.service.verifyRecompression(Buffer.from('c'), b, { ...contentDeadline(), timings }),
+      ).rejects.toMatchObject({ name: 'PhotoNativeUnavailableError' });
+      expect(timings.recordPhase.mock.calls.slice(-2)).toEqual([
+        ['recompression_decode_wait', 0],
+        ['recompression_native_roundtrip', 0],
+      ]);
+    } finally {
+      blocked.resolve();
+      clock.mockRestore();
+    }
+  });
+
   it('reuses complete fingerprints only for identical bytes and the same expected format', async () => {
     const s = nativeContentService();
     const bytes = Buffer.from('png-content');
