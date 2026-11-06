@@ -23,6 +23,8 @@ import {
 } from './photo-decode-resource';
 
 import { PHOTO_FINGERPRINT_ALGORITHM_VERSION } from './photo-fingerprint-version';
+import { PHOTO_RECOMPRESSION_VERSION } from './photo-recompression-version';
+import { PhotoNativeResultMemo } from './photo-native-result-memo';
 export { PHOTO_FINGERPRINT_ALGORITHM_VERSION } from './photo-fingerprint-version';
 export const PHOTO_PLATFORM_ID_ALGORITHM_VERSION = 'max-photo-id-album-v1';
 export const PHOTO_PD_DEFAULT_MIN_QUALITY = 50;
@@ -37,6 +39,7 @@ const MAX_ALBUM_INPUT_PIXELS = 160_000_000;
 const DEFAULT_MAX_CONCURRENT_PIPELINES = 1;
 const DEFAULT_MAX_QUEUED_PIPELINES = 8;
 const ALBUM_BUDGET_MULTIPLIER = 2;
+const MAX_RECOMPRESSION_PAIR_PIXELS = 8_000_000;
 
 export type SupportedPhotoFormat = 'jpeg' | 'png' | 'webp' | 'gif' | 'avif' | 'heif' | 'tiff';
 
@@ -114,6 +117,8 @@ export class PhotoFingerprintService implements OnModuleInit {
   private readonly decodeGate: PhotoDecodePipelineGate;
   private readonly canonicalOnly: boolean;
   private readonly nativeDecoder?: NativePhotoSandboxClient;
+  private readonly nativeFingerprintMemo = new PhotoNativeResultMemo(cloneFingerprint);
+  private readonly nativeRecompressionMemo = new PhotoNativeResultMemo(cloneRecompression);
 
   constructor(
     limits: {
@@ -202,9 +207,19 @@ export class PhotoFingerprintService implements OnModuleInit {
       throw new PhotoFingerprintRejectedError('image_byte_limit_exceeded');
     }
 
-    const waitingSince = performance.now();
+    let waitingSince = performance.now();
     let enteredSlot = false;
+    let requestedSlot = false;
     try {
+      if (this.nativeDecoder) {
+        requirePhotoDeadline(options.deadlineAtMs);
+        const key = this.nativeFingerprintKey(encodedImage, options.expectedFormat);
+        requirePhotoDeadline(options.deadlineAtMs);
+        const cached = this.cachedNativeFingerprint(key, encodedImage.byteLength, options);
+        if (cached) return cached;
+      }
+      requestedSlot = true;
+      waitingSince = performance.now();
       return await this.decodeGate.run(async () => {
         enteredSlot = true;
         recordDuplicatePhase(options.timings, 'decode_wait', performance.now() - waitingSince);
@@ -212,16 +227,25 @@ export class PhotoFingerprintService implements OnModuleInit {
           return measureDuplicatePhase(options.timings, 'local_fingerprint', () =>
             this.fingerprintWithinSlot(encodedImage, options),
           );
+        // FLAG: Admission bounds queued memory before copying. Hash and decode the same
+        // private snapshot, then recheck the memo; mutable caller bytes never name a proof.
+        const nativeInput = Buffer.from(encodedImage);
+        if (!nativeInput.length || nativeInput.length > this.maxInputBytes)
+          throw new PhotoFingerprintRejectedError('image_byte_limit_exceeded');
+        const key = this.nativeFingerprintKey(nativeInput, options.expectedFormat);
+        requirePhotoDeadline(options.deadlineAtMs);
+        const cached = this.cachedNativeFingerprint(key, nativeInput.byteLength, options);
+        if (cached) return cached;
         const usage = options.albumBudget?.usage();
         const remainingEncodedBytes = usage
           ? usage.maxEncodedBytes - usage.encodedBytes
           : this.maxInputBytes;
         const remainingPixels = usage ? usage.maxPixels - usage.pixels : this.maxInputPixels;
-        if (remainingEncodedBytes < encodedImage.byteLength || remainingPixels <= 0)
+        if (remainingEncodedBytes < nativeInput.byteLength || remainingPixels <= 0)
           throw new PhotoFingerprintRejectedError('album_decode_budget_exceeded');
         // FLAG: This measures IPC, process startup, decoding and reply together, not CPU decode.
         const result = await measureDuplicatePhase(options.timings, 'native_roundtrip', () =>
-          this.nativeDecoder!.fingerprint(encodedImage, {
+          this.nativeDecoder!.fingerprint(nativeInput, {
             deadlineAtMs: options.deadlineAtMs ?? Date.now() + 30_000,
             maxInputBytes: this.maxInputBytes,
             maxInputPixels: this.maxInputPixels,
@@ -236,15 +260,15 @@ export class PhotoFingerprintService implements OnModuleInit {
           if (result.reason === 'native_unavailable') throw new PhotoNativeUnavailableError();
           throw new PhotoFingerprintRejectedError(result.reason);
         }
-        const cost = result.fingerprint.decodeCost!;
-        if (cost.encodedBytes !== encodedImage.byteLength || cost.pixels > this.maxInputPixels)
-          throw new PhotoNativeUnavailableError();
+        requirePhotoDeadline(options.deadlineAtMs);
+        this.validateNativeFingerprint(result.fingerprint, nativeInput.byteLength);
         if (
           options.albumBudget &&
           !this.reserveCachedFingerprint(result.fingerprint, options.albumBudget)
         )
           throw new PhotoFingerprintRejectedError('album_decode_budget_exceeded');
-        return result.fingerprint;
+        this.nativeFingerprintMemo.set(key, result.fingerprint);
+        return cloneFingerprint(result.fingerprint);
       }, options.deadlineAtMs);
     } catch (error: unknown) {
       if (error instanceof PhotoDecodeDeadlineError) {
@@ -255,7 +279,7 @@ export class PhotoFingerprintService implements OnModuleInit {
       }
       throw error;
     } finally {
-      if (!enteredSlot)
+      if (requestedSlot && !enteredSlot)
         recordDuplicatePhase(options.timings, 'decode_wait', performance.now() - waitingSince);
     }
   }
@@ -273,10 +297,35 @@ export class PhotoFingerprintService implements OnModuleInit {
       remainingPixels: this.maxInputPixels,
     };
     try {
+      if (this.nativeDecoder) {
+        requirePhotoDeadline(request.deadlineAtMs);
+        this.validateNativePairBytes(original, current);
+        const key = nativePairKey(original, current);
+        requirePhotoDeadline(request.deadlineAtMs);
+        const cached = this.cachedNativeRecompression(
+          key,
+          original.byteLength + current.byteLength,
+          request.deadlineAtMs,
+        );
+        if (cached) return cached;
+      }
       return await this.decodeGate.run(async () => {
         if (!this.nativeDecoder) return verifyNativePhotoRecompression(original, current, request);
+        // FLAG: A memo hit requires independently supplied bytes, never a URL, receipt,
+        // candidate hash or authorization. Rehash both snapshots after bounded slot admission.
+        const nativeOriginal = Buffer.from(original);
+        const nativeCurrent = Buffer.from(current);
+        this.validateNativePairBytes(nativeOriginal, nativeCurrent);
+        const key = nativePairKey(nativeOriginal, nativeCurrent);
+        requirePhotoDeadline(request.deadlineAtMs);
+        const cached = this.cachedNativeRecompression(
+          key,
+          nativeOriginal.byteLength + nativeCurrent.byteLength,
+          request.deadlineAtMs,
+        );
+        if (cached) return cached;
         const result = await this.nativeDecoder
-          .verifyRecompression(original, current, request)
+          .verifyRecompression(nativeOriginal, nativeCurrent, request)
           .catch((cause: unknown) => {
             throw new PhotoNativeUnavailableError({ cause });
           });
@@ -284,12 +333,13 @@ export class PhotoFingerprintService implements OnModuleInit {
           if (result.reason === 'native_unavailable') throw new PhotoNativeUnavailableError();
           throw new PhotoFingerprintRejectedError(result.reason);
         }
-        if (
-          result.decodeCost.encodedBytes !== original.byteLength + current.byteLength ||
-          result.decodeCost.pixels > this.maxInputPixels
-        )
-          throw new PhotoNativeUnavailableError();
-        return result;
+        requirePhotoDeadline(request.deadlineAtMs);
+        this.validateNativeRecompression(
+          result,
+          nativeOriginal.byteLength + nativeCurrent.byteLength,
+        );
+        if (result.matched) this.nativeRecompressionMemo.set(key, result);
+        return cloneRecompression(result);
       }, options.deadlineAtMs);
     } catch (error) {
       if (error instanceof PhotoRecompressionRejectedError)
@@ -300,6 +350,73 @@ export class PhotoFingerprintService implements OnModuleInit {
         throw new PhotoFingerprintRejectedError('decode_capacity_exceeded', { cause: error });
       throw error;
     }
+  }
+
+  private nativeFingerprintKey(bytes: Uint8Array, expectedFormat?: SupportedPhotoFormat): string {
+    return JSON.stringify([
+      PHOTO_FINGERPRINT_ALGORITHM_VERSION,
+      this.canonicalOnly,
+      expectedFormat ?? null,
+      encodedPhotoHash(bytes),
+    ]);
+  }
+
+  private cachedNativeFingerprint(
+    key: string,
+    encodedBytes: number,
+    options: { albumBudget?: PhotoDecodeBudget; deadlineAtMs?: number },
+  ): PhotoFingerprint | undefined {
+    const cached = this.nativeFingerprintMemo.get(key);
+    if (!cached) return undefined;
+    requirePhotoDeadline(options.deadlineAtMs);
+    this.validateNativeFingerprint(cached, encodedBytes);
+    if (options.albumBudget && !this.reserveCachedFingerprint(cached, options.albumBudget))
+      throw new PhotoFingerprintRejectedError('album_decode_budget_exceeded');
+    return cached;
+  }
+
+  private cachedNativeRecompression(
+    key: string,
+    encodedBytes: number,
+    deadlineAtMs: number,
+  ): PhotoRecompressionResult | undefined {
+    const cached = this.nativeRecompressionMemo.get(key);
+    if (!cached) return undefined;
+    requirePhotoDeadline(deadlineAtMs);
+    this.validateNativeRecompression(cached, encodedBytes);
+    return cached;
+  }
+
+  private validateNativePairBytes(original: Uint8Array, current: Uint8Array): void {
+    if (
+      !original.byteLength ||
+      !current.byteLength ||
+      original.byteLength + current.byteLength > this.maxInputBytes
+    )
+      throw new PhotoFingerprintRejectedError('image_byte_limit_exceeded');
+  }
+
+  private validateNativeFingerprint(fingerprint: PhotoFingerprint, encodedBytes: number): void {
+    if (
+      fingerprint.algorithmVersion !== PHOTO_FINGERPRINT_ALGORITHM_VERSION ||
+      !validNativeCost(fingerprint.decodeCost, encodedBytes, this.maxInputPixels)
+    )
+      throw new PhotoNativeUnavailableError();
+  }
+
+  private validateNativeRecompression(
+    result: PhotoRecompressionResult,
+    encodedBytes: number,
+  ): void {
+    if (
+      result.proof.version !== PHOTO_RECOMPRESSION_VERSION ||
+      !validNativeCost(
+        result.decodeCost,
+        encodedBytes,
+        Math.min(this.maxInputPixels, MAX_RECOMPRESSION_PAIR_PIXELS),
+      )
+    )
+      throw new PhotoNativeUnavailableError();
   }
 
   private async fingerprintWithinSlot(
@@ -401,6 +518,45 @@ export class PhotoFingerprintService implements OnModuleInit {
       decodeCost: { encodedBytes: encodedImage.byteLength, pixels: pixelCount },
     };
   }
+}
+
+function requirePhotoDeadline(deadlineAtMs: number | undefined): void {
+  if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs)
+    throw new PhotoDecodeDeadlineError();
+}
+
+function encodedPhotoHash(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function nativePairKey(original: Uint8Array, current: Uint8Array): string {
+  // FLAG: Recompression is directional; swapping the ordered encoded hashes changes the key.
+  return `${PHOTO_FINGERPRINT_ALGORITHM_VERSION}\0${PHOTO_RECOMPRESSION_VERSION}\0${encodedPhotoHash(original)}\0${encodedPhotoHash(current)}`;
+}
+
+function validNativeCost(
+  cost: PhotoDecodeCost | undefined,
+  encodedBytes: number,
+  maxPixels: number,
+): boolean {
+  return (
+    cost !== undefined &&
+    cost.encodedBytes === encodedBytes &&
+    Number.isSafeInteger(cost.pixels) &&
+    cost.pixels > 0 &&
+    cost.pixels <= maxPixels
+  );
+}
+
+function cloneFingerprint(fingerprint: PhotoFingerprint): PhotoFingerprint {
+  return {
+    ...fingerprint,
+    decodeCost: fingerprint.decodeCost ? { ...fingerprint.decodeCost } : undefined,
+  };
+}
+
+function cloneRecompression(result: PhotoRecompressionResult): PhotoRecompressionResult {
+  return { ...result, proof: { ...result.proof }, decodeCost: { ...result.decodeCost } };
 }
 
 async function hashExactPhotoImage(image: ReturnType<typeof sharp>): Promise<string> {

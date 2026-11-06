@@ -85,6 +85,61 @@ const MAX_RETENTION_MS = 48 * 60 * 60 * 1000;
     expect(await index.read(scope, distantHash, now)).toEqual(distant);
   });
 
+  it('ranks a later closest original before the global cap across distinct populated bands', async () => {
+    const farther = Array.from({ length: 10 }, (_, i) => {
+      const bytes = Buffer.from(hash, 'hex');
+      const survivingBands = [i % bytes.length, (i + 1) % bytes.length];
+      for (let band = 0; band < bytes.length; band += 1)
+        if (!survivingBands.includes(band)) bytes[band]! ^= 1;
+      const recompressionHash = bytes.toString('hex');
+      track(recompressionHash);
+      return candidate(`farther-${i}`, {
+        recompressionHash,
+        publishedAtMs: now - 10_000 + i,
+        eventTimestampMs: now - 10_000 + i,
+      });
+    });
+    for (const row of farther) await index.remember(scope, row);
+    const closest = candidate('closest');
+    await index.remember(scope, closest);
+    const selected = track();
+    for (const key of selected)
+      expect(JSON.parse((await inspector.get(key))!)).toContainEqual(closest);
+    const expiries = await Promise.all(selected.map((key) => inspector.call('PEXPIRETIME', key)));
+    const ranked = await index.read(scope, hash, now);
+    expect(ranked).toEqual([closest, ...farther.slice(0, 7)]);
+    expect(await index.read(scope, hash, now)).toEqual(ranked);
+    expect(await Promise.all(selected.map((key) => inspector.call('PEXPIRETIME', key)))).toEqual(
+      expiries,
+    );
+    for (const key of selected) {
+      const raw = (await inspector.get(key))!;
+      expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(8192);
+      expect(JSON.parse(raw).length).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('breaks equally close candidate ties by publication, event and exact raster identity', async () => {
+    const earlierEvent = candidate('earlier-event', {
+      publishedAtMs: now - 2000,
+      eventTimestampMs: now - 1500,
+    });
+    const laterEvent = candidate('later-event', {
+      publishedAtMs: now - 2000,
+      eventTimestampMs: now - 1000,
+    });
+    const laterPublication = candidate('later-publication', {
+      publishedAtMs: now - 1500,
+      eventTimestampMs: now - 1500,
+    });
+    const lowerRaster = candidate('lower-raster', { canonicalHash: '1'.repeat(64) });
+    const higherRaster = candidate('higher-raster', { canonicalHash: 'f'.repeat(64) });
+    const expected = [earlierEvent, laterEvent, laterPublication, lowerRaster, higherRaster];
+    for (const row of [...expected].reverse()) await index.remember(scope, row);
+    expect(await index.read(scope, hash, now)).toEqual(expected);
+    expect(await index.read(scope, hash, now)).toEqual(expected);
+  });
+
   it('isolates every opaque author/chat/settings/control/window scope', async () => {
     await index.remember(scope, candidate('original'));
     const otherScope = digest(randomUUID());
@@ -237,7 +292,7 @@ const MAX_RETENTION_MS = 48 * 60 * 60 * 1000;
     );
   });
 
-  it('bounds collision buckets and globally returns eight unique earliest candidates', async () => {
+  it('bounds collision buckets and returns eight unique earliest equally close candidates', async () => {
     const rows = Array.from({ length: 12 }, (_, i) =>
       candidate(`original-${i}`, {
         publishedAtMs: now - 10_000 + i,
