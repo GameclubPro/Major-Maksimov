@@ -93,6 +93,9 @@ type NativeOcrSandboxLifecycleEvent = Readonly<{
   event: 'native_ocr_sandbox_recycle';
   reason: NativeOcrSandboxRecycleReason;
   operation: 'idle' | 'preprocess' | 'recognize';
+  psm: 6 | 11 | 'unavailable';
+  preprocessPass: 'primary' | 'confirmation' | 'unavailable';
+  payloadBytes: number | 'unavailable';
   queueDepth: number;
   pendingBytes: number;
   requestedTimeoutMs: number | 'unavailable';
@@ -184,6 +187,10 @@ export async function startNativeOcrSandboxServer(
   let active = false;
   let activeSocket: Socket | null = null;
   let activeRequestKind: 'preprocess' | 'recognize' | null = null;
+  let activeAttribution: Pick<
+    NativeOcrSandboxLifecycleEvent,
+    'psm' | 'preprocessPass' | 'payloadBytes'
+  > | null = null;
   let activeTiming: {
     requestedTimeoutMs: number;
     executionBudgetMs: number;
@@ -364,9 +371,12 @@ export async function startNativeOcrSandboxServer(
       event: 'native_ocr_sandbox_recycle',
       reason,
       operation: activeRequestKind ?? 'idle',
+      psm: activeAttribution?.psm ?? 'unavailable',
+      preprocessPass: activeAttribution?.preprocessPass ?? 'unavailable',
+      payloadBytes: activeAttribution?.payloadBytes ?? 'unavailable',
       queueDepth: pending.length,
       pendingBytes,
-      // FLAG: Only finite timing scalars (or unavailable without active work) leave
+      // FLAG: Only validated enums and finite scalars (or unavailable without active work) leave
       // this boundary; images, text, identities and absolute deadlines remain private.
       requestedTimeoutMs: activeTiming?.requestedTimeoutMs ?? 'unavailable',
       executionBudgetMs: activeTiming?.executionBudgetMs ?? 'unavailable',
@@ -410,6 +420,11 @@ export async function startNativeOcrSandboxServer(
       if (socket.destroyed) return;
       if (frame.kind === NATIVE_OCR_SANDBOX_FRAME_KINDS.preprocessRequest) {
         const input = validatePreprocessRequest(frame, controls.maxSourceImageBytes);
+        activeAttribution = {
+          psm: 'unavailable',
+          preprocessPass: input.pass,
+          payloadBytes: frame.payload.byteLength,
+        };
         const hardDeadline = setTimeout(
           () => fatalContainmentFailure('sharp_deadline'),
           request.timeoutMs + NATIVE_CONTAINMENT_GRACE_MS,
@@ -455,6 +470,11 @@ export async function startNativeOcrSandboxServer(
 
       const input = validateRecognizeRequest(frame, controls.maxImageBytes, controls.timeoutMs);
       if (socket.destroyed) return;
+      activeAttribution = {
+        psm: input.psm,
+        preprocessPass: 'unavailable',
+        payloadBytes: frame.payload.byteLength,
+      };
       let processGroupTeardownFailed = false;
       let requestNativeProcess: ChildProcessWithoutNullStreams | null = null;
       const result = await dependencies.runNativeTesseract({
@@ -565,6 +585,7 @@ export async function startNativeOcrSandboxServer(
         : 'recognize';
     const operation = processRequest(request).finally(() => {
       active = false;
+      activeAttribution = null;
       activeTiming = null;
       activeExecutionDeadlineNs = null;
       if (activeSocket === request.socket) {

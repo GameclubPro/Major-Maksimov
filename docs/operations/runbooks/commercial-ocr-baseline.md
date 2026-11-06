@@ -105,6 +105,14 @@ watchdog expiration is separately `request_timeout` / `ocr_request_timeout`: nat
 completion is uncertain, so it is terminal and must not become a safe queue retry. Boundary identity
 or malformed-response failures remain fail-closed and do not become temporary
 preprocessing outages. Recycle logs contain fixed reasons and aggregate values only.
+They include the active encoded `payloadBytes`, validated recognition `psm` (6 or 11),
+and validated `preprocessPass` (`primary` or `confirmation`); fields belonging to the
+other operation are `unavailable`. These values identify the failed native stage,
+not the source image, recognition quality or successful completion. Recognition
+pass names and raster dimensions are not inferred from PSM or encoded byte count.
+The diagnostic remains limited to 512 bytes with a 25 ms flush deadline; required
+containment never waits longer for logging. This metadata does not change the UDS
+request/response schema or reinterpret historical lifecycle evidence.
 
 There is one production OCR consumer. Under `slow`, it admits at most one cache-miss
 pass per governor retry interval; downloads and cache hits do not consume the slot.

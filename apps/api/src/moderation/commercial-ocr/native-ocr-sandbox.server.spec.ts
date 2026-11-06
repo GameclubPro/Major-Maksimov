@@ -240,50 +240,72 @@ describe('native OCR sandbox server containment', () => {
     }
   });
 
-  it('recycles the sandbox when the client disconnects during active Sharp preprocessing', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'maxim-ocr-preprocess-cancel-'));
-    const socketPath = join(directory, 'ocr.sock');
-    const environment = sandboxEnvironment(socketPath);
-    let markPreprocessStarted!: () => void;
-    const preprocessStarted = new Promise<void>((resolve) => {
-      markPreprocessStarted = resolve;
-    });
-    let resolvePreprocess!: (result: { bytes: Buffer; width: number; height: number }) => void;
-    const preprocessResult = new Promise<{ bytes: Buffer; width: number; height: number }>(
-      (resolve) => {
-        resolvePreprocess = resolve;
-      },
-    );
-    const fatalExit = jest.fn();
-    const previousExitCode = process.exitCode;
-    const server = await startNativeOcrSandboxServer(environment, {
-      ...successfulServerDependencies(),
-      createPreprocessor: async () => ({
-        prepare: async () => {
-          markPreprocessStarted();
-          return preprocessResult;
+  it.each(['primary', 'confirmation'] as const)(
+    'attributes %s preprocessing when its client disconnects',
+    async (pass) => {
+      const directory = await mkdtemp(join(tmpdir(), 'maxim-ocr-preprocess-cancel-'));
+      const socketPath = join(directory, 'ocr.sock');
+      const environment = sandboxEnvironment(socketPath);
+      let markPreprocessStarted!: () => void;
+      const preprocessStarted = new Promise<void>((resolve) => {
+        markPreprocessStarted = resolve;
+      });
+      let resolvePreprocess!: (result: { bytes: Buffer; width: number; height: number }) => void;
+      const preprocessResult = new Promise<{ bytes: Buffer; width: number; height: number }>(
+        (resolve) => {
+          resolvePreprocess = resolve;
         },
-      }),
-      fatalExit,
-    });
-    const client = new NativeOcrSandboxClient(testClientConfig(environment));
+      );
+      const fatalExit = jest.fn();
+      const recordLifecycleEvent = jest.fn<
+        ReturnType<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>,
+        Parameters<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>
+      >();
+      const previousExitCode = process.exitCode;
+      const server = await startNativeOcrSandboxServer(environment, {
+        ...successfulServerDependencies(),
+        createPreprocessor: async () => ({
+          prepare: async () => {
+            markPreprocessStarted();
+            return preprocessResult;
+          },
+        }),
+        fatalExit,
+        recordLifecycleEvent,
+      });
+      const client = new NativeOcrSandboxClient(testClientConfig(environment));
 
-    try {
-      const preprocessing = client.preprocess(Buffer.from('source'), 'primary', 5_000);
-      const outcome = expect(preprocessing).rejects.toMatchObject({ reason: 'unavailable' });
-      await preprocessStarted;
-      client.close();
-      await outcome;
-      await waitFor(() => fatalExit.mock.calls.length > 0);
-      expect(process.exitCode).toBe(1);
-      resolvePreprocess({ bytes: Buffer.from('prepared'), width: 1, height: 1 });
-    } finally {
-      process.exitCode = previousExitCode;
-      client.close();
-      await server.close().catch(() => undefined);
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+      try {
+        const input = Buffer.from('private-preprocess-source');
+        const preprocessing = client.preprocess(input, pass, 5_000);
+        const outcome = expect(preprocessing).rejects.toMatchObject({ reason: 'unavailable' });
+        await preprocessStarted;
+        client.close();
+        await outcome;
+        await waitFor(() => fatalExit.mock.calls.length > 0);
+        expect(recordLifecycleEvent).toHaveBeenCalledTimes(1);
+        expect(recordLifecycleEvent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: 'active_client_cancel',
+            operation: 'preprocess',
+            preprocessPass: pass,
+            psm: 'unavailable',
+            payloadBytes: input.byteLength,
+          }),
+        );
+        expect(JSON.stringify(recordLifecycleEvent.mock.calls[0]![0])).not.toContain(
+          'private-preprocess-source',
+        );
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.exitCode = previousExitCode;
+        resolvePreprocess({ bytes: Buffer.from('prepared'), width: 1, height: 1 });
+        client.close();
+        await server.close().catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('kills and recycles a native process that starts after its client socket closed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'maxim-ocr-late-native-cancel-'));
@@ -307,6 +329,10 @@ describe('native OCR sandbox server containment', () => {
       return true;
     });
     const fatalExit = jest.fn();
+    const recordLifecycleEvent = jest.fn<
+      ReturnType<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>,
+      Parameters<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>
+    >();
     const previousExitCode = process.exitCode;
     const server = await startNativeOcrSandboxServer(environment, {
       ...successfulServerDependencies(),
@@ -318,6 +344,7 @@ describe('native OCR sandbox server containment', () => {
       }) as NativeOcrSandboxServerDependencies['runNativeTesseract'],
       signalNativeProcessGroup: signalGroup,
       fatalExit,
+      recordLifecycleEvent,
     });
     const client = new NativeOcrSandboxClient(testClientConfig(environment));
 
@@ -329,6 +356,16 @@ describe('native OCR sandbox server containment', () => {
       await outcome;
       releaseNativeStart();
       await waitFor(() => fatalExit.mock.calls.length > 0);
+      expect(recordLifecycleEvent).toHaveBeenCalledTimes(1);
+      expect(recordLifecycleEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: 'active_client_cancel',
+          operation: 'recognize',
+          psm: 6,
+          preprocessPass: 'unavailable',
+          payloadBytes: Buffer.byteLength('prepared'),
+        }),
+      );
       expect(signalGroup).toHaveBeenCalledWith(child, 'SIGKILL', {
         requireIsolatedGroup: true,
       });
@@ -368,62 +405,75 @@ describe('native OCR sandbox server containment', () => {
     }
   });
 
-  it('cannot cancel mandatory OCR recycle with a stalled diagnostic or server close', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'maxim-ocr-stalled-diagnostic-'));
-    const environment = sandboxEnvironment(join(directory, 'ocr.sock'));
-    const fatalExit = jest.fn();
-    const recordLifecycleEvent = jest.fn<
-      ReturnType<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>,
-      Parameters<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>
-    >(() => new Promise<void>(() => {}));
-    const runNativeTesseract = jest.fn<
-      ReturnType<NativeOcrSandboxServerDependencies['runNativeTesseract']>,
-      Parameters<NativeOcrSandboxServerDependencies['runNativeTesseract']>
-    >(async () => ({ ok: false, reason: 'timeout' }));
-    const previousExitCode = process.exitCode;
-    const server = await startNativeOcrSandboxServer(environment, {
-      ...successfulServerDependencies(),
-      runNativeTesseract,
-      fatalExit,
-      recordLifecycleEvent,
-    });
-    const client = new NativeOcrSandboxClient(testClientConfig(environment));
-
-    try {
-      await client
-        .recognize(Buffer.from('private-prepared-image'), 6, 1_000)
-        .catch(() => undefined);
-      await server.close();
-      await waitFor(() => fatalExit.mock.calls.length > 0);
-      expect(recordLifecycleEvent).toHaveBeenCalledTimes(1);
-      expect(recordLifecycleEvent).toHaveBeenCalledWith({
-        event: 'native_ocr_sandbox_recycle',
-        reason: 'native_timeout',
-        operation: 'recognize',
-        queueDepth: 0,
-        pendingBytes: 0,
-        requestedTimeoutMs: 1_000,
-        executionBudgetMs: expect.any(Number),
-        queueWaitMs: expect.any(Number),
-        operationElapsedMs: expect.any(Number),
+  it.each([6, 11] as const)(
+    'attributes PSM%s without reusing completed preprocessing metadata or delaying recycle',
+    async (psm) => {
+      const directory = await mkdtemp(join(tmpdir(), 'maxim-ocr-stalled-diagnostic-'));
+      const environment = sandboxEnvironment(join(directory, 'ocr.sock'));
+      const fatalExit = jest.fn();
+      const recordLifecycleEvent = jest.fn<
+        ReturnType<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>,
+        Parameters<NativeOcrSandboxServerDependencies['recordLifecycleEvent']>
+      >(() => new Promise<void>(() => {}));
+      const runNativeTesseract = jest.fn<
+        ReturnType<NativeOcrSandboxServerDependencies['runNativeTesseract']>,
+        Parameters<NativeOcrSandboxServerDependencies['runNativeTesseract']>
+      >(async () => ({ ok: false, reason: 'timeout' }));
+      const previousExitCode = process.exitCode;
+      const server = await startNativeOcrSandboxServer(environment, {
+        ...successfulServerDependencies(),
+        runNativeTesseract,
+        createPreprocessor: async () => ({
+          prepare: async () => ({ bytes: Buffer.from('prepared'), width: 1, height: 1 }),
+        }),
+        fatalExit,
+        recordLifecycleEvent,
       });
-      const diagnostic = recordLifecycleEvent.mock.calls[0]![0];
-      expect(diagnostic.executionBudgetMs).toBeGreaterThan(0);
-      expect(diagnostic.executionBudgetMs).toBeLessThanOrEqual(1_000);
-      expect(diagnostic.executionBudgetMs).toBe(runNativeTesseract.mock.calls[0]![0].timeoutMs);
-      expect(diagnostic.queueWaitMs).toBeGreaterThanOrEqual(0);
-      expect(diagnostic.operationElapsedMs).toBeGreaterThanOrEqual(0);
-      expect(JSON.stringify(diagnostic)).not.toContain('private-prepared-image');
-      expect(runNativeTesseract).toHaveBeenCalledTimes(1);
-      expect(fatalExit).toHaveBeenCalledTimes(1);
-      expect(process.exitCode).toBe(1);
-    } finally {
-      process.exitCode = previousExitCode;
-      client.close();
-      await server.close().catch(() => undefined);
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
+      const client = new NativeOcrSandboxClient(testClientConfig(environment));
+
+      try {
+        await expect(
+          client.preprocess(Buffer.from('completed-source'), 'confirmation', 5_000),
+        ).resolves.toMatchObject({ width: 1, height: 1 });
+        expect(recordLifecycleEvent).not.toHaveBeenCalled();
+        await client
+          .recognize(Buffer.from('private-prepared-image'), psm, 1_000)
+          .catch(() => undefined);
+        await server.close();
+        await waitFor(() => fatalExit.mock.calls.length > 0);
+        expect(recordLifecycleEvent).toHaveBeenCalledTimes(1);
+        expect(recordLifecycleEvent).toHaveBeenCalledWith({
+          event: 'native_ocr_sandbox_recycle',
+          reason: 'native_timeout',
+          operation: 'recognize',
+          psm,
+          preprocessPass: 'unavailable',
+          payloadBytes: 22,
+          queueDepth: 0,
+          pendingBytes: 0,
+          requestedTimeoutMs: 1_000,
+          executionBudgetMs: expect.any(Number),
+          queueWaitMs: expect.any(Number),
+          operationElapsedMs: expect.any(Number),
+        });
+        const diagnostic = recordLifecycleEvent.mock.calls[0]![0];
+        expect(diagnostic.executionBudgetMs).toBeGreaterThan(0);
+        expect(diagnostic.executionBudgetMs).toBeLessThanOrEqual(1_000);
+        expect(diagnostic.executionBudgetMs).toBe(runNativeTesseract.mock.calls[0]![0].timeoutMs);
+        expect(diagnostic.queueWaitMs).toBeGreaterThanOrEqual(0);
+        expect(diagnostic.operationElapsedMs).toBeGreaterThanOrEqual(0);
+        expect(JSON.stringify(diagnostic)).not.toContain('private-prepared-image');
+        expect(runNativeTesseract).toHaveBeenCalledTimes(1);
+        expect(fatalExit).toHaveBeenCalledTimes(1);
+        expect(process.exitCode).toBe(1);
+      } finally {
+        process.exitCode = previousExitCode;
+        client.close();
+        await server.close().catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('rejects any non-loopback interface before binding the socket', () => {
     expect(() =>
@@ -546,10 +596,10 @@ describe('native OCR sandbox server containment', () => {
       const firstClient = new NativeOcrSandboxClient(testClientConfig(environment));
       const waitingClient = new NativeOcrSandboxClient(testClientConfig(environment));
       try {
-        const first = firstClient.recognize(Buffer.from('prepared'), 6, 3_000);
+        const first = firstClient.recognize(Buffer.from('first-input'), 6, 3_000);
         await started;
         const waiting = waitingClient
-          .recognize(Buffer.from('prepared'), 6, 1_000)
+          .recognize(Buffer.from('private-waiting-input'), 11, 1_000)
           .catch(() => undefined);
         const during = await waitForQueuedRuntime(server.socketPath);
         expect(during.remainingBudgetMs).toBeGreaterThan(0);
@@ -570,11 +620,15 @@ describe('native OCR sandbox server containment', () => {
           expect(diagnostic).toMatchObject({
             reason: 'native_timeout',
             operation: 'recognize',
+            psm: 11,
+            preprocessPass: 'unavailable',
+            payloadBytes: Buffer.byteLength('private-waiting-input'),
             requestedTimeoutMs: 1_000,
             executionBudgetMs: runNative.mock.calls[1]![0].timeoutMs,
           });
           expect(diagnostic.queueWaitMs).toBeGreaterThanOrEqual(100);
           expect(diagnostic.operationElapsedMs).toBeGreaterThanOrEqual(0);
+          expect(JSON.stringify(diagnostic)).not.toMatch(/first-input|private-waiting-input/u);
           expect(fatalExit).toHaveBeenCalledTimes(1);
           return;
         }
