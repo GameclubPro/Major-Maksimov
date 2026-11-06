@@ -55,6 +55,7 @@ import { executeModerationRuleFollowUp } from './moderation-rule-followup-execut
 import type { RuleFollowupExecutionContext } from './moderation-rule-followup.contract';
 import { ModerationRuleSanctionGuardService } from './moderation-rule-sanction-guard.service';
 import { ModerationStateDeleteGuardService } from './moderation-state-delete-guard.service';
+import { warnModerationEffectFailure } from './moderation-effect-failure-diagnostics';
 import {
   RequiredSubscriptionExecutionGuardService,
   RequiredSubscriptionExecutionRejectedError,
@@ -8819,13 +8820,10 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         return true;
       }
     } catch (error: unknown) {
-      this.logger.warn(
-        {
-          chatId,
-          userId,
-          messageId,
-          error: error instanceof Error ? error.message : 'Unknown error',
-        },
+      warnModerationEffectFailure(
+        this.logger,
+        { chatId, userId, messageId },
+        error,
         'Failed to kick known global spammer',
       );
     }

@@ -2,6 +2,7 @@ import { withMarketplaceModerationMessage } from '../max/marketplace-publication
 import type { BotSpeechStyle } from '@maxim/contracts/bot-speech';
 import type { MaxActionLedgerContext, MaxSendMessageOptions } from '../max/max-client.service';
 import { withModerationReleaseButton } from './moderation-release-callback.util';
+import { warnModerationEffectFailure } from './moderation-effect-failure-diagnostics';
 
 export type ModerationNoticeImmediateOptions = {
   immediate?: boolean;
@@ -85,13 +86,10 @@ export async function deliverSanctionNotice(params: {
       },
     });
   } catch (error) {
-    params.logger.warn(
-      {
-        chatId: input.chatId,
-        userId: input.userId,
-        messageId: input.messageId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      },
+    warnModerationEffectFailure(
+      params.logger,
+      { chatId: input.chatId, userId: input.userId, messageId: input.messageId },
+      error,
       params.action === 'UNMUTE'
         ? 'Failed to send mute notice message'
         : 'Failed to send permanent ban notice message',
