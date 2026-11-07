@@ -925,6 +925,13 @@ describe('ChatContextCacheService', () => {
     expect(redisInstance.get).toHaveBeenCalledTimes(1);
     expect(prisma.chat.findUnique).toHaveBeenCalledTimes(1);
     expect(prisma.chat.upsert).not.toHaveBeenCalled();
+    expect(service.getLocalCacheSnapshot().activity).toMatchObject({
+      coalescedLoads: 1,
+      redisReads: 1,
+      redisHits: 0,
+      redisMisses: 1,
+      sourceLoads: 1,
+    });
   });
 
   it.each([
@@ -1112,6 +1119,20 @@ describe('ChatContextCacheService', () => {
 
     expect(redisInstance.mget).toHaveBeenCalledTimes(2);
     expect(redisInstance.eval).not.toHaveBeenCalled();
+    expect(service.getLocalCacheSnapshot()).toMatchObject({
+      hits: 1,
+      misses: 2,
+      invalidations: 1,
+      activity: {
+        redisReads: 2,
+        redisHits: 2,
+        redisMisses: 0,
+        sourceLoads: 0,
+        localInvalidationCalls: 1,
+        remoteInvalidationCalls: 0,
+        invalidationsByReason: { explicit: { events: 1, evictedEntries: 1 } },
+      },
+    });
   });
 
   it('keeps a maximal standard notice image and full settings locally during hot reads', async () => {
@@ -1407,6 +1428,15 @@ describe('ChatContextCacheService', () => {
     });
 
     expect(prismaReader.chat.findUnique).toHaveBeenCalledTimes(2);
+    expect(reader.getLocalCacheSnapshot().activity).toMatchObject({
+      remoteInvalidationCalls: 1,
+      invalidationsByReason: { explicit: { events: 1, evictedEntries: 1 } },
+    });
+    expect(invalidator.getLocalCacheSnapshot().activity).toMatchObject({
+      localInvalidationCalls: 1,
+      remoteInvalidationCalls: 1,
+      invalidationsByReason: { explicit: { events: 2, evictedEntries: 0 } },
+    });
 
     await invalidator.onModuleDestroy();
     await reader.onModuleDestroy();
@@ -1498,6 +1528,60 @@ describe('ChatContextCacheService', () => {
     );
     expect(redisInstance.del).not.toHaveBeenCalled();
     expect(redisInstance.mget).toHaveBeenCalledTimes(3);
+    expect(service.getLocalCacheSnapshot().activity.invalidationsByReason.title_changed).toEqual({
+      events: 1,
+      evictedEntries: 1,
+    });
+  });
+
+  it('reuses a title already committed by another reader without patching or invalidating', async () => {
+    const chatId = 'chat-title-already-committed';
+    const service = new ChatContextCacheService(
+      { chat: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } } as never,
+      createConfigMock() as never,
+      maxBotLinkService as never,
+    );
+    const redis = getRedisMutationMock(service);
+    const store = (Redis as unknown as { __store: Map<string, string> }).__store;
+    const context = {
+      chatId,
+      title: 'Before rename',
+      settings: buildSettings(chatId),
+      domainAllowlist: [],
+      adminUserIds: ['admin-1'],
+      rulesPublishedUrl: null,
+      rulesPublishedMessageId: null,
+    };
+    store.set(ChatContextCacheService.cacheKey(chatId), JSON.stringify(context));
+    await service.getChatContext(chatId);
+    const localCache = (service as unknown as { localChatContextCache: ChatContextLocalCache })
+      .localChatContextCache;
+    const replace = jest.spyOn(localCache, 'replace');
+    store.set(
+      ChatContextCacheService.cacheKey(chatId),
+      JSON.stringify({ ...context, title: 'After rename' }),
+    );
+    const committedRevision = store.get(ChatContextCacheService.chatContextRevisionKey(chatId));
+
+    await expect(service.getChatContext(chatId, 'After rename')).resolves.toMatchObject({
+      title: 'After rename',
+      adminUserIds: ['admin-1'],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(redis.eval).not.toHaveBeenCalled();
+    expect(store.get(ChatContextCacheService.chatContextRevisionKey(chatId))).toBe(
+      committedRevision,
+    );
+    expect(service.getLocalCacheSnapshot()).toMatchObject({
+      entries: 1,
+      invalidations: 0,
+      activity: {
+        localInvalidationCalls: 0,
+        invalidationsByReason: { title_changed: { events: 0, evictedEntries: 0 } },
+      },
+    });
   });
 
   it('stores admin access decisions in redis with ttl', async () => {
@@ -2372,8 +2456,12 @@ describe('ChatContextCacheService', () => {
     expect(localCache.snapshot().entries).toBe(0);
     expect(remoteInvalidation).toHaveBeenCalledWith(
       'chat:context:invalidate:v1',
-      JSON.stringify({ chatId }),
+      JSON.stringify({ chatId, reason: 'access_denied' }),
     );
+    expect(service.getLocalCacheSnapshot().activity).toMatchObject({
+      denialReplays: 1,
+      invalidationsByReason: { access_denied: { events: 2, evictedEntries: 1 } },
+    });
     expect(recordMetric.mock.calls.map(([metric]) => metric.outcome)).toEqual([
       'miss',
       'superseded',
@@ -2815,6 +2903,52 @@ describe('ChatContextCacheService', () => {
       expect(getChatContextReadState(service).chatContextReadGenerations.size).toBe(0);
       expect(getChatContextReadState(service).chatContextInFlightLoads.size).toBe(0);
       expect(service.getLocalCacheSnapshot().entries).toBe(0);
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('attributes old and unknown pubsub reasons to a fixed legacy bucket without retaining labels', async () => {
+    const service = new ChatContextCacheService(
+      {} as never,
+      createConfigMock() as never,
+      maxBotLinkService as never,
+    );
+    try {
+      await service.onModuleInit();
+      const subscriber = (
+        service as unknown as { subscriber: { subscribe: jest.Mock; on: jest.Mock } }
+      ).subscriber;
+      const channel = subscriber.subscribe.mock.calls[0]?.[0] as string;
+      const handler = subscriber.on.mock.calls.find(([event]) => event === 'message')?.[1] as (
+        channel: string,
+        payload: string,
+      ) => void;
+      const localCache = (service as unknown as { localChatContextCache: ChatContextLocalCache })
+        .localChatContextCache;
+      for (const reason of [undefined, 'private-reason-fixture', 'access_denied']) {
+        localCache.set('private-chat-fixture', { chatId: 'private-chat-fixture' } as never);
+        handler(channel, JSON.stringify({ chatId: 'private-chat-fixture', reason }));
+      }
+      handler(channel, '{');
+      handler(channel, JSON.stringify({ reason: 'access_granted' }));
+
+      const snapshot = service.getLocalCacheSnapshot();
+      expect(snapshot).toMatchObject({
+        entries: 0,
+        invalidations: 3,
+        activity: {
+          localInvalidationCalls: 0,
+          remoteInvalidationCalls: 3,
+          invalidationsByReason: {
+            legacy: { events: 2, evictedEntries: 2 },
+            access_denied: { events: 1, evictedEntries: 1 },
+          },
+        },
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('private-');
+      snapshot.activity.invalidationsByReason.legacy.events = 999;
+      expect(service.getLocalCacheSnapshot().activity.invalidationsByReason.legacy.events).toBe(2);
     } finally {
       await service.onModuleDestroy();
     }

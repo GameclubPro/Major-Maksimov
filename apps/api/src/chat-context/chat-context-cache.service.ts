@@ -18,12 +18,19 @@ import {
   type ChatContextLocalCacheSnapshot,
 } from './chat-context-local-cache';
 import { ChatContextMediaCache, CHAT_CONTEXT_MEDIA_TTL_SEC } from './chat-context-media-cache';
+import {
+  createChatContextCacheActivity,
+  parseChatContextInvalidationReason,
+  type ChatContextCacheActivitySnapshot,
+  type ChatContextInvalidationReason,
+} from './chat-context-cache-metrics';
 
 export type ChatAdminAccessState = 'granted' | 'user_denied' | 'bot_denied';
 
 export async function invalidateSharedChatContext(
   redis: Pick<Redis, 'eval'>,
   chatId: string,
+  reason: ChatContextInvalidationReason = 'explicit',
 ): Promise<void> {
   const normalizedChatId = chatId.trim();
   if (!normalizedChatId) return;
@@ -34,7 +41,7 @@ export async function invalidateSharedChatContext(
     ChatContextCacheService.cacheKey(normalizedChatId),
     ChatContextCacheService.legacyCacheKey(normalizedChatId),
     CHAT_CONTEXT_INVALIDATION_CHANNEL,
-    JSON.stringify({ chatId: normalizedChatId }),
+    JSON.stringify({ chatId: normalizedChatId, reason }),
   );
 }
 
@@ -385,6 +392,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   private localChatContextSweepTimer: NodeJS.Timeout | null = null;
   private readonly chatContextInFlightLoads = new Map<string, Promise<ChatContext>>();
   private readonly chatContextReadGenerations = new Map<string, ChatContextReadGeneration>();
+  private readonly cacheActivity = createChatContextCacheActivity();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -442,13 +450,13 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const chatId = this.parseInvalidationPayload(payload);
-      if (!chatId) {
+      const invalidation = this.parseInvalidationPayload(payload);
+      if (!invalidation) {
         return;
       }
 
-      this.applyLocalInvalidation(chatId);
-      this.maxBotLinkService.forgetChatBotBinding(chatId);
+      this.applyLocalInvalidation(invalidation.chatId, invalidation.reason, 'remote');
+      this.maxBotLinkService.forgetChatBotBinding(invalidation.chatId);
     });
     await this.subscriber.subscribe(CHAT_CONTEXT_INVALIDATION_CHANNEL);
     if (!this.localChatContextSweepTimer) {
@@ -483,8 +491,21 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     return `chat:context:v3:${chatId}`;
   }
 
-  getLocalCacheSnapshot(): ChatContextLocalCacheSnapshot {
-    return this.localChatContextCache.snapshot();
+  getLocalCacheSnapshot(): ChatContextLocalCacheSnapshot & {
+    activity: ChatContextCacheActivitySnapshot;
+  } {
+    return {
+      ...this.localChatContextCache.snapshot(),
+      activity: {
+        ...this.cacheActivity,
+        invalidationsByReason: Object.fromEntries(
+          Object.entries(this.cacheActivity.invalidationsByReason).map(([reason, counters]) => [
+            reason,
+            { ...counters },
+          ]),
+        ) as ChatContextCacheActivitySnapshot['invalidationsByReason'],
+      },
+    };
   }
 
   static adminAccessKey(chatId: string, userId: string): string {
@@ -623,6 +644,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
 
         const existingLoad = this.chatContextInFlightLoads.get(chatId);
         if (existingLoad) {
+          this.cacheActivity.coalescedLoads += 1;
           const resolved = await existingLoad;
           if (!this.isChatContextReadGenerationCurrent(chatId, generation)) continue;
           return this.reconcileCachedChatTitle(chatId, resolved, normalizedTitle, generation);
@@ -897,7 +919,10 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
             String(this.resolveAdminAccessTtlSec(params.state)),
             userId,
             CHAT_CONTEXT_INVALIDATION_CHANNEL,
-            JSON.stringify({ chatId }),
+            JSON.stringify({
+              chatId,
+              reason: params.state === 'granted' ? 'access_granted' : 'access_denied',
+            }),
             ...opaqueMutations.flatMap((mutation) => this.serializeOpaqueRedisMutation(mutation)),
             recentMode,
             String(recentBootstrapTtlSec),
@@ -921,16 +946,25 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
           outcome: 'applied',
           durationMs: Date.now() - luaStartedAtMs,
         });
-        this.applyLocalInvalidation(chatId);
+        if (result === 3) this.cacheActivity.grantsReused += 1;
+        this.applyLocalInvalidation(
+          chatId,
+          result === 3
+            ? 'access_grant_reused'
+            : params.state === 'granted'
+              ? 'access_granted'
+              : 'access_denied',
+        );
         return true;
       }
       if (result === 2) {
+        this.cacheActivity.denialReplays += 1;
         this.recordAdminAccessEpochMutationMetric(options, {
           phase: 'lua',
           outcome: 'superseded',
           durationMs: Date.now() - luaStartedAtMs,
         });
-        this.applyLocalInvalidation(chatId);
+        this.applyLocalInvalidation(chatId, 'access_denied');
         return false;
       }
       if (result === 0) {
@@ -2441,6 +2475,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       // FLAG: Capture the distributed generation before the DB read. A membership mutation bumps
       // it atomically, so an older full-context load can never restore stale adminUserIds.
       const expectedRevision = await this.readChatContextRevision(chatId);
+      this.cacheActivity.sourceLoads += 1;
       let chat = await this.findChatContextRow(chatId);
       if (!chat?.settings) {
         chat = await this.initializeChatContextRow(chatId, title);
@@ -2493,6 +2528,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     const key = ChatContextCacheService.cacheKey(chatId);
     // FLAG: Atomically bind the cached body to the shared revision, including mutations made
     // by an older rollback image. A missing version proof must reload the complete SQL source.
+    this.cacheActivity.redisReads += 1;
     const snapshot = await this.readRedisStringsWithin(
       [
         key,
@@ -2503,18 +2539,25 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     );
     const cached =
       snapshot && snapshot[1] !== null && snapshot[1] === (snapshot[2] ?? '0') ? snapshot[0] : null;
+    if (!snapshot) this.cacheActivity.redisReadUnavailable += 1;
+    if (snapshot?.[0] && !cached) this.cacheActivity.redisRevisionMisses += 1;
+    if (!cached) this.cacheActivity.redisMisses += 1;
     if (cached && this.isChatContextReadGenerationCurrent(chatId, generation)) {
       try {
         const decoded = await this.mediaCache.decode(cached);
         // FLAG: A pre-policy v4 body cannot establish that SQL still has no link rules.
         // Reload under the existing distributed revision fence before caching it locally.
-        if (!Object.hasOwn(decoded.value.settings, 'linkRulesPolicy'))
+        if (!Object.hasOwn(decoded.value.settings, 'linkRulesPolicy')) {
+          this.cacheActivity.redisIncompatiblePayloads += 1;
           return this.loadAndCache(chatId, normalizedTitle, generation);
+        }
+        this.cacheActivity.redisHits += 1;
         if (this.isChatContextReadGenerationCurrent(chatId, generation)) {
           this.writeLocalChatContext(chatId, decoded.value, decoded.fullBytesEstimate);
         }
         return this.reconcileCachedChatTitle(chatId, decoded.value, normalizedTitle, generation);
       } catch (error: unknown) {
+        this.cacheActivity.redisDecodeFailures += 1;
         this.logger.warn(
           { chatId, err: error instanceof Error ? error.message : String(error) },
           'Failed to read complete chat context cache',
@@ -2652,10 +2695,12 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       this.localChatContextCache.replace(chatId, nextValue);
     }
     void this.runRedisWriteWithin(
-      this.patchChatContextInRedis(chatId, (current) => ({
-        ...current,
-        title: normalizedTitle,
-      })),
+      this.patchChatContextInRedis(
+        chatId,
+        (current) =>
+          current.title === normalizedTitle ? current : { ...current, title: normalizedTitle },
+        'title_changed',
+      ),
       ChatContextCacheService.CHAT_CONTEXT_REDIS_WRITE_TIMEOUT_MS,
     );
     void this.persistTitle(chatId, normalizedTitle);
@@ -2901,8 +2946,16 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     this.localChatContextCache.set(chatId, value, encodedBytes);
   }
 
-  private applyLocalInvalidation(chatId: string): void {
-    this.localChatContextCache.delete(chatId);
+  private applyLocalInvalidation(
+    chatId: string,
+    reason: ChatContextInvalidationReason = 'explicit',
+    origin: 'local' | 'remote' = 'local',
+  ): void {
+    const counters = this.cacheActivity.invalidationsByReason[reason];
+    counters.events += 1;
+    if (origin === 'remote') this.cacheActivity.remoteInvalidationCalls += 1;
+    else this.cacheActivity.localInvalidationCalls += 1;
+    if (this.localChatContextCache.delete(chatId)) counters.evictedEntries += 1;
     this.chatContextInFlightLoads.delete(chatId);
     // FLAG: Idle invalidations retain no keys. Retired objects stay invalid for every pending
     // reader, even after a newer generation finishes; resetting numeric epochs would allow ABA.
@@ -2913,11 +2966,16 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private parseInvalidationPayload(payload: string): string | null {
+  private parseInvalidationPayload(
+    payload: string,
+  ): { chatId: string; reason: ChatContextInvalidationReason } | null {
     try {
-      const parsed = JSON.parse(payload) as { chatId?: unknown };
+      const parsed = JSON.parse(payload) as { chatId?: unknown; reason?: unknown };
       return typeof parsed.chatId === 'string' && parsed.chatId.trim().length > 0
-        ? parsed.chatId.trim()
+        ? {
+            chatId: parsed.chatId.trim(),
+            reason: parseChatContextInvalidationReason(parsed.reason),
+          }
         : null;
     } catch {
       return null;
@@ -2969,6 +3027,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   private async patchChatContextInRedis(
     chatId: string,
     patch: (current: ChatContext) => ChatContext,
+    reason: ChatContextInvalidationReason = 'admin_list_changed',
   ): Promise<void> {
     const cacheKey = ChatContextCacheService.cacheKey(chatId);
     for (
@@ -3006,10 +3065,10 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
         expectedRevision,
         JSON.stringify(next),
         CHAT_CONTEXT_INVALIDATION_CHANNEL,
-        JSON.stringify({ chatId }),
+        JSON.stringify({ chatId, reason }),
       );
       if (Number(committed) === 1) {
-        this.applyLocalInvalidation(chatId);
+        this.applyLocalInvalidation(chatId, reason);
         return;
       }
     }

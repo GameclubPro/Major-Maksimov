@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { monitorEventLoopDelay, PerformanceObserver } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
+import { createChatContextCacheActivity } from '../chat-context/chat-context-cache-metrics';
 import { RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 import {
   sanitizeStorageRuntimeSnapshot,
@@ -77,6 +78,12 @@ function deleteDueSweepSnapshot() {
     handoffAcknowledgedCount: 1,
     handoffErrorCount: 1,
     handoffInsertionUnknownCount: 1,
+    handoffOutcomes: {
+      insertedCount: 0,
+      existingCount: 0,
+      reusedCount: 0,
+      observationErrorCount: 0,
+    },
     stages: Object.fromEntries(
       STORAGE_DELETE_DUE_SWEEP_STAGES.map((stage) => [
         stage,
@@ -134,6 +141,16 @@ describe('bounded storage-runtime metrics', () => {
       expiredEvictions: 0,
       invalidations: 0,
       sweepInspected: 0,
+      activity: {
+        ...createChatContextCacheActivity(),
+        redisHits: 7,
+        invalidationsByReason: {
+          ...createChatContextCacheActivity().invalidationsByReason,
+          access_denied: { events: 2, evictedEntries: 1 },
+          'private-reason-fixture': { events: 9, evictedEntries: 9 },
+        },
+        chatId: 'private-activity-fixture',
+      },
       payload: 'private-content-fixture',
       chatId: 'private-id-fixture',
     }));
@@ -160,7 +177,51 @@ describe('bounded storage-runtime metrics', () => {
     const snapshot = JSON.parse(encoded);
     expect(snapshot.counters.deleteLeaseChecks).toBe(1);
     expect(snapshot.chatContextCache.entries).toBe(2);
+    expect(snapshot.chatContextCache.activity.redisHits).toBe(7);
+    expect(snapshot.chatContextCache.activity.invalidationsByReason.access_denied).toEqual({
+      events: 2,
+      evictedEntries: 1,
+    });
     expect(snapshot.vkPersistence.durationBuckets.under100Ms).toBe(1);
+  });
+  it('keeps older cache reports readable and exposes invalid attribution as missing coverage', () => {
+    const report = metrics.getLocalSnapshot()!;
+    const cache = {
+      entries: 0,
+      estimatedBytes: 0,
+      maxEntries: 1,
+      maxBytes: 1024,
+      maxEntryBytes: 1024,
+      hits: 0,
+      misses: 0,
+      writes: 0,
+      oversizedSkips: 0,
+      capacityEvictions: 0,
+      expiredEvictions: 0,
+      invalidations: 0,
+      sweepInspected: 0,
+    };
+    expect(sanitizeStorageRuntimeSnapshot({ ...report, chatContextCache: cache })).toMatchObject({
+      chatContextCache: { ...cache, activity: null },
+    });
+    for (const activity of [
+      null,
+      {},
+      { ...createChatContextCacheActivity(), sourceLoads: -1 },
+      { ...createChatContextCacheActivity(), redisHits: 0.5 },
+      { ...createChatContextCacheActivity(), invalidationsByReason: {} },
+      {
+        ...createChatContextCacheActivity(),
+        invalidationsByReason: {
+          ...createChatContextCacheActivity().invalidationsByReason,
+          explicit: { events: 1, evictedEntries: 2 },
+        },
+      },
+    ]) {
+      expect(
+        sanitizeStorageRuntimeSnapshot({ ...report, chatContextCache: { ...cache, activity } }),
+      ).toMatchObject({ chatContextCache: { ...cache, activity: null } });
+    }
   });
   it('coalesces slow reporting without queuing reports or affecting work', async () => {
     let resolve!: (value: string) => void;
@@ -406,6 +467,20 @@ describe('bounded storage-runtime metrics', () => {
   it('keeps invalid or failing due-sweep measurements from discarding the existing report', () => {
     const valid = metrics.getLocalSnapshot()!;
     const fixture = deleteDueSweepSnapshot();
+    const legacyFixture: Partial<typeof fixture> = { ...fixture };
+    delete legacyFixture.handoffOutcomes;
+    expect(
+      sanitizeStorageRuntimeSnapshot({ ...valid, deleteDueSweep: legacyFixture }),
+    ).toMatchObject({ deleteDueSweep: { handoffOutcomes: null, handoffInsertionUnknownCount: 1 } });
+    expect(
+      sanitizeStorageRuntimeSnapshot({
+        ...valid,
+        deleteDueSweep: {
+          ...fixture,
+          handoffOutcomes: { ...fixture.handoffOutcomes, insertedCount: -1 },
+        },
+      }),
+    ).toMatchObject({ deleteDueSweep: { handoffOutcomes: null, handoffAcknowledgedCount: 1 } });
     for (const value of [-1, Infinity, NaN, '1', undefined])
       expect(
         sanitizeStorageRuntimeSnapshot({
@@ -449,6 +524,7 @@ describe('bounded storage-runtime metrics', () => {
       expiredEvictions: 1,
       invalidations: 1,
       sweepInspected: 1,
+      activity: createChatContextCacheActivity(),
     }));
     metrics.registerVkPersistenceSnapshot(() => ({
       batches: 1,

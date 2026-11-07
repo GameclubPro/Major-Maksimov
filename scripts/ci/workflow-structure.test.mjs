@@ -312,7 +312,7 @@ test('keeps the functional API lane separate from the median commercial benchmar
   assert.match(benchmark, /npm run test:api:commercial-benchmark:ci/u);
 });
 
-test('requires duplicate, interval, Publisher, OCR, retention and workstation Redis flows in the blocking API lane', () => {
+test('requires duplicate, DELETE handoff, interval, Publisher, OCR, retention and workstation Redis flows in the blocking API lane', () => {
   const api = jobBody('api', 'postgres-races');
   assert.match(api, /redis:\s*image: redis:7-alpine/u);
   assert.match(api, /127\.0\.0\.1:6379:6379/u);
@@ -320,7 +320,7 @@ test('requires duplicate, interval, Publisher, OCR, retention and workstation Re
   assert.match(api, /MAXIM_TEST_REDIS_URL: redis:\/\/127\.0\.0\.1:6379/u);
   assert.match(
     api,
-    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
+    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|moderation-delete-intent-handoff\.redis-integration\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
   );
   assert.doesNotMatch(api, /continue-on-error/u);
   const redis = parse(workflow).jobs.api.steps.find((step) => step.env?.MAXIM_TEST_REDIS_URL);

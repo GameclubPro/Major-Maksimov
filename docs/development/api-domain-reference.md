@@ -169,6 +169,7 @@ Statistics exchange does not grant advertising or shop authority.
 - Managed broadcast/autopost MAX calls use `MAX_API_SOURCE_TAGS.MANAGED_BROADCAST`. User sends/tests are `interactive`. The final authorized, exact-route PUBLIK scheduled SEND also uses interactive transport admission; its health accounting remains background. Scheduled preparation, uploads and optional receipt URL reads keep their original background options and governor decisions. Other scheduled/startup delivery remains background.
 - Publication `NOW` is user-triggered even when recovered by the action poller: materialize it ahead of background work and dispatch through the immediate lane.
 - Keep DB-only publication rollups outside governor pauses; ambiguous sends require manual review.
+- Publisher blocker cleanup locks the exact envelope profile/status/timestamp/token with `FOR NO KEY UPDATE` before occurrence and recipient writes. A lease assertion must preserve the envelope heap and `updatedAt`; actual lease renewals and state changes retain their normal writes.
 - Publisher bot snapshots remain valid until explicit loss of access. Connection roster work reuses
   the confirmed exact-bot SQL proof and retries proof supersession. Retired scheduled bot/maintenance
   jobs drain without MAX calls; publication-demand work retains its guarded coordinator lanes.

@@ -353,6 +353,7 @@ function createPublicationPrismaSendFailureHarness(
   const recoveryDeliveryUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
   const recoveryDeliveryCount = jest.fn().mockResolvedValue(0);
   const recoveryTx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ id: row.id }]),
     $executeRaw: jest.fn().mockResolvedValue(0),
     managedBroadcast: { updateMany: recoveryBroadcastUpdateMany },
     managedBroadcastDelivery: {
@@ -4089,6 +4090,7 @@ describe('AdminManagedBroadcastRuntime publication execution guard', () => {
       },
     ]);
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: row.id }]),
       managedBroadcast: { updateMany: managedBroadcastUpdateMany },
       managedBroadcastDelivery: { updateMany: deliveryUpdateMany },
       $executeRaw: jest.fn().mockResolvedValue(1),

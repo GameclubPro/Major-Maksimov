@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { performance } from 'node:perf_hooks';
+import { Job, type MinimalQueue, type Queue } from 'bullmq';
+import type { ModerationDeleteIntentJob } from './moderation-delete-intent.queue';
 import type { DeleteIntentLeaseCheck } from './moderation-delete-intent-lease';
 import { MaxApiInternalRateLimitError, type MaxClientService } from '../max/max-client.service';
 import { MaxModerationApiBudgetError } from '../max/max-moderation-api-budget';
@@ -67,6 +69,27 @@ import {
   prepareDeleteAuthority,
   prepareDeleteAuthorityRecheck,
 } from './moderation-delete-authority-preparation';
+
+// FLAG: Real Job receipts satisfy the producer contract; this inert queue has no Redis connection.
+// Tests that need Redis behavior use the separate native handoff suite.
+const unitJobQueue: MinimalQueue = {
+  name: 'unit-delete-intents',
+  qualifiedName: 'unit:unit-delete-intents',
+  opts: { connection: {} },
+  keys: {},
+  closing: undefined,
+  client: new Promise<never>(() => undefined),
+  databaseType: 'redis',
+  redisVersion: '7.0.0',
+  toKey: (kind) => `unit:unit-delete-intents:${kind}`,
+  emit: () => false,
+  on: () => unitJobQueue,
+  removeListener: () => unitJobQueue,
+  waitUntilReady: async () => {
+    throw new Error('Unit Job receipts must not access Redis');
+  },
+  trace: async (_kind, _operation, _destination, callback) => callback(),
+};
 
 function preparedGuardFixture<Args extends unknown[], Result>(
   run: (...args: Args) => Promise<Result>,
@@ -381,7 +404,20 @@ function createService(
       ...args,
     ),
   );
-  const queue = { add: jest.fn().mockResolvedValue(undefined) };
+  const queue = {
+    add: jest
+      .fn<
+        ReturnType<Queue<ModerationDeleteIntentJob>['add']>,
+        Parameters<Queue<ModerationDeleteIntentJob>['add']>
+      >()
+      .mockImplementation(async (name, data, opts) => new Job(unitJobQueue, name, data, opts)),
+    getJob: jest
+      .fn<
+        ReturnType<Queue<ModerationDeleteIntentJob>['getJob']>,
+        Parameters<Queue<ModerationDeleteIntentJob>['getJob']>
+      >()
+      .mockResolvedValue(undefined),
+  } satisfies Pick<Queue<ModerationDeleteIntentJob>, 'add' | 'getJob'>;
   // Unit fixtures keep intent-load/finalization responses separate from the
   // new lease SELECT. Real no-op/update/expiry semantics run against PostgreSQL.
   const leaseDatabase = {
@@ -3310,9 +3346,9 @@ describe('ModerationDeleteIntentService', () => {
         { MODERATION_DELETE_INTENT_MODE: 'off', COMMERCIAL_OCR_ROLLOUT_MODE: mode },
         { $transaction: transaction, $queryRaw: rootQueryRaw },
       );
-      queue.add.mockImplementation(async () => {
+      queue.add.mockImplementation(async (name, data, opts) => {
         order.push('enqueue');
-        return undefined;
+        return new Job(unitJobQueue, name, data, opts);
       });
 
       await expect(
@@ -11759,6 +11795,52 @@ describe('ModerationDeleteIntentService', () => {
     );
   });
 
+  it('reuses an existing deterministic due job without adding or changing its priority', async () => {
+    const { service, queue } = createService(
+      {},
+      { $queryRaw: jest.fn().mockResolvedValue([{ id: 'private-existing-intent' }]) },
+    );
+    queue.getJob.mockResolvedValueOnce({
+      id: 'mdi-private-existing-intent',
+      data: { intentId: 'private-existing-intent' },
+      opts: { priority: 1 },
+    } as never);
+
+    await expect(service.sweepDueIntents()).resolves.toBe(1);
+
+    expect(queue.add).not.toHaveBeenCalled();
+    expect(service.getDueSweepRuntimeSnapshot()).toMatchObject({
+      handoffAttemptedCount: 1,
+      handoffAcknowledgedCount: 1,
+      handoffInsertionUnknownCount: 0,
+      handoffOutcomes: {
+        insertedCount: 0,
+        existingCount: 1,
+        reusedCount: 1,
+        observationErrorCount: 0,
+      },
+    });
+    expect(JSON.stringify(service.getDueSweepRuntimeSnapshot())).not.toContain('private-');
+  });
+
+  it('keeps an acknowledged handoff when its insertion observation fails', async () => {
+    const { service, queue } = createService(
+      {},
+      { $queryRaw: jest.fn().mockResolvedValue([{ id: 'intent-1' }]) },
+    );
+    queue.getJob.mockRejectedValue(new Error('redis read unavailable'));
+
+    await expect(service.sweepDueIntents()).resolves.toBe(1);
+
+    expect(queue.add).toHaveBeenCalledTimes(1);
+    expect(service.getDueSweepRuntimeSnapshot()).toMatchObject({
+      handoffAcknowledgedCount: 1,
+      handoffErrorCount: 0,
+      handoffInsertionUnknownCount: 1,
+      handoffOutcomes: { insertedCount: 0, existingCount: 0, observationErrorCount: 2 },
+    });
+  });
+
   it('records expiry failure and propagates it before selection or Redis handoff', async () => {
     const error = new Error('private-expiry-failure');
     const queryRaw = jest.fn();
@@ -12057,7 +12139,7 @@ describe('ModerationDeleteIntentService', () => {
     expect(query.values).toContain(100);
     expect(queue.add).toHaveBeenCalledWith(
       'execute-moderation-delete-intent',
-      { intentId: 'baseline-intent-1' },
+      { intentId: 'baseline-intent-1', handoffToken: expect.any(String) },
       expect.objectContaining({ priority: 10 }),
     );
   });
@@ -12773,8 +12855,14 @@ describe('ModerationDeleteIntentService', () => {
       {},
       { $queryRaw: rootQueryRaw, $transaction: transaction },
     );
-    const changePriority = jest.fn().mockResolvedValue(undefined);
-    queue.add.mockResolvedValueOnce({ opts: { priority: 10 }, changePriority });
+    const existingJob = new Job<ModerationDeleteIntentJob>(
+      unitJobQueue,
+      'execute-moderation-delete-intent',
+      { intentId: 'intent-1' },
+      { priority: 10 },
+    );
+    const changePriority = jest.spyOn(existingJob, 'changePriority').mockResolvedValue(undefined);
+    queue.add.mockResolvedValueOnce(existingJob);
 
     const expectedUpdatedAt = new Date('2026-07-16T12:00:00.000Z');
     const result = await service.retryTerminalIntent(
