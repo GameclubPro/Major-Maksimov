@@ -2,6 +2,7 @@ import {
   ChatEntityType,
   ManagedBroadcastDeliveryStatus,
   PublicationDispatchProfile,
+  type Prisma,
 } from '../prisma/prisma-client';
 import { AdminManagedBroadcastRuntime } from './admin-managed-broadcast-runtime';
 import { ensureManagedBroadcastActorAccessBeforeExecution } from './admin-managed-broadcast-authorization';
@@ -314,9 +315,11 @@ describe('AdminManagedBroadcastRuntime publication boundary', () => {
 
   it('clears only the exact Publisher actor-access blocker after access returns', async () => {
     const broadcastUpdate = jest.fn().mockResolvedValue({ count: 1 });
+    const leaseQuery = jest.fn(async (_query: Prisma.Sql) => [{ id: 'broadcast-publik' }]);
     const occurrenceUpdate = jest.fn().mockResolvedValue({ count: 1 });
     const deliveryUpdate = jest.fn().mockResolvedValue({ count: 2 });
     const tx = {
+      $queryRaw: leaseQuery,
       managedBroadcast: { updateMany: broadcastUpdate },
       $executeRaw: occurrenceUpdate,
       publicationOccurrence: { updateMany: occurrenceUpdate },
@@ -347,15 +350,14 @@ describe('AdminManagedBroadcastRuntime publication boundary', () => {
       }),
     ).resolves.toEqual({ ready: true });
 
-    expect(broadcastUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          lockedAt: new Date('2026-08-27T10:00:00.000Z'),
-          lockToken: 'lease-1',
-        }),
-        data: { lockedAt: new Date('2026-08-27T10:00:00.000Z') },
-      }),
-    );
+    expect(leaseQuery).toHaveBeenCalledTimes(1);
+    expect(leaseQuery.mock.calls[0]![0].values).toEqual([
+      'broadcast-publik',
+      new Date('2026-08-27T10:00:00.000Z'),
+      'lease-1',
+    ]);
+    expect(leaseQuery.mock.calls[0]![0].text).toContain('FOR NO KEY UPDATE');
+    expect(broadcastUpdate).not.toHaveBeenCalled();
     const blockerWrite = occurrenceUpdate.mock.calls[0][0];
     expect(blockerWrite.values).toEqual([
       'PUBLISHER_EXPLICIT_RETRY',
@@ -449,9 +451,11 @@ describe('AdminManagedBroadcastRuntime publication boundary', () => {
 
   it('does not clear recovered actor blockers after its cleanup lease is lost', async () => {
     const broadcastUpdate = jest.fn().mockResolvedValue({ count: 0 });
+    const leaseQuery = jest.fn(async (_query: Prisma.Sql) => [] as Array<{ id: string }>);
     const occurrenceUpdate = jest.fn();
     const deliveryUpdate = jest.fn();
     const tx = {
+      $queryRaw: leaseQuery,
       managedBroadcast: { updateMany: broadcastUpdate },
       publicationOccurrence: { updateMany: occurrenceUpdate },
       managedBroadcastDelivery: { updateMany: deliveryUpdate },
@@ -484,7 +488,13 @@ describe('AdminManagedBroadcastRuntime publication boundary', () => {
       }),
     ).resolves.toEqual({ ready: false, leaseLost: true, retryAt: null });
 
-    expect(broadcastUpdate).toHaveBeenCalledTimes(1);
+    expect(leaseQuery).toHaveBeenCalledTimes(1);
+    expect(leaseQuery.mock.calls[0]![0].values).toEqual([
+      'broadcast-publik',
+      new Date('2026-08-27T10:00:00.000Z'),
+      'stale-cleanup-lease',
+    ]);
+    expect(broadcastUpdate).not.toHaveBeenCalled();
     expect(occurrenceUpdate).not.toHaveBeenCalled();
     expect(deliveryUpdate).not.toHaveBeenCalled();
   });
@@ -582,6 +592,7 @@ describe('AdminManagedBroadcastRuntime publication boundary', () => {
     const occurrenceUpdate = jest.fn().mockReturnValue(occurrenceGate);
     const deliveryUpdate = jest.fn().mockResolvedValue({ count: 1 });
     const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'broadcast-publik' }]),
       managedBroadcast: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       $executeRaw: occurrenceUpdate,
       publicationOccurrence: { updateMany: occurrenceUpdate },

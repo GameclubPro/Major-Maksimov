@@ -108,6 +108,7 @@ import { findManagedHandshakeAutoDeleteOwner } from './managed-handshake-auto-de
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moderation.service.support';
 import {
   MODERATION_DELETE_INTENT_QUEUE,
+  handoffModerationDeleteSweepJob,
   type ModerationDeleteIntentJob,
 } from './moderation-delete-intent.queue';
 import {
@@ -794,6 +795,12 @@ export class ModerationDeleteIntentService {
     handoffAcknowledgedCount: 0,
     handoffErrorCount: 0,
     handoffInsertionUnknownCount: 0,
+    handoffOutcomes: {
+      insertedCount: 0,
+      existingCount: 0,
+      reusedCount: 0,
+      observationErrorCount: 0,
+    },
     stages: {
       expire: createDueSweepStageCounters(),
       select: createDueSweepStageCounters(),
@@ -3451,15 +3458,29 @@ export class ModerationDeleteIntentService {
             dueIntents.map(async (intent) => {
               metrics.handoffAttemptedCount = addDueSweepCount(metrics.handoffAttemptedCount);
               try {
-                await this.enqueueIntentJob(intent.id);
+                const handoff = await handoffModerationDeleteSweepJob(
+                  this.queue,
+                  intent.id,
+                  DELETE_QUEUE_PRIORITY_BACKGROUND,
+                );
                 acknowledged++;
                 metrics.handoffAcknowledgedCount = addDueSweepCount(
                   metrics.handoffAcknowledgedCount,
                 );
-                // FLAG: BullMQ add acknowledges both new and duplicate deterministic jobs.
-                // A receipt is not proof of insertion, pending work, or a completed delete.
-                metrics.handoffInsertionUnknownCount = addDueSweepCount(
-                  metrics.handoffInsertionUnknownCount,
+                const outcomes = metrics.handoffOutcomes;
+                if (handoff.insertion === 'unknown') {
+                  metrics.handoffInsertionUnknownCount = addDueSweepCount(
+                    metrics.handoffInsertionUnknownCount,
+                  );
+                } else if (handoff.insertion === 'inserted') {
+                  outcomes.insertedCount = addDueSweepCount(outcomes.insertedCount);
+                } else {
+                  outcomes.existingCount = addDueSweepCount(outcomes.existingCount);
+                }
+                if (handoff.reused) outcomes.reusedCount = addDueSweepCount(outcomes.reusedCount);
+                outcomes.observationErrorCount = addDueSweepCount(
+                  outcomes.observationErrorCount,
+                  handoff.observationErrors,
                 );
               } catch (error: unknown) {
                 metrics.handoffErrorCount = addDueSweepCount(metrics.handoffErrorCount);
@@ -3475,8 +3496,8 @@ export class ModerationDeleteIntentService {
         (count) => count,
       );
       metrics.completed = addDueSweepCount(metrics.completed);
-      // FLAG: Preserve the historical selected-row return contract. Actual Redis
-      // acknowledgements/errors are independent scalars; failed handoffs remain DB-retryable.
+      // FLAG: Preserve the historical selected-row return contract. Observed existing
+      // jobs/add acknowledgements do not prove deletion; failed handoffs remain DB-retryable.
       return dueIntents.length;
     } catch (error: unknown) {
       metrics.errors = addDueSweepCount(metrics.errors);
@@ -3487,6 +3508,7 @@ export class ModerationDeleteIntentService {
   getDueSweepRuntimeSnapshot() {
     return {
       ...this.dueSweepMetrics,
+      handoffOutcomes: { ...this.dueSweepMetrics.handoffOutcomes },
       stages: Object.fromEntries(
         STORAGE_DELETE_DUE_SWEEP_STAGES.map((stage) => {
           const counters = this.dueSweepMetrics.stages[stage];

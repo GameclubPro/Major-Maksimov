@@ -1329,6 +1329,229 @@ integration('Publisher bounded recipient admission on PostgreSQL', () => {
     expect(remoteSend).not.toHaveBeenCalled();
   });
 
+  it.each(['recipient', 'runtime'] as const)(
+    'checks the %s cleanup lease without rewriting the envelope heap or updatedAt',
+    async (cleanup) => {
+      await fixture(1);
+      const lockedAt = new Date();
+      const row = await db.managedBroadcast.update({
+        where: { id: broadcastId },
+        data: {
+          lockedAt,
+          lockToken: 'lease-check-owner',
+          updatedAt: new Date(lockedAt.getTime() - 60_000),
+        },
+      });
+      const readHeap = () => db.$queryRaw`
+        SELECT xmin::text, ctid::text, updated_at
+        FROM managed_broadcasts WHERE id = ${broadcastId}
+      `;
+      const before = await readHeap();
+      const dispatch = runtime['publisherDispatch'];
+      const lease = { lockedAt, lockToken: 'lease-check-owner' };
+      const result =
+        cleanup === 'recipient'
+          ? await dispatch.clearResolvedRecipientBlocker(row, lease)
+          : await dispatch.ensureRuntimeBoundary(row, 1, lease);
+
+      expect(result).toEqual(cleanup === 'recipient' ? true : { ready: true });
+      expect(await readHeap()).toEqual(before);
+      expect(await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } })).toEqual(
+        row,
+      );
+      expect(remoteSend).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['recipient', 'runtime'] as const)(
+    'rechecks the %s cleanup lease after waiting for a competing owner',
+    async (cleanup) => {
+      await fixture(1);
+      const lockedAt = new Date();
+      const row = await db.managedBroadcast.update({
+        where: { id: broadcastId },
+        data: { lockedAt, lockToken: 'lease-check-before-takeover' },
+      });
+      const occurrenceBefore = await db.publicationOccurrence.findUniqueOrThrow({
+        where: { id: occurrenceId },
+      });
+      const deliveriesBefore = await db.managedBroadcastDelivery.findMany({
+        where: { broadcastId },
+      });
+      const entered = projectionGate();
+      const release = projectionGate();
+      let blockingPid = 0;
+      const takeover = competingDb.$transaction(async (tx) => {
+        const [owner] = await tx.$queryRaw<Array<{ pid: number }>>`
+          SELECT pg_backend_pid() AS pid FROM managed_broadcasts
+          WHERE id = ${broadcastId} FOR NO KEY UPDATE
+        `;
+        blockingPid = owner!.pid;
+        entered.resolve();
+        await release.promise;
+        return tx.managedBroadcast.update({
+          where: { id: broadcastId },
+          data: { lockedAt: new Date(lockedAt.getTime() + 1), lockToken: 'lease-check-winner' },
+        });
+      });
+      await entered.promise;
+      const dispatch = runtime['publisherDispatch'];
+      const lease = { lockedAt, lockToken: 'lease-check-before-takeover' };
+      const pending =
+        cleanup === 'recipient'
+          ? dispatch.clearResolvedRecipientBlocker(row, lease)
+          : dispatch.ensureRuntimeBoundary(row, 1, lease);
+      try {
+        const deadline = Date.now() + 3_000;
+        let observedWait = false;
+        while (Date.now() < deadline && !observedWait) {
+          const [sample] = await db.$queryRaw<Array<{ blocked: boolean }>>`
+            SELECT EXISTS (
+              SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock'
+                AND ${blockingPid} = ANY(pg_blocking_pids(pid))
+                AND query LIKE '%storage:publisher_envelope_lease_check%'
+            ) AS blocked
+          `;
+          observedWait = sample!.blocked;
+          if (!observedWait) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(observedWait).toBe(true);
+        release.resolve();
+        const winner = await takeover;
+        expect(await pending).toEqual(
+          cleanup === 'recipient' ? false : { ready: false, leaseLost: true, retryAt: null },
+        );
+        expect(await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } })).toEqual(
+          winner,
+        );
+        expect(
+          await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+        ).toEqual(occurrenceBefore);
+        expect(await db.managedBroadcastDelivery.findMany({ where: { broadcastId } })).toEqual(
+          deliveriesBefore,
+        );
+        expect(remoteSend).not.toHaveBeenCalled();
+      } finally {
+        release.resolve();
+        await Promise.allSettled([takeover, pending]);
+      }
+    },
+  );
+
+  it('keeps the envelope lease probe bounded beside retained broadcast history', async () => {
+    await fixture(1);
+    const slotIntervalMs = 2 * 3_600_000;
+    const latestSlotMs = Math.floor(Date.now() / slotIntervalMs) * slotIntervalMs;
+    const history = await db.publication.create({
+      data: {
+        actorUserId: actorId,
+        requestId: randomUUID(),
+        lifecycle: 'CANCELED',
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        schedule: {
+          create: {
+            mode: 'RECURRENCE',
+            status: 'CANCELED',
+            timezone: 'UTC',
+            rule: {
+              mode: 'recurrence',
+              timezone: 'UTC',
+              frequency: 'daily',
+              interval: 1,
+              weekdays: [],
+              times: Array.from(
+                { length: 12 },
+                (_, index) => `${String(index * 2).padStart(2, '0')}:00`,
+              ),
+              startsAt: new Date(latestSlotMs - 4_096 * slotIntervalMs).toISOString(),
+              endsAt: new Date(latestSlotMs).toISOString(),
+              maxOccurrences: null,
+              replaceConflicts: false,
+            },
+          },
+        },
+        contentRevisions: {
+          create: { revision: 1, text: 'Synthetic retained lease-probe history' },
+        },
+      },
+      include: { schedule: true, contentRevisions: true },
+    });
+    ownedPublicationIds.push(history.id);
+    const historySlots = Array.from({ length: 4_096 }, (_, index) => ({
+      id: randomUUID(),
+      scheduledAt: new Date(latestSlotMs - (index + 1) * slotIntervalMs),
+    }));
+    await db.publicationOccurrence.createMany({
+      data: historySlots.map((slot) => ({
+        ...slot,
+        publicationId: history.id,
+        scheduleId: history.schedule!.id,
+        scheduleRevision: 1,
+        contentRevisionId: history.contentRevisions[0]!.id,
+        status: 'CANCELED' as const,
+        dispatchProfile: 'PUBLIK_V1' as const,
+        requiredBotId: botId,
+      })),
+    });
+    await db.managedBroadcast.createMany({
+      data: historySlots.map((slot) => ({
+        sourceChatId: chatIds[0]!,
+        actorUserId: actorId,
+        text: 'Synthetic retained lease-probe history',
+        targetChatIds: [],
+        buttons: [],
+        status: 'CANCELED' as const,
+        publicationOccurrenceId: slot.id,
+        publicationContentRevisionId: history.contentRevisions[0]!.id,
+        dispatchProfile: 'PUBLIK_V1' as const,
+        requiredBotId: botId,
+      })),
+    });
+    await db.$executeRaw`ANALYZE managed_broadcasts`;
+    const lockedAt = new Date();
+    await db.managedBroadcast.update({
+      where: { id: broadcastId },
+      data: { lockedAt, lockToken: 'lease-check-plan' },
+    });
+    const query = jest.spyOn(db, '$queryRaw');
+    let statement: Prisma.Sql;
+    try {
+      expect(
+        await runtime['publisherDispatch']['lockOwnedBroadcastLease'](db, broadcastId, {
+          lockedAt,
+          lockToken: 'lease-check-plan',
+        }),
+      ).toBe(true);
+      statement = query.mock.calls[0]![0] as Prisma.Sql;
+    } finally {
+      query.mockRestore();
+    }
+    type PlanNode = {
+      'Node Type': string;
+      'Actual Rows': number;
+      'Shared Hit Blocks'?: number;
+      'Shared Read Blocks'?: number;
+      Plans?: PlanNode[];
+    };
+    const [result] = await db.$queryRawUnsafe<Array<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }>>(
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`,
+      ...statement.values,
+    );
+    const plan = result!['QUERY PLAN'][0]!.Plan;
+    const nodes: PlanNode[] = [];
+    const walk = (node: PlanNode) => {
+      nodes.push(node);
+      for (const child of node.Plans ?? []) walk(child);
+    };
+    walk(plan);
+    expect(nodes.some((node) => node['Node Type'] === 'Index Scan')).toBe(true);
+    expect(nodes.some((node) => node['Node Type'] === 'Seq Scan')).toBe(false);
+    expect(plan['Actual Rows']).toBe(1);
+    expect((plan['Shared Hit Blocks'] ?? 0) + (plan['Shared Read Blocks'] ?? 0)).toBeLessThan(20);
+  });
+
   it('retains native D15 receipts and E4 state when the recipient finalizer lease is lost', async () => {
     await fixture(2);
     const lockedAt = new Date();

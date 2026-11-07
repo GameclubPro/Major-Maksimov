@@ -16,6 +16,99 @@ const isLocalRedisUrl = (() => {
 const describeLocalRedis = isLocalRedisUrl ? describe : describe.skip;
 
 describeLocalRedis('ChatContextCacheService Redis integration', () => {
+  it('publishes a changed title but reuses the same committed title without Redis writes', async () => {
+    const chatId = `title-reuse-${randomUUID()}`;
+    const config = { getOrThrow: () => redisIntegrationUrl };
+    const prisma = { chat: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } };
+    const reader = new ChatContextCacheService(prisma as never, config as never, {} as never);
+    const writer = new ChatContextCacheService(prisma as never, config as never, {} as never);
+    const inspector = new Redis(redisIntegrationUrl);
+    const observer = new Redis(redisIntegrationUrl);
+    const key = ChatContextCacheService.cacheKey(chatId);
+    const cachedRevisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
+    const revisionKey = ChatContextCacheService.chatContextRevisionKey(chatId);
+    const channel = 'chat:context:invalidate:v1';
+    const messages: string[] = [];
+    let finishChanged = () => {};
+    let changedTimeout: NodeJS.Timeout | undefined;
+    observer.on('message', (_, payload) => {
+      if ((JSON.parse(payload) as { chatId?: string }).chatId !== chatId) return;
+      messages.push(payload);
+      finishChanged();
+    });
+    const readerRedis = (
+      reader as unknown as {
+        redis: {
+          eval: (...args: unknown[]) => Promise<unknown>;
+          mget: (...keys: string[]) => Promise<Array<string | null>>;
+        };
+      }
+    ).redis;
+    try {
+      await inspector.set(
+        key,
+        JSON.stringify({
+          chatId,
+          title: 'Before rename',
+          settings: { linkRulesPolicy: null },
+          domainAllowlist: [],
+          adminUserIds: ['admin-1'],
+          rulesPublishedUrl: null,
+          rulesPublishedMessageId: null,
+        }),
+        'EX',
+        60,
+      );
+      await inspector.set(cachedRevisionKey, '0', 'EX', 60);
+      await reader.getChatContext(chatId);
+      await observer.subscribe(channel);
+      const changed = new Promise<void>((resolve, reject) => {
+        changedTimeout = setTimeout(() => reject(new Error('Title invalidation missing')), 2_000);
+        finishChanged = () => {
+          clearTimeout(changedTimeout);
+          resolve();
+        };
+      });
+
+      expect((await writer.getChatContext(chatId, 'After rename')).title).toBe('After rename');
+      await changed;
+      expect(messages.map((payload) => JSON.parse(payload))).toEqual([
+        { chatId, reason: 'title_changed' },
+      ]);
+      expect(await inspector.get(revisionKey)).toBe('1');
+      await inspector.pexpire(key, 20_000);
+      const ttlBefore = await inspector.pttl(key);
+      const evaluate = jest.spyOn(readerRedis, 'eval');
+      const read = readerRedis.mget.bind(readerRedis);
+      let finishRead!: () => void;
+      const patchRead = new Promise<void>((resolve) => {
+        finishRead = resolve;
+      });
+      readerRedis.mget = async (...keys) => {
+        const result = await read(...keys);
+        finishRead();
+        return result;
+      };
+
+      expect((await reader.getChatContext(chatId, 'After rename')).title).toBe('After rename');
+      await patchRead;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(await inspector.get(revisionKey)).toBe('1');
+      expect(await inspector.pttl(key)).toBeLessThanOrEqual(ttlBefore);
+      expect(messages).toHaveLength(1);
+      expect(reader.getLocalCacheSnapshot()).toMatchObject({ entries: 1, invalidations: 0 });
+    } finally {
+      clearTimeout(changedTimeout);
+      await inspector.del(key, cachedRevisionKey, revisionKey);
+      await observer.quit();
+      await inspector.quit();
+      await reader.onModuleDestroy();
+      await writer.onModuleDestroy();
+    }
+  });
+
   it.each([1, 999])(
     'reloads a pre-policy Redis body and preserves raw SQL policy version %s',
     async (version) => {

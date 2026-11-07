@@ -7,6 +7,10 @@ import {
   type IntervalHistogram,
 } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
+import {
+  CHAT_CONTEXT_ACTIVITY_FIELDS,
+  CHAT_CONTEXT_INVALIDATION_REASONS,
+} from '../chat-context/chat-context-cache-metrics';
 import { isRuntimeServiceName, RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 
 export const STORAGE_RUNTIME_METRICS_PREFIX = 'runtime:storage-cost:v1:';
@@ -43,6 +47,12 @@ const DELETE_DUE_SWEEP_STAGE_FIELDS = [
   ...DELETE_RECONCILER_PHASE_FIELDS,
   'totalDurationMs',
   'maxDurationMs',
+] as const;
+const DELETE_HANDOFF_OUTCOME_FIELDS = [
+  'insertedCount',
+  'existingCount',
+  'reusedCount',
+  'observationErrorCount',
 ] as const;
 const PROCESS_MEMORY_FIELDS = [
   'rssBytes',
@@ -117,6 +127,26 @@ function checkedNumbers(value: unknown, fields: readonly string[]): Record<strin
   return Object.fromEntries(fields.map((field) => [field, source[field] as number]));
 }
 
+function sanitizeChatContextActivity(value: unknown) {
+  const counters = checkedNumbers(value, CHAT_CONTEXT_ACTIVITY_FIELDS);
+  if (!counters) return null;
+  const source = value as Record<string, unknown>;
+  if (
+    !source.invalidationsByReason ||
+    typeof source.invalidationsByReason !== 'object' ||
+    Array.isArray(source.invalidationsByReason)
+  )
+    return null;
+  const reasons = source.invalidationsByReason as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  for (const reason of CHAT_CONTEXT_INVALIDATION_REASONS) {
+    const counts = checkedNumbers(reasons[reason], ['events', 'evictedEntries']);
+    if (!counts || counts.evictedEntries! > counts.events!) return null;
+    sanitized[reason] = counts;
+  }
+  return { ...counters, invalidationsByReason: sanitized };
+}
+
 function sanitizeVkMediaAdmission(value: unknown) {
   const counters = checkedNumbers(value, VK_MEDIA_ADMISSION_FIELDS);
   if (!counters || typeof (value as Record<string, unknown>).stopping !== 'boolean') return null;
@@ -164,9 +194,13 @@ function sanitizeDeleteDueSweepSnapshot(value: unknown) {
     if (!counters || !durationBuckets) return null;
     sanitized[stage] = { ...counters, durationBuckets };
   }
-  // FLAG: Handoff acknowledgements include existing jobs; insertionUnknown is not
-  // a count of new jobs. Stage errors describe whole-stage failures, not per-job errors.
-  return { ...counters, stages: sanitized };
+  // FLAG: Older writers have no outcome attribution. Never turn missing or invalid
+  // observations into zero inserts; acknowledgements alone do not prove new jobs.
+  return {
+    ...counters,
+    handoffOutcomes: checkedNumbers(source.handoffOutcomes, DELETE_HANDOFF_OUTCOME_FIELDS),
+    stages: sanitized,
+  };
 }
 
 function sanitizeProcessPerformance(value: unknown) {
@@ -217,7 +251,16 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
     startedAt: source.startedAt,
     observedAt: source.observedAt,
     counters,
-    chatContextCache: cache,
+    chatContextCache: cache
+      ? {
+          ...cache,
+          // FLAG: Older writers have no attribution. Missing or invalid measurements remain
+          // unavailable; never report inferred zeroes or retain arbitrary invalidation labels.
+          activity: sanitizeChatContextActivity(
+            (source.chatContextCache as Record<string, unknown>).activity,
+          ),
+        }
+      : null,
     deleteReconciler,
     // FLAG: Additive diagnostic fields preserve old reports. Missing or corrupt
     // optional measurements are missing coverage, never inferred healthy zeroes.

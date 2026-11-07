@@ -470,23 +470,7 @@ export class PublisherManagedBroadcastDispatch {
   ): Promise<boolean> {
     if (!row.publicationOccurrenceId) return true;
     return this.context.prisma.$transaction(async (tx) => {
-      const leaseCheck = await tx.managedBroadcast.updateMany({
-        where: {
-          id: row.id,
-          dispatchProfile: PublicationDispatchProfile.PUBLIK_V1,
-          status: {
-            in: [
-              ManagedBroadcastStatus.ACTIVE,
-              ManagedBroadcastStatus.PARTIAL,
-              ManagedBroadcastStatus.FAILED,
-            ],
-          },
-          lockedAt: lease.lockedAt,
-          lockToken: lease.lockToken,
-        },
-        data: { lockedAt: lease.lockedAt },
-      });
-      if (leaseCheck.count !== 1) return false;
+      if (!(await this.lockOwnedBroadcastLease(tx, row.id, lease))) return false;
       await tx.$executeRaw(
         buildClearResolvedPublisherRecipientBlockerQuery(row.publicationOccurrenceId!, new Date()),
       );
@@ -570,25 +554,7 @@ export class PublisherManagedBroadcastDispatch {
     blockerCode: string,
   ): Promise<boolean> {
     return this.context.prisma.$transaction(async (tx) => {
-      const leaseCheck = await tx.managedBroadcast.updateMany({
-        where: {
-          id: row.id,
-          dispatchProfile: PublicationDispatchProfile.PUBLIK_V1,
-          status: {
-            in: [
-              ManagedBroadcastStatus.ACTIVE,
-              ManagedBroadcastStatus.PARTIAL,
-              ManagedBroadcastStatus.FAILED,
-            ],
-          },
-          lockedAt: lease.lockedAt,
-          lockToken: lease.lockToken,
-        },
-        data: { lockedAt: lease.lockedAt },
-      });
-      if (leaseCheck.count !== 1) {
-        return false;
-      }
+      if (!(await this.lockOwnedBroadcastLease(tx, row.id, lease))) return false;
       if (row.publicationOccurrenceId) {
         await this.updateOccurrenceBlocker(
           tx,
@@ -610,6 +576,32 @@ export class PublisherManagedBroadcastDispatch {
       });
       return true;
     });
+  }
+
+  private async lockOwnedBroadcastLease(
+    tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+    broadcastId: string,
+    lease: PublisherBroadcastLease,
+  ): Promise<boolean> {
+    // FLAG: Hold the exact envelope lease before occurrence/delivery writes. The no-key
+    // row lock matches the former non-key UPDATE without rewriting the heap or updatedAt.
+    // The transaction must retain this lock until all dependent cleanup writes finish.
+    const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      /* storage:publisher_envelope_lease_check */
+      SELECT "id"
+      FROM "managed_broadcasts"
+      WHERE "id" = ${broadcastId}
+        AND "dispatch_profile" = 'PUBLIK_V1'::"PublicationDispatchProfile"
+        AND "status" IN (
+          'ACTIVE'::"ManagedBroadcastStatus",
+          'PARTIAL'::"ManagedBroadcastStatus",
+          'FAILED'::"ManagedBroadcastStatus"
+        )
+        AND "locked_at" = ${lease.lockedAt}
+        AND "lock_token" = ${lease.lockToken}
+      FOR NO KEY UPDATE
+    `);
+    return rows.length === 1;
   }
 
   private async deferBlocked(

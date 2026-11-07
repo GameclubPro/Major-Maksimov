@@ -2,17 +2,18 @@ import {
   PublisherDeliveryDeferredError,
   PublisherManagedBroadcastDispatch,
 } from './publisher-managed-broadcast-dispatch';
+import type { Prisma } from '../prisma/prisma-client';
 
 describe('Publisher pre-dispatch claim deferral', () => {
   it('keeps shared blocker cleanup fenced by the exact envelope lease', async () => {
-    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const queryRaw = jest.fn(async (_query: Prisma.Sql) => [] as Array<{ id: string }>);
     const executeRaw = jest.fn();
     const service = new PublisherManagedBroadcastDispatch(
       {
         prisma: {
           $transaction: async (run: (tx: unknown) => unknown) =>
             run({
-              managedBroadcast: { updateMany },
+              $queryRaw: queryRaw,
               $executeRaw: executeRaw,
             }),
         },
@@ -26,16 +27,46 @@ describe('Publisher pre-dispatch claim deferral', () => {
         lease,
       ),
     ).toBe(false);
-    expect(updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: 'broadcast',
-          lockedAt: lease.lockedAt,
-          lockToken: lease.lockToken,
-        }),
-      }),
-    );
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    const query = queryRaw.mock.calls[0]![0];
+    expect(query.values).toEqual(['broadcast', lease.lockedAt, lease.lockToken]);
+    expect(query.text).toContain('"dispatch_profile" = \'PUBLIK_V1\'');
+    for (const status of ['ACTIVE', 'PARTIAL', 'FAILED'])
+      expect(query.text).toContain(`'${status}'::"ManagedBroadcastStatus"`);
+    expect(query.text).toContain('"locked_at" = $2');
+    expect(query.text).toContain('"lock_token" = $3');
+    expect(query.text).toContain('FOR NO KEY UPDATE');
     expect(executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('refuses runtime blocker cleanup after the exact envelope lease is lost', async () => {
+    const queryRaw = jest.fn(async (_query: Prisma.Sql) => [] as Array<{ id: string }>);
+    const executeRaw = jest.fn();
+    const deliveryUpdate = jest.fn();
+    const service = new PublisherManagedBroadcastDispatch(
+      {
+        prisma: {
+          $transaction: async (run: (tx: unknown) => unknown) =>
+            run({
+              $queryRaw: queryRaw,
+              $executeRaw: executeRaw,
+              managedBroadcastDelivery: { updateMany: deliveryUpdate },
+            }),
+        },
+        publisherRuntimeBoundaryService: { assertDispatchEnabled: jest.fn() },
+      } as never,
+      {} as never,
+    );
+    await expect(
+      service.ensureRuntimeBoundary(
+        { id: 'broadcast', publicationOccurrenceId: 'occurrence', requiredBotId: 'publik' },
+        1,
+        { lockedAt: new Date(), lockToken: 'old-lease' },
+      ),
+    ).resolves.toEqual({ ready: false, leaseLost: true, retryAt: null });
+    expect(queryRaw).toHaveBeenCalledTimes(1);
+    expect(executeRaw).not.toHaveBeenCalled();
+    expect(deliveryUpdate).not.toHaveBeenCalled();
   });
 
   it('rechecks author authority at the final send boundary after a valid bot route', async () => {

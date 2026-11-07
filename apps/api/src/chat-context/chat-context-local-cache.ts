@@ -114,11 +114,12 @@ export class ChatContextLocalCache {
     this.counters.writes += 1;
   }
 
-  delete(key: string): void {
+  delete(key: string): boolean {
     const entry = this.entries.get(key);
-    if (!entry) return;
+    if (!entry) return false;
     this.remove(key, entry);
     this.counters.invalidations += 1;
+    return true;
   }
 
   sweepExpired(): void {

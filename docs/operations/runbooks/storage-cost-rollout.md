@@ -52,6 +52,47 @@ retained data, not RSS. VK rows-written counters describe statement activity,
 not committed transactions; skipped rows also include publication fences.
 Table totals already include indexes and TOAST: never add them twice.
 
+### Fleet stage-one attribution and repeated work
+
+The additive `chatContextCache.activity` separates coalesced loads, Redis reads and
+hits, Redis misses/unavailable or rejected payloads, and source loads. An L1 miss
+does not establish a PostgreSQL load. Fixed invalidation reasons report both
+observed events and actually evicted L1 entries; a local notification echoed over
+Pub/Sub can produce multiple events without multiple evictions. Old or unrecognized
+reason payloads are `legacy`. Missing activity in an older report is unavailable
+coverage. Rights, revision checks and denial replay invalidations remain mandatory.
+Concurrent title refreshes skip only an already identical normalized title.
+
+The additive `deleteDueSweep.handoffOutcomes` distinguishes `insertedCount`,
+`existingCount`, `reusedCount` and `observationErrorCount`. The sweep first reads
+the same deterministic BullMQ job that `add` would reuse. An existing job is left
+intact, avoiding another duplicate-add write; if it disappears immediately after
+observation, the unchanged next sweep repairs its wakeup. A missing job uses the
+normal deterministic add with a fresh diagnostic token. Only a matching token read
+from the persisted job proves this invocation inserted it. A different token can
+also follow completion and replacement of our job, so it cannot prove a duplicate.
+A vanished or replaced job, or failed post-add read, increments the existing
+`handoffInsertionUnknownCount`. Observation failure never
+revokes an acknowledged add or grants execution authority. `reusedCount` is the
+subset of existing jobs that avoided `add`; `handoffAcknowledgedCount` includes
+these existing-job observations before add as well as acknowledged adds. These counters do
+not count distinct intents, pending deletions or completed external actions.
+Older reports without `handoffOutcomes` retain unknown coverage for this breakdown.
+
+Publisher recipient-blocker cleanup checks and locks the exact envelope lease with
+`SELECT ... FOR NO KEY UPDATE`, preserving transaction serialization without a
+synthetic envelope UPDATE. Heartbeats and actual delivery/occurrence changes still
+write normally. The native regression checks tuple identity and lease takeover;
+this removes two known sources of unnecessary tuple versions without attributing
+all observed `managed_broadcasts` updates to them. VK import freshness timestamps
+remain required observations; their high write ratio alone does not justify
+suppressing them.
+
+Compare same-epoch snapshots under comparable traffic, including misses, errors and
+unknown outcomes. A short post-release sample establishes that these instruments
+work; a full day covering scheduled publications, media and traffic peaks is still
+required before estimating fleet capacity or percentage savings.
+
 The later additive `deleteReconciler` report preserves old reports that lack the
 field. Its fixed phase calls, results, error counts and monotonic duration buckets
 do not change the one-second recovery cadence or hourly cleanup cadence. A
