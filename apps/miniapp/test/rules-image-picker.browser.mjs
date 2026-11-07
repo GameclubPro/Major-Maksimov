@@ -236,9 +236,16 @@ try {
       assert.equal(new URL(page.url()).pathname.endsWith('/settings'), true);
 
       await page.goto(`${baseUrl}chat/preview-chat/settings?preview=1&focus=links`);
-      const explanation = page.getByLabel('Включить объяснение для модерации ссылок');
+      const links = page.locator('.settings-drilldown__panel--links');
+      const sanctionsSummary = links
+        .locator('summary')
+        .filter({ hasText: /^Наказания и сообщения$/u });
+      const sanctions = sanctionsSummary.locator('..');
+      await sanctionsSummary.click();
+      assert.equal(await sanctions.evaluate((element) => element.open), true);
+      const explanation = sanctions.getByLabel('Включить объяснение для модерации ссылок');
       await explanation.check();
-      const openEditor = page.getByRole('button', {
+      const openEditor = sanctions.getByRole('button', {
         name: 'Редактировать текст сообщения о ссылках',
         exact: true,
       });
