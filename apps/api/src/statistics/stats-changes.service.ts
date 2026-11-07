@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { StatsChangesResult } from '@maxim/contracts/statistics-central';
+import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { getAppRole, roleRunsAction } from '../runtime/app-role';
 import { centralEnabled, StatsFailure } from './stats-common';
@@ -37,18 +38,36 @@ export class StatsChangesService implements OnModuleInit, OnModuleDestroy {
     await this.prisma.$transaction(
       async (tx) => {
         // FLAG: Publication sequences are assigned only to committed source rows under a short serialized relay lock.
+        // FLAG: Keep lock acquisition separate so reads after an advisory wait see the preceding commit.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(763429014)`;
         const rows = await tx.$queryRaw<
-          Array<{ id: string }>
-        >`SELECT id FROM stats_changes WHERE published_seq IS NULL ORDER BY created_at,id LIMIT 500 FOR UPDATE SKIP LOCKED`;
+          Array<{ id: string; tuple_id: string }>
+        >`SELECT id,ctid::text AS tuple_id FROM stats_changes WHERE published_seq IS NULL ORDER BY created_at,id LIMIT 500 FOR UPDATE SKIP LOCKED`;
         if (!rows.length) return;
         const last = (
           await tx.$queryRaw<
             Array<{ seq: bigint }>
           >`SELECT COALESCE((SELECT published_seq FROM stats_changes WHERE published_seq IS NOT NULL ORDER BY published_seq DESC LIMIT 1),0)::bigint AS seq`
         )[0]!.seq;
-        for (const [i, r] of rows.entries())
-          await tx.$executeRaw`UPDATE stats_changes SET published_seq=${last + BigInt(i) + 1n},published_at=now() WHERE id=${r.id}::uuid`;
+        // FLAG: Tuple IDs belong only to these row locks in this transaction; never persist or reuse them.
+        await tx.$executeRaw(Prisma.sql`
+          WITH assigned(id, tuple_id, seq) AS MATERIALIZED (
+            VALUES ${Prisma.join(
+              rows.map(
+                (row, index) => Prisma.sql`
+                  (${row.id}::uuid, ${row.tuple_id}::tid, ${last + BigInt(index) + 1n}::bigint)
+                `,
+              ),
+            )}
+          )
+          UPDATE stats_changes AS change
+          SET published_seq = assigned.seq, published_at = now()
+          FROM assigned
+          WHERE change.id = assigned.id
+            AND change.ctid = assigned.tuple_id
+            -- FLAG: The scalar array enables bounded TID probes; a VALUES join alone can scan retained history.
+            AND change.ctid = ANY(ARRAY(SELECT tuple_id FROM assigned))
+        `);
       },
       { timeout: 5000 },
     );
