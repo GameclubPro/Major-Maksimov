@@ -30,6 +30,21 @@ export function parseArgs(args) {
   };
 }
 
+export async function startTestStoreCommand(options, { run, start, log = console.log }) {
+  if (options.migrate) {
+    await run('npm', ['run', 'prisma:migrate:deploy', '--workspace', '@maxim/api']);
+    try {
+      await run('npm', ['run', 'prisma:check:drift', '--workspace', '@maxim/api']);
+    } catch {
+      // FLAG: Prisma failures can contain private connection credentials. Expose
+      // a fixed stage failure while the owned-store finally still performs cleanup.
+      throw new Error('TEST_STORE_SCHEMA_DRIFT_CHECK_FAILED: requested command was not started.');
+    }
+    log('[test-stores] Migrated PostgreSQL matches the reviewed Prisma drift baseline.');
+  }
+  return start(options.command[0], options.command.slice(1));
+}
+
 async function freePort() {
   const server = createServer();
   await new Promise((done, reject) => {
@@ -212,9 +227,10 @@ export async function withTestStores(options) {
     console.log(
       '[test-stores] Private PostgreSQL 16 (UTC) and Redis 7 ready; URLs remain in child environment.',
     );
-    if (options.migrate)
-      await run('npm', ['run', 'prisma:migrate:deploy', '--workspace', '@maxim/api']);
-    commandChild = start(options.command[0], options.command.slice(1), env, true);
+    commandChild = await startTestStoreCommand(options, {
+      run,
+      start: (command, args) => start(command, args, env, true),
+    });
     const result = await commandChild.done;
     return interrupted || result.code;
   } finally {
