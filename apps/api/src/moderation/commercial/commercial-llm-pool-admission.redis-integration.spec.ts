@@ -43,7 +43,7 @@ const shiftedSource = (source: CommercialLlmSource, eventAtMs: number): Commerci
 });
 const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
 
-(url ? describe : describe.skip)('three-node admission ownership on disposable real Redis', () => {
+(url ? describe : describe.skip)('four-node admission ownership on disposable real Redis', () => {
   let redis: Redis;
   let mailbox: CommercialLlmPoolAdmissionMailbox;
   let worker: string;
@@ -160,12 +160,13 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await redis.exists(legacyKeys.slot, legacyKeys.slotNext)).toBe(0);
   });
 
-  it('admits three independent active primaries and exactly two pending burst inputs', async () => {
+  it('admits four independent active primaries and exactly two pending burst inputs', async () => {
     const first = await activate(offer('active-a'));
     const second = await activate(offer('active-b'));
     const third = await activate(offer('active-c'));
+    const fourth = await activate(offer('active-d'));
     expect(await redis.hlen(keys.active)).toBe(COMMERCIAL_LLM_POOL_ACTIVE_LIMIT);
-    expect(await redis.hlen(keys.primary)).toBe(3);
+    expect(await redis.hlen(keys.primary)).toBe(4);
     await ready();
     const burst = Array.from({ length: 30 }, (_, index) => offer(`burst-${index}`));
     const results = await Promise.all(burst.map((value) => mailbox.offerDetailed(value)));
@@ -199,7 +200,9 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await redis.get(keys.slotNext)).toBe(tailRaw);
     expect(await redis.pexpiretime(keys.slot)).toBe(headExpiry);
     expect(await redis.pexpiretime(keys.slotNext)).toBe(tailExpiry);
-    expect(new Set(await activeValues())).toEqual(new Set([first.raw, second.raw, third.raw]));
+    expect(new Set(await activeValues())).toEqual(
+      new Set([first.raw, second.raw, third.raw, fourth.raw]),
+    );
   });
 
   it('promotes FIFO without renewing a tail and does not let later arrivals overtake it', async () => {
@@ -207,6 +210,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
       await activate(offer('a')),
       await activate(offer('b')),
       await activate(offer('c')),
+      await activate(offer('d')),
     ];
     await ready();
     expect(await mailbox.offerDetailed(offer('head'))).toBe('accepted');
@@ -227,7 +231,8 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     await mailbox.finish(active[1].raw, worker);
     expect((await mailbox.take(worker))?.raw).toBe(tailRaw);
     expect(await redis.get(keys.slot)).toBe(laterRaw);
-    expect(await redis.hlen(keys.active)).toBe(3);
+    expect(await redis.hlen(keys.active)).toBe(4);
+    expect(await mailbox.owns(active[3].raw)).toBe(true);
     expect(await mailbox.owns(active[2].raw)).toBe(true);
   });
 
@@ -373,6 +378,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
       await activate(offer('a')),
       await activate(offer('b')),
       await activate(offer('c')),
+      await activate(offer('d')),
     ];
     await ready();
     const head = offer('expires-head'),
@@ -399,7 +405,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await mailbox.hasProof(head.source)).toBe(false);
     expect(await mailbox.hasProof(tail.source)).toBe(false);
     for (const item of active) expect(await mailbox.owns(item.raw)).toBe(true);
-    expect(await redis.hlen(keys.active)).toBe(3);
+    expect(await redis.hlen(keys.active)).toBe(4);
     expect(await redis.exists(keys.slot, keys.slotNext)).toBe(0);
   });
 

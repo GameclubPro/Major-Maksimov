@@ -32,9 +32,11 @@ export class WorkstationFrames {
 export async function workstationJson(
   path,
   key,
-  { body, signal, maximumBytes = 16384, fetchImpl = fetch } = {},
+  { body, signal, maximumBytes = 16384, fetchImpl = fetch, endpoint = WORKSTATION_HTTP } = {},
 ) {
-  const response = await fetchImpl(new URL(path, WORKSTATION_HTTP), {
+  if (![WORKSTATION_HTTP, 'http://127.0.0.1:18085'].includes(endpoint))
+    throw new Error('model_endpoint_refused');
+  const response = await fetchImpl(new URL(path, endpoint), {
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     ...(body === undefined ? {} : { body }),

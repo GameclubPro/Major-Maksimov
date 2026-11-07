@@ -5,6 +5,7 @@ import {
   commercialLlmPoolIdentityMatches,
   commercialLlmPoolJobKey,
   commercialLlmPoolNodeKeys,
+  commercialLlmPoolMinRemainingMs,
 } from './commercial-llm-pool.protocol';
 import {
   COMMERCIAL_LLM_MODEL_SHA256,
@@ -33,6 +34,23 @@ describe('commercial pool immutable node profiles', () => {
     expect(COMMERCIAL_LLM_POOL_PROFILES['pc-b-9b'].identity.runtimeImageSha256).toBeUndefined();
   });
 
+  it('gives the CPU bridge its own resources and CPU admission floor', () => {
+    expect(COMMERCIAL_LLM_POOL_PROFILES['pc-a-cpu-9b']).toMatchObject({
+      nodeId: 'pc-a-cpu-9b',
+      model: '9b',
+      transport: 'bridge',
+      identity: {
+        modelSha256: COMMERCIAL_LLM_MODEL_SHA256,
+        runtimeArtifactSha256: COMMERCIAL_LLM_WORKSTATION_IDENTITY.runtimeArtifactSha256,
+      },
+    });
+    expect(commercialLlmPoolMinRemainingMs('pc-a-cpu-9b')).toBe(18_000);
+    expect(commercialLlmPoolMinRemainingMs('pc-b-9b')).toBe(0);
+    expect(commercialLlmPoolNodeKeys('pc-a-cpu-9b')).not.toEqual(
+      commercialLlmPoolNodeKeys('pc-a-4b'),
+    );
+  });
+
   it.each(POOL_NODE_IDS)('requires the complete exact profile for %s', (nodeId) => {
     const identity = COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity;
     expect(commercialLlmPoolIdentityMatches(nodeId, identity)).toBe(true);
@@ -46,9 +64,9 @@ describe('commercial pool immutable node profiles', () => {
     expect(commercialLlmPoolIdentityMatches(nodeId, null)).toBe(false);
   });
 
-  it('keeps three node resources and pending inputs separate from the legacy singleton', () => {
+  it('keeps four node resources and pending inputs separate from the legacy singleton', () => {
     const keys = POOL_NODE_IDS.flatMap((id) => Object.values(commercialLlmPoolNodeKeys(id)));
-    expect(new Set(keys).size).toBe(12);
+    expect(new Set(keys).size).toBe(16);
     expect(
       keys.some((key) =>
         Object.values(COMMERCIAL_LLM_WORKSTATION_KEYS).some((legacy) => legacy === key),

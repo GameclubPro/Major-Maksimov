@@ -13,7 +13,7 @@ import type {
 } from './commercial-llm-pool.mailbox';
 import {
   COMMERCIAL_LLM_POOL_PROFILES,
-  COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS,
+  commercialLlmPoolMinRemainingMs,
   COMMERCIAL_LLM_POOL_TIMEOUT_MS,
   POOL_NODE_IDS,
   commercialLlmPoolJobKey,
@@ -47,13 +47,14 @@ type RoutingSample = {
   lastFailureAt: string | null;
 };
 
-// FLAG: Process-local, bounded to the three trusted profiles. These measurements choose only
+// FLAG: Process-local, bounded to the four trusted profiles. These measurements choose only
 // among ready nodes; they never authorize moderation, create work, or override Redis capacity.
 export class CommercialLlmPoolRoutingStats {
   private readonly samples: Record<CommercialLlmPoolNodeId, RoutingSample> = {
     'server-9b': this.seed(),
     'pc-a-4b': this.seed(),
     'pc-b-9b': this.seed(),
+    'pc-a-cpu-9b': this.seed(),
   };
 
   rank(nodes: readonly CommercialLlmPoolNodeId[], nowMs = Date.now()): CommercialLlmPoolNodeId[] {
@@ -309,12 +310,9 @@ export class CommercialLlmPoolClient implements CommercialLlmClassifier {
       )
         continue;
       await current();
-      // FLAG: Keep the measured CPU p95 budget even after awaited authority checks;
+      // FLAG: Keep the measured CPU budget even after awaited authority checks;
       // a shorter original deadline may still use an available GPU, never a doomed CPU POST.
-      if (
-        nodeId === 'server-9b' &&
-        this.options.deadlineAtMs - Date.now() < COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS
-      )
+      if (this.options.deadlineAtMs - Date.now() < commercialLlmPoolMinRemainingMs(nodeId))
         continue;
       const reservation = await this.mailbox.reserve(
         nodeId,

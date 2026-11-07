@@ -2075,6 +2075,17 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
+# FLAG: Extend only the exact CPU bridge after the installed protected prefix.
+# Preserve legacy dispatch bytes and reject extra arguments before any remote execution.
+if [[ "$command" == commercial-llm && "${1:-}" == workstation-pool-bridge && "${2:-}" == pc-a-cpu-9b ]]; then
+  if [[ $# -ne 2 ]]; then
+    echo 'Usage: commercial-llm workstation-pool-bridge pc-a-cpu-9b' >&2
+    exit 2
+  fi
+  remote_exec "$(shell_quote_args bash ./infra/scripts/vps-commercial-llm.sh workstation-pool-bridge pc-a-cpu-9b)"
+  exit $?
+fi
+
 case "$command" in
   pair-release-state)
     [[ "$#" == 0 ]] || exit 2
@@ -2261,6 +2272,7 @@ case "$command" in
     ;;
   -h|--help|help|'')
     usage
+    echo '  commercial-llm workstation-pool-bridge pc-a-cpu-9b'
     ;;
   *)
     echo "Unknown command: $command"

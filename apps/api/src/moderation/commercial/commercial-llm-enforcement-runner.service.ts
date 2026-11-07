@@ -24,7 +24,10 @@ import {
   CommercialLlmPoolRoutingStats,
 } from './commercial-llm-pool.client';
 import { CommercialLlmPoolServer } from './commercial-llm-pool-server';
-import { COMMERCIAL_LLM_POOL_ADMISSION_KEYS } from './commercial-llm-pool-admission.mailbox';
+import {
+  COMMERCIAL_LLM_POOL_ADMISSION_KEYS,
+  COMMERCIAL_LLM_POOL_ACTIVE_LIMIT,
+} from './commercial-llm-pool-admission.mailbox';
 import { CommercialAiObservationService } from './commercial-ai-observation.service';
 import { CommercialAiObservationGate } from './commercial-ai-runtime-observation';
 
@@ -241,9 +244,10 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
       return;
     }
     await mailbox.advertise(this.worker);
-    // FLAG: At most primary running + secondary running + one waiting confirmation.
-    // The mailbox admits a second pending input only when both starts fit their original budget.
-    if (this.active.size >= 3 || poolHasNoCapacity) return;
+    // FLAG: Four independent pool nodes permit four active sources; the legacy cascade retains
+    // its three-source limit. Pending and per-chat bounds remain owned by their mailboxes.
+    const activeLimit = this.admission.poolPolicy() ? COMMERCIAL_LLM_POOL_ACTIVE_LIMIT : 3;
+    if (this.active.size >= activeLimit || poolHasNoCapacity) return;
     const redis = this.redis;
     const secondary = this.secondary!;
     const processor = new CommercialLlmEnforcementProcessor(

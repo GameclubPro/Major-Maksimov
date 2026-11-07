@@ -64,7 +64,7 @@ export type CommercialLlmObservationResult = CommercialLlmDecision & {
   durationMs: number;
   pool?: {
     version: 'commercial-pool-v2';
-    nodeId: 'server-9b' | 'pc-a-4b' | 'pc-b-9b';
+    nodeId: 'server-9b' | 'pc-a-4b' | 'pc-b-9b' | 'pc-a-cpu-9b';
     route: 'direct' | 'consulted';
     policy: 'confirm-positive' | 'direct-4b';
     attempts: 1 | 2;

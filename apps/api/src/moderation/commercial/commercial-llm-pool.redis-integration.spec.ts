@@ -54,7 +54,10 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
         },
       ],
     });
-  const job = (nodeId: CommercialLlmPoolNodeId, lifetimeMs = 3000) => {
+  const job = (
+    nodeId: CommercialLlmPoolNodeId,
+    lifetimeMs = nodeId === 'pc-a-cpu-9b' ? 20_000 : 3000,
+  ) => {
     const jobId = randomUUID();
     jobs.add(commercialLlmPoolJobKey(jobId));
     return {
@@ -95,7 +98,12 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     );
     jobs.clear();
     mailbox = new CommercialLlmPoolMailbox(redis);
-    sessions = { 'server-9b': randomUUID(), 'pc-a-4b': randomUUID(), 'pc-b-9b': randomUUID() };
+    sessions = {
+      'server-9b': randomUUID(),
+      'pc-a-4b': randomUUID(),
+      'pc-b-9b': randomUUID(),
+      'pc-a-cpu-9b': randomUUID(),
+    };
   });
   afterAll(async () => {
     await redis.del(
@@ -108,7 +116,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     redis.disconnect();
   });
 
-  it('executes three independent sources concurrently without the old global 9B lease', async () => {
+  it('executes four independent sources concurrently without the old global 9B lease', async () => {
     await Promise.all(POOL_NODE_IDS.map(ready));
     expect(await mailbox.available()).toEqual([...POOL_NODE_IDS]);
     const values = await Promise.all(POOL_NODE_IDS.map((nodeId) => reserved(nodeId)));
@@ -117,7 +125,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await mailbox.available()).toEqual([...POOL_NODE_IDS]);
   });
 
-  it('prefers free 9B then uses direct 4B while preserving both occupied 9B owners', async () => {
+  it('prefers free 9B then uses direct 4B while preserving all three occupied 9B owners', async () => {
     await Promise.all(POOL_NODE_IDS.map(ready));
     await mailbox.refreshWorker('server-9b', sessions['server-9b'], false);
     const routingStats = new CommercialLlmPoolRoutingStats();
@@ -171,7 +179,9 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
 
     await mailbox.refreshWorker('server-9b', sessions['server-9b'], true);
     const occupied = await Promise.all(
-      (['server-9b', 'pc-b-9b'] as const).map((nodeId) => reserved(nodeId, job(nodeId, 20_000))),
+      (['server-9b', 'pc-b-9b', 'pc-a-cpu-9b'] as const).map((nodeId) =>
+        reserved(nodeId, job(nodeId, 20_000)),
+      ),
     );
     const foreignKeys = occupied.flatMap((reservation) => [
       ...Object.values(commercialLlmPoolNodeKeys(reservation.nodeId)),
@@ -188,6 +198,36 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(dispatch).not.toHaveBeenCalled();
     expect(await redis.mget(...foreignKeys)).toEqual(foreignState);
     expect(await mailbox.available()).toEqual(['pc-a-4b']);
+  });
+
+  it('refuses CPU reservation after a delayed heartbeat read without consuming the direct4B attempt', async () => {
+    await ready('pc-a-cpu-9b');
+    await ready('pc-a-4b');
+    const request = job('pc-a-cpu-9b', 20_000);
+    const cpuKeys = commercialLlmPoolNodeKeys('pc-a-cpu-9b');
+    expect(request.deadlineAtMs - Date.now()).toBeGreaterThanOrEqual(18_000);
+    const hooked = new CommercialLlmPoolMailbox({
+      get: redis.get.bind(redis),
+      eval: redis.eval.bind(redis),
+      mget: (async (...args: Parameters<Redis['mget']>) => {
+        const observed = await redis.mget(...args);
+        await pause(Math.max(1, request.deadlineAtMs - Date.now() - 18_000 + 25));
+        return observed;
+      }) as Redis['mget'],
+    });
+    expect(await hooked.reserve('pc-a-cpu-9b', request)).toBeNull();
+    expect(request.deadlineAtMs - Date.now()).toBeLessThan(18_000);
+    expect(await redis.mget(cpuKeys.slot, commercialLlmPoolJobKey(request.jobId))).toEqual([
+      null,
+      null,
+    ]);
+    const fallback = await mailbox.reserve('pc-a-4b', { ...request, body: body('pc-a-4b') });
+    expect(fallback).toMatchObject({
+      nodeId: 'pc-a-4b',
+      attempt: 1,
+      deadlineAtMs: request.deadlineAtMs,
+    });
+    await complete(fallback!);
   });
 
   it('one atomic winner reserves a node and losers consume no job attempt', async () => {

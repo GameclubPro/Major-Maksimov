@@ -12,7 +12,7 @@ test('the host selects only the fixed compiled bridge and an allowlisted PC iden
     'node',
     'apps/api/dist/apps/api/src/scripts/commercial-llm-workstation-bridge.js',
   ]);
-  for (const nodeId of ['pc-a-4b', 'pc-b-9b'])
+  for (const nodeId of ['pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b'])
     assert.deepEqual(commercialLlmWorkstationBridgeCommand(nodeId), [
       'node',
       'apps/api/dist/apps/api/src/scripts/commercial-llm-pool-bridge.js',
@@ -28,23 +28,36 @@ test('the connector rejects extra or untrusted pool arguments before remote exec
   assert.notEqual(start, -1);
   const end = connector.indexOf('\n}\n', start);
   const fn = connector.slice(start, end + 2);
+  const dispatchStart = connector.indexOf('\ncommand="${1:-}"\n');
+  assert.notEqual(dispatchStart, -1);
+  const dispatch = connector.slice(dispatchStart);
   const invoke = (...args) =>
     spawnSync(
       'bash',
       [
         '-c',
-        `${fn}\nremote_exec() { printf 'remote:%s\\n' "$1"; }\nshell_quote_args() { printf '%q ' "$@"; }\ncommercial_llm "$@"`,
+        `${fn}\nremote_exec() { printf 'remote:%s\\n' "$1"; }\nshell_quote_args() { printf '%q ' "$@"; }\n${dispatch}`,
         'pool-host-test',
+        'commercial-llm',
         ...args,
       ],
       { encoding: 'utf8' },
     );
-  for (const nodeId of ['pc-a-4b', 'pc-b-9b']) {
+  for (const nodeId of ['pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b']) {
     const result = invoke('workstation-pool-bridge', nodeId);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, new RegExp(`workstation-pool-bridge ${nodeId}`, 'u'));
   }
-  for (const args of [[], ['foreign'], ['pc-a-4b', 'extra'], ['pc-b-9b;id']]) {
+  for (const args of [
+    [],
+    ['foreign'],
+    ['pc-a-4b', 'extra'],
+    ['pc-a-cpu-9b', 'extra'],
+    ['pc-b-9b;id'],
+    ['pc-a-cpu-9b;id'],
+    ['pc-a-cpu-9b$(id)'],
+    ['pc-a-cpu-9b', '--apply'],
+  ]) {
     const result = invoke('workstation-pool-bridge', ...args);
     assert.equal(result.status, 2);
     assert.doesNotMatch(result.stdout, /remote:/u);

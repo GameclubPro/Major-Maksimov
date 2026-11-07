@@ -23,6 +23,7 @@ import {
   buildCommercialLlmOffer,
   commercialLlmSourceKey,
   COMMERCIAL_LLM_DELETE_RULE_CODE,
+  legacyCommercialLlmPolicyEnforcementIdentity,
 } from './commercial-llm-enforcement.protocol';
 
 const positive: CommercialLlmObservationResult = {
@@ -403,19 +404,48 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     expect(h.max.getExactMessageRow).toHaveBeenCalledTimes(1);
   });
 
-  it('permits an explicitly blocked personal sale only with its distinct v3 9B decision', async () => {
+  it('accepts the new CPU9B commercial source with fresh settings and refuses legacy authority', async () => {
     const policy = createDefaultCommercialAdsPolicy();
-    policy.categories.PERSONAL_SALE = 'BLOCK';
-    const h = await fixture(
-      false,
-      true,
-      policy,
-      'Продам свой старый велосипед после переезда, один, б/у.',
-      { ...positive, classification: 'NOT_COMMERCIAL', reasonCodes: ['PERSONAL_SALE'] },
-    );
+    const classified: CommercialLlmObservationResult = {
+      ...positive,
+      ...COMMERCIAL_LLM_POOL_PROFILES['pc-a-cpu-9b'].identity,
+      pool: { ...positive.pool!, nodeId: 'pc-a-cpu-9b' },
+    };
+    const h = await fixture(false, true, policy, undefined, classified);
     await expect(h.guard.authorize(h.input)).resolves.toEqual({
       deadlineAtMs: h.source.deadlineAtMs,
       reasonKeys: [h.reasonKey],
     });
+    const old = await fixture(false, true, policy, undefined, classified);
+    old.source.classifierSha256 = legacyCommercialLlmPolicyEnforcementIdentity('confirm-positive');
+    old.input.reasons[0]!.reasonKey = `${COMMERCIAL_LLM_DELETE_RULE_CODE}:${commercialLlmSourceKey(old.source)}`;
+    await expect(old.guard.authorize(old.input)).rejects.toBeInstanceOf(
+      CommercialLlmGuardRejectedError,
+    );
   });
+
+  it.each(['pc-b-9b', 'pc-a-cpu-9b'] as const)(
+    'permits an explicitly blocked personal sale only with its distinct v3 %s decision',
+    async (nodeId) => {
+      const policy = createDefaultCommercialAdsPolicy();
+      policy.categories.PERSONAL_SALE = 'BLOCK';
+      const h = await fixture(
+        false,
+        true,
+        policy,
+        'Продам свой старый велосипед после переезда, один, б/у.',
+        {
+          ...positive,
+          ...COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity,
+          pool: { ...positive.pool!, nodeId },
+          classification: 'NOT_COMMERCIAL',
+          reasonCodes: ['PERSONAL_SALE'],
+        },
+      );
+      await expect(h.guard.authorize(h.input)).resolves.toEqual({
+        deadlineAtMs: h.source.deadlineAtMs,
+        reasonKeys: [h.reasonKey],
+      });
+    },
+  );
 });

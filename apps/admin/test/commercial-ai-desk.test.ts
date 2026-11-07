@@ -50,14 +50,15 @@ const render = (value: SafetyDeskCommercialAiResponse) =>
   renderToStaticMarkup(createElement(CommercialAiSnapshot, { snapshot: value }));
 
 test('commercial AI reads the closed same-origin GET and validates the observation contract', async () => {
+  const value = snapshot({ active: 4 });
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const client = new SafetyDeskApiClient(
     createAdminApiTransport(async (url, init) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot());
+      return Response.json(value);
     }),
   );
-  assert.deepEqual(await client.fetchCommercialAiRuntime(), snapshot());
+  assert.deepEqual(await client.fetchCommercialAiRuntime(), value);
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.url, '/api/v1/safety-desk/runtime/commercial-ai');
   assert.equal(calls[0]!.init?.method ?? 'GET', 'GET');
@@ -75,7 +76,7 @@ test('commercial AI refuses invented deletion evidence, missing coverage basis a
     { ...snapshot(), confirmedDeletes: 5 },
     { ...snapshot(), trafficCoverage: undefined },
     { ...snapshot(), observationStartedAt: undefined },
-    { ...snapshot(), active: 4 },
+    { ...snapshot(), active: 5 },
     { ...snapshot(), outcomes: { ...snapshot().outcomes, kept: -1 } },
   ]) {
     const client = new SafetyDeskApiClient(

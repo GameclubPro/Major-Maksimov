@@ -34,7 +34,7 @@ const statusSchema = z.object({
   mode: z.literal('ENFORCE'),
   heartbeatAt: z.iso.datetime(),
   lastSuccessAt: z.iso.datetime().nullable(),
-  active: count.max(3),
+  active: count.max(4),
   outcomeBasis: z.literal('process_cumulative'),
   outcomes: z.record(z.string().max(80), count),
   pendingDiscardBasis: z.literal('redis_namespace_cumulative'),

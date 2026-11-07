@@ -22,7 +22,7 @@ export const COMMERCIAL_LLM_POOL_ADMISSION_KEYS = Object.fromEntries(
     `${prefix}:${key === 'slotNext' ? 'slot-next' : key}`,
   ]),
 ) as { [Key in keyof typeof COMMERCIAL_LLM_ENFORCEMENT_KEYS]: string };
-export const COMMERCIAL_LLM_POOL_ACTIVE_LIMIT = 3;
+export const COMMERCIAL_LLM_POOL_ACTIVE_LIMIT = 4;
 export const COMMERCIAL_LLM_POOL_PENDING_ACCOUNTING_KEYS = {
   ready: `${prefix}:pending-accounting-v1:ready`,
   slot: `${prefix}:pending-accounting-v1:slot`,
@@ -77,11 +77,11 @@ local function settlePending(head, tail, headMetadata, tailMetadata, metrics, no
   settleExpired(tail, tailMetadata, metrics, now)
 end
 `;
-// FLAG: Every iteration is bounded by three active sources and two queued inputs.
+// FLAG: Every iteration is bounded by four active sources and two queued inputs.
 // Model slots are independent; source ownership remains held through consultation.
 const prune = `${pendingAccounting}
 local function prune(active, primary, secondary, worker, now)
-  if redis.call('HLEN', active) > 3 or redis.call('HLEN', primary) > 3 or redis.call('HLEN', secondary) > 3 then return false end
+  if redis.call('HLEN', active) > 4 or redis.call('HLEN', primary) > 4 or redis.call('HLEN', secondary) > 4 then return false end
   local live = {}
   local rows = redis.call('HGETALL', active)
   for i = 1, #rows, 2 do
@@ -275,9 +275,9 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
         redis.call('DEL', KEYS[1], KEYS[9]); promote(KEYS[1], KEYS[2], KEYS[9], KEYS[10]); redis.call('HINCRBY', KEYS[7], 'pending_expired', 1)
         redis.call('EXPIRE', KEYS[7], 86400); return 0
       end
-      if not prune(KEYS[4], KEYS[5], KEYS[6], ARGV[2], now) or redis.call('HLEN', KEYS[4]) >= 3 then return 0 end
+      if not prune(KEYS[4], KEYS[5], KEYS[6], ARGV[2], now) or redis.call('HLEN', KEYS[4]) >= 4 then return 0 end
       if chatBusy(KEYS[4], KEYS[5], ARGV[6], ARGV[7], ARGV[8]) then return 0 end
-      if redis.call('HLEN', KEYS[8]) > 3 then return 0 end
+      if redis.call('HLEN', KEYS[8]) > 4 then return 0 end
       local pending = redis.call('HGETALL', KEYS[8])
       for i = 1, #pending, 2 do
         local item = decode(pending[i + 1])
@@ -285,7 +285,7 @@ export class CommercialLlmPoolAdmissionMailbox extends CommercialLlmEnforcementM
           redis.call('HDEL', KEYS[8], pending[i])
         end
       end
-      if redis.call('HLEN', KEYS[8]) >= 3 then return 0 end
+      if redis.call('HLEN', KEYS[8]) >= 4 then return 0 end
       redis.call('HSET', KEYS[4], ARGV[3], ARGV[1]); redis.call('HSET', KEYS[5], ARGV[6], ARGV[1])
       redis.call('HSET', KEYS[8], ARGV[9], ARGV[1])
       if redis.call('PEXPIRETIME', KEYS[8]) < tonumber(ARGV[5]) then redis.call('PEXPIREAT', KEYS[8], ARGV[5]) end
