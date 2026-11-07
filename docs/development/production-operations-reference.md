@@ -279,6 +279,11 @@ Detailed constraints selected by the routing table in [infrastructure agent note
 
 ## Postgres And Redis
 
+- The settings-template migration adds UUID metadata without backfilling unchanged
+  settings. Application rollback preserves its table and trigger. A database restore
+  from before installation followed by reinstallation must restart all API roles
+  holding process-local templates so an old settings-ID/null proof cannot survive
+  a different restored source. See [verified settings templates](../operations/runbooks/storage-cost-rollout.md#verified-settings-templates).
 - Migration `20261024020000_add_exact_channel_statistics_views` adds two nullable `BIGINT`
   shadow counters without a table rewrite or retained-row backfill. Existing trigger entrypoints
   dualwrite exact values and saturated legacy integer projections; the runtime reads

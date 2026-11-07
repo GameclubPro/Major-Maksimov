@@ -1,3 +1,4 @@
+import { withChatContextSourceFixture } from './__tests__/chat-context-source.fixture';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { ChatContextCacheService, invalidateSharedChatContext } from './chat-context-cache.service';
@@ -35,8 +36,16 @@ describeRedis('chat context media payload isolation', () => {
     const secondDb = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
     const config = { getOrThrow: () => redisUrl };
     const routes = { forgetChatBotBinding: jest.fn() };
-    const first = new ChatContextCacheService(firstDb as never, config as never, routes as never);
-    const second = new ChatContextCacheService(secondDb as never, config as never, routes as never);
+    const first = new ChatContextCacheService(
+      withChatContextSourceFixture(firstDb),
+      config as never,
+      routes as never,
+    );
+    const second = new ChatContextCacheService(
+      withChatContextSourceFixture(secondDb),
+      config as never,
+      routes as never,
+    );
     const inspector = new Redis(redisUrl);
     const key = ChatContextCacheService.cacheKey(chatId);
     const retainedBlobKeys = new Set<string>();
@@ -114,13 +123,13 @@ describeRedis('chat context media recovery and access fences', () => {
         rules: null,
       };
       const first = new ChatContextCacheService(
-        { chat: { findUnique: jest.fn().mockResolvedValue(row) } } as never,
+        withChatContextSourceFixture({ chat: { findUnique: jest.fn().mockResolvedValue(row) } }),
         { getOrThrow: () => redisUrl } as never,
         {} as never,
       );
       const secondDb = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
       const second = new ChatContextCacheService(
-        secondDb as never,
+        withChatContextSourceFixture(secondDb),
         { getOrThrow: () => redisUrl } as never,
         {} as never,
       );
@@ -176,8 +185,16 @@ describeRedis('chat context media recovery and access fences', () => {
     const db = { chat: { findUnique: jest.fn().mockImplementation(async () => row) } };
     const config = { getOrThrow: () => redisUrl };
     const routes = { forgetChatBotBinding: jest.fn() };
-    const first = new ChatContextCacheService(db as never, config as never, routes as never);
-    const second = new ChatContextCacheService(db as never, config as never, routes as never);
+    const first = new ChatContextCacheService(
+      withChatContextSourceFixture(db),
+      config as never,
+      routes as never,
+    );
+    const second = new ChatContextCacheService(
+      withChatContextSourceFixture(db),
+      config as never,
+      routes as never,
+    );
     const inspector = new Redis(redisUrl);
     const secondInternals = second as unknown as { redis: Redis; subscriber: Redis };
     let resume!: () => void;
@@ -261,7 +278,7 @@ describeRedis('chat context media publication race', () => {
     };
     const db = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
     const service = new ChatContextCacheService(
-      db as never,
+      withChatContextSourceFixture(db),
       { getOrThrow: () => redisUrl } as never,
       {} as never,
     );
@@ -337,12 +354,12 @@ describeRedis('chat context rollback compatibility', () => {
         },
       };
       const first = new ChatContextCacheService(
-        db as never,
+        withChatContextSourceFixture(db),
         { getOrThrow: () => redisUrl } as never,
         {} as never,
       );
       const next = new ChatContextCacheService(
-        db as never,
+        withChatContextSourceFixture(db),
         { getOrThrow: () => redisUrl } as never,
         {} as never,
       );

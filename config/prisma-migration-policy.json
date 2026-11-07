@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261107120000_add_link_rules_policy",
-  "baselineNamesSha256": "7166bc8819ababf35ebcc518010ff2c3247fe65758d3ae4967000391d5048105",
-  "baselineContentsSha256": "93d86fd01fc218a862c94951065086518fad7d6ebb490d4055b1ac32ec9c681f",
+  "baselineThrough": "20261107183000_add_chat_settings_cache_revision",
+  "baselineNamesSha256": "16f036e018b71311b74f358b512d263d97b56326a775b44c7de79a6899dbf3ca",
+  "baselineContentsSha256": "9d935d6ea6c91b1942dbb7c75f65b379299ff07f626727bcb429653d772c04ad",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -186,6 +186,11 @@
       "reason": "Reviewed additive nullable JSONB policy column and static replacement of two recovery revision functions and their existing trigger. No retained rows are backfilled, deleted, scanned or indexed; unchanged JSONB preserves the existing baseline.",
       "twoPhaseRelease": true,
       "runtimeCompatibilityEvidence": "Legacy rows remain SQL NULL and keep their old policy and allowlist. Only explicit revision-fenced adoption writes the versioned JSON policy. New readers treat non-null malformed JSON as inert and never fall back to retired allowlist authority. Before the new admin accepts JSON, the guarded rollout stops old moderation/media readers and replaces action, publisher and retention roles. Stopped readers restart only on the target image; the queue pause is released after all 14 API roles pass the exact-image fence. Both rollback paths and the connector bootstrap require the JSON-policy and operation-v4 reader floor."
+    },
+    "20261107183000_add_chat_settings_cache_revision": {
+      "reason": "Manual review approved one additive metadata table and static settings-version trigger. The parser classifies CREATE TRIGGER EXECUTE FUNCTION as dynamic SQL and a dropped column, but this migration has no dynamic EXECUTE, DROP, DELETE, existing-data backfill or retained-history scan. The guarded key move updates only the new metadata table during a future source-key change.",
+      "twoPhaseRelease": true,
+      "runtimeCompatibilityEvidence": "Old runtime readers ignore the new metadata table and optional Prisma relation. Every existing INSERT/UPDATE writer of chat_settings, including older Prisma/raw writers, advances the UUID through the database trigger. Existing unchanged settings use the explicit settings.id/null baseline; DELETE cascades metadata and recreate obtains a new UUID. New runtime reuses a private settings template only after a coherent SQL identity/version read while preserving complete-context TTLs, Redis revision CAS and access fences. Application rollback leaves the additive table/trigger installed. Restore before migration requires all cache-holding API roles to restart."
     }
   },
   "nonConcurrentIndexExceptions": {

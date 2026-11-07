@@ -63,6 +63,36 @@ reason payloads are `legacy`. Missing activity in an older report is unavailable
 coverage. Rights, revision checks and denial replay invalidations remain mandatory.
 Concurrent title refreshes skip only an already identical normalized title.
 
+### Verified settings templates
+
+Each process may retain private ChatSettings templates within a 16 MiB estimated
+byte budget and 2,048 entries. This cache never establishes freshness. Every
+source refresh with a candidate reads the exact settings ID and nullable UUID
+revision together with fresh title, bot binding, administrators, active domains
+and rules publication fields in one SQL snapshot. An exact match reuses a cloned
+settings object. A cold or changed proof loads settings and metadata in a short
+RepeatableRead transaction; initialization does not seed an unverified template.
+The full-context Redis v4 body, 60-second source deadline, 30-second L1 deadline,
+revision CAS, access generations and complete-media recovery remain in force.
+
+The additive metadata table and static trigger advance the UUID on every settings
+INSERT or UPDATE, including older runtime and raw SQL writers. Existing unchanged
+rows deliberately have no metadata and use their settings ID plus a null revision.
+There is no backfill or historical settings rewrite. DELETE cascades metadata;
+recreation and source-key changes get a fresh UUID. Application rollback keeps
+the table and trigger installed. Restoring a database from before this migration
+and reinstalling it requires restarting all API roles that may retain templates:
+the old settings ID/null baseline must never survive a different database incarnation.
+
+The optional `chatContextCache.settingsTemplates` report exposes fixed cache
+capacity and counters plus `fullLoads`, `shellReads` and `reuses`. A shell mismatch
+can count both a shell read and a full load; `sourceLoads` retains its original
+meaning. Template `hits` mean a candidate existed, while `reuses` count successful
+SQL proofs. Missing or corrupt template reports remain unavailable without
+discarding older full-context counters. Bytes estimate retained content, not RSS.
+This optimization reduces heavy SQL transfer on repeated source refreshes; complete
+L1/Redis hits do not use it, and changing settings adds a probe before a full read.
+
 The additive `deleteDueSweep.handoffOutcomes` distinguishes `insertedCount`,
 `existingCount`, `reusedCount` and `observationErrorCount`. The sweep first reads
 the same deterministic BullMQ job that `add` would reuse. An existing job is left

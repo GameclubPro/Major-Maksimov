@@ -18,6 +18,8 @@ import {
   type ChatContextLocalCacheSnapshot,
 } from './chat-context-local-cache';
 import { ChatContextMediaCache, CHAT_CONTEXT_MEDIA_TTL_SEC } from './chat-context-media-cache';
+import { readChatContextSource } from './chat-context-source';
+import { ChatSettingsTemplateCache } from './chat-settings-template-cache';
 import {
   createChatContextCacheActivity,
   parseChatContextInvalidationReason,
@@ -389,6 +391,8 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   private readonly managedEntityBotProfileTtlSec: number;
   private readonly localChatContextCache: ChatContextLocalCache;
   private readonly mediaCache: ChatContextMediaCache;
+  private readonly settingsTemplates = new ChatSettingsTemplateCache();
+  private readonly settingsSourceActivity = { fullLoads: 0, shellReads: 0, reuses: 0 };
   private localChatContextSweepTimer: NodeJS.Timeout | null = null;
   private readonly chatContextInFlightLoads = new Map<string, Promise<ChatContext>>();
   private readonly chatContextReadGenerations = new Map<string, ChatContextReadGeneration>();
@@ -474,6 +478,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       this.localChatContextSweepTimer = null;
     }
     this.localChatContextCache.clear();
+    this.settingsTemplates.clear();
     this.mediaCache.clear();
     await this.subscriber.quit();
     await this.redis.quit();
@@ -493,9 +498,15 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
 
   getLocalCacheSnapshot(): ChatContextLocalCacheSnapshot & {
     activity: ChatContextCacheActivitySnapshot;
+    settingsTemplates: ReturnType<ChatSettingsTemplateCache['snapshot']> & {
+      fullLoads: number;
+      shellReads: number;
+      reuses: number;
+    };
   } {
     return {
       ...this.localChatContextCache.snapshot(),
+      settingsTemplates: { ...this.settingsTemplates.snapshot(), ...this.settingsSourceActivity },
       activity: {
         ...this.cacheActivity,
         invalidationsByReason: Object.fromEntries(
@@ -2476,7 +2487,19 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       // it atomically, so an older full-context load can never restore stale adminUserIds.
       const expectedRevision = await this.readChatContextRevision(chatId);
       this.cacheActivity.sourceLoads += 1;
-      let chat = await this.findChatContextRow(chatId);
+      const candidate = this.settingsTemplates.get(chatId);
+      if (candidate) this.settingsSourceActivity.shellReads += 1;
+      const source = await readChatContextSource(this.prisma, chatId, new Date(), candidate);
+      if (source.mode === 'shell') this.settingsSourceActivity.reuses += 1;
+      else this.settingsSourceActivity.fullLoads += 1;
+      // FLAG: Only a coherent SQL snapshot binds the private settings to this proof.
+      // Initialization and Redis bodies cannot seed or validate a reusable template.
+      if (source.mode === 'full' && source.row?.settings && source.proof) {
+        this.settingsTemplates.set(chatId, { settings: source.row.settings, proof: source.proof });
+      } else if (!source.row?.settings || !source.proof) {
+        this.settingsTemplates.delete(chatId);
+      }
+      let chat = source.row;
       if (!chat?.settings) {
         chat = await this.initializeChatContextRow(chatId, title);
       }
@@ -2566,34 +2589,6 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     }
 
     return this.loadAndCache(chatId, normalizedTitle, generation);
-  }
-
-  private async findChatContextRow(chatId: string) {
-    return this.prisma.chat.findUnique({
-      where: { id: chatId },
-      include: {
-        settings: true,
-        rules: {
-          select: {
-            publishedUrl: true,
-            publishedMessageId: true,
-          },
-        },
-        domains: {
-          where: {
-            OR: [{ removeAfterAt: null }, { removeAfterAt: { gt: new Date() } }],
-          },
-          select: {
-            domain: true,
-          },
-        },
-        admins: {
-          select: {
-            userId: true,
-          },
-        },
-      },
-    });
   }
 
   private async initializeChatContextRow(chatId: string, title?: string | null) {

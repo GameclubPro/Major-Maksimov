@@ -79,6 +79,21 @@ const CACHE_FIELDS = [
   'invalidations',
   'sweepInspected',
 ] as const;
+const SETTINGS_TEMPLATE_FIELDS = [
+  'entries',
+  'estimatedBytes',
+  'maxEntries',
+  'maxBytes',
+  'maxEntryBytes',
+  'hits',
+  'misses',
+  'writes',
+  'oversizedSkips',
+  'capacityEvictions',
+  'fullLoads',
+  'shellReads',
+  'reuses',
+] as const;
 const VK_FIELDS = [
   'batches',
   'postsAttempted',
@@ -258,6 +273,12 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
           // unavailable; never report inferred zeroes or retain arbitrary invalidation labels.
           activity: sanitizeChatContextActivity(
             (source.chatContextCache as Record<string, unknown>).activity,
+          ),
+          // FLAG: Older reports lack template measurements. Preserve their context counters
+          // while keeping missing or corrupt settings-cache coverage explicitly unavailable.
+          settingsTemplates: checkedNumbers(
+            (source.chatContextCache as Record<string, unknown>).settingsTemplates,
+            SETTINGS_TEMPLATE_FIELDS,
           ),
         }
       : null,

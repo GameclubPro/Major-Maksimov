@@ -151,6 +151,22 @@ describe('bounded storage-runtime metrics', () => {
         },
         chatId: 'private-activity-fixture',
       },
+      settingsTemplates: {
+        entries: 1,
+        estimatedBytes: 2048,
+        maxEntries: 2048,
+        maxBytes: 16777216,
+        maxEntryBytes: 16777216,
+        hits: 3,
+        misses: 1,
+        writes: 1,
+        oversizedSkips: 0,
+        capacityEvictions: 0,
+        fullLoads: 1,
+        shellReads: 3,
+        reuses: 2,
+        chatId: 'private-template-fixture',
+      },
       payload: 'private-content-fixture',
       chatId: 'private-id-fixture',
     }));
@@ -178,6 +194,21 @@ describe('bounded storage-runtime metrics', () => {
     expect(snapshot.counters.deleteLeaseChecks).toBe(1);
     expect(snapshot.chatContextCache.entries).toBe(2);
     expect(snapshot.chatContextCache.activity.redisHits).toBe(7);
+    expect(snapshot.chatContextCache.settingsTemplates).toEqual({
+      entries: 1,
+      estimatedBytes: 2048,
+      maxEntries: 2048,
+      maxBytes: 16777216,
+      maxEntryBytes: 16777216,
+      hits: 3,
+      misses: 1,
+      writes: 1,
+      oversizedSkips: 0,
+      capacityEvictions: 0,
+      fullLoads: 1,
+      shellReads: 3,
+      reuses: 2,
+    });
     expect(snapshot.chatContextCache.activity.invalidationsByReason.access_denied).toEqual({
       events: 2,
       evictedEntries: 1,
@@ -202,7 +233,7 @@ describe('bounded storage-runtime metrics', () => {
       sweepInspected: 0,
     };
     expect(sanitizeStorageRuntimeSnapshot({ ...report, chatContextCache: cache })).toMatchObject({
-      chatContextCache: { ...cache, activity: null },
+      chatContextCache: { ...cache, activity: null, settingsTemplates: null },
     });
     for (const activity of [
       null,
@@ -221,6 +252,20 @@ describe('bounded storage-runtime metrics', () => {
       expect(
         sanitizeStorageRuntimeSnapshot({ ...report, chatContextCache: { ...cache, activity } }),
       ).toMatchObject({ chatContextCache: { ...cache, activity: null } });
+    }
+    for (const settingsTemplates of [null, {}, { entries: -1 }, { reuses: 0.5 }]) {
+      expect(
+        sanitizeStorageRuntimeSnapshot({
+          ...report,
+          chatContextCache: {
+            ...cache,
+            activity: createChatContextCacheActivity(),
+            settingsTemplates,
+          },
+        }),
+      ).toMatchObject({
+        chatContextCache: { activity: createChatContextCacheActivity(), settingsTemplates: null },
+      });
     }
   });
   it('coalesces slow reporting without queuing reports or affecting work', async () => {
@@ -525,6 +570,21 @@ describe('bounded storage-runtime metrics', () => {
       invalidations: 1,
       sweepInspected: 1,
       activity: createChatContextCacheActivity(),
+      settingsTemplates: {
+        entries: 1,
+        estimatedBytes: 1,
+        maxEntries: 1,
+        maxBytes: 1,
+        maxEntryBytes: 1,
+        hits: 1,
+        misses: 1,
+        writes: 1,
+        oversizedSkips: 1,
+        capacityEvictions: 1,
+        fullLoads: 1,
+        shellReads: 1,
+        reuses: 1,
+      },
     }));
     metrics.registerVkPersistenceSnapshot(() => ({
       batches: 1,

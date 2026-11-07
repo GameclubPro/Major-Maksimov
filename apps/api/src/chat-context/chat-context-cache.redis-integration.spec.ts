@@ -1,3 +1,4 @@
+import { withChatContextSourceFixture } from './__tests__/chat-context-source.fixture';
 import type { ChatSummary } from '@maxim/contracts';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -20,8 +21,16 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const chatId = `title-reuse-${randomUUID()}`;
     const config = { getOrThrow: () => redisIntegrationUrl };
     const prisma = { chat: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } };
-    const reader = new ChatContextCacheService(prisma as never, config as never, {} as never);
-    const writer = new ChatContextCacheService(prisma as never, config as never, {} as never);
+    const reader = new ChatContextCacheService(
+      withChatContextSourceFixture(prisma),
+      config as never,
+      {} as never,
+    );
+    const writer = new ChatContextCacheService(
+      withChatContextSourceFixture(prisma),
+      config as never,
+      {} as never,
+    );
     const inspector = new Redis(redisIntegrationUrl);
     const observer = new Redis(redisIntegrationUrl);
     const key = ChatContextCacheService.cacheKey(chatId);
@@ -124,8 +133,16 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       };
       const db = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
       const config = { getOrThrow: () => redisIntegrationUrl };
-      const reader = new ChatContextCacheService(db as never, config as never, {} as never);
-      const second = new ChatContextCacheService({} as never, config as never, {} as never);
+      const reader = new ChatContextCacheService(
+        withChatContextSourceFixture(db),
+        config as never,
+        {} as never,
+      );
+      const second = new ChatContextCacheService(
+        withChatContextSourceFixture({}),
+        config as never,
+        {} as never,
+      );
       const inspector = new Redis(redisIntegrationUrl);
       const key = ChatContextCacheService.cacheKey(chatId);
       const revisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
@@ -172,8 +189,16 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       get: (key: string) => (key === 'CHAT_CONTEXT_LOCAL_CACHE_TTL_MS' ? localTtlMs : undefined),
     };
     // This reader never subscribes, so its populated local entry misses the real publication.
-    const reader = new ChatContextCacheService({} as never, config as never, {} as never);
-    const writer = new ChatContextCacheService({} as never, config as never, {} as never);
+    const reader = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
+    const writer = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
     const inspector = new Redis(redisIntegrationUrl);
     const contextKey = ChatContextCacheService.cacheKey(chatId);
     const cachedRevisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
@@ -240,7 +265,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       },
     };
     const reader = new ChatContextCacheService(
-      source as never,
+      withChatContextSourceFixture(source),
       {
         getOrThrow: () => redisIntegrationUrl,
         get: (key: string) => (key === 'CHAT_CONTEXT_LOCAL_CACHE_TTL_MS' ? localTtlMs : undefined),
@@ -308,8 +333,16 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
   it('admits one metadata refresh across viewers and reopens it after the finite cooldown', async () => {
     const chatId = `header-refresh-${randomUUID()}`;
     const config = { getOrThrow: () => redisIntegrationUrl };
-    const first = new ChatContextCacheService({} as never, config as never, {} as never);
-    const second = new ChatContextCacheService({} as never, config as never, {} as never);
+    const first = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
+    const second = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
     const inspector = new Redis(redisIntegrationUrl);
     const key = `${ChatContextCacheService.managedEntityHeaderKey(chatId, 'chat')}:refresh:v1`;
     try {
@@ -334,7 +367,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const userId = `header-user-${randomUUID()}`;
     const chatId = `header-chat-${randomUUID()}`;
     const service = new ChatContextCacheService(
-      {} as never,
+      withChatContextSourceFixture({}),
       { getOrThrow: () => redisIntegrationUrl } as never,
       {} as never,
     );
@@ -413,8 +446,16 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
   it('shares bot backoff across clients without throttling other bots or shortening Retry-After', async () => {
     const botId = `backoff-${randomUUID()}`;
     const config = { getOrThrow: () => redisIntegrationUrl };
-    const first = new ChatContextCacheService({} as never, config as never, {} as never);
-    const second = new ChatContextCacheService({} as never, config as never, {} as never);
+    const first = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
+    const second = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      config as never,
+      {} as never,
+    );
     const inspector = new Redis(redisIntegrationUrl);
     try {
       await first.activateManagedRefreshSourceBackoff(20, botId);
@@ -439,7 +480,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const userId = `redis-epoch-user-${suffix}`;
     const chatId = `redis-epoch-chat-${suffix}`;
     const service = new ChatContextCacheService(
-      {} as never,
+      withChatContextSourceFixture({}),
       { getOrThrow: () => redisIntegrationUrl } as never,
       {} as never,
     );
@@ -489,7 +530,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const userId = `redis-context-race-user-${suffix}`;
     const chatId = `redis-context-race-chat-${suffix}`;
     const service = new ChatContextCacheService(
-      {} as never,
+      withChatContextSourceFixture({}),
       { getOrThrow: () => redisIntegrationUrl } as never,
       {} as never,
     );
@@ -553,7 +594,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
   it('preserves empty arrays while moving a recovered entity between snapshots', async () => {
     const userId = `redis-integration-${randomUUID()}`;
     const service = new ChatContextCacheService(
-      {} as never,
+      withChatContextSourceFixture({}),
       { getOrThrow: () => redisIntegrationUrl } as never,
       {} as never,
     );
@@ -619,7 +660,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const userId = `redis-bootstrap-user-${suffix}`;
     const chatIds = [`redis-bootstrap-a-${suffix}`, `redis-bootstrap-b-${suffix}`];
     const service = new ChatContextCacheService(
-      {} as never,
+      withChatContextSourceFixture({}),
       { getOrThrow: () => redisIntegrationUrl } as never,
       {} as never,
     );
