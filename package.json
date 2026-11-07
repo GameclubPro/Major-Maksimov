@@ -81,7 +81,7 @@
     "prettier": "^3.8.3",
     "prisma": "7.9.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.59.3"
+    "typescript-eslint": "^8.67.0"
   },
   "lint-staged": {
     "*.{ts,tsx,js,json,md,yml,yaml}": "prettier --write"
