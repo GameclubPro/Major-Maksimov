@@ -12,8 +12,11 @@ that the models passed independent advertisement-quality acceptance.
 
 ## Scheduling and failure boundaries
 
-Each model has one physical inference slot. Primary work ranks available nodes by
-measured response-time EWMA plus a decaying failure penalty; exact ties rotate.
+Each model has one physical inference slot. Primary work first reserves available
+9B capacity, then immediately uses 4B when neither eligible 9B slot can be reserved.
+It never waits for a busy 9B or extends the original source deadline. Within the
+9B tier, measured response-time EWMA plus a decaying failure penalty ranks nodes;
+exact ties rotate. A faster 4B never outranks an eligible free 9B.
 The three bounded measurements live in the background process and reset on its
 restart. Atomic reservations prevent two producers from claiming the same slot.
 The shared bounded admission mailbox retains at most two pending inputs and three
@@ -21,7 +24,8 @@ active sources. Existing per-chat, source-age, three-second admission and origin
 20-second inference limits remain. These are short-lived work records, not an
 unbounded backlog or a historical replay queue. Expiry is an unclassified input.
 
-Only a 4B result can request a 9B consultation. A consultation must immediately
+In the retained `confirm-positive` policy, only a 4B result can request a 9B
+consultation. A consultation must immediately
 reserve an idle 9B slot after the atomic check for higher-priority primary work.
 It never queues behind another model request, retries, or extends the original
 deadline. If neither 9B is immediately available, the result remains `UNSURE`
@@ -29,13 +33,17 @@ and cannot authorize deletion. Ordinary primary work can make at most one retry
 on a different available node within the original deadline; obsolete results
 cannot replace the current attempt.
 
-The initial `confirm-positive` policy requires consultation for both 4B
-`COMMERCIAL` and `UNSURE` results. The optional `direct-4b` policy permits a direct
-4B commercial decision and consults only for `UNSURE`. Select `direct-4b` only
-after a separately reviewed, frozen, independently labelled quality evaluation
-accepts its false-positive and missed-advertisement rates. Installing another
-model is not that acceptance. Neither policy treats a model's self-reported
-confidence as a calibrated probability.
+The retained `confirm-positive` policy requires consultation for both 4B
+`COMMERCIAL` and `UNSURE` results. The owner selected 9B-first processing with
+`direct-4b` overflow on 2026-11-07, superseding the earlier requirement to confirm
+4B positives before enabling this deployment. In `direct-4b`, every 4B answer is
+terminal: a commercial decision may proceed through the existing effect guards,
+`NOT_COMMERCIAL` stays negative, and `UNSURE` cannot delete. No answer requests
+another model, including personal-sale observations. Explicit personal-sale BLOCK
+still requires its existing pinned 9B proof, so a fallback 4B personal-sale answer
+does not authorize that special deletion. The source, settings, grants and original
+deadline checks remain required. This routing decision does not certify classifier
+accuracy. Neither policy treats self-reported confidence as a calibrated probability.
 
 Node leases expire after ten seconds and readiness after six seconds without
 renewal. Disconnection prevents new reservations; generation/attempt fences reject

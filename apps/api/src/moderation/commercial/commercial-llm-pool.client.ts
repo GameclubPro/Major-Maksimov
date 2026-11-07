@@ -184,12 +184,13 @@ export class CommercialLlmPoolClient implements CommercialLlmClassifier {
       await current();
       const needsConsultation =
         primary.pool!.nodeId === 'pc-a-4b' &&
+        this.options.policy === 'confirm-positive' &&
         (primary.classification === 'UNSURE' ||
           (this.options.confirmPersonalSales === true &&
             primary.classification === 'NOT_COMMERCIAL' &&
             primary.reasonCodes.length === 1 &&
             primary.reasonCodes[0] === 'PERSONAL_SALE') ||
-          (this.options.policy === 'confirm-positive' && primary.classification === 'COMMERCIAL'));
+          primary.classification === 'COMMERCIAL');
       if (!needsConsultation) return { ...primary, durationMs: elapsed(startedAt) };
       if (this.options.deadlineAtMs - Date.now() < 1000)
         return this.unresolved(primary, 'budget_exhausted', startedAt);
@@ -291,10 +292,16 @@ export class CommercialLlmPoolClient implements CommercialLlmClassifier {
     current: () => Promise<void>,
   ): Promise<CommercialLlmPoolReservation | null> {
     const available = await this.bounded(this.mailbox.available(), signal);
-    // Measurements prefer faster healthy workers. A stable rotation distributes exact ties.
+    // FLAG: Ready 9B capacity precedes 4B overflow. Measurements rank peers within each
+    // model class; atomic reservation failure never waits or extends the original deadline.
     const offset = Number.parseInt(this.options.jobId.slice(-8), 16) % POOL_NODE_IDS.length;
     const order = [...POOL_NODE_IDS.slice(offset), ...POOL_NODE_IDS.slice(0, offset)];
-    for (const nodeId of this.options.routingStats?.rank(order) ?? order) {
+    const ranked = this.options.routingStats?.rank(order) ?? order;
+    const prioritized = [
+      ...ranked.filter((nodeId) => COMMERCIAL_LLM_POOL_PROFILES[nodeId].model === '9b'),
+      ...ranked.filter((nodeId) => COMMERCIAL_LLM_POOL_PROFILES[nodeId].model === '4b'),
+    ];
+    for (const nodeId of prioritized) {
       if (
         attempted.has(nodeId) ||
         !available.includes(nodeId) ||
