@@ -62,6 +62,26 @@ alone cannot prove that the production controller starts. See the
 
 ## Failure handling
 
+The change relay publishes at most 500 committed source rows per transaction in
+`created_at,id` order. It acquires its advisory lock in a separate first SQL
+statement: the subsequent candidate and head reads must see commits completed
+while it waited. Do not combine lock acquisition and those reads into one CTE.
+One parameterized batch UPDATE assigns exact BIGINT sequence values and the same
+transaction timestamp. A full batch uses four publication SQL commands instead
+of 503; transaction control and the separate retention statements are excluded.
+The candidate read also returns tuple addresses under its row locks. A materialized
+assignment list matches both UUID and tuple address, with a scalar address array
+for direct TID probes. A VALUES join or UUID IN condition alone can make PostgreSQL
+scan retained history. Tuple addresses belong only to that transaction; never persist,
+cache or reuse them after its locks are released. Concurrent row updates/deletes and
+table rewrites wait for those locks.
+The five-second transaction timeout, skipped row locks, cursor semantics and
+retention cadence stay unchanged. This reduces database round trips, with one
+tuple update per source row. Native regression coverage is in
+`apps/api/src/statistics/stats-changes-relay-postgres.spec.ts` and
+`apps/api/src/statistics/stats-central-postgres.spec.ts`; retained-history plans
+must cover candidate, head and UPDATE target work.
+
 An absent activation variable performs no dotenv or runtime change. `--plan`
 never persists activation. A repeated activation with the same epoch is safe;
 it must still use current exact-SHA green CI and the normal release fence.
