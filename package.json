@@ -71,7 +71,7 @@
     "@prisma/config": "7.9.0",
     "@prisma/dev": "0.24.14",
     "@types/node": "^24.12.4",
-    "concurrently": "^9.2.1",
+    "concurrently": "^10.0.5",
     "eslint": "^9.39.4",
     "globals": "^15.15.0",
     "husky": "^9.1.7",
