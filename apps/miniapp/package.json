@@ -16,7 +16,7 @@
   "dependencies": {
     "@maxim/contracts": "0.1.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@tanstack/react-query": "^5.100.14",
+    "@tanstack/react-query": "^5.101.4",
     "iconoir-react": "^7.11.0",
     "luxon": "^3.7.2",
     "react": "^19.2.8",
