@@ -34,6 +34,7 @@ import {
   readPoolProcess,
   poolResumeEnabled,
   connectPoolTransport,
+  warmPoolCpuModel,
 } from './commercial-llm-pool-workstation.mjs';
 
 const root = new URL('../../', import.meta.url);
@@ -88,7 +89,7 @@ async function eventually(condition, deadlineMs = 1000) {
   assert.ok(condition(), 'observable state did not arrive before its deadline');
 }
 
-test('both PC identities match backend v2 and preserve exact model/runtime provenance', () => {
+test('all PC identities match backend v2 and preserve exact model/runtime provenance', () => {
   for (const nodeId of POOL_NODE_IDS) {
     const profile = poolProfile(nodeId);
     assert.deepEqual(profile.identity, api.COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity);
@@ -108,7 +109,7 @@ test('both PC identities match backend v2 and preserve exact model/runtime prove
   assert.throws(() => poolProfile('server-9b'));
 });
 
-test('model profile stays loopback/private with one GPU slot and bounded generation', () => {
+test('model profiles isolate the CPU slot and retain bounded private GPU slots', () => {
   for (const nodeId of POOL_NODE_IDS) {
     const args = poolModelArgs(nodeId, '/models', '/private/key');
     for (const [flag, value] of [
@@ -116,9 +117,10 @@ test('model profile stays loopback/private with one GPU slot and bounded generat
       ['--parallel', '1'],
       ['--ctx-size', '4096'],
       ['--n-predict', '128'],
-      ['--threads', '4'],
+      ['--threads', nodeId === 'pc-a-cpu-9b' ? '6' : '4'],
       ['--api-key-file', '/private/key'],
-      ['--n-gpu-layers', '99'],
+      ['--n-gpu-layers', nodeId === 'pc-a-cpu-9b' ? '0' : '99'],
+      ['--port', nodeId === 'pc-a-cpu-9b' ? '18085' : '18084'],
     ])
       assert.equal(args[args.indexOf(flag) + 1], value);
     assert.equal(args[args.indexOf('--alias') + 1], poolProfile(nodeId).identity.modelAlias);
@@ -291,6 +293,105 @@ test('pool occupancy uses authenticated bounded slots and returns only a boolean
   }
 });
 
+test('CPU readiness and inference HTTP stay on the independent authenticated loopback port', async () => {
+  for (const nodeId of POOL_NODE_IDS) {
+    for (const path of ['/props', '/v1/models', '/slots', '/v1/chat/completions']) {
+      const body = path === '/v1/chat/completions' ? '{}' : undefined;
+      await poolJson(path, 'private-fixture-key', {
+        nodeId,
+        body,
+        fetchImpl: async (url, init) => {
+          const port = nodeId === 'pc-a-cpu-9b' ? '18085' : '18084';
+          assert.equal(String(url), `http://127.0.0.1:${port}${path}`);
+          assert.equal(init.headers.Authorization, 'Bearer private-fixture-key');
+          assert.equal(init.method, body ? 'POST' : 'GET');
+          assert.equal(init.redirect, 'error');
+          return Response.json({});
+        },
+      });
+    }
+  }
+  const reads = [];
+  await assert.rejects(
+    attestPoolModel('pc-a-cpu-9b', 'synthetic', undefined, {
+      readJson: async (path, _key, options) => {
+        reads.push({ path, nodeId: options.nodeId });
+        return { endpoint_slots: false };
+      },
+    }),
+    /pool_model_slots_disabled/u,
+  );
+  assert.deepEqual(reads, [{ path: '/props', nodeId: 'pc-a-cpu-9b' }]);
+  await assert.rejects(
+    poolModelIsIdle('synthetic', undefined, {
+      nodeId: 'pc-a-cpu-9b',
+      readJson: async (path, _key, options) => {
+        assert.equal(path, '/slots');
+        assert.equal(options.nodeId, 'pc-a-cpu-9b');
+        return [];
+      },
+    }),
+    /pool_model_slots/u,
+  );
+});
+
+test('CPU primer uses the pinned production prompt and rejects incomplete warm-up before readiness', async () => {
+  const signal = new AbortController().signal;
+  const calls = [];
+  const valid = {
+    model: poolProfile('pc-a-cpu-9b').identity.modelAlias,
+    choices: [
+      {
+        finish_reason: 'stop',
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            classification: 'NOT_COMMERCIAL',
+            reasonCodes: ['ORDINARY_DISCUSSION'],
+          }),
+        },
+      },
+    ],
+  };
+  const readJson = async (path, _key, options) => {
+    calls.push({ path, options });
+    return valid;
+  };
+  await warmPoolCpuModel('pc-a-cpu-9b', 'synthetic', signal, protocol, readJson);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].path, '/v1/chat/completions');
+  assert.equal(calls[0].options.nodeId, 'pc-a-cpu-9b');
+  const requestBody = JSON.parse(calls[0].options.body);
+  assert.equal(requestBody.messages[0].content, protocol.COMMERCIAL_LLM_SYSTEM_PROMPT);
+  assert.deepEqual(
+    requestBody.response_format,
+    protocol.buildCommercialLlmRequest('synthetic').response_format,
+  );
+  for (const response of [
+    { ...valid, model: 'foreign' },
+    { ...valid, choices: [{ ...valid.choices[0], finish_reason: 'length' }] },
+    { ...valid, choices: [] },
+  ])
+    await assert.rejects(
+      warmPoolCpuModel('pc-a-cpu-9b', 'synthetic', signal, protocol, async () => response),
+      /pool_primer_decision/u,
+    );
+  await assert.rejects(
+    warmPoolCpuModel(
+      'pc-a-cpu-9b',
+      'synthetic',
+      signal,
+      {
+        ...protocol,
+        commercialLlmPromptSha256: () => 'foreign',
+      },
+      readJson,
+    ),
+    /pool_primer_identity/u,
+  );
+  assert.equal(calls.length, 1);
+});
+
 test('pool occupancy rejects missing, multiple, mismatched and untyped slot records', async () => {
   const slot = { id: 0, n_ctx: 4096, is_processing: false };
   const invalid = [
@@ -430,28 +531,31 @@ test('node swap or altered identity is refused before accepting work', async () 
   assert.equal(calls, 0);
 });
 
-test('a successful inference withdraws readiness then publishes one result and restores readiness', async () => {
-  const server = peer(),
-    controller = new AbortController();
-  let finish;
-  const running = poolSession(server.child, 'pc-b-9b', 'key', {
-    signal: controller.signal,
-    infer: async () =>
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
+for (const nodeId of ['pc-b-9b', 'pc-a-cpu-9b'])
+  test(`a successful ${nodeId} inference withdraws readiness then publishes one result and restores readiness`, async () => {
+    const server = peer(),
+      controller = new AbortController();
+    let finish;
+    const running = poolSession(server.child, nodeId, 'key', {
+      signal: controller.signal,
+      infer: async (_path, _key, options) => {
+        assert.equal(options.nodeId, nodeId);
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    server.send({ type: 'hello', nodeId, identity: poolProfile(nodeId).identity });
+    await eventually(() => server.sent.some((frame) => frame.type === 'ready' && frame.ready));
+    server.send(request(nodeId));
+    await eventually(() => typeof finish === 'function');
+    assert.equal(server.sent.at(-1).ready, false);
+    finish({ model: poolProfile(nodeId).identity.modelAlias });
+    await eventually(() => server.sent.filter((frame) => frame.type === 'response').length === 1);
+    assert.equal(server.sent.at(-1).ready, true);
+    controller.abort();
+    await running.catch(() => undefined);
   });
-  server.send({ type: 'hello', nodeId: 'pc-b-9b', identity: poolProfile('pc-b-9b').identity });
-  await eventually(() => server.sent.some((frame) => frame.type === 'ready' && frame.ready));
-  server.send(request());
-  await eventually(() => typeof finish === 'function');
-  assert.equal(server.sent.at(-1).ready, false);
-  finish({ model: poolProfile('pc-b-9b').identity.modelAlias });
-  await eventually(() => server.sent.filter((frame) => frame.type === 'response').length === 1);
-  assert.equal(server.sent.at(-1).ready, true);
-  controller.abort();
-  await running.catch(() => undefined);
-});
 
 test('a concurrent request closes the session without adding local queued work', async () => {
   const server = peer();

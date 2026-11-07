@@ -93,14 +93,14 @@ integration('bounded commercial AI diagnostics on disposable Redis', () => {
   it('reads pool generations without substituting a healthy legacy status when pool evidence disappears', async () => {
     const now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
-    const snapshot = (kept: number) =>
+    const snapshot = (kept: number, active: number) =>
       JSON.stringify({
         stage: 'commercial-ai',
         schemaVersion: 2,
         mode: 'ENFORCE',
         heartbeatAt: new Date(now).toISOString(),
         lastSuccessAt: null,
-        active: 0,
+        active,
         observationProcessId: randomUUID(),
         observationStartedAt: new Date(now).toISOString(),
         outcomeBasis: 'process_cumulative',
@@ -108,9 +108,9 @@ integration('bounded commercial AI diagnostics on disposable Redis', () => {
         pendingDiscardBasis: 'redis_namespace_cumulative',
         pendingDiscards: {},
       });
-    const legacy = snapshot(99);
+    const legacy = snapshot(99, 3);
     await write(legacy, 30_000);
-    const pool = snapshot(2);
+    const pool = snapshot(2, 4);
     ownsPoolStatus = true;
     await redis.set(poolKeys.status, pool, 'PX', 30_000);
     const service = new SafetyDeskCommercialAiService(
@@ -124,6 +124,7 @@ integration('bounded commercial AI diagnostics on disposable Redis', () => {
     services.push(service);
     expect(await service.getSnapshot()).toMatchObject({
       availability: 'FRESH',
+      active: 4,
       observationProcessId: JSON.parse(pool).observationProcessId,
       outcomes: { kept: 2 },
     });

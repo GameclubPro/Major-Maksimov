@@ -336,7 +336,7 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       expect((await envelope(input)).attempts[0]?.analysis.state).toBe('NOT_STARTED');
     });
 
-    it.each(['server-9b', 'pc-a-4b', 'pc-b-9b'] as const)(
+    it.each(['server-9b', 'pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b'] as const)(
       'persists the unmodified actual pool identity from %s including protocol version',
       async (nodeId) => {
         const input = seed({ messageId: `synthetic-${nodeId}` });

@@ -25,6 +25,9 @@ import {
 } from './commercial-llm-workstation.protocol';
 import {
   COMMERCIAL_LLM_POOL_PROFILES,
+  LEGACY_COMMERCIAL_LLM_POOL_PROFILES,
+  LEGACY_POOL_NODE_IDS,
+  type CommercialLlmPoolNodeId,
   isCommercialLlmPoolNodeId,
 } from './commercial-llm-pool.protocol';
 
@@ -72,6 +75,14 @@ const legacyCommercialLlmSourceSchema = z
   })
   .strict();
 export type CommercialLlmPoolPolicy = 'confirm-positive' | 'direct-4b';
+export const COMMERCIAL_LLM_POOL_FOUR_NODE_READER_VERSION = 1;
+export function legacyCommercialLlmPoolEnforcementIdentity(
+  policy: CommercialLlmPoolPolicy,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify(['commercial-pool-v2', LEGACY_COMMERCIAL_LLM_POOL_PROFILES, policy]))
+    .digest('hex');
+}
 export function commercialLlmPoolEnforcementIdentity(policy: CommercialLlmPoolPolicy): string {
   return createHash('sha256')
     .update(JSON.stringify(['commercial-pool-v2', COMMERCIAL_LLM_POOL_PROFILES, policy]))
@@ -91,18 +102,36 @@ export function commercialLlmPolicyEnforcementIdentity(policy?: CommercialLlmPoo
     )
     .digest('hex');
 }
+export function legacyCommercialLlmPolicyEnforcementIdentity(
+  policy: CommercialLlmPoolPolicy,
+): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        'commercial-category-policy-v1',
+        legacyCommercialLlmPoolEnforcementIdentity(policy),
+      ]),
+    )
+    .digest('hex');
+}
 // FLAG: Explicit category policy has a distinct source identity. Legacy readers reject v3;
 // a policy-bound personal-sale decision never borrows legacy COMMERCIAL deletion authority.
 export const commercialLlmSourceSchema = z.union([
   legacyCommercialLlmSourceSchema,
   legacyCommercialLlmSourceSchema.extend({
     version: z.literal(2),
-    classifierSha256: z.literal(commercialLlmPoolEnforcementIdentity('confirm-positive')),
+    classifierSha256: z.union([
+      z.literal(commercialLlmPoolEnforcementIdentity('confirm-positive')),
+      z.literal(legacyCommercialLlmPoolEnforcementIdentity('confirm-positive')),
+    ]),
     poolPolicy: z.literal('confirm-positive'),
   }),
   legacyCommercialLlmSourceSchema.extend({
     version: z.literal(2),
-    classifierSha256: z.literal(commercialLlmPoolEnforcementIdentity('direct-4b')),
+    classifierSha256: z.union([
+      z.literal(commercialLlmPoolEnforcementIdentity('direct-4b')),
+      z.literal(legacyCommercialLlmPoolEnforcementIdentity('direct-4b')),
+    ]),
     poolPolicy: z.literal('direct-4b'),
   }),
   legacyCommercialLlmSourceSchema.extend({
@@ -113,13 +142,39 @@ export const commercialLlmSourceSchema = z.union([
   ...(['confirm-positive', 'direct-4b'] as const).map((policy) =>
     legacyCommercialLlmSourceSchema.extend({
       version: z.literal(3),
-      classifierSha256: z.literal(commercialLlmPolicyEnforcementIdentity(policy)),
+      classifierSha256: z.union([
+        z.literal(commercialLlmPolicyEnforcementIdentity(policy)),
+        z.literal(legacyCommercialLlmPolicyEnforcementIdentity(policy)),
+      ]),
       poolPolicy: z.literal(policy),
       personalSaleBlocked: z.boolean(),
     }),
   ),
 ]);
 export type CommercialLlmSource = z.infer<typeof commercialLlmSourceSchema>;
+// FLAG: A retained three-node source never acquires the fourth node's deletion capability.
+// Compare the original generation before converting v3 policy sources or inspecting a result.
+export function commercialLlmPoolSourceAllowsNode(
+  source: CommercialLlmSource,
+  nodeId: CommercialLlmPoolNodeId,
+): boolean {
+  if (!('poolPolicy' in source) || !isCommercialLlmPoolNodeId(nodeId)) return false;
+  const policy = source.poolPolicy;
+  if (source.version !== 2 && source.version !== 3) return false;
+  const currentIdentity =
+    source.version === 2
+      ? commercialLlmPoolEnforcementIdentity(policy)
+      : commercialLlmPolicyEnforcementIdentity(policy);
+  if (source.classifierSha256 === currentIdentity) return true;
+  const legacyIdentity =
+    source.version === 2
+      ? legacyCommercialLlmPoolEnforcementIdentity(policy)
+      : legacyCommercialLlmPolicyEnforcementIdentity(policy);
+  return (
+    source.classifierSha256 === legacyIdentity &&
+    LEGACY_POOL_NODE_IDS.some((legacyNodeId) => legacyNodeId === nodeId)
+  );
+}
 export const commercialLlmRequestSchema = z
   .object({
     source: commercialLlmSourceSchema,
@@ -263,7 +318,7 @@ function poolMayDelete(
     pool.policy !== source.poolPolicy ||
     !isCommercialLlmPoolNodeId(pool.nodeId) ||
     (pool.attempts !== 1 && pool.attempts !== 2) ||
-    source.classifierSha256 !== commercialLlmPoolEnforcementIdentity(source.poolPolicy) ||
+    !commercialLlmPoolSourceAllowsNode(source, pool.nodeId) ||
     parseCommercialLlmDecision({
       classification: result.classification,
       reasonCodes: result.reasonCodes,
@@ -305,14 +360,20 @@ function poolMayDelete(
 function legacySourceForPolicy(source: CommercialLlmSource): CommercialLlmSource | null {
   if (source.version !== 3) return null;
   const policy = 'poolPolicy' in source ? source.poolPolicy : undefined;
-  if (source.classifierSha256 !== commercialLlmPolicyEnforcementIdentity(policy)) return null;
+  const legacyPool =
+    policy !== undefined &&
+    source.classifierSha256 === legacyCommercialLlmPolicyEnforcementIdentity(policy);
+  if (!legacyPool && source.classifierSha256 !== commercialLlmPolicyEnforcementIdentity(policy))
+    return null;
   const base: Partial<typeof source> = { ...source };
   delete base.personalSaleBlocked;
   return commercialLlmSourceSchema.parse({
     ...base,
     version: policy ? 2 : 1,
     classifierSha256: policy
-      ? commercialLlmPoolEnforcementIdentity(policy)
+      ? legacyPool
+        ? legacyCommercialLlmPoolEnforcementIdentity(policy)
+        : commercialLlmPoolEnforcementIdentity(policy)
       : COMMERCIAL_LLM_ENFORCEMENT_IDENTITY_SHA256,
   });
 }
@@ -342,7 +403,12 @@ export function commercialLlmPolicyMayDeletePersonalSale(
     return false;
   if (result.pool) {
     const pool = result.pool;
-    if (legacy.version !== 2 || !isCommercialLlmPoolNodeId(pool.nodeId)) return false;
+    if (
+      legacy.version !== 2 ||
+      !isCommercialLlmPoolNodeId(pool.nodeId) ||
+      !commercialLlmPoolSourceAllowsNode(legacy, pool.nodeId)
+    )
+      return false;
     const profile = COMMERCIAL_LLM_POOL_PROFILES[pool.nodeId];
     const identity = profile.identity;
     if (

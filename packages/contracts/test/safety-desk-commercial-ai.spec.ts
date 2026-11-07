@@ -26,6 +26,11 @@ describe('commercial AI observation contract', () => {
   it('preserves missing evidence instead of defaulting to zero or healthy', () => {
     expect(safetyDeskCommercialAiResponseSchema.parse(unavailable)).toEqual(unavailable);
   });
+  it.each([0, 3, 4])('accepts %i observed active slots', (active) => {
+    expect(safetyDeskCommercialAiResponseSchema.parse({ ...unavailable, active }).active).toBe(
+      active,
+    );
+  });
   it.each([
     { confirmedDeletes: 1 },
     { trafficCoverage: 1 },
@@ -33,7 +38,7 @@ describe('commercial AI observation contract', () => {
     { observationProcessId: 'private-worker-lease' },
     { token: 'secret' },
     { active: -1 },
-    { active: 4 },
+    { active: 5 },
     { availability: 'HEALTHY' },
   ])('rejects unsupported success/privacy claims %j', (patch) => {
     expect(

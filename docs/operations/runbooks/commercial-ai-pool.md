@@ -1,10 +1,11 @@
 # Commercial AI pool
 
-The optional pool makes three pinned classifiers independent primary workers:
-`server-9b` on the VPS, `pc-a-4b` on the existing workstation and `pc-b-9b` on the
-second PC. The VPS owns admission, expiring reservations and final moderation
+The optional pool makes four pinned classifiers independent primary workers:
+`server-9b` on the VPS, `pc-a-4b` on the first PC GPU, `pc-b-9b` on the second PC
+GPU and `pc-a-cpu-9b` on the first PC CPU. The VPS owns admission, expiring reservations and final moderation
 authority. PCs make outbound SSH connections and expose their authenticated model
-API only on `127.0.0.1:18084`. They receive no MAX token or direct database access.
+API only on loopback: GPU workers use `127.0.0.1:18084`, and the independent
+first-PC CPU worker uses `127.0.0.1:18085`. They receive no MAX token or direct database access.
 
 This runbook describes the implementation and rollout gates. It does not establish
 that the pool has been deployed, that either PC passed an unattended reboot, or
@@ -13,13 +14,13 @@ that the models passed independent advertisement-quality acceptance.
 ## Scheduling and failure boundaries
 
 Each model has one physical inference slot. Primary work first reserves available
-9B capacity, then immediately uses 4B when neither eligible 9B slot can be reserved.
+9B capacity, then immediately uses 4B when no eligible 9B slot can be reserved.
 It never waits for a busy 9B or extends the original source deadline. Within the
 9B tier, measured response-time EWMA plus a decaying failure penalty ranks nodes;
 exact ties rotate. A faster 4B never outranks an eligible free 9B.
-The three bounded measurements live in the background process and reset on its
+The four bounded measurements live in the background process and reset on its
 restart. Atomic reservations prevent two producers from claiming the same slot.
-The shared bounded admission mailbox retains at most two pending inputs and three
+The shared bounded admission mailbox retains at most two pending inputs and four
 active sources. Existing per-chat, source-age, three-second admission and original
 20-second inference limits remain. These are short-lived work records, not an
 unbounded backlog or a historical replay queue. Expiry is an unclassified input.
@@ -28,7 +29,7 @@ In the retained `confirm-positive` policy, only a 4B result can request a 9B
 consultation. A consultation must immediately
 reserve an idle 9B slot after the atomic check for higher-priority primary work.
 It never queues behind another model request, retries, or extends the original
-deadline. If neither 9B is immediately available, the result remains `UNSURE`
+deadline. If no 9B is immediately available, the result remains `UNSURE`
 and cannot authorize deletion. Ordinary primary work can make at most one retry
 on a different available node within the original deadline; obsolete results
 cannot replace the current attempt.
@@ -64,8 +65,8 @@ prompt identity; an old result never inherits this transport compatibility. See 
 A missing PC reduces total capacity without blocking the other workers. Reduced capacity can still produce admission skips; three machines
 do not guarantee zero queues or complete traffic coverage under arbitrary load.
 
-The CPU node uses the same physical lease as the legacy CPU classifier.
-CPU handoff requires at least six seconds of the original inference budget, matching
+The VPS CPU node uses the same physical lease as the legacy CPU classifier.
+VPS CPU handoff requires at least six seconds of the original inference budget, matching
 the existing measured CPU p95 admission floor. The client leaves shorter budgets to
 available GPU nodes, and the CPU adapter rechecks after headroom and lease-retention
 waits before HTTP. A rejected undispatched request releases only its own capacity;
@@ -174,7 +175,7 @@ and independently enabled moderation rules keep their existing authority.
 
 ## Observations in Safety Desk
 
-The owner-only `GET /api/v1/safety-desk/runtime/commercial-ai/pool` reads the three
+The owner-only `GET /api/v1/safety-desk/runtime/commercial-ai/pool` reads the four
 fixed node registrations independently of the enforcement process. It distinguishes
 ready, occupied slot, connected-but-not-ready, missing registration, invalid data
 and expired cached observations. An occupied slot does not establish that inference
@@ -184,7 +185,7 @@ and TTLs before projecting states. It never reads a slot body or returns ownersh
 tokens, model inputs, responses or source identities. The two-second cache cannot
 extend a node's observed TTL. There are no MAX calls or runtime mutations.
 
-The process publishes three bounded attempt summaries and completed/no-capacity/
+The process publishes four bounded attempt summaries and completed/no-capacity/
 budget-exhausted consultation counters in its existing status. Attempts include
 primaries, consultations and retries; they are not unique message counts or final
 moderation decisions. Smoothed response duration is the existing routing EWMA,
@@ -193,9 +194,11 @@ unknown, not zero. Process generation and observation clocks bound the counters;
 cached or expired status is explicitly stale. Neither these metrics nor READY
 prove advertisement accuracy, traffic coverage or confirmed remote deletion.
 
-The original process-status endpoint is unchanged, so old open clients remain
-compatible during the API/static rollout. `confirm-positive`, immediate consultation
-admission, source deadlines and all deletion guards remain unchanged.
+New readers accept both the original three-node telemetry and four-node telemetry.
+Old open clients may require refresh after the static rollout because they reject
+four nodes or an active count of four. Immediate consultation admission in the
+retained `confirm-positive` policy, source deadlines and deletion guards remain
+enforced; the selected deployment policy is `direct-4b`.
 
 ## Flags and first host rollout
 
@@ -249,7 +252,7 @@ session; the existing supervisor reconnects and takes the selected path. Do not
 install a second 4B launcher or replace its authorized key for this migration.
 
 The new host operation is
-`commercial-llm workstation-pool-bridge pc-a-4b|pc-b-9b`. It accepts
+`commercial-llm workstation-pool-bridge pc-a-4b|pc-b-9b|pc-a-cpu-9b`. It accepts
 exactly one allowlisted identity and executes the compiled bridge in the attested
 active `api-moderation-background` container. A worker hello cannot choose another
 node, executable or container. This is a long-running framed worker transport,
@@ -285,7 +288,10 @@ node infra/scripts/commercial-llm-pool-workstation.mjs install pc-b-9b \
 The new 9B launcher uses an immutable installed script/runtime bundle and a
 private local API key. Preserve the existing 4B launcher's lifecycle settings;
 its protocol compatibility is provided on the VPS.
-The model must pass identity, template and warm-up checks before READY. A
+The model must pass identity, template and warm-up checks before READY. The PC CPU
+worker additionally warms the exact production classifier prompt from a verified
+immutable protocol snapshot before connecting. A failed primer does not advertise
+capacity; a generic readiness JSON does not establish a warm classifier prefix. A
 `started` result only confirms that supervision began; check subsequent local
 status and host readiness separately. Neither warm-up nor READY is a labelled
 advertisement evaluation.
@@ -322,6 +328,49 @@ Manual stop is persistent, including across reboot:
 Only explicit `start` re-enables a manually stopped worker. `resume` and the
 Windows watch preserve the disabled state. The startup helper's `Remove`
 operation stops the exact owned worker and removes only its matching task.
+
+## First-PC CPU installation
+
+The owner requested an additional CPU 9B on 2026-11-07. Its canonical identity is
+`pc-a-cpu-9b`. It uses the same pinned Qwen3.5-9B Q5_K_M weights and reviewed
+llama.cpp b11804 runtime/support archives as the second PC. CPU execution sets
+`--n-gpu-layers 0`, `CUDA_VISIBLE_DEVICES=-1`, six inference/batch threads and
+process niceness 10. One 4096-token slot and the original 20-second request budget
+remain enforced. These limits bound parallelism; measure actual CPU latency and
+memory before claiming additional completed-message capacity.
+The PC CPU requires at least 18 seconds of the original budget at reservation.
+Closed local fixtures on 2026-11-07 took 2.6–11.0 seconds with prefix reuse and
+14.7 seconds for the first classification. The production primer followed by a
+2500-character classification under local QA load took 18.2 and 15.5 seconds
+respectively; cold 2500-character input without the primer exceeded 20 seconds.
+These small samples are not a p95 or sustained-load guarantee. Shorter remaining budgets can still use eligible GPU
+nodes. The VPS CPU retains its independent six-second floor.
+
+Install verified artifacts into its private per-node directory and use a new SSH
+key restricted to the exact `pc-a-cpu-9b` bridge. Its port, API key, immutable bundle,
+supervisor, launcher and Windows task are independent of the existing GPU 4B.
+Do not stop or replace that GPU worker to install the CPU model.
+
+```bash
+node infra/scripts/commercial-llm-pool-workstation.mjs install pc-a-cpu-9b \
+  --artifact-dir /absolute/path/to/verified-artifacts --ssh-alias maxim-ai-cpu9b-vps
+~/.local/bin/maxim-llm-pc-a-cpu-9b start
+~/.local/bin/maxim-llm-pc-a-cpu-9b status
+```
+
+For Windows sign-in startup under the owning user:
+
+```powershell
+.\infra\scripts\commercial-llm-pool-startup.ps1 -Operation Install `
+  -NodeId pc-a-cpu-9b -Distro Ubuntu-24.04 -Mode Logon
+```
+
+`Logon` resumes only after sign-in and preserves manual stop. Installing the task
+is not evidence of a tested reboot. Before activation require exact production
+reader support, local warm-up, valid closed classification fixtures within the
+source deadline, and a fresh GPU 4B availability/latency comparison. After activation
+verify CPU registration and useful completed attempts independently. A fourth ready
+slot alone does not prove throughput or classifier accuracy.
 
 ## Acceptance and routing activation
 
@@ -381,3 +430,10 @@ in addition to the existing proof/origin/deadline guard. Turning routing or
 enforcement off does not remove that floor. Retain a compatible image before
 enabling writers; if no retained image has both readers, use a compatible
 fix-forward. A static-only rollback keeps its existing component scope.
+
+The fourth-node writer hashes all four pinned profiles. Readers retain the exact
+legacy three-profile identity for already issued version-2 and version-3 sources.
+A legacy source cannot authorize a `pc-a-cpu-9b` result or proof. Both ordinary
+and personal-sale proof guards enforce this capability boundary. The permanent
+pool rollback/bootstrap floor requires these wired readers; disabling the fourth
+node or routing does not make a pre-fourth-node API image compatible.

@@ -112,7 +112,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     const value = await new CommercialLlmPoolMailbox(redis).reserve(nodeId, {
       jobId,
       attempt: 1,
-      deadlineAtMs: Date.now() + 4000,
+      deadlineAtMs: Date.now() + (nodeId === 'pc-a-cpu-9b' ? 20_000 : 4000),
       body: JSON.stringify({
         ...buildCommercialLlmRequest('Продам свой старый холодильник'),
         model: COMMERCIAL_LLM_POOL_PROFILES[nodeId].identity.modelAlias,
@@ -169,7 +169,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     ).toEqual(['COMPLETE', 'COMPLETE']);
   });
 
-  it.each(['pc-a-4b', 'pc-b-9b'] as const)(
+  it.each(['pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b'] as const)(
     'forwards the current prompt to reviewed previous %s workers',
     async (nodeId) => {
       const state = await connected(nodeId, true);

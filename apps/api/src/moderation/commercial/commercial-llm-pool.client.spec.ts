@@ -12,6 +12,7 @@ import type {
 import {
   COMMERCIAL_LLM_POOL_PROFILES,
   POOL_NODE_IDS,
+  LEGACY_POOL_NODE_IDS,
   type CommercialLlmPoolNodeId,
 } from './commercial-llm-pool.protocol';
 import type { CommercialLlmClassification } from './commercial-llm.protocol';
@@ -103,8 +104,9 @@ describe('independent commercial model pool classifier', () => {
       'server-9b': 'NOT_COMMERCIAL',
       'pc-a-4b': 'NOT_COMMERCIAL',
       'pc-b-9b': 'NOT_COMMERCIAL',
+      'pc-a-cpu-9b': 'NOT_COMMERCIAL',
     };
-    mailbox.available.mockReset().mockResolvedValue([...POOL_NODE_IDS]);
+    mailbox.available.mockReset().mockResolvedValue([...LEGACY_POOL_NODE_IDS]);
     mailbox.reserve.mockReset().mockImplementation(async (nodeId, request) => {
       const id = randomUUID();
       return {
@@ -161,7 +163,8 @@ describe('independent commercial model pool classifier', () => {
     },
   );
 
-  it('distributes three simultaneous sources across all ready nodes', async () => {
+  it('distributes four simultaneous sources across all ready nodes', async () => {
+    mailbox.available.mockResolvedValue([...POOL_NODE_IDS]);
     const occupied = new Set<CommercialLlmPoolNodeId>();
     const complete: Array<() => void> = [];
     mailbox.reserve.mockImplementation(async (nodeId, request) => {
@@ -185,18 +188,16 @@ describe('independent commercial model pool classifier', () => {
           );
         }),
     );
-    const results = [0, 1, 2].map((i) =>
+    const results = [0, 1, 2, 3].map((i) =>
       client({ jobId: `00000000-0000-0000-0000-00000000000${i}` }).classify('synthetic'),
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(occupied).toEqual(new Set(POOL_NODE_IDS));
-    expect(complete).toHaveLength(3);
+    expect(complete).toHaveLength(4);
     complete.forEach((finish) => finish());
-    expect((await Promise.all(results)).map((result) => result.pool!.nodeId)).toEqual([
-      'server-9b',
-      'pc-b-9b',
-      'pc-a-4b',
-    ]);
+    expect(new Set((await Promise.all(results)).map((result) => result.pool!.nodeId))).toEqual(
+      new Set(POOL_NODE_IDS),
+    );
   });
 
   it('preserves the finite invalid-response reason across both failed primary attempts', async () => {
@@ -267,13 +268,18 @@ describe('independent commercial model pool classifier', () => {
     },
   );
 
-  it('uses 4B immediately after both 9B reservations lose capacity without spending an attempt', async () => {
-    mailbox.reserve.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+  it('uses 4B immediately after all three 9B reservations lose capacity without spending an attempt', async () => {
+    mailbox.available.mockResolvedValue([...POOL_NODE_IDS]);
+    mailbox.reserve
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
     decisions['pc-a-4b'] = 'COMMERCIAL';
     const result = await client({ policy: 'direct-4b' }).classify('synthetic');
     expect(result.pool).toMatchObject({ nodeId: 'pc-a-4b', route: 'direct', attempts: 1 });
     expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual([
       'pc-b-9b',
+      'pc-a-cpu-9b',
       'server-9b',
       'pc-a-4b',
     ]);
@@ -285,15 +291,22 @@ describe('independent commercial model pool classifier', () => {
     expect(canStartConsultation).not.toHaveBeenCalled();
   });
 
-  it('uses 4B when the only ready 9B cannot fit the original CPU budget', async () => {
-    mailbox.available.mockResolvedValue(['server-9b', 'pc-a-4b']);
-    const result = await client({ policy: 'direct-4b', deadlineAtMs: Date.now() + 5000 }).classify(
-      'synthetic',
-    );
-    expect(result.pool?.nodeId).toBe('pc-a-4b');
-    expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-a-4b']);
-    expect(dispatch).not.toHaveBeenCalled();
-  });
+  it.each([
+    ['server-9b', 5000],
+    ['pc-a-cpu-9b', 12_000],
+  ] as const)(
+    'uses 4B when ready %s cannot fit the original CPU budget of %i ms',
+    async (nodeId, remainingMs) => {
+      mailbox.available.mockResolvedValue([nodeId, 'pc-a-4b']);
+      const result = await client({
+        policy: 'direct-4b',
+        deadlineAtMs: Date.now() + remainingMs,
+      }).classify('synthetic');
+      expect(result.pool?.nodeId).toBe('pc-a-4b');
+      expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-a-4b']);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['NOT_COMMERCIAL', 'COMMERCIAL', 'UNSURE'] as const)(
     'returns fallback 4B %s without consultation under direct policy',

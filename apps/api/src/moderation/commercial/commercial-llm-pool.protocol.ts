@@ -8,7 +8,8 @@ import {
 } from './commercial-llm.protocol';
 import { COMMERCIAL_LLM_WORKSTATION_IDENTITY } from './commercial-llm-workstation.protocol';
 
-export const POOL_NODE_IDS = ['server-9b', 'pc-a-4b', 'pc-b-9b'] as const;
+export const LEGACY_POOL_NODE_IDS = ['server-9b', 'pc-a-4b', 'pc-b-9b'] as const;
+export const POOL_NODE_IDS = [...LEGACY_POOL_NODE_IDS, 'pc-a-cpu-9b'] as const;
 export type CommercialLlmPoolNodeId = (typeof POOL_NODE_IDS)[number];
 export type CommercialLlmPoolBridgeNodeId = Exclude<CommercialLlmPoolNodeId, 'server-9b'>;
 export const COMMERCIAL_LLM_POOL_PROTOCOL_VERSION = 2;
@@ -16,6 +17,9 @@ export const COMMERCIAL_LLM_POOL_LEASE_MS = 10_000;
 export const COMMERCIAL_LLM_POOL_HEARTBEAT_MS = 6_000;
 export const COMMERCIAL_LLM_POOL_TIMEOUT_MS = 20_000;
 export const COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS = 6_000;
+// FLAG: Closed fixtures after the production primer took up to 15.5s under local QA load.
+// Retain 18s of the original budget for PC CPU admission; this is not a p95 guarantee.
+export const COMMERCIAL_LLM_POOL_PC_CPU_MIN_REMAINING_MS = 18_000;
 export const COMMERCIAL_LLM_POOL_FRAME_BYTES = 64 * 1024;
 export const COMMERCIAL_LLM_POOL_REQUEST_BYTES = 32 * 1024;
 export const COMMERCIAL_LLM_POOL_RESPONSE_BYTES = 16 * 1024;
@@ -66,9 +70,10 @@ const pc9bIdentity: CommercialLlmPoolIdentity = Object.freeze({
   chatTemplateSha256: COMMERCIAL_LLM_CHAT_TEMPLATE_SHA256,
 });
 
-// FLAG: Node names are server-owned capabilities. A caller's hello cannot select another profile.
-export const COMMERCIAL_LLM_POOL_PROFILES: Readonly<
-  Record<CommercialLlmPoolNodeId, CommercialLlmPoolProfile>
+// FLAG: Freeze the original serialized three-profile shape and order for retained v2/v3 sources.
+// New node names are server-owned capabilities; a hello cannot select another profile.
+export const LEGACY_COMMERCIAL_LLM_POOL_PROFILES: Readonly<
+  Record<(typeof LEGACY_POOL_NODE_IDS)[number], CommercialLlmPoolProfile>
 > = Object.freeze({
   'server-9b': Object.freeze({
     nodeId: 'server-9b',
@@ -89,6 +94,34 @@ export const COMMERCIAL_LLM_POOL_PROFILES: Readonly<
     identity: pc9bIdentity,
   }),
 });
+
+// FLAG: The reviewed workstation binary also supports CPU-only execution. The CPU bridge
+// has its own node fences; its launcher enforces zero GPU layers and a separate endpoint.
+const pcCpu9bIdentity: CommercialLlmPoolIdentity = Object.freeze({
+  protocolVersion: 2,
+  modelAlias: COMMERCIAL_LLM_MODEL_ALIAS,
+  modelSha256: COMMERCIAL_LLM_MODEL_SHA256,
+  promptSha256: COMMERCIAL_LLM_PROMPT_SHA256,
+  chatTemplateSha256: COMMERCIAL_LLM_CHAT_TEMPLATE_SHA256,
+  runtimeVersion: COMMERCIAL_LLM_WORKSTATION_IDENTITY.runtimeVersion,
+  runtimeArtifactSha256: COMMERCIAL_LLM_WORKSTATION_IDENTITY.runtimeArtifactSha256,
+  runtimeSupportSha256: COMMERCIAL_LLM_WORKSTATION_IDENTITY.runtimeSupportSha256,
+});
+export const COMMERCIAL_LLM_POOL_PROFILES: Readonly<
+  Record<CommercialLlmPoolNodeId, CommercialLlmPoolProfile>
+> = Object.freeze({
+  ...LEGACY_COMMERCIAL_LLM_POOL_PROFILES,
+  'pc-a-cpu-9b': Object.freeze({
+    nodeId: 'pc-a-cpu-9b',
+    model: '9b',
+    transport: 'bridge',
+    identity: pcCpu9bIdentity,
+  }),
+});
+export function commercialLlmPoolMinRemainingMs(nodeId: CommercialLlmPoolNodeId): number {
+  if (nodeId === 'server-9b') return COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS;
+  return nodeId === 'pc-a-cpu-9b' ? COMMERCIAL_LLM_POOL_PC_CPU_MIN_REMAINING_MS : 0;
+}
 
 export function isCommercialLlmPoolNodeId(value: unknown): value is CommercialLlmPoolNodeId {
   return typeof value === 'string' && POOL_NODE_IDS.some((nodeId) => nodeId === value);

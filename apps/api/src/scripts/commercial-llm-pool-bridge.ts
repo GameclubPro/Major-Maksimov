@@ -19,7 +19,7 @@ export async function commercialLlmPoolBridge(
   trustedNodeId: CommercialLlmPoolBridgeNodeId,
 ): Promise<void> {
   if (
-    !['pc-a-4b', 'pc-b-9b'].includes(trustedNodeId) ||
+    !['pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b'].includes(trustedNodeId) ||
     process.env.APP_SERVICE_NAME !== 'api-moderation-background' ||
     process.env.COMMERCIAL_LLM_POOL_WORKERS_ENABLED !== 'true' ||
     !process.env.REDIS_URL
@@ -145,7 +145,7 @@ export async function commercialLlmPoolBridge(
 
 if (require.main === module) {
   const [nodeId, ...extra] = process.argv.slice(2);
-  if (extra.length || (nodeId !== 'pc-a-4b' && nodeId !== 'pc-b-9b')) {
+  if (extra.length || (nodeId !== 'pc-a-4b' && nodeId !== 'pc-b-9b' && nodeId !== 'pc-a-cpu-9b')) {
     process.stderr.write('pool_bridge_node_required\n');
     process.exitCode = 1;
   } else {

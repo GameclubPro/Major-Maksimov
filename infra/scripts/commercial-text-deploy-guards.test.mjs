@@ -11,6 +11,7 @@ const paths = {
   commercial: 'apps/api/src/moderation/commercial/commercial-delete-guard.service.ts',
   binding: 'apps/api/src/moderation/commercial/commercial-delete-binding.ts',
   protocol: 'apps/api/src/moderation/commercial/commercial-llm-enforcement.protocol.ts',
+  profiles: 'apps/api/src/moderation/commercial/commercial-llm-pool.protocol.ts',
   ai: 'apps/api/src/moderation/commercial/commercial-llm-delete-guard.service.ts',
   origin: 'apps/api/src/moderation/commercial/commercial-llm-effect-origin.ts',
 };
@@ -33,6 +34,26 @@ function changeReasons(change) {
   const body = source.slice(start, end);
   const changed = change(body);
   assert.notEqual(changed, body);
+  return source.slice(0, start) + changed + source.slice(end);
+}
+
+function changeFunction(key, name, change, indent = '') {
+  const source = readFileSync(resolve(root, paths[key]), 'utf8');
+  const starts = [
+    ...source.matchAll(
+      new RegExp(
+        `^${indent}(?:export )?(?:private )?(?:async )?(?:function )?${name}\\s*\\(`,
+        'gmu',
+      ),
+    ),
+  ];
+  assert.equal(starts.length, 1, `Expected one ${name} function`);
+  const start = starts[0].index;
+  const end = source.indexOf(`\n${indent}}`, start) + indent.length + 2;
+  assert.ok(end > start, `Missing ${name} function end`);
+  const original = source.slice(start, end);
+  const changed = change(original);
+  assert.notEqual(changed, original);
   return source.slice(0, start) + changed + source.slice(end);
 }
 
@@ -133,7 +154,7 @@ test('AI rollback floor retains fresh proof, original source and final dispatch 
     assert.equal(probe(t, mode, true).status, 1);
 });
 
-test('both rollback paths and tooling bootstrap retain v1/v2 pool readers with routing disabled', (t) => {
+test('both rollback paths retain v1/v2/v3 four-node pool readers with routing disabled', (t) => {
   for (const file of ['vps-release-rollback.sh', 'vps-runtime-rollback.sh'])
     assert.match(
       readFileSync(resolve(root, 'infra/scripts', file), 'utf8'),
@@ -148,6 +169,171 @@ test('both rollback paths and tooling bootstrap retain v1/v2 pool readers with r
   for (const mode of ['pool-no-v2', 'pool-no-v1', 'ai-no-proof', 'ai-unwired'])
     assert.equal(probe(t, mode, true, true).status, 1);
 });
+
+for (const [name, key, change] of [
+  [
+    'reader version',
+    'protocol',
+    (source) =>
+      replaceChecked(
+        source,
+        'COMMERCIAL_LLM_POOL_FOUR_NODE_READER_VERSION = 1',
+        'COMMERCIAL_LLM_POOL_FOUR_NODE_READER_VERSION = 0',
+      ),
+  ],
+  [
+    'legacy version-2 identity',
+    'protocol',
+    (source) =>
+      replaceChecked(
+        source,
+        "z.literal(legacyCommercialLlmPoolEnforcementIdentity('direct-4b'))",
+        "z.literal(commercialLlmPoolEnforcementIdentity('direct-4b'))",
+      ),
+  ],
+  [
+    'current version-2 identity',
+    'protocol',
+    (source) =>
+      replaceChecked(
+        source,
+        "z.literal(commercialLlmPoolEnforcementIdentity('confirm-positive'))",
+        "z.literal(legacyCommercialLlmPoolEnforcementIdentity('confirm-positive'))",
+      ),
+  ],
+  [
+    'legacy version-3 identity',
+    'protocol',
+    (source) =>
+      replaceChecked(
+        source,
+        'z.literal(legacyCommercialLlmPolicyEnforcementIdentity(policy))',
+        'z.literal(commercialLlmPolicyEnforcementIdentity(policy))',
+      ),
+  ],
+  [
+    'current version-3 identity',
+    'protocol',
+    (source) =>
+      replaceChecked(
+        source,
+        'z.literal(commercialLlmPolicyEnforcementIdentity(policy))',
+        'z.literal(legacyCommercialLlmPolicyEnforcementIdentity(policy))',
+      ),
+  ],
+  [
+    'separate legacy capability list',
+    'profiles',
+    (source) =>
+      replaceChecked(
+        source,
+        "['server-9b', 'pc-a-4b', 'pc-b-9b']",
+        "['server-9b', 'pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b']",
+      ),
+  ],
+  [
+    'new node capability',
+    'profiles',
+    (source) =>
+      replaceChecked(
+        source,
+        "[...LEGACY_POOL_NODE_IDS, 'pc-a-cpu-9b']",
+        '[...LEGACY_POOL_NODE_IDS]',
+      ),
+  ],
+  [
+    'frozen legacy profile order',
+    'profiles',
+    (source) => replaceChecked(source, 'identity: pc9bIdentity,', 'identity: pcCpu9bIdentity,'),
+  ],
+]) {
+  test(`pool rollback floor rejects missing ${name} despite an out-of-scope original marker`, (t) => {
+    const original = readFileSync(resolve(root, paths[key]), 'utf8');
+    const changed = change(original) + '\n/*\n' + original + '\n*/\n';
+    const result = probe(t, 'current', true, true, { [key]: changed });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /commercial AI.*four-node source reader/u);
+  });
+}
+
+for (const [name, key, fn, before, after, indent = ''] of [
+  [
+    'legacy profile hash',
+    'protocol',
+    'legacyCommercialLlmPoolEnforcementIdentity',
+    'LEGACY_COMMERCIAL_LLM_POOL_PROFILES',
+    'COMMERCIAL_LLM_POOL_PROFILES',
+  ],
+  [
+    'known-node restriction',
+    'protocol',
+    'commercialLlmPoolSourceAllowsNode',
+    "!('poolPolicy' in source) || !isCommercialLlmPoolNodeId(nodeId)",
+    "!('poolPolicy' in source)",
+  ],
+  [
+    'legacy node authority restriction',
+    'protocol',
+    'commercialLlmPoolSourceAllowsNode',
+    'LEGACY_POOL_NODE_IDS.some((legacyNodeId) => legacyNodeId === nodeId)',
+    'true',
+  ],
+  [
+    'ordinary pool generation check',
+    'protocol',
+    'poolMayDelete',
+    '!commercialLlmPoolSourceAllowsNode(source, pool.nodeId) ||',
+    '',
+  ],
+  [
+    'personal-sale pool generation check',
+    'protocol',
+    'commercialLlmPolicyMayDeletePersonalSale',
+    '!commercialLlmPoolSourceAllowsNode(legacy, pool.nodeId)',
+    'false',
+  ],
+  [
+    'version-3 legacy generation preservation',
+    'protocol',
+    'legacySourceForPolicy',
+    /legacyPool\s*\?\s*legacyCommercialLlmPoolEnforcementIdentity\(policy\)\s*:\s*commercialLlmPoolEnforcementIdentity\(policy\)/u,
+    'commercialLlmPoolEnforcementIdentity(policy)',
+  ],
+  [
+    'ordinary pool guard dispatch',
+    'protocol',
+    'commercialLlmMayDelete',
+    'return poolMayDelete(result, source)',
+    'return true',
+  ],
+  [
+    'pinned runtime proof',
+    'protocol',
+    'poolMayDelete',
+    'result.runtimeArtifactSha256 !== identity.runtimeArtifactSha256 ||',
+    '',
+  ],
+  [
+    'exact-source final proof',
+    'ai',
+    'currentSettings',
+    '!(await this.admission.hasProof(source)) ||',
+    '',
+    '  ',
+  ],
+]) {
+  test(`pool rollback floor rejects unwired ${name} despite a retained comment`, (t) => {
+    const original = readFileSync(resolve(root, paths[key]), 'utf8');
+    const changed =
+      changeFunction(key, fn, (source) => replaceChecked(source, before, after), indent) +
+      '\n/*\n' +
+      original +
+      '\n*/\n';
+    const result = probe(t, 'current', true, true, { [key]: changed });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /commercial AI.*four-node source reader/u);
+  });
+}
 
 for (const [name, before, after] of [
   [

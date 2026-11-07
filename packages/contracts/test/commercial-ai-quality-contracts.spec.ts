@@ -128,6 +128,51 @@ const completed = (value = result()) => ({
 });
 
 describe('bounded commercial AI quality observation contracts', () => {
+  it('accepts the independent CPU 9B on direct and consulted routes with the same bounded reasons', () => {
+    const direct = result({
+      classification: 'COMMERCIAL',
+      reasonCodes: ['SERVICE_OFFER'],
+      pool: {
+        version: 'commercial-pool-v2',
+        nodeId: 'pc-a-cpu-9b',
+        route: 'direct',
+        policy: 'direct-4b',
+        attempts: 1,
+      },
+    });
+    const consulted = result({
+      ...direct,
+      pool: {
+        ...direct.pool!,
+        route: 'consulted',
+        policy: 'confirm-positive',
+        primaryNodeId: 'pc-a-4b',
+        primaryClassification: 'COMMERCIAL',
+        primaryDurationMs: 100,
+        consultationDurationMs: 1000,
+        consultationOutcome: 'completed',
+      },
+    });
+    for (const value of [direct, consulted])
+      expect(commercialAiQualityResultSchema.parse(value)).toEqual(value);
+    for (const pool of [
+      { ...consulted.pool, primaryNodeId: 'pc-a-cpu-9b' },
+      { ...direct.pool, nodeId: 'unknown-9b' },
+    ])
+      expect(commercialAiQualityResultSchema.safeParse({ ...direct, pool }).success).toBe(false);
+    expect(
+      commercialAiQualityResultSchema.safeParse({
+        ...direct,
+        reasonCodes: [
+          'SERVICE_OFFER',
+          'BUSINESS_OFFER',
+          'COMMERCIAL_OFFER',
+          'CUSTOMER_ACQUISITION',
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
   it('retains the actual pool protocol version and rejects an unsupported version', () => {
     expect(
       commercialAiQualityResultSchema.parse(result({ protocolVersion: 2 })).protocolVersion,

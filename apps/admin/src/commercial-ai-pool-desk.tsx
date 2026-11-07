@@ -7,6 +7,7 @@ const names = {
   'server-9b': 'Сервер · Qwen 9B',
   'pc-a-4b': 'ПК-A · Qwen 4B',
   'pc-b-9b': 'ПК-B · Qwen 9B',
+  'pc-a-cpu-9b': 'ПК-A · CPU · Qwen 9B',
 };
 const states = {
   READY: 'Готов принять задание',
