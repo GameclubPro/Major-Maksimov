@@ -30,7 +30,8 @@ SELECT NOT EXISTS (
 \\if :commercial_quality_privileges_ready
 \\else
 \\echo 'Commercial quality metadata privileges are missing or excessive; refusing diagnostics.'
-\\quit 4
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
@@ -64,7 +65,8 @@ SELECT NOT EXISTS (
 \\if :commercial_quality_index_ready
 \\else
 \\echo 'Required commercial quality index is unavailable or incompatible; refusing an unindexed scan.'
-\\quit 3
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
