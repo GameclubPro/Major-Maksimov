@@ -66,6 +66,12 @@ before editing it; copying these notes does not install a fix or prove the deplo
    owned notice lease and record neither delivery coverage nor a deletion. Source 503, member GET
    404, lease loss, attempted/ambiguous mutations and a failure after successful authorization
    remain fenced. Never convert arbitrary errors to PROCESSED or rerun a started whole engine.
+   The inline text-rule follow-up with this attempt's own DELETE reason confirmed enters
+   `violation-follow-up.authority` before fresh sanction authorization. A failure there occurs
+   after deletion; it is neither a failed DELETE nor permission to replay the handler. Pending
+   or rejected DELETE and confirmation of an independent reason retain `violation-delete`.
+   This diagnostic stage preserves the existing DELETE-stage timeout/backoff behavior; do not
+   add it to the follow-up timeout-backoff suppression set.
    After a successful required-subscription notice/coverage handoff, an exact typed unavailable
    membership result or explicitly scoped pre-handoff source-unavailable result may transfer only its DELETE obligation to the durable intent service.
    Require a committed executable intent with its original source, reason and deadline; missing

@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { ACTION_LATENCY_EXTENSION_COLUMNS } from './action-latency-audit.mjs';
 
 export const OWNER_PROOF_COLUMNS = Object.freeze({
   webhook_execution_claims: Object.freeze([
@@ -32,14 +33,20 @@ export const OWNER_PROOF_COLUMNS = Object.freeze({
   ]),
 });
 const literal = (value) => `'${value.replaceAll("'", "''")}'`;
-const allowedValues = Object.entries(OWNER_PROOF_COLUMNS)
+const ownerValues = Object.entries(OWNER_PROOF_COLUMNS)
   .flatMap(([table, columns]) => columns.map((column) => `(${literal(table)}, ${literal(column)})`))
   .join(',\n  ');
 
 // FLAG: Optional for older catalogs, but never accept partial, inherited excess or write
-// access. Both modes require the exact effective grants before reading application rows.
+// access. Preserve the original group separately from the optional latency extension;
+// total counts alone could admit a mixed partial group. Reports require their own groups.
 export function ownerProofPrivilegesSql(requireAll = false) {
-  return `WITH allowed(table_name, column_name) AS (VALUES ${allowedValues}),
+  const extensionValues = ACTION_LATENCY_EXTENSION_COLUMNS.map(
+    (column) => `('max_action_ledger', ${literal(column)})`,
+  ).join(',');
+  return `WITH original(table_name, column_name) AS (VALUES ${ownerValues}),
+extension(table_name, column_name) AS (VALUES ${extensionValues}),
+allowed AS (SELECT * FROM original UNION ALL SELECT * FROM extension),
 relations AS (SELECT DISTINCT table_name, to_regclass('public.' || table_name) AS oid FROM allowed),
 attributes AS MATERIALIZED (
   SELECT r.table_name, r.oid, a.attnum, a.attname,
@@ -54,7 +61,14 @@ SELECT NOT EXISTS (
 ) AND NOT EXISTS (
   SELECT 1 FROM attributes a WHERE writable OR (readable AND NOT EXISTS (
     SELECT 1 FROM allowed WHERE table_name = a.table_name AND column_name = a.attname))
-) AND (SELECT count(*) FROM attributes WHERE readable) ${requireAll ? '= 25' : 'IN (0, 25)'}
+) AND (SELECT count(*) FROM attributes a JOIN original o
+  ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) ${requireAll ? '= 25' : 'IN (0, 25)'}
+AND (SELECT count(*) FROM attributes a JOIN extension e
+  ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) IN (0, 6)
+AND (NOT EXISTS (SELECT 1 FROM attributes a JOIN extension e
+  ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable)
+  OR (SELECT count(*) FROM attributes a JOIN original o
+    ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) = 25)
 AS owner_proof_privileges_ready;`;
 }
 

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
+import { ACTION_LATENCY_EXTENSION_COLUMNS } from './action-latency-audit.mjs';
 import {
   OWNER_PROOF_COLUMNS,
   ownerProofPrivilegesSql,
@@ -373,6 +374,97 @@ test('effective grants reject partial, broad, inherited/PUBLIC and column mutati
       assert.equal(await ready(true), false);
       await db.exec('ROLLBACK; SET ROLE proof_auditor');
     }
+  } finally {
+    await db.close();
+  }
+});
+
+test('optional latency grants preserve the original group and reject mixed partial access', async () => {
+  const db = new PGlite();
+  try {
+    await fixture(db);
+    await db.exec(`ALTER TABLE max_action_ledger
+      ADD COLUMN id text, ADD COLUMN source_tag text, ADD COLUMN traffic_class text,
+      ADD COLUMN enqueued_at timestamp(3), ADD COLUMN last_attempt_at timestamp(3), ADD COLUMN metadata jsonb;
+      CREATE ROLE proof_auditor; GRANT USAGE ON SCHEMA public TO proof_auditor;
+      ${grantSql('proof_auditor')} SET ROLE proof_auditor`);
+    const ready = async () =>
+      (await db.query(ownerProofPrivilegesSql(true))).rows[0].owner_proof_privileges_ready;
+    assert.equal(await ready(), true, 'new schema without optional grants preserves old reports');
+    const columns = ACTION_LATENCY_EXTENSION_COLUMNS.join(',');
+    await db.exec(`RESET ROLE; GRANT SELECT (${columns}) ON max_action_ledger TO proof_auditor;
+      SET ROLE proof_auditor`);
+    assert.equal(await ready(), true);
+    for (const column of ACTION_LATENCY_EXTENSION_COLUMNS) {
+      await db.exec(`RESET ROLE; BEGIN; REVOKE SELECT (${column}) ON max_action_ledger FROM proof_auditor;
+        SET ROLE proof_auditor`);
+      assert.equal(await ready(), false, `partial extension missing ${column}`);
+      await db.exec('ROLLBACK; SET ROLE proof_auditor');
+    }
+    for (const [table, originals] of Object.entries(OWNER_PROOF_COLUMNS)) {
+      await db.exec(`RESET ROLE; REVOKE SELECT (${originals.join(',')}) ON ${table} FROM proof_auditor;
+        SET ROLE proof_auditor`);
+    }
+    assert.equal(
+      (await db.query(ownerProofPrivilegesSql(false))).rows[0].owner_proof_privileges_ready,
+      false,
+      'six extension grants cannot replace the original twenty-five',
+    );
+  } finally {
+    await db.close();
+  }
+});
+
+test('checked-in latency provisioning grants all six only with both complete schemas', async () => {
+  const db = new PGlite();
+  try {
+    await fixture(db);
+    await db.exec('CREATE ROLE proof_auditor; GRANT USAGE ON SCHEMA public TO proof_auditor');
+    const source = readFileSync(
+      resolve(root, 'infra/scripts/vps-provision-postgres-audit-role.sh'),
+      'utf8',
+    );
+    const block = (name) => {
+      const start = source.indexOf(`DO $${name}$`);
+      return source
+        .slice(start, source.indexOf(`$${name}$;`, start) + name.length + 3)
+        .replaceAll('maxim_audit', 'proof_auditor');
+    };
+    const grants = block('webhook_owner_proof_grants') + block('action_latency_grants');
+    const verificationStart = source.indexOf('  -- FLAG: Provisioning must roll back');
+    const verification =
+      'DO $check$ BEGIN\n' +
+      source
+        .slice(
+          verificationStart,
+          source.indexOf('  -- FLAG: Effective PUBLIC/inherited excess', verificationStart),
+        )
+        .replaceAll('maxim_audit', 'proof_auditor') +
+      'END $check$;';
+    await db.exec(grants);
+    await db.exec(verification);
+    await db.exec(`ALTER TABLE max_action_ledger
+      ADD COLUMN id text, ADD COLUMN source_tag text, ADD COLUMN traffic_class text,
+      ADD COLUMN enqueued_at timestamp(3), ADD COLUMN last_attempt_at timestamp(3)`);
+    await db.exec(grants);
+    await db.exec(verification);
+    assert.equal(
+      (
+        await db.query(`SELECT has_column_privilege('proof_auditor',
+      'max_action_ledger', 'id', 'SELECT') AS readable`)
+      ).rows[0].readable,
+      false,
+    );
+    await db.exec('ALTER TABLE max_action_ledger ADD COLUMN metadata jsonb');
+    await db.exec(grants);
+    await db.exec(verification);
+    await db.exec('SET ROLE proof_auditor');
+    assert.equal(
+      (await db.query(ownerProofPrivilegesSql(true))).rows[0].owner_proof_privileges_ready,
+      true,
+    );
+    await db.exec('RESET ROLE; REVOKE SELECT(metadata) ON max_action_ledger FROM proof_auditor');
+    await assert.rejects(db.exec(verification), /owner proof column privileges are not exact/u);
   } finally {
     await db.close();
   }

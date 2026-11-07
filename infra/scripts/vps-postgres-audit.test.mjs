@@ -1864,6 +1864,76 @@ test('delete retry heads retain the bounded envelope and reject operator SQL', (
   }
 });
 
+test('action latency is opt-in with a bounded private read-only envelope', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  for (const options of [[], ['--explain']]) {
+    const result = runAudit(data, ['action-latency', ...options]);
+    assert.equal(result.status, 0, result.stderr);
+    const sql = readFileSync(data.sql, 'utf8');
+    assert.match(sql, /^BEGIN READ ONLY;$/mu);
+    assert.match(sql, /^COMMIT;$/mu);
+    const privilegeGuard = sql.indexOf('action_latency_privileges_ready');
+    const indexGuard = sql.indexOf('action_latency_indexes_ready');
+    const report = sql.indexOf("'audit','action_latency'");
+    assert.ok(privilegeGuard > sql.indexOf('owner_proof_privileges_ready'));
+    assert.ok(indexGuard > privilegeGuard && report > indexGuard);
+    assert.match(sql, /ORDER BY completed_at DESC,id DESC LIMIT 5001/u);
+    assert.match(sql, /ORDER BY completed_at DESC,id DESC LIMIT 5000/u);
+    assert.match(sql, /WHERE id=samples.id OFFSET 0/u);
+    assert.match(
+      sql,
+      /'pending_actions_observed',false,'retry_authority',false,'remote_effect_proven',false/u,
+    );
+    assert.equal(sql.includes('EXPLAIN (FORMAT JSON)'), options.includes('--explain'));
+    assert.doesNotMatch(sql, /EXPLAIN\s+ANALYZE|FOR UPDATE/iu);
+    if (options.includes('--explain')) assert.ok(sql.indexOf('EXPLAIN (FORMAT JSON)') > indexGuard);
+    assert.match(
+      sql,
+      /pg_size_bytes\(current_setting\('temp_file_limit'\)\) BETWEEN 0 AND 8388608/u,
+    );
+    const dockerArgs = readFileSync(data.dockerArgs, 'utf8');
+    for (const expected of [
+      'search_path=pg_catalog,public,pg_temp',
+      'timezone=UTC',
+      'default_transaction_read_only=on',
+      'statement_timeout=2500ms',
+      'lock_timeout=250ms',
+      'idle_in_transaction_session_timeout=4s',
+      'max_parallel_workers_per_gather=0',
+      'work_mem=1MB',
+      'ON_ERROR_STOP=1',
+      'ECHO=none',
+      'VERBOSITY=terse',
+      'SHOW_CONTEXT=never',
+    ])
+      assert.ok(dockerArgs.includes(expected), expected);
+    assert.equal(runConnect(data, ['postgres-audit', 'action-latency', ...options]).status, 0);
+    assert.match(readFileSync(data.sshArgs, 'utf8'), /vps-postgres-audit\.sh\\ action-latency/u);
+  }
+  const failed = runAudit(data, ['action-latency'], { MOCK_AUDIT_FAIL: '1' });
+  assert.equal(failed.status, 7);
+  assert.match(failed.stderr, /Bounded action latency audit failed closed/u);
+  assert.doesNotMatch(`${failed.stdout}${failed.stderr}`, /fixture-event|ERROR near/u);
+  for (const options of [
+    ['SELECT 1'],
+    ['/tmp/query.sql'],
+    ['--apply'],
+    ['--explain=analyze'],
+    ['--explain', 'extra'],
+    ['--explain', '--explain'],
+  ]) {
+    rmSync(data.dockerArgs, { force: true });
+    rmSync(data.sshArgs, { force: true });
+    assert.equal(runAudit(data, ['action-latency', ...options]).status, 2);
+    assert.equal(runConnect(data, ['postgres-audit', 'action-latency', ...options]).status, 2);
+    assert.equal(existsSync(data.dockerArgs), false);
+    assert.equal(existsSync(data.sshArgs), false);
+  }
+  assert.equal(runAudit(data, ['all']).status, 0);
+  assert.doesNotMatch(readFileSync(data.sql, 'utf8'), /'audit','action_latency'/u);
+});
+
 test('moderation outcomes retain the bounded read-only envelope and reject operator SQL', (t) => {
   const data = fixture();
   t.after(() => rmSync(data.directory, { force: true, recursive: true }));

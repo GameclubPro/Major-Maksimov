@@ -2172,7 +2172,18 @@ case "$command" in
     "$ROOT_DIR/infra/scripts/vps-monitor-readonly.sh" "$@"
     ;;
   postgres-audit)
-    postgres_audit "$@"
+    # FLAG: Extend dispatch after the installed protected prefix. Its immutable
+    # source floor must remain intact for existing release and recovery operations.
+    if [[ "${1:-}" == 'action-latency' ]]; then
+      shift
+      if [[ "$#" -gt 1 || ( "$#" == 1 && "$1" != '--explain' ) ]]; then
+        echo 'Usage: postgres-audit action-latency [--explain]' >&2
+        exit 2
+      fi
+      remote_exec "$(shell_quote_args ./infra/scripts/vps-postgres-audit.sh action-latency "$@")"
+    else
+      postgres_audit "$@"
+    fi
     ;;
   postgres-audit-provision)
     postgres_audit_provision "$@"
@@ -2261,6 +2272,7 @@ case "$command" in
     ;;
   -h|--help|help|'')
     usage
+    echo '  postgres-audit action-latency [--explain]'
     ;;
   *)
     echo "Unknown command: $command"
