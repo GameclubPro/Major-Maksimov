@@ -473,7 +473,7 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
   assert.equal(webhookAudits.env.TZ, 'UTC');
   assert.equal(
     webhookAudits.run,
-    'node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs',
+    'node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs infra/scripts/postgres-audit-refusal.native.test.mjs',
   );
   for (const step of postgres.steps) {
     assert.equal(step['continue-on-error'], undefined);

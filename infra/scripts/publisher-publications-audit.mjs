@@ -86,7 +86,8 @@ SELECT NOT EXISTS (
 \\if :publisher_publication_audit_ready
 \\else
 \\echo 'Publisher publication metadata privileges are missing or excessive; refusing diagnostics.'
-\\quit 4
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
@@ -115,7 +116,8 @@ SELECT NOT EXISTS (
 \\if :publisher_publication_indexes_ready
 \\else
 \\echo 'Required publication audit indexes are unavailable; refusing an unindexed scan.'
-\\quit 3
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }

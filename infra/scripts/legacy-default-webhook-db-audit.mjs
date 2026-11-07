@@ -4,9 +4,10 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { MAX_LEGACY_JOBS, readPrivateSnapshotFile } = require(
-  './legacy-default-webhook-queue-retirement.cjs',
-);
+const {
+  MAX_LEGACY_JOBS,
+  readPrivateSnapshotFile,
+} = require('./legacy-default-webhook-queue-retirement.cjs');
 
 const MAX_SUMMARY_BYTES = 16 * 1024;
 const AUDIT_NAME = 'legacy_default_webhook_jobs';
@@ -121,7 +122,8 @@ SELECT json_build_object(
 FROM summary;
 \\else
 \\echo 'Required primary-key index is missing; refusing the legacy queue database audit.'
-\\quit 3
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }

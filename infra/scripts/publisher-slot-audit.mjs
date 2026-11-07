@@ -90,7 +90,8 @@ export function buildPublisherSlotPrivilegesSql(requireAll = false) {
 \\if :publisher_slot_privileges_ready
 \\else
 \\echo MAXIM_PUBLISHER_SLOT_PRIVILEGES_UNAVAILABLE
-\\quit 4
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
@@ -176,7 +177,8 @@ export function buildPublisherSlotIndexSql() {
 \\if :publisher_slot_indexes_ready
 \\else
 \\echo MAXIM_PUBLISHER_SLOT_INDEX_UNAVAILABLE
-\\quit 3
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
