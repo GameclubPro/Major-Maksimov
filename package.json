@@ -70,7 +70,7 @@
     "@nestjs/platform-fastify": "11.2.4",
     "@prisma/config": "7.9.0",
     "@prisma/dev": "0.24.14",
-    "@types/node": "^24.12.4",
+    "@types/node": "^26.2.0",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.4",
     "globals": "^15.15.0",
