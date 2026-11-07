@@ -9,6 +9,10 @@ import {
   createCommercialLlmRedis,
 } from './commercial-llm-shadow.lease';
 import { CommercialLlmPoolServer } from './commercial-llm-pool-server';
+import {
+  CommercialLlmPoolClient,
+  CommercialLlmPoolRoutingStats,
+} from './commercial-llm-pool.client';
 import { buildCommercialLlmRequest } from './commercial-llm.protocol';
 import {
   CommercialLlmPoolMailbox,
@@ -111,6 +115,79 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await mailbox.available()).toEqual([]);
     await Promise.all(values.map(complete));
     expect(await mailbox.available()).toEqual([...POOL_NODE_IDS]);
+  });
+
+  it('prefers free 9B then uses direct 4B while preserving both occupied 9B owners', async () => {
+    await Promise.all(POOL_NODE_IDS.map(ready));
+    await mailbox.refreshWorker('server-9b', sessions['server-9b'], false);
+    const routingStats = new CommercialLlmPoolRoutingStats();
+    routingStats.recordSuccess('pc-a-4b', 1);
+    routingStats.recordSuccess('pc-b-9b', 1000);
+    const served: CommercialLlmPoolNodeId[] = [];
+    const workerMailbox: Pick<
+      CommercialLlmPoolMailbox,
+      'available' | 'reserve' | 'wait' | 'release'
+    > = {
+      available: () => mailbox.available(),
+      reserve: (...args) => mailbox.reserve(...args),
+      wait: async (reservation, signal) => {
+        served.push(reservation.nodeId);
+        const reply = JSON.stringify({
+          model: COMMERCIAL_LLM_POOL_PROFILES[reservation.nodeId].identity.modelAlias,
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: '{"classification":"COMMERCIAL","reasonCodes":["SERVICE_OFFER"]}',
+              },
+            },
+          ],
+        });
+        expect(
+          await mailbox.respond(reservation.nodeId, reservation.session, reservation.id, reply),
+        ).toBe(true);
+        return mailbox.wait(reservation, signal);
+      },
+      release: (reservation) => mailbox.release(reservation),
+    };
+    const dispatch = jest.fn<Promise<void>, [CommercialLlmPoolReservation, AbortSignal]>();
+    const canStartConsultation = jest.fn<Promise<boolean>, []>();
+    const classify = async () => {
+      const request = job('pc-a-4b', 20_000);
+      return new CommercialLlmPoolClient(workerMailbox, dispatch, {
+        jobId: request.jobId,
+        deadlineAtMs: request.deadlineAtMs,
+        policy: 'direct-4b',
+        routingStats,
+        primaryFinished: async () => undefined,
+        canStartConsultation,
+      }).classify('Предлагаем услуги ремонта квартир');
+    };
+    expect(await classify()).toMatchObject({
+      classification: 'COMMERCIAL',
+      pool: { nodeId: 'pc-b-9b', route: 'direct', attempts: 1 },
+    });
+
+    await mailbox.refreshWorker('server-9b', sessions['server-9b'], true);
+    const occupied = await Promise.all(
+      (['server-9b', 'pc-b-9b'] as const).map((nodeId) => reserved(nodeId, job(nodeId, 20_000))),
+    );
+    const foreignKeys = occupied.flatMap((reservation) => [
+      ...Object.values(commercialLlmPoolNodeKeys(reservation.nodeId)),
+      commercialLlmPoolJobKey(reservation.jobId),
+    ]);
+    const foreignState = await redis.mget(...foreignKeys);
+    expect(await mailbox.available()).toEqual(['pc-a-4b']);
+    expect(await classify()).toMatchObject({
+      classification: 'COMMERCIAL',
+      pool: { nodeId: 'pc-a-4b', route: 'direct', policy: 'direct-4b', attempts: 1 },
+    });
+    expect(served).toEqual(['pc-b-9b', 'pc-a-4b']);
+    expect(canStartConsultation).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await redis.mget(...foreignKeys)).toEqual(foreignState);
+    expect(await mailbox.available()).toEqual(['pc-a-4b']);
   });
 
   it('one atomic winner reserves a node and losers consume no job attempt', async () => {

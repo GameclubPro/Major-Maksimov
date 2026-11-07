@@ -128,7 +128,7 @@ describe('independent commercial model pool classifier', () => {
   });
 
   it('confirms a 4B personal sale with 9B only when its explicit category policy requires it', async () => {
-    mailbox.available.mockResolvedValue(['pc-a-4b', 'pc-b-9b']);
+    mailbox.available.mockResolvedValueOnce(['pc-a-4b']).mockResolvedValue(['pc-b-9b']);
     const result = await client({ confirmPersonalSales: true }).classify('Личная продажа');
     expect(result).toMatchObject({
       classification: 'NOT_COMMERCIAL',
@@ -193,7 +193,9 @@ describe('independent commercial model pool classifier', () => {
     expect(complete).toHaveLength(3);
     complete.forEach((finish) => finish());
     expect((await Promise.all(results)).map((result) => result.pool!.nodeId)).toEqual([
-      ...POOL_NODE_IDS,
+      'server-9b',
+      'pc-b-9b',
+      'pc-a-4b',
     ]);
   });
 
@@ -210,10 +212,10 @@ describe('independent commercial model pool classifier', () => {
     async (outcome) => {
       mailbox.wait.mockResolvedValueOnce({ outcome });
       const result = await client().classify('synthetic');
-      expect(result.pool).toMatchObject({ nodeId: 'pc-b-9b', attempts: 2 });
+      expect(result.pool).toMatchObject({ nodeId: 'server-9b', attempts: 2 });
       const [first, second] = mailbox.reserve.mock.calls;
-      expect(first[0]).toBe('pc-a-4b');
-      expect(second[0]).toBe('pc-b-9b');
+      expect(first[0]).toBe('pc-b-9b');
+      expect(second[0]).toBe('server-9b');
       expect(second[1]).toMatchObject({
         jobId: options.jobId,
         attempt: 2,
@@ -233,13 +235,13 @@ describe('independent commercial model pool classifier', () => {
       kind: 'INVALID_RESPONSE',
     });
     expect(mailbox.reserve).toHaveBeenCalledTimes(2);
-    expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-a-4b', 'pc-b-9b']);
+    expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-b-9b', 'server-9b']);
   });
 
   it('lost capacity races do not consume an attempt or create a queue', async () => {
     mailbox.reserve.mockResolvedValueOnce(null);
     const result = await client().classify('synthetic');
-    expect(result.pool).toMatchObject({ nodeId: 'pc-b-9b', attempts: 1 });
+    expect(result.pool).toMatchObject({ nodeId: 'server-9b', attempts: 1 });
     expect(mailbox.reserve.mock.calls.map(([, request]) => request.attempt)).toEqual([1, 1]);
   });
 
@@ -251,6 +253,66 @@ describe('independent commercial model pool classifier', () => {
     const result = await client({ routingStats }).classify('synthetic');
     expect(result.pool?.nodeId).toBe('pc-b-9b');
   });
+
+  it.each([false, true])(
+    'prefers ready 9B capacity even when 4B is faster (metrics=%s)',
+    async (measured) => {
+      const routingStats = measured ? new CommercialLlmPoolRoutingStats() : undefined;
+      routingStats?.recordSuccess('pc-a-4b', 100);
+      routingStats?.recordSuccess('server-9b', 3000);
+      routingStats?.recordSuccess('pc-b-9b', 1000);
+      const result = await client({ routingStats, policy: 'direct-4b' }).classify('synthetic');
+      expect(result.pool?.nodeId).toBe('pc-b-9b');
+      expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-b-9b']);
+    },
+  );
+
+  it('uses 4B immediately after both 9B reservations lose capacity without spending an attempt', async () => {
+    mailbox.reserve.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    decisions['pc-a-4b'] = 'COMMERCIAL';
+    const result = await client({ policy: 'direct-4b' }).classify('synthetic');
+    expect(result.pool).toMatchObject({ nodeId: 'pc-a-4b', route: 'direct', attempts: 1 });
+    expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual([
+      'pc-b-9b',
+      'server-9b',
+      'pc-a-4b',
+    ]);
+    expect(
+      mailbox.reserve.mock.calls.every(
+        ([, request]) => request.deadlineAtMs === options.deadlineAtMs,
+      ),
+    ).toBe(true);
+    expect(canStartConsultation).not.toHaveBeenCalled();
+  });
+
+  it('uses 4B when the only ready 9B cannot fit the original CPU budget', async () => {
+    mailbox.available.mockResolvedValue(['server-9b', 'pc-a-4b']);
+    const result = await client({ policy: 'direct-4b', deadlineAtMs: Date.now() + 5000 }).classify(
+      'synthetic',
+    );
+    expect(result.pool?.nodeId).toBe('pc-a-4b');
+    expect(mailbox.reserve.mock.calls.map(([node]) => node)).toEqual(['pc-a-4b']);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it.each(['NOT_COMMERCIAL', 'COMMERCIAL', 'UNSURE'] as const)(
+    'returns fallback 4B %s without consultation under direct policy',
+    async (classification) => {
+      mailbox.available.mockResolvedValue(['pc-a-4b']);
+      decisions['pc-a-4b'] = classification;
+      const result = await client({ policy: 'direct-4b', confirmPersonalSales: true }).classify(
+        'synthetic',
+      );
+      expect(result).toMatchObject({
+        classification,
+        pool: { nodeId: 'pc-a-4b', route: 'direct', policy: 'direct-4b' },
+      });
+      expect(result.pool?.consultationOutcome).toBeUndefined();
+      expect(mailbox.reserve).toHaveBeenCalledTimes(1);
+      expect(canStartConsultation).not.toHaveBeenCalled();
+      expect(consultationFinished).not.toHaveBeenCalled();
+    },
+  );
 
   it('temporarily penalizes a failed fast node and allows its preference to recover', async () => {
     const routingStats = new CommercialLlmPoolRoutingStats();
@@ -287,8 +349,8 @@ describe('independent commercial model pool classifier', () => {
     const failed = jest.spyOn(routingStats, 'recordFailure');
     mailbox.wait.mockResolvedValueOnce({ outcome: 'UNAVAILABLE' });
     await client({ routingStats }).classify('synthetic');
-    expect(failed).toHaveBeenCalledWith('pc-a-4b');
-    expect(success).toHaveBeenCalledWith('pc-b-9b', expect.any(Number));
+    expect(failed).toHaveBeenCalledWith('pc-b-9b');
+    expect(success).toHaveBeenCalledWith('server-9b', expect.any(Number));
   });
 
   it('reports unavailable initial capacity without fabricating a model answer', async () => {
@@ -301,6 +363,7 @@ describe('independent commercial model pool classifier', () => {
   it.each(['UNSURE', 'COMMERCIAL'] as const)(
     'consults an idle 9B for 4B %s under confirmation policy',
     async (classification) => {
+      mailbox.available.mockResolvedValueOnce(['pc-a-4b']).mockResolvedValue(['pc-b-9b']);
       decisions['pc-a-4b'] = classification;
       decisions['pc-b-9b'] = 'COMMERCIAL';
       const result = await client().classify('synthetic');
@@ -327,6 +390,7 @@ describe('independent commercial model pool classifier', () => {
   );
 
   it('direct-4B policy retains a positive without asking 9B', async () => {
+    mailbox.available.mockResolvedValue(['pc-a-4b']);
     decisions['pc-a-4b'] = 'COMMERCIAL';
     const result = await client({ policy: 'direct-4b' }).classify('synthetic');
     expect(result).toMatchObject({
@@ -341,8 +405,10 @@ describe('independent commercial model pool classifier', () => {
     'leaves an unconfirmed 4B positive unresolved when %s prevents consultation',
     async (block) => {
       decisions['pc-a-4b'] = 'COMMERCIAL';
-      if (block === 'admission') canStartConsultation.mockResolvedValue(false);
-      else mailbox.available.mockResolvedValueOnce(['pc-a-4b']).mockResolvedValue(['pc-a-4b']);
+      if (block === 'admission') {
+        mailbox.available.mockResolvedValue(['pc-a-4b']);
+        canStartConsultation.mockResolvedValue(false);
+      } else mailbox.available.mockResolvedValueOnce(['pc-a-4b']).mockResolvedValue(['pc-a-4b']);
       const result = await client().classify('synthetic');
       expect(result).toMatchObject({
         classification: 'UNSURE',
@@ -359,6 +425,7 @@ describe('independent commercial model pool classifier', () => {
   );
 
   it('skips consultation when less than one second of the original budget remains', async () => {
+    mailbox.available.mockResolvedValue(['pc-a-4b']);
     decisions['pc-a-4b'] = 'UNSURE';
     const result = await client({ deadlineAtMs: Date.now() + 800 }).classify('synthetic');
     expect(result.pool?.consultationOutcome).toBe('budget_exhausted');
@@ -386,6 +453,7 @@ describe('independent commercial model pool classifier', () => {
   });
 
   it('never retries a failed consultation or silently trusts its unconfirmed positive', async () => {
+    mailbox.available.mockResolvedValueOnce(['pc-a-4b']).mockResolvedValue(['pc-b-9b']);
     decisions['pc-a-4b'] = 'COMMERCIAL';
     mailbox.wait
       .mockImplementationOnce(async (reservation) => ({
@@ -449,7 +517,7 @@ describe('independent commercial model pool classifier', () => {
     await expect(
       client({ routingStats }).classify('synthetic', controller.signal),
     ).rejects.toMatchObject({ kind: 'TIMEOUT' });
-    expect(failed).toHaveBeenCalledWith('pc-a-4b');
+    expect(failed).toHaveBeenCalledWith('pc-b-9b');
     expect(mailbox.reserve).toHaveBeenCalledTimes(1);
   });
 });

@@ -25,11 +25,15 @@ and `COMMERCIAL_COMMUNITY` directly. Mixed offers retain every reported category
 incidental delivery, material or contact language does not add another category.
 Generic historical commercial reasons remain readable but supply no explicit-policy
 category authority. Existing buyer, quoted-discussion and private-sale protection stays
-in the resolver. Unknown categories stay unresolved. Model weights, budgets and the
-4B confirmation policy are unchanged; prompt identity advances and old observations
-cannot authorize current effects. Source version 3 binds explicit category
+in the resolver. Unknown categories stay unresolved. Model weights and budgets are
+unchanged, and the legacy confirmation policy remains supported; prompt identity advances and old observations
+cannot authorize current effects. The owner's 2026-11-07 pool decision selects
+available 9B before direct 4B overflow, without follow-up model calls for 4B answers;
+see the [pool scheduling contract](../operations/runbooks/commercial-ai-pool.md#scheduling-and-failure-boundaries).
+Source version 3 binds explicit category
 policy and personal-sale blocking while retaining v1/v2 readers. A confirmed personal
-sale requires the pinned server confirmation before deletion. A new personal-sale BLOCK
+sale requires a pinned 9B result before deletion, including when 4B overflow makes
+no follow-up request. A new personal-sale BLOCK
 cannot be enabled while that runtime is unavailable; existing stored policy stays intact
 and processing fails conservatively. Preview returns UNSURE for an unsupported deterministic
 personal-sale block, never a false promise of deletion.
