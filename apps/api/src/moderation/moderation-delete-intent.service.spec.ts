@@ -1,6 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { performance } from 'node:perf_hooks';
-import { Job, type MinimalQueue, type Queue } from 'bullmq';
+import { Job, RedisConnection, type MinimalQueue, type Queue } from 'bullmq';
 import type { ModerationDeleteIntentJob } from './moderation-delete-intent.queue';
 import type { DeleteIntentLeaseCheck } from './moderation-delete-intent-lease';
 import { MaxApiInternalRateLimitError, type MaxClientService } from '../max/max-client.service';
@@ -404,7 +404,55 @@ function createService(
       ...args,
     ),
   );
+  // FLAG: BullMQ owns its adapter type; this lazy connection skips readiness/version I/O.
+  // Only the in-memory command builder is real, and mocked exec never opens Redis.
+  const observationConnection = new RedisConnection(
+    { lazyConnect: true },
+    { blocking: false, skipWaitingForReady: true, skipVersionCheck: true },
+  );
+  const observationClient = observationConnection.client.then((client) => {
+    const pipeline = client.pipeline();
+    const reads = jest.spyOn(pipeline, 'hgetall');
+    let observedReadCount = 0;
+    client.pipeline = () => pipeline;
+    client.disconnect();
+    jest.spyOn(pipeline, 'exec').mockImplementation(async () => {
+      const pendingReads = reads.mock.calls.slice(observedReadCount);
+      observedReadCount = reads.mock.calls.length;
+      return Promise.all(
+        pendingReads.map(async ([key]): Promise<[Error | null, Record<string, string> | null]> => {
+          try {
+            const job = await queue.getJob(String(key).slice(queue.toKey('').length));
+            return [
+              null,
+              job
+                ? {
+                    name: 'execute-moderation-delete-intent',
+                    data: JSON.stringify(job.data),
+                    opts: JSON.stringify(job.opts),
+                    timestamp: '0',
+                    delay: '0',
+                    priority: String(job.opts.priority ?? 0),
+                  }
+                : {},
+            ];
+          } catch (error: unknown) {
+            return [error instanceof Error ? error : new Error(String(error)), null];
+          }
+        }),
+      );
+    });
+    return client;
+  });
   const queue = {
+    ...unitJobQueue,
+    on() {
+      return this;
+    },
+    removeListener() {
+      return this;
+    },
+    client: observationClient,
     add: jest
       .fn<
         ReturnType<Queue<ModerationDeleteIntentJob>['add']>,
@@ -417,7 +465,7 @@ function createService(
         Parameters<Queue<ModerationDeleteIntentJob>['getJob']>
       >()
       .mockResolvedValue(undefined),
-  } satisfies Pick<Queue<ModerationDeleteIntentJob>, 'add' | 'getJob'>;
+  } satisfies MinimalQueue & Pick<Queue<ModerationDeleteIntentJob>, 'add' | 'getJob'>;
   // Unit fixtures keep intent-load/finalization responses separate from the
   // new lease SELECT. Real no-op/update/expiry semantics run against PostgreSQL.
   const leaseDatabase = {
