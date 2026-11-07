@@ -44,6 +44,8 @@ local Docker-socket access under the production pg_hba rules, with:
   - eight fixed migration receipt columns; errors classified in SQL, raw logs never reported
   - 25 owner-proof columns across execution claims and action ledger; source keys,
     lease/dispatch tokens and command journal are join/check-only and never report output
+  - six optional bounded action-latency ledger columns, only with the complete owner-proof group;
+    IDs and admitted schedule metadata stay inside SQL, with no bot/error grants
   - 28 optional held-receipt scalar metadata columns; identities and seal bindings
     are join/check-only, with no payload, snapshot, attestation or effect authority
   - thirteen optional Karavan inventory projection columns; chat IDs/titles only in the private report, no actor IDs or raw audit payloads
@@ -593,6 +595,30 @@ BEGIN
   END IF;
 END
 $webhook_owner_proof_grants$;
+-- FLAG: Optional latency access extends, never replaces, the complete owner-proof
+-- group. Compressed/oversized metadata is not inspected; only fixed aggregates leave SQL.
+DO $action_latency_grants$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM (VALUES
+      ('webhook_execution_claims', ARRAY['id', 'kind', 'semantic_key', 'webhook_event_id',
+        'execution_bot_id', 'enforced', 'status', 'prepared_at', 'business_started_at',
+        'completed_at', 'lease_token', 'lease_expires_at', 'command_result']),
+      ('max_action_ledger', ARRAY['chat_id', 'action_type', 'message_id', 'status', 'ambiguous',
+        'terminal', 'attempt_count', 'dispatch_token', 'dispatch_started_at', 'dispatch_bot_id',
+        'remote_message_id', 'completed_at', 'id', 'source_tag', 'traffic_class',
+        'enqueued_at', 'last_attempt_at', 'metadata'])
+    ) required(table_name, columns)
+    CROSS JOIN LATERAL unnest(required.columns) expected(column_name)
+    LEFT JOIN pg_attribute attribute ON attribute.attrelid = to_regclass('public.' || required.table_name)
+      AND attribute.attname = expected.column_name AND attribute.attnum > 0 AND NOT attribute.attisdropped
+    WHERE attribute.attnum IS NULL
+  ) THEN
+    GRANT SELECT (id, source_tag, traffic_class, enqueued_at, last_attempt_at, metadata)
+      ON TABLE public.max_action_ledger TO maxim_audit;
+  END IF;
+END
+$action_latency_grants$;
 -- FLAG: Grant the complete scalar-only group or none. Scope and seal matches are
 -- diagnostics; snapshots, attestation JSON and source/effect evidence stay unreadable.
 DO $webhook_held_receipt_grants$
@@ -850,28 +876,40 @@ BEGIN
   -- FLAG: Provisioning must roll back on PUBLIC/inherited excess or mutation grants,
   -- rather than waiting for the first diagnostic to discover an unsafe audit role.
   IF (
-    WITH allowed(table_name, columns) AS (VALUES
+    WITH original(table_name, columns) AS (VALUES
       ('webhook_execution_claims', ARRAY['id', 'kind', 'semantic_key', 'webhook_event_id',
         'execution_bot_id', 'enforced', 'status', 'prepared_at', 'business_started_at',
         'completed_at', 'lease_token', 'lease_expires_at', 'command_result']),
       ('max_action_ledger', ARRAY['chat_id', 'action_type', 'message_id', 'status', 'ambiguous',
         'terminal', 'attempt_count', 'dispatch_token', 'dispatch_started_at', 'dispatch_bot_id',
         'remote_message_id', 'completed_at'])
-    ), relations AS (
-      SELECT table_name, columns, to_regclass('public.' || table_name) AS oid FROM allowed
+    ), extension(table_name, column_name) AS (
+      SELECT 'max_action_ledger', unnest(ARRAY['id', 'source_tag', 'traffic_class',
+        'enqueued_at', 'last_attempt_at', 'metadata'])
+    ), original_columns AS (
+      SELECT table_name, unnest(columns) AS column_name FROM original
+    ), allowed AS (SELECT * FROM original_columns UNION ALL SELECT * FROM extension),
+    relations AS (
+      SELECT DISTINCT table_name, to_regclass('public.' || table_name) AS oid FROM allowed
+    ), attributes AS MATERIALIZED (
+      SELECT r.table_name, r.oid, a.attnum, a.attname,
+        has_column_privilege('maxim_audit', r.oid, a.attnum, 'SELECT') AS readable,
+        has_column_privilege('maxim_audit', r.oid, a.attnum, 'INSERT,UPDATE,REFERENCES') AS writable
+      FROM relations r JOIN pg_attribute a ON a.attrelid = r.oid
+      WHERE a.attnum > 0 AND NOT a.attisdropped
+    ), counts AS (
+      SELECT (SELECT count(*) FROM attributes a JOIN original_columns o
+        ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) AS original_count,
+      (SELECT count(*) FROM attributes a JOIN extension e
+        ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS extension_count
     )
-
-    SELECT
-      (SELECT count(*) FROM relations r JOIN pg_attribute a ON a.attrelid = r.oid
-        WHERE a.attnum > 0 AND NOT a.attisdropped
-          AND has_column_privilege('maxim_audit', r.oid, a.attnum, 'SELECT')) NOT IN (0, 25)
+    SELECT original_count NOT IN (0, 25) OR extension_count NOT IN (0, 6)
+      OR (extension_count = 6 AND original_count <> 25)
       OR EXISTS (SELECT 1 FROM relations r WHERE r.oid IS NOT NULL
         AND has_table_privilege('maxim_audit', r.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
-      OR EXISTS (SELECT 1 FROM relations r JOIN pg_attribute a ON a.attrelid = r.oid
-        WHERE a.attnum > 0 AND NOT a.attisdropped
-          AND (has_column_privilege('maxim_audit', r.oid, a.attnum, 'INSERT,UPDATE,REFERENCES')
-            OR (has_column_privilege('maxim_audit', r.oid, a.attnum, 'SELECT')
-              AND NOT (a.attname = ANY(r.columns)))))
+      OR EXISTS (SELECT 1 FROM attributes a WHERE writable OR (readable AND NOT EXISTS (
+        SELECT 1 FROM allowed WHERE table_name=a.table_name AND column_name=a.attname)))
+    FROM counts
   ) THEN
     RAISE EXCEPTION 'maxim_audit owner proof column privileges are not exact';
   END IF;

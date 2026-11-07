@@ -193,6 +193,7 @@ describe('webhook execution diagnostics', () => {
 
   it.each([
     'violation-delete',
+    'violation-follow-up.authority',
     'report-submission',
     'report-submission.complete',
     'message-duplicate.observe',

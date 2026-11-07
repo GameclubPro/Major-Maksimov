@@ -3060,6 +3060,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           ) {
             return;
           }
+          this.markWebhookHotPathStage(hotPathProfile, 'violation-follow-up.authority');
           if (topViolation.ruleCode === 'COMMERCIAL_AD') {
             commercialSanctionPermit =
               this.commercialDeleteGuard?.createSanctionPermit({

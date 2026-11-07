@@ -75,6 +75,7 @@ const HOT_PATH_STAGES = new Set([
   'violation-admin-recheck',
   'violation-delete',
   'violation-follow-up',
+  'violation-follow-up.authority',
   'violation-record',
   'violation-rule-followup.persist',
   'violation-rule-followup.complete',

@@ -10,7 +10,11 @@ earlier ordered event and the queue report cannot establish its execution state:
 
 Synchronize the reviewed tooling and review the audit-role provision preview before
 the separate maintenance apply. This mode needs 25 additional column SELECT grants;
-it never provisions itself. Run catalogs sequentially under their shared audit lock.
+it never provisions itself. The shared guard also accepts the complete optional six-column
+[action-latency extension](action-latency-audit.md) alongside those 25 columns, or no
+extension; partial extensions and replacement of the original group are refused.
+Older schemas without the extension remain supported. Run catalogs sequentially
+under their shared audit lock.
 Keep the exact runtime release identity and UTC observation window with the report.
 The diagnostic is excluded from `all` and accepts no identifiers, SQL or input files.
 

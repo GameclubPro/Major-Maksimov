@@ -203,7 +203,10 @@ exact owners are read per blocker; there is no recursive traversal or action-led
 
 Six complete index definitions are attested, along with the existing eight quarantine column
 grants and the existing 25-column owner-proof group. No new grants or indexes are required;
-an absent group requires a separate reviewed provision step. READ ONLY, the shared audit lock,
+an absent group requires a separate reviewed provision step. The shared guard accepts the
+complete optional six-column [action-latency extension](action-latency-audit.md) alongside
+the original 25 columns, or no extension. It never substitutes for the original group;
+partial extensions are refused and older schemas remain supported. READ ONLY, the shared audit lock,
 SQL/wall deadlines, memory/temp limits, private error handling and exact-backend cleanup remain
 unchanged. The session fixes `search_path` to `pg_catalog, public, pg_temp` before admission so
 inherited schema order cannot change the inspected relations. The mode is excluded from `all`

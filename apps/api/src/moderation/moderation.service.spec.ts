@@ -3050,34 +3050,37 @@ describe('ModerationService', () => {
     expect((service as any).isWebhookHotTimeoutChatBackoffActive('-chat-1')).toBe(false);
   });
 
-  it('keeps hot-timeout backoff for timeouts before destructive moderation finishes', () => {
-    const update = {
-      ...createUpdate(),
-      message: {
-        ...createUpdate().message,
-        chatId: '-chat-1',
-      },
-    };
-    const service = new ModerationService(
-      {} as never,
-      { detect: jest.fn() } as never,
-      { resolveAction: jest.fn() } as never,
-      {} as never,
-    );
+  it.each(['required-subscription', 'violation-delete', 'violation-follow-up.authority'])(
+    'keeps existing hot-timeout backoff at %s',
+    (latestStage) => {
+      const update = {
+        ...createUpdate(),
+        message: {
+          ...createUpdate().message,
+          chatId: '-chat-1',
+        },
+      };
+      const service = new ModerationService(
+        {} as never,
+        { detect: jest.fn() } as never,
+        { resolveAction: jest.fn() } as never,
+        {} as never,
+      );
 
-    (service as any).createWebhookHotPathTimeoutError({
-      webhookEventId: 'event-timeout-required-subscription',
-      update,
-      activeBotId: 'id613002203036_bot',
-      timeoutMs: 10_000,
-      timeoutContext: {
-        latestStage: 'required-subscription',
-        elapsedMs: 10_001,
-      },
-    });
+      (service as any).createWebhookHotPathTimeoutError({
+        webhookEventId: 'event-timeout-required-subscription',
+        update,
+        activeBotId: 'id613002203036_bot',
+        timeoutMs: 10_000,
+        timeoutContext: {
+          latestStage,
+          elapsedMs: 10_001,
+        },
+      });
 
-    expect((service as any).isWebhookHotTimeoutChatBackoffActive('-chat-1')).toBe(true);
-  });
+      expect((service as any).isWebhookHotTimeoutChatBackoffActive('-chat-1')).toBe(true);
+    },
+  );
 
   it('returns a quarantine outcome for stuck user-facing message_created events', async () => {
     const update = {
