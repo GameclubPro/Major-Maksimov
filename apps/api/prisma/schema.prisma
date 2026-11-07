@@ -1446,7 +1446,18 @@ model ChatSettings {
 
   chat Chat @relation(fields: [chatId], references: [id], onDelete: Cascade)
 
+  cacheRevision ChatSettingsCacheRevision?
+
   @@map("chat_settings")
+}
+
+model ChatSettingsCacheRevision {
+  chatId   String @id @map("chat_id")
+  revision String @db.Uuid
+
+  settings ChatSettings @relation(fields: [chatId], references: [chatId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@map("chat_settings_cache_revisions")
 }
 
 model ModerationLinkHistoryScanState {
