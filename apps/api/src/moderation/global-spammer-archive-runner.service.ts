@@ -95,11 +95,18 @@ export class GlobalSpammerArchiveRunnerService implements OnModuleInit, OnModule
       if (!this.archiveEnabled) return;
       const result = await this.globalSpammerIntelligence.archiveExpiredRegistryEntries({
         limit: this.limit,
+        // FLAG: Scheduled maintenance must not scan the full backlog just for its log.
+        // null means unmeasured; the explicit operator CLI retains an exact count by default.
+        countRemainingExpired: false,
       });
       const pruneResult = await this.globalSpammerIntelligence.pruneExpiredRawEvidence({
         limit: this.limit,
       });
-      if (result.archived > 0 || result.deleted > 0 || result.remainingExpired > 0) {
+      if (
+        result.archived > 0 ||
+        result.deleted > 0 ||
+        (result.remainingExpired !== null && result.remainingExpired > 0)
+      ) {
         this.logger.log(
           {
             reason,

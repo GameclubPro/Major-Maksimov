@@ -95,7 +95,7 @@ export type GlobalSpammerArchiveExpiredResult = {
   scanned: number;
   archived: number;
   deleted: number;
-  remainingExpired: number;
+  remainingExpired: number | null;
 };
 
 export type GlobalSpammerPrivacyPruneResult = {
@@ -2060,7 +2060,12 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
   }
 
   async archiveExpiredRegistryEntries(
-    params: { limit?: number; dryRun?: boolean; now?: Date } = {},
+    params: {
+      limit?: number;
+      dryRun?: boolean;
+      now?: Date;
+      countRemainingExpired?: boolean;
+    } = {},
   ): Promise<GlobalSpammerArchiveExpiredResult> {
     const now = params.now ?? new Date();
     const limit = Math.max(1, Math.min(params.limit ?? 1000, 5000));
@@ -2072,9 +2077,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
     });
 
     if (params.dryRun || expiredRows.length === 0) {
-      const remainingExpired = await this.prisma.globalSpammer.count({
-        where: expiredWhere,
-      });
+      const remainingExpired =
+        params.countRemainingExpired === false
+          ? null
+          : await this.prisma.globalSpammer.count({ where: expiredWhere });
       return {
         ok: true,
         dryRun: Boolean(params.dryRun),
@@ -2115,9 +2121,10 @@ export class GlobalSpammerIntelligenceService implements OnModuleDestroy {
         },
       }),
     ]);
-    const remainingExpired = await this.prisma.globalSpammer.count({
-      where: expiredWhere,
-    });
+    const remainingExpired =
+      params.countRemainingExpired === false
+        ? null
+        : await this.prisma.globalSpammer.count({ where: expiredWhere });
 
     return {
       ok: true,
