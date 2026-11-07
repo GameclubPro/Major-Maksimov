@@ -83,7 +83,10 @@ function validateApiReadyTimeout(value) {
   );
 }
 
-function infraCheckFixture(t, { postgres = true, generatorStatus = 0, lintStatus = 0 } = {}) {
+function infraCheckFixture(
+  t,
+  { postgres = true, generatorStatus = 0, lintStatus = 0, parentEnvironment = process.env } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-infra-check-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   for (const path of ['infra/scripts', 'scripts/agent', 'bin']) {
@@ -141,13 +144,14 @@ if (process.env.MAXIM_TEST_POSTGRES_URL) {
     { mode: 0o755 },
   );
   const env = {
-    ...process.env,
+    ...parentEnvironment,
     CHECK_INFRA_FIXTURE_CALLS: calls,
     CHECK_INFRA_FIXTURE_GENERATOR_STATUS: String(generatorStatus),
     CHECK_INFRA_FIXTURE_LINT_STATUS: String(lintStatus),
     PATH: `${join(directory, 'bin')}:${process.env.PATH ?? ''}`,
   };
   delete env.NODE_TEST_CONTEXT;
+  delete env.MAXIM_INFRA_TEST_SHARD;
   if (postgres) env.MAXIM_TEST_POSTGRES_URL = 'postgresql://fixture.invalid/race_test';
   else delete env.MAXIM_TEST_POSTGRES_URL;
   const client = join(directory, 'apps/api/generated/prisma/client.js');
@@ -231,6 +235,18 @@ test('keeps non-native infrastructure validation independent of API generation',
     false,
   );
   assert.equal(fixture.calls.at(-1), 'tests');
+});
+
+test('runs the isolated infrastructure fixture despite parent CI sharding', (t) => {
+  for (const postgres of [true, false]) {
+    const fixture = infraCheckFixture(t, {
+      postgres,
+      parentEnvironment: { ...process.env, MAXIM_INFRA_TEST_SHARD: '2/2' },
+    });
+    assert.equal(fixture.result.status, 0, fixture.result.stderr + fixture.result.stdout);
+    assert.equal(fixture.calls.at(-1), 'tests', `postgres=${postgres}`);
+    assert.equal(existsSync(fixture.client), postgres);
+  }
 });
 
 test('rejects infrastructure lint before generating an API client or running tests', (t) => {
