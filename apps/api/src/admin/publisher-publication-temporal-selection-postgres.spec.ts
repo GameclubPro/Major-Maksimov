@@ -107,6 +107,11 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
   let envelopeSequence: number;
   let extraOwnedChatIds: string[];
   let ownedPublicationIds: string[];
+  let parentFixtureSeed: {
+    stopRequested: boolean;
+    settled: boolean;
+    completion: Promise<void>;
+  } | null = null;
   const botId = `temporal-${randomUUID()}`;
   const queries: Prisma.QueryEvent[] = [];
   const deliveryRoute = {
@@ -122,6 +127,34 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
     'dialogBotId' | 'publisherDialogContext' | 'publicationPolicyRevision'
   >;
 
+  function assertParentFixtureIdle(): void {
+    if (parentFixtureSeed && !parentFixtureSeed.settled)
+      throw new Error('Parent fixture seed is still active; refusing fixture setup or cleanup');
+  }
+
+  function startParentFixtureSeed(
+    seed: (shouldStop: () => boolean) => Promise<void>,
+  ): Promise<void> {
+    assertParentFixtureIdle();
+    const owner = { stopRequested: false, settled: false, completion: Promise.resolve() };
+    parentFixtureSeed = owner;
+    owner.completion = Promise.resolve()
+      .then(() => seed(() => owner.stopRequested))
+      .finally(() => {
+        owner.settled = true;
+      });
+    return owner.completion;
+  }
+
+  async function drainParentFixtureSeed(): Promise<void> {
+    const owner = parentFixtureSeed;
+    if (!owner) return;
+    // FLAG: Jest timing out a hook does not stop its writes. Keep the original
+    // promise owned until it settles; its rejection still belongs to beforeEach.
+    owner.stopRequested = true;
+    await owner.completion.catch(() => undefined);
+  }
+
   async function seedIndexedRows(sql: Prisma.Sql, client: PrismaClient = db): Promise<number> {
     return seedIndexedBatches([sql], client);
   }
@@ -131,17 +164,18 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
     client: PrismaClient = db,
   ): Promise<number> {
     // FLAG: Limit planner changes to fixture inserts; preserve initial table statistics
-    // and restore session settings before selection and plan assertions. Reuse indexed
-    // trigger lookup plans and one transaction across the supplied bounded statements.
+    // and restore session settings before selection and plan assertions. Reset earlier
+    // trigger/FK plans so their first lookup uses these indexed fixture settings.
     // The fixture transaction may exceed Prisma's 5s default; its 20s total remains inside
     // the recipient hook's 30s budget, with the separate 10s cap on each SQL statement.
-    const [settings, ...inserted] = await client.$transaction(
+    const [settings, , ...inserted] = await client.$transaction(
       [
         client.$queryRaw<Array<{ seq: string; jit: string; cache: string }>>(Prisma.sql`
         SELECT set_config('enable_seqscan', 'off', true) AS seq,
           set_config('jit', 'off', true) AS jit,
           set_config('plan_cache_mode', 'force_generic_plan', true) AS cache
       `),
+        client.$executeRaw(Prisma.sql`DISCARD PLANS`),
         ...statements.map((sql) => client.$executeRaw(sql)),
       ],
       { timeout: FIXTURE_TRANSACTION_TIMEOUT_MS },
@@ -173,6 +207,8 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
   });
 
   beforeEach(async () => {
+    assertParentFixtureIdle();
+    parentFixtureSeed = null;
     now = new Date();
     envelopeSequence = 0;
     extraOwnedChatIds = [];
@@ -209,6 +245,9 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
   }
 
   afterEach(async () => {
+    // FLAG: A timed-out drain hook may still fall through to this outer hook.
+    // Never delete fixture parents while their tracked writer remains active.
+    assertParentFixtureIdle();
     await db.publicationOccurrence.deleteMany({
       where: { publicationId: { in: ownedPublicationIds } },
     });
@@ -500,7 +539,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
 
       // FLAG: Parent fixture setup has a 60-second hook; recipient setup retains 30 seconds.
       // Selection and its plan assertions retain the independent 30-second test budget.
-      beforeEach(async () => {
+      async function seedParents(shouldStop: () => boolean): Promise<void> {
         const seedStarted = performance.now();
         const stageTimingsMs: Record<string, number> = {};
         let seedStage = 'prepare';
@@ -509,11 +548,13 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         let insertedBroadcasts = 0;
         let completedBroadcastTransactions = 0;
         try {
+          if (shouldStop()) return;
           prefix = `execution-parent-${randomUUID()}`;
           previousContent = await db.publicationContentRevision.create({
             data: { publicationId, revision: 2, text: 'Retained mismatched envelope' },
           });
           stageTimingsMs.prepare = performance.now() - stageStarted;
+          if (shouldStop()) return;
           seedStage = 'occurrences';
           stageStarted = performance.now();
           // FLAG: This fixture stresses parent selection, not a large audience under one parent.
@@ -530,6 +571,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             FROM generate_series(1, ${parents + retained}::integer) AS n
           `);
           stageTimingsMs.occurrences = performance.now() - stageStarted;
+          if (shouldStop()) return;
           seedStage = 'broadcasts';
           stageStarted = performance.now();
           // FLAG: Bound row-triggered inserts without reducing the retained parent history.
@@ -555,6 +597,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             first < broadcastStatements.length;
             first += broadcastStatementsPerTransaction
           ) {
+            if (shouldStop()) return;
             insertedBroadcasts += await seedIndexedBatches(
               broadcastStatements.slice(first, first + broadcastStatementsPerTransaction),
             );
@@ -578,13 +621,19 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               completedBroadcastTransactions,
               insertedBroadcasts,
               completed,
+              stopRequested: shouldStop(),
               seedStage,
               stageTimingsMs,
               wallMs: performance.now() - seedStarted,
             }),
           );
         }
-      }, 60_000);
+      }
+
+      beforeEach(() => startParentFixtureSeed(seedParents), 60_000);
+      afterEach(async () => {
+        await drainParentFixtureSeed();
+      });
 
       beforeEach(async () => {
         const seedStarted = performance.now();
@@ -1740,6 +1789,153 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
     } finally {
       release();
       await blocker.catch(() => undefined);
+      await connection.$disconnect();
+    }
+  });
+
+  it('drains an owned parent seed before cleanup and stops its next write', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let firstWriteFinished!: () => void;
+    let firstWriteFailed!: (error: unknown) => void;
+    const firstWrite = new Promise<void>((resolve, reject) => {
+      firstWriteFinished = resolve;
+      firstWriteFailed = reject;
+    });
+    const seed = startParentFixtureSeed(async (shouldStop) => {
+      await db.publicationContentRevision.create({
+        data: { publicationId, revision: 2, text: 'Synthetic owned seed write' },
+      });
+      firstWriteFinished();
+      await held;
+      if (shouldStop()) return;
+      await db.publicationContentRevision.create({
+        data: { publicationId, revision: 3, text: 'Must not start after drain' },
+      });
+    });
+    void seed.catch(firstWriteFailed);
+    try {
+      await firstWrite;
+      expect(() => assertParentFixtureIdle()).toThrow('Parent fixture seed is still active');
+      expect(() => startParentFixtureSeed(async () => undefined)).toThrow(
+        'Parent fixture seed is still active',
+      );
+      let drained = false;
+      const drain = drainParentFixtureSeed().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      expect(() => assertParentFixtureIdle()).toThrow('Parent fixture seed is still active');
+      release();
+      await drain;
+      await seed;
+      expect(() => assertParentFixtureIdle()).not.toThrow();
+      expect(
+        await db.publicationContentRevision.findMany({
+          where: { publicationId, revision: { gte: 2 } },
+          select: { revision: true },
+        }),
+      ).toEqual([{ revision: 2 }]);
+    } finally {
+      release();
+      await drainParentFixtureSeed();
+    }
+  });
+
+  it('retains the original parent seed rejection while draining for cleanup', async () => {
+    const failure = new Error('Synthetic parent seed failure');
+    const seed = startParentFixtureSeed(async () => {
+      throw failure;
+    });
+    const outcome = seed.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await expect(drainParentFixtureSeed()).resolves.toBeUndefined();
+    expect(await outcome).toBe(failure);
+    expect(() => assertParentFixtureIdle()).not.toThrow();
+  });
+
+  it('replans a trigger lookup cached before indexed fixture preparation', async () => {
+    const connection = new PrismaClient({
+      adapter: createPrismaAdapter(databaseUrl, { max: 1, statement_timeout: 10_000 }),
+    });
+    try {
+      await connection.$executeRaw(Prisma.sql`
+        CREATE TEMP TABLE fixture_seed_lookup (id text PRIMARY KEY, value text NOT NULL)
+      `);
+      await connection.$executeRaw(Prisma.sql`
+        INSERT INTO fixture_seed_lookup
+        SELECT 'key-' || n, 'value-' || n FROM generate_series(1, 2000) n
+      `);
+      await connection.$executeRaw(Prisma.sql`ANALYZE fixture_seed_lookup`);
+      await connection.$executeRaw(Prisma.sql`
+        CREATE TEMP TABLE fixture_seed_target (id text, lookup_id text, value text)
+      `);
+      await connection.$executeRaw(Prisma.sql`
+        CREATE FUNCTION pg_temp.fixture_seed_fill() RETURNS trigger LANGUAGE plpgsql AS $fn$
+        BEGIN
+          SELECT source.value INTO NEW.value
+          FROM pg_temp.fixture_seed_lookup source WHERE source.id = NEW.lookup_id;
+          RETURN NEW;
+        END $fn$
+      `);
+      await connection.$executeRaw(Prisma.sql`
+        CREATE TRIGGER fixture_seed_fill BEFORE INSERT ON fixture_seed_target
+        FOR EACH ROW EXECUTE FUNCTION pg_temp.fixture_seed_fill()
+      `);
+      // FLAG: Prime a real trigger's generic sequential plan on this exact backend.
+      // Changing planner settings alone must not be mistaken for invalidating it.
+      await connection.$queryRaw(Prisma.sql`
+        SELECT set_config('plan_cache_mode', 'force_generic_plan', false),
+          set_config('enable_indexscan', 'off', false),
+          set_config('enable_bitmapscan', 'off', false), set_config('jit', 'off', false)
+      `);
+      await connection.$executeRaw(Prisma.sql`
+        INSERT INTO fixture_seed_target VALUES ('prime', 'key-1999', NULL)
+      `);
+      await connection.$queryRaw(Prisma.sql`
+        SELECT set_config('enable_indexscan', 'on', false),
+          set_config('enable_bitmapscan', 'on', false)
+      `);
+      await connection.$executeRaw(Prisma.sql`
+        CREATE TEMP TABLE fixture_seed_scans (stage text, seq_scan bigint, idx_scan bigint)
+      `);
+      expect(
+        await seedIndexedBatches(
+          [
+            Prisma.sql`
+              INSERT INTO fixture_seed_scans
+              SELECT 'before', seq_scan, idx_scan FROM pg_stat_xact_user_tables
+              WHERE relid = 'pg_temp.fixture_seed_lookup'::regclass
+            `,
+            Prisma.sql`INSERT INTO fixture_seed_target VALUES ('indexed', 'key-1999', NULL)`,
+            Prisma.sql`
+              INSERT INTO fixture_seed_scans
+              SELECT 'after', seq_scan, idx_scan FROM pg_stat_xact_user_tables
+              WHERE relid = 'pg_temp.fixture_seed_lookup'::regclass
+            `,
+          ],
+          connection,
+        ),
+      ).toBe(3);
+      const scans = await connection.$queryRaw<
+        Array<{ stage: string; seq_scan: bigint; idx_scan: bigint }>
+      >(Prisma.sql`SELECT stage, seq_scan, idx_scan FROM fixture_seed_scans ORDER BY stage`);
+      expect(scans).toHaveLength(2);
+      expect(scans[0]!.stage).toBe('after');
+      expect(scans[1]!.stage).toBe('before');
+      expect(scans[0]!.seq_scan - scans[1]!.seq_scan).toBe(0n);
+      expect(scans[0]!.idx_scan - scans[1]!.idx_scan).toBe(1n);
+      expect(
+        await connection.$queryRaw(Prisma.sql`
+          SELECT value FROM fixture_seed_target WHERE id = 'indexed'
+        `),
+      ).toEqual([{ value: 'value-1999' }]);
+    } finally {
       await connection.$disconnect();
     }
   });
