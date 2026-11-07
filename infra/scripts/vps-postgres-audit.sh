@@ -19,6 +19,7 @@ LEGACY_DEFAULT_DB_AUDIT_HELPER="$ROOT_DIR/infra/scripts/legacy-default-webhook-d
 LEGACY_DEFAULT_SNAPSHOT_PATH=''
 AUDIT_SQL_FILE=''
 KARAVAN_CANDIDATE_ARGS=()
+STOP_WORDS_SETTINGS_ARGS=()
 AUDIT_STDERR_FILE=''
 AUDIT_BACKEND_MAY_EXIST=0
 POSTGRES_AUDIT_APP_NAME="maxim-bounded-audit-$(date -u +%Y%m%dT%H%M%SZ)-${BASHPID}-${RANDOM}"
@@ -61,6 +62,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh commercial-quality [--explain]
   ./infra/scripts/vps-postgres-audit.sh network-statistics <negative-chat-ID-CSV, max 12> [--observations] [--membership=7d|30d] [--explain]
   ./infra/scripts/vps-postgres-audit.sh statistics-exchange <exact-actor-id> [--explain]
+  ./infra/scripts/vps-postgres-audit.sh stop-words-settings <negative-chat-id> [--word-hash md5] [--sender-hash md5] [--explain]
   ./infra/scripts/vps-postgres-audit.sh karavan-candidates [--after settings-id] [--limit 1..40] [--explain]
   ./infra/scripts/vps-postgres-audit.sh central-statistics <negative-chat-ID-CSV, max 12> [--explain]
 
@@ -123,6 +125,10 @@ case "$AUDIT_MODE" in
   statistics-exchange)
     STATISTICS_EXCHANGE_ARGS=("${@:2}")
     node "$ROOT_DIR/infra/scripts/statistics-exchange-audit.mjs" --validate-scope "${STATISTICS_EXCHANGE_ARGS[@]}" >/dev/null || exit 2
+    ;;
+  stop-words-settings)
+    STOP_WORDS_SETTINGS_ARGS=("${@:2}")
+    node "$ROOT_DIR/infra/scripts/stop-words-settings-audit.mjs" --validate-scope "${STOP_WORDS_SETTINGS_ARGS[@]}" >/dev/null || exit 2
     ;;
   karavan-candidates)
     KARAVAN_CANDIDATE_ARGS=("${@:2}")
@@ -427,7 +433,8 @@ SELECT CASE
                 'duplicate_window_mode',
                 'duplicate_start_time_minutes',
                 'duplicate_end_time_minutes',
-                'duplicate_timezone'
+                'duplicate_timezone',
+              'chat_id', 'stop_words_policy', 'stop_words_revision', 'updated_at'
               )
             )
             OR (
@@ -447,6 +454,7 @@ SELECT CASE
         FROM information_schema.role_column_grants
         WHERE grantee = 'maxim_audit'
           AND table_schema = 'public'
+      AND NOT (table_name = 'chat_settings' AND column_name IN ('chat_id', 'stop_words_policy', 'stop_words_revision', 'updated_at'))
           AND table_name IN (
             'chat_settings',
             'moderation_delete_intents',
@@ -459,6 +467,7 @@ SELECT CASE
           FROM information_schema.role_column_grants
           WHERE grantee = 'maxim_audit'
             AND table_schema = 'public'
+            AND NOT (table_name = 'chat_settings' AND column_name IN ('chat_id', 'stop_words_policy', 'stop_words_revision', 'updated_at'))
             AND table_name IN (
               'chat_settings',
               'moderation_delete_intents',
@@ -503,7 +512,8 @@ SELECT CASE
               'duplicate_window_mode',
               'duplicate_start_time_minutes',
               'duplicate_end_time_minutes',
-              'duplicate_timezone'
+              'duplicate_timezone',
+              'chat_id', 'stop_words_policy', 'stop_words_revision', 'updated_at'
             )
           )
           OR (
@@ -547,6 +557,7 @@ SELECT CASE
               'stats_entities', 'stats_authorities', 'stats_measurements', 'stats_ingest_requests', 'stats_changes',
               'statistics_exchange_grants', 'statistics_exchange_entities', 'statistics_exchange_imports', 'statistics_exchange_generations',
               'karavan_marketplace_candidate_settings', 'karavan_marketplace_candidate_events',
+              'chat_admin_allowlist', 'managed_entity_admin_members', 'chat_participant_moderation_immunities',
                 'chat_settings',
                 'moderation_delete_intents',
                 'moderation_delete_intent_reasons'
@@ -2089,6 +2100,7 @@ SELECT CASE
     FROM information_schema.role_column_grants
     WHERE grantee = 'maxim_audit'
       AND table_schema = 'public'
+      AND NOT (table_name = 'chat_settings' AND column_name IN ('chat_id', 'stop_words_policy', 'stop_words_revision', 'updated_at'))
       AND table_name IN (
         'chat_settings',
         'moderation_delete_intents',
@@ -2504,6 +2516,9 @@ emit_legacy_default_webhook_audit() {
 
 emit_sql() {
   emit_prelude
+  local stop_words_privilege_args=(--privileges)
+  if [[ "$AUDIT_MODE" == 'stop-words-settings' ]]; then stop_words_privilege_args+=(--require-all); fi
+  node "$ROOT_DIR/infra/scripts/stop-words-settings-audit.mjs" "${stop_words_privilege_args[@]}"
   local karavan_privilege_args=(--privileges)
   if [[ "$AUDIT_MODE" == 'karavan-candidates' ]]; then karavan_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${karavan_privilege_args[@]}"
@@ -2544,6 +2559,9 @@ emit_sql() {
   if [[ "$AUDIT_MODE" == 'webhook-quarantine' ]]; then quarantine_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/webhook-quarantine-audit.mjs" "${quarantine_privilege_args[@]}"
   case "$AUDIT_MODE" in
+    stop-words-settings)
+      node "$ROOT_DIR/infra/scripts/stop-words-settings-audit.mjs" "${STOP_WORDS_SETTINGS_ARGS[@]}"
+      ;;
     karavan-candidates)
       node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${KARAVAN_CANDIDATE_ARGS[@]}"
       ;;
@@ -2822,7 +2840,8 @@ cleanup() {
     rm -f -- "$AUDIT_SQL_FILE"
   fi
   AUDIT_SQL_FILE=''
-KARAVAN_CANDIDATE_ARGS=()
+  KARAVAN_CANDIDATE_ARGS=()
+  STOP_WORDS_SETTINGS_ARGS=()
   if [[ -n "$AUDIT_STDERR_FILE" && -f "$AUDIT_STDERR_FILE" && ! -L "$AUDIT_STDERR_FILE" ]]; then
     rm -f -- "$AUDIT_STDERR_FILE"
   fi
