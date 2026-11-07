@@ -91,6 +91,7 @@ import { handlePreviewReports } from './preview-reports';
 import { getPreviewMessageRetention } from './preview-message-retention';
 import { handlePreviewCommercialAds } from './preview-commercial-ads';
 import { handlePreviewStopWords } from './preview-stop-words';
+import { previewLinksText, previewLinkWrite, readPreviewLinkSettings } from './preview-links';
 
 function activePreviewDomains(state: PreviewState) {
   const now = readPreviewClock(state.clock).getTime();
@@ -178,8 +179,8 @@ export function buildChatSettingsScreen(
     closure: createPreviewOpenChatClosure(state.chatSettings, readPreviewClock(state.clock)),
     settings:
       state.stopWordsStorageStatus === 'invalid'
-        ? { ...state.chatSettings, stopWordsPolicy: stopWordsPolicySchema.parse({}) }
-        : state.chatSettings,
+        ? { ...readPreviewLinkSettings(state), stopWordsPolicy: stopWordsPolicySchema.parse({}) }
+        : readPreviewLinkSettings(state),
     stopWordsStorageStatus: state.stopWordsStorageStatus,
     commercialPhotoModerationMode: 'OFF',
     commercialAiModerationMode: 'DELETE_ONLY',
@@ -577,6 +578,7 @@ export async function handleChatRequest(
     state.chatSettings = chatSettingsSchema.parse({
       ...state.chatSettings,
       ...request.changes,
+      ...previewLinkWrite(state, request.changes),
       botSpeechMedia: mergedMedia,
       settingsRevision: new Date(
         Math.max(Date.now(), Date.parse(request.expectedRevision) + 1),
@@ -603,8 +605,8 @@ export async function handleChatRequest(
     if (method === 'GET') {
       return cloneJson(
         state.stopWordsStorageStatus === 'invalid'
-          ? { ...state.chatSettings, stopWordsPolicy: stopWordsPolicySchema.parse({}) }
-          : state.chatSettings,
+          ? { ...readPreviewLinkSettings(state), stopWordsPolicy: stopWordsPolicySchema.parse({}) }
+          : readPreviewLinkSettings(state),
       );
     }
 
@@ -624,7 +626,9 @@ export async function handleChatRequest(
         );
       }
       state.chatSettings = chatSettingsSchema.parse({
+        ...state.chatSettings,
         ...(parseJsonBody(init) as object),
+        ...previewLinkWrite(state, parseJsonBody(init) as Partial<typeof state.chatSettings>),
         stopWordsPolicy: state.chatSettings.stopWordsPolicy,
         stopWordsRevision: state.chatSettings.stopWordsRevision,
         messageLimitsBlockedWords: state.chatSettings.messageLimitsBlockedWords,
@@ -650,6 +654,11 @@ export async function handleChatRequest(
   if (tail[0] === 'stop-words') {
     assertPreviewSettingsScreenAvailable(state);
     return handlePreviewStopWords(state, tail, url, method, init);
+  }
+
+  if (tail[0] === 'links' && tail[1] === 'preview' && method === 'POST') {
+    assertPreviewSettingsScreenAvailable(state);
+    return previewLinksText(state, parseJsonBody(init));
   }
 
   if (tail[0] === 'settings' && tail[1] === 'apply-section-to-all' && method === 'POST') {

@@ -27,6 +27,8 @@ import {
 } from './navigation/enabled-navigation-targets';
 import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.adapter';
 import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import { activeLinkPolicySql, linkPolicySemanticEffectiveAtSql } from './link-rules-history.sql';
+import { fingerprintLinkRulesPolicy, isRuntimeLinkPolicyActive } from './link-rules-policy.runtime';
 
 export {
   createMessageContentFingerprint,
@@ -81,6 +83,7 @@ type LinkHistoryRecoveryConfig = {
 
 type LinkHistoryPolicySnapshot = {
   linkPolicy: 'ALLOWLIST_ONLY' | 'BLOCKLIST_ONLY' | 'ALERT_ONLY';
+  linkRulesPolicy?: unknown;
   linkPolicyRevision: number;
   linkPolicyEffectiveAt: Date | null;
   adminUserIds: Set<string>;
@@ -388,16 +391,12 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
       await this.renewLease(lease);
       let exactRow: Record<string, unknown> | null;
       try {
-        exactRow = await this.maxClient.getExactMessageRow(
-          lease.chatId,
-          item.metadata.messageId,
-          {
-            trafficClass: 'background',
-            sourceTag: LINK_HISTORY_RECOVERY_SOURCE_TAG,
-            botId: scanBotId,
-            bypassCache: true,
-          },
-        );
+        exactRow = await this.maxClient.getExactMessageRow(lease.chatId, item.metadata.messageId, {
+          trafficClass: 'background',
+          sourceTag: LINK_HISTORY_RECOVERY_SOURCE_TAG,
+          botId: scanBotId,
+          bypassCache: true,
+        });
       } catch (error: unknown) {
         counters.exactLookups += 1;
         if (readHttpStatus(error) !== 404) {
@@ -428,7 +427,14 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
       const actionableTargets = filterActionableNavigationTargets(
         this.extractEnabledTargets(exactView),
       );
-      if (!isLinkHistoryPolicyViolation(policy.linkPolicy, policy.allowlist, actionableTargets)) {
+      if (
+        !isLinkHistoryPolicyViolation(
+          policy.linkPolicy,
+          policy.allowlist,
+          actionableTargets,
+          policy.linkRulesPolicy,
+        )
+      ) {
         continue;
       }
       counters.policyViolations += 1;
@@ -492,6 +498,9 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
             contentFingerprint: fingerprint,
             policyRevision: policy.linkPolicyRevision,
             policyEffectiveAt: policy.linkPolicyEffectiveAt!.toISOString(),
+            ...(policy.linkRulesPolicy != null
+              ? { linkRulesPolicySha256: fingerprintLinkRulesPolicy(policy.linkRulesPolicy) }
+              : {}),
             evidence: actionableTargets.map((target) => ({
               kind: target.kind,
               targetHash: hashSensitiveValue(target.normalizedTarget),
@@ -537,24 +546,9 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
       FROM "chat_settings" settings
       INNER JOIN "chats" chat ON chat."id" = settings."chat_id"
       CROSS JOIN LATERAL (
-        SELECT GREATEST(
-          settings."link_policy_effective_at",
-          CASE
-            WHEN settings."link_policy" = CAST('ALLOWLIST_ONLY' AS "LinkPolicy")
-            THEN (
-              SELECT MAX(allowlist."remove_after_at")
-              FROM "domain_allowlist" allowlist
-              WHERE allowlist."chat_id" = settings."chat_id"
-                AND allowlist."remove_after_at" <= ${now}
-            )
-            ELSE NULL
-          END
-        ) AS "effective_at"
+        SELECT ${linkPolicySemanticEffectiveAtSql(now)} AS "effective_at"
       ) semantic_baseline
-      WHERE settings."link_policy" IN (
-          CAST('ALLOWLIST_ONLY' AS "LinkPolicy"),
-          CAST('BLOCKLIST_ONLY' AS "LinkPolicy")
-        )
+      WHERE ${activeLinkPolicySql()}
         AND settings."link_policy_revision" >= 1
         AND settings."link_policy_effective_at" IS NOT NULL
         AND semantic_baseline."effective_at" IS NOT NULL
@@ -713,26 +707,11 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
         INNER JOIN "chat_settings" settings ON settings."chat_id" = state."chat_id"
         INNER JOIN "chats" chat ON chat."id" = state."chat_id"
         CROSS JOIN LATERAL (
-          SELECT GREATEST(
-            settings."link_policy_effective_at",
-            CASE
-              WHEN settings."link_policy" = CAST('ALLOWLIST_ONLY' AS "LinkPolicy")
-              THEN (
-                SELECT MAX(allowlist."remove_after_at")
-                FROM "domain_allowlist" allowlist
-                WHERE allowlist."chat_id" = settings."chat_id"
-                  AND allowlist."remove_after_at" <= ${now}
-              )
-              ELSE NULL
-            END
-          ) AS "effective_at"
+          SELECT ${linkPolicySemanticEffectiveAtSql(now)} AS "effective_at"
         ) semantic_baseline
         WHERE state."next_scan_at" <= ${now}
           AND (state."lease_expires_at" IS NULL OR state."lease_expires_at" < ${now})
-          AND settings."link_policy" IN (
-            CAST('ALLOWLIST_ONLY' AS "LinkPolicy"),
-            CAST('BLOCKLIST_ONLY' AS "LinkPolicy")
-          )
+          AND ${activeLinkPolicySql()}
           AND settings."link_policy_revision" = state."policy_revision"
           AND settings."link_policy_effective_at" IS NOT NULL
           AND semantic_baseline."effective_at" = state."policy_effective_at"
@@ -774,6 +753,7 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
           where: { chatId },
           select: {
             linkPolicy: true,
+            linkRulesPolicy: true,
             linkPolicyRevision: true,
             linkPolicyEffectiveAt: true,
             chat: {
@@ -805,11 +785,14 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
     }
     return {
       linkPolicy: settings.linkPolicy,
+      linkRulesPolicy: settings.linkRulesPolicy,
       linkPolicyRevision: settings.linkPolicyRevision,
       linkPolicyEffectiveAt: deriveLinkPolicySemanticEffectiveAt(
         settings.linkPolicy,
         settings.linkPolicyEffectiveAt,
         expiredAllowlist._max.removeAfterAt,
+        settings.linkRulesPolicy,
+        now.getTime(),
       ),
       adminUserIds: new Set(settings.chat.admins.map((admin) => admin.userId)),
       allowlist: allowlistRows.map((row) => row.domain),
@@ -829,7 +812,7 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
     policy: LinkHistoryPolicySnapshot,
   ): asserts policy is LinkHistoryPolicySnapshot & { linkPolicyEffectiveAt: Date } {
     if (
-      policy.linkPolicy === 'ALERT_ONLY' ||
+      !isRuntimeLinkPolicyActive(policy.linkPolicy, policy.linkRulesPolicy) ||
       !policy.linkPolicyEffectiveAt ||
       policy.linkPolicyRevision !== lease.policyRevision ||
       policy.linkPolicyEffectiveAt.getTime() !== lease.policyEffectiveAt.getTime()

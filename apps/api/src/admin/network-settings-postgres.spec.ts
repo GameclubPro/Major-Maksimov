@@ -171,6 +171,11 @@ integration('network settings durable writes with PostgreSQL', () => {
     await db.managedEntityFavorite.deleteMany({ where: { userId: actor } });
   });
 
+  afterEach(async () => {
+    await db?.networkSettingsOperation.deleteMany({ where: { id: { in: ownedOperations } } });
+    ownedOperations.length = 0;
+  });
+
   afterAll(async () => {
     await db?.networkSettingsOperation.deleteMany({ where: { id: { in: ownedOperations } } });
     await db?.auditLog.deleteMany({ where: { chatId: { in: [...ids, ...largeIds, chatId] } } });
@@ -630,6 +635,44 @@ integration('network settings durable writes with PostgreSQL', () => {
       service.apply(user, { operationId: row.id, previewHash: preview.previewHash }),
     ).rejects.toMatchObject({ response: { code: 'NETWORK_SETTINGS_READER_UNSUPPORTED' } });
     expect((await service.status(user, row.id)).status).toBe('PREPARED');
+    await db.networkSettingsOperation.update({
+      where: { id: row.id },
+      data: { status: 'RUNNING' },
+    });
+    writes.mockClear();
+    await expect(service.tick()).resolves.toBe(false);
+    expect(writes).not.toHaveBeenCalled();
+    expect((await service.status(user, row.id)).outcomes[0].status).toBe('VALIDATED');
+  });
+
+  it('leaves a retained new link-policy operation unsettled when its reader tag is older than v4', async () => {
+    const preview = await prepare({ mode: 'selected', entityIds: [ids[3]] });
+    const row = await db.networkSettingsOperation.findUniqueOrThrow({
+      where: { id: preview.operationId },
+    });
+    const payload = row.payload as unknown as { request: Record<string, unknown> };
+    await db.networkSettingsOperation.update({
+      where: { id: row.id },
+      data: {
+        payload: {
+          ...(row.payload as object),
+          readerVersion: 3,
+          request: {
+            ...payload.request,
+            changes: [
+              {
+                op: 'set',
+                path: 'linkRulesPolicy',
+                value: { version: 1, mode: 'DENY_SELECTED', rules: [] },
+              },
+            ],
+          },
+        },
+      },
+    });
+    await expect(
+      service.apply(user, { operationId: row.id, previewHash: preview.previewHash }),
+    ).rejects.toMatchObject({ response: { code: 'NETWORK_SETTINGS_READER_UNSUPPORTED' } });
     await db.networkSettingsOperation.update({
       where: { id: row.id },
       data: { status: 'RUNNING' },

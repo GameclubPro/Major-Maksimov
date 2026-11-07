@@ -8,6 +8,39 @@ import type { ChatSettingsReadSnapshot } from './admin-chat-settings';
 type SectionApplyParams = Parameters<typeof applySettingsSectionToAllChats>[0];
 
 describe('admin settings section apply', () => {
+  it('copies a confirmed JSON link policy and skips the retired allowlist synchronization', async () => {
+    const revision = '2026-11-07T10:00:00.000Z';
+    const settings = chatSettingsSchema.parse({
+      settingsRevision: revision,
+      linkRulesPolicy: { version: 1, mode: 'DENY_SELECTED', rules: [] },
+      linkRulesStorageStatus: 'valid',
+    });
+    const applySettings: jest.MockedFunction<SectionApplyParams['applySettings']> = jest
+      .fn()
+      .mockResolvedValue({ sourceChatId: 'source', updatedChats: 1, appliedChatIds: ['target'] });
+    const syncDomainAllowlistToChats = jest.fn();
+    await applySettingsSectionToAllChats({
+      sourceChatId: 'source',
+      source: 'miniapp',
+      body: {
+        section: 'links',
+        expectedSourceSettingsRevision: revision,
+        target: { mode: 'selectedChats', chatIds: ['target'] },
+      },
+      getSourceSettings: async () => settings,
+      applySettings,
+      syncDomainAllowlistToChats,
+    });
+    expect(applySettings).toHaveBeenCalledWith(
+      settings,
+      { mode: 'selectedChats', favoriteTypes: [], chatIds: ['target'] },
+      [...SETTINGS_SECTION_KEYS.links, 'botSpeechMedia'],
+      expect.any(Array),
+      undefined,
+      revision,
+    );
+    expect(syncDomainAllowlistToChats).not.toHaveBeenCalled();
+  });
   it('rejects an intervening administrator edit before copying a report policy', async () => {
     const applySettings = jest.fn();
     await expect(

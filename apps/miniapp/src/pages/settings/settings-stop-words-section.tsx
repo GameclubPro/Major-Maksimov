@@ -48,9 +48,7 @@ export function SettingsStopWordsSection(props: SettingsStopWordsSectionProps) {
     toggleSection,
   } = props;
   const policy = props.draft.stopWordsPolicy;
-  const count = policy
-    ? policy.rules.filter((rule) => rule.enabled).length + policy.domains.length
-    : 0;
+  const count = policy ? policy.rules.filter((rule) => rule.enabled).length : 0;
   const stopWordsCardStatus =
     !policy || props.storageInvalid ? 'Проверить' : policy.enabled ? String(count) : 'Выкл';
   const stopWordsHeaderSummary =

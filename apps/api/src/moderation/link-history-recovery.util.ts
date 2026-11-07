@@ -5,6 +5,11 @@ import type {
   NavigationTargetEvidence,
 } from './navigation/navigation-evidence.types';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
+import {
+  evaluateRuntimeLinkRulesPolicy,
+  latestExpiredLinkRuleAllowance,
+  readRuntimeLinkRulesPolicy,
+} from './link-rules-policy.runtime';
 import { createNavigationAllowlistMatcher } from './rule-engine-link-detector';
 
 const MIN_UNIX_MILLISECONDS = 100_000_000_000;
@@ -104,7 +109,13 @@ export function isLinkHistoryPolicyViolation(
   policy: 'ALLOWLIST_ONLY' | 'BLOCKLIST_ONLY' | 'ALERT_ONLY',
   allowlist: readonly string[],
   targets: readonly NavigationTargetEvidence[],
+  linkRulesPolicy?: unknown,
 ): boolean {
+  const current = readRuntimeLinkRulesPolicy(linkRulesPolicy);
+  if (current.status !== 'legacy')
+    return (
+      current.status === 'valid' && !evaluateRuntimeLinkRulesPolicy(current.policy, targets).allowed
+    );
   if (targets.length === 0 || policy === 'ALERT_ONLY') {
     return false;
   }
@@ -119,7 +130,15 @@ export function deriveLinkPolicySemanticEffectiveAt(
   policy: 'ALLOWLIST_ONLY' | 'BLOCKLIST_ONLY' | 'ALERT_ONLY',
   storedEffectiveAt: Date | null,
   latestExpiredAllowlistAt: Date | null,
+  linkRulesPolicy?: unknown,
+  nowMs = Date.now(),
 ): Date | null {
+  const current = readRuntimeLinkRulesPolicy(linkRulesPolicy);
+  if (current.status === 'invalid') return null;
+  if (current.status === 'valid') {
+    const latest = latestExpiredLinkRuleAllowance(current.policy, nowMs);
+    return storedEffectiveAt && latest && latest > storedEffectiveAt ? latest : storedEffectiveAt;
+  }
   if (policy !== 'ALLOWLIST_ONLY' || !storedEffectiveAt || !latestExpiredAllowlistAt) {
     return storedEffectiveAt;
   }

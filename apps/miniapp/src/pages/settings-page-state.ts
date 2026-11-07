@@ -155,7 +155,12 @@ export function normalizeSectionDraftSettings(
 }
 
 export function serializeChatSettingsDraft(settings: ChatSettings): string {
-  return JSON.stringify({ ...settings, settingsRevision: undefined });
+  return JSON.stringify({
+    ...settings,
+    settingsRevision: undefined,
+    linkRulesLegacySnapshot: undefined,
+    linkRulesStorageStatus: undefined,
+  });
 }
 
 export function shouldHydrateSettingsDraftFromServer(
@@ -208,6 +213,9 @@ export const SECTION_SETTING_KEYS: Record<ApplySectionKey, readonly (keyof ChatS
     'reportsMuteDurationHours',
   ],
   links: [
+    'linkRulesPolicy',
+    'linkRulesLegacySnapshot',
+    'linkRulesReplaceInvalidStorage',
     'linkPolicy',
     'linkEscalationWindowHours',
     'linkWarnMaxCount',
@@ -456,7 +464,9 @@ export function hasSectionSettingChanges(
   section: ApplySectionKey,
 ): boolean {
   return SECTION_SETTING_KEYS[section].some(
-    (key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]),
+    (key) =>
+      key !== 'linkRulesLegacySnapshot' &&
+      JSON.stringify(draft[key]) !== JSON.stringify(saved[key]),
   );
 }
 

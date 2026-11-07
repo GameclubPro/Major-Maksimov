@@ -573,6 +573,7 @@ trap cleanup EXIT
 # FLAG: Preserve the installed release-service prefix through its durable pause. New reader
 # floors run after that boundary and before any rollback environment, store or runtime work.
 maxim_topology_require_night_open_notice_cleanup_reader "$TARGET_FULL_SHA"
+maxim_topology_require_link_rules_policy_reader "$TARGET_FULL_SHA"
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 if ! MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
   node infra/scripts/release-manifest.mjs validate-current >/dev/null; then

@@ -10,6 +10,7 @@ import { Spinner } from '../../components/ui/spinner';
 import type {
   DuplicatePhotoEffectivePolicy,
   StopWordsStorageStatus,
+  LinkRulesPolicy,
 } from '@maxim/contracts/settings';
 import type { CommercialSettingsScope } from './commercial-policy-model';
 import type { StopWordsFocusRequest } from './stop-words-settings-feedback';
@@ -28,6 +29,26 @@ export type SharedChatSettingsContext = {
     moduleError?: string | null;
   };
   navigationAllowlist?: ReactNode;
+  linkRules?: {
+    legacySnapshot?: { revision: string; policy: LinkRulesPolicy } | null;
+    loading?: boolean;
+    error?: string | null;
+    storageStatus?: 'legacy' | 'valid' | 'invalid';
+    replacementAuthorized?: boolean;
+    onAuthorizeReplacement?: () => void;
+    onPolicyAuthored?: () => void;
+    legacySites?: ReactNode;
+    preview?: (
+      policy: LinkRulesPolicy,
+      text: string,
+    ) => Promise<{
+      allowed: boolean;
+      reason: string;
+      target?: string;
+      ruleId?: string;
+      targetsCount: number;
+    }>;
+  };
   requiredSubscriptionSources?: ReactNode;
   renderAdminContact?: (input: {
     enabledPath: ChatScalarFieldPath;

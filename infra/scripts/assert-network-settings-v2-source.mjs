@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
-// FLAG: The stable v2 entrypoint now enforces the v3 supplementary-operation floor too.
-// Retained list intents and independent policy revisions survive feature-off and rollback.
+// FLAG: The stable v2 entrypoint retains the v3 supplementary-operation floor.
+// Accept its inline reader or the canonical v4 reader without losing legacy list intents/revisions.
 export const NETWORK_SETTINGS_V2_SOURCE_CHECKS = Object.freeze([
   [
     'apps/api/prisma/migrations/20261022130000_network_allowlist_revision/migration.sql',
@@ -23,9 +23,7 @@ export const NETWORK_SETTINGS_V2_SOURCE_CHECKS = Object.freeze([
   [
     'apps/api/src/admin/network-settings.service.ts',
     [
-      'export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 3;',
       'assertOperationReader(stored);',
-      'readerVersion: V3_SECTIONS.has(request.section) ? 3 : request.navigationAllowlist ? 2 : 1',
       "code: 'NETWORK_SETTINGS_READER_UNSUPPORTED'",
       'this.allowlist.commitOnly(',
       'this.allowlist.planInTransaction(',
@@ -335,9 +333,7 @@ export function assertNetworkSettingsV2Source(
     const missing = fragments.find((fragment) => !source.includes(normalizedFragment(fragment)));
     if (missing) throw failure(path, missing);
   };
-  for (const [path, fragments] of NETWORK_SETTINGS_V2_SOURCE_CHECKS)
-    requireFragments(path, sourceFor(path), fragments);
-  for (const [path, start, end, fragments] of NETWORK_SETTINGS_V2_SCOPED_CHECKS) {
+  const requireScopedFragments = (path, start, end, fragments) => {
     const source = sourceFor(path);
     const first = source.indexOf(normalizedFragment(start));
     const last =
@@ -346,12 +342,47 @@ export function assertNetworkSettingsV2Source(
         : source.indexOf(normalizedFragment(end), first + normalizedFragment(start).length);
     if (first < 0 || last < 0) throw failure(path, `Missing boundary: ${start}`);
     requireFragments(path, source.slice(first, last), fragments);
-  }
-  for (const [path, module, names] of NETWORK_SETTINGS_V2_RUNTIME_IMPORTS) {
+  };
+  const requireRuntimeImports = (path, module, names) => {
     const imports = [...sourceFor(path).matchAll(/\bimport\{([^}]*)\}from(['"])([^'"]+)\2/gu)];
     const runtime = imports.find((entry) => entry[3] === module)?.[1].split(',') ?? [];
     const missing = names.find((name) => !runtime.includes(name));
     if (missing) throw failure(path, `Missing runtime import: ${module} ${missing}`);
+  };
+  for (const [path, fragments] of NETWORK_SETTINGS_V2_SOURCE_CHECKS)
+    requireFragments(path, sourceFor(path), fragments);
+  for (const check of NETWORK_SETTINGS_V2_SCOPED_CHECKS) requireScopedFragments(...check);
+  for (const check of NETWORK_SETTINGS_V2_RUNTIME_IMPORTS) requireRuntimeImports(...check);
+
+  // FLAG: The selective-policy floor is separate. This retained v2/v3 floor must
+  // continue accepting a safe pre-policy reader while verifying the real v4 runtime edge.
+  const servicePath = 'apps/api/src/admin/network-settings.service.ts';
+  const legacyWriter = 'V3_SECTIONS.has(request.section) ? 3 : request.navigationAllowlist ? 2 : 1';
+  if (
+    sourceFor(servicePath).includes(
+      normalizedFragment('export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 3;'),
+    )
+  ) {
+    requireScopedFragments(servicePath, 'async preview(', 'async apply(', [
+      `readerVersion: ${legacyWriter}`,
+    ]);
+  } else {
+    const module = '@maxim/contracts/network-settings';
+    requireFragments(
+      'packages/contracts/src/network-settings-read.ts',
+      sourceFor('packages/contracts/src/network-settings-read.ts'),
+      ['export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 4;'],
+    );
+    requireFragments(servicePath, sourceFor(servicePath), [
+      `export { NETWORK_SETTINGS_OPERATION_READER_VERSION } from '${module}';`,
+    ]);
+    requireRuntimeImports(servicePath, module, ['NETWORK_SETTINGS_OPERATION_READER_VERSION']);
+    requireScopedFragments(servicePath, 'function assertOperationReader(', 'function canonical(', [
+      "(payload.request.changes.some((change) => change.path === 'linkRulesPolicy') && version < 4)",
+    ]);
+    requireScopedFragments(servicePath, 'async preview(', 'async apply(', [
+      `readerVersion: request.changes.some((change) => change.path === 'linkRulesPolicy') ? 4 : ${legacyWriter}`,
+    ]);
   }
 }
 

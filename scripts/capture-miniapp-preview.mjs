@@ -489,6 +489,20 @@ async function savePreviewPollDraft(page) {
   await draft.locator('.managed-poll-item__status.is-draft').waitFor({ state: 'visible' });
 }
 
+async function openLinksSanctions(page) {
+  const panel = page.locator('.settings-drilldown__panel--links');
+  await panel.waitFor({ state: 'visible' });
+  const summary = panel.locator('summary').filter({ hasText: /^Наказания и сообщения$/u });
+  const details = summary.locator('..');
+  if (!(await details.evaluate((element) => element.open))) {
+    await summary.click();
+  }
+  await details
+    .getByLabel('Включить объяснение для модерации ссылок')
+    .waitFor({ state: 'visible' });
+  return details;
+}
+
 async function assertBotMessagePlaceholderRoundTrip(page) {
   const expectedKeys = ['user', 'message_status', 'reason'];
   const editor = page.locator('.max-rich-text-editor__surface');
@@ -2663,8 +2677,8 @@ const scenarioBehaviors = [
   {
     name: 'chat-settings-bot-message-editor',
     beforeShot: async (page) => {
-      await page.locator('.settings-drilldown__panel--links').waitFor({ state: 'visible' });
-      const explanationToggle = page.getByLabel('Включить объяснение для модерации ссылок');
+      const sanctions = await openLinksSanctions(page);
+      const explanationToggle = sanctions.getByLabel('Включить объяснение для модерации ссылок');
       if (!(await explanationToggle.isChecked())) {
         await explanationToggle.check();
       }
@@ -2682,7 +2696,8 @@ const scenarioBehaviors = [
       if (!(await page.locator('.settings-drilldown__panel--links').isVisible())) {
         await openSettingsSection(page, 'Ссылки', '.settings-drilldown__panel--links');
       }
-      await page.getByLabel('Включить объяснение для модерации ссылок').check();
+      const sanctions = await openLinksSanctions(page);
+      await sanctions.getByLabel('Включить объяснение для модерации ссылок').check();
       const toggle = page.getByLabel('Добавить связь с админом в сообщения о ссылках');
       if (await toggle.isChecked()) await toggle.uncheck();
       await toggle.click();
@@ -2724,8 +2739,8 @@ const scenarioBehaviors = [
   {
     name: 'chat-settings-links-button-picker',
     beforeShot: async (page) => {
-      await page.waitForTimeout(500);
-      await page.getByLabel('Включить объяснение для модерации ссылок').check();
+      const sanctions = await openLinksSanctions(page);
+      await sanctions.getByLabel('Включить объяснение для модерации ссылок').check();
       await page.waitForTimeout(250);
       const buttonToggle = page.getByLabel('Добавить кнопку в сообщение бота для модерации ссылок');
       await buttonToggle.scrollIntoViewIfNeeded();
@@ -2750,8 +2765,8 @@ const scenarioBehaviors = [
   {
     name: 'chat-settings-links-button-sheet',
     beforeShot: async (page) => {
-      await page.waitForTimeout(500);
-      await page.getByLabel('Включить объяснение для модерации ссылок').check();
+      const sanctions = await openLinksSanctions(page);
+      await sanctions.getByLabel('Включить объяснение для модерации ссылок').check();
       await page.waitForTimeout(250);
       const buttonToggle = page.getByLabel('Добавить кнопку в сообщение бота для модерации ссылок');
       await buttonToggle.scrollIntoViewIfNeeded();
@@ -3046,8 +3061,8 @@ const scenarioBehaviors = [
   {
     name: 'chat-settings-apply-target',
     beforeShot: async (page) => {
-      await page.waitForTimeout(500);
-      const explanationToggle = page.getByLabel('Включить объяснение для модерации ссылок');
+      const sanctions = await openLinksSanctions(page);
+      const explanationToggle = sanctions.getByLabel('Включить объяснение для модерации ссылок');
       if (!(await explanationToggle.isChecked())) {
         await explanationToggle.check();
       }

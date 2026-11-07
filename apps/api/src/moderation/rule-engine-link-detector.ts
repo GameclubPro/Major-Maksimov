@@ -8,6 +8,10 @@ import { LinkPolicy } from '../prisma/prisma-client';
 import { extractUrlsFromText as extractTextUrls } from '../common/url-text.util';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
+import {
+  evaluateRuntimeLinkRulesPolicy,
+  readRuntimeLinkRulesPolicy,
+} from './link-rules-policy.runtime';
 
 type AllowlistMatchers = {
   exactLinks: Set<string>;
@@ -34,7 +38,29 @@ export function detectBlockedLink(
   allowlist: readonly string[],
   allowlistMatcher?: AllowlistLinkMatcher,
   navigationTargets?: readonly NavigationTargetEvidence[],
+  linkRulesPolicy?: unknown,
 ): string | null {
+  const rules = readRuntimeLinkRulesPolicy(linkRulesPolicy);
+  if (rules.status !== 'legacy') {
+    if (rules.status === 'invalid') return null;
+    const targets =
+      navigationTargets ??
+      extractUrlsFromText(text).map((target) => ({
+        kind: 'external_url' as const,
+        target,
+        normalizedTarget: target,
+        enforceable: true,
+        origins: [],
+      }));
+    const result = evaluateRuntimeLinkRulesPolicy(rules.policy, targets);
+    return result.allowed
+      ? null
+      : result.reason === 'DENY_ALL'
+        ? 'Links are not allowed by policy'
+        : result.reason === 'DENY_RULE'
+          ? `Link ${result.target.normalizedTarget} is blocked by a link rule`
+          : `Link ${result.target.normalizedTarget} is not allowed by a link rule`;
+  }
   if (policy === LinkPolicy.ALERT_ONLY) {
     return null;
   }

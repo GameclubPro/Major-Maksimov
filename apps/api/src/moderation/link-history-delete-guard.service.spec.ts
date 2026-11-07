@@ -7,8 +7,68 @@ import {
   createMessageContentFingerprint,
 } from './link-history-recovery.util';
 import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.adapter';
+import { fingerprintLinkRulesPolicy } from './link-rules-policy.runtime';
+import { finalizeDeleteAuthority } from './moderation-delete-authority-preparation';
 
 describe('LinkHistoryDeleteGuardService', () => {
+  it.each(['live', 'history'] as const)(
+    'enforces selected rules for %s and ignores the legacy allowlist after adoption',
+    async (reasonKind) => {
+      const linkRulesPolicy = {
+        version: 1,
+        mode: 'DENY_SELECTED',
+        rules: [{ id: 'blocked', effect: 'DENY', kind: 'WEB_DOMAIN', target: 'blocked.example' }],
+      };
+      const harness = buildHarness({
+        reasonKind,
+        linkPolicy: 'ALLOWLIST_ONLY',
+        allowlist: ['domain:blocked.example'],
+        linkRulesPolicy,
+      });
+      await expect(harness.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+    },
+  );
+
+  it.each(['live', 'history'] as const)(
+    'rejects malformed present policy for %s before remote authority',
+    async (reasonKind) => {
+      const harness = buildHarness({ reasonKind, linkRulesPolicy: { version: 999 } });
+      await expect(harness.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+        code: `${reasonKind}_policy_inactive`,
+      });
+      expect(harness.maxClient.getExactMessageRow).not.toHaveBeenCalled();
+    },
+  );
+
+  it('revokes prepared deletion when the new rules change during transport admission even without a revised counter', async () => {
+    const linkRulesPolicy = {
+      version: 1,
+      mode: 'DENY_SELECTED',
+      rules: [{ id: 'blocked', effect: 'DENY', kind: 'WEB_DOMAIN', target: 'blocked.example' }],
+    };
+    const harness = buildHarness({ reasonKind: 'live', linkRulesPolicy });
+    const prepared = await harness.service.prepareForDispatch(baseInput);
+    const current = await harness.prisma.chatSettings.findUnique();
+    harness.prisma.chatSettings.findUnique.mockResolvedValue({
+      ...current,
+      linkRulesPolicy: { ...linkRulesPolicy, rules: [] },
+    });
+    await expect(finalizeDeleteAuthority(prepared)).rejects.toMatchObject({
+      code: 'live_policy_revision_changed',
+    });
+  });
+
+  it('does not lend new-policy authority to a legacy reason without its policy fingerprint', async () => {
+    const harness = buildHarness({
+      reasonKind: 'live',
+      linkRulesPolicy: { version: 1, mode: 'DENY_ALL', rules: [] },
+      omitPolicyFingerprint: true,
+    });
+    await expect(harness.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+      code: 'live_policy_revision_changed',
+    });
+  });
+
   it.each([
     ['userinfo', 'https://allowed.example@blocked.example/path'],
     ['long path', `https://blocked.example/${'a'.repeat(3_000)}`],
@@ -324,6 +384,8 @@ function buildHarness(
     settingsRevision?: number;
     invalidLiveMetadata?: boolean;
     textClickabilityEnabled?: boolean;
+    linkRulesPolicy?: unknown;
+    omitPolicyFingerprint?: boolean;
   } = {},
 ) {
   const effectiveAt = options.settingsEffectiveAt ?? new Date(Date.now() - 10 * 60_000);
@@ -335,11 +397,16 @@ function buildHarness(
   const fingerprint = createMessageContentFingerprint(
     adaptMaxMessageNavigationView(defaultExactRow),
   );
+  const policyFingerprint =
+    !options.omitPolicyFingerprint && options.linkRulesPolicy != null
+      ? { linkRulesPolicySha256: fingerprintLinkRulesPolicy(options.linkRulesPolicy) }
+      : {};
   const historyReason = {
     reasonKey: 'history-reason',
     ruleCode: LINK_HISTORY_RECOVERY_RULE_CODE,
     metadata: {
       contentFingerprint: fingerprint,
+      ...policyFingerprint,
       policyRevision: 1,
       policyEffectiveAt: reasonEffectiveAt.toISOString(),
     },
@@ -351,6 +418,7 @@ function buildHarness(
       ? { reason: 'legacy reason without a policy fence' }
       : {
           linkPolicyRevision: 1,
+          ...policyFingerprint,
           linkPolicyEffectiveAt: reasonEffectiveAt.toISOString(),
         },
   };
@@ -369,6 +437,7 @@ function buildHarness(
     chatSettings: {
       findUnique: jest.fn().mockResolvedValue({
         linkPolicy: options.linkPolicy ?? 'BLOCKLIST_ONLY',
+        linkRulesPolicy: options.linkRulesPolicy ?? null,
         linkPolicyRevision: options.settingsRevision ?? 1,
         linkPolicyEffectiveAt: effectiveAt,
         chat: {

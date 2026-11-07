@@ -1087,6 +1087,7 @@ function createLiveNavigationEnvelopeUpdate(
 function createLiveNavigationHarness(
   options: {
     linkPolicy?: 'ALLOWLIST_ONLY' | 'BLOCKLIST_ONLY' | 'ALERT_ONLY';
+    linkRulesPolicy?: unknown;
     cachedAllowlist?: string[];
     freshAllowlist?: string[];
     freshAllowlistError?: Error;
@@ -1110,6 +1111,7 @@ function createLiveNavigationHarness(
           russianProfanityFilterEnabled: false,
           commercialAdsFilterEnabled: false,
           linkPolicy: options.linkPolicy ?? 'BLOCKLIST_ONLY',
+          linkRulesPolicy: options.linkRulesPolicy ?? null,
           ...(Object.prototype.hasOwnProperty.call(options, 'linkPolicyEffectiveAt')
             ? { linkPolicyEffectiveAt: options.linkPolicyEffectiveAt }
             : {}),
@@ -1130,6 +1132,17 @@ function createLiveNavigationHarness(
       findMany: options.freshAllowlistError
         ? jest.fn().mockRejectedValue(options.freshAllowlistError)
         : jest.fn().mockResolvedValue(freshAllowlist.map((domain) => ({ domain }))),
+    },
+    chatSettings: {
+      findUnique: jest.fn().mockResolvedValue({
+        linkRulesPolicy: options.linkRulesPolicy ?? null,
+        linkPolicyRevision: 7,
+        linkPolicyEffectiveAt: new Date(
+          options.linkPolicyEffectiveAt instanceof Date
+            ? options.linkPolicyEffectiveAt.getTime()
+            : (options.linkPolicyEffectiveAt ?? '2026-08-10T00:00:00.000Z'),
+        ),
+      }),
     },
     violation: {
       create: jest.fn(),

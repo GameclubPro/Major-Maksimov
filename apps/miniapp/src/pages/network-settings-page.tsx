@@ -57,6 +57,7 @@ export interface NetworkSettingsPageProps {
   resumeOperationId?: string;
   retryOfOperationId?: string;
   onOperationChange?: (operation: NetworkSettingsOperationResponse | null) => void;
+  onOpenLegacySites: () => void;
   onClose: () => void;
 }
 export type NetworkSettingsEditorProps = NetworkSettingsPageProps;
@@ -358,6 +359,7 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
                 fields={chatFields}
                 navigationAllowlist={controller.navigationAllowlist}
                 onNavigationAllowlist={controller.setNavigationAllowlist}
+                onOpenLegacySites={props.onOpenLegacySites}
               >
                 {(context) =>
                   isSupplementaryChatSettingsSection(scope.initialSection) ? (

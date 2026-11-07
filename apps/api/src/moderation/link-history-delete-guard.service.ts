@@ -28,6 +28,7 @@ import {
 } from './navigation/enabled-navigation-targets';
 import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.adapter';
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moderation.service.support';
+import { fingerprintLinkRulesPolicy, isRuntimeLinkPolicyActive } from './link-rules-policy.runtime';
 
 export type LinkHistoryDeleteGuardResult = 'absent' | 'allowed' | 'not_applicable';
 
@@ -35,11 +36,13 @@ type RecoveryReasonMetadata = {
   contentFingerprint: string;
   policyRevision: number;
   policyEffectiveAt: Date;
+  linkRulesPolicySha256?: string;
 };
 
 type LiveReasonMetadata = {
   linkPolicyRevision: number;
   linkPolicyEffectiveAt: Date;
+  linkRulesPolicySha256?: string;
 };
 
 export class LinkHistoryDeleteGuardRejectedError extends Error {
@@ -143,6 +146,7 @@ export class LinkHistoryDeleteGuardService {
             where: { chatId: params.chatId },
             select: {
               linkPolicy: true,
+              linkRulesPolicy: true,
               linkPolicyRevision: true,
               linkPolicyEffectiveAt: true,
               chat: {
@@ -174,11 +178,13 @@ export class LinkHistoryDeleteGuardService {
             settings.linkPolicy,
             settings.linkPolicyEffectiveAt,
             expiredAllowlist._max.removeAfterAt,
+            settings.linkRulesPolicy,
+            now.getTime(),
           )
         : null;
       if (
         !settings ||
-        settings.linkPolicy === 'ALERT_ONLY' ||
+        !isRuntimeLinkPolicyActive(settings.linkPolicy, settings.linkRulesPolicy) ||
         (usesLiveSemantics ? !settings.linkPolicyEffectiveAt : !policyEffectiveAt)
       ) {
         throw reject(
@@ -189,11 +195,17 @@ export class LinkHistoryDeleteGuardService {
       const matchingRecoveryReasons = recoveryReasons.filter(
         (reason) =>
           reason.policyRevision === settings.linkPolicyRevision &&
+          (settings.linkRulesPolicy == null ||
+            reason.linkRulesPolicySha256 ===
+              fingerprintLinkRulesPolicy(settings.linkRulesPolicy)) &&
           reason.policyEffectiveAt.getTime() === policyEffectiveAt?.getTime(),
       );
       const matchingLiveReasons = liveReasons.filter(
         (reason) =>
           reason.linkPolicyRevision === settings.linkPolicyRevision &&
+          (settings.linkRulesPolicy == null ||
+            reason.linkRulesPolicySha256 ===
+              fingerprintLinkRulesPolicy(settings.linkRulesPolicy)) &&
           settings.linkPolicyEffectiveAt !== null &&
           reason.linkPolicyEffectiveAt.getTime() === settings.linkPolicyEffectiveAt.getTime(),
       );
@@ -314,6 +326,7 @@ export class LinkHistoryDeleteGuardService {
         settings.linkPolicy,
         allowlistRows.map((row) => row.domain),
         targets,
+        settings.linkRulesPolicy,
       )
     ) {
       throw reject(
@@ -333,6 +346,7 @@ export class LinkHistoryDeleteGuardService {
           current.settings.linkPolicy,
           current.allowlistRows.map((row) => row.domain),
           targets,
+          current.settings.linkRulesPolicy,
         )
       )
         throw reject(
@@ -370,6 +384,9 @@ export class LinkHistoryDeleteGuardService {
       contentFingerprint: fingerprint,
       policyRevision: revision,
       policyEffectiveAt: effectiveAt,
+      ...(typeof row.linkRulesPolicySha256 === 'string'
+        ? { linkRulesPolicySha256: row.linkRulesPolicySha256 }
+        : {}),
     };
   }
 
@@ -395,6 +412,9 @@ export class LinkHistoryDeleteGuardService {
     return {
       linkPolicyRevision: revision,
       linkPolicyEffectiveAt: effectiveAt,
+      ...(typeof row.linkRulesPolicySha256 === 'string'
+        ? { linkRulesPolicySha256: row.linkRulesPolicySha256 }
+        : {}),
     };
   }
 

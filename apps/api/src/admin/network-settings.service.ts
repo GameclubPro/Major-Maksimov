@@ -25,6 +25,7 @@ export function retentionOperationId(operationId: string, entityId: string): str
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 import {
+  NETWORK_SETTINGS_OPERATION_READER_VERSION,
   networkSettingsApplyRequestSchema,
   networkNavigationAllowlistReadRequestSchema,
   networkNavigationAllowlistReadResponseSchema,
@@ -74,7 +75,7 @@ const LEASE_MS = 5 * 60_000;
 const READ_PAGE_SIZE = 4;
 const WORK_CHUNK_SIZE = 2;
 const ACTIVE_STATUSES = ['PREVIEWING', 'AUTHORIZING', 'RUNNING'];
-export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 3;
+export { NETWORK_SETTINGS_OPERATION_READER_VERSION } from '@maxim/contracts/network-settings';
 const V3_SECTIONS = new Set([
   'speechStyle',
   'rules',
@@ -97,7 +98,8 @@ function assertOperationReader(payload: StoredPayload): void {
     version < 1 ||
     version > NETWORK_SETTINGS_OPERATION_READER_VERSION ||
     (payload.request.navigationAllowlist && version < 2) ||
-    (V3_SECTIONS.has(payload.request.section) && version < 3)
+    (V3_SECTIONS.has(payload.request.section) && version < 3) ||
+    (payload.request.changes.some((change) => change.path === 'linkRulesPolicy') && version < 4)
   )
     throw new ConflictException({
       code: 'NETWORK_SETTINGS_READER_UNSUPPORTED',
@@ -354,6 +356,14 @@ export class NetworkSettingsService {
 
   async preview(user: AuthUser, body: unknown): Promise<NetworkSettingsPreviewResponse> {
     const request = parse(networkSettingsPreviewRequestSchema, body);
+    if (
+      request.navigationAllowlist &&
+      request.changes.some((change) => change.path === 'linkRulesPolicy')
+    ) {
+      throw new BadRequestException(
+        'Выберите правила ссылок или изменение старого списка отдельным действием.',
+      );
+    }
     if (request.navigationAllowlist)
       request.navigationAllowlist = normalizeNetworkAllowlistIntent(request.navigationAllowlist);
     const requestHash = digest(request);
@@ -378,11 +388,13 @@ export class NetworkSettingsService {
             section: request.section,
             status: 'PREVIEWING',
             payload: {
-              readerVersion: V3_SECTIONS.has(request.section)
-                ? 3
-                : request.navigationAllowlist
-                  ? 2
-                  : 1,
+              readerVersion: request.changes.some((change) => change.path === 'linkRulesPolicy')
+                ? 4
+                : V3_SECTIONS.has(request.section)
+                  ? 3
+                  : request.navigationAllowlist
+                    ? 2
+                    : 1,
               request,
               expiresAt,
             } as unknown as Prisma.InputJsonValue,

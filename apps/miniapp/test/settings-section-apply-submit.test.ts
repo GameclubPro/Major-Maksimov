@@ -63,6 +63,54 @@ test('failed stop-word recovery preserves the last confirmed source snapshot', a
   assert.equal(await refreshSavedStopWordsSource(api, savedSource), savedSource);
 });
 
+test('new link policy copy fences the acknowledged source and preserves it on target failure', async () => {
+  const sourceSettings = chatSettingsSchema.parse({
+    settingsRevision: draftRevision,
+    linkRulesPolicy: {
+      version: 1,
+      mode: 'DENY_SELECTED',
+      rules: [{ id: 'one', effect: 'DENY', kind: 'WEB_EXACT', target: 'https://example.com/one' }],
+    },
+  });
+  const saved = { ...sourceSettings, settingsRevision: savedRevision };
+  let snapshot: SettingsApplySavedSource | null = null;
+  let applyBody: Record<string, unknown> | undefined;
+  const api: ApiTransport = {
+    async request(path, options) {
+      if (path.endsWith('/settings/section')) {
+        const body = JSON.parse(String(options?.body));
+        assert.deepEqual(body.changes.linkRulesPolicy, sourceSettings.linkRulesPolicy);
+        return saved;
+      }
+      assert.equal(path, '/chats/source/settings/apply-section-to-all');
+      applyBody = JSON.parse(String(options?.body));
+      throw new Error('target unavailable');
+    },
+    requestKeepalive() {},
+  };
+  await assert.rejects(
+    applySettingsSectionWithConfirmedSource(
+      api,
+      {
+        sourceChatId: 'source',
+        section: 'links',
+        sourceSettings,
+        target: { mode: 'selectedChats', favoriteTypes: [], chatIds: ['target'] },
+      },
+      (value) => {
+        snapshot = value;
+      },
+    ),
+    /target unavailable/u,
+  );
+  assert.equal(applyBody?.expectedSourceSettingsRevision, savedRevision);
+  assert.equal(Object.hasOwn(applyBody!, 'confirmedTargetChatIds'), false);
+  assert.deepEqual(
+    (snapshot as SettingsApplySavedSource | null)?.settings.linkRulesPolicy,
+    sourceSettings.linkRulesPolicy,
+  );
+});
+
 test('stop-word source copy uses acknowledged CAS and refreshes its receipt without promoting general revision', async () => {
   const policy = stopWordsPolicySchema.parse({ enabled: true, domains: ['source.example'] });
   const sourceSettings = chatSettingsSchema.parse({

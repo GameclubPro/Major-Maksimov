@@ -14,6 +14,7 @@ export const CHAT_SECTION_FIELDS = {
     'reportsMuteDurationHours',
   ],
   links: [
+    'linkRulesPolicy',
     'linkPolicy',
     'linkEscalationWindowHours',
     'linkWarnMaxCount',

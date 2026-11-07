@@ -23,7 +23,7 @@ async function checkLabels(group, label) {
   const problems = await group.evaluate((element) => {
     const issues = [];
     const buttons = [...element.querySelectorAll('[role="radio"]')];
-    if (buttons.length !== 3) issues.push('Expected all three link policies');
+    if (buttons.length !== 4) issues.push('Expected all four link policies');
     for (const [index, button] of buttons.entries()) {
       const box = button.getBoundingClientRect();
       if (box.width < 44 || box.height < 44) issues.push('Policy target smaller than 44px');
@@ -36,7 +36,13 @@ async function checkLabels(group, label) {
         )
           issues.push('Policy targets overlap');
       }
-      const node = button.querySelector('span').firstChild;
+      const node = [...button.querySelectorAll('span')].find((span) =>
+        span.textContent.trim(),
+      )?.firstChild;
+      if (!node || node.nodeType !== Node.TEXT_NODE) {
+        issues.push('Policy label missing');
+        continue;
+      }
       for (const match of node.textContent.matchAll(/\S+/gu)) {
         const range = document.createRange();
         range.setStart(node, match.index);
@@ -105,18 +111,29 @@ try {
                   .evaluateAll((nodes) =>
                     nodes.map((node) => Math.round(node.getBoundingClientRect().top)),
                   );
-                assert.equal(new Set(rows).size, 1, 'Ordinary smartphone retains a single row');
+                assert.equal(
+                  new Set(rows).size,
+                  2,
+                  'Ordinary smartphone uses the approved two-column panel',
+                );
               }
             }
             await page.evaluate(() => {
               document.documentElement.style.fontSize = '16px';
             });
-            for (const name of ['Разрешать все', 'Удалять все', 'Разрешать по списку']) {
+            for (const name of [
+              'Разрешать все',
+              'Удалять все',
+              'Разрешать по списку',
+              'Запрещать по списку',
+            ]) {
               const option = group.getByRole('radio', { name, exact: true });
               await option.click();
               assert.equal(await option.getAttribute('aria-checked'), 'true');
             }
-            const select = page.getByRole('combobox', { name: 'Что разрешить' });
+            await page.getByRole('button', { name: 'Добавить', exact: true }).click();
+            const editor = page.getByRole('region', { name: 'Добавление правила' });
+            const select = editor.getByRole('combobox', { name: 'Область правила' });
             await select.scrollIntoViewIfNeeded();
             assert.equal(
               await select.evaluate((node) => getComputedStyle(node).appearance),
@@ -129,6 +146,11 @@ try {
               await select.selectOption(value);
               assert.equal(await select.inputValue(), value);
             }
+            await editor.getByRole('button', { name: 'Отмена', exact: true }).click();
+            assert.equal(
+              await page.locator('.links-panel').getByText('МАЙОР', { exact: true }).count(),
+              0,
+            );
             await group.scrollIntoViewIfNeeded();
             await page.screenshot({
               path: join(output, `${engine}-${width}-${theme}.png`),
@@ -136,7 +158,7 @@ try {
             });
             assert.deepEqual(errors, []);
             console.log(
-              `PASS ${engine} ${width}px ${theme}: full words, large text, policy changes, themed select`,
+              `PASS ${engine} ${width}px ${theme}: four modes, two-column panel, large text, themed rule scope`,
             );
           } finally {
             await context.close();

@@ -44,6 +44,7 @@ import {
 } from './moderation.service.spec-support';
 import type { EnsureModerationDeleteIntentInput } from './moderation-delete-intent.types';
 import { MODERATION_ACTION_DISPATCH_TIMEOUT_MS } from './moderation.service.support';
+import { fingerprintLinkRulesPolicy } from './link-rules-policy.runtime';
 
 // FLAG: Template/orchestration mocks stop at the notice producer boundary. Real v3
 // authority and original-stage preservation are covered by native multibot/guard suites.
@@ -113,6 +114,67 @@ function installGuardedDeleteExecutorFixture(service: ModerationService) {
 
 describe('ModerationService', () => {
   describe('live typed navigation moderation', () => {
+    it('captures the selective policy fingerprint and suppresses a cached decision after policy replacement', async () => {
+      const linkRulesPolicy = {
+        version: 1,
+        mode: 'DENY_SELECTED',
+        rules: [{ id: 'deny', effect: 'DENY', kind: 'WEB_DOMAIN', target: 'blocked.example' }],
+      };
+      const harness = createLiveNavigationHarness({
+        linkPolicy: 'ALLOWLIST_ONLY',
+        linkRulesPolicy,
+      });
+      const ensureIntent = jest.fn().mockResolvedValue({
+        intentId: 'link-rules-intent',
+        rollout: 'execute',
+        status: 'PENDING',
+      });
+      Object.assign(harness.service, {
+        moderationDeleteIntentService: {
+          getRolloutForInput: () => 'execute',
+          ensureIntent,
+          ensureAndAttempt: jest.fn().mockResolvedValue({
+            kind: 'confirmed',
+            confirmed: true,
+            intentId: 'link-rules-intent',
+            status: 'SUCCEEDED',
+            botId: 'bot-1',
+          }),
+        },
+      });
+      const update = (messageId: string) =>
+        createLiveNavigationEnvelopeUpdate(
+          'message_created',
+          {
+            body: {
+              mid: 'selective-link',
+              text: 'blocked',
+              markup: [{ type: 'link', from: 0, length: 7, url: 'https://blocked.example/path' }],
+            },
+          },
+          { messageId },
+        );
+      await harness.service.handleUpdate(update('link-policy-original'));
+      expect(ensureIntent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: expect.objectContaining({
+            metadata: expect.objectContaining({
+              linkRulesPolicySha256: fingerprintLinkRulesPolicy(linkRulesPolicy),
+            }),
+          }),
+        }),
+        { enqueue: false },
+      );
+      ensureIntent.mockClear();
+      harness.prisma.chatSettings.findUnique.mockResolvedValue({
+        linkRulesPolicy: { version: 1, mode: 'ALLOW_ALL', rules: [] },
+        linkPolicyRevision: 8,
+        linkPolicyEffectiveAt: new Date('2026-08-10T00:00:00.000Z'),
+      });
+      await harness.service.handleUpdate(update('link-policy-replaced'));
+      expect(ensureIntent).not.toHaveBeenCalled();
+    });
+
     it.each(['message_created', 'message_edited'] as const)(
       'deletes bypass URLs in direct and forwarded %s messages',
       async (type) => {

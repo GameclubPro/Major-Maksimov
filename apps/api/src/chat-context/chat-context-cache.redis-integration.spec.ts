@@ -16,6 +16,61 @@ const isLocalRedisUrl = (() => {
 const describeLocalRedis = isLocalRedisUrl ? describe : describe.skip;
 
 describeLocalRedis('ChatContextCacheService Redis integration', () => {
+  it.each([1, 999])(
+    'reloads a pre-policy Redis body and preserves raw SQL policy version %s',
+    async (version) => {
+      const chatId = `link-policy-cache-${randomUUID()}`;
+      const policy = { version, mode: 'DENY_ALL', rules: [] };
+      const row = {
+        id: chatId,
+        title: 'Links',
+        settings: { linkRulesPolicy: policy, antiSpamEnabled: true },
+        domains: [],
+        admins: [],
+        rules: null,
+      };
+      const db = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
+      const config = { getOrThrow: () => redisIntegrationUrl };
+      const reader = new ChatContextCacheService(db as never, config as never, {} as never);
+      const second = new ChatContextCacheService({} as never, config as never, {} as never);
+      const inspector = new Redis(redisIntegrationUrl);
+      const key = ChatContextCacheService.cacheKey(chatId);
+      const revisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
+      try {
+        await inspector.set(
+          key,
+          JSON.stringify({
+            chatId,
+            title: 'Links',
+            settings: { antiSpamEnabled: true },
+            domainAllowlist: [],
+            adminUserIds: [],
+            rulesPublishedUrl: null,
+            rulesPublishedMessageId: null,
+          }),
+          'EX',
+          60,
+        );
+        await inspector.set(revisionKey, '0', 'EX', 60);
+        const loaded = await reader.getChatContext(chatId);
+        expect(loaded.settings.linkRulesPolicy).toEqual(policy);
+        expect(loaded.settings.antiSpamEnabled).toBe(true);
+        expect(db.chat.findUnique).toHaveBeenCalledTimes(1);
+        expect((await second.getChatContext(chatId)).settings.linkRulesPolicy).toEqual(policy);
+      } finally {
+        await inspector.del(
+          key,
+          revisionKey,
+          ChatContextCacheService.chatContextRevisionKey(chatId),
+          ChatContextCacheService.legacyCacheKey(chatId),
+        );
+        await inspector.quit();
+        await reader.onModuleDestroy();
+        await second.onModuleDestroy();
+      }
+    },
+  );
+
   it('refreshes a busy reader at its original deadline after losing a published invalidation', async () => {
     const chatId = `absolute-context-${randomUUID()}`;
     const localTtlMs = 120;
@@ -36,7 +91,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
         JSON.stringify({
           chatId,
           title: 'Busy chat',
-          settings: { stopWordsRevision: revision },
+          settings: { linkRulesPolicy: null, stopWordsRevision: revision },
           domainAllowlist: [],
           adminUserIds: [],
           rulesPublishedUrl: null,
@@ -83,7 +138,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
         findUnique: jest.fn().mockResolvedValue({
           id: chatId,
           title: 'New title',
-          settings: { stopWordsRevision: 1 },
+          settings: { linkRulesPolicy: null, stopWordsRevision: 1 },
           domains: [],
           admins: [],
           rules: null,
@@ -108,7 +163,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
         JSON.stringify({
           chatId,
           title: 'Old title',
-          settings: { stopWordsRevision: 0 },
+          settings: { linkRulesPolicy: null, stopWordsRevision: 0 },
           domainAllowlist: [],
           adminUserIds: [],
           rulesPublishedUrl: null,

@@ -42,6 +42,10 @@ import * as dupe from './duplicate-settings.js';
 import { stopWordsPolicySchema } from './stop-words.js';
 import { commercialAdsPolicySchema } from './commercial-policy.js';
 import {
+  linkRulesLegacySnapshotSchema,
+  linkRulesPolicySchema,
+} from './link-rules-policy-fields.js';
+import {
   DELETE_BOT_MESSAGES_DELAY_DEFAULT_MINUTES,
   DELETE_BOT_MESSAGES_DELAY_MAX_MINUTES,
   DELETE_BOT_MESSAGES_DELAY_MIN_MINUTES,
@@ -278,6 +282,10 @@ export const chatSettingsFieldsSchema = z.object({
   duplicateBanWindowSec: duplicateWindowSecSchema.default(172_800),
   duplicateBanMaxCount: duplicateMaxCountSchema.default(4),
   linkPolicy: linkPolicySchema.default('ALERT_ONLY'),
+  linkRulesPolicy: linkRulesPolicySchema.nullable().optional(),
+  linkRulesLegacySnapshot: linkRulesLegacySnapshotSchema.nullable().optional(),
+  linkRulesStorageStatus: z.enum(['legacy', 'valid', 'invalid']).optional(),
+  linkRulesReplaceInvalidStorage: z.boolean().optional(),
   linkEscalationWindowHours: escalationWindowHoursSchema.default(24),
   linkWarnMaxCount: escalationMaxCountSchema.default(2),
   linkMuteMaxCount: escalationMaxCountSchema.default(3),

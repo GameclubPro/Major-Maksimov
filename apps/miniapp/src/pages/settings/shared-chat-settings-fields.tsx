@@ -19,7 +19,6 @@ import type {
 } from '../../features/network-settings/field-model';
 import {
   setChatBoolean,
-  setChatLinkPolicy,
   type ChatBooleanField,
   type ChatNumberField,
   type ChatStringField,
@@ -29,7 +28,6 @@ import { ReportsSettingsFields } from './reports-settings-fields';
 import { SharedMuteStage } from './shared-mute-stage';
 import { SharedEscalationFields } from './shared-escalation-fields';
 import { SharedNativeSettingsToggle } from './shared-native-settings-toggle';
-import { SegmentedControl } from '../../components/ui/segmented-control';
 import { SharedSettingsLimitsFields } from './shared-settings-limits-fields';
 import {
   SharedGreetingFields,
@@ -331,43 +329,19 @@ function Reports({ fields, context }: BodyProps) {
   );
 }
 
+const LazySharedLinkSettingsFields = recoverableLazyNamedComponent<
+  BodyProps & { sanctions: ReactNode }
+>(() => import('./shared-link-settings-fields'), 'SharedLinkSettingsFields');
 function Links(props: BodyProps) {
-  const { fields, context } = props;
-  const policy = fields.read('linkPolicy');
-  const error = fields.error('linkPolicy');
   return (
-    <div className="settings-grid settings-grid--single">
-      <div className={`settings-policy${error ? ' field--error' : ''}`}>
-        <span className="field__label">Режим</span>
-        <SegmentedControl
-          value={policy.kind === 'common' ? policy.value : null}
-          options={[
-            { value: 'ALERT_ONLY' as const, label: 'Разрешать все', disabled: fields.readOnly },
-            { value: 'BLOCKLIST_ONLY' as const, label: 'Удалять все', disabled: fields.readOnly },
-            {
-              value: 'ALLOWLIST_ONLY' as const,
-              label: 'Разрешать по списку',
-              disabled: fields.readOnly,
-            },
-          ]}
-          className={`settings-mode-segments${error ? ' settings-mode-segments--error' : ''}`}
-          ariaLabel="Режим модерации ссылок"
-          onChange={(value) => setChatLinkPolicy(fields, value)}
-        />
-        {policy.kind === 'mixed' ? <p className="field__hint">Разные значения</p> : null}
-        {error ? (
-          <small className="field__hint" role="alert">
-            {error}
-          </small>
-        ) : null}
-      </div>
-      {policy.kind !== 'common' || policy.value === 'ALLOWLIST_ONLY'
-        ? context.navigationAllowlist
-        : null}
-      {policy.kind !== 'common' || policy.value !== 'ALERT_ONLY' ? (
-        <Sanctions {...props} prefix="link" warningText buttons thresholds />
-      ) : null}
-    </div>
+    <Suspense fallback={<Spinner label="Загружаем правила ссылок" />}>
+      <LazySharedLinkSettingsFields
+        {...props}
+        sanctions={
+          <Sanctions {...props} prefix="link" warningText buttons thresholds header={false} />
+        }
+      />
+    </Suspense>
   );
 }
 

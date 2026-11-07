@@ -51,7 +51,24 @@ export function buildRulesTextItemsFromSettings(input: {
   const { settings, requiredSubscriptionChannels, domains } = input;
   const items: string[] = [];
 
-  if (settings.linkPolicy === 'BLOCKLIST_ONLY') {
+  if (settings.linkRulesStorageStatus === 'invalid') {
+    // FLAG: An invalid policy must not publish a promise based on its stale legacy shadow.
+  } else if (settings.linkRulesPolicy) {
+    const mode = settings.linkRulesPolicy.mode;
+    if (mode === 'DENY_ALL') items.push('Пожалуйста, не отправляйте ссылки: бот их удаляет.');
+    else if (mode === 'ALLOW_SELECTED')
+      items.push('Можно отправлять только ссылки из разрешённого списка.');
+    else if (
+      mode === 'DENY_SELECTED' &&
+      settings.linkRulesPolicy.rules.some(
+        (rule) =>
+          rule.effect === 'DENY' &&
+          rule.enabled &&
+          (rule.expiresAt === null || Date.parse(rule.expiresAt) > Date.now()),
+      )
+    )
+      items.push('Не публикуйте ссылки из запрещённого списка.');
+  } else if (settings.linkPolicy === 'BLOCKLIST_ONLY') {
     items.push('Пожалуйста, не отправляйте ссылки: бот их удаляет.');
   } else if (settings.linkPolicy === 'ALLOWLIST_ONLY') {
     items.push(

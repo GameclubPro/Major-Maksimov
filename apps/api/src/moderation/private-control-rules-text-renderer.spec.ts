@@ -30,6 +30,37 @@ function createChannel(
 }
 
 describe('buildPrivateRulesTextItems', () => {
+  it.each([
+    ['ALLOW_ALL', undefined],
+    ['DENY_SELECTED', 'Не публикуйте ссылки из запрещённого списка.'],
+    ['ALLOW_SELECTED', 'Можно отправлять только ссылки из разрешённого списка.'],
+    ['DENY_ALL', 'Пожалуйста, не отправляйте ссылки: бот их удаляет.'],
+  ] as const)(
+    'describes an authored %s policy independently of the old selector',
+    (mode, expected) => {
+      expect(
+        buildPrivateRulesTextItems(
+          createInput({
+            linkPolicy: 'BLOCKLIST_ONLY',
+            linkRulesPolicy: {
+              version: 1,
+              mode,
+              rules: [
+                {
+                  id: 'blocked',
+                  kind: 'WEB_EXACT',
+                  effect: 'DENY',
+                  target: 'https://example.com/offer',
+                  enabled: true,
+                  expiresAt: null,
+                },
+              ],
+            },
+          }),
+        )[0],
+      ).toBe(expected);
+    },
+  );
   it('preserves the complete literal item order and final sanctions', () => {
     const input = createInput({
       linkPolicy: 'BLOCKLIST_ONLY',

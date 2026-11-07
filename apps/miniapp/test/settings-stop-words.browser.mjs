@@ -103,9 +103,6 @@ try {
       const panel = page.locator(PANEL);
       const words = (includeHidden = false) =>
         panel.getByRole('textbox', { name: 'Добавить слова и фразы', exact: true, includeHidden });
-      const domains = () =>
-        panel.getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true });
-      const tab = (value) => panel.getByRole('radio', { name: value });
       const save = () => panel.getByRole('button', { name: /^(?:Сохранить|Сохраняем\.\.\.)$/u });
       const stopState = (chatId, requestState = state) => ({
         policy:
@@ -326,7 +323,6 @@ try {
         );
       };
       const addWord = async (value) => {
-        await tab('Слова и фразы').click();
         await words().fill(value);
         await panel.getByRole('button', { name: 'Добавить записи', exact: true }).click();
         await panel
@@ -355,6 +351,20 @@ try {
         page.getByRole('dialog', { name: 'Загрузить сохранённый список?', exact: true });
 
       await fresh();
+      assert.equal(
+        await panel
+          .getByRole('radiogroup', { name: 'Запрещённые слова и сайты', exact: true })
+          .count(),
+        0,
+        'single Stop Words has no obsolete site tab after relocation to Links',
+      );
+      assert.equal(
+        await panel
+          .getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true })
+          .count(),
+        0,
+        'the independent site editor belongs to Links',
+      );
       await addWord('контрольная фраза');
       const savePresentation = await save().evaluate((element) => {
         const style = getComputedStyle(element);
@@ -378,14 +388,17 @@ try {
       );
       assert.equal(state.writes[0].body.expectedRevision, 7);
       assert.deepEqual(
+        state.writes[0].body.policy.domains,
+        ['blocked.example'],
+        'editing words preserves saved sites managed from Links',
+      );
+      assert.deepEqual(
         state.writes[0].body.policy.rules.slice(0, 2).map((rule) => rule.matchMode),
         ['EXACT', 'MASKED'],
       );
       await page.getByRole('button', { name: 'Стоп-слова', exact: true }).click();
       await panel.getByText('контрольная фраза', { exact: true }).waitFor();
       await words().fill('несохранённая фраза');
-      await tab('Сайты').click();
-      await domains().fill('buffer.example');
       await save().click();
       assert.equal(state.writes.length, 1);
       await words().waitFor();
@@ -393,26 +406,23 @@ try {
         () => document.activeElement?.getAttribute('aria-label') === 'Добавить слова и фразы',
       );
       assert.equal(await words().evaluate((element) => element === document.activeElement), true);
-      await tab('Слова и фразы').click();
       assert.equal(await words().inputValue(), 'несохранённая фраза');
-      await tab('Сайты').click();
-      assert.equal(await domains().inputValue(), 'buffer.example');
       await page.getByRole('link', { name: 'Чат B', exact: true }).click();
       const leave = page.getByRole('dialog', { name: 'Сохранить изменения?', exact: true });
       await leave.waitFor();
       await leave.getByRole('button', { name: 'Отмена', exact: true }).click();
       console.log(
-        `PASS ${name}: section uses stop CAS only; explicit modes and both unadded buffers survive blocked save`,
+        `PASS ${name}: words use stop CAS, preserve saved sites, and retain the unadded word buffer after blocked save`,
       );
 
       const viewport = page.viewportSize();
       await dismissToasts();
-      await domains().focus();
+      await words().focus();
       await page.setViewportSize({
         width: viewport.width,
         height: Math.max(320, viewport.height - 260),
       });
-      await assertReachable(domains());
+      await assertReachable(words());
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
         true,
@@ -421,7 +431,7 @@ try {
         path: path.join(screenshots, `${name}-keyboard.png`),
         fullPage: false,
       });
-      await domains().blur();
+      await words().blur();
       await page.setViewportSize(viewport);
       console.log(
         `PASS ${name}: safe areas, scroll and keyboard-sized viewport keep stop input reachable`,
@@ -546,12 +556,8 @@ try {
         0,
       );
       await words().fill('буфер слов');
-      await tab('Сайты').click();
-      await domains().fill('buffer.example');
       await reloadButton().click();
       await confirmReload().getByRole('button', { name: 'Отмена', exact: true }).click();
-      assert.equal(await domains().inputValue(), 'buffer.example');
-      await tab('Слова и фразы').click();
       assert.equal(await words().inputValue(), 'буфер слов');
       state.failReload = true;
       await reloadButton().click();
@@ -567,19 +573,14 @@ try {
       await dismissToasts();
       await confirmReload().getByRole('button', { name: 'Отмена', exact: true }).click();
       assert.equal(await words().inputValue(), 'буфер слов');
-      await tab('Сайты').click();
-      assert.equal(await domains().inputValue(), 'buffer.example');
       state.failReload = false;
       await reloadButton().click();
       await confirmReload().getByRole('button', { name: 'Загрузить', exact: true }).click();
       await confirmReload().waitFor({ state: 'hidden' });
-      await tab('Сайты').click();
-      assert.equal(await domains().inputValue(), '');
-      await tab('Слова и фразы').click();
       assert.equal(await words().inputValue(), '');
       assert.equal(await panel.getByText('конфликтный черновик', { exact: true }).count(), 0);
       console.log(
-        'PASS real page: stop conflict retains both buffers until a successful explicitly confirmed reload',
+        'PASS real page: stop conflict retains the word buffer through cancellation and failure until a confirmed reload succeeds',
       );
 
       for (const scenario of [
@@ -589,12 +590,6 @@ try {
           target: 'Слово или фраза',
           message: 'Проверьте правило 124',
           value: 'маркер123',
-        },
-        {
-          options: {},
-          issue: ['policy', 'domains', 0],
-          target: 'Добавить запрещённые сайты',
-          message: 'Проверьте сайт',
         },
         {
           options: { buttons: true },
@@ -649,9 +644,6 @@ try {
             .getByRole('dialog', { name: 'Правило', exact: true })
             .getByRole('button', { name: 'Применить', exact: true })
             .click();
-        } else if (scenario.target === 'Добавить запрещённые сайты') {
-          await target.fill('fixed.example');
-          await panel.getByRole('button', { name: 'Добавить записи', exact: true }).click();
         } else if (scenario.target === 'Ссылка кнопки 2') {
           await target.fill('https://fixed.example');
         } else if (scenario.target === 'Длительность ограничения, часов') {
@@ -669,7 +661,7 @@ try {
         await panel.waitFor({ state: 'hidden' });
       }
       console.log(
-        'PASS real page: full indexed validation opens hidden tab, rule124, sanctions and speech portal, then focuses the actual invalid control',
+        'PASS real page: indexed validation opens rule124, sanctions and speech portal, then focuses the actual invalid control',
       );
 
       await fresh({ invalid: true });

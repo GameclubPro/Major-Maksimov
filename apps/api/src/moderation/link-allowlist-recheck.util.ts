@@ -6,6 +6,24 @@ import type { RuleViolation } from './rule-engine.contract';
 import type { MessageLimitsBlockedDomainDetector } from './rule-engine-blocked-domains.detector';
 import { createAllowlistLinkMatcher, detectBlockedLink } from './rule-engine-link-detector';
 import { detectStopWordsViolations } from './stop-words/stop-words.detection';
+import { isRuntimeLinkPolicyActive } from './link-rules-policy.runtime';
+import type { PrismaService } from '../prisma/prisma.service';
+
+export async function loadFreshDomainAllowlistForLinkRecheck(
+  prisma: Pick<PrismaService, 'domainAllowlist'>,
+  chatId: string,
+): Promise<string[] | null> {
+  const delegate = prisma.domainAllowlist;
+  if (typeof delegate?.findMany !== 'function') return null;
+  const rows = await delegate.findMany({
+    where: {
+      chatId,
+      OR: [{ removeAfterAt: null }, { removeAfterAt: { gt: new Date() } }],
+    },
+    select: { domain: true },
+  });
+  return rows.map((row) => row.domain);
+}
 
 export function serializeLinkPolicyEffectiveAt(value: unknown): string | null {
   const parsed =
@@ -21,12 +39,15 @@ export function needsFreshLinkAllowlistRecheck(
   linkPolicy: ChatSettings['linkPolicy'],
   violations: readonly RuleViolation[],
   navigationTargets?: readonly NavigationTargetEvidence[],
+  linkRulesPolicy?: unknown,
 ): boolean {
   if (violations.some((violation) => violation.ruleCode === 'MESSAGE_BLOCKED_DOMAIN')) {
     return true;
   }
   return (
-    linkPolicy === 'ALLOWLIST_ONLY' &&
+    (linkRulesPolicy != null
+      ? isRuntimeLinkPolicyActive(linkPolicy, linkRulesPolicy)
+      : linkPolicy === 'ALLOWLIST_ONLY') &&
     (violations.some((violation) => violation.ruleCode === 'LINK_BLOCKED') ||
       Boolean(navigationTargets?.some(isEnforceableLinkPolicyTarget)))
   );
@@ -35,11 +56,13 @@ export function needsFreshLinkAllowlistRecheck(
 export function suppressUnverifiedAllowlistDependentViolations(
   linkPolicy: ChatSettings['linkPolicy'],
   violations: readonly RuleViolation[],
+  linkRulesPolicy?: unknown,
 ): RuleViolation[] {
   return violations.filter(
     (violation) =>
       violation.ruleCode !== 'MESSAGE_BLOCKED_DOMAIN' &&
-      (violation.ruleCode !== 'LINK_BLOCKED' || linkPolicy !== 'ALLOWLIST_ONLY'),
+      (violation.ruleCode !== 'LINK_BLOCKED' ||
+        (linkRulesPolicy == null && linkPolicy !== 'ALLOWLIST_ONLY')),
   );
 }
 
@@ -48,6 +71,7 @@ export function recalculateFreshLinkAllowlistViolations(params: {
   settings: Pick<ChatSettings, 'linkPolicy' | 'messageLimitsBlockedDomains'> & {
     stopWordsPolicy?: unknown;
     stopWordsRevision?: number;
+    linkRulesPolicy?: unknown;
   };
   freshDomainAllowlist: string[];
   navigationTargets?: readonly NavigationTargetEvidence[];
@@ -61,6 +85,7 @@ export function recalculateFreshLinkAllowlistViolations(params: {
     params.freshDomainAllowlist,
     freshAllowlistMatcher,
     params.navigationTargets,
+    params.settings.linkRulesPolicy,
   );
   const newDomainViolation =
     params.settings.stopWordsPolicy == null

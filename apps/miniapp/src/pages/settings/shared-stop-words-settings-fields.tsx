@@ -42,7 +42,9 @@ const SpeechEditor = lazy(() =>
     default: module.SharedBotSpeechEditor,
   })),
 );
-type Props = Pick<SharedChatSettingsSectionProps, 'fields' | 'context'>;
+type Props = Pick<SharedChatSettingsSectionProps, 'fields' | 'context'> & {
+  presentation?: 'words' | 'sites';
+};
 const shown = (state: SettingsFieldState<boolean>) => state.kind !== 'common' || state.value;
 
 function Toggle({
@@ -720,8 +722,10 @@ function StopWordsAdminUrl({ fields }: { fields: ChatSettingsFieldAdapter }) {
   );
 }
 
-export function SharedStopWordsSettingsFields({ fields, context }: Props) {
-  const [mode, setMode] = useState<'words' | 'domains'>('words');
+export function SharedStopWordsSettingsFields({ fields, context, presentation = 'words' }: Props) {
+  const [networkMode, setNetworkMode] = useState<'words' | 'domains'>('words');
+  const mode =
+    presentation === 'sites' ? 'domains' : context.mode === 'network' ? networkMode : 'words';
   const [speech, setSpeech] = useState<'explanation' | 'warning' | null>(null);
   const rootRef = useRef<HTMLFieldSetElement>(null);
   const sanctionsRef = useRef<HTMLDetailsElement>(null);
@@ -733,8 +737,9 @@ export function SharedStopWordsSettingsFields({ fields, context }: Props) {
   useEffect(() => {
     if (!focusRequest || storageBlocked) return;
     const { field } = focusRequest;
-    if (field === 'stopWordsPolicy.rules') setMode('words');
-    if (field === 'stopWordsPolicy.domains') setMode('domains');
+    if (context.mode === 'network' && field === 'stopWordsPolicy.domains')
+      setNetworkMode('domains');
+    if (context.mode === 'network' && field === 'stopWordsPolicy.rules') setNetworkMode('words');
     if (field.startsWith('stopWordsPolicy.sanctions.') && sanctionsRef.current)
       sanctionsRef.current.open = true;
     if (field === 'stopWordsPolicy.imageScanEnabled' && imageScanRef.current)
@@ -852,93 +857,102 @@ export function SharedStopWordsSettingsFields({ fields, context }: Props) {
         hidden={storageBlocked}
         style={storageBlocked ? { display: 'none' } : undefined}
       >
-        {toggle('stopWordsPolicy.enabled', 'Стоп-слова включены')}
-        <SegmentedControl
-          value={mode}
-          ariaLabel="Запрещённые слова и сайты"
-          options={[
-            {
-              value: 'words',
-              label: 'Слова и фразы',
-              count: rules.kind === 'common' ? rules.value.length : undefined,
-            },
-            {
-              value: 'domains',
-              label: 'Сайты',
-              count: domains.kind === 'common' ? domains.value.length : undefined,
-            },
-          ]}
-          onChange={setMode}
-        />
-        <div hidden={mode !== 'words'}>
-          {rules.kind === 'common' ? (
-            <StopWordsListEditor
-              key="words"
-              mode="words"
-              active={mode === 'words'}
-              focusRequest={focusRequest}
-              fields={fields}
-              items={rules.value}
-              replace={(next) => fields.replaceList('stopWordsPolicy.rules', next)}
-              toolbar={mode === 'words' ? context.stopWordsTools?.toolbar : null}
-              notice={mode === 'words' ? context.stopWordsTools?.notice : null}
-            />
-          ) : (
-            <FieldList<StopWordsRule>
-              label="Слова и фразы"
-              state={rules}
-              disabled={fields.readOnly}
-              onChange={(next) => fields.replaceList('stopWordsPolicy.rules', next)}
-            >
-              {(items, replace) => (
-                <StopWordsListEditor
-                  key="words"
-                  mode="words"
-                  active={mode === 'words'}
-                  focusRequest={focusRequest}
-                  fields={fields}
-                  items={items}
-                  replace={replace}
-                />
-              )}
-            </FieldList>
-          )}
-        </div>
-        <div hidden={mode !== 'domains'}>
-          {domains.kind === 'common' ? (
-            <StopWordsListEditor
-              key="domains"
-              mode="domains"
-              active={mode === 'domains'}
-              focusRequest={focusRequest}
-              fields={fields}
-              items={domains.value}
-              replace={(next) => fields.replaceList('stopWordsPolicy.domains', next)}
-              toolbar={mode === 'domains' ? context.stopWordsTools?.toolbar : null}
-              notice={mode === 'domains' ? context.stopWordsTools?.notice : null}
-            />
-          ) : (
-            <FieldList<string>
-              label="Сайты"
-              state={domains}
-              disabled={fields.readOnly}
-              onChange={(next) => fields.replaceList('stopWordsPolicy.domains', next)}
-            >
-              {(items, replace) => (
-                <StopWordsListEditor
-                  key="domains"
-                  mode="domains"
-                  active={mode === 'domains'}
-                  focusRequest={focusRequest}
-                  fields={fields}
-                  items={items}
-                  replace={replace}
-                />
-              )}
-            </FieldList>
-          )}
-        </div>
-        {context.stopWordsTools?.preview}
+        {toggle(
+          'stopWordsPolicy.enabled',
+          presentation === 'sites' ? 'Запрещённые сайты включены' : 'Стоп-слова включены',
+        )}
+        {context.mode === 'network' && presentation === 'words' ? (
+          <SegmentedControl
+            value={networkMode}
+            ariaLabel="Запрещённые слова и сайты"
+            options={[
+              {
+                value: 'words',
+                label: 'Слова и фразы',
+                count: rules.kind === 'common' ? rules.value.length : undefined,
+              },
+              {
+                value: 'domains',
+                label: 'Сайты',
+                count: domains.kind === 'common' ? domains.value.length : undefined,
+              },
+            ]}
+            onChange={setNetworkMode}
+          />
+        ) : null}
+        {presentation !== 'sites' ? (
+          <div hidden={mode !== 'words'}>
+            {rules.kind === 'common' ? (
+              <StopWordsListEditor
+                key="words"
+                mode="words"
+                active={mode === 'words'}
+                focusRequest={focusRequest}
+                fields={fields}
+                items={rules.value}
+                replace={(next) => fields.replaceList('stopWordsPolicy.rules', next)}
+                toolbar={mode === 'words' ? context.stopWordsTools?.toolbar : null}
+                notice={mode === 'words' ? context.stopWordsTools?.notice : null}
+              />
+            ) : (
+              <FieldList<StopWordsRule>
+                label="Слова и фразы"
+                state={rules}
+                disabled={fields.readOnly}
+                onChange={(next) => fields.replaceList('stopWordsPolicy.rules', next)}
+              >
+                {(items, replace) => (
+                  <StopWordsListEditor
+                    key="words"
+                    mode="words"
+                    active={mode === 'words'}
+                    focusRequest={focusRequest}
+                    fields={fields}
+                    items={items}
+                    replace={replace}
+                  />
+                )}
+              </FieldList>
+            )}
+          </div>
+        ) : null}
+        {presentation === 'sites' || context.mode === 'network' ? (
+          <div hidden={mode !== 'domains'}>
+            {domains.kind === 'common' ? (
+              <StopWordsListEditor
+                key="domains"
+                mode="domains"
+                active={mode === 'domains'}
+                focusRequest={focusRequest}
+                fields={fields}
+                items={domains.value}
+                replace={(next) => fields.replaceList('stopWordsPolicy.domains', next)}
+                toolbar={mode === 'domains' ? context.stopWordsTools?.toolbar : null}
+                notice={mode === 'domains' ? context.stopWordsTools?.notice : null}
+              />
+            ) : (
+              <FieldList<string>
+                label="Сайты"
+                state={domains}
+                disabled={fields.readOnly}
+                onChange={(next) => fields.replaceList('stopWordsPolicy.domains', next)}
+              >
+                {(items, replace) => (
+                  <StopWordsListEditor
+                    key="domains"
+                    mode="domains"
+                    active={mode === 'domains'}
+                    focusRequest={focusRequest}
+                    fields={fields}
+                    items={items}
+                    replace={replace}
+                  />
+                )}
+              </FieldList>
+            )}
+          </div>
+        ) : null}
+        {presentation === 'words' ? context.stopWordsTools?.preview : null}
         <details ref={sanctionsRef} className="stop-words-editor__section">
           <summary>
             Наказания и сообщения бота<small>{summary}</small>

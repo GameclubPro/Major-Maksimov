@@ -65,6 +65,7 @@ type Props = {
   fields: ChatSettingsFieldAdapter;
   navigationAllowlist?: NetworkNavigationAllowlistIntent;
   onNavigationAllowlist: (intent: NetworkNavigationAllowlistIntent | undefined) => void;
+  onOpenLegacySites?: () => void;
   children: (context: SharedChatSettingsContext) => ReactNode;
 };
 const message = (cause: unknown) =>
@@ -91,6 +92,23 @@ export function NetworkSettingsMetadataFields(props: Props) {
     mode: 'network',
     commercialAiModerationMode: props.read.commercialAiModerationMode,
     api: props.api,
+    linkRules:
+      props.read.section === 'links' && props.onOpenLegacySites
+        ? {
+            onPolicyAuthored: () => props.onNavigationAllowlist(undefined),
+            legacySites: (
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={props.onOpenLegacySites}
+              >
+                <AppIcon icon="Book" />
+                Ранее настроенные сайты
+                <AppIcon icon="NavArrowRight" />
+              </button>
+            ),
+          }
+        : undefined,
     navigationAllowlist:
       props.read.section === 'links' ? <Allowlist key={key} {...props} scope={scope} /> : undefined,
     requiredSubscriptionSources:

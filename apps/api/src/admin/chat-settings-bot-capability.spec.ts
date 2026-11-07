@@ -15,6 +15,26 @@ function resolveRequirements(
 }
 
 describe('resolveChatSettingsBotCapabilityRequirements', () => {
+  it('requires link write and retained ban rights when a new selected policy becomes active', () => {
+    expect(
+      resolveRequirements(
+        { linkRulesPolicy: { version: 1, mode: 'ALLOW_ALL', rules: [] }, linkBanEnabled: true },
+        { linkRulesPolicy: { version: 1, mode: 'DENY_SELECTED', rules: [] } },
+      ),
+    ).toEqual([
+      { permission: 'write', featureKeys: ['linkPolicy'] },
+      { permission: 'add_remove_members', featureKeys: ['linkPolicy'] },
+    ]);
+    expect(
+      resolveRequirements(
+        {
+          linkPolicy: 'BLOCKLIST_ONLY',
+          linkRulesPolicy: { version: 1, mode: 'ALLOW_ALL', rules: [] },
+        },
+        { linkWarnEnabled: true },
+      ),
+    ).toEqual([]);
+  });
   it('requires message rights for opening-notice cleanup only while its parent is active', () => {
     const update = { nightModeOpenMessageDeleteOnFirstMessageEnabled: true };
     expect(

@@ -343,12 +343,19 @@ export async function applySettingsSectionToAll(
   section: ApplySectionToAllResponse['section'],
   target?: ApplySettingsTarget,
   expectedSourceRevision?: number,
-  confirmedReports?: { expectedSourceSettingsRevision: string; confirmedTargetChatIds: string[] },
+  confirmedSource?: {
+    expectedSourceSettingsRevision: string;
+    confirmedTargetChatIds?: string[];
+  },
 ): Promise<ApplySectionToAllResponse> {
   const requestBody = {
     section,
     ...(section === 'stopWords' ? { expectedSourceRevision } : {}),
-    ...(section === 'reports' ? confirmedReports : {}),
+    ...(section === 'reports'
+      ? confirmedSource
+      : section === 'links' && confirmedSource
+        ? { expectedSourceSettingsRevision: confirmedSource.expectedSourceSettingsRevision }
+        : {}),
     ...(target ? { target: applySettingsTargetSchema.parse(target) } : {}),
   };
   const response = await api.request(`/chats/${chatId}/settings/apply-section-to-all`, {
