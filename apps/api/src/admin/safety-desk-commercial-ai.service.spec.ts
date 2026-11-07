@@ -94,6 +94,15 @@ describe('commercial AI bounded public projection', () => {
     });
   });
 
+  it.each([0, 3, 4])('preserves %i active slots without making a coverage claim', (active) => {
+    expect(projectCommercialAiStatus('DELETE_ONLY', read(status({ active })), now)).toMatchObject({
+      availability: 'FRESH',
+      active,
+      trafficCoverage: 'NOT_ESTABLISHED',
+      confirmedDeletes: null,
+    });
+  });
+
   it('expires a cached sample and the independent admission observation', () => {
     expect(projectCommercialAiStatus('DELETE_ONLY', read(), now + 30000)).toMatchObject({
       availability: 'STALE',
@@ -141,7 +150,7 @@ describe('commercial AI bounded public projection', () => {
 
   it.each([
     { schemaVersion: 1 },
-    { active: 4 },
+    { active: 5 },
     { heartbeatAt: iso(5001) },
     { observationStartedAt: iso(1) },
     { observationProcessId: undefined },

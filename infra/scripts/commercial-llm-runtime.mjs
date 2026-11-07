@@ -1906,7 +1906,8 @@ async function cli(argv) {
     return recoverCpuQuarantine(sourceSha, args[0], args[2]);
   }
   if (operation === 'workstation-pool-bridge') {
-    if (args.length !== 1) throw new Error('Usage: workstation-pool-bridge pc-a-4b|pc-b-9b');
+    if (args.length !== 1)
+      throw new Error('Usage: workstation-pool-bridge pc-a-4b|pc-b-9b|pc-a-cpu-9b');
     return workstationBridge(args[0]);
   }
   if (

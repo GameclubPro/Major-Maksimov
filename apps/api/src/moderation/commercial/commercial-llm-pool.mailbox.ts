@@ -20,6 +20,7 @@ import {
   POOL_ADMISSION_WORKER_KEY,
   commercialLlmPoolIdentityMatches,
   commercialLlmPoolJobKey,
+  commercialLlmPoolMinRemainingMs,
   commercialLlmPoolNodeKeys,
   type CommercialLlmPoolNodeId,
 } from './commercial-llm-pool.protocol';
@@ -262,17 +263,19 @@ export class CommercialLlmPoolMailbox {
       state: 'pending',
     });
     // FLAG: Priority, node capacity and the attempt fence are one Redis transaction. A failed
-    // reservation neither consumes a retry nor creates a queue behind a busy model.
+    // reservation neither consumes a retry nor creates a queue behind a busy model. The PC CPU
+    // floor is rechecked against Redis time after the awaited heartbeat read, before any write.
     const accepted = await this.redis.eval(
       `${decodeLua}
        local now = nowMs(); local deadline = tonumber(ARGV[4])
        if deadline <= now or deadline - now > tonumber(ARGV[8]) then return 0 end
+       if deadline - now < tonumber(ARGV[10]) then return 0 end
        if redis.call('GET', KEYS[1]) ~= ARGV[1] or redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
        local slotRaw = redis.call('GET', KEYS[3]); local slot = decode(slotRaw)
        if slotRaw and (not slot or slot.session == ARGV[1]) then return 0 end
        if ARGV[9] == '1' then
          for i = 6, 7 do if redis.call('EXISTS', KEYS[i]) == 1 then return 0 end end
-         if redis.call('HLEN', KEYS[8]) > 3 then return 0 end
+         if redis.call('HLEN', KEYS[8]) > 4 then return 0 end
          local owner = redis.call('GET', KEYS[9])
          local waiting = redis.call('HGETALL', KEYS[8]); local blocked = false
          for i = 1, #waiting, 2 do
@@ -316,6 +319,7 @@ export class CommercialLlmPoolMailbox {
       request.attempt,
       COMMERCIAL_LLM_POOL_TIMEOUT_MS,
       options.consultation ? '1' : '0',
+      nodeId === 'pc-a-cpu-9b' ? commercialLlmPoolMinRemainingMs(nodeId) : 0,
     );
     return accepted === 1
       ? Object.freeze({ ...request, nodeId, session, id, attemptId: id, raw })

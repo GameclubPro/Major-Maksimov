@@ -38,6 +38,8 @@ const scriptNames = [
   'commercial-llm-workstation-worker.mjs',
   'commercial-llm-profiles.mjs',
 ];
+const primerSource = '../../apps/api/src/moderation/commercial/commercial-llm.protocol.ts';
+const primerName = 'commercial-llm.protocol.ts';
 const shellQuote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 const hash = (path) =>
   new Promise((resolveHash, reject) => {
@@ -204,9 +206,12 @@ async function stopChild(child) {
   if (!closed) throw new Error('pool_child_teardown_failed');
 }
 
-async function assertFreeModelPort() {
+async function assertFreeModelPort(nodeId) {
   return new Promise((resolveFree, reject) => {
-    const socket = createConnection({ host: '127.0.0.1', port: 18084 });
+    const socket = createConnection({
+      host: '127.0.0.1',
+      port: Number(new URL(poolProfile(nodeId).http).port),
+    });
     socket.setTimeout(1000);
     socket.once('connect', () => {
       socket.destroy();
@@ -224,8 +229,49 @@ async function assertFreeModelPort() {
   });
 }
 
-async function warmModel(nodeId, key, signal) {
+// FLAG: CPU capacity is advertised only after the exact installed production prompt has
+// populated its prefix cache. A generic readiness prompt leaves long first inputs too slow.
+export async function warmPoolCpuModel(nodeId, key, signal, protocol, readJson = poolJson) {
+  if (
+    protocol.commercialLlmPromptSha256(poolProfile(nodeId).identity.chatTemplateSha256) !==
+    poolProfile(nodeId).identity.promptSha256
+  )
+    throw new Error('pool_primer_identity');
+  const body = protocol.buildCommercialLlmRequest('Обычное обсуждение погоды в нашем городе.');
+  const response = await readJson('/v1/chat/completions', key, {
+    nodeId,
+    signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
+    body: JSON.stringify({ ...body, model: poolProfile(nodeId).identity.modelAlias }),
+  });
+  const choice = response?.choices?.[0];
+  const message = choice?.message;
+  let decision;
+  try {
+    decision = protocol.parseCommercialLlmDecision(JSON.parse(message?.content));
+  } catch {
+    throw new Error('pool_primer_decision');
+  }
+  if (
+    response?.model !== poolProfile(nodeId).identity.modelAlias ||
+    response.choices.length !== 1 ||
+    choice.finish_reason !== 'stop' ||
+    message?.role !== 'assistant' ||
+    message.reasoning_content ||
+    message.reasoning ||
+    message.refusal ||
+    message.tool_calls?.length ||
+    !decision
+  )
+    throw new Error('pool_primer_decision');
+}
+
+async function warmModel(nodeId, key, signal, bundle) {
+  if (poolProfile(nodeId).device === 'cpu') {
+    const protocol = await import(pathToFileURL(join(bundle, primerName)).href);
+    return warmPoolCpuModel(nodeId, key, signal, protocol);
+  }
   const response = await poolJson('/v1/chat/completions', key, {
+    nodeId,
     signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
     body: JSON.stringify({
       model: poolProfile(nodeId).identity.modelAlias,
@@ -309,11 +355,14 @@ export function createPoolController(nodeId, { taskHome = homedir() } = {}) {
     const source = dirname(fileURLToPath(import.meta.url));
     const bundleHash = createHash('sha256');
     for (const name of scriptNames) bundleHash.update(readFileSync(join(source, name)));
+    if (profile.device === 'cpu') bundleHash.update(readFileSync(join(source, primerSource)));
     const bundle = join(state, 'bundles', bundleHash.digest('hex'));
     if (!existsSync(bundle)) {
       mkdirSync(dirname(bundle), { recursive: true, mode: 0o700 });
       const staging = mkdtempSync(join(dirname(bundle), '.preparing-'));
       for (const name of scriptNames) copyFileSync(join(source, name), join(staging, name));
+      if (profile.device === 'cpu')
+        copyFileSync(join(source, primerSource), join(staging, primerName));
       const runtime = join(staging, 'runtime');
       mkdirSync(runtime, { mode: 0o700 });
       for (const artifact of profile.artifacts.slice(1))
@@ -530,24 +579,34 @@ export function createPoolController(nodeId, { taskHome = homedir() } = {}) {
           '/usr/lib/wsl/lib',
         ].join(':'),
         CUDA_CACHE_PATH: join(root, 'cuda-cache'),
+        ...(profile.device === 'cpu'
+          ? { CUDA_VISIBLE_DEVICES: '-1', OMP_NUM_THREADS: String(profile.threads) }
+          : {}),
       };
-      const devices = execFileSync(binary, ['--list-devices'], {
-        env: modelEnv,
-        encoding: 'utf8',
-        timeout: 15_000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      if (!/CUDA\d+:/u.test(devices)) throw new Error('pool_cuda_unavailable');
+      if (profile.device === 'cuda') {
+        const devices = execFileSync(binary, ['--list-devices'], {
+          env: modelEnv,
+          encoding: 'utf8',
+          timeout: 15_000,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        if (!/CUDA\d+:/u.test(devices)) throw new Error('pool_cuda_unavailable');
+      }
       let retry = 0;
       while (!controller.signal.aborted) {
         try {
           if (!model) {
-            await assertFreeModelPort();
+            await assertFreeModelPort(nodeId);
             update('loading');
-            model = guardedPoolChild(binary, poolModelArgs(nodeId, root, keyPath), {
-              env: modelEnv,
-              stdio: 'ignore',
-            });
+            const args = poolModelArgs(nodeId, root, keyPath);
+            model = guardedPoolChild(
+              profile.device === 'cpu' ? '/usr/bin/nice' : binary,
+              profile.device === 'cpu' ? ['-n', '10', binary, ...args] : args,
+              {
+                env: modelEnv,
+                stdio: 'ignore',
+              },
+            );
             let spawnFailed = false;
             model.once('error', () => {
               spawnFailed = true;
@@ -570,7 +629,7 @@ export function createPoolController(nodeId, { taskHome = homedir() } = {}) {
             }
             if (!ready) throw new Error('pool_model_start_deadline');
             update('warming');
-            await warmModel(nodeId, key, controller.signal);
+            await warmModel(nodeId, key, controller.signal, bundle);
           }
           update('connecting');
           ssh = await connectPoolTransport(model, {

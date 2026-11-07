@@ -12,7 +12,7 @@ import {
 } from '../moderation/commercial/commercial-llm-enforcement.protocol';
 import { COMMERCIAL_LLM_POOL_ACTIVE_LIMIT } from '../moderation/commercial/commercial-llm-pool-admission.mailbox';
 import {
-  COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS,
+  commercialLlmPoolMinRemainingMs,
   COMMERCIAL_LLM_POOL_PROFILES,
   POOL_NODE_IDS,
   type CommercialLlmPoolNodeId,
@@ -44,7 +44,9 @@ const observation = z
     )
       context.addIssue({ code: 'custom', message: 'Contradictory bounded observation.' });
   });
-const costs = z.object({ 'server-9b': clock, 'pc-a-4b': clock, 'pc-b-9b': clock }).strict();
+const costs = z
+  .object({ 'server-9b': clock, 'pc-a-4b': clock, 'pc-b-9b': clock, 'pc-a-cpu-9b': clock })
+  .strict();
 
 export const commercialAiRoutingScenarioSchema = z
   .object({
@@ -176,7 +178,9 @@ export function commercialAiRoutingExpectedIdentity() {
       pendingMs: COMMERCIAL_LLM_PENDING_MAX_AGE_MS,
       inferenceMs: COMMERCIAL_LLM_INFERENCE_TIMEOUT_MS,
       effectMs: COMMERCIAL_LLM_EFFECT_MAX_AGE_MS,
-      cpuFloorMs: COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS,
+      cpuFloorMs: Object.fromEntries(
+        POOL_NODE_IDS.map((id) => [id, commercialLlmPoolMinRemainingMs(id)]),
+      ),
       policy: 'confirm-positive',
       primaryClaims: 'per-chat',
       primaryAttempts: 2,
@@ -307,7 +311,7 @@ function simulate(scenario: CommercialAiRoutingScenario, strategy: Strategy) {
         (job.phase === 'CONSULTATION' && COMMERCIAL_LLM_POOL_PROFILES[id].model !== '9b')
       )
         continue;
-      if (id === 'server-9b' && job.deadline - at < COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS) {
+      if (job.deadline - at < commercialLlmPoolMinRemainingMs(id)) {
         cpuFloorSkips += 1;
         continue;
       }

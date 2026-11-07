@@ -20,7 +20,7 @@ export const COMMERCIAL_AI_POOL_EXPECTED = JSON.stringify(
   })),
 );
 
-// FLAG: Ten fixed keys, bounded GET only after TYPE/STRLEN/PTTL. Ownership tokens stay
+// FLAG: Thirteen fixed keys, bounded GET only after TYPE/STRLEN/PTTL. Ownership tokens stay
 // inside Redis; slot bodies, prompts, responses, sources and pending queues are never read.
 // This projection is diagnostic only and neither renews nor releases any runtime authority.
 export const READ_COMMERCIAL_AI_POOL = `
@@ -39,7 +39,7 @@ local function sameIdentity(actual, target)
   return a == b
 end
 local nodes = {}
-for i=1,3 do
+for i=1,4 do
   local at=(i-1)*3
   local lk,hk,sk=kind(KEYS[at+1]),kind(KEYS[at+2]),kind(KEYS[at+3])
   local lt,ht,st=redis.call('PTTL',KEYS[at+1]),redis.call('PTTL',KEYS[at+2]),redis.call('PTTL',KEYS[at+3])
@@ -62,13 +62,13 @@ for i=1,3 do
   nodes[i]={nodeId=expected[i].nodeId,state=state,ttlMs=ttl}
 end
 local status={'missing'}
-local k=kind(KEYS[10])
+local k=kind(KEYS[13])
 if k~='none' then
   if k~='string' then status={'invalid'}
   else
-    local n=redis.call('STRLEN',KEYS[10]); local ttl=redis.call('PTTL',KEYS[10])
+    local n=redis.call('STRLEN',KEYS[13]); local ttl=redis.call('PTTL',KEYS[13])
     if n>16384 or ttl==-1 or ttl>30000 then status={'invalid'}
-    elseif n>0 and ttl>0 then status={'value',redis.call('GET',KEYS[10]),ttl} end
+    elseif n>0 and ttl>0 then status={'value',redis.call('GET',KEYS[13]),ttl} end
   end
 end
 return cjson.encode({nodes=nodes,status=status})`;
@@ -79,13 +79,13 @@ export const commercialAiPoolReadSchema = z
       .array(
         z
           .object({
-            nodeId: z.enum(['server-9b', 'pc-a-4b', 'pc-b-9b']),
+            nodeId: z.enum(POOL_NODE_IDS),
             state: z.enum(['READY', 'SLOT_OCCUPIED', 'NOT_READY', 'OFFLINE', 'INVALID']),
             ttlMs: z.number().int().min(0).max(6000),
           })
           .strict(),
       )
-      .length(3)
+      .length(4)
       .refine((nodes) =>
         nodes.every(
           (node, index) =>

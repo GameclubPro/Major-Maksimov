@@ -56,7 +56,12 @@ function scenario(
     frozenRanking: {
       evidenceSha256: sha('synthetic-frozen-ranking'),
       frozenAtMs: 0,
-      expectedUsefulCompletionCostMs: { 'pc-a-4b': 1, 'pc-b-9b': 2, 'server-9b': 3 },
+      expectedUsefulCompletionCostMs: {
+        'pc-a-4b': 1,
+        'pc-b-9b': 2,
+        'server-9b': 3,
+        'pc-a-cpu-9b': 4,
+      },
     },
     nodeIntervals: [],
     arrivals,
@@ -81,8 +86,8 @@ describe('bounded offline pool routing simulation', () => {
       invariantViolations: [],
     });
   });
-  it('caps active sources at three while queued inputs expire at their own three seconds', () => {
-    const arrivals = [0, 250, 500, 750, 1000].map((at, index) =>
+  it('caps active sources at four while queued inputs expire at their own three seconds', () => {
+    const arrivals = [0, 250, 500, 750, 1000, 1250].map((at, index) =>
       arrival(String(index), at, {
         observations: POOL_NODE_IDS.map((id) =>
           observed(id, { durationMs: 10_000, physicalCompletionMs: 10_000 }),
@@ -90,12 +95,12 @@ describe('bounded offline pool routing simulation', () => {
       }),
     );
     expect(frozen(scenario(arrivals))).toMatchObject({
-      admitted: 5,
-      started: 3,
-      maximumActive: 3,
+      admitted: 6,
+      started: 4,
+      maximumActive: 4,
       maximumPending: 2,
       rejected: { pending_expired: 2 },
-      completed: 3,
+      completed: 4,
       accountingGap: 0,
     });
   });
@@ -121,6 +126,7 @@ describe('bounded offline pool routing simulation', () => {
         nodeIntervals: [
           { nodeId: 'server-9b', kind: 'HELD', startMs: 0, endMs: null },
           { nodeId: 'pc-b-9b', kind: 'HELD', startMs: 0, endMs: null },
+          { nodeId: 'pc-a-cpu-9b', kind: 'HELD', startMs: 0, endMs: null },
         ],
       },
     );
@@ -180,7 +186,7 @@ describe('bounded offline pool routing simulation', () => {
       { nodeIntervals: [{ nodeId: 'pc-b-9b', kind: 'HELD', startMs: 0, endMs: null }] },
     );
     const result = frozen(input);
-    expect(result).toMatchObject({ cpuFloorSkips: 1, outcomes: { TECHNICAL_FAILURE: 1 } });
+    expect(result).toMatchObject({ cpuFloorSkips: 2, outcomes: { TECHNICAL_FAILURE: 1 } });
     expect(result.nodes.find((node) => node.nodeId === 'server-9b')?.reservations).toBe(0);
   });
   it('closes inference at twenty seconds and retains physical work through its observed completion', () => {

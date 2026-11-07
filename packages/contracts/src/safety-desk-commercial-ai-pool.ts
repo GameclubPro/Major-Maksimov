@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 const count = z.number().int().nonnegative().safe();
 const clock = z.iso.datetime().nullable();
-const nodeId = z.enum(['server-9b', 'pc-a-4b', 'pc-b-9b']);
-const nodeOrder = ['server-9b', 'pc-a-4b', 'pc-b-9b'];
+const nodeOrder = ['server-9b', 'pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b'] as const;
+const nodeId = z.enum(nodeOrder);
 const attemptMetrics = z
   .object({
     nodeId,
@@ -20,7 +20,8 @@ export const commercialAiPoolDiagnosticsSchema = z
     schemaVersion: z.literal(1),
     nodes: z
       .array(attemptMetrics)
-      .length(3)
+      .min(3)
+      .max(4)
       .refine((nodes) => nodes.every((node, index) => node.nodeId === nodeOrder[index])),
     consultations: z
       .object({
@@ -51,7 +52,8 @@ export const safetyDeskCommercialAiPoolResponseSchema = z
           })
           .strict(),
       )
-      .length(3)
+      .min(3)
+      .max(4)
       .refine((nodes) => nodes.every((node, index) => node.nodeId === nodeOrder[index]))
       .nullable(),
     metrics: z

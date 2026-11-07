@@ -23,6 +23,13 @@ const snapshot: SafetyDeskCommercialAiPoolResponse = {
   trafficCoverage: 'NOT_ESTABLISHED',
   confirmedDeletes: null,
 };
+const fourNodeSnapshot: SafetyDeskCommercialAiPoolResponse = {
+  ...snapshot,
+  nodes: [
+    ...snapshot.nodes!,
+    { nodeId: 'pc-a-cpu-9b', state: 'NOT_READY', validUntil: '2026-10-28T12:00:05.000Z' },
+  ],
+};
 test('pool view distinguishes busy from offline and does not invent zero measurements', () => {
   const html = renderToStaticMarkup(createElement(CommercialAiPoolSnapshot, { snapshot }));
   for (const text of [
@@ -34,9 +41,16 @@ test('pool view distinguishes busy from offline and does not invent zero measure
     assert.ok(html.includes(text));
   assert.ok(!html.includes('100%'));
 });
+test('pool view distinguishes PC-A CPU 9B from the GPU model', () => {
+  const html = renderToStaticMarkup(
+    createElement(CommercialAiPoolSnapshot, { snapshot: fourNodeSnapshot }),
+  );
+  for (const text of ['ПК-A · Qwen 4B', 'ПК-A · CPU · Qwen 9B', 'Подключён, не готов'])
+    assert.ok(html.includes(text));
+});
 test('pool view preserves distinct metrics and the observation window', () => {
   const value: SafetyDeskCommercialAiPoolResponse = {
-    ...snapshot,
+    ...fourNodeSnapshot,
     metrics: {
       availability: 'STALE',
       observedAt: snapshot.observedAt!,
@@ -45,7 +59,7 @@ test('pool view preserves distinct metrics and the observation window', () => {
       basis: 'PROCESS_MODEL_ATTEMPTS',
       diagnostics: {
         schemaVersion: 1,
-        nodes: snapshot.nodes!.map(({ nodeId }) => ({
+        nodes: fourNodeSnapshot.nodes!.map(({ nodeId }) => ({
           nodeId,
           completedAttempts: 0,
           failedAttempts: 0,
@@ -66,17 +80,33 @@ test('pool view preserves distinct metrics and the observation window', () => {
     'Число попыток не равно',
   ])
     assert.ok(html.includes(text));
-});
-test('pool GET stays independent of the existing process status endpoint', async () => {
-  let path = '';
-  const client = new SafetyDeskApiClient(
-    createAdminApiTransport(async (url, init) => {
-      path = String(url);
-      assert.equal(init?.method ?? 'GET', 'GET');
-      assert.equal(init?.body, undefined);
-      return Response.json(snapshot);
-    }),
+  assert.equal(html.split('ПК-A · CPU · Qwen 9B').length - 1, 2);
+  const legacyMetrics: SafetyDeskCommercialAiPoolResponse = {
+    ...value,
+    metrics: {
+      ...value.metrics!,
+      diagnostics: {
+        ...value.metrics!.diagnostics,
+        nodes: value.metrics!.diagnostics.nodes.slice(0, 3),
+      },
+    },
+  };
+  const legacyHtml = renderToStaticMarkup(
+    createElement(CommercialAiPoolSnapshot, { snapshot: legacyMetrics }),
   );
-  assert.deepEqual(await client.fetchCommercialAiPoolRuntime(), snapshot);
-  assert.equal(path, '/api/v1/safety-desk/runtime/commercial-ai/pool');
+  assert.equal(legacyHtml.split('ПК-A · CPU · Qwen 9B').length - 1, 1);
 });
+for (const value of [snapshot, fourNodeSnapshot])
+  test(`pool GET accepts ${value.nodes!.length} nodes through its independent endpoint`, async () => {
+    let path = '';
+    const client = new SafetyDeskApiClient(
+      createAdminApiTransport(async (url, init) => {
+        path = String(url);
+        assert.equal(init?.method ?? 'GET', 'GET');
+        assert.equal(init?.body, undefined);
+        return Response.json(value);
+      }),
+    );
+    assert.deepEqual(await client.fetchCommercialAiPoolRuntime(), value);
+    assert.equal(path, '/api/v1/safety-desk/runtime/commercial-ai/pool');
+  });

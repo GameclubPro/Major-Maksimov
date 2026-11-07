@@ -22,7 +22,7 @@ export const safetyDeskCommercialAiResponseSchema = z
     lastRecordedResultAt: clock,
     observationStartedAt: clock,
     observationProcessId: z.uuid().nullable(),
-    active: count.max(3).nullable(),
+    active: count.max(4).nullable(),
     admission: z.enum(['UNKNOWN', 'READY', 'GOVERNOR_PAUSED', 'HEADROOM_PAUSED']),
     admissionObservedAt: clock,
     outcomeBasis: z.literal('PROCESS_CUMULATIVE'),

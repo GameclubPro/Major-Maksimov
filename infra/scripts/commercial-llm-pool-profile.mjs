@@ -5,7 +5,7 @@ import {
 } from './commercial-llm-workstation-profile.mjs';
 import { COMMERCIAL_LLM_RUNTIME } from './commercial-llm-profiles.mjs';
 
-export const POOL_NODE_IDS = Object.freeze(['pc-a-4b', 'pc-b-9b']);
+export const POOL_NODE_IDS = Object.freeze(['pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b']);
 export const POOL_HTTP = 'http://127.0.0.1:18084';
 export const POOL_MAX_REQUEST_MS = 20_000;
 export const POOL_FRAME_BYTES = 64 * 1024;
@@ -16,11 +16,37 @@ export const POOL_SESSION_FRAMES_PER_MINUTE = 512;
 const profiles = Object.freeze({
   'pc-a-4b': Object.freeze({
     nodeId: 'pc-a-4b',
+    device: 'cuda',
+    http: POOL_HTTP,
     identity: Object.freeze({ ...WORKSTATION_IDENTITY, protocolVersion: 2 }),
     artifacts: WORKSTATION_ARTIFACTS,
   }),
   'pc-b-9b': Object.freeze({
     nodeId: 'pc-b-9b',
+    device: 'cuda',
+    http: POOL_HTTP,
+    identity: Object.freeze({
+      ...WORKSTATION_IDENTITY,
+      protocolVersion: 2,
+      modelAlias: COMMERCIAL_LLM_RUNTIME.alias,
+      modelSha256: COMMERCIAL_LLM_RUNTIME.modelSha256,
+      promptSha256: COMMERCIAL_LLM_RUNTIME.smokePromptSha256,
+      chatTemplateSha256: COMMERCIAL_LLM_RUNTIME.templateSha256,
+    }),
+    artifacts: Object.freeze([
+      Object.freeze({
+        name: 'Qwen3.5-9B-Q5_K_M.gguf',
+        bytes: COMMERCIAL_LLM_RUNTIME.modelBytes,
+        sha256: COMMERCIAL_LLM_RUNTIME.modelSha256,
+      }),
+      ...WORKSTATION_ARTIFACTS.slice(1),
+    ]),
+  }),
+  'pc-a-cpu-9b': Object.freeze({
+    nodeId: 'pc-a-cpu-9b',
+    device: 'cpu',
+    http: 'http://127.0.0.1:18085',
+    threads: 6,
     identity: Object.freeze({
       ...WORKSTATION_IDENTITY,
       protocolVersion: 2,
@@ -61,6 +87,13 @@ export function poolModelArgs(nodeId, root, keyFile) {
   const args = workstationModelArgs(root, keyFile);
   args[args.indexOf('--model') + 1] = `${root}/${profile.artifacts[0].name}`;
   args[args.indexOf('--alias') + 1] = profile.identity.modelAlias;
+  args[args.indexOf('--port') + 1] = new URL(profile.http).port;
+  if (profile.device === 'cpu') {
+    // FLAG: The additional CPU worker has its own port and cannot consume the 4B GPU slot.
+    args[args.indexOf('--n-gpu-layers') + 1] = '0';
+    args[args.indexOf('--threads') + 1] = String(profile.threads);
+    args[args.indexOf('--threads-batch') + 1] = String(profile.threads);
+  }
   return args.map((value) => (value === '--no-slots' ? '--slots' : value));
 }
 

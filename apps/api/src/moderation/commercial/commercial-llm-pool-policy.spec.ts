@@ -4,6 +4,12 @@ import {
   commercialLlmMayDelete,
   commercialLlmSourceKey,
   commercialLlmSourceSchema,
+  commercialLlmPolicyMayDeletePersonalSale,
+  commercialLlmPolicyEnforcementIdentity,
+  commercialLlmPoolEnforcementIdentity,
+  commercialLlmPoolSourceAllowsNode,
+  legacyCommercialLlmPolicyEnforcementIdentity,
+  legacyCommercialLlmPoolEnforcementIdentity,
   type CommercialLlmPoolPolicy,
 } from './commercial-llm-enforcement.protocol';
 import { CommercialLlmEnforcementService } from './commercial-llm-enforcement.service';
@@ -95,7 +101,7 @@ describe('commercial pool DELETE authority', () => {
     );
     expect(commercialLlmSourceSchema.safeParse({ ...pool, extra: true }).success).toBe(false);
   });
-  it.each(['server-9b', 'pc-b-9b'] as const)(
+  it.each(['server-9b', 'pc-b-9b', 'pc-a-cpu-9b'] as const)(
     'accepts exact direct9B provenance from %s only for its v2 source',
     (nodeId) => {
       const result = positive(nodeId, 'confirm-positive');
@@ -118,6 +124,74 @@ describe('commercial pool DELETE authority', () => {
         ).toBe(false);
     },
   );
+  it.each([
+    {
+      policy: 'confirm-positive' as const,
+      pool: '1557d284906f33d5ede2e03c62a6768260920693470324f7d7352eaa1548c0ad',
+      category: '5019d90c33288bb6b8f24a571b196306729b56470e6fad80da60bb34cf5356f0',
+    },
+    {
+      policy: 'direct-4b' as const,
+      pool: '4339ed5a3ec1f4dc241af66c8fad0d67d2fb9acfea7cecf6ef95c8040a9abe29',
+      category: 'f8ddb9860a60b028c2e91b6844c69c54e91781df2e095e3954862233bd8e38a8',
+    },
+  ])(
+    'reads retained $policy sources without granting the CPU bridge legacy authority',
+    ({ policy, pool, category }) => {
+      // Golden digests come from the pre-fourth-node 99c07156 source serialization.
+      expect(legacyCommercialLlmPoolEnforcementIdentity(policy)).toBe(pool);
+      expect(legacyCommercialLlmPolicyEnforcementIdentity(policy)).toBe(category);
+      expect(commercialLlmPoolEnforcementIdentity(policy)).not.toBe(pool);
+      for (const version of [2, 3] as const) {
+        const old = commercialLlmSourceSchema.parse({
+          ...source(policy),
+          version,
+          classifierSha256: version === 2 ? pool : category,
+          ...(version === 3 ? { personalSaleBlocked: true } : {}),
+        });
+        const roundtrip = commercialLlmSourceSchema.parse(JSON.parse(JSON.stringify(old)));
+        expect(commercialLlmSourceKey(roundtrip)).toBe(commercialLlmSourceKey(old));
+        expect(commercialLlmPoolSourceAllowsNode(old, 'pc-b-9b')).toBe(true);
+        expect(commercialLlmPoolSourceAllowsNode(old, 'pc-a-cpu-9b')).toBe(false);
+        expect(commercialLlmMayDelete(positive('pc-b-9b', policy), old)).toBe(true);
+        expect(commercialLlmMayDelete(positive('pc-a-cpu-9b', policy), old)).toBe(false);
+        const current = commercialLlmSourceSchema.parse({
+          ...old,
+          classifierSha256:
+            version === 2
+              ? commercialLlmPoolEnforcementIdentity(policy)
+              : commercialLlmPolicyEnforcementIdentity(policy),
+        });
+        expect(commercialLlmPoolSourceAllowsNode(current, 'pc-a-cpu-9b')).toBe(true);
+        expect(commercialLlmMayDelete(positive('pc-a-cpu-9b', policy), current)).toBe(true);
+        expect(
+          commercialLlmSourceSchema.safeParse({ ...old, classifierSha256: 'f'.repeat(64) }).success,
+        ).toBe(false);
+        if (version === 3) {
+          const personal = {
+            ...positive('pc-a-cpu-9b', policy),
+            classification: 'NOT_COMMERCIAL' as const,
+            reasonCodes: ['PERSONAL_SALE' as const],
+          };
+          expect(commercialLlmPolicyMayDeletePersonalSale(personal, old)).toBe(false);
+          expect(commercialLlmPolicyMayDeletePersonalSale(personal, current)).toBe(true);
+          expect(
+            commercialLlmPolicyMayDeletePersonalSale(
+              { ...personal, runtimeArtifactSha256: 'tampered' },
+              current,
+            ),
+          ).toBe(false);
+          const legacyPersonal = {
+            ...positive('pc-b-9b', policy),
+            classification: 'NOT_COMMERCIAL' as const,
+            reasonCodes: ['PERSONAL_SALE' as const],
+          };
+          expect(commercialLlmPolicyMayDeletePersonalSale(legacyPersonal, old)).toBe(true);
+        }
+      }
+    },
+  );
+
   it('requires explicit direct4B authority and completed idle9B confirmation under conservative policy', () => {
     expect(
       commercialLlmMayDelete(positive('pc-a-4b', 'confirm-positive'), source('confirm-positive')),

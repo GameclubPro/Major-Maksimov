@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import {
   WorkstationFrames as PoolFrames,
-  workstationJson as poolJson,
+  workstationJson,
 } from './commercial-llm-workstation-worker.mjs';
 import {
   poolProfile,
@@ -13,7 +13,11 @@ import {
   POOL_RESPONSE_BYTES,
   POOL_SESSION_FRAMES_PER_MINUTE,
 } from './commercial-llm-pool-profile.mjs';
-export { PoolFrames, poolJson };
+export { PoolFrames };
+
+export function poolJson(path, key, { nodeId = 'pc-b-9b', ...options } = {}) {
+  return workstationJson(path, key, { ...options, endpoint: poolProfile(nodeId).http });
+}
 
 export class PoolSessionError extends Error {
   constructor(kind, recycleModel) {
@@ -24,8 +28,12 @@ export class PoolSessionError extends Error {
 }
 
 // FLAG: Slot payloads can include private prompts; return only validated occupancy, never raw data.
-export async function poolModelIsIdle(key, signal, { readJson = poolJson } = {}) {
-  const slots = await readJson('/slots', key, { signal, maximumBytes: 65536 });
+export async function poolModelIsIdle(
+  key,
+  signal,
+  { readJson = poolJson, nodeId = 'pc-b-9b' } = {},
+) {
+  const slots = await readJson('/slots', key, { signal, maximumBytes: 65536, nodeId });
   if (
     !Array.isArray(slots) ||
     slots.length !== 1 ||
@@ -42,7 +50,7 @@ export async function poolModelIsIdle(key, signal, { readJson = poolJson } = {})
 
 export async function attestPoolModel(nodeId, key, signal, { readJson = poolJson } = {}) {
   const profile = poolProfile(nodeId);
-  const props = await readJson('/props', key, { signal, maximumBytes: 65536 });
+  const props = await readJson('/props', key, { signal, maximumBytes: 65536, nodeId });
   if (props?.endpoint_slots !== true) throw new Error('pool_model_slots_disabled');
   if (
     typeof props.chat_template !== 'string' ||
@@ -51,14 +59,15 @@ export async function attestPoolModel(nodeId, key, signal, { readJson = poolJson
     props.total_slots !== 1
   )
     throw new Error('pool_model_identity');
-  const models = await readJson('/v1/models', key, { signal });
+  const models = await readJson('/v1/models', key, { signal, nodeId });
   if (
     !Array.isArray(models.data) ||
     models.data.length !== 1 ||
     models.data[0]?.id !== profile.identity.modelAlias
   )
     throw new Error('pool_model_alias');
-  if (!(await poolModelIsIdle(key, signal, { readJson }))) throw new Error('pool_model_busy');
+  if (!(await poolModelIsIdle(key, signal, { readJson, nodeId })))
+    throw new Error('pool_model_busy');
 }
 
 export function validatePoolRequest(nodeId, value) {
@@ -201,6 +210,7 @@ export async function poolSession(
           const response = await infer('/v1/chat/completions', key, {
             body: request.body,
             signal: requestSignal,
+            nodeId,
           });
           requestSignal.throwIfAborted();
           const body = JSON.stringify(response);

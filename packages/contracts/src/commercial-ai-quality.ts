@@ -12,7 +12,7 @@ const duration = z.number().int().min(0).max(90_000);
 export const COMMERCIAL_AI_QUALITY_MAX_ATTEMPTS = 8;
 export const COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES = 128 * 1024;
 const classification = z.enum(['COMMERCIAL', 'NOT_COMMERCIAL', 'UNSURE']);
-const node = z.enum(['server-9b', 'pc-a-4b', 'pc-b-9b']);
+const node = z.enum(['server-9b', 'pc-a-4b', 'pc-b-9b', 'pc-a-cpu-9b']);
 const reason = z.enum([
   'SERVICE_OFFER',
   'BUSINESS_OFFER',

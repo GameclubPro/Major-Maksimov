@@ -531,6 +531,22 @@ describe('commercial AI runner resource lifecycle', () => {
     expect(redis.disconnect).not.toHaveBeenCalled();
   });
 
+  it('admits four pool jobs and keeps the fifth waiting until an actual completion', async () => {
+    enablePool();
+    const jobs = Array.from({ length: 5 }, () => pendingJob());
+    let next = 0;
+    const run = jest
+      .spyOn(CommercialLlmEnforcementProcessor.prototype, 'run')
+      .mockImplementation(() => jobs[next++]?.promise ?? Promise.resolve({ outcome: 'idle' }));
+    runner!.onModuleInit();
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(mailbox.heartbeat).toHaveBeenCalledTimes(8);
+    jobs[0]!.resolve({ outcome: 'kept' });
+    await jest.advanceTimersByTimeAsync(250);
+    expect(run).toHaveBeenCalledTimes(5);
+  });
+
   it('aborts and drains actual work before withdrawing the worker or closing Redis', async () => {
     const job = pendingJob();
     const run = jest
