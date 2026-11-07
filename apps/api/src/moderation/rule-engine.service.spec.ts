@@ -153,6 +153,7 @@ function buildSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
     duplicateBanWindowSec: 48 * 60 * 60,
     duplicateBanMaxCount: 4,
     linkPolicy: LinkPolicy.ALLOWLIST_ONLY,
+    linkRulesPolicy: null,
     linkPolicyRevision: 1,
     linkPolicyEffectiveAt: new Date(),
     linkEscalationWindowHours: 24,

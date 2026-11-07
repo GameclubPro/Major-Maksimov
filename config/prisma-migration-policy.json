@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261105010000_add_night_open_notice_cleanup",
-  "baselineNamesSha256": "fc581df3d03cc49fc6f71db8b070a2689e64a61a05696856ef6e8e691837fb4c",
-  "baselineContentsSha256": "762c6c6f3116fcae03b1d67ec5caded48ecaf37d23fd60d190d0366382eaf876",
+  "baselineThrough": "20261107120000_add_link_rules_policy",
+  "baselineNamesSha256": "7166bc8819ababf35ebcc518010ff2c3247fe65758d3ae4967000391d5048105",
+  "baselineContentsSha256": "93d86fd01fc218a862c94951065086518fad7d6ebb490d4055b1ac32ec9c681f",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -181,6 +181,11 @@
       "reason": "Reviewed static replacement of the existing immutable-route trigger and additive NOT VALID context constraint. The frozen-content UPDATE now invalidates only safely unattempted recipients or an exact explicit retry, using bounded primary-key revision lookups. No retained row backfill, table scan, index build, dynamic SQL or history deletion occurs.",
       "twoPhaseRelease": true,
       "runtimeCompatibilityEvidence": "The migration leaves all existing v1 and legacy v0 rows unchanged. Only a new content revision writes v2 pending intent; SEND constraints still reject every v0. Old readers can prepare only attempt-zero markers and cannot claim attempted v0 recipients, so a mixed-version rollout fails closed. Both rollback paths require the version-2 content/retry/CAS source floor. Attempt counters remain unchanged; exact human mark_failed retains its reviewed retry exception and automated absence/unknown-effect recipients stay fenced. Expired intent remains cancellable under the structural durable CHECK."
+    },
+    "20261107120000_add_link_rules_policy": {
+      "reason": "Reviewed additive nullable JSONB policy column and static replacement of two recovery revision functions and their existing trigger. No retained rows are backfilled, deleted, scanned or indexed; unchanged JSONB preserves the existing baseline.",
+      "twoPhaseRelease": true,
+      "runtimeCompatibilityEvidence": "Legacy rows remain SQL NULL and keep their old policy and allowlist. Only explicit revision-fenced adoption writes the versioned JSON policy. New readers treat non-null malformed JSON as inert and never fall back to retired allowlist authority. Before the new admin accepts JSON, the guarded rollout stops old moderation/media readers and replaces action, publisher and retention roles. Stopped readers restart only on the target image; the queue pause is released after all 14 API roles pass the exact-image fence. Both rollback paths and the connector bootstrap require the JSON-policy and operation-v4 reader floor."
     }
   },
   "nonConcurrentIndexExceptions": {

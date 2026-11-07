@@ -46,7 +46,10 @@ const MEMBER_MANAGEMENT_ENABLE_KEYS = [
 
 type EffectiveParent = (settings: ChatSettings) => boolean;
 
-const linkModerationActive: EffectiveParent = (settings) => settings.linkPolicy !== 'ALERT_ONLY';
+const linkModerationActive: EffectiveParent = (settings) =>
+  settings.linkRulesPolicy
+    ? settings.linkRulesPolicy.mode !== 'ALLOW_ALL'
+    : settings.linkPolicy !== 'ALERT_ONLY';
 const duplicateModerationActive: EffectiveParent = (settings) =>
   settings.antiDuplicateEnabled || settings.duplicatePhotoEnabled;
 const messageLimitsModerationActive: EffectiveParent = (settings) =>
@@ -177,6 +180,7 @@ export const CHAT_SETTINGS_BOT_CAPABILITY_SELECT = {
   nightModeEnabled: true,
   nightModeForceCloseEnabled: true,
   linkPolicy: true,
+  linkRulesPolicy: true,
   photoMessagesEnabled: true,
   videoMessagesEnabled: true,
   fileMessagesEnabled: true,
@@ -282,9 +286,10 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
     }
   }
   if (
-    hasOwnSetting(params.requestedSettings, 'linkPolicy') &&
-    params.current.linkPolicy === 'ALERT_ONLY' &&
-    params.next.linkPolicy !== 'ALERT_ONLY'
+    (hasOwnSetting(params.requestedSettings, 'linkPolicy') ||
+      hasOwnSetting(params.requestedSettings, 'linkRulesPolicy')) &&
+    !linkModerationActive(params.current) &&
+    linkModerationActive(params.next)
   ) {
     writeFeatureKeys.add('linkPolicy');
   }
@@ -345,7 +350,7 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
     }
   };
   addActivatedParentMemberRequirements(
-    params.current.linkPolicy === 'ALERT_ONLY' && params.next.linkPolicy !== 'ALERT_ONLY',
+    !linkModerationActive(params.current) && linkModerationActive(params.next),
     params.next.linkBanEnabled,
     ['linkPolicy'],
   );

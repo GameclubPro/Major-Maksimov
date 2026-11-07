@@ -11,6 +11,7 @@ const ADMIN_USER = {
 
 function createRuntime(rows: Array<{ domain: string; removeAfterAt?: Date | null }> = []) {
   const prisma = {
+    chatSettings: { findUnique: jest.fn().mockResolvedValue({ linkRulesPolicy: null }) },
     domainAllowlist: {
       findMany: jest.fn().mockResolvedValue(
         rows.map((row) => ({
@@ -45,6 +46,28 @@ function createRuntime(rows: Array<{ domain: string; removeAfterAt?: Date | null
 }
 
 describe('AdminDomainAllowlistRuntime typed navigation targets', () => {
+  it('rejects every legacy mutation after JSON policy adoption while retaining readable rows', async () => {
+    const { runtime, prisma } = createRuntime([{ domain: 'domain:example.com' }]);
+    prisma.chatSettings.findUnique.mockResolvedValue({
+      linkRulesPolicy: { version: 1, mode: 'DENY_SELECTED', rules: [] },
+    } as never);
+    await expect(
+      runtime.addDomain('chat-1', ADMIN_USER, { domain: 'another.example' }),
+    ).rejects.toMatchObject({ response: { code: 'LINK_RULES_OWNERSHIP_CONFLICT' } });
+    await expect(runtime.removeDomain('chat-1', ADMIN_USER, 'example.com')).rejects.toMatchObject({
+      response: { code: 'LINK_RULES_OWNERSHIP_CONFLICT' },
+    });
+    await expect(
+      runtime.scheduleDomainRemoval('chat-1', ADMIN_USER, 'example.com', { removeAfterAt: null }),
+    ).rejects.toMatchObject({ response: { code: 'LINK_RULES_OWNERSHIP_CONFLICT' } });
+    expect(prisma.domainAllowlist.upsert).not.toHaveBeenCalled();
+    expect(prisma.domainAllowlist.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.domainAllowlist.updateMany).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
+    await expect(runtime.getDomainAllowlist('chat-1', ADMIN_USER)).resolves.toEqual([
+      'example.com',
+    ]);
+  });
   it.each(['list', 'details', 'add', 'remove', 'schedule'] as const)(
     'performs no data access after denied authority for %s',
     async (operation) => {

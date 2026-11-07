@@ -92,6 +92,12 @@ const routeChunkSources = {
   'single-chat-settings': [
     '/src/pages/settings-page.tsx',
     '/src/pages/settings-page.legacy.tsx',
+    '/src/pages/settings-page-state.ts',
+    '/src/pages/settings/settings-message-retention-model.ts',
+    '/src/pages/settings/chat-settings-workspace.tsx',
+    '/src/pages/settings/use-settings-draft.ts',
+    '/src/pages/settings/use-settings-rules.ts',
+    '/src/pages/settings/use-settings-required-subscription.ts',
     '/src/pages/settings/settings-page-helpers.tsx',
     '/src/pages/settings/settings-apply-target.ts',
     '/src/lib/api/chat-settings-client.ts',
@@ -99,6 +105,8 @@ const routeChunkSources = {
   ],
   'network-settings-editor': [
     '/src/pages/network-settings-route.tsx',
+    '/src/pages/network-settings-overview.tsx',
+    '/packages/contracts/dist/network-settings-read.js',
     '/src/lib/api/network-settings-client.ts',
     '/src/pages/network-settings-page.tsx',
     '/src/features/network-settings/network-settings-controller.ts',

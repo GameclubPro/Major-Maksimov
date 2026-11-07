@@ -27,6 +27,11 @@ export function buildSettingsSectionPatch(current: ChatSettings, body: unknown):
   // FLAG: Merging a section must not author or clear an unrelated commercial policy.
   if (!Object.hasOwn(changes, 'commercialAdsPolicy'))
     delete (next as Partial<ChatSettings>).commercialAdsPolicy;
+  if (!Object.hasOwn(changes, 'linkRulesPolicy')) {
+    delete next.linkRulesPolicy;
+    delete next.linkRulesLegacySnapshot;
+    delete next.linkRulesReplaceInvalidStorage;
+  }
   if (Object.hasOwn(changes, 'botSpeechMedia')) {
     const media = changes.botSpeechMedia;
     if (!media || typeof media !== 'object' || Array.isArray(media)) {

@@ -1243,6 +1243,7 @@ export class RuleEngineService {
       domainAllowlist,
       allowlistLinkMatcher,
       navigationTargets,
+      settings.linkRulesPolicy,
     );
     if (linkViolation) {
       violations.push({ ruleCode: 'LINK_BLOCKED', score: 0.9, reason: linkViolation });

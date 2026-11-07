@@ -1,5 +1,6 @@
 import { NETWORK_ALLOWLIST_PLAN_ROW_LIMIT } from '@maxim/contracts/network-settings';
 import { assertBoundedAllowlistRows } from './network-navigation-allowlist';
+import { assertLegacyLinkAllowlistWrite } from './link-rules-settings-policy';
 import {
   addDomainRequestSchema,
   inferAllowlistMatchType,
@@ -291,6 +292,7 @@ export class AdminDomainAllowlistRuntime {
     return this.prisma.$transaction(async (tx) => {
       // FLAG: Serialize every allowlist writer, including legacy aliases and bulk replacement.
       await tx.$queryRaw`SELECT chat.id FROM chats AS chat WHERE chat.id = ${chatId} FOR UPDATE OF chat`;
+      await assertLegacyLinkAllowlistWrite(tx, chatId);
       return write(tx);
     });
   }

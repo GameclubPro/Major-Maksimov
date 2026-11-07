@@ -638,6 +638,9 @@ export const SETTINGS_SECTION_KEYS = {
   ],
   links: [
     'linkPolicy',
+    'linkRulesPolicy',
+    'linkRulesLegacySnapshot',
+    'linkRulesReplaceInvalidStorage',
     'linkEscalationWindowHours',
     'linkWarnMaxCount',
     'linkMuteMaxCount',

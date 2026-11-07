@@ -510,23 +510,36 @@ test('reviewed delivery is restricted to bounded answers with preserved evidence
   assert.doesNotMatch(fact('subscription-membership'), /откройте ссылки|подпишитесь|Добавить/u);
 });
 
-test('link modes preserve their actual effects and the required save action', () => {
+test('four link modes preserve their actual effects, target scope and save action', () => {
   const links = fact('links-policy');
-  assert.match(links, /«Ссылки» → «Режим»/u);
+  assert.match(links, /откройте «Ссылки».*четыре режима/u);
+  assert.doesNotMatch(links, /«Ссылки» → «Режим»|три режима/u);
   assert.match(links, /отключить запрет ссылок, выбирают «Разрешать все»/u);
   assert.match(links, /«Разрешать все» — этот фильтр не удаляет ссылки/u);
-  assert.match(links, /«Удалять все» — ссылки удаляются/u);
+  assert.match(links, /«Запрещать по списку» — запрещены адреса из списка с учётом исключений/u);
+  assert.match(links, /«Удалять все» — запрещены любые ссылки, исключения не действуют/u);
+  assert.match(links, /Сообщение с запрещённой ссылкой удаляется целиком/u);
   assert.match(links, /После изменения нажмите «Сохранить»/u);
-  assert.match(links, /Пустой разрешённый список.*не разрешает все ссылки/u);
+  assert.match(links, /Пустой список.*«Разрешать по списку» запрещает все ссылки/u);
+  assert.match(links, /«Запрещать по списку» запретов по пустому списку нет/u);
+  assert.match(links, /конкретного адреса.*«Добавить».*«Только эта ссылка»/u);
+  assert.match(links, /«Весь сайт и поддомены» охватывает весь домен/u);
   assert.match(links, /Другие включённые правила.*продолжают работать независимо/u);
-  const ui = source('apps/miniapp/src/pages/settings/shared-chat-settings-fields.tsx');
-  for (const label of ['Разрешать все', 'Удалять все', 'Разрешать по списку']) {
-    assert.ok(ui.includes(`label: '${label}'`), label);
+  const ui = source('apps/miniapp/src/pages/settings/shared-link-settings-fields.tsx');
+  for (const [mode, label] of [
+    ['ALLOW_ALL', 'Разрешать все'],
+    ['DENY_SELECTED', 'Запрещать по списку'],
+    ['ALLOW_SELECTED', 'Разрешать по списку'],
+    ['DENY_ALL', 'Удалять все'],
+  ]) {
+    assert.ok(ui.includes(`value: '${mode}', label: '${label}'`), label);
     assert.ok(links.includes(`«${label}»`), label);
   }
-  assert.match(ui, /value: 'ALERT_ONLY' as const, label: 'Разрешать все'/u);
-  assert.match(ui, /value: 'BLOCKLIST_ONLY' as const, label: 'Удалять все'/u);
+  const targetLabels = source('apps/miniapp/src/pages/settings/link-settings-model.ts');
+  assert.match(targetLabels, /WEB_EXACT: 'Только эта ссылка'/u);
+  assert.match(targetLabels, /WEB_DOMAIN: 'Весь сайт и поддомены'/u);
   const detector = source('apps/api/src/moderation/rule-engine-link-detector.ts');
+  assert.match(detector, /evaluateRuntimeLinkRulesPolicy\(rules\.policy, targets\)/u);
   assert.match(detector, /policy === LinkPolicy\.ALERT_ONLY\) \{\s*return null;/u);
   assert.match(
     source('apps/miniapp/src/pages/settings/settings-section-save-footer.tsx'),

@@ -24,6 +24,7 @@ import {
   patchSettingsSection,
 } from '../src/lib/api/chat-settings-client';
 import type { ApiTransport } from '../src/lib/api/transport';
+import { linkRulesPolicySchema } from '@maxim/contracts/settings';
 
 type ApiCall = {
   path: string;
@@ -41,6 +42,51 @@ function createApiMock(response: unknown, calls: ApiCall[]): ApiTransport {
     },
   };
 }
+
+test('link section transports policy, sanctions and initial list witness together without stop-word ownership', async () => {
+  const calls: ApiCall[] = [];
+  const policy = linkRulesPolicySchema.parse({
+    version: 1,
+    mode: 'DENY_SELECTED',
+    rules: [
+      {
+        id: 'page',
+        effect: 'DENY',
+        kind: 'WEB_EXACT',
+        target: 'https://example.com/ad?literal=%2525#offer',
+      },
+    ],
+  });
+  const settings = chatSettingsSchema.parse({
+    settingsRevision: '2026-11-07T08:00:00.000Z',
+    linkRulesPolicy: policy,
+    linkRulesLegacySnapshot: {
+      revision: '7',
+      policy: { version: 1, mode: 'ALLOW_ALL', rules: [] },
+    },
+    linkWarnEnabled: false,
+    linkMuteEnabled: false,
+    linkBanEnabled: false,
+  });
+  const api = createApiMock(settings, calls);
+  await patchSettingsSection(api, 'chat-1', 'links', settings, [
+    'linkRulesPolicy',
+    'linkRulesLegacySnapshot',
+    'linkWarnEnabled',
+    'linkMuteEnabled',
+    'linkBanEnabled',
+  ]);
+  const body = JSON.parse(calls[0].init?.body as string);
+  assert.equal(calls.length, 1);
+  assert.equal(body.expectedRevision, settings.settingsRevision);
+  assert.deepEqual(body.changes.linkRulesPolicy, policy);
+  assert.equal(body.changes.linkRulesLegacySnapshot.revision, '7');
+  assert.equal(body.changes.linkWarnEnabled, false);
+  assert.equal(body.changes.linkMuteEnabled, false);
+  assert.equal(body.changes.linkBanEnabled, false);
+  assert.equal(body.changes.stopWordsPolicy, undefined);
+  assert.equal(body.changes.stopWordsRevision, undefined);
+});
 
 test('speech-style save sends only the selected style and accepts an exact revision receipt', async () => {
   const calls: ApiCall[] = [];

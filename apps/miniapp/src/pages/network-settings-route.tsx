@@ -154,6 +154,7 @@ export function NetworkSettingsRoute({ api, userId }: { api: ApiTransport; userI
           retryOfOperationId={stored.retryOfOperationId}
           returnTo={stored.returnTo}
           resumeOperationId={recovered.kind === 'resume' ? recovered.operationId : undefined}
+          onOpenLegacySites={() => openSection('stopWords')}
           onClose={() => requestNavigation(hubPath, { replace: true })}
         />
       ) : null}

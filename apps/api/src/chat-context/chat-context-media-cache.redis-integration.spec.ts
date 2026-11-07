@@ -26,7 +26,7 @@ describeRedis('chat context media payload isolation', () => {
     const row = {
       id: chatId,
       title: 'Media community',
-      settings: { chatId, botSpeechMedia: media, stopWordsMedia: {} },
+      settings: { chatId, linkRulesPolicy: null, botSpeechMedia: media, stopWordsMedia: {} },
       admins: [],
       domains: [],
       rules: null,
@@ -108,7 +108,7 @@ describeRedis('chat context media recovery and access fences', () => {
       const row = {
         id: chatId,
         title: 'Recovery',
-        settings: { chatId, botSpeechMedia: media },
+        settings: { chatId, linkRulesPolicy: null, botSpeechMedia: media },
         domains: [],
         admins: [],
         rules: null,
@@ -168,7 +168,7 @@ describeRedis('chat context media recovery and access fences', () => {
     const row = {
       id: chatId,
       title: 'Fenced',
-      settings: { chatId, botSpeechMedia: media },
+      settings: { chatId, linkRulesPolicy: null, botSpeechMedia: media },
       domains: [],
       admins: [{ userId }],
       rules: null,
@@ -254,7 +254,7 @@ describeRedis('chat context media publication race', () => {
     const row = {
       id: chatId,
       title: 'Publication race',
-      settings: { chatId, botSpeechMedia: media },
+      settings: { chatId, linkRulesPolicy: null, botSpeechMedia: media },
       domains: [],
       admins: [],
       rules: null,
@@ -318,6 +318,7 @@ describeRedis('chat context rollback compatibility', () => {
         title: 'Before rollback',
         settings: {
           chatId,
+          linkRulesPolicy: null,
           botSpeechMedia: {
             greetingBotMessageText: {
               base64: 'v'.repeat(100_000),

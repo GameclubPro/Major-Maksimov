@@ -25,6 +25,8 @@ export type SettingsSaveProgress =
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 const independentKeys = new Set([
   'settingsRevision',
+  'linkRulesLegacySnapshot',
+  'linkRulesStorageStatus',
   'stopWordsPolicy',
   'stopWordsRevision',
   'messageLimitsBlockedWords',

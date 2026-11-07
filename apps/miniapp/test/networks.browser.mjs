@@ -129,8 +129,8 @@ async function numericSamplesFit(page, name, detail = false) {
   );
 }
 
-async function observe(page) {
-  await page.evaluate(async () => {
+async function observe(page, linkRulesField) {
+  await page.evaluate(async (linkRulesField) => {
     const findModule = (name) =>
       performance
         .getEntriesByType('resource')
@@ -148,6 +148,20 @@ async function observe(page) {
         body: init.body ? JSON.parse(init.body) : null,
       });
       if (
+        linkRulesField &&
+        method === 'POST' &&
+        url.pathname.endsWith('/networks/settings/read') &&
+        JSON.parse(init.body).section === 'links'
+      ) {
+        const { handleNetworkSettingsPreviewRequest } =
+          await import('/app/src/lib/api/preview-transport-network-settings.ts');
+        const response = await handleNetworkSettingsPreviewRequest(context);
+        return {
+          ...response,
+          fields: { ...response.fields, linkRulesPolicy: linkRulesField },
+        };
+      }
+      if (
         window.__networkLostComposition &&
         method === 'PUT' &&
         url.pathname.endsWith('/composition')
@@ -161,7 +175,7 @@ async function observe(page) {
       }
       return PREVIEW_NOT_HANDLED;
     });
-  });
+  }, linkRulesField);
 }
 
 async function back(page) {
@@ -264,6 +278,16 @@ async function labelWrites(page) {
 }
 
 const LINK_POLICY_LABEL = 'Режим модерации ссылок';
+const LINK_MODES = {
+  ALLOW_ALL: 'Разрешать все',
+  DENY_SELECTED: 'Запрещать по списку',
+  ALLOW_SELECTED: 'Разрешать по списку',
+  DENY_ALL: 'Удалять все',
+};
+const COMMON_LINK_POLICY = {
+  kind: 'common',
+  value: { version: 1, mode: 'DENY_SELECTED', rules: [] },
+};
 const LINK_PERIOD_LABEL = 'Повторные ссылки: период';
 const LINK_PERIOD_ERROR = 'Укажите число от 1 до 168.';
 const GREETING_LABEL = 'Включить приветствие новых участников';
@@ -278,9 +302,11 @@ const sectionFields = {
     {
       label: LINK_POLICY_LABEL,
       selector: `[role="radiogroup"][aria-label="${LINK_POLICY_LABEL}"]`,
-      wrapper: '.settings-policy',
-      labelSelector: '.field__label',
+      wrapper: '.links-panel__hero',
+      labelSelector: '.links-panel__hero-label',
     },
+  ],
+  linksSanctions: [
     ...['период', 'предупреждение', 'ограничение', 'блокировка'].map((label) => ({
       label: `Повторные ссылки: ${label}`,
       selector: `input[aria-label="Повторные ссылки: ${label}"]`,
@@ -322,11 +348,36 @@ function linkPolicy(panel) {
 async function policyValue(policy) {
   const selected = policy.getByRole('radio', { checked: true });
   assert.ok((await selected.count()) <= 1, 'policy has at most one selected segment');
-  return (await selected.count()) ? selected.getAttribute('data-segmented-value') : null;
+  if (!(await selected.count())) return null;
+  const label = (await selected.innerText()).trim();
+  const mode = Object.entries(LINK_MODES).find(([, value]) => value === label)?.[0];
+  assert.ok(mode, 'selected policy has a recognized accessible label');
+  return mode;
 }
-async function selectBlockingPolicy(policy) {
-  await policy.getByRole('radio', { name: 'Удалять все', exact: true }).click();
-  assert.equal(await policyValue(policy), 'BLOCKLIST_ONLY');
+async function confirmLinkReplacement(page) {
+  const dialog = page.getByRole('dialog', { name: 'Настроить общие правила?', exact: true });
+  await dialog.waitFor();
+  await dialog.getByRole('button', { name: 'Настроить', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+}
+async function selectBlockingPolicy(page) {
+  const policy = linkPolicy(page.locator('.network-settings-editor'));
+  const radio = policy.getByRole('radio', { name: LINK_MODES.DENY_ALL, exact: true });
+  if (await radio.isDisabled()) {
+    await page.getByRole('button', { name: 'Настроить общие правила', exact: true }).click();
+    await confirmLinkReplacement(page);
+  }
+  await radio.click();
+  if ((await policyValue(policy)) === null) await confirmLinkReplacement(page);
+  assert.equal(await policyValue(policy), 'DENY_ALL');
+}
+async function openLinkSanctions(panel) {
+  const summary = panel.locator('summary').filter({ hasText: /^Наказания и сообщения$/u });
+  const details = summary.locator('..');
+  if (!(await details.evaluate((node) => node.open))) {
+    await summary.click();
+  }
+  await panel.getByRole('spinbutton', { name: LINK_PERIOD_LABEL, exact: true }).waitFor();
 }
 
 async function tileAppearance(root) {
@@ -369,10 +420,11 @@ async function tileAppearance(root) {
 }
 
 async function overviewOrder(root) {
-  const misplaced = await root
-    .locator('.settings-home-entry, .settings-home-group-head')
-    .evaluateAll((nodes) => {
-      const entries = nodes
+  const groups = await root.locator('.settings-overview-group').evaluateAll((nodes) =>
+    nodes.map((group) => {
+      const bounds = group.getBoundingClientRect();
+      const heading = group.querySelector('.settings-home-group-head');
+      const entries = [...group.querySelectorAll('.settings-home-entry')]
         .filter((node) => node.getBoundingClientRect().height > 0)
         .map((node) => ({
           title: node.textContent.trim(),
@@ -380,8 +432,30 @@ async function overviewOrder(root) {
           top: node.getBoundingClientRect().top,
         }))
         .sort((a, b) => a.order - b.order);
-      return entries.filter((entry, index) => index > 0 && entry.top < entries[index - 1].top - 1);
-    });
+      return {
+        title: heading?.textContent.trim() ?? null,
+        top: bounds.top,
+        bottom: bounds.bottom,
+        headingBottom: heading?.getBoundingClientRect().bottom ?? null,
+        entries,
+      };
+    }),
+  );
+  assert.deepEqual(
+    groups.map((group) => group.title),
+    [null, 'Защита', 'Контент'],
+  );
+  const misplaced = groups.flatMap((group, index) => {
+    const failures = group.entries.filter(
+      (entry, entryIndex) =>
+        (entryIndex > 0 && entry.top < group.entries[entryIndex - 1].top - 1) ||
+        (group.headingBottom !== null && entry.top < group.headingBottom - 1),
+    );
+    if (index > 0 && group.top < groups[index - 1].bottom - 1) {
+      failures.push({ title: group.title, top: group.top });
+    }
+    return failures;
+  });
   assert.deepEqual(misplaced, [], 'settings tiles keep their order within the visible groups');
 }
 
@@ -441,7 +515,6 @@ async function sectionAppearance(panel, section) {
         options:
           control.getAttribute('role') === 'radiogroup'
             ? [...control.querySelectorAll('[role="radio"]')].map((option) => ({
-                value: option.dataset.segmentedValue,
                 label: option.textContent.trim(),
                 tag: option.tagName,
                 type: option.getAttribute('type'),
@@ -467,13 +540,16 @@ async function sectionAppearance(panel, section) {
       classes: [...root.classList].filter((name) => name !== 'network-settings-editor').sort(),
       icon: root.querySelector('.settings-drilldown__symbol')?.innerHTML ?? null,
       titleStyle: appearance(root.querySelector('.settings-drilldown__title')),
-      groups: [...root.querySelectorAll('.settings-subsection-divider, .duplicate-stage__top')].map(
-        (group) => ({
+      groups: [...root.querySelectorAll('.settings-subsection-divider, .duplicate-stage__top')]
+        .filter(
+          (group) =>
+            !group.closest('details:not([open])') && group.getBoundingClientRect().height > 0,
+        )
+        .map((group) => ({
           title: group.textContent.trim(),
           classes: [...group.classList].sort(),
           style: appearance(group),
-        }),
-      ),
+        })),
       fields,
       hasBody: Boolean(root.querySelector('.settings-drilldown__body')),
     };
@@ -487,6 +563,11 @@ async function singleSettingsAppearance(context, profile, errors) {
     await single.goto(new URL('chat/preview-chat/settings?preview=1', base).href);
     await single.locator('.settings-sections--chat-home').waitFor();
     await single.getByRole('searchbox', { name: 'Найти настройку', exact: true }).waitFor();
+    await Promise.all(
+      ['Команды', 'Магазин чата'].map((name) =>
+        single.getByRole('button', { name, exact: true }).waitFor(),
+      ),
+    );
     await applyNativeVisualMode(single, { safeTop: 0, safeBottom: profile.safeBottom });
     await settleVisualFrame(single);
     const header = await workspaceHeaderAppearance(single);
@@ -502,6 +583,11 @@ async function singleSettingsAppearance(context, profile, errors) {
       await sectionReady(panel, section).waitFor();
       await settleVisualFrame(single);
       sections[section] = await sectionAppearance(panel, section);
+      if (section === 'links') {
+        await openLinkSanctions(panel);
+        await settleVisualFrame(single);
+        sections.linksSanctions = await sectionAppearance(panel, 'linksSanctions');
+      }
       if (section === 'greeting') {
         assert.equal(
           await panel
@@ -610,7 +696,7 @@ async function openSettingsSection(page, section, single) {
   return panel;
 }
 
-for (const profile of [
+const profiles = [
   {
     name: 'iphone-se-dark',
     engine: webkit,
@@ -638,9 +724,13 @@ for (const profile of [
     platform: 'android',
     safeBottom: 0,
   },
-].filter(
-  (profile) =>
-    !process.env.MINIAPP_TEST_PROFILE || profile.name === process.env.MINIAPP_TEST_PROFILE,
+];
+const selectedProfile = process.env.MINIAPP_TEST_PROFILE;
+if (selectedProfile && !profiles.some((profile) => profile.name === selectedProfile)) {
+  throw new Error(`Unknown Networks browser profile: ${selectedProfile}`);
+}
+for (const profile of profiles.filter(
+  (profile) => !selectedProfile || profile.name === selectedProfile,
 )) {
   const browser = await profile.engine.launch(
     captureBrowserLaunchOptions(profile.engine.name(), base.href),
@@ -1105,7 +1195,7 @@ for (const profile of [
     assert.match(await page.locator('.network-summary-card').first().innerText(), /Подписчики/u);
     await fits(page, `${profile.name} channel catalogue`);
 
-    const openSelectedSettings = async (scenario) => {
+    const openSelectedSettings = async (scenario, linkRulesField) => {
       await open(
         'networks?type=chat&category=important&tab=communities',
         '[data-network-entity-id]',
@@ -1151,14 +1241,154 @@ for (const profile of [
           networksScenario: scenario,
         },
       );
-      await observe(page);
+      await observe(page, linkRulesField);
       const scope = await settingsHub(page);
       await openSettingsSection(page, 'links');
       return scope;
     };
-    const selectedScope = await openSelectedSettings('uncertain');
+    const legacyScope = await openSelectedSettings('uncertain');
     const policy = linkPolicy(page.locator('.network-settings-editor'));
-    assert.equal(await policyValue(policy), null, 'different settings remain mixed');
+    assert.deepEqual(await policy.getByRole('radio').allTextContents(), Object.values(LINK_MODES));
+    assert.equal(await policyValue(policy), null, 'legacy settings have no authored common policy');
+    assert.equal(
+      await policy.getByRole('radio', { disabled: true }).count(),
+      4,
+      'common legacy state requires explicit replacement before editing modes',
+    );
+    const replaceDialog = page.getByRole('dialog', {
+      name: 'Настроить общие правила?',
+      exact: true,
+    });
+    const configureRules = page.getByRole('button', {
+      name: 'Настроить общие правила',
+      exact: true,
+    });
+    const reviewChanges = page.getByRole('button', { name: 'Проверить изменения', exact: true });
+    await configureRules.click();
+    await replaceDialog.waitFor();
+    assert.equal(await policyValue(policy), null, 'opening confirmation does not author a policy');
+    await replaceDialog.getByRole('button', { name: 'Отмена', exact: true }).click();
+    await replaceDialog.waitFor({ state: 'hidden' });
+    assert.equal(
+      await reviewChanges.isDisabled(),
+      true,
+      'cancel preserves the unchanged legacy state',
+    );
+    await configureRules.click();
+    await confirmLinkReplacement(page);
+    assert.equal(await policyValue(policy), 'DENY_SELECTED');
+    assert.equal(
+      await reviewChanges.isEnabled(),
+      true,
+      'confirmation creates a reviewable common policy',
+    );
+
+    const previousSitesOperation = await page.evaluate(async (scopeId) => {
+      const { persistNetworkSettingsOperationReceipt } =
+        await import('/app/src/lib/network-settings-operation-storage.ts');
+      const key = Object.keys(localStorage).find(
+        (value) =>
+          value.startsWith('maxim.network.settings.scope.v1:') && value.endsWith(':' + scopeId),
+      );
+      const stored = JSON.parse(localStorage.getItem(key));
+      const operationId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      await persistNetworkSettingsOperationReceipt({
+        version: 1,
+        scopeId,
+        userId: stored.userId,
+        entityType: 'chat',
+        section: 'stopWords',
+        title: stored.title,
+        operationId,
+        launchState: 'submitted',
+        lastKnownStatus: 'COMPLETE',
+        updatedAt: now,
+        completionConfirmedAt: now,
+        recipientIds: stored.scope.target.entityIds,
+      });
+      return operationId;
+    }, legacyScope);
+    const leaveDialog = page.getByRole('dialog', { name: 'Выйти без сохранения?', exact: true });
+    const oldSites = page.getByRole('button', { name: 'Ранее настроенные сайты', exact: true });
+    await oldSites.click();
+    await leaveDialog.waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('scope'), legacyScope);
+    await back(page);
+    await leaveDialog.waitFor({ state: 'hidden' });
+    assert.equal(
+      await policyValue(policy),
+      'DENY_SELECTED',
+      'cancelled site navigation keeps the common policy draft',
+    );
+    await oldSites.click();
+    await leaveDialog.waitFor();
+    await leaveDialog.getByRole('button', { name: 'Выйти без сохранения', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Стоп-слова', exact: true }).waitFor();
+    await page.getByRole('radio', { name: /^Сайты/u }).click();
+    await page.getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true }).waitFor();
+    const freshSitesScope = new URL(page.url()).searchParams.get('scope');
+    assert.notEqual(
+      freshSitesScope,
+      legacyScope,
+      'completed site operations open a fresh editor scope',
+    );
+    assert.deepEqual(
+      (await storedScope(page, freshSitesScope)).scope.target,
+      (await storedScope(page, legacyScope)).scope.target,
+      'site navigation keeps the exact selected recipients',
+    );
+    assert.equal(
+      await page.locator('.network-settings-page__operation').count(),
+      0,
+      'old site receipt does not replace the requested editor with its result',
+    );
+    assert.equal(
+      await page.evaluate(
+        (operationId) => window.__networkRequests.some((row) => row.path.includes(operationId)),
+        previousSitesOperation,
+      ),
+      false,
+      'opening old sites does not resume a completed operation',
+    );
+    assert.equal(
+      await page.evaluate(
+        () =>
+          window.__networkRequests.filter(
+            (row) => row.path.endsWith('/preview') || row.path.endsWith('/apply'),
+          ).length,
+      ),
+      0,
+      'confirmation and site navigation do not prepare or apply changes',
+    );
+
+    await openSelectedSettings('uncertain', { kind: 'mixed' });
+    assert.equal(await policyValue(policy), null, 'different new policies remain mixed');
+    await policy.getByRole('radio', { name: LINK_MODES.DENY_ALL, exact: true }).click();
+    await replaceDialog.waitFor();
+    await replaceDialog.getByRole('button', { name: 'Отмена', exact: true }).click();
+    await replaceDialog.waitFor({ state: 'hidden' });
+    assert.equal(await policyValue(policy), null, 'cancel keeps the mixed policy unchanged');
+    assert.equal(await reviewChanges.isDisabled(), true);
+    await selectBlockingPolicy(page);
+    await reviewChanges.click();
+    await page.getByRole('button', { name: /^Применить ·/u }).waitFor();
+    const replacementRequest = await page.evaluate(() =>
+      window.__networkRequests.find((row) => row.path.endsWith('/preview')),
+    );
+    assert.deepEqual(
+      replacementRequest.body.changes,
+      [{ path: 'linkRulesPolicy', op: 'set', value: { version: 1, mode: 'DENY_ALL', rules: [] } }],
+      'explicit replacement authors the complete policy without changing sanction fields',
+    );
+    assert.equal('navigationAllowlist' in replacementRequest.body, false);
+
+    const selectedScope = await openSelectedSettings('uncertain', COMMON_LINK_POLICY);
+    assert.equal(
+      await policyValue(policy),
+      'DENY_SELECTED',
+      'existing common policy remains unchanged',
+    );
     await policy.getByRole('radio').first().focus();
     await policy.getByRole('radio').first().blur();
     assert.equal(
@@ -1166,7 +1396,13 @@ for (const profile of [
       true,
       'focus cannot create a draft',
     );
-    const leaveDialog = page.getByRole('dialog', { name: 'Выйти без сохранения?', exact: true });
+    await openLinkSanctions(page.locator('.network-settings-editor'));
+    await settleVisualFrame(page);
+    assert.deepEqual(
+      await sectionAppearance(page.locator('.network-settings-editor'), 'linksSanctions'),
+      single.sections.linksSanctions,
+      'network link sanctions retain the original single-chat controls and presentation',
+    );
     const invalidNumber = page
       .locator('.network-settings-editor')
       .getByRole('spinbutton', { name: LINK_PERIOD_LABEL, exact: true });
@@ -1202,6 +1438,7 @@ for (const profile of [
       readCount: readCountBeforeInvalidDiscard,
     });
     await openSettingsSection(page, 'links', single);
+    await openLinkSanctions(page.locator('.network-settings-editor'));
     assert.equal(
       await invalidNumber.inputValue(),
       originalNumber,
@@ -1210,8 +1447,8 @@ for (const profile of [
     assert.equal(await page.getByText(LINK_PERIOD_ERROR, { exact: true }).count(), 0);
     assert.equal(
       await policyValue(policy),
-      null,
-      'invalid-only discard does not author mixed policy',
+      'DENY_SELECTED',
+      'invalid-only discard preserves the saved common policy',
     );
     assert.equal(
       await page.getByRole('button', { name: 'Проверить изменения', exact: true }).isDisabled(),
@@ -1222,12 +1459,12 @@ for (const profile of [
     await settingsHub(page, { scope: selectedScope, readCount: (await readRequests(page)).length });
     assert.equal(await leaveDialog.count(), 0, 'discarded errors do not leave a stale dirty guard');
     await openSettingsSection(page, 'links', single);
-    await selectBlockingPolicy(policy);
+    await selectBlockingPolicy(page);
     await back(page);
     await leaveDialog.waitFor();
     await back(page);
     await leaveDialog.waitFor({ state: 'hidden' });
-    assert.equal(await policyValue(policy), 'BLOCKLIST_ONLY', 'cancel leaving keeps draft');
+    assert.equal(await policyValue(policy), 'DENY_ALL', 'cancel leaving keeps draft');
     await back(page);
     await leaveDialog.waitFor();
     await leaveDialog.getByRole('button', { name: 'Выйти без сохранения', exact: true }).click();
@@ -1280,7 +1517,11 @@ for (const profile of [
     await leaveDialog.getByRole('button', { name: 'Выйти без сохранения', exact: true }).click();
     await settingsHub(page, { scope: selectedScope, readCount: readCountAfterGreeting });
     await openSettingsSection(page, 'links', single);
-    assert.equal(await policyValue(policy), null, 'discarded draft restores original mixed state');
+    assert.equal(
+      await policyValue(policy),
+      'DENY_SELECTED',
+      'discarded draft restores the saved common policy',
+    );
     assert.equal(
       await page.evaluate(
         () =>
@@ -1291,14 +1532,14 @@ for (const profile of [
       0,
       'discard and section navigation never prepare or save',
     );
-    await selectBlockingPolicy(policy);
+    await selectBlockingPolicy(page);
     await back(page);
     await leaveDialog.waitFor();
     await back(page);
     await leaveDialog.waitFor({ state: 'hidden' });
     assert.equal(
       await policyValue(policy),
-      'BLOCKLIST_ONLY',
+      'DENY_ALL',
       'cancel leaving after section change keeps new draft',
     );
     await fits(page, `${profile.name} mixed settings`);
@@ -1306,6 +1547,7 @@ for (const profile of [
       path: join(output, `${profile.name}-mixed-settings.png`),
       animations: 'disabled',
     });
+    await openLinkSanctions(page.locator('.network-settings-editor'));
     await page.getByRole('spinbutton', { name: LINK_PERIOD_LABEL, exact: true }).focus();
     await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
     await fits(page, `${profile.name} settings keyboard`);
@@ -1330,7 +1572,7 @@ for (const profile of [
       window.__networkRequests.find((row) => row.path.endsWith('/preview')),
     );
     assert.deepEqual(previewRequest.body.changes, [
-      { path: 'linkPolicy', op: 'set', value: 'BLOCKLIST_ONLY' },
+      { path: 'linkRulesPolicy', op: 'set', value: { version: 1, mode: 'DENY_ALL', rules: [] } },
     ]);
     assert.equal(previewRequest.body.recipients.length, 2);
     assert.equal('source' in previewRequest.body, false);
@@ -1347,7 +1589,7 @@ for (const profile of [
     );
 
     await openSelectedSettings('prepared-reload');
-    await selectBlockingPolicy(linkPolicy(page.locator('.network-settings-editor')));
+    await selectBlockingPolicy(page);
     await page.getByRole('button', { name: 'Проверить изменения', exact: true }).click();
     await page.waitForFunction(() =>
       [...document.querySelectorAll('button')].some(
@@ -1396,7 +1638,7 @@ for (const profile of [
 
     if (profile.name === 'iphone-se-dark') {
       await openSelectedSettings('receipt-denied');
-      await selectBlockingPolicy(linkPolicy(page.locator('.network-settings-editor')));
+      await selectBlockingPolicy(page);
       await page.getByRole('button', { name: 'Проверить изменения', exact: true }).click();
       await page.waitForFunction(() =>
         [...document.querySelectorAll('button')].some(

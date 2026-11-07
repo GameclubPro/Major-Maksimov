@@ -30,6 +30,11 @@ const DERIVED_CHAT_PATHS = new Set<string>([
 ]);
 // FLAG: Keep the retired selector readable by old clients without authoring it in network drafts.
 const RETIRED_CHAT_PATHS = new Set<string>(['duplicateCompareMode']);
+const LINK_RULES_METADATA_PATHS = new Set<string>([
+  'linkRulesLegacySnapshot',
+  'linkRulesStorageStatus',
+  'linkRulesReplaceInvalidStorage',
+]);
 
 const CHAT_SUPPLEMENTAL_SECTIONS = {
   speechStyle: ['botSpeechStyle'],
@@ -112,7 +117,10 @@ export function networkSettingsPaths(
   const chatSection = section as keyof typeof SETTINGS_SECTION_KEYS;
   return [
     ...SETTINGS_SECTION_KEYS[chatSection].filter(
-      (key) => !DERIVED_CHAT_PATHS.has(key) && !RETIRED_CHAT_PATHS.has(key),
+      (key) =>
+        !DERIVED_CHAT_PATHS.has(key) &&
+        !RETIRED_CHAT_PATHS.has(key) &&
+        !LINK_RULES_METADATA_PATHS.has(key),
     ),
     ...SETTINGS_SECTION_BOT_SPEECH_MEDIA_KEYS[chatSection].map((key) => `botSpeechMedia.${key}`),
   ];

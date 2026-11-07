@@ -221,6 +221,95 @@ test('v2+ recipient parser permits new fields without losing retained revision w
   );
 });
 
+test('v2+ retains the inline v3 reader with every legacy version routing branch', () => {
+  const path = 'apps/api/src/admin/network-settings.service.ts';
+  const contract = 'packages/contracts/src/network-settings-read.ts';
+  const original = compact(read(path));
+  const v4Guard =
+    "||(payload.request.changes.some((change)=>change.path==='linkRulesPolicy')&&version<4)";
+  const v4Writer =
+    "readerVersion:request.changes.some((change)=>change.path==='linkRulesPolicy')?4:";
+  const legacy = original
+    .replace('NETWORK_SETTINGS_OPERATION_READER_VERSION,', '')
+    .replace(
+      "export{NETWORK_SETTINGS_OPERATION_READER_VERSION}from'@maxim/contracts/network-settings';",
+      'exportconstNETWORK_SETTINGS_OPERATION_READER_VERSION=3;',
+    )
+    .replace(v4Guard, '')
+    .replace(v4Writer, 'readerVersion:');
+  assert.ok(legacy.includes('exportconstNETWORK_SETTINGS_OPERATION_READER_VERSION=3;'));
+  assert.ok(!legacy.includes(v4Guard));
+  assert.ok(!legacy.includes(v4Writer));
+  const legacyRead = (candidate) =>
+    candidate === path
+      ? legacy
+      : candidate === contract
+        ? read(candidate).replace('export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 4;', '')
+        : read(candidate);
+  assert.doesNotThrow(() => assertNetworkSettingsV2Source('a'.repeat(40), legacyRead));
+  for (const fragment of [
+    'exportconstNETWORK_SETTINGS_OPERATION_READER_VERSION=3;',
+    'readerVersion:V3_SECTIONS.has(request.section)?3:request.navigationAllowlist?2:1',
+    '(payload.request.navigationAllowlist&&version<2)',
+    '(V3_SECTIONS.has(payload.request.section)&&version<3)',
+  ]) {
+    assert.ok(legacy.includes(fragment), fragment);
+    const changed = legacy.replace(fragment, 'removed_reader');
+    assert.throws(
+      () =>
+        assertNetworkSettingsV2Source('a'.repeat(40), (candidate) =>
+          candidate === path ? changed : legacyRead(candidate),
+        ),
+      failure,
+      fragment,
+    );
+  }
+});
+
+test('v2+ canonical v4 reader requires its selected contract and live runtime edge', () => {
+  const path = 'apps/api/src/admin/network-settings.service.ts';
+  const contract = 'packages/contracts/src/network-settings-read.ts';
+  const original = read(path);
+  const runtime = [...original.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\2/gu)].find(
+    (entry) => entry[3] === '@maxim/contracts/network-settings',
+  );
+  assert.ok(runtime);
+  const reexport =
+    "export { NETWORK_SETTINGS_OPERATION_READER_VERSION } from '@maxim/contracts/network-settings';";
+  assert.ok(original.includes(reexport));
+  const guard =
+    "(payload.request.changes.some((change) => change.path === 'linkRulesPolicy') && version < 4)";
+  const writer =
+    "readerVersion:request.changes.some((change)=>change.path==='linkRulesPolicy')?4:";
+  const compactOriginal = compact(original);
+  assert.ok(original.includes(guard));
+  assert.ok(compactOriginal.includes(writer));
+  for (const [candidatePath, changed] of [
+    [contract, read(contract).replace('READER_VERSION = 4;', 'READER_VERSION = 3;')],
+    [path, original.replace(reexport, '')],
+    [path, original.replace(runtime[0], runtime[0].replace('import {', 'import type {'))],
+    [
+      path,
+      original.replace(
+        runtime[0],
+        runtime[0].replace('@maxim/contracts/network-settings', '@maxim/contracts/stale-network-settings'),
+      ),
+    ],
+    [path, original.replace(guard, 'false') + `;function unrelated_reader(){return ${guard};}`],
+    [path, compactOriginal.replace(writer, 'readerVersion:') + `;const unrelated={${writer}1};`],
+  ]) {
+    assert.notEqual(changed, read(candidatePath), candidatePath);
+    assert.throws(
+      () =>
+        assertNetworkSettingsV2Source('a'.repeat(40), (candidate) =>
+          candidate === candidatePath ? changed : read(candidate),
+        ),
+      failure,
+      candidatePath,
+    );
+  }
+});
+
 test('both API rollback paths check v2+ before runtime or Git mutation', () => {
   for (const [path, argument, transition] of [
     [

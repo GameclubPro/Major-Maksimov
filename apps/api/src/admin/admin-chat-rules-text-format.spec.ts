@@ -19,6 +19,38 @@ import {
 } from './admin-chat-rules-text-format';
 
 describe('admin chat rules text format helpers', () => {
+  it.each([
+    ['ALLOW_ALL', undefined],
+    ['DENY_SELECTED', 'Не публикуйте ссылки из запрещённого списка.'],
+    ['ALLOW_SELECTED', 'Можно отправлять только ссылки из разрешённого списка.'],
+    ['DENY_ALL', 'Пожалуйста, не отправляйте ссылки: бот их удаляет.'],
+  ] as const)(
+    'describes the authored %s link mode without exposing configured targets',
+    (mode, expected) => {
+      const settings = chatSettingsSchema.parse({
+        linkPolicy: 'BLOCKLIST_ONLY',
+        linkRulesPolicy: {
+          version: 1,
+          mode,
+          rules: [
+            {
+              id: 'blocked',
+              kind: 'WEB_EXACT',
+              effect: 'DENY',
+              target: 'https://example.com/offer',
+            },
+          ],
+        },
+      });
+      expect(
+        buildRulesTextItemsFromSettings({
+          settings,
+          domains: [],
+          requiredSubscriptionChannels: [],
+        })[0],
+      ).toBe(expected);
+    },
+  );
   it('builds autofilled rules text from active settings', () => {
     const settings = chatSettingsSchema.parse({
       linkPolicy: 'ALLOWLIST_ONLY',

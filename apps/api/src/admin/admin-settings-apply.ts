@@ -22,7 +22,7 @@ import {
   stopWordsPolicySchema,
 } from '@maxim/contracts';
 import { BadRequestException, ConflictException, HttpException } from '@nestjs/common';
-import { commercialAdsPolicySchema } from '@maxim/contracts/settings';
+import { commercialAdsPolicySchema, linkRulesPolicySchema } from '@maxim/contracts/settings';
 import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
 import { ChatCatalogKind, ChatEntityType, Prisma } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -58,6 +58,12 @@ import {
 import { stopWordsPolicyStorage } from '../moderation/stop-words/stop-words.policy';
 import { assertReportsActivationAvailable } from './report-settings-availability';
 import { assertStopWordsStorageEditable } from './stop-words-storage-boundary';
+import {
+  LINK_RULES_METADATA_KEYS,
+  inactiveLinkRulesPolicy,
+  linkRulesLegacyShadow,
+  linkRulesOwnershipConflict,
+} from './link-rules-settings-policy';
 
 const REPORT_SETTINGS_KEYS = Object.keys(reportSettingsSchema.shape) as Array<keyof ReportSettings>;
 const REPORT_COMMAND_SELECT = Object.fromEntries(
@@ -306,10 +312,28 @@ export async function applySettingsToAllChats(params: {
   );
   const majorSettingsUpdatePayload = omitLegacyStopWordsSettings(legacySettingsUpdatePayload);
   delete majorSettingsUpdatePayload.settingsRevision;
+  const copiedLinkRulesPolicy = majorSettingsUpdatePayload.linkRulesPolicy;
+  const copiesLinkRulesPolicy =
+    copiedLinkRulesPolicy != null && hasOwnSetting(params.body, 'linkRulesPolicy');
+  if (copiesLinkRulesPolicy && normalizedSettings.linkRulesStorageStatus === 'invalid')
+    throw linkRulesOwnershipConflict();
+  const authorsLegacyLinkPolicy =
+    Object.hasOwn(majorSettingsUpdatePayload, 'linkPolicy') &&
+    hasOwnSetting(params.body, 'linkPolicy');
+  if (!authorsLegacyLinkPolicy && !copiesLinkRulesPolicy)
+    delete majorSettingsUpdatePayload.linkPolicy;
+  if (copiesLinkRulesPolicy)
+    majorSettingsUpdatePayload.linkPolicy = linkRulesLegacyShadow(copiedLinkRulesPolicy!);
+  delete majorSettingsUpdatePayload.linkRulesPolicy;
+  for (const key of LINK_RULES_METADATA_KEYS) delete majorSettingsUpdatePayload[key];
   if (!hasOwnSetting(params.body, 'commercialAdsPolicy'))
     delete majorSettingsUpdatePayload.commercialAdsPolicy;
+  const policyFreeUpdatePayload: Omit<
+    typeof majorSettingsUpdatePayload,
+    'linkRulesPolicy' | (typeof LINK_RULES_METADATA_KEYS)[number]
+  > = majorSettingsUpdatePayload;
   const { commercialAdsPolicy: copiedCommercialPolicy, ...majorSettingsUpdateData } =
-    majorSettingsUpdatePayload;
+    policyFreeUpdatePayload;
   const copiesCommercialPolicy = Object.hasOwn(majorSettingsUpdatePayload, 'commercialAdsPolicy');
   const requestedLegacySettings = Object.fromEntries(
     LEGACY_STOP_WORD_SETTING_KEYS.filter(
@@ -323,12 +347,16 @@ export async function applySettingsToAllChats(params: {
     ...DEFAULT_PUBLISHER_OWNED_CHAT_SETTINGS,
   };
   delete majorSettingsCreatePayload.settingsRevision;
+  delete majorSettingsCreatePayload.linkRulesPolicy;
+  for (const key of LINK_RULES_METADATA_KEYS) delete majorSettingsCreatePayload[key];
   const majorSettingsCreateBase: Partial<typeof majorSettingsCreatePayload> = {
     ...majorSettingsCreatePayload,
   };
   delete majorSettingsCreateBase.commercialAdsPolicy;
-  const majorSettingsCreateData: Omit<typeof majorSettingsCreateBase, 'commercialAdsPolicy'> =
-    majorSettingsCreateBase;
+  const majorSettingsCreateData: Omit<
+    typeof majorSettingsCreateBase,
+    'commercialAdsPolicy' | 'linkRulesPolicy' | (typeof LINK_RULES_METADATA_KEYS)[number]
+  > = majorSettingsCreateBase;
 
   const requiresReportPolicyValidation = Object.keys(majorSettingsUpdatePayload).some(
     (key) => key.startsWith('reports') || /^admin.*Command/.test(key),
@@ -372,7 +400,18 @@ export async function applySettingsToAllChats(params: {
           ...DEFAULT_CHAT_SETTINGS,
           ...(currentByChatId.get(chatId) ?? {}),
         } as ChatSettings;
-        const next = { ...current, ...majorSettingsUpdatePayload } as ChatSettings;
+        if (!copiesLinkRulesPolicy && authorsLegacyLinkPolicy && current.linkRulesPolicy != null)
+          throw linkRulesOwnershipConflict();
+        const storedLinks = linkRulesPolicySchema.safeParse(current.linkRulesPolicy);
+        if (current.linkRulesPolicy != null)
+          current.linkRulesPolicy = storedLinks.success
+            ? storedLinks.data
+            : inactiveLinkRulesPolicy();
+        const next = {
+          ...current,
+          ...majorSettingsUpdatePayload,
+          ...(copiesLinkRulesPolicy ? { linkRulesPolicy: copiedLinkRulesPolicy } : {}),
+        } as ChatSettings;
         if (requiresReportPolicyValidation) {
           assertReportPolicyForTarget(
             chatId,
@@ -518,6 +557,7 @@ export async function applySettingsToAllChats(params: {
             : normalizedSettings.botSpeechMedia;
         const updatePayloadForChat = {
           ...majorSettingsUpdateData,
+          ...(copiesLinkRulesPolicy ? { linkRulesPolicy: copiedLinkRulesPolicy! } : {}),
           ...(copiesCommercialPolicy
             ? { commercialAdsPolicy: copiedCommercialPolicy ?? Prisma.DbNull }
             : {}),
@@ -533,6 +573,12 @@ export async function applySettingsToAllChats(params: {
         };
         const createPayloadForChat = {
           ...majorSettingsCreateData,
+          ...(copiesLinkRulesPolicy
+            ? {
+                linkRulesPolicy: copiedLinkRulesPolicy!,
+                linkPolicy: linkRulesLegacyShadow(copiedLinkRulesPolicy!),
+              }
+            : {}),
           ...(copiesCommercialPolicy
             ? {
                 commercialAdsPolicy:
@@ -580,6 +626,13 @@ export async function applySettingsToAllChats(params: {
               },
               update: { catalogKind: ChatCatalogKind.MANAGED },
             });
+            if (!copiesLinkRulesPolicy && authorsLegacyLinkPolicy) {
+              const targetLinks = await tx.chatSettings.findUnique({
+                where: { chatId },
+                select: { linkRulesPolicy: true },
+              });
+              if (targetLinks?.linkRulesPolicy != null) throw linkRulesOwnershipConflict();
+            }
             await assertFixedModeratorCapabilitiesForSettings(
               tx,
               lockedChat,
@@ -917,6 +970,8 @@ export async function applySettingsSectionToAllChats(params: {
     });
   }
   const sourceSettings = stopWordsSource?.settings ?? (await params.getSourceSettings());
+  if (section === 'links' && sourceSettings.linkRulesStorageStatus === 'invalid')
+    throw linkRulesOwnershipConflict();
   if (
     section === 'stopWords' &&
     (sourceSettings.stopWordsRevision ?? 0) !== parsed.data.expectedSourceRevision
@@ -924,7 +979,7 @@ export async function applySettingsSectionToAllChats(params: {
     throw settingsApplyRevisionConflict(params.sourceChatId, []);
   }
   if (
-    section === 'reports' &&
+    (section === 'reports' || (section === 'links' && sourceSettings.linkRulesPolicy != null)) &&
     sourceSettings.settingsRevision !== parsed.data.expectedSourceSettingsRevision
   ) {
     throw settingsApplyRevisionConflict(params.sourceChatId, []);
@@ -940,10 +995,12 @@ export async function applySettingsSectionToAllChats(params: {
     ],
     SETTINGS_SECTION_BOT_SPEECH_MEDIA_KEYS[section],
     parsed.data.confirmedTargetChatIds,
-    section === 'reports' ? parsed.data.expectedSourceSettingsRevision : undefined,
+    section === 'reports' || (section === 'links' && sourceSettings.linkRulesPolicy != null)
+      ? parsed.data.expectedSourceSettingsRevision
+      : undefined,
   );
 
-  if (section === 'links') {
+  if (section === 'links' && sourceSettings.linkRulesPolicy == null) {
     await params.syncDomainAllowlistToChats(result.appliedChatIds);
   }
 

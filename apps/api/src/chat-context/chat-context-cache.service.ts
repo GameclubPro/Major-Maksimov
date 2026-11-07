@@ -2462,7 +2462,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       const value: ChatContext = {
         chatId: chat.id,
         title: resolvedTitle,
-        settings: chat.settings,
+        settings: { ...chat.settings, linkRulesPolicy: chat.settings.linkRulesPolicy ?? null },
         domainAllowlist: (chat.domains ?? []).map((item) => item.domain),
         adminUserIds: (chat.admins ?? []).map((item) => item.userId),
         rulesPublishedUrl: chat.rules?.publishedUrl ?? null,
@@ -2506,6 +2506,10 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     if (cached && this.isChatContextReadGenerationCurrent(chatId, generation)) {
       try {
         const decoded = await this.mediaCache.decode(cached);
+        // FLAG: A pre-policy v4 body cannot establish that SQL still has no link rules.
+        // Reload under the existing distributed revision fence before caching it locally.
+        if (!Object.hasOwn(decoded.value.settings, 'linkRulesPolicy'))
+          return this.loadAndCache(chatId, normalizedTitle, generation);
         if (this.isChatContextReadGenerationCurrent(chatId, generation)) {
           this.writeLocalChatContext(chatId, decoded.value, decoded.fullBytesEstimate);
         }

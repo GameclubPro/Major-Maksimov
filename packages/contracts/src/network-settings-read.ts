@@ -40,6 +40,7 @@ export const networkSettingsSectionSchema = z.union([
 export type NetworkSettingsSection = z.infer<typeof networkSettingsSectionSchema>;
 
 export const NETWORK_ALLOWLIST_PLAN_ROW_LIMIT = 1024;
+export const NETWORK_SETTINGS_OPERATION_READER_VERSION = 4;
 export const NETWORK_ALLOWLIST_ACTION_LIMIT = 128;
 export const NETWORK_ALLOWLIST_REPLACEMENT_LIMIT = 300;
 export const networkNavigationAllowlistTargetSchema = z

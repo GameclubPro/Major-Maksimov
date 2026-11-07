@@ -33,6 +33,7 @@ const LABELS: Record<string, string> = {
   reportsMuteEnabled: 'Ограничить автора сообщения',
   reportsMuteDurationHours: 'Срок ограничения, ч',
   linkPolicy: 'Режим проверки ссылок',
+  linkRulesPolicy: 'Правила ссылок',
   greetingEnabled: 'Приветствовать новых участников',
   greetingRulesButtonEnabled: 'Добавить кнопку правил',
   greetingDeleteBotMessageEnabled: 'Удалять приветствие бота',
@@ -223,8 +224,8 @@ const ENUM_VALUES: Record<string, Record<string, string>> = {
   },
   linkPolicy: {
     ALLOWLIST_ONLY: 'Только разрешённые ссылки',
-    BLOCKLIST_ONLY: 'Блокировать ссылки из списка',
-    ALERT_ONLY: 'Только уведомлять',
+    BLOCKLIST_ONLY: 'Удалять все',
+    ALERT_ONLY: 'Разрешать все',
   },
   profanitySensitivity: { CORE_ONLY: 'Мягкая', BALANCED: 'Обычная', STRICT: 'Строгая' },
   commercialAdsSensitivity: { BALANCED: 'Обычная', STRICT: 'Строгая' },
@@ -263,6 +264,16 @@ export function networkSettingsValueLabel(value: unknown, path?: string): string
       : 'Пустой список';
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
+    if (path === 'linkRulesPolicy') {
+      const modes: Record<string, string> = {
+        ALLOW_ALL: 'Разрешать все',
+        DENY_SELECTED: 'Запрещать по списку',
+        ALLOW_SELECTED: 'Разрешать по списку',
+        DENY_ALL: 'Удалять все',
+      };
+      const rules = Array.isArray(record.rules) ? record.rules : [];
+      return `${modes[String(record.mode)] ?? 'Правила ссылок'} · правил: ${rules.length}`;
+    }
     if (path === 'commercialAdsPolicy') return 'Правила и исключения рекламы';
     if ('base64' in record)
       return 'Изображение' + (record.fileName ? ' · ' + String(record.fileName) : '');

@@ -388,11 +388,16 @@ import {
 } from './stop-words/stop-words.policy';
 import {
   needsFreshLinkAllowlistRecheck,
+  loadFreshDomainAllowlistForLinkRecheck,
   recalculateFreshLinkAllowlistViolations,
   serializeLinkPolicyEffectiveAt,
   suppressUnverifiedAllowlistDependentViolations,
 } from './link-allowlist-recheck.util';
 import { LINK_BLOCKED_DELETE_RULE_CODE } from './link-history-recovery.util';
+import {
+  fingerprintLinkRulesPolicy,
+  hasFreshLinkRulesPolicyAuthority,
+} from './link-rules-policy.runtime';
 import {
   extractEnabledWebhookNavigationTargets,
   resolveEnabledNavigationTargetOptions,
@@ -2872,6 +2877,13 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
                         linkPolicyEffectiveAt: serializeLinkPolicyEffectiveAt(
                           settings.linkPolicyEffectiveAt,
                         ),
+                        ...(settings.linkRulesPolicy != null
+                          ? {
+                              linkRulesPolicySha256: fingerprintLinkRulesPolicy(
+                                settings.linkRulesPolicy,
+                              ),
+                            }
+                          : {}),
                       }
                     : {}),
                 },
@@ -16380,14 +16392,24 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         params.settings.linkPolicy,
         params.violations,
         params.navigationTargets,
+        params.settings.linkRulesPolicy,
       )
     ) {
       return params.violations;
     }
 
     let freshDomainAllowlist: string[] | null = null;
+    let linkRulesPolicyFresh = true;
     try {
-      freshDomainAllowlist = await this.loadFreshDomainAllowlistForLinkRecheck(params.chatId);
+      freshDomainAllowlist = await loadFreshDomainAllowlistForLinkRecheck(
+        this.prisma,
+        params.chatId,
+      );
+      linkRulesPolicyFresh = await hasFreshLinkRulesPolicyAuthority(
+        this.prisma,
+        params.chatId,
+        params.settings,
+      );
     } catch (error) {
       this.logger.warn(
         {
@@ -16399,6 +16421,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       return suppressUnverifiedAllowlistDependentViolations(
         params.settings.linkPolicy,
         params.violations,
+        params.settings.linkRulesPolicy,
       );
     }
 
@@ -16413,7 +16436,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       navigationTargets: params.navigationTargets,
       violations: params.violations,
       blockedDomainDetector: this.blockedDomainDetector,
-    });
+    }).filter((violation) => linkRulesPolicyFresh || violation.ruleCode !== 'LINK_BLOCKED');
 
     if (
       recalculatedViolations.some(
@@ -16443,38 +16466,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     });
 
     return recalculatedViolations;
-  }
-
-  private async loadFreshDomainAllowlistForLinkRecheck(chatId: string): Promise<string[] | null> {
-    const domainAllowlistDelegate = (
-      this.prisma as unknown as {
-        domainAllowlist?: {
-          findMany?: (args: {
-            where: {
-              chatId: string;
-              OR: Array<{ removeAfterAt: null } | { removeAfterAt: { gt: Date } }>;
-            };
-            select: { domain: true };
-          }) => Promise<Array<{ domain: string }>>;
-        };
-      }
-    ).domainAllowlist;
-
-    if (typeof domainAllowlistDelegate?.findMany !== 'function') {
-      return null;
-    }
-
-    const rows = await domainAllowlistDelegate.findMany({
-      where: {
-        chatId,
-        OR: [{ removeAfterAt: null }, { removeAfterAt: { gt: new Date() } }],
-      },
-      select: {
-        domain: true,
-      },
-    });
-
-    return rows.map((row) => row.domain);
   }
 
   private async loadChatContext(

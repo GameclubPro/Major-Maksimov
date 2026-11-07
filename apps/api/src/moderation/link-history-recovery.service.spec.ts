@@ -11,6 +11,50 @@ import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.
 const ORIGINAL_SERVICE_NAME = process.env.APP_SERVICE_NAME;
 
 describe('LinkHistoryRecoveryService', () => {
+  it('uses adopted selective rules and ignores frozen legacy exceptions', async () => {
+    const now = Date.now();
+    const row = buildLinkedMessage(now - 60_000);
+    const harness = buildHarness({
+      now,
+      listRows: [row],
+      exactRow: row,
+      deleteEnabled: true,
+      linkPolicy: 'ALLOWLIST_ONLY',
+      allowlist: ['domain:blocked.example'],
+      expiredAllowlistAt: new Date(now - 30_000),
+      linkRulesPolicy: {
+        version: 1,
+        mode: 'DENY_SELECTED',
+        rules: [{ id: 'deny', effect: 'DENY', kind: 'WEB_DOMAIN', target: 'blocked.example' }],
+      },
+    });
+    await harness.service.runOnce();
+    expect(harness.deleteIntents.ensureIntent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          metadata: expect.objectContaining({
+            linkRulesPolicySha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('never turns an unsupported new policy into legacy history authority', async () => {
+    const now = Date.now();
+    const row = buildLinkedMessage(now - 60_000);
+    const harness = buildHarness({
+      now,
+      listRows: [row],
+      exactRow: row,
+      deleteEnabled: true,
+      linkRulesPolicy: { version: 999 },
+    });
+    await harness.service.runOnce();
+    expect(harness.maxClient.listMessages).not.toHaveBeenCalled();
+    expect(harness.deleteIntents.ensureIntent).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     process.env.APP_SERVICE_NAME = 'api-moderation-background';
     jest.clearAllMocks();
@@ -471,6 +515,7 @@ function buildHarness(options: {
   allowlist?: string[];
   pageSize?: number;
   plainTextClickabilityEnabled?: boolean;
+  linkRulesPolicy?: unknown;
 }) {
   const effectiveAt = options.policyEffectiveAt ?? new Date(options.now - 10 * 60_000);
   const leaseEffectiveAt = options.leasePolicyEffectiveAt ?? effectiveAt;
@@ -496,6 +541,7 @@ function buildHarness(options: {
     chatSettings: {
       findUnique: jest.fn().mockResolvedValue({
         linkPolicy: options.linkPolicy ?? 'BLOCKLIST_ONLY',
+        linkRulesPolicy: options.linkRulesPolicy ?? null,
         linkPolicyRevision: 1,
         linkPolicyEffectiveAt: effectiveAt,
         chat: {

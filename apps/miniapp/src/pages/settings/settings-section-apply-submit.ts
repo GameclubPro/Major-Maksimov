@@ -83,7 +83,9 @@ export async function applySettingsSectionWithConfirmedSource(
   };
   onSourceSaved(savedSource);
   if (isCurrentScope?.() === false) throw new Error('Чат изменился во время сохранения.');
-  if (section === 'reports' && !savedSourceSettings.settingsRevision)
+  const needsSourceFence =
+    section === 'reports' || (section === 'links' && savedSourceSettings.linkRulesPolicy != null);
+  if (needsSourceFence && !savedSourceSettings.settingsRevision)
     throw new Error(
       'Не удалось подтвердить сохранённые настройки. Обновите экран перед применением.',
     );
@@ -93,10 +95,12 @@ export async function applySettingsSectionWithConfirmedSource(
     section,
     target,
     savedStopWords?.revision,
-    section === 'reports'
+    needsSourceFence
       ? {
           expectedSourceSettingsRevision: savedSourceSettings.settingsRevision!,
-          confirmedTargetChatIds: confirmedTargetChatIds ?? [],
+          ...(section === 'reports'
+            ? { confirmedTargetChatIds: confirmedTargetChatIds ?? [] }
+            : {}),
         }
       : undefined,
   );

@@ -38,7 +38,8 @@ const CONTENT_POLICY_FIELDS: Record<string, readonly string[]> = {
     'phoneNumbersBanMaxCount',
   ],
   LINK_BLOCKED: [
-    'linkMode',
+    'linkPolicy',
+    'linkRulesPolicy',
     'linkBotMessageEnabled',
     'linkPolicyRevision',
     'linkPolicyEffectiveAt',

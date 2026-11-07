@@ -327,6 +327,7 @@ function createService(
       const sql = extractSqlText(args);
       if (/SELECT id FROM chats WHERE id =/u.test(sql)) return [{ id: 'chat-1' }];
       if (/clock_timestamp\(\) AT TIME ZONE 'UTC'/u.test(sql)) return [{ at: new Date() }];
+      if (/navigation_allowlist_revision AS revision/u.test(sql)) return [{ revision: 0 }];
       throw new Error('Unexpected settings transaction fixture query');
     }),
     $executeRaw: jest.fn().mockResolvedValue(1),
@@ -345,6 +346,7 @@ function createService(
     chatAdminAllowlist: {
       upsert: jest.fn().mockResolvedValue({}),
     },
+    domainAllowlist: { findMany: jest.fn().mockResolvedValue([]) },
     chatSettings: {
       findUnique: jest.fn().mockResolvedValue(options.currentSettings ?? null),
       findMany: jest.fn().mockResolvedValue([]),
@@ -386,6 +388,7 @@ function createService(
   Object.assign(transactionClient, {
     chat: prisma.chat,
     chatSettings: prisma.chatSettings,
+    domainAllowlist: prisma.domainAllowlist,
     channelSettings: prisma.channelSettings,
     chatRules: prisma.chatRules,
     auditLog: prisma.auditLog,

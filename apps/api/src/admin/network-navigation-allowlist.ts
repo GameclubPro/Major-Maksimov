@@ -13,6 +13,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import type { Prisma } from '../prisma/prisma-client';
 import type { NetworkSettingsWriteOptions } from './network-settings-write';
+import { assertLegacyLinkAllowlistWrite } from './link-rules-settings-policy';
 type Row = { domain: string; removeAfterAt: Date | null };
 export function allowlistPlanTooLarge() {
   return new BadRequestException({
@@ -160,6 +161,7 @@ export class NetworkNavigationAllowlist {
     validateOnly: boolean,
   ): Promise<NetworkNavigationAllowlistImpact> {
     const revision = await this.lock(tx, chatId);
+    await assertLegacyLinkAllowlistWrite(tx, chatId);
     const now = new Date();
     const rows = await this.rows(tx, chatId);
     const actual = this.witness(revision, rows, now);

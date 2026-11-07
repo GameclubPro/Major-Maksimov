@@ -269,6 +269,26 @@ Statistics exchange does not grant advertising or shop authority.
 - Night-mode startup must not synthesize a pre-start catch-up. It may finish a current boundary only from an exact v4 durable registry/Bull intent, from an older intent whose boundary was still future when that process started, or from an exact terminal pre-dispatch access rejection after fresh actionable admin/owner access and a successful ledger CAS reset. A missing ledger without a durable intent remains a skip. Runtime recovery is exact-session only: stale Redis state must not replay, delete, or announce an older session inline.
 - Historical night-mode close recovery discovery is owned by `api-moderation-background`, never `api-enqueue`; keep the global discovery scan aligned with `20260823170000_add_night_mode_recovery_discovery_index`, the per-chat missing-event anti-join aligned with `20260830014000_add_night_mode_per_chat_recovery_index`, and preserve the page backoff.
 - Stop words include blocked words and domains. Blocked domains match exact hosts/subdomains independently of link moderation; an explicit allowlist suppresses that URL hit.
+- Selective link policy v1 is stored in nullable `ChatSettings.linkRulesPolicy`. Null retains
+  the legacy enum/allowlist behavior; present unsupported storage grants no link-delete
+  authority and is never repaired by GET or an unrelated settings write. Four modes are
+  allow-all, deny-selected, allow-selected and deny-all. Exact typed targets take precedence
+  over domains; a longer matching domain takes precedence over its parent. Every enforceable
+  navigation target must pass, and actual MAX user mentions retain their exemption.
+- Link policy, rules and link sanctions use the ordinary settings CAS. Initial single-chat
+  adoption carries a bounded legacy allowlist snapshot and verifies its independent revision
+  under the parent Chat lock. Activating JSON freezes legacy list mutation endpoints; old clients
+  cannot erase the new policy or change its shadow enum. JSON changes advance the existing
+  link baseline/revision. Live detection, preview, fresh checks, history and final dispatch
+  use the shared evaluator; final reasons retain the exact revision, baseline and policy hash.
+  Expired exceptions never authorize deletion of messages predating their expiry.
+- Existing blocked-site profiles retain `MESSAGE_BLOCKED_DOMAIN`, shared stop-word activation,
+  sanctions and image checks after their editor moves to Links. New ALLOW rules apply to the
+  new link policy; they do not silently rewrite those retained site profiles. The persisted
+  selective-policy reader and final guard remain mandatory in both API rollback paths.
+  Group operations containing `linkRulesPolicy` require reader v4; readers v1–v3 remain
+  supported for their original payloads. A legacy copy of the links section never writes the
+  retired allowlist after copying JSON; each target retains its own settings CAS and audit.
 - Phone blocking follows the explicit user decision of 3 November 2026: exclude explicitly
   labelled ИНН/артикул values and numbers inside URLs, including contact URLs such as `tel:`,
   `sms:` and `wa.me`. These exclusions cover only their own spans; separate phones, including

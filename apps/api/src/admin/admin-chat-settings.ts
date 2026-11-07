@@ -72,6 +72,14 @@ import {
 import { assertReportsActivationAvailable } from './report-settings-availability';
 import { advanceChatMutationOrder } from '../common/group-command-authority.service';
 import { assertCommercialPersonalSalePolicyAvailable } from './commercial-ads-settings-policy';
+import {
+  LINK_RULES_METADATA_KEYS,
+  inactiveLinkRulesPolicy,
+  linkRulesLegacyShadow,
+  linkRulesStorageStatus,
+  resolveLinkRulesSettingsWrite,
+} from './link-rules-settings-policy';
+import { linkRulesPolicySchema } from '@maxim/contracts/settings';
 
 function readLegacyPrimaryAdminCommandName(value: unknown, fallback: string): string {
   if (typeof value !== 'string') {
@@ -289,7 +297,11 @@ export function buildUpdateSettingsAuditPayload(params: {
       : {};
   const normalizedKeySet = new Set(Object.keys(params.normalizedSettings));
   const settingKeys = (Object.keys(requested) as Array<keyof ChatSettings>)
-    .filter((key) => normalizedKeySet.has(key))
+    .filter(
+      (key) =>
+        normalizedKeySet.has(key) &&
+        !LINK_RULES_METADATA_KEYS.some((metadataKey) => metadataKey === key),
+    )
     .sort();
   const payload: UpdateSettingsAuditPayload = {
     source: params.source,
@@ -498,6 +510,16 @@ export function sanitizeStoredChatSettings(settings: unknown): unknown {
   }
 
   let normalizedSettings = settings as Record<string, unknown>;
+  if (normalizedSettings.linkRulesPolicy != null) {
+    const policy = linkRulesPolicySchema.safeParse(normalizedSettings.linkRulesPolicy);
+    // FLAG: Invalid link policy disables only the returned copy, never its persisted authority.
+    normalizedSettings = {
+      ...normalizedSettings,
+      linkRulesPolicy: policy.success ? policy.data : inactiveLinkRulesPolicy(),
+      linkRulesStorageStatus: policy.success ? 'valid' : 'invalid',
+      linkPolicy: policy.success ? linkRulesLegacyShadow(policy.data) : 'ALERT_ONLY',
+    };
+  }
   // FLAG: Invalid commercial policy disables only the returned commercial filter. A GET
   // never repairs storage or resets unrelated settings; runtime readers independently reject it.
   if (
@@ -779,6 +801,8 @@ type ChatSettingsReadRepair = Partial<ChatSettings> &
   Partial<Pick<StoredChatSettings, 'stopWordsMedia'>>;
 
 const READ_PRESERVED_SETTING_KEYS = [
+  'linkRulesPolicy',
+  ...LINK_RULES_METADATA_KEYS,
   'commercialAdsPolicy',
   'commercialAdsFilterEnabled',
   'stopWordsPolicy',
@@ -807,11 +831,17 @@ const READ_PRESERVED_SETTING_KEYS = [
 function preservePoliciesOnSettingsRead(
   changes: ChatSettingsReadRepair,
   storedSettings: StoredChatSettings,
-): Partial<Omit<ChatSettings, 'commercialAdsPolicy'>> {
+): Partial<
+  Omit<
+    ChatSettings,
+    'commercialAdsPolicy' | 'linkRulesPolicy' | (typeof LINK_RULES_METADATA_KEYS)[number]
+  >
+> {
   // FLAG: Read repairs own unrelated settings only. Commercial policy and activation, legacy
   // rules and sanctions are normalized on copies until an administrator explicitly replaces them.
   const repair = { ...changes };
   for (const key of READ_PRESERVED_SETTING_KEYS) delete repair[key];
+  if (storedSettings.linkRulesPolicy != null) delete repair.linkPolicy;
   const media = storedSettings.botSpeechMedia;
   if (
     media &&
@@ -856,6 +886,8 @@ function buildChatSettingsReadSnapshot(params: {
       settingsRevision: params.storedSettings.updatedAt?.toISOString(),
       stopWordsPolicy,
       stopWordsRevision: params.storedSettings.stopWordsRevision,
+      linkRulesStorageStatus: linkRulesStorageStatus(params.storedSettings.linkRulesPolicy),
+      linkRulesLegacySnapshot: null,
     },
     stopWordsStorageStatus,
   };
@@ -1056,6 +1088,15 @@ export async function saveChatSettings(params: {
       commercialAdsPolicy: true,
     },
   });
+  const linkRulesWrite = resolveLinkRulesSettingsWrite({
+    current: currentSettings,
+    requested: parsed.data,
+    authored:
+      hasOwnSetting(params.body, 'linkRulesPolicy') &&
+      (!params.networkWrite?.authoredKeys ||
+        params.networkWrite.authoredKeys.includes('linkRulesPolicy')),
+    networkReplacement: params.networkWrite?.authoredKeys?.includes('linkRulesPolicy') ?? false,
+  });
   // FLAG: Compare the revision observed by the caller, not just the server read during this save.
   // Internal callers may omit it; public mutation routes require a precondition.
   if (
@@ -1079,6 +1120,9 @@ export async function saveChatSettings(params: {
   );
   const settingsInput = {
     ...parsed.data,
+    linkRulesPolicy: linkRulesWrite.policy,
+    linkRulesStorageStatus: linkRulesWrite.status,
+    linkPolicy: linkRulesWrite.linkPolicy,
     commercialAdsPolicy: hasOwnSetting(params.body, 'commercialAdsPolicy')
       ? parsed.data.commercialAdsPolicy
       : storedCommercialPolicy.success
@@ -1260,6 +1304,11 @@ export async function saveChatSettings(params: {
       ...DEFAULT_CHAT_SETTINGS,
       ...(currentSettings ?? {}),
       commercialAdsPolicy: storedCommercialPolicy.success ? storedCommercialPolicy.data : null,
+      linkRulesPolicy: linkRulesPolicySchema.safeParse(currentSettings?.linkRulesPolicy).success
+        ? linkRulesPolicySchema.parse(currentSettings?.linkRulesPolicy)
+        : currentSettings?.linkRulesPolicy != null
+          ? inactiveLinkRulesPolicy()
+          : null,
       requiredSubscriptionChannelIds: [...savedSubscriptionIds],
       // FLAG: Raw media is only the write-comparison baseline; capability checks
       // retain their previous typed default and never receive unsanitized JSONB.
@@ -1296,11 +1345,15 @@ export async function saveChatSettings(params: {
     omitStopWordsPolicy(omitPublisherOwnedChatSettings(normalizedSettings)),
   );
   delete majorOwnedSettings.settingsRevision;
+  for (const key of LINK_RULES_METADATA_KEYS) delete majorOwnedSettings[key];
+  if (!linkRulesWrite.writePolicy) delete majorOwnedSettings.linkRulesPolicy;
+  if (linkRulesWrite.preserveLegacyShadow) delete majorOwnedSettings.linkPolicy;
   // FLAG: Older clients cannot clear category permissions by omitting this newer field.
   if (!hasOwnSetting(params.body, 'commercialAdsPolicy'))
     delete majorOwnedSettings.commercialAdsPolicy;
   if (params.networkWrite?.authoredKeys) {
     const authored = new Set(params.networkWrite.authoredKeys);
+    if (authored.has('linkRulesPolicy')) authored.add('linkPolicy');
     if (
       params.networkWrite.authoredKeys.some((key) =>
         [
@@ -1317,11 +1370,15 @@ export async function saveChatSettings(params: {
     for (const key of Object.keys(majorOwnedSettings) as Array<keyof typeof majorOwnedSettings>)
       if (!authored.has(key)) delete majorOwnedSettings[key];
   }
-  const { commercialAdsPolicy, ...majorSettingsWithoutCommercialPolicy } = majorOwnedSettings;
+  const { commercialAdsPolicy, linkRulesPolicy, ...majorSettingsWithoutCommercialPolicy } =
+    majorOwnedSettings;
   const storedMajorSettings = {
     ...majorSettingsWithoutCommercialPolicy,
     ...(Object.hasOwn(majorOwnedSettings, 'commercialAdsPolicy')
       ? { commercialAdsPolicy: commercialAdsPolicy ?? Prisma.DbNull }
+      : {}),
+    ...(Object.hasOwn(majorOwnedSettings, 'linkRulesPolicy')
+      ? { linkRulesPolicy: linkRulesPolicy ?? Prisma.DbNull }
       : {}),
   };
   const createSettings = {
@@ -1354,6 +1411,22 @@ export async function saveChatSettings(params: {
         },
         update: { catalogKind: ChatCatalogKind.MANAGED },
       });
+      if (linkRulesWrite.initialAdoption) {
+        // FLAG: First adoption fences the legacy list under its writer lock before settings CAS.
+        const locked = await tx.$queryRaw<
+          Array<{ revision: number }>
+        >`SELECT navigation_allowlist_revision AS revision FROM chats WHERE id=${params.chatId} FOR UPDATE`;
+        if (
+          !locked[0] ||
+          String(locked[0].revision) !== parsed.data.linkRulesLegacySnapshot?.revision
+        ) {
+          throw new ConflictException({
+            code: 'LINK_RULES_LEGACY_CHANGED',
+            message:
+              'Список ссылок изменился. Обновите экран и сравните правила перед сохранением.',
+          });
+        }
+      }
       await assertFixedModeratorCapabilitiesForSettings(
         tx,
         lockedChat,
@@ -1445,6 +1518,8 @@ export async function saveChatSettings(params: {
   });
   const resultingSettings = {
     ...normalizedSettings,
+    linkRulesLegacySnapshot: null,
+    linkRulesReplaceInvalidStorage: undefined,
     settingsRevision: savedRevision,
     commentsEnabled:
       publisherOwnedSettings?.commentsEnabled ??

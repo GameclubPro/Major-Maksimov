@@ -1584,6 +1584,10 @@ maxim_topology_require_traffic_protection_guard() {
   fi
 }
 
+maxim_topology_require_link_rules_policy_reader() {
+  node infra/scripts/assert-link-rules-source.mjs "$1"
+}
+
 maxim_topology_require_stop_words_policy_guard() {
   local commit_sha="$1"
   local guard_source

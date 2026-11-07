@@ -88,7 +88,7 @@
 - Channel publication buttons are derived directly from `commentsEnabled` and `postSuggestionsEnabled`; do not add a separate button-mode control or preview filter.
 - Settings section apply defaults to the current chat. Applying all requires explicit `mode: 'all'`; keep contract, UI default, and preview transport aligned.
 - Required-subscription controls preserve saved unknown sources and external-link fallback. Validate new selections without deleting existing ones on lookup failure.
-- Stop-word UI owns both blocked words and blocked domains. Domain entry defaults to `DOMAIN`, not an accidental exact root URL.
+- «Ссылки» owns URL/domain rules and the relocated existing site profile; «Стоп-слова» owns words. Preserve the existing site's shared activation, sanctions and OCR through its revision API. See [MINIAPP-LINKS-01](../../docs/development/miniapp-product-decisions.md#miniapp-links-01-панель-ссылок-без-повторного-бренда).
 - Stop-word edits use the revision-checked `/chats/:chatId/stop-words` API. Keep words/phrases atomic during bulk input, preserve unsaved buffers on failed saves, and poll only `/stop-words/status` for lightweight OCR availability. Legacy settings writes must not overwrite the independent policy.
 - Keep `VkParsingCard` lazy-loaded in Publisher entity modules; do not restore it to Major settings routes.
 - Publication video selection uploads up to 100 MB directly to the MAX-issued HTTPS address. Keep progress, cancellation, persistent errors, generic native MIME inference, and actor-owned asset references; never encode the selected file as base64 or send it through the API mutation tunnel. `node apps/miniapp/test/publication-video-picker.browser.mjs` checks the local upload UI after builds finish.

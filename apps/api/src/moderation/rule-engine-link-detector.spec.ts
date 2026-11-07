@@ -19,6 +19,49 @@ function target(
 }
 
 describe('typed link moderation', () => {
+  it('blocks a selected exact URL while allowing the rest of its domain and supports an exact exception', () => {
+    const policy = {
+      version: 1,
+      mode: 'DENY_SELECTED',
+      rules: [
+        { id: 'deny', effect: 'DENY', kind: 'WEB_DOMAIN', target: 'blocked.example' },
+        { id: 'allow', effect: 'ALLOW', kind: 'WEB_EXACT', target: 'https://blocked.example/safe' },
+      ],
+    };
+    const detect = (url: string) =>
+      detectBlockedLink(
+        '',
+        LinkPolicy.ALLOWLIST_ONLY,
+        [],
+        undefined,
+        [target('external_url', url)],
+        policy,
+      );
+    expect(detect('https://other.example/page')).toBeNull();
+    expect(detect('https://blocked.example/safe')).toBeNull();
+    expect(detect('https://blocked.example/unsafe')).toContain('blocked by a link rule');
+  });
+
+  it('keeps malformed present policy inert and preserves null-policy legacy enforcement', () => {
+    const targets = [target('external_url', 'https://blocked.example/path')];
+    expect(
+      detectBlockedLink('', LinkPolicy.BLOCKLIST_ONLY, [], undefined, targets, { version: 999 }),
+    ).toBeNull();
+    expect(
+      detectBlockedLink('', LinkPolicy.BLOCKLIST_ONLY, [], undefined, targets, null),
+    ).not.toBeNull();
+    expect(
+      detectBlockedLink(
+        '',
+        LinkPolicy.BLOCKLIST_ONLY,
+        [],
+        undefined,
+        [target('external_url', 'https://blocked.example', false)],
+        { version: 1, mode: 'DENY_ALL', rules: [] },
+      ),
+    ).toBeNull();
+  });
+
   it.each(['https://vk.me/123456789', 'vk.me/123456789'])(
     'detects the reported VK contact link form: %s',
     (url) => {

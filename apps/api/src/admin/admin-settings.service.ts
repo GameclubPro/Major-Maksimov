@@ -86,6 +86,7 @@ import { classifySettingsScreenAccessError } from './settings-screen-access.erro
 import { AdminDuplicateDiagnosticsService } from './admin-duplicate-diagnostics.service';
 import { ReportViewService } from '../moderation/reports/report-view.service';
 import { AdminMessageRetentionService } from './admin-message-retention.service';
+import { readLinkRulesLegacySnapshot } from './link-rules-settings-policy';
 
 const NIGHT_MODE_TRANSITION_SETTING_KEYS = new Set<keyof ChatSettings>([
   'nightModeEnabled',
@@ -163,13 +164,21 @@ export class AdminSettingsService {
     await this.assertSensitiveSettingsReadAccess(chatId, user, 'chat', options);
     const botAssignmentData =
       await this.legacyAdminService.resolveChatSettingsReadBotAssignmentData(chatId);
-    return readChatSettingsSnapshot({
+    const snapshot = await readChatSettingsSnapshot({
       prisma: this.prisma,
       chatContextCache: this.chatContextCache,
       logger: this.logger,
       chatId,
       botAssignmentData,
     });
+    if (snapshot.settings.linkRulesStorageStatus === 'legacy') {
+      snapshot.settings.linkRulesLegacySnapshot = await readLinkRulesLegacySnapshot(
+        this.prisma,
+        chatId,
+        snapshot.settings.linkPolicy,
+      );
+    }
+    return snapshot;
   }
 
   async getChatSettingsScreen(

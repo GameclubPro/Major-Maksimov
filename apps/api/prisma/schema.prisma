@@ -1242,6 +1242,7 @@ model ChatSettings {
   duplicateBanWindowSec                         Int                       @default(172800) @map("duplicate_ban_window_sec")
   duplicateBanMaxCount                          Int                       @default(4) @map("duplicate_ban_max_count")
   linkPolicy                                    LinkPolicy                @default(ALERT_ONLY) @map("link_policy")
+  linkRulesPolicy                               Json?                     @map("link_rules_policy")
   linkPolicyRevision                            Int                       @default(0) @map("link_policy_revision")
   linkPolicyEffectiveAt                         DateTime?                 @map("link_policy_effective_at")
   linkEscalationWindowHours                     Int                       @default(24) @map("link_escalation_window_hours")

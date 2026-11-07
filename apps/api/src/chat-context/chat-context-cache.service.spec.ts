@@ -379,6 +379,7 @@ function buildChatSummary(chatId: string): ChatSummary {
 function buildSettings(chatId: string): ChatSettings {
   const now = new Date();
   return {
+    linkRulesPolicy: null,
     reportsEnabled: false,
     reportsThreshold: 3,
     reportsAliases: [],
@@ -926,6 +927,45 @@ describe('ChatContextCacheService', () => {
     expect(prisma.chat.upsert).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { version: 1, mode: 'DENY_ALL', rules: [] },
+    { version: 999, mode: 'DENY_ALL', rules: [] },
+  ])(
+    'reloads a pre-policy cached body and preserves present SQL link policy $version',
+    async (policy) => {
+      const chatId = 'pre-link-policy-cache';
+      const row = buildContextRow(chatId);
+      row.settings.linkRulesPolicy = policy;
+      const oldSettings = { ...buildSettings(chatId) };
+      delete (oldSettings as Partial<ChatSettings>).linkRulesPolicy;
+      const prisma = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
+      const service = new ChatContextCacheService(
+        prisma as never,
+        createConfigMock() as never,
+        maxBotLinkService as never,
+      );
+      const redis = getRedisMutationMock(service);
+      redis.mget.mockResolvedValueOnce([
+        JSON.stringify({
+          chatId,
+          title: row.title,
+          settings: oldSettings,
+          domainAllowlist: [],
+          adminUserIds: [],
+          rulesPublishedUrl: null,
+          rulesPublishedMessageId: null,
+        }),
+        '0',
+        null,
+      ]);
+      const context = await service.getChatContext(chatId);
+      expect(context.settings.linkRulesPolicy).toEqual(row.settings.linkRulesPolicy);
+      expect(context.settings.antiDuplicateEnabled).toBe(row.settings.antiDuplicateEnabled);
+      expect(prisma.chat.findUnique).toHaveBeenCalledTimes(1);
+      await service.onModuleDestroy();
+    },
+  );
+
   it('serves repeated chat context reads from the local cache before hitting redis again', async () => {
     const chatId = 'chat-1';
     const settings = buildSettings(chatId);
@@ -1241,7 +1281,7 @@ describe('ChatContextCacheService', () => {
       JSON.stringify({
         chatId: 'large-chat',
         title: 'Large chat',
-        settings: { botSpeechMedia: media },
+        settings: { linkRulesPolicy: null, botSpeechMedia: media },
       }),
     );
     const stringify = jest.spyOn(JSON, 'stringify');
@@ -1280,7 +1320,7 @@ describe('ChatContextCacheService', () => {
       for (const chatId of ['cold-a', 'cold-b']) {
         store.set(
           ChatContextCacheService.cacheKey(chatId),
-          JSON.stringify({ chatId, title: chatId }),
+          JSON.stringify({ chatId, title: chatId, settings: { linkRulesPolicy: null } }),
         );
         await service.getChatContext(chatId);
       }
@@ -3054,7 +3094,7 @@ describe('ChatContextCacheService', () => {
     for (const chatId of ['eviction-a', 'eviction-b']) {
       store.set(
         ChatContextCacheService.cacheKey(chatId),
-        JSON.stringify({ chatId, title: chatId }),
+        JSON.stringify({ chatId, title: chatId, settings: { linkRulesPolicy: null } }),
       );
       await service.getChatContext(chatId);
     }

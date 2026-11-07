@@ -1,4 +1,4 @@
-import { chatSettingsSchema } from '@maxim/contracts/settings';
+import { chatSettingsSchema, linkRulesPolicySchema } from '@maxim/contracts/settings';
 import { ConflictException } from '@nestjs/common';
 import { Prisma, type Chat } from '../prisma/prisma-client';
 import { executionRouteProof } from './max-execution-route-proof';
@@ -37,8 +37,15 @@ export async function readFixedModeratorSettingsPurposes(
       stopWordsPolicy: true,
     },
   });
+  const parsedLinkRules = linkRulesPolicySchema.safeParse(stored?.linkRulesPolicy);
   const settings = chatSettingsSchema.parse({
     ...stored,
+    linkRulesPolicy:
+      stored?.linkRulesPolicy == null
+        ? null
+        : parsedLinkRules.success
+          ? parsedLinkRules.data
+          : { version: 1, mode: 'ALLOW_ALL', rules: [] },
     stopWordsPolicy: stored ? (readStopWordsPolicy(stored) ?? undefined) : undefined,
   });
   return currentChatSettingsBotCapabilityRequirements(settings, commercialAiDeleteOnly).map(
