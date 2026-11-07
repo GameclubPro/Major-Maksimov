@@ -108,7 +108,7 @@ import { findManagedHandshakeAutoDeleteOwner } from './managed-handshake-auto-de
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moderation.service.support';
 import {
   MODERATION_DELETE_INTENT_QUEUE,
-  handoffModerationDeleteSweepJob,
+  handoffModerationDeleteSweepJobs,
   type ModerationDeleteIntentJob,
 } from './moderation-delete-intent.queue';
 import {
@@ -3454,43 +3454,43 @@ export class ModerationDeleteIntentService {
         'handoff',
         async () => {
           let acknowledged = 0;
-          await Promise.all(
-            dueIntents.map(async (intent) => {
-              metrics.handoffAttemptedCount = addDueSweepCount(metrics.handoffAttemptedCount);
-              try {
-                const handoff = await handoffModerationDeleteSweepJob(
-                  this.queue,
-                  intent.id,
-                  DELETE_QUEUE_PRIORITY_BACKGROUND,
-                );
-                acknowledged++;
-                metrics.handoffAcknowledgedCount = addDueSweepCount(
-                  metrics.handoffAcknowledgedCount,
-                );
-                const outcomes = metrics.handoffOutcomes;
-                if (handoff.insertion === 'unknown') {
-                  metrics.handoffInsertionUnknownCount = addDueSweepCount(
-                    metrics.handoffInsertionUnknownCount,
-                  );
-                } else if (handoff.insertion === 'inserted') {
-                  outcomes.insertedCount = addDueSweepCount(outcomes.insertedCount);
-                } else {
-                  outcomes.existingCount = addDueSweepCount(outcomes.existingCount);
-                }
-                if (handoff.reused) outcomes.reusedCount = addDueSweepCount(outcomes.reusedCount);
-                outcomes.observationErrorCount = addDueSweepCount(
-                  outcomes.observationErrorCount,
-                  handoff.observationErrors,
-                );
-              } catch (error: unknown) {
-                metrics.handoffErrorCount = addDueSweepCount(metrics.handoffErrorCount);
-                this.logger.warn(
-                  { intentId: intent.id, err: this.errorMessage(error) },
-                  'Failed to enqueue due moderation delete intent; DB state remains retryable',
-                );
-              }
-            }),
+          metrics.handoffAttemptedCount = addDueSweepCount(
+            metrics.handoffAttemptedCount,
+            dueIntents.length,
           );
+          const handoffs = await handoffModerationDeleteSweepJobs(
+            this.queue,
+            dueIntents.map((intent) => intent.id),
+            DELETE_QUEUE_PRIORITY_BACKGROUND,
+          );
+          handoffs.forEach((result, index) => {
+            if (result.status === 'fulfilled') {
+              const handoff = result.value;
+              acknowledged++;
+              metrics.handoffAcknowledgedCount = addDueSweepCount(metrics.handoffAcknowledgedCount);
+              const outcomes = metrics.handoffOutcomes;
+              if (handoff.insertion === 'unknown') {
+                metrics.handoffInsertionUnknownCount = addDueSweepCount(
+                  metrics.handoffInsertionUnknownCount,
+                );
+              } else if (handoff.insertion === 'inserted') {
+                outcomes.insertedCount = addDueSweepCount(outcomes.insertedCount);
+              } else {
+                outcomes.existingCount = addDueSweepCount(outcomes.existingCount);
+              }
+              if (handoff.reused) outcomes.reusedCount = addDueSweepCount(outcomes.reusedCount);
+              outcomes.observationErrorCount = addDueSweepCount(
+                outcomes.observationErrorCount,
+                handoff.observationErrors,
+              );
+            } else {
+              metrics.handoffErrorCount = addDueSweepCount(metrics.handoffErrorCount);
+              this.logger.warn(
+                { intentId: dueIntents[index].id, err: this.errorMessage(result.reason) },
+                'Failed to enqueue due moderation delete intent; DB state remains retryable',
+              );
+            }
+          });
           return acknowledged;
         },
         (count) => count,

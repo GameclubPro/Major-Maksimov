@@ -79,6 +79,15 @@ these existing-job observations before add as well as acknowledged adds. These c
 not count distinct intents, pending deletions or completed external actions.
 Older reports without `handoffOutcomes` retain unknown coverage for this breakdown.
 
+The due sweep observes existing BullMQ jobs in Redis pipelines of at most 100 job
+hashes. Each hash is decoded through BullMQ's public job parser; an empty hash is
+missing, while a command error or malformed hash remains an observation failure
+and falls back to the original deterministic add for that intent. A batch failure
+does not discard independent handoffs. Post-add insertion attribution still requires
+the exact diagnostic token read from persisted data. Batching reduces Redis network
+exchanges; it does not reduce SQL candidate selection or extend the one-second
+repair cadence. Interactive producers retain their ordinary enqueue and promotion.
+
 Publisher recipient-blocker cleanup checks and locks the exact envelope lease with
 `SELECT ... FOR NO KEY UPDATE`, preserving transaction serialization without a
 synthetic envelope UPDATE. Heartbeats and actual delivery/occurrence changes still

@@ -3,6 +3,7 @@ import { Queue, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import {
   handoffModerationDeleteSweepJob,
+  handoffModerationDeleteSweepJobs,
   MODERATION_DELETE_INTENT_QUEUE,
   type ModerationDeleteIntentJob,
 } from './moderation-delete-intent.queue';
@@ -24,6 +25,30 @@ function deferred() {
   let inspector: Redis | undefined;
   let connection: { host: string; port: number; db: number };
   let prefix: string;
+  const clientRestorations: Array<() => void> = [];
+
+  async function mockPipeline() {
+    const client = await queue.client;
+    const original = client.pipeline;
+    const pipeline = jest.fn(original.bind(client));
+    // FLAG: BullMQ's Redis adapter rejects delete; restore overrides by assignment.
+    client.pipeline = pipeline;
+    clientRestorations.push(() => {
+      client.pipeline = original;
+    });
+    return pipeline;
+  }
+
+  async function interceptNextBatchRead(
+    transform: (
+      results: Array<[Error | null, unknown]> | null,
+    ) => Promise<Array<[Error | null, unknown]> | null> | Array<[Error | null, unknown]> | null,
+  ) {
+    const pipeline = (await queue.client).pipeline();
+    const execute = pipeline.exec.bind(pipeline);
+    jest.spyOn(pipeline, 'exec').mockImplementation(async () => transform(await execute()));
+    (await mockPipeline()).mockReturnValueOnce(pipeline);
+  }
 
   beforeEach(async () => {
     const url = new URL(redisUrl);
@@ -41,6 +66,8 @@ function deferred() {
   });
 
   afterEach(async () => {
+    for (const restore of clientRestorations.splice(0).reverse()) restore();
+    jest.restoreAllMocks();
     await worker?.close();
     worker = undefined;
     await inspector?.quit();
@@ -225,5 +252,261 @@ function deferred() {
       handoffModerationDeleteSweepJob(unavailableFirstRead, 'read-failure-intent', 10),
     ).resolves.toEqual({ insertion: 'inserted', reused: false, observationErrors: 1 });
     expect(await queue.getJob('mdi-read-failure-intent')).toBeDefined();
+  });
+
+  it('preserves input order when a batch mixes legacy and missing jobs', async () => {
+    await queue.addBulk(
+      ['existing-first', 'existing-last'].map((intentId) => ({
+        name: 'execute-moderation-delete-intent',
+        data: { intentId },
+        opts: { jobId: `mdi-${intentId}`, priority: 1, removeOnComplete: true },
+      })),
+    );
+    const add = jest.spyOn(queue, 'add');
+    const getJob = jest.spyOn(queue, 'getJob');
+    const pipeline = await mockPipeline();
+
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['existing-first', 'missing', 'existing-last'], 10),
+    ).resolves.toEqual([
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true, observationErrors: 0 } },
+      {
+        status: 'fulfilled',
+        value: { insertion: 'inserted', reused: false, observationErrors: 0 },
+      },
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true, observationErrors: 0 } },
+    ]);
+
+    expect(pipeline).toHaveBeenCalledTimes(1);
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(getJob).toHaveBeenCalledTimes(1);
+    expect(getJob).toHaveBeenCalledWith('mdi-missing');
+    for (const intentId of ['existing-first', 'existing-last']) {
+      const preserved = (await queue.getJob(`mdi-${intentId}`))!;
+      expect(preserved.data).toEqual({ intentId });
+      expect(preserved.opts.priority).toBe(1);
+    }
+  });
+
+  it('bounds pre-observation chunks without scalar reads or writes for reused jobs', async () => {
+    const intentIds = Array.from({ length: 201 }, (_, index) => `chunk-${index}`);
+    await queue.addBulk(
+      intentIds.map((intentId) => ({
+        name: 'execute-moderation-delete-intent',
+        data: { intentId },
+        opts: { jobId: `mdi-${intentId}`, priority: 1, removeOnComplete: true },
+      })),
+    );
+    inspector = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 0 });
+    await inspector.connect();
+    const eventCount = await inspector.xlen(queue.toKey('events'));
+    const client = await queue.client;
+    const createPipeline = client.pipeline.bind(client);
+    const batchSizes: number[] = [];
+    (await mockPipeline()).mockImplementation(() => {
+      const pipeline = createPipeline();
+      const reads = jest.spyOn(pipeline, 'hgetall');
+      const execute = pipeline.exec.bind(pipeline);
+      jest.spyOn(pipeline, 'exec').mockImplementation(async () => {
+        batchSizes.push(reads.mock.calls.length);
+        return execute();
+      });
+      return pipeline;
+    });
+    const getJob = jest.spyOn(queue, 'getJob');
+    const add = jest.spyOn(queue, 'add');
+
+    const results = await handoffModerationDeleteSweepJobs(queue, intentIds, 10);
+
+    expect(results).toHaveLength(201);
+    expect(results.every((result) => result.status === 'fulfilled' && result.value.reused)).toBe(
+      true,
+    );
+    expect(batchSizes).toEqual([100, 100, 1]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    expect(await inspector.xlen(queue.toKey('events'))).toBe(eventCount);
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 201 });
+  });
+
+  it('does not open a pipeline for an empty batch', async () => {
+    const pipeline = await mockPipeline();
+    const add = jest.spyOn(queue, 'add');
+
+    await expect(handoffModerationDeleteSweepJobs(queue, [], 10)).resolves.toEqual([]);
+
+    expect(pipeline).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it.each(['command-error', 'malformed-hash', 'invalid-json'] as const)(
+    'isolates a %s observation from healthy entries in the same batch',
+    async (failure) => {
+      for (const intentId of ['healthy-before', 'damaged-observation', 'healthy-after']) {
+        await queue.add(
+          'execute-moderation-delete-intent',
+          { intentId },
+          { jobId: `mdi-${intentId}`, priority: 1, removeOnComplete: true },
+        );
+      }
+      await interceptNextBatchRead((results) => {
+        if (!results) throw new Error('Expected a real Redis pipeline response');
+        if (failure === 'command-error') results[1] = [new Error('read unavailable'), null];
+        if (failure === 'malformed-hash') results[1] = [null, { name: 'incomplete' }];
+        if (failure === 'invalid-json') {
+          const encoded = results[1]![1];
+          if (!encoded || typeof encoded !== 'object') throw new Error('Expected Redis hash');
+          results[1] = [null, { ...encoded, data: '{invalid-json' }];
+        }
+        return results;
+      });
+      const add = jest.spyOn(queue, 'add');
+
+      await expect(
+        handoffModerationDeleteSweepJobs(
+          queue,
+          ['healthy-before', 'damaged-observation', 'healthy-after'],
+          10,
+        ),
+      ).resolves.toEqual([
+        {
+          status: 'fulfilled',
+          value: { insertion: 'existing', reused: true, observationErrors: 0 },
+        },
+        {
+          status: 'fulfilled',
+          value: { insertion: 'unknown', reused: false, observationErrors: 1 },
+        },
+        {
+          status: 'fulfilled',
+          value: { insertion: 'existing', reused: true, observationErrors: 0 },
+        },
+      ]);
+      expect(add).toHaveBeenCalledTimes(1);
+      expect(add.mock.calls[0]![1].intentId).toBe('damaged-observation');
+      const preserved = (await queue.getJob('mdi-damaged-observation'))!;
+      expect(preserved.data).toEqual({ intentId: 'damaged-observation' });
+      expect(preserved.opts.priority).toBe(1);
+    },
+  );
+
+  it.each(['throw', 'null', 'length-mismatch'] as const)(
+    'falls back to deterministic add for every entry after a %s pipeline response',
+    async (failure) => {
+      await interceptNextBatchRead((results) => {
+        if (failure === 'throw') throw new Error('pipeline unavailable');
+        if (failure === 'null') return null;
+        return results?.slice(1) ?? [];
+      });
+      const add = jest.spyOn(queue, 'add');
+
+      await expect(
+        handoffModerationDeleteSweepJobs(queue, ['fallback-first', 'fallback-last'], 10),
+      ).resolves.toEqual([
+        {
+          status: 'fulfilled',
+          value: { insertion: 'inserted', reused: false, observationErrors: 1 },
+        },
+        {
+          status: 'fulfilled',
+          value: { insertion: 'inserted', reused: false, observationErrors: 1 },
+        },
+      ]);
+      expect(add).toHaveBeenCalledTimes(2);
+      expect(await queue.getJob('mdi-fallback-first')).toBeDefined();
+      expect(await queue.getJob('mdi-fallback-last')).toBeDefined();
+    },
+  );
+
+  it('repairs a job removed after a bulk observation on the next sweep', async () => {
+    const existing = await queue.add(
+      'execute-moderation-delete-intent',
+      { intentId: 'vanished-batch-intent' },
+      { jobId: 'mdi-vanished-batch-intent', priority: 1, removeOnComplete: true },
+    );
+    await interceptNextBatchRead(async (results) => {
+      await existing.remove();
+      return results;
+    });
+
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['vanished-batch-intent'], 10),
+    ).resolves.toEqual([
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true, observationErrors: 0 } },
+    ]);
+    expect(await queue.getJob('mdi-vanished-batch-intent')).toBeUndefined();
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['vanished-batch-intent'], 10),
+    ).resolves.toEqual([
+      {
+        status: 'fulfilled',
+        value: { insertion: 'inserted', reused: false, observationErrors: 0 },
+      },
+    ]);
+  });
+
+  it('preserves a replacement when a batch insertion completes before its final observation', async () => {
+    const completed = deferred();
+    worker = new Worker<ModerationDeleteIntentJob>(
+      MODERATION_DELETE_INTENT_QUEUE,
+      async () => undefined,
+      { connection, prefix },
+    );
+    worker.once('completed', () => completed.resolve());
+    await worker.waitUntilReady();
+    const add = queue.add.bind(queue);
+    const replacementToken = randomUUID();
+    jest.spyOn(queue, 'add').mockImplementationOnce(async (...args) => {
+      const original = await add(...args);
+      await completed.promise;
+      await worker!.close();
+      worker = undefined;
+      await add(
+        'execute-moderation-delete-intent',
+        { intentId: 'batch-replacement', handoffToken: replacementToken },
+        { jobId: 'mdi-batch-replacement', priority: 1, removeOnComplete: true },
+      );
+      return original;
+    });
+
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['batch-replacement'], 10),
+    ).resolves.toEqual([
+      { status: 'fulfilled', value: { insertion: 'unknown', reused: false, observationErrors: 0 } },
+    ]);
+    const replacement = (await queue.getJob('mdi-batch-replacement'))!;
+    expect(replacement.data.handoffToken).toBe(replacementToken);
+    expect(replacement.opts.priority).toBe(1);
+    expect(await replacement.getState()).toBe('prioritized');
+  });
+
+  it('settles an add failure independently while other intents still receive wakeups', async () => {
+    const add = queue.add.bind(queue);
+    const unavailable = new Error('independent add unavailable');
+    jest.spyOn(queue, 'add').mockImplementation(async (...args) => {
+      if (args[1].intentId === 'failed-add') throw unavailable;
+      return add(...args);
+    });
+
+    await expect(
+      handoffModerationDeleteSweepJobs(
+        queue,
+        ['success-before', 'failed-add', 'success-after'],
+        10,
+      ),
+    ).resolves.toEqual([
+      {
+        status: 'fulfilled',
+        value: { insertion: 'inserted', reused: false, observationErrors: 0 },
+      },
+      { status: 'rejected', reason: unavailable },
+      {
+        status: 'fulfilled',
+        value: { insertion: 'inserted', reused: false, observationErrors: 0 },
+      },
+    ]);
+    expect(await queue.getJob('mdi-success-before')).toBeDefined();
+    expect(await queue.getJob('mdi-failed-add')).toBeUndefined();
+    expect(await queue.getJob('mdi-success-after')).toBeDefined();
   });
 });
