@@ -18,7 +18,8 @@ export function buildPublisherAccessCensusReadinessSql() {
 \\if :publisher_access_census_ready
 \\else
 \\echo 'Publisher census requires the binding primary key and existing metadata grants.'
-\\quit 4
+-- FLAG: PostgreSQL 16 psql ignores numeric \\quit arguments. Fail under ON_ERROR_STOP.
+SELECT 1 / 0;
 \\endif
 `;
 }
