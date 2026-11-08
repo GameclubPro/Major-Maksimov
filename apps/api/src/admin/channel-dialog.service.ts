@@ -280,10 +280,10 @@ export class ChannelDialogService {
       messageId,
       body,
       dialogProfile: profile,
-      loadCommentSettings: (chatId) =>
+      loadCommentSettings: (chatId, token) =>
         profile === 'publisher'
           ? this.legacyAdminService.getPublicPublisherChatCommentSettingsForDialog(chatId)
-          : this.legacyAdminService.getPublicChatCommentSettingsForDialog(chatId),
+          : this.legacyAdminService.getPublicChatCommentSettingsForDialog(chatId, token),
       toggleReaction: (options) =>
         this.legacyAdminService.toggleEntityDialogReactionForDialog(options),
     });

@@ -34,6 +34,7 @@ import {
 } from '@maxim/contracts/settings';
 import { BadRequestException, ConflictException, type Logger } from '@nestjs/common';
 import { isDeepStrictEqual } from 'node:util';
+import { isNightModeCommentThreadId } from '../common/night-mode-comment-thread.util';
 import type { NetworkSettingsWriteOptions } from './network-settings-write';
 import {
   assertLegacyStopWordsWrite,
@@ -670,6 +671,7 @@ export type PublicChatCommentSettings = Pick<
 export async function readPublicChatCommentSettings(
   prisma: PrismaService,
   chatId: string,
+  verifiedThreadId?: string | null,
 ): Promise<PublicChatCommentSettings> {
   const settings = await prisma.chatSettings.findUnique({ where: { chatId } });
   const parsed = settings
@@ -679,7 +681,9 @@ export async function readPublicChatCommentSettings(
     ? normalizeChatSettings(parsed.data, undefined, chatId)
     : DEFAULT_CHAT_SETTINGS;
   return {
-    commentsEnabled: normalized.commentsEnabled,
+    commentsEnabled: isNightModeCommentThreadId(verifiedThreadId)
+      ? normalized.nightModeCommentsEnabled
+      : normalized.commentsEnabled,
     commentsAdminsEnabled: normalized.commentsAdminsEnabled,
     commentsAllEnabled: normalized.commentsAllEnabled,
     commentsChatBroadcastsEnabled: normalized.commentsChatBroadcastsEnabled,

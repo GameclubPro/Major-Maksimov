@@ -1287,7 +1287,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       buildClosedNoticeOptions: (settings) =>
         this.buildNightModeClosedNoticeOptions({
           chatId: settings.chatId,
-          commentsEnabled: settings.commentsEnabled,
           nightModeCommentsEnabled: settings.nightModeCommentsEnabled,
           nightModeBotButtons: settings.nightModeBotButtons,
           nightModeBotButtonEnabled: settings.nightModeBotButtonEnabled,
@@ -18161,7 +18160,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
 
   private buildNightModeClosedNoticeOptions(params: {
     chatId: string;
-    commentsEnabled: boolean;
     nightModeCommentsEnabled: boolean;
     nightModeBotButtons: unknown;
     nightModeBotButtonEnabled: boolean;
@@ -18183,7 +18181,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     );
     const commentsButton = buildNightModeCommentsButton({
       chatId: params.chatId,
-      commentsEnabled: params.commentsEnabled,
       nightModeCommentsEnabled: params.nightModeCommentsEnabled,
       buildButton: ({ chatId, threadId, text }) =>
         this.buildChatDialogButton(chatId, 'comments', threadId, text),
