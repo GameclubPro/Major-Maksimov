@@ -55,6 +55,23 @@ export const OPTIMIZATION_TIMING_PHASES = [
   'sendRetryQueue',
 ] as const;
 export type OptimizationTimingPhase = (typeof OPTIMIZATION_TIMING_PHASES)[number];
+export const RULE_TIMING_STAGES = [
+  'normalize',
+  'profanity',
+  'commercial-ad',
+  'links',
+  'message-length',
+  'anti-spam-burst',
+  'message-count-limit',
+  'blocked-words',
+  'blocked-domains',
+  'phone-numbers',
+  'attachments',
+  'traffic-protection',
+  'duplicate-precheck',
+  'duplicate-state',
+] as const;
+export const CONTEXT_TIMING_PHASES = ['coldLoad', 'candidateLoad'] as const;
 export const OPTIMIZATION_TIMING_FIELDS = [
   'calls',
   'errors',
@@ -102,6 +119,8 @@ export class OptimizationRuntimeMetrics {
   private readonly roster = matrix(ROSTER_SYNC_STATES, ROSTER_SYNC_COUNTERS);
   private readonly demand = counters(ROSTER_DEMAND_COUNTERS);
   private readonly timings = matrix(OPTIMIZATION_TIMING_PHASES, OPTIMIZATION_TIMING_FIELDS);
+  private readonly ruleStages = matrix(RULE_TIMING_STAGES, OPTIMIZATION_TIMING_FIELDS);
+  private readonly contextSource = matrix(CONTEXT_TIMING_PHASES, OPTIMIZATION_TIMING_FIELDS);
 
   author(
     module: DeleteAuthorModule | undefined,
@@ -117,7 +136,24 @@ export class OptimizationRuntimeMetrics {
     add(this.demand, counter);
   }
   timing(phase: OptimizationTimingPhase, elapsedMs: number | null, failed = false): void {
-    const counts = this.timings[phase];
+    this.observeTiming(this.timings[phase], elapsedMs, failed);
+  }
+  ruleStage(stage: string, elapsedMs: number | null): void {
+    if (!RULE_TIMING_STAGES.includes(stage as (typeof RULE_TIMING_STAGES)[number])) return;
+    this.observeTiming(this.ruleStages[stage as (typeof RULE_TIMING_STAGES)[number]], elapsedMs);
+  }
+  contextLoad(
+    phase: (typeof CONTEXT_TIMING_PHASES)[number],
+    elapsedMs: number | null,
+    failed = false,
+  ): void {
+    this.observeTiming(this.contextSource[phase], elapsedMs, failed);
+  }
+  private observeTiming(
+    counts: Record<string, number>,
+    elapsedMs: number | null,
+    failed = false,
+  ): void {
     add(counts, 'calls');
     if (failed) add(counts, 'errors');
     if (
@@ -151,6 +187,8 @@ export class OptimizationRuntimeMetrics {
       roster: this.roster,
       demand: this.demand,
       timings: this.timings,
+      ruleStages: this.ruleStages,
+      contextSource: this.contextSource,
     });
   }
 }
@@ -190,5 +228,19 @@ export function sanitizeOptimizationRuntimeMetrics(value: unknown) {
     OPTIMIZATION_TIMING_PHASES,
     OPTIMIZATION_TIMING_FIELDS,
   );
-  return authors && roster && demand && timings ? { authors, roster, demand, timings } : null;
+  // FLAG: Missing additive dimensions are unavailable coverage for older processes.
+  // Do not manufacture zero measurements while accepting their existing counters.
+  const ruleStages = checkedMatrix(
+    source.ruleStages,
+    RULE_TIMING_STAGES,
+    OPTIMIZATION_TIMING_FIELDS,
+  );
+  const contextSource = checkedMatrix(
+    source.contextSource,
+    CONTEXT_TIMING_PHASES,
+    OPTIMIZATION_TIMING_FIELDS,
+  );
+  return authors && roster && demand && timings
+    ? { authors, roster, demand, timings, ruleStages, contextSource }
+    : null;
 }

@@ -1,5 +1,8 @@
 import { pathToFileURL } from 'node:url';
-import { ACTION_LATENCY_EXTENSION_COLUMNS } from './action-latency-audit.mjs';
+import {
+  ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS,
+  ACTION_LATENCY_SCHEDULE_COLUMNS,
+} from './action-latency-audit.mjs';
 
 export const OWNER_PROOF_COLUMNS = Object.freeze({
   webhook_execution_claims: Object.freeze([
@@ -37,15 +40,17 @@ const ownerValues = Object.entries(OWNER_PROOF_COLUMNS)
   .flatMap(([table, columns]) => columns.map((column) => `(${literal(table)}, ${literal(column)})`))
   .join(',\n  ');
 
-// FLAG: Optional for older catalogs, but never accept partial, inherited excess or write
-// access. Preserve the original group separately from the optional latency extension;
-// total counts alone could admit a mixed partial group. Reports require their own groups.
+// FLAG: Preserve the exact legacy latency group through source sync and migration.
+// Scalar grants form a separate all-or-none group requiring all six legacy columns;
+// any latency access requires all original owner-proof columns. Counts never allow
+// mixed six-column sets, partial groups, inherited excess or mutation privileges.
 export function ownerProofPrivilegesSql(requireAll = false) {
-  const extensionValues = ACTION_LATENCY_EXTENSION_COLUMNS.map(
-    (column) => `('max_action_ledger', ${literal(column)})`,
-  ).join(',');
+  const values = (columns) =>
+    columns.map((column) => `('max_action_ledger', ${literal(column)})`).join(',');
   return `WITH original(table_name, column_name) AS (VALUES ${ownerValues}),
-extension(table_name, column_name) AS (VALUES ${extensionValues}),
+legacy_extension(table_name, column_name) AS (VALUES ${values(ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS)}),
+schedule_extension(table_name, column_name) AS (VALUES ${values(ACTION_LATENCY_SCHEDULE_COLUMNS)}),
+extension AS (SELECT * FROM legacy_extension UNION ALL SELECT * FROM schedule_extension),
 allowed AS (SELECT * FROM original UNION ALL SELECT * FROM extension),
 relations AS (SELECT DISTINCT table_name, to_regclass('public.' || table_name) AS oid FROM allowed),
 attributes AS MATERIALIZED (
@@ -54,6 +59,13 @@ attributes AS MATERIALIZED (
     has_column_privilege(current_user, r.oid, a.attnum, 'INSERT,UPDATE,REFERENCES') AS writable
   FROM relations r JOIN pg_attribute a ON a.attrelid = r.oid
   WHERE a.attnum > 0 AND NOT a.attisdropped
+), counts AS (
+  SELECT (SELECT count(*) FROM attributes a JOIN original o
+    ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) AS original_count,
+  (SELECT count(*) FROM attributes a JOIN legacy_extension e
+    ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS legacy_count,
+  (SELECT count(*) FROM attributes a JOIN schedule_extension e
+    ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS schedule_count
 )
 SELECT NOT EXISTS (
   SELECT 1 FROM relations WHERE oid IS NOT NULL AND
@@ -61,15 +73,12 @@ SELECT NOT EXISTS (
 ) AND NOT EXISTS (
   SELECT 1 FROM attributes a WHERE writable OR (readable AND NOT EXISTS (
     SELECT 1 FROM allowed WHERE table_name = a.table_name AND column_name = a.attname))
-) AND (SELECT count(*) FROM attributes a JOIN original o
-  ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) ${requireAll ? '= 25' : 'IN (0, 25)'}
-AND (SELECT count(*) FROM attributes a JOIN extension e
-  ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) IN (0, 6)
-AND (NOT EXISTS (SELECT 1 FROM attributes a JOIN extension e
-  ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable)
-  OR (SELECT count(*) FROM attributes a JOIN original o
-    ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) = 25)
-AS owner_proof_privileges_ready;`;
+) AND original_count ${requireAll ? '= 25' : 'IN (0, 25)'}
+AND legacy_count IN (0, ${ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS.length})
+AND schedule_count IN (0, ${ACTION_LATENCY_SCHEDULE_COLUMNS.length})
+AND (schedule_count = 0 OR legacy_count = ${ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS.length})
+AND ((legacy_count = 0 AND schedule_count = 0) OR original_count = 25)
+AS owner_proof_privileges_ready FROM counts;`;
 }
 
 const chatExpression = `COALESCE(NULLIF(btrim(((normalized_payload -> 'message'::text) ->> 'chatId'::text)), ''::text), NULLIF(btrim((normalized_payload ->> 'chatId'::text)), ''::text))`;

@@ -1,3 +1,4 @@
+import type { Prisma } from '../prisma/prisma-client';
 import { ActionLatencyService } from './action-latency.service';
 
 describe('ActionLatencyService', () => {
@@ -9,6 +10,7 @@ describe('ActionLatencyService', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
     const actionRows = [
       {
+        metadataState: 'ABSENT',
         actionType: 'DELETE_MESSAGE',
         status: 'SUCCEEDED',
         sourceTag: 'moderation',
@@ -19,6 +21,7 @@ describe('ActionLatencyService', () => {
         completedAt: new Date('2026-08-15T11:59:58.350Z'),
       },
       {
+        metadataState: 'ABSENT',
         actionType: 'SEND_MESSAGE',
         status: 'FAILED_TERMINAL',
         sourceTag: null,
@@ -29,6 +32,7 @@ describe('ActionLatencyService', () => {
         completedAt: new Date('2026-08-15T11:59:59.900Z'),
       },
       {
+        metadataState: 'ABSENT',
         actionType: 'SEND_MESSAGE',
         status: 'AMBIGUOUS',
         sourceTag: 'manual',
@@ -60,7 +64,7 @@ describe('ActionLatencyService', () => {
       },
     ];
     const prisma = {
-      maxActionLedgerEntry: { findMany: jest.fn().mockResolvedValue(actionRows) },
+      $queryRaw: jest.fn().mockResolvedValue(actionRows),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue(deleteRows) },
     };
     const service = new ActionLatencyService(
@@ -143,19 +147,15 @@ describe('ActionLatencyService', () => {
       generatedAt: '2026-08-15T12:00:00.000Z',
     });
 
-    expect(prisma.maxActionLedgerEntry.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          terminal: true,
-          completedAt: {
-            gte: new Date('2026-08-15T11:45:00.000Z'),
-            lte: new Date('2026-08-15T12:00:00.000Z'),
-          },
-        }),
-        orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
-        take: 4,
-      }),
-    );
+    const query = prisma.$queryRaw.mock.calls[0]![0] as Prisma.Sql;
+    expect(query.sql).toMatch(/WITH heads AS MATERIALIZED/);
+    expect(query.sql).toMatch(/ORDER BY completed_at DESC, id DESC LIMIT \?/);
+    expect(query.sql).toContain('WHERE id=heads.id OFFSET 0');
+    expect(query.values).toEqual([
+      new Date('2026-08-15T11:45:00.000Z'),
+      new Date('2026-08-15T12:00:00.000Z'),
+      4,
+    ]);
     expect(prisma.moderationDeleteIntent.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -200,7 +200,7 @@ describe('ActionLatencyService', () => {
 
   it('retains independently authorized deletes while excluding delayed-only outcomes', async () => {
     const prisma = {
-      maxActionLedgerEntry: { findMany: jest.fn().mockResolvedValue([]) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new ActionLatencyService(prisma as never, { get: jest.fn() } as never);
@@ -246,21 +246,20 @@ describe('ActionLatencyService', () => {
   it('measures delayed action reaction from its effective ready time', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
     const prisma = {
-      maxActionLedgerEntry: {
-        findMany: jest.fn().mockResolvedValue([
-          {
-            actionType: 'UNBAN_MEMBER',
-            status: 'SUCCEEDED',
-            sourceTag: 'moderation',
-            botId: 'bot-1',
-            trafficClass: 'background',
-            metadata: { scheduledFor: '2026-08-15T11:59:59.500Z' },
-            enqueuedAt: new Date('2026-08-15T11:00:00.000Z'),
-            lastAttemptAt: new Date('2026-08-15T11:59:59.600Z'),
-            completedAt: new Date('2026-08-15T11:59:59.700Z'),
-          },
-        ]),
-      },
+      $queryRaw: jest.fn().mockResolvedValue([
+        {
+          actionType: 'UNBAN_MEMBER',
+          status: 'SUCCEEDED',
+          sourceTag: 'moderation',
+          botId: 'bot-1',
+          trafficClass: 'background',
+          metadataState: 'BOUNDED_SCHEDULE',
+          legacyScheduledFor: '2026-08-15T11:59:59.500Z',
+          enqueuedAt: new Date('2026-08-15T11:00:00.000Z'),
+          lastAttemptAt: new Date('2026-08-15T11:59:59.600Z'),
+          completedAt: new Date('2026-08-15T11:59:59.700Z'),
+        },
+      ]),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new ActionLatencyService(prisma as never, { get: jest.fn() } as never);
@@ -282,16 +281,122 @@ describe('ActionLatencyService', () => {
         },
       },
     });
-    expect(prisma.maxActionLedgerEntry.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        select: expect.objectContaining({ metadata: true }),
-      }),
+    const query = prisma.$queryRaw.mock.calls[0]![0] as Prisma.Sql;
+    expect(query.sql).toContain('COMPRESSED_NOT_INSPECTED');
+    expect(query.sql).toContain('pg_column_size(details.metadata) <= 8192');
+    expect(query.sql).not.toMatch(/metadata AS/);
+  });
+
+  it.each([
+    {
+      metadataState: 'SCALAR_VALID',
+      scheduledForAt: new Date('2026-08-15T11:59:59.500Z'),
+      legacyScheduledFor: 'invalid',
+      state: 'KNOWN',
+      measured: 1,
+    },
+    { metadataState: 'SCALAR_UNSCHEDULED', state: 'KNOWN', measured: 1 },
+    { metadataState: 'SCALAR_INVALID', state: 'INVALID_SCHEDULE', measured: 0 },
+    { metadataState: 'COMPRESSED_NOT_INSPECTED', state: 'UNKNOWN_METADATA', measured: 0 },
+    { metadataState: 'OVERSIZED_NOT_INSPECTED', state: 'UNKNOWN_METADATA', measured: 0 },
+    { metadataState: 'INVALID_SCALAR_CLOCK', state: 'INVALID_READY_CLOCK', measured: 0 },
+    {
+      metadataState: 'BOUNDED_SCHEDULE',
+      legacyScheduledFor: '2026-02-30T00:00:00.000Z',
+      state: 'INVALID_SCHEDULE',
+      measured: 0,
+    },
+    {
+      metadataState: 'BOUNDED_SCHEDULE',
+      legacyScheduledFor: '2026-08-15T11:59:59+01:00',
+      state: 'INVALID_SCHEDULE',
+      measured: 0,
+    },
+    {
+      metadataState: 'SCALAR_VALID',
+      scheduledForAt: new Date('2026-08-15T11:59:59.500Z'),
+      enqueuedAt: null,
+      state: 'MISSING_READY_CLOCK',
+      measured: 0,
+    },
+    {
+      metadataState: 'SCALAR_UNSCHEDULED',
+      invalidEnqueuedAt: true,
+      state: 'INVALID_READY_CLOCK',
+      measured: 0,
+    },
+  ])(
+    'reports honest readiness coverage for $metadataState / $state',
+    async ({ state, measured, ...overrides }) => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+      const row = {
+        actionType: 'SEND_MESSAGE',
+        status: 'SUCCEEDED',
+        sourceTag: 'managed_broadcast',
+        botId: 'bot-1',
+        trafficClass: 'interactive',
+        scheduledForAt: null,
+        legacyScheduledFor: null,
+        invalidEnqueuedAt: false,
+        enqueuedAt: new Date('2026-08-15T11:59:59.000Z'),
+        lastAttemptAt: new Date('2026-08-15T11:59:59.600Z'),
+        completedAt: new Date('2026-08-15T11:59:59.700Z'),
+        ...overrides,
+      };
+      const service = new ActionLatencyService(
+        {
+          $queryRaw: jest.fn().mockResolvedValue([row]),
+          moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
+        } as never,
+        { get: jest.fn() } as never,
+      );
+      const result = await service.getSnapshot();
+      expect(result.readiness).toContainEqual({ state, count: 1 });
+      expect(result.overall.effectiveReadyToTerminal).toMatchObject({
+        sampleCount: measured,
+        excludedCount: 1 - measured,
+      });
+      expect(result.overall.lastAttemptToTerminal).toMatchObject({
+        sampleCount: 1,
+        excludedCount: 0,
+      });
+      expect(result.bySource[0]?.effectiveReadyToTerminal.excludedCount).toBe(1 - measured);
+    },
+  );
+
+  it('excludes attempt clocks after completion while retaining a valid readiness total', async () => {
+    const service = new ActionLatencyService(
+      {
+        $queryRaw: jest.fn().mockResolvedValue([
+          {
+            actionType: 'SEND_MESSAGE',
+            status: 'SUCCEEDED',
+            sourceTag: null,
+            botId: null,
+            trafficClass: null,
+            metadataState: 'SCALAR_UNSCHEDULED',
+            invalidEnqueuedAt: false,
+            scheduledForAt: null,
+            legacyScheduledFor: null,
+            enqueuedAt: new Date(1000),
+            lastAttemptAt: new Date(3000),
+            completedAt: new Date(2000),
+          },
+        ]),
+        moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
+      } as never,
+      { get: jest.fn() } as never,
     );
+    const { overall } = await service.getSnapshot();
+    expect(overall.effectiveReadyToLastAttempt.sampleCount).toBe(0);
+    expect(overall.lastAttemptToTerminal.sampleCount).toBe(0);
+    expect(overall.effectiveReadyToTerminal.sampleCount).toBe(1);
   });
 
   it('marks only an actual over-limit sample as truncated', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
     const actionRows = Array.from({ length: 4 }, (_, index) => ({
+      metadataState: 'ABSENT',
       actionType: 'SEND_MESSAGE',
       status: 'SUCCEEDED',
       sourceTag: 'moderation',
@@ -308,7 +413,7 @@ describe('ActionLatencyService', () => {
       completedAt: row.completedAt,
     }));
     const prisma = {
-      maxActionLedgerEntry: { findMany: jest.fn().mockResolvedValue(actionRows) },
+      $queryRaw: jest.fn().mockResolvedValue(actionRows),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue(deleteRows) },
     };
     const service = new ActionLatencyService(
@@ -328,7 +433,7 @@ describe('ActionLatencyService', () => {
   it('caps configuration, caches snapshots, and leaves missing intervals empty', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
     const prisma = {
-      maxActionLedgerEntry: { findMany: jest.fn().mockResolvedValue([]) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new ActionLatencyService(
@@ -348,7 +453,7 @@ describe('ActionLatencyService', () => {
     const second = await service.getSnapshot();
 
     expect(second).toBe(first);
-    expect(prisma.maxActionLedgerEntry.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
     expect(prisma.moderationDeleteIntent.findMany).toHaveBeenCalledTimes(1);
     expect(first).toMatchObject({
       sampleLimit: 5_000,
@@ -389,18 +494,16 @@ describe('ActionLatencyService', () => {
 
   it('clears a failed in-flight query so the next snapshot can recover', async () => {
     const prisma = {
-      maxActionLedgerEntry: {
-        findMany: jest
-          .fn()
-          .mockRejectedValueOnce(new Error('database unavailable'))
-          .mockResolvedValueOnce([]),
-      },
+      $queryRaw: jest
+        .fn()
+        .mockRejectedValueOnce(new Error('database unavailable'))
+        .mockResolvedValueOnce([]),
       moderationDeleteIntent: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new ActionLatencyService(prisma as never, { get: jest.fn() } as never);
 
     await expect(service.getSnapshot()).rejects.toThrow('database unavailable');
     await expect(service.getSnapshot()).resolves.toMatchObject({ actionSampleCount: 0 });
-    expect(prisma.maxActionLedgerEntry.findMany).toHaveBeenCalledTimes(2);
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
   });
 });

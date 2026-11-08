@@ -78,6 +78,7 @@ export class MaxRoutedPublicationService {
   ) {}
 
   async publish(request: MaxRoutedPublicationRequest): Promise<MaxRoutedPublicationResult> {
+    const invocationReadyAt = new Date();
     const entityId = request.entityId.trim();
     const logicalIdempotencyKey = request.logicalIdempotencyKey.trim();
     if (!entityId) {
@@ -113,7 +114,7 @@ export class MaxRoutedPublicationService {
       ...(request.options ? { options: request.options } : {}),
       attempt: 1,
       idempotencyKey: logicalIdempotencyKey,
-      createdAt: new Date().toISOString(),
+      createdAt: invocationReadyAt.toISOString(),
       ...(requiredBotId
         ? {
             routing: {
@@ -187,6 +188,9 @@ export class MaxRoutedPublicationService {
       },
     };
     const executionOptions: MaxActionDispatchExecutionOptions = {
+      // FLAG: Direct publication has no BullMQ enqueue. Observe this invocation's
+      // readiness before route/preparation waits; retained receipts keep their clocks.
+      enqueuedAt: invocationReadyAt,
       ...(request.prepareAttempt
         ? {
             prepareAttempt: async ({ botId, job: attemptJob }) => {

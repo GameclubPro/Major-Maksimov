@@ -38,7 +38,7 @@ coverage, not zero work. Reporting failure must not block bot work.
 ### Permission and SEND attribution
 
 The additive `optimization` report uses fixed module names and counters only. Its
-bounded envelope is 16 KiB per service, with the same 30-second publication and
+bounded envelope is 24 KiB per service, with the same 30-second publication and
 90-second expiry; old or malformed attribution is `null`. It adds no per-message
 Redis writes, SQL history, identities or arbitrary labels.
 
@@ -82,6 +82,20 @@ different populations and overlap as described: do not sum them or infer a cause
 from one large bucket. Direct sends can contribute transport without dispatcher
 timings. Fixed histograms locate a follow-up investigation; they do not establish
 per-message causal traces, daily savings or authorization to increase quotas.
+
+The additive `optimization.ruleStages` histograms admit only the fourteen fixed
+rule-engine stages. They observe the existing completed stage boundaries, using
+their existing wall clocks; they are not eligible-message counts and do not prove
+that a rule ran, completed successfully or covered every failure. Handler totals
+and inner rule stages overlap. `optimization.contextSource` uses monotonic clocks
+around each complete SQL-source attempt: `coldLoad` has no retained settings
+candidate; `candidateLoad` includes the compact proof and any full fallback.
+Errors remain in the same population. Compare these timings with `fullLoads`,
+`shellReads`, `reuses` and cache activity, rather than treating every candidate as
+a reuse. Older or corrupt additive blocks remain unavailable, preserving the
+other optimization counters. Both blocks use the existing process report and
+add no Redis exchange per observation. Readers predating the 24 KiB bound can
+temporarily reject a larger report during a mixed-version rollout.
 
 Keep saved snapshots owner-private. Retain only fixed service names, epochs,
 numeric metrics and fixed readiness/condition enums. Full ready responses and

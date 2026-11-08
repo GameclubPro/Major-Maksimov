@@ -1,4 +1,6 @@
 import { RuntimeDiagnosticsService } from './runtime-diagnostics.service';
+import { OptimizationRuntimeMetrics } from './optimization-runtime-metrics';
+import type { StorageRuntimeMetricsService } from './storage-runtime-metrics.service';
 
 type RedisHashes = Map<string, Record<string, string>>;
 
@@ -108,6 +110,32 @@ function createConfigMock(values: Record<string, string | number | undefined> = 
 }
 
 describe('RuntimeDiagnosticsService', () => {
+  it('records rule histograms locally even when Redis diagnostics is unavailable', async () => {
+    const optimization = new OptimizationRuntimeMetrics();
+    const provider: Pick<StorageRuntimeMetricsService, 'optimization'> = { optimization };
+    const service = new RuntimeDiagnosticsService(
+      createConfigMock() as never,
+      provider as StorageRuntimeMetricsService,
+    );
+    const redis = redisInstances.at(-1)!;
+    redis.pipeline.mockImplementationOnce(() => {
+      throw new Error('unavailable');
+    });
+    await expect(
+      service.recordHotPathProfile({
+        snapshot: {
+          stageDurations: {
+            'rule-engine.links': 320,
+            'rule-engine.private-dimension': 1000,
+            'chat-context': 200,
+          },
+        },
+      }),
+    ).rejects.toThrow('unavailable');
+    expect(optimization.snapshot()!.ruleStages!.links).toMatchObject({ calls: 1, totalMs: 320 });
+    expect(JSON.stringify(optimization.snapshot())).not.toContain('private-dimension');
+    await service.onModuleDestroy();
+  });
   beforeEach(() => {
     redisInstances.length = 0;
   });

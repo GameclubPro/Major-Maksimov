@@ -1,8 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { QueueMetricsSnapshot } from './queue-metrics.service';
 import type { SystemModeSnapshot } from './system-mode.service';
 import Redis from 'ioredis';
+import { StorageRuntimeMetricsService } from './storage-runtime-metrics.service';
 
 type HotPathStageSummary = {
   stage: string;
@@ -225,7 +226,10 @@ export class RuntimeDiagnosticsService implements OnModuleDestroy {
   private readonly burstLagThresholdSec: number;
   private readonly redisScanCount: number;
 
-  constructor(configService: ConfigService) {
+  constructor(
+    configService: ConfigService,
+    @Optional() private readonly storageRuntimeMetrics?: StorageRuntimeMetricsService,
+  ) {
     this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'));
     this.hotPathWindowSec = this.readPositiveInt(
       configService.get('SYSTEM_RUNTIME_DIAGNOSTICS_HOT_PATH_WINDOW_SEC'),
@@ -274,6 +278,18 @@ export class RuntimeDiagnosticsService implements OnModuleDestroy {
     stagePrefix?: string;
   }): Promise<void> {
     const stageDurations = this.readNumericRecord(params.snapshot?.stageDurations);
+    // FLAG: Observe only fixed rule phases, before Redis I/O. This adds no per-event
+    // network operation and cannot turn a failed diagnostics write into execution authority.
+    if (!params.stagePrefix) {
+      for (const [stage, elapsedMs] of Object.entries(stageDurations)) {
+        if (stage.startsWith('rule-engine.')) {
+          this.storageRuntimeMetrics?.optimization.ruleStage(
+            stage.slice('rule-engine.'.length),
+            elapsedMs,
+          );
+        }
+      }
+    }
     const now = Date.now();
     const bucketKey = this.buildBucketKey(HOT_PATH_BUCKET_PREFIX, now);
     const ttlSec = this.resolveBucketTtlSec(this.hotPathWindowSec);

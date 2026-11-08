@@ -18,7 +18,7 @@ import {
 import { isRuntimeServiceName, RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 
 export const STORAGE_RUNTIME_METRICS_PREFIX = 'runtime:storage-cost:v1:';
-export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 16_384;
+export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 24_576;
 export const STORAGE_RUNTIME_COUNTERS = [
   'deleteLeaseChecks',
   'deleteLeaseRenewals',

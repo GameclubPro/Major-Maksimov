@@ -13,6 +13,7 @@ import {
 import type { MaxBotChat } from '../max/max-client.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import { optimizationNow, optimizationElapsed } from '../system/optimization-runtime-metrics';
 import {
   ChatContextLocalCache,
   type ChatContextLocalCacheSnapshot,
@@ -2499,7 +2500,21 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       this.cacheActivity.sourceLoads += 1;
       const candidate = this.settingsTemplates.get(chatId);
       if (candidate) this.settingsSourceActivity.shellReads += 1;
-      const source = await readChatContextSource(this.prisma, chatId, new Date(), candidate);
+      const sourceStarted = optimizationNow();
+      let sourceFailed = true;
+      const source = await (async () => {
+        try {
+          const result = await readChatContextSource(this.prisma, chatId, new Date(), candidate);
+          sourceFailed = false;
+          return result;
+        } finally {
+          this.storageRuntimeMetrics?.optimization.contextLoad(
+            candidate ? 'candidateLoad' : 'coldLoad',
+            optimizationElapsed(sourceStarted),
+            sourceFailed,
+          );
+        }
+      })();
       if (source.mode === 'shell') this.settingsSourceActivity.reuses += 1;
       else this.settingsSourceActivity.fullLoads += 1;
       // FLAG: Only a coherent SQL snapshot binds the private settings to this proof.

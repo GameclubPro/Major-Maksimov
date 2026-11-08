@@ -115,6 +115,55 @@ function expectRejectedAt(value: unknown, path: Array<string | number>) {
 }
 
 describe('system dashboard contracts', () => {
+  it('accepts optional clock coverage while preserving older snapshots', () => {
+    const snapshot = createPopulatedSnapshot();
+    expect(systemDashboardActionLatencySchema.safeParse(snapshot).success).toBe(true);
+    const withCoverage = {
+      ...snapshot,
+      readiness: [{ state: 'KNOWN', count: 2 }],
+      scheduleClockBasis: 'scalar_with_bounded_legacy_fallback',
+      enqueueClockBasis: 'latest_accepted_queue_or_direct_invocation',
+      overall: {
+        ...snapshot.overall,
+        effectiveReadyToTerminal: { ...populatedPercentiles, excludedCount: 0 },
+      },
+    };
+    expect(systemDashboardActionLatencySchema.safeParse(withCoverage).success).toBe(true);
+    expectRejectedAt({ ...withCoverage, readiness: [{ state: 'KNOWN', count: 1 }] }, ['readiness']);
+    expectRejectedAt(
+      {
+        ...withCoverage,
+        readiness: [
+          { state: 'KNOWN', count: 1 },
+          { state: 'KNOWN', count: 1 },
+        ],
+      },
+      ['readiness'],
+    );
+    expectRejectedAt(
+      {
+        ...withCoverage,
+        overall: {
+          ...withCoverage.overall,
+          effectiveReadyToTerminal: { ...populatedPercentiles, excludedCount: 1 },
+        },
+      },
+      ['overall', 'effectiveReadyToTerminal', 'excludedCount'],
+    );
+    expectRejectedAt(
+      {
+        ...snapshot,
+        byAction: [
+          {
+            ...createActionGroup('SEND_MESSAGE'),
+            effectiveReadyToTerminal: { ...populatedPercentiles, excludedCount: 1 },
+          },
+        ],
+      },
+      ['byAction', 0, 'effectiveReadyToTerminal', 'excludedCount'],
+    );
+  });
+
   it('classifies system mode while accepting legacy snapshots without a condition', () => {
     const legacy = {
       mode: 'degrade',

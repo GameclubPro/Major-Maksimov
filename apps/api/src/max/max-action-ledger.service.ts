@@ -3,6 +3,7 @@ import {
   type NightModeTransitionKind,
 } from '../moderation/night-mode-transition-time.util';
 import { beginMaxSendLedgerObservation } from './max-send-observation';
+import { readMaxActionScheduleClock } from './max-action-schedule-clock';
 import {
   isMaxMutationOutcomeAmbiguous,
   wasMaxMessageSendAttempted,
@@ -1633,6 +1634,7 @@ export class MaxActionLedgerService {
       actionHealthLane: this.nullableString(job.actionHealthLane),
       attemptCount: 0,
       metadata: this.buildMetadata(job),
+      ...readMaxActionScheduleClock(job.scheduledFor),
     };
   }
 
@@ -1647,6 +1649,7 @@ export class MaxActionLedgerService {
       trafficClass: this.nullableString(job.trafficClass),
       actionHealthLane: this.nullableString(job.actionHealthLane),
       metadata: this.buildMetadata(job),
+      ...readMaxActionScheduleClock(job.scheduledFor),
     };
   }
 

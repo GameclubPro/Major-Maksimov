@@ -63,6 +63,7 @@ export const SOURCE_INVENTORY_DATE_COLUMNS: Readonly<Record<string, readonly str
   max_action_ledger: [
     'dispatch_started_at',
     'enqueued_at',
+    'scheduled_for_at',
     'first_attempt_at',
     'last_attempt_at',
     'completed_at',
