@@ -63,8 +63,15 @@ native('coherent settings templates on native PostgreSQL', () => {
   });
 
   afterEach(async () => {
-    await db.chat.deleteMany({ where: { id: { in: [...ownedChats] } } });
+    const ids = [...ownedChats];
     ownedChats.clear();
+    await db.chat.deleteMany({ where: { id: { in: ids } } });
+    await db.nightModeTransitionReconcileRequest.deleteMany({
+      where: { chatId: { in: ids } },
+    });
+    expect(
+      await db.nightModeTransitionReconcileRequest.count({ where: { chatId: { in: ids } } }),
+    ).toBe(0);
   });
 
   afterAll(async () => {
@@ -420,56 +427,78 @@ native('coherent settings templates on native PostgreSQL', () => {
   });
 
   it('bounds shell work on 10,000 chats with large settings and skewed shell relations', async () => {
+    let step = 0;
+    const started = performance.now();
+    const fixtureQuery = async (text: string, values?: unknown[]) => {
+      const queryStarted = performance.now();
+      const queryStep = ++step;
+      try {
+        return await raw.query(text, values);
+      } finally {
+        process.stdout.write(
+          `Chat context history fixture phase ${JSON.stringify({
+            step: queryStep,
+            operation: text.trim().split(/\s/u)[0],
+            durationMs: Math.round(performance.now() - queryStarted),
+            elapsedMs: Math.round(performance.now() - started),
+          })}\n`,
+        );
+      }
+    };
     const prefix = `settings-plan-${randomUUID()}-`;
     const target = `${prefix}1`;
     const large = Buffer.from('native-heavy-template'.repeat(16_000)).toString('base64');
     try {
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO chats (id, title, updated_at)
         SELECT $1 || n, 'History', now() FROM generate_series(1,10000) n`,
         [prefix],
       );
-      await raw.query(
-        `INSERT INTO chat_settings (id, chat_id, updated_at)
-        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO chat_admin_allowlist (chat_id, user_id)
         SELECT $1 || n, 'history-admin-' || u
         FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) u`,
         [prefix],
       );
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO domain_allowlist (chat_id, domain)
         SELECT $1 || n, 'history-domain-' || d || '.test'
         FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) d`,
         [prefix],
       );
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO chat_rules (id, chat_id, updated_at)
         SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
         [prefix],
       );
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO chat_admin_allowlist (chat_id, user_id)
         SELECT $1, 'skew-admin-' || n FROM generate_series(1,200) n`,
         [target],
       );
-      await raw.query(
+      await fixtureQuery(
         `INSERT INTO domain_allowlist (chat_id, domain)
         SELECT $1, 'skew-domain-' || n || '.test' FROM generate_series(1,200) n`,
         [target],
       );
+      // Default settings are created last so domain policy triggers do not reread
+      // 30,200 wide rows for a policy that makes no changes to this fixture.
+      await fixtureQuery(
+        `INSERT INTO chat_settings (id, chat_id, updated_at)
+        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
+        [prefix],
+      );
       for (const table of [
         'chats',
-        'chat_settings',
+        // The shell joins settings by chat_id and projects id; other settings columns
+        // cannot influence its plan. Keep the full rows, analyze its actual inputs.
+        'chat_settings (id, chat_id)',
         'chat_settings_cache_revisions',
         'chat_admin_allowlist',
         'domain_allowlist',
         'chat_rules',
       ])
-        await raw.query(`ANALYZE ${table}`);
+        await fixtureQuery(`ANALYZE ${table}`);
 
       for (const media of [{}, { greeting: { base64: large, mimeType: 'image/png' } }]) {
         await db.chatSettings.update({
@@ -492,7 +521,7 @@ native('coherent settings templates on native PostgreSQL', () => {
         expect(selectQueries()[0]).not.toContain('bot_speech_media');
       }
       const statement = chatContextShellQuery(target, now);
-      const result = await raw.query(
+      const result = await fixtureQuery(
         `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`,
         statement.values,
       );
@@ -521,8 +550,24 @@ native('coherent settings templates on native PostgreSQL', () => {
         ).toBeLessThan(500);
       }
     } finally {
-      // FLAG: Exact random fixture prefix only; cascades remove this test's metadata/relations.
-      await raw.query('DELETE FROM chats WHERE left(id, length($1)) = $1', [prefix]);
+      // FLAG: Exact random fixture prefix only; cascades remove metadata/relations.
+      // Settings deletion recreates non-FK reconcile requests, so remove them last.
+      await fixtureQuery('DELETE FROM chats WHERE left(id, length($1)) = $1', [prefix]);
+      await fixtureQuery(
+        'DELETE FROM night_mode_transition_reconcile_requests WHERE left(chat_id, length($1)) = $1',
+        [prefix],
+      );
     }
+    expect(
+      (
+        await raw.query(
+          'SELECT count(*)::int AS remaining FROM night_mode_transition_reconcile_requests WHERE left(chat_id, length($1)) = $1',
+          [prefix],
+        )
+      ).rows[0].remaining,
+    ).toBe(0);
+    expect(
+      await db.nightModeTransitionReconcileRequest.findUnique({ where: { chatId } }),
+    ).not.toBeNull();
   }, 30_000);
 });
