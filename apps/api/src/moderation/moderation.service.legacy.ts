@@ -2016,6 +2016,12 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }
 
       this.markWebhookHotPathStage(hotPathProfile, 'admin-check');
+      // FLAG: Modern duplicates own fresh qualification and sanction authority. A disabled
+      // invitation gate or its saved flag must not impose that proof on independent DELETEs.
+      // Retain the old admission boundary for legacy duplicate and active invitation paths.
+      const fullMessageDuplicates =
+        settings.antiDuplicateEnabled &&
+        (await this.messageDuplicateService?.isAuthoritative(chatId)) === true;
       const senderChatAdminCheck = await this.resolveSenderChatAdminCheck(
         chatId,
         chat.adminUserIds,
@@ -2025,8 +2031,8 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             roster: chat.adminRoster,
             botId: update.botId,
             useSavedProtection:
-              !settings.invitationAccessEnabled &&
-              !settings.antiDuplicateEnabled &&
+              !isInvitationAccessCurrentlyActive(settings) &&
+              (!settings.antiDuplicateEnabled || fullMessageDuplicates) &&
               !!this.moderationRuleSanctionGuard,
           },
           allowRemoteLookup:
@@ -2390,9 +2396,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         update.raw,
         this.navigationTargetOptions,
       );
-      const fullMessageDuplicates =
-        settings.antiDuplicateEnabled &&
-        (await this.messageDuplicateService?.isAuthoritative(chatId)) === true;
       this.markWebhookHotPathStage(hotPathProfile, 'rule-engine.detect');
       const detection = await this.ruleEngine.detect({
         chatId,

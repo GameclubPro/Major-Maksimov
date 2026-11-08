@@ -3,6 +3,9 @@ import type { ChatContextCacheService } from '../chat-context/chat-context-cache
 import type { ChatSettings } from '../prisma/prisma-client';
 import { ModerationAccessService } from './moderation-access.service';
 import { ModerationService } from './moderation.service';
+import type { MessageDuplicateService } from './message-duplicate/message-duplicate.service';
+import type { ModerationRuleSanctionGuardService } from './moderation-rule-sanction-guard.service';
+import { createLiveNavigationHarness, createUpdate } from './moderation.service.spec-support';
 
 const roster = {
   revision: 'saved-roster',
@@ -127,5 +130,81 @@ describe('saved administrator policy at automatic DELETE admission', () => {
     ).resolves.toEqual({ isAdmin: false, source: 'remote' });
     expect(s.lookup).toHaveBeenCalled();
     expect(s.observeActivity).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('saved administrator admission through the main handler', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    { authoritative: true, sanctionGuard: true, expectsLookup: false },
+    { authoritative: false, sanctionGuard: true, expectsLookup: true },
+    { authoritative: true, sanctionGuard: false, expectsLookup: true },
+  ])('preserves the independent authority boundary: %j', async (policy) => {
+    const h = createLiveNavigationHarness();
+    const runtime = h.service as unknown as {
+      loadChatContext: ModerationService['loadChatContext'];
+    };
+    const context = await runtime.loadChatContext('chat-1');
+    jest.spyOn(runtime, 'loadChatContext').mockResolvedValue({
+      ...context,
+      settings: {
+        ...context.settings,
+        antiSpamEnabled: false,
+        antiDuplicateEnabled: true,
+        invitationAccessEnabled: true,
+        deleteSpammersEnabled: false,
+        commercialAdsFilterEnabled: false,
+        russianProfanityFilterEnabled: false,
+      },
+      adminUserIds: [],
+      adminRoster: roster,
+      domainAllowlist: [],
+      rulesPublishedUrl: null,
+      rulesPublishedMessageId: null,
+    });
+    const duplicates = {
+      isAuthoritative: jest
+        .fn<
+          ReturnType<MessageDuplicateService['isAuthoritative']>,
+          Parameters<MessageDuplicateService['isAuthoritative']>
+        >()
+        .mockResolvedValue(policy.authoritative),
+      observe: jest
+        .fn<
+          ReturnType<MessageDuplicateService['observe']>,
+          Parameters<MessageDuplicateService['observe']>
+        >()
+        .mockResolvedValue(undefined),
+    } satisfies Pick<MessageDuplicateService, 'isAuthoritative' | 'observe'>;
+    const guard = {
+      assertAllowed: jest
+        .fn<
+          ReturnType<ModerationRuleSanctionGuardService['assertAllowed']>,
+          Parameters<ModerationRuleSanctionGuardService['assertAllowed']>
+        >()
+        .mockResolvedValue(undefined),
+    } satisfies Pick<ModerationRuleSanctionGuardService, 'assertAllowed'>;
+    Object.assign(h.service, {
+      messageDuplicateService: duplicates,
+      moderationRuleSanctionGuard: policy.sanctionGuard ? guard : undefined,
+    });
+    const access = (h.service as unknown as { moderationAccessService: ModerationAccessService })
+      .moderationAccessService;
+    const lookup = jest.spyOn(access, 'getRemoteChatAdminAccess').mockResolvedValue('user_denied');
+    h.detectSpy.mockResolvedValue({ violations: [] });
+
+    await h.service.handleUpdate({ ...createUpdate(), botId: 'selected-bot' });
+
+    expect(lookup.mock.calls.length > 0).toBe(policy.expectsLookup);
+    expect(duplicates.isAuthoritative).toHaveBeenCalledTimes(1);
+    expect(h.detectSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ skipDuplicateState: policy.authoritative }),
+    );
+    expect(guard.assertAllowed).not.toHaveBeenCalled();
+    expect(h.prisma.violation.create).not.toHaveBeenCalled();
+    expect(h.maxClient.deleteMessage).not.toHaveBeenCalled();
+    expect(h.maxClient.banMember).not.toHaveBeenCalled();
+    expect(h.maxClient.sendMessage).not.toHaveBeenCalled();
   });
 });

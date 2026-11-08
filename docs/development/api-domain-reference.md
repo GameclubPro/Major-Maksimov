@@ -269,6 +269,11 @@ Statistics exchange does not grant advertising or shop authority.
   One preparation attempt may share exact membership reads; retries, bot routes, sanctions and
   notices never inherit that memo. Local DELETE eligibility grants no command, strike or sanction
   authority. Uninitialized chats retain the previous fresh-author behavior during bounded bootstrap.
+- The main handler uses this saved DELETE protection when modern duplicates own their independent
+  fresh qualification and sanction checks. Legacy duplicate admission keeps its previous boundary.
+  Invitation admission follows `isInvitationAccessCurrentlyActive`, not the retained settings flag;
+  the currently disabled invitation gate must neither request author access nor create violations.
+  An active invitation gate or a missing rule-sanction guard retains strict shared admission.
 - Managed settings entry bypasses the lower member cache and durably protects the exact confirmed
   human before success, under actor/membership/complete-roster ordering fences. Full roster work
   stays asynchronous. Active chats nominate one background roster refresh after 24 hours with shared

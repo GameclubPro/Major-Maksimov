@@ -66,14 +66,18 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     return h;
   }
 
-  it('uses a complete empty roster at admission while retaining final author membership checks', async () => {
+  it.each([
+    { antiDuplicateEnabled: false, invitationAccessEnabled: false },
+    { antiDuplicateEnabled: true, invitationAccessEnabled: false },
+    { antiDuplicateEnabled: false, invitationAccessEnabled: true },
+    { antiDuplicateEnabled: true, invitationAccessEnabled: true },
+  ])('uses a complete empty roster for independent deletion with modules %j', async (modules) => {
     const s = await fixture(2);
     const [chatId] = await s.seedCatalog(1, {
       maxMessageLengthEnabled: true,
       maxMessageLength: 20,
       antiSpamEnabled: false,
-      antiDuplicateEnabled: false,
-      invitationAccessEnabled: false,
+      ...modules,
       messageLimitsWarnEnabled: false,
       messageLimitsMuteEnabled: false,
       messageLimitsBanEnabled: false,
@@ -124,6 +128,12 @@ describeStores('native current-rule authorization across mirrored bot delivery',
       s.effects.filter((effect) => effect.method === 'delete' && effect.messageId === messageId),
     ).toHaveLength(1);
     expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toEqual([]);
+    expect(await s.prisma.chatInvitationAccessProgress.count({ where: { chatId } })).toBe(0);
+    expect(
+      await s.prisma.violation.count({
+        where: { chatId, ruleCode: 'INVITATION_ACCESS' },
+      }),
+    ).toBe(0);
     expect(s.failures).toEqual([]);
   });
 

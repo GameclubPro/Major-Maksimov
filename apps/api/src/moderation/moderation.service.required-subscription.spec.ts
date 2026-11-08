@@ -2,6 +2,7 @@ import { ChannelPostDemandRuntime } from './channel-post-demand-runtime';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { MaxClientService } from '../max/max-client.service';
 import type { ManagedEntityAccessLossService } from '../max/managed-entity-access-loss.service';
+import type { MessageDuplicateService } from './message-duplicate/message-duplicate.service';
 import {
   REQUIRED_SUBSCRIPTION_MAX_CHANNELS,
   ChatEntityType,
@@ -2121,8 +2122,22 @@ describe('ModerationService', () => {
       it('still awaits deferred action suppression after a revoked deletion', async () => {
         const f = fixture();
         const error = new Error('Deferred action suppression unavailable');
-        const revokeActions = jest.fn().mockRejectedValue(error);
-        Object.assign(f.service, { messageDuplicateService: { revokeActions } });
+        const revokeActions = jest
+          .fn<
+            ReturnType<MessageDuplicateService['revokeActions']>,
+            Parameters<MessageDuplicateService['revokeActions']>
+          >()
+          .mockRejectedValue(error);
+        const duplicates = {
+          revokeActions,
+          isAuthoritative: jest
+            .fn<
+              ReturnType<MessageDuplicateService['isAuthoritative']>,
+              Parameters<MessageDuplicateService['isAuthoritative']>
+            >()
+            .mockResolvedValue(true),
+        } satisfies Pick<MessageDuplicateService, 'revokeActions' | 'isAuthoritative'>;
+        Object.assign(f.service, { messageDuplicateService: duplicates });
         f.guard.authorize
           .mockReset()
           .mockResolvedValueOnce({ reasonKeys: ['REQUIRED_SUBSCRIPTION:message-delete'] })
