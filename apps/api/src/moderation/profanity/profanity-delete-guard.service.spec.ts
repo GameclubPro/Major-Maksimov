@@ -99,7 +99,7 @@ describe('ProfanityDeleteGuardService', () => {
       'chat-1',
       'user-1',
       expect.objectContaining({ botId: 'delete-bot' }),
-      { requireMembership: true },
+      { requireMembership: true, module: 'profanity' },
     );
   });
 

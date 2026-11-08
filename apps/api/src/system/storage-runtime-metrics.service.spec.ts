@@ -8,6 +8,7 @@ import {
   STORAGE_DELETE_DUE_SWEEP_STAGES,
   STORAGE_DELETE_RECONCILER_PHASES,
   StorageRuntimeMetricsService,
+  STORAGE_RUNTIME_MAX_REPORT_BYTES,
 } from './storage-runtime-metrics.service';
 
 const mockRedis = {
@@ -522,7 +523,7 @@ describe('bounded storage-runtime metrics', () => {
     expect(snapshot.deleteDueSweep.handoffAcknowledgedCount).toBe(1);
     expect(snapshot.deleteDueSweep.handoffInsertionUnknownCount).toBe(1);
     expect(encoded).not.toContain('private');
-    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(STORAGE_RUNTIME_MAX_REPORT_BYTES);
   });
   it('keeps invalid or failing due-sweep measurements from discarding the existing report', () => {
     const valid = metrics.getLocalSnapshot()!;
@@ -622,7 +623,7 @@ describe('bounded storage-runtime metrics', () => {
     };
     const widest = widen(metrics.getLocalSnapshot());
     const encoded = JSON.stringify(widest);
-    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(STORAGE_RUNTIME_MAX_REPORT_BYTES);
     expect(sanitizeStorageRuntimeSnapshot(JSON.parse(encoded))).toEqual(widest);
   });
   it('publishes only fixed reconciliation phases with the existing process epoch and report', async () => {
@@ -645,7 +646,7 @@ describe('bounded storage-runtime metrics', () => {
     expect(Object.keys(snapshot.deleteReconciler.phases)).toEqual(STORAGE_DELETE_RECONCILER_PHASES);
     expect(snapshot.deleteReconciler.phases.dueSweep.returnedCount).toBe(0);
     expect(encoded).not.toContain('private');
-    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(8192);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(STORAGE_RUNTIME_MAX_REPORT_BYTES);
   });
   it('rejects invalid reconciliation counts and allows reports from roles without this provider', () => {
     const valid = metrics.getLocalSnapshot()!;

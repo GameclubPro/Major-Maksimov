@@ -90,6 +90,7 @@ export class TrafficProtectionDeleteGuardService {
     };
     const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
       requireMembership: true,
+      module: 'trafficProtection',
     });
     const access = author
       ? author.member

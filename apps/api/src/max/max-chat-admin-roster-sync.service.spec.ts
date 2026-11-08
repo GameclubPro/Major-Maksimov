@@ -2,11 +2,13 @@ import {
   MaxChatAdminRosterSyncService,
   MaxChatAdminRosterSyncSourceBackoffError,
 } from './max-chat-admin-roster-sync.service';
+import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
+import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
 import { ManagedEntityActivationRequiredError } from './managed-entity-activation.util';
 import type { ChatAdminRosterState } from '../prisma/prisma-client';
 
 describe('MaxChatAdminRosterSyncService', () => {
-  function createService() {
+  function createService(metrics?: Pick<StorageRuntimeMetricsService, 'optimization'>) {
     const latestProbeByMembership = new Map<
       string,
       {
@@ -196,6 +198,7 @@ describe('MaxChatAdminRosterSyncService', () => {
       chatContextCache as never,
       queue as never,
       nightModeTransitionScheduler as never,
+      metrics as StorageRuntimeMetricsService | undefined,
     );
 
     return {
@@ -210,6 +213,47 @@ describe('MaxChatAdminRosterSyncService', () => {
       latestProbeByMembership,
     };
   }
+
+  it('classifies bootstrap completion without counting observation deduplication as synchronization', async () => {
+    const metrics = { optimization: new OptimizationRuntimeMetrics() };
+    const h = createService(metrics);
+    await Promise.all([
+      h.service.observeActivity('-100-daily', 'bot-1'),
+      h.service.observeActivity('-100-daily', 'bot-1'),
+    ]);
+    expect(metrics.optimization.snapshot()!.demand).toMatchObject({
+      bootstrapObserved: 2,
+      localDeferred: 1,
+      acknowledged: 1,
+    });
+    expect(metrics.optimization.snapshot()!.roster.bootstrap!.completed).toBe(0);
+    h.maxClient.getCurrentChatMemberAccess.mockResolvedValue({ isAdmin: true, isOwner: false });
+    h.maxClient.getChatAdminIds.mockResolvedValue(['admin-1']);
+    await expect(
+      h.service.processJob({ chatId: '-100131', botIds: ['bot-1'], source: 'handshake_start' }),
+    ).resolves.toBe(true);
+    expect(metrics.optimization.snapshot()!.roster.bootstrap).toMatchObject({
+      calls: 1,
+      completed: 1,
+      failed: 0,
+    });
+  });
+
+  it('preserves an exact sync error when bootstrap observation is unavailable', async () => {
+    const metrics = { optimization: new OptimizationRuntimeMetrics() };
+    const h = createService(metrics);
+    h.prisma.$queryRaw.mockRejectedValueOnce(new Error('diagnostics unavailable'));
+    const error = new Error('exact original probe failure');
+    h.maxClient.getCurrentChatMemberAccess.mockRejectedValue(error);
+    await expect(h.service.processJob({ chatId: '-100131', botIds: ['bot-1'] })).rejects.toBe(
+      error,
+    );
+    expect(metrics.optimization.snapshot()!.roster.unknown).toMatchObject({
+      calls: 1,
+      failed: 1,
+      completed: 0,
+    });
+  });
 
   it('does not refresh an active chat whose complete roster is still recent', async () => {
     const h = createService();

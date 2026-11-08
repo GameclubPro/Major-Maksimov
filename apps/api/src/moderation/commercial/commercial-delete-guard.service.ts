@@ -285,6 +285,7 @@ export class CommercialDeleteGuardService {
     // authority; authorizeSanction keeps its own fresh exact-member check.
     const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
       requireMembership: false,
+      module: 'commercial',
     });
     const access = author
       ? author.member

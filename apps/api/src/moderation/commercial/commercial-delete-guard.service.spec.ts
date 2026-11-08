@@ -122,7 +122,7 @@ describe('CommercialDeleteGuardService', () => {
       'chat',
       'user',
       expect.objectContaining({ botId: 'bot', bypassCache: true }),
-      { requireMembership: false },
+      { requireMembership: false, module: 'commercial' },
     );
 
     const permit = h.service.createSanctionPermit({

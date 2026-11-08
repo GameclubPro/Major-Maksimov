@@ -339,7 +339,7 @@ export class CommercialOcrDeleteGuardService {
       params.chatId,
       binding.senderId,
       authorOptions,
-      { requireMembership: true },
+      { requireMembership: true, module: 'commercialOcr' },
     );
     if (author?.isAdmin) {
       throw rejected(

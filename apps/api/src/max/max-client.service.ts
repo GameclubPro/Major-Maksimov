@@ -25,6 +25,8 @@ import {
   type RetentionPriorityReservationOptions,
 } from './retention-priority-admission';
 import { performMaxHttpRequest } from './max-http-request';
+import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import { optimizationElapsed, optimizationNow } from '../system/optimization-runtime-metrics';
 import {
   beginMaxHttpFailureRequest,
   classifyMaxHttpFailureEndpoint,
@@ -1224,6 +1226,7 @@ export class MaxClientService implements OnModuleDestroy {
     @Optional()
     private readonly duplicateNoticeGuard?: MaxDuplicateNoticeGuardService,
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
+    @Optional() private readonly storageMetrics?: StorageRuntimeMetricsService,
   ) {
     this.baseUrl = configService.getOrThrow<string>('MAX_API_BASE_URL');
     this.isProduction =
@@ -8203,11 +8206,23 @@ export class MaxClientService implements OnModuleDestroy {
           if (!remoteMessageId) {
             throw new Error('MAX SEND_MESSAGE response has no remote message id');
           }
-          const completedAt = await this.actionLedgerService!.completeSendDispatch(
-            action,
-            claim.dispatchToken,
-            remoteMessageId,
-          );
+          const persistenceStarted = optimizationNow();
+          let persistenceFailed = true;
+          let completedAt: Date | null;
+          try {
+            completedAt = await this.actionLedgerService!.completeSendDispatch(
+              action,
+              claim.dispatchToken,
+              remoteMessageId,
+            );
+            persistenceFailed = false;
+          } finally {
+            this.storageMetrics?.optimization.timing(
+              'sendReceipt',
+              optimizationElapsed(persistenceStarted),
+              persistenceFailed,
+            );
+          }
           return {
             ...response,
             [MAX_SEND_DISPATCH_COMPLETION_RESPONSE]: {
@@ -9592,6 +9607,13 @@ export class MaxClientService implements OnModuleDestroy {
         )
       : undefined;
     observeMaxSendAdmission(method, path);
+    const sendMetrics =
+      method === 'post' && path === '/messages' ? this.storageMetrics?.optimization : undefined;
+    const preparationStarted = sendMetrics ? optimizationNow() : null;
+    let quotaDuration: number | null = 0;
+    let httpStarted: number | null = null;
+    let dispatched = false;
+    let httpFailed = true;
     let priorityActivityId: string | undefined;
     try {
       if (scope && method === scope.method && path === scope.path) {
@@ -9618,6 +9640,8 @@ export class MaxClientService implements OnModuleDestroy {
             existingMessage,
           );
           const reserve = async () => {
+            const quotaStarted = sendMetrics ? optimizationNow() : null;
+            let quotaFailed = true;
             try {
               priorityActivityId = await this.reserveRateLimitSlot(
                 bot.id,
@@ -9627,9 +9651,15 @@ export class MaxClientService implements OnModuleDestroy {
                 scope.requestOptions.timeoutMs,
                 scope.messageMutation,
               );
+              quotaFailed = false;
             } catch (error: unknown) {
               scope.quotaState.error = error;
               throw error;
+            } finally {
+              const elapsed = optimizationElapsed(quotaStarted);
+              quotaDuration =
+                quotaDuration !== null && elapsed !== null ? quotaDuration + elapsed : null;
+              sendMetrics?.timing('sendQuota', elapsed, quotaFailed);
             }
           };
           const verifyExecutionProof = async (stage: string) => {
@@ -9692,7 +9722,18 @@ export class MaxClientService implements OnModuleDestroy {
         this.muteApiBudget.consumeRequest();
       }
       this.recordPriorityHttpAttempt();
-      return await performMaxHttpRequest({
+      // FLAG: Synchronous observations add no wait after the final authority permit.
+      // Guard time excludes the separately observed quota reservation, including refusal.
+      if (sendMetrics) {
+        const elapsed = optimizationElapsed(preparationStarted);
+        sendMetrics.timing(
+          'sendGuard',
+          elapsed !== null && quotaDuration !== null ? Math.max(0, elapsed - quotaDuration) : null,
+        );
+        httpStarted = optimizationNow();
+      }
+      dispatched = true;
+      const response = await performMaxHttpRequest({
         method,
         path,
         association,
@@ -9714,7 +9755,23 @@ export class MaxClientService implements OnModuleDestroy {
         assertResponse: (status, data) =>
           this.assertSuccessfulMutationResponse(method, status, data),
       });
+      httpFailed = false;
+      return response;
     } finally {
+      if (sendMetrics) {
+        if (dispatched)
+          sendMetrics.timing('sendHttp', optimizationElapsed(httpStarted), httpFailed);
+        else {
+          const elapsed = optimizationElapsed(preparationStarted);
+          sendMetrics.timing(
+            'sendGuard',
+            elapsed !== null && quotaDuration !== null
+              ? Math.max(0, elapsed - quotaDuration)
+              : null,
+            true,
+          );
+        }
+      }
       this.releaseHigherPriorityActivity(priorityActivityId);
     }
   }

@@ -90,6 +90,7 @@ export class ClosedChatDeleteGuardService {
     };
     const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
       requireMembership: true,
+      module: 'closedChat',
     });
     const access = author
       ? author.member

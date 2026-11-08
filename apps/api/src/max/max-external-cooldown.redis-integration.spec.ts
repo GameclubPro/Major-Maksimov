@@ -1,3 +1,5 @@
+import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
+import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
 import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
@@ -44,6 +46,11 @@ function nativeTransportFixture(
     new MaxBotRegistryService(config),
     new MaxBotContextService(),
   );
+  const metrics = { optimization: new OptimizationRuntimeMetrics() } satisfies Pick<
+    StorageRuntimeMetricsService,
+    'optimization'
+  >;
+  Object.defineProperty(service, 'storageMetrics', { value: metrics });
   const internals = service as unknown as {
     limiterRedis: Redis;
     recordRateLimitUsage(
@@ -60,6 +67,7 @@ function nativeTransportFixture(
   return {
     botId,
     service,
+    metrics,
     request,
     internals,
     tokenKey: `maxapi:gcra:v1:bot:${botId}:all`,
@@ -307,6 +315,10 @@ describeRedis('MAX configured token burst pacing', () => {
           limitScope: 'external_cooldown',
         });
         expect(dispatchedAt).toHaveLength(3);
+        const timings = fixture.metrics.optimization.snapshot()!.timings;
+        expect(timings.sendQuota).toMatchObject({ calls: 4, errors: 1, unknownClock: 0 });
+        expect(timings.sendGuard).toMatchObject({ calls: 4, errors: 1, unknownClock: 0 });
+        expect(timings.sendHttp).toMatchObject({ calls: 3, errors: 0, unknownClock: 0 });
         await independent.service.getOwnProfile({ trafficClass: 'background' });
         expect(independent.request).toHaveBeenCalledTimes(2);
       } finally {

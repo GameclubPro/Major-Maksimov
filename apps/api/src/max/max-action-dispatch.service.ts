@@ -2,6 +2,8 @@ import { KaravanMarketplaceResolverService } from '../integrations/karavan-marke
 import { isMaxMutationOutcomeAmbiguous } from './max-mutation-outcome.util';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import { optimizationElapsed, optimizationNow } from '../system/optimization-runtime-metrics';
 import { UnrecoverableError } from 'bullmq';
 import {
   isMaxActionRouteQuarantinedError,
@@ -111,6 +113,7 @@ export class MaxActionDispatchService {
     @Optional() configService?: ConfigService,
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
     @Optional() private readonly karavanMarketplaces?: KaravanMarketplaceResolverService,
+    @Optional() private readonly metrics?: StorageRuntimeMetricsService,
   ) {
     this.routedMutationsMode = normalizeMaxRoutedMutationMode(
       configService?.get('MAX_ROUTED_MUTATIONS_MODE'),
@@ -178,6 +181,33 @@ export class MaxActionDispatchService {
   async execute(
     job: MaxActionJob,
     options: MaxActionDispatchExecutionOptions = {},
+  ): Promise<MaxActionDispatchResult | void> {
+    if (job.actionType !== 'SEND_MESSAGE' || !this.metrics)
+      return this.executeObserved(job, options);
+    const started = optimizationNow();
+    let failed = true;
+    if (options.enqueuedAt) {
+      const enqueuedAt = options.enqueuedAt.getTime();
+      const scheduledAt = job.scheduledFor == null ? enqueuedAt : Date.parse(job.scheduledFor);
+      const readyAt = Math.max(enqueuedAt, scheduledAt);
+      const now = Date.now();
+      this.metrics.optimization.timing(
+        job.attempt > 1 ? 'sendRetryQueue' : 'sendFirstQueue',
+        Number.isFinite(readyAt) && enqueuedAt > 0 && readyAt <= now ? now - readyAt : null,
+      );
+    }
+    try {
+      const result = await this.executeObserved(job, options);
+      failed = false;
+      return result;
+    } finally {
+      this.metrics.optimization.timing('sendDispatch', optimizationElapsed(started), failed);
+    }
+  }
+
+  private async executeObserved(
+    job: MaxActionJob,
+    options: MaxActionDispatchExecutionOptions,
   ): Promise<MaxActionDispatchResult | void> {
     const completedSend = await this.recoverCompletedSend(job);
     if (completedSend) {
@@ -391,7 +421,19 @@ export class MaxActionDispatchService {
           : await this.maxClient.executeActionJob(attemptJob);
         const recoveredSendDispatch = executionResult?.recoveredSendDispatch;
         if (!recoveredSendDispatch) {
-          await this.recordLedgerSucceeded(attemptJob);
+          const ledgerStarted = optimizationNow();
+          let ledgerFailed = true;
+          try {
+            await this.recordLedgerSucceeded(attemptJob);
+            ledgerFailed = false;
+          } finally {
+            if (attemptJob.actionType === 'SEND_MESSAGE')
+              this.metrics?.optimization.timing(
+                'sendLedger',
+                optimizationElapsed(ledgerStarted),
+                ledgerFailed,
+              );
+          }
         }
         if (executionResult) {
           const publishedMessage = { ...executionResult };
