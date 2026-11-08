@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chromium, devices } from 'playwright';
 import {
+  allocateMiniappBaseUrl,
   ensureMiniappDevServer,
   stopChildProcess,
 } from '../../../scripts/miniapp-local-server.mjs';
@@ -14,7 +15,7 @@ import {
   installNativeVisualModeInitScript,
 } from '../../../scripts/miniapp-native-visual-mode.mjs';
 
-const baseUrl = 'http://127.0.0.1:3000/app/';
+const baseUrl = await allocateMiniappBaseUrl('http://127.0.0.1:3000/app/');
 const server = await ensureMiniappDevServer(baseUrl);
 const screenshots = await mkdtemp(path.join(tmpdir(), 'maxim-video-picker-'));
 const oversizedPath = path.join(screenshots, 'oversized.mp4');
@@ -23,17 +24,61 @@ await oversizedFile.truncate(100_000_001);
 await oversizedFile.close();
 let browser;
 
+async function assertMediaPickerClicks(page, platform) {
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.maxPlatform), platform);
+  const photoInput = page.locator('.broadcast-content-composer__file-input');
+  assert.equal(
+    await photoInput.evaluate((input) =>
+      input.classList.contains('broadcast-content-composer__file-input--native'),
+    ),
+    platform === 'android',
+    'Exercise the actual photo picker branch for this platform',
+  );
+  for (const [tool, input, multiple] of [
+    [page.locator('.broadcast-content-composer__tool[title="Добавить фото"]'), photoInput, true],
+    [page.locator('.publication-video-tool'), page.locator('.publication-video-tool input'), false],
+  ]) {
+    await tool.scrollIntoViewIfNeeded();
+    const bounds = await tool.boundingBox();
+    assert.ok(bounds);
+    for (const position of [
+      { x: bounds.width / 2, y: bounds.height / 2 },
+      { x: 6, y: 6 },
+      { x: bounds.width / 2, y: bounds.height - 8 },
+    ]) {
+      const [chooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 5000 }),
+        tool.click({ position, timeout: 5000 }),
+      ]);
+      assert.equal(
+        await input.evaluate((element, chosen) => element === chosen, chooser.element()),
+        true,
+      );
+      assert.equal(chooser.isMultiple(), multiple);
+      await chooser.setFiles([]);
+    }
+  }
+  assert.equal(await page.locator('.publication-video-error').count(), 0);
+  assert.equal(await page.locator('.publication-retained-media').count(), 0);
+}
+
 try {
   browser = await chromium.launch({ headless: true });
   for (const [name, device, colorScheme] of [
     ['desktop-light', { viewport: { width: 1280, height: 900 } }, 'light'],
     ['desktop-dark', { viewport: { width: 1280, height: 900 } }, 'dark'],
+    ['desktop-compact', { viewport: { width: 390, height: 768 } }, 'light'],
     ['iphone-light', devices['iPhone 15'], 'light'],
     ['iphone-dark', devices['iPhone 15'], 'dark'],
     ['android-light', devices['Pixel 7'], 'light'],
     ['android-dark', devices['Pixel 7'], 'dark'],
     ['iphone-se-light', devices['iPhone SE'], 'light'],
   ]) {
+    const platform = name.startsWith('desktop')
+      ? 'desktop'
+      : name.startsWith('iphone')
+        ? 'ios'
+        : 'android';
     const context = await browser.newContext({ ...device, colorScheme });
     try {
       let binaryMode = 'success';
@@ -57,20 +102,38 @@ try {
         }
         return url.origin === new URL(baseUrl).origin ? route.continue() : route.abort();
       });
-      await installMaxBridgeShimInitScript(context, {}, { colorScheme });
+      await installMaxBridgeShimInitScript(context, {}, { colorScheme, platform });
       await installNativeVisualModeInitScript(context);
       const page = await context.newPage();
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));
-      await page.goto(`${baseUrl}publications?preview=1&profile=publisher&compose=1`);
+      const previewDevice = name.startsWith('iphone-se')
+        ? 'iphone-se'
+        : platform === 'ios'
+          ? 'iphone'
+          : 'android';
+      await page.goto(
+        `${baseUrl}publications?preview=1&profile=publisher&compose=1&device=${previewDevice}`,
+      );
       const input = page.locator('.publication-video-tool input');
       await input.waitFor();
       await applyNativeVisualMode(page, {
         safeTop: name.startsWith('iphone') ? 59 : name.startsWith('android') ? 24 : 0,
         safeBottom: name.startsWith('iphone') ? 34 : 0,
       });
+      // FLAG: Preview presets are mobile-only. Synchronize from the explicit Bridge platform
+      // so desktop scenarios exercise the programmatic photo picker, too.
+      await page.evaluate(async () => {
+        const { syncMaxNativeEnvironment } = await import('/app/src/lib/max-bridge.ts');
+        syncMaxNativeEnvironment();
+      });
       const editor = page.getByRole('textbox', { name: 'Текст публикации', exact: true });
       await editor.fill('Video attachment regression');
+      await editor.fill('');
+      await assertMediaPickerClicks(page, platform);
+      await editor.fill('Video attachment regression');
+      await assertMediaPickerClicks(page, platform);
+      assert.equal(binaryRequests, 0, 'Opening a picker and empty selection must not upload media');
       if (name.startsWith('iphone') || name.startsWith('android')) {
         await editor.focus();
         const mode = name.startsWith('iphone') ? 'visual' : 'resize';
@@ -204,7 +267,7 @@ try {
       assert.match(await editor.textContent(), /regression edited/u);
       assert.deepEqual(errors, []);
       console.log(
-        `PASS ${name}: 36 MB direct upload, 100 MB limit, persistent error, cancel, retry, generic MIME, empty, keyboard, native Back and restored draft`,
+        `PASS ${name} (${platform}): photo/video pointer clicks and reopen, 36 MB direct upload, 100 MB limit, persistent error, cancel, retry, generic MIME, empty, keyboard, native Back and restored draft`,
       );
     } finally {
       await context.close();
