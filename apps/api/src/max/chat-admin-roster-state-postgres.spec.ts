@@ -19,6 +19,7 @@ const native = databaseUrl ? describe : describe.skip;
 native('automatic-delete administrator roster on native PostgreSQL', () => {
   let db: PrismaClient;
   let chatId: string;
+  const ownedChats = new Set<string>();
   const now = new Date('2026-11-08T00:00:00Z');
 
   beforeAll(() => {
@@ -32,16 +33,33 @@ native('automatic-delete administrator roster on native PostgreSQL', () => {
   });
   beforeEach(async () => {
     chatId = `-admin-roster-${randomUUID()}`;
+    ownedChats.add(chatId);
     await db.chat.create({ data: { id: chatId, title: 'Roster fixture' } });
   });
   afterEach(async () => {
-    await db.chat.delete({ where: { id: chatId } });
+    await db.chat.deleteMany({ where: { id: { in: [...ownedChats] } } });
+    ownedChats.clear();
   });
   afterAll(async () => {
     await db?.$disconnect();
   });
 
-  const state = () => db.chatAdminRosterState.findUnique({ where: { chatId } });
+  const state = (id = chatId) => db.chatAdminRosterState.findUnique({ where: { chatId: id } });
+  const siblingChat = async () => {
+    const id = `-admin-roster-${randomUUID()}`;
+    ownedChats.add(id);
+    await db.chat.create({ data: { id, title: 'Roster fixture' } });
+    return id;
+  };
+  const seedCompleteState = (id = chatId) =>
+    db.chatAdminRosterState.create({
+      data: {
+        chatId: id,
+        completeProbeStartedAt: now,
+        completedAt: new Date(now.getTime() + 1_000),
+        refreshRequestedAt: new Date(now.getTime() + 2_000),
+      },
+    });
   const locked = <T>(run: (tx: Prisma.TransactionClient) => Promise<T>) =>
     db.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chatId} FOR UPDATE`;
@@ -78,6 +96,179 @@ native('automatic-delete administrator roster on native PostgreSQL', () => {
     await db.chatAdminAllowlist.deleteMany({ where: { chatId } });
     expect((await state())?.revision).not.toBe(renamed?.revision);
     expect((await state())?.completedAt).toBeNull();
+  });
+
+  it('handles bulk inserts across chats without changing completeness or refresh reservations', async () => {
+    const otherChatId = await siblingChat();
+    const untouchedChatId = await siblingChat();
+    const before = await seedCompleteState();
+    const untouched = await seedCompleteState(untouchedChatId);
+
+    await db.chatAdminAllowlist.createMany({
+      data: [
+        { chatId, userId: 'alpha' },
+        { chatId, userId: 'beta' },
+        { chatId: otherChatId, userId: 'alpha' },
+        { chatId: otherChatId, userId: 'beta' },
+      ],
+    });
+
+    const inserted = await state();
+    expect(inserted).toEqual({ ...before, revision: expect.any(String) });
+    expect(inserted?.revision).not.toBe(before.revision);
+    expect(await state(otherChatId)).toMatchObject({
+      chatId: otherChatId,
+      revision: expect.any(String),
+      completeProbeStartedAt: null,
+      completedAt: null,
+      refreshRequestedAt: null,
+    });
+    expect(await state(untouchedChatId)).toEqual(untouched);
+    expect(
+      await db.chatAdminAllowlist.count({ where: { chatId: { in: [chatId, otherChatId] } } }),
+    ).toBe(4);
+  });
+
+  it('invalidates both chats for a bulk raw membership move and preserves unrelated proof', async () => {
+    const destinationChatId = await siblingChat();
+    const untouchedChatId = await siblingChat();
+    await seedCompleteState();
+    await seedCompleteState(destinationChatId);
+    const untouched = await seedCompleteState(untouchedChatId);
+    await db.chatAdminAllowlist.createMany({
+      data: [
+        { chatId, userId: 'alpha' },
+        { chatId, userId: 'beta' },
+        { chatId: destinationChatId, userId: 'existing' },
+      ],
+    });
+    const sourceBefore = (await state())!;
+    const destinationBefore = (await state(destinationChatId))!;
+
+    expect(
+      await db.$executeRaw`
+        UPDATE chat_admin_allowlist
+        SET chat_id = ${destinationChatId}, user_id = user_id || '-moved'
+        WHERE chat_id = ${chatId}
+      `,
+    ).toBe(2);
+
+    const sourceAfter = await state();
+    const destinationAfter = await state(destinationChatId);
+    expect(sourceAfter).toEqual({ ...sourceBefore, revision: expect.any(String) });
+    expect(sourceAfter?.revision).not.toBe(sourceBefore.revision);
+    expect(destinationAfter).toEqual({
+      ...destinationBefore,
+      revision: expect.any(String),
+    });
+    expect(destinationAfter?.revision).not.toBe(destinationBefore.revision);
+    expect(await state(untouchedChatId)).toEqual(untouched);
+    expect(await db.chatAdminAllowlist.count({ where: { chatId } })).toBe(0);
+    expect(
+      await db.chatAdminAllowlist.findMany({
+        where: { chatId: destinationChatId },
+        select: { userId: true },
+        orderBy: { userId: 'asc' },
+      }),
+    ).toEqual([{ userId: 'alpha-moved' }, { userId: 'beta-moved' }, { userId: 'existing' }]);
+  });
+
+  it('preserves exact proof for duplicate inserts, metadata-only updates and empty statements', async () => {
+    const emptyChatId = await siblingChat();
+    await seedCompleteState();
+    await db.chatAdminAllowlist.createMany({
+      data: [
+        { chatId, userId: 'alpha' },
+        { chatId, userId: 'beta' },
+      ],
+    });
+    const before = await state();
+    expect(
+      await db.chatAdminAllowlist.createMany({
+        data: [
+          { chatId, userId: 'alpha' },
+          { chatId, userId: 'beta' },
+        ],
+        skipDuplicates: true,
+      }),
+    ).toEqual({ count: 0 });
+    expect(
+      await db.$executeRaw`
+        UPDATE chat_admin_allowlist SET created_at = created_at + interval '1 second'
+        WHERE chat_id = ${chatId}
+      `,
+    ).toBe(2);
+    expect(
+      await db.$executeRaw`
+        UPDATE chat_admin_allowlist SET chat_id = chat_id, user_id = user_id
+        WHERE chat_id = ${chatId}
+      `,
+    ).toBe(2);
+    expect(
+      await db.$executeRaw`
+        INSERT INTO chat_admin_allowlist (chat_id, user_id) VALUES (${chatId}, 'alpha')
+        ON CONFLICT (chat_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+      `,
+    ).toBe(1);
+    expect(
+      await db.$executeRaw`
+        INSERT INTO chat_admin_allowlist (chat_id, user_id)
+        SELECT ${emptyChatId}, 'absent' WHERE FALSE
+      `,
+    ).toBe(0);
+    expect(
+      await db.$executeRaw`
+        UPDATE chat_admin_allowlist SET user_id = 'absent' WHERE chat_id = ${emptyChatId}
+      `,
+    ).toBe(0);
+    expect(
+      await db.$executeRaw`DELETE FROM chat_admin_allowlist WHERE chat_id = ${emptyChatId}`,
+    ).toBe(0);
+
+    expect(await state()).toEqual(before);
+    expect(await state(emptyChatId)).toBeNull();
+    expect(await db.chatAdminAllowlist.count({ where: { chatId } })).toBe(2);
+  });
+
+  it('preserves metadata after bulk deletes and never recreates state during parent cascades', async () => {
+    const otherChatId = await siblingChat();
+    const untouchedChatId = await siblingChat();
+    await seedCompleteState();
+    await seedCompleteState(otherChatId);
+    const untouched = await seedCompleteState(untouchedChatId);
+    await db.chatAdminAllowlist.createMany({
+      data: [chatId, otherChatId].flatMap((id) =>
+        ['alpha', 'beta', 'keep'].map((userId) => ({ chatId: id, userId })),
+      ),
+    });
+    const before = (await state())!;
+    const otherBefore = (await state(otherChatId))!;
+
+    expect(
+      await db.$executeRaw`
+        DELETE FROM chat_admin_allowlist
+        WHERE chat_id IN (${chatId}, ${otherChatId}) AND user_id <> 'keep'
+      `,
+    ).toBe(4);
+
+    const deleted = await state();
+    const otherDeleted = await state(otherChatId);
+    expect(deleted).toEqual({ ...before, revision: expect.any(String) });
+    expect(deleted?.revision).not.toBe(before.revision);
+    expect(otherDeleted).toEqual({ ...otherBefore, revision: expect.any(String) });
+    expect(otherDeleted?.revision).not.toBe(otherBefore.revision);
+    expect(await state(untouchedChatId)).toEqual(untouched);
+    expect(
+      await db.chatAdminAllowlist.count({ where: { chatId: { in: [chatId, otherChatId] } } }),
+    ).toBe(2);
+
+    await db.chat.deleteMany({ where: { id: { in: [chatId, otherChatId] } } });
+    expect(await state()).toBeNull();
+    expect(await state(otherChatId)).toBeNull();
+    expect(
+      await db.chatAdminAllowlist.count({ where: { chatId: { in: [chatId, otherChatId] } } }),
+    ).toBe(0);
+    expect(await state(untouchedChatId)).toEqual(untouched);
   });
 
   it('never moves the complete observation backwards and renews unchanged accepted rosters', async () => {
