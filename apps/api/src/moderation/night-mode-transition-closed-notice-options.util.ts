@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { MaxMessageButton, MaxSendMessageOptions } from '../max/max-client.service';
-import { formatCommentsButtonText } from '../common/dialog-button-label.util';
+import { NIGHT_MODE_COMMENT_THREAD_PREFIX } from '../common/night-mode-comment-thread.util';
 
 export type NightModeCommentsButtonBuilder = (params: {
   chatId: string;
@@ -32,18 +32,17 @@ export function buildNightModeClosedNoticeOptions(params: {
 
 export function buildNightModeCommentsButton(params: {
   chatId: string;
-  commentsEnabled: boolean;
   nightModeCommentsEnabled: boolean;
   buildButton: NightModeCommentsButtonBuilder;
   createThreadId?: () => string;
 }): MaxMessageButton | null {
-  if (!params.commentsEnabled || !params.nightModeCommentsEnabled) {
+  if (!params.nightModeCommentsEnabled) {
     return null;
   }
 
   return params.buildButton({
     chatId: params.chatId,
-    threadId: params.createThreadId?.() ?? randomUUID(),
-    text: formatCommentsButtonText('💬 Комментарии', 0),
+    threadId: `${NIGHT_MODE_COMMENT_THREAD_PREFIX}${params.createThreadId?.() ?? randomUUID()}`,
+    text: '💬 Комментарии',
   });
 }

@@ -154,32 +154,33 @@ describe('night mode transition closed notice options util', () => {
     });
   });
 
-  it('builds a comments button only when global and night-mode comments are enabled', () => {
+  it('builds a scoped discussion from the independent night-mode switch', () => {
     const buildButton = jest.fn(({ chatId, threadId, text }) => ({
       type: 'link' as const,
       text,
       url: `https://max.ru/${chatId}/${threadId}`,
     }));
-    const createThreadId = jest.fn().mockReturnValue('thread-1');
+    const uuid = '12345678-1234-4234-9234-1234567890ab';
+    const threadId = `night-close-v1:${uuid}`;
+    const createThreadId = jest.fn().mockReturnValue(uuid);
 
     expect(
       buildNightModeCommentsButton({
         chatId: 'chat-1',
-        commentsEnabled: true,
         nightModeCommentsEnabled: true,
         buildButton,
         createThreadId,
       }),
     ).toEqual({
       type: 'link',
-      text: '💬 Комментарии · 0',
-      url: 'https://max.ru/chat-1/thread-1',
+      text: '💬 Комментарии',
+      url: `https://max.ru/chat-1/${threadId}`,
     });
 
     expect(buildButton).toHaveBeenCalledWith({
       chatId: 'chat-1',
-      threadId: 'thread-1',
-      text: '💬 Комментарии · 0',
+      threadId,
+      text: '💬 Комментарии',
     });
 
     buildButton.mockClear();
@@ -188,16 +189,6 @@ describe('night mode transition closed notice options util', () => {
     expect(
       buildNightModeCommentsButton({
         chatId: 'chat-1',
-        commentsEnabled: false,
-        nightModeCommentsEnabled: true,
-        buildButton,
-        createThreadId,
-      }),
-    ).toBeNull();
-    expect(
-      buildNightModeCommentsButton({
-        chatId: 'chat-1',
-        commentsEnabled: true,
         nightModeCommentsEnabled: false,
         buildButton,
         createThreadId,
