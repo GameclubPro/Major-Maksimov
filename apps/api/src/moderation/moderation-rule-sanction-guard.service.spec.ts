@@ -84,6 +84,22 @@ describe('own-rule sanction authorization', () => {
     });
     expect(s.max.getChatMemberAccess).not.toHaveBeenCalled();
   });
+  it('binds phone followups to the visible limits actions and revokes a changed switch', async () => {
+    const s = fixture();
+    Object.assign(s.settings, { phoneNumbersEnabled: false, messageLimitsBotMessageEnabled: true });
+    s.input.ruleCode = 'PHONE_NUMBER_BLOCKED_DELETE';
+    s.input.policySha256 = fingerprintModerationSettings(s.settings, s.input.ruleCode);
+    s.prisma.moderationDeleteIntentReason.findUnique.mockResolvedValue({
+      ruleCode: s.input.ruleCode,
+      userId: s.input.userId,
+      metadata: { moderationDeleteVerified: true },
+    });
+    await expect(s.service.assertAllowed(s.input)).resolves.toBeUndefined();
+    Object.assign(s.settings, { messageLimitsBotMessageEnabled: false });
+    await expect(s.service.assertAllowed(s.input)).rejects.toMatchObject({
+      code: 'moderation_rule_sanction_no_longer_authorized',
+    });
+  });
   it('requires exact verified reason receipt and current selected-peer author access', async () => {
     const s = fixture();
     await expect(s.service.assertAllowed(s.input)).resolves.toBeUndefined();

@@ -30,6 +30,13 @@ try {
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
     const panel = page.locator('.settings-drilldown__panel--limits');
     await panel.waitFor({ state: 'visible' });
+    const phones = panel.getByRole('checkbox', { name: 'Разрешить номера телефонов', exact: true });
+    const explanation = panel.getByRole('checkbox', {
+      name: 'Включить сообщение от бота для ограничений сообщений',
+      exact: true,
+    });
+    await phones.uncheck();
+    await explanation.check();
     await panel.getByRole('checkbox', { name: 'Медленный режим', exact: true }).check();
     const slow = panel.getByRole('spinbutton', { name: 'Медленный режим: интервал в секундах' });
     await slow.fill('90');
@@ -55,6 +62,8 @@ try {
     if (await panel.isVisible())
       await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
+    assert.equal(await phones.isChecked(), false);
+    assert.equal(await explanation.isChecked(), true);
     assert.equal(await slow.inputValue(), '90');
     assert.equal(
       await panel

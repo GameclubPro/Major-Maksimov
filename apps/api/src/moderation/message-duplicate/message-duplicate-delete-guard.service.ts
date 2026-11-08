@@ -361,10 +361,14 @@ export class MessageDuplicateDeleteGuardService {
       );
     } catch (error) {
       if (lookupPhase === 'sanction') recordModerationGuardFailure(error, sanctionBoundary);
-      // FLAG: A bare or generic not.found GET 404 is still unavailable evidence. Only this sanction's
-      // independently proven successful DELETE may replace that current-source read;
-      // healthy returned content, original reads, notices and initial deletes stay strict.
-      if (lookupPhase !== 'sanction' || !isUnprovenMessageLookup404(error)) throw error;
+      // FLAG: A generic GET 404 proves no absence. Only this follow-up's exact successful
+      // DELETE receipt may replace the current-source read for a sanction or queued notice.
+      // Returned content, original/author reads and initial deletes remain strict.
+      if (
+        (lookupPhase !== 'sanction' && lookupPhase !== 'notice') ||
+        !isUnprovenMessageLookup404(error)
+      )
+        throw error;
       currentReadFailure = error;
       raw = null;
     }
@@ -372,7 +376,13 @@ export class MessageDuplicateDeleteGuardService {
       proofFailure: ModerationGuardProofFailure,
       proofDetail?: ModerationGuardProofDetail,
     ): never => {
-      recordModerationGuardFailure(currentReadFailure, sanctionBoundary, proofFailure, proofDetail);
+      if (lookupPhase === 'sanction')
+        recordModerationGuardFailure(
+          currentReadFailure,
+          sanctionBoundary,
+          proofFailure,
+          proofDetail,
+        );
       // FLAG: Only the initial sanction authorization may decline unavailable evidence
       // before any sanction state or remote mutation. This grants no absence, DELETE
       // receipt, retry or claim reset; final member/notice rechecks retain the failure.
@@ -491,7 +501,7 @@ export class MessageDuplicateDeleteGuardService {
         const detail = (): ModerationGuardProofDetail | undefined => {
           if (canonicalBinding?.version !== 3 || canonicalBinding.enforcementScope !== 'full')
             return 'binding_invalid';
-          if (receipt.id !== params.sanctionIntentId) return 'intent_mismatch';
+          if (receipt.id !== receiptIntentId) return 'intent_mismatch';
           if (receipt.status !== 'SUCCEEDED') return 'receipt_unfinished';
           if (!receiptBotId) return 'executor_missing';
           if (receipt.succeededBotId !== receiptBotId) return 'executor_mismatch';

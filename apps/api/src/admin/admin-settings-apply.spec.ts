@@ -8,6 +8,40 @@ import type { ChatSettingsReadSnapshot } from './admin-chat-settings';
 type SectionApplyParams = Parameters<typeof applySettingsSectionToAllChats>[0];
 
 describe('admin settings section apply', () => {
+  it('copies common phone actions and media through the existing section writer', async () => {
+    const revision = '2026-11-08T10:00:00.000Z';
+    const settings = chatSettingsSchema.parse({
+      settingsRevision: revision,
+      phoneNumbersEnabled: false,
+      messageLimitsBotMessageEnabled: true,
+      phoneNumbersBotMessageEnabled: false,
+    });
+    const applySettings = jest
+      .fn()
+      .mockResolvedValue({ sourceChatId: 'source', updatedChats: 1, appliedChatIds: ['target'] });
+    await applySettingsSectionToAllChats({
+      sourceChatId: 'source',
+      source: 'miniapp',
+      body: {
+        section: 'phones',
+        expectedSourceSettingsRevision: revision,
+        target: { mode: 'selectedChats', chatIds: ['target'] },
+      },
+      getSourceSettings: async () => settings,
+      applySettings,
+      syncDomainAllowlistToChats: jest.fn(),
+    });
+    const [, , keys, media] = applySettings.mock.calls[0]!;
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        'phoneNumbersEnabled',
+        'messageLimitsBotMessageEnabled',
+        'messageLimitsWarnEnabled',
+      ]),
+    );
+    expect(keys).not.toContain('phoneNumbersBotMessageEnabled');
+    expect(media).toEqual(['messageLimitsBotMessageText', 'messageLimitsWarnMessageText']);
+  });
   it('copies a confirmed JSON link policy and skips the retired allowlist synchronization', async () => {
     const revision = '2026-11-07T10:00:00.000Z';
     const settings = chatSettingsSchema.parse({

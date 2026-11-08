@@ -4965,83 +4965,90 @@ describe('ModerationService', () => {
     });
   });
 
-  it('deletes phone-number messages when phone numbers are disabled', async () => {
-    const prisma = {
-      chat: {
-        upsert: jest.fn().mockResolvedValue({
-          id: 'chat-1',
-          title: 'Chat 1',
-          settings: createSettings({
-            phoneNumbersEnabled: false,
-            phoneNumbersBotMessageEnabled: true,
+  it.each([true, false])(
+    'uses the visible limits explanation switch %s for blocked phones',
+    async (enabled) => {
+      const prisma = {
+        chat: {
+          upsert: jest.fn().mockResolvedValue({
+            id: 'chat-1',
+            title: 'Chat 1',
+            settings: createSettings({
+              phoneNumbersEnabled: false,
+              messageLimitsBotMessageEnabled: enabled,
+              messageLimitsBotMessageText: 'Телефоны запрещены: {user}',
+              phoneNumbersBotMessageEnabled: !enabled,
+            }),
+            domains: [],
           }),
-          domains: [],
+        },
+        violation: {
+          create: jest.fn(),
+        },
+        moderationEvent: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn(),
+        },
+        webhookEvent: {
+          findUnique: jest.fn(),
+          update: jest.fn(),
+        },
+      };
+      const ruleEngine = {
+        detect: jest.fn().mockResolvedValue({
+          violations: [
+            {
+              ruleCode: 'PHONE_NUMBER_BLOCKED',
+              score: 0.88,
+              reason: 'Phone numbers are disabled',
+              metadata: { phoneCount: 1 },
+            },
+          ],
         }),
-      },
-      violation: {
-        create: jest.fn(),
-      },
-      moderationEvent: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-      },
-      webhookEvent: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-    };
-    const ruleEngine = {
-      detect: jest.fn().mockResolvedValue({
-        violations: [
-          {
-            ruleCode: 'PHONE_NUMBER_BLOCKED',
-            score: 0.88,
-            reason: 'Phone numbers are disabled',
-            metadata: { phoneCount: 1 },
-          },
-        ],
-      }),
-    };
-    const sanctionService = {
-      resolveAction: jest.fn(),
-    };
-    const maxClient = {
-      deleteMessage: jest.fn(),
-      sendMessage: jest.fn(),
-      kickMember: jest.fn(),
-      banMember: jest.fn(),
-      notifyModerators: jest.fn(),
-    };
+      };
+      const sanctionService = {
+        resolveAction: jest.fn(),
+      };
+      const maxClient = {
+        deleteMessage: jest.fn(),
+        sendMessage: jest.fn(),
+        kickMember: jest.fn(),
+        banMember: jest.fn(),
+        notifyModerators: jest.fn(),
+      };
 
-    const service = new ModerationService(
-      prisma as never,
-      ruleEngine as never,
-      sanctionService as never,
-      maxClient as never,
-    );
+      const service = new ModerationService(
+        prisma as never,
+        ruleEngine as never,
+        sanctionService as never,
+        maxClient as never,
+      );
 
-    await service.handleUpdate(createUpdate());
+      await service.handleUpdate(createUpdate());
 
-    expectImmediateDeleteMessage(maxClient.deleteMessage, 'chat-1', 'msg-1');
-    (expect(maxClient.sendMessage) as any).toHaveBeenCalledWithPrefix(
-      'chat-1',
-      '<a href="max://user/user-1">Алексей</a>, сообщение удалено. Причина: номера телефонов в сообщениях запрещены. Уберите номер телефона перед повторной отправкой.',
-    );
-    expect(sanctionService.resolveAction).not.toHaveBeenCalled();
-    expect(prisma.moderationEvent.create).toHaveBeenNthCalledWith(1, {
-      data: expect.objectContaining({
-        ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE',
-        metadata: expect.objectContaining({ phoneCount: 1 }),
-      }),
-    });
-    expect(prisma.moderationEvent.create).toHaveBeenNthCalledWith(2, {
-      data: expect.objectContaining({
-        ruleCode: 'PHONE_NUMBER_BLOCKED',
-        action: SanctionAction.NONE,
-        metadata: expect.objectContaining({ phoneCount: 1 }),
-      }),
-    });
-  });
+      expectImmediateDeleteMessage(maxClient.deleteMessage, 'chat-1', 'msg-1');
+      if (enabled) {
+        (expect(maxClient.sendMessage) as any).toHaveBeenCalledWithPrefix(
+          'chat-1',
+          'Телефоны запрещены: <a href="max://user/user-1">Алексей</a>',
+        );
+      } else expect(maxClient.sendMessage).not.toHaveBeenCalled();
+      expect(sanctionService.resolveAction).not.toHaveBeenCalled();
+      expect(prisma.moderationEvent.create).toHaveBeenNthCalledWith(1, {
+        data: expect.objectContaining({
+          ruleCode: 'PHONE_NUMBER_BLOCKED_DELETE',
+          metadata: expect.objectContaining({ phoneCount: 1 }),
+        }),
+      });
+      expect(prisma.moderationEvent.create).toHaveBeenNthCalledWith(2, {
+        data: expect.objectContaining({
+          ruleCode: 'PHONE_NUMBER_BLOCKED',
+          action: SanctionAction.NONE,
+          metadata: expect.objectContaining({ phoneCount: 1 }),
+        }),
+      });
+    },
+  );
 
   it('issues WARN on second MESSAGE_TOO_LONG violation in 12h when warning stage is enabled', async () => {
     const prisma = {

@@ -314,6 +314,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
   const botPermissions = new Map(
     bots.map((bot) => [bot.id, ['read_all_messages', 'write', 'add_remove_members']]),
   );
+  const messageLookupFailures = new Map<string, { status: number; code?: string }>();
   const adminUsers = new Set<string>();
   let ambiguousNextSend = false;
   let ambiguousNextEdit = false;
@@ -434,6 +435,14 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
             data = { messages: message ? [message] : [] };
           } else if (method === 'get' && path.startsWith('/messages/')) {
             const exactMessageId = decodeURIComponent(path.slice('/messages/'.length));
+            const failure = messageLookupFailures.get(exactMessageId);
+            if (failure)
+              throw Object.assign(new Error('Simulated exact message lookup failure'), {
+                response: {
+                  status: failure.status,
+                  data: failure.code ? { code: failure.code } : {},
+                },
+              });
             const message = await readMessage(exactMessageId);
             if (!message)
               throw Object.assign(new Error('Simulated exact message absence'), {
@@ -1236,6 +1245,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     capacity: { sqlPoolMax, preparationPoolMax, enqueueConcurrency },
     failures,
     messages,
+    messageLookupFailures,
     seedCatalog,
     ingest,
     pumpWork,

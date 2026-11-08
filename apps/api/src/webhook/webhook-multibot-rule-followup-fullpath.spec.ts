@@ -340,6 +340,91 @@ describeStores('native durable moderation rule continuation across bot/process c
     expect(executor).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    [0, 'NONE'],
+    [1, 'WARN'],
+    [2, 'MUTE'],
+    [3, 'BAN'],
+  ] as const)(
+    'applies common limits actions to phone violation %i as %s across mirrored bots',
+    async (prior, action) => {
+      const { s, chatId } = await fixture(
+        {
+          maxMessageLengthEnabled: false,
+          phoneNumbersEnabled: false,
+          messageLimitsBotMessageEnabled: true,
+          messageLimitsWarnEnabled: true,
+          messageLimitsMuteEnabled: true,
+          messageLimitsBanEnabled: true,
+          messageLimitsMuteDurationHours: 6,
+          phoneNumbersBotMessageEnabled: false,
+          phoneNumbersWarnEnabled: false,
+          phoneNumbersMuteEnabled: false,
+          phoneNumbersBanEnabled: false,
+          phoneNumbersMuteDurationHours: 1,
+        },
+        0,
+      );
+      if (prior)
+        await s.prisma.violation.createMany({
+          data: Array.from({ length: prior }, () => ({
+            chatId,
+            userId: 'fixture-user',
+            ruleCode: 'PHONE_NUMBER_BLOCKED',
+            score: 1,
+            createdAt: new Date(Date.now() - 1000),
+          })),
+        });
+      const messageId = `phone-${randomUUID()}`;
+      const at = Date.now();
+      await Promise.all(
+        s.bots.map((bot) =>
+          s.ingest({
+            chatId,
+            messageId,
+            botId: bot.id,
+            at,
+            text: 'Позвоните +7 900 123 45 67',
+          }),
+        ),
+      );
+      await s.drain();
+      await s.ruleFollowups.sweep();
+      const row = await s.prisma.moderationRuleFollowup.findFirstOrThrow({
+        where: { chatId, messageId },
+      });
+      expect(row.status).toBe('COMPLETED');
+      expect(row.actionPlan).toMatchObject({
+        action,
+        violationCount: prior + 1,
+        muteDurationHours: 6,
+      });
+      expect(await s.prisma.violation.count({ where: { chatId } })).toBe(prior + 1);
+      expect(s.effects.filter((e) => e.method === 'delete' && e.path === '/messages')).toHaveLength(
+        1,
+      );
+      expect(s.effects.filter((e) => e.method === 'post' && e.path === '/messages')).toHaveLength(
+        action === 'MUTE' ? 2 : 1,
+      );
+      if (action === 'MUTE') {
+        const notices = s.effects.filter((e) => e.method === 'post' && e.path === '/messages');
+        expect(notices).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              body: expect.objectContaining({ text: expect.stringContaining('6ч') }),
+            }),
+          ]),
+        );
+        expect(JSON.stringify(notices)).toContain('Снять мут');
+      }
+      expect(
+        await s.prisma.moderationEvent.count({
+          where: { chatId, messageId, ruleCode: 'PHONE_NUMBER_BLOCKED', action },
+        }),
+      ).toBe(1);
+    },
+  );
+
   it('resumes after confirmed DELETE without replaying DELETE or the moderation engine', async () => {
     const { s, chatId } = await fixture();
     const row = await ready(s, chatId, 'restart');

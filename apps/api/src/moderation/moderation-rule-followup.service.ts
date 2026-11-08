@@ -1,7 +1,5 @@
-import {
-  resolveConfiguredRuleEscalation,
-  resolveMessageLimitsRuleEscalation,
-} from './moderation-rule-escalation';
+import { resolveMessageLimitsRuleEscalation } from './moderation-rule-escalation';
+import { MESSAGE_LIMITS_ESCALATION_WINDOW_HOURS } from './moderation.service.support';
 import { RuntimeWorkerOwner, type RuntimeWorker } from '../runtime/runtime-worker-shutdown';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { WebhookLegacyHoldService } from '../webhook/webhook-legacy-hold.service';
@@ -479,8 +477,7 @@ export class ModerationRuleFollowupService
           createdAt: now,
         },
       });
-      const hours =
-        ruleCode === 'PHONE_NUMBER_BLOCKED' ? settings.phoneNumbersEscalationWindowHours : 12;
+      const hours = MESSAGE_LIMITS_ESCALATION_WINDOW_HOURS;
       const manual = await tx.moderationEvent.findFirst({
         where: {
           chatId: row.chatId,
@@ -635,15 +632,6 @@ function resolveAction(
   settings: ChatSettings,
 ): ModerationRuleFollowupPlan['action'] {
   if (rule === 'MESSAGE_RATE_LIMIT') return SanctionAction.BAN;
-  if (rule === 'PHONE_NUMBER_BLOCKED')
-    return resolveConfiguredRuleEscalation(count, {
-      banEnabled: settings.phoneNumbersBanEnabled,
-      banMaxCount: settings.phoneNumbersBanMaxCount,
-      muteEnabled: settings.phoneNumbersMuteEnabled,
-      muteMaxCount: settings.phoneNumbersMuteMaxCount,
-      warnEnabled: settings.phoneNumbersWarnEnabled,
-      warnMaxCount: settings.phoneNumbersWarnMaxCount,
-    });
   return resolveMessageLimitsRuleEscalation(count, {
     banEnabled: settings.messageLimitsBanEnabled,
     muteEnabled: settings.messageLimitsMuteEnabled,

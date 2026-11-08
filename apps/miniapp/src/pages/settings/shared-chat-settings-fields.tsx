@@ -416,7 +416,7 @@ function Phones(props: BodyProps) {
       >
         {c.toggle('phoneNumbersEnabled', 'Разрешить номера телефонов')}
       </Group>
-      <Sanctions {...props} prefix="phoneNumbers" thresholds />
+      <Sanctions {...props} prefix="messageLimits" buttons />
     </>
   );
 }

@@ -25,18 +25,7 @@ const CONTENT_POLICY_FIELDS: Record<string, readonly string[]> = {
   FORWARDED_MESSAGE_BLOCKED: ['forwardedMessagesEnabled'],
   MESSAGE_BLOCKED_WORD: ['stopWordsPolicy', 'stopWordsRevision', 'messageLimitsBlockedWords'],
   MESSAGE_BLOCKED_DOMAIN: ['stopWordsPolicy', 'stopWordsRevision', 'messageLimitsBlockedDomains'],
-  PHONE_NUMBER_BLOCKED: [
-    'phoneNumbersEnabled',
-    'phoneNumbersBotMessageEnabled',
-    'phoneNumbersWarnEnabled',
-    'phoneNumbersMuteEnabled',
-    'phoneNumbersBanEnabled',
-    'phoneNumbersMuteDurationHours',
-    'phoneNumbersEscalationWindowHours',
-    'phoneNumbersWarnMaxCount',
-    'phoneNumbersMuteMaxCount',
-    'phoneNumbersBanMaxCount',
-  ],
+  PHONE_NUMBER_BLOCKED: ['phoneNumbersEnabled'],
   LINK_BLOCKED: [
     'linkPolicy',
     'linkRulesPolicy',
@@ -83,7 +72,6 @@ export function fingerprintModerationSettings(
     rule in CONTENT_POLICY_FIELDS &&
     ![
       'MESSAGE_RATE_LIMIT',
-      'PHONE_NUMBER_BLOCKED',
       'LINK_BLOCKED',
       'PROFANITY',
       'REQUIRED_SUBSCRIPTION',
