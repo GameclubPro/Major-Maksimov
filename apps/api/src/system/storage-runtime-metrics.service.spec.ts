@@ -127,6 +127,14 @@ describe('bounded storage-runtime metrics', () => {
 
   it('persists only fixed scalars and bounds the lifetime of every report', async () => {
     metrics.increment('deleteLeaseChecks');
+    metrics.registerAutomaticDeleteAuthorSnapshot(() => ({
+      roster: 3,
+      protected: 1,
+      legacy: 0,
+      membership: 2,
+      shared: 1,
+      userId: 'private-author-fixture',
+    }));
     metrics.registerChatContextCacheSnapshot(() => ({
       entries: 2,
       estimatedBytes: 100,
@@ -192,6 +200,13 @@ describe('bounded storage-runtime metrics', () => {
     expect(encoded).not.toContain('private-');
     const snapshot = JSON.parse(encoded);
     expect(snapshot.counters.deleteLeaseChecks).toBe(1);
+    expect(snapshot.automaticDeleteAuthors).toEqual({
+      roster: 3,
+      protected: 1,
+      legacy: 0,
+      membership: 2,
+      shared: 1,
+    });
     expect(snapshot.chatContextCache.entries).toBe(2);
     expect(snapshot.chatContextCache.activity.redisHits).toBe(7);
     expect(snapshot.chatContextCache.settingsTemplates).toEqual({

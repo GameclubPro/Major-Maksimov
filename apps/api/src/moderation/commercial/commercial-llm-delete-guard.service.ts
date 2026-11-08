@@ -6,11 +6,12 @@ import {
   isPreparedDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from '../moderation-delete-authority-preparation';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../../max/max-client.service';
 import { MaxBotLinkService } from '../../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { WebhookParser } from '../../webhook/webhook.parser';
 import { ParticipantModerationImmunityService } from '../participant-moderation-immunity.service';
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from '../moderation.service.support';
@@ -56,6 +57,7 @@ export class CommercialLlmDeleteGuardService {
     private readonly immunity: ParticipantModerationImmunityService,
     private readonly config: ConfigService,
     private readonly admission: CommercialLlmEnforcementService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async authorize(params: AuthorizationInput): Promise<Authorization> {
@@ -150,17 +152,23 @@ export class CommercialLlmDeleteGuardService {
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       timeoutMs: this.config.get<number>('MODERATION_DELETE_INTENT_TIMEOUT_MS') ?? 5000,
     };
-    const access = await this.maxClient.getChatMemberAccess(
+    const author = await this.automaticDeleteAuthorAccess?.resolve(
       params.chatId,
       params.subjectUserId!,
       options,
+      { requireMembership: true },
     );
-    // FLAG: Unknown rights never authorize an AI decision; departure is a skip in this new mode.
+    const access = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, params.subjectUserId!, options);
+    // FLAG: Saved role immunity grants no membership proof. Departure and malformed member
+    // evidence still skip AI deletion; follow-up sanctions retain their separate fresh checks.
     if (
       !access ||
+      (author?.isAdmin ?? Boolean(access.isAdmin || access.isOwner)) ||
       access.userId !== params.subjectUserId ||
-      access.isAdmin !== false ||
-      access.isOwner !== false
+      typeof access.isAdmin !== 'boolean' ||
+      typeof access.isOwner !== 'boolean'
     )
       reject();
     const row = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, options);

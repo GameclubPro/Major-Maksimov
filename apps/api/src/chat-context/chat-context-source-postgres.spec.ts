@@ -145,6 +145,31 @@ native('coherent settings templates on native PostgreSQL', () => {
     ]);
   });
 
+  it('loads roster completeness with the current compact shell rather than a saved settings template', async () => {
+    const initial = await read();
+    expect(initial.row?.adminRosterState).toBeNull();
+    await db.chatAdminAllowlist.create({ data: { chatId, userId: 'fresh-admin' } });
+    const targeted = await read(template(initial));
+    expect(targeted.row?.adminRosterState).toMatchObject({
+      completedAt: null,
+      completeProbeStartedAt: null,
+    });
+    const accepted = await db.chatAdminRosterState.update({
+      where: { chatId },
+      data: { completeProbeStartedAt: now, completedAt: now },
+    });
+    queries.length = 0;
+    const complete = await read(template(targeted));
+    expect(complete.mode).toBe('shell');
+    expect(complete.row?.adminRosterState).toEqual({
+      revision: accepted.revision,
+      completeProbeStartedAt: now.toISOString(),
+      completedAt: now.toISOString(),
+    });
+    expect(selectQueries()).toHaveLength(1);
+    expect(selectQueries()[0]).not.toContain('bot_speech_media');
+  });
+
   it('detects raw updates with the same updatedAt and rotates proof for same-value writes', async () => {
     const original = await read();
     const value = template(original);
@@ -381,6 +406,7 @@ native('coherent settings templates on native PostgreSQL', () => {
           'chat_settings',
           'chat_settings_cache_revisions',
           'chat_admin_allowlist',
+          'chat_admin_roster_states',
           'domain_allowlist',
           'chat_rules',
         ]),

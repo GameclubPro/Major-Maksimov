@@ -3,9 +3,10 @@ import {
   finalizeDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from './moderation-delete-authority-preparation';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../max/max-client.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WebhookParser } from '../webhook/webhook.parser';
@@ -37,6 +38,7 @@ export class TrafficProtectionDeleteGuardService {
     private readonly maxBotLink: MaxBotLinkService,
     private readonly immunity: ParticipantModerationImmunityService,
     private readonly config: ConfigService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async assertIntentStillActionable(params: {
@@ -86,8 +88,13 @@ export class TrafficProtectionDeleteGuardService {
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       timeoutMs: this.config.get<number>('MODERATION_DELETE_INTENT_TIMEOUT_MS') ?? 5000,
     };
-    const access = await this.maxClient.getChatMemberAccess(params.chatId, userId, options);
-    if (!access || access.isAdmin || access.isOwner) this.reject();
+    const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
+      requireMembership: true,
+    });
+    const access = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, userId, options);
+    if (!access || (author?.isAdmin ?? Boolean(access.isAdmin || access.isOwner))) this.reject();
     if (access.userId !== null && access.userId !== userId)
       throw new Error('Traffic protection author access unavailable');
     const row = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, options);

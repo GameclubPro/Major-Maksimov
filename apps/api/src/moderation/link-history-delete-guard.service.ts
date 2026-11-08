@@ -3,10 +3,11 @@ import {
   finalizeDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from './moderation-delete-authority-preparation';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { MaxBotLinkService } from '../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../max/max-client.service';
 import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -66,6 +67,7 @@ export class LinkHistoryDeleteGuardService {
     private readonly maxClient: MaxClientService,
     private readonly maxBotLinkService: MaxBotLinkService,
     configService: ConfigService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {
     this.deleteEnabled = this.readBoolean(
       configService.get('MODERATION_LINK_HISTORY_DELETE_ENABLED'),
@@ -228,24 +230,33 @@ export class LinkHistoryDeleteGuardService {
     };
     const { settings, allowlistRows, policyEffectiveAt, matchingRecoveryReasons } =
       await loadAuthority();
-    const remoteAccess = await this.maxClient.getChatMemberAccess(
+    const authorOptions = {
+      trafficClass: 'critical' as const,
+      sourceTag: usesLiveSemantics
+        ? MAX_API_SOURCE_TAGS.MODERATION_DELETE
+        : LINK_HISTORY_RECOVERY_SOURCE_TAG,
+      ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
+      botId: params.botId,
+      bypassCache: true,
+    };
+    const author = await this.automaticDeleteAuthorAccess?.resolve(
       params.chatId,
       params.subjectUserId,
-      {
-        trafficClass: 'critical',
-        sourceTag: usesLiveSemantics
-          ? MAX_API_SOURCE_TAGS.MODERATION_DELETE
-          : LINK_HISTORY_RECOVERY_SOURCE_TAG,
-        ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
-        botId: params.botId,
-        bypassCache: true,
-      },
+      authorOptions,
+      { requireMembership: false },
     );
-    let authorInAdminRoster = false;
-    if (!remoteAccess) {
-      // FLAG: An omitted member is not proof of ordinary access. Only a fresh, complete,
-      // validated admin roster can exclude admin immunity, including departed authors.
-      // Transport/pagination failures propagate; exact source and policy checks still follow.
+    const remoteAccess = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(
+          params.chatId,
+          params.subjectUserId,
+          authorOptions,
+        );
+    let authorInAdminRoster = author?.isAdmin ?? false;
+    if (!authorInAdminRoster && !author?.initialized && !remoteAccess) {
+      // FLAG: Before the saved roster is initialized, an omitted member retains the legacy
+      // full-roster proof. Initialized DELETE never fetches an author or roster here;
+      // exact source and current local policy checks remain mandatory.
       const admins = await this.maxClient.getChatAdminAccesses(params.chatId, {
         trafficClass: 'critical',
         sourceTag: usesLiveSemantics
@@ -261,8 +272,7 @@ export class LinkHistoryDeleteGuardService {
       authorInAdminRoster ||
       (remoteAccess &&
         ((remoteAccess.userId && String(remoteAccess.userId) !== params.subjectUserId) ||
-          remoteAccess.isAdmin ||
-          remoteAccess.isOwner))
+          (author?.isAdmin ?? Boolean(remoteAccess.isAdmin || remoteAccess.isOwner))))
     ) {
       throw reject(
         usesLiveSemantics ? 'live_admin_immune' : 'history_admin_immune',

@@ -239,7 +239,10 @@ import {
   isSystemModeRecoveryWindow,
   type SystemModeSnapshot,
 } from '../system/system-mode.service';
-import { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
+import {
+  ChatContextCacheService,
+  type ChatContext,
+} from '../chat-context/chat-context-cache.service';
 import * as rulesFence from './chat-rules-own-bot-message-classifier';
 import * as protectedEventFence from './own-bot-protected-event-classifier';
 import { ModerationExecutionService } from './moderation-execution.service';
@@ -321,6 +324,11 @@ import {
 } from './bot-speech-custom-override.util';
 import { PrivateControlService } from './private-control.service';
 import { ModerationAccessService } from './moderation-access.service';
+import { clearChatAdminRoster } from '../max/chat-admin-roster-state';
+import {
+  scheduleModerationAdminRosterRefresh,
+  type ModerationAdminRosterRefresh,
+} from './moderation-admin-roster-refresh';
 import {
   ACTIVE_MUTE_CACHE_SLACK_SEC,
   ACTIVE_MUTE_NEGATIVE_CACHE_TTL_SEC,
@@ -2013,6 +2021,14 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         chat.adminUserIds,
         senderId,
         {
+          automaticDelete: {
+            roster: chat.adminRoster,
+            botId: update.botId,
+            useSavedProtection:
+              !settings.invitationAccessEnabled &&
+              !settings.antiDuplicateEnabled &&
+              !!this.moderationRuleSanctionGuard,
+          },
           allowRemoteLookup:
             !degradeMode && !hotChatBackoffActive && !keepDestructiveAdminCheckOnHotPath,
           skipRemoteLookupWhenLocalAdminsKnown:
@@ -2257,6 +2273,17 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           createdAt,
           deleteSpammersEnabled: settings.deleteSpammersEnabled,
           exemptFromEnforcement: isGlobalSpammerExempt,
+          ...(latestSenderChatAdminCheck.source === 'persisted_roster'
+            ? {
+                authorizePenalty: () =>
+                  this.moderationAccessService.confirmRegularMemberBeforePenalty(chatId, senderId, {
+                    botId:
+                      this.maxBotContextService?.getActiveBotId() ??
+                      this.readExecutionOwnerBotId(update) ??
+                      update.botId,
+                  }),
+              }
+            : {}),
         });
         if (globalSpammerTracking.handled) {
           await suppressDeferredPhotoAnalysisActions();
@@ -8852,6 +8879,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     deleteSpammersEnabled: boolean;
     exemptFromEnforcement: boolean;
     allowDestructiveSideEffects?: () => boolean;
+    authorizePenalty?: () => Promise<boolean>;
   }): Promise<GlobalSpammerTrackingResult> {
     const baseResult: GlobalSpammerTrackingResult = {
       handled: false,
@@ -8891,6 +8919,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (uniqueChatsState.size >= GLOBAL_SPAMMER_HIGH_FANOUT_MIN_CHATS) {
+        // FLAG: Raw fanout observations are not blacklist or sanction evidence.
+        // Local DELETE eligibility needs independent fresh authority before episode writes.
+        if (params.authorizePenalty && !(await params.authorizePenalty())) return baseResult;
         const episodeLockKey = this.buildGlobalSpammerFanoutEpisodeLockRedisKey(userId);
         const lockState = await this.redisCounter.addToSetWithTtl(
           episodeLockKey,
@@ -8990,6 +9021,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     createdAt: string;
     deleteSpammersEnabled: boolean;
     exemptFromEnforcement: boolean;
+    authorizePenalty?: () => Promise<boolean>;
   }): Promise<GlobalSpammerTrackingResult> {
     let timedOut = false;
     const result = await raceWithTimeout<GlobalSpammerTrackingResult>({
@@ -12254,11 +12286,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.maxClient.leaveCurrentChat(chatId, { botId: update.botId });
-    await this.prisma.chatAdminAllowlist.deleteMany({
-      where: {
-        chatId,
-      },
-    });
+    await clearChatAdminRoster(this.prisma, chatId);
     await this.chatContextCache?.invalidate(chatId);
 
     this.logger.warn(
@@ -14447,12 +14475,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     chatId: string,
     localAdminUserIds: string[] | undefined,
     userId: string,
-    options?: {
-      allowRemoteLookup?: boolean;
-      skipRemoteLookupWhenLocalAdminsKnown?: boolean;
-      remoteLookupSoftTimeoutMs?: number;
-      prefetchRemoteLookupWhenLocalAdminsKnown?: boolean;
-    },
+    options?: Parameters<ModerationAccessService['resolveSenderChatAdminCheck']>[3],
   ): Promise<ChatAdminCheckResult> {
     return this.moderationAccessService.resolveSenderChatAdminCheck(
       chatId,
@@ -14519,49 +14542,15 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  private scheduleDestructiveAdminRosterRefresh(params: {
-    chatId: string;
-    chatTitle: string | undefined;
-    botId: string | null;
-    entityType: string | null;
-    stage: string;
-  }): void {
-    if (typeof this.maxChatAdminRosterSyncService?.scheduleChatAdminRosterSync !== 'function') {
-      return;
-    }
-
-    const chatId = params.chatId.trim();
-    if (!chatId) {
-      return;
-    }
-
-    const now = Date.now();
-    const lastScheduledAt = this.destructiveAdminRosterRefreshScheduledAtMs.get(chatId) ?? 0;
-    if (now - lastScheduledAt < DESTRUCTIVE_ADMIN_ROSTER_REFRESH_THROTTLE_MS) {
-      return;
-    }
-    this.destructiveAdminRosterRefreshScheduledAtMs.set(chatId, now);
-
-    void this.maxChatAdminRosterSyncService
-      .scheduleChatAdminRosterSync({
-        chatId,
-        botIds: params.botId ? [params.botId] : [],
-        title: params.chatTitle ?? null,
-        entityType: params.entityType === 'channel' ? 'channel' : 'chat',
-        source: 'moderation_destructive_path',
-        retryUntilMs: null,
-      })
-      .catch((error: unknown) => {
-        this.destructiveAdminRosterRefreshScheduledAtMs.delete(chatId);
-        this.logger.warn(
-          {
-            chatId,
-            stage: params.stage,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to schedule destructive moderation admin roster refresh',
-        );
-      });
+  private scheduleDestructiveAdminRosterRefresh(params: ModerationAdminRosterRefresh): void {
+    scheduleModerationAdminRosterRefresh(
+      {
+        rosters: this.maxChatAdminRosterSyncService,
+        scheduledAt: this.destructiveAdminRosterRefreshScheduledAtMs,
+        logger: this.logger,
+      },
+      params,
+    );
   }
 
   private scheduleModerationActionAccessRecheck(
@@ -16472,13 +16461,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
   private async loadChatContext(
     chatId: string,
     chatTitle?: string,
-  ): Promise<{
-    settings: ChatSettings;
-    domainAllowlist: string[];
-    adminUserIds: string[];
-    rulesPublishedUrl: string | null;
-    rulesPublishedMessageId: string | null;
-  }> {
+  ): Promise<Omit<ChatContext, 'chatId' | 'title'>> {
     const startedAtMs = Date.now();
     if (this.chatContextCache) {
       const cached = await this.chatContextCache.getChatContext(chatId, chatTitle);
@@ -16487,6 +16470,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         settings: cached.settings,
         domainAllowlist: cached.domainAllowlist,
         adminUserIds: cached.adminUserIds,
+        adminRoster: cached.adminRoster ?? null,
         rulesPublishedUrl: cached.rulesPublishedUrl ?? null,
         rulesPublishedMessageId: cached.rulesPublishedMessageId ?? null,
       };

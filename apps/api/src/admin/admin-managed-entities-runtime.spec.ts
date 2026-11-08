@@ -61,6 +61,22 @@ function createContext(
 }
 
 describe('AdminManagedEntitiesRuntime', () => {
+  it('requires synchronous human protection at the managed settings access boundary', async () => {
+    const context = createContext();
+    const runtime = new AdminManagedEntitiesRuntime(context);
+
+    await runtime.assertManagedEntityAdminAccess('chat-1', user.userId, 'chat');
+
+    expect(context.assertChatAdmin).toHaveBeenCalledWith('chat-1', user.userId, 'chat', {
+      trafficClass: 'interactive',
+      allowPersistedFallback: false,
+      bypassPositiveCache: true,
+      syncPersistedAccess: false,
+      protectHumanAdministrator: true,
+    });
+    expect(context.ensureEntityType).toHaveBeenCalledWith('chat-1', user.userId, 'chat');
+  });
+
   it('lists managed entities through typed context callbacks', async () => {
     const context = createContext();
     const runtime = new AdminManagedEntitiesRuntime(context);

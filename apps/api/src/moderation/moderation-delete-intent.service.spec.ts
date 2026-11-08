@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { performance } from 'node:perf_hooks';
 import { Job, RedisConnection, type MinimalQueue, type Queue } from 'bullmq';
 import type { ModerationDeleteIntentJob } from './moderation-delete-intent.queue';
@@ -1732,6 +1733,57 @@ describe('ModerationDeleteIntentService', () => {
       expect(maxClient.deleteMessage).not.toHaveBeenCalled();
       expect(result).not.toHaveProperty('profanityVerified');
       expect(result).not.toHaveProperty('commercialVerified');
+    },
+  );
+
+  it.each([false, true])(
+    'checks a saved actor grant after DELETE admission (grant=%s)',
+    async (grant) => {
+      const f = initialDuplicateSourceFixture();
+      const leased = { ...f.leased, messageDuplicateOwned: false, durableUserDeleteReason: true };
+      let protectedNow = false;
+      const query = jest.fn(async () => [
+        { initialized: true, isAdmin: protectedNow, revision: 'r' },
+      ]);
+      const authors = new AutomaticDeleteAuthorAccessService(
+        { $queryRaw: query } as never,
+        {} as never,
+      );
+      const rejected = { kind: 'terminal', status: 'FAILED_TERMINAL', confirmed: false };
+      const completed = { kind: 'confirmed', status: 'SUCCEEDED', confirmed: true };
+      Object.assign(f.service, {
+        automaticDeleteAuthors: authors,
+        loadIntent: jest.fn().mockResolvedValue(leased),
+        runDeletePreDispatchGuards: async (
+          _intent: unknown,
+          _botId: string,
+          _options?: unknown,
+          _lease?: string,
+          _phase?: string,
+          beforeFinal?: () => Promise<void>,
+        ) => {
+          await beforeFinal?.();
+          return {
+            profanityVerified: false,
+            commercialVerifiedReasonKeys: [],
+          } satisfies Awaited<
+            ReturnType<ModerationDeleteIntentService['runDeletePreDispatchGuards']>
+          >;
+        },
+        finishTerminalPreDispatchGuardRejection: jest.fn().mockResolvedValue(rejected),
+        recordRemoteSuccessAndFinalize: jest.fn().mockResolvedValue(completed),
+      });
+      f.maxClient.deleteMessage.mockImplementation(async (_chat, _message, options) => {
+        await options?.beforeImmediateDeleteMutation?.(async () => {
+          protectedNow = grant;
+        });
+        f.remoteDelete();
+      });
+      await expect(f.service.executeLeasedIntent(leased.id, 'lease-1')).resolves.toEqual(
+        grant ? rejected : completed,
+      );
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(f.remoteDelete).toHaveBeenCalledTimes(grant ? 0 : 1);
     },
   );
 

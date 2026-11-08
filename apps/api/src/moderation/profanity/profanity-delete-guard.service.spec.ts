@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 
 import { MAX_API_SOURCE_TAGS } from '../../max/max-client.service';
@@ -25,7 +26,7 @@ function buildMessage(text = 'блять') {
   };
 }
 
-function buildHarness() {
+function buildHarness(authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>) {
   const settings = {
     russianProfanityFilterEnabled: true,
     profanitySensitivity: 'BALANCED' as 'CORE_ONLY' | 'BALANCED' | 'STRICT',
@@ -59,6 +60,7 @@ function buildHarness() {
     immunity as never,
     ruleEngine,
     new ConfigService({ MODERATION_DELETE_INTENT_TIMEOUT_MS: 5_000 }),
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { service, prisma, settings, maxClient, maxBotLink, immunity, detect };
 }
@@ -76,6 +78,44 @@ describe('ProfanityDeleteGuardService', () => {
     } else {
       process.env.PROFANITY_V2_ROLLOUT_MODE = previousRollout;
     }
+  });
+
+  it('uses saved role immunity while retaining the actual membership requirement', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({
+        initialized: true,
+        revision: '1',
+        isAdmin: false,
+        member: { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+      });
+    const h = buildHarness({ resolve });
+    await expect(h.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+    expect(h.maxClient.getChatMemberAccess).not.toHaveBeenCalled();
+    expect(resolve).toHaveBeenCalledWith(
+      'chat-1',
+      'user-1',
+      expect.objectContaining({ botId: 'delete-bot' }),
+      { requireMembership: true },
+    );
+  });
+
+  it('does not turn a saved nonadmin decision into proof that an absent author remains a member', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: true, revision: '1', isAdmin: false, member: null });
+    const h = buildHarness({ resolve });
+    await expect(h.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+      code: 'profanity_author_not_member',
+    });
+    expect(h.maxClient.getExactMessageRow).not.toHaveBeenCalled();
+    expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
   });
 
   it('checks current text once through the executable bot without running stateful rules', async () => {

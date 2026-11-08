@@ -7,6 +7,7 @@ import {
   type MaxChatMemberAccess,
 } from './max-client.service';
 import { hasFreshExecutionAccess } from './max-execution-route-proof';
+import { hasNewerCompleteAdminRoster } from './chat-admin-roster-state';
 import {
   hasExplicitHumanAdministrator,
   isMajorManagedEntityActivationRequired,
@@ -97,6 +98,9 @@ export async function probeManagedEntityActor(params: {
     const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
       SELECT id FROM chats WHERE id = ${chatId} FOR UPDATE`);
     if (locked.length !== 1) return false;
+    // FLAG: A newer complete roster can exclude an actor without an individual edge.
+    // Fence only positive protection; exact negative verdicts retain their bot/actor rules.
+    if (granted && (await hasNewerCompleteAdminRoster(tx, chatId, startedAt))) return false;
     const current = await tx.chatBotMembership.findUnique({
       where: { chatId_botId: { chatId, botId } },
     });

@@ -61,6 +61,13 @@ export function withChatContextSourceFixture<T extends object>(fixture: T): Pris
         rulesPublishedMessageId: row.rules?.publishedMessageId ?? null,
         adminUserIds: row.admins.map(({ userId }) => userId),
         domainAllowlist: row.domains.map(({ domain }) => domain),
+        adminRosterRevision: row.adminRosterState?.revision ?? null,
+        adminRosterCompleteProbeStartedAt: row.adminRosterState?.completeProbeStartedAt
+          ? new Date(row.adminRosterState.completeProbeStartedAt)
+          : null,
+        adminRosterCompletedAt: row.adminRosterState?.completedAt
+          ? new Date(row.adminRosterState.completedAt)
+          : null,
       } satisfies ChatContextShell,
     ];
   });

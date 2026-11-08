@@ -9,6 +9,7 @@ import {
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MaxBotLinkService } from '../../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../../max/max-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WebhookParser } from '../../webhook/webhook.parser';
@@ -75,6 +76,7 @@ export class CommercialDeleteGuardService {
     private readonly immunity: ParticipantModerationImmunityService,
     private readonly config: ConfigService,
     @Optional() private readonly textPolicy?: CommercialTextRuntimePolicyService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async assertIntentStillActionable(
@@ -279,12 +281,17 @@ export class CommercialDeleteGuardService {
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       timeoutMs: this.config.get<number>('MODERATION_DELETE_INTENT_TIMEOUT_MS') ?? 5000,
     };
-    const access = await this.maxClient.getChatMemberAccess(params.chatId, userId, options);
-    // FLAG: A verified departure is not immunity for an extant ad. Transport/malformed lookup
-    // failures throw; only an actual absent member may proceed to the exact-message check.
+    // FLAG: Automatic DELETE uses the saved complete roster. This proof grants no sanction
+    // authority; authorizeSanction keeps its own fresh exact-member check.
+    const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
+      requireMembership: false,
+    });
+    const access = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, userId, options);
     if (access && access.userId !== null && access.userId !== userId)
       throw new Error('Commercial author access could not be verified');
-    if (access?.isAdmin || access?.isOwner)
+    if (author?.isAdmin ?? Boolean(access?.isAdmin || access?.isOwner))
       throw new CommercialDeleteGuardRejectedError('commercial_text_author_immune');
 
     // FLAG: Read exactly one current message per dispatch attempt; never store or log its text.

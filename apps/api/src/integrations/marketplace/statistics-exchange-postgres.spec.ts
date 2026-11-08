@@ -2268,36 +2268,45 @@ postgres('statistics exchange PostgreSQL consent and immutable observations', ()
   });
   it('bounds the expiry selector on a skewed retained staging history with a real PostgreSQL plan', async () => {
     const prefix = 'stats-staging-plan-' + randomUUID();
+    const fixtureRollback = new Error('Discard local statistics staging plan fixture');
     try {
-      await db.$executeRaw`INSERT INTO statistics_exchange_grants(id,actor_user_id,revision,state,input_hash)
-        SELECT md5(${prefix}||n::text)::uuid,${prefix}||n::text,1,'ACTIVE','synthetic' FROM generate_series(1,10000)n`;
-      await db.$executeRaw`INSERT INTO statistics_exchange_entities(grant_id,entity_id,kind,profile)
-        SELECT md5(${prefix}||n::text)::uuid,'-'||n::text,'CHANNEL','moderation' FROM generate_series(1,10000)n`;
-      await db.$executeRaw`INSERT INTO statistics_exchange_downloads(id,grant_id,grant_revision,entity_id,kind,local_binding_id,remote_binding_id,generation_id,producer_revision,manifest,expires_at)
-        SELECT md5(${prefix}||'download'||n)::uuid,md5(${prefix}||n::text)::uuid,1,'-'||n::text,'CHANNEL',${bindingId}::uuid,${bindingId}::uuid,
-          md5(${prefix}||'generation'||n)::uuid,1,'{}'::jsonb,now()+CASE WHEN n<=150 THEN -interval '1 minute' ELSE interval '1 day' END
-        FROM generate_series(1,10000)n`;
-      await db.$executeRaw`ANALYZE statistics_exchange_downloads`;
-      const plan = await db.$queryRaw<
-        Array<{ 'QUERY PLAN': unknown }>
-      >`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
-        SELECT id FROM statistics_exchange_downloads WHERE expires_at<=now() ORDER BY expires_at,id LIMIT 100`;
-      const evidence = JSON.stringify(plan);
-      expect(evidence).toContain('statistics_exchange_downloads_expiry_idx');
-      expect(evidence).not.toContain('"Node Type":"Sort"');
-      expect(
-        await db.$queryRaw<
-          Array<{ id: string }>
-        >`SELECT id FROM statistics_exchange_downloads WHERE expires_at<=now() ORDER BY expires_at,id LIMIT 100`,
-      ).toHaveLength(100);
+      // FLAG: Keep all 10,000 real plan rows local to this transaction. Parent cleanup
+      // can exhaust its SQL budget and leak retained history into unrelated native suites.
+      await db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`INSERT INTO statistics_exchange_grants(id,actor_user_id,revision,state,input_hash)
+            SELECT md5(${prefix}||n::text)::uuid,${prefix}||n::text,1,'ACTIVE','synthetic' FROM generate_series(1,10000)n`;
+          await tx.$executeRaw`INSERT INTO statistics_exchange_entities(grant_id,entity_id,kind,profile)
+            SELECT md5(${prefix}||n::text)::uuid,'-'||n::text,'CHANNEL','moderation' FROM generate_series(1,10000)n`;
+          await tx.$executeRaw`INSERT INTO statistics_exchange_downloads(id,grant_id,grant_revision,entity_id,kind,local_binding_id,remote_binding_id,generation_id,producer_revision,manifest,expires_at)
+            SELECT md5(${prefix}||'download'||n)::uuid,md5(${prefix}||n::text)::uuid,1,'-'||n::text,'CHANNEL',${bindingId}::uuid,${bindingId}::uuid,
+              md5(${prefix}||'generation'||n)::uuid,1,'{}'::jsonb,now()+CASE WHEN n<=150 THEN -interval '1 minute' ELSE interval '1 day' END
+            FROM generate_series(1,10000)n`;
+          await tx.$executeRaw`ANALYZE statistics_exchange_downloads`;
+          const plan = await tx.$queryRaw<
+            Array<{ 'QUERY PLAN': unknown }>
+          >`EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON)
+            SELECT id FROM statistics_exchange_downloads WHERE expires_at<=now() ORDER BY expires_at,id LIMIT 100`;
+          const evidence = JSON.stringify(plan);
+          expect(evidence).toContain('statistics_exchange_downloads_expiry_idx');
+          expect(evidence).not.toContain('"Node Type":"Sort"');
+          expect(
+            await tx.$queryRaw<
+              Array<{ id: string }>
+            >`SELECT id FROM statistics_exchange_downloads WHERE expires_at<=now() ORDER BY expires_at,id LIMIT 100`,
+          ).toHaveLength(100);
+          throw fixtureRollback;
+        },
+        { timeout: 20_000 },
+      );
+    } catch (error) {
+      if (error !== fixtureRollback) throw error;
     } finally {
-      // FLAG: Retire this fixture's 10,000 downloads in one set operation before their
-      // parents. Per-entity cascading deletes can exhaust the unchanged statement budget
-      // and leave retained fixture history affecting later native suites.
-      await db.$executeRaw`DELETE FROM statistics_exchange_downloads WHERE grant_id IN(SELECT id FROM statistics_exchange_grants WHERE actor_user_id LIKE ${prefix + '%'})`;
-      await db.$executeRaw`DELETE FROM statistics_exchange_entities WHERE grant_id IN(SELECT id FROM statistics_exchange_grants WHERE actor_user_id LIKE ${prefix + '%'})`;
-      await db.$executeRaw`DELETE FROM statistics_exchange_grants WHERE actor_user_id LIKE ${prefix + '%'}`;
+      await db.$executeRaw`ANALYZE statistics_exchange_downloads`;
     }
+    expect(
+      await db.$queryRaw`SELECT id FROM statistics_exchange_grants WHERE actor_user_id LIKE ${prefix + '%'}`,
+    ).toEqual([]);
   });
   it('retains the measurement payload across repeated same-day retention visits', async () => {
     await grants.put(grantId, input());

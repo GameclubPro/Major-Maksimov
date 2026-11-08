@@ -1,9 +1,10 @@
+import type { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 import { stopWordsPolicySchema } from '@maxim/contracts/settings';
 import { StopWordsDeleteGuardService } from './stop-words-delete-guard.service';
 import { detectLegacyStopWordsViolations, detectStopWordsViolations } from './stop-words.detection';
 
-function harness() {
+function harness(authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>) {
   const policy = stopWordsPolicySchema.parse({
     enabled: true,
     rules: [{ id: 'casino', kind: 'WORD', value: 'casino' }],
@@ -48,6 +49,7 @@ function harness() {
     bots as never,
     immunity as never,
     new ConfigService(),
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   const input = {
     intentId: 'intent-1',
@@ -59,6 +61,53 @@ function harness() {
 }
 
 describe('StopWordsDeleteGuardService', () => {
+  it('uses saved DELETE immunity without allowing that proof to authorize a sanction', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({
+        initialized: true,
+        revision: '1',
+        isAdmin: false,
+        member: { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+      });
+    const h = harness({ resolve });
+    h.max.getChatMemberAccess.mockResolvedValue({
+      userId: 'user-1',
+      isAdmin: true,
+      isOwner: false,
+    });
+    await expect(h.guard.assertIntentStillActionable(h.input)).resolves.toBe('allowed');
+    expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    await expect(
+      h.guard.assertSanctionStillActionable({
+        ...h.input,
+        ruleCode: 'MESSAGE_BLOCKED_WORD',
+        metadata: h.metadata,
+        action: 'MUTE',
+      }),
+    ).rejects.toMatchObject({ rejectionReason: 'author_protected' });
+    expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves absent-member rejection even when the saved roster excludes the author', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: true, revision: '1', isAdmin: false, member: null });
+    const h = harness({ resolve });
+    await expect(h.guard.assertIntentStillActionable(h.input)).rejects.toMatchObject({
+      rejectionReason: 'author_absent',
+    });
+    expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+    expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['ставка', 'ставки'],
     ['казино', 'kазино'],

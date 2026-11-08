@@ -1,7 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
+import {
+  ChatEntityType,
+  createPrismaClient,
+  Prisma,
+  type PrismaClient,
+} from '../prisma/prisma-client';
 import { buildBotAccessSnapshotPersistence } from './bot-access-snapshot.util';
 import { probeManagedEntityActor } from './managed-entity-actor-probe';
+import { completeAdminRoster } from './chat-admin-roster-state';
+import {
+  MANAGED_ENTITY_HANDSHAKE_SOURCE,
+  ManagedEntityAccessWriter,
+  type ManagedEntityAccessWriteContext,
+} from './managed-entity-access-writer.service';
+import type { MaxBotLinkService } from './max-bot-link.service';
+import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
 import { ManagedEntityAccessRefreshService } from '../admin/managed-entity-access-refresh.service';
 import type { MaxChatMemberAccess, MaxClientService } from './max-client.service';
 
@@ -243,8 +256,210 @@ native('managed access demand on native PostgreSQL', () => {
     expect(cache.applyAdminAccessEpochMutation).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])(
+    'fences only a delayed positive actor verdict after a newer complete empty roster (granted=%s)',
+    async (granted) => {
+      await prisma.managedEntityAccessEdge.deleteMany({ where: { chatId, userId } });
+      let release!: () => void;
+      let entered!: () => void;
+      let observedAt!: Date;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const cache = {
+        applyAdminAccessEpochMutation: jest
+          .fn<
+            ReturnType<ChatContextCacheService['applyAdminAccessEpochMutation']>,
+            Parameters<ChatContextCacheService['applyAdminAccessEpochMutation']>
+          >()
+          .mockResolvedValue(true),
+      } satisfies Pick<ChatContextCacheService, 'applyAdminAccessEpochMutation'>;
+      const maxClient = {
+        getChatMembersAccess: async () => {
+          observedAt = new Date();
+          entered();
+          await gate;
+          const member: MaxChatMemberAccess = {
+            userId,
+            isBot: false,
+            isAdmin: granted,
+            isOwner: false,
+            permissions: [],
+            explicitPrivilegeEvidence: granted,
+            explicitNonPrivilegeEvidence: !granted,
+          };
+          return new Map([[userId, member]]);
+        },
+      } satisfies Pick<MaxClientService, 'getChatMembersAccess'>;
+      const work = probeManagedEntityActor({
+        prisma: prisma as never,
+        cache: cache as never,
+        maxClient: maxClient as unknown as MaxClientService,
+        chatId,
+        botId,
+        userId,
+        requiredCheckedAfter: new Date(Date.now() - 10),
+      });
+      try {
+        await started;
+        await prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chatId} FOR UPDATE`;
+          await completeAdminRoster(tx, chatId, new Date(observedAt.getTime() + 1));
+        });
+        release();
+        if (granted) await expect(work).rejects.toThrow('superseded');
+        else await expect(work).resolves.toBe(true);
+        expect(await prisma.chatAdminAllowlist.count({ where: { chatId, userId } })).toBe(0);
+        const edges = await prisma.managedEntityAccessEdge.findMany({ where: { chatId, userId } });
+        if (granted) {
+          expect(edges).toEqual([]);
+          expect(cache.applyAdminAccessEpochMutation).not.toHaveBeenCalled();
+        } else {
+          expect(edges).toEqual([expect.objectContaining({ botId, state: 'USER_DENIED' })]);
+          expect(cache.applyAdminAccessEpochMutation).toHaveBeenCalledWith(
+            expect.objectContaining({ chatId, userId, state: 'user_denied' }),
+          );
+        }
+        expect(
+          (
+            await prisma.chatBotMembership.findUniqueOrThrow({
+              where: { chatId_botId: { chatId, botId } },
+            })
+          ).botAccessCheckedAt,
+        ).toEqual(old);
+      } finally {
+        release();
+        await work.catch(() => undefined);
+      }
+    },
+  );
+
+  it.each(['grant', 'cache'] as const)(
+    'rejects a stale handshake at the %s boundary after a newer complete roster',
+    async (boundary) => {
+      const probeStartedAt = new Date(Date.now() - 10_000);
+      const newerRosterAt = new Date(probeStartedAt.getTime() + 1_000);
+      const peerBotId = 'newer-roster-peer';
+      await prisma.managedEntityAccessEdge.deleteMany({ where: { chatId, userId } });
+      await prisma.chatBotMembership.update({
+        where: { chatId_botId: { chatId, botId } },
+        data: {
+          botAccessCheckedAt: probeStartedAt,
+          botAccessSource: MANAGED_ENTITY_HANDSHAKE_SOURCE,
+        },
+      });
+      const persistNewerRoster = () =>
+        prisma.$transaction(async (tx) => {
+          await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chatId} FOR UPDATE`;
+          if (boundary === 'cache') {
+            await tx.managedEntityAccessEdge.create({
+              data: {
+                chatId,
+                userId,
+                botId: peerBotId,
+                state: 'GRANTED',
+                userRole: 'ADMIN',
+                botRole: 'ADMIN',
+                checkedAt: newerRosterAt,
+              },
+            });
+          }
+          await completeAdminRoster(tx, chatId, newerRosterAt);
+        });
+      if (boundary === 'grant') await persistNewerRoster();
+      const links = {
+        bindDiscoveredChatBots: jest
+          .fn<
+            ReturnType<MaxBotLinkService['bindDiscoveredChatBots']>,
+            Parameters<MaxBotLinkService['bindDiscoveredChatBots']>
+          >()
+          .mockResolvedValue(botId),
+        recordBotAccessProbe: jest
+          .fn<
+            ReturnType<MaxBotLinkService['recordBotAccessProbe']>,
+            Parameters<MaxBotLinkService['recordBotAccessProbe']>
+          >()
+          .mockResolvedValue(true),
+        reconcileChatPrimaryByAccess: jest
+          .fn<
+            ReturnType<MaxBotLinkService['reconcileChatPrimaryByAccess']>,
+            Parameters<MaxBotLinkService['reconcileChatPrimaryByAccess']>
+          >()
+          .mockImplementation(async () => {
+            if (boundary === 'cache') await persistNewerRoster();
+            return botId;
+          }),
+      } satisfies Pick<
+        MaxBotLinkService,
+        'bindDiscoveredChatBots' | 'recordBotAccessProbe' | 'reconcileChatPrimaryByAccess'
+      >;
+      const cache = {
+        applyAdminAccessEpochMutation: jest
+          .fn<
+            ReturnType<ChatContextCacheService['applyAdminAccessEpochMutation']>,
+            Parameters<ChatContextCacheService['applyAdminAccessEpochMutation']>
+          >()
+          .mockResolvedValue(true),
+      } satisfies Pick<ChatContextCacheService, 'applyAdminAccessEpochMutation'>;
+      const writer = new ManagedEntityAccessWriter(prisma as never, links as never, cache as never);
+      const context: ManagedEntityAccessWriteContext & { senderId: string } = {
+        chatId,
+        botId,
+        senderId: userId,
+        title: 'Roster handshake fence',
+        entityType: 'chat',
+        prismaEntityType: ChatEntityType.CHAT,
+        createdAt: null,
+      };
+      const botAccess: MaxChatMemberAccess = {
+        userId: botId,
+        isBot: true,
+        isAdmin: true,
+        isOwner: false,
+        explicitPrivilegeEvidence: true,
+        permissions: ['read_all_messages', 'write'],
+      };
+      const userAccess: MaxChatMemberAccess = { ...botAccess, userId, isBot: false };
+
+      await expect(
+        writer.persistGrantedAccess(context, botAccess, userAccess, probeStartedAt),
+      ).resolves.toBeNull();
+
+      expect(cache.applyAdminAccessEpochMutation).not.toHaveBeenCalled();
+      const edges = await prisma.managedEntityAccessEdge.findMany({ where: { chatId, userId } });
+      if (boundary === 'grant') {
+        expect(edges).toEqual([]);
+        expect(await prisma.chatAdminAllowlist.count({ where: { chatId, userId } })).toBe(0);
+        expect(links.reconcileChatPrimaryByAccess).not.toHaveBeenCalled();
+      } else {
+        expect(edges).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              botId: peerBotId,
+              state: 'GRANTED',
+              checkedAt: newerRosterAt,
+            }),
+          ]),
+        );
+        expect(await prisma.chatAdminAllowlist.count({ where: { chatId, userId } })).toBe(1);
+      }
+      const membership = await prisma.chatBotMembership.findUniqueOrThrow({
+        where: { chatId_botId: { chatId, botId } },
+      });
+      expect(membership.botAccessState).toBe('CONFIRMED_ADMIN');
+      expect(membership.botAccessCheckedAt).toEqual(probeStartedAt);
+    },
+  );
+
   it('starts after entry, commits the human proof, and retains bot authority without expiry', async () => {
     const boundary = Date.now() - 5;
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM chats WHERE id = ${chatId} FOR UPDATE`;
+      await completeAdminRoster(tx, chatId, old);
+    });
     const cache = { applyAdminAccessEpochMutation: jest.fn() };
     await probeManagedEntityActor({
       prisma: prisma as never,

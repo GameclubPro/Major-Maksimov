@@ -199,19 +199,19 @@ test('image-text rollback floor accepts prepared and legacy authority and reject
   const statusPath = resolve(directory, 'parser.status');
   const diagnosticsPath = resolve(directory, 'parser.stderr');
   const preparation = `const imageTextPreparation = finalDispatchLeaseToken
-        ? await this.prepareImageTextStopListDeleteAuthority(intent, botId)
-        : await this.assertImageTextStopListDeleteIntentStillActionable(intent, botId);`;
+          ? await this.prepareImageTextStopListDeleteAuthority(intent, botId)
+          : await this.assertImageTextStopListDeleteIntentStillActionable(intent, botId);`;
   const discriminator = `let imageTextStopListGuard = isPreparedDeleteAuthority(imageTextPreparation)
-        ? undefined
-        : imageTextPreparation;`;
+          ? undefined
+          : imageTextPreparation;`;
   const absence = `if (imageTextStopListGuard === 'absent') {
-        throw new ModerationDeleteGuardedMessageAbsentError(
-          'guarded_image_text_stop_list_predispatch_exact_absence',
-        );
-      }`;
+          throw new ModerationDeleteGuardedMessageAbsentError(
+            'guarded_image_text_stop_list_predispatch_exact_absence',
+          );
+        }`;
   const finalizer = 'imageTextStopListGuard = await finalizeDeleteAuthority(imageTextPreparation);';
   const checkpointAndFinalizer = `await beforeFinalAuthority?.();
-            ${finalizer}`;
+              ${finalizer}`;
   const boundaryCase = (label, anchor, replacement) => [
     label,
     mutateImageBoundary(executor, (boundary) => replaceExactlyOnce(boundary, anchor, replacement)),

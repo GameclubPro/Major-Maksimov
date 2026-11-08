@@ -440,6 +440,12 @@ import {
 } from './publisher-chat-comment-store';
 import { AdminDialogAdminAccessRuntime } from './admin-dialog-admin-access-runtime';
 import {
+  protectEntry,
+  readOnlyAdminOptions,
+  resolveProtectedSettingsEntryAccess,
+  type ReadOnlyAdminOptions,
+} from './admin-settings-entry-protection';
+import {
   createCommentsButtonPosition,
   PublisherCommentKeyboardRouting,
 } from './publisher-comment-keyboard-routing';
@@ -575,6 +581,9 @@ import {
   type ManagedBotChatCatalogSnapshotRow,
   type ManagedBotChatMembershipSnapshotRow,
   type AssertChatAdminOptions,
+  type AdminAccessProbeRequestOptions,
+  type RemoteAdminAccessOptions,
+  type ResolveAdminAccessOptions,
   type AdminReadBypassOptions,
   type TimedPromiseCacheEntry,
   type AdminAccessResolution,
@@ -6811,7 +6820,7 @@ export class AdminService implements OnModuleDestroy {
     user: AuthUser,
     options: AdminReadBypassOptions = {},
   ): Promise<ChatSettings> {
-    await this.assertManagedEntityReadAccess(chatId, user.userId, 'chat', options);
+    await this.assertManagedEntityReadAccess(chatId, user.userId, 'chat', protectEntry(options));
     return readChatSettingsValue({
       prisma: this.prisma,
       chatContextCache: this.chatContextCache,
@@ -6829,6 +6838,7 @@ export class AdminService implements OnModuleDestroy {
     await this.assertReadOnlyChatAdmin(chatId, user.userId, 'chat', {
       forceRemote: true,
       timeoutMs: SETTINGS_SCREEN_ADMIN_CHECK_TIMEOUT_MS,
+      protectHumanAdministrator: true,
     });
     await this.ensureEntityType(chatId, user.userId, 'chat');
 
@@ -7176,7 +7186,7 @@ export class AdminService implements OnModuleDestroy {
     user: AuthUser,
     options: AdminReadBypassOptions = {},
   ): Promise<ChannelSettings> {
-    await this.assertManagedEntityReadAccess(chatId, user.userId, 'channel', options);
+    await this.assertManagedEntityReadAccess(chatId, user.userId, 'channel', protectEntry(options));
     const botAssignmentData = await this.resolveChannelSettingsReadBotAssignmentData(chatId);
     return readChannelSettingsValue({
       prisma: this.prisma,
@@ -7194,6 +7204,7 @@ export class AdminService implements OnModuleDestroy {
     await this.assertReadOnlyChatAdmin(chatId, user.userId, 'channel', {
       forceRemote: true,
       timeoutMs: SETTINGS_SCREEN_ADMIN_CHECK_TIMEOUT_MS,
+      protectHumanAdministrator: true,
     });
     await this.ensureEntityType(chatId, user.userId, 'channel');
 
@@ -13805,7 +13816,11 @@ export class AdminService implements OnModuleDestroy {
     const isReadOnlyValidation = options.syncPersistedAccess === false;
     const access = await this.resolveUserAndBotAdminAccess(chatId, userId, {
       bypassNegativeCache: true,
-      bypassPositiveCache: options.bypassPositiveCache ?? !isReadOnlyValidation,
+      bypassPositiveCache:
+        options.protectHumanAdministrator === true
+          ? true
+          : (options.bypassPositiveCache ?? !isReadOnlyValidation),
+      protectHumanAdministrator: options.protectHumanAdministrator,
       ...(entityType ? { entityType } : {}),
       trafficClass: options.trafficClass,
       timeoutMs: options.timeoutMs,
@@ -14184,18 +14199,9 @@ export class AdminService implements OnModuleDestroy {
     chatId: string,
     userId: string,
     entityType: ManagedEntityType | null = null,
-    options: {
-      forceRemote?: boolean;
-      timeoutMs?: number;
-    } = {},
+    options: ReadOnlyAdminOptions = {},
   ): Promise<void> {
-    await this.assertChatAdmin(chatId, userId, entityType, {
-      syncPersistedAccess: false,
-      trafficClass: options.forceRemote === true ? 'interactive' : undefined,
-      timeoutMs: options.timeoutMs,
-      allowPersistedFallback: false,
-      bypassPositiveCache: true,
-    });
+    await this.assertChatAdmin(chatId, userId, entityType, readOnlyAdminOptions(options));
   }
 
   private scheduleAdminAccessValidationRosterSync(
@@ -20628,15 +20634,12 @@ export class AdminService implements OnModuleDestroy {
     userId: string,
     botId: string | null,
     probeStartedAt: Date,
-    options: {
-      trafficClass?: 'critical' | 'interactive' | 'background';
-      sourceTag?: string;
-      timeoutMs?: number;
-    } = {},
+    options: AdminAccessProbeRequestOptions = {},
   ): Promise<AdminAccessResolution> {
     try {
       const requestOptions = {
         actionHealthLane: ADMIN_ACTION_HEALTH_LANE,
+        ...(options.protectHumanAdministrator === true ? { bypassCache: true } : {}),
         ...(options.trafficClass ? { trafficClass: options.trafficClass } : {}),
         ...(options.sourceTag ? { sourceTag: options.sourceTag } : {}),
         ...(typeof options.timeoutMs === 'number' ? { timeoutMs: options.timeoutMs } : {}),
@@ -20667,6 +20670,18 @@ export class AdminService implements OnModuleDestroy {
           (hasRequestOptions
             ? await this.maxClient.getCurrentChatMemberAccess(chatId, requestOptions)
             : await this.maxClient.getCurrentChatMemberAccess(chatId));
+        if (options.protectHumanAdministrator === true) {
+          return resolveProtectedSettingsEntryAccess({
+            userId: normalizedUserId,
+            userAccess: this.managedEntityAccessRuntime.readAdminAccessByUserIdVariants(
+              accessByUserId,
+              normalizedUserId,
+            ),
+            botAccess,
+            botUserId: botContactId,
+            probeStartedAt,
+          });
+        }
         const botRole = this.resolveManagedEntityAccessRole(botAccess);
 
         if (!botAccess.isAdmin && !botAccess.isOwner) {
@@ -20706,6 +20721,8 @@ export class AdminService implements OnModuleDestroy {
         };
       }
 
+      if (options.protectHumanAdministrator === true)
+        throw new Error('MAX settings actor lookup is unavailable');
       const adminIds = hasRequestOptions
         ? await this.maxClient.getChatAdminIds(chatId, requestOptions)
         : await this.maxClient.getChatAdminIds(chatId);
@@ -20785,14 +20802,7 @@ export class AdminService implements OnModuleDestroy {
   private async loadRemoteAdminAccess(
     chatId: string,
     userId: string,
-    options: {
-      entityType?: ManagedEntityType;
-      candidateBotIds?: readonly string[];
-      trafficClass?: 'critical' | 'interactive' | 'background';
-      sourceTag?: string;
-      timeoutMs?: number;
-      allowPersistedFallback?: boolean;
-    } = {},
+    options: RemoteAdminAccessOptions = {},
   ): Promise<AdminAccessResolution> {
     const probeStartedAt = new Date();
     const discoveryCandidateBotIds = this.normalizeRuntimeManagedEntityBotIds(
@@ -21091,16 +21101,7 @@ export class AdminService implements OnModuleDestroy {
   private async resolveUserAndBotAdminAccess(
     chatId: string,
     userId: string,
-    options: {
-      bypassNegativeCache?: boolean;
-      entityType?: ManagedEntityType;
-      candidateBotIds?: readonly string[];
-      trafficClass?: 'critical' | 'interactive' | 'background';
-      sourceTag?: string;
-      timeoutMs?: number;
-      allowPersistedFallback?: boolean;
-      bypassPositiveCache?: boolean;
-    } = {},
+    options: ResolveAdminAccessOptions = {},
   ): Promise<AdminAccessResolution> {
     const cached = (await this.chatContextCache.getAdminAccess?.(chatId, userId)) ?? null;
     if (cached === 'granted' && options.bypassPositiveCache !== true) {
@@ -21136,6 +21137,7 @@ export class AdminService implements OnModuleDestroy {
 
     const pending = this.loadRemoteAdminAccess(chatId, userId, {
       entityType: options.entityType,
+      protectHumanAdministrator: options.protectHumanAdministrator,
       candidateBotIds: options.candidateBotIds,
       trafficClass: options.trafficClass,
       sourceTag: options.sourceTag,
@@ -21156,13 +21158,7 @@ export class AdminService implements OnModuleDestroy {
   private buildAdminAccessCheckKey(
     chatId: string,
     userId: string,
-    options: {
-      candidateBotIds?: readonly string[];
-      entityType?: ManagedEntityType;
-      trafficClass?: 'critical' | 'interactive' | 'background';
-      timeoutMs?: number;
-      allowPersistedFallback?: boolean;
-    },
+    options: Omit<RemoteAdminAccessOptions, 'sourceTag'>,
   ): string {
     const trafficClass = options.trafficClass ?? 'interactive';
     const timeoutKey =
@@ -21186,6 +21182,7 @@ export class AdminService implements OnModuleDestroy {
       trafficClass,
       timeoutKey,
       candidateBotIdsKey,
+      options.protectHumanAdministrator === true ? 'protect-human' : 'ordinary',
     ].join(':');
   }
 
@@ -22656,7 +22653,7 @@ export class AdminService implements OnModuleDestroy {
       ? await this.prisma.$transaction(async (tx) => {
           const chat = await tx.chat.upsert(chatWrite);
           if (
-            !(await this.managedEntityAccessRuntime.lockRemoteAdminAccessProbe(
+            !(await this.managedEntityAccessRuntime.lockRemoteAdminGrant(
               tx,
               chatId,
               userId,

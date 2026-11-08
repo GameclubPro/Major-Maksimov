@@ -4,12 +4,12 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { MaxApiCircuitOpenError } from '../max/max-client.service';
-import { AdminService } from './admin.service';
 import {
   createAdminMaxBotLinkMock,
   createChatContextCacheMock,
   createConfigMock,
   createPrismaMock,
+  createAdminServiceFixture,
 } from './admin-service-test-support';
 
 type PrismaMock = ReturnType<typeof createPrismaMock>;
@@ -58,6 +58,7 @@ function createActionableBotRegistry(botIds: readonly string[]) {
     ),
     getDefaultBot: jest.fn().mockReturnValue(botIds[0] ? { id: botIds[0] } : null),
     getActionableBots: jest.fn().mockReturnValue(botIds.map((id) => ({ id }))),
+    getOperationalBots: jest.fn().mockReturnValue(botIds.map((id) => ({ id }))),
     getDiscoveryBots: jest.fn().mockReturnValue([]),
   };
 }
@@ -89,7 +90,7 @@ describe('AdminService manual mute fanout reliability', () => {
         permissions: [],
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -139,7 +140,7 @@ describe('AdminService manual mute fanout reliability', () => {
         permissions: ['read_all_messages'],
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -195,7 +196,7 @@ describe('AdminService manual mute fanout reliability', () => {
       }),
     });
     const maxBotRegistry = createActionableBotRegistry(['bot-1', 'bot-2']);
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -247,7 +248,7 @@ describe('AdminService manual mute fanout reliability', () => {
         permissions: [],
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,

@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 
 import { LinkHistoryDeleteGuardService } from './link-history-delete-guard.service';
@@ -11,6 +12,60 @@ import { fingerprintLinkRulesPolicy } from './link-rules-policy.runtime';
 import { finalizeDeleteAuthority } from './moderation-delete-authority-preparation';
 
 describe('LinkHistoryDeleteGuardService', () => {
+  it.each(['live', 'history'] as const)(
+    'uses saved admin immunity for %s without an author GET or absent-author roster request',
+    async (reasonKind) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({ initialized: true, revision: '1', isAdmin: false, member: undefined });
+      const h = buildHarness({ reasonKind, remoteAccess: null, authorAccess: { resolve } });
+      await expect(h.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+      expect(h.maxClient.getChatMemberAccess).not.toHaveBeenCalled();
+      expect(h.maxClient.getChatAdminAccesses).not.toHaveBeenCalled();
+      expect(h.maxClient.getExactMessageRow).toHaveBeenCalledTimes(1);
+      expect(resolve).toHaveBeenCalledWith(
+        'chat-1',
+        'user-1',
+        expect.objectContaining({ botId: 'delete-bot', bypassCache: true }),
+        { requireMembership: false },
+      );
+    },
+  );
+
+  it('keeps absent-author full-roster validation until saved authority is initialized', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: false, revision: null, isAdmin: false, member: null });
+    const h = buildHarness({ authorAccess: { resolve } });
+    await expect(h.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+    expect(h.maxClient.getChatAdminAccesses).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'rejects a saved administrator before source reads (initialized=%s)',
+    async (initialized) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({ initialized, revision: '1', isAdmin: true, member: undefined });
+      const h = buildHarness({ reasonKind: 'live', authorAccess: { resolve } });
+      await expect(h.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+        code: 'live_admin_immune',
+      });
+      expect(h.maxClient.getChatMemberAccess).not.toHaveBeenCalled();
+      expect(h.maxClient.getChatAdminAccesses).not.toHaveBeenCalled();
+      expect(h.maxClient.getExactMessageRow).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['live', 'history'] as const)(
     'enforces selected rules for %s and ignores the legacy allowlist after adoption',
     async (reasonKind) => {
@@ -386,6 +441,7 @@ function buildHarness(
     textClickabilityEnabled?: boolean;
     linkRulesPolicy?: unknown;
     omitPolicyFingerprint?: boolean;
+    authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>;
   } = {},
 ) {
   const effectiveAt = options.settingsEffectiveAt ?? new Date(Date.now() - 10 * 60_000);
@@ -481,6 +537,7 @@ function buildHarness(
       MODERATION_LINK_HISTORY_DELETE_ENABLED: options.deleteEnabled ?? true,
       MODERATION_LINK_TEXT_CLICKABILITY_ENABLED: options.textClickabilityEnabled ?? false,
     }),
+    options.authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { service, prisma, maxClient, maxBotLinkService };
 }

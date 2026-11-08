@@ -27,7 +27,12 @@ export type ActiveMuteCacheReadResult =
   | { status: 'active'; mute: ActiveMute }
   | { status: 'inactive' }
   | { status: 'miss' };
-export type ChatAdminCheckSource = 'remote' | 'local' | 'remote+local' | 'local_fallback';
+export type ChatAdminCheckSource =
+  | 'remote'
+  | 'local'
+  | 'remote+local'
+  | 'local_fallback'
+  | 'persisted_roster';
 export type ChatAdminCheckResult = {
   isAdmin: boolean;
   source: ChatAdminCheckSource;

@@ -1,8 +1,15 @@
+import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { bindStateVoiceSource } from './state-voice-delete-source';
 import { ConfigService } from '@nestjs/config';
 import { ModerationStateDeleteGuardService } from './moderation-state-delete-guard.service';
 
-function fixture({ ruleCode = 'MUTE_ACTIVE_DELETE' }: { ruleCode?: string } = {}) {
+function fixture({
+  ruleCode = 'MUTE_ACTIVE_DELETE',
+  authorAccess,
+}: {
+  ruleCode?: string;
+  authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>;
+} = {}) {
   const at = new Date();
   const settings = {
     nightModeTimezone: 'UTC',
@@ -64,11 +71,71 @@ function fixture({ ruleCode = 'MUTE_ACTIVE_DELETE' }: { ruleCode?: string } = {}
     fence as never,
     policy as never,
     new ConfigService(),
+    undefined,
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { service, input, settings, prisma, max, immunity, bots, fence, event, policy, at };
 }
 
 describe('current moderation state delete authorization', () => {
+  it.each([false, true])(
+    'uses saved roles without fabricating state-delete membership, absent=%s',
+    async (absent) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({
+          initialized: true,
+          revision: '1',
+          isAdmin: false,
+          member: absent
+            ? null
+            : { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+        });
+      const h = fixture({ authorAccess: { resolve } });
+      if (absent) {
+        await expect(h.service.authorize(h.input)).rejects.toMatchObject({
+          code: 'moderation_state_delete_no_longer_authorized',
+        });
+        expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+        expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+      } else {
+        await expect(h.service.authorize(h.input)).resolves.toMatchObject({
+          reasonKeys: ['state'],
+        });
+      }
+      expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps fresh member-mutation authority independent of the saved DELETE role', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: true, revision: '1', isAdmin: false, member: undefined });
+    const h = fixture({ authorAccess: { resolve } });
+    h.max.getChatMemberAccess.mockResolvedValue({
+      userId: 'user-1',
+      isAdmin: true,
+      isOwner: false,
+    });
+    await expect(
+      h.service.assertSpammerMemberAllowed({
+        chatId: '-123',
+        userId: 'user-1',
+        messageId: 'm1',
+        botId: 'peer-2',
+        localBlock: true,
+      }),
+    ).rejects.toMatchObject({ code: 'moderation_state_delete_no_longer_authorized' });
+    expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
   it.each([
     'MUTE_ACTIVE_DELETE',
     'GLOBAL_SPAMMER_MESSAGE_DELETE',

@@ -1,5 +1,8 @@
 import { ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { AdminService } from './admin.service';
+import type { MaxChatMemberAccess, MaxClientService } from '../max/max-client.service';
+import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import {
   createChatContextCacheMock,
   createConfigMock,
@@ -7,6 +10,45 @@ import {
   createPrismaMock,
   flushAsyncTasks,
 } from './admin-service-test-support';
+
+function protectedEntryMaxClient(isAdmin = true, botContactId = '777000') {
+  const actor: MaxChatMemberAccess = {
+    userId: 'admin-1',
+    isBot: false,
+    isAdmin,
+    isOwner: false,
+    permissions: [],
+    explicitPrivilegeEvidence: isAdmin,
+    explicitNonPrivilegeEvidence: !isAdmin,
+  };
+  const bot: MaxChatMemberAccess = {
+    userId: botContactId,
+    isBot: true,
+    isAdmin: true,
+    isOwner: false,
+    permissions: [],
+    explicitPrivilegeEvidence: true,
+  };
+  return {
+    getChatMembersAccess: jest
+      .fn<
+        ReturnType<MaxClientService['getChatMembersAccess']>,
+        Parameters<MaxClientService['getChatMembersAccess']>
+      >()
+      .mockResolvedValue(
+        new Map([
+          [actor.userId!, actor],
+          [bot.userId!, bot],
+        ]),
+      ),
+    getCurrentChatMemberAccess: jest
+      .fn<
+        ReturnType<MaxClientService['getCurrentChatMemberAccess']>,
+        Parameters<MaxClientService['getCurrentChatMemberAccess']>
+      >()
+      .mockResolvedValue(bot),
+  } satisfies Pick<MaxClientService, 'getChatMembersAccess' | 'getCurrentChatMemberAccess'>;
+}
 
 describe('AdminService admin access validation', () => {
   const user = {
@@ -267,9 +309,7 @@ describe('AdminService admin access validation', () => {
     const chatContextCache = createChatContextCacheMock({
       getAdminAccess: jest.fn().mockResolvedValue('granted'),
     });
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue([]),
-    };
+    const maxClient = protectedEntryMaxClient(false);
     const service = new AdminService(
       prisma as never,
       maxClient as never,
@@ -281,7 +321,7 @@ describe('AdminService admin access validation', () => {
       service.assertManagedEntityAdminAccess('chat-1', user.userId, 'chat'),
     ).rejects.toThrow(ForbiddenException);
 
-    expect(maxClient.getChatAdminIds).toHaveBeenCalledTimes(1);
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledTimes(1);
     expect(chatContextCache.applyAdminAccessEpochMutation).toHaveBeenCalledWith({
       chatId: 'chat-1',
       userId: user.userId,
@@ -300,13 +340,12 @@ describe('AdminService admin access validation', () => {
   it('returns 503 for managed mutations when MAX fails despite an old allowlist row', async () => {
     const prisma = createPrismaMock();
     prisma.chatAdminAllowlist.findMany.mockResolvedValue([{ chatId: 'chat-1' }]);
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockRejectedValue(
-        Object.assign(new Error('timeout of 5000ms exceeded'), {
-          code: 'ECONNABORTED',
-        }),
-      ),
-    };
+    const maxClient = protectedEntryMaxClient();
+    maxClient.getChatMembersAccess.mockRejectedValue(
+      Object.assign(new Error('timeout of 5000ms exceeded'), {
+        code: 'ECONNABORTED',
+      }),
+    );
     const service = new AdminService(
       prisma as never,
       maxClient as never,
@@ -326,49 +365,73 @@ describe('AdminService admin access validation', () => {
       id: 'chat-1',
       title: 'Команда MAX',
       entityType: 'CHAT',
-      primaryBotId: 'bot-primary',
+      primaryBotId: '777000_bot',
       botId: null,
-      botMemberships: [{ botId: 'bot-primary' }, { botId: 'bot-secondary' }],
+      botMemberships: [{ botId: '777000_bot' }, { botId: '888000_bot' }],
     });
-    const maxClient = {
-      getChatAdminIds: jest
-        .fn()
-        .mockRejectedValueOnce({
-          response: {
-            status: 403,
-            data: { code: 'chat.denied', message: 'Bot is not a chat member' },
-          },
-        })
-        .mockResolvedValueOnce([user.userId]),
-    };
-    const maxBotRegistry = {
-      getBotById: jest.fn((botId: string | null | undefined) =>
-        botId ? { id: botId, state: 'active' } : null,
-      ),
-      getAllBots: jest.fn().mockReturnValue([{ id: 'bot-primary' }, { id: 'bot-secondary' }]),
-    };
+    Object.assign(prisma, {
+      managedEntityAccessEdge: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findFirst: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue(undefined),
+      },
+    });
+    const maxClient = protectedEntryMaxClient(true, '888000');
+    maxClient.getChatMembersAccess.mockRejectedValueOnce({
+      response: {
+        status: 403,
+        data: { code: 'chat.denied', message: 'Bot is not a chat member' },
+      },
+    });
+    const config = new ConfigService({
+      APP_BASE_URL: 'https://major-maksimov.ru',
+      MAX_BOT_ID: '777000_bot',
+      MAX_BOT_CONTACT_ID: '777000',
+      MAX_BOT_TOKEN: 'test-primary-token',
+      MAX_WEBHOOK_SECRET_PATH: 'test-primary-path',
+      MAX_WEBHOOK_HEADER_SECRET: 'test-primary-header',
+      MAX_BOTS_JSON: JSON.stringify([
+        {
+          id: '888000_bot',
+          contactId: '888000',
+          token: 'test-secondary-token',
+          webhookSecretPath: 'test-secondary-path',
+          webhookHeaderSecret: 'test-secondary-header',
+          state: 'active',
+        },
+      ]),
+    });
+    const maxBotRegistry = new MaxBotRegistryService(config);
     const service = new AdminService(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
-      createConfigMock({ botId: 'bot-primary' }) as never,
+      config,
       undefined,
       undefined,
       undefined,
       undefined,
       undefined,
-      maxBotRegistry as never,
+      maxBotRegistry,
     );
 
     await expect(
       service.assertManagedEntityAdminAccess('chat-1', user.userId, 'chat'),
     ).resolves.toBeUndefined();
-    expect(maxClient.getChatAdminIds).toHaveBeenCalledTimes(2);
-    expect(maxClient.getChatAdminIds).toHaveBeenNthCalledWith(
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledTimes(2);
+    expect(maxClient.getChatMembersAccess).toHaveBeenNthCalledWith(
+      1,
+      'chat-1',
+      ['admin-1', '777000'],
+      expect.objectContaining({ botId: '777000_bot', bypassCache: true }),
+    );
+    expect(maxClient.getChatMembersAccess).toHaveBeenNthCalledWith(
       2,
       'chat-1',
-      expect.objectContaining({ botId: 'bot-secondary' }),
+      ['admin-1', '888000'],
+      expect.objectContaining({ botId: '888000_bot', bypassCache: true }),
     );
+    expect(maxClient.getCurrentChatMemberAccess).not.toHaveBeenCalled();
   });
 
   it('rechecks cached granted access for managed-entity reads', async () => {

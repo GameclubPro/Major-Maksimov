@@ -27,6 +27,7 @@ export type MaxChatAdminRosterSyncJob = QueueJobEnvelope<
       | 'handshake_start'
       | 'moderation_destructive_path'
       | 'admin_access_validation'
+      | 'active_chat'
       | 'discovery_snapshot'
       | null;
     retryUntilMs?: number | null;

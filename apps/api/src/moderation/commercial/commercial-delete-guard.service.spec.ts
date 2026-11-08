@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 import {
   createDefaultCommercialAdsPolicy,
@@ -28,7 +29,11 @@ const message = (value = text, userId = 'user') => ({
   timestamp: Date.now(),
 });
 
-function harness(commercialPolicy: CommercialAdsPolicy | null = null, userId = 'user') {
+function harness(
+  commercialPolicy: CommercialAdsPolicy | null = null,
+  userId = 'user',
+  authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>,
+) {
   const settings = {
     commercialAdsFilterEnabled: true,
     commercialAdsPolicy: commercialPolicy,
@@ -82,6 +87,7 @@ function harness(commercialPolicy: CommercialAdsPolicy | null = null, userId = '
     immunity as never,
     new ConfigService({ MODERATION_DELETE_INTENT_TIMEOUT_MS: 5000 }),
     policy as never,
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { service, settings, binding, reason, prisma, max, botLink, immunity, authority, policy };
 }
@@ -90,6 +96,59 @@ describe('CommercialDeleteGuardService', () => {
   afterEach(() => {
     jest.restoreAllMocks();
     jest.useRealTimers();
+  });
+
+  it('uses a complete saved roster for DELETE without an author GET, while a sanction still checks fresh roles', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: true, revision: '1', isAdmin: false, member: undefined });
+    const h = harness(null, 'user', { resolve });
+    h.max.getChatMemberAccess.mockResolvedValue({
+      userId: 'user',
+      isAdmin: true,
+      isOwner: false,
+    });
+
+    await expect(h.service.assertIntentStillActionable(input)).resolves.toEqual({
+      kind: 'allowed',
+      reasonKeys: [h.reason.reasonKey],
+    });
+    expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    expect(h.max.getExactMessageRow).toHaveBeenCalledTimes(1);
+    expect(resolve).toHaveBeenCalledWith(
+      'chat',
+      'user',
+      expect.objectContaining({ botId: 'bot', bypassCache: true }),
+      { requireMembership: false },
+    );
+
+    const permit = h.service.createSanctionPermit({
+      ...input,
+      evidence: [h.reason],
+      deleted: true,
+      commercialVerified: true,
+    })!;
+    await expect(h.service.authorizeSanction(permit)).resolves.toBe(false);
+    expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('protects a saved administrator without fetching their membership or message', async () => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({ initialized: true, revision: '1', isAdmin: true, member: undefined });
+    const h = harness(null, 'user', { resolve });
+    await expect(h.service.assertIntentStillActionable(input)).rejects.toMatchObject({
+      code: 'commercial_text_author_immune',
+    });
+    expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
   });
 
   it('checks the exact current message and permissions once per dispatch, using the executable bot', async () => {

@@ -5,6 +5,7 @@ import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
 import { resolveChannelSuggestionMediaPublicationBotId } from './admin-channel-suggestion-media-route';
 import { AdminService } from './admin.service';
 import {
+  createAdminServiceFixture,
   AdminServicePrivateAccess,
   createAdminMaxBotLinkMock,
   createPrismaMock,
@@ -135,7 +136,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -204,7 +205,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       where: { chatId: 'channel-1' },
       data: {
         engagementPublishedMessageId: 'mid-channel-engagement-1',
-        engagementPublishedBotId: null,
+        engagementPublishedBotId: '777000_bot',
         engagementPublishedThreadId: commentsToken.d,
         engagementPublishedAt: expect.any(Date),
       },
@@ -225,7 +226,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         .mockResolvedValue({ messageId: 'mid-channel-engagement-miniapp-1', url: null }),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -285,7 +286,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -453,7 +454,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -511,7 +512,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -1742,7 +1743,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       bindDiscoveredChatBots: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -1866,7 +1867,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -1984,7 +1985,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -2087,7 +2088,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       add: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -2839,7 +2840,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -2910,7 +2911,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -3060,7 +3061,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       add: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -3670,7 +3671,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -3735,7 +3736,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -3873,7 +3874,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -3989,7 +3990,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -4137,7 +4138,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       config as never,
     );
 
-    const tokenPublisher = new AdminService(
+    const tokenPublisher = createAdminServiceFixture(
       prisma as never,
       tokenPublisherClient as never,
       chatContextCache as never,
@@ -4431,7 +4432,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       createConfigMock() as never,
     );
 
-    const tokenPublisher = new AdminService(
+    const tokenPublisher = createAdminServiceFixture(
       prisma as never,
       tokenPublisherClient as never,
       chatContextCache as never,
@@ -4555,7 +4556,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       .spyOn((service as any).logger, 'debug')
       .mockImplementation(() => undefined);
 
-    const tokenPublisher = new AdminService(
+    const tokenPublisher = createAdminServiceFixture(
       prisma as never,
       tokenPublisherClient as never,
       chatContextCache as never,
@@ -4693,7 +4694,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       maxBotLinkService as never,
     );
 
-    const tokenPublisher = new AdminService(
+    const tokenPublisher = createAdminServiceFixture(
       prisma as never,
       tokenPublisherClient as never,
       chatContextCache as never,
@@ -6813,7 +6814,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -6901,7 +6902,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       resolveBotId: jest.fn().mockResolvedValue('channel-bot-2'),
     });
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7029,7 +7030,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       resolveBotId: jest.fn().mockResolvedValue('write-only-bot'),
     });
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7144,7 +7145,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       resolveBotId: jest.fn().mockResolvedValue('write-only-bot'),
     });
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7229,7 +7230,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -7288,11 +7289,13 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       Buffer.from('a'),
       'comment.png',
       'image/png',
+      { botId: '777000_bot' },
     );
     expect(maxClient.uploadFile).toHaveBeenCalledWith(
       Buffer.from('b'),
       'minutes.pdf',
       'application/pdf',
+      { botId: '777000_bot' },
     );
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -7371,7 +7374,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       uploadFile: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7463,7 +7466,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       uploadFile: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7499,6 +7502,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       Buffer.from('a'),
       'gallery-shot.jpg',
       'image/jpeg',
+      { botId: '777000_bot' },
     );
     expect(maxClient.uploadFile).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
@@ -7546,7 +7550,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       uploadFile: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7764,7 +7768,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -7839,7 +7843,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,

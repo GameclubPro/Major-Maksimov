@@ -1,4 +1,5 @@
 import { ChatBotMembershipStatus, WebhookStatus } from '../prisma/prisma-client';
+import type { Prisma } from '../prisma/prisma-client';
 import type { MaxUpdate } from '@maxim/contracts';
 import { WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PREFIX } from '../webhook/webhook-timeout-quarantine';
 import { ModerationService } from './moderation.service';
@@ -391,10 +392,17 @@ describe('ModerationService shared chat ownership', () => {
   });
 
   it('still executes blocked-join protection for non-primary bot_added events in denied chats', async () => {
-    const prisma = {
+    const tx = {
       chatAdminAllowlist: {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
+      $queryRaw: jest.fn().mockResolvedValue([{ id: '-100123' }]),
+    };
+    const prisma = {
+      ...tx,
+      $transaction: jest.fn(async (work: (client: Prisma.TransactionClient) => Promise<void>) =>
+        work(tx as unknown as Prisma.TransactionClient),
+      ),
     };
     const maxClient = {
       leaveCurrentChat: jest.fn().mockResolvedValue(undefined),
@@ -448,6 +456,7 @@ describe('ModerationService shared chat ownership', () => {
     expect(prisma.chatAdminAllowlist.deleteMany).toHaveBeenCalledWith({
       where: { chatId: '-100123' },
     });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(chatContextCache.invalidate).toHaveBeenCalledWith('-100123');
   });
 

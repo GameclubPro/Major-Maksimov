@@ -94,6 +94,7 @@ const SETTINGS_TEMPLATE_FIELDS = [
   'shellReads',
   'reuses',
 ] as const;
+const DELETE_AUTHOR_FIELDS = ['roster', 'protected', 'legacy', 'membership', 'shared'] as const;
 const VK_FIELDS = [
   'batches',
   'postsAttempted',
@@ -287,6 +288,7 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
     // optional measurements are missing coverage, never inferred healthy zeroes.
     deleteDueSweep:
       source.deleteDueSweep == null ? null : sanitizeDeleteDueSweepSnapshot(source.deleteDueSweep),
+    automaticDeleteAuthors: checkedNumbers(source.automaticDeleteAuthors, DELETE_AUTHOR_FIELDS),
     processMemory:
       source.processMemory == null
         ? null
@@ -348,6 +350,7 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
   private vkMediaAdmissionProvider: (() => unknown) | null = null;
   private deleteReconcilerProvider: (() => unknown) | null = null;
   private deleteDueSweepProvider: (() => unknown) | null = null;
+  private deleteAuthorProvider: (() => unknown) | null = null;
   private gcObserver: PerformanceObserver | null = null;
   private eventLoopDelay: IntervalHistogram | null = null;
   private readonly gcCounters = { count: 0, totalDurationUs: 0 };
@@ -398,6 +401,9 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
   }
   registerDeleteDueSweepSnapshot(provider: () => unknown): void {
     this.deleteDueSweepProvider = provider;
+  }
+  registerAutomaticDeleteAuthorSnapshot(provider: () => unknown): void {
+    this.deleteAuthorProvider = provider;
   }
 
   private startProcessMonitoring(): void {
@@ -487,6 +493,7 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
       vkPersistence: readProvider(this.vkProvider),
       deleteReconciler: readProvider(this.deleteReconcilerProvider),
       deleteDueSweep: readProvider(this.deleteDueSweepProvider),
+      automaticDeleteAuthors: readProvider(this.deleteAuthorProvider),
       processMemory: this.readProcessMemory(),
       processPerformance: this.readProcessPerformance(),
       vkMediaAdmission: readProvider(this.vkMediaAdmissionProvider),

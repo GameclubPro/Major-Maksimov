@@ -17,6 +17,7 @@ import { buildDeveloperForcedGlobalSpammerCacheKey } from '../moderation/develop
 import { buildActiveMuteStateKey } from '../moderation/moderation-state.util';
 import { buildCompactProfileMentionStartPayload } from '../max/max-deep-link.util';
 import type { MaxClientService } from '../max/max-client.service';
+import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { Queue } from 'bullmq';
 import type { AdminManualFanoutJob } from './admin-manual-fanout.queue';
 import { AdminService } from './admin.service';
@@ -35,6 +36,7 @@ import {
   expectChatRulesSendOptions,
   expectChatRulesDeleteOptions,
   createAdminMaxBotLinkMock,
+  createAdminServiceFixture,
   createPrismaMock,
   wireManagedBroadcastDeliveryStore,
   wireManagedBroadcastOccurrenceStore,
@@ -60,6 +62,94 @@ const MINIMAL_MP4_HEADER = Buffer.from('000000186674797069736f6d0000020069736f6d
 const MAX_UNSUPPORTED_IMAGE_MESSAGE =
   'Формат изображения не поддерживается MAX. Используйте JPG, PNG, GIF, TIFF, BMP или HEIC.';
 
+function createRevokedTargetAdminMemberFixture() {
+  return jest
+    .fn<
+      ReturnType<MaxClientService['getChatMembersAccess']>,
+      Parameters<MaxClientService['getChatMembersAccess']>
+    >()
+    .mockImplementation(
+      async (chatId, userIds) =>
+        new Map(
+          userIds.map((userId) => {
+            const isBot = userId === '777000';
+            const isAdmin = isBot || (userId === 'admin-1' && chatId !== 'chat-revoked');
+            return [
+              userId,
+              {
+                userId,
+                isBot,
+                isAdmin,
+                isOwner: false,
+                permissions: [],
+                explicitPrivilegeEvidence: isAdmin,
+                explicitNonPrivilegeEvidence: !isAdmin,
+              },
+            ];
+          }),
+        ),
+    );
+}
+
+function createManualFanoutBotConfigFixture() {
+  const config = createConfigMock();
+  const readConfig = config.get.getMockImplementation()!;
+  config.get.mockImplementation((key: string) =>
+    key === 'MAX_BOTS_JSON'
+      ? JSON.stringify([
+          {
+            id: 'bot-1',
+            contactId: '777001',
+            token: 'test-max-bot-token-1',
+            webhookSecretPath: 'test-webhook-path-1',
+            webhookHeaderSecret: 'test-webhook-header-1',
+            state: 'active',
+          },
+          {
+            id: 'bot-2',
+            contactId: '777002',
+            token: 'test-max-bot-token-2',
+            webhookSecretPath: 'test-webhook-path-2',
+            webhookHeaderSecret: 'test-webhook-header-2',
+            state: 'active',
+          },
+        ])
+      : readConfig(key),
+  );
+  return config;
+}
+
+function createManualFanoutBotLinkFixture() {
+  const resolveBotRoute = jest.fn<
+    ReturnType<MaxBotLinkService['resolveBotRoute']>,
+    Parameters<MaxBotLinkService['resolveBotRoute']>
+  >(async (request) => {
+    const botId = request.chatId === 'chat-2' ? 'bot-2' : 'bot-1';
+    const route = {
+      chatId: request.chatId ?? null,
+      primaryBotId: botId,
+      botId,
+      candidateBotIds: [botId],
+      reason: 'primary_confirmed' as const,
+    };
+    if (request.purpose === 'moderation_action') {
+      return { ...route, purpose: request.purpose, action: request.action };
+    }
+    if (request.purpose === 'capability') {
+      return { ...route, purpose: request.purpose, capability: request.capability };
+    }
+    if (request.purpose === 'send_message') {
+      return { ...route, purpose: request.purpose };
+    }
+    return { ...route, purpose: request.purpose };
+  });
+  return {
+    ...createAdminMaxBotLinkMock(),
+    resolveBotRoute,
+    resolveBotRoutes: resolveBotRoute,
+  };
+}
+
 function broadcastRuntime(service: AdminService): any {
   return (service as any).managedBroadcastRuntime;
 }
@@ -78,20 +168,6 @@ function expectImmediateMemberMutationOptions(overrides: Record<string, unknown>
     beforeImmediateMemberMutation: expect.any(Function),
     ...overrides,
   });
-}
-
-function expectChatSettingsWrite(
-  prisma: ReturnType<typeof createPrismaMock>,
-  expected: Record<string, unknown>,
-  chatId = 'chat-1',
-): void {
-  const updated = prisma.chatSettings.updateMany.mock.calls
-    .filter(([args]) => args?.where?.chatId === chatId)
-    .at(-1)?.[0]?.data;
-  const created = prisma.chatSettings.create.mock.calls
-    .filter(([args]) => args?.data?.chatId === chatId)
-    .at(-1)?.[0]?.data;
-  expect(updated ?? created).toEqual(expect.objectContaining(expected));
 }
 
 const channelPublicationTextOptions = {
@@ -208,707 +284,6 @@ describe('AdminService dialog admin fallback reads', () => {
     });
   });
 });
-describe('AdminService night mode settings normalization', () => {
-  it('uses a resolved chat settings bot only for create without overwriting an existing route', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const maxBotLinkService = {
-      resolveBotId: jest.fn().mockResolvedValue('id613002203036_bot'),
-      resolveContactIdSync: jest.fn().mockReturnValue(null),
-      bindDiscoveredChatBots: jest.fn().mockResolvedValue('id613002203036_bot'),
-      getBotTokenSync: jest.fn().mockReturnValue(null),
-      getValidationTokens: jest.fn().mockReturnValue([]),
-      buildBotStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?start=payload'),
-      buildEntryBotStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?start=payload'),
-      buildMiniappStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?startapp=payload'),
-      buildEntryMiniappStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?startapp=payload'),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      createChatContextCacheMock() as never,
-      createConfigMock() as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      maxBotLinkService as never,
-    );
-
-    await service.updateSettings(
-      'chat-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      chatSettingsSchema.parse({}),
-    );
-
-    const upsert = prisma.chat.upsert.mock.lastCall?.[0];
-    expect(upsert?.create).toEqual(
-      expect.objectContaining({
-        botId: 'id613002203036_bot',
-        primaryBotId: 'id613002203036_bot',
-      }),
-    );
-    expect(upsert?.update).not.toHaveProperty('botId');
-    expect(upsert?.update).not.toHaveProperty('primaryBotId');
-  });
-
-  it('forces invitation access off when chat settings are updated', async () => {
-    const prisma = createPrismaMock();
-    const chatContextCache = createChatContextCacheMock();
-    const service = new AdminService(
-      prisma as never,
-      {
-        getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-      } as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.updateSettings(
-      'chat-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      chatSettingsSchema.parse({
-        invitationAccessEnabled: true,
-        invitationAccessRequiredCount: 4,
-        invitationAccessWarnEnabled: true,
-        invitationAccessMuteEnabled: true,
-        invitationAccessBanEnabled: true,
-      }),
-    );
-
-    expect(result).toEqual(
-      expect.objectContaining({
-        invitationAccessEnabled: false,
-        invitationAccessRequiredCount: 4,
-      }),
-    );
-    expectChatSettingsWrite(prisma, { invitationAccessEnabled: false });
-  });
-
-  it('uses a resolved channel settings bot only for create without overwriting an existing route', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    prisma.chat.findUnique.mockResolvedValue({
-      id: 'channel-1',
-      title: 'Канал MAX',
-      entityType: 'CHANNEL',
-    });
-    const maxBotLinkService = {
-      resolveBotId: jest.fn().mockResolvedValue('id613002203036_4_bot'),
-      resolveContactIdSync: jest.fn().mockReturnValue(null),
-      bindDiscoveredChatBots: jest.fn().mockResolvedValue('id613002203036_4_bot'),
-      getBotTokenSync: jest.fn().mockReturnValue(null),
-      getValidationTokens: jest.fn().mockReturnValue([]),
-      buildBotStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?start=payload'),
-      buildEntryBotStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?start=payload'),
-      buildMiniappStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?startapp=payload'),
-      buildEntryMiniappStartUrlSync: jest
-        .fn()
-        .mockReturnValue('https://max.ru/id613002203036_bot?startapp=payload'),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      createChatContextCacheMock() as never,
-      createConfigMock() as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      maxBotLinkService as never,
-    );
-
-    await service.updateChannelSettings(
-      'channel-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      channelSettingsSchema.parse({ revision: 0 }),
-    );
-
-    const upsert = prisma.chat.upsert.mock.lastCall?.[0];
-    expect(upsert?.create).toEqual(
-      expect.objectContaining({
-        botId: 'id613002203036_4_bot',
-        primaryBotId: 'id613002203036_4_bot',
-      }),
-    );
-    expect(upsert?.update).not.toHaveProperty('botId');
-    expect(upsert?.update).not.toHaveProperty('primaryBotId');
-  });
-
-  it('forces night bot message toggles off when night mode is disabled on update', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-    jest
-      .spyOn(service as any, 'resolveManualActionBotAssignment')
-      .mockResolvedValue('channel-bot-2');
-
-    const result = await service.updateSettings(
-      'chat-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      {
-        nightModeEnabled: false,
-        nightModeBotMessageEnabled: true,
-        nightModeCommentsEnabled: true,
-        nightModeBotButtonEnabled: true,
-        nightModeBotButtonUrl: 'https://max.ru/channel/rules',
-        nightModeBotButtonText: 'Правила',
-        nightModeRulesButtonEnabled: true,
-      },
-    );
-
-    expect(result.nightModeEnabled).toBe(false);
-    expect(result.nightModeBotMessageEnabled).toBe(false);
-    expect(result.nightModeCommentsEnabled).toBe(false);
-    expect(result.nightModeBotButtonEnabled).toBe(false);
-    expect(result.nightModeRulesButtonEnabled).toBe(false);
-    expectChatSettingsWrite(prisma, {
-      nightModeEnabled: false,
-      nightModeBotMessageEnabled: false,
-      nightModeCommentsEnabled: false,
-      nightModeBotButtonEnabled: false,
-      nightModeRulesButtonEnabled: false,
-    });
-  });
-
-  it('rejects legacy profile handoff button urls on update', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-    await expect(
-      service.updateSettings(
-        'chat-1',
-        {
-          userId: 'admin-1',
-          username: null,
-          displayName: null,
-          chatTitle: null,
-        },
-        {
-          greetingEnabled: true,
-          greetingBotMessageEnabled: true,
-          greetingBotButtonEnabled: true,
-          greetingBotButtonUrl: 'https://max.ru/777000_bot?start=pmh-legacy',
-          greetingBotButtonText: 'Профиль',
-        },
-      ),
-    ).rejects.toMatchObject({
-      response: expect.objectContaining({
-        greetingBotButtons: expect.objectContaining({
-          0: expect.objectContaining({
-            url: expect.objectContaining({
-              _errors: expect.arrayContaining([
-                'Укажите корректную ссылку для кнопки (http/https).',
-              ]),
-            }),
-          }),
-        }),
-      }),
-    });
-    expect(prisma.chatSettings.findUnique).not.toHaveBeenCalled();
-  });
-
-  it('rejects max user deeplinks in new button urls on update', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    await expect(
-      service.updateSettings(
-        'chat-1',
-        {
-          userId: 'admin-1',
-          username: null,
-          displayName: null,
-          chatTitle: null,
-        },
-        {
-          greetingEnabled: true,
-          greetingBotMessageEnabled: true,
-          greetingBotButtonEnabled: true,
-          greetingBotButtonUrl: 'max://user/user-42',
-          greetingBotButtonText: 'Профиль',
-        },
-      ),
-    ).rejects.toMatchObject({
-      response: expect.objectContaining({
-        greetingBotButtons: expect.objectContaining({
-          0: expect.objectContaining({
-            url: expect.objectContaining({
-              _errors: expect.arrayContaining([
-                'Укажите корректную ссылку для кнопки (http/https).',
-              ]),
-            }),
-          }),
-        }),
-      }),
-    });
-    expect(prisma.chatSettings.findUnique).not.toHaveBeenCalled();
-  });
-
-  it('drops legacy profile handoff button urls from stored settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: {
-        greetingEnabled: true,
-        greetingBotMessageEnabled: true,
-        greetingBotButtonEnabled: true,
-        greetingBotButtonUrl: 'https://max.ru/777000_bot?start=pmh-legacy',
-        greetingBotButtonText: 'Профиль',
-      },
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(result.greetingBotButtonEnabled).toBe(false);
-    expect(result.greetingBotButtonUrl).toBe('');
-    expect(prisma.chatSettings.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ chatId: 'chat-1' }),
-        data: expect.objectContaining({
-          greetingBotButtonEnabled: false,
-          greetingBotButtonUrl: '',
-        }),
-      }),
-    );
-  });
-
-  it('drops compact profile handoff button urls from stored settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: {
-        greetingEnabled: true,
-        greetingBotMessageEnabled: true,
-        greetingBotButtonEnabled: true,
-        greetingBotButtonUrl:
-          'https://max.ru/777000_bot?start=pm2_chat-1_h_admin-1_abcdef0123456789',
-        greetingBotButtonText: 'Профиль',
-      },
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(result.greetingBotButtonEnabled).toBe(false);
-    expect(result.greetingBotButtonUrl).toBe('');
-    expect(prisma.chatSettings.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ chatId: 'chat-1' }),
-        data: expect.objectContaining({
-          greetingBotButtonEnabled: false,
-          greetingBotButtonUrl: '',
-        }),
-      }),
-    );
-  });
-
-  it('drops legacy max user button urls from stored settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: {
-        greetingEnabled: true,
-        greetingBotMessageEnabled: true,
-        greetingBotButtonEnabled: true,
-        greetingBotButtonUrl: 'max://user/user-42',
-        greetingBotButtonText: 'Профиль',
-      },
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(result.greetingBotButtonEnabled).toBe(false);
-    expect(result.greetingBotButtonUrl).toBe('');
-    expect(prisma.chatSettings.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ chatId: 'chat-1' }),
-        data: expect.objectContaining({
-          greetingBotButtonEnabled: false,
-          greetingBotButtonUrl: '',
-        }),
-      }),
-    );
-  });
-
-  it('normalizes stale night bot message toggles from stored settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: {
-        nightModeEnabled: false,
-        nightModeBotMessageEnabled: true,
-        nightModeCommentsEnabled: true,
-        nightModeBotButtonEnabled: true,
-        nightModeBotButtonUrl: 'https://max.ru/channel/rules',
-        nightModeBotButtonText: 'Правила',
-        nightModeRulesButtonEnabled: true,
-      },
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(result.nightModeEnabled).toBe(false);
-    expect(result.nightModeBotMessageEnabled).toBe(false);
-    expect(result.nightModeCommentsEnabled).toBe(false);
-    expect(result.nightModeBotButtonEnabled).toBe(false);
-    expect(result.nightModeRulesButtonEnabled).toBe(false);
-    expect(prisma.chatSettings.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ chatId: 'chat-1' }),
-        data: expect.objectContaining({
-          nightModeBotMessageEnabled: false,
-          nightModeCommentsEnabled: false,
-          nightModeBotButtonEnabled: false,
-          nightModeRulesButtonEnabled: false,
-        }),
-      }),
-    );
-  });
-
-  it('starts manual close timer when timed close is enabled on update', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-    jest.spyOn(service, 'assertChatSettingsBotCapabilities').mockResolvedValue(undefined);
-
-    const before = Date.now();
-    const result = await service.updateSettings(
-      'chat-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      {
-        nightModeForceCloseEnabled: true,
-        nightModeForceCloseForever: false,
-        nightModeForceCloseDays: 1,
-        nightModeForceCloseHours: 2,
-      },
-    );
-    const after = Date.now();
-
-    expect(result.nightModeForceCloseEnabled).toBe(true);
-    expect(result.nightModeForceCloseForever).toBe(false);
-    expect(result.nightModeForceCloseUntil).not.toBe('');
-
-    const closeUntil = Date.parse(result.nightModeForceCloseUntil);
-    expect(closeUntil).toBeGreaterThanOrEqual(before + 26 * 60 * 60 * 1_000);
-    expect(closeUntil).toBeLessThanOrEqual(after + 26 * 60 * 60 * 1_000);
-  });
-
-  it('prewarms the destructive moderation admin roster when closing a chat', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-    const maxChatAdminRosterSyncService = {
-      scheduleChatAdminRosterSync: jest.fn().mockResolvedValue(true),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      maxChatAdminRosterSyncService as never,
-    );
-    jest.spyOn(service, 'assertChatSettingsBotCapabilities').mockResolvedValue(undefined);
-
-    await service.updateSettings(
-      'chat-1',
-      {
-        userId: 'admin-1',
-        username: null,
-        displayName: null,
-        chatTitle: null,
-      },
-      {
-        nightModeForceCloseEnabled: true,
-        nightModeForceCloseForever: true,
-      },
-    );
-
-    expect(maxChatAdminRosterSyncService.scheduleChatAdminRosterSync).toHaveBeenCalledWith({
-      chatId: 'chat-1',
-      entityType: 'chat',
-      source: 'moderation_destructive_path',
-      retryUntilMs: null,
-    });
-  });
-
-  it('disables expired timed manual close while reading settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: {
-        ...chatSettingsSchema.parse({}),
-        nightModeForceCloseEnabled: true,
-        nightModeForceCloseForever: false,
-        nightModeForceCloseHours: 4,
-        nightModeForceCloseDays: 0,
-        nightModeForceCloseUntil: new Date(Date.now() - 60_000).toISOString(),
-      },
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
-
-    const result = await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(result.nightModeForceCloseEnabled).toBe(false);
-    expect(result.nightModeForceCloseUntil).toBe('');
-    expect(prisma.chatSettings.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ chatId: 'chat-1' }),
-        data: expect.objectContaining({
-          nightModeForceCloseEnabled: false,
-          nightModeForceCloseUntil: '',
-        }),
-      }),
-    );
-  });
-
-  it('does not probe manual-action bot access while reading chat settings', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.findUnique.mockResolvedValue({
-      id: 'chat-1',
-      entityType: 'CHAT',
-      primaryBotId: 'id613002203036_bot',
-      botId: null,
-      botMemberships: [],
-    });
-    prisma.chat.upsert.mockResolvedValue({
-      id: 'chat-1',
-      title: 'Команда MAX',
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-      settings: chatSettingsSchema.parse({}),
-    });
-
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-      getCurrentChatMemberAccess: jest.fn(),
-    };
-
-    const service = new AdminService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn().mockResolvedValue(undefined) } as never,
-      createConfigMock() as never,
-    );
-
-    await service.getSettings('chat-1', {
-      userId: 'admin-1',
-      username: null,
-      displayName: null,
-      chatTitle: null,
-    });
-
-    expect(maxClient.getCurrentChatMemberAccess).not.toHaveBeenCalled();
-  });
-});
-
 describe('AdminService.getLogsDashboard', () => {
   afterEach(() => {
     jest.useRealTimers();
@@ -2387,7 +1762,7 @@ describe('AdminService.applyManualModerationAction', () => {
       kickMember: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -2454,7 +1829,7 @@ describe('AdminService.applyManualModerationAction', () => {
       sendMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -2486,6 +1861,7 @@ describe('AdminService.applyManualModerationAction', () => {
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-1', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(prisma.moderationEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3514,7 +2890,7 @@ describe('AdminService.applyManualModerationAction', () => {
       sendMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -3533,8 +2909,12 @@ describe('AdminService.applyManualModerationAction', () => {
       { action: 'BAN' },
     );
 
-    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-3');
-    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-2', 'user-3');
+    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-3', {
+      botId: '777000_bot',
+    });
+    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-2', 'user-3', {
+      botId: '777000_bot',
+    });
     expect(maxClient.banMember).toHaveBeenNthCalledWith(
       1,
       'chat-1',
@@ -3550,14 +2930,17 @@ describe('AdminService.applyManualModerationAction', () => {
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(1, 'chat-1', 'mid-source-1', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(2, 'chat-1', 'mid-source-2', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(3, 'chat-2', 'mid-fanout-1', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(maxClient.banMember.mock.invocationCallOrder[0]).toBeLessThan(
       maxClient.deleteMessage.mock.invocationCallOrder[0],
@@ -4947,7 +4330,7 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -4967,10 +4350,15 @@ describe('AdminService.applyManualSystemBan', () => {
       { fanoutAllChats: true },
     );
 
-    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-3');
-    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-2', 'user-3');
+    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-3', {
+      botId: '777000_bot',
+    });
+    expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-2', 'user-3', {
+      botId: '777000_bot',
+    });
     expect(maxClient.getChatMemberAccess).toHaveBeenCalledWith('chat-2', 'user-3', {
       trafficClass: 'background',
+      botId: '777000_bot',
       bypassCache: true,
     });
     expect(maxClient.banMember).toHaveBeenCalledWith(
@@ -4986,14 +4374,17 @@ describe('AdminService.applyManualSystemBan', () => {
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-1', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-1', 'mid-source-2', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(maxClient.deleteMessage).toHaveBeenCalledWith('chat-2', 'mid-fanout-1', {
       immediate: true,
       beforeImmediateDeleteMutation: expect.any(Function),
+      botId: '777000_bot',
     });
     expect(prisma.moderationEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -5063,15 +4454,17 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
-      createConfigMock() as never,
+      createManualFanoutBotConfigFixture() as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      createManualFanoutBotLinkFixture() as never,
     );
-    jest
-      .spyOn(service as any, 'resolveManualActionBotAssignment')
-      .mockImplementation(async (...args: unknown[]) => (args[0] === 'chat-2' ? 'bot-2' : 'bot-1'));
 
     await service.applyManualSystemBan(
       'chat-1',
@@ -6653,7 +6046,7 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -6709,6 +6102,7 @@ describe('AdminService.applyManualSystemBan', () => {
       },
     ]);
     const maxClient = {
+      getChatMembersAccess: createRevokedTargetAdminMemberFixture(),
       getChatAdminIds: jest
         .fn()
         .mockImplementation(async (chatId: string) =>
@@ -6718,7 +6112,7 @@ describe('AdminService.applyManualSystemBan', () => {
       kickMember: jest.fn(),
       deleteMessage: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -6741,6 +6135,12 @@ describe('AdminService.applyManualSystemBan', () => {
         source: 'group_command',
       }),
     ).rejects.toThrow(ForbiddenException);
+
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledWith(
+      'chat-revoked',
+      expect.arrayContaining(['admin-1']),
+      expect.objectContaining({ bypassCache: true }),
+    );
 
     expect(prisma.$queryRaw).not.toHaveBeenCalled();
     expect(prisma.manualModerationFanoutLedgerEntry.createMany).not.toHaveBeenCalled();
@@ -6890,15 +6290,17 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
-      createConfigMock() as never,
+      createManualFanoutBotConfigFixture() as never,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      createManualFanoutBotLinkFixture() as never,
     );
-    jest
-      .spyOn(service as any, 'resolveManualActionBotAssignment')
-      .mockImplementation(async (...args: unknown[]) => (args[0] === 'chat-2' ? 'bot-2' : 'bot-1'));
 
     await service.processManualModerationFanoutJob({
       kind: 'manual_ban_fanout',
@@ -6972,7 +6374,7 @@ describe('AdminService.applyManualSystemBan', () => {
       banMember: jest.fn().mockResolvedValue(undefined),
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7054,7 +6456,7 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7178,7 +6580,7 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -7251,7 +6653,7 @@ describe('AdminService.applyManualSystemBan', () => {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -17498,6 +16900,7 @@ describe('AdminService settings screen endpoints', () => {
       timeoutMs: 1_500,
       allowPersistedFallback: false,
       bypassPositiveCache: true,
+      protectHumanAdministrator: true,
     });
   });
 
@@ -17641,7 +17044,7 @@ describe('AdminService settings screen endpoints', () => {
       },
     ]);
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -17718,13 +17121,14 @@ describe('AdminService settings screen endpoints', () => {
   it('rejects settings fanout before settings writes when a target admin was revoked', async () => {
     const prisma = createPrismaMock();
     const maxClient = {
+      getChatMembersAccess: createRevokedTargetAdminMemberFixture(),
       getChatAdminIds: jest
         .fn()
         .mockImplementation(async (chatId: string) =>
           chatId === 'chat-revoked' ? [] : ['admin-1'],
         ),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -17752,10 +17156,21 @@ describe('AdminService settings screen endpoints', () => {
       ),
     ).rejects.toThrow(ForbiddenException);
 
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledWith(
+      'chat-revoked',
+      expect.arrayContaining(['admin-1']),
+      expect.objectContaining({ bypassCache: true }),
+    );
+
     expect(
       prisma.chat.upsert.mock.calls.every(([args]) => args?.update?.settings === undefined),
     ).toBe(true);
-    expect(prisma.chatAdminAllowlist.upsert).not.toHaveBeenCalled();
+    expect(prisma.chatAdminAllowlist.upsert).toHaveBeenCalledTimes(1);
+    expect(prisma.chatAdminAllowlist.upsert).toHaveBeenCalledWith({
+      where: { chatId_userId: { chatId: 'chat-1', userId: 'admin-1' } },
+      create: { chatId: 'chat-1', userId: 'admin-1' },
+      update: {},
+    });
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 });
@@ -21062,7 +20477,7 @@ describe('AdminService.updateChannelSettings', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -21123,7 +20538,7 @@ describe('AdminService.updateChannelSettings', () => {
       getCurrentChatMemberAccess: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -21152,7 +20567,7 @@ describe('AdminService.updateChannelSettings', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -21207,7 +20622,7 @@ describe('AdminService.updateChannelSettings', () => {
       refreshChatBotCapabilitySnapshots: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -21701,7 +21116,7 @@ describe('AdminService.sendBroadcast', () => {
       findMany: ledgerFindMany,
       findUnique: jest.fn().mockResolvedValue(null),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       { getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']) } as never,
       createChatContextCacheMock() as never,
@@ -21945,6 +21360,7 @@ describe('AdminService.sendBroadcast', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-03T10:00:00.000Z'));
     const prisma = createPrismaMock();
     const maxClient = {
+      getChatMembersAccess: createRevokedTargetAdminMemberFixture(),
       getChatAdminIds: jest
         .fn()
         .mockImplementation(async (chatId: string) =>
@@ -21952,7 +21368,7 @@ describe('AdminService.sendBroadcast', () => {
         ),
       sendMessageImmediateWithId: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22000,6 +21416,12 @@ describe('AdminService.sendBroadcast', () => {
       ),
     ).rejects.toThrow(ForbiddenException);
 
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledWith(
+      'chat-revoked',
+      expect.arrayContaining(['admin-1']),
+      expect.objectContaining({ bypassCache: true }),
+    );
+
     expect(prisma.managedBroadcast.create).not.toHaveBeenCalled();
     expect(prisma.managedBroadcastIdempotencyRecord.create).not.toHaveBeenCalled();
     expect(prisma.managedBroadcastDelivery.createMany).not.toHaveBeenCalled();
@@ -22009,13 +21431,14 @@ describe('AdminService.sendBroadcast', () => {
   it('rejects a revoked calendar target before reading reservations', async () => {
     const prisma = createPrismaMock();
     const maxClient = {
+      getChatMembersAccess: createRevokedTargetAdminMemberFixture(),
       getChatAdminIds: jest
         .fn()
         .mockImplementation(async (chatId: string) =>
           chatId === 'chat-revoked' ? [] : ['admin-1'],
         ),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22043,6 +21466,12 @@ describe('AdminService.sendBroadcast', () => {
       ),
     ).rejects.toThrow(ForbiddenException);
 
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledWith(
+      'chat-revoked',
+      expect.arrayContaining(['admin-1']),
+      expect.objectContaining({ bypassCache: true }),
+    );
+
     expect(prisma.managedBroadcastCalendarReservation.findMany).not.toHaveBeenCalled();
   });
 
@@ -22063,6 +21492,7 @@ describe('AdminService.sendBroadcast', () => {
       },
     });
     const maxClient = {
+      getChatMembersAccess: createRevokedTargetAdminMemberFixture(),
       getChatAdminIds: jest
         .fn()
         .mockImplementation(async (chatId: string) =>
@@ -22070,7 +21500,7 @@ describe('AdminService.sendBroadcast', () => {
         ),
       sendMessageImmediateWithId: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22087,6 +21517,12 @@ describe('AdminService.sendBroadcast', () => {
       'scheduled',
       new Date('2026-03-03T09:55:00.000Z'),
       ['ACTIVE'],
+    );
+
+    expect(maxClient.getChatMembersAccess).toHaveBeenCalledWith(
+      'chat-revoked',
+      expect.arrayContaining(['admin-1']),
+      expect.objectContaining({ bypassCache: true }),
     );
 
     expect(result.status).toBe('FAILED');
@@ -22371,7 +21807,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -22441,7 +21877,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -22533,7 +21969,7 @@ describe('AdminService.sendBroadcast', () => {
       }),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22661,7 +22097,7 @@ describe('AdminService.sendBroadcast', () => {
       sendMessageImmediateWithId: jest.fn().mockRejectedValue(timeoutError),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22770,7 +22206,7 @@ describe('AdminService.sendBroadcast', () => {
       getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
       sendMessageImmediateWithId: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22832,7 +22268,7 @@ describe('AdminService.sendBroadcast', () => {
       }),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -22984,7 +22420,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23168,7 +22604,7 @@ describe('AdminService.sendBroadcast', () => {
     deliveries[0].remoteMessageId = 'mid-preserved';
     deliveries[1].lastError = 'MAX send failed';
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -23282,7 +22718,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23402,7 +22838,7 @@ describe('AdminService.sendBroadcast', () => {
     const chatContextCache = {
       invalidate: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23470,7 +22906,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23559,7 +22995,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23635,7 +23071,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -23768,7 +23204,7 @@ describe('AdminService.sendBroadcast', () => {
         invalidate: jest.fn(),
       };
 
-      const service = new AdminService(
+      const service = createAdminServiceFixture(
         prisma as never,
         maxClient as never,
         chatContextCache as never,
@@ -23845,7 +23281,7 @@ describe('AdminService.sendBroadcast', () => {
           },
         ),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -24016,7 +23452,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -24126,7 +23562,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -24258,7 +23694,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -24377,7 +23813,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -24487,7 +23923,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -24596,7 +24032,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -24798,7 +24234,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -24946,7 +24382,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25278,7 +24714,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25404,7 +24840,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25536,7 +24972,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25709,7 +25145,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -25766,7 +25202,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25895,7 +25331,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -25988,7 +25424,7 @@ describe('AdminService.sendBroadcast', () => {
         return { messageId: `mid-${chatId}`, url: null };
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -26085,7 +25521,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -26184,7 +25620,7 @@ describe('AdminService.sendBroadcast', () => {
         return { messageId: 'mid-stale-owner', url: null };
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -26235,7 +25671,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -26315,7 +25751,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       })),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -26448,7 +25884,7 @@ describe('AdminService.sendBroadcast', () => {
       resolveBotId: jest.fn().mockResolvedValue('draining-primary-bot'),
     });
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -26536,7 +25972,7 @@ describe('AdminService.sendBroadcast', () => {
         };
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -26609,7 +26045,7 @@ describe('AdminService.sendBroadcast', () => {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
         sendMessageImmediateWithId: jest.fn(),
       };
-      const service = new AdminService(
+      const service = createAdminServiceFixture(
         prisma as never,
         maxClient as never,
         createChatContextCacheMock() as never,
@@ -26675,7 +26111,7 @@ describe('AdminService.sendBroadcast', () => {
       clearManagedEntitiesRefreshCursor: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -26749,7 +26185,7 @@ describe('AdminService.sendBroadcast', () => {
       clearManagedEntitiesRefreshCursor: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -26855,7 +26291,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -27141,7 +26577,7 @@ describe('AdminService.sendBroadcast', () => {
         url: 'https://max.ru/chats/chat-1/message/mid-chat-comments-1',
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -27220,7 +26656,7 @@ describe('AdminService.sendBroadcast', () => {
       getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
       sendMessageImmediateWithId: jest.fn(),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       { invalidate: jest.fn() } as never,
@@ -27265,7 +26701,7 @@ describe('AdminService.sendBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -27348,7 +26784,7 @@ describe('AdminService.sendBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -28954,7 +28390,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29064,7 +28500,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       }),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -29173,7 +28609,7 @@ describe('AdminService.sendChannelBroadcast', () => {
         url: 'https://max.ru/chats/channel-1/message/mid-channel-gallery-1',
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -29274,7 +28710,7 @@ describe('AdminService.sendChannelBroadcast', () => {
         url: 'https://max.ru/chats/channel-1/message/mid-channel-video-1',
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -29366,7 +28802,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29449,7 +28885,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29509,7 +28945,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29589,7 +29025,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29693,7 +29129,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       bindDiscoveredChatBots: jest.fn().mockResolvedValue(undefined),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29820,7 +29256,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -29926,7 +29362,7 @@ describe('AdminService.sendChannelBroadcast', () => {
         url: null,
       }),
     };
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       createChatContextCacheMock() as never,
@@ -29985,7 +29421,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30063,7 +29499,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30109,7 +29545,7 @@ describe('AdminService.sendChannelBroadcast', () => {
 
     const prisma = createPrismaMock();
     wireManagedBroadcastDeliveryStore(prisma);
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -30163,7 +29599,7 @@ describe('AdminService.sendChannelBroadcast', () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-18T10:00:00.000Z'));
 
     const buildService = () =>
-      new AdminService(
+      createAdminServiceFixture(
         createPrismaMock() as never,
         {
           getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -30232,7 +29668,7 @@ describe('AdminService.sendChannelBroadcast', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30681,7 +30117,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30810,7 +30246,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30895,7 +30331,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -30983,7 +30419,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31047,7 +30483,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31121,7 +30557,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31207,7 +30643,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31281,7 +30717,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31357,7 +30793,7 @@ describe('AdminService chat rules', () => {
     };
     const deleteChatRulesMessage = jest.fn().mockResolvedValue('accepted');
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31461,7 +30897,7 @@ describe('AdminService chat rules', () => {
       chatTitle: null,
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -31566,7 +31002,7 @@ describe('AdminService chat rules', () => {
       invalidate: jest.fn(),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
