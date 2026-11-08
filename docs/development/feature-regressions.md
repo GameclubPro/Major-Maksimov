@@ -120,6 +120,11 @@ diagnostics separate from the ordinary feed; do not return global aggregates to 
 These browser scripts start their local server through the shared helper; port selection
 differs by script. VK accepts `MINIAPP_VK_TEST_BASE_URL`. Inspect the selected entrypoint
 instead of assuming that every browser test accepts `MINIAPP_TEST_BASE_URL`.
+The video browser checks real photo/video clicks at the center, edge and label, reopening
+after empty selection, and both photo activation modes on explicit desktop, iOS and Android
+platforms. Its compact desktop case models a narrow MAX window. Chromium with a Bridge shim
+does not prove that the Windows MAX client's native file dialog works; retain that as a
+separate client acceptance check when investigating desktop-only complaints.
 For actual publication recovery and access, use the maintained
 [diagnostics](../operations/runbooks/publisher-publication-diagnostics.md) and
 [access runbook](../operations/runbooks/publisher-access-refresh-rollout.md).
