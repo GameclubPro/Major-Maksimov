@@ -54,25 +54,25 @@ test('both rollback paths require guarded participant report execution', async (
   const boundaryMarker = '  private async runDeletePreDispatchGuards(';
   const composerMarker = '  private async authorizeGuardedUserDeleteReasons(';
   const standalonePreparation = `reportPreparation = await this.reportDeleteGuard.prepareForDispatch({
-            intentId: intent.id,
-            chatId: intent.chatId,
-            messageId: intent.messageId,
-            subjectUserId: intent.subjectUserId,
-            botId,
-            trafficClass: intent.reportHistoryOnly ? 'background' : 'critical',
-            isIndependentReasonExecutable: (reasons) =>
-              this.hasExecutableIndependentReportReason(intent.chatId, reasons),
-          });`;
+              intentId: intent.id,
+              chatId: intent.chatId,
+              messageId: intent.messageId,
+              subjectUserId: intent.subjectUserId,
+              botId,
+              trafficClass: intent.reportHistoryOnly ? 'background' : 'critical',
+              isIndependentReasonExecutable: (reasons) =>
+                this.hasExecutableIndependentReportReason(intent.chatId, reasons),
+            });`;
   const unavailable = `if (!this.reportDeleteGuard && hasReportReason)
-          throw new Error('Participant report delete guard unavailable');`;
+            throw new Error('Participant report delete guard unavailable');`;
   const standaloneFinalizer = 'const report = await finalizeDeleteAuthority(reportPreparation);';
   const standaloneAbsence = `if (report === 'absent')
-              throw new ModerationDeleteGuardedMessageAbsentError('guarded_report_absence');`;
-  const standaloneResult = `${standaloneFinalizer}\n            ${standaloneAbsence}`;
+                throw new ModerationDeleteGuardedMessageAbsentError('guarded_report_absence');`;
+  const standaloneResult = `${standaloneFinalizer}\n              ${standaloneAbsence}`;
   const callbackStart = `async () => {
-            await beforeFinalAuthority?.();
-            imageTextStopListGuard = await finalizeDeleteAuthority(imageTextPreparation);
-            ${standaloneFinalizer}`;
+              await beforeFinalAuthority?.();
+              imageTextStopListGuard = await finalizeDeleteAuthority(imageTextPreparation);
+              ${standaloneFinalizer}`;
   const reportBranch = `if (reasons.some((r) => REPORT_GUARDED_RULES.has(r.ruleCode))) {
       if (!this.reportDeleteGuard) throw new Error('Participant report delete guard unavailable');
       const reportParams = {
@@ -228,7 +228,7 @@ test('both rollback paths require guarded participant report execution', async (
       ['chat', 'chatId: intent.chatId', 'chatId: intent.messageId'],
       ['message', 'messageId: intent.messageId', 'messageId: intent.chatId'],
       ['subject', 'subjectUserId: intent.subjectUserId', 'subjectUserId: null'],
-      ['bot', '            botId,', '            botId: intent.chatId,'],
+      ['bot', '              botId,', '              botId: intent.chatId,'],
     ].map(([name, anchor, replacement]) =>
       standaloneMutation(
         `standalone-wrong-${name}`,
@@ -241,7 +241,7 @@ test('both rollback paths require guarded participant report execution', async (
       standalonePreparation,
       replaceChecked(
         standalonePreparation,
-        '(reasons) =>\n              this.hasExecutableIndependentReportReason(intent.chatId, reasons)',
+        '(reasons) =>\n                this.hasExecutableIndependentReportReason(intent.chatId, reasons)',
         '() => true',
       ),
     ),
@@ -308,7 +308,7 @@ test('both rollback paths require guarded participant report execution', async (
     standaloneMutation(
       'standalone-late-checkpoint',
       callbackStart,
-      replaceChecked(callbackStart, 'await beforeFinalAuthority?.();\n            ', '') +
+      replaceChecked(callbackStart, 'await beforeFinalAuthority?.();\n              ', '') +
         '\n            await beforeFinalAuthority?.();',
     ),
     standaloneMutation(

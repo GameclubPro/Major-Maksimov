@@ -4131,14 +4131,7 @@ export class ModerationDeleteIntentService {
     );
   }
 
-  private runDeletePreDispatchGuards(
-    ...args: Parameters<ModerationDeleteIntentService['runScopedDeletePreDispatchGuards']>
-  ): ReturnType<ModerationDeleteIntentService['runScopedDeletePreDispatchGuards']> {
-    const run = () => this.runScopedDeletePreDispatchGuards(...args);
-    return this.automaticDeleteAuthors ? this.automaticDeleteAuthors.withDispatchScope(run) : run();
-  }
-
-  private async runScopedDeletePreDispatchGuards(
+  private async runDeletePreDispatchGuards(
     intent: IntentRow,
     botId: string,
     options?: ModerationDeleteIntentAttemptOptions,
@@ -4156,176 +4149,180 @@ export class ModerationDeleteIntentService {
     guardedReasonFingerprint?: string;
     independentRecheck?: PreparedDeleteAuthority<GuardedDeleteAuthorityProof>;
   }> {
-    try {
-      if (await this.isLegacyIntentHeld(intent)) throw new WebhookLegacyHoldRejectedError();
-      let profanityVerified = false;
-      let commercialVerifiedReasonKeys: string[] = [];
-      let messageDuplicateVerified = false;
-      let independentVerified = false;
-      let independentAuthorityDeadlineAtMs: number | null = null;
-      let guardedReasonFingerprint: string | undefined;
-      let independentRecheck: PreparedDeleteAuthority<GuardedDeleteAuthorityProof> | undefined;
-      let verifiedReasonKeys: string[] = [];
-      let verifiedReasonDeadlines: VerifiedDeleteReasonDeadline[] = [];
-      if (intent.retentionOwned) {
-        if (!this.messageRetentionGuard) throw new Error('Retention delete guard unavailable');
-        await beforeFinalAuthority?.();
-        await this.messageRetentionGuard.assertAllowed(intent.id, botId, retentionPhase);
-        return { profanityVerified, commercialVerifiedReasonKeys };
-      }
-      // FLAG: A remote DELETE must always have a durable reason at the exact dispatch boundary.
-      // Derived rule classifiers cannot represent a reasonless intent and therefore cannot fence it.
-      // FLAG: A channel replacement cleanup must never cross an entity reclassification boundary.
-      await this.assertChannelAutoPostCleanupStillAuthorized(intent, botId);
-      // FLAG: A delayed close-notice cleanup is bound to the exact open session, settings
-      // generation and persisted notice event. Re-check all three at the transport-final boundary.
-      await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
-      await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
-      const commercialOcrGuardRequired = await this.resolveDeleteIntentCommercialOcrGuard(intent);
-      // FLAG: A durable photo-only retry must regain authorization from current chat settings and
-      // a fresh shared runtime control immediately before every remote DELETE mutation.
-      await this.assertPhotoDuplicateDeleteIntentStillActionable(intent);
-      const imageTextPreparation = finalDispatchLeaseToken
-        ? await this.prepareImageTextStopListDeleteAuthority(intent, botId)
-        : await this.assertImageTextStopListDeleteIntentStillActionable(intent, botId);
-      let imageTextStopListGuard = isPreparedDeleteAuthority(imageTextPreparation)
-        ? undefined
-        : imageTextPreparation;
-      if (imageTextStopListGuard === 'absent') {
-        throw new ModerationDeleteGuardedMessageAbsentError(
-          'guarded_image_text_stop_list_predispatch_exact_absence',
-        );
-      }
-      if (commercialOcrGuardRequired && !finalDispatchLeaseToken) {
-        // FLAG: OCR is asynchronous. Bind every OCR-only DELETE to the current exact message,
-        // author immunity, filter setting, runtime rollout and behavior versions at dispatch time.
-        const result = await this.commercialOcrDeleteGuard.assertIntentStillActionable({
-          intentId: intent.id,
-          chatId: intent.chatId,
-          messageId: intent.messageId,
-          subjectUserId: intent.subjectUserId,
-          sourceMessageAt: intent.sourceMessageAt,
-          botId,
-        });
-        if (result === 'absent') {
-          throw new ModerationDeleteGuardedMessageAbsentError(
-            'guarded_commercial_ocr_predispatch_exact_absence',
-          );
-        }
-        if (result !== 'allowed') throw new Error('Required OCR guard did not supply authority');
-      }
-      if (intent.linkFamilyDeleteOnly === true && !finalDispatchLeaseToken) {
-        const result = await this.linkHistoryDeleteGuard.assertIntentStillActionable({
-          intentId: intent.id,
-          chatId: intent.chatId,
-          messageId: intent.messageId,
-          subjectUserId: intent.subjectUserId,
-          botId,
-        });
-        if (result === 'absent') {
-          throw new ModerationDeleteGuardedMessageAbsentError(
-            'guarded_link_predispatch_exact_absence',
-          );
-        }
-        if (result !== 'allowed') {
-          throw new Error('Guarded link delete intent lost its required reason metadata');
-        }
-      }
+    // FLAG: Read sharing starts anew for this exact guard attempt; final SQL checks stay fresh.
+    const run = async () => {
       try {
-        await options?.beforeDeleteMutation?.(
-          !finalDispatchLeaseToken &&
-            intent.attemptCount === 1 &&
-            !this.hasDeleteMutationEvidence(intent)
-            ? 'initial_unattempted'
-            : 'recheck',
-        );
-      } catch (error) {
-        if (error instanceof ModerationDeleteGuardedMessageAbsentError) throw error;
-        throw new ModerationDeletePreDispatchGuardError(error, 'caller');
-      }
-      let reportPreparation: DeleteAuthorityPreparation<unknown>;
-      if (finalDispatchLeaseToken) {
-        const reportReasons = await this.prisma.moderationDeleteIntentReason.findMany({
-          where: { intentId: intent.id },
-          select: { ruleCode: true },
-        });
-        const hasReportReason = reportReasons.some((r) => REPORT_GUARDED_RULES.has(r.ruleCode));
-        if (!this.reportDeleteGuard && hasReportReason)
-          throw new Error('Participant report delete guard unavailable');
-        if (this.reportDeleteGuard && !hasReportReason)
-          reportPreparation = await this.reportDeleteGuard.prepareForDispatch({
+        if (await this.isLegacyIntentHeld(intent)) throw new WebhookLegacyHoldRejectedError();
+        let profanityVerified = false;
+        let commercialVerifiedReasonKeys: string[] = [];
+        let messageDuplicateVerified = false;
+        let independentVerified = false;
+        let independentAuthorityDeadlineAtMs: number | null = null;
+        let guardedReasonFingerprint: string | undefined;
+        let independentRecheck: PreparedDeleteAuthority<GuardedDeleteAuthorityProof> | undefined;
+        let verifiedReasonKeys: string[] = [];
+        let verifiedReasonDeadlines: VerifiedDeleteReasonDeadline[] = [];
+        if (intent.retentionOwned) {
+          if (!this.messageRetentionGuard) throw new Error('Retention delete guard unavailable');
+          await beforeFinalAuthority?.();
+          await this.messageRetentionGuard.assertAllowed(intent.id, botId, retentionPhase);
+          return { profanityVerified, commercialVerifiedReasonKeys };
+        }
+        // FLAG: A remote DELETE must always have a durable reason at the exact dispatch boundary.
+        // Derived rule classifiers cannot represent a reasonless intent and therefore cannot fence it.
+        // FLAG: A channel replacement cleanup must never cross an entity reclassification boundary.
+        await this.assertChannelAutoPostCleanupStillAuthorized(intent, botId);
+        // FLAG: A delayed close-notice cleanup is bound to the exact open session, settings
+        // generation and persisted notice event. Re-check all three at the transport-final boundary.
+        await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
+        await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
+        const commercialOcrGuardRequired = await this.resolveDeleteIntentCommercialOcrGuard(intent);
+        // FLAG: A durable photo-only retry must regain authorization from current chat settings and
+        // a fresh shared runtime control immediately before every remote DELETE mutation.
+        await this.assertPhotoDuplicateDeleteIntentStillActionable(intent);
+        const imageTextPreparation = finalDispatchLeaseToken
+          ? await this.prepareImageTextStopListDeleteAuthority(intent, botId)
+          : await this.assertImageTextStopListDeleteIntentStillActionable(intent, botId);
+        let imageTextStopListGuard = isPreparedDeleteAuthority(imageTextPreparation)
+          ? undefined
+          : imageTextPreparation;
+        if (imageTextStopListGuard === 'absent') {
+          throw new ModerationDeleteGuardedMessageAbsentError(
+            'guarded_image_text_stop_list_predispatch_exact_absence',
+          );
+        }
+        if (commercialOcrGuardRequired && !finalDispatchLeaseToken) {
+          // FLAG: OCR is asynchronous. Bind every OCR-only DELETE to the current exact message,
+          // author immunity, filter setting, runtime rollout and behavior versions at dispatch time.
+          const result = await this.commercialOcrDeleteGuard.assertIntentStillActionable({
+            intentId: intent.id,
+            chatId: intent.chatId,
+            messageId: intent.messageId,
+            subjectUserId: intent.subjectUserId,
+            sourceMessageAt: intent.sourceMessageAt,
+            botId,
+          });
+          if (result === 'absent') {
+            throw new ModerationDeleteGuardedMessageAbsentError(
+              'guarded_commercial_ocr_predispatch_exact_absence',
+            );
+          }
+          if (result !== 'allowed') throw new Error('Required OCR guard did not supply authority');
+        }
+        if (intent.linkFamilyDeleteOnly === true && !finalDispatchLeaseToken) {
+          const result = await this.linkHistoryDeleteGuard.assertIntentStillActionable({
             intentId: intent.id,
             chatId: intent.chatId,
             messageId: intent.messageId,
             subjectUserId: intent.subjectUserId,
             botId,
-            trafficClass: intent.reportHistoryOnly ? 'background' : 'critical',
-            isIndependentReasonExecutable: (reasons) =>
-              this.hasExecutableIndependentReportReason(intent.chatId, reasons),
           });
+          if (result === 'absent') {
+            throw new ModerationDeleteGuardedMessageAbsentError(
+              'guarded_link_predispatch_exact_absence',
+            );
+          }
+          if (result !== 'allowed') {
+            throw new Error('Guarded link delete intent lost its required reason metadata');
+          }
+        }
+        try {
+          await options?.beforeDeleteMutation?.(
+            !finalDispatchLeaseToken &&
+              intent.attemptCount === 1 &&
+              !this.hasDeleteMutationEvidence(intent)
+              ? 'initial_unattempted'
+              : 'recheck',
+          );
+        } catch (error) {
+          if (error instanceof ModerationDeleteGuardedMessageAbsentError) throw error;
+          throw new ModerationDeletePreDispatchGuardError(error, 'caller');
+        }
+        let reportPreparation: DeleteAuthorityPreparation<unknown>;
+        if (finalDispatchLeaseToken) {
+          const reportReasons = await this.prisma.moderationDeleteIntentReason.findMany({
+            where: { intentId: intent.id },
+            select: { ruleCode: true },
+          });
+          const hasReportReason = reportReasons.some((r) => REPORT_GUARDED_RULES.has(r.ruleCode));
+          if (!this.reportDeleteGuard && hasReportReason)
+            throw new Error('Participant report delete guard unavailable');
+          if (this.reportDeleteGuard && !hasReportReason)
+            reportPreparation = await this.reportDeleteGuard.prepareForDispatch({
+              intentId: intent.id,
+              chatId: intent.chatId,
+              messageId: intent.messageId,
+              subjectUserId: intent.subjectUserId,
+              botId,
+              trafficClass: intent.reportHistoryOnly ? 'background' : 'critical',
+              isIndependentReasonExecutable: (reasons) =>
+                this.hasExecutableIndependentReportReason(intent.chatId, reasons),
+            });
+        }
+        if (finalDispatchLeaseToken) {
+          // FLAG: Independent user rules share one DELETE, not each other's authorization.
+          // A stale binding may yield only to a freshly verified reason on this exact attempt.
+          const proof = await this.authorizeGuardedUserDeleteReasons(
+            intent,
+            botId,
+            finalDispatchLeaseToken,
+            async () => {
+              await beforeFinalAuthority?.();
+              imageTextStopListGuard = await finalizeDeleteAuthority(imageTextPreparation);
+              const report = await finalizeDeleteAuthority(reportPreparation);
+              if (report === 'absent')
+                throw new ModerationDeleteGuardedMessageAbsentError('guarded_report_absence');
+              await this.assertChannelAutoPostCleanupLocalAuthority(intent);
+              await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
+              await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
+            },
+          );
+          independentVerified = proof.independentVerified;
+          profanityVerified = proof.profanityVerified;
+          commercialVerifiedReasonKeys = proof.commercialVerifiedReasonKeys;
+          messageDuplicateVerified = proof.messageDuplicateVerified;
+          independentAuthorityDeadlineAtMs = proof.independentAuthorityDeadlineAtMs;
+          guardedReasonFingerprint = proof.guardedReasonFingerprint;
+          independentRecheck = proof.independentRecheck;
+          verifiedReasonKeys = proof.verifiedReasonKeys;
+          verifiedReasonDeadlines = proof.verifiedReasonDeadlines;
+        }
+        if (typeof imageTextStopListGuard === 'object' && finalDispatchLeaseToken) {
+          await this.assertImageTextStopListDispatchDeadline(
+            intent.id,
+            finalDispatchLeaseToken,
+            botId,
+          );
+          // FLAG: Only these freshly authorized OCR reasons may receive the confirmed DELETE
+          // receipt. Keep each original expiry through all later awaited guards and mixed reasons.
+          verifiedReasonKeys.push(
+            ...imageTextStopListGuard.reasonDeadlines.map((permit) => permit.reasonKey),
+          );
+          verifiedReasonDeadlines.push(...imageTextStopListGuard.reasonDeadlines);
+          independentAuthorityDeadlineAtMs = Math.min(
+            ...imageTextStopListGuard.reasonDeadlines.map((permit) => permit.deadlineAtMs),
+          );
+        }
+        return {
+          profanityVerified,
+          commercialVerifiedReasonKeys,
+          messageDuplicateVerified,
+          independentVerified,
+          independentAuthorityDeadlineAtMs,
+          guardedReasonFingerprint,
+          independentRecheck,
+          verifiedReasonKeys,
+          verifiedReasonDeadlines,
+        };
+      } catch (error: unknown) {
+        if (error instanceof ModerationDeleteGuardedMessageAbsentError) {
+          throw error;
+        }
+        if (error instanceof ModerationDeletePreDispatchGuardError) throw error;
+        throw new ModerationDeletePreDispatchGuardError(error);
       }
-      if (finalDispatchLeaseToken) {
-        // FLAG: Independent user rules share one DELETE, not each other's authorization.
-        // A stale binding may yield only to a freshly verified reason on this exact attempt.
-        const proof = await this.authorizeGuardedUserDeleteReasons(
-          intent,
-          botId,
-          finalDispatchLeaseToken,
-          async () => {
-            await beforeFinalAuthority?.();
-            imageTextStopListGuard = await finalizeDeleteAuthority(imageTextPreparation);
-            const report = await finalizeDeleteAuthority(reportPreparation);
-            if (report === 'absent')
-              throw new ModerationDeleteGuardedMessageAbsentError('guarded_report_absence');
-            await this.assertChannelAutoPostCleanupLocalAuthority(intent);
-            await this.assertNightModeCloseNoticeCleanupStillAuthorized(intent);
-            await this.assertNightModeOpenNoticeCleanupStillAuthorized(intent);
-          },
-        );
-        independentVerified = proof.independentVerified;
-        profanityVerified = proof.profanityVerified;
-        commercialVerifiedReasonKeys = proof.commercialVerifiedReasonKeys;
-        messageDuplicateVerified = proof.messageDuplicateVerified;
-        independentAuthorityDeadlineAtMs = proof.independentAuthorityDeadlineAtMs;
-        guardedReasonFingerprint = proof.guardedReasonFingerprint;
-        independentRecheck = proof.independentRecheck;
-        verifiedReasonKeys = proof.verifiedReasonKeys;
-        verifiedReasonDeadlines = proof.verifiedReasonDeadlines;
-      }
-      if (typeof imageTextStopListGuard === 'object' && finalDispatchLeaseToken) {
-        await this.assertImageTextStopListDispatchDeadline(
-          intent.id,
-          finalDispatchLeaseToken,
-          botId,
-        );
-        // FLAG: Only these freshly authorized OCR reasons may receive the confirmed DELETE
-        // receipt. Keep each original expiry through all later awaited guards and mixed reasons.
-        verifiedReasonKeys.push(
-          ...imageTextStopListGuard.reasonDeadlines.map((permit) => permit.reasonKey),
-        );
-        verifiedReasonDeadlines.push(...imageTextStopListGuard.reasonDeadlines);
-        independentAuthorityDeadlineAtMs = Math.min(
-          ...imageTextStopListGuard.reasonDeadlines.map((permit) => permit.deadlineAtMs),
-        );
-      }
-      return {
-        profanityVerified,
-        commercialVerifiedReasonKeys,
-        messageDuplicateVerified,
-        independentVerified,
-        independentAuthorityDeadlineAtMs,
-        guardedReasonFingerprint,
-        independentRecheck,
-        verifiedReasonKeys,
-        verifiedReasonDeadlines,
-      };
-    } catch (error: unknown) {
-      if (error instanceof ModerationDeleteGuardedMessageAbsentError) {
-        throw error;
-      }
-      if (error instanceof ModerationDeletePreDispatchGuardError) throw error;
-      throw new ModerationDeletePreDispatchGuardError(error);
-    }
+    };
+    return this.automaticDeleteAuthors ? this.automaticDeleteAuthors.withDispatchScope(run) : run();
   }
 
   private async assertVerifiedReasonDeadlineFence(
