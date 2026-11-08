@@ -26,6 +26,39 @@ function template(
 }
 
 describe('ChatSettingsTemplateCache', () => {
+  it('retains a rotating fleet without expanding its media budget', () => {
+    const previous = new ChatSettingsTemplateCache();
+    const expanded = new ChatSettingsTemplateCache({
+      maxBytes: 72 * 1024 * 1024,
+      maxMediaBytes: 8 * 1024 * 1024,
+      maxEntries: 8192,
+    });
+    for (const cache of [previous, expanded]) {
+      for (let index = 0; index < 1024; index++)
+        cache.set(`fleet-${index}`, template(`fleet-${index}`, 's'.repeat(18_000)));
+      let misses = 0;
+      for (let index = 0; index < 1024; index++) {
+        const id = `fleet-${index}`;
+        if (!cache.get(id)) {
+          misses += 1;
+          cache.set(id, template(id, 's'.repeat(18_000)));
+        }
+        const snapshot = cache.snapshot();
+        expect(snapshot.estimatedBytes).toBeLessThanOrEqual(snapshot.maxBytes);
+        expect(snapshot.segments.compactBytes).toBeLessThanOrEqual(
+          snapshot.segments.maxCompactBytes,
+        );
+        expect(snapshot.segments.maxMediaBytes).toBe(8 * 1024 * 1024);
+      }
+      expect(misses).toBe(cache === expanded ? 0 : 1024);
+    }
+    expect(expanded.snapshot()).toMatchObject({
+      entries: 1024,
+      capacityEvictions: 0,
+      segments: { maxCompactBytes: 64 * 1024 * 1024 },
+    });
+  });
+
   it('retains ordinary settings when a single exceptional media template arrives', () => {
     const cache = new ChatSettingsTemplateCache();
     for (let index = 0; index < 200; index++) {

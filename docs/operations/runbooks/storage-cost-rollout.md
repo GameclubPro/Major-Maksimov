@@ -113,8 +113,13 @@ Concurrent title refreshes skip only an already identical normalized title.
 
 ### Verified settings templates
 
-Each process may retain private ChatSettings templates within a 16 MiB estimated
-byte budget and 2,048 entries. This cache never establishes freshness. Every
+Each process may retain private ChatSettings templates. The default estimated
+byte budget is 16 MiB and 2,048 entries. `CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES`,
+`CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES` and
+`CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES` configure bounded retention; the media
+budget must be smaller than the total. Production's four realtime moderation roles
+use 72 MiB total, 8 MiB media and 8,192 entries, leaving 64 MiB for compact settings.
+Other roles retain the defaults. This cache never establishes freshness. Every
 source refresh with a candidate reads the exact settings ID and nullable UUID
 revision together with fresh title, bot binding, administrators, active domains
 and rules publication fields in one SQL snapshot. An exact match reuses a cloned
@@ -123,8 +128,9 @@ RepeatableRead transaction; initialization does not seed an unverified template.
 The full-context Redis v4 body, 60-second source deadline, 30-second L1 deadline,
 revision CAS, access generations and complete-media recovery remain in force.
 
-The template budget is split into 8 MiB for compact settings and 8 MiB for shared
-media. Templates over 2 MiB of estimated full content or 256 KiB of compact content
+The default template budget is split into 8 MiB for compact settings and 8 MiB for
+shared media. Increasing compact capacity does not increase the media segment.
+Templates over 2 MiB of estimated full content or 256 KiB of compact content
 bypass retention before evicting unrelated entries. SQL still returns complete
 settings. The two configured media fields share immutable values by SHA256 when
 their serialized size reaches 64 KiB. Media capacity evicts dependent templates
@@ -135,6 +141,13 @@ in-flight result. Only a successful SQL proof materializes private JSON containe
 and dates; immutable base64 strings can be shared. These budgets exclude in-flight
 results and do not guarantee total process RSS. Retain regression coverage in
 `chat-settings-template-cache.spec.ts` and `chat-context-settings-cache-postgres.spec.ts`.
+
+The realtime expansion addresses observed compact-segment churn; it adds at most
+224 MiB of estimated retained capacity across the four processes. Compare matching
+process epochs and workload intervals for `capacityEvictions`, `fullLoads`, `reuses`,
+compact/media occupancy, heap/RSS and actual action latency. A larger cache or a
+synthetic reuse result alone does not prove lower production p95/p99. Reverting the
+three overrides restores the defaults without changing persisted data or rights.
 
 The additive metadata table and static trigger advance the UUID on every settings
 INSERT or UPDATE, including older runtime and raw SQL writers. Existing unchanged

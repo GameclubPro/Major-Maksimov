@@ -19,6 +19,38 @@ function createValidEnv(overrides: Record<string, unknown> = {}) {
 }
 
 describe('validateEnv boolean parsing', () => {
+  it('bounds independent settings-template budgets without changing their default capacity', () => {
+    expect(validateEnv(createValidEnv())).toMatchObject({
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES: 16_777_216,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: 8_388_608,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: 2048,
+    });
+    expect(
+      validateEnv(
+        createValidEnv({
+          CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES: '75497472',
+          CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: '8388608',
+          CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: '8192',
+        }),
+      ),
+    ).toMatchObject({
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES: 75_497_472,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: 8_388_608,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: 8192,
+    });
+    for (const [key, value] of [
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES', '268435457'],
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES', '16777216'],
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES', '0'],
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES', '65537'],
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES', '0'],
+      ['CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES', '1.5'],
+    ])
+      expect(() => validateEnv(createValidEnv({ [key!]: value }))).toThrow(
+        /CHAT_CONTEXT_SETTINGS_TEMPLATE/u,
+      );
+  });
+
   it('keeps the machine overview reader disabled by default and accepts only a canonical digest', () => {
     for (const value of [undefined, ''])
       expect(

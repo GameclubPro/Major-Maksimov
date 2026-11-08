@@ -265,6 +265,24 @@ const envSchema = z.object({
   WEBHOOK_RECEIPT_MAX_IN_FLIGHT: z.coerce.number().int().min(1).max(1_024).default(64),
   WEBHOOK_MEMBERSHIP_CACHE_MAX_IN_FLIGHT: z.coerce.number().int().min(2).max(1_024).default(64),
   CHAT_CONTEXT_LOCAL_CACHE_TTL_MS: z.coerce.number().int().positive().default(30_000),
+  CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .min(2)
+    .max(268_435_456)
+    .default(16_777_216),
+  CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(134_217_728)
+    .default(8_388_608),
+  CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_536)
+    .default(2_048),
   CHAT_CONTEXT_LOCAL_CACHE_MAX_BYTES: z.coerce
     .number()
     .int()
@@ -825,6 +843,14 @@ export function validateEnv(config: Record<string, unknown>): EnvSchema {
     );
   }
 
+  if (
+    parsed.data.CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES >=
+    parsed.data.CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES
+  ) {
+    throw new Error(
+      'Environment validation failed: CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES must be less than CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES',
+    );
+  }
   if (
     parsed.data.PUBLISHER_AUTO_REPLY_USER_ROLLING_LIMIT <
     parsed.data.PUBLISHER_AUTO_REPLY_USER_BURST_LIMIT
