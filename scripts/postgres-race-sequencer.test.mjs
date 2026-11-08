@@ -62,13 +62,14 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 151 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 151);
-  assert.equal(new Set(nativePaths).size, 151);
+test('all 152 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 152);
+  assert.equal(new Set(nativePaths).size, 152);
   for (const path of [
     'src/chat-context/chat-context-source-postgres.spec.ts',
     'src/chat-context/chat-context-settings-cache-postgres.spec.ts',
     'src/chat-context/chat-context-media-cache.redis-integration.spec.ts',
+    'src/chat-context/chat-context-subscriber.redis-integration.spec.ts',
   ])
     assert.ok(nativePaths.includes(path));
   assert.ok(nativePaths.includes('src/admin/link-rules-settings-postgres.spec.ts'));
