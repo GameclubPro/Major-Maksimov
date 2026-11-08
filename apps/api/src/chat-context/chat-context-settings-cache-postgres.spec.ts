@@ -5,7 +5,11 @@ import { randomUUID } from 'node:crypto';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import { createPrismaAdapter, PrismaClient } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
-import { ChatContextCacheService, type ChatContext } from './chat-context-cache.service';
+import {
+  ChatContextCacheService,
+  invalidateSharedChatContext,
+  type ChatContext,
+} from './chat-context-cache.service';
 import { chatContextMediaKey } from './chat-context-media-cache';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
@@ -64,7 +68,11 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
   const routing = {
     rememberChatBotBinding: jest.fn(),
     forgetChatBotBinding: jest.fn(),
-  } satisfies Pick<MaxBotLinkService, 'rememberChatBotBinding' | 'forgetChatBotBinding'>;
+    forgetAllChatBotBindings: jest.fn(),
+  } satisfies Pick<
+    MaxBotLinkService,
+    'rememberChatBotBinding' | 'forgetChatBotBinding' | 'forgetAllChatBotBindings'
+  >;
 
   beforeAll(async () => {
     db = createDatabase();
@@ -96,6 +104,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
     ]);
     routing.rememberChatBotBinding.mockClear();
     routing.forgetChatBotBinding.mockClear();
+    routing.forgetAllChatBotBindings.mockClear();
     await db.chat.create({
       data: {
         id: chatId,
@@ -152,6 +161,29 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
     return cache;
   }
 
+  async function invalidateAndObserve(cache: ChatContextCacheService, id = chatId): Promise<void> {
+    const subscriber = (cache as unknown as { subscriber: Redis }).subscriber;
+    const observed = deferred();
+    const onMessage = (channel: string, payload: string): void => {
+      if (channel !== 'chat:context:invalidate:v1') return;
+      try {
+        const event = JSON.parse(payload) as { chatId?: unknown; reason?: unknown };
+        if (event.chatId === id && event.reason === 'explicit') observed.resolve();
+      } catch {
+        // Ignore publications that do not describe this fixture's explicit invalidation.
+      }
+    };
+    subscriber.on('message', onMessage);
+    try {
+      await cache.invalidate(id);
+      // FLAG: The command reply and Pub/Sub echo use independent sockets. Finish the actual
+      // local invalidation before measuring one warm refresh, without hiding generation races.
+      await within(observed.promise);
+    } finally {
+      subscriber.off('message', onMessage);
+    }
+  }
+
   it('uses a bounded configured fleet budget and refreshes SQL proofs without reloading unchanged settings', async () => {
     const ids = Array.from({ length: 24 }, (_, index) => `${chatId}-fleet-${index}`);
     const cache = makeCache(undefined, 40, {
@@ -159,6 +191,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: 256 * 1024,
       CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: 32,
     });
+    await cache.onModuleInit();
     try {
       for (const id of ids) {
         for (const key of [
@@ -185,7 +218,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
         segments: { maxCompactBytes: 1792 * 1024, maxMediaBytes: 256 * 1024 },
       });
       for (const id of ids) {
-        await cache.invalidate(id);
+        await invalidateAndObserve(cache, id);
         expect((await cache.getChatContext(id)).adminUserIds).toEqual([userId]);
       }
       expect(heavySettingsSelects).toBe(ids.length);
@@ -198,7 +231,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
         data: { reportsAliases: ['changed'] },
       });
       await db.chatAdminAllowlist.deleteMany({ where: { chatId: ids[0]! } });
-      await cache.invalidate(ids[0]!);
+      await invalidateAndObserve(cache, ids[0]!);
       expect(await cache.getChatContext(ids[0]!)).toMatchObject({
         settings: { reportsAliases: ['changed'] },
         adminUserIds: [],
@@ -211,6 +244,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
 
   it('reuses unchanged settings after refreshing title, bot binding, administrators, domains and rules', async () => {
     const cache = makeCache();
+    await cache.onModuleInit();
     const first = await cache.getChatContext(chatId);
     expect(first.adminUserIds).toEqual([userId]);
     expect(heavySettingsSelects).toBe(1);
@@ -232,7 +266,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
         },
       }),
     ]);
-    await cache.invalidate(chatId);
+    await invalidateAndObserve(cache);
     const refreshed = await cache.getChatContext(chatId);
 
     expect(refreshed).toMatchObject({
@@ -255,6 +289,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
   it('observes a raw settings update with unchanged updatedAt at the original deadline despite continuous title changes', async () => {
     const localTtlMs = 40;
     const cache = makeCache(undefined, localTtlMs);
+    await cache.onModuleInit();
     const initial = await cache.getChatContext(chatId);
     const originalUpdatedAt = initial.settings.updatedAt;
     const key = ChatContextCacheService.cacheKey(chatId);
@@ -303,9 +338,10 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       data: { removeAfterAt: expiresAt },
     });
     const cache = makeCache();
+    await cache.onModuleInit();
     expect((await cache.getChatContext(chatId)).domainAllowlist).toEqual(['before.example']);
     await delay(Math.max(0, expiresAt.getTime() - Date.now() + 20));
-    await cache.invalidate(chatId);
+    await invalidateAndObserve(cache);
 
     expect((await cache.getChatContext(chatId)).domainAllowlist).toEqual([]);
     expect(cache.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
@@ -320,12 +356,13 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
   it('rejects a stale warm SQL shell after another process commits an access denial without Pub/Sub delivery', async () => {
     const captured = deferred();
     const resume = deferred();
+    let pauseNext = false;
     let intercepted = false;
     const paused = db.$extends({
       query: {
         async $queryRaw({ args, query }) {
           const rows = await query(args);
-          if (!intercepted) {
+          if (pauseNext && !intercepted) {
             intercepted = true;
             captured.resolve();
             await resume.promise;
@@ -339,6 +376,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
     const reader = makeCache(paused as unknown as PrismaService);
     const writer = makeCache();
     expect((await reader.getChatContext(chatId)).adminUserIds).toEqual([userId]);
+    pauseNext = true;
     await reader.invalidate(chatId);
     const reading = reader.getChatContext(chatId);
     try {
@@ -374,21 +412,90 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
     }
   });
 
+  it('retires a delayed PostgreSQL shell and its bot binding across a real subscription gap', async () => {
+    const captured = deferred();
+    const resume = deferred();
+    let pauseNext = false;
+    const paused = db.$extends({
+      query: {
+        async $queryRaw({ args, query }) {
+          const rows = await query(args);
+          if (pauseNext) {
+            pauseNext = false;
+            captured.resolve();
+            await resume.promise;
+          }
+          return rows;
+        },
+      },
+    });
+    const reader = makeCache(paused as unknown as PrismaService, 30_000);
+    await reader.onModuleInit();
+    expect((await reader.getChatContext(chatId)).adminUserIds).toEqual([userId]);
+    await invalidateAndObserve(reader);
+    routing.rememberChatBotBinding.mockClear();
+    pauseNext = true;
+    const reading = reader.getChatContext(chatId);
+    const subscriber = (reader as unknown as { subscriber: Redis }).subscriber;
+    try {
+      await within(captured.promise);
+      const closed = new Promise<void>((resolve) => subscriber.once('close', () => resolve()));
+      subscriber.disconnect(false);
+      await within(closed);
+      await db.$transaction([
+        db.chat.update({
+          where: { id: chatId },
+          data: { botId: 'fresh-bot', primaryBotId: 'fresh-bot' },
+        }),
+        db.chatAdminAllowlist.deleteMany({ where: { chatId } }),
+      ]);
+      await invalidateSharedChatContext(redis, chatId);
+      const resets = routing.forgetAllChatBotBindings.mock.calls.length;
+      await within(subscriber.connect());
+      await within(
+        (async () => {
+          const deadline = Date.now() + 5_000;
+          while (routing.forgetAllChatBotBindings.mock.calls.length <= resets) {
+            if (Date.now() >= deadline)
+              throw new Error('Native resubscribe acknowledgement missing');
+            await delay(5);
+          }
+        })(),
+      );
+      resume.resolve();
+
+      expect((await within(reading)).adminUserIds).toEqual([]);
+      expect((await reader.getChatContext(chatId)).adminUserIds).toEqual([]);
+      expect(routing.rememberChatBotBinding).not.toHaveBeenCalledWith(chatId, 'original-bot');
+      expect(routing.rememberChatBotBinding).toHaveBeenLastCalledWith(chatId, 'fresh-bot');
+      expect(reader.getLocalCacheSnapshot()).toMatchObject({
+        entries: 1,
+        settingsTemplates: { entries: 1, fullLoads: 1 },
+      });
+      expect(heavySettingsSelects).toBe(1);
+    } finally {
+      resume.resolve();
+      if (subscriber.status === 'end') await within(subscriber.connect());
+      await within(reading).catch(() => undefined);
+    }
+  });
+
   it('isolates both a full-source result and later warm results from the retained template', async () => {
     const cache = makeCache();
+    await cache.onModuleInit();
     const first = await cache.getChatContext(chatId);
     const expected = structuredClone(first.settings);
     first.settings.reportsAliases.push('full-source mutation');
     first.settings.botSpeechMedia = { corrupted: true };
     first.settings.createdAt.setTime(0);
-    await cache.invalidate(chatId);
+    await invalidateAndObserve(cache);
 
     const warm = await cache.getChatContext(chatId);
     expect(warm.settings).toEqual(expected);
     warm.settings.reportsAliases.push('warm-result mutation');
     (warm.settings.botSpeechMedia as { nested: { text: string } }).nested.text = 'corrupted';
     warm.settings.updatedAt.setTime(0);
-    await cache.invalidate(chatId);
+    await invalidateAndObserve(cache);
 
     const next = await cache.getChatContext(chatId);
     expect(next.settings).toEqual(expected);
@@ -411,6 +518,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       const media = { fixture: chatId, base64: 'm'.repeat(size), tags: ['original'] };
       await db.chatSettings.update({ where: { chatId }, data: { botSpeechMedia: media } });
       const cache = makeCache();
+      await cache.onModuleInit();
       const trackMedia = async () => {
         const raw = await redis.get(ChatContextCacheService.cacheKey(chatId));
         const envelope = JSON.parse(raw!) as {
@@ -422,7 +530,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       await trackMedia();
       expect(first.settings.botSpeechMedia).toEqual(media);
       (first.settings.botSpeechMedia as { tags: string[] }).tags.push('caller mutation');
-      await cache.invalidate(chatId);
+      await invalidateAndObserve(cache);
       expect((await cache.getChatContext(chatId)).settings.botSpeechMedia).toEqual(media);
       expect(cache.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
         fullLoads: retained ? 1 : 2,
@@ -437,7 +545,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       UPDATE chat_settings SET bot_speech_media = ${JSON.stringify(replacement)}::jsonb,
         updated_at = updated_at WHERE chat_id = ${chatId}
     `;
-      await cache.invalidate(chatId);
+      await invalidateAndObserve(cache);
       const updated = await cache.getChatContext(chatId);
       await trackMedia();
       expect(updated.settings.botSpeechMedia).toEqual(replacement);
@@ -458,6 +566,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       };
       await db.chatSettings.update({ where: { chatId }, data: { botSpeechMedia: media } });
       const first = makeCache();
+      await first.onModuleInit();
       const loaded = await first.getChatContext(chatId);
       const raw = (await redis.get(ChatContextCacheService.cacheKey(chatId)))!;
       const envelope = JSON.parse(raw) as {
@@ -471,6 +580,7 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
       else await redis.set(blobKey, 'invalid fixture bytes', 'EX', 60);
 
       const second = makeCache();
+      await second.onModuleInit();
       const rebuilt = await second.getChatContext(chatId);
       expect(rebuilt.settings).toEqual(loaded.settings);
       expect(rebuilt).not.toHaveProperty('__maximMedia');

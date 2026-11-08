@@ -137,8 +137,22 @@ Other roles retain the defaults. This cache never establishes freshness. Every
 source refresh with a candidate reads the exact settings ID and nullable UUID
 revision together with fresh title, bot binding, administrators, active domains
 and rules publication fields in one SQL snapshot. An exact match reuses a cloned
-settings object. A cold or changed proof loads settings and metadata in a short
-RepeatableRead transaction; initialization does not seed an unverified template.
+settings object. A cold or changed proof loads settings and every mutable shell
+relation with one MVCC SELECT. The exhaustive typed scalar projection preserves
+native timestamps, arrays and JSON values without serializing the settings row.
+Missing settings still use initialization, which does not seed an unverified template.
+An unchanged candidate needs one compact SELECT; a changed candidate needs the
+compact probe followed by one full SELECT. No database migration is required.
+
+Local full-context reads and writes require an acknowledged invalidation subscription.
+Connection errors, closure, reconnect and end clear local contexts, retire in-flight
+read generations and clear local bot bindings. Reads during the gap use the existing
+Redis revision proof or SQL fallback. Redis `ready` alone is insufficient: a fresh
+explicit subscription must acknowledge, then local state is cleared again before
+reuse. Delayed replies from retired generations cannot refill local contexts or
+bindings. Revision-verified settings templates remain reusable; existing 30-second
+local and 60-second Redis deadlines are unchanged. Failed reconnect subscriptions
+retry while the connection is ready, and shutdown cancels retries.
 The full-context Redis v4 body, 60-second source deadline, 30-second L1 deadline,
 revision CAS, access generations and complete-media recovery remain in force.
 

@@ -2,6 +2,7 @@ import { withChatContextSourceFixture } from './__tests__/chat-context-source.fi
 import type { ChatSummary } from '@maxim/contracts';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
+import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import { ChatContextCacheService } from './chat-context-cache.service';
 import { publishManagedEntityHeaderChanges } from '../admin/admin-managed-entity-header-refresh';
 
@@ -16,6 +17,17 @@ const isLocalRedisUrl = (() => {
 })();
 const describeLocalRedis = isLocalRedisUrl ? describe : describe.skip;
 
+function routingMock() {
+  return {
+    rememberChatBotBinding: jest.fn(),
+    forgetChatBotBinding: jest.fn(),
+    forgetAllChatBotBindings: jest.fn(),
+  } satisfies Pick<
+    MaxBotLinkService,
+    'rememberChatBotBinding' | 'forgetChatBotBinding' | 'forgetAllChatBotBindings'
+  >;
+}
+
 describeLocalRedis('ChatContextCacheService Redis integration', () => {
   it('publishes a changed title but reuses the same committed title without Redis writes', async () => {
     const chatId = `title-reuse-${randomUUID()}`;
@@ -24,12 +36,12 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     const reader = new ChatContextCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
-      {} as never,
+      routingMock() as never,
     );
     const writer = new ChatContextCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
-      {} as never,
+      routingMock() as never,
     );
     const inspector = new Redis(redisIntegrationUrl);
     const observer = new Redis(redisIntegrationUrl);
@@ -54,6 +66,8 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       }
     ).redis;
     try {
+      await reader.onModuleInit();
+      await writer.onModuleInit();
       await inspector.set(
         key,
         JSON.stringify({
@@ -78,9 +92,13 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
           resolve();
         };
       });
+      const readerInvalidated = new Promise<void>((resolve) => {
+        (reader as unknown as { subscriber: Redis }).subscriber.once('message', () => resolve());
+      });
 
       expect((await writer.getChatContext(chatId, 'After rename')).title).toBe('After rename');
       await changed;
+      await readerInvalidated;
       expect(messages.map((payload) => JSON.parse(payload))).toEqual([
         { chatId, reason: 'title_changed' },
       ]);
@@ -107,7 +125,7 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       expect(await inspector.get(revisionKey)).toBe('1');
       expect(await inspector.pttl(key)).toBeLessThanOrEqual(ttlBefore);
       expect(messages).toHaveLength(1);
-      expect(reader.getLocalCacheSnapshot()).toMatchObject({ entries: 1, invalidations: 0 });
+      expect(reader.getLocalCacheSnapshot()).toMatchObject({ entries: 1, invalidations: 1 });
     } finally {
       clearTimeout(changedTimeout);
       await inspector.del(key, cachedRevisionKey, revisionKey);
@@ -136,17 +154,19 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       const reader = new ChatContextCacheService(
         withChatContextSourceFixture(db),
         config as never,
-        {} as never,
+        routingMock() as never,
       );
       const second = new ChatContextCacheService(
         withChatContextSourceFixture({}),
         config as never,
-        {} as never,
+        routingMock() as never,
       );
       const inspector = new Redis(redisIntegrationUrl);
       const key = ChatContextCacheService.cacheKey(chatId);
       const revisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
       try {
+        await reader.onModuleInit();
+        await second.onModuleInit();
         await inspector.set(
           key,
           JSON.stringify({
@@ -181,28 +201,28 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
     },
   );
 
-  it('refreshes a busy reader at its original deadline after losing a published invalidation', async () => {
+  it('bypasses a busy reader local cache immediately after an observed subscription gap', async () => {
     const chatId = `absolute-context-${randomUUID()}`;
     const localTtlMs = 120;
     const config = {
       getOrThrow: () => redisIntegrationUrl,
       get: (key: string) => (key === 'CHAT_CONTEXT_LOCAL_CACHE_TTL_MS' ? localTtlMs : undefined),
     };
-    // This reader never subscribes, so its populated local entry misses the real publication.
     const reader = new ChatContextCacheService(
       withChatContextSourceFixture({}),
       config as never,
-      {} as never,
+      routingMock() as never,
     );
     const writer = new ChatContextCacheService(
       withChatContextSourceFixture({}),
       config as never,
-      {} as never,
+      routingMock() as never,
     );
     const inspector = new Redis(redisIntegrationUrl);
     const contextKey = ChatContextCacheService.cacheKey(chatId);
     const cachedRevisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
     const revisionKey = ChatContextCacheService.chatContextRevisionKey(chatId);
+    const subscriber = (reader as unknown as { subscriber: Redis }).subscriber;
     const publish = async (revision: number) => {
       await inspector.set(
         contextKey,
@@ -221,20 +241,23 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
       await inspector.set(cachedRevisionKey, String(revision), 'EX', 60);
     };
     try {
+      await reader.onModuleInit();
       await publish(0);
       expect((await reader.getChatContext(chatId)).settings.stopWordsRevision).toBe(0);
+      expect(reader.getLocalCacheSnapshot().entries).toBe(1);
+      const writes = reader.getLocalCacheSnapshot().writes;
+      const closed = new Promise<void>((resolve) => subscriber.once('close', () => resolve()));
+      subscriber.disconnect(false);
+      await closed;
       await writer.invalidate(chatId);
       await expect(inspector.get(revisionKey)).resolves.toBe('1');
       await publish(1);
 
-      const deadline = Date.now() + 4 * localTtlMs;
-      let revision = 0;
-      while (Date.now() < deadline && revision === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        revision = (await reader.getChatContext(chatId)).settings.stopWordsRevision;
-      }
-      expect(revision).toBe(1);
+      expect((await reader.getChatContext(chatId)).settings.stopWordsRevision).toBe(1);
+      expect((await reader.getChatContext(chatId)).settings.stopWordsRevision).toBe(1);
+      expect(reader.getLocalCacheSnapshot()).toMatchObject({ entries: 0, writes });
     } finally {
+      if (subscriber.status === 'end') await subscriber.connect();
       await inspector.del(
         contextKey,
         cachedRevisionKey,
@@ -270,12 +293,13 @@ describeLocalRedis('ChatContextCacheService Redis integration', () => {
         getOrThrow: () => redisIntegrationUrl,
         get: (key: string) => (key === 'CHAT_CONTEXT_LOCAL_CACHE_TTL_MS' ? localTtlMs : undefined),
       } as never,
-      {} as never,
+      routingMock() as never,
     );
     const inspector = new Redis(redisIntegrationUrl);
     const contextKey = ChatContextCacheService.cacheKey(chatId);
     const cachedRevisionKey = ChatContextCacheService.cachedContextRevisionKey(chatId);
     try {
+      await reader.onModuleInit();
       await inspector.set(
         contextKey,
         JSON.stringify({

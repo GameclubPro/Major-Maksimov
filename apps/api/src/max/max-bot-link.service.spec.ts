@@ -834,6 +834,25 @@ describe('MaxBotLinkService', () => {
     fixture.service.onModuleDestroy();
   });
 
+  it('forgets every local route after a missed invalidation without retaining an active sweep', async () => {
+    const fixture = createServiceFixture();
+    const state = readBotLinkCacheState(fixture.service);
+    const botId = fixture.bots[1]!.id;
+    for (let index = 0; index < 512; index++) {
+      fixture.service.rememberChatBotBinding(`gap-${index}`, botId);
+    }
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(state.chatBotBindingSweepRemaining).toBe(256);
+    fixture.service.forgetAllChatBotBindings();
+    expect(state.chatBotBindingCache.size).toBe(0);
+    expect(state.chatBotBindingSweepIterator).toBeNull();
+    expect(state.chatBotBindingSweepRemaining).toBe(0);
+    fixture.service.rememberChatBotBinding('fresh-route', botId);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(fixture.service.resolveBotIdSync(null, 'fresh-route')).toBe(botId);
+    fixture.service.onModuleDestroy();
+  });
+
   it('ends a bounded binding pass while new routes are appended and cancels it on shutdown', async () => {
     const fixture = createServiceFixture();
     const state = readBotLinkCacheState(fixture.service);

@@ -1743,6 +1743,12 @@ export class MaxBotLinkService implements OnModuleDestroy {
     this.chatBotBindingCache.delete(normalizedChatId);
   }
 
+  forgetAllChatBotBindings(): void {
+    this.chatBotBindingCache.clear();
+    this.chatBotBindingSweepIterator = null;
+    this.chatBotBindingSweepRemaining = 0;
+  }
+
   async resolveContactId(
     options: { chatId?: string | null; botId?: string | null } = {},
   ): Promise<string | null> {

@@ -17,7 +17,9 @@ jest.mock('ioredis', () => {
 
   const createInstance = () => {
     const messageHandlers = new Set<(channel: string, payload: string) => void>();
+    const eventHandlers = new Map<string, Array<(...args: unknown[]) => void>>();
     const instance = {
+      status: 'ready',
       get: jest.fn().mockImplementation(async (key: string) => store.get(key) ?? null),
       exists: jest.fn().mockImplementation(async (key: string) => (store.has(key) ? 1 : 0)),
       mget: jest
@@ -282,6 +284,11 @@ jest.mock('ioredis', () => {
       }),
       subscribe: jest.fn().mockResolvedValue(1),
       on: jest.fn().mockImplementation((event: string, handler: unknown) => {
+        if (typeof handler === 'function') {
+          const handlers = eventHandlers.get(event) ?? [];
+          handlers.push(handler as (...args: unknown[]) => void);
+          eventHandlers.set(event, handlers);
+        }
         if (event === 'message' && typeof handler === 'function') {
           const messageHandler = handler as (channel: string, payload: string) => void;
           messageHandlers.add(messageHandler);
@@ -289,6 +296,9 @@ jest.mock('ioredis', () => {
         }
         return instance;
       }),
+      emit: (event: string, ...args: unknown[]) => {
+        for (const handler of eventHandlers.get(event) ?? []) handler(...args);
+      },
       duplicate: jest.fn().mockImplementation(() => createInstance()),
       multi: jest.fn().mockImplementation(() => {
         const operations: Array<[keyof typeof instance, ...unknown[]]> = [];
@@ -644,6 +654,17 @@ function getRedisMutationMock(service: ChatContextCacheService): {
   ).redis;
 }
 
+const activeCacheServices: ChatContextCacheService[] = [];
+
+async function createCacheService(
+  ...args: ConstructorParameters<typeof ChatContextCacheService>
+): Promise<ChatContextCacheService> {
+  const service = new ChatContextCacheService(...args);
+  await service.onModuleInit();
+  activeCacheServices.push(service);
+  return service;
+}
+
 function getChatContextReadState(service: ChatContextCacheService) {
   return service as unknown as {
     chatContextReadGenerations: Map<string, { invalidated: boolean; readers: number }>;
@@ -686,6 +707,7 @@ describe('ChatContextCacheService', () => {
     getContextOrDefaultBotId: jest.fn().mockReturnValue('777000_bot'),
     rememberChatBotBinding: jest.fn(),
     forgetChatBotBinding: jest.fn(),
+    forgetAllChatBotBindings: jest.fn(),
   };
 
   beforeEach(() => {
@@ -707,15 +729,20 @@ describe('ChatContextCacheService', () => {
     maxBotLinkService.getContextOrDefaultBotId.mockReturnValue('777000_bot');
   });
 
+  afterEach(async () => {
+    for (const service of activeCacheServices.splice(0)) await service.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
   it('isolates media references from legacy full-context cache readers', () => {
     expect(ChatContextCacheService.cacheKey('chat-1')).toBe('chat:context:v4:chat-1');
     expect(ChatContextCacheService.legacyCacheKey('chat-1')).toBe('chat:context:v3:chat-1');
   });
 
-  it('disables Redis ready check on the pub/sub subscriber connection', () => {
+  it('disables Redis ready check on the pub/sub subscriber connection', async () => {
     const prisma = {} as never;
 
-    new ChatContextCacheService(
+    await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -725,6 +752,93 @@ describe('ChatContextCacheService', () => {
       duplicate: jest.Mock;
     };
     expect(redisInstance.duplicate).toHaveBeenCalledWith({ enableReadyCheck: false });
+  });
+
+  it('bypasses local reads until subscription acknowledgement and throughout a reconnect gap', async () => {
+    const chatId = 'subscription-gap';
+    const service = new ChatContextCacheService(
+      withChatContextSourceFixture({}),
+      createConfigMock() as never,
+      maxBotLinkService as never,
+    );
+    const subscriber = (
+      service as unknown as {
+        subscriber: { subscribe: jest.Mock; emit: (event: string) => void };
+      }
+    ).subscriber;
+    const store = (Redis as unknown as { __store: Map<string, string> }).__store;
+    const publish = (revision: number) =>
+      store.set(
+        ChatContextCacheService.cacheKey(chatId),
+        JSON.stringify({
+          chatId,
+          title: 'Chat',
+          settings: { ...buildSettings(chatId), stopWordsRevision: revision },
+          domainAllowlist: [],
+          adminUserIds: [],
+          rulesPublishedUrl: null,
+          rulesPublishedMessageId: null,
+        }),
+      );
+    const initial = deferred<number>();
+    subscriber.subscribe.mockReturnValueOnce(initial.promise);
+    const initialized = service.onModuleInit();
+    try {
+      publish(0);
+      await service.getChatContext(chatId);
+      await service.getChatContext(chatId);
+      expect(service.getLocalCacheSnapshot().entries).toBe(0);
+      initial.resolve(1);
+      await initialized;
+      await service.getChatContext(chatId);
+      expect(service.getLocalCacheSnapshot().entries).toBe(1);
+      subscriber.emit('close');
+      expect(service.getLocalCacheSnapshot().entries).toBe(0);
+      expect(maxBotLinkService.forgetAllChatBotBindings).toHaveBeenCalledTimes(2);
+      publish(1);
+      expect((await service.getChatContext(chatId)).settings.stopWordsRevision).toBe(1);
+      expect(service.getLocalCacheSnapshot().entries).toBe(0);
+      const reconnect = deferred<number>();
+      subscriber.subscribe.mockReturnValueOnce(reconnect.promise);
+      subscriber.emit('ready');
+      await service.getChatContext(chatId);
+      expect(service.getLocalCacheSnapshot().entries).toBe(0);
+      reconnect.resolve(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      publish(2);
+      expect((await service.getChatContext(chatId)).settings.stopWordsRevision).toBe(2);
+      expect(service.getLocalCacheSnapshot().entries).toBe(1);
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('retries a failed reconnect subscription and cancels further retries after acknowledgement', async () => {
+    jest.useFakeTimers();
+    const service = await createCacheService(
+      withChatContextSourceFixture({}),
+      createConfigMock() as never,
+      maxBotLinkService as never,
+    );
+    const subscriber = (
+      service as unknown as {
+        subscriber: { subscribe: jest.Mock; emit: (event: string) => void };
+      }
+    ).subscriber;
+    subscriber.emit('close');
+    subscriber.subscribe.mockRejectedValueOnce(new Error('Temporary subscription failure'));
+    subscriber.emit('ready');
+    await jest.advanceTimersByTimeAsync(0);
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(2);
+    expect(service.getLocalCacheSnapshot().entries).toBe(0);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(3);
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(3);
+    await service.onModuleDestroy();
+    subscriber.emit('ready');
+    await jest.advanceTimersByTimeAsync(2000);
+    expect(subscriber.subscribe).toHaveBeenCalledTimes(3);
   });
 
   it('loads existing chat context with a single read and caches the result', async () => {
@@ -747,7 +861,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -792,7 +906,7 @@ describe('ChatContextCacheService', () => {
       optimization,
       registerChatContextCacheSnapshot: jest.fn(),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({ chat: { findUnique } }),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -854,7 +968,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -907,7 +1021,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -951,7 +1065,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -1018,7 +1132,7 @@ describe('ChatContextCacheService', () => {
       const oldSettings = { ...buildSettings(chatId) };
       delete (oldSettings as Partial<ChatSettings>).linkRulesPolicy;
       const prisma = { chat: { findUnique: jest.fn().mockResolvedValue(row) } };
-      const service = new ChatContextCacheService(
+      const service = await createCacheService(
         withChatContextSourceFixture(prisma),
         createConfigMock() as never,
         maxBotLinkService as never,
@@ -1053,7 +1167,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1107,7 +1221,7 @@ describe('ChatContextCacheService', () => {
       config.get.mockImplementation((key) =>
         key === 'CHAT_CONTEXT_LOCAL_CACHE_TTL_MS' ? 100 : undefined,
       );
-      const service = new ChatContextCacheService(
+      const service = await createCacheService(
         withChatContextSourceFixture({
           chat: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         }),
@@ -1139,7 +1253,7 @@ describe('ChatContextCacheService', () => {
       try {
         publish(0, 'Original title');
         expect((await service.getChatContext(chatId)).settings.stopWordsRevision).toBe(0);
-        // A disconnected subscriber misses this source update and cannot clear its local copy.
+        // Model an unobserved publication while retaining the absolute local deadline.
         publish(1, changeTitle ? 'New title' : 'Original title');
         for (now = 1_020; now < 1_100; now += 20) {
           const context = await service.getChatContext(
@@ -1163,7 +1277,7 @@ describe('ChatContextCacheService', () => {
   it('invalidates only the local chat context without issuing a Redis mutation', async () => {
     const chatId = 'chat-local-invalidation';
     const cachedSettings = JSON.parse(JSON.stringify(buildSettings(chatId))) as ChatSettings;
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -1212,7 +1326,7 @@ describe('ChatContextCacheService', () => {
   it('keeps a maximal standard notice image and full settings locally during hot reads', async () => {
     const chatId = 'max-standard-image';
     const base64 = Buffer.alloc(6_000_000, 1).toString('base64');
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -1278,7 +1392,7 @@ describe('ChatContextCacheService', () => {
         fileName: 'opened.jpg',
       },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -1323,7 +1437,7 @@ describe('ChatContextCacheService', () => {
     config.get.mockImplementation((key) =>
       key === 'CHAT_CONTEXT_LOCAL_CACHE_MAX_ENTRIES' ? 1 : undefined,
     );
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1364,7 +1478,7 @@ describe('ChatContextCacheService', () => {
     config.get.mockImplementation((key) =>
       key === 'CHAT_CONTEXT_LOCAL_CACHE_MAX_ENTRY_BYTES' ? 1024 : undefined,
     );
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1404,7 +1518,7 @@ describe('ChatContextCacheService', () => {
       if (key === 'CHAT_CONTEXT_LOCAL_CACHE_SWEEP_BATCH_SIZE') return 1;
       return undefined;
     });
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1469,7 +1583,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const invalidator = new ChatContextCacheService(
+    const invalidator = await createCacheService(
       withChatContextSourceFixture({ chat: {} }),
       config as never,
       maxBotLinkService as never,
@@ -1477,13 +1591,10 @@ describe('ChatContextCacheService', () => {
     const readerBotLinks = {
       ...maxBotLinkService,
       forgetChatBotBinding: jest.fn(),
+      forgetAllChatBotBindings: jest.fn(),
     };
     const readerSource = withChatContextSourceFixture(prismaReader);
-    const reader = new ChatContextCacheService(
-      readerSource,
-      config as never,
-      readerBotLinks as never,
-    );
+    const reader = await createCacheService(readerSource, config as never, readerBotLinks as never);
 
     await invalidator.onModuleInit();
     await reader.onModuleInit();
@@ -1506,8 +1617,8 @@ describe('ChatContextCacheService', () => {
     });
 
     expect(prismaReader.chat.findUnique).toHaveBeenCalledTimes(3);
-    expect(readerSource.$queryRaw).toHaveBeenCalledTimes(1);
-    expect(readerSource.$transaction).toHaveBeenCalledTimes(2);
+    expect(readerSource.$queryRaw).toHaveBeenCalledTimes(3);
+    expect(readerSource.$transaction).not.toHaveBeenCalled();
     expect(reader.getLocalCacheSnapshot().activity).toMatchObject({
       remoteInvalidationCalls: 1,
       invalidationsByReason: { explicit: { events: 1, evictedEntries: 1 } },
@@ -1534,7 +1645,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -1609,14 +1720,14 @@ describe('ChatContextCacheService', () => {
     expect(redisInstance.del).not.toHaveBeenCalled();
     expect(redisInstance.mget).toHaveBeenCalledTimes(3);
     expect(service.getLocalCacheSnapshot().activity.invalidationsByReason.title_changed).toEqual({
-      events: 1,
+      events: 2,
       evictedEntries: 1,
     });
   });
 
   it('reuses a title already committed by another reader without patching or invalidating', async () => {
     const chatId = 'chat-title-already-committed';
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({
         chat: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       }),
@@ -1671,7 +1782,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1699,7 +1810,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1729,7 +1840,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1777,7 +1888,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -1815,7 +1926,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1877,7 +1988,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1896,7 +2007,7 @@ describe('ChatContextCacheService', () => {
   it('bounds a stalled header batch once for the entire list and rejects foreign cached identities', async () => {
     jest.useFakeTimers();
     const config = { getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379') };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1925,7 +2036,7 @@ describe('ChatContextCacheService', () => {
       get: jest.fn().mockReturnValue(null),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -1959,7 +2070,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -2021,7 +2132,7 @@ describe('ChatContextCacheService', () => {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
 
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -2097,7 +2208,7 @@ describe('ChatContextCacheService', () => {
     const config = {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -2144,7 +2255,7 @@ describe('ChatContextCacheService', () => {
     const config = {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -2217,7 +2328,7 @@ describe('ChatContextCacheService', () => {
     const config = {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -2254,7 +2365,7 @@ describe('ChatContextCacheService', () => {
     const config = {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -2297,7 +2408,7 @@ describe('ChatContextCacheService', () => {
     const config = {
       getOrThrow: jest.fn().mockReturnValue('redis://127.0.0.1:6379'),
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       config as never,
       maxBotLinkService as never,
@@ -2322,7 +2433,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('merges concurrent standalone recent bootstrap upserts for the same user', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2338,7 +2449,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('preserves a concurrent recent bootstrap upsert while removing another item', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2364,7 +2475,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('lets an equal-millisecond removal beat a grant and rejects its delayed replay', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2408,7 +2519,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('fast-rejects a strictly superseded epoch before reading opaque values', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2449,7 +2560,7 @@ describe('ChatContextCacheService', () => {
     { currentPriority: 0, label: 'equal-time grant' },
     { currentPriority: 1, label: 'equal denial repair' },
   ])('does not fast-reject an $label', async ({ currentPriority }) => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2493,7 +2604,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('keeps exact denial replay key-write-free while invalidating local caches', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2542,7 +2653,7 @@ describe('ChatContextCacheService', () => {
     );
     expect(service.getLocalCacheSnapshot().activity).toMatchObject({
       denialReplays: 1,
-      invalidationsByReason: { access_denied: { events: 2, evictedEntries: 1 } },
+      invalidationsByReason: { access_denied: { events: 4, evictedEntries: 1 } },
     });
     expect(recordMetric.mock.calls.map(([metric]) => metric.outcome)).toEqual([
       'miss',
@@ -2551,7 +2662,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('repairs an equal epoch when the committed access state is missing', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2576,7 +2687,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('repairs stale derivatives behind an exact denied epoch and state', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2627,7 +2738,7 @@ describe('ChatContextCacheService', () => {
     { label: 'missing', raw: null },
     { label: 'malformed', raw: 'not-an-epoch' },
   ])('falls through the precheck for a $label epoch', async ({ raw }) => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2658,7 +2769,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('falls through the precheck when its Redis GET fails', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2689,7 +2800,7 @@ describe('ChatContextCacheService', () => {
 
   it('falls through the precheck when its Redis GET does not settle within the read budget', async () => {
     jest.useFakeTimers();
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2725,7 +2836,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('retains the Lua race fence when a newer epoch appears after the precheck', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2763,7 +2874,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('records Lua conflicts, retries, exhaustion, and failures without identifiers', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2832,7 +2943,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('accepts a newer grant after an older removal epoch', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2856,7 +2967,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('removes only the affected published card under a denial epoch', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2890,7 +3001,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('merges concurrent published grants for different chats of the same user', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2918,7 +3029,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('rejects a stale full snapshot rebuild after an item-level grant', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2963,7 +3074,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('retains no read generations for idle invalidations delivered through pubsub', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -2991,7 +3102,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('attributes old and unknown pubsub reasons to a fixed legacy bucket without retaining labels', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3049,7 +3160,7 @@ describe('ChatContextCacheService', () => {
         upsert: jest.fn(),
       },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3111,7 +3222,7 @@ describe('ChatContextCacheService', () => {
         upsert: jest.fn(),
       },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3164,7 +3275,7 @@ describe('ChatContextCacheService', () => {
         upsert: jest.fn(),
       },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3204,7 +3315,7 @@ describe('ChatContextCacheService', () => {
         upsert: jest.fn(),
       },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3234,7 +3345,7 @@ describe('ChatContextCacheService', () => {
     const prisma = {
       chat: { findUnique: jest.fn().mockResolvedValue(buildContextRow(chatId, [])) },
     };
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3297,7 +3408,7 @@ describe('ChatContextCacheService', () => {
     config.get.mockImplementation((key) =>
       key === 'CHAT_CONTEXT_LOCAL_CACHE_MAX_ENTRIES' ? 1 : undefined,
     );
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture(prisma),
       config as never,
       maxBotLinkService as never,
@@ -3328,7 +3439,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('retries a denial when a stale context appears after the initial CAS read', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
@@ -3371,7 +3482,7 @@ describe('ChatContextCacheService', () => {
   });
 
   it('does not let a delayed title patch restore an admin removed from cached context', async () => {
-    const service = new ChatContextCacheService(
+    const service = await createCacheService(
       withChatContextSourceFixture({}),
       createConfigMock() as never,
       maxBotLinkService as never,
