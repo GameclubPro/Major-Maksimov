@@ -5,6 +5,7 @@ import test from 'node:test';
 import pg from 'pg';
 import {
   ACTION_LATENCY_EXTENSION_COLUMNS,
+  ACTION_LATENCY_SCHEDULE_COLUMNS,
   ACTION_LATENCY_SOURCES,
   actionLatencyIndexesSql,
   buildActionLatencyAuditSql,
@@ -39,6 +40,7 @@ CREATE TABLE max_action_ledger (
   id text PRIMARY KEY, terminal boolean NOT NULL DEFAULT true, completed_at timestamp(3),
   action_type text, status "MaxActionLedgerStatus", source_tag text, traffic_class text,
   enqueued_at timestamp(3), last_attempt_at timestamp(3), metadata jsonb,
+  scheduled_for_at timestamp(3), schedule_clock_state text,
   chat_id text, message_id text, ambiguous boolean, attempt_count integer,
   dispatch_token text, dispatch_started_at timestamp(3), dispatch_bot_id text,
   remote_message_id text, last_error text, private_forbidden text
@@ -134,13 +136,15 @@ async function insert(client, rows) {
       'private-message',
       'dispatch-secret',
       'private-forbidden',
+      row.scheduledForAt ?? null,
+      row.scheduleClockState ?? null,
     );
-    return `(${Array.from({ length: 14 }, (_, j) => `$${i * 14 + j + 1}`).join(',')})`;
+    return `(${Array.from({ length: 16 }, (_, j) => `$${i * 16 + j + 1}`).join(',')})`;
   });
   await client.query(
     `INSERT INTO max_action_ledger
     (id,terminal,completed_at,action_type,status,source_tag,traffic_class,enqueued_at,
-      last_attempt_at,metadata,chat_id,message_id,dispatch_token,private_forbidden)
+      last_attempt_at,metadata,chat_id,message_id,dispatch_token,private_forbidden,scheduled_for_at,schedule_clock_state)
     VALUES ${tuples.join(',')}`,
     values,
   );
@@ -590,6 +594,71 @@ test(
 );
 
 test(
+  'native scalar schedule clocks bypass compressed payload and preserve unknown legacy rows',
+  native,
+  async (t) => {
+    const f = await fixture(t);
+    const anchor = Date.now() - 5_000;
+    const base = {
+      enqueued: time(anchor, -1000),
+      attempt: time(anchor, -400),
+      completed: time(anchor, 0),
+    };
+    const large = { scheduledFor: time(anchor, -700), secret: 'private-padding-'.repeat(4000) };
+    await insert(f.client, [
+      {
+        ...base,
+        id: 'private-scalar-valid',
+        metadata: large,
+        scheduleClockState: 'VALID',
+        scheduledForAt: time(anchor, -700),
+      },
+      {
+        ...base,
+        id: 'private-scalar-unscheduled',
+        metadata: large,
+        scheduleClockState: 'UNSCHEDULED',
+      },
+      { ...base, id: 'private-scalar-invalid', metadata: large, scheduleClockState: 'INVALID' },
+      { ...base, id: 'private-legacy-compressed', metadata: large },
+      {
+        ...base,
+        id: 'private-scalar-missing-enqueue',
+        enqueued: null,
+        scheduleClockState: 'VALID',
+        scheduledForAt: time(anchor, -700),
+      },
+      {
+        ...base,
+        id: 'private-invalid-scalar-pair',
+        scheduleClockState: 'UNSCHEDULED',
+        scheduledForAt: time(anchor, -700),
+      },
+    ]);
+    assert.notEqual(
+      (
+        await f.client.query(
+          "SELECT pg_column_compression(metadata) AS compression FROM max_action_ledger WHERE id='private-scalar-valid'",
+        )
+      ).rows[0].compression,
+      null,
+    );
+    const value = await report(f);
+    assert.deepEqual(counts(value.readiness), {
+      KNOWN: 2,
+      INVALID_SCHEDULE: 1,
+      UNKNOWN_METADATA: 1,
+      MISSING_READY_CLOCK: 1,
+      INVALID_READY_CLOCK: 1,
+    });
+    assert.equal(group(value).ready_to_terminal.sample_count, 2);
+    assert.equal(group(value).ready_to_terminal.excluded_count, 4);
+    assert.equal(group(value).last_attempt_to_terminal.sample_count, 6);
+    assert.equal(value.schedule_clock_basis, 'scalar_with_bounded_legacy_fallback');
+  },
+);
+
+test(
   'native action latency refuses drifted indexes, storage relations and clock types',
   native,
   async (t) => {
@@ -627,6 +696,14 @@ test(
       [
         'changed collation',
         'DROP INDEX max_action_ledger_terminal_completed_id_idx; CREATE INDEX max_action_ledger_terminal_completed_id_idx ON max_action_ledger(terminal,completed_at DESC,id COLLATE "C" DESC)',
+      ],
+      [
+        'scalar clock type',
+        'ALTER TABLE max_action_ledger ALTER COLUMN scheduled_for_at TYPE timestamp(3) with time zone',
+      ],
+      [
+        'scalar state type',
+        'ALTER TABLE max_action_ledger ALTER COLUMN schedule_clock_state TYPE varchar(80)',
       ],
       ['row security', 'ALTER TABLE max_action_ledger ENABLE ROW LEVEL SECURITY'],
       [
@@ -673,6 +750,31 @@ test(
     const address = localAddress();
     const cases = [
       ['complete reviewed union', '', true],
+      [
+        'legacy exact six remain admitted by general guard on modern schema',
+        `REVOKE SELECT (${ACTION_LATENCY_SCHEDULE_COLUMNS.join(',')}) ON max_action_ledger FROM READER;`,
+        false,
+        'ACTION_LATENCY_PRIVILEGES_INVALID',
+      ],
+      [
+        'legacy exact six remain admitted by general guard before scalar migration',
+        'ALTER TABLE max_action_ledger DROP COLUMN scheduled_for_at, DROP COLUMN schedule_clock_state;',
+        false,
+        'ACTION_LATENCY_PRIVILEGES_INVALID',
+      ],
+      [
+        'mixed six cannot impersonate legacy exact six',
+        'REVOKE SELECT (metadata,last_attempt_at) ON max_action_ledger FROM READER;',
+        false,
+        'WEBHOOK_OWNER_PROOF_PRIVILEGES_INVALID',
+      ],
+      [
+        'seven grants are a partial scalar group',
+        'REVOKE SELECT (schedule_clock_state) ON max_action_ledger FROM READER;',
+        false,
+        'WEBHOOK_OWNER_PROOF_PRIVILEGES_INVALID',
+      ],
+
       [
         'partial latency extension',
         'REVOKE SELECT (metadata) ON max_action_ledger FROM READER;',
@@ -777,7 +879,9 @@ ROLLBACK;`,
           assert.match(result.stdout, /(?:PRIVILEGES|INDEXES)_INVALID/u);
           if (expectedRefusal) {
             assert.ok(result.stdout.includes(expectedRefusal), result.stdout);
-            assert.doesNotMatch(result.stdout, /WEBHOOK_OWNER_PROOF_PRIVILEGES_INVALID/u);
+            if (expectedRefusal !== 'WEBHOOK_OWNER_PROOF_PRIVILEGES_INVALID') {
+              assert.doesNotMatch(result.stdout, /WEBHOOK_OWNER_PROOF_PRIVILEGES_INVALID/u);
+            }
           }
         }
       });

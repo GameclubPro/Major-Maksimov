@@ -1469,6 +1469,7 @@ export type SystemDashboardWebhookSlo = z.infer<typeof systemDashboardWebhookSlo
 export const systemDashboardLatencyPercentilesSchema = z
   .object({
     sampleCount: z.number().int().min(0).max(5_000),
+    excludedCount: z.number().int().min(0).max(5_000).optional(),
     p50Ms: z.number().int().min(0).nullable(),
     p95Ms: z.number().int().min(0).nullable(),
     p99Ms: z.number().int().min(0).nullable(),
@@ -1525,6 +1526,16 @@ export const systemDashboardActionLatencyGroupSchema = systemDashboardActionLate
       'lastAttemptToTerminal',
       'effectiveReadyToTerminal',
     ] as const) {
+      if (
+        value[metric].excludedCount !== undefined &&
+        value[metric].sampleCount + value[metric].excludedCount !== value.rowCount
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Latency coverage must match its row count',
+          path: [metric, 'excludedCount'],
+        });
+      }
       if (value[metric].sampleCount > value.rowCount) {
         context.addIssue({
           code: 'custom',
@@ -1558,6 +1569,16 @@ export const systemDashboardDeleteLatencyGroupSchema = systemDashboardDeleteLate
       'firstAttemptToTerminal',
       'messageToTerminal',
     ] as const) {
+      if (
+        value[metric].excludedCount !== undefined &&
+        value[metric].sampleCount + value[metric].excludedCount !== value.rowCount
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Latency coverage must match its row count',
+          path: [metric, 'excludedCount'],
+        });
+      }
       if (value[metric].sampleCount > value.rowCount) {
         context.addIssue({
           code: 'custom',
@@ -1610,6 +1631,23 @@ export const systemDashboardActionLatencySchema = z
     actionSampleCount: z.number().int().min(0).max(5_000),
     actionSampleTruncated: z.boolean(),
     actionSampledFrom: z.string().datetime().nullable(),
+    readiness: z
+      .array(
+        z.object({
+          state: z.enum([
+            'KNOWN',
+            'UNKNOWN_METADATA',
+            'INVALID_SCHEDULE',
+            'MISSING_READY_CLOCK',
+            'INVALID_READY_CLOCK',
+          ]),
+          count: z.number().int().min(0).max(5_000),
+        }),
+      )
+      .max(5)
+      .optional(),
+    scheduleClockBasis: z.literal('scalar_with_bounded_legacy_fallback').optional(),
+    enqueueClockBasis: z.literal('latest_accepted_queue_or_direct_invocation').optional(),
     overall: systemDashboardActionLatencyMetricsSchema,
     byAction: z.array(systemDashboardActionLatencyGroupSchema).max(5_000),
     byOutcome: z.array(systemDashboardActionLatencyGroupSchema).max(5_000),
@@ -1626,6 +1664,17 @@ export const systemDashboardActionLatencySchema = z
     generatedAt: z.string().datetime(),
   })
   .superRefine((value, context) => {
+    if (
+      value.readiness &&
+      (new Set(value.readiness.map((item) => item.state)).size !== value.readiness.length ||
+        value.readiness.reduce((total, item) => total + item.count, 0) !== value.actionSampleCount)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Readiness coverage must cover the action sample exactly once',
+        path: ['readiness'],
+      });
+    }
     if (value.actionSampleCount > value.sampleLimit) {
       context.addIssue({
         code: 'custom',
@@ -1679,6 +1728,17 @@ export const systemDashboardActionLatencySchema = z
       'lastAttemptToTerminal',
       'effectiveReadyToTerminal',
     ] as const) {
+      if (
+        value.overall[metric].excludedCount !== undefined &&
+        value.overall[metric].sampleCount + value.overall[metric].excludedCount !==
+          value.actionSampleCount
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Latency coverage must match the action row count',
+          path: ['overall', metric, 'excludedCount'],
+        });
+      }
       if (value.overall[metric].sampleCount > value.actionSampleCount) {
         context.addIssue({
           code: 'custom',
@@ -1692,6 +1752,18 @@ export const systemDashboardActionLatencySchema = z
       'firstAttemptToTerminal',
       'messageToTerminal',
     ] as const) {
+      if (
+        value.moderationDelete.overall[metric].excludedCount !== undefined &&
+        value.moderationDelete.overall[metric].sampleCount +
+          value.moderationDelete.overall[metric].excludedCount !==
+          value.moderationDelete.sampleCount
+      ) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Latency coverage must match the delete row count',
+          path: ['moderationDelete', 'overall', metric, 'excludedCount'],
+        });
+      }
       if (value.moderationDelete.overall[metric].sampleCount > value.moderationDelete.sampleCount) {
         context.addIssue({
           code: 'custom',

@@ -1,12 +1,20 @@
 import { pathToFileURL } from 'node:url';
 
-export const ACTION_LATENCY_EXTENSION_COLUMNS = Object.freeze([
+export const ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS = Object.freeze([
   'id',
   'source_tag',
   'traffic_class',
   'enqueued_at',
   'last_attempt_at',
   'metadata',
+]);
+export const ACTION_LATENCY_SCHEDULE_COLUMNS = Object.freeze([
+  'scheduled_for_at',
+  'schedule_clock_state',
+]);
+export const ACTION_LATENCY_EXTENSION_COLUMNS = Object.freeze([
+  ...ACTION_LATENCY_LEGACY_EXTENSION_COLUMNS,
+  ...ACTION_LATENCY_SCHEDULE_COLUMNS,
 ]);
 export const ACTION_LATENCY_COLUMNS = Object.freeze([
   'id',
@@ -18,6 +26,8 @@ export const ACTION_LATENCY_COLUMNS = Object.freeze([
   'traffic_class',
   'enqueued_at',
   'last_attempt_at',
+  'scheduled_for_at',
+  'schedule_clock_state',
   'metadata',
 ]);
 const ACTIONS = [
@@ -89,7 +99,8 @@ export const actionLatencyIndexesSql = `WITH required(column_name, type_name, mo
   ('id','text',-1),('terminal','boolean',-1),('completed_at','timestamp without time zone',3),
   ('action_type','text',-1),('status','public."MaxActionLedgerStatus"',-1),('source_tag','text',-1),
   ('traffic_class','text',-1),('enqueued_at','timestamp without time zone',3),
-  ('last_attempt_at','timestamp without time zone',3),('metadata','jsonb',-1)
+  ('last_attempt_at','timestamp without time zone',3),('scheduled_for_at','timestamp without time zone',3),
+  ('schedule_clock_state','text',-1),('metadata','jsonb',-1)
 ), expected(name, keys, options, is_unique, is_primary) AS (VALUES
   ('max_action_ledger_pkey',ARRAY['id'],ARRAY[0]::smallint[],true,true),
   ('max_action_ledger_terminal_completed_id_idx',ARRAY['terminal','completed_at','id'],ARRAY[0,3,3]::smallint[],false,false)
@@ -149,7 +160,8 @@ export function buildActionLatencyAuditSql(explain = false) {
   // FLAG: Bound the global completion head before any detail or metadata read.
   // Grouping happens after the sentinel and never filters away global saturation.
   // FLAG: Storage admission must surround every JSON operation, including shape
-  // checks. Compressed/oversized bodies remain unknown; no enqueue-time fallback.
+  // checks. Scalar schedule clocks avoid payload inspection; legacy compressed/oversized
+  // bodies remain unknown, with no enqueue-time fallback.
   const query = `WITH clock AS MATERIALIZED (SELECT transaction_timestamp() AS observed_at),
 heads AS MATERIALIZED (
   SELECT id,completed_at FROM public.max_action_ledger
@@ -160,12 +172,22 @@ heads AS MATERIALIZED (
 ), samples AS MATERIALIZED (
   SELECT id,completed_at FROM heads ORDER BY completed_at DESC,id DESC LIMIT 5000
 ), inspected AS MATERIALIZED (
-  SELECT samples.completed_at,details.enqueued_at,details.last_attempt_at,
+  SELECT samples.completed_at,details.enqueued_at,details.last_attempt_at,details.scheduled_for_at,
     ${dimension('details.action_type', ACTIONS)} AS action,
     CASE WHEN details.status::text IN (${literals(OUTCOMES)}) THEN details.status::text ELSE 'OTHER' END AS outcome,
     ${dimension('details.source_tag', ACTION_LATENCY_SOURCES)} AS source,
     ${dimension('details.traffic_class', ['critical', 'interactive', 'background'])} AS traffic_class,
-    CASE WHEN details.metadata IS NULL THEN 'ABSENT'
+    CASE WHEN details.schedule_clock_state IS NOT NULL THEN
+      CASE WHEN pg_column_compression(details.schedule_clock_state) IS NOT NULL
+        OR pg_column_size(details.schedule_clock_state) > 80 THEN 'INVALID_SCALAR_CLOCK'
+      ELSE CASE
+        WHEN details.schedule_clock_state='UNSCHEDULED' AND details.scheduled_for_at IS NULL THEN 'SCALAR_UNSCHEDULED'
+        WHEN details.schedule_clock_state='VALID' AND details.scheduled_for_at IS NOT NULL
+          AND isfinite(details.scheduled_for_at) THEN 'SCALAR_VALID'
+        WHEN details.schedule_clock_state='INVALID' AND details.scheduled_for_at IS NULL THEN 'SCALAR_INVALID'
+        ELSE 'INVALID_SCALAR_CLOCK' END END
+      WHEN details.scheduled_for_at IS NOT NULL THEN 'INVALID_SCALAR_CLOCK'
+      WHEN details.metadata IS NULL THEN 'ABSENT'
       WHEN pg_column_compression(details.metadata) IS NOT NULL THEN 'COMPRESSED_NOT_INSPECTED'
       WHEN pg_column_size(details.metadata) > 8192 THEN 'OVERSIZED_NOT_INSPECTED'
       ELSE CASE WHEN jsonb_typeof(details.metadata)='object' THEN
@@ -174,18 +196,20 @@ heads AS MATERIALIZED (
             THEN CASE WHEN octet_length(details.metadata->>'scheduledFor') <= 80 THEN 'BOUNDED_SCHEDULE' ELSE 'INVALID_SCHEDULE_SHAPE' END
           ELSE 'INVALID_SCHEDULE_SHAPE' END
         ELSE 'INVALID_METADATA_SHAPE' END END AS metadata_state,
-    CASE WHEN pg_column_compression(details.metadata) IS NULL AND pg_column_size(details.metadata) <= 8192
+    CASE WHEN details.schedule_clock_state IS NULL AND details.scheduled_for_at IS NULL
+      AND pg_column_compression(details.metadata) IS NULL AND pg_column_size(details.metadata) <= 8192
       THEN CASE WHEN jsonb_typeof(details.metadata)='object'
         THEN CASE WHEN jsonb_typeof(details.metadata->'scheduledFor')='string'
           THEN CASE WHEN octet_length(details.metadata->>'scheduledFor') <= 80
             THEN details.metadata->>'scheduledFor' END END END END AS scheduled_for
   FROM samples CROSS JOIN LATERAL (
-    SELECT action_type,status,source_tag,traffic_class,enqueued_at,last_attempt_at,metadata
+    SELECT action_type,status,source_tag,traffic_class,enqueued_at,last_attempt_at,scheduled_for_at,schedule_clock_state,metadata
     FROM public.max_action_ledger WHERE id=samples.id OFFSET 0
   ) details
 ), scheduled AS MATERIALIZED (
   SELECT inspected.*,
-    CASE WHEN scheduled_for ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,3})?Z$'
+    CASE WHEN metadata_state='SCALAR_VALID' THEN scheduled_for_at
+      WHEN scheduled_for ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]{1,3})?Z$'
       AND left(scheduled_for,4) <> '0000'
       THEN CASE WHEN pg_input_is_valid(scheduled_for,'timestamp with time zone')
         THEN scheduled_for::timestamptz AT TIME ZONE 'UTC' END END AS scheduled_at
@@ -193,13 +217,15 @@ heads AS MATERIALIZED (
 ), readiness AS MATERIALIZED (
   SELECT scheduled.*,
     CASE WHEN enqueued_at IS NULL OR NOT isfinite(enqueued_at) THEN NULL
-      WHEN metadata_state IN ('ABSENT','UNSCHEDULED') THEN enqueued_at
-      WHEN metadata_state='BOUNDED_SCHEDULE' AND scheduled_at IS NOT NULL
+      WHEN metadata_state IN ('ABSENT','UNSCHEDULED','SCALAR_UNSCHEDULED') THEN enqueued_at
+      WHEN metadata_state IN ('BOUNDED_SCHEDULE','SCALAR_VALID') AND scheduled_at IS NOT NULL
         THEN greatest(enqueued_at,scheduled_at) END AS ready_at
   FROM scheduled
 ), observations AS MATERIALIZED (
   SELECT action,outcome,source,traffic_class,metadata_state,
-    CASE WHEN metadata_state NOT IN ('ABSENT','UNSCHEDULED','BOUNDED_SCHEDULE') THEN 'UNKNOWN_METADATA'
+    CASE WHEN metadata_state='INVALID_SCALAR_CLOCK' THEN 'INVALID_READY_CLOCK'
+      WHEN metadata_state='SCALAR_INVALID' THEN 'INVALID_SCHEDULE'
+      WHEN metadata_state NOT IN ('ABSENT','UNSCHEDULED','BOUNDED_SCHEDULE','SCALAR_UNSCHEDULED','SCALAR_VALID') THEN 'UNKNOWN_METADATA'
       WHEN metadata_state='BOUNDED_SCHEDULE' AND scheduled_at IS NULL THEN 'INVALID_SCHEDULE'
       WHEN enqueued_at IS NOT NULL AND NOT isfinite(enqueued_at) THEN 'INVALID_READY_CLOCK'
       WHEN ready_at IS NULL THEN 'MISSING_READY_CLOCK'
@@ -227,6 +253,8 @@ SELECT json_build_object('schema_version',1,'audit','action_latency',
   'window_started_at',clock.observed_at-interval '15 minutes','window_ended_at',clock.observed_at,
   'sample_cap',5000,'sample_count',(SELECT count(*) FROM samples),'sample_complete',(SELECT count(*)<=5000 FROM heads),
   'sampled_from',(SELECT min(completed_at) AT TIME ZONE 'UTC' FROM samples),
+  'schedule_clock_basis','scalar_with_bounded_legacy_fallback',
+  'enqueue_clock_basis','latest_accepted_queue_or_direct_invocation',
   'metadata_max_bytes',8192,'schedule_format','UTC_ISO_8601_MILLISECONDS',
   'metadata_admission',coalesce((SELECT json_agg(x ORDER BY state) FROM
     (SELECT metadata_state AS state,count(*) AS count FROM observations GROUP BY metadata_state)x),'[]'::json),

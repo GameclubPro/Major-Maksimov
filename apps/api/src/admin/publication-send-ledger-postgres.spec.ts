@@ -1,3 +1,4 @@
+import { ActionLatencyService } from '../system/action-latency.service';
 import { createMaxSendObservation } from '../max/max-send-observation';
 import { ConfigService } from '@nestjs/config';
 import { Queue, UnrecoverableError } from 'bullmq';
@@ -87,6 +88,94 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
     await queue?.close();
     await redis?.quit();
     await db?.$disconnect();
+  });
+
+  it('persists scalar schedule admission through real ledger create and preparation updates', async () => {
+    const initial = await db.maxActionLedgerEntry.findUniqueOrThrow({
+      where: { jobId: job.idempotencyKey },
+    });
+    expect(initial).toMatchObject({
+      scheduleClockState: 'UNSCHEDULED',
+      scheduledForAt: null,
+      enqueuedAt: null,
+    });
+    const scheduledFor = '2026-11-08T19:00:00.100Z';
+    await ledger.recordPrepared({ ...job, scheduledFor });
+    expect(
+      await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: job.idempotencyKey } }),
+    ).toMatchObject({
+      scheduleClockState: 'VALID',
+      scheduledForAt: new Date(scheduledFor),
+      enqueuedAt: null,
+    });
+    await ledger.recordPrepared({ ...job, scheduledFor: '2026-02-30T19:00:00.000Z' });
+    expect(
+      await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: job.idempotencyKey } }),
+    ).toMatchObject({
+      scheduleClockState: 'INVALID',
+      scheduledForAt: null,
+      enqueuedAt: null,
+    });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('dashboard measures scalar readiness with compressed metadata and excludes its legacy peer', async () => {
+    const sourceTag = `clock-native-${randomUUID()}`;
+    const legacyJobId = `${job.idempotencyKey}-legacy`;
+    const anchor = Date.now() - 5_000;
+    const scheduledForAt = new Date(anchor - 700);
+    const metadata = {
+      scheduledFor: scheduledForAt.toISOString(),
+      padding: 'private-padding-'.repeat(4000),
+    };
+    const clocks = {
+      enqueuedAt: new Date(anchor - 1000),
+      lastAttemptAt: new Date(anchor - 400),
+      completedAt: new Date(anchor),
+    };
+    try {
+      await db.maxActionLedgerEntry.update({
+        where: { jobId: job.idempotencyKey },
+        data: {
+          ...clocks,
+          sourceTag,
+          status: 'SUCCEEDED',
+          terminal: true,
+          scheduleClockState: 'VALID',
+          scheduledForAt,
+          metadata,
+        },
+      });
+      await db.maxActionLedgerEntry.create({
+        data: {
+          ...clocks,
+          jobId: legacyJobId,
+          actionType: 'SEND_MESSAGE',
+          chatId: job.chatId,
+          sourceTag,
+          status: 'SUCCEEDED',
+          terminal: true,
+          metadata,
+        },
+      });
+      const storage = await db.$queryRaw<Array<{ compression: string | null }>>`
+        SELECT pg_column_compression(metadata)::text AS compression FROM max_action_ledger
+        WHERE job_id=${job.idempotencyKey}
+      `;
+      expect(storage[0]?.compression).not.toBeNull();
+      const service = new ActionLatencyService(db as never, { get: () => undefined } as never);
+      const snapshot = await service.getSnapshot();
+      const group = snapshot.bySource.find((entry) => entry.key === sourceTag);
+      expect(group).toMatchObject({
+        rowCount: 2,
+        effectiveReadyToTerminal: { sampleCount: 1, excludedCount: 1, p50Ms: 700 },
+        effectiveReadyToLastAttempt: { sampleCount: 1, excludedCount: 1, p50Ms: 300 },
+        lastAttemptToTerminal: { sampleCount: 2, excludedCount: 0, p50Ms: 400 },
+      });
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      await db.maxActionLedgerEntry.deleteMany({ where: { jobId: legacyJobId } });
+    }
   });
 
   function client(selectedLedger = ledger): SendHarness {

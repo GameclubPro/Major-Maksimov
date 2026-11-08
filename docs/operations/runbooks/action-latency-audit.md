@@ -15,11 +15,17 @@ using the report:
 ```
 
 The apply is a separate maintenance mutation; running a report never provisions its
-own access. The optional extension grants exactly six ledger columns: `id`,
-`source_tag`, `traffic_class`, `enqueued_at`, `last_attempt_at` and `metadata`. It is
+own access. The optional extension grants exactly eight ledger columns: `id`,
+`source_tag`, `traffic_class`, `enqueued_at`, `last_attempt_at`, `scheduled_for_at`,
+`schedule_clock_state` and `metadata`. Install the additive schedule-clock migration
+before previewing and reprovisioning this group. The older six-column group must
+be upgraded before using the new catalog. The group is
 admitted only alongside the existing complete 25-column owner-proof group. Older or
-partial schemas receive none of the extension. Other catalogs accept the complete
-extension or no extension and continue to accept the original schema without it.
+partial schemas receive no new extension. Other catalogs continue to accept exactly
+the previous complete six-column group, the complete eight-column group or no
+extension. The two scalar grants require all six legacy grants; mixed or incomplete
+groups remain invalid. This preserves general diagnostics during source/schema/grant
+transition, while the new action-latency catalog requires all eight columns.
 Effective PUBLIC/inherited excess, partial groups, table access and mutation grants
 fail closed. No bot identity or error columns are added.
 
@@ -52,7 +58,13 @@ windows as if coverage matched, or raise the row/session budgets to hide saturat
 The sample is an ordered prefix, not random sampling. `sampled_from` describes the
 oldest included completion, not an independently closed replacement window.
 
-Before every JSON shape check or extraction, metadata must be uncompressed and at
+New ledger writes persist the observational schedule separately: `UNSCHEDULED`,
+`VALID` with a scalar timestamp, or `INVALID`. This state takes precedence over
+metadata; it neither authorizes execution nor changes a deadline. Inconsistent
+scalar state/timestamp combinations remain unknown. Existing rows are not backfilled.
+
+For legacy rows without scalar state, before every JSON shape check or extraction,
+metadata must be uncompressed and at
 most 8,192 stored bytes. Compressed, oversized and malformed bodies are explicit
 admission states. Their readiness stays unknown; enqueue time is never substituted
 for an unread schedule. Only `scheduledFor` is inspected, and its string is bounded
@@ -86,7 +98,12 @@ and enqueue time for an unscheduled action. A missing or nonfinite enqueue alway
 excludes both readiness clocks, including actions with a valid schedule. A future
 schedule therefore does not appear as queue delay. Malformed/unknown metadata,
 invalid schedules, missing clocks and invalid clock order are explicit in admission,
-readiness and per-clock coverage.
+readiness and per-clock coverage. `enqueued_at` describes the latest accepted queue
+clock or a direct publication invocation observed before routing and preparation.
+It is not immutable original-ingress time; retries may update it. Completed receipt
+recovery does not acquire a new clock or execute another SEND. The dashboard uses
+the same scalar admission and bounded legacy extraction, reports explicit per-clock
+exclusions and readiness counts, and preserves missing coverage in older contracts.
 
 Clock one can include retry waits and earlier attempts. Clock two is a saved ledger
 interval, not an HTTP request duration: it may include executor work, verification,

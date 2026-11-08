@@ -1,4 +1,5 @@
 import type { MaxActionJob } from './max-client.service';
+import type { MaxActionDispatchExecutionOptions } from './max-action-dispatch.service';
 import { UnrecoverableError } from 'bullmq';
 import { buildNightModeTransitionScheduleFingerprint } from '../moderation/night-mode-transition-generation.util';
 import { MaxActionNoExecutableRouteError } from './max-action-dispatch-error';
@@ -24,16 +25,20 @@ describe('MaxRoutedPublicationService', () => {
     };
     const maxActionDispatchService = {
       recoverCompletedSend: jest.fn().mockResolvedValue(null),
-      execute: jest.fn().mockImplementation(async (job: MaxActionJob, options: any) => {
-        const prepared = await options.prepareAttempt({ botId: 'bot-2', job });
-        await options.onDispatchAttempt({ botId: 'bot-2', job: { ...job, ...prepared } });
-        await options.beforeSendMutation({ botId: 'bot-2', job: { ...job, ...prepared } });
-        return {
-          messageId: 'mid-1',
-          url: 'https://max.ru/channel-1/mid-1',
-          botId: 'bot-2',
-        };
-      }),
+      execute: jest
+        .fn()
+        .mockImplementation(
+          async (job: MaxActionJob, options: MaxActionDispatchExecutionOptions) => {
+            const prepared = await options.prepareAttempt!({ botId: 'bot-2', job });
+            await options.onDispatchAttempt!({ botId: 'bot-2', job: { ...job, ...prepared } });
+            await options.beforeSendMutation!({ botId: 'bot-2', job: { ...job, ...prepared } });
+            return {
+              messageId: 'mid-1',
+              url: 'https://max.ru/channel-1/mid-1',
+              botId: 'bot-2',
+            };
+          },
+        ),
     };
     const prepareAttempt = jest.fn().mockResolvedValue({
       options: { imagePayload: { token: 'bot-2-upload' } },
@@ -85,6 +90,40 @@ describe('MaxRoutedPublicationService', () => {
     expect(
       (maxActionDispatchService.execute.mock.calls[0]?.[0] as MaxActionJob).idempotencyKey,
     ).not.toContain('bot-1');
+  });
+
+  it('observes immediate readiness before route selection without deriving it from payload history', async () => {
+    const startedAt = new Date('2026-11-08T19:00:00.000Z');
+    jest.useFakeTimers().setSystemTime(startedAt);
+    const links = {
+      resolveBotRoute: jest.fn().mockImplementation(async () => {
+        jest.setSystemTime(new Date(startedAt.getTime() + 2_500));
+        return { primaryBotId: 'bot-1', candidateBotIds: ['bot-1'], routingVersion: 7 };
+      }),
+    };
+    const execute = jest
+      .fn<
+        Promise<{ messageId: string; botId: string; url: string | null }>,
+        [MaxActionJob, MaxActionDispatchExecutionOptions]
+      >()
+      .mockResolvedValue({ messageId: 'mid-ready', botId: 'bot-1', url: null });
+    const service = new MaxRoutedPublicationService(
+      links as never,
+      { recoverCompletedSend: jest.fn().mockResolvedValue(null), execute } as never,
+      { resolveMessageLink: jest.fn() } as never,
+    );
+    await service.publish({
+      entityId: 'channel-1',
+      logicalIdempotencyKey: 'publication:ready-clock',
+      text: 'publication',
+      trafficClass: 'interactive',
+      sourceTag: 'test_publication',
+      hydrateMessageUrl: false,
+    });
+    const [job, options] = execute.mock.calls[0]!;
+    expect(options.enqueuedAt).toEqual(startedAt);
+    expect(job.createdAt).toBe(startedAt.toISOString());
+    expect(Date.now() - options.enqueuedAt!.getTime()).toBe(2_500);
   });
 
   it.each([
@@ -302,7 +341,7 @@ describe('MaxRoutedPublicationService', () => {
         candidateBotIds: ['media-bot'],
         routing: expect.objectContaining({ requiredBotId: 'media-bot' }),
       }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
   });
 
@@ -357,7 +396,9 @@ describe('MaxRoutedPublicationService', () => {
             requiredBotId: 'se14088825_bot',
           }),
         }),
-        {},
+        expect.objectContaining<MaxActionDispatchExecutionOptions>({
+          enqueuedAt: expect.any(Date),
+        }),
       );
     } finally {
       if (previousRole === undefined) delete process.env.APP_ROLE;
@@ -535,7 +576,7 @@ describe('MaxRoutedPublicationService', () => {
         candidateBotIds: ['bot-2', 'bot-3'],
         routing: expect.objectContaining({ purpose: 'channel_poll', routingVersion: 9 }),
       }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
     expect(maxClientService.resolveMessageLink).toHaveBeenCalledWith('mid-poll-1', {
       botId: 'bot-2',
@@ -722,7 +763,7 @@ describe('MaxRoutedPublicationService', () => {
         candidateBotIds: ['bot-1'],
         routing: expect.objectContaining({ purpose: 'channel_poll', routingVersion: 5 }),
       }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
   });
 
@@ -797,7 +838,7 @@ describe('MaxRoutedPublicationService', () => {
     expect(maxBotLinkService.recordBotAccessProbe).not.toHaveBeenCalled();
     expect(maxActionDispatchService.execute).toHaveBeenCalledWith(
       expect.objectContaining({ botId: 'bot-1', candidateBotIds: ['bot-1'] }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
   });
 
@@ -867,7 +908,7 @@ describe('MaxRoutedPublicationService', () => {
     expect(maxClientService.getCurrentChatMemberAccess).not.toHaveBeenCalled();
     expect(maxActionDispatchService.execute).toHaveBeenCalledWith(
       expect.objectContaining({ botId: 'bot-1', candidateBotIds: ['bot-1'] }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
   });
 
@@ -1343,7 +1384,7 @@ describe('MaxRoutedPublicationService', () => {
     expect(maxClientService.getCurrentChatMemberAccess).toHaveBeenCalledTimes(2);
     expect(maxActionDispatchService.execute).toHaveBeenCalledWith(
       expect.objectContaining({ botId: 'bot-2', candidateBotIds: ['bot-2'] }),
-      {},
+      expect.objectContaining<MaxActionDispatchExecutionOptions>({ enqueuedAt: expect.any(Date) }),
     );
   });
 });

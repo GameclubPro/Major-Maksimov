@@ -357,6 +357,8 @@ import Redis from 'ioredis';
 import type { ChatContextLocalCache } from './chat-context-local-cache';
 import type { ChatSummary } from '@maxim/contracts';
 import type { ChatSettings } from '../prisma/prisma-client';
+import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
+import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
 import {
   ChatContextCacheService,
   type ChatContext,
@@ -769,6 +771,67 @@ describe('ChatContextCacheService', () => {
       rulesPublishedUrl: null,
       rulesPublishedMessageId: null,
     });
+  });
+
+  it('observes source attempts without changing fallback classification or SQL failures', async () => {
+    const chatId = 'source-observation';
+    const settings = buildSettings(chatId);
+    const findUnique = jest.fn().mockResolvedValue({
+      id: chatId,
+      title: 'Observed source',
+      settings,
+      domains: [],
+      admins: [],
+      rules: null,
+    });
+    const optimization = new OptimizationRuntimeMetrics();
+    const provider: Pick<
+      StorageRuntimeMetricsService,
+      'optimization' | 'registerChatContextCacheSnapshot'
+    > = {
+      optimization,
+      registerChatContextCacheSnapshot: jest.fn(),
+    };
+    const service = new ChatContextCacheService(
+      withChatContextSourceFixture({ chat: { findUnique } }),
+      createConfigMock() as never,
+      maxBotLinkService as never,
+      provider as StorageRuntimeMetricsService,
+    );
+    try {
+      await service.getChatContext(chatId);
+      await service.invalidate(chatId);
+      await service.getChatContext(chatId);
+      // A changed identity forces the candidate probe to fall back to a full read.
+      findUnique.mockResolvedValue({
+        id: chatId,
+        title: 'Observed source',
+        settings: { ...settings, id: 'replacement-settings' },
+        domains: [],
+        admins: [],
+        rules: null,
+      });
+      await service.invalidate(chatId);
+      await service.getChatContext(chatId);
+      const failure = new Error('SQL source unavailable');
+      findUnique.mockRejectedValue(failure);
+      await service.invalidate(chatId);
+      await expect(service.getChatContext(chatId)).rejects.toBe(failure);
+      expect(optimization.snapshot()!.contextSource!.coldLoad).toMatchObject({
+        calls: 1,
+        errors: 0,
+      });
+      expect(optimization.snapshot()!.contextSource!.candidateLoad).toMatchObject({
+        calls: 3,
+        errors: 1,
+      });
+      expect(service.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
+        fullLoads: 2,
+        reuses: 1,
+      });
+    } finally {
+      await service.onModuleDestroy();
+    }
   });
 
   it('initializes missing chat context with an upsert fallback', async () => {

@@ -1329,6 +1329,43 @@ describe('MaxActionLedgerService', () => {
     );
   });
 
+  it.each([
+    { scheduledFor: undefined, state: 'UNSCHEDULED', at: null },
+    {
+      scheduledFor: '2026-11-08T19:00:00.1Z',
+      state: 'VALID',
+      at: new Date('2026-11-08T19:00:00.100Z'),
+    },
+    { scheduledFor: '2026-02-30T19:00:00.000Z', state: 'INVALID', at: null },
+    { scheduledFor: '2026-11-08T19:00:00+03:00', state: 'INVALID', at: null },
+  ])(
+    'records $state scalar schedule on both enqueue creation and prepared update',
+    async ({ scheduledFor, state, at }) => {
+      const { service, prisma } = createService();
+      const job = createJob({ scheduledFor });
+      await service.recordEnqueuedIfAbsent(job, new Date('2026-11-08T18:00:00.000Z'));
+      expect(prisma.maxActionLedgerEntry.createMany.mock.calls[0]?.[0]?.data?.[0]).toEqual(
+        expect.objectContaining({ scheduleClockState: state, scheduledForAt: at }),
+      );
+      await service.recordPrepared(job);
+      expect(prisma.maxActionLedgerEntry.updateMany.mock.calls.at(-1)?.[0]?.data).toEqual(
+        expect.objectContaining({ scheduleClockState: state, scheduledForAt: at }),
+      );
+    },
+  );
+
+  it('does not manufacture enqueue time from job creation while recording a schedule', async () => {
+    const { service, prisma } = createService();
+    prisma.maxActionLedgerEntry.updateMany.mockResolvedValueOnce({ count: 0 });
+    await service.recordStarted(createJob({ scheduledFor: '2026-11-08T19:00:00.000Z' }));
+    const created = prisma.maxActionLedgerEntry.createMany.mock.calls[0]?.[0]?.data?.[0];
+    expect(created).toMatchObject({
+      scheduleClockState: 'VALID',
+      scheduledForAt: new Date('2026-11-08T19:00:00.000Z'),
+    });
+    expect(created).not.toHaveProperty('enqueuedAt');
+  });
+
   it('keeps the BullMQ creation timestamp when a fast worker creates and starts the ledger first', async () => {
     const attemptedAt = new Date('2026-07-06T20:00:05.000Z');
     const bullMqEnqueuedAt = new Date('2026-07-06T20:00:01.000Z');

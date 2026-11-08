@@ -44,7 +44,8 @@ local Docker-socket access under the production pg_hba rules, with:
   - eight fixed migration receipt columns; errors classified in SQL, raw logs never reported
   - 25 owner-proof columns across execution claims and action ledger; source keys,
     lease/dispatch tokens and command journal are join/check-only and never report output
-  - six optional bounded action-latency ledger columns, only with the complete owner-proof group;
+  - six optional bounded action-latency ledger columns and a separate pair of schedule clocks,
+    only with the complete owner-proof group;
     IDs and admitted schedule metadata stay inside SQL, with no bot/error grants
   - 28 optional held-receipt scalar metadata columns; identities and seal bindings
     are join/check-only, with no payload, snapshot, attestation or effect authority
@@ -596,7 +597,8 @@ BEGIN
 END
 $webhook_owner_proof_grants$;
 -- FLAG: Optional latency access extends, never replaces, the complete owner-proof
--- group. Compressed/oversized metadata is not inspected; only fixed aggregates leave SQL.
+-- group. Preserve the complete legacy six on older schemas; the two scalar clocks
+-- are a separate complete pair. Only fixed aggregates leave SQL.
 DO $action_latency_grants$
 BEGIN
   IF NOT EXISTS (
@@ -616,6 +618,15 @@ BEGIN
   ) THEN
     GRANT SELECT (id, source_tag, traffic_class, enqueued_at, last_attempt_at, metadata)
       ON TABLE public.max_action_ledger TO maxim_audit;
+    IF NOT EXISTS (
+      SELECT 1 FROM (VALUES ('scheduled_for_at'), ('schedule_clock_state')) expected(column_name)
+      LEFT JOIN pg_attribute attribute ON attribute.attrelid = to_regclass('public.max_action_ledger')
+        AND attribute.attname = expected.column_name AND attribute.attnum > 0 AND NOT attribute.attisdropped
+      WHERE attribute.attnum IS NULL
+    ) THEN
+      GRANT SELECT (scheduled_for_at, schedule_clock_state)
+        ON TABLE public.max_action_ledger TO maxim_audit;
+    END IF;
   END IF;
 END
 $action_latency_grants$;
@@ -883,12 +894,17 @@ BEGIN
       ('max_action_ledger', ARRAY['chat_id', 'action_type', 'message_id', 'status', 'ambiguous',
         'terminal', 'attempt_count', 'dispatch_token', 'dispatch_started_at', 'dispatch_bot_id',
         'remote_message_id', 'completed_at'])
-    ), extension(table_name, column_name) AS (
+    ), legacy_extension(table_name, column_name) AS (
       SELECT 'max_action_ledger', unnest(ARRAY['id', 'source_tag', 'traffic_class',
         'enqueued_at', 'last_attempt_at', 'metadata'])
+    ), schedule_extension(table_name, column_name) AS (
+      SELECT 'max_action_ledger', unnest(ARRAY['scheduled_for_at', 'schedule_clock_state'])
     ), original_columns AS (
       SELECT table_name, unnest(columns) AS column_name FROM original
-    ), allowed AS (SELECT * FROM original_columns UNION ALL SELECT * FROM extension),
+    ), allowed AS (
+      SELECT * FROM original_columns UNION ALL SELECT * FROM legacy_extension
+      UNION ALL SELECT * FROM schedule_extension
+    ),
     relations AS (
       SELECT DISTINCT table_name, to_regclass('public.' || table_name) AS oid FROM allowed
     ), attributes AS MATERIALIZED (
@@ -900,11 +916,15 @@ BEGIN
     ), counts AS (
       SELECT (SELECT count(*) FROM attributes a JOIN original_columns o
         ON o.table_name=a.table_name AND o.column_name=a.attname WHERE readable) AS original_count,
-      (SELECT count(*) FROM attributes a JOIN extension e
-        ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS extension_count
+      (SELECT count(*) FROM attributes a JOIN legacy_extension e
+        ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS legacy_count,
+      (SELECT count(*) FROM attributes a JOIN schedule_extension e
+        ON e.table_name=a.table_name AND e.column_name=a.attname WHERE readable) AS schedule_count
     )
-    SELECT original_count NOT IN (0, 25) OR extension_count NOT IN (0, 6)
-      OR (extension_count = 6 AND original_count <> 25)
+    SELECT original_count NOT IN (0, 25) OR legacy_count NOT IN (0, 6)
+      OR schedule_count NOT IN (0, 2)
+      OR (schedule_count > 0 AND legacy_count <> 6)
+      OR ((legacy_count > 0 OR schedule_count > 0) AND original_count <> 25)
       OR EXISTS (SELECT 1 FROM relations r WHERE r.oid IS NOT NULL
         AND has_table_privilege('maxim_audit', r.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
       OR EXISTS (SELECT 1 FROM attributes a WHERE writable OR (readable AND NOT EXISTS (

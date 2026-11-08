@@ -5,6 +5,7 @@ import type { PrismaService } from '../prisma/prisma.service';
 import {
   chatContextShellQuery,
   readChatContextSource,
+  type ChatContextShell,
   type ChatContextSourceResult,
   type ChatSettingsTemplate,
 } from './chat-context-source';
@@ -143,6 +144,108 @@ native('coherent settings templates on native PostgreSQL', () => {
     expect((await read(template(fresh), new Date(now.getTime() + 1_000))).row!.domains).toEqual([
       { domain: 'permanent.test' },
     ]);
+  });
+
+  it('measures cold reads and keeps verified SQL projections independent of configured media size', async () => {
+    const media = Buffer.from('source-baseline-media'.repeat(8192)).toString('base64');
+    await db.chatAdminAllowlist.create({ data: { chatId, userId: 'baseline-admin' } });
+    await db.domainAllowlist.create({ data: { chatId, domain: 'baseline.test' } });
+    await db.chatRules.create({
+      data: { chatId, publishedUrl: 'https://example.test/baseline', publishedMessageId: 'rules' },
+    });
+    const samples: {
+      variant: string;
+      coldStatements: number;
+      coldSelects: number;
+      verifiedStatements: number;
+      verifiedSelects: number;
+      serializedSettingsBytes: number;
+      serializedShellProjectionBytes: number;
+    }[] = [];
+
+    for (const variant of ['small', 'media']) {
+      await db.chatSettings.update({
+        where: { chatId },
+        data: {
+          botSpeechMedia:
+            variant === 'media' ? { greeting: { base64: media, mimeType: 'image/png' } } : {},
+          stopWordsMedia:
+            variant === 'media'
+              ? { notice: { base64: media, mimeType: 'image/png' } }
+              : Prisma.DbNull,
+          messageLimitsBlockedWords: ['baseline-word'],
+          stopWordsPolicy: { version: 1, entries: [{ text: 'baseline-word', enabled: true }] },
+          linkPolicyEffectiveAt: now,
+          trafficPolicyEffectiveAt: now,
+        },
+      });
+      // FLAG: Policy triggers own effective clocks. Read the actual typed row before the
+      // measurement window; configured timestamps alone do not describe persisted settings.
+      const storedSettings = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });
+      queries.length = 0;
+      const full = await read();
+      const coldStatements = queries.length;
+      const coldSelects = selectQueries().length;
+      expect(full.mode).toBe('full');
+      expect(full.row?.settings).toEqual(storedSettings);
+      expect(full.row?.settings).toMatchObject({
+        messageLimitsBlockedWords: ['baseline-word'],
+        stopWordsPolicy: { version: 1, entries: [{ text: 'baseline-word', enabled: true }] },
+      });
+      expect(full.row?.settings?.botSpeechMedia).toEqual(
+        variant === 'media' ? { greeting: { base64: media, mimeType: 'image/png' } } : {},
+      );
+      expect(full.row?.settings?.stopWordsMedia).toEqual(
+        variant === 'media' ? { notice: { base64: media, mimeType: 'image/png' } } : null,
+      );
+
+      queries.length = 0;
+      const verified = await read(template(full));
+      const verifiedStatements = queries.length;
+      const verifiedSelects = selectQueries();
+      expect(verified.mode).toBe('shell');
+      expect(verified.proof).toEqual(full.proof);
+      expect(verified.row).toEqual(full.row);
+      expect(verifiedStatements).toBe(1);
+      expect(verifiedSelects).toHaveLength(1);
+      for (const column of ['bot_speech_media', 'stop_words_media', 'anti_spam_enabled'])
+        expect(verifiedSelects[0]).not.toContain(column);
+
+      const [shell] = await db.$queryRaw<ChatContextShell[]>(chatContextShellQuery(chatId, now));
+      expect(shell).toMatchObject({
+        settingsId: full.proof!.settingsId,
+        settingsRevision: full.proof!.revision,
+        adminUserIds: ['baseline-admin'],
+        domainAllowlist: ['baseline.test'],
+        rulesPublishedMessageId: 'rules',
+      });
+      expect(shell).not.toHaveProperty('botSpeechMedia');
+      expect(shell).not.toHaveProperty('stopWordsMedia');
+      samples.push({
+        variant,
+        coldStatements,
+        coldSelects,
+        verifiedStatements,
+        verifiedSelects: verifiedSelects.length,
+        serializedSettingsBytes: Buffer.byteLength(JSON.stringify(full.row!.settings)),
+        serializedShellProjectionBytes: Buffer.byteLength(JSON.stringify(shell)),
+      });
+    }
+
+    // FLAG: Measure serialized logical results, not PostgreSQL wire traffic. Cold statement
+    // counts are evidence for optimization; their current multi-query shape is not a contract.
+    expect(samples[0].coldSelects).toBeGreaterThanOrEqual(1);
+    expect(samples[1].coldSelects).toBeGreaterThanOrEqual(1);
+    expect(samples[1].serializedShellProjectionBytes).toBe(
+      samples[0].serializedShellProjectionBytes,
+    );
+    expect(
+      samples[1].serializedSettingsBytes - samples[0].serializedSettingsBytes,
+    ).toBeGreaterThanOrEqual(2 * Buffer.byteLength(media));
+    expect(samples[1].serializedShellProjectionBytes).toBeLessThan(
+      samples[1].serializedSettingsBytes,
+    );
+    console.info('Chat context source native baseline', JSON.stringify({ samples }));
   });
 
   it('loads roster completeness with the current compact shell rather than a saved settings template', async () => {

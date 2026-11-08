@@ -45,4 +45,31 @@ describe('bounded optimization observations', () => {
     metrics.timing('sendHttp', Number.MAX_SAFE_INTEGER);
     expect(metrics.snapshot()!.timings.sendHttp!.totalMs).toBe(Number.MAX_SAFE_INTEGER);
   });
+  it('admits fixed rule and source phases while preserving unavailable older coverage', () => {
+    const metrics = new OptimizationRuntimeMetrics();
+    metrics.ruleStage('links', 126);
+    metrics.ruleStage('private-chat-id', 5000);
+    metrics.contextLoad('coldLoad', 250, true);
+    metrics.contextLoad('candidateLoad', null);
+    const snapshot = metrics.snapshot()!;
+    expect(snapshot.ruleStages!.links).toMatchObject({ calls: 1, under500Ms: 1, totalMs: 126 });
+    expect(snapshot.contextSource!.coldLoad).toMatchObject({ calls: 1, errors: 1, under500Ms: 1 });
+    expect(snapshot.contextSource!.candidateLoad).toMatchObject({ calls: 1, unknownClock: 1 });
+    expect(JSON.stringify(snapshot)).not.toContain('private-chat-id');
+    const legacy = {
+      authors: snapshot.authors,
+      roster: snapshot.roster,
+      demand: snapshot.demand,
+      timings: snapshot.timings,
+    };
+    expect(sanitizeOptimizationRuntimeMetrics(legacy)).toEqual({
+      ...legacy,
+      ruleStages: null,
+      contextSource: null,
+    });
+    expect(sanitizeOptimizationRuntimeMetrics({ ...snapshot, ruleStages: {} })).toEqual({
+      ...snapshot,
+      ruleStages: null,
+    });
+  });
 });

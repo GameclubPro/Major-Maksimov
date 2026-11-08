@@ -50,6 +50,20 @@ const grantSql = (role) =>
   Object.entries(OWNER_PROOF_COLUMNS)
     .map(([table, columns]) => `GRANT SELECT (${columns.join(',')}) ON ${table} TO ${role};`)
     .join('\n');
+const legacyLatencyColumns = [
+  'id',
+  'source_tag',
+  'traffic_class',
+  'enqueued_at',
+  'last_attempt_at',
+  'metadata',
+];
+const scalarLatencyColumns = ['scheduled_for_at', 'schedule_clock_state'];
+const partialLatencyGroups = [
+  ['mixed six', [...legacyLatencyColumns.slice(0, 5), scalarLatencyColumns[0]]],
+  ['seven', [...legacyLatencyColumns, scalarLatencyColumns[0]]],
+  ['scalar pair without legacy group', scalarLatencyColumns],
+];
 const now = '2026-10-01T00:00:00.000Z';
 const secret = 'PRIVATE_VALUE_MUST_NOT_APPEAR';
 const key = `message:message_created:${secret}:${secret}`;
@@ -385,13 +399,24 @@ test('optional latency grants preserve the original group and reject mixed parti
     await fixture(db);
     await db.exec(`ALTER TABLE max_action_ledger
       ADD COLUMN id text, ADD COLUMN source_tag text, ADD COLUMN traffic_class text,
-      ADD COLUMN enqueued_at timestamp(3), ADD COLUMN last_attempt_at timestamp(3), ADD COLUMN metadata jsonb;
+      ADD COLUMN enqueued_at timestamp(3), ADD COLUMN last_attempt_at timestamp(3), ADD COLUMN metadata jsonb,
+      ADD COLUMN scheduled_for_at timestamp(3), ADD COLUMN schedule_clock_state text;
       CREATE ROLE proof_auditor; GRANT USAGE ON SCHEMA public TO proof_auditor;
       ${grantSql('proof_auditor')} SET ROLE proof_auditor`);
     const ready = async () =>
       (await db.query(ownerProofPrivilegesSql(true))).rows[0].owner_proof_privileges_ready;
     assert.equal(await ready(), true, 'new schema without optional grants preserves old reports');
+    await db.exec(`RESET ROLE; GRANT SELECT (${legacyLatencyColumns.join(',')})
+      ON max_action_ledger TO proof_auditor; SET ROLE proof_auditor`);
+    assert.equal(await ready(), true, 'legitimate legacy six-column grants preserve old reports');
     const columns = ACTION_LATENCY_EXTENSION_COLUMNS.join(',');
+    for (const [label, partial] of partialLatencyGroups) {
+      await db.exec(`RESET ROLE; BEGIN; REVOKE SELECT (${columns}) ON max_action_ledger FROM proof_auditor;
+        GRANT SELECT (${partial.join(',')}) ON max_action_ledger TO proof_auditor;
+        SET ROLE proof_auditor`);
+      assert.equal(await ready(), false, `partial latency group: ${label}`);
+      await db.exec('ROLLBACK; SET ROLE proof_auditor');
+    }
     await db.exec(`RESET ROLE; GRANT SELECT (${columns}) ON max_action_ledger TO proof_auditor;
       SET ROLE proof_auditor`);
     assert.equal(await ready(), true);
@@ -408,14 +433,14 @@ test('optional latency grants preserve the original group and reject mixed parti
     assert.equal(
       (await db.query(ownerProofPrivilegesSql(false))).rows[0].owner_proof_privileges_ready,
       false,
-      'six extension grants cannot replace the original twenty-five',
+      'eight extension grants cannot replace the original twenty-five',
     );
   } finally {
     await db.close();
   }
 });
 
-test('checked-in latency provisioning grants all six only with both complete schemas', async () => {
+test('checked-in latency provisioning preserves legacy grants and adds only a complete scalar pair', async () => {
   const db = new PGlite();
   try {
     await fixture(db);
@@ -458,12 +483,59 @@ test('checked-in latency provisioning grants all six only with both complete sch
     await db.exec('ALTER TABLE max_action_ledger ADD COLUMN metadata jsonb');
     await db.exec(grants);
     await db.exec(verification);
+    assert.equal(
+      (
+        await db.query(`SELECT has_column_privilege('proof_auditor',
+      'max_action_ledger', 'id', 'SELECT') AS readable`)
+      ).rows[0].readable,
+      true,
+      'complete legacy latency schema receives its original six-column group',
+    );
+    await db.exec('ALTER TABLE max_action_ledger ADD COLUMN scheduled_for_at timestamp(3)');
+    await db.exec(grants);
+    await db.exec(verification);
+    assert.equal(
+      (
+        await db.query(`SELECT has_column_privilege('proof_auditor',
+      'max_action_ledger', 'scheduled_for_at', 'SELECT') AS readable`)
+      ).rows[0].readable,
+      false,
+      'a missing schedule state prevents partial scalar-clock grants',
+    );
+    await db.exec('ALTER TABLE max_action_ledger ADD COLUMN schedule_clock_state text');
+    await db.exec(`GRANT SELECT (${legacyLatencyColumns.join(',')})
+      ON max_action_ledger TO proof_auditor`);
+    await db.exec(verification);
+    await db.exec(grants);
+    await db.exec(verification);
+    assert.equal(
+      (
+        await db.query(`SELECT has_column_privilege('proof_auditor',
+          'max_action_ledger', 'scheduled_for_at', 'SELECT')
+          AND has_column_privilege('proof_auditor',
+          'max_action_ledger', 'schedule_clock_state', 'SELECT') AS readable`)
+      ).rows[0].readable,
+      true,
+      'modern schema receives both scalar-clock grants',
+    );
     await db.exec('SET ROLE proof_auditor');
     assert.equal(
       (await db.query(ownerProofPrivilegesSql(true))).rows[0].owner_proof_privileges_ready,
       true,
     );
-    await db.exec('RESET ROLE; REVOKE SELECT(metadata) ON max_action_ledger FROM proof_auditor');
+    await db.exec('RESET ROLE');
+    for (const [label, partial] of partialLatencyGroups) {
+      await db.exec(`BEGIN; REVOKE SELECT (${ACTION_LATENCY_EXTENSION_COLUMNS.join(',')})
+        ON max_action_ledger FROM proof_auditor;
+        GRANT SELECT (${partial.join(',')}) ON max_action_ledger TO proof_auditor`);
+      await assert.rejects(
+        db.exec(verification),
+        /owner proof column privileges are not exact/u,
+        `provision verification rejects ${label}`,
+      );
+      await db.exec('ROLLBACK');
+    }
+    await db.exec('REVOKE SELECT(metadata) ON max_action_ledger FROM proof_auditor');
     await assert.rejects(db.exec(verification), /owner proof column privileges are not exact/u);
   } finally {
     await db.close();
