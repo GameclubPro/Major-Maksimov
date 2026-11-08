@@ -53,3 +53,30 @@ already in progress. Shutdown stops further admission and drains the owned pass.
 error and publication evidence remain unchanged when admission is deferred; a skipped repair
 is not a successful render or proof that a publication was deleted. Interactive poll operations
 retain their existing exact access and publication guards.
+
+## Repeated unknown access results
+
+Repeated ambiguous access failures use a durable, exact-publication retry schedule:
+5, 10, 20, 40, 80, 160, 320 minutes, then at most six hours between attempts.
+Only consecutive ambiguous access results increase the count; an explicit access denial
+or other transport failure uses the existing five-minute delay. MAX admission and token
+cooldowns continue to apply. A timeout or 429 does not inherit a six-hour access delay.
+
+PostgreSQL stores the next attempt and the original message/bot identity. Background
+selection excludes waiting rows before its ten-item limit, so they cannot fill the batch.
+Votes and render-revision changes do not reset the wait. A replacement message or bot
+has its own schedule; a stale failure cannot update a replacement binding. Successful
+rendering clears retry state together with the guarded rendered-revision update. The
+bounded local/Redis five-minute cooldown remains a fallback if persistence fails.
+
+An explicitly authorized manual refresh may bypass the extended wait after the same
+five-minute minimum. It retains the ordinary access checks and never republishes the
+message. A failed manual attempt advances the same consecutive-failure schedule.
+Closed polls remain eligible for final-result repair. Unknown presence never closes a
+poll, clears its binding, removes bot rights or authorizes a replacement SEND.
+
+The column migration adds only nullable/constant-default columns without a history backfill.
+A separate concurrent partial index orders pending format-v7 repairs by their effective due
+time; delayed polls and rendered history do not require scans before admitting a batch.
+Presentation-format upgrades must update this index and the native history-plan regression. Previous runtime versions ignore these columns and keep their old retry
+frequency; rollback preserves publication identity and stored retry metadata.

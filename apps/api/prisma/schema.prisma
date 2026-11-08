@@ -1604,6 +1604,10 @@ model ManagedPoll {
   lockToken            String?               @map("lock_token")
   lastError            String?               @map("last_error")
   lastRenderError      String?               @map("last_render_error")
+  renderRetryCount     Int                   @default(0) @map("render_retry_count")
+  renderRetryAt        DateTime?             @map("render_retry_at")
+  renderRetryMessageId String?               @map("render_retry_message_id")
+  renderRetryBotId     String?               @map("render_retry_bot_id")
   createdAt            DateTime              @default(now()) @map("created_at")
   updatedAt            DateTime              @updatedAt @map("updated_at")
 

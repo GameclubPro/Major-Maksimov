@@ -1,3 +1,7 @@
+import {
+  managedPollRenderSelection,
+  MANAGED_POLL_RENDER_FORMAT_VERSION,
+} from './managed-poll-render-selection';
 import { resolveExplicitMembershipAccessDenial } from '../max/max-membership-access-error';
 import {
   createManagedPollRequestSchema,
@@ -107,9 +111,9 @@ const MANAGED_POLL_RENDER_REPAIR_DELAY_MS = 250;
 const MANAGED_POLL_BACKGROUND_REPAIR_BATCH_SIZE = 10;
 const MANAGED_POLL_BACKGROUND_REPAIR_DISPATCH_MS = 5_000;
 const MANAGED_POLL_BACKGROUND_RETRY_DELAY_MS = 5 * 60_000;
+const MANAGED_POLL_MAX_RETRY_DELAY_MS = 6 * 60 * 60_000;
 const MANAGED_POLL_RECENT_EVENT_HASH_LIMIT = 16;
 const MANAGED_POLL_AMBIGUOUS_PUBLICATION_ERROR = 'Публикация требует ручной проверки.';
-const MANAGED_POLL_RENDER_FORMAT_VERSION = 7;
 // FLAG: A dispatched send key must remain stable across render-only format upgrades.
 const MANAGED_POLL_SEND_IDEMPOTENCY_VERSION = 4;
 
@@ -141,6 +145,10 @@ const MANAGED_POLL_HOT_PATH_SELECT = {
   actorUserId: true,
   identitySalt: true,
   publicationBotId: true,
+  renderRetryCount: true,
+  renderRetryAt: true,
+  renderRetryMessageId: true,
+  renderRetryBotId: true,
   lockToken: true,
   chat: { select: { entityType: true } },
 } satisfies Prisma.ManagedPollSelect;
@@ -210,20 +218,13 @@ export class ManagedPollService {
     const decision = await this.pollRepairDecision();
     if (decision.action === 'pause') return 0;
     const dispatchUntil = performance.now() + MANAGED_POLL_BACKGROUND_REPAIR_DISPATCH_MS;
-    const retryBefore = new Date(Date.now() - MANAGED_POLL_BACKGROUND_RETRY_DELAY_MS);
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; chatId: string }>>`
-      SELECT "id", "chat_id" AS "chatId"
-      FROM "managed_polls"
-      WHERE "publication_message_id" IS NOT NULL
-        AND (
-          "rendered_revision" < "render_revision"
-          OR "render_format_version" < ${MANAGED_POLL_RENDER_FORMAT_VERSION}
-          OR "last_render_error" IS NOT NULL
-        )
-        AND ("last_render_error" IS NULL OR "updated_at" <= ${retryBefore})
-      ORDER BY "updated_at" ASC, "id" ASC
-      LIMIT ${MANAGED_POLL_BACKGROUND_REPAIR_BATCH_SIZE}
-    `;
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; chatId: string }>>(
+      managedPollRenderSelection(
+        new Date(),
+        MANAGED_POLL_RENDER_FORMAT_VERSION,
+        MANAGED_POLL_BACKGROUND_REPAIR_BATCH_SIZE,
+      ),
+    );
     let repaired = 0;
     let attempted = 0;
     for (const row of rows) {
@@ -1114,7 +1115,7 @@ export class ManagedPollService {
         if (outcome.needsRender) {
           if (engagement.state === 'inconclusive') {
             this.schedulePollRenderRepair(chatId, poll.id);
-          } else if (!(await this.markPollRendered(poll.id, poll.renderRevision))) {
+          } else if (!(await this.markPollRendered(poll))) {
             this.schedulePollRenderRepair(chatId, poll.id);
           }
         }
@@ -1361,8 +1362,12 @@ export class ManagedPollService {
       if (!poll.publicationMessageId) {
         return true;
       }
-      const retryKey = `managed-poll:render-backoff:v1:${poll.id}:${poll.publicationMessageId}`;
-      if (await this.isRenderBackoffActive(retryKey)) return false;
+      const retryKey = this.pollRenderRetryKey(poll);
+      if (
+        this.persistedRenderBackoffActive(poll, action) ||
+        (await this.isRenderBackoffActive(retryKey))
+      )
+        return false;
       const entityType = this.managedEntityTypeFromPrisma(poll.chat.entityType);
       let botId: string | null | undefined = poll.publicationBotId;
       let editAttemptStartedAt: Date | null = null;
@@ -1432,12 +1437,12 @@ export class ManagedPollService {
           }
           return false;
         }
-        if (await this.markPollRendered(poll.id, poll.renderRevision)) {
+        if (await this.markPollRendered(poll)) {
           return true;
         }
       } catch (error: unknown) {
         await this.verifyPollPublicationAfterEditFailure(poll, botId, entityType, error);
-        await this.deferPollRender(retryKey);
+        await this.deferPollRender(retryKey, poll, error);
         await this.recordPollRenderError(poll.id, poll.renderRevision, chatId, action, error);
         const status = (error as { response?: { status?: number } })?.response?.status;
         if (
@@ -1702,10 +1707,73 @@ export class ManagedPollService {
     }
   }
 
-  private async deferPollRender(key: string): Promise<void> {
+  private pollRenderRetryKey(
+    poll: Pick<PollHotPathItem, 'id' | 'publicationMessageId' | 'publicationBotId'>,
+  ): string {
+    return `managed-poll:render-backoff:v2:${poll.id}:${poll.publicationBotId ?? ''}:${poll.publicationMessageId}`;
+  }
+
+  private pollRenderRetryDelay(count: number): number {
+    return Math.min(
+      MANAGED_POLL_MAX_RETRY_DELAY_MS,
+      MANAGED_POLL_BACKGROUND_RETRY_DELAY_MS * 2 ** Math.max(0, Math.min(8, count) - 1),
+    );
+  }
+
+  private persistedRenderBackoffActive(poll: PollHotPathItem, action: string): boolean {
+    if (
+      !poll.renderRetryAt ||
+      poll.renderRetryMessageId !== poll.publicationMessageId ||
+      poll.renderRetryBotId !== poll.publicationBotId
+    )
+      return false;
+    const until = poll.renderRetryAt.getTime();
+    // FLAG: Only an explicitly authorized refresh bypasses the extended wait. Votes/revisions
+    // cannot reset an unresolved publication; the original five-minute floor still applies.
+    const allowedAt =
+      action === 'manual-refresh'
+        ? until -
+          this.pollRenderRetryDelay(poll.renderRetryCount) +
+          MANAGED_POLL_BACKGROUND_RETRY_DELAY_MS
+        : until;
+    return allowedAt > Date.now();
+  }
+
+  private async deferPollRender(key: string, poll: PollHotPathItem, error: unknown): Promise<void> {
+    const sameBinding =
+      poll.renderRetryMessageId === poll.publicationMessageId &&
+      poll.renderRetryBotId === poll.publicationBotId;
+    const ambiguous =
+      classifyMaxSendAutoDeleteVerificationCause(error).kind === 'access_ambiguous' &&
+      !resolveExplicitMembershipAccessDenial(error);
+    const count = ambiguous ? Math.min(8, (sameBinding ? poll.renderRetryCount : 0) + 1) : 0;
+    try {
+      const saved = await this.prisma.managedPoll.updateMany({
+        where: {
+          id: poll.id,
+          publicationMessageId: poll.publicationMessageId,
+          publicationBotId: poll.publicationBotId,
+          renderRetryCount: poll.renderRetryCount ?? 0,
+          renderRetryAt: poll.renderRetryAt ?? null,
+        },
+        data: {
+          renderRetryCount: count,
+          renderRetryAt: new Date(Date.now() + this.pollRenderRetryDelay(count)),
+          renderRetryMessageId: poll.publicationMessageId,
+          renderRetryBotId: poll.publicationBotId,
+        },
+      });
+      if (!saved.count) return;
+    } catch (storageError: unknown) {
+      this.logger.warn(
+        { pollId: poll.id, err: this.formatError(storageError) },
+        'Could not persist managed poll render retry; retaining short cooldown',
+      );
+    }
     const until = Date.now() + MANAGED_POLL_BACKGROUND_RETRY_DELAY_MS;
     // FLAG: A read/edit failure is unknown, not proof of deletion or lost bot rights.
-    // Cooldown survives another replica; SQL still owns repair and exact presence proof.
+    // SQL owns the extended wait across replicas/restarts; local/Redis cooldown is fallback.
+    // Binding-scoped CAS cannot delay a replacement publication or overwrite a newer retry.
     this.renderRetryUntil.set(key, until);
     if (this.renderRetryUntil.size > 2048)
       this.renderRetryUntil.delete(this.renderRetryUntil.keys().next().value!);
@@ -2512,15 +2580,32 @@ export class ManagedPollService {
     }
   }
 
-  private async markPollRendered(pollId: string, renderRevision: number): Promise<boolean> {
+  private async markPollRendered(poll: PollHotPathItem): Promise<boolean> {
+    const { id: pollId, renderRevision, publicationMessageId, publicationBotId } = poll;
     const updated = await this.prisma.managedPoll.updateMany({
-      where: { id: pollId, renderRevision },
+      where: {
+        id: pollId,
+        renderRevision,
+        publicationMessageId,
+        publicationBotId,
+        renderRetryCount: poll.renderRetryCount ?? 0,
+        renderRetryAt: poll.renderRetryAt ?? null,
+      },
       data: {
+        renderRetryCount: 0,
+        renderRetryAt: null,
+        renderRetryMessageId: null,
+        renderRetryBotId: null,
         renderedRevision: renderRevision,
         renderFormatVersion: MANAGED_POLL_RENDER_FORMAT_VERSION,
         lastRenderError: null,
       },
     });
+    if (updated.count > 0) {
+      const key = this.pollRenderRetryKey(poll);
+      this.renderRetryUntil.delete(key);
+      await this.redisCounter?.deleteKey(key).catch(() => undefined);
+    }
     return updated.count > 0;
   }
 
