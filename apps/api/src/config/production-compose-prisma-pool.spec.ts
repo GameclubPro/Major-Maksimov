@@ -57,6 +57,28 @@ describe('production compose Prisma pool caps', () => {
       expect(readEnvNumber(adminBlock, 'MANAGED_ENTITIES_READ_PRISMA_PG_POOL_MAX')).toBe(6);
     });
 
+    it('expands only main realtime compact-template capacity within a separate media budget', () => {
+      const realtime = new Set([
+        'api-moderation',
+        'api-moderation-realtime-b',
+        'api-moderation-realtime-c',
+        'api-moderation-realtime-d',
+      ]);
+      for (const service of Object.keys(API_SERVICE_POOL_CAPS)) {
+        const block = readServiceBlock(compose, service);
+        const expanded = _name === 'main' && realtime.has(service);
+        expect(readOptionalEnvNumber(block, 'CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES')).toBe(
+          expanded ? 72 * 1024 * 1024 : null,
+        );
+        expect(readOptionalEnvNumber(block, 'CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES')).toBe(
+          expanded ? 8 * 1024 * 1024 : null,
+        );
+        expect(readOptionalEnvNumber(block, 'CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES')).toBe(
+          expanded ? 8192 : null,
+        );
+      }
+    });
+
     it('bounds long statements on the webhook ingress role only', () => {
       for (const service of Object.keys(API_SERVICE_POOL_CAPS)) {
         const block = readServiceBlock(compose, service);

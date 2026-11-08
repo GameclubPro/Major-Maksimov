@@ -137,15 +137,77 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
   function makeCache(
     database: PrismaService = db as unknown as PrismaService,
     localTtlMs = 40,
+    limits: Record<string, number> = {},
   ): ChatContextCacheService {
     const cache = new ChatContextCacheService(
       database,
-      new ConfigService({ REDIS_URL: redisUrl, CHAT_CONTEXT_LOCAL_CACHE_TTL_MS: localTtlMs }),
+      new ConfigService({
+        REDIS_URL: redisUrl,
+        CHAT_CONTEXT_LOCAL_CACHE_TTL_MS: localTtlMs,
+        ...limits,
+      }),
       routing as unknown as MaxBotLinkService,
     );
     caches.push(cache);
     return cache;
   }
+
+  it('uses a bounded configured fleet budget and refreshes SQL proofs without reloading unchanged settings', async () => {
+    const ids = Array.from({ length: 24 }, (_, index) => `${chatId}-fleet-${index}`);
+    const cache = makeCache(undefined, 40, {
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES: 2 * 1024 * 1024,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES: 256 * 1024,
+      CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES: 32,
+    });
+    try {
+      for (const id of ids) {
+        for (const key of [
+          ChatContextCacheService.cacheKey(id),
+          ChatContextCacheService.cachedContextRevisionKey(id),
+          ChatContextCacheService.chatContextRevisionKey(id),
+        ])
+          ownedRedisKeys.add(key);
+        await db.chat.create({
+          data: {
+            id,
+            title: 'Fleet fixture',
+            settings: { create: { reportsAliases: ['x'.repeat(16_000)] } },
+            admins: { create: { userId } },
+          },
+        });
+        await cache.getChatContext(id);
+      }
+      expect(heavySettingsSelects).toBe(ids.length);
+      expect(cache.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
+        entries: ids.length,
+        maxBytes: 2 * 1024 * 1024,
+        maxEntries: 32,
+        segments: { maxCompactBytes: 1792 * 1024, maxMediaBytes: 256 * 1024 },
+      });
+      for (const id of ids) {
+        await cache.invalidate(id);
+        expect((await cache.getChatContext(id)).adminUserIds).toEqual([userId]);
+      }
+      expect(heavySettingsSelects).toBe(ids.length);
+      expect(cache.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
+        reuses: ids.length,
+        capacityEvictions: 0,
+      });
+      await db.chatSettings.update({
+        where: { chatId: ids[0]! },
+        data: { reportsAliases: ['changed'] },
+      });
+      await db.chatAdminAllowlist.deleteMany({ where: { chatId: ids[0]! } });
+      await cache.invalidate(ids[0]!);
+      expect(await cache.getChatContext(ids[0]!)).toMatchObject({
+        settings: { reportsAliases: ['changed'] },
+        adminUserIds: [],
+      });
+      expect(heavySettingsSelects).toBe(ids.length + 1);
+    } finally {
+      await db.chat.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
 
   it('reuses unchanged settings after refreshing title, bot binding, administrators, domains and rules', async () => {
     const cache = makeCache();

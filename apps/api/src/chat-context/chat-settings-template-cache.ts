@@ -5,6 +5,7 @@ import { CHAT_CONTEXT_MEDIA_FIELDS } from './chat-context-media-cache';
 
 type CacheOptions = {
   maxBytes?: number;
+  maxMediaBytes?: number;
   maxEntries?: number;
   maxEntryBytes?: number;
 };
@@ -81,8 +82,14 @@ export class ChatSettingsTemplateCache {
       positiveLimit(options.maxEntryBytes, DEFAULT_MAX_ENTRY_BYTES),
       this.maxBytes,
     );
-    this.maxMediaBytes =
+    const defaultMediaBytes =
       this.maxBytes >= 4 * MIN_SHARED_MEDIA_BYTES ? Math.floor(this.maxBytes / 2) : 0;
+    // FLAG: Expanding compact retention must not expand the independent media budget.
+    // Both segments still fit inside the same total estimated-byte ceiling.
+    this.maxMediaBytes = Math.min(
+      positiveLimit(options.maxMediaBytes, defaultMediaBytes),
+      this.maxBytes - 1,
+    );
     this.maxCompactBytes = this.maxBytes - this.maxMediaBytes;
     this.maxCompactEntryBytes = Math.min(MAX_COMPACT_ENTRY_BYTES, this.maxCompactBytes);
   }

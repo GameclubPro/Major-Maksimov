@@ -75,6 +75,173 @@ function nativeTransportFixture(
   };
 }
 
+describeRedis('MAX targeted member shared cache fill', () => {
+  function gate() {
+    let resolve = () => undefined as void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  it('shares a slow Redis fill, writes each member once and keeps bypass reads independent', async () => {
+    const fixture = nativeTransportFixture();
+    const { service, request, internals, botId } = fixture;
+    const chatId = `member-fill-${randomUUID()}`;
+    const cacheKey = `maxapi:cache:v1:chat-member-access:${botId}:${chatId}:user`;
+    request.mockReturnValue(
+      of({
+        status: 200,
+        data: {
+          members: [
+            { user_id: 'user', role: 'admin', is_admin: true, permissions: ['delete_message'] },
+          ],
+        },
+      }),
+    );
+    const filling = gate();
+    const release = gate();
+    const followerRead = gate();
+    const originalSet = internals.limiterRedis.set.bind(internals.limiterRedis);
+    const originalGet = internals.limiterRedis.get.bind(internals.limiterRedis);
+    let cacheReads = 0;
+    let writes = 0;
+    jest.spyOn(internals.limiterRedis, 'get').mockImplementation(async (...args) => {
+      const value = await originalGet(...args);
+      if (args[0] === cacheKey && ++cacheReads === 2) followerRead.resolve();
+      return value;
+    });
+    jest.spyOn(internals.limiterRedis, 'set').mockImplementation(async (...args) => {
+      if (args[0] === cacheKey) {
+        writes += 1;
+        filling.resolve();
+        await release.promise;
+      }
+      return originalSet(...args);
+    });
+    const lookups: ReturnType<MaxClientService['getChatMembersAccess']>[] = [];
+    try {
+      lookups.push(service.getChatMembersAccess(chatId, ['user']));
+      await filling.promise;
+      lookups.push(service.getChatMembersAccess(chatId, ['user']));
+      await followerRead.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(writes).toBe(1);
+      request.mockReturnValue(
+        of({ status: 200, data: { members: [{ user_id: 'user', role: 'member' }] } }),
+      );
+      const fresh = await service.getChatMembersAccess(chatId, ['user'], { bypassCache: true });
+      expect(fresh.get('user')?.isAdmin).toBe(false);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(writes).toBe(1);
+      release.resolve();
+      const [first, follower] = await Promise.all(lookups);
+      expect(first.get('user')?.isAdmin).toBe(true);
+      expect(follower).toEqual(first);
+      first.get('user')!.permissions.push('mutated');
+      expect(follower.get('user')?.permissions).toEqual(['delete_message']);
+      const cached = await service.getChatMembersAccess(chatId, ['user']);
+      expect(cached).toEqual(follower);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(writes).toBe(1);
+      expect(await internals.limiterRedis.ttl(cacheKey)).toBeGreaterThan(0);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(lookups);
+      await internals.limiterRedis.del(cacheKey);
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('shares partially filled and overlapping batches while returning only requested members', async () => {
+    const { service, request, internals, botId } = nativeTransportFixture();
+    const chatId = `member-batch-${randomUUID()}`;
+    const key = (id: string) => `maxapi:cache:v1:chat-member-access:${botId}:${chatId}:${id}`;
+    request.mockImplementation((config: { url: string }) => {
+      const ids = new URL(config.url, 'https://example.invalid').searchParams
+        .get('user_ids')!
+        .split(',');
+      return of({
+        status: 200,
+        data: { members: ids.map((user_id) => ({ user_id, role: 'member' })) },
+      });
+    });
+    const filling = gate();
+    const release = gate();
+    const independentFilled = gate();
+    const originalSet = internals.limiterRedis.set.bind(internals.limiterRedis);
+    const writes: string[] = [];
+    jest.spyOn(internals.limiterRedis, 'set').mockImplementation(async (...args) => {
+      if (args[0] === key('b')) {
+        filling.resolve();
+        await release.promise;
+      }
+      const result = await originalSet(...args);
+      if ([key('a'), key('b'), key('c')].includes(String(args[0]))) writes.push(String(args[0]));
+      if (args[0] === key('c')) independentFilled.resolve();
+      return result;
+    });
+    const lookups: ReturnType<MaxClientService['getChatMembersAccess']>[] = [];
+    try {
+      lookups.push(service.getChatMembersAccess(chatId, ['a', 'b']));
+      await filling.promise;
+      expect(await internals.limiterRedis.get(key('a'))).not.toBeNull();
+      lookups.push(service.getChatMembersAccess(chatId, ['b', 'a', 'c']));
+      lookups.push(service.getChatMembersAccess(chatId, ['b']));
+      await independentFilled.promise;
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(
+        new URL(request.mock.calls[1]![0].url, 'https://example.invalid').searchParams.get(
+          'user_ids',
+        ),
+      ).toBe('c');
+      release.resolve();
+      const [first, overlap, subset] = await Promise.all(lookups);
+      expect([...first.keys()].sort()).toEqual(['a', 'b']);
+      expect([...overlap.keys()].sort()).toEqual(['a', 'b', 'c']);
+      expect([...subset.keys()]).toEqual(['b']);
+      expect(writes.sort()).toEqual([key('a'), key('b'), key('c')].sort());
+    } finally {
+      release.resolve();
+      await Promise.allSettled(lookups);
+      await internals.limiterRedis.del(key('a'), key('b'), key('c'));
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('releases failed cache fills so a later lookup can load again', async () => {
+    const { service, request, internals, botId } = nativeTransportFixture();
+    const chatId = `member-failed-fill-${randomUUID()}`;
+    const key = `maxapi:cache:v1:chat-member-access:${botId}:${chatId}:user`;
+    request.mockReturnValue(
+      of({ status: 200, data: { members: [{ user_id: 'user', role: 'member' }] } }),
+    );
+    const originalSet = internals.limiterRedis.set.bind(internals.limiterRedis);
+    let fail = true;
+    jest.spyOn(internals.limiterRedis, 'set').mockImplementation(async (...args) => {
+      if (args[0] === key && fail) {
+        fail = false;
+        throw new Error('fixture cache write unavailable');
+      }
+      return originalSet(...args);
+    });
+    try {
+      await expect(service.getChatMembersAccess(chatId, ['user'])).rejects.toThrow(
+        'fixture cache write unavailable',
+      );
+      expect(await internals.limiterRedis.get(key)).toBeNull();
+      expect((await service.getChatMembersAccess(chatId, ['user'])).get('user')?.isAdmin).toBe(
+        false,
+      );
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      await internals.limiterRedis.del(key);
+      await service.onModuleDestroy();
+    }
+  });
+});
+
 describeRedis('MAX configured token burst pacing', () => {
   let redis: Redis;
   beforeAll(async () => {

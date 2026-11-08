@@ -4135,39 +4135,60 @@ export class MaxClientService implements OnModuleDestroy {
 
     for (let index = 0; index < missingUserIds.length; index += 100) {
       const chunk = missingUserIds.slice(index, index + 100);
-      const inFlightKey = this.buildChatMembersAccessInFlightKey(botId, normalizedChatId, chunk);
-      let fetchedAccess: Map<string, MaxChatMemberAccess>;
-      if (!options.bypassCache && this.chatMembersAccessInFlight.has(inFlightKey)) {
-        fetchedAccess = await this.chatMembersAccessInFlight.get(inFlightKey)!;
-      } else {
+      const loads = new Set<Promise<Map<string, MaxChatMemberAccess>>>();
+      const uncovered = chunk.filter((userId) => {
+        const existing = !options.bypassCache
+          ? this.chatMembersAccessInFlight.get(
+              this.buildChatMemberAccessCacheKey(botId, normalizedChatId, userId),
+            )
+          : undefined;
+        if (existing) loads.add(existing);
+        return !existing;
+      });
+      if (uncovered.length > 0) {
         const pending = this.fetchChatMembersAccessChunkUncached(
           normalizedChatId,
-          chunk,
+          uncovered,
           options,
           timeoutMs,
           failureObserver,
-        ).finally(() => {
-          if (this.chatMembersAccessInFlight.get(inFlightKey) === pending) {
-            this.chatMembersAccessInFlight.delete(inFlightKey);
-          }
-        });
+        )
+          .then(async (fetched) => {
+            // FLAG: Keep exact bot/chat/member aliases until cache fill really settles.
+            // Partial batch fills and overlapping callers must share the same GET and SETs;
+            // explicit fresh authorization bypasses both sharing and cache population.
+            if (!options.bypassCache)
+              for (const [userId, access] of fetched) {
+                await this.writeJsonCache(
+                  this.buildChatMemberAccessCacheKey(botId, normalizedChatId, userId),
+                  access,
+                  this.resolveChatMemberAccessCacheTtlSec(access),
+                );
+              }
+            return fetched;
+          })
+          .finally(() => {
+            for (const userId of uncovered) {
+              const key = this.buildChatMemberAccessCacheKey(botId, normalizedChatId, userId);
+              if (this.chatMembersAccessInFlight.get(key) === pending)
+                this.chatMembersAccessInFlight.delete(key);
+            }
+          });
         if (!options.bypassCache) {
-          this.chatMembersAccessInFlight.set(inFlightKey, pending);
+          for (const userId of uncovered)
+            this.chatMembersAccessInFlight.set(
+              this.buildChatMemberAccessCacheKey(botId, normalizedChatId, userId),
+              pending,
+            );
         }
-        fetchedAccess = await pending;
+        loads.add(pending);
       }
 
-      for (const [userId, access] of fetchedAccess.entries()) {
-        accessByUserId.set(userId, {
-          ...access,
-          permissions: [...access.permissions],
-        });
-        if (!options.bypassCache) {
-          await this.writeJsonCache(
-            this.buildChatMemberAccessCacheKey(botId, normalizedChatId, userId),
-            access,
-            this.resolveChatMemberAccessCacheTtlSec(access),
-          );
+      for (const fetched of await Promise.all(loads)) {
+        for (const userId of chunk) {
+          const access = fetched.get(userId);
+          if (access)
+            accessByUserId.set(userId, { ...access, permissions: [...access.permissions] });
         }
       }
     }
@@ -4588,14 +4609,6 @@ export class MaxClientService implements OnModuleDestroy {
 
   private buildChatMemberAccessCacheKey(botId: string, chatId: string, userId: string): string {
     return `maxapi:cache:v1:chat-member-access:${botId}:${chatId}:${userId}`;
-  }
-
-  private buildChatMembersAccessInFlightKey(
-    botId: string,
-    chatId: string,
-    userIds: readonly string[],
-  ): string {
-    return `${botId}:${chatId}:${userIds.join(',')}`;
   }
 
   private buildChatAdminIdsCacheKey(botId: string, chatId: string): string {

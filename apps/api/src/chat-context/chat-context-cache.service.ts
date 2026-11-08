@@ -393,7 +393,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   private readonly managedEntityBotProfileTtlSec: number;
   private readonly localChatContextCache: ChatContextLocalCache;
   private readonly mediaCache: ChatContextMediaCache;
-  private readonly settingsTemplates = new ChatSettingsTemplateCache();
+  private readonly settingsTemplates: ChatSettingsTemplateCache;
   private readonly settingsSourceActivity = { fullLoads: 0, shellReads: 0, reuses: 0 };
   private localChatContextSweepTimer: NodeJS.Timeout | null = null;
   private readonly chatContextInFlightLoads = new Map<string, Promise<ChatContext>>();
@@ -422,6 +422,14 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
         (configService as { get?: (key: string) => unknown }).get?.(key),
         fallback,
       );
+    this.settingsTemplates = new ChatSettingsTemplateCache({
+      maxBytes: readCacheLimit('CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYTES', 16 * 1024 * 1024),
+      maxMediaBytes: readCacheLimit(
+        'CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES',
+        8 * 1024 * 1024,
+      ),
+      maxEntries: readCacheLimit('CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES', 2048),
+    });
     this.localChatContextCache = new ChatContextLocalCache({
       ttlMs: localChatContextTtlMs,
       maxBytes: readCacheLimit('CHAT_CONTEXT_LOCAL_CACHE_MAX_BYTES', 128 * 1024 * 1024),
