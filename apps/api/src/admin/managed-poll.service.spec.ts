@@ -522,7 +522,14 @@ describe('ManagedPollService callback rendering', () => {
         boundObject: { kind: 'poll', id: 'poll-1' },
       }),
     );
-    expect(markRendered).toHaveBeenCalledWith('poll-1', 2);
+    expect(markRendered).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'poll-1',
+        renderRevision: 2,
+        publicationMessageId: 'message-1',
+        publicationBotId: 'bot-1',
+      }),
+    );
     expect(recordVote.mock.invocationCallOrder[0]).toBeLessThan(
       loadPollAggregate.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
@@ -1061,8 +1068,19 @@ describe('ManagedPollService callback rendering', () => {
       expect.objectContaining({ botId: 'bot-1', trafficClass: 'background' }),
     );
     expect(prisma.managedPoll.updateMany).toHaveBeenCalledWith({
-      where: { id: 'poll-1', renderRevision: 4 },
+      where: {
+        id: 'poll-1',
+        renderRevision: 4,
+        publicationMessageId: 'message-1',
+        publicationBotId: 'bot-1',
+        renderRetryCount: 0,
+        renderRetryAt: null,
+      },
       data: {
+        renderRetryCount: 0,
+        renderRetryAt: null,
+        renderRetryMessageId: null,
+        renderRetryBotId: null,
         renderedRevision: 4,
         renderFormatVersion: POLL_RENDER_FORMAT_VERSION,
         lastRenderError: null,
@@ -1124,8 +1142,19 @@ describe('ManagedPollService callback rendering', () => {
       expect.objectContaining({ botId: 'bot-1', trafficClass: 'background' }),
     );
     expect(prisma.managedPoll.updateMany).toHaveBeenCalledWith({
-      where: { id: 'poll-1', renderRevision: 4 },
+      where: {
+        id: 'poll-1',
+        renderRevision: 4,
+        publicationMessageId: 'message-1',
+        publicationBotId: 'bot-1',
+        renderRetryCount: 0,
+        renderRetryAt: null,
+      },
       data: {
+        renderRetryCount: 0,
+        renderRetryAt: null,
+        renderRetryMessageId: null,
+        renderRetryBotId: null,
         renderedRevision: 4,
         renderFormatVersion: POLL_RENDER_FORMAT_VERSION,
         lastRenderError: null,
@@ -1770,8 +1799,19 @@ describe('ManagedPollService callback rendering', () => {
       expect.objectContaining({ botId: 'bot-1' }),
     );
     expect(prisma.managedPoll.updateMany).toHaveBeenCalledWith({
-      where: { id: 'poll-1', renderRevision: 2 },
+      where: {
+        id: 'poll-1',
+        renderRevision: 2,
+        publicationMessageId: 'message-1',
+        publicationBotId: 'bot-1',
+        renderRetryCount: 0,
+        renderRetryAt: null,
+      },
       data: {
+        renderRetryCount: 0,
+        renderRetryAt: null,
+        renderRetryMessageId: null,
+        renderRetryBotId: null,
         renderedRevision: 2,
         renderFormatVersion: POLL_RENDER_FORMAT_VERSION,
         lastRenderError: null,
@@ -4275,10 +4315,10 @@ describe('ManagedPollService background render repair', () => {
     expect(render).toHaveBeenNthCalledWith(1, 'chat-1', 'poll-1', 'background-repair');
     expect(render).toHaveBeenNthCalledWith(2, 'channel-1', 'poll-2', 'background-repair');
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
-    const query = prisma.$queryRaw.mock.calls[0]?.[0]?.join(' ');
+    const query = prisma.$queryRaw.mock.calls[0]?.[0]?.sql;
     expect(query).toContain('WHERE "publication_message_id" IS NOT NULL');
     expect(query).toContain('OR "render_format_version" <');
     expect(query).toContain('OR "last_render_error" IS NOT NULL');
-    expect(prisma.$queryRaw.mock.calls[0]?.[1]).toBe(POLL_RENDER_FORMAT_VERSION);
+    expect(prisma.$queryRaw.mock.calls[0]?.[0]?.values[0]).toBe(POLL_RENDER_FORMAT_VERSION);
   });
 });
