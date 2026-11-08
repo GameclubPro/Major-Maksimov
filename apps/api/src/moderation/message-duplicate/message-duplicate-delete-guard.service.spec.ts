@@ -1857,12 +1857,18 @@ describe('queued duplicate explanation authority', () => {
       expiresAtMs: Date.now() + 3_600_000,
     });
     const receipt = {
+      id: 'intent',
+      status: 'SUCCEEDED',
+      remoteDeleteSucceededBotId: 'bot',
+      succeededBotId: 'bot',
       chatId: s.params.chatId,
       messageId: s.params.messageId,
       subjectUserId: s.binding.senderId,
       remoteDeleteSucceededAt: new Date(),
       reasons: [
         {
+          reasonKey: `MESSAGE_DUPLICATE:v1:${s.binding.eventTimestampMs}`,
+          userId: s.binding.senderId,
           ruleCode: 'DUPLICATE_DELETE',
           createdAt: new Date(Date.now() - 1_000),
           metadata: {
@@ -1897,6 +1903,65 @@ describe('queued duplicate explanation authority', () => {
     expect(s.prisma.moderationDeleteIntent.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'intent' } }),
     );
+  });
+
+  it.each([{}, { code: 'not.found' }])(
+    'authorizes a queued explanation with a generic current GET 404 %j only from its own DELETE receipt',
+    async (data) => {
+      const s = noticeFixture();
+      const error = { response: { status: 404, data } };
+      s.max.getExactMessageRow.mockRejectedValue(error);
+      await expect(s.service.assertMessageStillActionable(s.request)).resolves.toBe('allowed');
+      expect(s.originalLookup).toHaveBeenCalledTimes(1);
+      expect(s.history.stillMatches).toHaveBeenLastCalledWith(s.params.chatId, s.binding, true);
+      expect(s.binding.sanction).toBeUndefined();
+    },
+  );
+
+  it.each([
+    'wrong-intent',
+    'unfinished',
+    'unverified',
+    'missing-executor',
+    'wrong-executor',
+    'unregistered-executor',
+    'wrong-reason-key',
+    'wrong-reason-user',
+    'future-clock',
+  ])('retains generic current GET 404 when the notice receipt is %s', async (change) => {
+    const s = noticeFixture();
+    const error = { response: { status: 404, data: { code: 'not.found' } } };
+    s.max.getExactMessageRow.mockRejectedValue(error);
+    if (change === 'wrong-intent') s.receipt.id = 'other';
+    if (change === 'unfinished') s.receipt.status = 'PENDING';
+    if (change === 'unverified') s.receipt.reasons[0]!.metadata.moderationDeleteVerified = false;
+    if (change === 'missing-executor') s.receipt.remoteDeleteSucceededBotId = '';
+    if (change === 'wrong-executor') s.receipt.succeededBotId = 'peer';
+    if (change === 'unregistered-executor')
+      s.bots.isRegisteredModerationBotId.mockReturnValue(false);
+    if (change === 'wrong-reason-key') s.receipt.reasons[0]!.reasonKey = 'other';
+    if (change === 'wrong-reason-user') s.receipt.reasons[0]!.userId = 'other';
+    if (change === 'future-clock')
+      s.receipt.remoteDeleteSucceededAt = new Date(Date.now() + 60_000);
+    await expect(s.service.assertMessageStillActionable(s.request)).rejects.toBe(error);
+    expect(s.originalLookup).not.toHaveBeenCalled();
+    expect(s.history.stillMatches).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['current', 403, 'access.denied'],
+    ['current', 404, 'chat.not.found'],
+    ['current', 503, 'unavailable'],
+    ['original', 404, 'not.found'],
+    ['author', 404, 'not.found'],
+  ])('keeps notice %s GET %i %s strict despite its own DELETE', async (source, status, code) => {
+    const s = noticeFixture();
+    const error = { response: { status, data: { code } } };
+    if (source === 'current') s.max.getExactMessageRow.mockRejectedValue(error);
+    if (source === 'original') s.originalLookup.mockRejectedValue(error);
+    if (source === 'author') s.max.getChatMemberAccess.mockRejectedValue(error);
+    await expect(s.service.assertMessageStillActionable(s.request)).rejects.toBe(error);
+    expect(s.history.stillMatches).not.toHaveBeenCalled();
   });
 
   it('rejects an absent hit when a length DELETE succeeded but the duplicate reason was revoked', async () => {

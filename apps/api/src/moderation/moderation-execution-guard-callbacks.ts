@@ -527,7 +527,6 @@ export function resolveModerationMuteDurationHours(
   >,
 ): number {
   if (ruleCode === 'LINK_BLOCKED') return settings.linkMuteDurationHours;
-  if (ruleCode === 'PHONE_NUMBER_BLOCKED') return settings.phoneNumbersMuteDurationHours;
   if (ruleCode === REQUIRED_SUBSCRIPTION_RULE_CODE)
     return settings.requiredSubscriptionMuteDurationHours;
   if (ruleCode === INVITATION_ACCESS_RULE_CODE) return settings.invitationAccessMuteDurationHours;

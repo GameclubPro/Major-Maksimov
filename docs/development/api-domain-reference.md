@@ -324,6 +324,13 @@ Statistics exchange does not grant advertising or shop authority.
   DELETE guard use `extractBlockedPhoneNumbers`. Keep the legacy broad numeric signal used for
   duplicate admission and the separate conservative duplicate-phone identity unchanged. Cover
   exemptions, mixed real phones, source edits and independent delete reasons before changing this policy.
+- Phone blocking uses the visible Limits actions: explanation/warning templates, buttons,
+  contacts, WARN/MUTE/BAN stages, mute duration and the 12-hour per-rule counter. Retained
+  `phoneNumbers*` action fields are compatibility storage only; `phoneNumbersEnabled` still
+  controls detection. Phone DELETE/follow-up fingerprints bind the common action switches,
+  so old or changed policies cannot authorize delayed effects. The hidden legacy phone
+  editor and section-copy paths edit those same common actions. Cover both conflicting
+  legacy flags and the native mirrored DELETE → explanation/WARN/MUTE/BAN continuation.
 - Message-limit state deadlines report one best-effort outcome for the fixed burst/count/photo/
   sticker rule. Unknown state proves no violation. Only the Redis counter's own readiness refusal
   before any mutating dispatch may skip that rule and continue independent content checks;
@@ -344,6 +351,14 @@ Statistics exchange does not grant advertising or shop authority.
 - A typed unavailable source read during duplicate qualification retains the exact owner for bounded retry. Deferred text qualification explicitly writes `comparison=TEXT` to the existing base queue identity; IMAGE keeps its separate identity and media workers keep their own job. An absent comparison preserves the MESSAGE media path, independent of saved chat selectors. Preserve original deadlines, final source/policy/immunity guards and SQL cleanup obligations; never replay the whole webhook or treat queue acceptance as deletion. See [duplicate rollout](../operations/runbooks/message-duplicate-rollout.md).
 - Duplicate windows use the shared contracts resolver with a 48-hour maximum. History v4 uses Redis-clock-bounded absolute expiry, preserves earlier expiry on replay/qualification, and retains v3 reset/removal fences while isolating positive history. Parser-aligned source selection preserves webhook identity/deadlines through their explicit v1 projection. Storage-version transitions revoke all old evidence, including IMAGE, without changing raster hashes. Constant-size lifecycle materialization provenance must survive state loss and invalidate; unchanged or unverified old content cannot rebuild a baseline across reset epochs, including accepted future timestamps. Never shorten durable action revocation or sanction idempotency to the comparison window. Optional photo proof-cache Redis uses its own fail-fast connection and retires timed-out inflight queues; authority/history connections must remain independent.
 - Duplicate final transport guards recheck the original history binding after quota/route/payload waits, before the final SQL/Redis authorization read. A history reset or lifecycle invalidation does not revoke the separate ordering grant. Preserve the early history check and immunity consumption order; the final recheck performs no MAX reads. Native reset and final SQL policy coverage live in `message-duplicate-flow.redis-integration.spec.ts` and `message-duplicate-sanction-receipt-postgres.spec.ts`.
+- A queued duplicate explanation may use its exact successful v3 DELETE receipt when the
+  current-message GET returns a bare/generic `404 not.found`. The 404 itself proves no absence:
+  require a finished intent, verified duplicate reason, matching full binding, registered
+  successful executor and valid clocks. Current author, original-message, history/reset,
+  settings, route and source-deadline checks remain mandatory. Other read failures and
+  attempted/ambiguous mutations remain fenced; failed old notices are never replayed.
+  Regressions: `message-duplicate-delete-guard.service.spec.ts` and native
+  `webhook-multibot-duplicate-notices-fullpath.spec.ts`.
 - Allowlist `DOMAIN` matches the host and subdomains; `EXACT` remains URL-specific.
 - Sanction-register retention, release identity and MAX activity paging follow the
   [maintained contract and regression map](feature-regressions.md#sanctions-and-participant-activity).

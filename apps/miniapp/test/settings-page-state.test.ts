@@ -29,6 +29,23 @@ function createSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
   };
 }
 
+test('phone section saves the same actions as Limits and leaves retired fields untouched', () => {
+  const saved = createSettings({ phoneNumbersBotMessageEnabled: false });
+  const draft = createSettings({
+    phoneNumbersEnabled: false,
+    messageLimitsBotMessageEnabled: true,
+    messageLimitsWarnEnabled: true,
+    messageLimitsBotMessageText: 'Общее объяснение',
+  });
+  assert.equal(hasSectionSettingChanges(draft, saved, 'phones'), true);
+  const merged = mergeSectionSettings(saved, draft, 'phones');
+  assert.equal(merged.phoneNumbersEnabled, false);
+  assert.equal(merged.messageLimitsBotMessageEnabled, true);
+  assert.equal(merged.messageLimitsWarnEnabled, true);
+  assert.equal(merged.messageLimitsBotMessageText, 'Общее объяснение');
+  assert.equal(merged.phoneNumbersBotMessageEnabled, false);
+});
+
 test('retired message comparison mode does not dirty or overwrite the duplicate section', () => {
   const saved = createSettings({ duplicateCompareMode: 'MESSAGE' });
   const draft = createSettings({ duplicateCompareMode: 'TEXT' });

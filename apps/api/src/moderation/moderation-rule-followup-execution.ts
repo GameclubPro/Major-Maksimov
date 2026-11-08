@@ -72,15 +72,15 @@ export async function executeModerationRuleFollowUp(
           updateType,
         })
       : null;
-  const isPhoneNumberHit = topViolation.ruleCode === 'PHONE_NUMBER_BLOCKED';
   const isTextFilterHit =
     host.isTextFilterViolation(topViolation.ruleCode) && !isCommercialReviewOnly;
   const isEscalatingTextFilterHit =
     isTextFilterHit &&
     (topViolation.ruleCode !== 'PROFANITY' ||
       topViolation.score >= PROFANITY_AUTOMATIC_ESCALATION_MIN_SCORE);
-  const isMessageLimitsHit =
-    host.isMessageLimitsViolation(topViolation.ruleCode) && !isPhoneNumberHit;
+  // FLAG: Phone blocking uses the visible Limits actions, including their templates and window.
+  // Retained phone-specific fields cannot silently enable a separate sanction policy.
+  const isMessageLimitsHit = host.isMessageLimitsViolation(topViolation.ruleCode);
   const messageLimitsBlockedWord = extractMessageLimitsBlockedToken(topViolation.metadata);
   const textFilterEscalationSettings = isTextFilterHit
     ? host.resolveTextFilterEscalationSettings(topViolation.ruleCode, settings)
@@ -110,18 +110,6 @@ export async function executeModerationRuleFollowUp(
         rulesPublishedMessageId,
       )
     : null;
-  const phoneNumbersMessageOptions = isPhoneNumberHit
-    ? host.buildBotMessageOptions(
-        chatId,
-        [],
-        false,
-        '',
-        '',
-        settings.rulesAttachViolationsEnabled,
-        rulesPublishedUrl,
-        rulesPublishedMessageId,
-      )
-    : null;
   const textFilterViolationCount24h = isEscalatingTextFilterHit
     ? await host.countRecentTextFilterViolations(chatId, senderId, topViolation.ruleCode, {
         messageId,
@@ -134,15 +122,6 @@ export async function executeModerationRuleFollowUp(
         messageId,
         updateType,
       })))
-    : null;
-  const phoneNumbersViolationCount = isPhoneNumberHit
-    ? (durable?.plan.violationCount ??
-      (await host.countRecentPhoneNumberViolations(
-        chatId,
-        senderId,
-        settings.phoneNumbersEscalationWindowHours,
-        { messageId, updateType },
-      )))
     : null;
   let action: SanctionAction = durable?.plan.action ?? SanctionAction.NONE;
   const sendChatBotMessage = async (
@@ -187,15 +166,6 @@ export async function executeModerationRuleFollowUp(
         warnMaxCount: settings.linkWarnMaxCount,
         muteMaxCount: settings.linkMuteMaxCount,
         banMaxCount: settings.linkBanMaxCount,
-      });
-    } else if (isPhoneNumberHit) {
-      action = host.resolveConfiguredEscalationAction(phoneNumbersViolationCount ?? 1, {
-        warnEnabled: settings.phoneNumbersWarnEnabled,
-        banEnabled: settings.phoneNumbersBanEnabled,
-        muteEnabled: settings.phoneNumbersMuteEnabled,
-        warnMaxCount: settings.phoneNumbersWarnMaxCount,
-        muteMaxCount: settings.phoneNumbersMuteMaxCount,
-        banMaxCount: settings.phoneNumbersBanMaxCount,
       });
     } else if (isEscalatingTextFilterHit) {
       action = host.resolveTextFilterEscalationAction(textFilterViolationCount24h ?? 1, {
@@ -248,7 +218,6 @@ export async function executeModerationRuleFollowUp(
     topViolation.ruleCode === 'LINK_BLOCKED' && linkViolationCount24h === 1;
   const isFirstTextFilterViolation = isEscalatingTextFilterHit && textFilterViolationCount24h === 1;
   const isFirstMessageLimitsViolation = isMessageLimitsHit && messageLimitsViolationCount12h === 1;
-  const isFirstPhoneNumberViolation = isPhoneNumberHit && phoneNumbersViolationCount === 1;
 
   if (topViolation.ruleCode === 'LINK_BLOCKED') {
     if (action === SanctionAction.NONE && isFirstLinkViolation && settings.linkBotMessageEnabled) {
@@ -308,71 +277,6 @@ export async function executeModerationRuleFollowUp(
             error: error instanceof Error ? error.message : 'Unknown error',
           },
           'Failed to send link warning message',
-        );
-      }
-    }
-  }
-
-  if (isPhoneNumberHit) {
-    if (
-      action === SanctionAction.NONE &&
-      isFirstPhoneNumberViolation &&
-      settings.phoneNumbersBotMessageEnabled
-    ) {
-      try {
-        await sendChatBotMessage(
-          await host.appendAdminContactMarkdownLink(
-            chatId,
-            host.buildPhoneNumbersExplanation(
-              userLabel,
-              messageDeleted,
-              settings.phoneNumbersBotMessageText,
-              settings.botSpeechStyle,
-            ),
-            settings.phoneNumbersAdminContactButtonEnabled,
-            settings.phoneNumbersAdminContactButtonUrl,
-          ),
-          phoneNumbersMessageOptions ?? undefined,
-          'phoneNumbersBotMessageText',
-        );
-      } catch (error: unknown) {
-        if (durable) throw error;
-        host.logger.warn(
-          {
-            chatId,
-            userId: senderId,
-            messageId,
-            error: error instanceof Error ? error.message : 'Unknown error',
-          },
-          'Failed to send phone number explanation message',
-        );
-      }
-    } else if (action === SanctionAction.WARN) {
-      try {
-        await sendChatBotMessage(
-          await host.appendAdminContactMarkdownLink(
-            chatId,
-            host.buildMessageLimitsWarnExplanation(
-              userLabel,
-              topViolation.ruleCode,
-              null,
-              settings.botSpeechStyle,
-            ),
-            settings.phoneNumbersAdminContactButtonEnabled,
-            settings.phoneNumbersAdminContactButtonUrl,
-          ),
-          phoneNumbersMessageOptions ?? undefined,
-        );
-      } catch (error: unknown) {
-        if (durable) throw error;
-        host.logger.warn(
-          {
-            chatId,
-            userId: senderId,
-            messageId,
-            error: error instanceof Error ? error.message : 'Unknown error',
-          },
-          'Failed to send phone number warning message',
         );
       }
     }
@@ -556,12 +460,6 @@ export async function executeModerationRuleFollowUp(
                 linkEscalationWindowHours: settings.linkEscalationWindowHours,
               }
             : {}),
-          ...(isPhoneNumberHit && phoneNumbersViolationCount !== null
-            ? {
-                phoneNumbersViolationCount,
-                phoneNumbersEscalationWindowHours: settings.phoneNumbersEscalationWindowHours,
-              }
-            : {}),
           ...(isTextFilterHit && textFilterViolationCount24h !== null
             ? {
                 textFilterViolationCount24h,
@@ -599,35 +497,25 @@ export async function executeModerationRuleFollowUp(
       botMessageOptions: withMarketplaceModerationMessage(
         topViolation.ruleCode === 'LINK_BLOCKED'
           ? (linkMessageOptions ?? undefined)
-          : isPhoneNumberHit
-            ? (phoneNumbersMessageOptions ?? undefined)
-            : isMessageLimitsHit
-              ? (limitsMessageOptions ?? undefined)
-              : isTextFilterHit
-                ? (textFilterMessageOptions ?? undefined)
-                : undefined,
+          : isMessageLimitsHit
+            ? (limitsMessageOptions ?? undefined)
+            : isTextFilterHit
+              ? (textFilterMessageOptions ?? undefined)
+              : undefined,
         chatId,
         'MODERATION_NOTICE',
         marketplaceModuleForRule(topViolation.ruleCode),
       ),
       sanctionNoticeText:
-        isPhoneNumberHit && action === SanctionAction.BAN
+        isMessageLimitsHit && action === SanctionAction.BAN
           ? host.buildMessageLimitsBanExplanation(
               userLabel,
               topViolation.ruleCode,
               actionMuteDurationHours,
-              null,
+              messageLimitsBlockedWord,
               settings.botSpeechStyle,
             )
-          : isMessageLimitsHit && action === SanctionAction.BAN
-            ? host.buildMessageLimitsBanExplanation(
-                userLabel,
-                topViolation.ruleCode,
-                actionMuteDurationHours,
-                messageLimitsBlockedWord,
-                settings.botSpeechStyle,
-              )
-            : undefined,
+          : undefined,
       botSpeechStyle: settings.botSpeechStyle,
       persistModerationEvent,
     });
@@ -699,32 +587,6 @@ export async function executeModerationRuleFollowUp(
             error: error instanceof Error ? error.message : 'Unknown error',
           },
           'Failed to send message limits mute message',
-        );
-      }
-    }
-
-    if (isPhoneNumberHit && action === SanctionAction.MUTE) {
-      try {
-        await sendChatBotMessage(
-          host.buildMessageLimitsMuteExplanation(
-            userLabel,
-            topViolation.ruleCode,
-            null,
-            settings.botSpeechStyle,
-          ),
-          phoneNumbersMessageOptions ?? undefined,
-        );
-      } catch (error: unknown) {
-        if (durable) throw error;
-        host.logger.warn(
-          {
-            chatId,
-            userId: senderId,
-            messageId,
-            ruleCode: topViolation.ruleCode,
-            error: error instanceof Error ? error.message : 'Unknown error',
-          },
-          'Failed to send phone number mute message',
         );
       }
     }

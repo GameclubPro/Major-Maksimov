@@ -395,6 +395,60 @@ describeStores(
       },
     );
 
+    it.each([undefined, 'not.found'])(
+      'delivers one durable explanation after confirmed DELETE despite generic current GET 404 %s',
+      async (code) => {
+        const f = await realDuplicate(4);
+        f.s.messageLookupFailures.set(f.duplicateId, { status: 404, code });
+        await f.s.demote(f.chatId, f.s.bots[0]!.id);
+        await expect(f.deliver()).resolves.toBeNull();
+        expect(f.s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+        expect(f.s.effects.filter((effect) => effect.method === 'post')).toHaveLength(1);
+        expect(
+          await f.s.prisma.maxActionLedgerEntry.count({
+            where: { chatId: f.chatId, actionType: 'SEND_MESSAGE', status: 'SUCCEEDED' },
+          }),
+        ).toBe(1);
+      },
+    );
+
+    it.each(['unverified-reason', 'unfinished-receipt', 'original-unavailable', 'history-reset'])(
+      'refuses generic current GET 404 when notice evidence is %s',
+      async (change) => {
+        const f = await realDuplicate(4);
+        f.s.messageLookupFailures.set(f.duplicateId, { status: 404, code: 'not.found' });
+        if (change === 'unverified-reason') {
+          const reason = f.intent.reasons[0]!;
+          await f.s.prisma.moderationDeleteIntentReason.update({
+            where: { id: reason.id },
+            data: { metadata: { ...(reason.metadata as object), moderationDeleteVerified: false } },
+          });
+        }
+        if (change === 'unfinished-receipt')
+          await f.s.prisma.moderationDeleteIntent.update({
+            where: { id: f.intent.id },
+            data: { status: 'PENDING' },
+          });
+        if (change === 'original-unavailable') {
+          f.s.messages.delete(f.originalId);
+          f.s.messageLookupFailures.set(f.originalId, { status: 404, code: 'not.found' });
+        }
+        if (change === 'history-reset') {
+          await f.s.prisma.chatSettings.update({
+            where: { chatId: f.chatId },
+            data: { antiDuplicateEnabled: false },
+          });
+          await f.s.prisma.chatSettings.update({
+            where: { chatId: f.chatId },
+            data: { antiDuplicateEnabled: true },
+          });
+        }
+        await expect(f.deliver()).rejects.toThrow();
+        expect(f.s.effects.filter((effect) => effect.method === 'post')).toHaveLength(0);
+        expect(f.s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+      },
+    );
+
     it.each(['disabled', 'history-reset', 'original-edit'])(
       'rejects a queued explanation after %s without another HTTP SEND',
       async (change) => {

@@ -63,6 +63,7 @@ const messageLimitsModerationActive: EffectiveParent = (settings) =>
   !settings.fileMessagesEnabled ||
   !settings.voiceMessagesEnabled ||
   !settings.forwardedMessagesEnabled ||
+  !settings.phoneNumbersEnabled ||
   settings.messageLimitsBlockedWords.length > 0 ||
   settings.messageLimitsBlockedDomains.length > 0;
 
@@ -90,9 +91,6 @@ const WRITE_SUBFEATURES = [
   ['messageLimitsBotMessageEnabled', messageLimitsModerationActive],
   ['messageLimitsWarnEnabled', messageLimitsModerationActive],
   ['messageLimitsMuteEnabled', messageLimitsModerationActive],
-  ['phoneNumbersBotMessageEnabled', (settings: ChatSettings) => !settings.phoneNumbersEnabled],
-  ['phoneNumbersWarnEnabled', (settings: ChatSettings) => !settings.phoneNumbersEnabled],
-  ['phoneNumbersMuteEnabled', (settings: ChatSettings) => !settings.phoneNumbersEnabled],
   ['nightModeBotMessageEnabled', (settings: ChatSettings) => settings.nightModeEnabled],
   ['nightModeOpenMessageEnabled', (settings: ChatSettings) => settings.nightModeEnabled],
   [
@@ -125,7 +123,6 @@ const MEMBER_MANAGEMENT_SUBFEATURES = [
   ['textFiltersBanEnabled', (settings: ChatSettings) => settings.commercialAdsFilterEnabled],
   ['duplicateBanEnabled', duplicateModerationActive],
   ['messageLimitsBanEnabled', messageLimitsModerationActive],
-  ['phoneNumbersBanEnabled', (settings: ChatSettings) => !settings.phoneNumbersEnabled],
   [
     'requiredSubscriptionBanEnabled',
     (settings: ChatSettings) => settings.requiredSubscriptionEnabled,
@@ -150,6 +147,7 @@ const MESSAGE_LIMITS_PARENT_FEATURE_KEYS = [
   'forwardedMessagesEnabled',
   'messageLimitsBlockedWords',
   'messageLimitsBlockedDomains',
+  'phoneNumbersEnabled',
 ] as const satisfies readonly (keyof ChatSettings)[];
 
 export const CHAT_SETTINGS_BOT_CAPABILITY_SELECT = {
@@ -373,11 +371,6 @@ export function resolveChatSettingsBotCapabilityRequirements(params: {
     !messageLimitsModerationActive(params.current) && messageLimitsModerationActive(params.next),
     params.next.messageLimitsBanEnabled,
     MESSAGE_LIMITS_PARENT_FEATURE_KEYS,
-  );
-  addActivatedParentMemberRequirements(
-    params.current.phoneNumbersEnabled && !params.next.phoneNumbersEnabled,
-    params.next.phoneNumbersBanEnabled,
-    ['phoneNumbersEnabled'],
   );
   addActivatedParentMemberRequirements(
     !params.current.requiredSubscriptionEnabled && params.next.requiredSubscriptionEnabled,

@@ -158,3 +158,20 @@ test('supplementary settings keep their own paths and canonical field validation
     ),
   );
 });
+
+test('phone section edits common Limits actions and their media', () => {
+  assert.equal(
+    registry.parseSettingsField('chat', 'phones', 'messageLimitsBotMessageEnabled', true),
+    true,
+  );
+  assert.equal(
+    registry.parseSettingsField('chat', 'phones', 'messageLimitsWarnEnabled', false),
+    false,
+  );
+  assert.ok(
+    settingsSectionPaths('chat', 'phones').includes('botSpeechMedia.messageLimitsBotMessageText'),
+  );
+  assert.throws(() =>
+    registry.parseSettingsField('chat', 'phones', 'phoneNumbersBotMessageEnabled', true),
+  );
+});

@@ -15,6 +15,33 @@ function resolveRequirements(
 }
 
 describe('resolveChatSettingsBotCapabilityRequirements', () => {
+  it('requires common action rights when only phone blocking is active', () => {
+    const quiet = {
+      antiSpamEnabled: false,
+      maxMessageLengthEnabled: false,
+      messageCountLimitEnabled: false,
+      photoMessageCooldownEnabled: false,
+      stickerMessageCooldownEnabled: false,
+      phoneNumbersEnabled: false,
+    };
+    expect(resolveRequirements(quiet, { messageLimitsBotMessageEnabled: true })).toContainEqual({
+      permission: 'write',
+      featureKeys: ['messageLimitsBotMessageEnabled'],
+    });
+    expect(resolveRequirements(quiet, { messageLimitsBanEnabled: true })).toContainEqual({
+      permission: 'add_remove_members',
+      featureKeys: ['messageLimitsBanEnabled'],
+    });
+    expect(
+      resolveRequirements(
+        { ...quiet, phoneNumbersEnabled: true, messageLimitsBanEnabled: true },
+        { phoneNumbersEnabled: false },
+      ),
+    ).toContainEqual({
+      permission: 'add_remove_members',
+      featureKeys: ['phoneNumbersEnabled'],
+    });
+  });
   it('requires link write and retained ban rights when a new selected policy becomes active', () => {
     expect(
       resolveRequirements(
