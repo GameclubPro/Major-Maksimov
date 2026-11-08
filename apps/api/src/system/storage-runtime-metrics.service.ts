@@ -99,6 +99,16 @@ const SETTINGS_TEMPLATE_FIELDS = [
   'shellReads',
   'reuses',
 ] as const;
+const SETTINGS_TEMPLATE_SEGMENT_FIELDS = [
+  'compactBytes',
+  'maxCompactBytes',
+  'maxCompactEntryBytes',
+  'mediaBytes',
+  'maxMediaBytes',
+  'mediaEntries',
+  'sharedMediaReuses',
+  'mediaCapacityEvictions',
+] as const;
 const DELETE_AUTHOR_FIELDS = ['roster', 'protected', 'legacy', 'membership', 'shared'] as const;
 const VK_FIELDS = [
   'batches',
@@ -146,6 +156,17 @@ function checkedNumbers(value: unknown, fields: readonly string[]): Record<strin
   )
     return null;
   return Object.fromEntries(fields.map((field) => [field, source[field] as number]));
+}
+
+function sanitizeSettingsTemplates(value: unknown) {
+  const counters = checkedNumbers(value, SETTINGS_TEMPLATE_FIELDS);
+  if (!counters) return null;
+  const segments = checkedNumbers(
+    (value as Record<string, unknown>).segments,
+    SETTINGS_TEMPLATE_SEGMENT_FIELDS,
+  );
+  // FLAG: Older writers remain readable; absent segment metrics never imply empty media.
+  return { ...counters, ...(segments ? { segments } : {}) };
 }
 
 function sanitizeChatContextActivity(value: unknown) {
@@ -282,9 +303,8 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
           ),
           // FLAG: Older reports lack template measurements. Preserve their context counters
           // while keeping missing or corrupt settings-cache coverage explicitly unavailable.
-          settingsTemplates: checkedNumbers(
+          settingsTemplates: sanitizeSettingsTemplates(
             (source.chatContextCache as Record<string, unknown>).settingsTemplates,
-            SETTINGS_TEMPLATE_FIELDS,
           ),
         }
       : null,

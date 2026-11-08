@@ -26,6 +26,50 @@ function template(
 }
 
 describe('ChatSettingsTemplateCache', () => {
+  it('retains ordinary settings when a single exceptional media template arrives', () => {
+    const cache = new ChatSettingsTemplateCache();
+    for (let index = 0; index < 200; index++) {
+      cache.set(`ordinary-${index}`, template(`ordinary-${index}`, 's'.repeat(10_000)));
+    }
+    cache.set('exceptional', template('exceptional', 'x'.repeat(7_000_000)));
+    expect(cache.get('exceptional')).toBeNull();
+    for (let index = 0; index < 200; index++) {
+      expect(cache.get(`ordinary-${index}`)?.settings.chatId).toBe(`ordinary-${index}`);
+    }
+    expect(cache.snapshot()).toMatchObject({ oversizedSkips: 1, capacityEvictions: 0 });
+  });
+
+  it('retains many chats sharing the same configured media without paying for each copy', () => {
+    const cache = new ChatSettingsTemplateCache();
+    for (let index = 0; index < 120; index++) {
+      cache.set(`shared-${index}`, template(`shared-${index}`, 'm'.repeat(100_000)));
+    }
+    for (let index = 0; index < 120; index++) {
+      expect(cache.get(`shared-${index}`)?.settings.botSpeechMedia).toEqual(
+        template('expected', 'm'.repeat(100_000)).settings.botSpeechMedia,
+      );
+    }
+    expect(cache.snapshot().estimatedBytes).toBeLessThan(2 * 1024 * 1024);
+    expect(cache.snapshot().entries).toBe(120);
+  });
+
+  it('confines churn from distinct media to media-bearing templates', () => {
+    const cache = new ChatSettingsTemplateCache();
+    for (let index = 0; index < 200; index++) {
+      cache.set(`ordinary-${index}`, template(`ordinary-${index}`, 's'.repeat(10_000)));
+    }
+    for (let index = 0; index < 30; index++) {
+      cache.set(`media-${index}`, template(`media-${index}`, `${index}:` + 'm'.repeat(400_000)));
+      expect(cache.snapshot().estimatedBytes).toBeLessThanOrEqual(cache.snapshot().maxBytes);
+    }
+    for (let index = 0; index < 200; index++) {
+      expect(cache.get(`ordinary-${index}`)?.settings.chatId).toBe(`ordinary-${index}`);
+    }
+    expect(cache.get('media-29')?.settings.botSpeechMedia).toEqual(
+      template('expected', '29:' + 'm'.repeat(400_000)).settings.botSpeechMedia,
+    );
+  });
+
   it.each([null, 'b29d39bf-7241-482e-8a92-bd32c9cba102'])(
     'isolates stored settings and proof from input and output mutations for revision %s',
     (revision) => {
@@ -71,19 +115,57 @@ describe('ChatSettingsTemplateCache', () => {
     expect(cache.snapshot()).toMatchObject({ entries: 2, capacityEvictions: 1, misses: 1 });
   });
 
-  it('bounds media bytes independently of the number of entries', () => {
+  it('bounds compact bytes independently of the number of entries', () => {
     const oneEntry = new ChatSettingsTemplateCache();
-    oneEntry.set('a', template('a', 'x'.repeat(100_000)));
+    oneEntry.set('a', template('a', 'x'.repeat(20_000)));
     const weight = oneEntry.snapshot().estimatedBytes;
     const cache = new ChatSettingsTemplateCache({ maxBytes: weight * 2, maxEntries: 100 });
     for (const chatId of ['a', 'b', 'c']) {
-      cache.set(chatId, template(chatId, 'x'.repeat(100_000)));
+      cache.set(chatId, template(chatId, 'x'.repeat(20_000)));
       expect(cache.snapshot().estimatedBytes).toBeLessThanOrEqual(weight * 2);
     }
     expect(cache.get('a')).toBeNull();
     expect(cache.get('b')?.settings.chatId).toBe('b');
     expect(cache.get('c')?.settings.chatId).toBe('c');
     expect(cache.snapshot()).toMatchObject({ entries: 2, capacityEvictions: 1 });
+  });
+
+  it('releases shared media only after the last owner, including repeated fields and replacement', () => {
+    const cache = new ChatSettingsTemplateCache();
+    const a = template('a', 'x'.repeat(100_000));
+    a.settings.stopWordsMedia = a.settings.botSpeechMedia;
+    cache.set('a', a);
+    cache.set('b', template('b', 'x'.repeat(100_000)));
+    expect(cache.snapshot().segments).toMatchObject({ mediaEntries: 1, sharedMediaReuses: 1 });
+    (a.settings.botSpeechMedia as { tags: string[] }).tags.push('input mutation');
+    const b = cache.get('b')!.settings;
+    (b.botSpeechMedia as { tags: string[] }).tags.push('output mutation');
+    expect(cache.get('a')!.settings.stopWordsMedia).toEqual(
+      template('expected', 'x'.repeat(100_000)).settings.botSpeechMedia,
+    );
+    cache.set('a', template('a', 'replacement'));
+    expect(cache.snapshot().segments.mediaEntries).toBe(1);
+    cache.delete('b');
+    expect(cache.snapshot().segments).toMatchObject({ mediaEntries: 0, mediaBytes: 0 });
+    cache.delete('a');
+    expect(cache.snapshot()).toMatchObject({ entries: 0, estimatedBytes: 0 });
+  });
+
+  it('preserves a complete in-flight candidate after shared media eviction and cache clear', () => {
+    const cache = new ChatSettingsTemplateCache({ maxBytes: 1024 * 1024 });
+    cache.set('ordinary', template('ordinary'));
+    cache.set('a', template('a', 'x'.repeat(100_000)));
+    cache.set('b', template('b', 'x'.repeat(100_000)));
+    const captured = cache.get('a')!;
+    cache.set('c', template('c', 'y'.repeat(200_000)));
+    expect(cache.get('a')).toBeNull();
+    expect(cache.get('b')).toBeNull();
+    expect(cache.get('ordinary')).not.toBeNull();
+    expect(cache.snapshot().segments.mediaCapacityEvictions).toBe(1);
+    cache.clear();
+    expect(cache.snapshot()).toMatchObject({ entries: 0, estimatedBytes: 0 });
+    expect(captured).toEqual(template('a', 'x'.repeat(100_000)));
+    expect(isDate(captured.settings.createdAt)).toBe(true);
   });
 
   it('rejects an oversized template without evicting unrelated entries or cloning its media', () => {
@@ -133,7 +215,12 @@ describe('ChatSettingsTemplateCache', () => {
     const snapshot = cache.snapshot();
     snapshot.estimatedBytes = 0;
     expect(cache.snapshot().estimatedBytes).toBeGreaterThan(0);
-    expect(Object.values(snapshot).every((value) => typeof value === 'number')).toBe(true);
+    const { segments, ...counters } = snapshot;
+    expect(
+      [...Object.values(counters), ...Object.values(segments)].every(
+        (value) => typeof value === 'number',
+      ),
+    ).toBe(true);
     expect(JSON.stringify(snapshot)).not.toMatch(/private-chat|private-media/u);
   });
 
@@ -148,7 +235,7 @@ describe('ChatSettingsTemplateCache', () => {
       expect(cache.snapshot()).toMatchObject({
         maxBytes: 16 * 1024 * 1024,
         maxEntries: 2048,
-        maxEntryBytes: 16 * 1024 * 1024,
+        maxEntryBytes: 2 * 1024 * 1024,
       });
     },
   );

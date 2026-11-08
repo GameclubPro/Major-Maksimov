@@ -123,6 +123,19 @@ RepeatableRead transaction; initialization does not seed an unverified template.
 The full-context Redis v4 body, 60-second source deadline, 30-second L1 deadline,
 revision CAS, access generations and complete-media recovery remain in force.
 
+The template budget is split into 8 MiB for compact settings and 8 MiB for shared
+media. Templates over 2 MiB of estimated full content or 256 KiB of compact content
+bypass retention before evicting unrelated entries. SQL still returns complete
+settings. The two configured media fields share immutable values by SHA256 when
+their serialized size reaches 64 KiB. Media capacity evicts dependent templates
+without evicting ordinary small settings; compact bytes and total entry count
+retain their own LRU limits. Releasing the last template releases its shared media.
+Capture complete candidates before awaiting SQL so eviction cannot truncate an
+in-flight result. Only a successful SQL proof materializes private JSON containers
+and dates; immutable base64 strings can be shared. These budgets exclude in-flight
+results and do not guarantee total process RSS. Retain regression coverage in
+`chat-settings-template-cache.spec.ts` and `chat-context-settings-cache-postgres.spec.ts`.
+
 The additive metadata table and static trigger advance the UUID on every settings
 INSERT or UPDATE, including older runtime and raw SQL writers. Existing unchanged
 rows deliberately have no metadata and use their settings ID plus a null revision.
@@ -138,6 +151,9 @@ can count both a shell read and a full load; `sourceLoads` retains its original
 meaning. Template `hits` mean a candidate existed, while `reuses` count successful
 SQL proofs. Missing or corrupt template reports remain unavailable without
 discarding older full-context counters. Bytes estimate retained content, not RSS.
+Optional `segments` reports compact/media budgets and bytes, shared blob count,
+reuse and media evictions; older writers without that block remain readable and
+do not imply zero media usage. Reports contain no chat IDs, hashes or media content.
 This optimization reduces heavy SQL transfer on repeated source refreshes; complete
 L1/Redis hits do not use it, and changing settings adds a probe before a full read.
 

@@ -340,6 +340,50 @@ native('verified ChatSettings templates with PostgreSQL and Redis', () => {
     expect(heavySettingsSelects).toBe(1);
   });
 
+  it.each([
+    { size: 100_000, retained: true },
+    { size: 1_100_000, retained: false },
+  ])(
+    'preserves complete media and SQL freshness with retention=$retained',
+    async ({ size, retained }) => {
+      const media = { fixture: chatId, base64: 'm'.repeat(size), tags: ['original'] };
+      await db.chatSettings.update({ where: { chatId }, data: { botSpeechMedia: media } });
+      const cache = makeCache();
+      const trackMedia = async () => {
+        const raw = await redis.get(ChatContextCacheService.cacheKey(chatId));
+        const envelope = JSON.parse(raw!) as {
+          __maximMedia: { fields: { botSpeechMedia: { sha256: string } } };
+        };
+        ownedRedisKeys.add(chatContextMediaKey(envelope.__maximMedia.fields.botSpeechMedia.sha256));
+      };
+      const first = await cache.getChatContext(chatId);
+      await trackMedia();
+      expect(first.settings.botSpeechMedia).toEqual(media);
+      (first.settings.botSpeechMedia as { tags: string[] }).tags.push('caller mutation');
+      await cache.invalidate(chatId);
+      expect((await cache.getChatContext(chatId)).settings.botSpeechMedia).toEqual(media);
+      expect(cache.getLocalCacheSnapshot().settingsTemplates).toMatchObject({
+        fullLoads: retained ? 1 : 2,
+        reuses: retained ? 1 : 0,
+        oversizedSkips: retained ? 0 : 2,
+        segments: { mediaEntries: retained ? 1 : 0 },
+      });
+      expect(heavySettingsSelects).toBe(retained ? 1 : 2);
+
+      const replacement = { fixture: chatId, base64: 'n'.repeat(size), tags: ['updated'] };
+      await db.$executeRaw`
+      UPDATE chat_settings SET bot_speech_media = ${JSON.stringify(replacement)}::jsonb,
+        updated_at = updated_at WHERE chat_id = ${chatId}
+    `;
+      await cache.invalidate(chatId);
+      const updated = await cache.getChatContext(chatId);
+      await trackMedia();
+      expect(updated.settings.botSpeechMedia).toEqual(replacement);
+      expect(updated.settings.updatedAt).toEqual(first.settings.updatedAt);
+      expect(heavySettingsSelects).toBe(retained ? 2 : 3);
+    },
+  );
+
   it.each(['missing', 'corrupt'] as const)(
     'returns complete large settings from PostgreSQL when a shared media blob is %s',
     async (mode) => {
