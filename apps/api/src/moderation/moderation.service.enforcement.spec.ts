@@ -526,7 +526,7 @@ describe('ModerationService', () => {
             nightModeTimezone: 'Europe/Moscow',
             nightModeBotMessageEnabled: true,
             nightModeBotMessageText: '',
-            commentsEnabled: true,
+            commentsEnabled: false,
             nightModeCommentsEnabled: true,
             nightModeBotButtonEnabled: true,
             nightModeBotButtonUrl: 'https://max.ru/night-rules',
@@ -559,7 +559,7 @@ describe('ModerationService', () => {
           buttons: [
             [
               expect.objectContaining({
-                text: '💬 Комментарии · 0',
+                text: '💬 Комментарии',
               }),
             ],
             [

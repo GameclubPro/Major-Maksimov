@@ -368,6 +368,7 @@ import {
   resolveDialogAuditAction,
   resolveDialogCommentsTargetMessageId,
 } from './admin-dialog-profile-helpers';
+import { buildDialogCommentThreadWhere } from './night-mode-comment-access';
 import {
   isRequiredSubscriptionCurrentlyActive,
   normalizeChatSettings,
@@ -375,7 +376,6 @@ import {
   readChatSettings as readChatSettingsValue,
   readChatSettingsSnapshot as readChatSettingsSnapshotValue,
   saveChatSettings as saveChatSettingsValue,
-  type PublicChatCommentSettings,
   type ResolvedBotAssignmentData,
 } from './admin-chat-settings';
 import {
@@ -7438,8 +7438,13 @@ export class AdminService implements OnModuleDestroy {
 
   getPublicChatCommentSettingsForDialog(
     chatId: string,
+    token?: string | null,
   ): Promise<Pick<ChatSettings, 'commentsEnabled'>> {
-    return this.getPublicChatCommentSettings(chatId);
+    const threadId =
+      token === undefined
+        ? null
+        : this.dialogLinkHelper.resolveChatDialogThreadId(chatId, 'comments', token);
+    return this.getPublicChatCommentSettings(chatId, threadId);
   }
 
   getPublicPublisherChatCommentSettingsForDialog(
@@ -7688,19 +7693,12 @@ export class AdminService implements OnModuleDestroy {
 
     const threadId = this.dialogLinkHelper.resolveChatDialogThreadId(chatId, dialogType, token);
     const [chatSettings, rows, adminUserIds, notificationSettings] = await Promise.all([
-      this.getPublicChatCommentSettings(chatId),
+      this.getPublicChatCommentSettings(chatId, threadId),
       this.prisma.auditLog.findMany({
         where: {
           chatId,
           action: CHANNEL_DIALOG_ACTION_COMMENT,
-          ...(threadId
-            ? {
-                payload: {
-                  path: ['threadId'],
-                  equals: threadId,
-                },
-              }
-            : {}),
+          ...buildDialogCommentThreadWhere(threadId, 'chat'),
         },
         orderBy: {
           createdAt: 'desc',
@@ -7796,10 +7794,6 @@ export class AdminService implements OnModuleDestroy {
     dialogProfile: MiniappProfile = 'moderation',
   ) {
     const dialogType = channelDialogTypeSchema.parse(dialogTypeRaw);
-    const chatSettings =
-      dialogProfile === 'publisher'
-        ? await this.publisherDialogProfileRuntime.readChatCommentSettings(chatId)
-        : await this.getPublicChatCommentSettings(chatId);
     if (dialogType !== 'comments') {
       throw new BadRequestException('Для чатов доступен только сценарий комментариев.');
     }
@@ -7811,10 +7805,6 @@ export class AdminService implements OnModuleDestroy {
         body,
       );
     }
-    if (!chatSettings.commentsEnabled) {
-      throw new BadRequestException('Комментарии для этого чата сейчас закрыты.');
-    }
-
     return this.updateEntityDialogNotifications({
       entityType: 'chat',
       chatId,
@@ -7872,7 +7862,7 @@ export class AdminService implements OnModuleDestroy {
     const chatSettings =
       dialogProfile === 'publisher'
         ? await this.publisherDialogProfileRuntime.readChatCommentSettings(chatId)
-        : await this.getPublicChatCommentSettings(chatId);
+        : await this.getPublicChatCommentSettings(chatId, threadId);
 
     if (!chatSettings.commentsEnabled) {
       throw new BadRequestException('Комментарии для этого чата сейчас закрыты.');
@@ -8024,6 +8014,12 @@ export class AdminService implements OnModuleDestroy {
             params.dialogType,
             parsed.data.token,
           );
+    if (params.entityType === 'chat') {
+      const settings = await this.getPublicChatCommentSettings(params.chatId, threadId);
+      if (!settings.commentsEnabled) {
+        throw new BadRequestException('Комментарии для этого чата сейчас закрыты.');
+      }
+    }
     const notificationSettings = await this.upsertEntityDialogNotificationSubscription({
       entityType: params.entityType,
       chatId: params.chatId,
@@ -8126,7 +8122,7 @@ export class AdminService implements OnModuleDestroy {
     const chatSettings =
       dialogProfile === 'publisher'
         ? await this.publisherDialogProfileRuntime.readChatCommentSettings(chatId)
-        : await this.getPublicChatCommentSettings(chatId);
+        : await this.getPublicChatCommentSettingsForDialog(chatId, parsed.data.token);
     if (!chatSettings.commentsEnabled) {
       throw new BadRequestException('Комментарии для этого чата сейчас закрыты.');
     }
@@ -8163,7 +8159,7 @@ export class AdminService implements OnModuleDestroy {
     const chatSettings =
       dialogProfile === 'publisher'
         ? await this.publisherDialogProfileRuntime.readChatCommentSettings(chatId)
-        : await this.getPublicChatCommentSettings(chatId);
+        : await this.getPublicChatCommentSettingsForDialog(chatId, parsed.data.token);
     if (!chatSettings.commentsEnabled) {
       throw new BadRequestException('Комментарии для этого чата сейчас закрыты.');
     }
@@ -8214,10 +8210,10 @@ export class AdminService implements OnModuleDestroy {
       dialogTypeRaw,
       body,
       dialogProfile,
-      loadCommentSettings: (chatId) =>
+      loadCommentSettings: (chatId, token) =>
         dialogProfile === 'publisher'
           ? this.publisherDialogProfileRuntime.readChatCommentSettings(chatId)
-          : this.getPublicChatCommentSettings(chatId),
+          : this.getPublicChatCommentSettingsForDialog(chatId, token),
       toggleReaction: (options) => this.toggleEntityDialogReaction(options),
     });
   }
@@ -14629,8 +14625,8 @@ export class AdminService implements OnModuleDestroy {
     return readPublicChannelSettingsValue(this.prisma, chatId);
   }
 
-  private async getPublicChatCommentSettings(chatId: string): Promise<PublicChatCommentSettings> {
-    return readPublicChatCommentSettingsValue(this.prisma, chatId);
+  private getPublicChatCommentSettings(chatId: string, verifiedThreadId?: string | null) {
+    return readPublicChatCommentSettingsValue(this.prisma, chatId, verifiedThreadId);
   }
 
   private shouldIncludeChatCommentsButton(
@@ -14856,14 +14852,7 @@ export class AdminService implements OnModuleDestroy {
         id: replyToMessageId,
         chatId: params.chatId,
         action: resolveDialogAuditAction(params.dialogType, params.dialogProfile),
-        ...(params.threadId
-          ? {
-              payload: {
-                path: ['threadId'],
-                equals: params.threadId,
-              },
-            }
-          : {}),
+        ...buildDialogCommentThreadWhere(params.threadId, params.entityType, params.dialogProfile),
       },
       select: {
         id: true,
@@ -14932,14 +14921,7 @@ export class AdminService implements OnModuleDestroy {
         id: messageId,
         chatId: params.chatId,
         action: resolveDialogAuditAction(params.dialogType, params.dialogProfile),
-        ...(threadId
-          ? {
-              payload: {
-                path: ['threadId'],
-                equals: threadId,
-              },
-            }
-          : {}),
+        ...buildDialogCommentThreadWhere(threadId, params.entityType, params.dialogProfile),
       },
       select: {
         id: true,

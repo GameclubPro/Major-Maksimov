@@ -6,6 +6,16 @@ Night mode restricts new non-administrator messages in chats through moderation.
 change MAX's native write permissions. Manual closure and the daily schedule are independent;
 lifting one restriction must not announce an open chat while the other still applies.
 
+Night-close discussions are independent of legacy chat comments and Publik. The explicit
+`nightModeCommentsEnabled` switch controls both the closing-notice button and access to newly
+issued `night-close-v1:<uuid>` discussions. Their existing dialog HMAC binds the exact chat,
+dialog type and thread before the access policy is read. Ordinary legacy threads retain their
+previous switch; unscoped legacy links cannot read or mutate night-discussion comments. Turning
+the night-comment switch off closes those discussions without deleting their contents. Older
+notice links keep their original legacy policy. The button label omits a count because night
+notices have no auto-attach counter binding. See `night-mode-comments-postgres.spec.ts` and
+`settings-night-status.browser.mjs` for the saved-setting and interface regressions.
+
 The owner confirmed on 29 October 2026 that enabled opening notices are independent of closing
 notices. A failed, ambiguous or unrecorded closing send, an obsolete Redis session, or a failed
 closing-message deletion must not prevent an otherwise authorized opening notice. Preserve the

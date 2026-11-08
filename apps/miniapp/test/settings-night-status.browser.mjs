@@ -94,6 +94,8 @@ try {
       let savedClosure = closure();
       let settingsRevision = timestamp;
       let savedNightFields = {
+        nightModeBotMessageEnabled: false,
+        nightModeCommentsEnabled: false,
         nightModeOpenMessageEnabled: false,
         nightModeOpenMessageDeleteOnFirstMessageEnabled: false,
       };
@@ -112,6 +114,7 @@ try {
                     nightModeStartTimeMinutes: savedStart,
                     nightModeEndTimeMinutes: 420,
                     nightModeTimezone: 'Europe/Berlin',
+                    commentsEnabled: false,
                     ...savedNightFields,
                     settingsRevision,
                   },
@@ -133,6 +136,8 @@ try {
         const body = route.request().postDataJSON();
         patches.push(body);
         savedNightFields = {
+          nightModeBotMessageEnabled: body.changes.nightModeBotMessageEnabled,
+          nightModeCommentsEnabled: body.changes.nightModeCommentsEnabled,
           nightModeOpenMessageEnabled: body.changes.nightModeOpenMessageEnabled,
           nightModeOpenMessageDeleteOnFirstMessageEnabled:
             body.changes.nightModeOpenMessageDeleteOnFirstMessageEnabled,
@@ -332,6 +337,41 @@ try {
         await panel.innerText(),
         /Последние даты|Уведомление о закрытии|Уведомление об открытии|Проверено:|подтвержден|восстановлен|отправки/iu,
       );
+      const nightComments = panel.getByRole('checkbox', {
+        name: 'Добавить комментарии под сообщением ночного режима',
+        exact: true,
+      });
+      assert.equal(await nightComments.count(), 0, 'Comments wait for the closing notice');
+      await panel
+        .getByRole('checkbox', {
+          name: 'Включить сообщение от бота для ночного режима',
+          exact: true,
+        })
+        .check();
+      await nightComments.waitFor();
+      assert.equal(
+        await nightComments.isEnabled(),
+        true,
+        'Night comments do not require the retired general comments switch',
+      );
+      assert.equal(await nightComments.isChecked(), false, 'Night comments are opt-in');
+      const commentsHint = panel.getByRole('button', {
+        name: 'Как работают комментарии под ночным сообщением',
+        exact: true,
+      });
+      assert.equal(await commentsHint.getAttribute('aria-expanded'), 'false');
+      await commentsHint.click();
+      const commentsExplanation = panel.getByRole('note', {
+        name: 'Как работают комментарии под ночным сообщением',
+        exact: true,
+      });
+      assert.equal(
+        await commentsExplanation.innerText(),
+        'Кнопка «Комментарии» под сообщением о закрытии группы.',
+      );
+      assert.doesNotMatch(await commentsExplanation.innerText(), /включён блок|Публик/u);
+      await commentsHint.click();
+      await nightComments.check();
       const cleanup = panel.getByRole('checkbox', {
         name: 'Удалять сообщение об открытии после первого сообщения участника',
         exact: true,
@@ -414,6 +454,9 @@ try {
       assert.equal(patches.length, 1);
       assert.equal(patches[0].section, 'night');
       assert.equal(patches[0].expectedRevision, timestamp);
+      assert.equal(patches[0].changes.nightModeBotMessageEnabled, true);
+      assert.equal(patches[0].changes.nightModeCommentsEnabled, true);
+      assert.equal(Object.hasOwn(patches[0].changes, 'commentsEnabled'), false);
       assert.equal(patches[0].changes.nightModeOpenMessageDeleteOnFirstMessageEnabled, true);
       assert.equal(patches[0].changes.nightModeOpenMessageEnabled, true);
       assert.equal(patches[0].changes.nightModeStartTimeMinutes, 1319);
@@ -422,6 +465,11 @@ try {
       await screen.getByRole('button', { name: 'Ночной режим', exact: true }).click();
       await cleanup.waitFor();
       assert.equal(await cleanup.isChecked(), true, 'Saved cleanup setting survives a fresh read');
+      assert.equal(
+        await nightComments.isChecked(),
+        true,
+        'Night comments stay enabled after reloading with general comments still disabled',
+      );
       assert.match(
         await start.innerText(),
         /21:59/,

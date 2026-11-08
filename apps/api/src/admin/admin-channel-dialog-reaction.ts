@@ -21,7 +21,7 @@ export async function toggleDialogReactionValue(params: {
   messageId: string;
   body: unknown;
   dialogProfile?: MiniappProfile;
-  loadCommentSettings: (chatId: string) => Promise<DialogCommentSettings>;
+  loadCommentSettings: (chatId: string, token: string) => Promise<DialogCommentSettings>;
   toggleReaction: (options: {
     chatId: string;
     entityType: ManagedEntityType;
@@ -39,7 +39,7 @@ export async function toggleDialogReactionValue(params: {
     throw new BadRequestException(parsed.error.format());
   }
 
-  const settings = await params.loadCommentSettings(params.chatId);
+  const settings = await params.loadCommentSettings(params.chatId, parsed.data.token);
   if (!settings.commentsEnabled) {
     throw new BadRequestException(
       params.entityType === 'channel'

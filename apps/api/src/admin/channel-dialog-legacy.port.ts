@@ -68,6 +68,7 @@ export type ChannelDialogLegacyPort = {
   ): Promise<{ commentsEnabled: boolean }>;
   getPublicChatCommentSettingsForDialog(
     chatId: string,
+    token?: string | null,
   ): Promise<Pick<ChatSettings, 'commentsEnabled'>>;
   getPublicPublisherChatCommentSettingsForDialog(
     chatId: string,

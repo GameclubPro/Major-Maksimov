@@ -62,9 +62,10 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 152 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 152);
-  assert.equal(new Set(nativePaths).size, 152);
+test('all 153 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 153);
+  assert.equal(new Set(nativePaths).size, 153);
+  assert.ok(nativePaths.includes('src/admin/night-mode-comments-postgres.spec.ts'));
   for (const path of [
     'src/chat-context/chat-context-source-postgres.spec.ts',
     'src/chat-context/chat-context-settings-cache-postgres.spec.ts',

@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import type { ChannelDialogLegacyPort } from './channel-dialog-legacy.port';
 import { ChannelDialogService } from './channel-dialog.service';
 
 function createConfigMock() {
@@ -56,9 +57,12 @@ function createService(
       postSuggestionsEnabled: options.postSuggestionsEnabled ?? true,
       commentsEnabled: true,
     }),
-    getPublicChatCommentSettingsForDialog: jest.fn().mockResolvedValue({
-      commentsEnabled: true,
-    }),
+    getPublicChatCommentSettingsForDialog: jest
+      .fn<
+        ReturnType<ChannelDialogLegacyPort['getPublicChatCommentSettingsForDialog']>,
+        Parameters<ChannelDialogLegacyPort['getPublicChatCommentSettingsForDialog']>
+      >()
+      .mockResolvedValue({ commentsEnabled: true }),
     toggleEntityDialogReactionForDialog: jest.fn().mockResolvedValue({
       ok: true,
       message: {
@@ -208,7 +212,10 @@ describe('ChannelDialogService reactions', () => {
     ).resolves.toEqual(expect.objectContaining({ ok: true }));
 
     expect(legacyAdminService.toggleChatDialogReaction).not.toHaveBeenCalled();
-    expect(legacyAdminService.getPublicChatCommentSettingsForDialog).toHaveBeenCalledWith('chat-1');
+    expect(legacyAdminService.getPublicChatCommentSettingsForDialog).toHaveBeenCalledWith(
+      'chat-1',
+      'reaction-token-1',
+    );
     expect(legacyAdminService.toggleEntityDialogReactionForDialog).toHaveBeenCalledWith({
       chatId: 'chat-1',
       entityType: 'chat',

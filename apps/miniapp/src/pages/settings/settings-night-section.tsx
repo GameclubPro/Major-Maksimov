@@ -490,8 +490,7 @@ export function SettingsNightSection(props: SettingsNightSectionProps) {
                                   onToggleHint={toggleHint}
                                   label="Как работают комментарии под ночным сообщением"
                                 >
-                                  Добавляет кнопку комментариев под сообщением о закрытии группы.
-                                  Работает, если в чате включён блок «Комментарии».
+                                  Кнопка «Комментарии» под сообщением о закрытии группы.
                                 </SettingsHintAnchor>
                               </div>
                             </div>
