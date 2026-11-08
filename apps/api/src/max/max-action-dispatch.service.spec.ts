@@ -27,6 +27,8 @@ import {
 } from './max-media-upload-validation';
 import { createMaxSendAutoDeleteVerificationError } from './max-send-auto-delete-verification-error';
 import type { MaxBotLinkService } from './max-bot-link.service';
+import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
 
 const FUTURE_NIGHT_SCHEDULE_FINGERPRINT = buildNightModeTransitionScheduleFingerprint({
   nightModeEnabled: true,
@@ -128,6 +130,36 @@ function createLegacyHoldFixture(
 }
 
 describe('MaxActionDispatchService', () => {
+  it('separates scheduled first attempts and retry age while preserving rejected dispatch', async () => {
+    const f = createLegacyHoldFixture();
+    const metrics = { optimization: new OptimizationRuntimeMetrics() } satisfies Pick<
+      StorageRuntimeMetricsService,
+      'optimization'
+    >;
+    Object.defineProperty(f.service, 'metrics', { value: metrics });
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await f.service.execute(
+        { ...f.job, scheduledFor: new Date(now - 100).toISOString() },
+        { enqueuedAt: new Date(now - 20000) },
+      );
+      const error = new Error('exact admission failure');
+      f.ledger.assertCanExecute.mockRejectedValueOnce(error);
+      await expect(
+        f.service.execute({ ...f.job, attempt: 2 }, { enqueuedAt: new Date(now - 16000) }),
+      ).rejects.toBe(error);
+      const timings = metrics.optimization.snapshot()!.timings;
+      expect(timings.sendFirstQueue).toMatchObject({ calls: 1, totalMs: 100 });
+      expect(timings.sendRetryQueue).toMatchObject({ calls: 1, totalMs: 16000 });
+      expect(timings.sendDispatch).toMatchObject({ calls: 2, errors: 1 });
+      expect(timings.sendLedger).toMatchObject({ calls: 1, errors: 0 });
+      expect(f.effect).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it.each(['metadata', 'source-tag'])(
     'rechecks retirement for an old queued relay identified by %s',
     async (kind) => {

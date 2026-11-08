@@ -135,6 +135,7 @@ export class ModerationStateDeleteGuardService {
     };
     const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
       requireMembership: true,
+      module: 'moderationState',
     });
     const access = author
       ? author.member

@@ -3,6 +3,11 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import {
+  optimizationElapsed,
+  optimizationNow,
+  type DeleteAuthorModule,
+} from '../system/optimization-runtime-metrics';
 import { MaxClientService, type MaxChatMemberAccess } from './max-client.service';
 
 export type AutomaticDeleteMemberReadOptions = NonNullable<
@@ -64,7 +69,7 @@ export class AutomaticDeleteAuthorAccessService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly maxClient: MaxClientService,
-    @Optional() metrics?: StorageRuntimeMetricsService,
+    @Optional() private readonly metrics?: StorageRuntimeMetricsService,
   ) {
     metrics?.registerAutomaticDeleteAuthorSnapshot(() => this.getSnapshot());
   }
@@ -93,7 +98,28 @@ export class AutomaticDeleteAuthorAccessService {
     chatId: string,
     userId: string,
     options: AutomaticDeleteMemberReadOptions,
-    policy: { requireMembership: boolean },
+    policy: { requireMembership: boolean; module?: DeleteAuthorModule },
+  ): Promise<AutomaticDeleteAuthorAccess> {
+    const started = optimizationNow();
+    let failed = true;
+    this.metrics?.optimization.author(policy.module, 'calls');
+    try {
+      const result = await this.resolveAuthor(chatId, userId, options, policy);
+      failed = false;
+      return result;
+    } catch (error) {
+      this.metrics?.optimization.author(policy.module, 'errors');
+      throw error;
+    } finally {
+      this.metrics?.optimization.timing('author', optimizationElapsed(started), failed);
+    }
+  }
+
+  private async resolveAuthor(
+    chatId: string,
+    userId: string,
+    options: AutomaticDeleteMemberReadOptions,
+    policy: { requireMembership: boolean; module?: DeleteAuthorModule },
   ): Promise<AutomaticDeleteAuthorAccess> {
     const scope = this.dispatch.getStore();
     const protectionKey = JSON.stringify([chatId, userId]);
@@ -103,14 +129,20 @@ export class AutomaticDeleteAuthorAccessService {
       scope?.protection.set(protectionKey, pendingProtection);
     }
     const protection = await pendingProtection;
+    if (!protection.initialized) this.metrics?.optimization.author(policy.module, 'missingRoster');
     if (protection.isAdmin) {
       this.counts.protected += 1;
+      this.metrics?.optimization.author(policy.module, 'protectedSkips');
       return { ...protection, member: undefined };
     }
     if (protection.initialized) this.counts.roster += 1;
     else this.counts.legacy += 1;
-    if (protection.initialized && !policy.requireMembership)
+    if (protection.initialized && !policy.requireMembership) {
+      this.metrics?.optimization.author(policy.module, 'rosterSkips');
       return { ...protection, member: undefined };
+    }
+    if (policy.requireMembership)
+      this.metrics?.optimization.author(policy.module, 'membershipRequired');
 
     const membershipKey = JSON.stringify([
       chatId,
@@ -121,9 +153,12 @@ export class AutomaticDeleteAuthorAccessService {
       options.trafficClass ?? null,
     ]);
     let pendingMember = scope?.membership.get(membershipKey);
-    if (pendingMember) this.counts.shared += 1;
-    else {
+    if (pendingMember) {
+      this.counts.shared += 1;
+      this.metrics?.optimization.author(policy.module, 'sharedReads');
+    } else {
       this.counts.membership += 1;
+      this.metrics?.optimization.author(policy.module, 'memberCalls');
       pendingMember = this.maxClient.getChatMemberAccess(chatId, userId, {
         ...options,
         bypassCache: true,

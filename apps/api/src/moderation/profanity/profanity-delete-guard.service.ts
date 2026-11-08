@@ -141,7 +141,7 @@ export class ProfanityDeleteGuardService {
       params.chatId,
       senderId,
       requestOptions,
-      { requireMembership: true },
+      { requireMembership: true, module: 'profanity' },
     );
     const access = author
       ? author.member

@@ -124,6 +124,7 @@ export class MessageLimitsDeleteGuardService {
     };
     const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
       requireMembership: true,
+      module: 'messageLimits',
     });
     const access = author
       ? author.member

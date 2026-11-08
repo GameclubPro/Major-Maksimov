@@ -26,6 +26,9 @@ import { ChatContextCacheService } from '../chat-context/chat-context-cache.serv
 import { isPrivateDirectChatId } from '../common/chat-id.util';
 import { NightModeTransitionSchedulerService } from '../moderation/night-mode-transition-scheduler.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import type { RosterSyncState } from '../system/optimization-runtime-metrics';
+import { MaxApiInternalRateLimitError } from './max-api-internal-rate-limit.error';
 import { MAX_API_SOURCE_TAGS, MaxClientService, type MaxBotChat } from './max-client.service';
 import { MaxBotLinkService } from './max-bot-link.service';
 import { resolveExplicitMembershipAccessDenial } from './max-membership-access-error';
@@ -128,6 +131,7 @@ export class MaxChatAdminRosterSyncService {
     private readonly queue?: Queue<MaxChatAdminRosterSyncJob>,
     @Optional()
     private readonly nightModeTransitionScheduler?: NightModeTransitionSchedulerService,
+    @Optional() private readonly metrics?: StorageRuntimeMetricsService,
   ) {}
 
   async observeActivity(
@@ -141,14 +145,19 @@ export class MaxChatAdminRosterSyncService {
       return;
     const now = Date.now();
     const completedAt = observedCompleteAt ? Date.parse(observedCompleteAt) : Number.NaN;
+    this.metrics?.optimization.rosterDemand(
+      Number.isFinite(completedAt) ? 'refreshObserved' : 'bootstrapObserved',
+    );
     if (
       (Number.isFinite(completedAt) &&
         completedAt <= now &&
         now - completedAt < ADMIN_ROSTER_ACTIVE_REFRESH_MS) ||
       (this.nextActiveRosterObservationAt.get(normalizedChatId) ?? 0) > now ||
       this.activeRosterObservations >= ACTIVE_ROSTER_OBSERVATION_CONCURRENCY
-    )
+    ) {
+      this.metrics?.optimization.rosterDemand('localDeferred');
       return;
+    }
     this.nextActiveRosterObservationAt.delete(normalizedChatId);
     this.nextActiveRosterObservationAt.set(normalizedChatId, now + ADMIN_ROSTER_REFRESH_RETRY_MS);
     if (this.nextActiveRosterObservationAt.size > ACTIVE_ROSTER_OBSERVATION_MAX_KEYS) {
@@ -159,15 +168,19 @@ export class MaxChatAdminRosterSyncService {
     try {
       // FLAG: One SQL reservation across roles bounds refresh retries even after Redis loss.
       // No roster polling or network permission read runs in the message handler.
-      if (!(await claimActiveAdminRosterRefresh(this.prisma, normalizedChatId, new Date(now))))
+      if (!(await claimActiveAdminRosterRefresh(this.prisma, normalizedChatId, new Date(now)))) {
+        this.metrics?.optimization.rosterDemand('reservationRefused');
         return;
-      await this.scheduleChatAdminRosterSync({
+      }
+      const acknowledged = await this.scheduleChatAdminRosterSync({
         chatId: normalizedChatId,
         botIds: [normalizedBotId],
         entityType: 'chat',
         source: 'active_chat',
       });
+      this.metrics?.optimization.rosterDemand(acknowledged ? 'acknowledged' : 'notAcknowledged');
     } catch (error: unknown) {
+      this.metrics?.optimization.rosterDemand('failed');
       this.logger.debug(
         { chatId: normalizedChatId, err: error instanceof Error ? error.message : String(error) },
         'Active-chat administrator roster refresh deferred',
@@ -510,6 +523,39 @@ export class MaxChatAdminRosterSyncService {
   }
 
   private async syncChatAdminRoster(job: MaxChatAdminRosterSyncJob): Promise<boolean> {
+    if (!this.metrics) return this.syncChatAdminRosterObserved(job);
+    let state: RosterSyncState = 'unknown';
+    try {
+      // FLAG: One exact background-job lookup classifies bootstrap, not a fleet scan.
+      // Missing diagnostics must never stop the existing synchronization procedure.
+      const [row] = await this.prisma.$queryRaw<{ initialized: boolean }[]>(Prisma.sql`
+        SELECT (completed_at IS NOT NULL AND complete_probe_started_at IS NOT NULL) AS initialized
+        FROM chat_admin_roster_states WHERE chat_id = ${job.chatId}
+      `);
+      state = row?.initialized === true ? 'refresh' : 'bootstrap';
+    } catch {
+      /* Unknown coverage; preserve the job's existing behavior. */
+    }
+    this.metrics.optimization.rosterSync(state, 'calls');
+    try {
+      const completed = await this.syncChatAdminRosterObserved(job);
+      this.metrics.optimization.rosterSync(state, completed ? 'completed' : 'notSynced');
+      return completed;
+    } catch (error) {
+      this.metrics.optimization.rosterSync(
+        state,
+        error instanceof MaxChatAdminRosterSyncSourceBackoffError
+          ? 'sourceBackoff'
+          : error instanceof MaxApiInternalRateLimitError ||
+              (error as { response?: { status?: unknown } } | null)?.response?.status === 429
+            ? 'rateLimited'
+            : 'failed',
+      );
+      throw error;
+    }
+  }
+
+  private async syncChatAdminRosterObserved(job: MaxChatAdminRosterSyncJob): Promise<boolean> {
     const normalized = await this.buildMergedJobData(job);
     if (!normalized) {
       return false;

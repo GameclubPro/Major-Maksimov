@@ -30,7 +30,7 @@ describe('LinkHistoryDeleteGuardService', () => {
         'chat-1',
         'user-1',
         expect.objectContaining({ botId: 'delete-bot', bypassCache: true }),
-        { requireMembership: false },
+        { requireMembership: false, module: 'links' },
       );
     },
   );

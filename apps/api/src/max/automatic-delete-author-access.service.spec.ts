@@ -1,6 +1,8 @@
 import type { PrismaService } from '../prisma/prisma.service';
 import { MaxClientService, type MaxChatMemberAccess } from './max-client.service';
 import { AutomaticDeleteAuthorAccessService } from './automatic-delete-author-access.service';
+import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
 
 const ordinary: MaxChatMemberAccess = {
   userId: '123',
@@ -12,6 +14,13 @@ const ordinary: MaxChatMemberAccess = {
 const options = { botId: 'major', bypassCache: true, timeoutMs: 5000 } as const;
 
 function fixture(initialized = true, isAdmin = false) {
+  const metrics = {
+    optimization: new OptimizationRuntimeMetrics(),
+    registerAutomaticDeleteAuthorSnapshot: jest.fn(),
+  } satisfies Pick<
+    StorageRuntimeMetricsService,
+    'optimization' | 'registerAutomaticDeleteAuthorSnapshot'
+  >;
   const query = jest
     .fn<ReturnType<PrismaService['$queryRaw']>, Parameters<PrismaService['$queryRaw']>>()
     .mockResolvedValue([{ initialized, isAdmin, revision: 'revision-1' }]);
@@ -24,11 +33,61 @@ function fixture(initialized = true, isAdmin = false) {
   const service = new AutomaticDeleteAuthorAccessService(
     { $queryRaw: query } as unknown as PrismaService,
     { getChatMemberAccess: getMember } as unknown as MaxClientService,
+    metrics as unknown as StorageRuntimeMetricsService,
   );
-  return { service, query, getMember };
+  return { service, query, getMember, metrics };
 }
 
 describe('automatic DELETE author authority', () => {
+  it('counts actual skips, required reads, shared reads and errors by a finite module', async () => {
+    const s = fixture();
+    await s.service.resolve('chat', '123', options, { requireMembership: false, module: 'links' });
+    await s.service.withDispatchScope(() =>
+      Promise.all([
+        s.service.resolve('chat', '123', options, { requireMembership: true, module: 'profanity' }),
+        s.service.resolve('chat', '123', options, { requireMembership: true, module: 'stopWords' }),
+      ]),
+    );
+    s.query.mockRejectedValue(new Error('private-db-error'));
+    await expect(
+      s.service.resolve('chat', '123', options, { requireMembership: false, module: 'links' }),
+    ).rejects.toThrow('private-db-error');
+    const snapshot = s.metrics.optimization.snapshot()!;
+    expect(snapshot.authors.links).toMatchObject({
+      calls: 2,
+      rosterSkips: 1,
+      memberCalls: 0,
+      errors: 1,
+    });
+    expect(snapshot.authors.profanity).toMatchObject({
+      membershipRequired: 1,
+      memberCalls: 1,
+      rosterSkips: 0,
+    });
+    expect(snapshot.authors.stopWords).toMatchObject({
+      membershipRequired: 1,
+      sharedReads: 1,
+      memberCalls: 0,
+    });
+    expect(snapshot.timings.author).toMatchObject({ calls: 4, errors: 1 });
+    expect(s.getMember).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(snapshot)).not.toContain('private');
+  });
+
+  it('counts a protected bootstrap author as skipped, not as a member call or initialized roster', async () => {
+    const s = fixture(false, true);
+    await s.service.resolve('chat', '123', options, {
+      requireMembership: true,
+      module: 'profanity',
+    });
+    expect(s.metrics.optimization.snapshot()!.authors.profanity).toMatchObject({
+      calls: 1,
+      protectedSkips: 1,
+      missingRoster: 1,
+      memberCalls: 0,
+      rosterSkips: 0,
+    });
+  });
   it('uses a complete saved roster without an external author-role lookup', async () => {
     const s = fixture();
     await expect(

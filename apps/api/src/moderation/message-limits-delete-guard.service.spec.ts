@@ -89,7 +89,7 @@ describe('saved role protection with independent membership evidence', () => {
       '-123',
       'user-1',
       expect.objectContaining({ botId: 'executor-b' }),
-      { requireMembership: true },
+      { requireMembership: true, module: 'messageLimits' },
     );
   });
 });

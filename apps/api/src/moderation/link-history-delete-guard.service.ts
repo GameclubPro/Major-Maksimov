@@ -243,7 +243,7 @@ export class LinkHistoryDeleteGuardService {
       params.chatId,
       params.subjectUserId,
       authorOptions,
-      { requireMembership: false },
+      { requireMembership: false, module: 'links' },
     );
     const remoteAccess = author
       ? author.member

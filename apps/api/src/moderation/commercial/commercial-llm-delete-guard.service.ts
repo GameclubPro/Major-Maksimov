@@ -156,7 +156,7 @@ export class CommercialLlmDeleteGuardService {
       params.chatId,
       params.subjectUserId!,
       options,
-      { requireMembership: true },
+      { requireMembership: true, module: 'commercialLlm' },
     );
     const access = author
       ? author.member

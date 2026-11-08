@@ -35,6 +35,54 @@ publish every 30 seconds and expire after 90 seconds; collect after the first
 publication. Missing, malformed, stale or unavailable reports are missing
 coverage, not zero work. Reporting failure must not block bot work.
 
+### Permission and SEND attribution
+
+The additive `optimization` report uses fixed module names and counters only. Its
+bounded envelope is 16 KiB per service, with the same 30-second publication and
+90-second expiry; old or malformed attribution is `null`. It adds no per-message
+Redis writes, SQL history, identities or arbitrary labels.
+
+`authors` counts resolver invocations by rule module. `rosterSkips` is an explicit
+skip of the member client call because a complete roster sufficed; `protectedSkips`
+is a skip because the saved author was protected. `memberCalls` counts actual client
+method invocations, including calls rejected before HTTP. `sharedReads` counts
+reuse within one preparation scope, including reuse of a rejected promise.
+`missingRoster` and `membershipRequired` overlap these outcomes; neither measures
+savings. `errors` includes SQL failures. Calls can still be in flight at a snapshot,
+so do not derive skips by subtracting other counters. These are not unique messages
+or a measurement of every deletion path; the main handler's early policy is separate.
+
+`demand` counts activity observations with missing versus known cached completeness,
+local deferrals, refused SQL reservations and acknowledged/unacknowledged scheduling.
+An acknowledgement can reuse an existing job; it proves neither a new job nor a
+completed roster. `roster` classifies a background synchronization invocation by an
+exact indexed completeness read before it starts: `bootstrap`, `refresh`, or `unknown`
+when the diagnostic read failed. Its result separates completion, no sync, source
+backoff, rate limits and other errors. Concurrent jobs can both observe bootstrap;
+this is not the number of uninitialized chats. Actor-only probes are excluded.
+
+`timings` contains disjoint duration buckets, total/max milliseconds, errors and
+unknown clocks. `author` times the resolver. SEND phases are:
+
+- `sendQuota`: the exact transport quota reservation, including rejected waits.
+- `sendGuard`: preparation at POST `/messages` minus that quota time. This includes
+  route, payload and feature checks, including remote reads performed by a guard.
+- `sendHttp`: the HTTP adapter and response validation. A completed HTTP response
+  does not prove a recorded message identity or ledger settlement.
+- `sendReceipt`: the durable send-receipt completion call, including its exact readback.
+- `sendLedger`: the outer dispatch ledger settlement call, which may handle errors internally.
+- `sendDispatch`: the complete dispatcher invocation, including preparation and failure handling;
+  it overlaps the inner phases and includes receipt recovery without a new send.
+- `sendFirstQueue` and `sendRetryQueue`: wall-clock age from the later of enqueue and
+  valid schedule to this invocation. Only calls with a supplied enqueue timestamp are
+  included. Retry age includes earlier attempts and backoff, not just time in the queue.
+
+All other clocks are monotonic; invalid clocks remain unknown. The phases cover
+different populations and overlap as described: do not sum them or infer a cause
+from one large bucket. Direct sends can contribute transport without dispatcher
+timings. Fixed histograms locate a follow-up investigation; they do not establish
+per-message causal traces, daily savings or authorization to increase quotas.
+
 Keep saved snapshots owner-private. Retain only fixed service names, epochs,
 numeric metrics and fixed readiness/condition enums. Full ready responses and
 monitor logs may contain identifiers; archive only their allowlisted readiness,

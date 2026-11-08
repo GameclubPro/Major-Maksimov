@@ -8,12 +8,17 @@ import {
 } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
 import {
+  OptimizationRuntimeMetrics,
+  sanitizeOptimizationRuntimeMetrics,
+} from './optimization-runtime-metrics';
+import {
   CHAT_CONTEXT_ACTIVITY_FIELDS,
   CHAT_CONTEXT_INVALIDATION_REASONS,
 } from '../chat-context/chat-context-cache-metrics';
 import { isRuntimeServiceName, RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 
 export const STORAGE_RUNTIME_METRICS_PREFIX = 'runtime:storage-cost:v1:';
+export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 16_384;
 export const STORAGE_RUNTIME_COUNTERS = [
   'deleteLeaseChecks',
   'deleteLeaseRenewals',
@@ -289,6 +294,7 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
     deleteDueSweep:
       source.deleteDueSweep == null ? null : sanitizeDeleteDueSweepSnapshot(source.deleteDueSweep),
     automaticDeleteAuthors: checkedNumbers(source.automaticDeleteAuthors, DELETE_AUTHOR_FIELDS),
+    optimization: sanitizeOptimizationRuntimeMetrics(source.optimization),
     processMemory:
       source.processMemory == null
         ? null
@@ -318,7 +324,7 @@ export async function readStorageRuntimeFleet(redis: Pick<Redis, 'mget'>) {
         let snapshot = null;
         try {
           const raw = values[index];
-          if (raw && Buffer.byteLength(raw) <= 8_192)
+          if (raw && Buffer.byteLength(raw) <= STORAGE_RUNTIME_MAX_REPORT_BYTES)
             snapshot = sanitizeStorageRuntimeSnapshot(JSON.parse(raw));
         } catch {
           /* Missing coverage. */
@@ -341,6 +347,7 @@ export async function readStorageRuntimeFleet(redis: Pick<Redis, 'mget'>) {
 // error text, credentials, arbitrary labels, SQL, or environment are persisted.
 @Injectable()
 export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestroy {
+  readonly optimization = new OptimizationRuntimeMetrics();
   private readonly redis: Redis;
   private readonly startedAt = Date.now();
   private readonly serviceName: string | null;
@@ -494,6 +501,7 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
       deleteReconciler: readProvider(this.deleteReconcilerProvider),
       deleteDueSweep: readProvider(this.deleteDueSweepProvider),
       automaticDeleteAuthors: readProvider(this.deleteAuthorProvider),
+      optimization: this.optimization.snapshot(),
       processMemory: this.readProcessMemory(),
       processPerformance: this.readProcessPerformance(),
       vkMediaAdmission: readProvider(this.vkMediaAdmissionProvider),

@@ -175,6 +175,7 @@ export class StopWordsDeleteGuardService {
     const author = !action
       ? await this.automaticDeleteAuthorAccess?.resolve(params.chatId, senderId, options, {
           requireMembership: true,
+          module: 'stopWords',
         })
       : undefined;
     const access = author
