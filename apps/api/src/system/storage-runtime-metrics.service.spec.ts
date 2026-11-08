@@ -174,6 +174,17 @@ describe('bounded storage-runtime metrics', () => {
         fullLoads: 1,
         shellReads: 3,
         reuses: 2,
+        segments: {
+          compactBytes: 1024,
+          maxCompactBytes: 8388608,
+          maxCompactEntryBytes: 262144,
+          mediaBytes: 1024,
+          maxMediaBytes: 8388608,
+          mediaEntries: 1,
+          sharedMediaReuses: 2,
+          mediaCapacityEvictions: 0,
+          content: 'private-media-fixture',
+        },
         chatId: 'private-template-fixture',
       },
       payload: 'private-content-fixture',
@@ -224,7 +235,31 @@ describe('bounded storage-runtime metrics', () => {
       fullLoads: 1,
       shellReads: 3,
       reuses: 2,
+      segments: {
+        compactBytes: 1024,
+        maxCompactBytes: 8388608,
+        maxCompactEntryBytes: 262144,
+        mediaBytes: 1024,
+        maxMediaBytes: 8388608,
+        mediaEntries: 1,
+        sharedMediaReuses: 2,
+        mediaCapacityEvictions: 0,
+      },
     });
+    expect(sanitizeStorageRuntimeSnapshot(snapshot)?.chatContextCache?.settingsTemplates).toEqual(
+      snapshot.chatContextCache.settingsTemplates,
+    );
+    for (const segments of [undefined, null, {}, { mediaBytes: -1 }]) {
+      const older = sanitizeStorageRuntimeSnapshot({
+        ...snapshot,
+        chatContextCache: {
+          ...snapshot.chatContextCache,
+          settingsTemplates: { ...snapshot.chatContextCache.settingsTemplates, segments },
+        },
+      });
+      expect(older?.chatContextCache?.settingsTemplates).toMatchObject({ entries: 1, reuses: 2 });
+      expect(older?.chatContextCache?.settingsTemplates).not.toHaveProperty('segments');
+    }
     expect(snapshot.chatContextCache.activity.invalidationsByReason.access_denied).toEqual({
       events: 2,
       evictedEntries: 1,

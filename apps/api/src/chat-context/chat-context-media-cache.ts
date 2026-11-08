@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type Redis from 'ioredis';
 import type { ChatContext } from './chat-context-cache.service';
 
-const MEDIA_FIELDS = ['botSpeechMedia', 'stopWordsMedia'] as const;
+export const CHAT_CONTEXT_MEDIA_FIELDS = ['botSpeechMedia', 'stopWordsMedia'] as const;
+const MEDIA_FIELDS = CHAT_CONTEXT_MEDIA_FIELDS;
 const MIN_BLOB_BYTES = 64 * 1024;
 const MAX_BLOB_BYTES = 16 * 1024 * 1024;
 export const CHAT_CONTEXT_MEDIA_TTL_SEC = 60;

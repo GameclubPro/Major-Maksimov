@@ -253,6 +253,10 @@ Statistics exchange does not grant advertising or shop authority.
   readers in API, Lastik and both rollback paths.
 
 - Chat context v4 separates large configured media into SHA256-bound, expiring cache blobs. A missing/corrupt blob reloads the complete SQL context, never omits an image. Keep the compact body bound to the shared context revision on reads and all mutations, invalidate v3 on v4 mutations, and preserve access-epoch/generation fences across rollback/re-upgrade. Run native chat-context media/cache tests plus managed-access and membership full-path regressions; local media strings have their own bounded budget, while decoded settings retain the full existing context budget.
+- SQL settings templates split their existing bounded budget between compact settings and shared
+  immutable media. Media pressure must preserve unrelated small settings; skipped or evicted
+  templates still load complete content from SQL. Reuse requires fresh identity/revision proof;
+  see [template budgets and regressions](../operations/runbooks/storage-cost-rollout.md#verified-settings-templates).
 
 - Participant protection spends one daily unit per logical violating message, shared across rules, edits and bot mirrors. State-delete guards must establish a current actionable reason and unexpired deadline before consuming it; released/expired/replaced mutes and disabled or retired rules cannot spend the allowance. Final policy, release and sanction-fence checks still apply after awaited work.
 - Sanction lists and both manual/button release guards share the original sanction expiry resolver. Persisted duration-only mutes use their stored bounded duration from the event's creation time; an explicit absolute expiry takes precedence. Release never substitutes current chat settings for missing expiry evidence, and expired, replaced or fenced sanctions remain rejected.
