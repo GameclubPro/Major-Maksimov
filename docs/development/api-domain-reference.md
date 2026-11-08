@@ -276,6 +276,10 @@ Statistics exchange does not grant advertising or shop authority.
   and failures preserve prior protection. Older full/actor observations cannot overwrite newer
   authority; all-bot denial and whole-roster cleanup invalidate completeness. Publisher/Lastik and
   bot activation/capability authority remain separate.
+- Allowlist revision triggers process distinct affected chats through statement transition tables;
+  bulk writes must not perform one state upsert per administrator row. Membership changes invalidate
+  proof without changing completion or refresh reservations; timestamp-only and empty writes preserve
+  it. Keep the native 30,000-row context fixture and its 15-second SQL budget.
 - Settings closure diagnostics are exact-chat SQL observations: restriction, delete route and notice receipt are separate. Missing ledgers never prove no attempt; only matching successful terminal receipts prove delivery.
 - Night mode/manual close is chat-only. It deletes non-admin chat messages in the event path; transitions/notices are scheduled background work. Do not add channel handling, list polling, per-chat sleeps, or user-message-triggered notices.
 - Enabled night-mode openings are independent of closing-send recovery and cleanup. Keep exact SEND idempotency and unknown-effect fences, durable separate recovery obligations, truthful effective closure and future scheduling after retirement. See [night-mode delivery](../operations/runbooks/night-mode-delivery.md).
