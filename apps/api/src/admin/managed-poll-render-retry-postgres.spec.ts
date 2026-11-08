@@ -220,6 +220,10 @@ native('durable managed poll render retries on PostgreSQL and Redis', () => {
 
   it('does not overwrite a newer retry snapshot and keeps transport failures at five minutes', async () => {
     const row = await poll();
+    // FLAG: Freeze the failure clock before SQL/Redis writes; their wall-clock latency
+    // must not make the shared short floor outlive the test's simulated retry instant.
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
     const current = service();
     const snapshot = await current.internal.loadPollAggregate(chatId, row.id);
     const key = current.internal.pollRenderRetryKey(row);
@@ -229,8 +233,7 @@ native('durable managed poll render retries on PostgreSQL and Redis', () => {
     await current.internal.deferPollRender(key, snapshot, { response: { status: 503 } });
     expect(await db.managedPoll.findUniqueOrThrow({ where: { id: row.id } })).toEqual(first);
     expect(await current.internal.markPollRendered(snapshot)).toBe(false);
-    const now = first.renderRetryAt!.getTime() + 1;
-    jest.spyOn(Date, 'now').mockReturnValue(now);
+    now = first.renderRetryAt!.getTime() + 1;
     max.editMessageInlineKeyboard.mockRejectedValue({ response: { status: 429 } });
     await render(row);
     const next = await db.managedPoll.findUniqueOrThrow({ where: { id: row.id } });
