@@ -38,6 +38,7 @@ export type AdminManagedEntitiesRuntimeContext = {
     options?: {
       forceRemote?: boolean;
       timeoutMs?: number;
+      protectHumanAdministrator?: boolean;
     },
   ): Promise<void>;
   attachManagedEntityFavoriteTypes(

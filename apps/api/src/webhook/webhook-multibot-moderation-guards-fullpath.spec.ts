@@ -43,6 +43,7 @@ import { NightModeTransitionEventService } from '../moderation/night-mode-transi
 import { LOCAL_CHAT_BAN_MODE } from '../moderation/local-chat-ban';
 import { WebhookParser } from './webhook.parser';
 import { isRedisCounterPreDispatchUnavailable } from '../moderation/redis-counter.service';
+import { ModerationAccessService } from '../moderation/moderation-access.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -64,6 +65,67 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     h = await createMultibotHarness({ databaseUrl, redisUrl, bots, mode: 'on' });
     return h;
   }
+
+  it('uses a complete empty roster at admission while retaining final author membership checks', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: true,
+      maxMessageLength: 20,
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      invitationAccessEnabled: false,
+      messageLimitsWarnEnabled: false,
+      messageLimitsMuteEnabled: false,
+      messageLimitsBanEnabled: false,
+    });
+    await s.prisma.chatAdminRosterState.create({
+      data: {
+        chatId: chatId!,
+        completeProbeStartedAt: new Date(Date.now() - 1_000),
+        completedAt: new Date(),
+      },
+    });
+    const admissionLookup = jest.spyOn(
+      ModerationAccessService.prototype,
+      'getRemoteChatAdminAccess',
+    );
+    const authorMembership = jest.spyOn(s.max, 'getChatMemberAccess');
+    const handler = jest.spyOn(s.moderation, 'handleUpdate');
+    const messageId = `complete-roster-${randomUUID()}`;
+    const at = Date.now();
+    await Promise.all(
+      s.bots.map((bot) =>
+        s.ingest({
+          chatId: chatId!,
+          messageId,
+          botId: bot.id,
+          at,
+          text: 'Harmless long content exceeding the configured twenty character limit',
+        }),
+      ),
+    );
+    await s.drain();
+    await waitForUserDelete(s, chatId!, messageId);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(
+      admissionLookup.mock.calls.filter(
+        ([chat, user]) => chat === chatId && user === 'fixture-user',
+      ),
+    ).toEqual([]);
+    expect(authorMembership).toHaveBeenCalledWith(
+      chatId,
+      'fixture-user',
+      expect.objectContaining({
+        bypassCache: true,
+        sourceTag: MAX_API_SOURCE_TAGS.MODERATION_DELETE,
+      }),
+    );
+    expect(
+      s.effects.filter((effect) => effect.method === 'delete' && effect.messageId === messageId),
+    ).toHaveLength(1);
+    expect(s.effects.filter((effect) => effect.path.endsWith('/members'))).toEqual([]);
+    expect(s.failures).toEqual([]);
+  });
 
   it.each([' ', '\n'])(
     'phone blocking deletes adjacent real numbers once across mirrored delivery, separator=%j',

@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { bindStateVoiceSource } from './state-voice-delete-source';
 import { ConfigService } from '@nestjs/config';
 import { ClosedChatDeleteGuardService } from './closed-chat-delete-guard.service';
@@ -18,7 +19,7 @@ const input = {
   reasons: [nightReason],
 };
 
-function fixture() {
+function fixture(authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>) {
   const settings = {
     nightModeEnabled: true,
     nightModeStartTimeMinutes: 1380,
@@ -52,6 +53,7 @@ function fixture() {
     bots as never,
     immunity as never,
     new ConfigService(),
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { settings, row, prisma, max, bots, immunity, guard };
 }
@@ -62,6 +64,34 @@ describe('closed-chat final delete authority', () => {
     jest.setSystemTime(now);
   });
   afterEach(() => jest.useRealTimers());
+
+  it.each([false, true])(
+    'uses saved roles but retains the closed-chat member requirement, absent=%s',
+    async (absent) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({
+          initialized: true,
+          revision: '1',
+          isAdmin: false,
+          member: absent ? null : { userId: 'u1', isAdmin: true, isOwner: false, permissions: [] },
+        });
+      const h = fixture({ resolve });
+      if (absent) {
+        await expect(h.guard.authorize(input)).rejects.toMatchObject({
+          code: 'closed_chat_delete_no_longer_authorized',
+        });
+        expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+        expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+      } else {
+        await expect(h.guard.authorize(input)).resolves.toMatchObject({ reasonKeys: ['night'] });
+      }
+      expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    },
+  );
 
   function voiceFixture() {
     const h = fixture();

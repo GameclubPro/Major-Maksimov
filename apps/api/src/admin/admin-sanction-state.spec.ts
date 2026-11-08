@@ -18,6 +18,7 @@ import {
 import { AdminService } from './admin.service';
 import { ChatEntityType } from '../prisma/prisma-client';
 import {
+  createAdminServiceFixture,
   createChatContextCacheMock,
   createConfigMock,
   createPrismaMock,
@@ -1677,7 +1678,12 @@ describe('AdminService sanction state ordering', () => {
       banMember: jest.fn().mockRejectedValueOnce(timeoutError).mockResolvedValue(undefined),
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     });
-    const service = createService(prisma, maxClient);
+    const service = createAdminServiceFixture(
+      prisma as never,
+      maxClient as never,
+      createChatContextCacheMock() as never,
+      createConfigMock() as never,
+    );
     const job = {
       kind: 'manual_ban_fanout' as const,
       jobId: 'job-ban-timeout-1',
@@ -2188,7 +2194,12 @@ describe('AdminService sanction state ordering', () => {
       }),
       deleteMessage: jest.fn().mockResolvedValue(undefined),
     });
-    const service = createService(prisma, maxClient);
+    const service = createAdminServiceFixture(
+      prisma as never,
+      maxClient as never,
+      createChatContextCacheMock() as never,
+      createConfigMock() as never,
+    );
     const params = {
       jobId: 'job-ban-persist-failure-1',
       rootIntentKey: 'command-root-persist-failure-1',

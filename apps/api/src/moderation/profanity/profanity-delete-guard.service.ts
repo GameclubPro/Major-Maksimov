@@ -4,10 +4,11 @@ import {
   type DeleteAuthorityPreparation,
 } from '../moderation-delete-authority-preparation';
 import type { MaxUpdate } from '@maxim/contracts';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { MaxBotLinkService } from '../../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../../max/max-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WebhookParser } from '../../webhook/webhook.parser';
@@ -54,6 +55,7 @@ export class ProfanityDeleteGuardService {
     private readonly participantImmunity: ParticipantModerationImmunityService,
     private readonly ruleEngine: RuleEngineService,
     configService: ConfigService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {
     this.timeoutMs = configService.get<number>('MODERATION_DELETE_INTENT_TIMEOUT_MS') ?? 5_000;
   }
@@ -135,13 +137,23 @@ export class ProfanityDeleteGuardService {
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       timeoutMs: this.timeoutMs,
     };
-    const access = await this.maxClient.getChatMemberAccess(
+    const author = await this.automaticDeleteAuthorAccess?.resolve(
       params.chatId,
       senderId,
       requestOptions,
+      { requireMembership: true },
     );
-    // FLAG: This uncached lookup returns null only after a valid response omits the author.
-    // Cancel without sanctions; transport/malformed-response errors still propagate for retry.
+    const access = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, senderId, requestOptions);
+    if (author?.isAdmin) {
+      throw new ProfanityDeleteGuardRejectedError(
+        'profanity_author_immune',
+        'Saved chat administrators are exempt from profanity deletion',
+      );
+    }
+    // FLAG: A complete roster decides role immunity, never current membership. A real absent
+    // member still cancels without sanctions; transport/malformed errors retain their retry.
     if (!access) {
       throw new ProfanityDeleteGuardRejectedError(
         'profanity_author_not_member',
@@ -151,7 +163,7 @@ export class ProfanityDeleteGuardService {
     if (access.userId !== null && access.userId !== senderId) {
       throw new Error('Profanity deletion author access is unavailable');
     }
-    if (access.isAdmin || access.isOwner) {
+    if (author?.isAdmin ?? Boolean(access.isAdmin || access.isOwner)) {
       throw new ProfanityDeleteGuardRejectedError(
         'profanity_author_immune',
         'Current chat administrators are exempt from profanity deletion',

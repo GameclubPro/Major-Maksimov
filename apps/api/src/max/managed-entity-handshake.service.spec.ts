@@ -673,13 +673,15 @@ describe('ManagedEntityHandshakeService', () => {
     );
     expect(fixture.prisma.chatBotMembership.upsert).not.toHaveBeenCalled();
     const lockSql = fixture.prisma.$queryRaw.mock.calls.map(([query]) =>
-      (query as readonly string[]).join(''),
+      Array.isArray(query) ? query.join('') : (query as { sql: string }).sql,
     );
-    expect(lockSql).toHaveLength(4);
+    expect(lockSql).toHaveLength(6);
     expect(lockSql[0]).toContain('FROM "chats"');
     expect(lockSql[1]).toContain('FROM "chat_bot_memberships"');
-    expect(lockSql[2]).toContain('FROM "chats"');
-    expect(lockSql[3]).toContain('FROM "chat_bot_memberships"');
+    expect(lockSql[2]).toContain('FROM chat_admin_roster_states');
+    expect(lockSql[3]).toContain('FROM "chats"');
+    expect(lockSql[4]).toContain('FROM "chat_bot_memberships"');
+    expect(lockSql[5]).toContain('FROM chat_admin_roster_states');
     expect(fixture.chatContextCache.applyAdminAccessEpochMutation).toHaveBeenCalledTimes(1);
     expect(fixture.chatContextCache.applyAdminAccessEpochMutation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -700,7 +702,7 @@ describe('ManagedEntityHandshakeService', () => {
       }),
       { acceptNewerGrantedEpoch: true },
     );
-    expect(fixture.prisma.$queryRaw.mock.invocationCallOrder[3]).toBeLessThan(
+    expect(fixture.prisma.$queryRaw.mock.invocationCallOrder[5]).toBeLessThan(
       fixture.chatContextCache.applyAdminAccessEpochMutation.mock.invocationCallOrder[0],
     );
     const catalogWrite = fixture.prisma.managedBotChatCatalog.upsert.mock.calls[0]?.[0] as {
@@ -1000,6 +1002,7 @@ describe('ManagedEntityHandshakeService', () => {
     fixture.prisma.$queryRaw
       .mockResolvedValueOnce([{ id: 'chat-1' }])
       .mockResolvedValueOnce([{ id: 'membership-1' }])
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: 'chat-1' }])
       .mockResolvedValueOnce([]);
 

@@ -3894,9 +3894,11 @@ describe('ModerationService', () => {
 
   it('auto-leaves chats from join denylist on bot_added update', async () => {
     const prisma = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'chat-1' }]),
       chatAdminAllowlist: {
         deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
+      $transaction: async <T>(work: (tx: unknown) => Promise<T>): Promise<T> => work(prisma),
     };
     const ruleEngine = {
       detect: jest.fn(),

@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import {
   createDefaultCommercialAdsPolicy,
   type CommercialAdsPolicy,
@@ -75,6 +76,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     policy?: CommercialAdsPolicy,
     messageText?: string,
     classified?: CommercialLlmObservationResult,
+    authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>,
   ) {
     const chatId = `commercial-ai-protection-${randomUUID()}`;
     const messageId = randomUUID();
@@ -170,6 +172,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       immunity,
       new ConfigService({ MODERATION_DELETE_INTENT_TIMEOUT_MS: 5000 }),
       admission as never,
+      authorAccess as AutomaticDeleteAuthorAccessService | undefined,
     );
     const reasonKey = `${COMMERCIAL_LLM_DELETE_RULE_CODE}:${commercialLlmSourceKey(source)}`;
     const input = {
@@ -219,6 +222,38 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       reasonKey,
     };
   }
+
+  it.each([false, true])(
+    'preserves real AI author membership alongside saved DELETE immunity, absent=%s',
+    async (absent) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({
+          initialized: true,
+          revision: '1',
+          isAdmin: false,
+          member: absent
+            ? null
+            : { userId: '10000007', isAdmin: true, isOwner: false, permissions: [] },
+        });
+      const h = await fixture(false, false, undefined, undefined, undefined, { resolve });
+      if (absent) {
+        await expect(h.guard.authorize(h.input)).rejects.toBeInstanceOf(
+          CommercialLlmGuardRejectedError,
+        );
+        expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+        expect(h.consume).not.toHaveBeenCalled();
+      } else {
+        await expect(h.guard.authorize(h.input)).resolves.toMatchObject({
+          reasonKeys: [h.reasonKey],
+        });
+      }
+      expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     'expired',

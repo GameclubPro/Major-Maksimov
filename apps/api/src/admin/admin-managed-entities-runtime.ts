@@ -92,6 +92,7 @@ export class AdminManagedEntitiesRuntime {
     options?: {
       forceRemote?: boolean;
       timeoutMs?: number;
+      protectHumanAdministrator?: boolean;
     },
   ): Promise<void> {
     return this.context.assertReadOnlyChatAdmin(chatId, userId, entityType, options);
@@ -309,6 +310,7 @@ export class AdminManagedEntitiesRuntime {
       allowPersistedFallback: false,
       bypassPositiveCache: true,
       syncPersistedAccess: false,
+      protectHumanAdministrator: true,
     });
     await this.ensureEntityType(chatId, userId, entityType);
   }
@@ -323,6 +325,7 @@ export class AdminManagedEntitiesRuntime {
       await this.assertReadOnlyChatAdmin(chatId, userId, entityType, {
         forceRemote: true,
         timeoutMs: options.timeoutMs,
+        ...(options.protectHumanAdministrator === true ? { protectHumanAdministrator: true } : {}),
       });
     }
     if (!options.skipEntityCheck) {

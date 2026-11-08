@@ -3,6 +3,7 @@ import {
   MaxChatAdminRosterSyncSourceBackoffError,
 } from './max-chat-admin-roster-sync.service';
 import { ManagedEntityActivationRequiredError } from './managed-entity-activation.util';
+import type { ChatAdminRosterState } from '../prisma/prisma-client';
 
 describe('MaxChatAdminRosterSyncService', () => {
   function createService() {
@@ -68,6 +69,14 @@ describe('MaxChatAdminRosterSyncService', () => {
           values?: readonly unknown[];
         };
         const sql = statement.strings?.join('') ?? statement.sql ?? '';
+        if (sql.includes('chat_admin_roster_states')) {
+          if (!sql.includes('INSERT INTO')) return [];
+          const claimedChatId =
+            statement.values?.[sql.includes('SELECT id, gen_random_uuid()') ? 1 : 0];
+          if (typeof claimedChatId !== 'string')
+            throw new Error('Roster reservation fixture requires the exact chat identity');
+          return [{ chatId: claimedChatId }] satisfies Array<Pick<ChatAdminRosterState, 'chatId'>>;
+        }
         if (sql.includes('FROM "chats"')) {
           return [{ id: 'chat-lock' }];
         }
@@ -201,6 +210,57 @@ describe('MaxChatAdminRosterSyncService', () => {
       latestProbeByMembership,
     };
   }
+
+  it('does not refresh an active chat whose complete roster is still recent', async () => {
+    const h = createService();
+    await h.service.observeActivity('-100-daily', 'bot-1', new Date().toISOString());
+    expect(h.prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(h.queue.add).not.toHaveBeenCalled();
+  });
+
+  it('reserves and deduplicates optional active-chat demand without querying author permissions', async () => {
+    const h = createService();
+    await Promise.all([
+      h.service.observeActivity('-100-daily', 'bot-1'),
+      h.service.observeActivity('-100-daily', 'bot-2'),
+    ]);
+    expect(h.prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(h.queue.add).toHaveBeenCalledTimes(1);
+    expect(h.queue.add).toHaveBeenCalledWith(
+      'sync-chat-admin-roster',
+      expect.objectContaining({ chatId: '-100-daily', botIds: ['bot-1'], source: 'active_chat' }),
+      expect.objectContaining({ priority: 20 }),
+    );
+    expect(h.maxClient.getCurrentChatMemberAccess).not.toHaveBeenCalled();
+  });
+
+  it('keeps stronger pending roster work instead of replacing it with optional daily demand', async () => {
+    const h = createService();
+    const remove = jest.fn();
+    h.queue.getJob.mockResolvedValue({
+      data: { chatId: '-100-daily', source: 'admin_access_validation' },
+      getState: jest.fn().mockResolvedValue('waiting'),
+      remove,
+    });
+    await expect(
+      h.service.scheduleChatAdminRosterSync({
+        chatId: '-100-daily',
+        botIds: ['bot-1'],
+        source: 'active_chat',
+        entityType: 'chat',
+      }),
+    ).resolves.toBe(true);
+    expect(remove).not.toHaveBeenCalled();
+    expect(h.queue.add).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh a dormant bot or a private direct chat on activity', async () => {
+    const h = createService();
+    await h.service.observeActivity('12345', 'bot-1');
+    await h.service.observeActivity('-100-daily', 'bot-dormant');
+    expect(h.prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(h.queue.add).not.toHaveBeenCalled();
+  });
 
   it('does not retry a dormant bot or clear roster grants when explicit activation is required', async () => {
     const h = createService();

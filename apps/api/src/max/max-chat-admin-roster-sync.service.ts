@@ -1,6 +1,14 @@
 import { observedManagedEntityTitle } from '../common/managed-entity-title';
 import { probeManagedEntityActor } from './managed-entity-actor-probe';
 import { handOffHandshakeRoster } from './handshake-roster-handoff';
+import {
+  ADMIN_ROSTER_ACTIVE_REFRESH_MS,
+  ADMIN_ROSTER_REFRESH_RETRY_MS,
+  claimActiveAdminRosterRefresh,
+  completeAdminRoster,
+  hasNewerCompleteAdminRoster,
+  invalidateAdminRosterCompleteness,
+} from './chat-admin-roster-state';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
@@ -51,6 +59,8 @@ const MANAGED_ENTITIES_PUBLISHED_SNAPSHOT_TTL_SEC = 7 * 24 * 60 * 60;
 const MANAGED_ENTITIES_PUBLISHED_SNAPSHOT_PATCH_CONCURRENCY = 8;
 const MANAGED_ENTITY_ACCESS_EDGE_GRANTED_TTL_MS = 3 * 24 * 60 * 60 * 1_000;
 const LOCAL_BACKFILL_MEMBERSHIP_PAGE_SIZE = 500;
+const ACTIVE_ROSTER_OBSERVATION_CONCURRENCY = 8;
+const ACTIVE_ROSTER_OBSERVATION_MAX_KEYS = 20_000;
 
 type ManagedEntityAccessRoleValue = 'OWNER' | 'ADMIN' | 'MEMBER' | 'UNKNOWN';
 type ManagedEntityAccessEdgeClient = {
@@ -104,6 +114,8 @@ export class MaxChatAdminRosterSyncService {
   private readonly logger = new Logger(MaxChatAdminRosterSyncService.name);
   private readonly managedRefreshSourceBackoffUntilMs = new Map<string, number>();
   private readonly terminalBotBackoffUntilMs = new Map<string, number>();
+  private readonly nextActiveRosterObservationAt = new Map<string, number>();
+  private activeRosterObservations = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -117,6 +129,53 @@ export class MaxChatAdminRosterSyncService {
     @Optional()
     private readonly nightModeTransitionScheduler?: NightModeTransitionSchedulerService,
   ) {}
+
+  async observeActivity(
+    chatId: string,
+    botId?: string | null,
+    observedCompleteAt?: string | null,
+  ): Promise<void> {
+    const normalizedChatId = chatId.trim();
+    const normalizedBotId = this.resolveDiscoveryBotId(botId);
+    if (!this.queue || !normalizedChatId || !normalizedBotId || isPrivateDirectChatId(chatId))
+      return;
+    const now = Date.now();
+    const completedAt = observedCompleteAt ? Date.parse(observedCompleteAt) : Number.NaN;
+    if (
+      (Number.isFinite(completedAt) &&
+        completedAt <= now &&
+        now - completedAt < ADMIN_ROSTER_ACTIVE_REFRESH_MS) ||
+      (this.nextActiveRosterObservationAt.get(normalizedChatId) ?? 0) > now ||
+      this.activeRosterObservations >= ACTIVE_ROSTER_OBSERVATION_CONCURRENCY
+    )
+      return;
+    this.nextActiveRosterObservationAt.delete(normalizedChatId);
+    this.nextActiveRosterObservationAt.set(normalizedChatId, now + ADMIN_ROSTER_REFRESH_RETRY_MS);
+    if (this.nextActiveRosterObservationAt.size > ACTIVE_ROSTER_OBSERVATION_MAX_KEYS) {
+      const oldest = this.nextActiveRosterObservationAt.keys().next().value;
+      if (oldest !== undefined) this.nextActiveRosterObservationAt.delete(oldest);
+    }
+    this.activeRosterObservations += 1;
+    try {
+      // FLAG: One SQL reservation across roles bounds refresh retries even after Redis loss.
+      // No roster polling or network permission read runs in the message handler.
+      if (!(await claimActiveAdminRosterRefresh(this.prisma, normalizedChatId, new Date(now))))
+        return;
+      await this.scheduleChatAdminRosterSync({
+        chatId: normalizedChatId,
+        botIds: [normalizedBotId],
+        entityType: 'chat',
+        source: 'active_chat',
+      });
+    } catch (error: unknown) {
+      this.logger.debug(
+        { chatId: normalizedChatId, err: error instanceof Error ? error.message : String(error) },
+        'Active-chat administrator roster refresh deferred',
+      );
+    } finally {
+      this.activeRosterObservations -= 1;
+    }
+  }
 
   async scheduleDiscoverySnapshotSync(chats: readonly MaxBotChat[]): Promise<void> {
     await this.mapWithConcurrencyLimit(
@@ -162,6 +221,8 @@ export class MaxChatAdminRosterSyncService {
         const state = await existing.getState();
         const existingData = this.normalizeJobData(existing.data);
         if (state !== 'failed' && state !== 'completed') {
+          // FLAG: Optional daily refresh never replaces explicit connection or actor work.
+          if (desiredJobData.source === 'active_chat') return true;
           // FLAG: Membership churn is only a best-effort prewarm. Any live exact-chat job is
           // stronger evidence and must never be replaced by this lower-priority refresh.
           if (membershipPrewarm) {
@@ -198,7 +259,10 @@ export class MaxChatAdminRosterSyncService {
         }
       }
 
-      if (membershipPrewarm && !(await this.canAdmitMembershipChurnPrewarm())) {
+      if (
+        (membershipPrewarm || desiredJobData.source === 'active_chat') &&
+        !(await this.canAdmitMembershipChurnPrewarm())
+      ) {
         return false;
       }
 
@@ -451,7 +515,7 @@ export class MaxChatAdminRosterSyncService {
       return false;
     }
 
-    await this.persistCatalogBinding(normalized);
+    if (normalized.source !== 'active_chat') await this.persistCatalogBinding(normalized);
 
     const candidateResolution = await this.resolveCandidateBotIds(normalized);
     const candidateBotIds = candidateResolution.botIds;
@@ -770,6 +834,7 @@ export class MaxChatAdminRosterSyncService {
       params?.source === 'handshake_start' ||
       params?.source === 'moderation_destructive_path' ||
       params?.source === 'admin_access_validation' ||
+      params?.source === 'active_chat' ||
       params?.source === 'discovery_snapshot'
         ? params.source
         : null;
@@ -998,6 +1063,10 @@ export class MaxChatAdminRosterSyncService {
           return null;
         }
 
+        if (await hasNewerCompleteAdminRoster(tx, chatId, accessContext.probeStartedAt)) {
+          return null;
+        }
+
         const existingRows = await tx.chatAdminAllowlist.findMany({
           where: { chatId },
           select: { userId: true },
@@ -1165,6 +1234,7 @@ export class MaxChatAdminRosterSyncService {
           });
         }
 
+        await completeAdminRoster(tx, chatId, accessContext.probeStartedAt);
         return {
           adminUserIds: usersToGrant,
           removedUserIds: usersToRemove,
@@ -1175,6 +1245,8 @@ export class MaxChatAdminRosterSyncService {
     if (!persisted) {
       return false;
     }
+    // FLAG: A successful unchanged/empty roster also updates completeness in cached contexts.
+    await this.chatContextCache.invalidate(chatId);
     return this.publishRosterCachesForAcceptedEpoch(job, accessContext, persisted);
   }
 
@@ -1485,6 +1557,7 @@ export class MaxChatAdminRosterSyncService {
           tx,
         );
 
+        await invalidateAdminRosterCompleteness(tx, chatId);
         return usersToDeny;
       },
       {
@@ -1495,6 +1568,7 @@ export class MaxChatAdminRosterSyncService {
     if (!deniedUserIds) {
       return false;
     }
+    await this.chatContextCache.invalidate(chatId);
     await this.mapWithConcurrencyLimit(
       deniedUserIds,
       MANAGED_ENTITIES_PUBLISHED_SNAPSHOT_PATCH_CONCURRENCY,
@@ -1853,6 +1927,7 @@ export class MaxChatAdminRosterSyncService {
   }
 
   private resolveJobPriority(job: MaxChatAdminRosterSyncJob): number {
+    if (job.source === 'active_chat') return CHAT_ADMIN_ROSTER_SYNC_DEFAULT_PRIORITY + 10;
     if (job.source === 'webhook_bot_added') {
       return CHAT_ADMIN_ROSTER_SYNC_WEBHOOK_BOT_ADDED_PRIORITY;
     }

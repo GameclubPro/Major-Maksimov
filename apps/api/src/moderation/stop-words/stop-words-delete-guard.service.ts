@@ -3,9 +3,10 @@ import {
   finalizeDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from '../moderation-delete-authority-preparation';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MaxBotLinkService } from '../../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../../max/max-client.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { WebhookParser } from '../../webhook/webhook.parser';
@@ -72,6 +73,7 @@ export class StopWordsDeleteGuardService {
     private readonly maxBotLink: MaxBotLinkService,
     private readonly immunity: ParticipantModerationImmunityService,
     private readonly config: ConfigService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async assertIntentStillActionable(params: {
@@ -169,9 +171,19 @@ export class StopWordsDeleteGuardService {
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       timeoutMs: this.config.get<number>('MODERATION_DELETE_INTENT_TIMEOUT_MS') ?? 5_000,
     };
-    const access = await this.maxClient.getChatMemberAccess(params.chatId, senderId, options);
+    // FLAG: A sanction keeps a fresh member proof even when DELETE uses a complete saved roster.
+    const author = !action
+      ? await this.automaticDeleteAuthorAccess?.resolve(params.chatId, senderId, options, {
+          requireMembership: true,
+        })
+      : undefined;
+    const access = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, senderId, options);
+    if (author?.isAdmin) this.reject('author_protected');
     if (!access) this.reject('author_absent');
-    if (access.isAdmin || access.isOwner) this.reject('author_protected');
+    if (author?.isAdmin ?? Boolean(access.isAdmin || access.isOwner))
+      this.reject('author_protected');
     if (access.userId !== null && access.userId !== senderId)
       throw new Error('Stop-list author access unavailable');
     const row = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, options);

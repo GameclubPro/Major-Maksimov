@@ -4,9 +4,10 @@ import {
   type DeleteAuthorityPreparation,
 } from './moderation-delete-authority-preparation';
 import { isStateVoiceReason, readStateVoiceReasonKeys } from './state-voice-delete-source';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../max/max-client.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WebhookParser } from '../webhook/webhook.parser';
@@ -42,6 +43,7 @@ export class ClosedChatDeleteGuardService {
     private readonly bots: MaxBotLinkService,
     private readonly immunity: ParticipantModerationImmunityService,
     private readonly config: ConfigService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async authorize(params: {
@@ -86,9 +88,18 @@ export class ClosedChatDeleteGuardService {
       sourceTag: MAX_API_SOURCE_TAGS.MODERATION_DELETE,
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
     };
-    const access = await this.max.getChatMemberAccess(params.chatId, userId, options);
-    if (!access || access.isAdmin === true || access.isOwner === true) this.reject();
-    if (access.userId !== userId || access.isAdmin !== false || access.isOwner !== false)
+    const author = await this.automaticDeleteAuthorAccess?.resolve(params.chatId, userId, options, {
+      requireMembership: true,
+    });
+    const access = author
+      ? author.member
+      : await this.max.getChatMemberAccess(params.chatId, userId, options);
+    if (!access || (author?.isAdmin ?? Boolean(access.isAdmin || access.isOwner))) this.reject();
+    if (
+      access.userId !== userId ||
+      typeof access.isAdmin !== 'boolean' ||
+      typeof access.isOwner !== 'boolean'
+    )
       throw new Error('Closed chat author access unavailable');
     const voiceReasons = owned.filter(isStateVoiceReason);
     if (voiceReasons.length) {

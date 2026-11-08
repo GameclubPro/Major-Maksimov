@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { extractLogicalPhotoAlbumResult } from '../photo-duplicate/photo-attachment-extractor';
 
 import {
@@ -32,6 +33,36 @@ const baseInput = {
 };
 
 describe('CommercialOcrDeleteGuardService', () => {
+  it.each([false, true])(
+    'retains the OCR member requirement after a saved role decision, absent=%s',
+    async (absent) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({
+          initialized: true,
+          revision: '1',
+          isAdmin: false,
+          member: absent
+            ? null
+            : { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+        });
+      const h = buildHarness({ authorAccess: { resolve } });
+      if (absent) {
+        await expect(h.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+          code: 'commercial_ocr_author_access_unknown',
+        });
+        expect(h.maxClient.getExactMessageRow).not.toHaveBeenCalled();
+        expect(h.participantImmunity.consumeForMessage).not.toHaveBeenCalled();
+      } else {
+        await expect(h.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+      }
+      expect(h.maxClient.getChatMemberAccess).not.toHaveBeenCalled();
+    },
+  );
+
   const baselineAuthority: CommercialOcrEnforcementAuthority = {
     kind: 'BASELINE',
     behaviorIdentitySha256: 'a'.repeat(64),
@@ -496,6 +527,7 @@ function buildHarness(
     certifiedSettingsFingerprints?: readonly string[];
     bindingOcrVersion?: string;
     bindingAuthority?: CommercialOcrEnforcementAuthority;
+    authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>;
   } = {},
 ) {
   const exactRow = options.exactRow === undefined ? messageRow() : options.exactRow;
@@ -572,6 +604,7 @@ function buildHarness(
     maxBotLinkService as never,
     participantImmunity as never,
     runtimePolicy as never,
+    options.authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return {
     service,

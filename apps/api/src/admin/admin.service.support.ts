@@ -135,9 +135,26 @@ export type ManagedEntityBotProfileSnapshot = {
 
 export type AssertChatAdminOptions = {
   syncPersistedAccess?: boolean;
+  protectHumanAdministrator?: boolean;
   trafficClass?: 'critical' | 'interactive' | 'background';
   timeoutMs?: number;
   allowPersistedFallback?: boolean;
+  bypassPositiveCache?: boolean;
+};
+
+export type AdminAccessProbeRequestOptions = Pick<
+  AssertChatAdminOptions,
+  'protectHumanAdministrator' | 'trafficClass' | 'timeoutMs'
+> & { sourceTag?: string };
+
+export type RemoteAdminAccessOptions = AdminAccessProbeRequestOptions & {
+  entityType?: ManagedEntityType;
+  candidateBotIds?: readonly string[];
+  allowPersistedFallback?: boolean;
+};
+
+export type ResolveAdminAccessOptions = RemoteAdminAccessOptions & {
+  bypassNegativeCache?: boolean;
   bypassPositiveCache?: boolean;
 };
 
@@ -146,6 +163,7 @@ export type AdminReadBypassOptions = {
   skipEntityCheck?: boolean;
   forceRemote?: boolean;
   timeoutMs?: number;
+  protectHumanAdministrator?: boolean;
 };
 
 export type TimedPromiseCacheEntry<T> = {
@@ -178,6 +196,7 @@ export type AdminAccessResolution =
       userRole?: ManagedEntityAccessRoleValue;
       botRole?: ManagedEntityAccessRoleValue;
       probeStartedAt?: Date;
+      humanAdministratorConfirmed?: true;
     }
   | {
       status: 'denied';

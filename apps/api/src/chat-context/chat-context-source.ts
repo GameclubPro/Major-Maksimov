@@ -1,5 +1,6 @@
 import { Prisma, type ChatSettings } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
+import type { ChatAdminRosterSnapshot } from '../max/chat-admin-roster-state';
 
 export type ChatSettingsProof = { settingsId: string; revision: string | null };
 export type ChatSettingsTemplate = { proof: ChatSettingsProof; settings: ChatSettings };
@@ -11,6 +12,7 @@ export type ChatContextSourceRow = {
   settings: ChatSettings | null;
   domains: { domain: string }[];
   admins: { userId: string }[];
+  adminRosterState?: ChatAdminRosterSnapshot | null;
   rules: { publishedUrl: string | null; publishedMessageId: string | null } | null;
 };
 export type ChatContextSourceResult = {
@@ -30,12 +32,18 @@ export type ChatContextShell = {
   rulesPublishedMessageId: string | null;
   adminUserIds: string[];
   domainAllowlist: string[];
+  adminRosterRevision: string | null;
+  adminRosterCompleteProbeStartedAt: Date | null;
+  adminRosterCompletedAt: Date | null;
 };
 
 export function chatContextShellQuery(chatId: string, sourceAt: Date): Prisma.Sql {
   return Prisma.sql`
     SELECT c.id, c.title, c.bot_id AS "botId", c.primary_bot_id AS "primaryBotId",
       s.id AS "settingsId", v.revision::text AS "settingsRevision",
+      ar.revision::text AS "adminRosterRevision",
+      ar.complete_probe_started_at AS "adminRosterCompleteProbeStartedAt",
+      ar.completed_at AS "adminRosterCompletedAt",
       r.published_url AS "rulesPublishedUrl",
       r.published_message_id AS "rulesPublishedMessageId",
       COALESCE((SELECT jsonb_agg(a.user_id) FROM chat_admin_allowlist a
@@ -49,6 +57,7 @@ export function chatContextShellQuery(chatId: string, sourceAt: Date): Prisma.Sq
     LEFT JOIN chat_settings s ON s.chat_id = c.id
     LEFT JOIN chat_settings_cache_revisions v ON v.chat_id = s.chat_id
     LEFT JOIN chat_rules r ON r.chat_id = c.id
+    LEFT JOIN chat_admin_roster_states ar ON ar.chat_id = c.id
     WHERE c.id = ${chatId}
   `;
 }
@@ -78,6 +87,14 @@ export async function readChatContextSource(
           settings: candidate.settings,
           domains: shell.domainAllowlist.map((domain) => ({ domain })),
           admins: shell.adminUserIds.map((userId) => ({ userId })),
+          adminRosterState: shell.adminRosterRevision
+            ? {
+                revision: shell.adminRosterRevision,
+                completeProbeStartedAt:
+                  shell.adminRosterCompleteProbeStartedAt?.toISOString() ?? null,
+                completedAt: shell.adminRosterCompletedAt?.toISOString() ?? null,
+              }
+            : null,
           rules: {
             publishedUrl: shell.rulesPublishedUrl,
             publishedMessageId: shell.rulesPublishedMessageId,
@@ -103,6 +120,7 @@ export async function readChatContextSource(
             select: { domain: true },
           },
           admins: { select: { userId: true } },
+          adminRosterState: true,
         },
       });
       if (!chat) return { row: null, proof: null, mode: 'full' };
@@ -122,6 +140,14 @@ export async function readChatContextSource(
           settings,
           domains: chat.domains,
           admins: chat.admins,
+          adminRosterState: chat.adminRosterState
+            ? {
+                revision: chat.adminRosterState.revision,
+                completeProbeStartedAt:
+                  chat.adminRosterState.completeProbeStartedAt?.toISOString() ?? null,
+                completedAt: chat.adminRosterState.completedAt?.toISOString() ?? null,
+              }
+            : null,
           rules: chat.rules,
         },
         proof,

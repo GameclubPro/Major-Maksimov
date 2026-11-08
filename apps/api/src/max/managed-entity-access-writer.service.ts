@@ -14,6 +14,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { MaxBotLinkService } from './max-bot-link.service';
 import type { MaxChatMemberAccess } from './max-client.service';
+import { hasNewerCompleteAdminRoster } from './chat-admin-roster-state';
 import {
   isExplicitManagedEntityActivationCurrent,
   hasMajorActivationCapabilities,
@@ -193,6 +194,9 @@ export class ManagedEntityAccessWriter {
       if (!(await this.lockCurrentProbe(tx, context, probeStartedAt))) {
         return null;
       }
+      // FLAG: Complete roster exclusion is newer evidence even for a never-saved actor.
+      // Keep this positive-grant fence out of shared bot-scoped denial/cleanup checks.
+      if (await hasNewerCompleteAdminRoster(tx, context.chatId, probeStartedAt)) return null;
 
       const existing = await tx.managedEntityAccessEdge.findUnique({
         where: {
@@ -339,7 +343,7 @@ export class ManagedEntityAccessWriter {
       if (!(await this.lockCurrentProbe(tx, context, probeStartedAt))) {
         return false;
       }
-      return true;
+      return !(await hasNewerCompleteAdminRoster(tx, context.chatId, probeStartedAt));
     });
     if (!stillCurrent) {
       return false;

@@ -765,6 +765,7 @@ describe('ChatContextCacheService', () => {
       settings,
       domainAllowlist: ['example.com'],
       adminUserIds: ['user-1'],
+      adminRoster: null,
       rulesPublishedUrl: null,
       rulesPublishedMessageId: null,
     });
@@ -806,6 +807,7 @@ describe('ChatContextCacheService', () => {
       settings,
       domainAllowlist: ['example.com'],
       adminUserIds: ['user-1'],
+      adminRoster: null,
       rulesPublishedUrl: null,
       rulesPublishedMessageId: null,
     });
@@ -915,6 +917,7 @@ describe('ChatContextCacheService', () => {
       settings,
       domainAllowlist: ['example.com'],
       adminUserIds: ['user-1'],
+      adminRoster: null,
       rulesPublishedUrl: null,
       rulesPublishedMessageId: null,
     });
@@ -924,6 +927,7 @@ describe('ChatContextCacheService', () => {
       settings,
       domainAllowlist: ['example.com'],
       adminUserIds: ['user-1'],
+      adminRoster: null,
       rulesPublishedUrl: null,
       rulesPublishedMessageId: null,
     });

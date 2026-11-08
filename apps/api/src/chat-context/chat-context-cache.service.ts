@@ -19,6 +19,7 @@ import {
 } from './chat-context-local-cache';
 import { ChatContextMediaCache, CHAT_CONTEXT_MEDIA_TTL_SEC } from './chat-context-media-cache';
 import { readChatContextSource } from './chat-context-source';
+import type { ChatAdminRosterSnapshot } from '../max/chat-admin-roster-state';
 import { ChatSettingsTemplateCache } from './chat-settings-template-cache';
 import {
   createChatContextCacheActivity,
@@ -53,6 +54,7 @@ export type ChatContext = {
   settings: ChatSettings;
   domainAllowlist: string[];
   adminUserIds: string[];
+  adminRoster?: ChatAdminRosterSnapshot | null;
   rulesPublishedUrl: string | null;
   rulesPublishedMessageId: string | null;
 };
@@ -2523,6 +2525,7 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
         settings: { ...chat.settings, linkRulesPolicy: chat.settings.linkRulesPolicy ?? null },
         domainAllowlist: (chat.domains ?? []).map((item) => item.domain),
         adminUserIds: (chat.admins ?? []).map((item) => item.userId),
+        adminRoster: 'adminRosterState' in chat ? (chat.adminRosterState ?? null) : null,
         rulesPublishedUrl: chat.rules?.publishedUrl ?? null,
         rulesPublishedMessageId: chat.rules?.publishedMessageId ?? null,
       };

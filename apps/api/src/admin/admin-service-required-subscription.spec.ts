@@ -3,6 +3,7 @@ import { BadRequestException, ServiceUnavailableException } from '@nestjs/common
 import { AdminRequiredSubscriptionRuntime } from './admin-required-subscription-runtime';
 import { AdminService } from './admin.service';
 import {
+  createAdminServiceFixture,
   createChatSummaryFixture,
   createManagedEntityHeaderFixture,
   createPrismaMock,
@@ -46,6 +47,7 @@ function createRequiredSubscriptionService(
     }),
   };
   const maxBotRegistry = {
+    getDefaultBot: jest.fn().mockReturnValue(bot),
     getBotById: jest.fn((candidateBotId: string | null | undefined) =>
       candidateBotId === botId ? bot : null,
     ),
@@ -54,7 +56,7 @@ function createRequiredSubscriptionService(
     getActionableBots: jest.fn().mockReturnValue([bot]),
   };
 
-  return new AdminService(
+  return createAdminServiceFixture(
     prisma as never,
     maxClient as never,
     chatContextCache as never,
@@ -1096,6 +1098,7 @@ describe('AdminService required subscription settings', () => {
       }),
     };
     const maxBotRegistry = {
+      getDefaultBot: jest.fn().mockReturnValue({ id: 'id613002203036_bot' }),
       getBotById: jest.fn((botId?: string | null) => {
         if (botId === 'id613002203036_bot') {
           return {
@@ -1125,7 +1128,7 @@ describe('AdminService required subscription settings', () => {
         .mockReturnValue([{ id: 'id613002203036_bot' }, { id: 'id613002203036_4_bot' }]),
     };
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       maxClient as never,
       chatContextCache as never,
@@ -1781,7 +1784,15 @@ describe('AdminService required subscription settings', () => {
     );
     expect(chatContextCache.invalidate).toHaveBeenCalledWith('chat-1');
     expect(chatContextCache.invalidate).toHaveBeenCalledWith('chat-2');
-    expect(prisma.chatAdminAllowlist.upsert).not.toHaveBeenCalled();
+    expect(prisma.chatAdminAllowlist.upsert.mock.calls).toEqual(
+      ['chat-1', 'chat-2'].map((chatId) => [
+        {
+          where: { chatId_userId: { chatId, userId: actor.userId } },
+          create: { chatId, userId: actor.userId },
+          update: {},
+        },
+      ]),
+    );
 
     await flushAsyncTasks();
 
@@ -1822,7 +1833,7 @@ describe('AdminService required subscription settings', () => {
       },
     ]);
 
-    const service = new AdminService(
+    const service = createAdminServiceFixture(
       prisma as never,
       {
         getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
@@ -1887,7 +1898,15 @@ describe('AdminService required subscription settings', () => {
       },
       'chat-2',
     );
-    expect(prisma.chatAdminAllowlist.upsert).not.toHaveBeenCalled();
+    expect(prisma.chatAdminAllowlist.upsert.mock.calls).toEqual(
+      ['chat-1', 'chat-2'].map((chatId) => [
+        {
+          where: { chatId_userId: { chatId, userId: actor.userId } },
+          create: { chatId, userId: actor.userId },
+          update: {},
+        },
+      ]),
+    );
   });
 
   it('uses the cached mass-action target set when applying settings to all chats', async () => {

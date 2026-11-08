@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 import { TrafficProtectionDetector } from './traffic-protection.detector';
 import {
@@ -5,7 +6,7 @@ import {
   TrafficProtectionGuardRejectedError,
 } from './traffic-protection-delete-guard.service';
 
-async function harness() {
+async function harness(authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>) {
   const settings = {
     slowModeEnabled: true,
     slowModeIntervalSeconds: 30,
@@ -55,6 +56,7 @@ async function harness() {
     bots as never,
     immunity as never,
     new ConfigService(),
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   const input = {
     intentId: 'intent',
@@ -66,6 +68,36 @@ async function harness() {
 }
 
 describe('TrafficProtectionDeleteGuardService', () => {
+  it.each([false, true])(
+    'retains current traffic-author membership after a saved role decision, absent=%s',
+    async (absent) => {
+      const resolve = jest
+        .fn<
+          ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+          Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+        >()
+        .mockResolvedValue({
+          initialized: true,
+          revision: '1',
+          isAdmin: false,
+          member: absent
+            ? null
+            : { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+        });
+      const h = await harness({ resolve });
+      if (absent) {
+        await expect(h.guard.assertIntentStillActionable(h.input)).rejects.toBeInstanceOf(
+          TrafficProtectionGuardRejectedError,
+        );
+        expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+        expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+      } else {
+        await expect(h.guard.assertIntentStillActionable(h.input)).resolves.toBe('allowed');
+      }
+      expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    },
+  );
+
   it('checks current source, exact author, immunity and final policy', async () => {
     const h = await harness();
     await expect(h.guard.assertIntentStillActionable(h.input)).resolves.toBe('allowed');

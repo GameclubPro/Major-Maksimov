@@ -24,6 +24,7 @@ import { MAX_CHAT_ADMIN_ROSTER_SYNC_QUEUE } from './max-chat-admin-roster-sync.q
 import { MaxChatAdminRosterSyncService } from './max-chat-admin-roster-sync.service';
 import { MaxBotExecutionPlannerService } from './max-bot-execution-planner.service';
 import { MaxClientService } from './max-client.service';
+import { AutomaticDeleteAuthorAccessService } from './automatic-delete-author-access.service';
 import { MaxMembershipLookupService } from './max-membership-lookup.service';
 import { MaxRoutedPublicationService } from './max-routed-publication.service';
 import { MaxWebhookSubscriptionReconcilerService } from './max-webhook-subscription-reconciler.service';
@@ -45,6 +46,7 @@ const maxProviders = [
   KaravanMarketplaceResolverService,
   GroupCommandAuthorityService,
   MaxClientService,
+  AutomaticDeleteAuthorAccessService,
   MaxModerationRuleNoticeGuardService,
   MaxRequiredSubscriptionNoticeGuardService,
   MaxDuplicateNoticeGuardService,
@@ -93,6 +95,7 @@ const maxProviders = [
     KaravanMarketplaceResolverService,
     GroupCommandAuthorityService,
     MaxClientService,
+    AutomaticDeleteAuthorAccessService,
     MaxActionDispatchService,
     MaxActionLedgerService,
     MaxChatAdminRosterSyncService,

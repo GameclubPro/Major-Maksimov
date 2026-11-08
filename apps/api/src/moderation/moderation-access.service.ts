@@ -5,6 +5,8 @@ import { Prisma, type ChatSettings } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
 import { MaxClientService } from '../max/max-client.service';
+import { MaxChatAdminRosterSyncService } from '../max/max-chat-admin-roster-sync.service';
+import type { ChatAdminRosterSnapshot } from '../max/chat-admin-roster-state';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { RuntimeDiagnosticsService } from '../system/runtime-diagnostics.service';
 import { raceWithTimeout } from '../common/promise-timeout.util';
@@ -75,6 +77,7 @@ export class ModerationAccessService {
     @Optional() configService?: ConfigService,
     @Optional() private readonly maxBotLinkService?: MaxBotLinkService,
     @Optional() private readonly runtimeDiagnosticsService?: RuntimeDiagnosticsService,
+    @Optional() private readonly adminRosters?: MaxChatAdminRosterSyncService,
   ) {
     this.chatAdminLookupTimeoutMs = this.readPositiveConfigInt(
       configService?.get<number>('CHAT_ADMIN_LOOKUP_TIMEOUT_MS'),
@@ -91,6 +94,45 @@ export class ModerationAccessService {
     return this.chatAdminSyncRemoteLookupWhenLocalAdminsKnown;
   }
 
+  async confirmRegularMemberBeforePenalty(
+    chatId: string,
+    userId: string,
+    options: { botId?: string } = {},
+  ): Promise<boolean> {
+    const normalizedChatId = chatId.trim();
+    const normalizedUserId = userId.trim();
+    if (!normalizedChatId || !normalizedUserId) return false;
+    try {
+      const botId =
+        options.botId?.trim() ||
+        (await resolveChatReadBotId(
+          { maxBotLinkService: this.maxBotLinkService },
+          normalizedChatId,
+        ));
+      if (!botId) return false;
+      // FLAG: Saved DELETE immunity grants no reputation or episode authority.
+      // Only a fresh exact human member may enter the penalty-producing threshold branch.
+      const member = await this.maxClient.getChatMemberAccess(normalizedChatId, normalizedUserId, {
+        botId,
+        bypassCache: true,
+        trafficClass: 'interactive',
+        actionHealthLane: 'background',
+        sourceTag: 'moderation.fanout.penalty.author',
+        ignoreFailureMetricStatuses: CHAT_ADMIN_SOFT_LOOKUP_FAILURE_METRIC_STATUSES,
+        timeoutMs: this.chatAdminLookupTimeoutMs,
+      });
+      return (
+        member?.userId === normalizedUserId &&
+        member.explicitNonPrivilegeEvidence === true &&
+        member.isAdmin === false &&
+        member.isOwner === false &&
+        member.isBot === false
+      );
+    } catch {
+      return false;
+    }
+  }
+
   async resolveSenderChatAdminCheck(
     chatId: string,
     localAdminUserIds: string[] | undefined,
@@ -100,10 +142,34 @@ export class ModerationAccessService {
       skipRemoteLookupWhenLocalAdminsKnown?: boolean;
       remoteLookupSoftTimeoutMs?: number;
       prefetchRemoteLookupWhenLocalAdminsKnown?: boolean;
+      automaticDelete?: {
+        roster: ChatAdminRosterSnapshot | null | undefined;
+        botId?: string;
+        useSavedProtection?: boolean;
+      };
     },
   ): Promise<ChatAdminCheckResult> {
     const startedAtMs = Date.now();
     const localIsAdmin = this.isSenderChatAdmin(localAdminUserIds, userId);
+    if (options?.automaticDelete) {
+      const { roster, botId } = options.automaticDelete;
+      void this.adminRosters?.observeActivity(chatId, botId, roster?.completedAt).catch(() => {
+        this.logger.warn({ chatId }, 'Active chat administrator refresh could not be scheduled');
+      });
+      // FLAG: This is DELETE exemption only, never command or sanction authority.
+      // A stale shared negative member cache cannot override the saved protection set.
+      if (
+        options.automaticDelete.useSavedProtection !== false &&
+        roster?.completedAt &&
+        roster.completeProbeStartedAt
+      ) {
+        return this.finalizeAdminCheckResult(
+          { isAdmin: localIsAdmin, source: 'persisted_roster' },
+          'admin-check.persisted-roster',
+          startedAtMs,
+        );
+      }
+    }
     const cachedRemoteAdminAccess = await this.getRemoteChatAdminAccess(chatId, userId, {
       allowLookup: false,
     });

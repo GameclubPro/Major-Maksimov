@@ -6,7 +6,11 @@ import {
 import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
 import { Prisma } from '../prisma/prisma-client';
 import { createChannelSettingsPrismaMock } from './admin-channel-settings-test-support';
-import { AdminService } from './admin.service';
+
+export {
+  createAdminServiceFixture,
+  createBareAdminServiceForCatalogTests,
+} from './admin-settings-access-test-support';
 
 export type ManagedEntityType = 'chat' | 'channel';
 
@@ -107,18 +111,6 @@ export function createManagedEntityHeaderFixture(
       canEdit: false,
     },
   };
-}
-
-export function createBareAdminServiceForCatalogTests() {
-  const service = Object.create(AdminService.prototype) as any;
-  service.maxBotRegistry = {
-    getBotById: jest.fn().mockReturnValue(null),
-  };
-  service.managedEntitiesRuntimeBotIds = new Set(['bot-1']);
-  service.logger = {
-    warn: jest.fn(),
-  };
-  return service;
 }
 
 export function expectChatRulesReadOptions(overrides: Record<string, unknown> = {}) {
@@ -1034,6 +1026,13 @@ export function createPrismaMock() {
         if (/FOR UPDATE OF chat|SELECT id FROM chats WHERE id =/u.test(sql))
           return [{ id: 'chat-1' }];
         if (/clock_timestamp\(\) AT TIME ZONE 'UTC'/u.test(sql)) return [{ at: new Date() }];
+        // FLAG: The new roster fence must not consume a business query's one-shot result.
+        if (
+          /SELECT complete_probe_started_at AS "completeProbeStartedAt"\s+FROM chat_admin_roster_states WHERE chat_id =/u.test(
+            sql,
+          )
+        )
+          return [];
         return prisma.$queryRaw(...args);
       };
     },

@@ -1,3 +1,4 @@
+import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 import { stopWordsPolicySchema } from '@maxim/contracts/settings';
 import {
@@ -14,7 +15,7 @@ const input = {
   reasons: [{ ruleCode: 'MESSAGE_TOO_LONG_DELETE', reasonKey: 'length' }],
 };
 
-function fixture() {
+function fixture(authorAccess?: Pick<AutomaticDeleteAuthorAccessService, 'resolve'>) {
   const settings = {
     maxMessageLengthEnabled: true,
     maxMessageLength: 10,
@@ -53,9 +54,45 @@ function fixture() {
     bots as never,
     immunity as never,
     new ConfigService(),
+    authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
   return { service, max, settings, message, immunity, prisma, bots };
 }
+
+describe('saved role protection with independent membership evidence', () => {
+  it.each([false, true])('retains current-member eligibility, absent=%s', async (absent) => {
+    const resolve = jest
+      .fn<
+        ReturnType<AutomaticDeleteAuthorAccessService['resolve']>,
+        Parameters<AutomaticDeleteAuthorAccessService['resolve']>
+      >()
+      .mockResolvedValue({
+        initialized: true,
+        revision: '1',
+        isAdmin: false,
+        member: absent
+          ? null
+          : { userId: 'user-1', isAdmin: true, isOwner: false, permissions: [] },
+      });
+    const h = fixture({ resolve });
+    if (absent) {
+      await expect(h.service.authorize(input)).rejects.toMatchObject({
+        code: 'message_limits_delete_no_longer_authorized',
+      });
+      expect(h.max.getExactMessageRow).not.toHaveBeenCalled();
+      expect(h.immunity.consumeForMessage).not.toHaveBeenCalled();
+    } else {
+      await expect(h.service.authorize(input)).resolves.toEqual({ reasonKeys: ['length'] });
+    }
+    expect(h.max.getChatMemberAccess).not.toHaveBeenCalled();
+    expect(resolve).toHaveBeenCalledWith(
+      '-123',
+      'user-1',
+      expect.objectContaining({ botId: 'executor-b' }),
+      { requireMembership: true },
+    );
+  });
+});
 
 describe('native voice authority without MAX message GET', () => {
   function voiceFixture() {

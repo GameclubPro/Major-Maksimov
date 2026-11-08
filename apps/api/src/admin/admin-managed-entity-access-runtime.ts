@@ -4,6 +4,7 @@ import type { Logger } from '@nestjs/common';
 import { Prisma } from '../prisma/prisma-client';
 import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
 import type { MaxChatMemberAccess } from '../max/max-client.service';
+import { hasNewerCompleteAdminRoster } from '../max/chat-admin-roster-state';
 import type { PrismaService } from '../prisma/prisma.service';
 import { isPrismaKnownError, toPrismaEntityType } from './admin-legacy-utils';
 import type { AdminManagedEntityAccessRuntimeContext } from './admin-managed-entity-access-runtime-context';
@@ -191,6 +192,19 @@ export class AdminManagedEntityAccessRuntime {
     }
   }
 
+  async lockRemoteAdminGrant(
+    tx: Prisma.TransactionClient,
+    chatId: string,
+    userId: string,
+    probeStartedAt: Date,
+  ): Promise<boolean> {
+    // FLAG: A delayed discovery grant cannot restore an actor excluded by a newer full roster.
+    return (
+      (await this.lockRemoteAdminAccessProbe(tx, chatId, userId, probeStartedAt)) &&
+      !(await hasNewerCompleteAdminRoster(tx, chatId, probeStartedAt))
+    );
+  }
+
   async persistRemoteManagedEntityAccessEdge(params: {
     chatId: string;
     userId: string;
@@ -222,8 +236,16 @@ export class AdminManagedEntityAccessRuntime {
         if (!(await this.lockRemoteAdminAccessProbe(tx, chatId, userId, params.probeStartedAt))) {
           return false;
         }
+        if (
+          params.resolution.status === 'granted' &&
+          (await hasNewerCompleteAdminRoster(tx, chatId, params.probeStartedAt))
+        )
+          return false;
+        const protectHumanAdministrator =
+          params.resolution.status === 'granted' &&
+          params.resolution.humanAdministratorConfirmed === true;
         if (!params.entityType) {
-          return true;
+          return !protectHumanAdministrator;
         }
 
         const edgeClient = (
@@ -235,11 +257,24 @@ export class AdminManagedEntityAccessRuntime {
           }
         ).managedEntityAccessEdge;
         if (typeof edgeClient?.upsert !== 'function') {
-          return true;
+          return !protectHumanAdministrator;
         }
         const botId = this.normalizeManagedEntityAccessBotId(params.botId);
         if (!botId) {
           return false;
+        }
+        if (protectHumanAdministrator) {
+          if (!this.context.managedEntitiesRuntimeBotIds.has(botId)) return false;
+          const newerActorEvidence = await tx.managedEntityAccessEdge.findFirst({
+            where: {
+              chatId,
+              userId: { in: this.buildAdminAccessUserIdVariants(userId) },
+              botId: { in: [...this.context.managedEntitiesRuntimeBotIds] },
+              checkedAt: { gt: params.probeStartedAt },
+            },
+            select: { userId: true },
+          });
+          if (newerActorEvidence) return false;
         }
         const existing =
           typeof edgeClient.findUnique === 'function'
@@ -302,6 +337,15 @@ export class AdminManagedEntityAccessRuntime {
           },
           update: data,
         });
+        if (protectHumanAdministrator) {
+          // FLAG: Settings return only after the exact human grant protects the local DELETE
+          // reader. Keep the allowlist and edge in this fenced transaction; never activate a bot.
+          await tx.chatAdminAllowlist.upsert({
+            where: { chatId_userId: { chatId, userId } },
+            create: { chatId, userId },
+            update: {},
+          });
+        }
         return true;
       });
     } catch (error: unknown) {

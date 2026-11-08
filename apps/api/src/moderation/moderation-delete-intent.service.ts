@@ -62,6 +62,10 @@ import {
 } from './stop-words/stop-words.policy';
 
 import { MaxBotLinkService, type MaxDeleteMessageBotRoute } from '../max/max-bot-link.service';
+import {
+  AutomaticDeleteAuthorAccessService,
+  AutomaticDeleteAuthorProtectedError,
+} from '../max/automatic-delete-author-access.service';
 import { normalizeMembershipAccessSnapshot } from '../max/max-bot-access-policy.util';
 import { hasConfirmedDeleteMessageAccess } from '../max/max-delete-message-access.util';
 import { resolveExplicitMembershipAccessDenial } from '../max/max-membership-access-error';
@@ -838,6 +842,7 @@ export class ModerationDeleteIntentService {
     private readonly requiredSubscriptionExecutionGuard?: RequiredSubscriptionExecutionGuardService,
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
     @Optional() private readonly commercialLlmGuard?: CommercialLlmDeleteGuardService,
+    @Optional() private readonly automaticDeleteAuthors?: AutomaticDeleteAuthorAccessService,
   ) {
     this.expectedImageOcrNativeBehavior =
       resolveExpectedCommercialOcrProductionBehaviorIdentity(configService).identity;
@@ -2874,6 +2879,32 @@ export class ModerationDeleteIntentService {
               botId,
               textProof,
             );
+            // FLAG: Settings grants committed during quota/preparation waits protect queued
+            // user messages. Keep duplicate's exact authority as the final awaited guard.
+            if (
+              this.automaticDeleteAuthors &&
+              intent.subjectUserId &&
+              intent.entityType !== 'CHANNEL' &&
+              intent.messageAuthorKind !== 'bot' &&
+              (intent.durableUserDeleteReason ||
+                intent.messageDuplicateOwned ||
+                intent.photoDuplicateDeleteOnly ||
+                intent.commercialOcrDeleteReason ||
+                intent.imageTextStopListDeleteReason ||
+                intent.requiredSubscriptionDeleteReason ||
+                intent.activeMuteDeleteReason ||
+                intent.retentionOwned ||
+                intent.reportDeleteReason)
+            ) {
+              const current = await this.automaticDeleteAuthors.readCurrentProtection(
+                intent.chatId,
+                intent.subjectUserId,
+              );
+              if (current.isAdmin)
+                throw new ModerationDeletePreDispatchGuardError(
+                  new AutomaticDeleteAuthorProtectedError(),
+                );
+            }
             if (this.messageDuplicateDeleteGuard && textProof.messageDuplicateVerified) {
               try {
                 await this.messageDuplicateDeleteGuard.assertIntentStillActionable({
@@ -4100,7 +4131,14 @@ export class ModerationDeleteIntentService {
     );
   }
 
-  private async runDeletePreDispatchGuards(
+  private runDeletePreDispatchGuards(
+    ...args: Parameters<ModerationDeleteIntentService['runScopedDeletePreDispatchGuards']>
+  ): ReturnType<ModerationDeleteIntentService['runScopedDeletePreDispatchGuards']> {
+    const run = () => this.runScopedDeletePreDispatchGuards(...args);
+    return this.automaticDeleteAuthors ? this.automaticDeleteAuthors.withDispatchScope(run) : run();
+  }
+
+  private async runScopedDeletePreDispatchGuards(
     intent: IntentRow,
     botId: string,
     options?: ModerationDeleteIntentAttemptOptions,
@@ -4788,6 +4826,7 @@ export class ModerationDeleteIntentService {
   }
 
   private isTerminalDeleteGuardRejection(error: unknown): boolean {
+    if (error instanceof AutomaticDeleteAuthorProtectedError) return true;
     if (error instanceof WebhookLegacyHoldRejectedError) return true;
     if (error instanceof LinkHistoryDeleteGuardRejectedError)
       return !['live_author_access_unknown', 'history_author_access_unknown'].includes(error.code);

@@ -3,10 +3,11 @@ import {
   finalizeDeleteAuthority,
   type DeleteAuthorityPreparation,
 } from '../moderation-delete-authority-preparation';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 
 import { MaxBotLinkService } from '../../max/max-bot-link.service';
+import { AutomaticDeleteAuthorAccessService } from '../../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../../max/max-client.service';
 import type { ChatSettings } from '../../prisma/prisma-client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -221,6 +222,7 @@ export class CommercialOcrDeleteGuardService {
     private readonly maxBotLinkService: MaxBotLinkService,
     private readonly participantImmunity: ParticipantModerationImmunityService,
     private readonly runtimePolicy: CommercialOcrRuntimePolicyService,
+    @Optional() private readonly automaticDeleteAuthorAccess?: AutomaticDeleteAuthorAccessService,
   ) {}
 
   async assertIntentStillActionable(params: {
@@ -326,13 +328,28 @@ export class CommercialOcrDeleteGuardService {
       );
     }
 
-    const remoteAccess = await this.maxClient.getChatMemberAccess(params.chatId, binding.senderId, {
-      trafficClass: 'critical',
+    const authorOptions = {
+      trafficClass: 'critical' as const,
       sourceTag: MAX_API_SOURCE_TAGS.MODERATION_DELETE,
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
       botId: params.botId,
       bypassCache: true,
-    });
+    };
+    const author = await this.automaticDeleteAuthorAccess?.resolve(
+      params.chatId,
+      binding.senderId,
+      authorOptions,
+      { requireMembership: true },
+    );
+    if (author?.isAdmin) {
+      throw rejected(
+        'commercial_ocr_admin_immune',
+        'Saved chat administrators are immune from OCR deletion',
+      );
+    }
+    const remoteAccess = author
+      ? author.member
+      : await this.maxClient.getChatMemberAccess(params.chatId, binding.senderId, authorOptions);
     if (
       !remoteAccess ||
       (remoteAccess.userId !== null && remoteAccess.userId !== binding.senderId)
@@ -342,7 +359,7 @@ export class CommercialOcrDeleteGuardService {
         'MAX did not confirm the current identity of the OCR message author',
       );
     }
-    if (remoteAccess.isAdmin || remoteAccess.isOwner) {
+    if (author?.isAdmin ?? Boolean(remoteAccess.isAdmin || remoteAccess.isOwner)) {
       throw rejected(
         'commercial_ocr_admin_immune',
         'MAX reports current administrator or owner access for the OCR message author',
