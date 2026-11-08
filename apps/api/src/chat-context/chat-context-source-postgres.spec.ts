@@ -539,131 +539,132 @@ native('coherent settings templates on native PostgreSQL', () => {
     const prefix = `settings-plan-${randomUUID()}-`;
     const target = `${prefix}1`;
     const large = Buffer.from('native-heavy-template'.repeat(16_000)).toString('base64');
+    const fixtureRollback = new Error('Discard local chat context source plan fixture');
+    const tables = [
+      'chats',
+      'chat_settings',
+      'chat_settings_cache_revisions',
+      'chat_admin_allowlist',
+      'chat_admin_roster_states',
+      'domain_allowlist',
+      'chat_rules',
+    ] as const;
+    const startedAt = performance.now();
+    let setupCompletedAt = startedAt;
+    let checksCompletedAt = startedAt;
+    let rollbackCompletedAt = startedAt;
+    let statisticsRestoredAt = startedAt;
     try {
-      await raw.query(
-        `INSERT INTO chats (id, title, updated_at)
-        SELECT $1 || n, 'History', now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await raw.query(
-        `INSERT INTO chat_settings (id, chat_id, updated_at)
-        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await raw.query(
-        `INSERT INTO chat_admin_allowlist (chat_id, user_id)
-        SELECT $1 || n, 'history-admin-' || u
-        FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) u`,
-        [prefix],
-      );
-      await raw.query(
-        `INSERT INTO domain_allowlist (chat_id, domain)
-        SELECT $1 || n, 'history-domain-' || d || '.test'
-        FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) d`,
-        [prefix],
-      );
-      await raw.query(
-        `INSERT INTO chat_rules (id, chat_id, updated_at)
-        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await raw.query(
-        `INSERT INTO chat_admin_allowlist (chat_id, user_id)
-        SELECT $1, 'skew-admin-' || n FROM generate_series(1,200) n`,
-        [target],
-      );
-      await raw.query(
-        `INSERT INTO domain_allowlist (chat_id, domain)
-        SELECT $1, 'skew-domain-' || n || '.test' FROM generate_series(1,200) n`,
-        [target],
-      );
-      for (const table of [
-        'chats',
-        'chat_settings',
-        'chat_settings_cache_revisions',
-        'chat_admin_allowlist',
-        'chat_admin_roster_states',
-        'domain_allowlist',
-        'chat_rules',
-      ])
-        await raw.query(`ANALYZE ${table}`);
+      // FLAG: Keep the full plan population in one real transaction. Rolling it back
+      // avoids 10,000 parent DELETE cascades without weakening the measured query bounds.
+      await db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`INSERT INTO chats (id, title, updated_at)
+            SELECT ${prefix} || n, 'History', now() FROM generate_series(1,10000) n`;
+          await tx.$executeRaw`INSERT INTO chat_settings (id, chat_id, updated_at)
+            SELECT ${prefix} || n, ${prefix} || n, now() FROM generate_series(1,10000) n`;
+          // FLAG: Relation triggers query these new parents/settings. Refresh empty-table
+          // statistics before bulk child inserts so setup retains the real indexed paths.
+          await tx.$executeRaw`ANALYZE chats`;
+          await tx.$executeRaw`ANALYZE chat_settings`;
+          await tx.$executeRaw`INSERT INTO chat_admin_allowlist (chat_id, user_id)
+            SELECT ${prefix} || n, 'history-admin-' || u
+            FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) u`;
+          await tx.$executeRaw`INSERT INTO domain_allowlist (chat_id, domain)
+            SELECT ${prefix} || n, 'history-domain-' || d || '.test'
+            FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) d`;
+          await tx.$executeRaw`INSERT INTO chat_rules (id, chat_id, updated_at)
+            SELECT ${prefix} || n, ${prefix} || n, now() FROM generate_series(1,10000) n`;
+          await tx.$executeRaw`INSERT INTO chat_admin_allowlist (chat_id, user_id)
+            SELECT ${target}, 'skew-admin-' || n FROM generate_series(1,200) n`;
+          await tx.$executeRaw`INSERT INTO domain_allowlist (chat_id, domain)
+            SELECT ${target}, 'skew-domain-' || n || '.test' FROM generate_series(1,200) n`;
+          for (const table of tables)
+            await tx.$executeRaw(Prisma.sql`ANALYZE ${Prisma.raw(table)}`);
+          setupCompletedAt = performance.now();
 
-      for (const media of [{}, { greeting: { base64: large, mimeType: 'image/png' } }]) {
-        await db.chatSettings.update({
-          where: { chatId: target },
-          data: { botSpeechMedia: media },
-        });
-        queries.length = 0;
-        const full = await readChatContextSource(db as PrismaService, target, now, null);
-        expect(full.mode).toBe('full');
-        expect(full.row!.settings!.botSpeechMedia).toEqual(media);
-        expect(full.row!.admins).toHaveLength(203);
-        expect(full.row!.domains).toHaveLength(203);
-        expect(queries).toHaveLength(1);
-        expect(selectQueries()).toHaveLength(1);
-        queries.length = 0;
-        const reused = await readChatContextSource(
-          db as PrismaService,
-          target,
-          now,
-          template(full),
-        );
-        expect(reused.mode).toBe('shell');
-        expect(reused.row!.settings!.botSpeechMedia).toEqual(media);
-        expect(reused.row!.admins).toHaveLength(203);
-        expect(reused.row!.domains).toHaveLength(203);
-        expect(selectQueries()).toHaveLength(1);
-        expect(selectQueries()[0]).not.toContain('bot_speech_media');
-      }
-      for (const [mode, statement] of [
-        ['shell', chatContextShellQuery(target, now)],
-        ['full', chatContextFullQuery(target, now)],
-      ] as const) {
-        const result = await raw.query(
-          `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`,
-          statement.values,
-        );
-        const plans: Plan[] = [];
-        const visit = (node: Plan) => {
-          plans.push(node);
-          node.Plans?.forEach(visit);
-        };
-        visit(result.rows[0]['QUERY PLAN'][0].Plan as Plan);
-        const relevant = plans.filter((plan) => plan['Relation Name']);
-        expect(new Set(relevant.map((plan) => plan['Relation Name']))).toEqual(
-          new Set([
-            'chats',
-            'chat_settings',
-            'chat_settings_cache_revisions',
-            'chat_admin_allowlist',
-            'chat_admin_roster_states',
-            'domain_allowlist',
-            'chat_rules',
-          ]),
-        );
-        for (const scan of relevant) {
-          expect(scan['Node Type']).not.toBe('Seq Scan');
-          expect(
-            (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) * scan['Actual Loops'],
-          ).toBeLessThan(500);
-        }
-        console.info(
-          'Chat context source native indexed plan',
-          JSON.stringify({
-            mode,
-            relationScans: relevant.map((scan) => ({
-              relation: scan['Relation Name'],
-              nodeType: scan['Node Type'],
-              examinedRows:
+          const source = tx as unknown as PrismaService;
+          for (const media of [{}, { greeting: { base64: large, mimeType: 'image/png' } }]) {
+            await tx.chatSettings.update({
+              where: { chatId: target },
+              data: { botSpeechMedia: media },
+            });
+            queries.length = 0;
+            const full = await readChatContextSource(source, target, now, null);
+            expect(full.mode).toBe('full');
+            expect(full.row!.settings!.botSpeechMedia).toEqual(media);
+            expect(full.row!.admins).toHaveLength(203);
+            expect(full.row!.domains).toHaveLength(203);
+            expect(queries).toHaveLength(1);
+            expect(selectQueries()).toHaveLength(1);
+            queries.length = 0;
+            const reused = await readChatContextSource(source, target, now, template(full));
+            expect(reused.mode).toBe('shell');
+            expect(reused.row!.settings!.botSpeechMedia).toEqual(media);
+            expect(reused.row!.admins).toHaveLength(203);
+            expect(reused.row!.domains).toHaveLength(203);
+            expect(selectQueries()).toHaveLength(1);
+            expect(selectQueries()[0]).not.toContain('bot_speech_media');
+          }
+          for (const [mode, statement] of [
+            ['shell', chatContextShellQuery(target, now)],
+            ['full', chatContextFullQuery(target, now)],
+          ] as const) {
+            const result = await tx.$queryRaw<{ 'QUERY PLAN': { Plan: Plan }[] }[]>(
+              Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`,
+            );
+            const plans: Plan[] = [];
+            const visit = (node: Plan) => {
+              plans.push(node);
+              node.Plans?.forEach(visit);
+            };
+            visit(result[0]!['QUERY PLAN'][0]!.Plan);
+            const relevant = plans.filter((plan) => plan['Relation Name']);
+            expect(new Set(relevant.map((plan) => plan['Relation Name']))).toEqual(new Set(tables));
+            for (const scan of relevant) {
+              expect(scan['Node Type']).not.toBe('Seq Scan');
+              expect(
                 (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) *
-                scan['Actual Loops'],
-            })),
-          }),
-        );
-      }
+                  scan['Actual Loops'],
+              ).toBeLessThan(500);
+            }
+            console.info(
+              'Chat context source native indexed plan',
+              JSON.stringify({
+                mode,
+                relationScans: relevant.map((scan) => ({
+                  relation: scan['Relation Name'],
+                  nodeType: scan['Node Type'],
+                  examinedRows:
+                    (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) *
+                    scan['Actual Loops'],
+                })),
+              }),
+            );
+          }
+          checksCompletedAt = performance.now();
+          throw fixtureRollback;
+        },
+        { maxWait: 5_000, timeout: 20_000 },
+      );
+    } catch (error) {
+      if (error !== fixtureRollback) throw error;
     } finally {
-      // FLAG: Exact random fixture prefix only; cascades remove this test's metadata/relations.
-      await raw.query('DELETE FROM chats WHERE left(id, length($1)) = $1', [prefix]);
+      rollbackCompletedAt = performance.now();
+      // FLAG: ANALYZE statistics can outlive rollback. Restore them for following native cases.
+      for (const table of tables) await raw.query(`ANALYZE ${table}`);
+      statisticsRestoredAt = performance.now();
     }
+    expect(await db.chat.findUnique({ where: { id: target }, select: { id: true } })).toBeNull();
+    console.info(
+      'Chat context source native fixture phases',
+      JSON.stringify({
+        chats: 10_000,
+        setupMs: Math.round(setupCompletedAt - startedAt),
+        sourceChecksMs: Math.round(checksCompletedAt - setupCompletedAt),
+        rollbackMs: Math.round(rollbackCompletedAt - checksCompletedAt),
+        restoreStatisticsMs: Math.round(statisticsRestoredAt - rollbackCompletedAt),
+      }),
+    );
   }, 30_000);
 });
