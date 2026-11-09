@@ -16,27 +16,31 @@ import {
 const root = join(homedir(), '.local/share/maxim-support-llm');
 const state = join(root, 'service');
 const bundle = dirname(fileURLToPath(import.meta.url));
-const sshArgs = [
-  '-T',
-  '-o',
-  'BatchMode=yes',
-  '-o',
-  'StrictHostKeyChecking=yes',
-  '-o',
-  'ConnectTimeout=8',
-  '-o',
-  'ServerAliveInterval=5',
-  '-o',
-  'ServerAliveCountMax=2',
-  '-o',
-  'ControlMaster=no',
-  '-o',
-  'ControlPath=none',
-  '-o',
-  'ClearAllForwardings=yes',
-  'maxim-vps',
-  'cd /var/www/Chat_bot && exec node infra/scripts/support-chat-remote.mjs bridge',
-];
+export const SUPPORT_CHAT_IDS = Object.freeze(['-78271094414679', '-79143082792210']);
+export function supportChatSshArgs(chatId = SUPPORT_CHAT_IDS[0]) {
+  if (!SUPPORT_CHAT_IDS.includes(chatId)) throw new Error('support_chat_refused');
+  return [
+    '-T',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=yes',
+    '-o',
+    'ConnectTimeout=8',
+    '-o',
+    'ServerAliveInterval=5',
+    '-o',
+    'ServerAliveCountMax=2',
+    '-o',
+    'ControlMaster=no',
+    '-o',
+    'ControlPath=none',
+    '-o',
+    'ClearAllForwardings=yes',
+    'maxim-vps',
+    `cd /var/www/Chat_bot && exec node infra/scripts/support-chat-remote.mjs bridge ${chatId}`,
+  ];
+}
 
 const failureCodes = new Set([
   'support_ssh_unavailable',
@@ -115,14 +119,17 @@ export function validateQuestion(value) {
 export async function supportChatSession({
   key,
   api = false,
+  chatId = SUPPORT_CHAT_IDS[0],
   signal,
   onStatus = () => {},
   onUsage = () => {},
   invoke = answerSupport,
   command = 'ssh',
-  args = sshArgs,
+  args = supportChatSshArgs(chatId),
 }) {
   signal.throwIfAborted();
+  if (!SUPPORT_CHAT_IDS.includes(chatId)) throw new Error('support_chat_refused');
+  const sourceDigest = (id) => createHash('sha256').update(`${chatId}\0${id}`).digest('hex');
   const knowledgeSha = createHash('sha256')
     .update(readFileSync(new URL('./support-llm-knowledge.json', import.meta.url)))
     .digest('hex');
@@ -199,7 +206,7 @@ export async function supportChatSession({
               value.issuedAt > Date.now() + 5000))
         )
           throw new Error('support_clock_skew');
-        if (value.type === 'hello' && value.chatId === '-78271094414679' && !hello) {
+        if (value.type === 'hello' && value.chatId === chatId && !hello) {
           hello = true;
           lastServerHeartbeat = Date.now();
           onStatus('connected');
@@ -251,7 +258,7 @@ export async function supportChatSession({
               const observeUsage = (kind, usage) => {
                 observed = true;
                 onUsage({
-                  sourceDigest: createHash('sha256').update(value.id).digest('hex'),
+                  sourceDigest: sourceDigest(value.id),
                   observedAt: new Date().toISOString(),
                   kind,
                   usage,
@@ -297,10 +304,7 @@ export async function supportChatSession({
           ['sent', 'unknown', 'refused'].includes(value.outcome)
         )
           onStatus(value.outcome, {
-            sourceDigest:
-              typeof value.id === 'string'
-                ? createHash('sha256').update(value.id).digest('hex')
-                : null,
+            sourceDigest: typeof value.id === 'string' ? sourceDigest(value.id) : null,
           });
         else throw new Error('support_frame_refused');
       }
@@ -322,6 +326,213 @@ export async function supportChatSession({
   if (failure && !signal.aborted) throw failure;
 }
 
+export function supportChatsReady(chats, now = Date.now()) {
+  return SUPPORT_CHAT_IDS.every((chatId) => {
+    const chat = chats?.[chatId];
+    const pollAge = now - Date.parse(chat?.lastSampleAt);
+    const heartbeatAge = now - Date.parse(chat?.remoteHeartbeatAt);
+    return (
+      ['connected', 'answering'].includes(chat?.phase) &&
+      Number.isFinite(pollAge) &&
+      pollAge >= -5000 &&
+      pollAge < 30_000 &&
+      Number.isFinite(heartbeatAge) &&
+      heartbeatAge >= 0 &&
+      heartbeatAge < 25_000
+    );
+  });
+}
+
+export class SupportChatWorkerStatus {
+  policies = new Map(SUPPORT_CHAT_IDS.map((chatId) => [chatId, new SupportReconnectPolicy()]));
+  chats = Object.fromEntries(
+    SUPPORT_CHAT_IDS.map((chatId) => [
+      chatId,
+      {
+        chatId,
+        phase: 'starting',
+        lastSuccessAt: null,
+        lastSampleAt: null,
+        remoteHeartbeatAt: null,
+        replies: 0,
+        errors: 0,
+        reconnects: 0,
+        consecutiveReconnects: 0,
+        reconnectDelayMs: 0,
+        lastFailureCode: null,
+        lastFailureAt: null,
+        lastDisconnectCode: null,
+        lastDisconnectAt: null,
+        lastInference: null,
+        lastReplyUsage: null,
+      },
+    ]),
+  );
+  event(chatId, event, details = {}) {
+    const chat = this.chats[chatId],
+      policy = this.policies.get(chatId);
+    if (!chat || !policy) throw new Error('support_chat_refused');
+    const now = new Date(Date.now()).toISOString();
+    if (event === 'connected') policy.connected();
+    if (event === 'connecting' || event === 'connected') {
+      chat.lastSampleAt = null;
+      chat.remoteHeartbeatAt = null;
+      chat.reconnectDelayMs = 0;
+    }
+    if (event === 'observation') {
+      chat.remoteHeartbeatAt = now;
+      chat.lastSampleAt =
+        details.sampleAt === null ? null : new Date(details.sampleAt).toISOString();
+      policy.observed(details.sampleAt);
+    } else if (event === 'usage') chat.lastInference = details;
+    else if (event === 'disconnected') {
+      chat.reconnects++;
+      chat.lastDisconnectAt = now;
+      chat.lastDisconnectCode = details.failureCode ?? 'support_session_closed';
+      if (details.failureCode) {
+        chat.errors++;
+        chat.lastFailureCode = details.failureCode;
+        chat.lastFailureAt = now;
+      }
+      chat.reconnectDelayMs = policy.disconnected();
+      chat.lastSampleAt = null;
+      chat.remoteHeartbeatAt = null;
+      chat.phase = 'reconnecting';
+    } else {
+      chat.phase = event;
+      if (event === 'sent') {
+        chat.replies++;
+        chat.lastSuccessAt = now;
+        chat.lastReplyUsage =
+          chat.lastInference?.sourceDigest === details.sourceDigest ? chat.lastInference : null;
+      }
+      // FLAG: Polls and periodic status writes never count a previous delivery failure again.
+      if (['inference_failed', 'unknown', 'refused'].includes(event)) chat.errors++;
+      if (['sent', 'unknown', 'refused', 'inference_failed', 'skipped', 'answered'].includes(event))
+        chat.phase = 'connected';
+    }
+    chat.consecutiveReconnects = policy.consecutive;
+  }
+  snapshot(now = Date.now()) {
+    const rows = Object.values(this.chats);
+    const latest = (field, timeField = field) =>
+      rows
+        .filter((chat) => chat[field] !== null)
+        .sort((a, b) => Date.parse(b[timeField]) - Date.parse(a[timeField]))[0]?.[field] ?? null;
+    const oldest = (field) =>
+      rows.every((chat) => chat[field] !== null) ? rows.map((chat) => chat[field]).sort()[0] : null;
+    const ready = supportChatsReady(this.chats, now);
+    return {
+      phase: rows.every((chat) => chat.phase === 'stopped')
+        ? 'stopped'
+        : ready
+          ? rows.some((chat) => chat.phase === 'answering')
+            ? 'answering'
+            : 'connected'
+          : rows.some((chat) => chat.phase === 'reconnecting')
+            ? 'reconnecting'
+            : 'connecting',
+      ready,
+      chatIds: [...SUPPORT_CHAT_IDS],
+      chats: Object.fromEntries(rows.map((chat) => [chat.chatId, { ...chat }])),
+      lastSuccessAt: latest('lastSuccessAt'),
+      lastSampleAt: oldest('lastSampleAt'),
+      remoteHeartbeatAt: oldest('remoteHeartbeatAt'),
+      ...Object.fromEntries(
+        ['replies', 'errors', 'reconnects'].map((field) => [
+          field,
+          rows.reduce((sum, chat) => sum + chat[field], 0),
+        ]),
+      ),
+      consecutiveReconnects: Math.max(...rows.map((chat) => chat.consecutiveReconnects)),
+      reconnectDelayMs: Math.max(...rows.map((chat) => chat.reconnectDelayMs)),
+      lastFailureCode: latest('lastFailureCode', 'lastFailureAt'),
+      lastFailureAt: latest('lastFailureAt'),
+      lastDisconnectCode: latest('lastDisconnectCode', 'lastDisconnectAt'),
+      lastDisconnectAt: latest('lastDisconnectAt'),
+      lastInference:
+        rows
+          .map((chat) => chat.lastInference)
+          .filter(Boolean)
+          .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0] ?? null,
+      lastReplyUsage:
+        rows
+          .map((chat) => chat.lastReplyUsage)
+          .filter(Boolean)
+          .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0] ?? null,
+    };
+  }
+}
+
+export function serializeSupportInference(invoke) {
+  let previous = Promise.resolve();
+  return (options) => {
+    // FLAG: The single CPU slot stays owned until raw cleanup settles, including cancellation.
+    const current = previous.then(() => {
+      options.signal.throwIfAborted();
+      return invoke(options);
+    });
+    previous = current.catch(() => undefined);
+    return current;
+  };
+}
+
+export async function runSupportChatWorkers({
+  key,
+  api,
+  signal,
+  enabled = () => true,
+  onStatus = () => {},
+  session = supportChatSession,
+  invoke = answerSupport,
+  wait = pause,
+}) {
+  const status = new SupportChatWorkerStatus();
+  const inference = api ? invoke : serializeSupportInference(invoke);
+  const write = () => onStatus(status.snapshot());
+  const event = (chatId, value, details) => {
+    status.event(chatId, value, details);
+    write();
+  };
+  const heartbeat = setInterval(write, 5000);
+  write();
+  try {
+    await Promise.all(
+      SUPPORT_CHAT_IDS.map(async (chatId) => {
+        try {
+          while (!signal.aborted && enabled()) {
+            let failureCode = null;
+            try {
+              event(chatId, 'connecting');
+              await session({
+                key,
+                api,
+                chatId,
+                signal,
+                invoke: inference,
+                onStatus: (value, details) => event(chatId, value, details),
+                onUsage: (observation) => event(chatId, 'usage', observation),
+              });
+            } catch (error) {
+              if (!signal.aborted) failureCode = supportChatFailureCode(error);
+            }
+            if (!signal.aborted && enabled()) {
+              event(chatId, 'disconnected', { failureCode });
+              await wait(status.chats[chatId].reconnectDelayMs, undefined, { signal }).catch(
+                () => undefined,
+              );
+            }
+          }
+        } finally {
+          event(chatId, 'stopped');
+        }
+      }),
+    );
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
 async function run() {
   if (!existsSync(join(state, 'chat-enabled'))) return;
   const install = JSON.parse(readFileSync(join(state, 'installation.json'), 'utf8'));
@@ -336,115 +547,35 @@ async function run() {
   const startTicks = readFileSync(`/proc/${process.pid}/stat`, 'utf8')
     .split(') ')[1]
     .split(' ')[19];
-  const reconnectPolicy = new SupportReconnectPolicy();
-  let phase = 'starting',
-    lastSuccessAt = null,
-    replies = 0,
-    errors = 0,
-    reconnects = 0,
-    lastSampleAt = null,
-    remoteHeartbeatAt = null,
-    lastFailureCode = null,
-    lastFailureAt = null,
-    lastDisconnectCode = null,
-    lastDisconnectAt = null,
-    reconnectDelayMs = 0,
-    lastInference = null,
-    lastReplyUsage = null;
   mkdirSync(state, { recursive: true, mode: 0o700 });
-  const status = (next, details = {}) => {
-    const event = next;
-    if (next === 'connected') reconnectPolicy.connected();
-    next ??= phase;
-    if (next === 'observation') {
-      remoteHeartbeatAt = new Date().toISOString();
-      lastSampleAt = details.sampleAt === null ? null : new Date(details.sampleAt).toISOString();
-      reconnectPolicy.observed(details.sampleAt);
-      next = phase;
-    }
-    phase = next;
-    if (event === 'sent') {
-      replies++;
-      lastSuccessAt = new Date().toISOString();
-      phase = 'connected';
-      lastReplyUsage = lastInference?.sourceDigest === details.sourceDigest ? lastInference : null;
-    }
-    // FLAG: Heartbeat/observation writes must not count the previous outcome a second time.
-    if (event === 'inference_failed' || event === 'unknown' || event === 'refused') errors++;
-    if (event === 'skipped' || event === 'answered') phase = 'connected';
-    const value = {
-      pid: process.pid,
-      startTicks,
-      bundle,
-      phase,
-      heartbeatAt: new Date().toISOString(),
-      lastSuccessAt,
-      lastSampleAt,
-      remoteHeartbeatAt,
-      replies,
-      errors,
-      reconnects,
-      consecutiveReconnects: reconnectPolicy.consecutive,
-      reconnectDelayMs,
-      lastFailureCode,
-      lastFailureAt,
-      lastDisconnectCode,
-      lastDisconnectAt,
-      model: provider.model,
-      backend: provider.backend,
-      lastInference,
-      lastReplyUsage,
-      ...(api
-        ? {
-            apiProfileSha256: SUPPORT_API_PROFILE.sha256,
-            reasoningEffort: SUPPORT_API_PROFILE.reasoningEffort,
-          }
-        : {}),
-      chatId: '-78271094414679',
-    };
-    const temporary = join(state, `chat-status.${process.pid}.tmp`);
-    writeFileSync(temporary, JSON.stringify(value) + '\n', { mode: 0o600 });
-    renameSync(temporary, join(state, 'chat-status.json'));
-  };
-  const heartbeat = setInterval(status, 5000);
   try {
-    while (!controller.signal.aborted && existsSync(join(state, 'chat-enabled'))) {
-      let sessionFailure = null;
-      try {
-        reconnectDelayMs = 0;
-        status('connecting');
-        await supportChatSession({
-          key,
-          api,
-          signal: controller.signal,
-          onStatus: status,
-          onUsage: (observation) => {
-            lastInference = observation;
-            status();
-          },
-        });
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          errors++;
-          sessionFailure = supportChatFailureCode(error);
-          lastFailureCode = sessionFailure;
-          lastFailureAt = new Date().toISOString();
-        }
-      }
-      if (!controller.signal.aborted) {
-        reconnects++;
-        lastDisconnectCode = sessionFailure ?? 'support_session_closed';
-        lastDisconnectAt = new Date().toISOString();
-        reconnectDelayMs = reconnectPolicy.disconnected();
-        status('reconnecting');
-        await pause(reconnectDelayMs, undefined, {
-          signal: controller.signal,
-        }).catch(() => undefined);
-      }
-    }
+    await runSupportChatWorkers({
+      key,
+      api,
+      signal: controller.signal,
+      enabled: () => existsSync(join(state, 'chat-enabled')),
+      onStatus: (status) => {
+        const value = {
+          pid: process.pid,
+          startTicks,
+          bundle,
+          ...status,
+          heartbeatAt: new Date().toISOString(),
+          model: provider.model,
+          backend: provider.backend,
+          ...(api
+            ? {
+                apiProfileSha256: SUPPORT_API_PROFILE.sha256,
+                reasoningEffort: SUPPORT_API_PROFILE.reasoningEffort,
+              }
+            : {}),
+        };
+        const temporary = join(state, `chat-status.${process.pid}.tmp`);
+        writeFileSync(temporary, JSON.stringify(value) + '\n', { mode: 0o600 });
+        renameSync(temporary, join(state, 'chat-status.json'));
+      },
+    });
   } finally {
-    clearInterval(heartbeat);
-    status('stopped');
     process.removeListener('SIGTERM', stop);
     process.removeListener('SIGINT', stop);
   }

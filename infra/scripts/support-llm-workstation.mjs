@@ -511,6 +511,8 @@ export function createSupportController({
                     lastFailureAt: last.lastFailureAt ?? null,
                     lastDisconnectCode: last.lastDisconnectCode ?? null,
                     lastDisconnectAt: last.lastDisconnectAt ?? null,
+                    chats: last.chats ?? null,
+                    chatIds: last.chatIds ?? null,
                   }
                 : {}),
             }
@@ -520,7 +522,12 @@ export function createSupportController({
     const age = Date.now() - Date.parse(current.heartbeatAt);
     const heartbeatFresh =
       Number.isFinite(age) && age >= 0 && age < (chat ? 15_000 : HEARTBEAT_MS * 3);
-    let ready = chat ? ['ready', 'connected', 'answering'].includes(current.phase) : false;
+    let ready = false;
+    if (chat) {
+      const { supportChatsReady } = await import('./support-chat-worker.mjs');
+      ready =
+        ['connected', 'answering'].includes(current.phase) && supportChatsReady(current.chats);
+    }
     const ownsModel = chat ? undefined : modelOwned(current, installed);
     if (!chat && ownsModel && current.phase === 'ready' && heartbeatFresh) {
       try {

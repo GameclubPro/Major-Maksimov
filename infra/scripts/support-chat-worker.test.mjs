@@ -13,6 +13,12 @@ import {
   validateQuestion,
   SupportReconnectPolicy,
   supportChatFailureCode,
+  SUPPORT_CHAT_IDS,
+  supportChatSshArgs,
+  supportChatsReady,
+  SupportChatWorkerStatus,
+  runSupportChatWorkers,
+  serializeSupportInference,
 } from './support-chat-worker.mjs';
 import { SUPPORT_ANSWER_FOOTER } from './support-llm-client.mjs';
 import { SUPPORT_API_PROFILE } from './support-llm-provider.mjs';
@@ -42,6 +48,154 @@ input.on('line',line=>{
    process.exit(0);
  }
 });`;
+
+test('SSH selection is limited to the two owner-authorized chats', async () => {
+  assert.deepEqual(SUPPORT_CHAT_IDS, bridge.CHAT_IDS);
+  for (const chatId of SUPPORT_CHAT_IDS)
+    assert.ok(supportChatSshArgs(chatId).at(-1).endsWith(` bridge ${chatId}`));
+  for (const chatId of ['-999', `${SUPPORT_CHAT_IDS[0]}; echo unsafe`, null]) {
+    assert.throws(() => supportChatSshArgs(chatId), /support_chat_refused/u);
+    await assert.rejects(
+      supportChatSession({
+        chatId,
+        key: 'fixture',
+        signal: new AbortController().signal,
+        command: '/never-start',
+        args: [],
+      }),
+      /support_chat_refused/u,
+    );
+  }
+});
+
+test('the second chat answers only after its exact handshake and keeps namespaced usage', async () => {
+  const chatId = SUPPORT_CHAT_IDS[1],
+    observations = [],
+    outcomes = [];
+  await supportChatSession({
+    chatId,
+    api: true,
+    key: 'fixture',
+    signal: AbortSignal.timeout(3000),
+    command: process.execPath,
+    args: ['-e', peer.replaceAll(SUPPORT_CHAT_IDS[0], chatId)],
+    onUsage: (value) => observations.push(value),
+    onStatus: (value) => outcomes.push(value),
+    invoke: async () => ({ action: 'reply', text: presentedAnswer }),
+  });
+  assert.ok(outcomes.includes('sent'));
+  assert.equal(
+    observations[0].sourceDigest,
+    createHash('sha256').update(`${chatId}\0fixture-source`).digest('hex'),
+  );
+  for (const [expected, actual] of [SUPPORT_CHAT_IDS, [...SUPPORT_CHAT_IDS].reverse()]) {
+    let invoked = false;
+    await assert.rejects(
+      supportChatSession({
+        chatId: expected,
+        key: 'fixture',
+        signal: AbortSignal.timeout(3000),
+        command: process.execPath,
+        args: ['-e', peer.replaceAll(SUPPORT_CHAT_IDS[0], actual)],
+        invoke: async () => {
+          invoked = true;
+        },
+      }),
+      /support_frame_refused/u,
+    );
+    assert.equal(invoked, false);
+  }
+});
+
+test('readiness requires fresh polls for both chats and old polls cannot survive reconnect', (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const state = new SupportChatWorkerStatus();
+  for (const chatId of SUPPORT_CHAT_IDS) state.event(chatId, 'connected');
+  state.event(SUPPORT_CHAT_IDS[0], 'observation', { sampleAt: now });
+  assert.equal(state.snapshot(now).ready, false);
+  state.event(SUPPORT_CHAT_IDS[1], 'observation', { sampleAt: now });
+  assert.equal(state.snapshot(now).ready, true);
+  assert.equal(supportChatsReady(state.chats, now + 30_001), false);
+  state.event(SUPPORT_CHAT_IDS[1], 'disconnected', { failureCode: 'support_clock_skew' });
+  state.event(SUPPORT_CHAT_IDS[1], 'connected');
+  assert.equal(state.snapshot(now).ready, false);
+  assert.equal(state.snapshot(now).chats[SUPPORT_CHAT_IDS[0]].reconnects, 0);
+  assert.equal(
+    state.snapshot(now).chats[SUPPORT_CHAT_IDS[1]].lastFailureCode,
+    'support_clock_skew',
+  );
+  state.event(SUPPORT_CHAT_IDS[1], 'observation', { sampleAt: now });
+  assert.equal(state.snapshot(now).ready, true);
+});
+
+test('one chat reconnects independently while the other retains its healthy session', async () => {
+  const controller = new AbortController(),
+    snapshots = [],
+    calls = new Map();
+  await runSupportChatWorkers({
+    key: 'fixture',
+    api: true,
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(3000)]),
+    wait: async () => {},
+    onStatus: (value) => {
+      snapshots.push(value);
+      if (value.ready) controller.abort();
+    },
+    session: async ({ chatId, signal, onStatus }) => {
+      const count = (calls.get(chatId) ?? 0) + 1;
+      calls.set(chatId, count);
+      if (chatId === SUPPORT_CHAT_IDS[0] && count === 1) throw new Error('support_clock_skew');
+      onStatus('connected');
+      onStatus('observation', { sampleAt: Date.now() });
+      if (!signal.aborted)
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+    },
+  });
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(calls.get(SUPPORT_CHAT_IDS[0]), 2);
+  assert.equal(calls.get(SUPPORT_CHAT_IDS[1]), 1);
+  const healthy = snapshots.find((value) => value.ready);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[0]].errors, 1);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[0]].reconnects, 1);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[1]].errors, 0);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[1]].reconnects, 0);
+});
+
+test('CPU calls in separate chats serialize raw cancellation cleanup and skip cancelled waiting calls', async () => {
+  let running = 0,
+    peak = 0;
+  const calls = [],
+    first = new AbortController(),
+    waiting = new AbortController();
+  const invoke = serializeSupportInference(async ({ id, signal }) => {
+    calls.push(id);
+    running++;
+    peak = Math.max(peak, running);
+    try {
+      if (id === 'first')
+        await new Promise((resolve) =>
+          signal.addEventListener('abort', () => setTimeout(resolve, 20), { once: true }),
+        );
+      return id;
+    } finally {
+      running--;
+    }
+  });
+  const a = invoke({ id: 'first', signal: first.signal });
+  const b = invoke({ id: 'cancelled', signal: waiting.signal });
+  const rejected = assert.rejects(b, { name: 'AbortError' });
+  const c = invoke({ id: 'third', signal: new AbortController().signal });
+  await pause(1);
+  first.abort();
+  waiting.abort();
+  assert.equal(await a, 'first');
+  await rejected;
+  assert.equal(await c, 'third');
+  assert.deepEqual(calls, ['first', 'third']);
+  assert.equal(peak, 1);
+  assert.equal(running, 0);
+});
 
 test('already cancelled sessions never start a transport process', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'support-cancel-test-'));
@@ -142,7 +296,8 @@ test(
     writeFileSync(
       join(bin, 'ssh'),
       `#!${process.execPath}
-console.log(JSON.stringify({type:'hello',chatId:'-78271094414679'}));
+const chatId = process.argv.at(-1).split(' ').at(-1);
+console.log(JSON.stringify({type:'hello',chatId}));
 console.log(JSON.stringify({type:'settled',outcome:'unknown'}));
 setInterval(()=>console.log(JSON.stringify({type:'heartbeat',sampleAt:Date.now()})),100);
 `,
@@ -166,8 +321,13 @@ setInterval(()=>console.log(JSON.stringify({type:'heartbeat',sampleAt:Date.now()
         await pause(20);
       }
       assert.ok(value?.lastSampleAt, 'Expected a real closed-fixture poll sample');
-      assert.equal(value.errors, 1);
+      assert.equal(value.errors, 2);
       assert.equal(value.replies, 0);
+      assert.equal(value.ready, true);
+      for (const chatId of SUPPORT_CHAT_IDS) {
+        assert.equal(value.chats[chatId].errors, 1);
+        assert.ok(value.chats[chatId].lastSampleAt);
+      }
     } finally {
       child.kill('SIGTERM');
       await closed;
@@ -595,7 +755,7 @@ test(
     assert.equal(observations.length, 1);
     assert.equal(
       observations[0].sourceDigest,
-      createHash('sha256').update('fixture-source').digest('hex'),
+      createHash('sha256').update(`${SUPPORT_CHAT_IDS[0]}\0fixture-source`).digest('hex'),
     );
     assert.equal(observations[0].kind, 'provider-reported');
     assert.deepEqual(observations[0].usage, usage);

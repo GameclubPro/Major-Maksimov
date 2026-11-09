@@ -10,6 +10,56 @@ const fact = (id) => {
 };
 const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 
+test('VK publication options distinguish new MAX timers, retained schedules and the original source', () => {
+  const ui = source('apps/miniapp/src/components/vk-parsing/publication-options.tsx');
+  for (const label of ['Первоисточник', 'Пост ВК', 'Своя ссылка', 'Автоудаление', 'Свой срок'])
+    assert.ok(ui.includes(label), label);
+  const sourceLink = fact('publisher-vk-source-link');
+  assert.match(sourceLink, /HTTPS.*без логина и пароля/u);
+  assert.match(sourceLink, /сохраняется.*удаление обычных ссылок/u);
+  const deletion = fact('publisher-vk-auto-delete');
+  assert.match(deletion, /от публикации в MAX.*новым постам/u);
+  assert.match(deletion, /Оригиналы в VK остаются/u);
+  assert.match(deletion, /не меняет уже назначенное время/u);
+  assert.match(deletion, /от 1 до 43200 минут/u);
+  assert.match(
+    source('packages/contracts/src/vk-parsing-common.ts'),
+    /MAX_DELETE_AFTER_MINUTES = 43_200/u,
+  );
+});
+
+test('participant facts retain current controls and the mute deadline across leaving and returning', () => {
+  const ui = source('apps/miniapp/src/components/dashboard/chat-participant-sheet.tsx');
+  for (const label of ['Мут', 'Назначить мут', 'Срок идёт с момента назначения'])
+    assert.ok(ui.includes(label), label);
+  assert.match(fact('participant-mute'), /«Мут».*«Назначить мут»/u);
+  assert.match(fact('participant-mute'), /после его возвращения.*с момента назначения/u);
+  assert.doesNotMatch(
+    fact('participants') + fact('participant-mute'),
+    /«Без сообщений»|«Ограничить сообщения»/u,
+  );
+  assert.match(fact('sanction-history'), /«Мут» и «Бан»/u);
+});
+
+test('unified duplicate and commercial preview facts preserve independent evidence boundaries', () => {
+  assert.match(fact('duplicates'), /Одинаковый текст.*независимо от результата проверки картинки/u);
+  assert.match(fact('duplicates-photo'), /изменённой подписью/u);
+  assert.match(fact('duplicates-photo'), /Период, допустимые повторы и действия общие/u);
+  assert.doesNotMatch(fact('duplicates-photo'), /у «Одинаковых картинок»/u);
+  const preview = fact('commercial-message-preview');
+  assert.match(preview, /несохранённый черновик/u);
+  assert.match(preview, /не сохраняет и не удаляет сообщения/u);
+  assert.match(preview, /«Недостаточно данных» и «Не удалось проверить» не подтверждают/u);
+});
+
+test('storefront caller access includes the verified user handoff and its chat scope', () => {
+  const ui = source('apps/miniapp/src/pages/settings/settings-storefront-section.tsx');
+  for (const label of ['Разрешённые пользователи', 'Добавить пользователя', 'Отозвать доступ'])
+    assert.ok(ui.includes(label), label);
+  assert.match(fact('karavan-storefront'), /«Добавить пользователя».*перешлите.*сообщение.*срок/iu);
+  assert.match(fact('karavan-storefront'), /только в этом чате/iu);
+});
+
 test('customer knowledge uses the public project name without renaming the MAX platform', () => {
   for (const entry of entries.values()) assert.doesNotMatch(entry.answer, /\bMAXIM\b/iu, entry.id);
   assert.match(fact('support-room'), /«Майор Максимов»/u);
