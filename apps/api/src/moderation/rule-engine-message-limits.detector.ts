@@ -8,6 +8,7 @@ import { extractBlockedPhoneNumbers } from './phone-blocking-evidence';
 import type { RuleViolation } from './rule-engine.contract';
 import { MessageLimitsBlockedDomainDetector } from './rule-engine-blocked-domains.detector';
 import { MessageLimitsBlockedWordDetector } from './rule-engine-blocked-words.detector';
+import { MESSAGE_COUNT_QUOTA_POLICY_VERSION } from './message-count-quota-policy';
 
 export const ANTI_SPAM_BURST_LIMIT = 5;
 export const ANTI_SPAM_BURST_WINDOW_SEC = 6;
@@ -29,7 +30,10 @@ export type MessageLimitStateObservation = Readonly<{
 type MessageLimitStateObserver = (value: MessageLimitStateObservation) => void | Promise<void>;
 type MessageLimitCounters = Pick<
   RedisCounterService,
-  'incrementWithTtl' | 'claimEventCooldown' | 'replaceRevisionedSetMembershipsBeforeDeadline'
+  | 'incrementWithTtl'
+  | 'claimEventCooldown'
+  | 'claimMessageCountQuota'
+  | 'replaceRevisionedSetMembershipsBeforeDeadline'
 >;
 
 export class RuleEngineMessageLimitsDetector {
@@ -102,6 +106,7 @@ export class RuleEngineMessageLimitsDetector {
     userId: string;
     messageId?: string;
     eventTimestampMs?: number;
+    publicationId?: string;
     settings: ChatSettings;
   }): Promise<RuleViolation | null> {
     const { chatId, userId, settings } = params;
@@ -111,24 +116,51 @@ export class RuleEngineMessageLimitsDetector {
 
     const windowHours = Math.min(24, Math.max(1, settings.messageCountLimitWindowHours));
     const maxMessages = Math.min(10, Math.max(1, settings.messageCountLimitMessages));
-    const key = `message:count-limit:v2:${chatId}:${userId}:${maxMessages}:${windowHours}`;
-    const count = await this.countEventWindow({
-      rule: 'message-count-limit',
-      key,
-      messageId: params.messageId,
-      eventTimestampMs: params.eventTimestampMs,
-      windowSeconds: windowHours * 60 * 60,
-      countLimit: maxMessages + 1,
-      timeoutMs: MESSAGE_LIMIT_STATE_TIMEOUT_MS,
-    });
-    if (count === null || count <= maxMessages) {
+    const messageId = params.messageId?.trim();
+    const eventTimestampMs = params.eventTimestampMs;
+    if (
+      !messageId ||
+      !Number.isSafeInteger(eventTimestampMs) ||
+      !eventTimestampMs ||
+      eventTimestampMs <= 0 ||
+      classifyDuplicateEventTime({ eventTimestampMs, windowSec: windowHours * 60 * 60 })
+    )
+      return null;
+    const deadlineAtMs = Date.now() + MESSAGE_LIMIT_STATE_TIMEOUT_MS;
+    const result = await this.withCounterAdmission('message-count-limit', () =>
+      raceWithTimeout({
+        operation: () =>
+          this.redisCounter.claimMessageCountQuota({
+            chatId,
+            userId,
+            messageId,
+            eventTimestampMs,
+            maxMessages,
+            windowSeconds: windowHours * 60 * 60,
+            ...(params.publicationId ? { publicationId: params.publicationId } : {}),
+            deadlineAtMs,
+            requireReadyBeforeDispatch: true,
+          }),
+        timeoutMs: MESSAGE_LIMIT_STATE_TIMEOUT_MS,
+        onTimeout: () => ({ kind: 'deadline_exceeded' as const }),
+      }),
+    );
+    if (result?.kind === 'deadline_exceeded') {
+      this.observeState({ rule: 'message-count-limit', reason: 'deadline' });
       return null;
     }
+    if (result?.kind !== 'blocked') return null;
 
     return {
       ruleCode: 'MESSAGE_COUNT_LIMIT',
       score: 0.87,
       reason: `Messages are limited to ${maxMessages} per ${windowHours}h`,
+      metadata: {
+        quotaPolicyVersion: MESSAGE_COUNT_QUOTA_POLICY_VERSION,
+        quotaAnchorTimestampMs: result.eventTimestampMs,
+        quotaDecisionReplayed: result.replayed,
+        ...(result.publicationId ? { quotaPublicationId: result.publicationId } : {}),
+      },
     };
   }
 
@@ -331,12 +363,13 @@ export class RuleEngineMessageLimitsDetector {
     eventTimestampMs?: number;
     windowSeconds: number;
   }): Promise<boolean> {
-    const messageId = params.messageId?.trim();
-    if (!messageId) {
+    if (params.messageId === undefined) {
       return (
         (await this.redisCounter.incrementWithTtl(`${params.key}:legacy`, params.windowSeconds)) > 1
       );
     }
+    const messageId = params.messageId.trim();
+    if (!messageId) return false;
     const eventTimestampMs = params.eventTimestampMs;
     if (!Number.isSafeInteger(eventTimestampMs) || !eventTimestampMs || eventTimestampMs <= 0)
       return false;
@@ -377,8 +410,7 @@ export class RuleEngineMessageLimitsDetector {
     countLimit: number;
     timeoutMs: number;
   }): Promise<number | null> {
-    const messageId = params.messageId?.trim();
-    if (!messageId) {
+    if (params.messageId === undefined) {
       const result = await raceWithTimeout({
         operation: () =>
           this.redisCounter.incrementWithTtl(`${params.key}:legacy`, params.windowSeconds),
@@ -388,6 +420,8 @@ export class RuleEngineMessageLimitsDetector {
       if (result === null) this.observeState({ rule: params.rule, reason: 'deadline' });
       return result;
     }
+    const messageId = params.messageId.trim();
+    if (!messageId) return null;
     const eventTimestampMs = params.eventTimestampMs;
     if (
       !Number.isSafeInteger(eventTimestampMs) ||

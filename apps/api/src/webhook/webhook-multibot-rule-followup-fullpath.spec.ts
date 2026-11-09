@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '../prisma/prisma-client';
 import { ModerationRuleFollowupSourceExpiredError } from '../moderation/moderation-rule-followup-persistence';
+import { MESSAGE_COUNT_QUOTA_POLICY_VERSION } from '../moderation/message-count-quota-policy';
 import {
   bindMessageLimitEvidence,
   fingerprintModerationSettings,
@@ -42,6 +43,12 @@ describeStores('native durable moderation rule continuation across bot/process c
     chatId: string,
     suffix = 'continuation',
     sourceAgeMs = 0,
+    quota?: {
+      publicationId: string;
+      anchorTimestampMs: number;
+      decisionReplayed?: boolean;
+      confirmDelete?: boolean;
+    },
   ) {
     const messageId = `${suffix}-${randomUUID()}`;
     const sourceAt = new Date(Date.now() - sourceAgeMs);
@@ -50,10 +57,19 @@ describeStores('native durable moderation rule continuation across bot/process c
       sender: { user_id: 'fixture-user', is_bot: false },
       recipient: { chat_id: chatId, chat_type: 'chat' },
       timestamp: sourceAt.getTime(),
-      body: { mid: messageId, text },
+      body: {
+        mid: messageId,
+        text,
+        ...(quota
+          ? {
+              media_group_id: quota.publicationId,
+              attachments: [{ type: 'image', payload: { photo_id: messageId } }],
+            }
+          : {}),
+      },
     });
     const settings = await s.prisma.chatSettings.findUniqueOrThrow({ where: { chatId } });
-    const ruleCode = 'MESSAGE_TOO_LONG_DELETE';
+    const ruleCode = quota ? 'MESSAGE_COUNT_LIMIT_DELETE' : 'MESSAGE_TOO_LONG_DELETE';
     const result = await s.intents.ensureIntentWithRuleFollowup(
       {
         chatId,
@@ -64,13 +80,28 @@ describeStores('native durable moderation rule continuation across bot/process c
         routingPolicy: 'delete_capable',
         entityType: 'CHAT',
         messageAuthorKind: 'user',
-        reasonKey: 'MESSAGE_TOO_LONG:violation-delete',
+        reasonKey: `${ruleCode.replace(/_DELETE$/u, '')}:violation-delete`,
         ruleCode,
         event: {
           userId: 'fixture-user',
           eventType: 'MESSAGE',
           score: 1,
-          metadata: bindMessageLimitEvidence(settings, sourceAt.getTime(), ruleCode),
+          metadata: {
+            ...bindMessageLimitEvidence(
+              settings,
+              sourceAt.getTime(),
+              ruleCode,
+              quota?.anchorTimestampMs,
+            ),
+            ...(quota
+              ? {
+                  quotaPolicyVersion: MESSAGE_COUNT_QUOTA_POLICY_VERSION,
+                  quotaPublicationId: quota.publicationId,
+                  quotaAnchorTimestampMs: quota.anchorTimestampMs,
+                  quotaDecisionReplayed: quota.decisionReplayed ?? false,
+                }
+              : {}),
+          },
         },
       },
       fingerprintModerationSettings(settings, ruleCode),
@@ -88,11 +119,38 @@ describeStores('native durable moderation rule continuation across bot/process c
     const row = await s.prisma.moderationRuleFollowup.findUniqueOrThrow({
       where: { id: result.followupId! },
     });
+    if (quota?.confirmDelete === false) return row;
     expect((await s.intents.attemptIntent(row.intentId)).confirmed).toBe(true);
     expect(
       (await s.prisma.moderationRuleFollowup.findUniqueOrThrow({ where: { id: row.id } })).status,
     ).toBe('READY');
     return row;
+  }
+
+  async function quotaFixture() {
+    const result = await fixture(
+      {
+        maxMessageLengthEnabled: false,
+        messageCountLimitEnabled: true,
+        messageCountLimitMessages: 2,
+        messageCountLimitWindowHours: 1,
+        messageLimitsBotMessageEnabled: true,
+        messageLimitsWarnEnabled: true,
+        messageLimitsMuteEnabled: false,
+        messageLimitsBanEnabled: false,
+      },
+      0,
+    );
+    await result.s.prisma.violation.create({
+      data: {
+        chatId: result.chatId,
+        userId: 'fixture-user',
+        ruleCode: 'MESSAGE_COUNT_LIMIT',
+        score: 1,
+        createdAt: new Date(Date.now() - 1000),
+      },
+    });
+    return result;
   }
   async function due(s: MultibotHarness, id: string) {
     await s.prisma.moderationRuleFollowup.update({
@@ -146,6 +204,167 @@ describeStores('native durable moderation rule continuation across bot/process c
       },
     };
   }
+
+  it('claims one quota strike for concurrent album parts and a new strike when the same album ID has a new anchor', async () => {
+    const { s, chatId } = await quotaFixture();
+    const publicationId = `album-${randomUUID()}`;
+    const anchorTimestampMs = Date.now() - 100;
+    const parts = await Promise.all(
+      [false, true].map((decisionReplayed, index) =>
+        ready(s, chatId, `quota-part-${index}`, 0, {
+          publicationId,
+          anchorTimestampMs,
+          decisionReplayed,
+        }),
+      ),
+    );
+    const executor = jest.spyOn(s.moderation, 'executeRuleFollowup');
+    await Promise.all(parts.map((part) => s.ruleFollowups.attempt(part.id)));
+    const settled = await s.prisma.moderationRuleFollowup.findMany({
+      where: { id: { in: parts.map((part) => part.id) } },
+    });
+    expect(settled.map((part) => part.status).sort()).toEqual(['CANCELLED', 'COMPLETED']);
+    const owner = settled.find((part) => part.status === 'COMPLETED')!;
+    expect(owner.actionPlan).toMatchObject({ action: 'WARN', violationCount: 2 });
+    expect(settled.find((part) => part.status === 'CANCELLED')!.actionPlan).toBeNull();
+    expect(settled.every((part) => part.leaseToken === null && part.leaseExpiresAt === null)).toBe(
+      true,
+    );
+    const claims = await s.prisma.moderationViolationMessageClaim.findMany({ where: { chatId } });
+    expect(claims).toEqual([
+      expect.objectContaining({
+        dedupeKey: expect.stringMatching(/^quota-publication:v3:/u),
+        messageId: owner.messageId,
+        userId: 'fixture-user',
+        ruleCode: 'MESSAGE_COUNT_LIMIT',
+      }),
+    ]);
+    expect(await s.prisma.violation.count({ where: { chatId } })).toBe(2);
+    expect(
+      await s.prisma.moderationEvent.count({
+        where: { chatId, ruleCode: 'MESSAGE_COUNT_LIMIT', action: 'WARN' },
+      }),
+    ).toBe(1);
+    expect(executor).toHaveBeenCalledTimes(1);
+    expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(2);
+    expect(s.effects.filter((effect) => effect.method === 'post')).toHaveLength(1);
+
+    const nextAnchorTimestampMs = Date.now();
+    expect(nextAnchorTimestampMs).toBeGreaterThan(anchorTimestampMs);
+    const independent = await ready(s, chatId, 'quota-reused-album-id', 0, {
+      publicationId,
+      anchorTimestampMs: nextAnchorTimestampMs,
+    });
+    await s.ruleFollowups.attempt(independent.id);
+    await s.ruleFollowups.sweep();
+    expect(await s.prisma.violation.count({ where: { chatId } })).toBe(3);
+    const generations = await s.prisma.moderationViolationMessageClaim.findMany({
+      where: { chatId },
+    });
+    expect(generations).toHaveLength(2);
+    expect(new Set(generations.map((claim) => claim.dedupeKey)).size).toBe(2);
+    expect(executor).toHaveBeenCalledTimes(2);
+    expect(s.failures).toEqual([]);
+  });
+
+  it('lets a replayed album part own the quota followup when the first exact DELETE remains unavailable', async () => {
+    const { s, chatId } = await quotaFixture();
+    const publicationId = `album-${randomUUID()}`;
+    const anchorTimestampMs = Date.now() - 100;
+    const first = await ready(s, chatId, 'quota-unavailable', 0, {
+      publicationId,
+      anchorTimestampMs,
+      confirmDelete: false,
+    });
+    const source = s.max.getExactMessageRow.bind(s.max);
+    const failure = Object.assign(new Error('Exact album part temporarily unavailable'), {
+      response: { status: 503 },
+    });
+    const unavailable = jest
+      .spyOn(s.max, 'getExactMessageRow')
+      .mockImplementation((chat, mid, options) =>
+        mid === first.messageId ? Promise.reject(failure) : source(chat, mid, options),
+      );
+    await expect(
+      s.intents.attemptIntent(first.intentId, { deferGuardFailure: true }),
+    ).resolves.toMatchObject({ confirmed: false, status: 'RETRYABLE' });
+    expect(await s.prisma.moderationViolationMessageClaim.count({ where: { chatId } })).toBe(0);
+    expect(await s.prisma.violation.count({ where: { chatId } })).toBe(1);
+    unavailable.mockRestore();
+    const second = await ready(s, chatId, 'quota-replayed', 0, {
+      publicationId,
+      anchorTimestampMs,
+      decisionReplayed: true,
+    });
+    await s.ruleFollowups.attempt(second.id);
+    expect(
+      await s.prisma.moderationRuleFollowup.findUniqueOrThrow({ where: { id: second.id } }),
+    ).toMatchObject({
+      status: 'COMPLETED',
+      actionPlan: expect.objectContaining({ action: 'WARN' }),
+    });
+    expect(
+      await s.prisma.moderationRuleFollowup.findUniqueOrThrow({ where: { id: first.id } }),
+    ).toMatchObject({ status: 'WAITING_DELETE', actionPlan: null });
+    expect(await s.prisma.violation.count({ where: { chatId } })).toBe(2);
+    expect(
+      await s.prisma.moderationViolationMessageClaim.findFirstOrThrow({ where: { chatId } }),
+    ).toMatchObject({ messageId: second.messageId });
+    expect(s.messages.has(first.messageId)).toBe(true);
+    expect(s.messages.has(second.messageId)).toBe(false);
+    expect(s.effects.filter((effect) => effect.method === 'post')).toHaveLength(1);
+    expect(s.failures).toEqual([]);
+  });
+
+  it('denies old or malformed stored quota authority before creating an album strike or plan', async () => {
+    const { s, chatId } = await quotaFixture();
+    const patches = [
+      { quotaPolicyVersion: 2 },
+      { quotaPublicationId: ' ' },
+      { quotaAnchorTimestampMs: Date.now() + 60_000 },
+      { quotaAnchorTimestampMs: Date.now() - 360_000 },
+      { messageLimitPolicySha256: '0'.repeat(64) },
+    ];
+    const deletedMessageIds: string[] = [];
+    for (const [index, patch] of patches.entries()) {
+      const row = await ready(s, chatId, `quota-invalid-${index}`, 0, {
+        publicationId: `album-${randomUUID()}`,
+        anchorTimestampMs: Date.now() - 100,
+      });
+      deletedMessageIds.push(row.messageId);
+      const reason = await s.prisma.moderationDeleteIntentReason.findUniqueOrThrow({
+        where: { intentId_reasonKey: { intentId: row.intentId, reasonKey: row.reasonKey } },
+      });
+      await s.prisma.moderationDeleteIntentReason.update({
+        where: { id: reason.id },
+        data: { metadata: { ...(reason.metadata as Prisma.JsonObject), ...patch } },
+      });
+      await s.ruleFollowups.attempt(row.id);
+      expect(
+        await s.prisma.moderationRuleFollowup.findUniqueOrThrow({ where: { id: row.id } }),
+      ).toMatchObject({ status: 'CANCELLED', actionPlan: null });
+    }
+    expect(await s.prisma.violation.count({ where: { chatId } })).toBe(1);
+    expect(await s.prisma.moderationViolationMessageClaim.count({ where: { chatId } })).toBe(0);
+    const events = await s.prisma.moderationEvent.findMany({
+      where: { chatId },
+      select: { messageId: true, eventType: true, ruleCode: true, action: true, operator: true },
+    });
+    expect(events).toHaveLength(patches.length);
+    expect(events).toEqual(
+      expect.arrayContaining(
+        deletedMessageIds.map((messageId) => ({
+          messageId,
+          eventType: 'MESSAGE',
+          ruleCode: 'MESSAGE_COUNT_LIMIT_DELETE',
+          action: 'DELETE_MESSAGE',
+          operator: 'BOT',
+        })),
+      ),
+    );
+    expect(s.effects.filter((effect) => effect.method === 'post')).toEqual([]);
+    expect(s.failures).toEqual([]);
+  });
 
   it('declines an expired valid stateful source before creating its intent, reason or followup', async () => {
     const { s, chatId } = await fixture({}, 0);

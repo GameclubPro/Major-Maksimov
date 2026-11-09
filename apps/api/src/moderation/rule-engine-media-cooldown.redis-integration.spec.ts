@@ -7,6 +7,7 @@ import { RuleEngineService } from './rule-engine.service';
 import type { ChatSettings } from '../prisma/prisma-client';
 import { isRedisCounterPreDispatchUnavailable, RedisCounterService } from './redis-counter.service';
 import { CommercialAdDetector } from './commercial';
+import { buildMessageCountQuotaKeys } from './message-count-quota';
 import {
   ANTI_SPAM_BURST_LIMIT,
   ANTI_SPAM_BURST_WINDOW_SEC,
@@ -121,6 +122,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
         const evalCommand = jest.spyOn(client, 'eval');
         const claim = jest.spyOn(unavailable, 'claimEventCooldown');
         const membership = jest.spyOn(unavailable, 'replaceRevisionedSetMembershipsBeforeDeadline');
+        const quota = jest.spyOn(unavailable, 'claimMessageCountQuota');
         const observations: MessageLimitStateObservation[] = [];
         const isolatedDetector = new RuleEngineMessageLimitsDetector(unavailable, (value) => {
           observations.push(value);
@@ -133,11 +135,17 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
         expect(evalCommand).not.toHaveBeenCalled();
         const claimParams = claim.mock.calls[0]?.[0];
         const memberParams = membership.mock.calls[0]?.[0];
+        const quotaKeys =
+          quota.mock.calls[0]?.[0] && buildMessageCountQuotaKeys(quota.mock.calls[0]![0]);
         const keys = claimParams
           ? [claimParams.key, claimParams.memberKey]
-          : [memberParams!.stateKey, ...memberParams!.membershipKeys];
+          : quotaKeys
+            ? [quotaKeys.historyKey, quotaKeys.decisionKey]
+            : [memberParams!.stateKey, ...memberParams!.membershipKeys];
         expect(await inspector.exists(...keys)).toBe(0);
-        expect(claim.mock.calls.length + membership.mock.calls.length).toBe(1);
+        expect(
+          claim.mock.calls.length + membership.mock.calls.length + quota.mock.calls.length,
+        ).toBe(1);
       } finally {
         client.disconnect();
       }
@@ -156,6 +164,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
       });
       const claim = jest.spyOn(redis, 'claimEventCooldown');
       const membership = jest.spyOn(redis, 'replaceRevisionedSetMembershipsBeforeDeadline');
+      const quota = jest.spyOn(redis, 'claimMessageCountQuota');
       const observations: MessageLimitStateObservation[] = [];
       const target = new RuleEngineMessageLimitsDetector(redis, (value) => {
         observations.push(value);
@@ -165,7 +174,9 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
         expect(isRedisCounterPreDispatchUnavailable(error)).toBe(false);
         expect(observations).toEqual([]);
         expect(evalCommand).toHaveBeenCalledTimes(1);
-        expect(claim.mock.calls.length + membership.mock.calls.length).toBe(1);
+        expect(
+          claim.mock.calls.length + membership.mock.calls.length + quota.mock.calls.length,
+        ).toBe(1);
         const claimParams = claim.mock.calls[0]?.[0];
         if (claimParams) {
           expect(await inspector.get(claimParams.key)).toBe(String(now));
@@ -175,6 +186,19 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
           });
           expect(await inspector.pttl(claimParams.key)).toBeGreaterThan(0);
           expect(await inspector.pttl(claimParams.memberKey)).toBeGreaterThan(0);
+        } else if (quota.mock.calls.length) {
+          const keys = buildMessageCountQuotaKeys(quota.mock.calls[0]![0]);
+          expect(await inspector.zrange(keys.historyKey, 0, -1, 'WITHSCORES')).toEqual([
+            keys.member,
+            String(now),
+          ]);
+          expect(JSON.parse((await inspector.get(keys.decisionKey))!)).toMatchObject({
+            version: 3,
+            result: 1,
+            timestamp: now,
+          });
+          expect(await inspector.pttl(keys.historyKey)).toBeGreaterThan(0);
+          expect(await inspector.pttl(keys.decisionKey)).toBeGreaterThan(0);
         } else {
           const params = membership.mock.calls[0]![0];
           const key = params.membershipKeys[0]!;
@@ -191,6 +215,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
         evalCommand.mockRestore();
         claim.mockRestore();
         membership.mockRestore();
+        quota.mockRestore();
       }
     },
   );
@@ -547,27 +572,26 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
             : detector.detectMessageCountLimit(input(index))),
         ).toBeNull();
       }
-      const original = redis.replaceRevisionedSetMembershipsBeforeDeadline.bind(redis);
+      const client = nativeClient(redis);
+      const original = client.eval.bind(client);
       let releaseResponse!: () => void;
       const responseBarrier = new Promise<void>((resolve) => {
         releaseResponse = resolve;
       });
-      let nativeResult!: Awaited<ReturnType<typeof original>>;
+      let nativeResult: unknown;
       let finishResponse!: () => void;
       const responseDone = new Promise<void>((resolve) => {
         finishResponse = resolve;
       });
-      const response = jest
-        .spyOn(redis, 'replaceRevisionedSetMembershipsBeforeDeadline')
-        .mockImplementationOnce(async (params) => {
-          try {
-            nativeResult = await original(params);
-            await responseBarrier;
-            return nativeResult;
-          } finally {
-            finishResponse();
-          }
-        });
+      const response = jest.spyOn(client, 'eval').mockImplementationOnce(async (...args) => {
+        try {
+          nativeResult = await original(...args);
+          await responseBarrier;
+          return nativeResult;
+        } finally {
+          finishResponse();
+        }
+      });
       const engine = new RuleEngineService(redis);
       const current = input(threshold);
       const detection = engine.detect({
@@ -578,13 +602,16 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
       });
       try {
         const result = await detection;
-        expect(nativeResult).toMatchObject({ kind: 'applied', counts: [threshold + 1] });
+        expect(nativeResult).toEqual(
+          kind === 'count' ? [2, current.eventTimestampMs, ''] : [1, threshold + 1],
+        );
         expect(result.violations.map((violation) => violation.ruleCode)).toEqual([
           'MESSAGE_BLOCKED_WORD',
         ]);
         expect(response).toHaveBeenCalledTimes(1);
-        const key = response.mock.calls[0]![0].membershipKeys[0]!;
-        expect(await inspector.zcard(key)).toBe(threshold + 1);
+        const key =
+          kind === 'count' ? `message:count-limit:v3:${chatId}:user:admitted` : burstWindowKey();
+        expect(await inspector.zcard(key)).toBe(kind === 'count' ? 1 : threshold + 1);
         releaseResponse();
         await responseDone;
         expect(result.violations.map((violation) => violation.ruleCode)).toEqual([
@@ -747,7 +774,7 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
       settings: config,
     });
     const first = input('first', now - 3_599_000);
-    const second = input('second', now - 3_598_000);
+    const second = input('second', now - 1000);
     expect(await detector.detectMessageCountLimit(first)).toBeNull();
     expect(await detector.detectMessageCountLimit(second)).toMatchObject({
       ruleCode: 'MESSAGE_COUNT_LIMIT',
@@ -757,4 +784,64 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
     });
     expect(await detector.detectMessageCountLimit(input('boundary', now + 2000))).toBeNull();
   });
+
+  it.each([undefined, false])(
+    'never spends stateful quota on edits when the caller passes skip=%s',
+    async (skipStatefulMessageLimits) => {
+      const config = {
+        ...chatSettingsSchema.parse({}),
+        antiSpamEnabled: true,
+        antiDuplicateEnabled: false,
+        messageCountLimitEnabled: true,
+        messageCountLimitMessages: 2,
+        messageCountLimitWindowHours: 1,
+        photoMessageCooldownEnabled: true,
+        photoMessageCooldownHours: 1,
+        stickerMessageCooldownEnabled: true,
+        stickerMessageCooldownMinutes: 1,
+      } as unknown as ChatSettings;
+      const engine = new RuleEngineService(redis);
+      const detect = (
+        messageId: string,
+        eventTimestampMs: number,
+        edit = false,
+        withMedia = false,
+      ) =>
+        engine.detect({
+          chatId,
+          userId: 'user',
+          messageId,
+          duplicateStateEventType: edit ? 'message_edited' : 'message_created',
+          duplicateStateEventTimestampMs: eventTimestampMs,
+          text: 'Продам личный стол',
+          settings: config,
+          domainAllowlist: [],
+          ...(edit ? { skipStatefulMessageLimits } : {}),
+          ...(withMedia ? { hasPhotoAttachment: true, hasStickerAttachment: true } : {}),
+        });
+      expect((await detect('first', now - 4000)).violations).toEqual([]);
+      const key = `message:count-limit:v3:${chatId}:user:admitted`;
+      const original = await inspector.zrange(key, 0, -1, 'WITHSCORES');
+      const memberships = jest.spyOn(redis, 'replaceRevisionedSetMembershipsBeforeDeadline');
+      const quota = jest.spyOn(redis, 'claimMessageCountQuota');
+      const cooldown = jest.spyOn(redis, 'claimEventCooldown');
+      try {
+        for (let i = 0; i < 6; i++) {
+          expect((await detect('first', now - 3000 + i, true, i % 2 === 0)).violations).toEqual([]);
+        }
+        expect(memberships).not.toHaveBeenCalled();
+        expect(quota).not.toHaveBeenCalled();
+        expect(cooldown).not.toHaveBeenCalled();
+        expect(await inspector.zrange(key, 0, -1, 'WITHSCORES')).toEqual(original);
+      } finally {
+        memberships.mockRestore();
+        quota.mockRestore();
+        cooldown.mockRestore();
+      }
+      expect((await detect('second', now - 2000)).violations).toEqual([]);
+      expect((await detect('third', now - 1000)).violations).toEqual([
+        expect.objectContaining({ ruleCode: 'MESSAGE_COUNT_LIMIT' }),
+      ]);
+    },
+  );
 });

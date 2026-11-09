@@ -239,6 +239,47 @@ Statistics exchange does not grant advertising or shop authority.
 
 ## Moderation And Read Models
 
+- Message-count quota applies to new eligible messages per chat and author, shared across bots.
+  By the user's decision of 9 November 2026, only publications admitted by this quota spend it;
+  quota-rejected attempts never extend the wait. Admission does not guarantee survival of other
+  content/moderation rules. `message-count-quota.ts` commits the immutable decision and optional
+  admitted-history entry atomically under Redis time and the original absolute deadline. A replay
+  never moves the timestamp or renews receipt/history retention. Count/window changes reuse one
+  history with fixed retention covering the maximum 24-hour window; disabling retains live history.
+  Delayed events still count only chronological predecessors, preserving the conservative rule
+  against retroactive punishment rather than guaranteeing a strict maximum after reordered delivery.
+- Quota v3 has an isolated namespace and starts with empty admitted history once at rollout. Never
+  import v2 attempted-message sets as admitted history or clear retained Redis/queue evidence.
+  The count-only policy fingerprint includes algorithm version 3: old and new pending reasons
+  reject each other's authority on deploy/rollback. The sanction guard additionally requires the
+  verified reason's exact policy hash; a new follow-up cannot borrow an older DELETE receipt.
+- A MAX message containing several photo attachments spends one slot by its outer MID. Separate
+  photo messages may share one slot only with a valid direct `media_group_id`, `mediaGroupId`,
+  `album_id` or `albumId` on the same parser-selected outer photo message. Official MAX Message
+  documentation specifies MID plus attachments and does not establish a split-message album ID;
+  these explicit aliases are compatibility support, not proof of live split-album delivery.
+  Group reuse is bounded to the original five-minute cluster; later new MIDs use their own quota
+  identity. Every real MID retains its immutable decision even after that cluster expires.
+  Never infer a group from timestamps, text, replies or forwarded source metadata. Individual
+  DELETE targets remain real MIDs; the transactional SQL publication claim permits one strike,
+  notice and sanction per confirmed over-quota album, anchored to the original quota deadline.
+  A failed first DELETE cannot consume that claim. Native quota coverage lives in
+  `message-count-quota.redis-integration.spec.ts`; follow-up recovery/claim coverage lives in
+  `webhook-multibot-rule-followup-fullpath.spec.ts`.
+- Edits never spend burst/count/media quota, including direct engine calls without a skip hint;
+  duplicate revision/tombstone handling and content checks still run. Explicitly blank IDs never
+  enter compatibility counters. Pure forwards without a real outer message ID may receive a
+  synthetic ID only for private recovery, never for group/channel quota or deletion. Native
+  regressions live in `rule-engine-media-cooldown.redis-integration.spec.ts`; parser and engine
+  cases also preserve private recovery and duplicate tombstones. The mirrored-bot scenario in
+  `webhook-multibot-moderation-guards-fullpath.spec.ts` verifies the actual durable deletion path.
+- Count-limit explanations, warnings, mutes and bans use the configured count and hour window.
+  `message-limits-speech.ts` shares reason normalization with the first explanation; any nonempty
+  custom template retains ownership, including whitespace and text resembling an old default.
+  Custom templates without `{reason}` receive no appended explanation. Rendering coverage lives
+  in `bot-speech.spec.ts`, with production follow-up callers covered by
+  `moderation.service.navigation.spec.ts`.
+
 - Channel fallback scans reserve one task before asynchronous planning and contain shared failures at the scheduled-task boundary. Candidate selection pages at most 64 unique chat keys before filtering settings, retains unvisited candidates and alternates regular/marketplace sources; durable demand remains prioritized.
 - Poll render repair preserves publication identity and poll status when exact MAX presence is unavailable. The current remote lookup proves presence or fails; its documented ambiguous 404 does not prove absence or authorize automatic closure.
 

@@ -3,6 +3,7 @@ import {
   collectForwardedTextSnippets,
   detectMediaFlags,
   extractDirectMediaBatchId,
+  extractMessageCountPublicationId,
   hasForwardedMessage,
   shouldSkipAntiSpamBurstForForward,
 } from './moderation-update-extractors';
@@ -367,5 +368,148 @@ describe('direct media batch identity extraction', () => {
         createUpdate({ message: { body: { media_group_id: 'x'.repeat(513) } } }),
       ),
     ).toBeNull();
+  });
+});
+
+describe('message-count photo publication identity', () => {
+  const photo = { type: 'image', payload: { photo_id: 1, url: 'https://cdn.example/photo.jpg' } };
+  const message = (body: Record<string, unknown> = {}) => ({
+    recipient: { chat_id: 'chat-1' },
+    sender: { user_id: 'user-1' },
+    body: { mid: 'msg-media-flags-1', attachments: [photo], ...body },
+  });
+
+  it.each(['media_group_id', 'mediaGroupId', 'album_id', 'albumId'])(
+    'reads explicit direct %s for real photo messages',
+    (key) => {
+      expect(
+        extractMessageCountPublicationId(
+          createUpdate({
+            message: message({ [key]: ' album-1 ' }),
+          }),
+        ),
+      ).toBe('album-1');
+    },
+  );
+
+  it('uses the parser-selected outer message in a recursive wrapper', () => {
+    expect(
+      extractMessageCountPublicationId(
+        createUpdate({
+          update_type: 'message_created',
+          data: { wrapper: message({ media_group_id: 12345 }) },
+        }),
+      ),
+    ).toBe('12345');
+  });
+
+  it('counts a documented multi-photo body through its MID without inventing a group', () => {
+    expect(
+      extractMessageCountPublicationId(
+        createUpdate({
+          message: message({ attachments: [photo, photo] }),
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ['text-only marker', { message: message({ attachments: [], media_group_id: 'group-1' }) }],
+    [
+      'video marker',
+      {
+        message: message({
+          attachments: [{ type: 'video', payload: { url: 'video.mp4' } }],
+          media_group_id: 'group-1',
+        }),
+      },
+    ],
+    [
+      'image-looking file',
+      {
+        message: message({
+          attachments: [{ type: 'file', payload: { mime_type: 'image/jpeg', url: 'photo.jpg' } }],
+          media_group_id: 'group-1',
+        }),
+      },
+    ],
+    [
+      'unidentified image',
+      {
+        message: message({
+          attachments: [{ type: 'image', payload: {} }],
+          media_group_id: 'group-1',
+        }),
+      },
+    ],
+    ['generic album marker', { message: message({ album: 'group-1' }) }],
+    ['generic media-group marker', { message: message({ mediaGroup: 'group-1' }) }],
+    [
+      'outer-message mismatch',
+      { message: message({ mid: 'another-message', media_group_id: 'group-1' }) },
+    ],
+    ['blank outer-message id', { message: message({ mid: '', media_group_id: 'group-1' }) }],
+    ['envelope marker', { media_group_id: 'group-1', message: message() }],
+    [
+      'conflicting markers',
+      { message: { ...message({ media_group_id: 'group-1' }), album_id: 'group-2' } },
+    ],
+    ['blank marker', { message: message({ media_group_id: ' ' }) }],
+    ['oversized marker', { message: message({ media_group_id: 'x'.repeat(257) }) }],
+    [
+      'unsafe numeric marker',
+      { message: message({ media_group_id: Number.MAX_SAFE_INTEGER + 1 }) },
+    ],
+    [
+      'linked marker',
+      {
+        message: {
+          ...message(),
+          link: {
+            type: 'forward',
+            message: { ...message({ media_group_id: 'source-group' }).body },
+          },
+        },
+      },
+    ],
+    [
+      'linked photo',
+      {
+        message: {
+          ...message({ attachments: [], media_group_id: 'group-1' }),
+          link: { type: 'forward', message: { attachments: [photo] } },
+        },
+      },
+    ],
+    [
+      'reply photo',
+      {
+        message: {
+          ...message({ attachments: [], media_group_id: 'group-1' }),
+          link: { type: 'reply', message: { attachments: [photo] } },
+        },
+      },
+    ],
+    [
+      'selected linked source',
+      { data: { link: { type: 'forward', message: message({ media_group_id: 'source-group' }) } } },
+    ],
+  ])('rejects %s', (_label, raw) => {
+    expect(extractMessageCountPublicationId(createUpdate(raw))).toBeNull();
+  });
+
+  it('accepts the exact identifier length bound', () => {
+    expect(
+      extractMessageCountPublicationId(
+        createUpdate({
+          message: message({ media_group_id: 'x'.repeat(256) }),
+        }),
+      ),
+    ).toBe('x'.repeat(256));
+  });
+
+  it('never creates a publication identity for an edit', () => {
+    const update = createUpdate({ message: message({ media_group_id: 'group-1' }) });
+    expect(extractMessageCountPublicationId({ ...update, type: 'message_edited' })).toBeNull();
   });
 });

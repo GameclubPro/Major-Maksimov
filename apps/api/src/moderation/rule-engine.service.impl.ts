@@ -1088,6 +1088,7 @@ export class RuleEngineService {
     hasForwardedMessage?: boolean;
     hasMediaBatch?: boolean;
     mediaGroupId?: string | null;
+    messageCountPublicationId?: string | null;
     skipAntiSpamBurstLimit?: boolean;
     skipDuplicateState?: boolean;
     skipStatefulMessageLimits?: boolean;
@@ -1114,9 +1115,12 @@ export class RuleEngineService {
       hasMediaBatch,
       skipAntiSpamBurstLimit,
       skipDuplicateState,
-      skipStatefulMessageLimits,
+      skipStatefulMessageLimits: requestedSkipStatefulMessageLimits,
       commercialCampaignContext,
     } = params;
+    // FLAG: An edit never spends rate quota, even if its caller omits or clears the skip hint.
+    const skipStatefulMessageLimits =
+      requestedSkipStatefulMessageLimits === true || duplicateStateEventType === 'message_edited';
     const hasAntiSpamBurstExcludedAttachment = Boolean(
       hasPhotoAttachment ||
       hasVideoAttachment ||
@@ -1281,6 +1285,11 @@ export class RuleEngineService {
           chatId,
           userId,
           messageId,
+          ...(hasPhotoAttachment &&
+          duplicateStateEventType === 'message_created' &&
+          params.messageCountPublicationId
+            ? { publicationId: params.messageCountPublicationId }
+            : {}),
           eventTimestampMs: duplicateStateEventTimestampMs,
           settings,
         });

@@ -211,6 +211,67 @@ describe('bot speech custom override compatibility', () => {
     },
   );
 
+  it.each([1, 2, 5, 10])(
+    'includes the configured %i-message quota in sanction reasons',
+    (count) => {
+      for (const hours of [1, 6, 24]) {
+        const quota = {
+          messageCountLimitMessages: count,
+          messageCountLimitWindowHours: hours,
+        };
+        expect(resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, '', quota)).toBe(
+          `превышен лимит сообщений: ${count} за ${hours} ч`,
+        );
+        expect(
+          resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, undefined, quota),
+        ).toBe(`превышен лимит сообщений: ${count} за ${hours} ч`);
+        for (const templateText of ['Свой текст: {reason}', '   ']) {
+          expect(
+            resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, templateText, quota),
+          ).toBe(`слишком частая отправка сообщений: не более ${count} за ${hours}ч`);
+        }
+      }
+    },
+  );
+
+  it('keeps quota-less and unrelated sanction reasons compatible', () => {
+    expect(resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, '')).toBe(
+      'лимит сообщений за выбранный период превышен',
+    );
+    expect(resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, 'Свой {reason}')).toBe(
+      'слишком частая отправка сообщений',
+    );
+    const quota = { messageCountLimitMessages: 2, messageCountLimitWindowHours: 24 };
+    for (const ruleCode of [
+      'MESSAGE_BLOCKED_WORD',
+      'MESSAGE_BLOCKED_DOMAIN',
+      'PHONE_NUMBER_BLOCKED',
+      'MESSAGE_TOO_LONG',
+      'MESSAGE_RATE_LIMIT',
+      'PHOTO_RATE_LIMIT',
+      'STICKER_RATE_LIMIT',
+      'PHOTO_BLOCKED',
+      'VIDEO_BLOCKED',
+      'FILE_BLOCKED',
+      'VOICE_BLOCKED',
+      'FORWARDED_MESSAGE_BLOCKED',
+      'UNKNOWN_LIMIT',
+    ]) {
+      for (const templateText of ['', 'Свой {reason}', '   ']) {
+        expect(resolveMessageLimitsSanctionReason(ruleCode, 'казино', templateText, quota)).toBe(
+          resolveMessageLimitsSanctionReason(ruleCode, 'казино', templateText),
+        );
+      }
+    }
+  });
+
+  it('uses the same safe quota defaults in initial and sanction explanations', () => {
+    const quota = { messageCountLimitMessages: Number.NaN, messageCountLimitWindowHours: 25 };
+    expect(resolveMessageLimitsSanctionReason('MESSAGE_COUNT_LIMIT', null, '', quota)).toBe(
+      'превышен лимит сообщений: 5 за 1 ч',
+    );
+  });
+
   it('does not expose blocked tokens and preserves custom blocked-list wording', () => {
     expect(
       buildMessageLimitsExplanationReplacements({

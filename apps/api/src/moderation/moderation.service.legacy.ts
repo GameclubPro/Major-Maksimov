@@ -319,9 +319,9 @@ import {
   resolveBotSpeechDuplicateContext,
   resolveBotSpeechMessageStatus,
   resolveBotSpeechPlaceholder,
-  resolveMessageLimitsSanctionReason,
   resolveTextFilterExplanationReason,
 } from './bot-speech-custom-override.util';
+import { createMessageLimitsSanctionSpeech } from './message-limits-speech';
 import { PrivateControlService } from './private-control.service';
 import { ModerationAccessService } from './moderation-access.service';
 import { clearChatAdminRoster } from '../max/chat-admin-roster-state';
@@ -420,6 +420,7 @@ import {
   collectForwardedNodes,
   detectMediaFlags,
   extractDirectMediaBatchId,
+  extractMessageCountPublicationId,
   extractRawMessageNode,
   hasForwardedMessage,
   shouldSkipAntiSpamBurstForForward,
@@ -2417,6 +2418,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         hasMediaBatch: mediaFlags.hasMediaBatch,
         mediaGroupId: extractDirectMediaBatchId(update),
         skipAntiSpamBurstLimit,
+        messageCountPublicationId: extractMessageCountPublicationId(update),
         skipContentFiltersForReport: reportCommand,
         skipDuplicateState:
           duplicateEventTimeSkipReason !== null ||
@@ -5550,57 +5552,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private buildMessageLimitsMuteExplanation(
-    userLabel: string,
-    ruleCode: string,
-    blockedWord: string | null | undefined,
-    botSpeechStyle: BotSpeechStyle | null,
-  ): string {
-    return this.renderSystemBotSpeechTemplate({
-      style: botSpeechStyle,
-      templateKey: 'messageLimitsMute',
-      replacements: {
-        user: userLabel,
-        reason: resolveMessageLimitsSanctionReason(ruleCode, blockedWord),
-      },
-    });
-  }
-
-  private buildMessageLimitsWarnExplanation(
-    userLabel: string,
-    ruleCode: string,
-    blockedWord: string | null | undefined,
-    botSpeechStyle: BotSpeechStyle | null,
-    templateText = '',
-  ): string {
-    return this.renderEditableBotSpeechTemplate({
-      style: botSpeechStyle,
-      fieldKey: 'messageLimitsWarnMessageText',
-      overrideText: templateText,
-      replacements: {
-        user: userLabel,
-        reason: resolveMessageLimitsSanctionReason(ruleCode, blockedWord, templateText),
-      },
-    });
-  }
-
-  private buildMessageLimitsBanExplanation(
-    userLabel: string,
-    ruleCode: string,
-    _muteDurationHours: number,
-    blockedWord: string | null | undefined,
-    botSpeechStyle: BotSpeechStyle | null,
-  ): string {
-    return this.renderSystemBotSpeechTemplate({
-      style: botSpeechStyle,
-      templateKey: 'messageLimitsBan',
-      replacements: {
-        user: userLabel,
-        reason: resolveMessageLimitsSanctionReason(ruleCode, blockedWord),
-      },
-    });
-  }
-
   private buildBotMessageOptions(
     chatId: string,
     rawButtons: unknown,
@@ -6356,10 +6307,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       buildLinkExplanation: this.buildLinkExplanation.bind(this),
       buildLinkMuteExplanation: this.buildLinkMuteExplanation.bind(this),
       buildLinkWarnExplanation: this.buildLinkWarnExplanation.bind(this),
-      buildMessageLimitsBanExplanation: this.buildMessageLimitsBanExplanation.bind(this),
       buildMessageLimitsExplanation: this.buildMessageLimitsExplanation.bind(this),
-      buildMessageLimitsMuteExplanation: this.buildMessageLimitsMuteExplanation.bind(this),
-      buildMessageLimitsWarnExplanation: this.buildMessageLimitsWarnExplanation.bind(this),
+      ...createMessageLimitsSanctionSpeech({
+        renderEditable: this.renderEditableBotSpeechTemplate.bind(this),
+        renderSystem: this.renderSystemBotSpeechTemplate.bind(this),
+      }),
       buildPhoneNumbersExplanation: this.buildPhoneNumbersExplanation.bind(this),
       buildTextFilterExplanation: this.buildTextFilterExplanation.bind(this),
       buildTextFilterMuteExplanation: this.buildTextFilterMuteExplanation.bind(this),

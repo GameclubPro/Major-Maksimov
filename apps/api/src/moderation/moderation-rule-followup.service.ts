@@ -24,6 +24,7 @@ import {
 } from './moderation-rule-followup.contract';
 import { readRuleFollowupEnvelope } from './moderation-rule-followup-persistence';
 import { buildModerationMessageViolationProcessingClaimKey } from './moderation-message-action-claim';
+import { buildMessageCountQuotaFollowupClaim } from './moderation-rule-followup-quota-claim';
 import { resolveModerationMuteDurationHours } from './moderation-execution-guard-callbacks';
 import { readStopWordsPolicy, withStopWordsSanctions } from './stop-words/stop-words.policy';
 import {
@@ -432,7 +433,7 @@ export class ModerationRuleFollowupService
         record(reason.metadata).moderationDeleteVerified !== true
       )
         throw new ModerationRuleSanctionRejectedError();
-      const reasonDeadline = record(reason.metadata).messageLimitDeadlineAtMs;
+      let reasonDeadline = record(reason.metadata).messageLimitDeadlineAtMs;
       const decisionClocks = await tx.$queryRaw<Array<{ now: Date }>>(
         Prisma.sql`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`,
       );
@@ -444,6 +445,21 @@ export class ModerationRuleFollowupService
         (!Number.isSafeInteger(reasonDeadline) || now.getTime() >= Number(reasonDeadline))
       )
         throw new ModerationRuleSanctionRejectedError();
+      const quotaClaim =
+        ruleCode === 'MESSAGE_COUNT_LIMIT'
+          ? buildMessageCountQuotaFollowupClaim({
+              chatId: row.chatId,
+              userId: row.userId,
+              policySha256: row.policySha256,
+              metadata: reason.metadata,
+              nowMs: now.getTime(),
+            })
+          : {};
+      if (quotaClaim.deadlineAtMs !== undefined)
+        reasonDeadline = Math.min(
+          Number(reasonDeadline ?? quotaClaim.deadlineAtMs),
+          quotaClaim.deadlineAtMs,
+        );
       const key = buildModerationMessageViolationProcessingClaimKey({
         chatId: row.chatId,
         userId: row.userId,
@@ -451,14 +467,15 @@ export class ModerationRuleFollowupService
         ruleCode,
         updateType: envelope.updateType,
       });
+      const dedupeKey = quotaClaim.dedupeKey ?? key.dedupeKey;
       const existing = await tx.moderationViolationMessageClaim.findUnique({
-        where: { dedupeKey: key.dedupeKey },
+        where: { dedupeKey },
       });
       if (existing) return null; // Existing historical/independent claim cannot be adopted.
       await tx.moderationViolationMessageClaim.create({
         data: {
           id: `${row.id}:claim`,
-          dedupeKey: key.dedupeKey,
+          dedupeKey,
           chatId: row.chatId,
           userId: row.userId,
           messageId: row.messageId,

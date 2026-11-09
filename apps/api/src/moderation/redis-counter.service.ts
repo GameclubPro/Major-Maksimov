@@ -34,6 +34,11 @@ import {
   DUPLICATE_EVENT_MAX_FUTURE_SKEW_MS,
   resolveDuplicateHistoryRetentionSeconds,
 } from './duplicate-state';
+import {
+  claimMessageCountQuota,
+  type MessageCountQuotaInput,
+  type MessageCountQuotaResult,
+} from './message-count-quota';
 
 const preDispatchUnavailableErrors = new WeakSet<Error>();
 
@@ -449,6 +454,11 @@ export class RedisCounterService implements OnModuleDestroy {
     return Number(
       await this.redis.eval(INCREMENT_WITH_TTL_SCRIPT, 1, key, String(Math.trunc(ttlSeconds))),
     );
+  }
+
+  async claimMessageCountQuota(input: MessageCountQuotaInput): Promise<MessageCountQuotaResult> {
+    if (input.requireReadyBeforeDispatch) this.requireReadyBeforeCounterDispatch(false);
+    return claimMessageCountQuota(this.redis, input);
   }
 
   async claimEventCooldown(params: {

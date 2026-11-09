@@ -106,6 +106,12 @@ export async function assertModerationRuleSanctionAuthority(
     metadata.moderationDeleteVerified !== true
   )
     return reject();
+  // FLAG: A verified older DELETE cannot lend its receipt to a newer quota algorithm.
+  if (
+    proof.ruleCode.replace(/_DELETE$/u, '') === 'MESSAGE_COUNT_LIMIT' &&
+    metadata.messageLimitPolicySha256 !== proof.policySha256
+  )
+    return reject();
   const reasonDeadlineAtMs = metadata.messageLimitDeadlineAtMs;
   if (
     reasonDeadlineAtMs !== undefined &&

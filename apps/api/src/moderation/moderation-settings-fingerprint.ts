@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { MESSAGE_LENGTH_POLICY_VERSION } from './moderation-message-length';
+import { MESSAGE_COUNT_QUOTA_POLICY_VERSION } from './message-count-quota-policy';
 
 const LIMIT_SANCTION_FIELDS = [
   'messageLimitsBotMessageEnabled',
@@ -105,5 +106,8 @@ export function fingerprintModerationSettings(
   // FLAG: Previously measured metadata/UTF-16 length cannot authorize a queued sanction.
   if (rule === 'MESSAGE_TOO_LONG')
     entries.push(['messageLengthPolicyVersion', MESSAGE_LENGTH_POLICY_VERSION]);
+  // FLAG: Persisted attempt-quota decisions cannot acquire admitted-publication authority.
+  if (rule === 'MESSAGE_COUNT_LIMIT')
+    entries.push(['messageCountQuotaPolicyVersion', MESSAGE_COUNT_QUOTA_POLICY_VERSION]);
   return createHash('sha256').update(JSON.stringify(entries)).digest('hex');
 }

@@ -274,8 +274,9 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
           <small className="field__hint">{fieldErrors.messageCountLimitWindowHours}</small>
         ) : openHintKey === 'messageCountLimit' ? (
           <p id="message-count-limit-hint" className="settings-native-toggle__hint">
-            Считается отдельно для каждого участника. Например, при лимите 3 сообщения за 1 час
-            четвёртое сообщение будет удалено. Предупреждения и ограничения настраиваются ниже.
+            Лимит действует отдельно для каждого участника за последние выбранные часы. Учитываются
+            новые сообщения, включая ответы; фото одного альбома — как одна публикация.
+            Редактирование не расходует лимит. Попытки сверх лимита не продлевают ожидание.
           </p>
         ) : null}
       </div>

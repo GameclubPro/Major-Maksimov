@@ -3,6 +3,7 @@ import {
   type BotSpeechPersona,
   type BotSpeechStyle,
 } from '@maxim/contracts/bot-speech';
+import type { ChatSettings } from '@maxim/contracts/settings';
 import {
   buildMessageLimitsBlockedReason,
   isMessageLimitsBlockedListRuleCode,
@@ -118,12 +119,15 @@ function selectPersonaText(
   return variants[persona];
 }
 
-type MessageLimitsContextParams = {
+export type MessageCountLimitSpeechContext = Pick<
+  ChatSettings,
+  'messageCountLimitMessages' | 'messageCountLimitWindowHours'
+>;
+
+type MessageLimitsContextParams = MessageCountLimitSpeechContext & {
   templateText?: string | null;
   ruleCode: string;
   messageDeleted: boolean;
-  messageCountLimitMessages: number;
-  messageCountLimitWindowHours: number;
   photoCooldownHours: number;
   stickerCooldownMinutes: number;
   messageLength?: number;
@@ -192,16 +196,7 @@ function buildMessageLimitsReasonContext(params: MessageLimitsContextParams): {
     };
   }
   if (params.ruleCode === 'MESSAGE_COUNT_LIMIT') {
-    const count = normalizeIntegerInRange(params.messageCountLimitMessages, 1, 10, 5);
-    const hours = normalizeIntegerInRange(params.messageCountLimitWindowHours, 1, 24, 1);
-    return {
-      legacyReason: `слишком частая отправка сообщений: не более ${count} за ${hours}ч`,
-      inheritedReason: `превышен лимит сообщений: ${count} за ${hours} ч`,
-      replacements: {
-        message_limit_count: String(count),
-        message_limit_window_hours: String(hours),
-      },
-    };
+    return buildMessageCountLimitReasonContext(params);
   }
   const blockedMediaReason = resolveBlockedMediaReason(params.ruleCode);
   if (blockedMediaReason) return blockedMediaReason;
@@ -217,6 +212,19 @@ function buildMessageLimitsReasonContext(params: MessageLimitsContextParams): {
     legacyReason: `слишком частая отправка фото: не чаще одного раза в ${hours}ч. Если фото несколько, лучше собрать их в альбом или коллаж`,
     inheritedReason: `между отправками фото должно пройти не менее ${hours} ч`,
     replacements: { photo_cooldown_hours: String(hours) },
+  };
+}
+
+function buildMessageCountLimitReasonContext(params: MessageCountLimitSpeechContext) {
+  const count = normalizeIntegerInRange(params.messageCountLimitMessages, 1, 10, 5);
+  const hours = normalizeIntegerInRange(params.messageCountLimitWindowHours, 1, 24, 1);
+  return {
+    legacyReason: `слишком частая отправка сообщений: не более ${count} за ${hours}ч`,
+    inheritedReason: `превышен лимит сообщений: ${count} за ${hours} ч`,
+    replacements: {
+      message_limit_count: String(count),
+      message_limit_window_hours: String(hours),
+    },
   };
 }
 
@@ -245,7 +253,12 @@ export function resolveMessageLimitsSanctionReason(
   ruleCode: string,
   blockedWord?: string | null,
   templateText?: string | null,
+  quota?: MessageCountLimitSpeechContext,
 ): string {
+  if (ruleCode === 'MESSAGE_COUNT_LIMIT' && quota) {
+    const context = buildMessageCountLimitReasonContext(quota);
+    return resolveBotSpeechPlaceholder(templateText, context.legacyReason, context.inheritedReason);
+  }
   const legacyReasons: Record<string, string> = {
     PHOTO_RATE_LIMIT: 'слишком частая отправка фото',
     PHOTO_BLOCKED: 'фото в этом чате отключены',
