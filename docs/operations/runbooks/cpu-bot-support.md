@@ -4,7 +4,7 @@ The selected CPU support profile is Gemma 4 26B-A4B UD-Q5_K_M through an indepen
 llama.cpp b11804 installation. This is retrieval from reviewed customer instructions, not fine-tuning.
 The existing GPU commercial classifier and server moderation remain separate.
 
-An optional owner-selected API profile uses `gpt-6.1-sol` with `reasoning_effort: medium`
+An optional owner-selected API profile uses `gpt-6.1-terra` with `reasoning_effort: max`
 through the pinned third-party HTTPS gateway in `infra/scripts/support-llm-provider.mjs`.
 The gateway's model label and acceptance of a parameter do not independently establish its
 underlying implementation or pricing. Reviewed support facts and bounded question/history are
@@ -74,7 +74,11 @@ selection file, start the verified CPU model, then start the worker again; prese
   Keep thinking explicitly disabled at both server and request boundaries. Check actual
   tokenization, completed structured answers and the existing 120-second request deadline
   before enabling the pilot.
-- The sole recipient is the designated test **CHAT `-78271094414679`**. The bridge
+- The owner-approved recipients are **CHAT `-78271094414679`** and
+  **CHAT `-79143082792210`** (owner request of 9 November 2026). Each bridge process
+  selects exactly one allowlisted chat, with independent history, Redis lease and source
+  fences. The original chat keeps its existing Redis namespace and uncertain-send fences.
+  The bridge
   selects only its existing fixed, primary or legacy assigned moderator, verifies the
   actual remote entity type and fresh exact bot access, and refuses assignment drift.
   It never changes bot assignments, activation, webhooks or settings.
@@ -210,7 +214,13 @@ do not change the API image or require rebuilding application services. Then:
 ~/.local/bin/maxim-support stop
 ```
 
-The preview posts nothing. Local status is content-free and records exact PID/start identity,
+The preview checks both approved chats sequentially and posts nothing. A bridge invocation may
+select one exact approved chat as its second argument; any other chat is refused before access.
+The singleton workstation supervisor maintains one independent session and reconnect policy per
+chat. Local status includes each chat's phase, polling timestamps and delivery counts; readiness
+requires fresh successful polling from both. CPU inference retains one shared slot, while API
+inference is bounded to one outstanding question per chat.
+Local status is content-free and records exact PID/start identity,
 heartbeat and successful reply counts. A connected worker proves transport availability,
 not answer correctness or completed delivery. Check local question quality and latency
 separately from a real user's fresh question and confirmed reply in the designated chat.

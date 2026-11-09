@@ -1,12 +1,15 @@
-// FLAG: This pilot can read and reply only in the designated test CHAT. No webhook is changed.
+// FLAG: Each process reads/replies only in one owner-approved CHAT. Keep the original
+// chat's Redis namespace unchanged so uncertain sends remain fenced across upgrades.
 const { createHash, randomUUID } = require('node:crypto');
 const { setTimeout: pause } = require('node:timers/promises');
-const CHAT_ID = '-78271094414679';
+const CHAT_IDS = Object.freeze(['-78271094414679', '-79143082792210']);
+const CHAT_ID = process.env.SUPPORT_CHAT_ID ?? CHAT_IDS[0];
+if (!CHAT_IDS.includes(CHAT_ID)) throw new Error('support_chat_refused');
 const PREFIX = `support-cpu-pilot:v1:${CHAT_ID}`;
 const SOURCE_AGE_MS = 180_000;
 const RETENTION_MS = 7 * 86400_000;
 const MODEL_SHA = '769d386a69d43782321c1bad04d41d29a2e84b2c06e6a277cd99fd6265ec0e80';
-const API_PROFILE_SHA = '15148942c53fad1f22aaaf344b22dc37b508c1a523da1d737f13394199e7a73d';
+const API_PROFILE_SHA = '6d528271f60ea9dfb2005f8fa9f68ba231b4564ebf8c840065d3d64ebe84656b';
 const DIGEST = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ANSWER_FOOTER = '✦ Ответ подготовлен ИИ-помощником «Майор Максимов»';
 
@@ -579,6 +582,7 @@ async function runBridge(runtime, { preview = false } = {}) {
 }
 
 module.exports = {
+  CHAT_IDS,
   CHAT_ID,
   MODEL_SHA,
   API_PROFILE_SHA,
@@ -592,7 +596,7 @@ module.exports = {
   renderSupportMessage,
   runBridge,
 };
-if (require.main === module || process.argv[1] === undefined || process.argv[1] === '-') {
+if (require.main === module || module.id === '[eval]' || module.id === '[stdin]') {
   createRuntime()
     .then((runtime) => runBridge(runtime, { preview: process.env.SUPPORT_PREVIEW === '1' }))
     .catch((error) => {

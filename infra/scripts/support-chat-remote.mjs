@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { readCurrentManifest, validateCompleteReleaseManifest } from './release-manifest.mjs';
+import bridge from './support-chat-bridge.cjs';
 
 const run = (file, args) =>
   execFileSync(file, args, {
@@ -29,8 +30,14 @@ export function verifySupportContainer(rows, imageId) {
   return value.Id;
 }
 
-export async function supportChatRemote(operation) {
+export async function supportChatRemote(operation, chatId) {
   if (!['preview', 'bridge'].includes(operation)) throw new Error('support_operation_refused');
+  if (chatId === undefined && operation === 'preview') {
+    for (const selected of bridge.CHAT_IDS) await supportChatRemote(operation, selected);
+    return;
+  }
+  chatId ??= bridge.CHAT_IDS[0];
+  if (!bridge.CHAT_IDS.includes(chatId)) throw new Error('support_chat_refused');
   const readiness = JSON.parse(
     run('curl', [
       '--fail',
@@ -78,6 +85,8 @@ export async function supportChatRemote(operation) {
       '-e',
       `SUPPORT_PREVIEW=${operation === 'preview' ? '1' : '0'}`,
       '-e',
+      `SUPPORT_CHAT_ID=${chatId}`,
+      '-e',
       'PRISMA_PG_POOL_MAX=1',
       '-e',
       'PRISMA_PG_POOL_CONNECTION_TIMEOUT_MS=2000',
@@ -109,7 +118,7 @@ export async function supportChatRemote(operation) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  supportChatRemote(process.argv[2]).catch(() => {
+  supportChatRemote(process.argv[2], process.argv[3]).catch(() => {
     process.stderr.write('support_remote_unavailable\n');
     process.exitCode = 1;
   });

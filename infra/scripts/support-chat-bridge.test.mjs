@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Redis from 'ioredis';
 import bridge from './support-chat-bridge.cjs';
-import { verifySupportContainer } from './support-chat-remote.mjs';
+import { supportChatRemote, verifySupportContainer } from './support-chat-remote.mjs';
 import { answerSupport, knowledge, SUPPORT_ANSWER_FOOTER } from './support-llm-client.mjs';
 import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 const {
@@ -30,6 +30,48 @@ const row = (text = 'Как подключить бота?') => ({
 
 test('PC profile and injected host bridge require the same pinned support model', () => {
   assert.equal(bridge.MODEL_SHA, SUPPORT_MODEL.sha256);
+});
+
+test('only the two owner-approved chats can select a bridge before any remote access', async () => {
+  assert.deepEqual(bridge.CHAT_IDS, ['-78271094414679', '-79143082792210']);
+  await assert.rejects(supportChatRemote('preview', '-123'), /support_chat_refused/u);
+  assert.throws(
+    () =>
+      execFileSync(
+        process.execPath,
+        [
+          '-e',
+          `require(${JSON.stringify(fileURLToPath(new URL('./support-chat-bridge.cjs', import.meta.url)))})`,
+        ],
+        {
+          env: { ...process.env, SUPPORT_CHAT_ID: '-123' },
+          stdio: 'pipe',
+        },
+      ),
+    (error) => /support_chat_refused/u.test(error.stderr.toString()),
+  );
+});
+
+test('stdin and eval imports stay inert while the injected eval entrypoint still runs', async () => {
+  const remoteUrl = new URL('./support-chat-remote.mjs', import.meta.url).href;
+  const script = `await import(${JSON.stringify(remoteUrl)}); console.log('import-only');`;
+  for (const args of [
+    ['--input-type=module', '-'],
+    ['--input-type=module', '-e', script],
+  ])
+    assert.equal(
+      execFileSync(process.execPath, args, { input: script, encoding: 'utf8' }).trim(),
+      'import-only',
+    );
+  const code = await readFile(new URL('./support-chat-bridge.cjs', import.meta.url), 'utf8');
+  assert.throws(
+    () =>
+      execFileSync(process.execPath, ['-e', code], {
+        env: { ...process.env, SUPPORT_BOT_CATALOG: 'null' },
+        stdio: 'pipe',
+      }),
+    (error) => error.stderr.toString().trim() === 'support_bot_catalog_refused',
+  );
 });
 
 test('all eight public bot names become exact catalog links without linking the AI footer', () => {
@@ -298,6 +340,40 @@ test(
       assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
       assert.equal(await owner.prepare(source.id), false);
       assert.equal(await owner.begin(source.id, Date.now() + 1000), false);
+      const second = JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            '-e',
+            `
+            const Redis = require(${JSON.stringify(fileURLToPath(import.meta.resolve('ioredis')))});
+            const bridge = require(${JSON.stringify(fileURLToPath(new URL('./support-chat-bridge.cjs', import.meta.url)))});
+            (async () => {
+              const redis = new Redis({path:process.argv[1],retryStrategy:null,maxRetriesPerRequest:0});
+              const fence = new bridge.PilotFence(redis, 'second-chat');
+              const acquired = await fence.acquire();
+              const prepared = await fence.prepare('question-1');
+              const begun = await fence.begin('question-1', Date.now()+1000);
+              await fence.settle('question-1','UNKNOWN');
+              const accepted = bridge.sourceMessage({recipient:{chat_id:bridge.CHAT_ID},sender:{user_id:42,is_bot:false},timestamp:Date.now(),body:{mid:'question-1',text:'Вопрос'}});
+              const foreign = bridge.sourceMessage({recipient:{chat_id:'-78271094414679'},sender:{user_id:42,is_bot:false},timestamp:Date.now(),body:{mid:'question-1',text:'Вопрос'}});
+              console.log(JSON.stringify({chatId:bridge.CHAT_ID,lease:fence.lease,key:fence.key('question-1'),acquired,prepared,begun,accepted:Boolean(accepted),foreign}));
+              await fence.close();
+              await redis.quit();
+            })().catch(()=>process.exit(1));
+          `,
+            socket,
+          ],
+          { env: { ...process.env, SUPPORT_CHAT_ID: '-79143082792210' }, timeout: 5000 },
+        ).toString(),
+      );
+      assert.equal(owner.lease, 'support-cpu-pilot:v1:-78271094414679:lease');
+      assert.equal(second.lease, 'support-cpu-pilot:v1:-79143082792210:lease');
+      assert.notEqual(second.key, owner.key(source.id));
+      assert.equal(second.acquired && second.prepared && second.begun && second.accepted, true);
+      assert.equal(second.foreign, null);
+      assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
+      assert.equal(await redis.get(second.key), 'UNKNOWN');
       await owner.close();
       assert.equal(await other.acquire(), true);
       assert.equal(await other.prepare(source.id), false);
