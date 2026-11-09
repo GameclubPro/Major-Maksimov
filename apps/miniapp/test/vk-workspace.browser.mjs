@@ -21,6 +21,8 @@ assert.ok(
 const profiles = [
   ['desktop-light', { viewport: { width: 1440, height: 1000 } }, 'light'],
   ['iphone-light', devices['iPhone 15'], 'light'],
+  ['iphone-dark', devices['iPhone 15'], 'dark'],
+  ['android-light', devices['Pixel 7'], 'light'],
   ['android-dark', devices['Pixel 7'], 'dark'],
   ['iphone-se-light', devices['iPhone SE'], 'light'],
 ];
@@ -120,6 +122,56 @@ try {
       await filter.selectOption('');
 
       await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+      const options = page.getByRole('region', { name: 'Оформление и удаление постов' });
+      await options.getByRole('switch', { name: 'Первоисточник', exact: true }).check();
+      await options.getByRole('button', { name: 'Своя ссылка', exact: true }).click();
+      const sourceInput = options.getByRole('textbox', {
+        name: 'Ссылка на первоисточник',
+        exact: true,
+      });
+      await sourceInput.fill('https://user:password@example.com');
+      await options.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await options.getByRole('alert').waitFor();
+      await sourceInput.fill('https://example.com/original?article=12345678901234567890');
+      await options.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await page.waitForFunction(
+        () => document.querySelector('.vk-publication-options__url button')?.disabled,
+      );
+      await options.getByRole('switch', { name: 'Автоудаление', exact: true }).check();
+      const delay = options.getByRole('combobox', {
+        name: 'Срок автоудаления постов ВК',
+        exact: true,
+      });
+      await delay.selectOption('360');
+      await page.waitForFunction(
+        () => document.querySelector('.vk-publication-options__delay select')?.value === '360',
+      );
+      await delay.selectOption('custom');
+      const customMinutes = options.getByRole('spinbutton', {
+        name: 'Срок автоудаления в минутах',
+        exact: true,
+      });
+      await customMinutes.fill('90');
+      await customMinutes.press('Enter');
+      await page.waitForFunction(
+        () =>
+          document.querySelector('.vk-publication-options input[type="number"]')?.value === '90',
+      );
+      await options.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(screenshots, `${name}-publication-options.png`) });
+      assert.equal(
+        await options.evaluate((element) => element.scrollWidth > element.clientWidth + 1),
+        false,
+        'Publication options must fit',
+      );
+      await page.getByRole('tab', { name: 'Посты', exact: true }).click();
+      await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+      assert.equal(
+        await sourceInput.inputValue(),
+        'https://example.com/original?article=12345678901234567890',
+      );
+      assert.equal(await customMinutes.inputValue(), '90');
+
       await page.getByRole('radio', { name: 'Пауза', exact: true }).click();
       await page.waitForFunction(
         () =>

@@ -12,6 +12,7 @@ import { PostMediaPicker } from './post-media-picker';
 import { measureVkParsingPublishTextLength } from './publish-text';
 
 type PostEditorProps = {
+  sourceLink?: { url: string; html: string } | null;
   post: VkParsingPost;
   draftText: string;
   draftTextFormat: VkParsingPost['textFormat'];
@@ -37,6 +38,7 @@ type PostEditorProps = {
 
 export function PostEditor({
   post,
+  sourceLink,
   draftText,
   draftTextFormat,
   selectedPhotoUrls,
@@ -71,6 +73,7 @@ export function PostEditor({
     channelLinkUrl,
     customChannelLinkUrl,
     preserveLinkUrls,
+    sourceLinkHtml: sourceLink?.html,
   });
   const remainingLength = VK_PARSING_MAX_PUBLISH_TEXT_LENGTH - measuredTextLength;
   const isOverLimit = remainingLength < 0;
@@ -97,6 +100,16 @@ export function PostEditor({
             className="vk-parsing-editor__rich-text"
           />
 
+          {sourceLink ? (
+            <a
+              className="vk-parsing-editor__channel-link"
+              href={sourceLink.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Источник
+            </a>
+          ) : null}
           {appendChannelLinkEnabled ? (
             <span className="vk-parsing-editor__channel-link">
               <IconoirSprite variant="iconoir" icon="Link" aria-hidden />

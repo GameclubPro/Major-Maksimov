@@ -7,6 +7,8 @@ import {
 } from '@maxim/contracts';
 import {
   VK_PARSING_DEFAULT_CHANNEL_LINK_TEXT,
+  buildVkParsingSourceLink,
+  vkParsingSettingsSchema,
   publishVkParsingPostRequestSchema,
   publishVkParsingPostResultSchema,
   rollbackVkParsingResultSchema,
@@ -97,5 +99,54 @@ describe('VK parsing contracts', () => {
         autoPublishEnabled: false,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('VK attribution and deletion settings', () => {
+  it('leaves existing installations unchanged', () => {
+    expect(vkParsingSettingsSchema.parse({ chatId: 'channel' })).toMatchObject({
+      sourceLinkEnabled: false,
+      sourceLinkUrl: '',
+      deleteAfterMinutes: null,
+    });
+  });
+  it('validates explicit HTTPS attribution and a bounded whole-minute delay', () => {
+    expect(
+      updateVkParsingSettingsRequestSchema.parse({
+        sourceLinkUrl: ' https://example.com/a?x=1&y=2 ',
+        deleteAfterMinutes: 1440,
+      }),
+    ).toEqual({
+      sourceLinkUrl: 'https://example.com/a?x=1&y=2',
+      deleteAfterMinutes: 1440,
+    });
+    for (const sourceLinkUrl of [
+      'javascript:alert(1)',
+      'http://example.com',
+      'https://user:secret@example.com',
+      'https://exam\nple.com',
+    ])
+      expect(updateVkParsingSettingsRequestSchema.safeParse({ sourceLinkUrl }).success).toBe(false);
+    for (const deleteAfterMinutes of [0, -1, 1.5, 43201])
+      expect(updateVkParsingSettingsRequestSchema.safeParse({ deleteAfterMinutes }).success).toBe(
+        false,
+      );
+    expect(updateVkParsingSettingsRequestSchema.parse({ deleteAfterMinutes: null })).toEqual({
+      deleteAfterMinutes: null,
+    });
+  });
+  it('uses each original or an explicit custom source with safe markup', () => {
+    expect(
+      buildVkParsingSourceLink('https://vk.com/wall-1_2', { sourceLinkEnabled: false }),
+    ).toBeNull();
+    expect(
+      buildVkParsingSourceLink('https://vk.com/wall-1_2', { sourceLinkEnabled: true })?.url,
+    ).toBe('https://vk.com/wall-1_2');
+    expect(
+      buildVkParsingSourceLink('https://vk.com/wall-1_2', {
+        sourceLinkEnabled: true,
+        sourceLinkUrl: 'https://example.com/a?x=1&y=2',
+      })?.html,
+    ).toBe('<a href="https://example.com/a?x=1&amp;y=2">Источник</a>');
   });
 });

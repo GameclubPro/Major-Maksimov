@@ -38,6 +38,9 @@ type SourcePostStats = {
 };
 
 type VkParsingSettingsLike = {
+  sourceLinkEnabled: boolean;
+  sourceLinkUrl: string;
+  deleteAfterMinutes: number | null;
   chatId: string;
   autoPublishEnabled: boolean;
   autoPublishEnabledAt: Date | null;
@@ -408,6 +411,8 @@ export class VkParsingFeedService {
       publishedContentHash: post.publishedContentHash,
       publishedMessageId: post.publishedMessageId,
       publishedUrl: post.publishedUrl,
+      autoDeleteAt: post.autoDeleteAt?.toISOString() ?? null,
+      deletedAt: post.rollbackDeletedAt?.toISOString() ?? null,
       publishedAtMax: post.publishedAtMax ? post.publishedAtMax.toISOString() : null,
       autoPublishedAt: post.autoPublishedAt ? post.autoPublishedAt.toISOString() : null,
       autoPublishError: post.autoPublishError,
@@ -443,6 +448,9 @@ export class VkParsingFeedService {
   ): VkParsingSettings {
     return {
       chatId,
+      sourceLinkEnabled: settings?.sourceLinkEnabled ?? false,
+      sourceLinkUrl: settings?.sourceLinkUrl ?? '',
+      deleteAfterMinutes: settings?.deleteAfterMinutes ?? null,
       autoPublishEnabled: settings?.autoPublishEnabled ?? false,
       autoPublishEnabledAt: settings?.autoPublishEnabledAt
         ? settings.autoPublishEnabledAt.toISOString()

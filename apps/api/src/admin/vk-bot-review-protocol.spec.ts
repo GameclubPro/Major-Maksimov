@@ -67,6 +67,14 @@ describe('VK bot review protocol', () => {
   it('binds content, media, formatting and applied content settings', () => {
     const hash = buildVkBotReviewFingerprint(post, settings);
     expect(hash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(
+      buildVkBotReviewFingerprint(post, {
+        ...settings,
+        sourceLinkEnabled: false,
+        sourceLinkUrl: '',
+        deleteAfterMinutes: null,
+      }),
+    ).toBe(hash);
     for (const patch of [
       { text: 'changed' },
       { contentHash: 'source-v2' },
@@ -82,6 +90,9 @@ describe('VK bot review protocol', () => {
       { skipAdsEnabled: true },
       { appendChannelLinkEnabled: true },
       { channelLinkText: 'Changed' },
+      { sourceLinkEnabled: true },
+      { sourceLinkEnabled: true, sourceLinkUrl: 'https://example.com/original' },
+      { deleteAfterMinutes: 60 },
     ]) {
       expect(buildVkBotReviewFingerprint(post, { ...settings, ...patch })).not.toBe(hash);
     }

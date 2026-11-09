@@ -1129,4 +1129,90 @@
       justify-content: flex-start;
     }
   }
+  .vk-publication-options {
+    display: grid;
+    gap: 1px;
+    overflow: hidden;
+    border: 1px solid var(--vk-line);
+    border-radius: 18px;
+    background: var(--vk-line);
+  }
+  .vk-publication-options__item {
+    min-width: 0;
+    padding: 14px 16px;
+    background: var(--vk-surface);
+  }
+  .vk-publication-options__heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .vk-publication-options__heading > svg {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 auto;
+    color: var(--vk-accent);
+  }
+  .vk-publication-options__heading .vk-setting-row {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+    min-height: 44px;
+    margin: 0;
+    font-weight: 700;
+  }
+  .vk-publication-options__fields {
+    display: grid;
+    gap: 12px;
+    padding-top: 12px;
+  }
+  .vk-publication-options__fields label {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--vk-muted-strong);
+  }
+  .vk-publication-options__fields input,
+  .vk-publication-options__fields select {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    padding: 10px 12px;
+    border: 1px solid var(--vk-line-strong);
+    border-radius: 10px;
+    background: var(--vk-control-surface);
+    color: var(--vk-ink);
+    font: inherit;
+    font-size: 16px;
+  }
+  .vk-publication-options__url {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+  .vk-publication-options__url p {
+    grid-column: 1 / -1;
+    margin: 0;
+    color: var(--vk-danger);
+    font-size: 13px;
+  }
+  .vk-publication-options__url .button {
+    min-height: 46px;
+    border-color: var(--vk-accent);
+    background: var(--vk-accent);
+    color: var(--vk-control-surface);
+    box-shadow: none;
+  }
+  @media (max-width: 360px) {
+    .vk-publication-options__item {
+      padding: 12px;
+    }
+    .vk-publication-options__url {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
 }

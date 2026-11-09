@@ -3802,6 +3802,9 @@ model VkParsingSource {
 }
 
 model VkParsingSettings {
+  sourceLinkEnabled            Boolean   @default(false) @map("source_link_enabled")
+  sourceLinkUrl                String    @default("") @map("source_link_url")
+  deleteAfterMinutes           Int?      @map("delete_after_minutes")
   id                           String    @id @default(cuid())
   chatId                       String    @map("chat_id")
   ownerProfile                 VkParsingOwnerProfile @map("owner_profile")
@@ -3835,6 +3838,7 @@ model VkParsingSettings {
 }
 
 model VkParsingPost {
+  autoDeleteAt              DateTime?                  @map("auto_delete_at")
   id                        String                     @id @default(cuid())
   sourceId                  String                     @map("source_id")
   chatId                    String                     @map("chat_id")

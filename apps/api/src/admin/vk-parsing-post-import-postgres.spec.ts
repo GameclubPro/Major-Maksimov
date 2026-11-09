@@ -1088,6 +1088,7 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
 
   it('retains a pending confirmed receipt and finalizes it before dispatch guards', async () => {
     const receipt = {
+      autoDeleteAt: new Date('2026-09-01T01:01:00Z'),
       publishedMessageId: 'synthetic-confirmed-pending-message',
       publishedBotId: botId,
       publishedContentHash: 'revision-1',

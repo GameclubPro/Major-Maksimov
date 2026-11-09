@@ -155,9 +155,20 @@ import {
   type VkParsingPublisherRollbackJob,
 } from './vk-parsing.queue';
 
+import { buildVkParsingSourceLink } from '@maxim/contracts/vk-parsing';
+import {
+  vkAutoDeleteCandidatesQuery,
+  vkAutoDeletePostSelect,
+  VK_AUTO_DELETE_BATCH_SIZE,
+  type VkAutoDeleteCursor,
+} from './vk-auto-delete';
+
 type VkParsingPostWithSource = Prisma.VkParsingPostGetPayload<{ include: { source: true } }>;
 
 type VkParsingSettingsLike = {
+  sourceLinkEnabled: boolean;
+  sourceLinkUrl: string;
+  deleteAfterMinutes: number | null;
   chatId: string;
   autoPublishEnabled: boolean;
   autoPublishEnabledAt: Date | null;
@@ -248,6 +259,7 @@ type VkConfirmedPublishReceipt = {
   publishedAtMax: Date;
   autoPublishedAt: Date | null;
   publishedContentHash: string;
+  autoDeleteAt: Date | null;
 };
 
 class PublisherVkDispatchBlockedError extends Error {
@@ -352,6 +364,7 @@ const VK_SUPPORTED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime', '
 
 @Injectable()
 export class VkPublishService {
+  private autoDeleteCursor: VkAutoDeleteCursor | null = null;
   private readonly logger = new Logger(VkPublishService.name);
   private readonly persistedPublishFailures = new WeakSet<object>();
   private readonly publishSourceFences = new Map<string, Promise<void>>();
@@ -1020,6 +1033,7 @@ export class VkPublishService {
       settings,
       'background',
       post.ownerBotId,
+      post.url,
     );
     return vkBotReviewSnapshotSchema.parse({
       version: 1,
@@ -1535,6 +1549,35 @@ export class VkPublishService {
     });
   }
 
+  async enqueueDueAutoDeletes(): Promise<number> {
+    this.assertPublisherRuntimeBeforeClaim();
+    const ownerScope = this.getPublisherOwnerScope();
+    const now = new Date();
+    const candidates = await this.prisma.$queryRaw<VkAutoDeleteCursor[]>(
+      vkAutoDeleteCandidatesQuery(ownerScope.ownerBotId, now, this.autoDeleteCursor),
+    );
+    let queued = 0;
+    for (const candidate of candidates) {
+      try {
+        const post = await this.prisma.vkParsingPost.findFirst({
+          where: { id: candidate.id, ...ownerScope, autoDeleteAt: candidate.autoDeleteAt },
+          select: vkAutoDeletePostSelect,
+        });
+        if (
+          post &&
+          !post.rollbackQueuedAt &&
+          (await this.enqueuePublisherRollback(post, candidate.autoDeleteAt))
+        )
+          queued += 1;
+      } catch (error) {
+        this.logger.warn({ postId: candidate.id, err: error }, 'VK auto-delete scheduling failed');
+      }
+      this.autoDeleteCursor = candidate;
+    }
+    if (candidates.length < VK_AUTO_DELETE_BATCH_SIZE) this.autoDeleteCursor = null;
+    return queued;
+  }
+
   private async enqueuePublisherRollback(
     post: Pick<
       VkParsingPostWithSource,
@@ -1557,6 +1600,7 @@ export class VkPublishService {
       | 'rollbackDeletedAt'
       | 'status'
     >,
+    autoDeleteAt?: Date,
   ): Promise<boolean> {
     if (
       post.dispatchProfile !== PublicationDispatchProfile.PUBLIK_V1 ||
@@ -1614,6 +1658,7 @@ export class VkPublishService {
         rollbackDeletedAt: null,
         rollbackLockedAt: null,
         rollbackIdempotencyKey: null,
+        ...(autoDeleteAt ? { autoDeleteAt: { equals: autoDeleteAt, lte: queuedAt } } : {}),
       },
       data: {
         rollbackQueuedAt: queuedAt,
@@ -2653,6 +2698,7 @@ export class VkPublishService {
       trafficClass: MaxApiTrafficClass;
       debugAction: string;
       auto: boolean;
+      deleteAfterMinutes: number | null;
       storedDraft?: VkParsingStoredDraft;
       queuedIdempotencyKey?: string;
       queuedPublishReason?: VkParsingPublishReason;
@@ -2833,6 +2879,10 @@ export class VkPublishService {
         dispatchBotId: result.botId,
       });
       const publishedAtMax = new Date();
+      const autoDeleteAt =
+        params.deleteAfterMinutes == null
+          ? null
+          : new Date(publishedAtMax.getTime() + params.deleteAfterMinutes * 60_000);
       if (maxSendAttemptStartedAt) {
         await this.recordPublisherSendSuccessSafely(post.chatId, maxSendAttemptStartedAt);
       }
@@ -2853,6 +2903,7 @@ export class VkPublishService {
         publishedBotId: result.botId,
         publishedUrl: result.url,
         publishedAtMax,
+        autoDeleteAt,
         autoPublishedAt: params.auto ? publishedAtMax : post.autoPublishedAt,
         autoPublishError: null,
         unavailableAt: null,
@@ -2895,6 +2946,7 @@ export class VkPublishService {
               publishedBotId: result.botId,
               publishedUrl: result.url,
               publishedAtMax,
+              autoDeleteAt,
               autoPublishedAt: publishedPost.autoPublishedAt,
               autoPublishError: null,
               unavailableAt: null,
@@ -2933,6 +2985,7 @@ export class VkPublishService {
           botId: result.botId,
           url: result.url ?? null,
           publishedAtMax,
+          autoDeleteAt,
           autoPublishedAt: publishedPost.autoPublishedAt,
           publishedContentHash,
         });
@@ -4655,6 +4708,7 @@ export class VkPublishService {
           trafficClass: 'interactive',
           debugAction: 'bot_review_publish',
           auto: false,
+          deleteAfterMinutes: settings.deleteAfterMinutes,
           queuedIdempotencyKey: idempotencyKey,
           queuedPublishReason: reason,
           onPublishAttemptRecorded,
@@ -4729,6 +4783,7 @@ export class VkPublishService {
       settings,
       'background',
       publisherBotId,
+      post.url,
     );
 
     await this.publishPreparedPostToMax(post, prepared, maxMessage, {
@@ -4740,6 +4795,7 @@ export class VkPublishService {
       trafficClass: 'background',
       debugAction: auto ? 'auto_publish_post' : 'queued_manual_publish_post',
       auto,
+      deleteAfterMinutes: settings.deleteAfterMinutes,
       queuedIdempotencyKey: idempotencyKey,
       queuedPublishReason: reason,
       onPublishAttemptRecorded,
@@ -5041,6 +5097,7 @@ export class VkPublishService {
               publishedBotId: receipt.botId,
               publishedUrl: receipt.url,
               publishedAtMax: receipt.publishedAtMax,
+              autoDeleteAt: receipt.autoDeleteAt,
               autoPublishedAt: receipt.autoPublishedAt,
               publishedContentHash: receipt.publishedContentHash,
             }
@@ -5080,6 +5137,7 @@ export class VkPublishService {
       botId,
       url: post.publishedUrl,
       publishedAtMax: post.publishedAtMax,
+      autoDeleteAt: post.autoDeleteAt ?? null,
       autoPublishedAt: post.autoPublishedAt,
       publishedContentHash,
     };
@@ -6060,9 +6118,11 @@ export class VkPublishService {
   private async prepareMaxMessageText(
     chatId: string,
     payload: PreparedVkPublishPayload,
-    settings: Pick<VkParsingSettingsLike, 'appendChannelLinkEnabled' | 'channelLinkText'>,
+    settings: Pick<VkParsingSettingsLike, 'appendChannelLinkEnabled' | 'channelLinkText'> &
+      Partial<Pick<VkParsingSettingsLike, 'sourceLinkEnabled' | 'sourceLinkUrl'>>,
     trafficClass: MaxApiTrafficClass,
     publisherBotId: string,
+    postUrl = '',
   ): Promise<VkParsingMaxMessageText> {
     if (publisherBotId !== this.getPublisherOwnerScope().ownerBotId) {
       throw new Error('Publik VK message preparation requires the exact Publisher bot');
@@ -6077,10 +6137,10 @@ export class VkPublishService {
     const renderedLinkHtml = missingLinkUrls.map(
       (url) => `<a href="${escapeMaxHtmlAttribute(url)}">${escapeMaxHtmlText(url)}</a>`,
     );
-    const contentHtml = usesRichText
+    let contentHtml = usesRichText
       ? [renderedText.trim(), ...renderedLinkHtml].filter(Boolean).join('\n')
       : renderedText;
-    const engagementText = usesRichText
+    let engagementText = usesRichText
       ? [
           payload.text.trim(),
           ...missingLinkUrls.map((url) => `[${escapeMarkdownLinkLabel(url)}](${url})`),
@@ -6089,11 +6149,22 @@ export class VkPublishService {
           .join('\n')
       : payload.text;
 
+    const sourceLink = buildVkParsingSourceLink(postUrl, settings);
+    if (sourceLink) {
+      contentHtml = [
+        usesRichText ? contentHtml.trim() : escapeMaxHtmlText(contentHtml.trim()),
+        sourceLink.html,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
+      engagementText = [engagementText.trim(), sourceLink.markdown].filter(Boolean).join('\n\n');
+    }
+    const hasHtml = usesRichText || Boolean(sourceLink);
     if (!settings.appendChannelLinkEnabled) {
       this.assertMaxMessageTextLength(contentHtml);
       return {
         text: contentHtml,
-        textFormat: usesRichText ? 'html' : undefined,
+        textFormat: hasHtml ? 'html' : undefined,
         engagementText,
       };
     }
@@ -6103,7 +6174,7 @@ export class VkPublishService {
       throw new BadRequestException('Укажите текст ссылки на канал.');
     }
     const channelLink = await this.resolveChannelLink(chatId, trafficClass, publisherBotId);
-    const baseHtml = usesRichText ? contentHtml : escapeMaxHtmlText(renderedText);
+    const baseHtml = hasHtml ? contentHtml : escapeMaxHtmlText(renderedText);
     const signatureHtml = `<a href="${escapeMaxHtmlAttribute(channelLink)}">${escapeMaxHtmlText(
       linkText,
     )}</a>`;
@@ -6400,6 +6471,9 @@ export class VkPublishService {
   private getDefaultSettings(chatId: string): VkParsingSettingsLike {
     return {
       chatId,
+      sourceLinkEnabled: false,
+      sourceLinkUrl: '',
+      deleteAfterMinutes: null,
       autoPublishEnabled: false,
       autoPublishEnabledAt: null,
       autoPublishKillSwitchEnabled: false,

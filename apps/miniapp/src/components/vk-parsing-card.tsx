@@ -1,3 +1,5 @@
+import { VkPublicationOptions } from './vk-parsing/publication-options';
+import { buildVkParsingSourceLink } from '@maxim/contracts/vk-parsing';
 import { AppIcon as IconoirSprite } from './ui/app-icon';
 import {
   CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
@@ -333,6 +335,11 @@ export function VkParsingCard({
             sourceControls
           ) : (
             <div className="vk-automation-view">
+              <VkPublicationOptions
+                settings={settings}
+                disabled={state.isSavingSettings}
+                onUpdate={state.updateSetting}
+              />
               <SchedulerPanel
                 settings={settings}
                 sources={sources}
@@ -369,6 +376,7 @@ export function VkParsingCard({
             </div>
             <LazyPostEditor
               post={editingPost}
+              sourceLink={buildVkParsingSourceLink(editingPost.url, settings)}
               draftText={state.draftText}
               draftTextFormat={state.draftTextFormat}
               selectedPhotoUrls={state.selectedPhotoUrls}

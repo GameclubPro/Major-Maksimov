@@ -1,3 +1,4 @@
+import { buildVkParsingSourceLink } from '@maxim/contracts/vk-parsing';
 import { AppIcon as IconoirSprite } from '../ui/app-icon';
 
 import type {
@@ -119,7 +120,11 @@ export function PostCard({
     (post.sourcePublishMode === 'REVIEW' || post.sourcePublishMode === 'BOT_REVIEW') &&
     (post.status === 'NEW' || post.status === 'FAILED');
   const botReviewLabel = vkReviewLabel(post);
-  const visibleStatusLabel = isReviewMode ? null : (publishState?.label ?? statusLabel);
+  const visibleStatusLabel = post.deletedAt
+    ? 'Удалён'
+    : isReviewMode
+      ? null
+      : (publishState?.label ?? statusLabel);
   const visiblePostIssue = blockedReason ? null : postIssue;
 
   return (
@@ -145,7 +150,7 @@ export function PostCard({
             <span
               className={cn(
                 'vk-parsing-status-pill',
-                post.status === 'PUBLISHED' && 'is-success',
+                post.status === 'PUBLISHED' && !post.deletedAt && 'is-success',
                 post.status === 'FAILED' && !publishState && 'is-danger',
                 publishState?.tone === 'warning' && 'is-warning',
                 publishState?.tone === 'danger' && 'is-danger',
@@ -211,6 +216,7 @@ export function PostCard({
         >
           <LazyPostEditor
             post={post}
+            sourceLink={buildVkParsingSourceLink(post.url, settings)}
             draftText={draftText}
             draftTextFormat={draftTextFormat}
             selectedPhotoUrls={selectedPhotoUrls}
@@ -402,7 +408,18 @@ export function PostCard({
             </p>
           ) : null}
 
-          {(post.status === 'PUBLISHED' || post.status === 'CHANGED_AFTER_PUBLISH') &&
+          {post.deletedAt || post.autoDeleteAt ? (
+            <div className="vk-parsing-post-card__facts">
+              <span>
+                <IconoirSprite icon="Timer" aria-hidden />
+                {post.deletedAt
+                  ? 'Удалён из MAX'
+                  : `Удаление ${formatVkPostDate(post.autoDeleteAt)}`}
+              </span>
+            </div>
+          ) : null}
+          {!post.deletedAt &&
+          (post.status === 'PUBLISHED' || post.status === 'CHANGED_AFTER_PUBLISH') &&
           post.publishedUrl ? (
             <div className="vk-parsing-post-card__actions">
               <a

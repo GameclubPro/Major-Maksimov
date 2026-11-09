@@ -36,6 +36,9 @@ export function buildVkBotReviewFingerprint(
     skipAdsEnabled: boolean;
     appendChannelLinkEnabled: boolean;
     channelLinkText: string;
+    sourceLinkEnabled?: boolean;
+    sourceLinkUrl?: string;
+    deleteAfterMinutes?: number | null;
   },
 ): string {
   return createHash('sha256')
@@ -54,6 +57,13 @@ export function buildVkBotReviewFingerprint(
         settings.skipAdsEnabled,
         settings.appendChannelLinkEnabled,
         settings.channelLinkText,
+        ...(settings.sourceLinkEnabled || settings.deleteAfterMinutes != null
+          ? [
+              settings.sourceLinkEnabled ?? false,
+              settings.sourceLinkEnabled ? (settings.sourceLinkUrl ?? '') : '',
+              settings.deleteAfterMinutes ?? null,
+            ]
+          : []),
       ]),
     )
     .digest('hex');
