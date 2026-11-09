@@ -99,7 +99,7 @@ function fixture() {
     allowed: true,
     accessible: true,
     heartbeat: () => Date.now(),
-    afterFirst: async () => {},
+    beforeMutation: async () => {},
     beforeAsset: async () => {},
     afterEffect: async () => {},
     missingAckAt: null,
@@ -126,6 +126,7 @@ function fixture() {
         return structuredClone(rows.get(id));
       },
       sendMessageImmediateWithId: async (chatId, text, options, requestOptions) => {
+        await state.beforeMutation();
         await options.beforeSend();
         const effect = {
           chatId,
@@ -137,7 +138,6 @@ function fixture() {
         };
         effects.push(effect);
         await state.afterEffect(effects.length);
-        if (effects.length === 1) await state.afterFirst();
         if (effects.length === state.missingAckAt) return {};
         return { messageId: `confirmed-guide-${effects.length}` };
       },
@@ -210,7 +210,7 @@ async function prepare(redis, state) {
   return fence;
 }
 
-test('generic onboarding and its confirmed image follow-up reach both fenced image batches', async (t) => {
+test('generic onboarding and its confirmed image follow-up send all eleven images together', async (t) => {
   t.mock.method(globalThis, 'fetch', () => {
     assert.fail('reviewed onboarding must not fall through to model inference');
   });
@@ -245,10 +245,10 @@ test('generic onboarding and its confirmed image follow-up reach both fenced ima
         );
         assert.deepEqual(
           state.effects.map(({ attachments }) => attachments.length),
-          [10, 1],
+          [11],
         );
-        assert.deepEqual(state.confirmed, ['confirmed-guide-1', 'confirmed-guide-2']);
-        assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-2');
+        assert.deepEqual(state.confirmed, ['confirmed-guide-1']);
+        assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-1');
       });
     });
 });
@@ -337,7 +337,7 @@ test('reviewed forward resolution emits token-only images in the approved order'
 });
 
 test(
-  'real Redis delivers all eleven guide images once, in two confirmed batches',
+  'real Redis delivers all eleven guide images once, with one caption and one receipt',
   { timeout: 10000 },
   async () => {
     await withRedis(async (redis) => {
@@ -349,7 +349,7 @@ test(
       );
       assert.deepEqual(
         state.effects.map(({ attachments }) => attachments.length),
-        [10, 1],
+        [11],
       );
       assert.deepEqual(
         state.effects.flatMap(({ attachments }) => attachments.map(({ payload }) => payload.token)),
@@ -358,7 +358,7 @@ test(
         ),
       );
       assert.equal(state.effects[0].text, CAPTION);
-      assert.match(state.effects[1].text, /карточка 11 из 11/u);
+      assert.doesNotMatch(state.effects[0].text, /карточк[аи]\s+\d|\d+\s+из\s+\d+/iu);
       for (const effect of state.effects) {
         assert.equal(effect.chatId, CHAT_ID);
         assert.equal(effect.textFormat, 'html');
@@ -373,16 +373,13 @@ test(
         for (const attachment of effect.attachments)
           assert.deepEqual(Object.keys(attachment.payload), ['token']);
       }
-      assert.deepEqual(state.confirmed, ['confirmed-guide-1', 'confirmed-guide-2']);
-      assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-2');
+      assert.deepEqual(state.confirmed, ['confirmed-guide-1']);
+      assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-1');
       assert.equal(
         await redis.get(fence.partKey(state.source.id, 0)),
         `SENT:${fence.owner}:confirmed-guide-1`,
       );
-      assert.equal(
-        await redis.get(fence.partKey(state.source.id, 1)),
-        `SENT:${fence.owner}:confirmed-guide-2`,
-      );
+      assert.equal(await redis.get(fence.partKey(state.source.id, 1)), null);
       assert.equal(await fence.prepare(state.source.id), false);
       assert.equal(await fence.beginPart(state.source.id, 0, Date.now() + 10000), false);
       assert.equal(await fence.beginPart(state.source.id, 1, Date.now() + 10000), false);
@@ -444,48 +441,48 @@ test(
 );
 
 test(
-  'between-batch safety changes stop the remaining card without replaying the first ten',
+  'final safety checks refuse the entire pack before its single SEND',
   { timeout: 20000 },
   async (t) => {
-    for (const [name, afterFirst] of [
+    for (const [name, change] of [
       [
         'edited question',
-        async (state) => {
+        (state) => {
           state.original.body.text = 'Уже другой вопрос';
         },
       ],
       [
         'new legacy hold',
-        async (state) => {
+        (state) => {
           state.allowed = false;
         },
       ],
       [
         'lost administrator access',
-        async (state) => {
+        (state) => {
           state.accessible = false;
         },
       ],
       [
         'stale session heartbeat',
-        async (state) => {
+        (state) => {
           state.heartbeat = () => Date.now() - 16000;
         },
       ],
       [
         'aborted session',
-        async (state) => {
+        (state) => {
           state.controller.abort();
         },
       ],
-      [
-        'changed final gallery',
-        async (state) => {
+      ...[0, 1].map((index) => [
+        `changed gallery ${index}`,
+        (state) => {
           state.rows.get(
-            state.guide.sourceMessages[1].messageId,
+            state.guide.sourceMessages[index].messageId,
           ).link.message.attachments[0].payload.photo_id = 999999;
         },
-      ],
+      ]),
       [
         'expired session deadline',
         async () => {
@@ -497,75 +494,85 @@ test(
         await withRedis(async (redis) => {
           const state = fixture();
           if (name === 'expired session deadline') state.bounds.sessionEnd = Date.now() + 1000;
-          state.afterFirst = () => afterFirst(state);
+          state.beforeMutation = () => change(state);
           const fence = await prepare(redis, state);
           assert.equal(
             await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
-            'unknown',
-          );
-          assert.equal(state.effects.length, 1);
-          assert.equal(state.effects[0].attachments.length, 10);
-          assert.deepEqual(state.confirmed, ['confirmed-guide-1']);
-          assert.equal(await redis.get(fence.key(state.source.id)), 'UNKNOWN');
-          assert.equal(
-            await redis.get(fence.partKey(state.source.id, 0)),
-            `SENT:${fence.owner}:confirmed-guide-1`,
-          );
-          assert.equal(await redis.get(fence.partKey(state.source.id, 1)), null);
-          assert.equal(await fence.prepare(state.source.id), false);
-          assert.equal(await fence.beginPart(state.source.id, 0, Date.now() + 10000), false);
-          assert.equal(await fence.beginPart(state.source.id, 1, Date.now() + 10000), false);
-          await fence.close();
-        });
-      });
-  },
-);
-
-test(
-  'missing acknowledgement in either guide batch remains uncertain across owners',
-  { timeout: 15000 },
-  async (t) => {
-    for (const missingAckAt of [1, 2])
-      await t.test(`batch ${missingAckAt}`, async () => {
-        await withRedis(async (redis) => {
-          const state = fixture();
-          state.missingAckAt = missingAckAt;
-          const fence = await prepare(redis, state);
-          assert.equal(
-            await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
-            'unknown',
-          );
-          assert.equal(state.effects.length, missingAckAt);
-          assert.equal(await redis.get(fence.key(state.source.id)), 'UNKNOWN');
-          assert.equal(
-            await redis.get(fence.partKey(state.source.id, missingAckAt - 1)),
-            `UNKNOWN:${fence.owner}`,
-          );
-          assert.deepEqual(state.confirmed, missingAckAt === 1 ? [] : ['confirmed-guide-1']);
-          await fence.close();
-          const next = new PilotFence(redis, 'next-guide-owner');
-          assert.equal(await next.acquire(), true);
-          assert.equal(await next.prepare(state.source.id), false);
-          assert.equal(await next.beginPart(state.source.id, 0, Date.now() + 10000), false);
-          assert.equal(await next.beginPart(state.source.id, 1, Date.now() + 10000), false);
-          assert.equal(
-            await deliverAnswer(state.runtime, next, state.source, CAPTION, state.bounds),
             'refused',
           );
-          assert.equal(
-            state.effects.length,
-            missingAckAt,
-            'an unknown effect must never be replayed',
-          );
-          assert.equal(await redis.get(next.key(state.source.id)), 'UNKNOWN');
-          await next.close();
+          assert.equal(state.effects.length, 0);
+          assert.deepEqual(state.confirmed, []);
+          assert.equal(await redis.get(fence.key(state.source.id)), 'REFUSED');
+          assert.equal(await redis.get(fence.partKey(state.source.id, 0)), null);
+          assert.equal(await redis.get(fence.partKey(state.source.id, 1)), null);
+          assert.equal(await fence.prepare(state.source.id), false);
+          await fence.close();
         });
       });
   },
 );
 
+test('missing acknowledgement of the complete pack remains uncertain across owners', async () => {
+  await withRedis(async (redis) => {
+    const state = fixture();
+    state.missingAckAt = 1;
+    const fence = await prepare(redis, state);
+    assert.equal(
+      await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
+      'unknown',
+    );
+    assert.equal(state.effects.length, 1);
+    assert.equal(state.effects[0].attachments.length, 11);
+    assert.equal(await redis.get(fence.key(state.source.id)), 'UNKNOWN');
+    assert.equal(await redis.get(fence.partKey(state.source.id, 0)), `UNKNOWN:${fence.owner}`);
+    assert.equal(await redis.get(fence.partKey(state.source.id, 1)), null);
+    assert.deepEqual(state.confirmed, []);
+    await fence.close();
+    const next = new PilotFence(redis, 'next-guide-owner');
+    assert.equal(await next.acquire(), true);
+    assert.equal(await next.prepare(state.source.id), false);
+    assert.equal(
+      await deliverAnswer(state.runtime, next, state.source, CAPTION, state.bounds),
+      'refused',
+    );
+    assert.equal(state.effects.length, 1, 'an unknown effect must never be replayed');
+    assert.equal(await redis.get(next.key(state.source.id)), 'UNKNOWN');
+    await next.close();
+  });
+});
+
+test('retained partial two-message guides cannot be replayed by the single-message sender', async (t) => {
+  for (const unknown of [false, true])
+    await t.test(unknown ? 'unknown' : 'sending', async () => {
+      await withRedis(async (redis) => {
+        const state = fixture();
+        const previous = await prepare(redis, state);
+        assert.equal(await previous.beginPart(state.source.id, 0, Date.now() + 10000), true);
+        assert.equal(Number(await previous.settlePart(state.source.id, 0, 'old-first-ten')), 1);
+        if (unknown) await previous.settle(state.source.id, 'UNKNOWN');
+        const retained = await redis.get(previous.key(state.source.id));
+        await previous.close();
+        const next = new PilotFence(redis, 'new-single-message-owner');
+        assert.equal(await next.acquire(), true);
+        assert.equal(await next.prepare(state.source.id), false);
+        assert.equal(
+          await deliverAnswer(state.runtime, next, state.source, CAPTION, state.bounds),
+          'refused',
+        );
+        assert.equal(state.effects.length, 0);
+        assert.equal(await redis.get(next.key(state.source.id)), retained);
+        assert.equal(
+          await redis.get(next.partKey(state.source.id, 0)),
+          `SENT:${previous.owner}:old-first-ten`,
+        );
+        assert.equal(await redis.get(next.partKey(state.source.id, 1)), null);
+        await next.close();
+      });
+    });
+});
+
 test(
-  'real Redis requires a confirmed prior batch and rejects expired or repeated child SENDs',
+  'retained legacy child fences require a confirmed prior batch and reject repeated SENDs',
   { timeout: 10000 },
   async () => {
     await withRedis(async (redis) => {
@@ -611,11 +618,11 @@ test(
         Date.now() - startedAt >= 16000,
         'the test must cross the real original lease duration',
       );
-      assert.equal(state.effects.length, 2);
-      assert.deepEqual(state.confirmed, ['confirmed-guide-1', 'confirmed-guide-2']);
+      assert.equal(state.effects.length, 1);
+      assert.deepEqual(state.confirmed, ['confirmed-guide-1']);
       assert.equal(await redis.get(fence.lease), fence.owner);
       assert.ok((await redis.pttl(fence.lease)) > 0);
-      assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-2');
+      assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-1');
       await fence.close();
     });
   },
@@ -673,7 +680,7 @@ test(
             sendMessageImmediateWithId:async(chatId,text,options)=>{
               await options.beforeSend();
               effects++;
-              await pause(effects===1?10000:4000);
+              await pause(16000);
               await redis.rpush(recordKey+':effects',JSON.stringify({
                 chatId,text,images:options.attachments.length,assetReads,at:Date.now()
               }));
@@ -719,7 +726,10 @@ test(
       });
       assert.equal(invocations, 1);
       assert.ok(statuses.includes('connected'));
-      assert.ok(statuses.includes('sent'), 'the actual worker must survive until both ACKs');
+      assert.ok(
+        statuses.includes('sent'),
+        'the actual worker must survive until the complete-pack ACK',
+      );
       assert.equal(statuses.includes('unknown'), false);
       assert.equal(statuses.includes('refused'), false);
       assert.ok(sentAt - invokedAt >= 30000, 'delivery must exceed the existing 25s watchdog');
@@ -741,20 +751,17 @@ test(
       const effects = (await redis.lrange(recordKey + ':effects', 0, -1)).map(JSON.parse);
       assert.deepEqual(
         effects.map(({ images }) => images),
-        [10, 1],
+        [11],
       );
       assert.equal(effects[0].text, CAPTION);
-      assert.equal(effects[1].assetReads, 4);
+      assert.equal(effects[0].assetReads, 4);
       const inspector = new PilotFence(redis, 'closed-protocol-inspector');
-      assert.equal(await redis.get(inspector.key(state.source.id)), 'SENT:closed-guide-ack-2');
+      assert.equal(await redis.get(inspector.key(state.source.id)), 'SENT:closed-guide-ack-1');
       assert.match(
         await redis.get(inspector.partKey(state.source.id, 0)),
         /^SENT:[^:]+:closed-guide-ack-1$/u,
       );
-      assert.match(
-        await redis.get(inspector.partKey(state.source.id, 1)),
-        /^SENT:[^:]+:closed-guide-ack-2$/u,
-      );
+      assert.equal(await redis.get(inspector.partKey(state.source.id, 1)), null);
     });
   },
 );
