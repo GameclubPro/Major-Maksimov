@@ -33,6 +33,40 @@ test('human conversations skip before any model call or reviewed public answer',
     );
 });
 
+test('reviewed onboarding packs return a brief caption without a model key or request', async () => {
+  for (const [text, guideId, sourceId] of [
+    ['Как подключить Майора к группе?', 'moderator-group', 'connect'],
+    ['Как подключить Публика к группе?', 'publisher-group', 'publik'],
+    ['Пришли инструкцию по подключению Публика.', 'publisher-group', 'publik'],
+  ]) {
+    const result = await answerSupport({ text, endpoint: 'http://127.0.0.1:1' });
+    assert.equal(result.action, 'reply');
+    assert.equal(result.responseRoute, 'reviewed-guide');
+    assert.equal(result.guideId, guideId);
+    assert.equal(result.durationMs, 0);
+    assert.deepEqual(result.sourceIds, [sourceId]);
+    assert.ok(presentedBody(result).length <= 600);
+    assert.match(result.text, /«Старт»/u);
+    assert.match(result.text, /провер/iu);
+    assert.equal(result.usage, undefined);
+  }
+});
+
+test('inference cannot choose a guide pack or attach media through model output', async (t) => {
+  const fixture = await completionFixture(t, {
+    action: 'reply',
+    text: 'Проверьте права администратора группы.',
+    sourceIds: ['connect'],
+    guideId: 'publisher-group',
+    attachments: [{ type: 'image', payload: { token: 'invented' } }],
+  });
+  const result = await answerSupport(fixture.input);
+  assert.equal(result.responseRoute, 'model-inference');
+  assert.equal(result.guideId, undefined);
+  assert.equal(result.attachments, undefined);
+  assert.equal(fixture.requests, 1);
+});
+
 test('ordinary administrator instructions translate known permission codes without developer details', async (t) => {
   const fixture = await completionFixture(t, {
     action: 'reply',

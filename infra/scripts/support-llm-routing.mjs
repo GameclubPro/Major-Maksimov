@@ -36,7 +36,8 @@ const reserveComparison = (text) =>
 const reportedPublisherReady = (text, publisherRequest) =>
   Boolean(
     publisherRequest &&
-    /карточк\p{L}*\s+подключ\p{L}*.{0,25}(?:готов|подключен)|публик\p{L}*\s+(?:уже\s+)?подключен(?![\p{L}])|(?:уже\s+)?подключен\p{L}*.{0,20}публик/iu.test(
+    // FLAG: A setup noun such as «подключению Публика» is not a reported ready state.
+    /карточк\p{L}*\s+подключ\p{L}*.{0,25}(?:готов|подключен(?:а|о|ы)?(?![\p{L}]))|публик\p{L}*\s+(?:уже\s+)?подключен(?![\p{L}])|(?:уже\s+)?подключен(?:а|о|ы)?(?![\p{L}]).{0,20}публик/iu.test(
       text,
     ) &&
     !/не\s+(?:готов|подключен)/iu.test(text) &&

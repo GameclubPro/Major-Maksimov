@@ -107,6 +107,29 @@ test('the second chat answers only after its exact handshake and keeps namespace
   }
 });
 
+test('the worker sends only a symbolic reviewed guide ID beside the short answer', async () => {
+  const guidePeer = peer.replace(
+    "if('usage' in value",
+    "if(value.guideId!=='moderator-group' || 'attachments' in value || 'sourceMessages' in value) process.exit(9); if('usage' in value",
+  );
+  const outcomes = [];
+  await supportChatSession({
+    key: 'fixture',
+    signal: AbortSignal.timeout(3000),
+    command: process.execPath,
+    args: ['-e', guidePeer],
+    onStatus: (value) => outcomes.push(value),
+    invoke: async () => ({
+      action: 'reply',
+      text: presentedAnswer,
+      guideId: 'moderator-group',
+      attachments: [{ type: 'image', payload: { token: 'never-forward' } }],
+      sourceMessages: ['never-forward'],
+    }),
+  });
+  assert.ok(outcomes.includes('sent'));
+});
+
 test('readiness requires fresh polls for both chats and old polls cannot survive reconnect', (t) => {
   const now = 1_800_000_000_000;
   t.mock.method(Date, 'now', () => now);
