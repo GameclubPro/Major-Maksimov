@@ -21,6 +21,7 @@ import {
 } from './duplicate-phone-evidence';
 import { RedisCounterService } from './redis-counter.service';
 import { normalizeDuplicateSemanticText } from './duplicate-semantic-text';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 import { resolveDuplicateFlowConfig, type DuplicateReactionStage } from './duplicate-flow-policy';
 import type {
   DuplicateAction,
@@ -96,10 +97,12 @@ export class RuleEngineDuplicateDetector {
     settings: ChatSettings;
     navigationTargets?: readonly NavigationTargetEvidence[];
     trackCurrentText?: boolean;
+    observer?: RuleEvaluationObserver;
   }): Promise<{
     hit?: DuplicateHit;
     decision?: DuplicateDecision;
   }> {
+    params.observer?.configured(true);
     const messageId = params.messageId?.trim();
     if (!messageId) {
       return this.detectLegacyState(params);
@@ -107,6 +110,7 @@ export class RuleEngineDuplicateDetector {
 
     const eventTimestampMs = Math.trunc(params.eventTimestampMs ?? Number.NaN);
     if (!Number.isSafeInteger(eventTimestampMs) || eventTimestampMs <= 0) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return {};
     }
     if (typeof this.redisCounter.replaceRevisionedSetMembershipsBeforeDeadline !== 'function') {
@@ -144,6 +148,7 @@ export class RuleEngineDuplicateDetector {
       settings: ChatSettings;
       navigationTargets?: readonly NavigationTargetEvidence[];
       trackCurrentText?: boolean;
+      observer?: RuleEvaluationObserver;
     },
     deadlineAtMs: number,
     budgetContext: DuplicateBudgetContext,
@@ -164,6 +169,7 @@ export class RuleEngineDuplicateDetector {
           )
         : [];
     const messageHash = createHash('sha256').update(params.messageId).digest('hex').slice(0, 20);
+    params.observer?.eligible();
     const mutation = await this.redisCounter.replaceRevisionedSetMembershipsBeforeDeadline({
       stateKey: buildDuplicateMessageStateKey(chatId, userId, messageHash),
       member: messageHash,
@@ -178,10 +184,13 @@ export class RuleEngineDuplicateDetector {
       throw this.createBudgetExceededError(params, 'redis_deadline', budgetContext);
     }
     if (mutation.kind === 'stale') {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return {};
     }
 
-    return this.resolveOutcomeFromCounts(fingerprints, mutation.counts, flow);
+    const outcome = this.resolveOutcomeFromCounts(fingerprints, mutation.counts, flow);
+    params.observer?.finish({ kind: 'evaluated', matched: Boolean(outcome.hit) });
+    return outcome;
   }
 
   private async detectLegacyState(params: {
@@ -192,11 +201,13 @@ export class RuleEngineDuplicateDetector {
     settings: ChatSettings;
     navigationTargets?: readonly NavigationTargetEvidence[];
     trackCurrentText?: boolean;
+    observer?: RuleEvaluationObserver;
   }): Promise<{
     hit?: DuplicateHit;
     decision?: DuplicateDecision;
   }> {
     if (params.trackCurrentText === false) {
+      params.observer?.finish({ kind: 'skip', reason: 'content' });
       return {};
     }
 
@@ -210,6 +221,7 @@ export class RuleEngineDuplicateDetector {
       params.navigationTargets,
     );
     const counts: number[] = [];
+    if (fingerprints.length > 0) params.observer?.eligible();
 
     for (const fingerprint of fingerprints) {
       const flowKey = buildDuplicateStageKey(
@@ -221,7 +233,13 @@ export class RuleEngineDuplicateDetector {
       counts.push(await this.redisCounter.incrementWithTtl(flowKey, flow.windowSec + 1));
     }
 
-    return this.resolveOutcomeFromCounts(fingerprints, counts, flow);
+    const outcome = this.resolveOutcomeFromCounts(fingerprints, counts, flow);
+    params.observer?.finish(
+      fingerprints.length > 0
+        ? { kind: 'evaluated', matched: Boolean(outcome.hit) }
+        : { kind: 'skip', reason: 'content' },
+    );
+    return outcome;
   }
 
   private resolveOutcomeFromCounts(

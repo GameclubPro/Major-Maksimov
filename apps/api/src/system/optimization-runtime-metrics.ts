@@ -1,3 +1,11 @@
+import {
+  RULE_COVERAGE_COUNTERS,
+  RULE_COVERAGE_FAMILIES,
+  RULE_COVERAGE_SCHEMA,
+  type RuleCoverageRow,
+  type RuleCoverageSnapshot,
+} from '../moderation/rule-engine-observation';
+
 // FLAG: Fixed dimensions only. These counters describe invocations, never unique users,
 // chats, HTTP successes or permission authority. No observations may affect execution.
 export const DELETE_AUTHOR_MODULES = [
@@ -71,6 +79,7 @@ export const RULE_TIMING_STAGES = [
   'duplicate-precheck',
   'duplicate-state',
 ] as const;
+export const RULE_SHARED_TIMING_STAGES = ['stop-words-policy', 'media-cooldowns'] as const;
 export const CONTEXT_TIMING_PHASES = ['coldLoad', 'candidateLoad'] as const;
 export const OPTIMIZATION_TIMING_FIELDS = [
   'calls',
@@ -120,6 +129,10 @@ export class OptimizationRuntimeMetrics {
   private readonly demand = counters(ROSTER_DEMAND_COUNTERS);
   private readonly timings = matrix(OPTIMIZATION_TIMING_PHASES, OPTIMIZATION_TIMING_FIELDS);
   private readonly ruleStages = matrix(RULE_TIMING_STAGES, OPTIMIZATION_TIMING_FIELDS);
+  private readonly ruleSharedStages = matrix(RULE_SHARED_TIMING_STAGES, OPTIMIZATION_TIMING_FIELDS);
+  private readonly ruleCoverageCounts: RuleCoverageRow[] = RULE_COVERAGE_FAMILIES.map(
+    () => RULE_COVERAGE_COUNTERS.map(() => 0) as RuleCoverageRow,
+  );
   private readonly contextSource = matrix(CONTEXT_TIMING_PHASES, OPTIMIZATION_TIMING_FIELDS);
 
   author(
@@ -139,8 +152,27 @@ export class OptimizationRuntimeMetrics {
     this.observeTiming(this.timings[phase], elapsedMs, failed);
   }
   ruleStage(stage: string, elapsedMs: number | null): void {
+    if (RULE_SHARED_TIMING_STAGES.includes(stage as (typeof RULE_SHARED_TIMING_STAGES)[number])) {
+      this.observeTiming(
+        this.ruleSharedStages[stage as (typeof RULE_SHARED_TIMING_STAGES)[number]],
+        elapsedMs,
+      );
+      return;
+    }
     if (!RULE_TIMING_STAGES.includes(stage as (typeof RULE_TIMING_STAGES)[number])) return;
     this.observeTiming(this.ruleStages[stage as (typeof RULE_TIMING_STAGES)[number]], elapsedMs);
+  }
+  ruleCoverage(value: unknown): void {
+    const snapshot = checkedRuleCoverage(value);
+    if (!snapshot) return;
+    snapshot.rows.forEach((row, family) => {
+      row.forEach((count, counter) => {
+        this.ruleCoverageCounts[family]![counter] = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          this.ruleCoverageCounts[family]![counter]! + count,
+        );
+      });
+    });
   }
   contextLoad(
     phase: (typeof CONTEXT_TIMING_PHASES)[number],
@@ -188,6 +220,8 @@ export class OptimizationRuntimeMetrics {
       demand: this.demand,
       timings: this.timings,
       ruleStages: this.ruleStages,
+      ruleSharedStages: this.ruleSharedStages,
+      ruleCoverage: { schema: RULE_COVERAGE_SCHEMA, rows: this.ruleCoverageCounts },
       contextSource: this.contextSource,
     });
   }
@@ -217,6 +251,27 @@ function checkedMatrix(value: unknown, keys: readonly string[], fields: readonly
   }
   return result;
 }
+function checkedRuleCoverage(value: unknown): RuleCoverageSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (
+    source.schema !== RULE_COVERAGE_SCHEMA ||
+    !Array.isArray(source.rows) ||
+    source.rows.length !== RULE_COVERAGE_FAMILIES.length
+  )
+    return null;
+  const rows: RuleCoverageRow[] = [];
+  for (const row of source.rows) {
+    if (
+      !Array.isArray(row) ||
+      row.length !== RULE_COVERAGE_COUNTERS.length ||
+      RULE_COVERAGE_COUNTERS.some((_, index) => !Number.isSafeInteger(row[index]) || row[index] < 0)
+    )
+      return null;
+    rows.push(RULE_COVERAGE_COUNTERS.map((_, index) => row[index]) as RuleCoverageRow);
+  }
+  return { schema: RULE_COVERAGE_SCHEMA, rows };
+}
 export function sanitizeOptimizationRuntimeMetrics(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
@@ -240,7 +295,22 @@ export function sanitizeOptimizationRuntimeMetrics(value: unknown) {
     CONTEXT_TIMING_PHASES,
     OPTIMIZATION_TIMING_FIELDS,
   );
+  const ruleSharedStages = checkedMatrix(
+    source.ruleSharedStages,
+    RULE_SHARED_TIMING_STAGES,
+    OPTIMIZATION_TIMING_FIELDS,
+  );
+  const ruleCoverage = checkedRuleCoverage(source.ruleCoverage);
   return authors && roster && demand && timings
-    ? { authors, roster, demand, timings, ruleStages, contextSource }
+    ? {
+        authors,
+        roster,
+        demand,
+        timings,
+        ruleStages,
+        contextSource,
+        ruleSharedStages,
+        ruleCoverage,
+      }
     : null;
 }

@@ -83,17 +83,53 @@ from one large bucket. Direct sends can contribute transport without dispatcher
 timings. Fixed histograms locate a follow-up investigation; they do not establish
 per-message causal traces, daily savings or authorization to increase quotas.
 
-The additive `optimization.ruleStages` histograms admit only the fourteen fixed
-rule-engine stages. They observe the existing completed stage boundaries, using
-their existing wall clocks; they are not eligible-message counts and do not prove
-that a rule ran, completed successfully or covered every failure. Handler totals
-and inner rule stages overlap. `optimization.contextSource` uses monotonic clocks
+The additive `optimization.ruleStages` histograms retain the fourteen fixed
+rule-engine stage names for older readers. `optimization.ruleSharedStages` adds
+`stop-words-policy` for the shared legacy/modern word and domain matcher, and
+`media-cooldowns` for the combined photo/sticker cooldown work. New engines no longer
+attribute shared stop-list work to separate `blocked-words` and `blocked-domains`
+clocks. Stage histograms use the existing wall clocks and describe completed
+boundaries, including partial progress before a thrown error. They are not
+eligible-message counts. Handler totals and inner rule stages overlap.
+
+`optimization.ruleCoverage` has the shape
+`{ schema: "rule-engine-coverage-v1", rows: [...] }`. Its rows are a fixed tuple
+matrix in `RULE_COVERAGE_FAMILIES` × `RULE_COVERAGE_COUNTERS` order from
+`apps/api/src/moderation/rule-engine-observation.ts`. Schema v1 fixes all fourteen
+family positions and ten counter positions and meanings; additions or reorderings
+require a new schema even when the matrix dimensions match. Readers reject unknown
+schemas as unavailable coverage while retaining the other report fields.
+Each engine invocation counts
+each family at most once per counter, including multiple visible paragraphs and
+modern/legacy stop-list matching. Counters distinguish configured and eligible
+rules, completed evaluation and detection matches, disabled/content/state skips,
+expired deadlines, errors and interrupted later families. A match is detection evidence,
+not a sanction or proof of an external effect. An error preserves completed earlier
+observations; an abrupt process loss or an operation that never unwinds has no
+completed observation. Guards and policy rechecks outside canonical detection are
+excluded. Never infer successful non-matches from skipped or unavailable state.
+
+When no paragraph was evaluated, skip priority is `expired`, `state`, `content`,
+then `disabled`; a later empty paragraph cannot hide an unavailable result.
+`expired` records exhausted message-limit counter wait/write deadlines or a traffic
+violation rejected by its enforcement clock window. Traffic state lookup failures
+remain `errors` under the existing fail-open behavior. Missing, invalid or stale
+revisions, pre-dispatch unavailability, and message-limit events rejected by the
+existing old/future admission check remain `skippedState`.
+
+For modern stop lists, `eligible` counts dispatch to a configured family evaluator;
+it includes inputs with empty sources or no usable domain links. This is not a
+content-admission count. Legacy word/domain detectors observe their existing
+content-admission boundaries, so their eligibility rates describe a different
+population and must not be compared as equivalent coverage.
+
+`optimization.contextSource` uses monotonic clocks
 around each complete SQL-source attempt: `coldLoad` has no retained settings
 candidate; `candidateLoad` includes the compact proof and any full fallback.
 Errors remain in the same population. Compare these timings with `fullLoads`,
 `shellReads`, `reuses` and cache activity, rather than treating every candidate as
 a reuse. Older or corrupt additive blocks remain unavailable, preserving the
-other optimization counters. Both blocks use the existing process report and
+other optimization counters. These blocks use the existing process report and
 add no Redis exchange per observation. Readers predating the 24 KiB bound can
 temporarily reject a larger report during a mixed-version rollout.
 

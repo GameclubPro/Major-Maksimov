@@ -8,6 +8,7 @@ import { extractBlockedPhoneNumbers } from './phone-blocking-evidence';
 import type { RuleViolation } from './rule-engine.contract';
 import { MessageLimitsBlockedDomainDetector } from './rule-engine-blocked-domains.detector';
 import { MessageLimitsBlockedWordDetector } from './rule-engine-blocked-words.detector';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 
 export const ANTI_SPAM_BURST_LIMIT = 5;
 export const ANTI_SPAM_BURST_WINDOW_SEC = 6;
@@ -49,9 +50,19 @@ export class RuleEngineMessageLimitsDetector {
     settings: ChatSettings;
     hasExcludedAttachment?: boolean;
     skipAntiSpamBurstLimit?: boolean;
+    observer?: RuleEvaluationObserver;
   }): Promise<RuleViolation | null> {
     const { chatId, userId, settings, hasExcludedAttachment, skipAntiSpamBurstLimit } = params;
+    params.observer?.configured(settings.antiSpamEnabled);
     if (!settings.antiSpamEnabled || hasExcludedAttachment || skipAntiSpamBurstLimit) {
+      params.observer?.finish({
+        kind: 'skip',
+        reason: !settings.antiSpamEnabled
+          ? 'disabled'
+          : hasExcludedAttachment
+            ? 'content'
+            : 'state',
+      });
       return null;
     }
 
@@ -64,7 +75,10 @@ export class RuleEngineMessageLimitsDetector {
       windowSeconds: ANTI_SPAM_BURST_WINDOW_SEC,
       countLimit: ANTI_SPAM_BURST_LIMIT + 1,
       timeoutMs: ANTI_SPAM_STATE_LOOKUP_TIMEOUT_MS,
+      observer: params.observer,
     });
+    if (count !== null)
+      params.observer?.finish({ kind: 'evaluated', matched: count > ANTI_SPAM_BURST_LIMIT });
     if (count === null || count <= ANTI_SPAM_BURST_LIMIT) {
       return null;
     }
@@ -84,12 +98,21 @@ export class RuleEngineMessageLimitsDetector {
   detectMessageLengthLimit(params: {
     measuredLength: number;
     settings: ChatSettings;
+    observer?: RuleEvaluationObserver;
   }): RuleViolation | null {
     const { measuredLength, settings } = params;
+    params.observer?.configured(settings.maxMessageLengthEnabled);
+    if (settings.maxMessageLengthEnabled) params.observer?.eligible();
     if (!settings.maxMessageLengthEnabled || measuredLength <= settings.maxMessageLength) {
+      params.observer?.finish(
+        settings.maxMessageLengthEnabled
+          ? { kind: 'evaluated', matched: false }
+          : { kind: 'skip', reason: 'disabled' },
+      );
       return null;
     }
 
+    params.observer?.finish({ kind: 'evaluated', matched: true });
     return {
       ruleCode: 'MESSAGE_TOO_LONG',
       score: 0.82,
@@ -103,9 +126,12 @@ export class RuleEngineMessageLimitsDetector {
     messageId?: string;
     eventTimestampMs?: number;
     settings: ChatSettings;
+    observer?: RuleEvaluationObserver;
   }): Promise<RuleViolation | null> {
     const { chatId, userId, settings } = params;
+    params.observer?.configured(settings.messageCountLimitEnabled);
     if (!settings.messageCountLimitEnabled) {
+      params.observer?.finish({ kind: 'skip', reason: 'disabled' });
       return null;
     }
 
@@ -120,7 +146,10 @@ export class RuleEngineMessageLimitsDetector {
       windowSeconds: windowHours * 60 * 60,
       countLimit: maxMessages + 1,
       timeoutMs: MESSAGE_LIMIT_STATE_TIMEOUT_MS,
+      observer: params.observer,
     });
+    if (count !== null)
+      params.observer?.finish({ kind: 'evaluated', matched: count > maxMessages });
     if (count === null || count <= maxMessages) {
       return null;
     }
@@ -132,10 +161,15 @@ export class RuleEngineMessageLimitsDetector {
     };
   }
 
-  detectBlockedWordLimit(params: { text: string; settings: ChatSettings }): RuleViolation | null {
+  detectBlockedWordLimit(params: {
+    text: string;
+    settings: ChatSettings;
+    observer?: RuleEvaluationObserver;
+  }): RuleViolation | null {
     const blockedWord = this.blockedWordDetector.detect(
       params.text,
       params.settings.messageLimitsBlockedWords,
+      params.observer,
     );
     if (!blockedWord) {
       return null;
@@ -156,12 +190,14 @@ export class RuleEngineMessageLimitsDetector {
     text: string;
     settings: ChatSettings;
     isLinkAllowlisted?: (link: string) => boolean;
+    observer?: RuleEvaluationObserver;
   }): RuleViolation | null {
     const blockedDomain = this.blockedDomainDetector.detect(
       params.text,
       params.settings.messageLimitsBlockedDomains,
       {
         isLinkAllowlisted: params.isLinkAllowlisted,
+        observer: params.observer,
       },
     );
     if (!blockedDomain) {
@@ -180,12 +216,20 @@ export class RuleEngineMessageLimitsDetector {
     };
   }
 
-  detectPhoneNumberLimit(params: { text: string; settings: ChatSettings }): RuleViolation | null {
+  detectPhoneNumberLimit(params: {
+    text: string;
+    settings: ChatSettings;
+    observer?: RuleEvaluationObserver;
+  }): RuleViolation | null {
+    params.observer?.configured(!params.settings.phoneNumbersEnabled);
     if (params.settings.phoneNumbersEnabled) {
+      params.observer?.finish({ kind: 'skip', reason: 'disabled' });
       return null;
     }
 
+    params.observer?.eligible();
     const phoneCount = extractBlockedPhoneNumbers(params.text).length;
+    params.observer?.finish({ kind: 'evaluated', matched: phoneCount > 0 });
     if (phoneCount === 0) {
       return null;
     }
@@ -207,6 +251,7 @@ export class RuleEngineMessageLimitsDetector {
     hasFileAttachment?: boolean;
     hasVoiceAttachment?: boolean;
     hasForwardedMessage?: boolean;
+    observer?: RuleEvaluationObserver;
   }): RuleViolation[] {
     const violations: RuleViolation[] = [];
     const {
@@ -217,6 +262,21 @@ export class RuleEngineMessageLimitsDetector {
       hasVoiceAttachment,
       hasForwardedMessage,
     } = params;
+    const configured =
+      !settings.photoMessagesEnabled ||
+      !settings.videoMessagesEnabled ||
+      !settings.fileMessagesEnabled ||
+      !settings.voiceMessagesEnabled ||
+      settings.forwardedMessagesEnabled === false;
+    params.observer?.configured(configured);
+    const hasContent = Boolean(
+      hasPhotoAttachment ||
+      hasVideoAttachment ||
+      hasFileAttachment ||
+      hasVoiceAttachment ||
+      hasForwardedMessage,
+    );
+    if (configured && hasContent) params.observer?.eligible();
 
     if (hasPhotoAttachment && !settings.photoMessagesEnabled) {
       violations.push({
@@ -258,6 +318,13 @@ export class RuleEngineMessageLimitsDetector {
       });
     }
 
+    params.observer?.finish(
+      !configured
+        ? { kind: 'skip', reason: 'disabled' }
+        : !hasContent
+          ? { kind: 'skip', reason: 'content' }
+          : { kind: 'evaluated', matched: violations.length > 0 },
+    );
     return violations;
   }
 
@@ -269,9 +336,17 @@ export class RuleEngineMessageLimitsDetector {
     settings: ChatSettings;
     hasPhotoAttachment?: boolean;
     hasStickerAttachment?: boolean;
+    photoObserver?: RuleEvaluationObserver;
+    stickerObserver?: RuleEvaluationObserver;
   }): Promise<RuleViolation[]> {
     const violations: RuleViolation[] = [];
     const { chatId, userId, settings, hasPhotoAttachment, hasStickerAttachment } = params;
+    params.photoObserver?.configured(settings.photoMessageCooldownEnabled);
+    if (!settings.photoMessageCooldownEnabled || !hasPhotoAttachment)
+      params.photoObserver?.finish({
+        kind: 'skip',
+        reason: !settings.photoMessageCooldownEnabled ? 'disabled' : 'content',
+      });
 
     if (hasPhotoAttachment && settings.photoMessageCooldownEnabled) {
       const cooldownSec = settings.photoMessageCooldownHours * 60 * 60;
@@ -287,6 +362,7 @@ export class RuleEngineMessageLimitsDetector {
         messageId: params.messageId,
         eventTimestampMs: params.eventTimestampMs,
         windowSeconds: cooldownSec,
+        observer: params.photoObserver,
       });
       if (blocked) {
         violations.push({
@@ -297,6 +373,12 @@ export class RuleEngineMessageLimitsDetector {
       }
     }
 
+    params.stickerObserver?.configured(settings.stickerMessageCooldownEnabled);
+    if (!settings.stickerMessageCooldownEnabled || !hasStickerAttachment)
+      params.stickerObserver?.finish({
+        kind: 'skip',
+        reason: !settings.stickerMessageCooldownEnabled ? 'disabled' : 'content',
+      });
     if (hasStickerAttachment && settings.stickerMessageCooldownEnabled) {
       const cooldownSec = settings.stickerMessageCooldownMinutes * 60;
       const key = buildMediaCooldownKey(
@@ -311,6 +393,7 @@ export class RuleEngineMessageLimitsDetector {
         messageId: params.messageId,
         eventTimestampMs: params.eventTimestampMs,
         windowSeconds: cooldownSec,
+        observer: params.stickerObserver,
       });
       if (blocked) {
         violations.push({
@@ -330,17 +413,24 @@ export class RuleEngineMessageLimitsDetector {
     messageId?: string;
     eventTimestampMs?: number;
     windowSeconds: number;
+    observer?: RuleEvaluationObserver;
   }): Promise<boolean> {
     const messageId = params.messageId?.trim();
     if (!messageId) {
-      return (
-        (await this.redisCounter.incrementWithTtl(`${params.key}:legacy`, params.windowSeconds)) > 1
-      );
+      params.observer?.eligible();
+      const blocked =
+        (await this.redisCounter.incrementWithTtl(`${params.key}:legacy`, params.windowSeconds)) >
+        1;
+      params.observer?.finish({ kind: 'evaluated', matched: blocked });
+      return blocked;
     }
     const eventTimestampMs = params.eventTimestampMs;
-    if (!Number.isSafeInteger(eventTimestampMs) || !eventTimestampMs || eventTimestampMs <= 0)
+    if (!Number.isSafeInteger(eventTimestampMs) || !eventTimestampMs || eventTimestampMs <= 0) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return false;
+    }
 
+    params.observer?.eligible();
     const messageHash = createHash('sha256').update(messageId).digest('hex').slice(0, 20);
     const deadlineAtMs = Date.now() + MESSAGE_LIMIT_STATE_TIMEOUT_MS;
     const result = await this.withCounterAdmission(params.rule, () =>
@@ -360,11 +450,20 @@ export class RuleEngineMessageLimitsDetector {
     );
     // FLAG: Unknown cooldown state cannot prove a violation or strand the started engine.
     // Keep the Redis absolute deadline; a late response never authorizes a sanction.
-    if (result === null) return false;
-    if (result === 'deadline_exceeded') {
-      this.observeState({ rule: params.rule, reason: 'deadline' });
+    if (result === null) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return false;
     }
+    if (result === 'deadline_exceeded') {
+      this.observeState({ rule: params.rule, reason: 'deadline' });
+      params.observer?.finish({ kind: 'skip', reason: 'expired' });
+      return false;
+    }
+    if (result === 'stale') {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
+      return false;
+    }
+    params.observer?.finish({ kind: 'evaluated', matched: result === 'blocked' });
     return result === 'blocked';
   }
 
@@ -376,9 +475,11 @@ export class RuleEngineMessageLimitsDetector {
     windowSeconds: number;
     countLimit: number;
     timeoutMs: number;
+    observer?: RuleEvaluationObserver;
   }): Promise<number | null> {
     const messageId = params.messageId?.trim();
     if (!messageId) {
+      params.observer?.eligible();
       const result = await raceWithTimeout({
         operation: () =>
           this.redisCounter.incrementWithTtl(`${params.key}:legacy`, params.windowSeconds),
@@ -386,6 +487,7 @@ export class RuleEngineMessageLimitsDetector {
         onTimeout: () => null,
       });
       if (result === null) this.observeState({ rule: params.rule, reason: 'deadline' });
+      if (result === null) params.observer?.finish({ kind: 'skip', reason: 'expired' });
       return result;
     }
     const eventTimestampMs = params.eventTimestampMs;
@@ -394,8 +496,11 @@ export class RuleEngineMessageLimitsDetector {
       !eventTimestampMs ||
       eventTimestampMs <= 0 ||
       classifyDuplicateEventTime({ eventTimestampMs, windowSec: params.windowSeconds })
-    )
+    ) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return null;
+    }
+    params.observer?.eligible();
     const messageHash = createHash('sha256').update(messageId).digest('hex').slice(0, 20);
     const deadlineAtMs = Date.now() + params.timeoutMs;
     const result = await this.withCounterAdmission(params.rule, () =>
@@ -418,11 +523,16 @@ export class RuleEngineMessageLimitsDetector {
     );
     // FLAG: An unavailable count skips only this rule, without replaying the started engine.
     // Redis still owns the absolute write deadline, including after the local wait expires.
-    if (result === null) return null;
-    if (result.kind === 'deadline_exceeded') {
-      this.observeState({ rule: params.rule, reason: 'deadline' });
+    if (result === null) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return null;
     }
+    if (result.kind === 'deadline_exceeded') {
+      this.observeState({ rule: params.rule, reason: 'deadline' });
+      params.observer?.finish({ kind: 'skip', reason: 'expired' });
+      return null;
+    }
+    if (result.kind === 'stale') params.observer?.finish({ kind: 'skip', reason: 'state' });
     return result.kind === 'stale' ? null : (result.counts[0] ?? 0);
   }
 

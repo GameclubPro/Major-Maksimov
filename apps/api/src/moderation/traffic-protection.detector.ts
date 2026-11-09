@@ -4,6 +4,7 @@ import { DUPLICATE_EVENT_MAX_FUTURE_SKEW_MS } from './duplicate-state';
 import type { ModerationMediaFlags } from './moderation-update-extractors';
 import type { RedisCounterService } from './redis-counter.service';
 import type { RuleViolation } from './rule-engine.contract';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 import {
   fingerprintTrafficSource,
   hasTrafficMedia,
@@ -29,7 +30,9 @@ export class TrafficProtectionDetector {
     text: string;
     media: Partial<ModerationMediaFlags>;
     settings: TrafficProtectionSettings;
+    observer?: RuleEvaluationObserver;
   }): Promise<RuleViolation | null> {
+    params.observer?.configured(true);
     const { settings, media, eventTimestampMs } = params;
     if (
       !params.messageId?.trim() ||
@@ -40,22 +43,33 @@ export class TrafficProtectionDetector {
       settings.trafficPolicyRevision < 0 ||
       !Number.isFinite(trafficPolicyEffectiveAtMs(settings.trafficPolicyEffectiveAt)) ||
       eventTimestampMs < trafficPolicyEffectiveAtMs(settings.trafficPolicyEffectiveAt)
-    )
+    ) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return null;
+    }
 
     const rule: TrafficProtectionRule | null =
       media.hasStickerAttachment && settings.stickerMessagesEnabled === false
         ? 'STICKER_BLOCKED'
         : null;
-    if (rule) return this.violation(params, rule, 300);
+    if (rule) {
+      params.observer?.eligible();
+      return this.violation(params, rule, 300);
+    }
     // FLAG: An edit is not a send, and an album without a stable MAX identity cannot
     // safely consume a per-message quota. Never guess its identity from timing alone.
-    if (params.eventType !== 'message_created' || (media.hasMediaBatch && !params.mediaGroupId))
+    if (params.eventType !== 'message_created' || (media.hasMediaBatch && !params.mediaGroupId)) {
+      params.observer?.finish({ kind: 'skip', reason: 'state' });
       return null;
+    }
 
+    let evaluated = false;
+    let stale = false;
     for (const candidate of ['SLOW_MODE', 'MEDIA_RATE_LIMIT'] as const) {
       const interval = trafficRuleInterval(candidate, settings);
       if (!interval || (candidate === 'MEDIA_RATE_LIMIT' && !hasTrafficMedia(media))) continue;
+      params.observer?.configured(true);
+      params.observer?.eligible();
       const key = `traffic:v1:${params.chatId}:${params.userId}:${candidate}:${settings.trafficPolicyRevision}:${interval}`;
       const identity = params.mediaGroupId
         ? `album:${params.mediaGroupId}`
@@ -77,7 +91,19 @@ export class TrafficProtectionDetector {
       });
       if (outcome === 'deadline_exceeded') throw new Error('Traffic protection state unavailable');
       if (outcome === 'blocked') return this.violation(params, candidate, interval);
+      if (outcome === 'stale') {
+        stale = true;
+        params.observer?.finish({ kind: 'skip', reason: 'state' });
+      } else {
+        evaluated = true;
+        params.observer?.finish({ kind: 'evaluated', matched: false });
+      }
     }
+    params.observer?.finish(
+      evaluated
+        ? { kind: 'evaluated', matched: false }
+        : { kind: 'skip', reason: stale ? 'state' : 'content' },
+    );
     return null;
   }
 
@@ -88,8 +114,11 @@ export class TrafficProtectionDetector {
   ): RuleViolation | null {
     const occurredAt = params.eventTimestampMs!;
     const deadline = occurredAt + Math.min(interval * 1000, TRAFFIC_PROTECTION_MAX_DELETE_AGE_MS);
-    if (Date.now() >= deadline || occurredAt - Date.now() > DUPLICATE_EVENT_MAX_FUTURE_SKEW_MS)
+    if (Date.now() >= deadline || occurredAt - Date.now() > DUPLICATE_EVENT_MAX_FUTURE_SKEW_MS) {
+      params.observer?.finish({ kind: 'skip', reason: 'expired' });
       return null;
+    }
+    params.observer?.finish({ kind: 'evaluated', matched: true });
     return {
       ruleCode: rule,
       score: 0.85,

@@ -15,15 +15,25 @@ export function readStopWordsPolicy(settings: {
   stopWordsPolicy?: unknown;
   stopWordsMedia?: unknown;
 }): StopWordsPolicy | null {
-  if (settings.stopWordsPolicy == null) return null;
+  return readStopWordsPolicyState(settings).policy;
+}
+
+export function readStopWordsPolicyState(settings: {
+  stopWordsPolicy?: unknown;
+  stopWordsMedia?: unknown;
+}): { status: 'absent' | 'invalid' | 'valid'; policy: StopWordsPolicy | null } {
+  if (settings.stopWordsPolicy == null) return { status: 'absent', policy: null };
   const parsed = stopWordsPolicySchema.safeParse(settings.stopWordsPolicy);
   // FLAG: A malformed new policy must never fall back to an older, broader stop-list.
-  if (!parsed.success) return stopWordsPolicySchema.parse({});
-  if (settings.stopWordsMedia == null) return parsed.data;
+  if (!parsed.success) return { status: 'invalid', policy: stopWordsPolicySchema.parse({}) };
+  if (settings.stopWordsMedia == null) return { status: 'valid', policy: parsed.data };
   const media = stopWordsMediaSchema.safeParse(settings.stopWordsMedia);
   return {
-    ...parsed.data,
-    sanctions: { ...parsed.data.sanctions, media: media.success ? media.data : {} },
+    status: 'valid',
+    policy: {
+      ...parsed.data,
+      sanctions: { ...parsed.data.sanctions, media: media.success ? media.data : {} },
+    },
   };
 }
 

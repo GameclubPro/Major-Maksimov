@@ -5,8 +5,9 @@ import { selectMaxMessageCandidate } from '../../max/max-message-candidate.util'
 import { extractMaxVisibleContentTextSegments } from '../../max/max-visible-content-text';
 import { MessageLimitsBlockedWordDetector } from '../rule-engine-blocked-words.detector';
 import { MessageLimitsBlockedDomainDetector } from '../rule-engine-blocked-domains.detector';
-import { readStopWordsPolicy } from './stop-words.policy';
+import { readStopWordsPolicyState } from './stop-words.policy';
 import { StopWordsMatcher } from './stop-words.matcher';
+import type { RuleEvaluationObserver } from '../rule-engine-observation';
 
 const matcher = new StopWordsMatcher();
 const legacyWords = new MessageLimitsBlockedWordDetector();
@@ -39,13 +40,49 @@ export function detectStopWordsViolations(params: {
   textSegments?: readonly string[];
   navigationTargets?: readonly NavigationTargetEvidence[];
   isLinkAllowlisted?: (link: string) => boolean;
+  wordObserver?: RuleEvaluationObserver;
+  domainObserver?: RuleEvaluationObserver;
+  skipContentForReport?: boolean;
 }): RuleViolation[] {
-  const policy = readStopWordsPolicy(params.settings);
+  params.wordObserver?.configured(false);
+  const { policy, status } = readStopWordsPolicyState(params.settings);
   if (!policy) return [];
-  const matches = [
-    ...matcher.detect({ ...params, policy: { ...policy, domains: [] }, limit: 1 }),
-    ...matcher.detect({ ...params, policy: { ...policy, rules: [] }, limit: 1 }),
-  ];
+  if (status === 'invalid') {
+    params.wordObserver?.finish({ kind: 'skip', reason: 'state' });
+    params.domainObserver?.configured(false);
+    params.domainObserver?.finish({ kind: 'skip', reason: 'state' });
+    return [];
+  }
+  const wordsConfigured = policy.enabled && policy.rules.some((rule) => rule.enabled);
+  params.wordObserver?.configured(wordsConfigured);
+  const domainsConfigured = policy.enabled && policy.domains.length > 0;
+  if (params.skipContentForReport) {
+    params.wordObserver?.finish({ kind: 'skip', reason: wordsConfigured ? 'content' : 'disabled' });
+    params.domainObserver?.configured(domainsConfigured);
+    params.domainObserver?.finish({
+      kind: 'skip',
+      reason: domainsConfigured ? 'content' : 'disabled',
+    });
+    return [];
+  }
+  // FLAG: Modern eligibility means dispatch to the configured matcher, whose private
+  // content admission stays inside the shared implementation; do not duplicate it here.
+  if (wordsConfigured) params.wordObserver?.eligible();
+  const wordMatches = matcher.detect({ ...params, policy: { ...policy, domains: [] }, limit: 1 });
+  params.wordObserver?.finish(
+    wordsConfigured
+      ? { kind: 'evaluated', matched: wordMatches.length > 0 }
+      : { kind: 'skip', reason: 'disabled' },
+  );
+  params.domainObserver?.configured(domainsConfigured);
+  if (domainsConfigured) params.domainObserver?.eligible();
+  const domainMatches = matcher.detect({ ...params, policy: { ...policy, rules: [] }, limit: 1 });
+  params.domainObserver?.finish(
+    domainsConfigured
+      ? { kind: 'evaluated', matched: domainMatches.length > 0 }
+      : { kind: 'skip', reason: 'disabled' },
+  );
+  const matches = [...wordMatches, ...domainMatches];
   const seen = new Set<string>();
   return matches.flatMap((match): RuleViolation[] => {
     const ruleCode = match.kind === 'DOMAIN' ? 'MESSAGE_BLOCKED_DOMAIN' : 'MESSAGE_BLOCKED_WORD';

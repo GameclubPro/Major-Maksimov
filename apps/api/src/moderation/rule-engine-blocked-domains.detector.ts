@@ -1,5 +1,6 @@
 import { normalizeMessageLimitsBlockedDomainCandidate } from '@maxim/contracts/settings';
 import { extractUrlsFromText } from '../common/url-text.util';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 
 export type BlockedDomainDetection = {
   blockedDomain: string;
@@ -19,7 +20,10 @@ export class MessageLimitsBlockedDomainDetector {
   detect(
     text: string,
     blockedDomains: readonly string[],
-    options: { isLinkAllowlisted?: (link: string) => boolean } = {},
+    options: {
+      isLinkAllowlisted?: (link: string) => boolean;
+      observer?: RuleEvaluationObserver;
+    } = {},
   ): BlockedDomainDetection | null {
     return this.detectMatches(text, blockedDomains, options, true)[0] ?? null;
   }
@@ -35,23 +39,29 @@ export class MessageLimitsBlockedDomainDetector {
   private detectMatches(
     text: string,
     blockedDomains: readonly string[],
-    options: { isLinkAllowlisted?: (link: string) => boolean },
+    options: { isLinkAllowlisted?: (link: string) => boolean; observer?: RuleEvaluationObserver },
     stopAfterFirst: boolean,
   ): BlockedDomainDetection[] {
+    const observer = options.observer;
+    observer?.configured(Array.isArray(blockedDomains) && blockedDomains.length > 0);
     if (!text || !Array.isArray(blockedDomains) || blockedDomains.length === 0) {
+      observer?.finish({ kind: 'skip', reason: blockedDomains?.length ? 'content' : 'disabled' });
       return [];
     }
 
     const blockedDomainIndex = this.resolveMessageLimitsBlockedDomainList(blockedDomains);
     if (blockedDomainIndex.domains.length === 0) {
+      observer?.finish({ kind: 'skip', reason: 'state' });
       return [];
     }
 
     const links = extractUrlsFromText(text);
     if (links.length === 0) {
+      observer?.finish({ kind: 'skip', reason: 'content' });
       return [];
     }
 
+    observer?.eligible();
     const detections: BlockedDomainDetection[] = [];
     const detectedDomains = new Set<string>();
     for (const link of links) {
@@ -78,11 +88,13 @@ export class MessageLimitsBlockedDomainDetector {
           matchedLink: link,
         });
         if (stopAfterFirst) {
+          observer?.finish({ kind: 'evaluated', matched: true });
           return detections;
         }
       }
     }
 
+    observer?.finish({ kind: 'evaluated', matched: detections.length > 0 });
     return detections;
   }
 

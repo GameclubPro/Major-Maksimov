@@ -8,6 +8,7 @@ import { LinkPolicy } from '../prisma/prisma-client';
 import { extractUrlsFromText as extractTextUrls } from '../common/url-text.util';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 import {
   evaluateRuntimeLinkRulesPolicy,
   readRuntimeLinkRulesPolicy,
@@ -39,10 +40,16 @@ export function detectBlockedLink(
   allowlistMatcher?: AllowlistLinkMatcher,
   navigationTargets?: readonly NavigationTargetEvidence[],
   linkRulesPolicy?: unknown,
+  observer?: RuleEvaluationObserver,
 ): string | null {
+  observer?.configured(false);
   const rules = readRuntimeLinkRulesPolicy(linkRulesPolicy);
   if (rules.status !== 'legacy') {
-    if (rules.status === 'invalid') return null;
+    if (rules.status === 'invalid') {
+      observer?.finish({ kind: 'skip', reason: 'state' });
+      return null;
+    }
+    observer?.configured(rules.policy.mode !== 'ALLOW_ALL');
     const targets =
       navigationTargets ??
       extractUrlsFromText(text).map((target) => ({
@@ -52,7 +59,7 @@ export function detectBlockedLink(
         enforceable: true,
         origins: [],
       }));
-    const result = evaluateRuntimeLinkRulesPolicy(rules.policy, targets);
+    const result = evaluateRuntimeLinkRulesPolicy(rules.policy, targets, Date.now(), observer);
     return result.allowed
       ? null
       : result.reason === 'DENY_ALL'
@@ -62,30 +69,39 @@ export function detectBlockedLink(
           : `Link ${result.target.normalizedTarget} is not allowed by a link rule`;
   }
   if (policy === LinkPolicy.ALERT_ONLY) {
+    observer?.finish({ kind: 'skip', reason: 'disabled' });
     return null;
   }
 
+  observer?.configured(true);
   if (navigationTargets) {
     const enforceableTargets = navigationTargets.filter(isEnforceableLinkPolicyTarget);
     if (enforceableTargets.length === 0) {
+      observer?.finish({ kind: 'skip', reason: 'content' });
       return null;
     }
+    observer?.eligible();
     if (policy === LinkPolicy.BLOCKLIST_ONLY) {
+      observer?.finish({ kind: 'evaluated', matched: true });
       return 'Links are not allowed by policy';
     }
 
     const isAllowlisted = createNavigationAllowlistMatcher(allowlist);
     const blockedTarget = enforceableTargets.find((target) => !isAllowlisted(target));
+    observer?.finish({ kind: 'evaluated', matched: Boolean(blockedTarget) });
     return blockedTarget ? `Link ${blockedTarget.normalizedTarget} is not in allowlist` : null;
   }
 
   const links = extractUrlsFromText(text);
 
   if (links.length === 0) {
+    observer?.finish({ kind: 'skip', reason: 'content' });
     return null;
   }
 
+  observer?.eligible();
   if (policy === LinkPolicy.BLOCKLIST_ONLY) {
+    observer?.finish({ kind: 'evaluated', matched: true });
     return 'Links are not allowed by policy';
   }
 
@@ -121,9 +137,11 @@ export function detectBlockedLink(
       continue;
     }
 
+    observer?.finish({ kind: 'evaluated', matched: true });
     return `Link ${link.match.normalizedLink} is not in allowlist`;
   }
 
+  observer?.finish({ kind: 'evaluated', matched: false });
   return null;
 }
 

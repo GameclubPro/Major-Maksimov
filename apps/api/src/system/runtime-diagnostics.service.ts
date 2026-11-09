@@ -278,9 +278,11 @@ export class RuntimeDiagnosticsService implements OnModuleDestroy {
     stagePrefix?: string;
   }): Promise<void> {
     const stageDurations = this.readNumericRecord(params.snapshot?.stageDurations);
-    // FLAG: Observe only fixed rule phases, before Redis I/O. This adds no per-event
-    // network operation and cannot turn a failed diagnostics write into execution authority.
+    // FLAG: Observe only fixed rule phases and per-detect coverage, before Redis I/O.
+    // This adds no per-event network operation and cannot turn a failed diagnostics
+    // write into execution authority.
     if (!params.stagePrefix) {
+      this.storageRuntimeMetrics?.optimization.ruleCoverage(params.snapshot?.ruleCoverage);
       for (const [stage, elapsedMs] of Object.entries(stageDurations)) {
         if (stage.startsWith('rule-engine.')) {
           this.storageRuntimeMetrics?.optimization.ruleStage(
