@@ -469,13 +469,14 @@ export function supportTokenUsage(value) {
 export async function answerSupport({
   text,
   history = [],
+  interaction,
   key,
   signal,
   endpoint = SUPPORT_MODEL.endpoint,
   api = false,
   onUsage = () => {},
 }) {
-  const request = classifySupportRequest(text, history);
+  const request = classifySupportRequest(text, history, interaction);
   if (!request.eligible) return { action: 'skip', text: '', sourceIds: [] };
   // FLAG: The owner requires an explicit room-policy answer for participant advert requests.
   // Route this known policy directly so a model's off-topic decision cannot suppress it.
@@ -492,7 +493,7 @@ export async function answerSupport({
       durationMs: 0,
       responseRoute: 'room-policy',
     };
-  let selected = selectKnowledge(text, history);
+  let selected = selectKnowledge(text, history, interaction);
   const actionBoundary = request.liveActionRequested
     ? 'Я не могу сам изменить настройки или запустить действие в вашем сообществе.\n\n'
     : '';

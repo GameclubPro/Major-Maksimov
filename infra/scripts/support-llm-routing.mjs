@@ -121,6 +121,18 @@ const unresolvedHelp =
   /не\s+(?:работа|заработ|открыва|пуска|получа|приход|могу|вижу|размещ|включ|сохраня|добавля|отправля|публику|загружа|появ|получил)|(?:все еще|по-прежнему|снова|опять|все равно).{0,30}(?:ошибк|сбо|удал|пропал|молчит)|(?:проблем|ошибк).{0,15}(?:остал|сохрани|не исчез)|недоступ|слетел/iu;
 const supportFollowup =
   /по\s+шагам|пошагов|попроще|понятнее|подробнее|не\s+помогло|так\s+и\s+не\s+получилось/iu;
+const supportQuestion =
+  /\?|нужна помощь|(?:^|\s)(?:как|почему|где|куда|зачем|какой|какие|что|можно|сколько|вопрос|подскаж\p{L}*|помог\p{L}*|объясн\p{L}*)(?:\s|$)/iu;
+const supportIncident =
+  /удаля(?:ет|ют|ется|ются)|удалили|удален|снес(?:ли|ен)|снос|исчез|пропал|заблок|ошибк|слетел|дублиру|повторя|(?:нет|не видно).{0,30}(?:чат|канал|доступ|кноп|модул)/iu;
+const configurationIntent =
+  /(?:хочу|нужно|надо|нужен|нужна).{0,45}(?:включить|выключить|отключить|настроить|запре(?:тить|щать)|разреш(?:ить|ать)|подключить|добавить|удал(?:ить|ять)|очистить|опубликовать|разместить|запостить|создать|сохранить|закры(?:ть|вать)|открыть|изменить|обновить|оставить)/iu;
+const configurationSubject =
+  /настройк|прав[аоу]|доступ|кнопк|видео|фото|изображен|сообщен|чат|канал|профил|приложен/iu;
+const configurationAction =
+  /включ|выключ|отключ|настро|запрет|разреш|подключ|огранич|сохран|измен|откр[оы]|закр[оы]/iu;
+const projectSubject =
+  /приветстви|стиль речи|команд.{0,20}(?:бан|мут)|(?:запретить|ограничить).{0,20}участник.{0,20}писать|снять.{0,25}блокировк|(?:статистик|сводк).{0,25}(?:чат|групп|участник)|мини[\s-]?приложен|(?:оператор|разбор|раздел).{0,40}событи|меня заблокировали в группе|текстовые правила|публичн.{0,20}канал/iu;
 const supportOpener = (text) =>
   /^(?:нужна\s+помощь(?:\s+с\s+ботом)?|(?:вы\s+)?(?:можете|можешь)\s+помочь|помоги(?:те)?(?:,?\s+пожалуйста)?|подскажи(?:те)?|не\s+(?:работает|открывается))[.!?\s]*$/iu.test(
     text.replace(/^(?:здравствуйте|здравствуй|привет)[,!\s]*(?:бот[,!\s]*)?/iu, ''),
@@ -1673,7 +1685,7 @@ export function createSupportRouter(knowledge) {
       if (byId.has(id)) scores.set(id, Math.max(scores.get(id) ?? 0, priority + 15));
     return [...scores].sort((a, b) => b[1] - a[1]).map(([id]) => id);
   };
-  function classify(text, history = []) {
+  function classify(text, history = [], interaction = {}) {
     const ctx = conversation(text, history);
     const role = roleOf(ctx.current, ctx.recent);
     const openerContext = ctx.recent.some(
@@ -1687,12 +1699,20 @@ export function createSupportRouter(knowledge) {
     const hasContext = topicContext || openerContext;
     const freshClarification =
       ctx.recent.at(-1)?.role === 'assistant' &&
-      /\?|уточни|выберите|нужен|нужны/iu.test(ctx.recent.at(-1).text) &&
+      /\?|(?:^|\s)(?:уточните|выберите|подскажите)(?![\p{L}])/iu.test(ctx.recent.at(-1).text) &&
       hasContext;
-    const supportDialogue =
+    const clarificationAnswer =
+      ctx.current.length <= 160 &&
+      (/^(?:я\s+(?:админ|участ|владел)|админ|участ|да(?![\p{L}])|нет(?![\p{L}])|в\s|во\s|на\s|у меня\s|мне\s|только\s|одному\s|здесь\s|два\s|две\s|три\s|один\s|одна\s|\d)/iu.test(
+        ctx.current,
+      ) ||
+        (ctx.current.split(/\s+/u).length <= 6 &&
+          (domain.test(ctx.current) || topics(ctx.current).length > 0)));
+    let supportDialogue =
       (!hasContext && supportOpener(ctx.current)) ||
       (openerContext &&
         freshClarification &&
+        clarificationAnswer &&
         !domain.test(ctx.current) &&
         !topics(ctx.current).length &&
         !advert.test(ctx.current) &&
@@ -1721,7 +1741,13 @@ export function createSupportRouter(knowledge) {
       );
     const switchingModerator = moderatorSwitchRequest(ctx.current);
     const request =
-      help.test(ctx.current) ||
+      supportQuestion.test(ctx.current) ||
+      supportIncident.test(ctx.current) ||
+      (domain.test(ctx.current) &&
+        /(?:удалил[ао]?|снес|перестал)(?![\p{L}])/iu.test(ctx.current)) ||
+      /(?:^|\s)нуж(?:на|ен|ны)\s/iu.test(ctx.current) ||
+      configurationIntent.test(ctx.current) ||
+      /(?:^|\s)хочу\s/iu.test(ctx.current) ||
       unresolvedHelp.test(ctx.current) ||
       actionRequest.test(ctx.current) ||
       switchingModerator ||
@@ -1729,23 +1755,42 @@ export function createSupportRouter(knowledge) {
       botDirectory ||
       (hasContext && supportFollowup.test(ctx.current)) ||
       supportDialogue;
-    const contextualReply = hasContext && (request || freshClarification);
-    const keywords = new Set(words(ctx.current));
-    const keywordHelp =
-      request &&
-      entries.some((entry) => [...terms.get(entry.id)].some((term) => keywords.has(term)));
+    const contextualReply =
+      hasContext &&
+      (supportFollowup.test(ctx.current) ||
+        unresolvedHelp.test(ctx.current) ||
+        (request &&
+          (/(?:^|\s)(?:это|этот|эта|эти|этого|этом|так|там|тут|туда|он|его|ее|их|ему|теперь|тем же)(?![\p{L}])/iu.test(
+            ctx.current,
+          ) ||
+            /^(?:а\s+)?(?:что дальше|можно повторить|как проверить результат|можно выбрать другую модель)|^а\s+.*(?:как|где|что|можно|кто увидит)(?![\p{L}])/iu.test(
+              ctx.current,
+            ))) ||
+        (freshClarification && !request && clarificationAnswer));
+    const addressed = interaction?.addressedToSupport === true;
+    if (addressed && request && !domain.test(ctx.current) && !topics(ctx.current).length)
+      supportDialogue = true;
+    const configurationHelp =
+      configurationSubject.test(ctx.current) &&
+      (unresolvedHelp.test(ctx.current) ||
+        supportIncident.test(ctx.current) ||
+        configurationAction.test(ctx.current));
+    // FLAG: A reply/mention to somebody else never inherits our support context or keyword match.
     const eligible =
       typeof text === 'string' &&
       Boolean(text.trim()) &&
       text.length <= 1200 &&
+      !(interaction?.replyToOther === true && !addressed) &&
       !ordinaryConversation(ctx.current) &&
       (!roleOnly || freshClarification) &&
       ((request &&
         (domain.test(ctx.current) ||
           advert.test(ctx.current) ||
           topics(ctx.current).length ||
+          projectSubject.test(ctx.current) ||
           switchingModerator)) ||
-        keywordHelp ||
+        (request && configurationHelp) ||
+        (addressed && request) ||
         contextualReply ||
         supportDialogue ||
         /^(?:цена|тарифы?|платно|бесплатно|не работает|не открывается|помогите|подскажите)[.!?\s]*$/iu.test(
@@ -1875,8 +1920,8 @@ export function createSupportRouter(knowledge) {
       ].filter(Boolean),
     };
   }
-  function selectKnowledge(text, history = []) {
-    const state = classify(text, history);
+  function selectKnowledge(text, history = [], interaction = {}) {
+    const state = classify(text, history, interaction);
     const selected = state.primaryIds
       .filter((id) => byId.get(id)?.audience !== 'developer' || state.developer)
       .slice(0, 5);
@@ -1907,7 +1952,8 @@ export function createSupportRouter(knowledge) {
   }
   return {
     classify,
-    eligibleQuestion: (text, history = []) => classify(text, history).eligible,
+    eligibleQuestion: (text, history = [], interaction = {}) =>
+      classify(text, history, interaction).eligible,
     selectKnowledge,
   };
 }

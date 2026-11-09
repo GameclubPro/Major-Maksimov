@@ -15,6 +15,7 @@ import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 const {
   CHAT_ID,
   sourceMessage,
+  supportInteraction,
   PilotFence,
   PilotHistory,
   deliverAnswer,
@@ -221,34 +222,231 @@ test('source boundary requires exact test chat, explicit human and fresh creatio
   assert.equal(sourceMessage({ ...row(), timestamp: Date.now() - 181000 }), null);
 });
 
-test('followups use bounded context of the same participant', () => {
+const replyRow = (senderId = 84, isBot = false, text = 'Синтетическая цитата') => ({
+  ...row('Привет'),
+  link: {
+    type: 'reply',
+    chat_id: CHAT_ID,
+    sender: { user_id: senderId, is_bot: isBot },
+    message: { mid: 'earlier-answer', text },
+  },
+});
+
+test('reply context distinguishes a human, another bot and a confirmed support answer', () => {
+  const other = { addressedToSupport: false, replyToOther: true };
+  assert.deepEqual(supportInteraction(sourceMessage(replyRow()), '900'), other);
+  assert.deepEqual(supportInteraction(sourceMessage(replyRow(901, true)), '900'), other);
+  const plainBotReply = sourceMessage(replyRow(900, true));
+  assert.deepEqual(supportInteraction(plainBotReply, '900'), other);
+  assert.deepEqual(supportInteraction(plainBotReply, '900', new Set(['earlier-answer'])), {
+    addressedToSupport: true,
+    replyToOther: false,
+  });
+  const marked = replyRow(900, true, `Проверьте настройки.\n\n${SUPPORT_ANSWER_FOOTER}`);
+  assert.deepEqual(supportInteraction(sourceMessage(marked), '900'), {
+    addressedToSupport: true,
+    replyToOther: false,
+  });
+  assert.deepEqual(supportInteraction(sourceMessage(marked), null), other);
+  assert.deepEqual(
+    supportInteraction(
+      sourceMessage({ ...marked, link: { ...marked.link, chat_id: '-999' } }),
+      '900',
+    ),
+    other,
+  );
+  assert.deepEqual(
+    supportInteraction(sourceMessage(replyRow(901, true, marked.link.message.text)), '900'),
+    other,
+  );
+  assert.deepEqual(
+    supportInteraction(
+      sourceMessage(replyRow(900, true, `${marked.link.message.text} ещё`)),
+      '900',
+    ),
+    other,
+  );
+  assert.ok(!JSON.stringify(sourceMessage(marked)).includes('Проверьте настройки.'));
+});
+
+test('mentions use exact selected MAX user identity and bounded compatible markup', () => {
+  const raw = row('Помощник, проверь настройки');
+  const mention = (userId) => ({ type: 'user_mention', from: 0, length: 8, user_id: userId });
+  assert.deepEqual(supportInteraction(sourceMessage(raw), '900'), {
+    addressedToSupport: false,
+    replyToOther: false,
+  });
+  for (const metadata of [
+    { body: { ...raw.body, markup: [mention(84)] } },
+    { text_markup: [{ type: 'user_mention', from: 0, length: 8, user_link: 'user/84' }] },
+    {
+      body: { ...raw.body, textMarkup: [{ type: 'user_mention', from: 0, length: 8, userId: 84 }] },
+    },
+  ])
+    assert.deepEqual(supportInteraction(sourceMessage({ ...raw, ...metadata }), '900'), {
+      addressedToSupport: false,
+      replyToOther: true,
+    });
+  assert.deepEqual(
+    supportInteraction(
+      sourceMessage({ ...raw, body: { ...raw.body, markup: [mention(900), mention(84)] } }),
+      '900',
+    ),
+    { addressedToSupport: true, replyToOther: false },
+  );
+});
+
+test('source fingerprint binds reply identity, footer marker and mention target and span', () => {
+  const original = replyRow();
+  const fingerprint = sourceMessage(original).fingerprint;
+  for (const link of [
+    { ...original.link, message: { ...original.link.message, mid: 'different-target' } },
+    { ...original.link, sender: { user_id: 85, is_bot: false } },
+    { ...original.link, sender: { user_id: 84, is_bot: true } },
+    { ...original.link, chat_id: '-999' },
+    {
+      ...original.link,
+      message: { ...original.link.message, text: `Ответ.\n\n${SUPPORT_ANSWER_FOOTER}` },
+    },
+  ])
+    assert.notEqual(sourceMessage({ ...original, link }).fingerprint, fingerprint);
+  const raw = row('Помощник, проверь');
+  const withMention = (userId, from = 0) =>
+    sourceMessage({
+      ...raw,
+      body: { ...raw.body, markup: [{ type: 'user_mention', from, length: 8, user_id: userId }] },
+    });
+  assert.notEqual(withMention(900).fingerprint, withMention(901).fingerprint);
+  assert.notEqual(withMention(900).fingerprint, withMention(900, 1).fingerprint);
+  const quotedChange = replyRow();
+  quotedChange.link.message.text = 'Другая синтетическая цитата';
+  assert.equal(sourceMessage(quotedChange).fingerprint, fingerprint);
+});
+
+test('malformed or oversized addressing metadata fails closed', () => {
+  const raw = row('Помощник, проверь');
+  for (const metadata of [
+    { link: null },
+    { link: [] },
+    { link: { type: 'reply' } },
+    { link: { ...replyRow().link, chat_id: null } },
+    { link: { ...replyRow().link, sender: { user_id: 84 } } },
+    { link: { ...replyRow().link, message: { mid: 'x', text: 'x'.repeat(4097) } } },
+    { markup: {} },
+    { markup: Array(65).fill({ type: 'bold', from: 0, length: 1 }) },
+    { markup: [null] },
+    { markup: [{ type: 'user_mention', from: 0, length: 999, user_id: 900 }] },
+    { markup: [{ type: 'user_mention', from: 0, length: 1, user_id: 900, user_link: 'user/901' }] },
+    { markup: [{ type: 'user_mention', from: 0, length: 1, user_id: 9007199254740992 }] },
+    { markup: [{ type: 'user_mention', from: 0, length: 1, user_id: '9'.repeat(31) }] },
+  ])
+    assert.equal(
+      sourceMessage({ ...raw, ...metadata }),
+      null,
+      JSON.stringify(metadata).slice(0, 180),
+    );
+});
+
+test('final exact source check refuses addressing edits before SEND and records only confirmed receipts', async () => {
+  for (const outcome of ['sent', 'refused', 'unknown', 'receipt-lost']) {
+    const raw = replyRow();
+    const source = sourceMessage(raw);
+    let begun = 0;
+    const receipts = [];
+    const runtime = {
+      options: () => ({}),
+      assertSourceAllowed: async () => {},
+      assertAccess: async () => {},
+      client: {
+        getExactMessageRow: async () =>
+          outcome === 'refused'
+            ? {
+                ...raw,
+                link: { ...raw.link, message: { ...raw.link.message, mid: 'changed-target' } },
+              }
+            : raw,
+        sendMessageImmediateWithId: async (_chatId, _text, options) => {
+          await options.beforeSend();
+          if (outcome === 'unknown') throw new Error('synthetic lost acknowledgement');
+          return { messageId: 'confirmed-ai-answer' };
+        },
+      },
+    };
+    const fence = {
+      begin: async () => {
+        begun++;
+        return true;
+      },
+      settle: async () => (outcome === 'receipt-lost' ? 0 : 1),
+    };
+    const result = await deliverAnswer(runtime, fence, source, 'Откройте настройки.', {
+      signal: new AbortController().signal,
+      sessionEnd: Date.now() + 180000,
+      heartbeatAt: () => Date.now(),
+      onSent: (id) => receipts.push(id),
+    });
+    assert.equal(result, outcome === 'receipt-lost' ? 'unknown' : outcome);
+    assert.equal(begun, outcome === 'refused' ? 0 : 1);
+    assert.deepEqual(receipts, outcome === 'sent' ? ['confirmed-ai-answer'] : []);
+  }
+});
+
+test('confirmed followups use bounded pairs of the same participant', () => {
   const history = new PilotHistory();
-  history.push('alice', { role: 'user', text: 'Как настроить бота?' });
-  assert.deepEqual(history.read('bob'), []);
-  for (let i = 0; i < 20; i++) history.push('alice', { role: 'user', text: String(i) });
-  assert.equal(history.read('alice').length, 6);
-  for (let i = 0; i < 40; i++) history.push(String(i), { role: 'user', text: 'Привет' });
+  history.settle('participant-a', 'Как настроить бота?', 'Откройте настройки.', 'sent');
+  assert.deepEqual(history.read('participant-b'), []);
+  for (let i = 0; i < 20; i++) history.settle('participant-a', String(i), `Ответ ${i}`, 'sent');
+  assert.equal(history.read('participant-a').length, 6);
+  assert.deepEqual(
+    history.read('participant-a').map((entry) => entry.role),
+    ['user', 'assistant', 'user', 'assistant', 'user', 'assistant'],
+  );
+  for (let i = 0; i < 40; i++) history.settle(String(i), 'Вопрос', 'Ответ', 'sent');
   assert.equal(history.users.size, 32);
+});
+
+test('failed exchanges cannot append or renew context and skip ends only its participant context', () => {
+  const history = new PilotHistory();
+  const now = Date.now();
+  for (const outcome of ['refused', 'unknown', 'expired'])
+    history.settle('participant-a', 'Неотправленный вопрос', 'Неотправленный ответ', outcome, now);
+  assert.deepEqual(history.read('participant-a', now), []);
+  history.settle('participant-a', 'Вопрос', 'Ответ', 'sent', now);
+  history.settle('participant-b', 'Другой вопрос', 'Другой ответ', 'sent', now);
+  history.settle('participant-a', 'Посторонняя реплика', '', 'skipped', now + 1000);
+  assert.deepEqual(history.read('participant-a', now + 1000), []);
+  assert.equal(history.read('participant-b', now + 1000).length, 2);
+});
+
+test('context expires five minutes after the last confirmed exchange', () => {
+  const history = new PilotHistory();
+  const now = Date.now();
+  history.settle('participant-a', 'Первый вопрос', 'Первый ответ', 'sent', now);
+  assert.equal(history.read('participant-a', now + 299999).length, 2);
+  history.settle('participant-a', 'Потерянный вопрос', 'Потерянный ответ', 'unknown', now + 299999);
+  assert.deepEqual(history.read('participant-a', now + 300000), []);
+  history.settle('participant-a', 'Новый вопрос', 'Новый ответ', 'sent', now + 400000);
+  history.settle('participant-a', 'Уточнение', 'Уточняющий ответ', 'sent', now + 500000);
+  assert.equal(history.read('participant-a', now + 799999).length, 4);
+  assert.deepEqual(history.read('participant-a', now + 800000), []);
 });
 
 test('bounded live history preserves the latest clarification and observation without the AI footer', () => {
   const history = new PilotHistory();
   const question = 'Какой результат появился после сохранения: ошибка или прежние настройки?';
-  history.push('alice', {
-    role: 'assistant',
-    text: `Проверьте выбранный чат. ${'Пояснение. '.repeat(70)}${question}\n\n${SUPPORT_ANSWER_FOOTER}`,
-  });
-  history.push('alice', {
-    role: 'user',
-    text: `Я сохранила настройки. ${'Подробность. '.repeat(60)}Ошибка: доступ запрещён.`,
-  });
-  const turns = history.read('alice');
+  history.settle(
+    'participant-a',
+    `Я сохранил настройки. ${'Подробность. '.repeat(60)}Ошибка: доступ запрещён.`,
+    `Проверьте выбранный чат. ${'Пояснение. '.repeat(70)}${question}\n\n${SUPPORT_ANSWER_FOOTER}`,
+    'sent',
+  );
+  const turns = history.read('participant-a');
   assert.equal(turns.length, 2);
   assert.ok(turns.every((turn) => turn.text.length <= 300));
-  assert.ok(turns[0].text.startsWith('Проверьте выбранный чат.'));
-  assert.ok(turns[0].text.endsWith(question));
-  assert.ok(!turns[0].text.includes(SUPPORT_ANSWER_FOOTER));
-  assert.ok(turns[1].text.endsWith('Ошибка: доступ запрещён.'));
+  assert.ok(turns[1].text.startsWith('Проверьте выбранный чат.'));
+  assert.ok(turns[1].text.endsWith(question));
+  assert.ok(!turns[1].text.includes(SUPPORT_ANSWER_FOOTER));
+  assert.ok(turns[0].text.endsWith('Ошибка: доступ запрещён.'));
   assert.deepEqual(history.read('bob'), []);
 });
 
@@ -482,6 +680,11 @@ test(
             assert.equal(stderr.trim(), expectedCode ?? '');
             if (name === 'question') {
               assert.ok(Number.isSafeInteger(questionFrame?.issuedAt));
+              assert.deepEqual(questionFrame.history, []);
+              assert.deepEqual(questionFrame.interaction, {
+                addressedToSupport: false,
+                replyToOther: false,
+              });
               assert.equal(
                 questionFrame.deadline,
                 helloFrame.fixtureSourceAt + bridge.SOURCE_AGE_MS,

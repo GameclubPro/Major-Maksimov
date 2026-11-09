@@ -127,7 +127,18 @@ instructions for unrelated settings. Most administrator tasks and Publisher inst
 manual VK-import procedures use reviewed answers. Profile and reserve-selection answers use
 canonical catalog identities and the reviewed selection steps;
 profiled complaints, action requests and contextual answers require `reply`, including one known
-source. Ordinary conversation and completed acknowledgements can still be skipped.
+source. Ordinary conversation and completed acknowledgements are skipped.
+
+The owner's 9 November 2026 correction requires silence during conversations between
+participants. A reply or mention directed at somebody else is skipped before inference,
+unless the same message explicitly addresses this assistant. Exact MAX bot identity and
+confirmed AI replies establish that address; another bot's flag alone does not. Specific
+project questions and incident reports remain eligible without a mention. A generic word
+shared with the knowledge base, a launch-plan announcement or any question after earlier
+support is insufficient. A real clarification or a continuation of the current support task
+can retain context. The bridge keeps only confirmed user/assistant pairs, expires them after
+five minutes and clears the user's context on a skip. No diagnostic messages are posted to
+verify these rules.
 
 An interrupted publication send retrieves result-verification instructions before creation steps;
 an explicit request to switch to a named moderator retrieves both the selection procedure and

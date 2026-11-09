@@ -12,6 +12,7 @@ const MODEL_SHA = '769d386a69d43782321c1bad04d41d29a2e84b2c06e6a277cd99fd6265ec0
 const API_PROFILE_SHA = '6d528271f60ea9dfb2005f8fa9f68ba231b4564ebf8c840065d3d64ebe84656b';
 const DIGEST = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ANSWER_FOOTER = '✦ Ответ подготовлен ИИ-помощником «Майор Максимов»';
+const HISTORY_TTL_MS = 5 * 60_000;
 
 function supportProfileMatches(value) {
   // FLAG: API configuration identity is distinct from a CPU weight digest. Require exactly
@@ -123,6 +124,120 @@ local now=redis.call('TIME'); local ms=now[1]*1000+math.floor(now[2]/1000)
 if ms>tonumber(ARGV[2]) or redis.call('GET',KEYS[3])~='PREPARED:'..ARGV[1] then return 0 end
 redis.call('SET',KEYS[3],'SENDING:'..ARGV[1],'PX',ARGV[3]); return 1`;
 
+const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const maxUserId = (value) =>
+  ((typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) ||
+    typeof value === 'string') &&
+  /^\d{1,30}$/u.test(String(value))
+    ? String(value)
+    : null;
+const messageId = (value) =>
+  typeof value === 'string' && value.length > 0 && value.length <= 200 ? value : null;
+
+function sourceAddressing(row, text) {
+  let link = null;
+  if (row.link !== undefined) {
+    const raw = row.link;
+    if (!record(raw) || !['reply', 'forward'].includes(raw.type)) return null;
+    link = { type: raw.type };
+    if (raw.type === 'reply') {
+      const senderId = maxUserId(raw.sender?.user_id);
+      const targetId = messageId(raw.message?.mid);
+      const chatId = raw.chat_id === undefined ? null : String(raw.chat_id);
+      const linkedText = raw.message?.text;
+      if (
+        !record(raw.sender) ||
+        !senderId ||
+        typeof raw.sender.is_bot !== 'boolean' ||
+        !record(raw.message) ||
+        !targetId ||
+        (raw.chat_id !== undefined &&
+          !(
+            (typeof raw.chat_id === 'number' && Number.isSafeInteger(raw.chat_id)) ||
+            typeof raw.chat_id === 'string'
+          )) ||
+        (chatId !== null && !/^-?\d{1,30}$/u.test(chatId)) ||
+        (linkedText !== undefined && (typeof linkedText !== 'string' || linkedText.length > 4096))
+      )
+        return null;
+      link = {
+        type: 'reply',
+        messageId: targetId,
+        senderId,
+        senderIsBot: raw.sender.is_bot,
+        chatId,
+        aiFooter: typeof linkedText === 'string' && linkedText.endsWith(`\n\n${ANSWER_FOOTER}`),
+      };
+    }
+  }
+  const mentions = new Map();
+  let markupCount = 0;
+  for (const container of [row.body, row])
+    for (const key of ['markup', 'text_markup', 'textMarkup', 'caption_markup', 'captionMarkup']) {
+      const markup = container?.[key];
+      if (markup === undefined) continue;
+      if (!Array.isArray(markup) || (markupCount += markup.length) > 64) return null;
+      for (const item of markup) {
+        if (
+          !record(item) ||
+          typeof item.type !== 'string' ||
+          item.type.length > 40 ||
+          !Number.isSafeInteger(item.from) ||
+          item.from < 0 ||
+          !Number.isSafeInteger(item.length) ||
+          item.length <= 0 ||
+          item.from + item.length > text.length
+        )
+          return null;
+        if (item.type !== 'user_mention') continue;
+        const ids = [];
+        for (const idKey of ['user_id', 'userId'])
+          if (item[idKey] !== undefined) {
+            const id = maxUserId(item[idKey]);
+            if (!id) return null;
+            ids.push(id);
+          }
+        for (const linkKey of ['user_link', 'userLink'])
+          if (item[linkKey] !== undefined) {
+            if (typeof item[linkKey] !== 'string' || !/^user\/\d{1,30}$/u.test(item[linkKey]))
+              return null;
+            ids.push(item[linkKey].slice(5));
+          }
+        if (!ids.length || ids.some((id) => id !== ids[0])) return null;
+        const mention = { userId: ids[0], from: item.from, length: item.length };
+        mentions.set(JSON.stringify(mention), mention);
+      }
+    }
+  return {
+    link,
+    mentions: [...mentions.values()].sort(
+      (a, b) => a.from - b.from || a.length - b.length || a.userId.localeCompare(b.userId),
+    ),
+  };
+}
+
+function supportInteraction(source, botUserId, confirmedAnswers = new Set()) {
+  const selected = maxUserId(botUserId);
+  const { link, mentions } = source.addressing;
+  // FLAG: Reply metadata establishes context only. A bot flag alone never identifies our AI;
+  // reconnect context requires the selected MAX identity and the exact support footer.
+  const supportReply = Boolean(
+    selected &&
+    link?.type === 'reply' &&
+    link.senderIsBot &&
+    link.senderId === selected &&
+    (link.chatId === null || link.chatId === CHAT_ID) &&
+    (confirmedAnswers.has(link.messageId) || link.aiFooter),
+  );
+  const addressedToSupport =
+    supportReply || mentions.some((mention) => mention.userId === selected);
+  return {
+    addressedToSupport,
+    replyToOther:
+      (link?.type === 'reply' && !supportReply) || (mentions.length > 0 && !addressedToSupport),
+  };
+}
+
 function sourceMessage(row, now = Date.now()) {
   if (!row || String(row.recipient?.chat_id) !== CHAT_ID || row.sender?.is_bot !== false)
     return null;
@@ -138,19 +253,21 @@ function sourceMessage(row, now = Date.now()) {
     typeof text !== 'string' ||
     !text.trim() ||
     text.length > 1200 ||
-    (typeof userId !== 'number' && typeof userId !== 'string') ||
-    !/^\d+$/u.test(String(userId)) ||
+    !maxUserId(userId) ||
     !Number.isFinite(timestamp) ||
     timestamp > now + 5000 ||
     now - timestamp > SOURCE_AGE_MS
   )
     return null;
+  const addressing = sourceAddressing(row, text);
+  if (!addressing) return null;
   const value = {
     id,
     text,
     userId: String(userId),
     timestamp,
     edited: row.last_updated_time ?? row.body?.last_updated_time ?? null,
+    addressing,
   };
   return { ...value, fingerprint: DIGEST(value) };
 }
@@ -227,23 +344,37 @@ class PilotHistory {
   constructor() {
     this.users = new Map();
   }
-  read(userId) {
-    return (this.users.get(userId) ?? []).slice(-6);
+  read(userId, now = Date.now()) {
+    const saved = this.users.get(userId);
+    if (!saved) return [];
+    if (now >= saved.confirmedAt + HISTORY_TTL_MS) {
+      this.users.delete(userId);
+      return [];
+    }
+    return saved.turns.slice();
   }
-  push(userId, entry) {
-    if (!this.users.has(userId) && this.users.size >= 32)
-      this.users.delete(this.users.keys().next().value);
-    this.users.set(
-      userId,
-      [
-        ...this.read(userId),
-        { role: entry.role, text: supportHistoryText(entry.text, entry.role) },
-      ].slice(-6),
-    );
+  settle(userId, userText, assistantText, outcome, now = Date.now()) {
+    if (outcome === 'skipped') this.users.delete(userId);
+    if (outcome !== 'sent') return;
+    // FLAG: Only a confirmed SEND stores both sides of an exchange or refreshes its TTL.
+    const turns = [
+      ...this.read(userId, now),
+      { role: 'user', text: supportHistoryText(userText, 'user') },
+      { role: 'assistant', text: supportHistoryText(assistantText, 'assistant') },
+    ].slice(-6);
+    this.users.delete(userId);
+    if (this.users.size >= 32) this.users.delete(this.users.keys().next().value);
+    this.users.set(userId, { turns, confirmedAt: now });
   }
 }
 
-async function deliverAnswer(runtime, fence, source, answer, { signal, sessionEnd, heartbeatAt }) {
+async function deliverAnswer(
+  runtime,
+  fence,
+  source,
+  answer,
+  { signal, sessionEnd, heartbeatAt, onSent },
+) {
   let attempted = false;
   try {
     const presented = renderSupportMessage(answer, runtime.supportBotCatalog);
@@ -284,9 +415,10 @@ async function deliverAnswer(runtime, fence, source, answer, { signal, sessionEn
         timeoutMs: 12000,
       },
     );
-    if (!result?.messageId) throw new Error('support_ack_missing');
+    if (!messageId(result?.messageId)) throw new Error('support_ack_missing');
     if (Number(await fence.settle(source.id, `SENT:${result.messageId}`)) !== 1)
       throw new Error('support_receipt_lost');
+    onSent?.(result.messageId);
     return 'sent';
   } catch {
     await fence.settle(
@@ -425,7 +557,7 @@ async function createRuntime() {
         }))
       )
         throw new Error('support_access_refused');
-      return { botId, title: snapshot.title };
+      return { botId, botUserId: maxUserId(access.userId), title: snapshot.title };
     };
     return {
       client,
@@ -471,7 +603,8 @@ async function runBridge(runtime, { preview = false } = {}) {
     lastReport = 0,
     lastSampleAt = null,
     receiveFailure = null;
-  const history = new PilotHistory();
+  const history = new PilotHistory(),
+    confirmedAnswers = new Set();
   const abort = () => controller.abort();
   const deadlineTimer = setTimeout(abort, 30 * 60_000);
   const send = (value) => process.stdout.write(JSON.stringify(value) + '\n');
@@ -539,16 +672,21 @@ async function runBridge(runtime, { preview = false } = {}) {
         const source = busy,
           answer = source.answer;
         busy = null;
-        if (!answer.reply || !answer.text.trim())
+        if (!answer.reply || !answer.text.trim()) {
           await fence.settle(source.id, 'SKIPPED', 'PREPARED');
-        else {
+          history.settle(source.userId, source.text, answer.text, 'skipped');
+        } else {
           const outcome = await deliverAnswer(runtime, fence, source, answer.text, {
             signal: controller.signal,
             sessionEnd: endAt,
             heartbeatAt: () => lastHeartbeat,
+            onSent: (id) => {
+              confirmedAnswers.add(id);
+              if (confirmedAnswers.size > 256)
+                confirmedAnswers.delete(confirmedAnswers.values().next().value);
+            },
           });
-          if (outcome === 'sent')
-            history.push(source.userId, { role: 'assistant', text: answer.text });
+          history.settle(source.userId, source.text, answer.text, outcome);
           send({ type: 'settled', id: source.id, outcome });
         }
       }
@@ -575,10 +713,10 @@ async function runBridge(runtime, { preview = false } = {}) {
             id: source.id,
             text: source.text,
             history: history.read(source.userId),
+            interaction: supportInteraction(source, identity.botUserId, confirmedAnswers),
             issuedAt: Date.now(),
             deadline: source.timestamp + SOURCE_AGE_MS,
           });
-          history.push(source.userId, { role: 'user', text: source.text });
           break;
         }
       }
@@ -605,6 +743,7 @@ module.exports = {
   supportProfileMatches,
   SOURCE_AGE_MS,
   sourceMessage,
+  supportInteraction,
   PilotFence,
   PilotHistory,
   deliverAnswer,

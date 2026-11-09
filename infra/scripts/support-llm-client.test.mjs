@@ -16,6 +16,23 @@ import {
 } from './support-llm-client.mjs';
 import { supportModelArgs, SUPPORT_MODEL } from './support-llm-profile.mjs';
 
+test('human conversations skip before any model call or reviewed public answer', async () => {
+  const history = [
+    { role: 'user', text: 'Почему удаляют объявления?' },
+    { role: 'assistant', text: 'Вы администратор или участник группы?' },
+  ];
+  for (const input of [
+    { text: 'Ирина, здравствуйте' },
+    { text: 'Надо сегодня протестировать, докрутить настройки и запустить в поддержку' },
+    { text: 'Я участник. Почему удаляют мои объявления?', interaction: { replyToOther: true } },
+    { text: 'Как включить антимат?', interaction: { replyToOther: true } },
+  ])
+    assert.deepEqual(
+      await answerSupport({ ...input, history, endpoint: 'http://127.0.0.1:1', key: 'unused' }),
+      { action: 'skip', text: '', sourceIds: [] },
+    );
+});
+
 test('ordinary administrator instructions translate known permission codes without developer details', async (t) => {
   const fixture = await completionFixture(t, {
     action: 'reply',
