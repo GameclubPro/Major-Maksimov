@@ -64,8 +64,15 @@ native('coherent settings templates on native PostgreSQL', () => {
   });
 
   afterEach(async () => {
-    await db.chat.deleteMany({ where: { id: { in: [...ownedChats] } } });
+    const ids = [...ownedChats];
     ownedChats.clear();
+    await db.chat.deleteMany({ where: { id: { in: ids } } });
+    await db.nightModeTransitionReconcileRequest.deleteMany({
+      where: { chatId: { in: ids } },
+    });
+    expect(
+      await db.nightModeTransitionReconcileRequest.count({ where: { chatId: { in: ids } } }),
+    ).toBe(0);
   });
 
   afterAll(async () => {
@@ -656,6 +663,14 @@ native('coherent settings templates on native PostgreSQL', () => {
       statisticsRestoredAt = performance.now();
     }
     expect(await db.chat.findUnique({ where: { id: target }, select: { id: true } })).toBeNull();
+    expect(
+      await db.nightModeTransitionReconcileRequest.count({
+        where: { chatId: { startsWith: prefix } },
+      }),
+    ).toBe(0);
+    expect(
+      await db.nightModeTransitionReconcileRequest.findUnique({ where: { chatId } }),
+    ).not.toBeNull();
     console.info(
       'Chat context source native fixture phases',
       JSON.stringify({
