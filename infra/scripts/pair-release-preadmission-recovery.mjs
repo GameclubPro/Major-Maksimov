@@ -461,6 +461,46 @@ export function inspectPreadmissionRuntime(rows, { imageId, context, fleet }) {
   };
 }
 
+function projectHistoricalSiblingFiles(
+  value,
+  operatorUid,
+  ownerStartedAtMs = started,
+  code = 'historical_sibling_metadata_unproved',
+) {
+  requireFact(Array.isArray(value) && value.length <= 256, code);
+  let previousName = '';
+  const projection = [];
+  for (let index = 0; index < value.length; index++) {
+    const entry = value[index];
+    requireFact(record(entry), code);
+    const { nameSha256, kind, uid, mode, nlink, size, dev, ino, mtimeMs, ctimeMs } = entry;
+    requireFact(
+      typeof nameSha256 === 'string' &&
+        HASH.test(nameSha256) &&
+        nameSha256 > previousName &&
+        kind === 'regular' &&
+        uid === operatorUid &&
+        mode === 0o600 &&
+        nlink === 1 &&
+        Number.isSafeInteger(size) &&
+        size >= 0 &&
+        size <= 64 * 1024 &&
+        Number.isSafeInteger(dev) &&
+        dev >= 0 &&
+        Number.isSafeInteger(ino) &&
+        ino >= 0 &&
+        Number.isFinite(mtimeMs) &&
+        Number.isFinite(ctimeMs) &&
+        mtimeMs <= ctimeMs &&
+        ctimeMs < ownerStartedAtMs,
+      code,
+    );
+    previousName = nameSha256;
+    projection.push({ nameSha256, kind, uid, mode, nlink, size, dev, ino, mtimeMs, ctimeMs });
+  }
+  return projection;
+}
+
 // FLAG: This historical exception only archives the retained admission owner. The
 // exact source barrier, unchanged journal bytes and directory ctime prove that the
 // controller did not cross durable admission; no child exit or business recovery
@@ -550,6 +590,12 @@ export function buildPreadmissionProof(request, observation) {
       'preadmission_artifact_changed',
     );
   }
+  // FLAG: Revalidate explicit metadata here; a supplied opaque digest never
+  // authenticates sibling safety. Contents stay unread and names stay hashed.
+  const historicalSiblingFiles = projectHistoricalSiblingFiles(
+    operation.historicalSiblingFiles,
+    observation.operatorUid,
+  );
   const context = operation.contextFacts;
   requireFact(
     context?.version === 1 &&
@@ -652,6 +698,10 @@ export function buildPreadmissionProof(request, observation) {
     stateSha256: request.stateSha256,
     ownerStartedAt: owner.started_at,
     operationSha256: operation.idSha256,
+    historicalSiblingFiles: {
+      count: historicalSiblingFiles.length,
+      sha256: canonicalDigest(historicalSiblingFiles),
+    },
     ownerIdentity: safeMetadata(ownerFile),
     admissionInode: observation.admissionInode,
     sourceHashes: Object.fromEntries(
@@ -1014,6 +1064,59 @@ async function boundedEntries(path) {
   }
   return result.sort();
 }
+export async function observePreadmissionSiblings(
+  privateDirectory,
+  operationId,
+  { ownerStartedAtMs = started, operatorUid = process.getuid() } = {},
+) {
+  requireFact(
+    Number.isFinite(ownerStartedAtMs) && Number.isSafeInteger(operatorUid) && operatorUid >= 0,
+    'unsafe_sibling_private_directory',
+  );
+  const siblings = await boundedEntries(privateDirectory);
+  const candidates = [];
+  const historicalFiles = [];
+  for (const name of siblings) {
+    const stat = await lstat(join(privateDirectory, name));
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      requireFact(
+        stat.uid === operatorUid && (stat.mode & 0o777) === 0o700,
+        'unsafe_sibling_private_directory',
+      );
+      if (stat.ctimeMs >= ownerStartedAtMs && stat.ctimeMs <= ownerStartedAtMs + 10_000)
+        candidates.push(name);
+    } else if (stat.isFile() && !stat.isSymbolicLink()) {
+      // FLAG: Historical sibling files are opaque and inert to this operation.
+      // Read metadata only; any later write changes ctime and refuses recovery.
+      const file = {
+        nameSha256: digest(name),
+        kind: 'regular',
+        uid: stat.uid,
+        mode: stat.mode & 0o7777,
+        nlink: stat.nlink,
+        size: stat.size,
+        dev: stat.dev,
+        ino: stat.ino,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      };
+      historicalFiles.push(
+        ...projectHistoricalSiblingFiles(
+          [file],
+          operatorUid,
+          ownerStartedAtMs,
+          'unsafe_historical_sibling_file',
+        ),
+      );
+    } else fail('unsafe_sibling_private_directory');
+  }
+  historicalFiles.sort((left, right) => left.nameSha256.localeCompare(right.nameSha256));
+  return {
+    uniqueWindowDirectory: candidates.length === 1 && candidates[0] === operationId,
+    historicalSiblingFiles: historicalFiles,
+  };
+}
+
 async function operationObservation(request) {
   const path = join(PRIVATE, request.operationId);
   await ancestors(path);
@@ -1029,19 +1132,7 @@ async function operationObservation(request) {
   );
   const context = await boundedFile(join(path, 'context.json'), 65536);
   const queueControl = await boundedFile(join(path, 'queue-control.cjs'), 65536);
-  const siblings = await boundedEntries(PRIVATE);
-  const candidates = [];
-  for (const name of siblings) {
-    const stat = await lstat(join(PRIVATE, name));
-    requireFact(
-      stat.isDirectory() &&
-        !stat.isSymbolicLink() &&
-        stat.uid === process.getuid() &&
-        (stat.mode & 0o777) === 0o700,
-      'unsafe_sibling_private_directory',
-    );
-    if (stat.ctimeMs >= started && stat.ctimeMs <= started + 10_000) candidates.push(name);
-  }
+  const siblingObservation = await observePreadmissionSiblings(PRIVATE, request.operationId);
   const after = await lstat(path);
   requireFact(
     before.dev === after.dev &&
@@ -1063,7 +1154,7 @@ async function operationObservation(request) {
         ctimeMs: after.ctimeMs,
       },
       entries,
-      uniqueWindowDirectory: candidates.length === 1 && candidates[0] === request.operationId,
+      ...siblingObservation,
       context: metadata(context),
       queueControl: metadata(queueControl),
       contextFacts: inspectPreadmissionContext(context.bytes),

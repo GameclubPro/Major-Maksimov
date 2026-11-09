@@ -1,11 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, writeFile, readFile, lstat, mkdir, symlink, rm, chmod } from 'node:fs/promises';
+import {
+  mkdtemp,
+  writeFile,
+  readFile,
+  lstat,
+  mkdir,
+  symlink,
+  rm,
+  chmod,
+  link,
+  truncate,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   PREADMISSION_SOURCE as SOURCE,
   PREADMISSION_CONTRACT as CONTRACT,
@@ -15,6 +27,7 @@ import {
   inspectPreadmissionContext,
   inspectPreadmissionRuntime,
   observePreadmissionMaintenanceBoundary,
+  observePreadmissionSiblings,
   recoverPreadmission,
   withPreadmissionLocks,
   archivePreadmission,
@@ -103,6 +116,7 @@ function fixture() {
       },
       entries: ['context.json', 'queue-control.cjs'],
       uniqueWindowDirectory: true,
+      historicalSiblingFiles: [],
       context: metadata(CONTRACT.contextSha256, START + 923),
       queueControl: metadata(CONTRACT.queueControlSha256, START + 922),
       contextFacts: {
@@ -1017,4 +1031,444 @@ test('the actual streamed module rejects invalid arguments and identities before
       return true;
     });
   }
+});
+
+function historicalSibling(overrides = {}) {
+  return {
+    nameSha256: digest('opaque-history-fixture'),
+    kind: 'regular',
+    uid,
+    mode: 0o600,
+    nlink: 1,
+    size: 32,
+    dev: 1,
+    ino: 42,
+    mtimeMs: START - 2000,
+    ctimeMs: START - 1000,
+    ...overrides,
+  };
+}
+async function siblingFilesystem(t) {
+  const root = await mkdtemp(join(tmpdir(), 'preadmission-siblings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, 'opaque-operator-history');
+  await writeFile(file, 'synthetic-private-opaque-content', { mode: 0o600 });
+  await delay(20);
+  const selected = join(root, UUID);
+  await mkdir(selected, { mode: 0o700 });
+  const ownerStartedAtMs = (await lstat(selected)).ctimeMs;
+  return { root, file, selected, options: { ownerStartedAtMs } };
+}
+test('sibling observation accepts one safe historical opaque file while preserving the unique operation window', async (t) => {
+  const h = await siblingFilesystem(t);
+  const result = await observePreadmissionSiblings(h.root, UUID, h.options);
+  assert.equal(result.uniqueWindowDirectory, true);
+  assert.equal(result.historicalSiblingFiles.length, 1);
+  const file = result.historicalSiblingFiles[0];
+  assert.equal(file.nameSha256, digest('opaque-operator-history'));
+  assert.equal(file.kind, 'regular');
+  assert.equal(file.mode, 0o600);
+  assert.equal(file.nlink, 1);
+  assert.equal(file.size, Buffer.byteLength('synthetic-private-opaque-content'));
+  assert.ok(file.ctimeMs < h.options.ownerStartedAtMs);
+  assert.ok(file.mtimeMs <= file.ctimeMs);
+  const text = JSON.stringify(result);
+  assert.equal(text.includes('opaque-operator-history'), false);
+  assert.equal(text.includes('synthetic-private-opaque-content'), false);
+});
+test('sibling observation hashes names and sorts explicit metadata independently of directory enumeration', async (t) => {
+  const h = await siblingFilesystem(t);
+  await writeFile(join(h.root, 'another-opaque-history'), '', { mode: 0o600 });
+  const latest = (await lstat(join(h.root, 'another-opaque-history'))).ctimeMs;
+  const result = await observePreadmissionSiblings(h.root, UUID, { ownerStartedAtMs: latest + 1 });
+  assert.equal(result.historicalSiblingFiles.length, 2);
+  const names = result.historicalSiblingFiles.map((file) => file.nameSha256);
+  assert.deepEqual(names, [...names].sort());
+});
+for (const [name, change, code] of [
+  [
+    'world-readable file',
+    async (h) => {
+      await chmod(h.file, 0o644);
+    },
+    'unsafe_historical_sibling_file',
+  ],
+  [
+    'special permission bits',
+    async (h) => {
+      await chmod(h.file, 0o4600);
+    },
+    'unsafe_historical_sibling_file',
+  ],
+  [
+    'multiple hard links',
+    async (h) => {
+      await link(h.file, join(h.root, 'alias'));
+    },
+    'unsafe_historical_sibling_file',
+  ],
+  [
+    'symbolic link',
+    async (h) => {
+      await symlink(h.file, join(h.root, 'alias'));
+    },
+    'unsafe_sibling_private_directory',
+  ],
+  [
+    'oversized file',
+    async (h) => {
+      await truncate(h.file, 65537);
+    },
+    'unsafe_historical_sibling_file',
+  ],
+  [
+    'recent file',
+    async (h) => {
+      await writeFile(join(h.root, 'new-file'), '', { mode: 0o600 });
+    },
+    'unsafe_historical_sibling_file',
+  ],
+  [
+    'unsafe sibling directory',
+    async (h) => {
+      const path = join(h.root, 'other-directory');
+      await mkdir(path, { mode: 0o755 });
+    },
+    'unsafe_sibling_private_directory',
+  ],
+])
+  test(`sibling filesystem refuses ${name}`, async (t) => {
+    const h = await siblingFilesystem(t);
+    await change(h);
+    if (name !== 'recent file') {
+      // Keep the file historical so its unsafe metadata must cause the refusal.
+      h.options.ownerStartedAtMs = (await lstat(h.file)).ctimeMs + 1;
+    }
+    await assert.rejects(observePreadmissionSiblings(h.root, UUID, h.options), { message: code });
+  });
+test('sibling filesystem refuses a historical file belonging to a different operator', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'preadmission-sibling-uid-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, 'old-file');
+  await writeFile(file, '', { mode: 0o600 });
+  await assert.rejects(
+    observePreadmissionSiblings(root, UUID, {
+      ownerStartedAtMs: (await lstat(file)).ctimeMs + 1,
+      operatorUid: uid + 1,
+    }),
+    { message: 'unsafe_historical_sibling_file' },
+  );
+});
+test('sibling filesystem rejects ctime exactly at owner acquisition', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'preadmission-sibling-time-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, 'boundary-file');
+  await writeFile(file, '', { mode: 0o600 });
+  await assert.rejects(
+    observePreadmissionSiblings(root, UUID, { ownerStartedAtMs: (await lstat(file)).ctimeMs }),
+    { message: 'unsafe_historical_sibling_file' },
+  );
+});
+test('a second safe directory in the owner window still prevents unique-operation proof', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'preadmission-sibling-window-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = join(root, UUID);
+  await mkdir(first, { mode: 0o700 });
+  const ownerStartedAtMs = (await lstat(first)).ctimeMs;
+  await mkdir(join(root, '22222222-2222-4222-8222-222222222222'), { mode: 0o700 });
+  const result = await observePreadmissionSiblings(root, UUID, { ownerStartedAtMs });
+  assert.equal(result.uniqueWindowDirectory, false);
+  assert.deepEqual(result.historicalSiblingFiles, []);
+});
+test('proof independently validates sibling metadata and returns only a count plus deterministic digest', () => {
+  const { request, observation } = fixture();
+  const first = historicalSibling();
+  const second = historicalSibling({ nameSha256: digest('another-opaque-fixture'), ino: 43 });
+  observation.operation.historicalSiblingFiles = [first, second].sort((left, right) =>
+    left.nameSha256.localeCompare(right.nameSha256),
+  );
+  const proof = buildPreadmissionProof(request, observation);
+  assert.equal(proof.historicalSiblingFiles.count, 2);
+  assert.match(proof.historicalSiblingFiles.sha256, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(Object.keys(proof.historicalSiblingFiles).sort(), ['count', 'sha256']);
+  assert.equal(JSON.stringify(proof).includes(first.nameSha256), false);
+  assert.equal(JSON.stringify(proof).includes(second.nameSha256), false);
+});
+for (const [name, change] of [
+  [
+    'missing projection',
+    (_rows, o) => {
+      delete o.operation.historicalSiblingFiles;
+    },
+  ],
+  [
+    'wrong file kind',
+    (rows) => {
+      rows[0].kind = 'symlink';
+    },
+  ],
+  [
+    'wrong operator',
+    (rows) => {
+      rows[0].uid++;
+    },
+  ],
+  [
+    'unsafe mode',
+    (rows) => {
+      rows[0].mode = 0o644;
+    },
+  ],
+  [
+    'multiple links',
+    (rows) => {
+      rows[0].nlink = 2;
+    },
+  ],
+  [
+    'nonfinite device',
+    (rows) => {
+      rows[0].dev = NaN;
+    },
+  ],
+  [
+    'negative device',
+    (rows) => {
+      rows[0].dev = -1;
+    },
+  ],
+  [
+    'fractional inode',
+    (rows) => {
+      rows[0].ino = 1.5;
+    },
+  ],
+  [
+    'negative inode',
+    (rows) => {
+      rows[0].ino = -1;
+    },
+  ],
+  [
+    'negative size',
+    (rows) => {
+      rows[0].size = -1;
+    },
+  ],
+  [
+    'fractional size',
+    (rows) => {
+      rows[0].size = 0.5;
+    },
+  ],
+  [
+    'oversized size',
+    (rows) => {
+      rows[0].size = 65537;
+    },
+  ],
+  [
+    'nonfinite ctime',
+    (rows) => {
+      rows[0].ctimeMs = NaN;
+    },
+  ],
+  [
+    'nonfinite mtime',
+    (rows) => {
+      rows[0].mtimeMs = Infinity;
+    },
+  ],
+  [
+    'ctime at owner',
+    (rows) => {
+      rows[0].ctimeMs = START;
+    },
+  ],
+  [
+    'mtime after ctime',
+    (rows) => {
+      rows[0].mtimeMs = rows[0].ctimeMs + 1;
+    },
+  ],
+  [
+    'invalid filename hash',
+    (rows) => {
+      rows[0].nameSha256 = 'raw-file-name';
+    },
+  ],
+  [
+    'coercible filename hash object',
+    (rows) => {
+      rows[0].nameSha256 = { toString: () => 'a'.repeat(64) };
+    },
+  ],
+  [
+    'sparse census',
+    (rows) => {
+      delete rows[0];
+    },
+  ],
+  [
+    'duplicate filename hashes',
+    (rows) => {
+      rows.push({ ...rows[0] });
+    },
+  ],
+  [
+    'unsorted filename hashes',
+    (rows) => {
+      rows.push(historicalSibling({ nameSha256: '0'.repeat(64), ino: 99 }));
+    },
+  ],
+  [
+    'oversized census',
+    (rows) => {
+      rows.splice(
+        0,
+        1,
+        ...Array.from({ length: 257 }, (_, i) =>
+          historicalSibling({ nameSha256: i.toString(16).padStart(64, '0'), ino: i + 100 }),
+        ),
+      );
+    },
+  ],
+])
+  test(`proof refuses sibling ${name}`, () => {
+    const { request, observation } = fixture();
+    const rows = [historicalSibling()];
+    observation.operation.historicalSiblingFiles = rows;
+    change(rows, observation);
+    assert.throws(() => buildPreadmissionProof(request, observation), {
+      message: 'historical_sibling_metadata_unproved',
+    });
+  });
+test('sibling metadata extensions are dropped before deterministic proof hashing', () => {
+  const { request, observation } = fixture();
+  observation.operation.historicalSiblingFiles = [historicalSibling()];
+  const original = buildPreadmissionProof(request, observation);
+  Object.defineProperty(observation.operation.historicalSiblingFiles[0], 'opaquePayload', {
+    enumerable: true,
+    get: () => assert.fail('opaque sibling extension was read'),
+  });
+  assert.deepEqual(buildPreadmissionProof(request, observation), original);
+});
+for (const [name, change] of [
+  [
+    'addition',
+    (rows) => {
+      rows.push(historicalSibling({ nameSha256: 'f'.repeat(64), ino: 43 }));
+    },
+  ],
+  [
+    'removal',
+    (rows) => {
+      rows.pop();
+    },
+  ],
+  [
+    'rename',
+    (rows) => {
+      rows[0].nameSha256 = digest('renamed-history');
+    },
+  ],
+  [
+    'inode',
+    (rows) => {
+      rows[0].ino++;
+    },
+  ],
+  [
+    'size',
+    (rows) => {
+      rows[0].size++;
+    },
+  ],
+  [
+    'mtime',
+    (rows) => {
+      rows[0].mtimeMs--;
+    },
+  ],
+  [
+    'ctime',
+    (rows) => {
+      rows[0].ctimeMs--;
+    },
+  ],
+])
+  test(`sibling ${name} drift between preview and apply prevents archival`, async () => {
+    const { request, observation } = fixture();
+    observation.operation.historicalSiblingFiles = [historicalSibling()];
+    const preview = await recoverPreadmission(request, {
+      observe: async () => structuredClone(observation),
+    });
+    change(observation.operation.historicalSiblingFiles);
+    await assert.rejects(
+      recoverPreadmission(
+        { ...request, mode: 'apply', proofSha256: preview.proofSha256 },
+        {
+          observe: async () => observation,
+          archive: async () => assert.fail('changed sibling evidence reached archival'),
+        },
+      ),
+      { message: 'preview_proof_changed' },
+    );
+  });
+test('a historical file content rewrite changes its metadata proof without reading opaque contents', async (t) => {
+  const h = await siblingFilesystem(t);
+  const first = await observePreadmissionSiblings(h.root, UUID, h.options);
+  await writeFile(h.file, 'synthetic-private-rewritten-content', { mode: 0o600 });
+  await assert.rejects(observePreadmissionSiblings(h.root, UUID, h.options), {
+    message: 'unsafe_historical_sibling_file',
+  });
+  assert.equal(first.historicalSiblingFiles.length, 1);
+});
+
+test('sibling metadata accepts a historical file exactly at its 64 KiB size ceiling', async (t) => {
+  const h = await siblingFilesystem(t);
+  await truncate(h.file, 65536);
+  const ownerStartedAtMs = (await lstat(h.file)).ctimeMs + 1;
+  const result = await observePreadmissionSiblings(h.root, UUID, { ownerStartedAtMs });
+  assert.equal(result.historicalSiblingFiles.length, 1);
+  assert.equal(result.historicalSiblingFiles[0].size, 65536);
+});
+test('sibling observer never opens or reads opaque historical file contents', async (t) => {
+  const h = await siblingFilesystem(t);
+  const source = `
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const [moduleUrl, privateDirectory, operationId, cutoff] = process.argv.slice(2);
+const { observePreadmissionSiblings } = await import(moduleUrl);
+let forbiddenCalls = 0;
+const forbidden = () => { forbiddenCalls++; throw new Error('opaque_file_contents_accessed'); };
+for (const key of ['open', 'openSync', 'readFile', 'readFileSync', 'createReadStream']) fs[key] = forbidden;
+for (const key of ['open', 'readFile']) fs.promises[key] = forbidden;
+syncBuiltinESMExports();
+const result = await observePreadmissionSiblings(privateDirectory, operationId, { ownerStartedAtMs: Number(cutoff) });
+process.stdout.write(JSON.stringify({ forbiddenCalls, count: result.historicalSiblingFiles.length }));
+`;
+  const pending = execute(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-',
+      new URL('./pair-release-preadmission-recovery.mjs', import.meta.url).href,
+      h.root,
+      UUID,
+      String(h.options.ownerStartedAtMs),
+    ],
+    { timeout: 5000, maxBuffer: 16384 },
+  );
+  pending.child.stdin.end(source);
+  const result = await pending;
+  assert.equal(result.stderr, '');
+  assert.deepEqual(JSON.parse(result.stdout), { forbiddenCalls: 0, count: 1 });
+});
+test('sibling filesystem refuses a FIFO without opening it', async (t) => {
+  const h = await siblingFilesystem(t);
+  await execute('mkfifo', [join(h.root, 'a-fifo')]);
+  await assert.rejects(observePreadmissionSiblings(h.root, UUID, h.options), {
+    message: 'unsafe_sibling_private_directory',
+  });
 });
