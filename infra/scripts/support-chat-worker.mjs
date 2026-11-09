@@ -85,6 +85,7 @@ export class SupportReconnectPolicy {
 
 export function validateQuestion(value) {
   const now = Date.now();
+  const interaction = value?.interaction;
   return (
     value?.type === 'question' &&
     typeof value.id === 'string' &&
@@ -93,6 +94,15 @@ export function validateQuestion(value) {
     typeof value.text === 'string' &&
     value.text.trim().length > 0 &&
     value.text.length <= 1200 &&
+    (interaction === undefined ||
+      (interaction !== null &&
+        typeof interaction === 'object' &&
+        !Array.isArray(interaction) &&
+        Object.keys(interaction).length === 2 &&
+        Object.hasOwn(interaction, 'addressedToSupport') &&
+        Object.hasOwn(interaction, 'replyToOther') &&
+        typeof interaction.addressedToSupport === 'boolean' &&
+        typeof interaction.replyToOther === 'boolean')) &&
     Number.isSafeInteger(value.issuedAt) &&
     value.issuedAt >= 0 &&
     value.issuedAt <= now + 5000 &&
@@ -267,6 +277,10 @@ export async function supportChatSession({
               const answer = await invoke({
                 text: value.text,
                 history: value.history,
+                interaction: value.interaction ?? {
+                  addressedToSupport: false,
+                  replyToOther: false,
+                },
                 key,
                 api,
                 onUsage: (usage) => observeUsage('provider-reported', usage),
