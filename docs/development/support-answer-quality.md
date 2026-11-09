@@ -12,6 +12,12 @@ when its answer changes that step. Usually use two to four short sentences; a pr
 actual ordered steps. Preserve the required conditions and exact UI labels. Do not add unrelated
 FAQ, repeat completed checks or ask again for unavailable screens.
 
+The owner's 9 November 2026 request reinforces concise conversation: usually 250–600 characters,
+without padding a sufficient shorter answer. Continue from the user's last result and ask one
+specific missing observation. A greeting with a request for help gets a brief task clarification;
+ordinary participant conversation still stays silent. A request for steps keeps its current topic.
+Official MAX statements retain the supplied verification date and cannot imply live browsing.
+
 Use respectful Russian with «вы». Understand colloquial language, typos and irritation without
 copying insults or giving lectures. The name «Майор Максимов» does not imply military roleplay.
 One short acknowledgement of a difficulty can help; repeating it in every answer cannot replace
@@ -102,6 +108,10 @@ Focused tests cover eligibility and required replies together, role changes, con
 retrieval, API paths, mandatory policy retention, source/link validation, honest AI identity and
 intent-specific FAQ. The installer must include every imported runtime module in its immutable
 manifest. Keep the bridge's per-user history and uncertain-send fences intact.
+
+The bridge keeps six turns of at most 300 characters each. For a longer turn it preserves the
+beginning and end, removing the assistant's redundant signature. This retains a final clarification
+and the user's latest observed result; it is bounded context, not complete conversation memory.
 
 Before changing the candidate, record the previous source identity and results. Freeze candidate
 bytes before the final CPU run. Retain each first result, rejected draft, error and timing; label

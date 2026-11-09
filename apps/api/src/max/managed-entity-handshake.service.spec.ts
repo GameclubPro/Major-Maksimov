@@ -8,7 +8,11 @@ import {
   ManagedEntityHandshakeService,
   MANAGED_ENTITY_HANDSHAKE_START_CALLBACK_PAYLOAD,
 } from './managed-entity-handshake.service';
-import type { MaxChatMemberAccess } from './max-client.service';
+import type { MaxChatMemberAccess, MaxClientService } from './max-client.service';
+import {
+  MAX_SEND_PRE_DISPATCH_GUARD_REJECTED_CODE,
+  markMaxPreDispatchGuardRejected,
+} from './max-action-pre-dispatch-guard';
 import { WebhookParser } from '../webhook/webhook.parser';
 import { createGroupCommandAuthorityMock } from '../common/group-command-authority.spec-support';
 import { buildGroupCommandKey } from '../common/group-command-authority.service';
@@ -193,7 +197,12 @@ function createFixture() {
       messageId: 'reply-1',
       url: null,
     }),
-    sendMessage: jest.fn().mockResolvedValue({ messageId: 'start-reply-1', url: null }),
+    sendMessage: jest
+      .fn<
+        ReturnType<MaxClientService['sendMessage']>,
+        Parameters<MaxClientService['sendMessage']>
+      >()
+      .mockResolvedValue({ messageId: 'start-reply-1', url: null }),
     deleteMessage: jest.fn().mockResolvedValue(undefined),
   };
   const maxBotLinkService = {
@@ -590,6 +599,36 @@ describe('ManagedEntityHandshakeService', () => {
         beforeImmediateSendMutation: expect.any(Function),
       }),
     );
+  });
+
+  it('settles a one-shot Start confirmation refusal while retaining the applied connection', async () => {
+    const fixture = createFixture();
+    fixture.maxClient.sendMessage.mockRejectedValueOnce(
+      markMaxPreDispatchGuardRejected(
+        new Error('Start authority expired before transport'),
+        MAX_SEND_PRE_DISPATCH_GUARD_REJECTED_CODE,
+      ),
+    );
+    await expect(fixture.service.handleWebhookUpdate(createUpdate())).resolves.toBe('connected');
+    expect(fixture.maxClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(fixture.maxClient.sendMessage.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({
+        immediate: true,
+        immediateFailurePolicy: 'terminal',
+        candidateBotIds: ['bot-1'],
+        routing: { purpose: 'send_message', requiredBotId: 'bot-1' },
+        beforeImmediateSendMutation: expect.any(Function),
+      }),
+    );
+    expect(fixture.groupCommandAuthority.prepareResult).toHaveBeenCalledWith(expect.anything(), {
+      action: 'START',
+      noticeText: null,
+      applied: true,
+    });
+    expect(fixture.groupCommandAuthority.complete).toHaveBeenCalledTimes(1);
+    expect(fixture.maxClient.sendMessageImmediateWithId).not.toHaveBeenCalled();
+    await fixture.service.handleWebhookUpdate(createUpdate({ updateId: 'refused-start-mirror' }));
+    expect(fixture.maxClient.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('does not bootstrap a public Start without a proven actor', async () => {

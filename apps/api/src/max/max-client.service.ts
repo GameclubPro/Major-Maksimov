@@ -49,6 +49,11 @@ import {
   observeMaxSendAcknowledgement,
   runWithMaxSendHttpObservation,
 } from './max-send-observation';
+import {
+  certifyMaxSendCapacityDeferral,
+  markMaxApiCapacityRefusal,
+  runWithMaxSendCapacityAttempt,
+} from './max-send-capacity-deferral';
 import { readMaxChatAvatar } from './max-chat-avatar';
 import { readMaxRetryAfterMs } from './max-retry-after';
 import {
@@ -743,6 +748,8 @@ export type MaxActionJob = QueueJobEnvelope<
 export type MaxActionDispatchOptions = {
   delayMs?: number;
   immediate?: boolean;
+  /** FLAG: Set only when this immediate attempt has no caller or durable retry owner. */
+  immediateFailurePolicy?: 'terminal';
   /** Ephemeral guard evaluated after routing and ledger work, immediately before send HTTP. */
   beforeImmediateSendMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>;
   /** Ephemeral guard evaluated after routing and ledger work, immediately before delete HTTP. */
@@ -5849,6 +5856,9 @@ export class MaxClientService implements OnModuleDestroy {
     const beforeImmediateSendMutation = options?.beforeImmediateSendMutation;
     const beforeImmediateDeleteMutation = options?.beforeImmediateDeleteMutation;
     const beforeImmediateMemberMutation = options?.beforeImmediateMemberMutation;
+    if (options?.immediateFailurePolicy === 'terminal' && options.immediate !== true) {
+      throw new Error('Terminal failure settlement requires immediate dispatch');
+    }
     if (beforeImmediateSendMutation && options?.immediate !== true) {
       throw new Error('Send mutation guard requires immediate dispatch');
     }
@@ -6017,6 +6027,7 @@ export class MaxClientService implements OnModuleDestroy {
         beforeImmediateDeleteMutation,
         beforeImmediateMemberMutation,
         beforeImmediateSendMutation,
+        options?.immediateFailurePolicy,
       );
     }
 
@@ -6294,6 +6305,7 @@ export class MaxClientService implements OnModuleDestroy {
     beforeDeleteMutation?: MaxActionDispatchOptions['beforeImmediateDeleteMutation'],
     beforeMemberMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>,
     beforeSendMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>,
+    immediateFailurePolicy?: MaxActionDispatchOptions['immediateFailurePolicy'],
   ): Promise<MaxPublishedMessage | void> {
     const executionOptions: MaxActionExecutionOptions = {
       beforeDeleteMutation,
@@ -6339,20 +6351,22 @@ export class MaxClientService implements OnModuleDestroy {
         }
       }
     } catch (error: unknown) {
-      await this.actionLedgerService
-        .recordFailed(executionJob, error)
-        .catch((ledgerError: unknown) => {
-          this.logger.warn(
-            {
-              actionType: job.actionType,
-              chatId: job.chatId,
-              botId: executionJob.botId,
-              error: this.extractErrorMessage(ledgerError),
-              originalError: this.extractErrorMessage(error),
-            },
-            'Failed to record immediate MAX action failure in durable ledger',
-          );
-        });
+      const recordFailure =
+        immediateFailurePolicy === 'terminal'
+          ? this.actionLedgerService.recordFailed(executionJob, error, { exhausted: true })
+          : this.actionLedgerService.recordFailed(executionJob, error);
+      await recordFailure.catch((ledgerError: unknown) => {
+        this.logger.warn(
+          {
+            actionType: job.actionType,
+            chatId: job.chatId,
+            botId: executionJob.botId,
+            error: this.extractErrorMessage(ledgerError),
+            originalError: this.extractErrorMessage(error),
+          },
+          'Failed to record immediate MAX action failure in durable ledger',
+        );
+      });
       throw error;
     }
 
@@ -8148,20 +8162,25 @@ export class MaxClientService implements OnModuleDestroy {
     if (!hasText && attachments.length === 0 && !messageLink) {
       throw new UnrecoverableError('MAX SEND_MESSAGE payload has no text, attachments, or link');
     }
+    const sendBotId = this.readTrimmedString(mutationOptions.botId) ?? this.getCurrentBot().id;
     const sendRequest = () =>
-      runWithMaxSendHttpObservation(action.idempotencyKey, () =>
-        this.request<Record<string, unknown>>('post', '/messages', {
-          params: {
-            chat_id: action.chatId,
-          },
-          data: {
-            text: hasText ? action.text : null,
-            ...(hasText && action.options?.textFormat ? { format: action.options.textFormat } : {}),
-            ...(messageLink ? { link: messageLink } : {}),
-            ...(attachments.length > 0 ? { attachments } : {}),
-          },
-          ...(mutationOptions.timeoutMs ? { timeout: mutationOptions.timeoutMs } : {}),
-        }),
+      runWithMaxSendCapacityAttempt(action, sendBotId, () =>
+        runWithMaxSendHttpObservation(action.idempotencyKey, () =>
+          this.request<Record<string, unknown>>('post', '/messages', {
+            params: {
+              chat_id: action.chatId,
+            },
+            data: {
+              text: hasText ? action.text : null,
+              ...(hasText && action.options?.textFormat
+                ? { format: action.options.textFormat }
+                : {}),
+              ...(messageLink ? { link: messageLink } : {}),
+              ...(attachments.length > 0 ? { attachments } : {}),
+            },
+            ...(mutationOptions.timeoutMs ? { timeout: mutationOptions.timeoutMs } : {}),
+          }),
+        ),
       );
 
     if (!this.actionLedgerService) {
@@ -8270,6 +8289,7 @@ export class MaxClientService implements OnModuleDestroy {
         }
       }
       if (!dispatchToken) {
+        certifyMaxSendCapacityDeferral(error, action, sendBotId);
         throw error;
       }
 
@@ -8284,6 +8304,7 @@ export class MaxClientService implements OnModuleDestroy {
             `Ambiguous MAX SEND_MESSAGE fence release after pre-dispatch guard rejection for chat ${action.chatId}`,
           );
         }
+        certifyMaxSendCapacityDeferral(error, action, sendBotId);
         throw error;
       }
 
@@ -8677,10 +8698,13 @@ export class MaxClientService implements OnModuleDestroy {
           retryAfterMs: reservation.retryAfterMs,
           limitScope: reservation.limitScope,
         });
-        throw new MaxApiInternalRateLimitError(
-          reservation.reason,
-          reservation.retryAfterMs,
-          reservation.limitScope,
+        throw markMaxApiCapacityRefusal(
+          new MaxApiInternalRateLimitError(
+            reservation.reason,
+            reservation.retryAfterMs,
+            reservation.limitScope,
+          ),
+          { botId, chatId, operation: messageMutation?.operation },
         );
       }
 

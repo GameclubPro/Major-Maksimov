@@ -29,6 +29,7 @@ import {
   warmSupportModel,
 } from './support-llm-workstation.mjs';
 import { SUPPORT_MODEL, supportModelArgs } from './support-llm-profile.mjs';
+import { SUPPORT_CHAT_IDS } from './support-chat-worker.mjs';
 
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 function fixture(t) {
@@ -110,6 +111,43 @@ test('stopped chat status preserves the last finite transport diagnostic', async
   assert.equal(status.running, false);
   assert.equal(status.ready, false);
   for (const [key, value] of Object.entries(diagnostics)) assert.equal(status[key], value);
+});
+
+test('live chat status requires fresh observations for every authorized chat', async (t) => {
+  const previous = previousBundleFixture(t, { modelSha256: SUPPORT_MODEL.sha256 });
+  const child = await fixtureProcess(t, process.execPath, [
+    join(previous.bundle, 'support-chat-worker.mjs'),
+    'run',
+  ]);
+  const identity = supportProcessIdentity(child.pid);
+  const now = Date.now(),
+    stamp = new Date(now).toISOString();
+  const record = {
+    ...identity,
+    bundle: previous.bundle,
+    phase: 'connected',
+    heartbeatAt: stamp,
+    chats: Object.fromEntries(
+      SUPPORT_CHAT_IDS.map((chatId) => [
+        chatId,
+        {
+          phase: 'connected',
+          lastSampleAt: stamp,
+          remoteHeartbeatAt: stamp,
+        },
+      ]),
+    ),
+  };
+  const statusPath = join(previous.state, 'chat-status.json');
+  const controller = createSupportController({ root: previous.root });
+  writeFileSync(statusPath, JSON.stringify(record), { mode: 0o600 });
+  assert.equal((await controller.status(true)).ready, true);
+  record.chats[SUPPORT_CHAT_IDS[1]].lastSampleAt = new Date(now - 31_000).toISOString();
+  writeFileSync(statusPath, JSON.stringify(record));
+  assert.equal((await controller.status(true)).ready, false);
+  delete record.chats[SUPPORT_CHAT_IDS[1]];
+  writeFileSync(statusPath, JSON.stringify(record));
+  assert.equal((await controller.status(true)).ready, false);
 });
 
 async function tinyController(source, root, gpuRoot, bin, modelText, filename) {
@@ -707,9 +745,9 @@ test('installed API inference works with the CPU stopped and still rejects bundl
     calls++;
     assert.equal(url.href, 'https://5x2.gptclaudegemini.xyz/v1/chat/completions');
     assert.equal(options.headers.Authorization, 'Bearer sk-private-fixture-key-123456789');
-    assert.equal(JSON.parse(options.body).reasoning_effort, 'medium');
+    assert.equal(JSON.parse(options.body).reasoning_effort, 'max');
     return Response.json({
-      model: 'gpt-6.1-sol',
+      model: 'gpt-6.1-terra',
       choices: [
         {
           finish_reason: 'stop',
