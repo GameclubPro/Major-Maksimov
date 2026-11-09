@@ -34,6 +34,7 @@ import {
   consumeMaxExactMessageLookupHttp429,
   markMaxMemberMutationAttempted,
   normalizeMaxActionIdempotencyKeyPart,
+  type MaxActionDispatchOptions,
   type MaxActionJob,
   wasMaxMemberMutationAttempted,
   wasMaxMemberMutationConfirmed,
@@ -88,6 +89,11 @@ import { AxiosHeaders } from 'axios';
 import type { Logger } from '@nestjs/common';
 import type { ActionHealthService } from '../system/action-health.service';
 import type { MaxActionLedgerService } from './max-action-ledger.service';
+import type { MaxModerationRuleNoticeGuardService } from './max-moderation-rule-notice.guard';
+import {
+  MaxSendCapacityDeferralError,
+  readMaxSendCapacityDeferral,
+} from './max-send-capacity-deferral';
 import { ModerationStateDeleteGuardService } from '../moderation/moderation-state-delete-guard.service';
 import { RequiredSubscriptionExecutionGuardService } from '../moderation/required-subscription-execution-guard.service';
 import { fingerprintModerationSettings } from '../moderation/message-limits-delete-guard.service';
@@ -1525,7 +1531,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
         });
         const request = jest.fn().mockReturnValue(throwError(() => denial));
         const ledger = {
-          claimSendDispatch: jest.fn(async () => ({
+          claimSendDispatch: jest.fn<
+            ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+            Parameters<MaxActionLedgerService['claimSendDispatch']>
+          >(async () => ({
             kind: 'claimed',
             dispatchToken: 'proof-fence',
           })),
@@ -1949,23 +1958,26 @@ describe('MaxClientService inline keyboard guardrails', () => {
     httpService: { request?: jest.Mock } = {},
     configOverrides: Partial<Record<string, boolean | string>> = {},
     actionQueue?: { add: jest.Mock; getJob: jest.Mock },
-    actionLedgerService?: {
-      isIrreversibleAction?: jest.Mock;
-      assertCanEnqueue?: jest.Mock;
-      recordStarted?: jest.Mock;
-      recordSucceeded?: jest.Mock;
-      recordFailed?: jest.Mock;
-      recordEnqueuedIfAbsent?: jest.Mock;
-      recordEnqueueFailedIfAbsent?: jest.Mock;
-      hasExecutionEvidenceSince?: jest.Mock;
-      getCompletedSendDispatch?: jest.Mock;
-      getCompletedSendDispatchResult?: jest.Mock;
-      claimSendDispatch?: jest.Mock;
-      completeSendDispatch?: jest.Mock;
-      releaseSendDispatch?: jest.Mock;
-      recordAmbiguousSendDispatch?: jest.Mock;
-      clearTerminalBanStateAfterUnban?: jest.Mock;
-    },
+    actionLedgerService?: Partial<
+      Pick<
+        MaxActionLedgerService,
+        | 'isIrreversibleAction'
+        | 'assertCanEnqueue'
+        | 'recordStarted'
+        | 'recordSucceeded'
+        | 'recordFailed'
+        | 'recordEnqueuedIfAbsent'
+        | 'recordEnqueueFailedIfAbsent'
+        | 'hasExecutionEvidenceSince'
+        | 'getCompletedSendDispatch'
+        | 'getCompletedSendDispatchResult'
+        | 'claimSendDispatch'
+        | 'completeSendDispatch'
+        | 'releaseSendDispatch'
+        | 'recordAmbiguousSendDispatch'
+        | 'clearTerminalBanStateAfterUnban'
+      >
+    >,
     marketplaceState?: { resolvePublicationButton: jest.Mock; recordButtonDiagnostic: jest.Mock },
   ) {
     const configService = {
@@ -3871,6 +3883,299 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
+  it.each(['terminal', 'caller'] as const)(
+    'retains the %s failure policy after a one-shot immediate send guard refuses HTTP',
+    async (policy) => {
+      const refusal = new Error('Start authority expired before transport');
+      const httpService = { request: jest.fn() };
+      const ledger: jest.Mocked<
+        Pick<
+          MaxActionLedgerService,
+          | 'isIrreversibleAction'
+          | 'assertCanEnqueue'
+          | 'recordStarted'
+          | 'recordFailed'
+          | 'recordSucceeded'
+          | 'getCompletedSendDispatchResult'
+          | 'claimSendDispatch'
+          | 'releaseSendDispatch'
+          | 'recordAmbiguousSendDispatch'
+        >
+      > = {
+        isIrreversibleAction: jest.fn().mockReturnValue(true),
+        assertCanEnqueue: jest.fn().mockResolvedValue(undefined),
+        recordStarted: jest.fn().mockResolvedValue(undefined),
+        recordFailed: jest.fn().mockResolvedValue(undefined),
+        recordSucceeded: jest.fn().mockResolvedValue(undefined),
+        getCompletedSendDispatchResult: jest.fn().mockResolvedValue(null),
+        claimSendDispatch: jest.fn().mockResolvedValue({ kind: 'claimed', dispatchToken: 'start' }),
+        releaseSendDispatch: jest.fn().mockResolvedValue(undefined),
+        recordAmbiguousSendDispatch: jest.fn().mockResolvedValue(true),
+      };
+      const guard = jest.fn(async () => {
+        throw refusal;
+      });
+      const options: MaxActionDispatchOptions = {
+        immediate: true,
+        botId: '777000_bot',
+        idempotencyKey: `one-shot-start-${policy}`,
+        beforeImmediateSendMutation: guard,
+        ...(policy === 'terminal' ? { immediateFailurePolicy: 'terminal' } : {}),
+      };
+      const service = createService(httpService, {}, undefined, ledger);
+      try {
+        await expect(service.sendMessage('chat-1', 'Connected', undefined, options)).rejects.toBe(
+          refusal,
+        );
+        expect(wasMaxPreDispatchGuardRejected(refusal)).toBe(true);
+        expect(wasMaxMessageSendAttempted(refusal)).toBe(false);
+        expect(guard).toHaveBeenCalledTimes(1);
+        expect(httpService.request).not.toHaveBeenCalled();
+        expect(ledger.releaseSendDispatch).toHaveBeenCalledTimes(1);
+        const job = ledger.recordStarted.mock.calls[0]![0];
+        expect(ledger.releaseSendDispatch).toHaveBeenCalledWith(job, 'start');
+        expect(ledger.recordFailed.mock.calls).toEqual([
+          policy === 'terminal' ? [job, refusal, { exhausted: true }] : [job, refusal],
+        ]);
+        expect(ledger.recordSucceeded).not.toHaveBeenCalled();
+        expect(ledger.recordAmbiguousSendDispatch).not.toHaveBeenCalled();
+      } finally {
+        await service.onModuleDestroy();
+      }
+    },
+  );
+
+  it('keeps a one-shot immediate unknown SEND fenced before the next call reaches HTTP', async () => {
+    const timeout = Object.assign(new Error('Start confirmation response timed out'), {
+      code: 'ETIMEDOUT',
+    });
+    const quarantinedError = new UnrecoverableError('Unknown Start send requires manual review');
+    const httpService = { request: jest.fn(() => throwError(() => timeout)) };
+    let quarantined = false;
+    const ledger: jest.Mocked<
+      Pick<
+        MaxActionLedgerService,
+        | 'isIrreversibleAction'
+        | 'assertCanEnqueue'
+        | 'recordStarted'
+        | 'recordFailed'
+        | 'recordSucceeded'
+        | 'getCompletedSendDispatchResult'
+        | 'claimSendDispatch'
+        | 'releaseSendDispatch'
+        | 'recordAmbiguousSendDispatch'
+      >
+    > = {
+      isIrreversibleAction: jest.fn().mockReturnValue(true),
+      assertCanEnqueue: jest.fn<
+        ReturnType<MaxActionLedgerService['assertCanEnqueue']>,
+        Parameters<MaxActionLedgerService['assertCanEnqueue']>
+      >(async () => {
+        if (quarantined) throw quarantinedError;
+      }),
+      recordStarted: jest.fn().mockResolvedValue(undefined),
+      recordFailed: jest.fn().mockResolvedValue(undefined),
+      recordSucceeded: jest.fn().mockResolvedValue(undefined),
+      getCompletedSendDispatchResult: jest.fn().mockResolvedValue(null),
+      claimSendDispatch: jest.fn().mockResolvedValue({ kind: 'claimed', dispatchToken: 'unknown' }),
+      releaseSendDispatch: jest.fn().mockResolvedValue(undefined),
+      recordAmbiguousSendDispatch: jest.fn<
+        ReturnType<MaxActionLedgerService['recordAmbiguousSendDispatch']>,
+        Parameters<MaxActionLedgerService['recordAmbiguousSendDispatch']>
+      >(async () => {
+        quarantined = true;
+        return true;
+      }),
+    };
+    const options: MaxActionDispatchOptions = {
+      immediate: true,
+      immediateFailurePolicy: 'terminal',
+      botId: '777000_bot',
+      idempotencyKey: 'one-shot-unknown-start',
+    };
+    const service = createService(httpService, {}, undefined, ledger);
+    try {
+      await expect(
+        service.sendMessage('chat-1', 'Connected', undefined, options),
+      ).rejects.toBeInstanceOf(UnrecoverableError);
+      await expect(service.sendMessage('chat-1', 'Connected', undefined, options)).rejects.toBe(
+        quarantinedError,
+      );
+      expect(httpService.request).toHaveBeenCalledTimes(1);
+      expect(ledger.recordStarted).toHaveBeenCalledTimes(1);
+      expect(ledger.recordAmbiguousSendDispatch).toHaveBeenCalledTimes(1);
+      expect(ledger.releaseSendDispatch).not.toHaveBeenCalled();
+      expect(ledger.recordSucceeded).not.toHaveBeenCalled();
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('requires explicit immediate dispatch for terminal failure settlement', async () => {
+    const httpService = {
+      request: jest.fn(() => of({ status: 200, data: { message_id: 'unexpected-send' } })),
+    };
+    const options: MaxActionDispatchOptions = {
+      immediateFailurePolicy: 'terminal',
+    };
+    const service = createService(httpService);
+    try {
+      await expect(service.sendMessage('chat-1', 'Connected', undefined, options)).rejects.toThrow(
+        'Terminal failure settlement requires immediate dispatch',
+      );
+      expect(httpService.request).not.toHaveBeenCalled();
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
+  describe('SEND capacity origin', () => {
+    function fixture() {
+      const now = Date.now();
+      const http = { request: jest.fn() };
+      const ledger: jest.Mocked<
+        Pick<
+          MaxActionLedgerService,
+          | 'getCompletedSendDispatchResult'
+          | 'claimSendDispatch'
+          | 'releaseSendDispatch'
+          | 'recordAmbiguousSendDispatch'
+        >
+      > = {
+        getCompletedSendDispatchResult: jest.fn().mockResolvedValue(null),
+        claimSendDispatch: jest.fn().mockResolvedValue({ kind: 'claimed', dispatchToken: 'quota' }),
+        releaseSendDispatch: jest.fn().mockResolvedValue(undefined),
+        recordAmbiguousSendDispatch: jest.fn().mockResolvedValue(true),
+      };
+      const notice: jest.Mocked<Pick<MaxModerationRuleNoticeGuardService, 'assertAllowed'>> = {
+        assertAllowed: jest.fn<
+          ReturnType<MaxModerationRuleNoticeGuardService['assertAllowed']>,
+          Parameters<MaxModerationRuleNoticeGuardService['assertAllowed']>
+        >(async (_action, _botId, _reader, checkpoint) => {
+          await checkpoint?.();
+        }),
+      };
+      const service = createService(
+        http,
+        { MAX_API_RATE_LIMIT_WAIT_MS_CRITICAL: '0' },
+        undefined,
+        ledger,
+      );
+      Object.defineProperty(service, 'moderationRuleNoticeGuard', { value: notice });
+      const quota = observeActionFailureDiagnostics(service).quota;
+      const job: MaxActionJob = {
+        actionType: 'SEND_MESSAGE',
+        chatId: 'chat-1',
+        botId: '777000_bot',
+        text: 'Synthetic moderation notice',
+        sourceTag: MAX_API_SOURCE_TAGS.MODERATION_NOTICE,
+        trafficClass: 'critical',
+        attempt: 1,
+        idempotencyKey: 'current-send-capacity',
+        createdAt: new Date(now).toISOString(),
+        ledgerContext: {
+          moderationRuleNotice: {
+            version: 1,
+            chatId: 'chat-1',
+            messageId: 'synthetic-source',
+            userId: 'human',
+            reasonKey: 'LINKS_BLOCKED_DELETE:synthetic-source',
+            ruleCode: 'LINKS',
+            policySha256: 'a'.repeat(64),
+            deadlineAtMs: now + 300_000,
+          },
+        },
+      };
+      return { now, http, ledger, notice, service, quota, job };
+    }
+
+    it('certifies the actual limiter refusal only after releasing this SEND fence', async () => {
+      const f = fixture();
+      f.quota.mockResolvedValueOnce([1, 0, 0]).mockResolvedValueOnce([0, 1, 60_000]);
+      try {
+        const error = await f.service.executeActionJob(f.job).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(MaxApiInternalRateLimitError);
+        expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+        expect(wasMaxMessageSendAttempted(error)).toBe(false);
+        expect(f.ledger.releaseSendDispatch).toHaveBeenCalledTimes(1);
+        expect(f.http.request).not.toHaveBeenCalled();
+        expect(f.ledger.recordAmbiguousSendDispatch).not.toHaveBeenCalled();
+        const deferral = readMaxSendCapacityDeferral(error, f.job, f.now);
+        expect(deferral).toBeInstanceOf(MaxSendCapacityDeferralError);
+        expect(deferral).toMatchObject({
+          jobId: f.job.idempotencyKey,
+          retryAtMs: f.now + 60_000,
+          deadlineAtMs: f.now + 300_000,
+        });
+        expect(readMaxSendCapacityDeferral(error, f.job, f.now)).toBeNull();
+      } finally {
+        await f.service.onModuleDestroy();
+      }
+    });
+
+    it('keeps an uncertain fence release ambiguous without certifying a capacity retry', async () => {
+      const f = fixture();
+      const releaseError = new Error('SEND fence release unavailable');
+      f.ledger.releaseSendDispatch.mockRejectedValueOnce(releaseError);
+      f.quota.mockResolvedValueOnce([1, 0, 0]).mockResolvedValueOnce([0, 1, 60_000]);
+      try {
+        const error = await f.service.executeActionJob(f.job).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(UnrecoverableError);
+        expect(f.ledger.releaseSendDispatch).toHaveBeenCalledTimes(1);
+        expect(f.ledger.recordAmbiguousSendDispatch).toHaveBeenCalledWith(
+          expect.objectContaining({ idempotencyKey: f.job.idempotencyKey }),
+          'quota',
+          error,
+        );
+        expect(readMaxSendCapacityDeferral(error, f.job, f.now)).toBeNull();
+        expect(f.http.request).not.toHaveBeenCalled();
+      } finally {
+        await f.service.onModuleDestroy();
+      }
+    });
+
+    it('refuses a real nested GET quota error from the SEND final guard', async () => {
+      const f = fixture();
+      f.notice.assertAllowed.mockImplementationOnce(async () => {
+        await f.service.getCurrentChatMemberAccess(f.job.chatId, {
+          botId: f.job.botId,
+          bypassCache: true,
+          trafficClass: 'critical',
+        });
+      });
+      f.quota
+        .mockResolvedValueOnce([1, 0, 0])
+        .mockResolvedValueOnce([1, 0, 0])
+        .mockResolvedValueOnce([0, 1, 60_000]);
+      try {
+        const error = await f.service.executeActionJob(f.job).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(MaxApiInternalRateLimitError);
+        expect(wasMaxPreDispatchGuardRejected(error)).toBe(true);
+        expect(f.ledger.releaseSendDispatch).toHaveBeenCalledTimes(1);
+        expect(readMaxSendCapacityDeferral(error, f.job, f.now)).toBeNull();
+        expect(f.http.request).not.toHaveBeenCalled();
+      } finally {
+        await f.service.onModuleDestroy();
+      }
+    });
+
+    it('refuses an unconsumed genuine quota error borrowed from the prior SEND invocation', async () => {
+      const f = fixture();
+      f.quota.mockResolvedValueOnce([1, 0, 0]).mockResolvedValueOnce([0, 1, 60_000]);
+      try {
+        const oldError = await f.service.executeActionJob(f.job).catch((caught: unknown) => caught);
+        expect(oldError).toBeInstanceOf(MaxApiInternalRateLimitError);
+        f.notice.assertAllowed.mockRejectedValueOnce(oldError);
+        await expect(f.service.executeActionJob(f.job)).rejects.toBe(oldError);
+        expect(f.ledger.releaseSendDispatch).toHaveBeenCalledTimes(2);
+        expect(readMaxSendCapacityDeferral(oldError, f.job, f.now)).toBeNull();
+        expect(f.http.request).not.toHaveBeenCalled();
+      } finally {
+        await f.service.onModuleDestroy();
+      }
+    });
+  });
+
   it.each([false, true])(
     'keeps the Publisher greeting fence after Redis job restoration (ambiguous=%s)',
     async (ambiguous) => {
@@ -3894,7 +4199,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
             ? { remoteMessageId, dispatchBotId: '777000_bot', completedAt: new Date() }
             : null,
         ),
-        claimSendDispatch: jest.fn(async () => {
+        claimSendDispatch: jest.fn<
+          ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+          Parameters<MaxActionLedgerService['claimSendDispatch']>
+        >(async () => {
           if (dispatchToken) throw new UnrecoverableError('retained dispatch');
           dispatchToken = 'durable-token';
           return { kind: 'claimed', dispatchToken };
@@ -4468,7 +4776,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
     };
     const actionLedgerService = {
       getCompletedSendDispatch: jest.fn().mockResolvedValue(null),
-      claimSendDispatch: jest.fn(async (_job: unknown, botId: string) => ({
+      claimSendDispatch: jest.fn<
+        ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+        Parameters<MaxActionLedgerService['claimSendDispatch']>
+      >(async (_job, botId) => ({
         kind: 'claimed',
         dispatchToken: `dispatch-${botId}`,
       })),
@@ -5698,7 +6009,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
         recordSucceeded: jest.fn(async () => undefined),
         recordFailed: jest.fn(async () => undefined),
         getCompletedSendDispatchResult: jest.fn(async () => null),
-        claimSendDispatch: jest.fn(async () => ({ kind: 'claimed', dispatchToken: 'safe-fence' })),
+        claimSendDispatch: jest.fn<
+          ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+          Parameters<MaxActionLedgerService['claimSendDispatch']>
+        >(async () => ({ kind: 'claimed', dispatchToken: 'safe-fence' })),
         releaseSendDispatch: jest.fn(async () => undefined),
         recordAmbiguousSendDispatch: jest.fn(async () => true),
       };
@@ -5791,7 +6105,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
         recordSucceeded: jest.fn(async () => undefined),
         recordFailed: jest.fn(async () => undefined),
         getCompletedSendDispatchResult: jest.fn(async () => null),
-        claimSendDispatch: jest.fn(async () => ({
+        claimSendDispatch: jest.fn<
+          ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+          Parameters<MaxActionLedgerService['claimSendDispatch']>
+        >(async () => ({
           kind: 'claimed',
           dispatchToken: 'binding-fence',
         })),
@@ -5857,7 +6174,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
       recordSucceeded: jest.fn(async () => undefined),
       recordFailed: jest.fn(async () => undefined),
       getCompletedSendDispatchResult: jest.fn(async () => null),
-      claimSendDispatch: jest.fn(async () => {
+      claimSendDispatch: jest.fn<
+        ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+        Parameters<MaxActionLedgerService['claimSendDispatch']>
+      >(async () => {
         if (!started) throw new UnrecoverableError('Missing durable SEND journal');
         order.push('claim');
         return { kind: 'claimed', dispatchToken: 'fallback-token' };
@@ -5896,7 +6216,10 @@ describe('MaxClientService inline keyboard guardrails', () => {
       recordSucceeded: jest.fn(async () => undefined),
       recordFailed: jest.fn(async () => undefined),
       getCompletedSendDispatchResult: jest.fn(async () => null),
-      claimSendDispatch: jest.fn(async () => ({ kind: 'claimed', dispatchToken: 'unknown-token' })),
+      claimSendDispatch: jest.fn<
+        ReturnType<MaxActionLedgerService['claimSendDispatch']>,
+        Parameters<MaxActionLedgerService['claimSendDispatch']>
+      >(async () => ({ kind: 'claimed', dispatchToken: 'unknown-token' })),
       recordAmbiguousSendDispatch: jest.fn(async () => {
         quarantined = true;
         return true;
