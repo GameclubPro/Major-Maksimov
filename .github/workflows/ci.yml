@@ -254,8 +254,9 @@ jobs:
         env:
           MAXIM_TEST_POSTGRES_URL: ${{ env.DATABASE_URL }}
           MAXIM_REQUIRE_ACTION_LATENCY_NATIVE: '1'
+          MAXIM_REQUIRE_CHAT_MODERATION_NATIVE: '1'
           TZ: UTC
-        run: node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs infra/scripts/postgres-audit-refusal.native.test.mjs infra/scripts/action-latency-audit.native.test.mjs
+        run: node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs infra/scripts/postgres-audit-refusal.native.test.mjs infra/scripts/action-latency-audit.native.test.mjs infra/scripts/chat-moderation-audit.test.mjs
       - name: Shared statistics with native PostgreSQL
         if: matrix.shard == 'compatibility'
         env:

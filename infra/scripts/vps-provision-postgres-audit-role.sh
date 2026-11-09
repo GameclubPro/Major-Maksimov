@@ -50,6 +50,8 @@ local Docker-socket access under the production pg_hba rules, with:
   - 28 optional held-receipt scalar metadata columns; identities and seal bindings
     are join/check-only, with no payload, snapshot, attestation or effect authority
   - thirteen optional Karavan inventory projection columns; chat IDs/titles only in the private report, no actor IDs or raw audit payloads
+  - twelve optional exact-group moderation settings/roster metadata columns;
+    no user IDs, configured words/domains, message content or permissions in output
   - no publication content, media, tokens or raw permission payloads
   - INHERIT only so the pg_read_all_stats membership takes effect
   - read-only/time/parallel/memory/temp defaults used as a server-side backstop
@@ -143,7 +145,7 @@ BEGIN
         'publisher_entity_bindings',
         'publisher_entity_settings',
         'managed_entity_publication_policies',
-        'chat_rules', 'managed_polls', 'chat_bot_memberships', 'webhook_dependency_quarantines',
+        'chat_rules', 'managed_polls', 'chat_bot_memberships', 'chat_admin_roster_states', 'webhook_dependency_quarantines',
         'chat_settings',
         'moderation_delete_intents',
         'moderation_delete_intent_reasons',
@@ -193,6 +195,41 @@ DO $karavan_candidate_privileges$ BEGIN IF NOT (WITH allowed(table_name,column_n
     AND NOT EXISTS(SELECT 1 FROM pg_class r JOIN pg_namespace ns ON ns.oid=r.relnamespace WHERE ns.nspname='public' AND r.relname IN (SELECT table_name FROM allowed)
       AND (has_table_privilege('maxim_audit',r.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=r.oid AND a.attnum>0 AND NOT a.attisdropped AND has_column_privilege('maxim_audit',r.oid,a.attnum,'INSERT,UPDATE,REFERENCES'))))
    ) THEN RAISE EXCEPTION 'maxim_audit Karavan candidate privileges are not exact'; END IF; END $karavan_candidate_privileges$;
+
+-- FLAG: This optional exact-chat metadata extension grants all twelve columns or none.
+DO $chat_moderation_grants$
+BEGIN
+  IF NOT EXISTS (
+    WITH extension(table_name,column_name) AS (VALUES ('chat_settings','chat_id'),('chat_settings','link_policy'),('chat_settings','link_rules_policy'),('chat_settings','link_policy_revision'),('chat_settings','link_policy_effective_at'),('chat_settings','russian_profanity_filter_enabled'),('chat_settings','profanity_sensitivity'),('chat_settings','updated_at'),('chat_admin_roster_states','chat_id'),('chat_admin_roster_states','completed_at'),('chat_admin_roster_states','complete_probe_started_at'),('chat_admin_roster_states','refresh_requested_at'))
+    SELECT 1 FROM extension LEFT JOIN pg_attribute attribute
+      ON attribute.attrelid=to_regclass('public.'||extension.table_name)
+      AND attribute.attname=extension.column_name AND attribute.attnum>0 AND NOT attribute.attisdropped
+    WHERE attribute.attnum IS NULL
+  ) THEN
+    GRANT SELECT (chat_id,link_policy,link_rules_policy,link_policy_revision,link_policy_effective_at,russian_profanity_filter_enabled,profanity_sensitivity,updated_at) ON TABLE public.chat_settings TO maxim_audit;
+    GRANT SELECT (chat_id,completed_at,complete_probe_started_at,refresh_requested_at) ON TABLE public.chat_admin_roster_states TO maxim_audit;
+  END IF;
+  IF NOT (WITH allowed(table_name,column_name) AS (VALUES ('chats','id'),('chats','entity_type'),('chat_settings','id'),('chat_settings','anti_duplicate_enabled'),('chat_settings','duplicate_photo_enabled'),('chat_settings','duplicate_detection_preset'),('chat_settings','duplicate_photo_match_preset'),('chat_settings','duplicate_photo_scope'),('chat_settings','duplicate_compare_mode'),('chat_settings','duplicate_window_mode'),('chat_settings','duplicate_start_time_minutes'),('chat_settings','duplicate_end_time_minutes'),('chat_settings','duplicate_timezone'),('chat_settings','chat_id'),('chat_settings','link_policy'),('chat_settings','link_rules_policy'),('chat_settings','link_policy_revision'),('chat_settings','link_policy_effective_at'),('chat_settings','russian_profanity_filter_enabled'),('chat_settings','profanity_sensitivity'),('chat_settings','updated_at'),('chat_bot_memberships','chat_id'),('chat_bot_memberships','bot_id'),('chat_bot_memberships','status'),('chat_bot_memberships','bot_access_state'),('chat_bot_memberships','bot_access_checked_at'),('chat_bot_memberships','bot_access_source'),('chat_bot_memberships','lifecycle_event_at'),('chat_admin_roster_states','chat_id'),('chat_admin_roster_states','completed_at'),('chat_admin_roster_states','complete_probe_started_at'),('chat_admin_roster_states','refresh_requested_at')),
+    extension(table_name,column_name) AS (VALUES ('chat_settings','chat_id'),('chat_settings','link_policy'),('chat_settings','link_rules_policy'),('chat_settings','link_policy_revision'),('chat_settings','link_policy_effective_at'),('chat_settings','russian_profanity_filter_enabled'),('chat_settings','profanity_sensitivity'),('chat_settings','updated_at'),('chat_admin_roster_states','chat_id'),('chat_admin_roster_states','completed_at'),('chat_admin_roster_states','complete_probe_started_at'),('chat_admin_roster_states','refresh_requested_at')), effective AS (
+      SELECT relation.relname AS table_name,attribute.attname AS column_name
+      FROM pg_class relation JOIN pg_namespace ns ON ns.oid=relation.relnamespace
+      JOIN pg_attribute attribute ON attribute.attrelid=relation.oid
+      WHERE ns.nspname='public' AND relation.relname IN (SELECT table_name FROM allowed)
+        AND attribute.attnum>0 AND NOT attribute.attisdropped
+        AND has_column_privilege('maxim_audit',relation.oid,attribute.attnum,'SELECT')
+    ) SELECT NOT EXISTS (SELECT * FROM effective EXCEPT SELECT * FROM allowed)
+      AND (SELECT count(*) FROM effective JOIN extension USING(table_name,column_name))
+        IN (0,12)
+      AND NOT EXISTS (SELECT 1 FROM pg_class relation JOIN pg_namespace ns ON ns.oid=relation.relnamespace
+        WHERE ns.nspname='public' AND relation.relname IN (SELECT table_name FROM allowed)
+          AND (has_table_privilege('maxim_audit',relation.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+            OR EXISTS (SELECT 1 FROM pg_attribute attribute WHERE attribute.attrelid=relation.oid
+              AND attribute.attnum>0 AND NOT attribute.attisdropped
+              AND has_column_privilege('maxim_audit',relation.oid,attribute.attnum,'INSERT,UPDATE,REFERENCES'))))) THEN
+    RAISE EXCEPTION 'maxim_audit chat-moderation metadata privileges are not exact';
+  END IF;
+END
+$chat_moderation_grants$;
 
 GRANT CONNECT ON DATABASE maxim TO maxim_audit;
 GRANT USAGE ON SCHEMA public TO maxim_audit;
@@ -779,7 +816,7 @@ BEGIN
     RAISE EXCEPTION 'maxim_audit has unexpected direct table privileges';
   END IF;
 
-  IF 40 <> (
+  IF (
     SELECT count(DISTINCT (table_name, column_name, privilege_type))
     FROM information_schema.role_column_grants
     WHERE grantee = 'maxim_audit'
@@ -790,7 +827,7 @@ BEGIN
         'moderation_delete_intent_reasons'
       )
       AND privilege_type = 'SELECT'
-  ) OR EXISTS (
+  ) NOT IN (40, 48) OR EXISTS (
     SELECT 1
     FROM information_schema.role_column_grants
     WHERE grantee = 'maxim_audit'
@@ -816,7 +853,10 @@ BEGIN
               'duplicate_window_mode',
               'duplicate_start_time_minutes',
               'duplicate_end_time_minutes',
-              'duplicate_timezone'
+              'duplicate_timezone',
+              'chat_id', 'link_policy', 'link_rules_policy', 'link_policy_revision',
+              'link_policy_effective_at', 'russian_profanity_filter_enabled',
+              'profanity_sensitivity', 'updated_at'
             )
           )
           OR (
@@ -868,7 +908,10 @@ BEGIN
             'duplicate_window_mode',
             'duplicate_start_time_minutes',
             'duplicate_end_time_minutes',
-            'duplicate_timezone'
+            'duplicate_timezone',
+            'chat_id', 'link_policy', 'link_rules_policy', 'link_policy_revision',
+            'link_policy_effective_at', 'russian_profanity_filter_enabled',
+            'profanity_sensitivity', 'updated_at'
           )
         )
         OR (
@@ -1152,7 +1195,7 @@ BEGIN
               'publisher_entity_bindings',
               'publisher_entity_settings',
               'managed_entity_publication_policies',
-              'chat_rules', 'managed_polls', 'chat_bot_memberships', 'webhook_dependency_quarantines',
+              'chat_rules', 'managed_polls', 'chat_bot_memberships', 'chat_admin_roster_states', 'webhook_dependency_quarantines',
               'publications', 'publication_schedules', 'publication_occurrences',
               'publication_targets', 'managed_entity_access_edges', 'managed_bot_chat_catalog',
               'managed_broadcast_deliveries', 'managed_broadcasts', 'chats', 'commercial_review_samples', '_prisma_migrations',
