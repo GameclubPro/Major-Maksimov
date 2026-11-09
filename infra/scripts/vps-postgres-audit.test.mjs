@@ -21,6 +21,7 @@ import {
   buildPublisherPublicationPrivilegesSql,
 } from './publisher-publications-audit.mjs';
 import { buildNetworkStatisticsAuditSql } from './network-statistics-audit.mjs';
+import { buildChatModerationProvisionSql } from './chat-moderation-audit.mjs';
 import { HELD_RECEIPT_COLUMNS, heldReceiptPrivilegesSql } from './webhook-held-receipt-audit.mjs';
 import { armAuditFixtureInactivityWatchdog } from './vps-postgres-audit-test-watchdog.mjs';
 
@@ -248,19 +249,27 @@ function extractAuditColumnResetSql() {
   const revokeStart = source.indexOf('DO $revoke_audit_columns$');
   const revokeEndMarker = '$revoke_audit_columns$;';
   const revokeEnd = source.indexOf(revokeEndMarker, revokeStart) + revokeEndMarker.length;
-  const grantStart = source.indexOf('GRANT SELECT (', revokeEnd);
+  const baseGrantStart = source.indexOf('GRANT CONNECT ON DATABASE maxim', revokeEnd);
+  const grantStart = source.indexOf('GRANT SELECT (', baseGrantStart);
   const grantEndMarker = 'ON TABLE public.chats TO maxim_audit;';
   const grantEnd = source.indexOf(grantEndMarker, grantStart) + grantEndMarker.length;
   assert.notEqual(revokeStart, -1);
   assert.ok(revokeEnd >= revokeEndMarker.length);
   assert.notEqual(grantStart, -1);
+  assert.notEqual(baseGrantStart, -1);
   assert.ok(grantEnd >= grantEndMarker.length);
   const receiptStart = source.indexOf('DO $multibot_preparation_grants$');
   const receiptEndMarker = '$multibot_preparation_grants$;';
   const receiptEnd = source.indexOf(receiptEndMarker, receiptStart) + receiptEndMarker.length;
   assert.notEqual(receiptStart, -1);
   assert.ok(receiptEnd >= receiptEndMarker.length);
-  return `${source.slice(revokeStart, revokeEnd)}\n${source.slice(grantStart, grantEnd)}\n${source.slice(receiptStart, receiptEnd)}`;
+  const moderationStart = source.indexOf('DO $chat_moderation_grants$');
+  const moderationEndMarker = '$chat_moderation_grants$;';
+  const moderationEnd =
+    source.indexOf(moderationEndMarker, moderationStart) + moderationEndMarker.length;
+  assert.notEqual(moderationStart, -1);
+  assert.ok(moderationEnd >= moderationEndMarker.length);
+  return `${source.slice(revokeStart, revokeEnd)}\n${source.slice(grantStart, grantEnd)}\n${source.slice(receiptStart, receiptEnd)}\n${source.slice(moderationStart, moderationEnd)}`;
 }
 
 function extractAuditSessionReadinessSql(sql) {
@@ -548,6 +557,43 @@ process.exit(result.status ?? 1);
         assert.equal(result.status, 3, result.stderr);
         assert.equal(result.stdout.trim(), 'MAXIM_POSTGRES_DUPLICATE_AUDIT_UNAVAILABLE');
       }
+      await client.query(`
+        ALTER TABLE chat_settings ADD chat_id text, ADD link_policy text,
+          ADD link_rules_policy jsonb, ADD link_policy_revision int,
+          ADD link_policy_effective_at timestamptz,
+          ADD russian_profanity_filter_enabled bool, ADD profanity_sensitivity text,
+          ADD updated_at timestamptz;
+        CREATE TABLE chat_admin_roster_states (
+          chat_id text, completed_at timestamptz, complete_probe_started_at timestamptz
+        );
+      `);
+      await client.query(resetSql);
+      await client.query(verificationSql);
+      assert.equal(await ready(), 'true', 'partial moderation schema receives no extension');
+      await client.query(
+        'ALTER TABLE chat_admin_roster_states ADD refresh_requested_at timestamptz',
+      );
+      await client.query(resetSql);
+      await client.query(resetSql);
+      await client.query(verificationSql);
+      assert.equal(await ready(), 'true', 'complete moderation grants preserve generic sessions');
+      assert.equal(runNativeWrapper().status, 0);
+      assert.equal(
+        (await client.query(duplicateReadiness)).rows[0].duplicate_audit_ready,
+        'true',
+        'the shared duplicate catalog admits all forty-eight exact grants',
+      );
+      await client.query(`GRANT SELECT (private_extra) ON chat_settings TO PUBLIC`);
+      await assert.rejects(client.query(verificationSql), /unexpected effective Antiduplicate/u);
+      assertWrapperRejected();
+      await client.query(`REVOKE SELECT (private_extra) ON chat_settings FROM PUBLIC`);
+      await client.query(
+        `REVOKE SELECT (refresh_requested_at) ON chat_admin_roster_states FROM ${role}`,
+      );
+      assert.equal(runNativeWrapper().status, 3, 'partial moderation extension fails closed');
+      await client.query(resetSql);
+      await client.query(verificationSql);
+      assert.equal(runNativeWrapper().status, 0);
       assert.match(identity.rows[0].version, /^PostgreSQL 16\./u);
       await client.query(
         readFileSync(resolve(root, 'infra/scripts/test-fixtures/network-statistics.sql'), 'utf8'),
@@ -3613,7 +3659,7 @@ test('duplicate explain plans only the fixed intent query and forwards no operat
   assert.equal([...reportSql.matchAll(/EXPLAIN/gu)].length, 1);
   assert.doesNotMatch(reportSql, /ANALYZE|duplicate_settings|recent_duplicate_moderation/u);
   assert.match(sql, /required_duplicate_indexes/u);
-  assert.match(sql, /40 = \(/u);
+  assert.match(sql, /\) IN \(40, 48\)/u);
   assert.equal(runConnect(data, ['postgres-audit', 'duplicate', '--explain']).status, 0);
   assert.match(
     readFileSync(data.sshArgs, 'utf8'),
@@ -3857,7 +3903,8 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
       duplicate_start_time_minutes INTEGER NOT NULL DEFAULT 540,
       duplicate_end_time_minutes INTEGER NOT NULL DEFAULT 1080,
       duplicate_timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',
-      chat_id TEXT
+      chat_id TEXT,
+      private_extra TEXT
     );
     CREATE TABLE moderation_events (
       id TEXT PRIMARY KEY,
@@ -4220,19 +4267,21 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
   );
   await database.exec('SET SESSION AUTHORIZATION postgres;');
 
-  await database.exec('GRANT SELECT (chat_id) ON TABLE chat_settings TO PUBLIC;');
+  await database.exec('GRANT SELECT (private_extra) ON TABLE chat_settings TO PUBLIC;');
   await assert.rejects(
     database.exec(verificationSql),
     /unexpected effective Antiduplicate column privileges/u,
   );
-  await database.exec('REVOKE SELECT (chat_id) ON TABLE chat_settings FROM PUBLIC;');
+  await database.exec('REVOKE SELECT (private_extra) ON TABLE chat_settings FROM PUBLIC;');
 
-  await database.exec('GRANT SELECT (chat_id) ON TABLE chat_settings TO pg_read_all_stats;');
+  await database.exec('GRANT SELECT (private_extra) ON TABLE chat_settings TO pg_read_all_stats;');
   await assert.rejects(
     database.exec(verificationSql),
     /unexpected effective Antiduplicate column privileges/u,
   );
-  await database.exec('REVOKE SELECT (chat_id) ON TABLE chat_settings FROM pg_read_all_stats;');
+  await database.exec(
+    'REVOKE SELECT (private_extra) ON TABLE chat_settings FROM pg_read_all_stats;',
+  );
   await database.exec(verificationSql);
 
   await database.exec('SET SESSION AUTHORIZATION maxim_audit;');
@@ -4742,6 +4791,49 @@ test('monitor delegates its database sample to the fixed bounded audit', () => {
   assert.doesNotMatch(monitor, /\bpsql\b/u);
   assert.match(monitor, /vps-postgres-audit\.sh monitor-signals "\$SIGNAL_WINDOW_MIN"/u);
   assert.match(monitor, /SIGNAL_WINDOW_MIN > 1440/u);
+});
+
+test('chat moderation keeps exact scope, private failures and the shared audit budgets', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  for (const options of [[], ['--explain']]) {
+    const result = runAudit(data, ['chat-moderation', '-123', ...options]);
+    assert.equal(result.status, 0, result.stderr);
+    const sql = readFileSync(data.sql, 'utf8');
+    assert.match(sql, /BEGIN READ ONLY/u);
+    assert.match(sql, /chat_moderation_privileges_ready/u);
+    assert.match(sql, /chat_moderation_indexes_ready/u);
+    assert.match(
+      sql,
+      /FROM public\.chat_bot_memberships WHERE chat_id=.* ORDER BY bot_id LIMIT 9/u,
+    );
+    const args = readFileSync(data.dockerArgs, 'utf8');
+    assert.match(args, /statement_timeout=2500ms/u);
+    assert.match(args, /search_path=pg_catalog,public,pg_temp/u);
+    assert.match(args, /timezone=UTC/u);
+    assert.equal(
+      runConnect(data, ['postgres-audit', 'chat-moderation', '-123', ...options]).status,
+      0,
+    );
+  }
+  for (const args of [
+    [],
+    ['1'],
+    ['-01'],
+    ['-1,-2'],
+    ["-1';SELECT 1"],
+    ['/tmp/query.sql'],
+    ['-123', '--apply'],
+    ['-123', '--explain', 'extra'],
+  ]) {
+    assert.equal(runAudit(data, ['chat-moderation', ...args]).status, 2);
+    assert.equal(runConnect(data, ['postgres-audit', 'chat-moderation', ...args]).status, 2);
+  }
+  const failed = runAudit(data, ['chat-moderation', '-123'], { MOCK_AUDIT_FAIL: '1' });
+  assert.equal(failed.status, 7);
+  assert.match(failed.stderr, /chat moderation audit failed closed/u);
+  assert.doesNotMatch(failed.stderr, /fixture-event/u);
+  assert.ok(readFileSync(provision, 'utf8').includes(buildChatModerationProvisionSql()));
 });
 
 test('network statistics mode validates exact scope and preserves private bounded audit admission', (t) => {

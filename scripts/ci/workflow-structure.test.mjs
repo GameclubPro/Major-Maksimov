@@ -472,9 +472,10 @@ test('isolates every native shard and keeps all compatibility checks blocking', 
   assert.equal(webhookAudits.env.MAXIM_TEST_POSTGRES_URL, '${{ env.DATABASE_URL }}');
   assert.equal(webhookAudits.env.TZ, 'UTC');
   assert.equal(webhookAudits.env.MAXIM_REQUIRE_ACTION_LATENCY_NATIVE, '1');
+  assert.equal(webhookAudits.env.MAXIM_REQUIRE_CHAT_MODERATION_NATIVE, '1');
   assert.equal(
     webhookAudits.run,
-    'node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs infra/scripts/postgres-audit-refusal.native.test.mjs infra/scripts/action-latency-audit.native.test.mjs',
+    'node --test --test-concurrency=1 infra/scripts/webhook-quarantine-proof-audit.test.mjs infra/scripts/webhook-recovery-key-cohort-audit.test.mjs infra/scripts/webhook-cohort-audit.test.mjs infra/scripts/monitor-signals.native.test.mjs infra/scripts/postgres-audit-refusal.native.test.mjs infra/scripts/action-latency-audit.native.test.mjs infra/scripts/chat-moderation-audit.test.mjs',
   );
   for (const step of postgres.steps) {
     assert.equal(step['continue-on-error'], undefined);

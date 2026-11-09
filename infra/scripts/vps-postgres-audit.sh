@@ -40,6 +40,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh action-latency [--explain]
   ./infra/scripts/vps-postgres-audit.sh moderation-outcomes [--bot <bot-id>] [--explain]
   ./infra/scripts/vps-postgres-audit.sh chat-message-window <chat-id> <UTC-minute> [--slice <0..11>] [--explain]
+  ./infra/scripts/vps-postgres-audit.sh chat-moderation <chat-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh duplicate [--status <STATUS>] [--explain]
   ./infra/scripts/vps-postgres-audit.sh poll-publication <poll-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-quarantine <UTC-minute> [--explain]
@@ -107,6 +108,7 @@ RULES_CLEANUP_EXPLAIN=''
 DUPLICATE_EXPLAIN=''
 DUPLICATE_STATUS=''
 MESSAGE_WINDOW_ARGS=()
+CHAT_MODERATION_ARGS=()
 WEBHOOK_COHORT_ARGS=()
 RECOVERY_KEY_COHORT_ARGS=()
 SOURCE_ENVELOPE_OWNER=''
@@ -116,6 +118,10 @@ NETWORK_STATISTICS_ARGS=()
 STATISTICS_EXCHANGE_ARGS=()
 CENTRAL_STATISTICS_ARGS=()
 case "$AUDIT_MODE" in
+  chat-moderation)
+    CHAT_MODERATION_ARGS=("${@:2}")
+    node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" --validate-scope "${CHAT_MODERATION_ARGS[@]}" >/dev/null || exit 2
+    ;;
   central-statistics)
     CENTRAL_STATISTICS_ARGS=("${@:2}")
     node "$ROOT_DIR/infra/scripts/central-statistics-audit.mjs" --validate-scope "${CENTRAL_STATISTICS_ARGS[@]}" >/dev/null || exit 2
@@ -243,10 +249,10 @@ esac
 
 # FLAG: This report attests public relations. Pin resolution before the shared
 # privilege admission as well as the report, including pg_temp last explicitly.
-if [[ "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
+if [[ "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
   POSTGRES_AUDIT_OPTIONS+=' -c search_path=pg_catalog,public,pg_temp'
 fi
-if [[ "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
+if [[ "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
 
 emit_prelude() {
   cat <<'SQL'
@@ -427,7 +433,10 @@ SELECT CASE
                 'duplicate_window_mode',
                 'duplicate_start_time_minutes',
                 'duplicate_end_time_minutes',
-                'duplicate_timezone'
+                'duplicate_timezone',
+                'chat_id', 'link_policy', 'link_rules_policy', 'link_policy_revision',
+                'link_policy_effective_at', 'russian_profanity_filter_enabled',
+                'profanity_sensitivity', 'updated_at'
               )
             )
             OR (
@@ -454,7 +463,7 @@ SELECT CASE
           )
       )
       OR (
-        40 = (
+        (
           SELECT count(DISTINCT (table_name, column_name, privilege_type))
           FROM information_schema.role_column_grants
           WHERE grantee = 'maxim_audit'
@@ -465,7 +474,7 @@ SELECT CASE
               'moderation_delete_intent_reasons'
             )
             AND privilege_type = 'SELECT'
-        )
+        ) IN (40, 48)
       )
     )
     AND NOT EXISTS (
@@ -503,7 +512,10 @@ SELECT CASE
               'duplicate_window_mode',
               'duplicate_start_time_minutes',
               'duplicate_end_time_minutes',
-              'duplicate_timezone'
+              'duplicate_timezone',
+              'chat_id', 'link_policy', 'link_rules_policy', 'link_policy_revision',
+              'link_policy_effective_at', 'russian_profanity_filter_enabled',
+              'profanity_sensitivity', 'updated_at'
             )
           )
           OR (
@@ -533,7 +545,7 @@ SELECT CASE
               'publisher_entity_bindings',
               'publisher_entity_settings',
               'managed_entity_publication_policies',
-              'chat_rules', 'managed_polls', 'chat_bot_memberships', 'webhook_dependency_quarantines',
+              'chat_rules', 'managed_polls', 'chat_bot_memberships', 'chat_admin_roster_states', 'webhook_dependency_quarantines',
               'publications', 'publication_schedules', 'publication_occurrences',
               'publication_targets', 'managed_entity_access_edges', 'managed_bot_chat_catalog',
               'managed_broadcast_deliveries', 'managed_broadcasts', 'chats', 'commercial_review_samples', '_prisma_migrations',
@@ -2084,7 +2096,7 @@ WITH required_duplicate_indexes(
     ) = required_duplicate_indexes.key_columns
 )
 SELECT CASE
-  WHEN 40 = (
+  WHEN (
     SELECT count(DISTINCT (table_name, column_name, privilege_type))
     FROM information_schema.role_column_grants
     WHERE grantee = 'maxim_audit'
@@ -2095,7 +2107,7 @@ SELECT CASE
         'moderation_delete_intent_reasons'
       )
       AND privilege_type = 'SELECT'
-  )
+  ) IN (40, 48)
     AND 4 = (SELECT count(*) FROM exact_duplicate_indexes) THEN 'true'
   ELSE 'false'
 END AS duplicate_audit_ready \gset
@@ -2504,6 +2516,9 @@ emit_legacy_default_webhook_audit() {
 
 emit_sql() {
   emit_prelude
+  local chat_moderation_privilege_args=(--privileges)
+  if [[ "$AUDIT_MODE" == 'chat-moderation' ]]; then chat_moderation_privilege_args+=(--require-all); fi
+  node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${chat_moderation_privilege_args[@]}"
   local karavan_privilege_args=(--privileges)
   if [[ "$AUDIT_MODE" == 'karavan-candidates' ]]; then karavan_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${karavan_privilege_args[@]}"
@@ -2544,6 +2559,9 @@ emit_sql() {
   if [[ "$AUDIT_MODE" == 'webhook-quarantine' ]]; then quarantine_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/webhook-quarantine-audit.mjs" "${quarantine_privilege_args[@]}"
   case "$AUDIT_MODE" in
+    chat-moderation)
+      node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${CHAT_MODERATION_ARGS[@]}"
+      ;;
     karavan-candidates)
       node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" "${KARAVAN_CANDIDATE_ARGS[@]}"
       ;;
@@ -2726,7 +2744,7 @@ prepare_audit_sql() {
     echo "Generated PostgreSQL audit input is invalid." >&2
     return 1
   fi
-  if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
+  if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
     AUDIT_STDERR_FILE="$(mktemp "$temp_root/maxim-postgres-audit-stderr.XXXXXXXX")" || {
       echo "Could not create the private PostgreSQL audit diagnostics file." >&2
       return 1
@@ -2837,7 +2855,7 @@ trap 'exit 143' TERM
 
 prepare_audit_sql
 AUDIT_BACKEND_MAY_EXIST=1
-if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
+if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
   timeout --signal=TERM --kill-after=2s \
     "$AUDIT_WALL_TIMEOUT_SEC" "${psql_command[@]}" <"$AUDIT_SQL_FILE" \
     2>"$AUDIT_STDERR_FILE" &
@@ -2872,6 +2890,8 @@ elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "action-latency" ]]; then
   echo "Bounded action latency audit failed closed; private SQL details withheld." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "delete-retry-heads" ]]; then
   echo "Bounded delete retry heads audit failed closed." >&2
+elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "chat-moderation" ]]; then
+  echo "Bounded chat moderation audit failed closed; private SQL details withheld." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "chat-message-window" ]]; then
   echo "Bounded chat message window audit failed closed." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "moderation-outcomes" ]]; then
