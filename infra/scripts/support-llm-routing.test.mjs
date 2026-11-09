@@ -8,6 +8,54 @@ import {
   validateSupportAnswer,
 } from './support-llm-client.mjs';
 
+test('group conversations do not become support requests through keywords or old context', () => {
+  const history = [
+    { role: 'user', text: 'Как подключить Майора?' },
+    { role: 'assistant', text: 'Для подключения нужны права администратора.' },
+  ];
+  for (const text of [
+    'Ирина, здравствуйте',
+    'Нужно сегодня проверить настройки и вечером запустить поддержку',
+    'Надо сегодня протестировать, докрутить настройки и запустить в поддержку',
+    'Я удалил пост, завтра добавлю другой',
+    'Оля, где фото?',
+    'Саша, пришли сообщение',
+    'Будешь вечером?',
+    'Оля всё поняла',
+  ])
+    for (const prior of [
+      [],
+      history,
+      [...history.slice(0, 1), { role: 'assistant', text: 'Вы администратор этого чата?' }],
+    ])
+      assert.equal(eligibleQuestion(text, prior), false, text);
+});
+
+test('a human reply target overrides topical words and support history', () => {
+  const history = [
+    { role: 'user', text: 'Как настроить автоответчик?' },
+    { role: 'assistant', text: 'Откройте Публик.' },
+  ];
+  for (const text of [
+    'Как включить антимат?',
+    'Он помогает только с ботами или с любыми задачами?',
+  ]) {
+    assert.equal(eligibleQuestion(text, history, { replyToOther: true }), false, text);
+    assert.equal(
+      eligibleQuestion(text, history, { replyToOther: true, addressedToSupport: true }),
+      true,
+      text,
+    );
+  }
+  assert.equal(eligibleQuestion('Где в Майоре автоответчик?'), true);
+  const clarification = [
+    { role: 'user', text: 'Здравствуйте, нужна помощь' },
+    { role: 'assistant', text: 'С чем нужна помощь?' },
+  ];
+  for (const text of ['Публик', 'С Публиком', 'Ластик', 'Антимат', 'Со стоп-словами', 'Автоответы'])
+    assert.equal(eligibleQuestion(text, clarification), true, text);
+});
+
 test('moderation rights questions retain deletion permission alongside general group access', () => {
   const facts = selectKnowledge('Я администратор. Какие права дать боту для модерации группы?');
   assert.ok(facts.some((entry) => entry.id === 'max-delete-rights'));
@@ -390,6 +438,19 @@ test('direct support complaints reach the model without a question mark or the w
       'Рэкс сносит частные объявления',
       'Подключил но нет чата',
       'Хочу запостить в канале',
+      'Бот удалил моё сообщение',
+      'Майор удалил объявление',
+      'Ластик удалил закреплённый пост',
+      'Публик удалил пост',
+      'Нужна ссылка на Публика',
+      'Нужна инструкция по Ластику',
+      'Нужен автоответчик для чата',
+      'Хочу чтобы бот удалял ссылки',
+      'Бот снес пост',
+      'Бот перестал удалять сообщения',
+      'Нужен опрос',
+      'Нужна настройка ночного режима',
+      'Нужна статистика чата',
     ],
     (text) => assert.equal(eligibleQuestion(text), true, text),
   );

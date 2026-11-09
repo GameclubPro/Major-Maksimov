@@ -391,6 +391,29 @@ test('question history rejects non-object entries without throwing', () => {
     assert.equal(validateQuestion({ ...question(), history: [entry] }), false);
 });
 
+test('question interaction accepts only the two boolean addressing fields', () => {
+  assert.equal(validateQuestion({ ...question(), interaction: undefined }), true);
+  for (const interaction of [
+    { addressedToSupport: false, replyToOther: false },
+    { addressedToSupport: true, replyToOther: false },
+    { addressedToSupport: false, replyToOther: true },
+    { addressedToSupport: true, replyToOther: true },
+  ])
+    assert.equal(validateQuestion({ ...question(), interaction }), true);
+  for (const interaction of [
+    null,
+    [],
+    true,
+    'mention',
+    {},
+    { addressedToSupport: true },
+    { addressedToSupport: 'true', replyToOther: false },
+    { addressedToSupport: true, replyToOther: 0 },
+    { addressedToSupport: false, replyToOther: false, quotedText: 'private quote' },
+  ])
+    assert.equal(validateQuestion({ ...question(), interaction }), false);
+});
+
 test(
   'an overlapping question stops the session without starting parallel inference',
   { timeout: 10000 },
@@ -681,13 +704,40 @@ test(
       command: process.execPath,
       args: ['-e', peer],
       onStatus: (value) => statuses.push(value),
-      invoke: async ({ text, history }) => {
+      invoke: async ({ text, history, interaction }) => {
         assert.equal(text, 'Как подключить бота?');
         assert.deepEqual(history, []);
+        assert.deepEqual(interaction, { addressedToSupport: false, replyToOther: false });
         return { action: 'reply', text: presentedAnswer };
       },
     });
     assert.ok(statuses.includes('sent'));
+  },
+);
+
+test(
+  'framed worker passes bounded addressing flags into inference',
+  { timeout: 10000 },
+  async () => {
+    let called = false;
+    const interaction = { addressedToSupport: false, replyToOther: true };
+    const addressedPeer = peer.replace(
+      'history:[],issuedAt:Date.now()',
+      `history:[],interaction:${JSON.stringify(interaction)},issuedAt:Date.now()`,
+    );
+    await supportChatSession({
+      key: 'fixture-key',
+      signal: new AbortController().signal,
+      command: process.execPath,
+      args: ['-e', addressedPeer],
+      invoke: async (value) => {
+        called = true;
+        assert.deepEqual(value.interaction, interaction);
+        assert.equal('quotedText' in value, false);
+        return { action: 'reply', text: presentedAnswer };
+      },
+    });
+    assert.equal(called, true);
   },
 );
 
