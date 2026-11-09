@@ -32,6 +32,15 @@ import {
   withPreadmissionLocks,
   archivePreadmission,
 } from './pair-release-preadmission-recovery.mjs';
+import * as preadmission from './pair-release-preadmission-recovery.mjs';
+import {
+  COMMERCIAL_LLM_RUNTIME as shadowStandard,
+  COMMERCIAL_LLM_SLOTS_RUNTIME as shadowSlots,
+  assertCommercialLlmContainer,
+  assertCommercialLlmImage,
+  assertCommercialLlmApiClient,
+} from './commercial-llm-runtime.mjs';
+import { commercialLlmCommand } from './commercial-llm-profiles.mjs';
 
 const execute = promisify(execFile);
 const digest = (value) => createHash('sha256').update(value).digest('hex');
@@ -140,6 +149,7 @@ function fixture() {
     },
     runtime: {
       imageId: IMAGE,
+      shadow: null,
       noRecoveryClients: true,
       unexpectedCount: 0,
       nativeBoundaryReviewed: true,
@@ -732,6 +742,9 @@ function rawRuntime() {
     'MAX_BOT_ID=publisher',
     'MAX_PUBLISHER_BOT_ID=publisher',
   ];
+  const background = rows.find((row) => row.Name === '/infra-api-moderation-background-1');
+  background.Config.Env = ['APP_ROLE=moderation', 'APP_SERVICE_NAME=api-moderation-background'];
+  background.Config.Labels['com.maxim.release-protected'] = 'true';
   const fleet = {
     available: true,
     expectedRoleCount: 14,
@@ -1471,4 +1484,1023 @@ test('sibling filesystem refuses a FIFO without opening it', async (t) => {
   await assert.rejects(observePreadmissionSiblings(h.root, UUID, h.options), {
     message: 'unsafe_sibling_private_directory',
   });
+});
+
+const SHADOW_NETWORK = 'infra_commercial_llm_internal';
+const SHADOW_COMMAND = 'ab089ab1c6bc2720eb9414110d4eb8248e9b3687fe211401eabea5d18f43e898';
+const SHADOW_SOURCES = Object.freeze({
+  'infra/scripts/commercial-llm-runtime.mjs': [
+    72002,
+    '80bf5e81a2a19606c261faad5eac82bc6b57f5350681e5f7548366f268e44ec4',
+  ],
+  'infra/scripts/release-manifest.mjs': [
+    24579,
+    '0d552d61088c74aafd001063a900042e124774da17f4564b189f6101eebb5c2d',
+  ],
+  'infra/scripts/commercial-llm-workstation-profile.mjs': [
+    2400,
+    'ea78495881193d96ec1dd636125a75beaee96e42596d126b5bed4a83ff3bf29d',
+  ],
+  'infra/scripts/commercial-llm-pool-profile.mjs': [
+    4538,
+    'b3040adb42e3f62879cfcf5c5e23609c3e36850272c687b4fc1cc8572560419b',
+  ],
+  'infra/scripts/commercial-llm-cpu-recovery.mjs': [
+    13017,
+    'f8ba29b00114d2608acb5b9a4d16d38bb73fd678f949f4d1e3a02e39ab9ead96',
+  ],
+  'infra/scripts/commercial-llm-cpu-controller-identity.mjs': [
+    3652,
+    'd75433d47c4e6a7d9349c92fa7dc09ab02999b488948fbded2de19d0e27e7592',
+  ],
+  'infra/scripts/commercial-llm-profiles.mjs': [
+    4950,
+    '604d3457ad07f87a8f2d6635fe2117df1f2267ccad6bfceb0d0b67fb68758fae',
+  ],
+});
+const realShadowRuntime = {
+  COMMERCIAL_LLM_SLOTS_RUNTIME: shadowSlots,
+  assertCommercialLlmContainer,
+  assertCommercialLlmImage,
+  assertCommercialLlmApiClient,
+};
+function rawShadow(profile = shadowSlots) {
+  const { rows, options } = rawRuntime();
+  const client = rows.find((row) => row.Name === '/infra-api-moderation-background-1');
+  const networkId = digest('synthetic-commercial-network');
+  const modelEndpoint = digest('synthetic-model-endpoint');
+  const clientEndpoint = digest('synthetic-client-endpoint');
+  const model = {
+    Id: digest('synthetic-commercial-model'),
+    Name: '/infra-gemma-commercial-shadow-1',
+    Image: profile.imageId,
+    Created: '2026-10-28T12:00:00.000000000Z',
+    RestartCount: 0,
+    Config: {
+      Image: profile.imageRef,
+      User: '1000:1000',
+      Entrypoint: ['/app/llama-server'],
+      Cmd: [...commercialLlmCommand(profile)],
+      Env: [
+        'LLAMA_ARG_HOST=0.0.0.0',
+        'LLAMA_ARG_PORT=8080',
+        'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      ],
+      Labels: {
+        'com.docker.compose.project': 'infra',
+        'com.docker.compose.service': 'gemma-commercial-shadow',
+        'com.docker.compose.oneoff': 'False',
+        'com.maxim.commercial-llm-shadow': 'true',
+        'com.maxim.commercial-llm-model-sha256': profile.modelSha256,
+      },
+    },
+    State: {
+      Status: 'running',
+      Running: true,
+      Paused: false,
+      Restarting: false,
+      Dead: false,
+      Health: { Status: 'healthy' },
+      StartedAt: '2026-11-07T12:00:00.000000000Z',
+    },
+    HostConfig: {
+      ReadonlyRootfs: true,
+      Init: true,
+      NanoCpus: profile.cpuLimit * 1e9,
+      CpuShares: 128,
+      Memory: profile.memoryLimitBytes,
+      MemorySwap: profile.memoryLimitBytes,
+      PidsLimit: profile.pidLimit,
+      CapDrop: ['ALL'],
+      CapAdd: null,
+      Devices: null,
+      DeviceRequests: null,
+      DeviceCgroupRules: null,
+      VolumesFrom: null,
+      SecurityOpt: ['no-new-privileges:true'],
+      PortBindings: {},
+      Privileged: false,
+      Tmpfs: { '/tmp': 'size=64m,mode=1777,uid=1000,gid=1000' },
+      PidMode: '',
+      IpcMode: 'private',
+      UTSMode: '',
+      UsernsMode: '',
+      NetworkMode: SHADOW_NETWORK,
+    },
+    NetworkSettings: {
+      Networks: {
+        [SHADOW_NETWORK]: {
+          NetworkID: networkId,
+          EndpointID: modelEndpoint,
+        },
+      },
+    },
+    Mounts: [
+      {
+        Type: 'bind',
+        Source: profile.modelPath,
+        Destination: profile.modelContainerPath,
+        RW: false,
+      },
+    ],
+  };
+  client.NetworkSettings = {
+    Networks: {
+      infra_default: { NetworkID: options.context.networkId },
+      [SHADOW_NETWORK]: { NetworkID: networkId, EndpointID: clientEndpoint },
+    },
+  };
+  const network = {
+    Id: networkId,
+    Name: SHADOW_NETWORK,
+    Internal: true,
+    Driver: 'bridge',
+    Scope: 'local',
+    Labels: {
+      'com.docker.compose.project': 'infra',
+      'com.docker.compose.network': 'commercial_llm_internal',
+    },
+    Containers: {
+      [model.Id]: { Name: model.Name.slice(1), EndpointID: modelEndpoint },
+      [client.Id]: { Name: client.Name.slice(1), EndpointID: clientEndpoint },
+    },
+  };
+  const image = {
+    Id: profile.imageId,
+    Descriptor: {
+      digest: profile.imageId,
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    },
+    Architecture: 'amd64',
+    Os: 'linux',
+    RepoDigests: [profile.imageRef],
+    Config: {
+      Labels: {
+        'org.opencontainers.image.revision': profile.upstreamRevision,
+        'org.opencontainers.image.version': profile.upstreamVersion,
+      },
+    },
+  };
+  rows.push(model);
+  return { rows, options, model, client, network, image };
+}
+function inspectShadow(h) {
+  return preadmission.inspectPreadmissionShadow(h.rows, {
+    imageId: h.options.imageId,
+    image: h.image,
+    network: h.network,
+    runtime: realShadowRuntime,
+  });
+}
+function shadowObservation() {
+  const h = rawShadow();
+  const { request, observation } = fixture();
+  observation.runtime = {
+    ...inspectPreadmissionRuntime(h.rows, { ...h.options, shadow: inspectShadow(h) }),
+    queueFence: { queueCount: 24, pausedCount: 0, ownerPresent: false },
+  };
+  Object.assign(
+    observation.source.hashes,
+    Object.fromEntries(Object.entries(SHADOW_SOURCES).map(([path, [, hash]]) => [path, hash])),
+  );
+  Object.assign(
+    observation.operation.contextFacts,
+    inspectPreadmissionContext(Buffer.from(JSON.stringify(h.options.context))),
+  );
+  return { request, observation };
+}
+async function shadowSourceDescriptors(mode = 0o664) {
+  const sources = {};
+  for (const [path, [size, hash]] of Object.entries(SHADOW_SOURCES)) {
+    const bytes = await readFile(new URL(`../../${path}`, import.meta.url));
+    assert.equal(bytes.length, size, path);
+    assert.equal(digest(bytes), hash, path);
+    sources[path] = { bytes, uid, gid: process.getgid(), mode, links: 1 };
+  }
+  return sources;
+}
+const proofDigest = (proof) => digest(JSON.stringify(proof));
+
+test('shadow Slots fixture passes the real historical model, OCI image and background API guards', () => {
+  const h = rawShadow();
+  assert.equal(assertCommercialLlmContainer(h.model, { profile: shadowSlots }), h.model.Id);
+  assert.equal(assertCommercialLlmImage(h.image), h.image.Id);
+  assert.equal(
+    assertCommercialLlmApiClient(h.client, {
+      service: 'api-moderation-background',
+      imageId: IMAGE,
+    }),
+    h.client,
+  );
+  assert.equal(digest(JSON.stringify(h.model.Config.Cmd)), SHADOW_COMMAND);
+  assert.throws(
+    () => assertCommercialLlmContainer(h.model, { profile: shadowStandard }),
+    /commercial_llm_runtime_attestation_refused/u,
+  );
+});
+test('shadow absence retains the exact original API/native census and is explicit', () => {
+  const { rows, options } = rawRuntime();
+  const runtime = inspectPreadmissionRuntime(rows, { ...options, shadow: null });
+  assert.equal(runtime.services.length, 16);
+  assert.equal(runtime.shadow, null);
+  assert.equal(runtime.unexpectedCount, 0);
+});
+test('validated actual Slots shadow passes the original strict census without becoming a required API role', () => {
+  const h = rawShadow();
+  // Missing shadow support must reproduce the original census refusal, not a fixture error.
+  const shadow =
+    typeof preadmission.inspectPreadmissionShadow === 'function' ? inspectShadow(h) : null;
+  const runtime = inspectPreadmissionRuntime(h.rows, { ...h.options, shadow });
+  assert.equal(runtime.services.length, 16);
+  assert.deepEqual(runtime.shadow, shadow);
+  assert.equal(shadow.runtimeProfile, 'qwen35-9b-slots-v1');
+  assert.equal(shadow.commandSha256, SHADOW_COMMAND);
+  assert.equal(shadow.containerSha256, digest(h.model.Id));
+  assert.equal(shadow.network.clientContainerSha256, digest(h.client.Id));
+  assert.equal(shadow.network.networkSha256, digest(h.network.Id));
+  assert.equal(shadow.network.peerCount, 2);
+});
+test('a shadow name alone, a boolean or detached evidence cannot bypass the strict census', () => {
+  for (const shadow of [undefined, null, true, { attested: true }, { boundaryPassed: true }]) {
+    const h = rawShadow();
+    assert.throws(() => inspectPreadmissionRuntime(h.rows, { ...h.options, shadow }));
+  }
+  const h = rawShadow();
+  const shadow = inspectShadow(h);
+  h.model.Id = digest('unattested-replacement');
+  assert.throws(() => inspectPreadmissionRuntime(h.rows, { ...h.options, shadow }));
+});
+
+for (const [name, change] of [
+  [
+    'standard no-slots profile',
+    (h) => {
+      h.model.Config.Cmd = [...commercialLlmCommand(shadowStandard)];
+    },
+  ],
+  [
+    'unknown command',
+    (h) => {
+      h.model.Config.Cmd.push('--unreviewed');
+    },
+  ],
+  [
+    'model image',
+    (h) => {
+      h.model.Image = `sha256:${'1'.repeat(64)}`;
+    },
+  ],
+  [
+    'OCI manifest digest',
+    (h) => {
+      h.image.Descriptor.digest = `sha256:${'2'.repeat(64)}`;
+    },
+  ],
+  [
+    'OCI media type',
+    (h) => {
+      h.image.Descriptor.mediaType = 'application/vnd.oci.image.index.v1+json';
+    },
+  ],
+  [
+    'model mount is writable',
+    (h) => {
+      h.model.Mounts[0].RW = true;
+    },
+  ],
+  [
+    'model mount source',
+    (h) => {
+      h.model.Mounts[0].Source = '/tmp/unreviewed-model';
+    },
+  ],
+  [
+    'second mount',
+    (h) => {
+      h.model.Mounts.push({ ...h.model.Mounts[0], Destination: '/extra' });
+    },
+  ],
+  [
+    'database environment',
+    (h) => {
+      h.model.Config.Env.push('DATABASE_URL=synthetic-secret');
+    },
+  ],
+  [
+    'Redis environment',
+    (h) => {
+      h.model.Config.Env.push('REDIS_URL=redis://synthetic-secret');
+    },
+  ],
+  [
+    'API environment',
+    (h) => {
+      h.model.Config.Env.push('APP_ROLE=moderation');
+    },
+  ],
+  [
+    'API credential',
+    (h) => {
+      h.model.Config.Env.push('MAX_BOT_TOKEN=synthetic-secret');
+    },
+  ],
+  [
+    'wrong project',
+    (h) => {
+      h.model.Config.Labels['com.docker.compose.project'] = 'other';
+    },
+  ],
+  [
+    'wrong service',
+    (h) => {
+      h.model.Config.Labels['com.docker.compose.service'] = 'unknown';
+    },
+  ],
+  [
+    'wrong name',
+    (h) => {
+      h.model.Name = '/infra-gemma-commercial-shadow-2';
+    },
+  ],
+  [
+    'oneoff',
+    (h) => {
+      h.model.Config.Labels['com.docker.compose.oneoff'] = 'True';
+    },
+  ],
+  [
+    'missing oneoff identity',
+    (h) => {
+      delete h.model.Config.Labels['com.docker.compose.oneoff'];
+    },
+  ],
+  [
+    'duplicate',
+    (h) => {
+      h.rows.push({ ...h.model, Id: digest('duplicate-model') });
+    },
+  ],
+  [
+    'created after owner',
+    (h) => {
+      h.model.Created = new Date(START + 1).toISOString();
+    },
+  ],
+  [
+    'started after owner',
+    (h) => {
+      h.model.State.StartedAt = new Date(START + 1).toISOString();
+    },
+  ],
+  [
+    'started at owner',
+    (h) => {
+      h.model.State.StartedAt = CONTRACT.ownerStartedAt;
+    },
+  ],
+  [
+    'invalid restart count',
+    (h) => {
+      h.model.RestartCount = -1;
+    },
+  ],
+  [
+    'not running',
+    (h) => {
+      h.model.State.Running = false;
+    },
+  ],
+  [
+    'wrong state status',
+    (h) => {
+      h.model.State.Status = 'exited';
+    },
+  ],
+  [
+    'paused',
+    (h) => {
+      h.model.State.Paused = true;
+    },
+  ],
+  [
+    'restarting',
+    (h) => {
+      h.model.State.Restarting = true;
+    },
+  ],
+  [
+    'dead',
+    (h) => {
+      h.model.State.Dead = true;
+    },
+  ],
+  [
+    'unhealthy',
+    (h) => {
+      h.model.State.Health.Status = 'unhealthy';
+    },
+  ],
+  [
+    'background image',
+    (h) => {
+      h.client.Image = `sha256:${'3'.repeat(64)}`;
+    },
+  ],
+  [
+    'background role',
+    (h) => {
+      h.client.Config.Env = [
+        'APP_ROLE=moderation-background',
+        'APP_SERVICE_NAME=api-moderation-background',
+      ];
+    },
+  ],
+  [
+    'duplicate background role',
+    (h) => {
+      h.client.Config.Env.push('APP_ROLE=moderation');
+    },
+  ],
+  [
+    'background service environment',
+    (h) => {
+      h.client.Config.Env[1] = 'APP_SERVICE_NAME=api-moderation';
+    },
+  ],
+  [
+    'background release protection',
+    (h) => {
+      h.client.Config.Labels['com.maxim.release-protected'] = 'false';
+    },
+  ],
+])
+  test(`shadow observer refuses ${name}`, () => {
+    const h = rawShadow();
+    change(h);
+    assert.throws(() => inspectShadow(h));
+  });
+
+for (const [name, change] of [
+  [
+    'added capability',
+    (host) => {
+      host.CapAdd = ['SYS_ADMIN'];
+    },
+  ],
+  [
+    'device',
+    (host) => {
+      host.Devices = [{ PathOnHost: '/dev/sda' }];
+    },
+  ],
+  [
+    'device request',
+    (host) => {
+      host.DeviceRequests = [{ Driver: 'nvidia', Count: -1 }];
+    },
+  ],
+  [
+    'device cgroup rule',
+    (host) => {
+      host.DeviceCgroupRules = ['a *:* rwm'];
+    },
+  ],
+  [
+    'inherited volume',
+    (host) => {
+      host.VolumesFrom = ['other'];
+    },
+  ],
+  [
+    'privileged',
+    (host) => {
+      host.Privileged = true;
+    },
+  ],
+  [
+    'host PID',
+    (host) => {
+      host.PidMode = 'host';
+    },
+  ],
+  [
+    'host IPC',
+    (host) => {
+      host.IpcMode = 'host';
+    },
+  ],
+  [
+    'host UTS',
+    (host) => {
+      host.UTSMode = 'host';
+    },
+  ],
+  [
+    'host user namespace',
+    (host) => {
+      host.UsernsMode = 'host';
+    },
+  ],
+  [
+    'host network',
+    (host) => {
+      host.NetworkMode = 'host';
+    },
+  ],
+  [
+    'extra security option',
+    (host) => {
+      host.SecurityOpt.push('seccomp:unconfined');
+    },
+  ],
+  [
+    'duplicate security option',
+    (host) => {
+      host.SecurityOpt.push('no-new-privileges:true');
+    },
+  ],
+  [
+    'missing capability metadata',
+    (host) => {
+      delete host.CapAdd;
+    },
+  ],
+  [
+    'writable root',
+    (host) => {
+      host.ReadonlyRootfs = false;
+    },
+  ],
+  [
+    'raised CPU',
+    (host) => {
+      host.NanoCpus += 1e9;
+    },
+  ],
+  [
+    'raised memory',
+    (host) => {
+      host.Memory += 1024;
+    },
+  ],
+  [
+    'raised swap',
+    (host) => {
+      host.MemorySwap += 1024;
+    },
+  ],
+  [
+    'raised PID limit',
+    (host) => {
+      host.PidsLimit += 1;
+    },
+  ],
+  [
+    'published port',
+    (host) => {
+      host.PortBindings = { '8080/tcp': [{ HostPort: '8080' }] };
+    },
+  ],
+])
+  test(`shadow observer refuses ${name}`, () => {
+    const h = rawShadow();
+    change(h.model.HostConfig);
+    assert.throws(() => inspectShadow(h));
+  });
+
+for (const [name, change] of [
+  [
+    'external network',
+    (h) => {
+      h.network.Internal = false;
+    },
+  ],
+  [
+    'another driver',
+    (h) => {
+      h.network.Driver = 'overlay';
+    },
+  ],
+  [
+    'another scope',
+    (h) => {
+      h.network.Scope = 'swarm';
+    },
+  ],
+  [
+    'another project',
+    (h) => {
+      h.network.Labels['com.docker.compose.project'] = 'other';
+    },
+  ],
+  [
+    'another compose network',
+    (h) => {
+      h.network.Labels['com.docker.compose.network'] = 'default';
+    },
+  ],
+  [
+    'unknown peer',
+    (h) => {
+      h.network.Containers[digest('unknown-peer')] = {
+        Name: 'unknown',
+        EndpointID: digest('unknown-endpoint'),
+      };
+    },
+  ],
+  [
+    'missing background peer',
+    (h) => {
+      delete h.network.Containers[h.client.Id];
+    },
+  ],
+  [
+    'peer name',
+    (h) => {
+      h.network.Containers[h.client.Id].Name = 'infra-api-admin-1';
+    },
+  ],
+  [
+    'peer endpoint',
+    (h) => {
+      h.network.Containers[h.client.Id].EndpointID = digest('replacement-endpoint');
+    },
+  ],
+  [
+    'model endpoint',
+    (h) => {
+      h.model.NetworkSettings.Networks[SHADOW_NETWORK].EndpointID = digest('replacement-endpoint');
+    },
+  ],
+  [
+    'model network ID',
+    (h) => {
+      h.model.NetworkSettings.Networks[SHADOW_NETWORK].NetworkID = digest('replacement-network');
+    },
+  ],
+  [
+    'client network ID',
+    (h) => {
+      h.client.NetworkSettings.Networks[SHADOW_NETWORK].NetworkID = digest('replacement-network');
+    },
+  ],
+  [
+    'uninspected peer ID',
+    (h) => {
+      const peer = h.network.Containers[h.client.Id];
+      delete h.network.Containers[h.client.Id];
+      h.network.Containers[digest('same-name-other-client')] = peer;
+    },
+  ],
+  [
+    'additional model network',
+    (h) => {
+      h.model.NetworkSettings.Networks.infra_default = { NetworkID: h.options.context.networkId };
+    },
+  ],
+])
+  test(`shadow observer refuses ${name}`, () => {
+    const h = rawShadow();
+    change(h);
+    assert.throws(() => inspectShadow(h));
+  });
+
+test('shadow proof binds the consumer to the same required background generation', () => {
+  const { request, observation } = shadowObservation();
+  const proof = buildPreadmissionProof(request, observation);
+  assert.equal(proof.runtime.shadow.runtimeProfile, 'qwen35-9b-slots-v1');
+  const background = proof.runtime.services.find(
+    (row) => row.serviceName === 'api-moderation-background',
+  );
+  assert.equal(proof.runtime.shadow.network.clientContainerSha256, background.containerSha256);
+  observation.runtime.shadow.network.clientContainerSha256 = digest('different-background');
+  assert.throws(() => buildPreadmissionProof(request, observation));
+});
+test('proof independently validates shadow primitive facts rather than trusting an attested boolean or config hash', () => {
+  const { request, observation } = shadowObservation();
+  const original = observation.runtime.shadow;
+  for (const change of [
+    (value) => {
+      value.runtimeProfile = 'qwen35-9b-no-slots';
+    },
+    (value) => {
+      value.commandSha256 = 'f'.repeat(64);
+    },
+    (value) => {
+      value.configuration.capAddCount = 1;
+    },
+    (value) => {
+      value.configuration.privileged = true;
+    },
+    (value) => {
+      value.configuration.ipcMode = 'host';
+    },
+    (value) => {
+      value.network.internal = false;
+    },
+    (value) => {
+      value.network.peerCount = 3;
+    },
+    (value) => {
+      value.network.clientImageId = `sha256:${'4'.repeat(64)}`;
+    },
+    (value) => {
+      value.containerSha256 = { toString: () => digest('coerced') };
+    },
+  ]) {
+    const value = structuredClone(original);
+    change(value);
+    observation.runtime.shadow = value;
+    assert.throws(() => buildPreadmissionProof(request, observation));
+  }
+});
+test('proof retains shadow generation and network identity but drops raw configuration and secret extensions', () => {
+  const h = rawShadow();
+  h.model.Config.syntheticSecret = 'synthetic-shadow-secret';
+  h.model.HostConfig.syntheticSecret = 'synthetic-host-secret';
+  h.network.syntheticSecret = 'synthetic-network-secret';
+  const shadow = inspectShadow(h);
+  const { request, observation } = shadowObservation();
+  observation.runtime.shadow = shadow;
+  const original = buildPreadmissionProof(request, observation);
+  Object.defineProperty(shadow, 'secretExtension', {
+    enumerable: true,
+    get() {
+      throw new Error('untrusted extension getter executed');
+    },
+  });
+  Object.defineProperty(shadow.configuration, 'secretExtension', {
+    enumerable: true,
+    get() {
+      throw new Error('untrusted configuration extension getter executed');
+    },
+  });
+  Object.defineProperty(shadow.network, 'secretExtension', {
+    enumerable: true,
+    get() {
+      throw new Error('untrusted network extension getter executed');
+    },
+  });
+  assert.deepEqual(buildPreadmissionProof(request, observation), original);
+  const serialized = JSON.stringify(original);
+  for (const secret of [
+    'synthetic-shadow-secret',
+    'synthetic-host-secret',
+    'synthetic-network-secret',
+    h.model.Id,
+    h.client.Id,
+    h.network.Id,
+    'Config',
+    'Env',
+  ])
+    assert.equal(serialized.includes(secret), false);
+});
+for (const [name, change] of [
+  [
+    'model generation',
+    (value) => {
+      value.startedAt = '2026-11-08T12:00:00.000Z';
+      value.restartCount += 1;
+    },
+  ],
+  [
+    'model identity',
+    (value) => {
+      value.containerSha256 = digest('new-model');
+    },
+  ],
+  [
+    'network identity',
+    (value) => {
+      value.network.networkSha256 = digest('new-network');
+    },
+  ],
+  [
+    'model endpoint',
+    (value) => {
+      value.network.modelEndpointSha256 = digest('new-endpoint');
+    },
+  ],
+  [
+    'consumer endpoint',
+    (value) => {
+      value.network.clientEndpointSha256 = digest('new-endpoint');
+    },
+  ],
+  [
+    'optional presence',
+    (_value, runtime) => {
+      runtime.shadow = null;
+    },
+  ],
+])
+  test(`shadow ${name} drift prevents archive between preview and apply`, async () => {
+    const { request, observation } = shadowObservation();
+    const preview = await recoverPreadmission(request, {
+      observe: async () => structuredClone(observation),
+    });
+    change(observation.runtime.shadow, observation.runtime);
+    await assert.rejects(
+      recoverPreadmission(
+        { ...request, mode: 'apply', proofSha256: preview.proofSha256 },
+        {
+          observe: async () => observation,
+          archive: async () => assert.fail('changed shadow archived'),
+        },
+      ),
+      { message: 'preview_proof_changed' },
+    );
+  });
+test('the third durable-proof readback also binds model and endpoint generations', async (t) => {
+  const { request, observation } = shadowObservation();
+  const proof = buildPreadmissionProof(request, observation);
+  const root = await mkdtemp(join(tmpdir(), 'maxim-shadow-third-proof-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ownerPath = join(root, 'owner');
+  const ownerBytes = Buffer.from('synthetic-owner-bytes');
+  await writeFile(ownerPath, ownerBytes, { mode: 0o600 });
+  const stat = await lstat(ownerPath);
+  observation.runtime.shadow.network.modelEndpointSha256 = digest('changed-third-endpoint');
+  let reobserved = false;
+  await assert.rejects(
+    archivePreadmission({
+      ownerPath,
+      archiveDirectory: join(root, 'archive'),
+      operatorUid: uid,
+      ownerBytes,
+      ownerIdentity: { dev: stat.dev, ino: stat.ino, sha256: digest(ownerBytes) },
+      proof,
+      assertLocks: async () => {},
+      reobserve: async () => {
+        reobserved = true;
+        if (proofDigest(buildPreadmissionProof(request, observation)) !== proofDigest(proof))
+          throw new Error('synthetic_shadow_third_readback_changed');
+      },
+    }),
+    { message: 'synthetic_shadow_third_readback_changed' },
+  );
+  assert.equal(reobserved, true);
+  assert.deepEqual(await readFile(ownerPath), ownerBytes);
+});
+
+for (const mode of [0o644, 0o664])
+  test(`fixed memory loader accepts ordinary operator program mode ${mode.toString(8)} and invokes real Slots guards`, async () => {
+    const sources = await shadowSourceDescriptors(mode);
+    const runtime = await preadmission.loadPreadmissionShadowRuntime(sources);
+    const h = rawShadow();
+    assert.equal(runtime.COMMERCIAL_LLM_SLOTS_RUNTIME.runtimeProfile, 'qwen35-9b-slots-v1');
+    assert.equal(
+      runtime.assertCommercialLlmContainer(h.model, {
+        profile: runtime.COMMERCIAL_LLM_SLOTS_RUNTIME,
+      }),
+      h.model.Id,
+    );
+    assert.equal(runtime.assertCommercialLlmImage(h.image), h.image.Id);
+  });
+for (const [name, change] of [
+  [
+    'missing transitive source',
+    (value) => {
+      delete value['infra/scripts/release-manifest.mjs'];
+    },
+  ],
+  [
+    'unknown graph edge source',
+    (value) => {
+      value['infra/scripts/unknown.mjs'] = { bytes: Buffer.from('throw 1') };
+    },
+  ],
+  [
+    'changed source byte',
+    (value) => {
+      value['infra/scripts/commercial-llm-profiles.mjs'].bytes[0] ^= 1;
+    },
+  ],
+  [
+    'oversized source',
+    (value) => {
+      value['infra/scripts/commercial-llm-runtime.mjs'].bytes = Buffer.alloc(72003);
+    },
+  ],
+  [
+    'different source operator',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].uid += 1;
+    },
+  ],
+  [
+    'different source primary group',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].gid += 1;
+    },
+  ],
+  [
+    'multiple links',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].links = 2;
+    },
+  ],
+  [
+    'world write',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].mode = 0o666;
+    },
+  ],
+  [
+    'special permission bit',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].mode = 0o4664;
+    },
+  ],
+  [
+    'executable source',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].mode = 0o764;
+    },
+  ],
+  [
+    'coercible mode',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].mode = { valueOf: () => 0o664 };
+    },
+  ],
+  [
+    'non-Buffer bytes',
+    (value) => {
+      value['infra/scripts/release-manifest.mjs'].bytes = 'synthetic';
+    },
+  ],
+])
+  test(`fixed memory loader refuses ${name} before import`, async () => {
+    const sources = await shadowSourceDescriptors();
+    change(sources);
+    await assert.rejects(preadmission.loadPreadmissionShadowRuntime(sources));
+  });
+test('fixed memory loader refuses accessor source metadata without executing it', async () => {
+  const sources = await shadowSourceDescriptors();
+  let getterCalls = 0;
+  Object.defineProperty(sources['infra/scripts/release-manifest.mjs'], 'bytes', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return Buffer.alloc(24579);
+    },
+  });
+  await assert.rejects(preadmission.loadPreadmissionShadowRuntime(sources));
+  assert.equal(getterCalls, 0);
+});
+test('shadow projection refuses primitive-field accessors and sparse structured values', () => {
+  const { request, observation } = shadowObservation();
+  const original = observation.runtime.shadow;
+  let getterCalls = 0;
+  const accessor = structuredClone(original);
+  Object.defineProperty(accessor, 'containerSha256', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return digest('synthetic');
+    },
+  });
+  observation.runtime.shadow = accessor;
+  assert.throws(() => buildPreadmissionProof(request, observation));
+  assert.equal(getterCalls, 0);
+  observation.runtime.shadow = { ...original, configuration: new Array(10) };
+  assert.throws(() => buildPreadmissionProof(request, observation));
+});
+test('shadow evidence cannot survive model absence or bind a different required background', () => {
+  const h = rawShadow();
+  const shadow = inspectShadow(h);
+  h.rows.pop();
+  assert.throws(() => inspectPreadmissionRuntime(h.rows, { ...h.options, shadow }));
+  h.rows.push(h.model);
+  h.client.Id = digest('replacement-background');
+  assert.throws(() => inspectPreadmissionRuntime(h.rows, { ...h.options, shadow }));
+});
+test('proof requires all seven exact source pins when admitting shadow evidence', () => {
+  const { request, observation } = shadowObservation();
+  for (const [path, [, hash]] of Object.entries(SHADOW_SOURCES)) {
+    delete observation.source.hashes[path];
+    assert.throws(() => buildPreadmissionProof(request, observation));
+    observation.source.hashes[path] = '0'.repeat(64);
+    assert.throws(() => buildPreadmissionProof(request, observation));
+    observation.source.hashes[path] = hash;
+  }
+});
+test('fixed memory loader refuses map, sparse array and top-level getters before reading source data', async () => {
+  const sources = await shadowSourceDescriptors();
+  await assert.rejects(
+    preadmission.loadPreadmissionShadowRuntime(new Map(Object.entries(sources))),
+  );
+  await assert.rejects(preadmission.loadPreadmissionShadowRuntime(new Array(7)));
+  let getterCalls = 0;
+  const accessor = { ...sources };
+  Object.defineProperty(accessor, 'infra/scripts/release-manifest.mjs', {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return sources['infra/scripts/release-manifest.mjs'];
+    },
+  });
+  await assert.rejects(preadmission.loadPreadmissionShadowRuntime(accessor));
+  assert.equal(getterCalls, 0);
 });

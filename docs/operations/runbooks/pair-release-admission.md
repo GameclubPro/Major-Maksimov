@@ -144,6 +144,15 @@ secretless isolation profile. Its latest process start and restart count are rec
 bound to the preview; their causes and full history remain unproved. OCR process continuity
 does not establish or invalidate the separate durable admission barrier.
 
+The existing optional Qwen auxiliary retains the service name `gemma-commercial-shadow`.
+Recovery admits only its pinned slots profile after checking the historical source graph,
+exact image and container configuration, pre-owner generation, containment and internal
+network. The network must have exactly the model and the same `api-moderation-background`
+generation already checked in the API fleet. Source modules are imported from verified bytes
+in memory. The explicit auxiliary configuration and network projection joins every repeated
+proof comparison; unknown profiles, peers or changed generations refuse recovery. This
+attests the configured model identity without reading model contents or making HTTP requests.
+
 From a clean controller with exact successful `Required` and CodeQL checks, retain the preview:
 
 ```bash
