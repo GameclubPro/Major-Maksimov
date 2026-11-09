@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { open, lstat, readFile, readlink, mkdir, opendir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify, types } from 'node:util';
 import { once } from 'node:events';
 import { dirname, join, parse } from 'node:path';
 import { createRequire } from 'node:module';
@@ -81,6 +81,517 @@ const canonical = (value) =>
         )
       : value;
 const canonicalDigest = (value) => digest(JSON.stringify(canonical(value)));
+
+const SHADOW_SERVICE = 'gemma-commercial-shadow';
+const SHADOW_NAME = '/infra-gemma-commercial-shadow-1';
+const SHADOW_NETWORK = 'infra_commercial_llm_internal';
+const SHADOW_PROFILE = 'qwen35-9b-slots-v1';
+const SHADOW_IMAGE = 'sha256:8badce92ec1860c764ca19c736422e81a12c65d76da57313651a7804bfe6ed40';
+const SHADOW_MODEL = 'dc2a39aef291f91a9116ad214058da0d86eb648743a124bd8c333787c4b9c91c';
+const SHADOW_COMMAND = 'ab089ab1c6bc2720eb9414110d4eb8248e9b3687fe211401eabea5d18f43e898';
+// FLAG: Only these seven historical 4345 blobs and nine literal import edges may
+// supply the pure shadow guards. Import verified memory, never reopened checkout paths.
+const shadowGraph = [
+  [
+    'release-manifest.mjs',
+    24579,
+    '0d552d61088c74aafd001063a900042e124774da17f4564b189f6101eebb5c2d',
+    [],
+  ],
+  [
+    'commercial-llm-workstation-profile.mjs',
+    2400,
+    'ea78495881193d96ec1dd636125a75beaee96e42596d126b5bed4a83ff3bf29d',
+    [],
+  ],
+  [
+    'commercial-llm-profiles.mjs',
+    4950,
+    '604d3457ad07f87a8f2d6635fe2117df1f2267ccad6bfceb0d0b67fb68758fae',
+    [],
+  ],
+  [
+    'commercial-llm-cpu-recovery.mjs',
+    13017,
+    'f8ba29b00114d2608acb5b9a4d16d38bb73fd678f949f4d1e3a02e39ab9ead96',
+    [],
+  ],
+  [
+    'commercial-llm-cpu-controller-identity.mjs',
+    3652,
+    'd75433d47c4e6a7d9349c92fa7dc09ab02999b488948fbded2de19d0e27e7592',
+    ['commercial-llm-cpu-recovery.mjs'],
+  ],
+  [
+    'commercial-llm-pool-profile.mjs',
+    4538,
+    'b3040adb42e3f62879cfcf5c5e23609c3e36850272c687b4fc1cc8572560419b',
+    ['commercial-llm-workstation-profile.mjs', 'commercial-llm-profiles.mjs'],
+  ],
+  [
+    'commercial-llm-runtime.mjs',
+    72002,
+    '80bf5e81a2a19606c261faad5eac82bc6b57f5350681e5f7548366f268e44ec4',
+    [
+      'release-manifest.mjs',
+      'commercial-llm-workstation-profile.mjs',
+      'commercial-llm-pool-profile.mjs',
+      'commercial-llm-cpu-recovery.mjs',
+      'commercial-llm-cpu-controller-identity.mjs',
+      'commercial-llm-profiles.mjs',
+    ],
+  ],
+];
+const shadowEnvironment = [
+  'LLAMA_ARG_HOST=0.0.0.0',
+  'LLAMA_ARG_PORT=8080',
+  'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+];
+const shadowMounts = [
+  {
+    type: 'bind',
+    source: `/var/lib/maxim-deploy/commercial-llm/models/${SHADOW_MODEL}.gguf`,
+    destination: '/models/qwen35-9b.gguf',
+    readOnly: true,
+  },
+];
+const shadowConfiguration = Object.freeze({
+  user: '1000:1000',
+  entrypointSha256: digest(JSON.stringify(['/app/llama-server'])),
+  environmentSha256: digest(JSON.stringify([...shadowEnvironment].sort())),
+  commandSha256: SHADOW_COMMAND,
+  mountsSha256: canonicalDigest(shadowMounts),
+  readonlyRootfs: true,
+  init: true,
+  nanoCpus: 6e9,
+  cpuShares: 128,
+  memory: 12 * 1024 ** 3,
+  memorySwap: 12 * 1024 ** 3,
+  pidsLimit: 128,
+  capDropAll: true,
+  capAddCount: 0,
+  devicesCount: 0,
+  deviceRequestsCount: 0,
+  deviceCgroupRulesCount: 0,
+  volumesFromCount: 0,
+  privileged: false,
+  pidMode: '',
+  ipcMode: 'private',
+  utsMode: '',
+  usernsMode: '',
+  networkMode: SHADOW_NETWORK,
+  securityOptSha256: digest(JSON.stringify(['no-new-privileges:true'])),
+  tmpfsSha256: canonicalDigest({
+    path: '/tmp',
+    sizeBytes: 64 * 1024 ** 2,
+    mode: '1777',
+    uid: '1000',
+    gid: '1000',
+  }),
+  publishedPortCount: 0,
+  mountCount: 1,
+});
+function dataRecord(value, code) {
+  requireFact(
+    record(value) &&
+      !types.isProxy(value) &&
+      [Object.prototype, null].includes(Object.getPrototypeOf(value)),
+    code,
+  );
+  return value;
+}
+function dataField(value, key, code = 'shadow_projection_unproved') {
+  dataRecord(value, code);
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  requireFact(descriptor && Object.hasOwn(descriptor, 'value'), code);
+  return descriptor.value;
+}
+const shadowHash = (value) => typeof value === 'string' && HASH.test(value);
+function denseArray(value, maximum, code) {
+  requireFact(Array.isArray(value) && value.length <= maximum, code);
+  for (let index = 0; index < value.length; index++) requireFact(Object.hasOwn(value, index), code);
+  return value;
+}
+
+export async function loadPreadmissionShadowRuntime(sources) {
+  const code = 'shadow_source_unproved';
+  dataRecord(sources, code);
+  requireFact(Reflect.ownKeys(sources).length === shadowGraph.length, code);
+  const copies = new Map();
+  // FLAG: Verify the complete closed graph before importing any of its modules.
+  for (const [name, size, hash] of shadowGraph) {
+    const source = dataField(sources, `infra/scripts/${name}`, code);
+    const bytes = dataField(source, 'bytes', code);
+    requireFact(
+      Buffer.isBuffer(bytes) &&
+        bytes.length === size &&
+        dataField(source, 'uid', code) === process.getuid() &&
+        dataField(source, 'gid', code) === process.getgid() &&
+        [0o644, 0o664].includes(dataField(source, 'mode', code)) &&
+        dataField(source, 'links', code) === 1,
+      code,
+    );
+    const copy = Buffer.from(bytes);
+    requireFact(digest(copy) === hash, code);
+    copies.set(name, copy);
+  }
+  const urls = new Map();
+  for (const [name, , , dependencies] of shadowGraph) {
+    let text = copies.get(name).toString('utf8');
+    for (const dependency of dependencies) {
+      const token = `'./${dependency}'`;
+      requireFact(text.split(token).length === 2 && urls.has(dependency), code);
+      text = text.replace(token, `'${urls.get(dependency)}'`);
+    }
+    const url = `data:text/javascript;base64,${Buffer.from(text).toString('base64')}`;
+    requireFact(url.length <= 1024 * 1024, code);
+    urls.set(name, url);
+  }
+  const runtime = await import(urls.get('commercial-llm-runtime.mjs'));
+  return Object.freeze({
+    COMMERCIAL_LLM_SLOTS_RUNTIME: runtime.COMMERCIAL_LLM_SLOTS_RUNTIME,
+    assertCommercialLlmContainer: runtime.assertCommercialLlmContainer,
+    assertCommercialLlmImage: runtime.assertCommercialLlmImage,
+    assertCommercialLlmApiClient: runtime.assertCommercialLlmApiClient,
+  });
+}
+
+function shadowCandidates(rows) {
+  return rows.filter(
+    (row) =>
+      row.Name === SHADOW_NAME ||
+      row.Config?.Labels?.['com.docker.compose.service'] === SHADOW_SERVICE,
+  );
+}
+function rawShadowConfiguration(container) {
+  const code = 'shadow_runtime_unproved';
+  const config = container.Config;
+  const host = container.HostConfig;
+  requireFact(record(config) && record(host), code);
+  const strings = (value) => {
+    denseArray(value, 64, code);
+    requireFact(
+      value.every((entry) => typeof entry === 'string'),
+      code,
+    );
+    return value;
+  };
+  const emptyCount = (value) => {
+    requireFact(value === null || (Array.isArray(value) && value.length === 0), code);
+    return 0;
+  };
+  const mounts = denseArray(container.Mounts, 2, code).map((mount) => ({
+    type: mount.Type,
+    source: mount.Source,
+    destination: mount.Destination,
+    readOnly: mount.RW === false,
+  }));
+  const tmpfs = Object.entries(host.Tmpfs ?? {});
+  requireFact(
+    tmpfs.length === 1 && tmpfs[0][0] === '/tmp' && typeof tmpfs[0][1] === 'string',
+    code,
+  );
+  const options = {};
+  for (const option of tmpfs[0][1].split(',')) {
+    if (option === 'rw') continue;
+    const split = option.indexOf('=');
+    requireFact(split > 0 && !Object.hasOwn(options, option.slice(0, split)), code);
+    options[option.slice(0, split)] = option.slice(split + 1);
+  }
+  requireFact(
+    Object.keys(options).length === 4 &&
+      ['size', 'mode', 'uid', 'gid'].every((key) => Object.hasOwn(options, key)),
+    code,
+  );
+  const projected = {
+    user: config.User,
+    entrypointSha256: digest(JSON.stringify(strings(config.Entrypoint))),
+    environmentSha256: digest(JSON.stringify([...strings(config.Env)].sort())),
+    commandSha256: digest(JSON.stringify(strings(config.Cmd))),
+    mountsSha256: canonicalDigest(mounts),
+    readonlyRootfs: host.ReadonlyRootfs,
+    init: host.Init,
+    nanoCpus: host.NanoCpus,
+    cpuShares: host.CpuShares,
+    memory: host.Memory,
+    memorySwap: host.MemorySwap,
+    pidsLimit: host.PidsLimit,
+    capDropAll: JSON.stringify(strings(host.CapDrop)) === '["ALL"]',
+    capAddCount: emptyCount(host.CapAdd),
+    devicesCount: emptyCount(host.Devices),
+    deviceRequestsCount: emptyCount(host.DeviceRequests),
+    deviceCgroupRulesCount: emptyCount(host.DeviceCgroupRules),
+    volumesFromCount: emptyCount(host.VolumesFrom),
+    privileged: host.Privileged,
+    pidMode: host.PidMode,
+    ipcMode: host.IpcMode,
+    utsMode: host.UTSMode,
+    usernsMode: host.UsernsMode,
+    networkMode: host.NetworkMode,
+    securityOptSha256: digest(JSON.stringify(strings(host.SecurityOpt))),
+    tmpfsSha256: canonicalDigest({
+      path: '/tmp',
+      sizeBytes: ['64m', '67108864'].includes(options.size) ? 64 * 1024 ** 2 : null,
+      mode: options.mode,
+      uid: options.uid,
+      gid: options.gid,
+    }),
+    publishedPortCount: Object.keys(host.PortBindings ?? {}).length,
+    mountCount: mounts.length,
+  };
+  for (const [key, expected] of Object.entries(shadowConfiguration))
+    requireFact(typeof projected[key] === typeof expected && projected[key] === expected, code);
+  return projected;
+}
+
+// FLAG: This is a finite configuration attestation for the already-running Slots
+// auxiliary. It proves no model request, receipt, semantic outcome or recovery effect.
+function projectPreadmissionShadow(value, { imageId, background } = {}) {
+  if (value === null) return null;
+  const code = 'shadow_projection_unproved';
+  const field = (key) => dataField(value, key, code);
+  const configuration = dataField(value, 'configuration', code);
+  const projectedConfiguration = {};
+  for (const [key, expected] of Object.entries(shadowConfiguration)) {
+    const actual = dataField(configuration, key, code);
+    requireFact(typeof actual === typeof expected && actual === expected, code);
+    projectedConfiguration[key] = actual;
+  }
+  const configurationSha256 = canonicalDigest(projectedConfiguration);
+  requireFact(field('configurationSha256') === configurationSha256, code);
+  const network = dataField(value, 'network', code);
+  const projectedNetwork = {};
+  for (const [key, expected] of Object.entries({
+    name: SHADOW_NETWORK,
+    internal: true,
+    driver: 'bridge',
+    scope: 'local',
+    project: 'infra',
+    composeNetwork: 'commercial_llm_internal',
+    clientServiceName: 'api-moderation-background',
+    peerCount: 2,
+  })) {
+    const actual = dataField(network, key, code);
+    requireFact(typeof actual === typeof expected && actual === expected, code);
+    projectedNetwork[key] = actual;
+  }
+  for (const key of [
+    'networkSha256',
+    'modelEndpointSha256',
+    'clientContainerSha256',
+    'clientEndpointSha256',
+  ]) {
+    const actual = dataField(network, key, code);
+    requireFact(shadowHash(actual), code);
+    projectedNetwork[key] = actual;
+  }
+  const clientImageId = dataField(network, 'clientImageId', code);
+  requireFact(
+    typeof clientImageId === 'string' &&
+      IMAGE.test(clientImageId) &&
+      clientImageId === imageId &&
+      projectedNetwork.modelEndpointSha256 !== projectedNetwork.clientEndpointSha256 &&
+      (!background || projectedNetwork.clientContainerSha256 === background.containerSha256),
+    code,
+  );
+  projectedNetwork.clientImageId = clientImageId;
+  requireFact(
+    field('schemaVersion') === 1 &&
+      field('serviceName') === SHADOW_SERVICE &&
+      field('runtimeProfile') === SHADOW_PROFILE &&
+      field('imageId') === SHADOW_IMAGE &&
+      field('modelSha256') === SHADOW_MODEL &&
+      field('commandSha256') === SHADOW_COMMAND &&
+      shadowHash(field('containerSha256')) &&
+      field('containerSha256') !== projectedNetwork.clientContainerSha256 &&
+      field('running') === true &&
+      field('healthy') === true &&
+      validDate(field('createdAt')) &&
+      Date.parse(field('createdAt')) < started &&
+      validDate(field('startedAt')) &&
+      Date.parse(field('startedAt')) < started &&
+      Date.parse(field('createdAt')) <= Date.parse(field('startedAt')) &&
+      Number.isSafeInteger(field('restartCount')) &&
+      field('restartCount') >= 0,
+    code,
+  );
+  return {
+    schemaVersion: 1,
+    serviceName: SHADOW_SERVICE,
+    runtimeProfile: SHADOW_PROFILE,
+    containerSha256: field('containerSha256'),
+    imageId: SHADOW_IMAGE,
+    modelSha256: SHADOW_MODEL,
+    commandSha256: SHADOW_COMMAND,
+    createdAt: field('createdAt'),
+    startedAt: field('startedAt'),
+    restartCount: field('restartCount'),
+    running: true,
+    healthy: true,
+    configuration: projectedConfiguration,
+    configurationSha256,
+    network: projectedNetwork,
+  };
+}
+
+export function inspectPreadmissionShadow(rows, { imageId, image, network, runtime }) {
+  const code = 'shadow_runtime_unproved';
+  denseArray(rows, 128, code);
+  requireFact(
+    rows.every((row) => record(row) && shadowHash(row.Id)) &&
+      new Set(rows.map((row) => row.Id)).size === rows.length,
+    code,
+  );
+  const candidates = shadowCandidates(rows);
+  if (candidates.length === 0) return null;
+  requireFact(candidates.length === 1, code);
+  const model = candidates[0];
+  const clientRows = rows.filter(
+    (row) =>
+      row.Name === '/infra-api-moderation-background-1' ||
+      (row.Config?.Labels?.['com.docker.compose.project'] === 'infra' &&
+        row.Config?.Labels?.['com.docker.compose.service'] === 'api-moderation-background'),
+  );
+  requireFact(
+    clientRows.length === 1 &&
+      model.Name === SHADOW_NAME &&
+      model.Config?.Labels?.['com.docker.compose.oneoff'] === 'False' &&
+      model.State?.Status === 'running' &&
+      model.State.Running === true &&
+      model.State.Paused === false &&
+      model.State.Restarting === false &&
+      model.State.Dead === false &&
+      runtime?.COMMERCIAL_LLM_SLOTS_RUNTIME?.runtimeProfile === SHADOW_PROFILE &&
+      typeof runtime.assertCommercialLlmContainer === 'function' &&
+      typeof runtime.assertCommercialLlmImage === 'function' &&
+      typeof runtime.assertCommercialLlmApiClient === 'function',
+    code,
+  );
+  const client = clientRows[0];
+  requireFact(client.Name === '/infra-api-moderation-background-1', code);
+  runtime.assertCommercialLlmContainer(model, { profile: runtime.COMMERCIAL_LLM_SLOTS_RUNTIME });
+  runtime.assertCommercialLlmImage(image);
+  runtime.assertCommercialLlmApiClient(client, { service: 'api-moderation-background', imageId });
+  const configuration = rawShadowConfiguration(model);
+  const netCode = 'shadow_network_unproved';
+  const modelEndpoint = model.NetworkSettings?.Networks?.[SHADOW_NETWORK];
+  const clientEndpoint = client.NetworkSettings?.Networks?.[SHADOW_NETWORK];
+  const peers = Object.entries(network?.Containers ?? {});
+  requireFact(
+    network?.Name === SHADOW_NETWORK &&
+      shadowHash(network.Id) &&
+      network.Internal === true &&
+      network.Driver === 'bridge' &&
+      network.Scope === 'local' &&
+      network.Labels?.['com.docker.compose.project'] === 'infra' &&
+      network.Labels?.['com.docker.compose.network'] === 'commercial_llm_internal' &&
+      modelEndpoint?.NetworkID === network.Id &&
+      clientEndpoint?.NetworkID === network.Id &&
+      shadowHash(modelEndpoint?.EndpointID) &&
+      shadowHash(clientEndpoint?.EndpointID) &&
+      peers.length === 2 &&
+      peers.every(
+        ([id, peer]) =>
+          (id === model.Id &&
+            peer?.Name === SHADOW_NAME.slice(1) &&
+            peer.EndpointID === modelEndpoint.EndpointID) ||
+          (id === client.Id &&
+            peer?.Name === client.Name.slice(1) &&
+            peer.EndpointID === clientEndpoint.EndpointID),
+      ),
+    netCode,
+  );
+  return projectPreadmissionShadow(
+    {
+      schemaVersion: 1,
+      serviceName: SHADOW_SERVICE,
+      runtimeProfile: SHADOW_PROFILE,
+      containerSha256: digest(model.Id),
+      imageId: model.Image,
+      modelSha256: SHADOW_MODEL,
+      commandSha256: configuration.commandSha256,
+      createdAt: model.Created,
+      startedAt: model.State.StartedAt,
+      restartCount: model.RestartCount,
+      running: model.State.Running,
+      healthy: model.State.Health.Status === 'healthy',
+      configuration,
+      configurationSha256: canonicalDigest(configuration),
+      network: {
+        name: network.Name,
+        networkSha256: digest(network.Id),
+        internal: network.Internal,
+        driver: network.Driver,
+        scope: network.Scope,
+        project: network.Labels['com.docker.compose.project'],
+        composeNetwork: network.Labels['com.docker.compose.network'],
+        modelEndpointSha256: digest(modelEndpoint.EndpointID),
+        clientServiceName: 'api-moderation-background',
+        clientContainerSha256: digest(client.Id),
+        clientImageId: client.Image,
+        clientEndpointSha256: digest(clientEndpoint.EndpointID),
+        peerCount: peers.length,
+      },
+    },
+    { imageId },
+  );
+}
+
+function bindPreadmissionShadow(rows, shadow, imageId) {
+  const candidates = shadowCandidates(rows);
+  if (shadow === null) {
+    requireFact(candidates.length === 0, 'unexpected_maxim_container');
+    return null;
+  }
+  const projected = projectPreadmissionShadow(shadow, { imageId });
+  const model = candidates[0];
+  const client = rows.find(
+    (row) =>
+      row.Config?.Labels?.['com.docker.compose.project'] === 'infra' &&
+      row.Config.Labels['com.docker.compose.service'] === 'api-moderation-background',
+  );
+  const modelEndpoint = model?.NetworkSettings?.Networks?.[SHADOW_NETWORK];
+  const clientEndpoint = client?.NetworkSettings?.Networks?.[SHADOW_NETWORK];
+  requireFact(
+    candidates.length === 1 &&
+      model?.Name === SHADOW_NAME &&
+      model.Config?.Labels?.['com.docker.compose.project'] === 'infra' &&
+      model.Config.Labels['com.docker.compose.service'] === SHADOW_SERVICE &&
+      model.Config.Labels['com.docker.compose.oneoff'] === 'False' &&
+      model.Config.Labels['com.maxim.commercial-llm-shadow'] === 'true' &&
+      model.Config.Labels['com.maxim.commercial-llm-model-sha256'] === SHADOW_MODEL &&
+      model.Config.Image === `ghcr.io/ggml-org/llama.cpp@${SHADOW_IMAGE}` &&
+      Object.keys(model.NetworkSettings?.Networks ?? {}).length === 1 &&
+      digest(model.Id) === projected.containerSha256 &&
+      model.Image === projected.imageId &&
+      model.Created === projected.createdAt &&
+      model.State?.StartedAt === projected.startedAt &&
+      model.RestartCount === projected.restartCount &&
+      model.State.Running === true &&
+      model.State.Status === 'running' &&
+      model.State.Paused === false &&
+      model.State.Restarting === false &&
+      model.State.Dead === false &&
+      model.State.Health?.Status === 'healthy' &&
+      canonicalDigest(rawShadowConfiguration(model)) === projected.configurationSha256 &&
+      client &&
+      digest(client.Id) === projected.network.clientContainerSha256 &&
+      client.Image === projected.network.clientImageId &&
+      client.Config?.Labels?.['com.maxim.release-protected'] === 'true' &&
+      environmentField(client.Config?.Env, 'APP_ROLE') === 'moderation' &&
+      environmentField(client.Config?.Env, 'APP_SERVICE_NAME') === 'api-moderation-background' &&
+      shadowHash(modelEndpoint?.NetworkID) &&
+      shadowHash(clientEndpoint?.NetworkID) &&
+      digest(modelEndpoint.NetworkID) === projected.network.networkSha256 &&
+      digest(clientEndpoint.NetworkID) === projected.network.networkSha256 &&
+      shadowHash(modelEndpoint?.EndpointID) &&
+      shadowHash(clientEndpoint?.EndpointID) &&
+      digest(modelEndpoint.EndpointID) === projected.network.modelEndpointSha256 &&
+      digest(clientEndpoint.EndpointID) === projected.network.clientEndpointSha256,
+    'shadow_runtime_binding_unproved',
+  );
+  return projected;
+}
 
 export function parsePreadmissionRecoveryArgs(args) {
   const [mode, ...rest] = args;
@@ -325,7 +836,7 @@ function historicalEnvironmentRefusal(environment) {
 
 // FLAG: This reads immutable configuration only. No raw environment, catalog or
 // source-event identity leaves the observer; proof retains hashes and generations.
-export function inspectPreadmissionRuntime(rows, { imageId, context, fleet }) {
+export function inspectPreadmissionRuntime(rows, { imageId, context, fleet, shadow = null }) {
   requireFact(
     Array.isArray(rows) &&
       rows.length > 0 &&
@@ -337,6 +848,7 @@ export function inspectPreadmissionRuntime(rows, { imageId, context, fleet }) {
   );
   requireFleet(fleet);
   validateContext(context);
+  const shadowEvidence = bindPreadmissionShadow(rows, shadow, imageId);
   const extras = new Set([
     'postgres',
     'redis',
@@ -359,7 +871,10 @@ export function inspectPreadmissionRuntime(rows, { imageId, context, fleet }) {
     if (labels['com.docker.compose.project'] === 'infra') {
       const service = labels['com.docker.compose.service'];
       requireFact(
-        [...PREADMISSION_SERVICES, ...extras].includes(service) &&
+        ([...PREADMISSION_SERVICES, ...extras].includes(service) ||
+          (service === SHADOW_SERVICE &&
+            shadowEvidence !== null &&
+            digest(row.Id) === shadowEvidence.containerSha256)) &&
           row.Name === `/infra-${service}-1` &&
           labels['com.docker.compose.oneoff'] !== 'True' &&
           !seen.has(service),
@@ -450,6 +965,7 @@ export function inspectPreadmissionRuntime(rows, { imageId, context, fleet }) {
   return {
     imageId,
     services,
+    shadow: shadowEvidence,
     noRecoveryClients: true,
     // FLAG: This census covers unexpected API/native producers in the pinned classifier.
     unexpectedCount: 0,
@@ -682,6 +1198,18 @@ export function buildPreadmissionProof(request, observation) {
       runtime.queueFence.ownerPresent === false,
     'queue_fence_not_released',
   );
+  const shadow = projectPreadmissionShadow(
+    Object.hasOwn(runtime, 'shadow') ? dataField(runtime, 'shadow') : null,
+    {
+      imageId: runtime.imageId,
+      background: runtime.services.find(
+        (service) => service.serviceName === 'api-moderation-background',
+      ),
+    },
+  );
+  if (shadow !== null)
+    for (const [name, , hash] of shadowGraph)
+      requireFact(source.hashes[`infra/scripts/${name}`] === hash, 'shadow_source_unproved');
   const safeMetadata = ({ sha256, dev, ino, mtimeMs, ctimeMs }) => ({
     sha256,
     dev,
@@ -733,6 +1261,7 @@ export function buildPreadmissionProof(request, observation) {
     ),
     runtime: {
       imageId: runtime.imageId,
+      shadow,
       services: runtime.services
         .map(
           ({
@@ -797,6 +1326,36 @@ async function boundedFile(path, maximum) {
       'input_file_changed',
     );
     return { bytes, stat: after };
+  } finally {
+    await fd.close();
+  }
+}
+async function boundedShadowSourceFile(path, size) {
+  const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await fd.stat();
+    requireFact(
+      before.isFile() && before.nlink === 1 && before.size === size,
+      'shadow_source_unproved',
+    );
+    const bytes = Buffer.alloc(size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await fd.read(bytes, length, bytes.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    const after = await fd.stat();
+    const current = await lstat(path);
+    const keys = ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeMs', 'ctimeMs'];
+    requireFact(
+      length === size &&
+        current.isFile() &&
+        !current.isSymbolicLink() &&
+        keys.every((key) => before[key] === after[key] && before[key] === current[key]),
+      'shadow_source_changed',
+    );
+    return { bytes: bytes.subarray(0, length), stat: after };
   } finally {
     await fd.close();
   }
@@ -1211,14 +1770,49 @@ async function sourceObservation(request) {
       );
     }
   }
-  return { majorSha, karavanSha, majorClean, karavanClean, installedMatch: true, hashes };
+  const shadowSources = {};
+  for (const [name, size, hash] of shadowGraph) {
+    const relative = `infra/scripts/${name}`;
+    const path = join(MAJOR, relative);
+    await ancestors(dirname(path));
+    const current = await boundedShadowSourceFile(path, size);
+    const original = await git(MAJOR, [
+      'show',
+      '--no-ext-diff',
+      '--no-textconv',
+      `${request.sourceSha}:${relative}`,
+    ]);
+    requireFact(
+      Buffer.byteLength(original) === size &&
+        digest(original) === hash &&
+        digest(current.bytes) === hash,
+      'shadow_source_unproved',
+    );
+    hashes[relative] = hash;
+    shadowSources[relative] = {
+      bytes: current.bytes,
+      uid: current.stat.uid,
+      gid: current.stat.gid,
+      mode: current.stat.mode & 0o7777,
+      links: current.stat.nlink,
+    };
+  }
+  return {
+    majorSha,
+    karavanSha,
+    majorClean,
+    karavanClean,
+    installedMatch: true,
+    hashes,
+    shadowSources,
+  };
 }
 
 async function observe(request) {
   await validatePaths();
   const original = await boundedFile(OWNER, 2048);
   const owner = parsePreadmissionOwner(original.bytes);
-  const source = await sourceObservation(request);
+  const { shadowSources, ...source } = await sourceObservation(request);
   const reported = JSON.parse(
     await command('bash', [`${ROOT}/admission.sh`, 'state'], { env: gitEnvironment() }),
   );
@@ -1283,10 +1877,30 @@ async function observe(request) {
     fleet.parseApiFleetInspection(JSON.stringify(rows)),
     'ocr-native-sandbox,photo-native-sandbox',
   );
+  let shadow = null;
+  if (shadowCandidates(rows).length > 0) {
+    const shadowRuntime = await loadPreadmissionShadowRuntime(shadowSources);
+    const images = JSON.parse(await command('docker', ['image', 'inspect', SHADOW_IMAGE]));
+    const networks = JSON.parse(await command('docker', ['network', 'inspect', SHADOW_NETWORK]));
+    requireFact(
+      Array.isArray(images) &&
+        images.length === 1 &&
+        Array.isArray(networks) &&
+        networks.length === 1,
+      'shadow_runtime_unproved',
+    );
+    shadow = inspectPreadmissionShadow(rows, {
+      imageId: api.imageId,
+      image: images[0],
+      network: networks[0],
+      runtime: shadowRuntime,
+    });
+  }
   const runtime = inspectPreadmissionRuntime(rows, {
     imageId: api.imageId,
     context: operation.rawContext,
     fleet: fleetEvidence,
+    shadow,
   });
   const network = JSON.parse(
     await command('docker', ['network', 'inspect', operation.rawContext.networkId], {
