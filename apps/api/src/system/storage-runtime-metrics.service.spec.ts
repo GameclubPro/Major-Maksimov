@@ -606,6 +606,22 @@ describe('bounded storage-runtime metrics', () => {
     mockEventLoopDelay.percentile.mockReturnValue(100_000_000);
     metrics.registerDeleteReconcilerSnapshot(deleteReconcilerSnapshot);
     metrics.registerDeleteDueSweepSnapshot(deleteDueSweepSnapshot);
+    metrics.registerAutomaticDeleteAuthorSnapshot(() => ({
+      roster: 1,
+      protected: 1,
+      legacy: 1,
+      membership: 1,
+      shared: 1,
+    }));
+    metrics.registerVkMediaAdmissionSnapshot(() => ({
+      budgetBytes: 1,
+      reservedBytes: 1,
+      active: 1,
+      waiting: 1,
+      peakReservedBytes: 1,
+      peakWaiting: 1,
+      stopping: false,
+    }));
     metrics.registerChatContextCacheSnapshot(() => ({
       entries: 1,
       estimatedBytes: 1,
@@ -635,6 +651,16 @@ describe('bounded storage-runtime metrics', () => {
         fullLoads: 1,
         shellReads: 1,
         reuses: 1,
+        segments: {
+          compactBytes: 1,
+          maxCompactBytes: 1,
+          maxCompactEntryBytes: 1,
+          mediaBytes: 1,
+          maxMediaBytes: 1,
+          mediaEntries: 1,
+          sharedMediaReuses: 1,
+          mediaCapacityEvictions: 1,
+        },
       },
     }));
     metrics.registerVkPersistenceSnapshot(() => ({
@@ -650,6 +676,7 @@ describe('bounded storage-runtime metrics', () => {
         return field === 'schemaVersion' || field === 'resolutionMs'
           ? value
           : Number.MAX_SAFE_INTEGER;
+      if (Array.isArray(value)) return value.map((entry) => widen(entry));
       if (value && typeof value === 'object')
         return Object.fromEntries(
           Object.entries(value).map(([key, entry]) => [key, widen(entry, key)]),
@@ -658,8 +685,18 @@ describe('bounded storage-runtime metrics', () => {
     };
     const widest = widen(metrics.getLocalSnapshot());
     const encoded = JSON.stringify(widest);
+    const decoded = JSON.parse(encoded);
+    expect(decoded.optimization.ruleCoverage.schema).toBe('rule-engine-coverage-v1');
+    expect(Array.isArray(decoded.optimization.ruleCoverage.rows)).toBe(true);
+    expect(decoded.optimization.ruleCoverage.rows).toHaveLength(14);
+    expect(
+      decoded.optimization.ruleCoverage.rows.every(
+        (row: unknown[]) =>
+          row.length === 10 && row.every((count) => count === Number.MAX_SAFE_INTEGER),
+      ),
+    ).toBe(true);
     expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(STORAGE_RUNTIME_MAX_REPORT_BYTES);
-    expect(sanitizeStorageRuntimeSnapshot(JSON.parse(encoded))).toEqual(widest);
+    expect(sanitizeStorageRuntimeSnapshot(decoded)).toEqual(widest);
   });
   it('publishes only fixed reconciliation phases with the existing process epoch and report', async () => {
     const fixture = deleteReconcilerSnapshot();

@@ -1,5 +1,11 @@
 import { LinkPolicy, type ChatSettings } from '../prisma/prisma-client';
-import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
+import { createDefaultCommercialAdsPolicy, stopWordsPolicySchema } from '@maxim/contracts/settings';
+import {
+  RULE_COVERAGE_COUNTERS,
+  RULE_COVERAGE_FAMILIES,
+  type RuleCoverageFamily,
+  type RuleCoverageSnapshot,
+} from './rule-engine-observation';
 import {
   COMMERCIAL_REAL_WORLD_NEGATIVE_CASES,
   COMMERCIAL_REAL_WORLD_POSITIVE_CASES,
@@ -705,10 +711,11 @@ describe('RuleEngineService', () => {
       const payload = JSON.parse(String(consoleWarnSpy.mock.calls[0]?.[0] ?? '{}'));
       expect(payload.msg).toBe('Slow rule-engine detect completed close to the hot-path deadline');
       expect(payload.chatId).toBe('chat-1');
-      expect(payload.latestStage).toBe('duplicate-state');
+      expect(payload.latestStage).toBe('media-cooldowns');
       expect(payload.stageDurations.profanity).toBe(3400);
       expect(payload.stageTimelineMs.profanity).toBeGreaterThanOrEqual(3400);
       expect(payload.stageDurations['duplicate-state']).toBe(0);
+      expect(payload.stageDurations['media-cooldowns']).toBe(0);
     } finally {
       consoleWarnSpy.mockRestore();
       dateNowSpy.mockRestore();
@@ -5709,5 +5716,579 @@ describe('RuleEngineService', () => {
     });
 
     expect(result.violations.some((item) => item.ruleCode === 'LINK_BLOCKED')).toBe(false);
+  });
+});
+
+describe('RuleEngineService invocation coverage', () => {
+  function input(
+    overrides: Partial<ChatSettings> = {},
+  ): Parameters<RuleEngineService['detect']>[0] {
+    return {
+      chatId: 'coverage-chat',
+      userId: 'coverage-user',
+      text: 'Обычное сообщение',
+      settings: buildSettings({
+        antiSpamEnabled: false,
+        antiDuplicateEnabled: false,
+        russianProfanityFilterEnabled: false,
+        linkPolicy: LinkPolicy.ALERT_ONLY,
+        ...overrides,
+      }),
+      domainAllowlist: [],
+    };
+  }
+
+  function harness(counters = new MockRedisCounterService() as unknown as RedisCounterService) {
+    const diagnostics = {
+      recordHotPathStageOutcome: jest
+        .fn<
+          ReturnType<RuntimeDiagnosticsService['recordHotPathStageOutcome']>,
+          Parameters<RuntimeDiagnosticsService['recordHotPathStageOutcome']>
+        >()
+        .mockResolvedValue(undefined),
+      recordHotPathProfile: jest
+        .fn<
+          ReturnType<RuntimeDiagnosticsService['recordHotPathProfile']>,
+          Parameters<RuntimeDiagnosticsService['recordHotPathProfile']>
+        >()
+        .mockResolvedValue(undefined),
+    } satisfies Pick<
+      RuntimeDiagnosticsService,
+      'recordHotPathStageOutcome' | 'recordHotPathProfile'
+    >;
+    const sink = Object.assign(
+      Object.create(RuntimeDiagnosticsService.prototype) as RuntimeDiagnosticsService,
+      diagnostics,
+    );
+    const service = new RuleEngineService(counters, sink);
+    const profile = () => diagnostics.recordHotPathProfile.mock.calls.at(-1)?.[0].snapshot;
+    const coverage = (family: RuleCoverageFamily) => {
+      const snapshot = profile()?.ruleCoverage as RuleCoverageSnapshot;
+      expect(snapshot.rows).toHaveLength(RULE_COVERAGE_FAMILIES.length);
+      const row = snapshot.rows[RULE_COVERAGE_FAMILIES.indexOf(family)]!;
+      return Object.fromEntries(
+        RULE_COVERAGE_COUNTERS.map((counter, index) => [counter, row[index]]),
+      );
+    };
+    return { service, diagnostics, coverage, profile };
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('records disabled rules once and reports shared stop-word/media clocks separately', async () => {
+    const run = harness();
+    await expect(run.service.detect(input())).resolves.toEqual({ violations: [] });
+    for (const family of RULE_COVERAGE_FAMILIES) {
+      expect(run.coverage(family)).toMatchObject({
+        configured: 0,
+        eligible: 0,
+        evaluated: 0,
+        skippedDisabled: 1,
+        errors: 0,
+        interrupted: 0,
+      });
+    }
+    expect(run.diagnostics.recordHotPathProfile).toHaveBeenCalledTimes(1);
+    expect(run.profile()?.stageDurations).toMatchObject({
+      'rule-engine.stop-words-policy': expect.any(Number),
+      'rule-engine.media-cooldowns': expect.any(Number),
+      'rule-engine.phone-numbers': expect.any(Number),
+    });
+    expect(run.profile()?.stageDurations).not.toHaveProperty(['rule-engine.blocked-words']);
+    expect(run.profile()?.stageDurations).not.toHaveProperty(['rule-engine.blocked-domains']);
+  });
+
+  it('distinguishes report, state and content skips while retaining independent limits', async () => {
+    const run = harness();
+    const request = input({
+      russianProfanityFilterEnabled: true,
+      commercialAdsFilterEnabled: true,
+      phoneNumbersEnabled: false,
+      antiSpamEnabled: true,
+      messageCountLimitEnabled: true,
+      maxMessageLengthEnabled: true,
+      maxMessageLength: 2,
+      photoMessageCooldownEnabled: true,
+    });
+    await run.service.detect({
+      ...request,
+      skipContentFiltersForReport: true,
+      skipStatefulMessageLimits: true,
+    });
+    for (const family of ['profanity', 'commercial-ad', 'phone-numbers'] as const) {
+      expect(run.coverage(family)).toMatchObject({
+        configured: 1,
+        eligible: 0,
+        evaluated: 0,
+        skippedContent: 1,
+      });
+    }
+    for (const family of ['anti-spam-burst', 'message-count-limit', 'photo-cooldown'] as const) {
+      expect(run.coverage(family)).toMatchObject({ configured: 1, evaluated: 0, skippedState: 1 });
+    }
+    expect(run.coverage('message-length')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      evaluated: 1,
+      matched: 1,
+    });
+
+    await run.service.detect(
+      input({ photoMessageCooldownEnabled: true, messageLimitsBlockedDomains: ['example.com'] }),
+    );
+    expect(run.coverage('photo-cooldown')).toMatchObject({
+      configured: 1,
+      eligible: 0,
+      skippedContent: 1,
+    });
+    expect(run.coverage('blocked-domains')).toMatchObject({
+      configured: 1,
+      eligible: 0,
+      skippedContent: 1,
+    });
+  });
+
+  it.each(['legacy', 'modern'] as const)(
+    'counts %s overlapping word/domain matches once across source segments',
+    async (mode) => {
+      const run = harness();
+      const request = input({
+        messageLimitsBlockedWords: ['спаммаркер'],
+        messageLimitsBlockedDomains: ['example.com'],
+        ...(mode === 'modern'
+          ? {
+              stopWordsPolicy: stopWordsPolicySchema.parse({
+                enabled: true,
+                rules: [
+                  {
+                    id: 'word-1',
+                    kind: 'WORD',
+                    value: 'спаммаркер',
+                    enabled: true,
+                    matchMode: 'EXACT',
+                  },
+                ],
+                domains: ['example.com'],
+              }),
+            }
+          : {}),
+      });
+      const result = await run.service.detect({
+        ...request,
+        text: 'спаммаркер https://example.com/путь',
+        stopWordsTextSegments: [
+          'Обычное сообщение',
+          'спаммаркер',
+          'спаммаркер https://example.com/путь',
+        ],
+      });
+      expect(result.violations.map((value) => value.ruleCode)).toEqual([
+        'MESSAGE_BLOCKED_WORD',
+        'MESSAGE_BLOCKED_DOMAIN',
+      ]);
+      for (const family of ['blocked-words', 'blocked-domains'] as const) {
+        expect(run.coverage(family)).toMatchObject({
+          configured: 1,
+          eligible: 1,
+          evaluated: 1,
+          matched: 1,
+          errors: 0,
+          interrupted: 0,
+        });
+      }
+    },
+  );
+
+  it('does not turn malformed modern policies or stale counter state into valid nonmatches', async () => {
+    const counters = new MockRedisCounterService();
+    jest
+      .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .mockResolvedValue({ kind: 'stale' });
+    const run = harness(counters as unknown as RedisCounterService);
+    await run.service.detect({
+      ...input({
+        antiSpamEnabled: true,
+        messageLimitsBlockedWords: ['спаммаркер'],
+        stopWordsPolicy: { version: 999 },
+        linkRulesPolicy: { version: 999 },
+      }),
+      messageId: 'stale-message',
+      duplicateStateEventTimestampMs: Date.now(),
+      text: 'спаммаркер https://example.com',
+    });
+    expect(run.coverage('anti-spam-burst')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      evaluated: 0,
+      matched: 0,
+      skippedState: 1,
+    });
+    expect(run.coverage('links')).toMatchObject({ eligible: 0, evaluated: 0, skippedState: 1 });
+    expect(run.coverage('blocked-words')).toMatchObject({
+      eligible: 0,
+      evaluated: 0,
+      matched: 0,
+      skippedState: 1,
+    });
+  });
+
+  it('records an expired counter lookup while continuing the next independent match', async () => {
+    const counters = new MockRedisCounterService();
+    jest
+      .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .mockResolvedValue({ kind: 'deadline_exceeded' });
+    const run = harness(counters as unknown as RedisCounterService);
+    const result = await run.service.detect({
+      ...input({ antiSpamEnabled: true, messageLimitsBlockedWords: ['спаммаркер'] }),
+      text: 'спаммаркер',
+      messageId: 'expired-lookup',
+      duplicateStateEventTimestampMs: Date.now(),
+    });
+    expect(result.violations.map((value) => value.ruleCode)).toEqual(['MESSAGE_BLOCKED_WORD']);
+    expect(run.coverage('anti-spam-burst')).toMatchObject({
+      eligible: 1,
+      evaluated: 0,
+      expired: 1,
+      errors: 0,
+    });
+    expect(run.coverage('blocked-words')).toMatchObject({ evaluated: 1, matched: 1 });
+  });
+
+  it('preserves the original unknown-write error and emits completed, active and unreached observations once', async () => {
+    const original = new Error('Unknown Redis write outcome');
+    const counters = new MockRedisCounterService();
+    jest.spyOn(counters, 'incrementWithTtl').mockRejectedValue(original);
+    const run = harness(counters as unknown as RedisCounterService);
+    await expect(
+      run.service.detect(
+        input({ antiSpamEnabled: true, maxMessageLengthEnabled: true, maxMessageLength: 2 }),
+      ),
+    ).rejects.toBe(original);
+    expect(run.diagnostics.recordHotPathProfile).toHaveBeenCalledTimes(1);
+    expect(run.coverage('message-length')).toMatchObject({ evaluated: 1, matched: 1, errors: 0 });
+    expect(run.coverage('anti-spam-burst')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      evaluated: 0,
+      errors: 1,
+      interrupted: 0,
+    });
+    for (const family of [
+      'message-count-limit',
+      'blocked-words',
+      'blocked-domains',
+      'photo-cooldown',
+      'sticker-cooldown',
+    ] as const) {
+      expect(run.coverage(family)).toMatchObject({
+        configured: 0,
+        evaluated: 0,
+        errors: 0,
+        interrupted: 1,
+      });
+    }
+    expect(run.profile()?.stageDurations).toHaveProperty(['rule-engine.anti-spam-burst']);
+    expect(run.profile()?.stageDurations).not.toHaveProperty(['rule-engine.phone-numbers']);
+  });
+
+  it.each(['synchronous', 'rejected'] as const)(
+    'keeps detection results and original errors when the profile sink fails (%s)',
+    async (mode) => {
+      const run = harness();
+      const diagnosticError = new Error('Diagnostic transport unavailable');
+      if (mode === 'synchronous')
+        run.diagnostics.recordHotPathProfile.mockImplementation(() => {
+          throw diagnosticError;
+        });
+      else run.diagnostics.recordHotPathProfile.mockRejectedValue(diagnosticError);
+      await expect(run.service.detect(input())).resolves.toEqual({ violations: [] });
+      const original = new Error('Original detector failure');
+      jest.spyOn(run.service, 'detectProfanityForSettings').mockImplementation(() => {
+        throw original;
+      });
+      await expect(run.service.detect(input({ russianProfanityFilterEnabled: true }))).rejects.toBe(
+        original,
+      );
+      expect(run.diagnostics.recordHotPathProfile).toHaveBeenCalledTimes(2);
+      await Promise.resolve();
+    },
+  );
+
+  it('records traffic fail-open errors and continues when its diagnostic callback also throws', async () => {
+    const counters = Object.assign(
+      Object.create(RedisCounterService.prototype) as RedisCounterService,
+      {
+        claimEventCooldown: jest
+          .fn<
+            ReturnType<RedisCounterService['claimEventCooldown']>,
+            Parameters<RedisCounterService['claimEventCooldown']>
+          >()
+          .mockRejectedValue(new Error('Traffic state unavailable')),
+      },
+    );
+    const run = harness(counters);
+    run.diagnostics.recordHotPathStageOutcome.mockImplementation(() => {
+      throw new Error('Diagnostic failure');
+    });
+    await expect(
+      run.service.detect({
+        ...input({ slowModeEnabled: true }),
+        messageId: 'traffic-message',
+        duplicateStateEventType: 'message_created',
+        duplicateStateEventTimestampMs: Date.now(),
+      }),
+    ).resolves.toEqual({ violations: [] });
+    expect(run.coverage('traffic-protection')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      evaluated: 0,
+      errors: 1,
+      interrupted: 0,
+    });
+    expect(run.coverage('duplicate-state')).toMatchObject({ skippedDisabled: 1, interrupted: 0 });
+    expect(run.coverage('sticker-cooldown')).toMatchObject({ skippedDisabled: 1, interrupted: 0 });
+  });
+
+  it('reads modern report-skip configuration once without dispatching the matcher', async () => {
+    const run = harness();
+    const request = input({
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [
+          { id: 'word-1', kind: 'WORD', value: 'спаммаркер', enabled: true, matchMode: 'EXACT' },
+        ],
+        domains: ['example.com'],
+      }),
+    });
+    await expect(
+      run.service.detect({
+        ...request,
+        text: 'спаммаркер https://example.com',
+        skipContentFiltersForReport: true,
+      }),
+    ).resolves.toEqual({ violations: [] });
+    for (const family of ['blocked-words', 'blocked-domains'] as const) {
+      expect(run.coverage(family)).toMatchObject({
+        configured: 1,
+        eligible: 0,
+        evaluated: 0,
+        skippedContent: 1,
+      });
+    }
+    await run.service.detect({ ...request, text: '' });
+    // Modern eligibility is dispatch of the configured matcher, including an empty source.
+    for (const family of ['blocked-words', 'blocked-domains'] as const) {
+      expect(run.coverage(family)).toMatchObject({
+        configured: 1,
+        eligible: 1,
+        evaluated: 1,
+        matched: 0,
+        skippedContent: 0,
+      });
+    }
+  });
+
+  it('uses the actual enforceable navigation boundary for modern link eligibility', async () => {
+    const run = harness();
+    await run.service.detect({
+      ...input({ linkRulesPolicy: { version: 1, mode: 'DENY_ALL', rules: [] } }),
+      navigationTargets: [
+        {
+          kind: 'external_url',
+          target: 'https://example.com',
+          normalizedTarget: 'https://example.com',
+          enforceable: false,
+          origins: [],
+        },
+      ],
+    });
+    expect(run.coverage('links')).toMatchObject({
+      configured: 1,
+      eligible: 0,
+      evaluated: 0,
+      skippedContent: 1,
+    });
+  });
+
+  it.each(['blocked', 'stale', 'deadline_exceeded'] as const)(
+    'keeps photo/sticker cooldown outcome %s distinct from a valid nonmatch',
+    async (outcome) => {
+      const claimEventCooldown = jest
+        .fn<
+          ReturnType<RedisCounterService['claimEventCooldown']>,
+          Parameters<RedisCounterService['claimEventCooldown']>
+        >()
+        .mockResolvedValue(outcome);
+      const counters = Object.assign(
+        Object.create(RedisCounterService.prototype) as RedisCounterService,
+        { claimEventCooldown },
+      );
+      const run = harness(counters);
+      const result = await run.service.detect({
+        ...input({ photoMessageCooldownEnabled: true, stickerMessageCooldownEnabled: true }),
+        messageId: 'media-message',
+        duplicateStateEventTimestampMs: Date.now(),
+        hasPhotoAttachment: true,
+        hasStickerAttachment: true,
+      });
+      expect(result.violations.map((value) => value.ruleCode)).toEqual(
+        outcome === 'blocked' ? ['PHOTO_RATE_LIMIT', 'STICKER_RATE_LIMIT'] : [],
+      );
+      for (const family of ['photo-cooldown', 'sticker-cooldown'] as const) {
+        expect(run.coverage(family)).toMatchObject({
+          configured: 1,
+          eligible: 1,
+          evaluated: +(outcome === 'blocked'),
+          matched: +(outcome === 'blocked'),
+          skippedState: +(outcome === 'stale'),
+          expired: +(outcome === 'deadline_exceeded'),
+          errors: 0,
+        });
+      }
+      expect(claimEventCooldown).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('marks a failed photo lookup active and the unvisited sticker family interrupted', async () => {
+    const original = new Error('Unknown photo cooldown write');
+    const claimEventCooldown = jest
+      .fn<
+        ReturnType<RedisCounterService['claimEventCooldown']>,
+        Parameters<RedisCounterService['claimEventCooldown']>
+      >()
+      .mockRejectedValue(original);
+    const run = harness(
+      Object.assign(Object.create(RedisCounterService.prototype) as RedisCounterService, {
+        claimEventCooldown,
+      }),
+    );
+    await expect(
+      run.service.detect({
+        ...input({ photoMessageCooldownEnabled: true, stickerMessageCooldownEnabled: true }),
+        messageId: 'media-error',
+        duplicateStateEventTimestampMs: Date.now(),
+        hasPhotoAttachment: true,
+        hasStickerAttachment: true,
+      }),
+    ).rejects.toBe(original);
+    expect(run.coverage('photo-cooldown')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      errors: 1,
+      interrupted: 0,
+    });
+    expect(run.coverage('sticker-cooldown')).toMatchObject({
+      configured: 0,
+      errors: 0,
+      interrupted: 1,
+    });
+  });
+
+  it.each(['stale', 'error'] as const)(
+    'retains a valid traffic candidate before a later %s result',
+    async (second) => {
+      const claimEventCooldown = jest
+        .fn<
+          ReturnType<RedisCounterService['claimEventCooldown']>,
+          Parameters<RedisCounterService['claimEventCooldown']>
+        >()
+        .mockResolvedValueOnce('allowed');
+      if (second === 'stale') claimEventCooldown.mockResolvedValueOnce('stale');
+      else
+        claimEventCooldown.mockRejectedValueOnce(new Error('Second traffic candidate unavailable'));
+      const run = harness(
+        Object.assign(Object.create(RedisCounterService.prototype) as RedisCounterService, {
+          claimEventCooldown,
+        }),
+      );
+      await expect(
+        run.service.detect({
+          ...input({ slowModeEnabled: true, mediaMessageCooldownEnabled: true }),
+          messageId: 'traffic-partial',
+          duplicateStateEventTimestampMs: Date.now(),
+          duplicateStateEventType: 'message_created',
+          hasPhotoAttachment: true,
+        }),
+      ).resolves.toEqual({ violations: [] });
+      expect(run.coverage('traffic-protection')).toMatchObject({
+        configured: 1,
+        eligible: 1,
+        evaluated: 1,
+        matched: 0,
+        skippedState: 0,
+        errors: +(second === 'error'),
+      });
+    },
+  );
+
+  it('keeps a stale duplicate revision unavailable instead of counting a successful nonmatch', async () => {
+    const counters = new MockRedisCounterService();
+    jest
+      .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .mockResolvedValue({ kind: 'stale' });
+    const run = harness(counters as unknown as RedisCounterService);
+    await expect(
+      run.service.detect({
+        ...input({ antiDuplicateEnabled: true }),
+        messageId: 'duplicate-edit',
+        duplicateStateEventType: 'message_edited',
+        duplicateStateEventTimestampMs: Date.now(),
+      }),
+    ).resolves.toEqual({ violations: [] });
+    expect(run.coverage('duplicate-state')).toMatchObject({
+      configured: 1,
+      eligible: 1,
+      evaluated: 0,
+      matched: 0,
+      skippedState: 1,
+    });
+  });
+
+  it('does not rewrite the closed observation when timed-out duplicate state completes late', async () => {
+    jest.useFakeTimers();
+    try {
+      jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      let resolveMutation!: (
+        value: Awaited<
+          ReturnType<RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']>
+        >,
+      ) => void;
+      const mutation = new Promise<
+        Awaited<ReturnType<RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']>>
+      >((resolve) => {
+        resolveMutation = resolve;
+      });
+      const counters = new MockRedisCounterService();
+      jest
+        .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+        .mockReturnValue(mutation);
+      const run = harness(counters as unknown as RedisCounterService);
+      const detection = run.service
+        .detect({
+          ...input({ antiDuplicateEnabled: true }),
+          messageId: 'duplicate-late',
+          duplicateStateEventType: 'message_edited',
+          duplicateStateEventTimestampMs: Date.now(),
+        })
+        .catch((error: unknown) => error);
+      await jest.advanceTimersByTimeAsync(DUPLICATE_STATE_BUDGET_MS);
+      expect(await detection).toMatchObject({ code: 'DUPLICATE_STATE_BUDGET_EXCEEDED' });
+      const before = run.profile()?.ruleCoverage;
+      expect(run.coverage('duplicate-state')).toMatchObject({ errors: 1, evaluated: 0 });
+      resolveMutation({ kind: 'applied', counts: [] });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(run.diagnostics.recordHotPathProfile).toHaveBeenCalledTimes(1);
+      expect(run.profile()?.ruleCoverage).toEqual(before);
+      expect(run.coverage('duplicate-state')).toMatchObject({ errors: 1, evaluated: 0 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does not count standalone guard rechecks as canonical engine evaluations', () => {
+    const run = harness();
+    run.service.detectProfanityForSettings('блять', input().settings);
+    expect(run.diagnostics.recordHotPathProfile).not.toHaveBeenCalled();
   });
 });

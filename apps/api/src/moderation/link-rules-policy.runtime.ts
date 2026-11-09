@@ -9,6 +9,7 @@ import {
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
 import type { PrismaService } from '../prisma/prisma.service';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 
 export type RuntimeLinkRulesPolicy =
   | { status: 'legacy'; policy: null }
@@ -36,8 +37,20 @@ export function evaluateRuntimeLinkRulesPolicy(
   policy: LinkRulesPolicy,
   targets: readonly NavigationTargetEvidence[],
   nowMs = Date.now(),
+  observer?: RuleEvaluationObserver,
 ): LinkRulesPolicyEvaluation<NavigationTargetEvidence> {
-  return evaluateLinkRulesPolicy(policy, targets.filter(isEnforceableLinkPolicyTarget), nowMs);
+  const enforceableTargets = targets.filter(isEnforceableLinkPolicyTarget);
+  const eligible = policy.mode !== 'ALLOW_ALL' && enforceableTargets.length > 0;
+  if (eligible) observer?.eligible();
+  const result = evaluateLinkRulesPolicy(policy, enforceableTargets, nowMs);
+  observer?.finish(
+    policy.mode === 'ALLOW_ALL'
+      ? { kind: 'skip', reason: 'disabled' }
+      : !eligible
+        ? { kind: 'skip', reason: 'content' }
+        : { kind: 'evaluated', matched: !result.allowed },
+  );
+  return result;
 }
 
 export function isRuntimeLinkPolicyActive(legacyPolicy: string, value: unknown): boolean {

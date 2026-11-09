@@ -1,5 +1,6 @@
 import type { ChatSettings } from '../prisma/prisma-client';
 import type { RuntimeDiagnosticsService } from '../system/runtime-diagnostics.service';
+import type { RuleCoverageSnapshot } from './rule-engine-observation';
 
 const RULE_ENGINE_SLOW_LOG_THRESHOLD_MS = 3_000;
 
@@ -7,6 +8,7 @@ export type RuleEngineDetectProfile = {
   startedAtMs: number;
   lastMarkedAtMs: number;
   latestStage: string;
+  pendingStage?: string;
   stages: Map<string, number>;
   stageTimelineMs: Map<string, number>;
 };
@@ -22,12 +24,17 @@ export function createRuleEngineDetectProfile(): RuleEngineDetectProfile {
   };
 }
 
+export function beginRuleEngineDetectStage(profile: RuleEngineDetectProfile, stage: string): void {
+  profile.pendingStage = stage;
+}
+
 export function markRuleEngineDetectStage(profile: RuleEngineDetectProfile, stage: string): void {
   const now = Date.now();
   profile.latestStage = stage;
   profile.stages.set(stage, Math.max(0, now - profile.lastMarkedAtMs));
   profile.stageTimelineMs.set(stage, Math.max(0, now - profile.startedAtMs));
   profile.lastMarkedAtMs = now;
+  profile.pendingStage = undefined;
 }
 
 export function readRuleEngineDetectProfileSnapshot(profile: RuleEngineDetectProfile): {
@@ -84,16 +91,25 @@ export function logSlowRuleEngineDetectIfNeeded(params: {
 export function recordRuleEngineDetectProfile(
   profile: RuleEngineDetectProfile,
   runtimeDiagnosticsService?: RuntimeDiagnosticsService,
+  ruleCoverage?: RuleCoverageSnapshot,
 ): void {
-  const snapshot = readRuleEngineDetectProfileSnapshot(profile);
-  void runtimeDiagnosticsService?.recordHotPathProfile({
-    snapshot: {
-      stageDurations: Object.fromEntries(
-        Object.entries(snapshot.stageDurations).map(([stage, elapsedMs]) => [
-          `rule-engine.${stage}`,
-          elapsedMs,
-        ]),
-      ),
-    },
-  });
+  // FLAG: Partial timings/coverage survive an exception, but diagnostics never replace it.
+  try {
+    if (profile.pendingStage) markRuleEngineDetectStage(profile, profile.pendingStage);
+    const snapshot = readRuleEngineDetectProfileSnapshot(profile);
+    const pending = runtimeDiagnosticsService?.recordHotPathProfile({
+      snapshot: {
+        ruleCoverage,
+        stageDurations: Object.fromEntries(
+          Object.entries(snapshot.stageDurations).map(([stage, elapsedMs]) => [
+            `rule-engine.${stage}`,
+            elapsedMs,
+          ]),
+        ),
+      },
+    });
+    if (pending) void pending.catch(() => undefined);
+  } catch {
+    // FLAG: A diagnostic sink cannot change moderation results or retry authority.
+  }
 }

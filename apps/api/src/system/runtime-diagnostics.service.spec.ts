@@ -1,6 +1,10 @@
 import { RuntimeDiagnosticsService } from './runtime-diagnostics.service';
 import { OptimizationRuntimeMetrics } from './optimization-runtime-metrics';
 import type { StorageRuntimeMetricsService } from './storage-runtime-metrics.service';
+import {
+  RULE_COVERAGE_FAMILIES,
+  createRuleEngineObservation,
+} from '../moderation/rule-engine-observation';
 
 type RedisHashes = Map<string, Record<string, string>>;
 
@@ -110,7 +114,7 @@ function createConfigMock(values: Record<string, string | number | undefined> = 
 }
 
 describe('RuntimeDiagnosticsService', () => {
-  it('records rule histograms locally even when Redis diagnostics is unavailable', async () => {
+  it('records rule timing and coverage locally even when Redis diagnostics is unavailable', async () => {
     const optimization = new OptimizationRuntimeMetrics();
     const provider: Pick<StorageRuntimeMetricsService, 'optimization'> = { optimization };
     const service = new RuntimeDiagnosticsService(
@@ -121,11 +125,18 @@ describe('RuntimeDiagnosticsService', () => {
     redis.pipeline.mockImplementationOnce(() => {
       throw new Error('unavailable');
     });
+    const observation = createRuleEngineObservation();
+    const links = observation.family('links');
+    links.configured(true);
+    links.eligible();
+    links.finish({ kind: 'evaluated', matched: false });
     await expect(
       service.recordHotPathProfile({
         snapshot: {
+          ruleCoverage: observation.close(),
           stageDurations: {
             'rule-engine.links': 320,
+            'rule-engine.stop-words-policy': 4,
             'rule-engine.private-dimension': 1000,
             'chat-context': 200,
           },
@@ -133,7 +144,33 @@ describe('RuntimeDiagnosticsService', () => {
       }),
     ).rejects.toThrow('unavailable');
     expect(optimization.snapshot()!.ruleStages!.links).toMatchObject({ calls: 1, totalMs: 320 });
+    expect(optimization.snapshot()!.ruleSharedStages!['stop-words-policy']).toMatchObject({
+      calls: 1,
+      totalMs: 4,
+    });
+    expect(
+      optimization.snapshot()!.ruleCoverage!.rows[RULE_COVERAGE_FAMILIES.indexOf('links')],
+    ).toEqual([1, 1, 1, 0, 0, 0, 0, 0, 0, 0]);
     expect(JSON.stringify(optimization.snapshot())).not.toContain('private-dimension');
+    await service.onModuleDestroy();
+  });
+  it('records coverage without a Redis exchange when no stage duration exists', async () => {
+    const optimization = new OptimizationRuntimeMetrics();
+    const provider: Pick<StorageRuntimeMetricsService, 'optimization'> = { optimization };
+    const service = new RuntimeDiagnosticsService(
+      createConfigMock() as never,
+      provider as StorageRuntimeMetricsService,
+    );
+    const observation = createRuleEngineObservation();
+    const coverage = observation.close(true);
+    await service.recordHotPathProfile({ snapshot: { ruleCoverage: coverage } });
+    expect(optimization.snapshot()!.ruleCoverage).toEqual(coverage);
+    expect(redisInstances.at(-1)!.pipeline).not.toHaveBeenCalled();
+    await service.recordHotPathProfile({
+      snapshot: { ruleCoverage: coverage },
+      stagePrefix: 'other.',
+    });
+    expect(optimization.snapshot()!.ruleCoverage).toEqual(coverage);
     await service.onModuleDestroy();
   });
   beforeEach(() => {

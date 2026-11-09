@@ -1,6 +1,7 @@
 import { normalizeMessageLimitsBlockedWordCandidate } from '@maxim/contracts/settings';
 import { stripUrlsFromText } from '../common/url-text.util';
 import { normalizeMixedWriting } from './rule-engine-normalization';
+import type { RuleEvaluationObserver } from './rule-engine-observation';
 
 export type BlockedWordDetection = {
   blockedWord: string;
@@ -101,8 +102,13 @@ export class MessageLimitsBlockedWordDetector {
   private readonly blockedWordListCache = new Map<string, ResolvedBlockedWordIndex>();
   private readonly blockedWordPatternCache = new Map<string, RegExp>();
 
-  detect(text: string, blockedWords: readonly string[]): BlockedWordDetection | null {
-    return this.detectMatches(text, blockedWords, true)[0] ?? null;
+  detect(
+    text: string,
+    blockedWords: readonly string[],
+    observer?: RuleEvaluationObserver,
+  ): BlockedWordDetection | null {
+    const matches = this.detectMatches(text, blockedWords, true, observer);
+    return matches[0] ?? null;
   }
 
   detectAll(text: string, blockedWords: readonly string[]): BlockedWordDetection[] {
@@ -113,13 +119,17 @@ export class MessageLimitsBlockedWordDetector {
     text: string,
     blockedWords: readonly string[],
     stopAfterFirst: boolean,
+    observer?: RuleEvaluationObserver,
   ): BlockedWordDetection[] {
+    observer?.configured(Array.isArray(blockedWords) && blockedWords.length > 0);
     if (!text || !Array.isArray(blockedWords) || blockedWords.length === 0) {
+      observer?.finish({ kind: 'skip', reason: blockedWords?.length ? 'content' : 'disabled' });
       return [];
     }
 
     const blockedWordIndex = this.resolveMessageLimitsBlockedWordList(blockedWords);
     if (blockedWordIndex.words.length === 0) {
+      observer?.finish({ kind: 'skip', reason: 'state' });
       return [];
     }
 
@@ -130,9 +140,11 @@ export class MessageLimitsBlockedWordDetector {
       ),
     );
     if (!normalizedText) {
+      observer?.finish({ kind: 'skip', reason: 'content' });
       return [];
     }
 
+    observer?.eligible();
     const compactText = normalizedText.replace(/[^\p{L}\p{N}]+/gu, '');
     const normalizedTokens = normalizedText.match(/[a-zа-яё0-9]+/giu) ?? [];
     const matchedPrefilterTokens = this.findMessageLimitsBlockedWordPrefilterTokens(
@@ -143,6 +155,7 @@ export class MessageLimitsBlockedWordDetector {
     const tokenInflectionRoots =
       this.resolveMessageLimitsBlockedWordInflectionRoots(normalizedTokens);
     if (matchedPrefilterTokens.size === 0 && tokenInflectionRoots.size === 0) {
+      observer?.finish({ kind: 'evaluated', matched: false });
       return [];
     }
 
@@ -187,6 +200,7 @@ export class MessageLimitsBlockedWordDetector {
     }
 
     if (candidateFlagsByBlockedWord.size === 0) {
+      observer?.finish({ kind: 'evaluated', matched: false });
       return [];
     }
 
@@ -206,6 +220,7 @@ export class MessageLimitsBlockedWordDetector {
           matchKind: 'pattern',
         });
         if (stopAfterFirst) {
+          observer?.finish({ kind: 'evaluated', matched: true });
           return detections;
         }
         continue;
@@ -217,11 +232,13 @@ export class MessageLimitsBlockedWordDetector {
           matchKind: 'inflection',
         });
         if (stopAfterFirst) {
+          observer?.finish({ kind: 'evaluated', matched: true });
           return detections;
         }
       }
     }
 
+    observer?.finish({ kind: 'evaluated', matched: detections.length > 0 });
     return detections;
   }
 

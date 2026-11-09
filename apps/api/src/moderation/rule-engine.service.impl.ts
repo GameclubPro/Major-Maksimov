@@ -66,6 +66,11 @@ import {
   normalizeMixedWriting,
 } from './rule-engine-normalization';
 import {
+  createRuleEngineObservation,
+  type RuleEvaluationObserver,
+} from './rule-engine-observation';
+import {
+  beginRuleEngineDetectStage,
   createRuleEngineDetectProfile,
   logSlowRuleEngineDetectIfNeeded,
   markRuleEngineDetectStage,
@@ -1125,349 +1130,481 @@ export class RuleEngineService {
       hasMediaBatch,
     );
     const profile = createRuleEngineDetectProfile();
-    const violations: RuleViolation[] = [];
-    const detectionContext = createRuleDetectionContext({
-      text,
-      settings,
-      effectiveLength,
-    });
-    markRuleEngineDetectStage(profile, 'normalize');
-
-    // FLAG: A recognized report command still passes all rate, length and attachment limits.
-    const profanityDecision = params.skipContentFiltersForReport
-      ? null
-      : this.detectProfanityForSettings(text, settings);
-    if (profanityDecision) {
-      violations.push({
-        ruleCode: 'PROFANITY',
-        score: profanityDecision.score,
-        reason: 'Detected profanity or abusive language pattern',
-        metadata: {
-          category: profanityDecision.category,
-          sensitivity: profanityDecision.sensitivity,
-          rolloutMode: profanityDecision.rolloutMode,
-          familyId: profanityDecision.familyId,
-          matchKind: profanityDecision.matchKind,
-          matchedVariant: profanityDecision.matchedVariant,
-          evidence: profanityDecision.evidence,
-          detectorVersion: profanityDecision.detectorVersion,
-        },
-      });
-    }
-    markRuleEngineDetectStage(profile, 'profanity');
-
-    if (settings.commercialAdsFilterEnabled && !params.skipContentFiltersForReport) {
-      const authority = await this.commercialTextPolicy?.authority(
-        params.chatId,
-        fingerprintCommercialTextSettingsProfile(settings),
-      );
-      const commercial = this.commercialAdDetector.detect({
-        normalizedText: detectionContext.normalizedText,
-        rawLoweredText: detectionContext.rawLoweredText,
-        settings,
-        commercialCampaignContext,
-        promotedPolicyCohorts:
-          authority?.promotedPolicyCohorts ?? COMMERCIAL_TEXT_BASELINE_POLICY_COHORTS,
-      });
-      if (commercial) {
-        const categories = commercialAdsDetectionCategories(commercial);
-        const categoryPolicy = resolveCommercialAdsPolicy({
-          policy: settings.commercialAdsPolicy,
-          categories,
-          userId,
-        });
-        const categoryActionable =
-          categoryPolicy.decision === 'LEGACY' || categoryPolicy.decision === 'BLOCK';
-        violations.push({
-          ruleCode: 'COMMERCIAL_AD',
-          score: commercial.confidenceScore / 100,
-          reason: 'Detected Russian commercial ad pattern',
-          metadata: {
-            commercialAdsCategories: categories,
-            commercialAdsPolicyReason: categoryPolicy.reason,
-            confidenceScore: commercial.confidenceScore,
-            decisionBand: commercial.decisionBand,
-            matchedSignals: commercial.matchedSignals,
-            negativeSignals: commercial.negativeSignals,
-            primarySubtype: commercial.primarySubtype,
-            supportingSubtypes: commercial.supportingSubtypes,
-            evidenceStrength: commercial.evidenceStrength,
-            reviewRecommended: commercial.reviewRecommended,
-            reviewReasons: commercial.reviewReasons,
-            classifierVersion: commercial.classifierVersion,
-            commercialProbability: commercial.commercialProbability,
-            reviewProbability: commercial.reviewProbability,
-            classifierReasons: commercial.classifierReasons,
-            ...(commercial.campaignContext ? { campaignContext: commercial.campaignContext } : {}),
-            appliedThresholds: commercial.appliedThresholds,
-            decisionVersion: commercial.decisionVersion,
-            score: commercial.score,
-            actionScore: commercial.actionScore,
-            fpRisk: commercial.fpRisk,
-            policyFpRisk: commercial.policyFpRisk,
-            evidenceTier: commercial.evidenceTier,
-            subtype: commercial.subtype,
-            actionBand:
-              authority?.baselineAllowed === false || !categoryActionable
-                ? 'REVIEW_ONLY'
-                : commercial.actionBand,
-            messageDisposition:
-              authority?.baselineAllowed === false || !categoryActionable
-                ? 'KEEP'
-                : commercial.messageDisposition,
-            commercialTextRuntimeRevision: authority?.revision ?? 0,
-            commercialTextRuntimeMode: authority?.mode ?? 'baseline',
-            requiredPolicyCohorts: commercial.requiredPolicyCohorts ?? [],
-            reviewPriority: commercial.reviewPriority,
-            campaignStrength: commercial.campaignStrength,
-            safeContextBucket: commercial.safeContextBucket,
-            actionable:
-              authority?.baselineAllowed !== false && categoryActionable && commercial.actionable,
-            recordable:
-              authority?.baselineAllowed !== false && categoryActionable && commercial.recordable,
-            deleteSuppressed: commercial.deleteSuppressed,
-            suppressionReasons: commercial.suppressionReasons,
-            reasonCodes: commercial.reasonCodes,
-            featureVector: commercial.featureVector,
-          },
-        });
-      }
-    }
-    markRuleEngineDetectStage(profile, 'commercial-ad');
-
-    const allowlistLinkMatcher =
-      domainAllowlist.length > 0 ? createAllowlistLinkMatcher(domainAllowlist) : undefined;
-    const linkViolation = detectBlockedLink(
-      text,
-      settings.linkPolicy,
-      domainAllowlist,
-      allowlistLinkMatcher,
-      navigationTargets,
-      settings.linkRulesPolicy,
-    );
-    if (linkViolation) {
-      violations.push({ ruleCode: 'LINK_BLOCKED', score: 0.9, reason: linkViolation });
-    }
-    markRuleEngineDetectStage(profile, 'links');
-
-    const messageLengthViolation = this.messageLimitsDetector.detectMessageLengthLimit({
-      measuredLength: detectionContext.measuredLength,
-      settings,
-    });
-    if (messageLengthViolation) {
-      violations.push(messageLengthViolation);
-    }
-    markRuleEngineDetectStage(profile, 'message-length');
-
-    const antiSpamViolation = skipStatefulMessageLimits
-      ? null
-      : await this.messageLimitsDetector.detectAntiSpamBurstLimit({
-          chatId,
-          userId,
-          messageId,
-          eventTimestampMs: duplicateStateEventTimestampMs,
-          settings,
-          hasExcludedAttachment: hasAntiSpamBurstExcludedAttachment,
-          skipAntiSpamBurstLimit,
-        });
-    if (antiSpamViolation) {
-      violations.push(antiSpamViolation);
-    }
-    markRuleEngineDetectStage(profile, 'anti-spam-burst');
-
-    const messageCountViolation = skipStatefulMessageLimits
-      ? null
-      : await this.messageLimitsDetector.detectMessageCountLimit({
-          chatId,
-          userId,
-          messageId,
-          eventTimestampMs: duplicateStateEventTimestampMs,
-          settings,
-        });
-    if (messageCountViolation) {
-      violations.push(messageCountViolation);
-    }
-    markRuleEngineDetectStage(profile, 'message-count-limit');
-
-    let blockedWordViolation: RuleViolation | null = null;
-    let blockedDomainViolation: RuleViolation | null = null;
-    if (settings.stopWordsPolicy == null && !params.skipContentFiltersForReport) {
-      for (const segment of splitStopWordsSourceParagraphs({
+    const observation = createRuleEngineObservation();
+    let failed = true;
+    try {
+      beginRuleEngineDetectStage(profile, 'normalize');
+      const violations: RuleViolation[] = [];
+      const detectionContext = createRuleDetectionContext({
         text,
-        textSegments: params.stopWordsTextSegments,
-      })) {
-        blockedWordViolation ??= this.messageLimitsDetector.detectBlockedWordLimit({
-          text: segment,
-          settings,
-        });
-        blockedDomainViolation ??= this.messageLimitsDetector.detectBlockedDomainLimit({
-          text: segment,
-          settings,
-          isLinkAllowlisted: allowlistLinkMatcher,
-        });
-        if (blockedWordViolation && blockedDomainViolation) break;
-      }
-    }
-    if (blockedWordViolation) {
-      violations.push(blockedWordViolation);
-    }
-    markRuleEngineDetectStage(profile, 'blocked-words');
-
-    if (blockedDomainViolation) {
-      violations.push(blockedDomainViolation);
-    }
-    markRuleEngineDetectStage(profile, 'blocked-domains');
-    if (settings.stopWordsPolicy != null && !params.skipContentFiltersForReport) {
-      violations.push(
-        ...detectStopWordsViolations({
-          text,
-          settings,
-          textSegments: params.stopWordsTextSegments,
-          navigationTargets,
-          isLinkAllowlisted: allowlistLinkMatcher,
-        }),
-      );
-    }
-
-    const phoneNumberViolation = params.skipContentFiltersForReport
-      ? null
-      : this.messageLimitsDetector.detectPhoneNumberLimit({
-          text,
-          settings,
-        });
-    if (phoneNumberViolation) {
-      violations.push(phoneNumberViolation);
-    }
-    markRuleEngineDetectStage(profile, 'phone-numbers');
-
-    violations.push(
-      ...this.messageLimitsDetector.detectAttachmentLimits({
         settings,
-        hasPhotoAttachment,
-        hasVideoAttachment,
-        hasFileAttachment,
-        hasVoiceAttachment,
-        hasForwardedMessage,
-      }),
-    );
-    markRuleEngineDetectStage(profile, 'attachments');
+        effectiveLength,
+      });
+      markRuleEngineDetectStage(profile, 'normalize');
 
-    const trafficEligible = !hasCompetingModerationViolation(violations);
-    if (
-      trafficEligible &&
-      (settings.slowModeEnabled ||
-        settings.mediaMessageCooldownEnabled ||
-        settings.stickerMessagesEnabled === false)
-    ) {
-      try {
-        const trafficViolation = await this.trafficProtectionDetector.detect({
-          chatId,
-          userId,
-          messageId,
-          eventType: duplicateStateEventType,
-          eventTimestampMs: duplicateStateEventTimestampMs,
-          mediaGroupId: params.mediaGroupId,
-          text,
-          settings,
-          media: {
-            hasPhotoAttachment,
-            hasStickerAttachment,
-            hasVideoAttachment,
-            hasFileAttachment,
-            hasVoiceAttachment,
-            hasMediaBatch,
+      // FLAG: A recognized report command still passes all rate, length and attachment limits.
+      beginRuleEngineDetectStage(profile, 'profanity');
+      const profanityObserver = observation.family('profanity');
+      if (params.skipContentFiltersForReport) {
+        profanityObserver.configured(settings.russianProfanityFilterEnabled);
+        profanityObserver.finish({
+          kind: 'skip',
+          reason: settings.russianProfanityFilterEnabled ? 'content' : 'disabled',
+        });
+      }
+      const profanityDecision = params.skipContentFiltersForReport
+        ? null
+        : this.detectProfanityForSettings(text, settings, profanityObserver);
+      if (profanityDecision) {
+        violations.push({
+          ruleCode: 'PROFANITY',
+          score: profanityDecision.score,
+          reason: 'Detected profanity or abusive language pattern',
+          metadata: {
+            category: profanityDecision.category,
+            sensitivity: profanityDecision.sensitivity,
+            rolloutMode: profanityDecision.rolloutMode,
+            familyId: profanityDecision.familyId,
+            matchKind: profanityDecision.matchKind,
+            matchedVariant: profanityDecision.matchedVariant,
+            evidence: profanityDecision.evidence,
+            detectorVersion: profanityDecision.detectorVersion,
           },
         });
-        if (trafficViolation) violations.push(trafficViolation);
-      } catch {
-        void this.runtimeDiagnosticsService?.recordHotPathStageOutcome({
-          stage: 'rule-engine.traffic-protection',
-          outcome: 'skip',
-          failOpen: true,
+      }
+      markRuleEngineDetectStage(profile, 'profanity');
+
+      beginRuleEngineDetectStage(profile, 'commercial-ad');
+      const commercialObserver = observation.family('commercial-ad');
+      commercialObserver.configured(settings.commercialAdsFilterEnabled);
+      if (settings.commercialAdsFilterEnabled && !params.skipContentFiltersForReport) {
+        commercialObserver.eligible();
+        const authority = await this.commercialTextPolicy?.authority(
+          params.chatId,
+          fingerprintCommercialTextSettingsProfile(settings),
+        );
+        const commercial = this.commercialAdDetector.detect({
+          normalizedText: detectionContext.normalizedText,
+          rawLoweredText: detectionContext.rawLoweredText,
+          settings,
+          commercialCampaignContext,
+          promotedPolicyCohorts:
+            authority?.promotedPolicyCohorts ?? COMMERCIAL_TEXT_BASELINE_POLICY_COHORTS,
+        });
+        commercialObserver.finish({ kind: 'evaluated', matched: Boolean(commercial) });
+        if (commercial) {
+          const categories = commercialAdsDetectionCategories(commercial);
+          const categoryPolicy = resolveCommercialAdsPolicy({
+            policy: settings.commercialAdsPolicy,
+            categories,
+            userId,
+          });
+          const categoryActionable =
+            categoryPolicy.decision === 'LEGACY' || categoryPolicy.decision === 'BLOCK';
+          violations.push({
+            ruleCode: 'COMMERCIAL_AD',
+            score: commercial.confidenceScore / 100,
+            reason: 'Detected Russian commercial ad pattern',
+            metadata: {
+              commercialAdsCategories: categories,
+              commercialAdsPolicyReason: categoryPolicy.reason,
+              confidenceScore: commercial.confidenceScore,
+              decisionBand: commercial.decisionBand,
+              matchedSignals: commercial.matchedSignals,
+              negativeSignals: commercial.negativeSignals,
+              primarySubtype: commercial.primarySubtype,
+              supportingSubtypes: commercial.supportingSubtypes,
+              evidenceStrength: commercial.evidenceStrength,
+              reviewRecommended: commercial.reviewRecommended,
+              reviewReasons: commercial.reviewReasons,
+              classifierVersion: commercial.classifierVersion,
+              commercialProbability: commercial.commercialProbability,
+              reviewProbability: commercial.reviewProbability,
+              classifierReasons: commercial.classifierReasons,
+              ...(commercial.campaignContext
+                ? { campaignContext: commercial.campaignContext }
+                : {}),
+              appliedThresholds: commercial.appliedThresholds,
+              decisionVersion: commercial.decisionVersion,
+              score: commercial.score,
+              actionScore: commercial.actionScore,
+              fpRisk: commercial.fpRisk,
+              policyFpRisk: commercial.policyFpRisk,
+              evidenceTier: commercial.evidenceTier,
+              subtype: commercial.subtype,
+              actionBand:
+                authority?.baselineAllowed === false || !categoryActionable
+                  ? 'REVIEW_ONLY'
+                  : commercial.actionBand,
+              messageDisposition:
+                authority?.baselineAllowed === false || !categoryActionable
+                  ? 'KEEP'
+                  : commercial.messageDisposition,
+              commercialTextRuntimeRevision: authority?.revision ?? 0,
+              commercialTextRuntimeMode: authority?.mode ?? 'baseline',
+              requiredPolicyCohorts: commercial.requiredPolicyCohorts ?? [],
+              reviewPriority: commercial.reviewPriority,
+              campaignStrength: commercial.campaignStrength,
+              safeContextBucket: commercial.safeContextBucket,
+              actionable:
+                authority?.baselineAllowed !== false && categoryActionable && commercial.actionable,
+              recordable:
+                authority?.baselineAllowed !== false && categoryActionable && commercial.recordable,
+              deleteSuppressed: commercial.deleteSuppressed,
+              suppressionReasons: commercial.suppressionReasons,
+              reasonCodes: commercial.reasonCodes,
+              featureVector: commercial.featureVector,
+            },
+          });
+        }
+      } else
+        commercialObserver.finish({
+          kind: 'skip',
+          reason: settings.commercialAdsFilterEnabled ? 'content' : 'disabled',
+        });
+      markRuleEngineDetectStage(profile, 'commercial-ad');
+
+      beginRuleEngineDetectStage(profile, 'links');
+      const allowlistLinkMatcher =
+        domainAllowlist.length > 0 ? createAllowlistLinkMatcher(domainAllowlist) : undefined;
+      const linkViolation = detectBlockedLink(
+        text,
+        settings.linkPolicy,
+        domainAllowlist,
+        allowlistLinkMatcher,
+        navigationTargets,
+        settings.linkRulesPolicy,
+        observation.family('links'),
+      );
+      if (linkViolation) {
+        violations.push({ ruleCode: 'LINK_BLOCKED', score: 0.9, reason: linkViolation });
+      }
+      markRuleEngineDetectStage(profile, 'links');
+
+      beginRuleEngineDetectStage(profile, 'message-length');
+      const messageLengthViolation = this.messageLimitsDetector.detectMessageLengthLimit({
+        measuredLength: detectionContext.measuredLength,
+        settings,
+        observer: observation.family('message-length'),
+      });
+      if (messageLengthViolation) {
+        violations.push(messageLengthViolation);
+      }
+      markRuleEngineDetectStage(profile, 'message-length');
+
+      beginRuleEngineDetectStage(profile, 'anti-spam-burst');
+      const antiSpamObserver = observation.family('anti-spam-burst');
+      if (skipStatefulMessageLimits) {
+        antiSpamObserver.configured(settings.antiSpamEnabled);
+        antiSpamObserver.finish({
+          kind: 'skip',
+          reason: settings.antiSpamEnabled ? 'state' : 'disabled',
         });
       }
-    }
-    markRuleEngineDetectStage(profile, 'traffic-protection');
-
-    const hasTransferableAttachment = Boolean(
-      hasPhotoAttachment ||
-      hasVideoAttachment ||
-      hasFileAttachment ||
-      hasVoiceAttachment ||
-      hasMediaBatch ||
-      hasForwardedMessage,
-    );
-    const duplicateTextCandidate =
-      settings.antiDuplicateEnabled &&
-      violations.length === 0 &&
-      !linkViolation &&
-      !hasTransferableAttachment &&
-      this.shouldTrackDuplicate(text, detectionContext.compactText, navigationTargets);
-    const editedDuplicateStateCandidate =
-      settings.antiDuplicateEnabled &&
-      duplicateStateEventType === 'message_edited' &&
-      Boolean(messageId);
-    const duplicateCandidate = duplicateTextCandidate || editedDuplicateStateCandidate;
-    const hasUsableDuplicateRevision =
-      !messageId ||
-      (Number.isSafeInteger(duplicateStateEventTimestampMs) &&
-        (duplicateStateEventTimestampMs ?? 0) > 0);
-    markRuleEngineDetectStage(profile, 'duplicate-precheck');
-    const duplicateState =
-      duplicateCandidate &&
-      !skipDuplicateState &&
-      (!skipStatefulMessageLimits || duplicateStateEventType === 'message_edited') &&
-      hasUsableDuplicateRevision
-        ? await this.duplicateDetector.detectWithin({
+      const antiSpamViolation = skipStatefulMessageLimits
+        ? null
+        : await this.messageLimitsDetector.detectAntiSpamBurstLimit({
             chatId,
             userId,
             messageId,
             eventTimestampMs: duplicateStateEventTimestampMs,
-            rawText: text,
-            compactText: detectionContext.compactText,
             settings,
-            navigationTargets,
-            trackCurrentText: duplicateTextCandidate,
-          })
-        : undefined;
-    markRuleEngineDetectStage(profile, 'duplicate-state');
+            hasExcludedAttachment: hasAntiSpamBurstExcludedAttachment,
+            skipAntiSpamBurstLimit,
+            observer: antiSpamObserver,
+          });
+      if (antiSpamViolation) {
+        violations.push(antiSpamViolation);
+      }
+      markRuleEngineDetectStage(profile, 'anti-spam-burst');
 
-    if (
-      !hasCompetingModerationViolation(violations) &&
-      !duplicateState?.hit &&
-      !duplicateState?.decision &&
-      !skipStatefulMessageLimits
-    ) {
+      beginRuleEngineDetectStage(profile, 'message-count-limit');
+      const messageCountObserver = observation.family('message-count-limit');
+      if (skipStatefulMessageLimits) {
+        messageCountObserver.configured(settings.messageCountLimitEnabled);
+        messageCountObserver.finish({
+          kind: 'skip',
+          reason: settings.messageCountLimitEnabled ? 'state' : 'disabled',
+        });
+      }
+      const messageCountViolation = skipStatefulMessageLimits
+        ? null
+        : await this.messageLimitsDetector.detectMessageCountLimit({
+            chatId,
+            userId,
+            messageId,
+            eventTimestampMs: duplicateStateEventTimestampMs,
+            settings,
+            observer: messageCountObserver,
+          });
+      if (messageCountViolation) {
+        violations.push(messageCountViolation);
+      }
+      markRuleEngineDetectStage(profile, 'message-count-limit');
+
+      beginRuleEngineDetectStage(profile, 'stop-words-policy');
+      const wordObserver = observation.family('blocked-words');
+      const domainObserver = observation.family('blocked-domains');
+      if (params.skipContentFiltersForReport && settings.stopWordsPolicy == null) {
+        const wordsConfigured = settings.messageLimitsBlockedWords.length > 0;
+        const domainsConfigured = settings.messageLimitsBlockedDomains.length > 0;
+        wordObserver.configured(wordsConfigured);
+        domainObserver.configured(domainsConfigured);
+        wordObserver.finish({ kind: 'skip', reason: wordsConfigured ? 'content' : 'disabled' });
+        domainObserver.finish({ kind: 'skip', reason: domainsConfigured ? 'content' : 'disabled' });
+      }
+      let blockedWordViolation: RuleViolation | null = null;
+      let blockedDomainViolation: RuleViolation | null = null;
+      if (settings.stopWordsPolicy == null && !params.skipContentFiltersForReport) {
+        const segments = splitStopWordsSourceParagraphs({
+          text,
+          textSegments: params.stopWordsTextSegments,
+        });
+        if (segments.length === 0) {
+          wordObserver.configured(settings.messageLimitsBlockedWords.length > 0);
+          wordObserver.finish({
+            kind: 'skip',
+            reason: settings.messageLimitsBlockedWords.length ? 'content' : 'disabled',
+          });
+          domainObserver.configured(settings.messageLimitsBlockedDomains.length > 0);
+          domainObserver.finish({
+            kind: 'skip',
+            reason: settings.messageLimitsBlockedDomains.length ? 'content' : 'disabled',
+          });
+        }
+        for (const segment of segments) {
+          blockedWordViolation ??= this.messageLimitsDetector.detectBlockedWordLimit({
+            text: segment,
+            settings,
+            observer: wordObserver,
+          });
+          blockedDomainViolation ??= this.messageLimitsDetector.detectBlockedDomainLimit({
+            text: segment,
+            settings,
+            isLinkAllowlisted: allowlistLinkMatcher,
+            observer: domainObserver,
+          });
+          if (blockedWordViolation && blockedDomainViolation) break;
+        }
+      }
+      if (blockedWordViolation) {
+        violations.push(blockedWordViolation);
+      }
+      if (blockedDomainViolation) {
+        violations.push(blockedDomainViolation);
+      }
+      if (settings.stopWordsPolicy != null) {
+        violations.push(
+          ...detectStopWordsViolations({
+            text,
+            settings,
+            textSegments: params.stopWordsTextSegments,
+            navigationTargets,
+            isLinkAllowlisted: allowlistLinkMatcher,
+            wordObserver,
+            domainObserver,
+            skipContentForReport: params.skipContentFiltersForReport,
+          }),
+        );
+      }
+      markRuleEngineDetectStage(profile, 'stop-words-policy');
+
+      beginRuleEngineDetectStage(profile, 'phone-numbers');
+      const phoneObserver = observation.family('phone-numbers');
+      if (params.skipContentFiltersForReport) {
+        phoneObserver.configured(!settings.phoneNumbersEnabled);
+        phoneObserver.finish({
+          kind: 'skip',
+          reason: settings.phoneNumbersEnabled ? 'disabled' : 'content',
+        });
+      }
+      const phoneNumberViolation = params.skipContentFiltersForReport
+        ? null
+        : this.messageLimitsDetector.detectPhoneNumberLimit({
+            text,
+            settings,
+            observer: phoneObserver,
+          });
+      if (phoneNumberViolation) {
+        violations.push(phoneNumberViolation);
+      }
+      markRuleEngineDetectStage(profile, 'phone-numbers');
+
+      beginRuleEngineDetectStage(profile, 'attachments');
       violations.push(
-        ...(await this.messageLimitsDetector.detectMediaCooldownLimits({
-          chatId,
-          userId,
-          messageId,
-          eventTimestampMs: duplicateStateEventTimestampMs,
+        ...this.messageLimitsDetector.detectAttachmentLimits({
           settings,
           hasPhotoAttachment,
-          hasStickerAttachment,
-        })),
+          hasVideoAttachment,
+          hasFileAttachment,
+          hasVoiceAttachment,
+          hasForwardedMessage,
+          observer: observation.family('attachments'),
+        }),
+      );
+      markRuleEngineDetectStage(profile, 'attachments');
+
+      beginRuleEngineDetectStage(profile, 'traffic-protection');
+      const trafficEligible = !hasCompetingModerationViolation(violations);
+      const trafficObserver = observation.family('traffic-protection');
+      const trafficConfigured =
+        settings.slowModeEnabled ||
+        settings.mediaMessageCooldownEnabled ||
+        settings.stickerMessagesEnabled === false;
+      trafficObserver.configured(trafficConfigured);
+      if (trafficEligible && trafficConfigured) {
+        try {
+          const trafficViolation = await this.trafficProtectionDetector.detect({
+            chatId,
+            userId,
+            messageId,
+            eventType: duplicateStateEventType,
+            eventTimestampMs: duplicateStateEventTimestampMs,
+            mediaGroupId: params.mediaGroupId,
+            text,
+            settings,
+            observer: trafficObserver,
+            media: {
+              hasPhotoAttachment,
+              hasStickerAttachment,
+              hasVideoAttachment,
+              hasFileAttachment,
+              hasVoiceAttachment,
+              hasMediaBatch,
+            },
+          });
+          if (trafficViolation) violations.push(trafficViolation);
+        } catch {
+          trafficObserver.finish({ kind: 'error' });
+          try {
+            const pending = this.runtimeDiagnosticsService?.recordHotPathStageOutcome({
+              stage: 'rule-engine.traffic-protection',
+              outcome: 'skip',
+              failOpen: true,
+            });
+            if (pending) void pending.catch(() => undefined);
+          } catch {
+            // FLAG: Diagnostic failure must preserve this rule's existing fail-open result.
+          }
+        }
+      } else
+        trafficObserver.finish({ kind: 'skip', reason: trafficConfigured ? 'state' : 'disabled' });
+      markRuleEngineDetectStage(profile, 'traffic-protection');
+
+      beginRuleEngineDetectStage(profile, 'duplicate-precheck');
+      const duplicateObserver = observation.family('duplicate-state');
+      duplicateObserver.configured(settings.antiDuplicateEnabled);
+      const hasTransferableAttachment = Boolean(
+        hasPhotoAttachment ||
+        hasVideoAttachment ||
+        hasFileAttachment ||
+        hasVoiceAttachment ||
+        hasMediaBatch ||
+        hasForwardedMessage,
+      );
+      const duplicateTextCandidate =
+        settings.antiDuplicateEnabled &&
+        violations.length === 0 &&
+        !linkViolation &&
+        !hasTransferableAttachment &&
+        this.shouldTrackDuplicate(text, detectionContext.compactText, navigationTargets);
+      const editedDuplicateStateCandidate =
+        settings.antiDuplicateEnabled &&
+        duplicateStateEventType === 'message_edited' &&
+        Boolean(messageId);
+      const duplicateCandidate = duplicateTextCandidate || editedDuplicateStateCandidate;
+      const hasUsableDuplicateRevision =
+        !messageId ||
+        (Number.isSafeInteger(duplicateStateEventTimestampMs) &&
+          (duplicateStateEventTimestampMs ?? 0) > 0);
+      markRuleEngineDetectStage(profile, 'duplicate-precheck');
+      beginRuleEngineDetectStage(profile, 'duplicate-state');
+      const duplicateState =
+        duplicateCandidate &&
+        !skipDuplicateState &&
+        (!skipStatefulMessageLimits || duplicateStateEventType === 'message_edited') &&
+        hasUsableDuplicateRevision
+          ? await this.duplicateDetector.detectWithin({
+              chatId,
+              userId,
+              messageId,
+              eventTimestampMs: duplicateStateEventTimestampMs,
+              rawText: text,
+              compactText: detectionContext.compactText,
+              settings,
+              navigationTargets,
+              trackCurrentText: duplicateTextCandidate,
+              observer: duplicateObserver,
+            })
+          : undefined;
+      if (!duplicateState)
+        duplicateObserver.finish({
+          kind: 'skip',
+          reason: !settings.antiDuplicateEnabled
+            ? 'disabled'
+            : skipDuplicateState ||
+                (skipStatefulMessageLimits && duplicateStateEventType !== 'message_edited') ||
+                !hasUsableDuplicateRevision
+              ? 'state'
+              : 'content',
+        });
+      markRuleEngineDetectStage(profile, 'duplicate-state');
+
+      beginRuleEngineDetectStage(profile, 'media-cooldowns');
+      if (
+        !hasCompetingModerationViolation(violations) &&
+        !duplicateState?.hit &&
+        !duplicateState?.decision &&
+        !skipStatefulMessageLimits
+      ) {
+        violations.push(
+          ...(await this.messageLimitsDetector.detectMediaCooldownLimits({
+            chatId,
+            userId,
+            messageId,
+            eventTimestampMs: duplicateStateEventTimestampMs,
+            settings,
+            hasPhotoAttachment,
+            hasStickerAttachment,
+            photoObserver: observation.family('photo-cooldown'),
+            stickerObserver: observation.family('sticker-cooldown'),
+          })),
+        );
+      } else {
+        for (const [family, configured] of [
+          ['photo-cooldown', settings.photoMessageCooldownEnabled],
+          ['sticker-cooldown', settings.stickerMessageCooldownEnabled],
+        ] as const) {
+          const observer = observation.family(family);
+          observer.configured(configured);
+          observer.finish({ kind: 'skip', reason: configured ? 'state' : 'disabled' });
+        }
+      }
+      markRuleEngineDetectStage(profile, 'media-cooldowns');
+
+      logSlowRuleEngineDetectIfNeeded({
+        chatId,
+        userId,
+        measuredLength: detectionContext.measuredLength,
+        settings,
+        violationsCount: violations.length,
+        duplicateCandidate,
+        profile,
+      });
+      failed = false;
+      return {
+        violations,
+        ...(duplicateState?.hit ? { duplicateHit: duplicateState.hit } : {}),
+        ...(duplicateState?.decision ? { duplicateDecision: duplicateState.decision } : {}),
+        ...(skipDuplicateState ? { duplicateStateSkipped: true } : {}),
+      };
+    } finally {
+      recordRuleEngineDetectProfile(
+        profile,
+        this.runtimeDiagnosticsService,
+        observation.close(failed),
       );
     }
-
-    logSlowRuleEngineDetectIfNeeded({
-      chatId,
-      userId,
-      measuredLength: detectionContext.measuredLength,
-      settings,
-      violationsCount: violations.length,
-      duplicateCandidate,
-      profile,
-    });
-    recordRuleEngineDetectProfile(profile, this.runtimeDiagnosticsService);
-
-    return {
-      violations,
-      ...(duplicateState?.hit ? { duplicateHit: duplicateState.hit } : {}),
-      ...(duplicateState?.decision ? { duplicateDecision: duplicateState.decision } : {}),
-      ...(skipDuplicateState ? { duplicateStateSkipped: true } : {}),
-    };
   }
 
   hasCommercialSpamMarkers(text: string): boolean {
@@ -1477,14 +1614,22 @@ export class RuleEngineService {
   detectProfanityForSettings(
     text: string,
     settings: Pick<ChatSettings, 'russianProfanityFilterEnabled' | 'profanitySensitivity'>,
+    observer?: RuleEvaluationObserver,
   ): ProfanityDetectionDecision | null {
-    if (!settings.russianProfanityFilterEnabled) return null;
+    observer?.configured(settings.russianProfanityFilterEnabled);
+    if (!settings.russianProfanityFilterEnabled) {
+      observer?.finish({ kind: 'skip', reason: 'disabled' });
+      return null;
+    }
+    observer?.eligible();
     const rolloutMode = resolveProfanityRolloutMode();
-    return this.detectProfanity(
+    const decision = this.detectProfanity(
       text,
       rolloutMode === 'legacy' ? 'STRICT' : resolveProfanitySensitivity(settings),
       rolloutMode,
     );
+    observer?.finish({ kind: 'evaluated', matched: Boolean(decision) });
+    return decision;
   }
 
   private detectProfanity(
