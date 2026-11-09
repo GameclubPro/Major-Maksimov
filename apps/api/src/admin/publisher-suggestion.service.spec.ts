@@ -1,10 +1,12 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { PublicationDispatchProfile } from '../prisma/prisma-client';
+import { PublicationDispatchProfile, type Prisma } from '../prisma/prisma-client';
 import { PublisherSuggestionService } from './publisher-suggestion.service';
+import type { SuggestionSubscriptionService } from '../suggestions/suggestion-subscription.service';
 import { TINY_VALID_MP4 } from '../../test/fixtures/max-media';
 import {
   buildLegacyPublisherSuggestionPublicationRequestId,
@@ -88,7 +90,11 @@ function createFixture(payloadOverrides: Record<string, unknown> = {}) {
     publicationMutationRecord: { findUnique: jest.fn().mockResolvedValue(null) },
     $queryRaw: jest.fn(),
     $executeRaw: jest.fn().mockResolvedValue(1),
+    $transaction: jest.fn<Promise<void>, [(tx: Prisma.TransactionClient) => Promise<void>]>(),
   };
+  prisma.$transaction.mockImplementation(async (operation) =>
+    operation(prisma as unknown as Prisma.TransactionClient),
+  );
   const policy = { getEntity: jest.fn().mockResolvedValue({ id: 'channel-1' }) };
   const publications = {
     create: jest
@@ -97,6 +103,20 @@ function createFixture(payloadOverrides: Record<string, unknown> = {}) {
   };
   const publicationQueue = { enqueue: jest.fn().mockResolvedValue(undefined) };
   const adminQueue = { enqueueSync: jest.fn().mockResolvedValue(undefined) };
+  const suggestionSubscriptions = {
+    assertCanSubmit: jest
+      .fn<
+        ReturnType<SuggestionSubscriptionService['assertCanSubmit']>,
+        Parameters<SuggestionSubscriptionService['assertCanSubmit']>
+      >()
+      .mockResolvedValue(undefined),
+    track: jest
+      .fn<
+        ReturnType<SuggestionSubscriptionService['track']>,
+        Parameters<SuggestionSubscriptionService['track']>
+      >()
+      .mockResolvedValue(undefined),
+  };
   const service = new PublisherSuggestionService(
     prisma as never,
     policy as never,
@@ -104,6 +124,7 @@ function createFixture(payloadOverrides: Record<string, unknown> = {}) {
     publicationQueue as never,
     adminQueue as never,
     { getBotId: () => 'publisher-bot' } as never,
+    suggestionSubscriptions as never,
   );
   return {
     service,
@@ -112,6 +133,7 @@ function createFixture(payloadOverrides: Record<string, unknown> = {}) {
     publications,
     publicationQueue,
     adminQueue,
+    suggestionSubscriptions,
     row,
     setPayload(next: Record<string, unknown>) {
       payload = next;
@@ -228,10 +250,12 @@ describe('PublisherSuggestionService', () => {
   it('atomically claims a publish request and only enqueues it from the HTTP path', async () => {
     const fixture = createFixture();
     const claimedPayload = createClaimedPayload();
-    jest.spyOn(fixture.service as any, 'claimPending').mockImplementation(async () => {
-      fixture.setPayload(claimedPayload);
-      return fixture.row();
-    });
+    const claimPending = jest
+      .spyOn(fixture.service as any, 'claimPending')
+      .mockImplementation(async () => {
+        fixture.setPayload(claimedPayload);
+        return fixture.row();
+      });
 
     const result = await fixture.service.review('channel-1', 'suggestion-1', user, {
       action: 'publish',
@@ -246,6 +270,66 @@ describe('PublisherSuggestionService', () => {
       recycleCompleted: true,
     });
     expect(fixture.publications.create).not.toHaveBeenCalled();
+    expect(fixture.suggestionSubscriptions.assertCanSubmit).toHaveBeenCalledWith(
+      'channel-1',
+      '42',
+      'publisher',
+    );
+    expect(
+      fixture.suggestionSubscriptions.assertCanSubmit.mock.invocationCallOrder[0],
+    ).toBeLessThan(claimPending.mock.invocationCallOrder[0]!);
+  });
+
+  it.each(['publish', 'draft'] as const)(
+    'checks the original author before admitting a new %s claim',
+    async (action) => {
+      const fixture = createFixture();
+      const failure = new ForbiddenException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' });
+      fixture.suggestionSubscriptions.assertCanSubmit.mockRejectedValue(failure);
+
+      await expect(
+        fixture.service.review('channel-1', 'suggestion-1', user, { action }),
+      ).rejects.toBe(failure);
+
+      expect(fixture.suggestionSubscriptions.assertCanSubmit).toHaveBeenCalledWith(
+        'channel-1',
+        '42',
+        'publisher',
+      );
+      expect(fixture.row().payload.reviewStatus).toBe('pending');
+      expect(fixture.prisma.$queryRaw).not.toHaveBeenCalled();
+      expect(fixture.prisma.$executeRaw).not.toHaveBeenCalled();
+      expect(fixture.publications.create).not.toHaveBeenCalled();
+      expect(fixture.publicationQueue.enqueue).not.toHaveBeenCalled();
+      expect(fixture.adminQueue.enqueueSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps an unknown author subscription retryable without creating a publication claim', async () => {
+    const fixture = createFixture();
+    const failure = new ServiceUnavailableException('Subscription verification unavailable');
+    fixture.suggestionSubscriptions.assertCanSubmit.mockRejectedValue(failure);
+
+    await expect(
+      fixture.service.review('channel-1', 'suggestion-1', user, { action: 'publish' }),
+    ).rejects.toBe(failure);
+
+    expect(fixture.prisma.$queryRaw).not.toHaveBeenCalled();
+    expect(fixture.publicationQueue.enqueue).not.toHaveBeenCalled();
+    expect(fixture.publications.create).not.toHaveBeenCalled();
+  });
+
+  it('does not recheck author membership for an already accepted durable publication claim', async () => {
+    const fixture = createFixture(createClaimedPayload());
+
+    await expect(
+      fixture.service.review('channel-1', 'suggestion-1', user, { action: 'publish' }),
+    ).resolves.toEqual({ suggestion: expect.objectContaining({ reviewStatus: 'publishing' }) });
+
+    expect(fixture.suggestionSubscriptions.assertCanSubmit).not.toHaveBeenCalled();
+    expect(fixture.publicationQueue.enqueue).toHaveBeenCalledWith('suggestion-1', 'claim-1', {
+      recycleCompleted: true,
+    });
   });
 
   it('creates a recoverable Publication draft and returns its id from the review action', async () => {
@@ -381,6 +465,7 @@ describe('PublisherSuggestionService', () => {
     expect(fixture.prisma.channelSuggestionImageAsset.deleteMany).toHaveBeenCalledWith({
       where: { auditLogId: 'suggestion-1' },
     });
+    expect(fixture.suggestionSubscriptions.assertCanSubmit).not.toHaveBeenCalled();
     expect(fixture.publications.create).not.toHaveBeenCalled();
     expect(fixture.adminQueue.enqueueSync).toHaveBeenCalledWith({
       suggestionId: 'suggestion-1',
@@ -450,6 +535,7 @@ describe('PublisherSuggestionService', () => {
     await expect(
       published.service.review('channel-1', 'suggestion-1', user, { action: 'cancel' }),
     ).rejects.toBeInstanceOf(ConflictException);
+    expect(published.suggestionSubscriptions.assertCanSubmit).not.toHaveBeenCalled();
 
     const drafted = createFixture({
       reviewStatus: 'drafted',

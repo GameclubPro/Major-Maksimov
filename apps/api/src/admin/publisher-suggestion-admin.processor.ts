@@ -1,5 +1,5 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { ForbiddenException, HttpException, Optional } from '@nestjs/common';
+import { ForbiddenException, HttpException, Logger, Optional } from '@nestjs/common';
 import { VkBotReviewService } from './vk-bot-review.service';
 import type { VkBotReviewJob } from '../publisher/publisher-vk-bot-review.queue';
 import { UnrecoverableError, type Job } from 'bullmq';
@@ -32,6 +32,8 @@ import { PublisherSuggestionService } from './publisher-suggestion.service';
 
 @Processor(PUBLISHER_SUGGESTION_ADMIN_QUEUE, { concurrency: 1 })
 export class PublisherSuggestionAdminProcessor extends WorkerHost {
+  private readonly logger = new Logger(PublisherSuggestionAdminProcessor.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly maxClient: MaxClientService,
@@ -186,8 +188,21 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
       }
       await this.answerCallback(job, reviewNotification(reviewStatus));
     } catch (error: unknown) {
-      await this.answerCallback(job, reviewErrorNotification(error));
-      if (!isTerminalReviewError(error)) {
+      const rejection = reviewErrorDetails(error);
+      await this.answerCallback(job, rejection.notification);
+      if (isTerminalReviewError(error)) {
+        // FLAG: Preserve the rejection reason without logging the exception, actor or card content.
+        this.logger.warn(
+          {
+            suggestionId: row.id,
+            botId: job.requiredBotId,
+            action: job.action,
+            statusCode: error instanceof HttpException ? error.getStatus() : null,
+            reason: rejection.reason,
+          },
+          'Publisher suggestion review rejected',
+        );
+      } else {
         throw error;
       }
     }
@@ -227,10 +242,43 @@ function isTerminalReviewError(error: unknown): boolean {
   return status >= 400 && status < 500 && status !== 429;
 }
 
-function reviewErrorNotification(error: unknown): string {
-  if (error instanceof ForbiddenException) return 'Права администратора не подтверждены.';
-  if (error instanceof HttpException && error.getStatus() === 409) {
-    return 'Состояние предложки уже изменилось.';
+function reviewErrorDetails(error: unknown): {
+  notification: string;
+  reason:
+    | 'author_subscription_required'
+    | 'administrator_access_required'
+    | 'review_conflict'
+    | 'request_rejected';
+} {
+  if (error instanceof HttpException && error.getStatus() === 403) {
+    const response = error.getResponse();
+    if (
+      typeof response === 'object' &&
+      response !== null &&
+      'code' in response &&
+      response.code === 'SUGGESTION_SUBSCRIPTION_REQUIRED'
+    ) {
+      return {
+        notification:
+          'Подписка автора предложки на канал не подтверждена. Включено требование подписки.',
+        reason: 'author_subscription_required',
+      };
+    }
   }
-  return 'Не удалось обработать предложку. Повторите позже.';
+  if (error instanceof ForbiddenException) {
+    return {
+      notification: 'Права администратора не подтверждены.',
+      reason: 'administrator_access_required',
+    };
+  }
+  if (error instanceof HttpException && error.getStatus() === 409) {
+    return {
+      notification: 'Состояние предложки уже изменилось.',
+      reason: 'review_conflict',
+    };
+  }
+  return {
+    notification: 'Не удалось обработать предложку. Повторите позже.',
+    reason: 'request_rejected',
+  };
 }
