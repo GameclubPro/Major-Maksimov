@@ -318,7 +318,7 @@ test('source fingerprint binds reply identity, footer marker and mention target 
     });
   assert.notEqual(withMention(900).fingerprint, withMention(901).fingerprint);
   assert.notEqual(withMention(900).fingerprint, withMention(900, 1).fingerprint);
-  const quotedChange = replyRow();
+  const quotedChange = structuredClone(original);
   quotedChange.link.message.text = 'Другая синтетическая цитата';
   assert.equal(sourceMessage(quotedChange).fingerprint, fingerprint);
 });
