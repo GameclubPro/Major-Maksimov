@@ -718,6 +718,38 @@ jobs:
         run: |
           sha256sum --check maxim-image.tar.gz.sha256
           gzip -dc maxim-image.tar.gz | docker image load
+      # FLAG: Retry only the pinned tool installer before any image publication.
+      # A final preparation failure must stop auth/publish; retain normal cancellation.
+      - name: Prepare pinned Syft (1/3)
+        id: syft_prepare_1
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          syft-version: v1.56.0
+      - name: Back off before the second Syft preparation
+        if: steps.syft_prepare_1.outcome == 'failure'
+        timeout-minutes: 1
+        run: sleep 10
+      - name: Prepare pinned Syft (2/3)
+        id: syft_prepare_2
+        if: steps.syft_prepare_1.outcome == 'failure'
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          syft-version: v1.56.0
+      - name: Back off before the final Syft preparation
+        if: steps.syft_prepare_2.outcome == 'failure'
+        timeout-minutes: 1
+        run: sleep 20
+      - name: Prepare pinned Syft (3/3)
+        id: syft_prepare_3
+        if: steps.syft_prepare_2.outcome == 'failure'
+        timeout-minutes: 2
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          syft-version: v1.56.0
       - name: Authenticate the isolated publication job
         env:
           REGISTRY_ACTOR: ${{ github.actor }}
