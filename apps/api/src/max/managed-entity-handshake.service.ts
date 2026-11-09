@@ -963,6 +963,8 @@ export class ManagedEntityHandshakeService {
         { buttons: this.buildSettingsButton(context) },
         {
           immediate: true,
+          // FLAG: This command completes after the notice; no SEND retry owner remains.
+          immediateFailurePolicy: 'terminal',
           botId: context.botId,
           candidateBotIds: [permit.executionBotId],
           routing: { purpose: 'send_message', requiredBotId: permit.executionBotId },

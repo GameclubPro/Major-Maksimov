@@ -46,6 +46,10 @@ import {
 import { readMaxSendAutoDeleteVerificationDiagnostic } from './max-send-auto-delete-verification-error';
 import { parseMaxFutureNightStickyRouteProbe } from './max-send-route-sticky-probe';
 import { resolveExplicitMembershipAccessDenial } from './max-membership-access-error';
+import {
+  MaxSendCapacityDeadlineError,
+  readMaxSendCapacityDeferral,
+} from './max-send-capacity-deferral';
 
 type TerminalManagedEntityOutcome =
   | {
@@ -70,6 +74,7 @@ export type MaxActionDispatchResult = MaxPublishedMessage & {
 export type MaxActionDispatchExecutionOptions = {
   finalAttempt?: boolean;
   enqueuedAt?: Date;
+  deferSendCapacity?: boolean;
   prepareAttempt?: (params: { botId: string | null; job: MaxActionJob }) => Promise<{
     text?: string;
     options?: MaxSendMessageOptions;
@@ -458,6 +463,22 @@ export class MaxActionDispatchService {
       } catch (error: unknown) {
         if (!dispatchAttemptStartedAt) {
           await releaseHalfOpenClaim();
+        }
+        const capacityDeferral =
+          options.deferSendCapacity === true && this.actionLedgerService
+            ? readMaxSendCapacityDeferral(error, attemptJob)
+            : null;
+        if (capacityDeferral && this.actionLedgerService) {
+          await releaseHalfOpenClaim();
+          // FLAG: Only a certified unattempted notice can keep its final ordinary
+          // attempt. Persist the retry state before moving the same locked job.
+          const expired = capacityDeferral instanceof MaxSendCapacityDeadlineError;
+          await this.actionLedgerService.recordFailed(
+            attemptJob,
+            expired ? capacityDeferral : error,
+            { exhausted: expired },
+          );
+          throw capacityDeferral;
         }
         // FLAG: Ambiguous verification is not deletion success. Stop BullMQ retries only after
         // the durable ledger owns the terminal, manually repairable outcome.
