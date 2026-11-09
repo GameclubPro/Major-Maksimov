@@ -148,6 +148,7 @@ Commands:
   postgres-audit commercial-quality [--explain]
   postgres-audit network-statistics <negative-chat-ID-CSV, max 12> [--observations] [--membership=7d|30d] [--explain]
   postgres-audit statistics-exchange <exact-actor-id> [--explain]
+  postgres-audit stop-words-settings <negative-chat-id> [--word-hash md5] [--sender-hash md5] [--explain]
   postgres-audit karavan-candidates [--after settings-id] [--limit 1..40] [--explain]
   postgres-audit central-statistics <negative-chat-ID-CSV, max 12> [--explain]
   recover-publication-post-actions-migration [--apply]
@@ -772,6 +773,12 @@ ERROR
 
 postgres_audit() {
   local mode="${1:-all}"
+
+  if [[ "$mode" == 'stop-words-settings' ]]; then
+    node "$ROOT_DIR/infra/scripts/stop-words-settings-audit.mjs" --validate-scope "${@:2}" >/dev/null || return 2
+    remote_exec "$(shell_quote_args ./infra/scripts/vps-postgres-audit.sh "$@")"
+    return
+  fi
 
   if [[ "$mode" == 'karavan-candidates' ]]; then
     node "$ROOT_DIR/infra/scripts/karavan-candidates-audit.mjs" --validate-scope "${@:2}" >/dev/null || return 2

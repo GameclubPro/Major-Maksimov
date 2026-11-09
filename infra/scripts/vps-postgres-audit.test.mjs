@@ -1383,6 +1383,37 @@ test(
   },
 );
 
+test('stop-word settings report validates exact scope before transport and retains audit guards', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  const args = [
+    'stop-words-settings',
+    '-123',
+    '--word-hash',
+    'a'.repeat(32),
+    '--sender-hash',
+    'b'.repeat(32),
+    '--explain',
+  ];
+  const result = runAudit(data, args);
+  assert.equal(result.status, 0, result.stderr);
+  const sql = readFileSync(data.sql, 'utf8');
+  assert.match(sql, /MAXIM_STOP_WORDS_SETTINGS_PRIVILEGES_UNAVAILABLE/u);
+  assert.match(sql, /MAXIM_STOP_WORDS_SETTINGS_INDEXES_UNAVAILABLE/u);
+  assert.match(sql, /EXPLAIN \(FORMAT JSON\)/u);
+  assert.match(sql, /'report','stop_words_settings'/u);
+  assert.equal(runConnect(data, ['postgres-audit', ...args]).status, 0);
+  for (const bad of [
+    ['-1,-2'],
+    ['-1', '--apply'],
+    ['-1', '--sender-hash', 'bad'],
+    ['-1', '--explain', '--explain'],
+  ]) {
+    assert.equal(runAudit(data, ['stop-words-settings', ...bad]).status, 2);
+    assert.equal(runConnect(data, ['postgres-audit', 'stop-words-settings', ...bad]).status, 2);
+  }
+});
+
 test('queue audit uses the dedicated role and a hard read-only resource envelope', (t) => {
   const data = fixture();
   t.after(() => rmSync(data.directory, { force: true, recursive: true }));
@@ -4221,17 +4252,11 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
   await database.exec('SET SESSION AUTHORIZATION postgres;');
 
   await database.exec('GRANT SELECT (chat_id) ON TABLE chat_settings TO PUBLIC;');
-  await assert.rejects(
-    database.exec(verificationSql),
-    /unexpected effective Antiduplicate column privileges/u,
-  );
+  await assert.rejects(database.exec(verificationSql), /Stop-word audit privileges are not exact/u);
   await database.exec('REVOKE SELECT (chat_id) ON TABLE chat_settings FROM PUBLIC;');
 
   await database.exec('GRANT SELECT (chat_id) ON TABLE chat_settings TO pg_read_all_stats;');
-  await assert.rejects(
-    database.exec(verificationSql),
-    /unexpected effective Antiduplicate column privileges/u,
-  );
+  await assert.rejects(database.exec(verificationSql), /Stop-word audit privileges are not exact/u);
   await database.exec('REVOKE SELECT (chat_id) ON TABLE chat_settings FROM pg_read_all_stats;');
   await database.exec(verificationSql);
 
@@ -4848,7 +4873,7 @@ test('provisioning is preview-only by default and declares a hardened idempotent
     /GRANT SELECT \([\s\S]*intent_id[\s\S]*rule_code[\s\S]*\) ON TABLE public\.moderation_delete_intent_reasons TO maxim_audit/u,
   );
   assert.match(source, /Antiduplicate column privileges are not exact/u);
-  assert.match(source, /unexpected effective Antiduplicate column privileges/u);
+  assert.match(source, /Stop-word audit privileges are not exact/u);
   assert.match(source, /restricted_relation[\s\S]*restricted_attribute/u);
   assert.match(source, /has_table_privilege\([\s\S]*public\.chat_settings[\s\S]*'SELECT'/u);
   assert.match(source, /GRANT pg_read_all_stats TO maxim_audit/u);

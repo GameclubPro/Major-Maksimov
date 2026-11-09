@@ -65,3 +65,32 @@ Select validation with `scripts/agent/plan.mjs --worktree`; run affected callers
 For the mini app, run mobile browser flows covering section and leave-save, mixed changes, partial failure, stale revisions with retained drafts, confirmed reload, errors in hidden tabs and invalid-storage replacement. Check iPhone and Android, light and dark themes, keyboard overlap, scrolling and maximum-length entries. Preserve explicit EXACT/MASKED; fuzzy matching, mass policy rewrites, MASKED accent support and Unicode length changes are separate work.
 
 Release the compatible API before the mini app. Each runtime release requires green `Required` and `Analyze JavaScript and TypeScript` on the exact selected SHA, guarded deployment and strict role/native smokes. Verify the canonical mini app, ingress/admin health, synchronized VPS SHA, all 14 API roles, both native identities and component manifest. Verify new policy and old-client rejection using only the designated test entities, freshly checked exact bot/admin access and uniquely marked own messages. Do not sanction real participants or replay historical messages; restore scenario settings. After the last release and controlled scenarios, observe for 30 minutes with identified collector processes, heartbeat and last-successful samples. Missing observations remain acceptance gaps; earlier diagnostics do not substitute for this window.
+
+## Bounded Incident Settings Report
+
+Use the reviewed catalog before changing settings for a reported miss:
+
+```bash
+read -r -p 'Exact negative chat ID: ' STOP_WORDS_CHAT_ID
+read -r -p 'MD5 of exact configured value: ' STOP_WORDS_VALUE_MD5
+read -r -p 'Sender MD5 from receipt report: ' STOP_WORDS_SENDER_MD5
+./infra/scripts/vps-connect.sh postgres-audit stop-words-settings "$STOP_WORDS_CHAT_ID" --word-hash "$STOP_WORDS_VALUE_MD5" --sender-hash "$STOP_WORDS_SENDER_MD5" --explain
+./infra/scripts/vps-connect.sh postgres-audit stop-words-settings "$STOP_WORDS_CHAT_ID" --word-hash "$STOP_WORDS_VALUE_MD5" --sender-hash "$STOP_WORDS_SENDER_MD5"
+```
+
+Review the plain EXPLAIN before the first SELECT. The report uses one unique settings lookup and
+at most 129 rows from each exact-chat indexed admin/allowlist/immunity source. It prints only
+policy switches, revision, candidate counts, roster/immunity metadata and cap flags. No configured
+text, templates, media, actor IDs or permissions leave SQL. Candidate hashes compare exact stored
+values; they do not prove matcher equivalence. A 129-row probe is capped when it exceeds 128;
+absence in a capped roster cannot establish absence of protection.
+
+The report describes current storage, never the historical settings or admin decision for an
+earlier message. Metadata shape checks do not validate the full runtime policy schema. Legacy,
+malformed or storage-bound-refused values remain unresolved. Original JSON storage is admitted
+before inspection using the source-envelope collector's PG16 compression bounds and coherent
+storage assumption. No broader legacy-list fallback is inferred.
+
+Provision the complete optional eighteen-column audit grant group through the normal preview/apply
+wrapper after reviewed tooling delivery. Partial grants, effective PUBLIC/inherited excess and
+mutation privileges refuse admission. This diagnostic does not change group settings or post tests.
