@@ -56,6 +56,83 @@ function validateSupportBotCatalog(catalog) {
   return catalog;
 }
 
+function validateSupportGuideCatalog(catalog) {
+  if (!Array.isArray(catalog) || ![0, 2].includes(catalog.length))
+    throw new Error('support_guide_catalog_refused');
+  const ids = new Set();
+  for (const guide of catalog) {
+    if (
+      !record(guide) ||
+      !['moderator-group', 'publisher-group'].includes(guide.id) ||
+      ids.has(guide.id) ||
+      guide.sourceChatId !== CHAT_IDS[0] ||
+      !/^id\d+_\d+_bot$/u.test(guide.sourceBotId ?? '') ||
+      typeof guide.title !== 'string' ||
+      !guide.title.trim() ||
+      guide.title.length > 160 ||
+      !Array.isArray(guide.sourceMessages) ||
+      guide.sourceMessages.length !== 2
+    )
+      throw new Error('support_guide_catalog_refused');
+    ids.add(guide.id);
+    const photos = new Set();
+    for (const [index, part] of guide.sourceMessages.entries()) {
+      if (
+        !record(part) ||
+        !messageId(part.messageId) ||
+        !messageId(part.forwardedMessageId) ||
+        !Array.isArray(part.photos) ||
+        part.photos.length !== (index === 0 ? 10 : 1)
+      )
+        throw new Error('support_guide_catalog_refused');
+      for (const photo of part.photos) {
+        if (
+          !record(photo) ||
+          !/^\d{1,20}$/u.test(photo.photoId ?? '') ||
+          !/^[a-f0-9]{64}$/u.test(photo.sha256 ?? '') ||
+          photos.has(photo.photoId)
+        )
+          throw new Error('support_guide_catalog_refused');
+        photos.add(photo.photoId);
+      }
+    }
+  }
+  return catalog;
+}
+
+function supportGuideImages(row, part, chatId) {
+  // FLAG: Only reviewed image identities can become attachments. MAX captions, URLs,
+  // forwarded text and other media never enter the model or the outgoing image payload.
+  const attachments = row?.link?.message?.attachments;
+  if (
+    String(row?.recipient?.chat_id) !== chatId ||
+    row?.body?.mid !== part.messageId ||
+    row?.link?.type !== 'forward' ||
+    row.link.message?.mid !== part.forwardedMessageId ||
+    !Array.isArray(attachments) ||
+    attachments.length !== part.photos.length ||
+    attachments.some(
+      (attachment, index) =>
+        attachment?.type !== 'image' ||
+        String(attachment.payload?.photo_id) !== part.photos[index].photoId ||
+        typeof attachment.payload?.token !== 'string' ||
+        !attachment.payload.token.trim() ||
+        attachment.payload.token.length > 8192,
+    )
+  )
+    throw new Error('support_guide_source_changed');
+  return attachments.map(({ payload }) => ({ type: 'image', payload: { token: payload.token } }));
+}
+
+async function loadSupportGuideImages(runtime, guide, part) {
+  if (runtime.options().botId !== guide.sourceBotId) throw new Error('support_guide_bot_refused');
+  return supportGuideImages(
+    await runtime.client.getExactMessageRow(guide.sourceChatId, part.messageId, runtime.options()),
+    part,
+    guide.sourceChatId,
+  );
+}
+
 function renderSupportMessage(text, catalog = []) {
   const escape = (value) =>
     value
@@ -123,6 +200,20 @@ if redis.call('GET',KEYS[1])~=ARGV[1] or redis.call('GET',KEYS[2])~=ARGV[1] then
 local now=redis.call('TIME'); local ms=now[1]*1000+math.floor(now[2]/1000)
 if ms>tonumber(ARGV[2]) or redis.call('GET',KEYS[3])~='PREPARED:'..ARGV[1] then return 0 end
 redis.call('SET',KEYS[3],'SENDING:'..ARGV[1],'PX',ARGV[3]); return 1`;
+const SEND_GUIDE_PART_CAS = `
+if redis.call('GET',KEYS[1])~=ARGV[1] or redis.call('GET',KEYS[2])~=ARGV[1] then return 0 end
+local now=redis.call('TIME'); local ms=now[1]*1000+math.floor(now[2]/1000)
+if ms>tonumber(ARGV[2]) or redis.call('EXISTS',KEYS[4])~=0 then return 0 end
+if ARGV[4]=='0' then
+  if redis.call('GET',KEYS[3])~='PREPARED:'..ARGV[1] then return 0 end
+else
+  if redis.call('GET',KEYS[3])~='SENDING:'..ARGV[1] then return 0 end
+  local previous=redis.call('GET',KEYS[5]) or ''
+  local prefix='SENT:'..ARGV[1]..':'
+  if string.sub(previous,1,string.len(prefix))~=prefix then return 0 end
+end
+redis.call('SET',KEYS[3],'SENDING:'..ARGV[1],'PX',ARGV[3])
+redis.call('SET',KEYS[4],'SENDING:'..ARGV[1],'PX',ARGV[3]); return 1`;
 
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const maxUserId = (value) =>
@@ -313,6 +404,43 @@ class PilotFence {
       ) === 1
     );
   }
+  partKey(id, index) {
+    return `${this.key(id)}:guide-part:${index}`;
+  }
+  async beginPart(id, index, deadline) {
+    // FLAG: Each image batch crosses its own one-way SEND fence. A confirmed prior
+    // batch permits only the next batch; neither a retry nor a new session can replay it.
+    if (!Number.isInteger(index) || index < 0 || index > 1)
+      throw new Error('support_guide_part_refused');
+    return (
+      Number(
+        await this.redis.eval(
+          SEND_GUIDE_PART_CAS,
+          5,
+          this.lease,
+          this.enabled,
+          this.key(id),
+          this.partKey(id, index),
+          this.partKey(id, index - 1),
+          this.owner,
+          String(deadline),
+          String(RETENTION_MS),
+          String(index),
+        ),
+      ) === 1
+    );
+  }
+  async settlePart(id, index, confirmedId = null) {
+    if (confirmedId !== null && !messageId(confirmedId)) throw new Error('support_ack_missing');
+    return this.redis.eval(
+      "if redis.call('GET',KEYS[1])~=ARGV[1] then return 0 end redis.call('SET',KEYS[1],ARGV[2],'PX',ARGV[3]); return 1",
+      1,
+      this.partKey(id, index),
+      `SENDING:${this.owner}`,
+      confirmedId === null ? `UNKNOWN:${this.owner}` : `SENT:${this.owner}:${confirmedId}`,
+      String(RETENTION_MS),
+    );
+  }
   async settle(id, state, expected = 'SENDING') {
     // FLAG: No transition ever makes an attempted SEND executable again, including lost ACKs.
     return this.redis.eval(
@@ -373,60 +501,127 @@ async function deliverAnswer(
   fence,
   source,
   answer,
-  { signal, sessionEnd, heartbeatAt, onSent },
+  { signal, sessionEnd, heartbeatAt, onSent, guideId },
 ) {
-  let attempted = false;
+  let attempted = false,
+    activePart = null,
+    renewTimer = null,
+    renewing = false,
+    leaseAlive = true;
   try {
     const presented = renderSupportMessage(answer, runtime.supportBotCatalog);
-    const result = await runtime.client.sendMessageImmediateWithId(
-      CHAT_ID,
-      presented.text,
-      {
-        textFormat: presented.textFormat,
-        messageLink: { type: 'reply', mid: source.id },
-        beforeSend: async () => {
-          if (
-            signal.aborted ||
-            Date.now() > source.timestamp + SOURCE_AGE_MS ||
-            Date.now() - heartbeatAt() > 15000
-          )
-            throw new Error('support_source_expired');
-          await runtime.assertSourceAllowed(source);
-          const exact = sourceMessage(
-            await runtime.client.getExactMessageRow(CHAT_ID, source.id, runtime.options()),
+    const guide =
+      guideId === undefined
+        ? null
+        : validateSupportGuideCatalog(runtime.supportGuideCatalog).find(
+            (entry) => entry.id === guideId,
           );
-          if (!exact || exact.fingerprint !== source.fingerprint)
-            throw new Error('support_source_changed');
-          await runtime.assertAccess();
-          if (
-            signal.aborted ||
-            Date.now() > sessionEnd ||
-            Date.now() - heartbeatAt() > 15000 ||
-            !(await fence.begin(source.id, Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS)))
-          )
-            throw new Error('support_send_refused');
-          attempted = true;
+    if (guideId !== undefined && !guide) throw new Error('support_guide_refused');
+    const loadImages = (part) => loadSupportGuideImages(runtime, guide, part);
+    if (guide) {
+      // FLAG: A bounded image pack can take longer than one SEND. Preserve the same
+      // lease throughout preparation and both batches; losing it fences the next effect.
+      leaseAlive = await fence.renew();
+      if (!leaseAlive) throw new Error('support_lease_lost');
+      renewTimer = setInterval(() => {
+        if (renewing || !leaseAlive) return;
+        renewing = true;
+        void fence
+          .renew()
+          .then((renewed) => {
+            leaseAlive = renewed;
+          })
+          .catch(() => {
+            leaseAlive = false;
+          })
+          .finally(() => {
+            renewing = false;
+          });
+      }, 4000);
+    }
+    const batches = [];
+    if (guide)
+      for (const part of guide.sourceMessages)
+        batches.push({ part, attachments: await loadImages(part) });
+    else batches.push({ part: null, attachments: null });
+    let lastId;
+    for (const [index, batch] of batches.entries()) {
+      const message =
+        index === 0
+          ? presented
+          : renderSupportMessage(
+              `${guide.title}: карточка 11 из 11.\n\n${ANSWER_FOOTER}`,
+              runtime.supportBotCatalog,
+            );
+      const result = await runtime.client.sendMessageImmediateWithId(
+        CHAT_ID,
+        message.text,
+        {
+          textFormat: message.textFormat,
+          messageLink: { type: 'reply', mid: source.id },
+          ...(batch.attachments ? { attachments: batch.attachments } : {}),
+          beforeSend: async () => {
+            if (
+              signal.aborted ||
+              !leaseAlive ||
+              Date.now() > source.timestamp + SOURCE_AGE_MS ||
+              Date.now() - heartbeatAt() > 15000
+            )
+              throw new Error('support_source_expired');
+            await runtime.assertSourceAllowed(source);
+            const exact = sourceMessage(
+              await runtime.client.getExactMessageRow(CHAT_ID, source.id, runtime.options()),
+            );
+            if (!exact || exact.fingerprint !== source.fingerprint)
+              throw new Error('support_source_changed');
+            await runtime.assertAccess();
+            if (batch.part) await loadImages(batch.part);
+            if (
+              signal.aborted ||
+              !leaseAlive ||
+              Date.now() > sessionEnd ||
+              Date.now() - heartbeatAt() > 15000 ||
+              !(await (guide
+                ? fence.beginPart(
+                    source.id,
+                    index,
+                    Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS),
+                  )
+                : fence.begin(source.id, Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS))))
+            )
+              throw new Error('support_send_refused');
+            attempted = true;
+            activePart = guide ? index : null;
+          },
         },
-      },
-      {
-        ...runtime.options(),
-        trafficClass: 'interactive',
-        actionHealthLane: 'interactive',
-        timeoutMs: 12000,
-      },
-    );
-    if (!messageId(result?.messageId)) throw new Error('support_ack_missing');
-    if (Number(await fence.settle(source.id, `SENT:${result.messageId}`)) !== 1)
+        {
+          ...runtime.options(),
+          trafficClass: 'interactive',
+          actionHealthLane: 'interactive',
+          timeoutMs: 12000,
+        },
+      );
+      if (!messageId(result?.messageId)) throw new Error('support_ack_missing');
+      if (guide && Number(await fence.settlePart(source.id, index, result.messageId)) !== 1)
+        throw new Error('support_receipt_lost');
+      activePart = null;
+      lastId = result.messageId;
+      if (guide) onSent?.(result.messageId);
+    }
+    if (Number(await fence.settle(source.id, `SENT:${lastId}`)) !== 1)
       throw new Error('support_receipt_lost');
-    onSent?.(result.messageId);
+    if (!guide) onSent?.(lastId);
     return 'sent';
   } catch {
+    if (activePart !== null) await fence.settlePart(source.id, activePart);
     await fence.settle(
       source.id,
       attempted ? 'UNKNOWN' : 'REFUSED',
       attempted ? 'SENDING' : 'PREPARED',
     );
     return attempted ? 'unknown' : 'refused';
+  } finally {
+    if (renewTimer !== null) clearInterval(renewTimer);
   }
 }
 
@@ -442,6 +637,9 @@ async function createRuntime() {
   try {
     const supportBotCatalog = validateSupportBotCatalog(
       JSON.parse(process.env.SUPPORT_BOT_CATALOG ?? 'null'),
+    );
+    const supportGuideCatalog = validateSupportGuideCatalog(
+      JSON.parse(process.env.SUPPORT_GUIDE_CATALOG ?? '[]'),
     );
     require('reflect-metadata');
     const base = './apps/api/dist/apps/api/src/';
@@ -582,6 +780,7 @@ async function createRuntime() {
           options: { messageLink: { type: 'reply', mid: source.id } },
         }),
       supportBotCatalog,
+      supportGuideCatalog,
       close,
     };
   } catch (error) {
@@ -600,7 +799,6 @@ async function runBridge(runtime, { preview = false } = {}) {
     busy = null,
     pending = Buffer.alloc(0),
     lastPoll = 0,
-    lastReport = 0,
     lastSampleAt = null,
     receiveFailure = null;
   const history = new PilotHistory(),
@@ -608,13 +806,25 @@ async function runBridge(runtime, { preview = false } = {}) {
   const abort = () => controller.abort();
   const deadlineTimer = setTimeout(abort, 30 * 60_000);
   const send = (value) => process.stdout.write(JSON.stringify(value) + '\n');
+  // FLAG: Preparing and sending a guide can outlast the worker's heartbeat watchdog.
+  // Report connection liveness independently, retaining the last actual MAX poll time.
+  const reportHeartbeat = setInterval(() => {
+    if (hello && !controller.signal.aborted) send({ type: 'heartbeat', sampleAt: lastSampleAt });
+  }, 5000);
   process.once('SIGTERM', abort);
   process.once('SIGINT', abort);
   process.stdout.on('error', abort);
   try {
     const identity = await runtime.assertAccess();
     if (preview) {
-      send({ type: 'preview', chatId: CHAT_ID, ...identity, readOnly: true });
+      const guides = [];
+      for (const guide of validateSupportGuideCatalog(runtime.supportGuideCatalog ?? [])) {
+        let pages = 0;
+        for (const part of guide.sourceMessages)
+          pages += (await loadSupportGuideImages(runtime, guide, part)).length;
+        guides.push({ id: guide.id, pages, batches: guide.sourceMessages.length });
+      }
+      send({ type: 'preview', chatId: CHAT_ID, ...identity, guides, readOnly: true });
       return;
     }
     if (!(await fence.acquire())) throw new Error('support_worker_busy');
@@ -649,9 +859,12 @@ async function runBridge(runtime, { preview = false } = {}) {
             value.id === busy.id &&
             typeof value.text === 'string' &&
             value.text.length <= 1800 &&
-            typeof value.reply === 'boolean'
+            typeof value.reply === 'boolean' &&
+            (value.guideId === undefined ||
+              (value.reply &&
+                runtime.supportGuideCatalog.some((guide) => guide.id === value.guideId)))
           ) {
-            busy.answer = { reply: value.reply, text: value.text };
+            busy.answer = { reply: value.reply, text: value.text, guideId: value.guideId };
           } else throw new Error('support_frame_refused');
         }
       }
@@ -664,10 +877,6 @@ async function runBridge(runtime, { preview = false } = {}) {
     while (!controller.signal.aborted && Date.now() < endAt) {
       if (Date.now() - lastHeartbeat > 15000 || !(await fence.renew()))
         throw new Error('support_heartbeat_lost');
-      if (hello && Date.now() - lastReport > 5000) {
-        lastReport = Date.now();
-        send({ type: 'heartbeat', sampleAt: lastSampleAt });
-      }
       if (busy?.answer) {
         const source = busy,
           answer = source.answer;
@@ -680,6 +889,7 @@ async function runBridge(runtime, { preview = false } = {}) {
             signal: controller.signal,
             sessionEnd: endAt,
             heartbeatAt: () => lastHeartbeat,
+            guideId: answer.guideId,
             onSent: (id) => {
               confirmedAnswers.add(id);
               if (confirmedAnswers.size > 256)
@@ -724,6 +934,7 @@ async function runBridge(runtime, { preview = false } = {}) {
     }
     if (receiveFailure) throw receiveFailure;
   } finally {
+    clearInterval(reportHeartbeat);
     clearTimeout(deadlineTimer);
     controller.abort();
     process.stdin.destroy();
@@ -748,6 +959,9 @@ module.exports = {
   PilotHistory,
   deliverAnswer,
   validateSupportBotCatalog,
+  validateSupportGuideCatalog,
+  supportGuideImages,
+  loadSupportGuideImages,
   renderSupportMessage,
   runBridge,
 };

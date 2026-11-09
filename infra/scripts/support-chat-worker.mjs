@@ -298,6 +298,9 @@ export async function supportChatSession({
                     id: value.id,
                     reply: answer.action === 'reply',
                     text: answer.text,
+                    ...(answer.action === 'reply' && answer.guideId !== undefined
+                      ? { guideId: answer.guideId }
+                      : {}),
                   });
                   onStatus(answer.action === 'reply' ? 'answered' : 'skipped');
                 } else onStatus('inference_failed');

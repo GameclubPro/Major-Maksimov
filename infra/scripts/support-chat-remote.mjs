@@ -72,7 +72,9 @@ export async function supportChatRemote(operation, chatId) {
   const code = readFileSync(new URL('./support-chat-bridge.cjs', import.meta.url), 'utf8');
   const knowledgeBytes = readFileSync(new URL('./support-llm-knowledge.json', import.meta.url));
   const knowledgeSha = createHash('sha256').update(knowledgeBytes).digest('hex');
-  const botCatalog = JSON.parse(knowledgeBytes).botCatalog;
+  const knowledge = JSON.parse(knowledgeBytes);
+  const botCatalog = knowledge.botCatalog;
+  const guideCatalog = bridge.validateSupportGuideCatalog(knowledge.onboardingGuides ?? []);
   const child = spawn(
     'docker',
     [
@@ -82,6 +84,8 @@ export async function supportChatRemote(operation, chatId) {
       `SUPPORT_KNOWLEDGE_SHA256=${knowledgeSha}`,
       '-e',
       `SUPPORT_BOT_CATALOG=${JSON.stringify(botCatalog)}`,
+      '-e',
+      `SUPPORT_GUIDE_CATALOG=${JSON.stringify(guideCatalog)}`,
       '-e',
       `SUPPORT_PREVIEW=${operation === 'preview' ? '1' : '0'}`,
       '-e',

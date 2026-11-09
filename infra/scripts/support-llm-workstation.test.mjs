@@ -157,6 +157,7 @@ async function tinyController(source, root, gpuRoot, bin, modelText, filename) {
     'support-llm-client.mjs',
     'support-llm-provider.mjs',
     'support-llm-routing.mjs',
+    'support-llm-guides.mjs',
     'support-llm-knowledge.json',
     'support-chat-worker.mjs',
   ])

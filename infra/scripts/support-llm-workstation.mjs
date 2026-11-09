@@ -39,6 +39,7 @@ const REQUIRED_FILES = [
   'support-llm-provider.mjs',
   'support-llm-client.mjs',
   'support-llm-routing.mjs',
+  'support-llm-guides.mjs',
   'support-llm-knowledge.json',
   'commercial-llm-workstation-profile.mjs',
 ];
