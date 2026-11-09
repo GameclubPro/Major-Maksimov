@@ -85,6 +85,11 @@ Detailed constraints selected by the routing table in [infrastructure agent note
 
 ## Deploy And Rollback
 
+- Major / Market coordinated releases use a protected installed reader under the existing
+  host lock, separate from Major / Karavan admission. Bootstrap only exact tooling sources,
+  bind the whole release expectation and read back each owner before the next step. See
+  [Major / Market release boundary](../operations/runbooks/major-market-release.md).
+
 - Major and Karavan use the fixed shared VPS admission before their product locks. Bootstrap
   with the exact-target bundle installer and verify both checkouts; do not bootstrap through
   ordinary deploy. Planning uses a bounded private-state fingerprint, rechecked after admission.

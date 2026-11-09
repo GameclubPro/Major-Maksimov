@@ -27,6 +27,8 @@ DATABASE_BREAK_GLASS_REASON_FROM_CALLER="${MAXIM_VPS_DATABASE_BREAK_GLASS_REASON
 DEPLOY_DISK_MIN_FREE_BYTES_FROM_CALLER="${MAXIM_DEPLOY_DISK_MIN_FREE_BYTES:-}"
 DEPLOY_API_READY_TIMEOUT_SEC_FROM_CALLER="${MAXIM_DEPLOY_API_READY_TIMEOUT_SEC:-}"
 PAIR_RELEASE_EXPECTED_STATE_FROM_CALLER="${PAIR_RELEASE_EXPECTED_STATE_SHA256:-}"
+MAJOR_MARKET_RELEASE_EXPECTED_STATE_FROM_CALLER="${MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256:-}"
+MAJOR_MARKET_RELEASE_EXPECTATION_FROM_CALLER="${MAJOR_MARKET_RELEASE_EXPECTATION_B64:-}"
 readonly MESSAGE_RETENTION_MODE_FROM_CALLER="${MAXIM_MESSAGE_RETENTION_MODE:-}"
 readonly COMMERCIAL_AI_FROM_CALLER="${MAXIM_COMMERCIAL_LLM_ENFORCEMENT:-}"
 readonly COMMERCIAL_AI_POOL_WORKERS_FROM_CALLER="${MAXIM_COMMERCIAL_LLM_POOL_WORKERS_ENABLED:-}"
@@ -52,6 +54,8 @@ MAXIM_MESSAGE_RETENTION_MODE="$MESSAGE_RETENTION_MODE_FROM_CALLER"
 STATISTICS_EXCHANGE_V3_ENABLED="$STATISTICS_EXCHANGE_V3_FROM_CALLER"
 MAXIM_STATISTICS_CENTRAL_EPOCH="$STATISTICS_CENTRAL_EPOCH_FROM_CALLER"
 PAIR_RELEASE_EXPECTED_STATE_SHA256="$PAIR_RELEASE_EXPECTED_STATE_FROM_CALLER"
+MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256="$MAJOR_MARKET_RELEASE_EXPECTED_STATE_FROM_CALLER"
+MAJOR_MARKET_RELEASE_EXPECTATION_B64="$MAJOR_MARKET_RELEASE_EXPECTATION_FROM_CALLER"
 
 readonly SCALE_SSH_TARGET_FROM_PROFILE="${MAXIM_VPS_SSH_TARGET:-}"
 readonly SCALE_REPO_DIR_FROM_PROFILE="${MAXIM_VPS_REPO_DIR:-}"
@@ -75,6 +79,12 @@ Commands:
                               Prove an exact runtime and finalize its interrupted manifest
   install-deploy-flock <old-sha>  Install reviewed lock tooling under both protocols
   pair-release-state            Read bounded Major/Karavan release identities and fingerprint
+  major-market-release-state [profiles] Read bounded Major/Market release state
+  major-market-release-readback --expected-sha SHA --components CSV
+                                Verify exact Major runtime and owner smokes after release
+  verify-major-market-release-guard Verify protected Major/Market guard installation
+  install-major-market-release-guard <major-sha> <market-sha>
+                                Install exact reviewed tooling under the existing host lock
   install-pair-release-admission <major-sha> <karavan-local-repo> <karavan-sha> [operator-user]
                                 Provision the shared admission during its reviewed upgrade window
   verify-pair-release-admission [operator-user]
@@ -365,9 +375,17 @@ remote_exec() {
   if [[ -n "$PAIR_RELEASE_EXPECTED_STATE_SHA256" && ! "$PAIR_RELEASE_EXPECTED_STATE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
     echo 'Invalid pair release state fingerprint.' >&2; return 2
   fi
+  if [[ -n "$MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256$MAJOR_MARKET_RELEASE_EXPECTATION_B64" ]]; then
+    [[ "$MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256" =~ ^[a-f0-9]{64}$ && "$MAJOR_MARKET_RELEASE_EXPECTATION_B64" =~ ^[A-Za-z0-9+/=]+$ && ${#MAJOR_MARKET_RELEASE_EXPECTATION_B64} -le 65536 ]] || {
+      echo 'Invalid Major/Market whole expectation transport.' >&2; return 2;
+    }
+    remote_command="export MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256=$(printf '%q' "$MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256"); export MAJOR_MARKET_RELEASE_EXPECTATION_B64=$(printf '%q' "$MAJOR_MARKET_RELEASE_EXPECTATION_B64"); "
+  else
+    remote_command=''
+  fi
   maybe_allow_ssh_current_ip
   mapfile -d '' -t args < <(ssh_args)
-  printf -v remote_command 'cd %q && %s' "$MAXIM_VPS_REPO_DIR" "$command"
+  printf -v remote_command '%scd %q && %s' "$remote_command" "$MAXIM_VPS_REPO_DIR" "$command"
   if [[ -n "$PAIR_RELEASE_EXPECTED_STATE_SHA256" ]]; then
     remote_command="export PAIR_RELEASE_EXPECTED_STATE_SHA256=$(printf '%q' "$PAIR_RELEASE_EXPECTED_STATE_SHA256"); $remote_command"
   fi
@@ -1180,6 +1198,7 @@ if [[ "$(git rev-parse --verify refs/heads/main 2>/dev/null || true)" != "$expec
   exit 1
 fi
 require_market_statistics_lock_dispatch "$expected_tooling_sha" || exit 1
+require_major_market_release_dispatch "$expected_tooling_sha" || exit 1
 require_pair_release_admission_dispatch "$expected_tooling_sha" || exit 1
 if [[ -e /var/lib/maxim-deploy/eraser-connection-proof-reader-version || -L /var/lib/maxim-deploy/eraser-connection-proof-reader-version ]]; then
   source infra/scripts/lib/deploy-topology.sh
@@ -2087,6 +2106,25 @@ if [[ "$command" == commercial-llm && "${1:-}" == workstation-pool-bridge && "${
 fi
 
 case "$command" in
+  major-market-release-state)
+    [[ "$#" -le 1 ]] || exit 2
+    # shellcheck disable=SC2016
+    remote_exec "$(shell_quote_args timeout 20 bash -c 'set -euo pipefail; source infra/scripts/lib/deploy-lock.sh; major_market_release_trust; exec node /etc/maxim-deploy/major-market-release/guard.mjs state --profiles "$1"' state "${1:-}")"
+    ;;
+  major-market-release-readback)
+    [[ "$#" == 4 && "$1" == --expected-sha && "$2" =~ ^[a-f0-9]{40}$ && "$3" == --components ]] || exit 2
+    # shellcheck disable=SC2016
+    remote_exec "$(shell_quote_args timeout 340 bash -c 'set -euo pipefail; source infra/scripts/lib/deploy-lock.sh; major_market_release_trust; exec node /etc/maxim-deploy/major-market-release/guard.mjs readback "$@"' readback "$@")"
+    ;;
+  verify-major-market-release-guard)
+    [[ "$#" == 0 ]] || exit 2
+    remote_exec 'timeout 12 bash -c '\''set -euo pipefail; source infra/scripts/lib/deploy-lock.sh; major_market_release_trust; exec node /etc/maxim-deploy/major-market-release/guard.mjs verify-install'\'''
+    ;;
+  install-major-market-release-guard)
+    [[ "$#" == 2 && "$1" =~ ^[a-f0-9]{40}$ && "$2" =~ ^[a-f0-9]{40}$ ]] || exit 2
+    node "$ROOT_DIR/scripts/ci/assert-green.mjs" "$1"
+    remote_exec "$(shell_quote_args timeout 90 bash -s -- "$1" "$2")" < <(git show "$1:infra/scripts/install-major-market-release-guard.sh")
+    ;;
   pair-release-state)
     [[ "$#" == 0 ]] || exit 2
     remote_exec 'timeout 12 bash /var/lib/major-karavan-release/admission.sh state'

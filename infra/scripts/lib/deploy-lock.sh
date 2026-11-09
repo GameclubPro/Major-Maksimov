@@ -176,6 +176,62 @@ require_deploy_lock() {
   maxim_pair_release_assert && validate_deploy_lock_path && validate_deploy_lock_descriptor
 }
 
+major_market_release_trust() {
+  local path metadata owner mode links
+  # FLAG: Candidate checkouts cannot replace this protected admission reader.
+  for path in /etc /etc/maxim-deploy /etc/maxim-deploy/major-market-release; do
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    metadata="$(stat -c '%u %a' -- "$path")" || return 1
+    read -r owner mode <<<"$metadata"
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) || return 1
+  done
+  for path in /etc/maxim-deploy/major-market-release/guard.mjs /etc/maxim-deploy/major-market-release/protocol-v1.json; do
+    [[ -f "$path" && ! -L "$path" ]] || return 1
+    metadata="$(stat -c '%u %a %h' -- "$path")" || return 1
+    read -r owner mode links <<<"$metadata"
+    [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ && "$links" == 1 ]] && (( (8#$mode & 0022) == 0 )) || return 1
+  done
+}
+
+validate_major_market_release_admission() {
+  local actual_source actual_owner=major
+  if [[ ! -e /etc/maxim-deploy/major-market-release && ! -L /etc/maxim-deploy/major-market-release ]]; then
+    [[ -z "${MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256:-}${MAJOR_MARKET_RELEASE_EXPECTATION_B64:-}" ]] || {
+      echo 'Major/Market coordinated release guard is not installed.' >&2; return 1;
+    }
+    return 0
+  fi
+  major_market_release_trust || return 1
+  actual_source="$(pwd -P)" || return 1
+  if [[ "$actual_source" == /var/www/svyazka || "$actual_source" == /var/www/svyazka/* ]]; then
+    actual_owner=market
+    actual_source="${source_dir:-}"
+  fi
+  node /etc/maxim-deploy/major-market-release/guard.mjs admit --owner "$actual_owner" --source "$actual_source" >/dev/null
+}
+
+require_major_market_release_dispatch() {
+  [[ -e /etc/maxim-deploy/major-market-release || -L /etc/maxim-deploy/major-market-release ]] || return 0
+  validate_major_market_release_admission || return 1
+  node /etc/maxim-deploy/major-market-release/guard.mjs check-source --owner major --source "$(pwd -P)" --ref "$1" >/dev/null
+}
+
+major_market_release_verify() {
+  [[ -e /etc/maxim-deploy/major-market-release || -L /etc/maxim-deploy/major-market-release ]] || {
+    [[ -z "${MAJOR_MARKET_RELEASE_EXPECTED_STATE_SHA256:-}${MAJOR_MARKET_RELEASE_EXPECTATION_B64:-}" ]]; return;
+  }
+  major_market_release_trust || return 1
+  local selected='' component
+  if declare -p DEPLOYED_COMPONENTS >/dev/null 2>&1; then
+    for component in "${DEPLOYED_COMPONENTS[@]}"; do selected+="$component,"; done
+    selected="$(tr ',' '\n' <<<"$selected" | sed '/^$/d' | sort -u | paste -sd, -)"
+  else
+    selected=api-shared
+  fi
+  node /etc/maxim-deploy/major-market-release/guard.mjs verify --owner major --phase "$1" \
+    --source "$(pwd -P)" --target-sha "${TARGET_SHA:-${TARGET_FULL_SHA:-}}" --components "$selected" >/dev/null
+}
+
 validate_market_statistics_deploy_admission() {
   local market_scope=0 market_path market_metadata market_owner market_mode market_links
   local market_source_dir="${source_dir:-}" market_release="${release:-}"
@@ -261,6 +317,7 @@ acquire_deploy_lock() {
     validate_deploy_lock_descriptor || return 1
     trap release_deploy_lock EXIT
     validate_market_statistics_deploy_admission || return 1
+    validate_major_market_release_admission || return 1
     return 0
   fi
 
@@ -309,6 +366,10 @@ acquire_deploy_lock() {
   fi
   trap release_deploy_lock EXIT
   if ! validate_market_statistics_deploy_admission; then
+    release_deploy_lock || true
+    return 1
+  fi
+  if ! validate_major_market_release_admission; then
     release_deploy_lock || true
     return 1
   fi
