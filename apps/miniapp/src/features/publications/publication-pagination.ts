@@ -77,9 +77,8 @@ export function mergePublicationDeliveryPages<T extends { id: string; status: st
   ambiguousPages: readonly CursorPage<T>[] | undefined,
   remainingPages: readonly CursorPage<T>[] | undefined,
 ): T[] {
-  const items = mergePrioritizedPublicationPages(
+  return mergePrioritizedPublicationPages(
     hasAmbiguous ? ambiguousPages : undefined,
     remainingPages,
   );
-  return hasAmbiguous ? items : items.filter((item) => item.status !== 'AMBIGUOUS');
 }

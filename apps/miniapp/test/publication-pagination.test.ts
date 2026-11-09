@@ -98,21 +98,35 @@ test('keeps ambiguous deliveries first while deduplicating the general feed', ()
   ]);
 });
 
-test('drops cached ambiguous deliveries after the current count reaches zero', () => {
+test('does not reuse the old priority page when the all-history review count reaches zero', () => {
   const items = mergePublicationDeliveryPages(
     false,
     [{ items: [{ id: 'delivery-stale-priority', status: 'AMBIGUOUS' }] }],
     [
       {
-        items: [
-          { id: 'delivery-stale-general', status: 'AMBIGUOUS' },
-          { id: 'delivery-sent', status: 'SENT' },
-        ],
+        items: [{ id: 'delivery-sent', status: 'SENT' }],
       },
     ],
   );
 
   assert.deepEqual(items, [{ id: 'delivery-sent', status: 'SENT' }]);
+});
+
+test('keeps a fresh ambiguous general row even while its aggregate count is stale', () => {
+  assert.deepEqual(
+    mergePublicationDeliveryPages(false, undefined, [
+      {
+        items: [
+          { id: 'delivery-unknown', status: 'AMBIGUOUS' },
+          { id: 'delivery-sent', status: 'SENT' },
+        ],
+      },
+    ]),
+    [
+      { id: 'delivery-unknown', status: 'AMBIGUOUS' },
+      { id: 'delivery-sent', status: 'SENT' },
+    ],
+  );
 });
 
 test('keeps polling cached delivery rows until their terminal state is fetched', () => {

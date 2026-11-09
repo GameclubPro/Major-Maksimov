@@ -1,6 +1,7 @@
 import { ActionLatencyService } from '../system/action-latency.service';
 import { createMaxSendObservation } from '../max/max-send-observation';
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { Queue, UnrecoverableError } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -13,6 +14,13 @@ import {
   PublisherDispatchDisabledError,
   PublisherRuntimeBoundaryService,
 } from '../publisher/publisher-runtime-boundary.service';
+import { markManagedBroadcastSendPhase } from './admin-managed-broadcast-reconciliation';
+import { buildPublicationDeliveryActionKey } from './publication-delivery-action-key';
+import { deferPublicationDeliveryAfterPreDispatchThrottle } from './publication-execution-recovery';
+import {
+  classifyPublicationSendFailure,
+  persistPublicationSendFailure,
+} from './publication-send-failure';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -37,6 +45,9 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
   let observations: Array<Parameters<Parameters<typeof createMaxSendObservation>[1]>[0]>;
   const botId = `publisher-send-test-${randomUUID()}`;
   const prefix = `publication-send-test-${randomUUID()}`;
+  const ownedLedgerIds: string[] = [];
+  const ownedPublicationIds: string[] = [];
+  const ownedChatIds: string[] = [];
 
   beforeAll(async () => {
     const pg = new URL(databaseUrl);
@@ -61,6 +72,9 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
   });
 
   beforeEach(async () => {
+    ownedLedgerIds.length = 0;
+    ownedPublicationIds.length = 0;
+    ownedChatIds.length = 0;
     observations = [];
     job = {
       actionType: 'SEND_MESSAGE',
@@ -73,6 +87,7 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
       sourceTag: 'managed_broadcast',
       routing: { purpose: 'send_message', requiredBotId: botId },
     } as MaxActionJob;
+    ownedLedgerIds.push(job.idempotencyKey);
     await ledger.recordStarted(job);
     await ledger.recordPrepared(job);
     await queue.add('send', job, { jobId: job.idempotencyKey });
@@ -81,7 +96,9 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
 
   afterEach(async () => {
     await queue.obliterate({ force: true });
-    await db.maxActionLedgerEntry.deleteMany({ where: { jobId: job.idempotencyKey } });
+    await db.maxActionLedgerEntry.deleteMany({ where: { jobId: { in: ownedLedgerIds } } });
+    await db.publication.deleteMany({ where: { id: { in: ownedPublicationIds } } });
+    await db.chat.deleteMany({ where: { id: { in: ownedChatIds } } });
   });
 
   afterAll(async () => {
@@ -245,13 +262,285 @@ integration('Publication send fences on real PostgreSQL and Redis', () => {
     );
   }
 
-  async function restoreQueue(snapshot: Awaited<ReturnType<typeof snapshotQueue>>): Promise<void> {
+  async function restoreQueue(
+    snapshot: Awaited<ReturnType<typeof snapshotQueue>>,
+    queueJobId = job.idempotencyKey,
+  ): Promise<void> {
     await queue.obliterate({ force: true });
     for (const { key, value } of snapshot) {
       await redis.restore(key, 0, value, 'REPLACE');
     }
-    expect((await queue.getJob(job.idempotencyKey))?.data).toEqual(job);
+    expect((await queue.getJob(queueJobId))?.data).toEqual(job);
   }
+
+  async function createPublicationDelivery() {
+    const chatId = `native-failure-${randomUUID()}`;
+    await db.chat.create({ data: { id: chatId, title: 'Native delivery failure fixture' } });
+    ownedChatIds.push(chatId);
+    const publication = await db.publication.create({
+      data: {
+        actorUserId: 'native-delivery-fixture',
+        requestId: randomUUID(),
+        lifecycle: 'ACTIVE',
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        schedule: {
+          create: { mode: 'NOW', status: 'ACTIVE', rule: { mode: 'now', timezone: 'UTC' } },
+        },
+      },
+      include: { schedule: true },
+    });
+    ownedPublicationIds.push(publication.id);
+    const content = await db.publicationContentRevision.create({
+      data: { publicationId: publication.id, revision: 1, text: 'Native failure fixture' },
+    });
+    await db.publication.update({
+      where: { id: publication.id },
+      data: { canonicalContentRevisionId: content.id },
+    });
+    const scheduledAt = new Date();
+    const deliveryDeadlineAt = new Date(scheduledAt.getTime() + 86_400_000);
+    const occurrence = await db.publicationOccurrence.create({
+      data: {
+        publicationId: publication.id,
+        scheduleId: publication.schedule!.id,
+        scheduleRevision: publication.schedule!.revision,
+        contentRevisionId: content.id,
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        scheduledAt,
+        deliveryDeadlineAt,
+        status: 'IN_PROGRESS',
+      },
+    });
+    const broadcast = await db.managedBroadcast.create({
+      data: {
+        sourceChatId: chatId,
+        actorUserId: publication.actorUserId,
+        targetChatIds: [chatId],
+        buttons: [],
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        publicationOccurrenceId: occurrence.id,
+        publicationContentRevisionId: content.id,
+        lockedAt: scheduledAt,
+        lockToken: randomUUID(),
+      },
+    });
+    const delivery = await db.managedBroadcastDelivery.create({
+      data: {
+        broadcastId: broadcast.id,
+        occurrenceIndex: 1,
+        targetChatId: chatId,
+        publicationOccurrenceId: occurrence.id,
+        contentRevisionId: content.id,
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        botId,
+        dialogBotId: botId,
+        publicationPolicyRevision: 1,
+        publisherDialogContext: { version: 1, dialogBotId: botId, buttons: [], reference: null },
+      },
+    });
+    return { publication, occurrence, broadcast, delivery };
+  }
+
+  it.each(['timeout', 'access_text_503'] as const)(
+    'keeps the sixth %s SEND ambiguous after five real 429 deferrals and Redis restoration',
+    async (failureKind) => {
+      const fixture = await createPublicationDelivery();
+      const sourceJob = job;
+      let snapshot: Awaited<ReturnType<typeof snapshotQueue>> = [];
+      let queueJobId = '';
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        const before = await db.managedBroadcastDelivery.findUniqueOrThrow({
+          where: { id: fixture.delivery.id },
+        });
+        const lockToken = randomUUID();
+        // FLAG: The test drives eligible ticks explicitly; route/temporal admission is
+        // covered separately. Real claims retain the saved counter and immutable route.
+        const dueAt = before.nextAttemptAt ?? new Date();
+        const claim = await db.managedBroadcastDelivery.updateMany({
+          where: {
+            id: before.id,
+            status: 'PENDING',
+            attemptCount: attempt - 1,
+            OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: dueAt } }],
+          },
+          data: {
+            status: 'SENDING',
+            attemptCount: { increment: 1 },
+            nextAttemptAt: null,
+            waitReason: null,
+            lockedAt: dueAt,
+            lockToken,
+          },
+        });
+        expect(claim.count).toBe(1);
+        job = {
+          ...sourceJob,
+          chatId: before.targetChatId,
+          attempt,
+          idempotencyKey: buildPublicationDeliveryActionKey({
+            broadcastId: fixture.broadcast.id,
+            occurrenceIndex: 1,
+            targetChatId: before.targetChatId,
+            contentRevisionId: before.contentRevisionId!,
+            attemptCount: attempt,
+          }),
+        };
+        ownedLedgerIds.push(job.idempotencyKey);
+        await ledger.recordStarted(job);
+        await ledger.recordPrepared(job);
+        queueJobId = randomUUID();
+        await queue.add('send', job, { jobId: queueJobId });
+        if (attempt === 6) snapshot = await snapshotQueue();
+        const transportError =
+          attempt < 6
+            ? Object.assign(new Error('Too many requests'), {
+                response: { status: 429, headers: { 'retry-after': '1' } },
+              })
+            : failureKind === 'timeout'
+              ? Object.assign(new Error('SEND timed out'), { code: 'ETIMEDOUT' })
+              : Object.assign(new Error('Chat not accessible'), {
+                  response: { status: 503, data: { message: 'Chat not accessible' } },
+                });
+        request.mockRejectedValueOnce(transportError);
+        let failure: unknown;
+        try {
+          await client().executeQueuedSendMessage(job, [], { botId });
+        } catch (error: unknown) {
+          failure = markManagedBroadcastSendPhase(error, true);
+        }
+        expect(failure).toBeInstanceOf(Error);
+        if (attempt < 6) {
+          expect(classifyPublicationSendFailure(failure)).toBe('failed');
+          await ledger.recordFailed(job, failure);
+          const retryAt = await deferPublicationDeliveryAfterPreDispatchThrottle({
+            context: { prisma: db as never, logger: new Logger('NativePublicationFailure') },
+            row: fixture.broadcast,
+            delivery: before,
+            reason: 'deadline',
+            occurrenceIndex: 1,
+            broadcastLockToken: fixture.broadcast.lockToken!,
+            deliveryLockToken: lockToken,
+            sendAttemptStarted: true,
+            error: failure,
+          });
+          expect(retryAt).toBeInstanceOf(Date);
+          expect(
+            await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: before.id } }),
+          ).toMatchObject({
+            status: 'PENDING',
+            attemptCount: attempt,
+            rateLimitDeferralCount: attempt,
+            waitReason: 'max_rate_limit',
+            nextAttemptAt: retryAt,
+          });
+          expect(
+            await db.maxActionLedgerEntry.findUniqueOrThrow({
+              where: { jobId: job.idempotencyKey },
+            }),
+          ).toMatchObject({
+            status: 'FAILED_RETRYABLE',
+            terminal: false,
+            ambiguous: false,
+            dispatchToken: null,
+          });
+        } else {
+          expect(classifyPublicationSendFailure(failure)).toBe('ambiguous');
+          expect(
+            await persistPublicationSendFailure({
+              prisma: db as never,
+              deliveryId: before.id,
+              lockToken,
+              botId,
+              failure: 'ambiguous',
+              lastError: (failure as Error).message,
+            }),
+          ).toBe(true);
+        }
+      }
+
+      for (let restart = 0; restart < 2; restart += 1) {
+        expect(
+          await db.managedBroadcastDelivery.findMany({
+            where: { publicationOccurrenceId: fixture.occurrence.id, status: 'PENDING' },
+          }),
+        ).toEqual([]);
+        await restoreQueue(snapshot, queueJobId);
+        const restored = (await queue.getJob(queueJobId))!.data;
+        const restartedLedger = new MaxActionLedgerService(db as never);
+        await expect(
+          client(restartedLedger).executeQueuedSendMessage(restored, [], { botId }),
+        ).rejects.toBeInstanceOf(UnrecoverableError);
+      }
+      expect(request).toHaveBeenCalledTimes(6);
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: fixture.delivery.id } }),
+      ).toMatchObject({
+        status: 'AMBIGUOUS',
+        attemptCount: 6,
+        rateLimitDeferralCount: 5,
+        contentRevisionId: fixture.occurrence.contentRevisionId,
+        requiredBotId: botId,
+        dialogBotId: botId,
+        botId,
+        remoteMessageId: null,
+        lockedAt: null,
+        lockToken: null,
+      });
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: fixture.occurrence.id } }),
+      ).toMatchObject({
+        deliveryDeadlineAt: fixture.occurrence.deliveryDeadlineAt,
+        contentRevisionId: fixture.occurrence.contentRevisionId,
+        requiredBotId: botId,
+      });
+      expect(
+        await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: job.idempotencyKey } }),
+      ).toMatchObject({
+        status: 'AMBIGUOUS',
+        ambiguous: true,
+        terminal: true,
+        dispatchBotId: botId,
+      });
+    },
+  );
+
+  it.each(['replacement_token', 'sent_receipt'] as const)(
+    'preserves a newer %s when an old failure writer resumes',
+    async (state) => {
+      const fixture = await createPublicationDelivery();
+      const oldToken = randomUUID();
+      const before = await db.managedBroadcastDelivery.update({
+        where: { id: fixture.delivery.id },
+        data:
+          state === 'replacement_token'
+            ? { status: 'SENDING', attemptCount: 6, lockToken: randomUUID(), lockedAt: new Date() }
+            : {
+                status: 'SENT',
+                attemptCount: 6,
+                remoteMessageId: 'confirmed-native-receipt',
+                sentAt: new Date(),
+              },
+      });
+      expect(
+        await persistPublicationSendFailure({
+          prisma: db as never,
+          deliveryId: before.id,
+          lockToken: oldToken,
+          botId,
+          failure: 'ambiguous',
+          lastError: 'Old attempt timed out',
+        }),
+      ).toBe(false);
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: before.id } }),
+      ).toEqual(before);
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
 
   function failReceiptWrite(afterCommit: boolean): MaxActionLedgerService {
     let injected = false;

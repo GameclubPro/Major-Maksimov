@@ -517,6 +517,88 @@ function createPublicationDialogReceiptHarness(options?: {
 }
 
 describe('AdminManagedBroadcastRuntime publication execution guard', () => {
+  it('leaves the final outcome to stored receipts when an unknown-error CAS loses', async () => {
+    const error = Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+    const h = createPublicationPrismaSendFailureHarness(error, true);
+    h.deliveryUpdateMany.mockImplementation(async (args) => ({
+      count: args.data.status === ManagedBroadcastDeliveryStatus.AMBIGUOUS ? 0 : 1,
+    }));
+    await (h.runtime as any).processManagedBroadcastOccurrence(h.row.id, 'deadline', new Date(), [
+      ManagedBroadcastStatus.ACTIVE,
+    ]);
+    expect((h.runtime as any).finalizeManagedBroadcastOccurrence).toHaveBeenCalledWith(
+      expect.objectContaining({ id: h.row.id }),
+      1,
+      [],
+      [],
+      null,
+      expect.any(Object),
+    );
+    expect((h.runtime as any).publisherDispatch.recordFailure).not.toHaveBeenCalled();
+    expect(h.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 5])(
+    'preserves an unknown SEND after %i earlier attempts without legacy quarantine',
+    async (priorAttempts) => {
+      const error = Object.assign(new Error('timeout of 15000ms exceeded'), { code: 'ETIMEDOUT' });
+      const h = createPublicationPrismaSendFailureHarness(error, true);
+      h.delivery.attemptCount = priorAttempts;
+      const quarantine = jest
+        .spyOn(h.runtime as any, 'resolveManagedBroadcastTransientQuarantineMessage')
+        .mockResolvedValue('Legacy attempt threshold reached');
+      await (h.runtime as any).processManagedBroadcastOccurrence(h.row.id, 'deadline', new Date(), [
+        ManagedBroadcastStatus.ACTIVE,
+      ]);
+      expect(h.publish).toHaveBeenCalledTimes(1);
+      expect(quarantine).not.toHaveBeenCalled();
+      expect(h.deliveryUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: h.delivery.id,
+            status: ManagedBroadcastDeliveryStatus.SENDING,
+            remoteMessageId: null,
+          }),
+          data: expect.objectContaining({
+            status: ManagedBroadcastDeliveryStatus.AMBIGUOUS,
+            lockToken: null,
+          }),
+        }),
+      );
+      expect(
+        h.deliveryUpdateMany.mock.calls.some(
+          ([q]) => q.data.status === ManagedBroadcastDeliveryStatus.CANCELED,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    [403, 'Forbidden', ManagedBroadcastDeliveryStatus.FAILED],
+    [404, 'Chat not found', ManagedBroadcastDeliveryStatus.FAILED],
+    [503, 'Chat not accessible', ManagedBroadcastDeliveryStatus.AMBIGUOUS],
+  ] as const)(
+    'does not manufacture target cancellation from HTTP %i text',
+    async (status, message, expected) => {
+      const error = Object.assign(new Error(message), { response: { status, data: { message } } });
+      const h = createPublicationPrismaSendFailureHarness(error, true);
+      await (h.runtime as any).processManagedBroadcastOccurrence(h.row.id, 'deadline', new Date(), [
+        ManagedBroadcastStatus.ACTIVE,
+      ]);
+      expect(h.publish).toHaveBeenCalledTimes(1);
+      expect(h.deliveryUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: expected }),
+        }),
+      );
+      expect(
+        h.deliveryUpdateMany.mock.calls.some(
+          ([q]) => q.data.status === ManagedBroadcastDeliveryStatus.CANCELED,
+        ),
+      ).toBe(false);
+    },
+  );
+
   afterEach(() => {
     jest.useRealTimers();
   });

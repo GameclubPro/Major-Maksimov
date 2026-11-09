@@ -323,6 +323,10 @@ import {
   reconcileRoutedManagedBroadcastSendingDeliveries as reconcileRoutedManagedBroadcastSendingDeliveriesValue,
 } from './admin-managed-broadcast-ledger-recovery';
 import { cancelManagedBroadcastTargetDeliveries } from './admin-managed-broadcast-target-failure';
+import {
+  classifyPublicationSendFailure,
+  persistPublicationSendFailure,
+} from './publication-send-failure';
 import type { PublisherDeliveryAuthority } from './publication-execution-authority';
 import {
   cancelPublicationDeliveryBeforeStoppedDispatch,
@@ -3977,6 +3981,38 @@ export class AdminManagedBroadcastRuntime {
               nextSendAt: null,
             };
           }
+          const sendFailure = classifyPublicationSendFailure(error);
+          if (sendFailure === 'ambiguous') {
+            const persistedFailure = await persistPublicationSendFailure({
+              prisma: this.prisma,
+              deliveryId: delivery.id,
+              lockToken: deliveryLockToken,
+              botId: resolvedBotId ?? null,
+              failure: 'ambiguous',
+              lastError:
+                this.extractMaxApiErrorMessage(error) ||
+                (error instanceof Error ? error.message : String(error)),
+            });
+            if (persistedFailure) {
+              firstSendError ??= error;
+              failedChatIds.push(delivery.targetChatId);
+            }
+            activeDeliveryClaim = undefined;
+            if (persistedFailure && isPublikExecution) {
+              await this.publisherDispatch.recordFailure(
+                delivery.targetChatId,
+                error,
+                directSendAttemptStartedAt ?? new Date(),
+              );
+            }
+            if (persistedFailure) {
+              this.logger.warn(
+                { broadcastId: row.id, deliveryId: delivery.id, targetChatId: delivery.targetChatId },
+                'Managed broadcast SEND requires manual review; recipient policy was not applied',
+              );
+            }
+            continue;
+          }
           if (isPublikExecution) {
             const classification =
               error instanceof PublisherDeliveryDeferredError
@@ -4218,7 +4254,12 @@ export class AdminManagedBroadcastRuntime {
             (!this.maxRoutedPublicationService ||
               (error as { managedBroadcastSendStarted?: unknown })?.managedBroadcastSendStarted ===
                 true) &&
-            isManagedBroadcastPermanentTargetDeliveryFailure(effectiveError, deliveryFailureMessage)
+            (isPublikExecution
+              ? classifyPublicationSendFailure(effectiveError) === 'target_denied'
+              : isManagedBroadcastPermanentTargetDeliveryFailure(
+                  effectiveError,
+                  deliveryFailureMessage,
+                ))
           ) {
             await cancelManagedBroadcastTargetDeliveries(this.prisma, row.id, currentOccurrence, {
               targetChatId: delivery.targetChatId,
@@ -4240,14 +4281,17 @@ export class AdminManagedBroadcastRuntime {
             continue;
           } else if (!sentMessage) {
             const currentAttemptCount = delivery.attemptCount + 1;
-            const transientQuarantineMessage =
-              await this.resolveManagedBroadcastTransientQuarantineMessage(
-                row.id,
-                currentOccurrence,
-                delivery.targetChatId,
-                currentAttemptCount,
-                deliveryFailureMessage,
-              );
+            // FLAG: Publik has finite intent deadlines. Legacy aggregate attempt counts
+            // cannot cancel its recipient or replace the outcome of an individual SEND.
+            const transientQuarantineMessage = isPublikExecution
+              ? null
+              : await this.resolveManagedBroadcastTransientQuarantineMessage(
+                  row.id,
+                  currentOccurrence,
+                  delivery.targetChatId,
+                  currentAttemptCount,
+                  deliveryFailureMessage,
+                );
             if (transientQuarantineMessage) {
               await cancelManagedBroadcastTargetDeliveries(this.prisma, row.id, currentOccurrence, {
                 targetChatId: delivery.targetChatId,

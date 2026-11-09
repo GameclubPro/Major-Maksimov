@@ -82,11 +82,22 @@ describe('Publication recurrence preparation recovery', () => {
   beforeEach(() => jest.useFakeTimers().setSystemTime(new Date('2026-09-13T10:00:00Z')));
   afterEach(() => jest.useRealTimers());
 
-  it.each(['P1001', 'P2024', 'P2028', 'P2034'])(
-    'preserves the schedule after %s and materializes it on the next poll',
-    async (code) => {
+  it.each([
+    ...['P1001', 'P2024', 'P2028', 'P2034'].map((code) => ({
+      label: code,
+      error: Object.assign(new Error('Transient database failure'), { code }),
+    })),
+    ...['57014', '40P01', '40001', '55P03'].map((code) => ({
+      label: `P2010 SQLSTATE ${code}`,
+      error: Object.assign(new Error('Raw query failed'), {
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { originalCode: code } } },
+      }),
+    })),
+  ])(
+    'preserves the schedule after $label and materializes it on the next poll',
+    async ({ error }) => {
       const harness = createHarness();
-      const error = Object.assign(new Error('Transient database failure'), { code });
       harness.transaction.mockRejectedValueOnce(error);
       await harness.service.materializeRecurringSchedules(1);
       expect(harness.scheduleUpdate).toHaveBeenCalledWith(

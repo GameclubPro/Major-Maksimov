@@ -32,6 +32,7 @@ import {
 import {
   getPublicationActionCapabilities,
   getPublicationActionableDelivery,
+  getPublicationReviewCount,
   getPublicationDetailsPollingInterval,
   getPublicationDispatchIssuePresentation,
   getPublicationScheduleErrorPresentation,
@@ -167,7 +168,8 @@ export function PublicationDetailsSheet({
     actionableDelivery &&
     shouldPollPublicationDeliveries(detailsQuery.data, actionableDelivery),
   );
-  const ambiguousCount = actionableDelivery?.ambiguous ?? 0;
+  const reviewSource = detailsQuery.data ?? publication;
+  const ambiguousCount = reviewSource ? getPublicationReviewCount(reviewSource) : 0;
   const hasAmbiguous = ambiguousCount > 0;
   const ambiguousDeliveriesQuery = useInfiniteQuery({
     queryKey: ['publications', 'deliveries', publication?.id, 'ambiguous'],
@@ -205,7 +207,13 @@ export function PublicationDetailsSheet({
     isSuccess: ambiguousDeliveriesLoaded,
   });
   const deliveriesQuery = useInfiniteQuery({
-    queryKey: ['publications', 'deliveries', publication?.id, 'all'],
+    queryKey: [
+      'publications',
+      'deliveries',
+      publication?.id,
+      'all',
+      { excludeStatus: hasAmbiguous ? 'AMBIGUOUS' : null },
+    ],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) =>
       listPublicationDeliveries(api, publication?.id ?? '', {

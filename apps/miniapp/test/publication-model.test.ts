@@ -14,6 +14,7 @@ import {
   filterFuturePublicationSlots,
   getPublicationActionCapabilities,
   getPublicationActionableDelivery,
+  getPublicationReviewCount,
   getPublicationDispatchPendingCount,
   getPublicationDetailsPollingInterval,
   getPublicationDispatchIssuePresentation,
@@ -640,6 +641,28 @@ test('uses actionable delivery stats for list decisions without changing lifetim
     actionable,
   );
   assert.equal(getPublicationActionableDelivery({ delivery: lifetime }), lifetime);
+});
+
+test('reviews uncertainty from old schedule revisions without granting retry authority', () => {
+  const publication = {
+    lifecycle: 'ACTIVE' as const,
+    delivery: { total: 1, pending: 0, sent: 0, failed: 0, ambiguous: 1, canceled: 0 },
+    actionableDelivery: {
+      total: 0,
+      pending: 0,
+      sent: 0,
+      failed: 0,
+      ambiguous: 0,
+      canceled: 0,
+      dispatchPending: 0,
+    },
+    schedule: null,
+  } as Parameters<typeof getPublicationFeedStatusLabel>[0];
+  assert.equal(getPublicationReviewCount(publication), 1);
+  assert.equal(getPublicationFeedStatusLabel(publication), 'Нужно проверить');
+  assert.equal(getLifecycleTone(publication), 'danger');
+  assert.equal(getPublicationActionCapabilities(publication).canRetry, false);
+  assert.equal(getPublicationActionCapabilities(publication).editScope, null);
 });
 
 test('polls publication lists only while delivery or an active schedule can change', () => {

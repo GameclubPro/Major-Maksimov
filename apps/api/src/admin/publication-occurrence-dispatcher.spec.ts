@@ -214,6 +214,13 @@ describe('publication occurrence dispatcher', () => {
       'Prisma initialization failure',
       new Prisma.PrismaClientInitializationError('database unavailable', 'test-client'),
     ],
+    ...['57014', '40P01', '40001', '55P03'].map((code): [string, Error] => [
+      `P2010 SQLSTATE ${code}`,
+      Object.assign(new Error('Raw query failed'), {
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { originalCode: code } } },
+      }),
+    ]),
   ])('rethrows a transient %s without a permanent domain transition', async (_label, error) => {
     const harness = createHarness({ createExecutionError: error });
 
@@ -226,6 +233,21 @@ describe('publication occurrence dispatcher', () => {
     expect(harness.publisherRouting.deferOccurrenceIfBlocked).not.toHaveBeenCalled();
     expect(harness.transaction).not.toHaveBeenCalled();
     expect(harness.logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps a permanent raw query failure terminal instead of deferring it forever', async () => {
+    const failure = Object.assign(new Error('Invalid publication SQL'), {
+      code: 'P2010',
+      meta: { driverAdapterError: { cause: { originalCode: '42601' } } },
+    });
+    const harness = createHarness({ createExecutionError: failure });
+    await dispatchScheduledPublicationOccurrences(harness.context as never, 1, [
+      PublicationScheduleMode.NOW,
+    ]);
+    expect(harness.tx.publicationSchedule.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'ERROR' }) }),
+    );
+    expect(harness.cancelFutureWork).toHaveBeenCalledTimes(1);
   });
 
   it('does not stop the schedule when another worker materialized the occurrence first', async () => {

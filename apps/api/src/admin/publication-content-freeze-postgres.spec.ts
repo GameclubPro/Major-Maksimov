@@ -9,6 +9,8 @@ import {
   type Prisma,
 } from '../prisma/prisma-client';
 import { PublicationService } from './publication.service';
+import { rollupPublicationOccurrence } from './publication-occurrence-rollup';
+import { ensureManagedBroadcastPublicationExecutionActive } from './publication-execution-recovery';
 import { PublicationContentService } from './publication-content.service';
 import type { PublicationPublisherRoutingService } from './publication-publisher-routing.service';
 import {
@@ -206,6 +208,279 @@ integration('Publication content freeze and immutable recovery on PostgreSQL', (
   });
   afterAll(async () => {
     await db?.$disconnect();
+  });
+
+  const normalize = (selectedService: PublicationService = service, limit = 200) =>
+    (
+      selectedService as unknown as {
+        normalizeStalePublicationOccurrences(limit: number): Promise<void>;
+      }
+    ).normalizeStalePublicationOccurrences(limit);
+
+  async function makePreparedOccurrenceStale() {
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: { scheduledAt: new Date(Date.now() - 60_000) },
+    });
+    await db.publicationSchedule.update({
+      where: { publicationId },
+      data: { revision: { increment: 1 } },
+    });
+  }
+
+  it('preserves a saved SENT receipt across schedule replacement before occurrence rollup', async () => {
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: 'SENT',
+        attemptCount: 1,
+        remoteMessageId: 'synthetic-normalizer-receipt',
+        sentAt: new Date(),
+        remoteMessageVerifiedAt: new Date(),
+        botId,
+      },
+    });
+    await db.managedBroadcast.update({
+      where: { id: broadcastId },
+      data: { status: 'COMPLETED', sentCount: 1 },
+    });
+    await makePreparedOccurrenceStale();
+    await normalize();
+    await rollupPublicationOccurrence(db as unknown as PrismaService, occurrenceId);
+    expect(
+      await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+    ).toMatchObject({ status: 'SENT', scheduleRevision: 1 });
+    expect(
+      await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+    ).toMatchObject({
+      status: 'SENT',
+      remoteMessageId: 'synthetic-normalizer-receipt',
+      attemptCount: 1,
+    });
+  });
+
+  it.each(['pause', 'resume'] as const)(
+    'preserves an elapsed SENT receipt during %s before its occurrence rollup',
+    async (action) => {
+      await db.publicationOccurrence.update({
+        where: { id: occurrenceId },
+        data: { scheduledAt: new Date(Date.now() - 60_000) },
+      });
+      await db.managedBroadcastDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: 'SENT',
+          attemptCount: 1,
+          remoteMessageId: `synthetic-${action}-receipt`,
+          sentAt: new Date(),
+          remoteMessageVerifiedAt: new Date(),
+          botId,
+        },
+      });
+      if (action === 'resume') {
+        await db.publication.update({
+          where: { id: publicationId },
+          data: { lifecycle: 'PAUSED' },
+        });
+        await db.publicationSchedule.update({
+          where: { publicationId },
+          data: { status: 'PAUSED' },
+        });
+      }
+      await service[action](
+        publicationId,
+        user(),
+        { requestId: randomUUID(), expectedRevision: 1 },
+        'PUBLIK_V1',
+      );
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+      ).toMatchObject({ status: 'SCHEDULED' });
+      await rollupPublicationOccurrence(db as unknown as PrismaService, occurrenceId);
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+      ).toMatchObject({ status: 'SENT' });
+    },
+  );
+
+  it.each([
+    {
+      status: 'SENDING',
+      attemptCount: 1,
+      lockedAt: new Date(),
+      lockToken: 'protected-claim',
+    },
+    { status: 'AMBIGUOUS', attemptCount: 1 },
+    { status: 'FAILED', attemptCount: 1 },
+    { status: 'FAILED', attemptCount: 0, remoteMessageId: 'retained-receipt' },
+    { status: 'FAILED', attemptCount: 0, legacySentWithoutRemoteId: true },
+    { status: 'PENDING', attemptCount: 0, lockToken: 'protected-token' },
+  ] satisfies Array<Prisma.ManagedBroadcastDeliveryUpdateInput>)(
+    'preserves protected execution evidence %# during stale normalization',
+    async (data) => {
+      await db.managedBroadcastDelivery.update({ where: { id: deliveryId }, data });
+      await makePreparedOccurrenceStale();
+      await normalize();
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+      ).toMatchObject({ status: 'SCHEDULED' });
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+      ).toMatchObject(data);
+    },
+  );
+
+  it.each(['claim', 'receipt'] as const)(
+    'retains a concurrent %s committed after selection while envelope locking waits',
+    async (outcome) => {
+      await makePreparedOccurrenceStale();
+      const workerReady = gate();
+      const releaseWorker = gate();
+      const cleanupReachedLock = gate();
+      const worker = db.$transaction(async (tx) => {
+        await tx.managedBroadcast.update({
+          where: { id: broadcastId },
+          data: { lockedAt: new Date(), lockToken: 'concurrent-cleanup-worker' },
+        });
+        await tx.managedBroadcastDelivery.update({
+          where: { id: deliveryId },
+          data:
+            outcome === 'receipt'
+              ? {
+                  status: 'SENT',
+                  attemptCount: 1,
+                  remoteMessageId: 'concurrent-cleanup-receipt',
+                  sentAt: new Date(),
+                }
+              : {
+                  status: 'SENDING',
+                  attemptCount: 1,
+                  lockedAt: new Date(),
+                  lockToken: 'concurrent-delivery-claim',
+                },
+        });
+        workerReady.resolve();
+        await releaseWorker.promise;
+      });
+      await workerReady.promise;
+      const observedDb = new Proxy(db, {
+        get(target, key) {
+          if (key !== '$transaction') return Reflect.get(target, key);
+          return (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+            target.$transaction((tx) =>
+              callback(
+                new Proxy(tx, {
+                  get(client, field) {
+                    if (field !== '$queryRaw') return Reflect.get(client, field);
+                    return (query: Prisma.Sql) => {
+                      if (query.sql.includes('SELECT envelope."id"')) cleanupReachedLock.resolve();
+                      return client.$queryRaw(query);
+                    };
+                  },
+                }),
+              ),
+            );
+        },
+      });
+      const cleaning = normalize(createService(observedDb));
+      try {
+        await Promise.race([
+          cleanupReachedLock.promise,
+          cleaning.then(() => {
+            throw new Error('Cleanup completed without acquiring the selected envelope lock');
+          }),
+        ]);
+      } finally {
+        releaseWorker.resolve();
+      }
+      await Promise.all([worker, cleaning]);
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+      ).toMatchObject({ status: 'SCHEDULED' });
+      expect(
+        await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+      ).toMatchObject({ status: outcome === 'receipt' ? 'SENT' : 'SENDING', attemptCount: 1 });
+    },
+  );
+
+  it('cancels an untouched stale occurrence without rewriting its envelope lease heap', async () => {
+    await makePreparedOccurrenceStale();
+    const before = await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } });
+    await normalize();
+    const after = await db.managedBroadcast.findUniqueOrThrow({ where: { id: broadcastId } });
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    expect(after.lockToken).toBeNull();
+    expect(
+      await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+    ).toMatchObject({ status: 'CANCELED' });
+    expect(
+      await ensureManagedBroadcastPublicationExecutionActive({
+        prisma: db as unknown as PrismaService,
+        row: after,
+        occurrenceIndex: 1,
+      }),
+    ).toBe(false);
+    expect(
+      await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+    ).toMatchObject({ attemptCount: 0, remoteMessageId: null });
+  });
+
+  it('preserves a mixed SENT and PENDING audience instead of canceling the whole stale date', async () => {
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: 'SENT',
+        attemptCount: 1,
+        remoteMessageId: 'mixed-recipient-receipt',
+        sentAt: new Date(),
+      },
+    });
+    const pending = await db.managedBroadcastDelivery.create({
+      data: {
+        broadcastId,
+        occurrenceIndex: 1,
+        targetChatId: `synthetic-other-${randomUUID()}`,
+        publicationOccurrenceId: occurrenceId,
+        contentRevisionId,
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        dialogBotId: botId,
+        publicationPolicyRevision: 0,
+        publisherDialogContext: { version: 1, dialogBotId: botId, buttons: [] },
+      },
+    });
+    await makePreparedOccurrenceStale();
+    await normalize();
+    expect(
+      await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+    ).toMatchObject({ status: 'SCHEDULED' });
+    expect(
+      await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: deliveryId } }),
+    ).toMatchObject({ status: 'SENT', remoteMessageId: 'mixed-recipient-receipt' });
+    expect(
+      await db.managedBroadcastDelivery.findUniqueOrThrow({ where: { id: pending.id } }),
+    ).toMatchObject({ status: 'PENDING', attemptCount: 0 });
+  });
+
+  it('keeps historical CANCELED occurrences terminal instead of replaying them from a receipt', async () => {
+    await db.publicationOccurrence.update({
+      where: { id: occurrenceId },
+      data: { status: 'CANCELED' },
+    });
+    await db.managedBroadcastDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: 'SENT',
+        attemptCount: 1,
+        remoteMessageId: 'historical-receipt',
+        sentAt: new Date(),
+      },
+    });
+    await normalize();
+    await rollupPublicationOccurrence(db as unknown as PrismaService, occurrenceId);
+    expect(
+      await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrenceId } }),
+    ).toMatchObject({ status: 'CANCELED' });
   });
 
   it.each([

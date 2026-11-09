@@ -198,6 +198,10 @@ is token-scoped in the existing atomic GCRA boundary. Publisher SEND yields imme
 on local rejection; other tokens and ready recipients retain their own progress.
 A retry beyond intent expiry wakes the envelope for SQL expiry without an early SEND.
 
+Unknown SEND outcomes retain manual review before any recipient quarantine, including after repeated 429 deferrals. Access-like text and bare 403/404 do not prove permanent loss. Publication FAILED history requires explicit retry authority; automatic recovery never recreates it from error text. Infrastructure SQL deferrals preserve the original content/deadline, and the P2010 adapter envelope alone is not evidence of a transient error.
+
+Stale-date cancellation locks execution envelopes and rechecks untouched evidence before writing. A SENT receipt must remain in history after a schedule revision. The mini app reviews unknown deliveries across all accessible revisions while current execution/retry counters remain revision-scoped. Historical canceled rows are not reactivated by these readers.
+
 The existing Bull wake remains an acceleration hint. SQL occurrences/envelopes are the
 durable queue; a lost post-commit wake is repaired by the 15-second Publisher poll.
 No separate outbox or second executor is required. Polls coalesce and shutdown waits

@@ -1,9 +1,10 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useState } from 'react';
 import type {
   PublicationSummary,
   PublicationDetails,
   PublicationOccurrenceSummary,
+  ListPublicationDeliveriesResponse,
 } from '@maxim/contracts/publication';
 import type { ApiTransport } from '../../lib/api/transport';
 import {
@@ -169,9 +170,30 @@ export function usePublicationActions(api: ApiTransport, requestIds: Publication
         deliveryId: target.deliveryId,
         resolution: target.resolution,
       }),
-    onSuccess: async () => {
+    onSuccess: async (details, target) => {
       requestIds.confirmAmbiguousSuccess();
       setAmbiguousTarget(null);
+      // FLAG: A pre-resolution read must not restore its unknown outcome after this decision.
+      await Promise.all([
+        queryClient.cancelQueries({
+          queryKey: ['publications', 'details', target.publicationId],
+        }),
+        queryClient.cancelQueries({
+          queryKey: ['publications', 'deliveries', target.publicationId],
+        }),
+      ]);
+      queryClient.setQueryData(['publications', 'details', target.publicationId], details);
+      queryClient.setQueriesData<InfiniteData<ListPublicationDeliveriesResponse>>(
+        { queryKey: ['publications', 'deliveries', target.publicationId] },
+        (cached) =>
+          cached && {
+            ...cached,
+            pages: cached.pages.map((page) => ({
+              ...page,
+              items: page.items.filter((item) => item.id !== target.deliveryId),
+            })),
+          },
+      );
       await Promise.all([
         invalidatePublicationQueries(),
         queryClient.invalidateQueries({ queryKey: ['publications', 'details'] }),
