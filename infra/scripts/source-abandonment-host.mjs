@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { parseLegacyColdHostRequest, runLegacyColdHost } from './legacy-cold-host.mjs';
+import { assertSourceAbandonmentPreflightCompletion } from './source-abandonment-preflight-completion.mjs';
 
 export const SOURCE_ABANDONMENT_PROTOCOL = 'source-abandonment-v1';
 
@@ -33,26 +34,41 @@ export async function runSourceAbandonmentHost(request) {
   return runLegacyColdHost(request, { protocol: SOURCE_ABANDONMENT_PROTOCOL });
 }
 
-async function main() {
+export async function runSourceAbandonmentHostCli({
+  args = process.argv.slice(2),
+  input = process.stdin,
+  output = process.stdout,
+  errorOutput = process.stderr,
+  runHost = runSourceAbandonmentHost,
+  confirmCompletion = assertSourceAbandonmentPreflightCompletion,
+} = {}) {
   let text = '';
-  const timer = setTimeout(() => process.stdin.destroy(new Error('stdin_deadline')), 5_000);
+  const timer = setTimeout(() => input.destroy(new Error('stdin_deadline')), 5_000);
   try {
-    if (process.argv.length !== 2) throw new Error('stdin_only');
-    for await (const part of process.stdin) {
+    if (args.length !== 0 && (args.length !== 1 || args[0] !== '--supervised-preflight'))
+      throw new Error('stdin_only');
+    for await (const part of input) {
       text += part;
       if (Buffer.byteLength(text) > 64 * 1024) throw new Error('stdin_budget');
     }
     clearTimeout(timer);
-    const result = await runSourceAbandonmentHost(parseSourceAbandonmentHostRequest(text));
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-    if (result.decision === 'DENY') process.exitCode = 1;
+    const request = parseSourceAbandonmentHostRequest(text);
+    const result = await runHost(request);
+    let status = result.decision === 'DENY' ? 1 : 0;
+    if (args[0] === '--supervised-preflight' && request.operation === 'preflight' && status === 1) {
+      await confirmCompletion(request, result);
+      status = 3;
+    }
+    output.write(`${JSON.stringify(result)}\n`);
+    return status;
   } catch {
-    process.stderr.write(
+    errorOutput.write(
       'Exact-source abandonment refused; inspect its private evidence and durable journal.\n',
     );
-    process.exitCode = 1;
+    return 1;
   } finally {
     clearTimeout(timer);
   }
 }
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
+  process.exitCode = await runSourceAbandonmentHostCli();
