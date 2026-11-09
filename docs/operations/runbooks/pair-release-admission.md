@@ -112,6 +112,54 @@ drift, incomplete publication or an interrupted standalone maintenance operation
 outcome evidence stays blocked for a separately reviewed recovery. Never switch a runtime owner to
 tooling mode or invent a manifest to make recovery pass.
 
+### Pinned refusal before cold admission
+
+The source-abandonment check on 9 November stopped before its durable admission artifact.
+The supervisor intentionally retained its runtime-mode owner after a nonzero child outcome.
+Generic runtime reconciliation cannot prove that outcome from an older release manifest.
+Do not substitute tooling mode, remove the owner, or retry the failed operation to bypass it.
+
+`recover-pair-preadmission` is a separate forensic boundary for the exact historical source,
+owner and artifact hashes supported by its controller. It proves that the operation did not
+cross the source's durable admission barrier. The old host must persist and fsync
+`admission.json` before queue control, cold journal admission or any stop/install work, and
+never deletes that artifact. Recovery requires the exact two-entry private operation directory,
+its fixed historical change time, unchanged old terminal journals, unchanged pair state,
+exact runtime identities, released queues and no remaining operation actors or clients.
+Missing or changed evidence refuses recovery. This does not establish a recorded child exit,
+successful source admission or completion of the interrupted release.
+
+All fourteen API generations and photo native must predate the owner. OCR must retain its
+original pre-owner container and exact image, with fresh health and the strict networkless,
+secretless isolation profile. Its latest process start and restart count are recorded and
+bound to the preview; their causes and full history remain unproved. OCR process continuity
+does not establish or invalidate the separate durable admission barrier.
+
+From a clean controller with exact successful `Required` and CodeQL checks, retain the preview:
+
+```bash
+./infra/scripts/vps-connect.sh recover-pair-preadmission preview \
+  --owner-sha256 "$OWNER_SHA256" --state-sha256 "$PAIR_STATE_SHA256" \
+  --source-sha "$HISTORICAL_SOURCE_SHA" --operation-id "$PRIVATE_OPERATION_ID"
+```
+
+Review the concrete proof and preserve any refusal. Apply reobserves the same facts under
+all three original locks and requires the exact preview proof hash:
+
+```bash
+./infra/scripts/vps-connect.sh recover-pair-preadmission apply \
+  --owner-sha256 "$OWNER_SHA256" --state-sha256 "$PAIR_STATE_SHA256" \
+  --source-sha "$HISTORICAL_SOURCE_SHA" --operation-id "$PRIVATE_OPERATION_ID" \
+  --proof-sha256 "$PREVIEW_PROOF_SHA256"
+```
+
+The ordinary operator archives durable proof before moving the unchanged original owner into
+its private recovery archive. The persistent lock inodes, installed admission helper, runtime
+manifest, source, stores, queues and services stay intact. It grants no source abandonment,
+replay or fleet-stop authority. Read back shared admission afterward, then resume the separately
+verified ordinary release. A new stock readonly preflight follows its corrective release;
+this recovery never repeats it. Other failed checks and unknown effects require their own evidence.
+
 ### Interrupted backup unit installation
 
 The fixed [3 November installation incident](../incidents/2026-11-03-backup-activation.md)

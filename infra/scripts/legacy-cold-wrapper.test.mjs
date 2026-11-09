@@ -22,6 +22,7 @@ const wrappers = [
     host: 'source-abandonment-host.mjs',
     sourceEnv: 'MAXIM_EXPECTED_DEPLOY_SHA',
     args: [],
+    hostArgs: ['--supervised-preflight'],
   },
   {
     name: 'corrective',
@@ -109,7 +110,7 @@ for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT']) process.on(signal, () => {
   if (closing) return;
   closing = true;
   mark('cleaning.json', {pid: process.pid, signal});
-  const drain = () => { if (existsSync(join(root, 'allow-cleanup'))) finish(0); };
+  const drain = () => { if (existsSync(join(root, 'allow-cleanup'))) finish(process.env.FIXTURE_MODE === 'signal-deny' ? 3 : 0); };
   drain(); setInterval(drain, 10);
 });
 process.stdout.write(JSON.stringify({pid: process.pid, args: process.argv.slice(2)}) + '\\n');
@@ -117,8 +118,8 @@ let input = '';
 for await (const chunk of process.stdin) input += chunk;
 if (JSON.parse(input).operation !== 'status') throw new Error('request changed');
 mark('received.json', {input});
-if (process.env.FIXTURE_MODE === 'signal') await new Promise(() => setInterval(() => {}, 1000));
-else finish(process.env.FIXTURE_MODE === 'nonzero' ? 37 : 0);
+if (['signal', 'signal-deny'].includes(process.env.FIXTURE_MODE)) await new Promise(() => setInterval(() => {}, 1000));
+else finish(process.env.FIXTURE_MODE === 'nonzero' ? 37 : process.env.FIXTURE_MODE === 'preflight-deny' ? 3 : 0);
 `,
   );
   const env = deployLockEnvironment({
@@ -126,7 +127,7 @@ else finish(process.env.FIXTURE_MODE === 'nonzero' ? 37 : 0);
     [definition.sourceEnv]: sha,
     FIXTURE_ROOT: root,
     FIXTURE_MODE: mode,
-    FIXTURE_EXPECTED_ARGS: JSON.stringify(definition.args),
+    FIXTURE_EXPECTED_ARGS: JSON.stringify(definition.hostArgs ?? definition.args),
   });
   const observe = () =>
     spawnSync(
@@ -140,8 +141,132 @@ else finish(process.env.FIXTURE_MODE === 'nonzero' ? 37 : 0);
       { env, encoding: 'utf8', timeout: 3000 },
     );
   const kernelFree = (path) => spawnSync('flock', ['-n', path, 'true']).status === 0;
-  return { root, wrapper, lock, env, observe, kernelFree };
+  return {
+    root,
+    wrapper,
+    lock,
+    env,
+    observe,
+    kernelFree,
+    hostArgs: definition.hostArgs ?? definition.args,
+  };
 }
+
+test(
+  'source typed preflight denial keeps exit one and releases the exact admission owner',
+  { timeout: 8000 },
+  async (t) => {
+    const definition = wrappers.find(({ name }) => name === 'source');
+    const h = fixture(definition, 'preflight-deny');
+    const running = await launch(t, h, definition.args);
+    assert.equal(h.kernelFree(h.lock.file), false);
+    assert.equal(h.kernelFree(h.lock.pair.file), false);
+    running.child.stdin.end(request);
+    assert.equal((await running.done)[0], 1, running.stderr());
+    assert.equal((await marker(h.root, 'finished.json')).code, 3);
+    assert.equal(existsSync(join(h.lock.pair.state, 'admission.owner')), false);
+    assert.equal(h.kernelFree(h.lock.file), true);
+    assert.equal(h.kernelFree(h.lock.pair.file), true);
+    assert.equal(h.observe().status, 0);
+  },
+);
+
+for (const definition of wrappers.filter(({ name }) => name !== 'source'))
+  test(
+    `${definition.name} cannot nominate the source-only completion code`,
+    { timeout: 8000 },
+    async (t) => {
+      const h = fixture(definition, 'preflight-deny');
+      const running = await launch(t, h, definition.args);
+      running.child.stdin.end(request);
+      assert.equal((await running.done)[0], 3, running.stderr());
+      assert.equal(existsSync(join(h.lock.pair.state, 'admission.owner')), true);
+      assert.notEqual(h.observe().status, 0);
+    },
+  );
+
+for (const missing of ['fixed profile', 'original child identity'])
+  test(
+    `source reserved completion without ${missing} retains its owner`,
+    { timeout: 8000 },
+    async (t) => {
+      const definition = { ...wrappers.find(({ name }) => name === 'source') };
+      if (missing === 'fixed profile') definition.hostArgs = [];
+      const h = fixture(definition, 'preflight-deny');
+      if (missing === 'fixed profile')
+        writeFileSync(
+          h.wrapper,
+          readFileSync(h.wrapper, 'utf8').replace(' --supervised-preflight', ''),
+        );
+      else
+        writeFileSync(
+          h.lock.helper,
+          readFileSync(h.lock.helper, 'utf8').replace(
+            /_maxim_deploy_controller_start\(\) \{[\s\S]*?\n\}/u,
+            '_maxim_deploy_controller_start() { return 1; }',
+          ),
+        );
+      const running = await launch(t, h, definition.args);
+      running.child.stdin.end(request);
+      assert.equal((await running.done)[0], 3, running.stderr());
+      assert.equal(existsSync(join(h.lock.pair.state, 'admission.owner')), true);
+      assert.notEqual(h.observe().status, 0);
+    },
+  );
+
+test(
+  'source reserved completion after a parent signal retains uncertain admission',
+  { timeout: 8000 },
+  async (t) => {
+    const definition = wrappers.find(({ name }) => name === 'source');
+    const h = fixture(definition, 'signal-deny');
+    const running = await launch(t, h, definition.args);
+    running.child.stdin.end(request);
+    await marker(h.root, 'received.json');
+    process.kill(running.child.pid, 'SIGTERM');
+    await marker(h.root, 'cleaning.json');
+    assert.equal(h.kernelFree(h.lock.file), false);
+    assert.equal(h.kernelFree(h.lock.pair.file), false);
+    writeFileSync(join(h.root, 'allow-cleanup'), 'release');
+    assert.equal((await running.done)[0], 3, running.stderr());
+    assert.equal(existsSync(join(h.lock.pair.state, 'admission.owner')), true);
+    assert.notEqual(h.observe().status, 0);
+  },
+);
+
+test(
+  'source denial observed during completion freeze retains its owner and signal status',
+  { timeout: 8000 },
+  async (t) => {
+    const definition = wrappers.find(({ name }) => name === 'source');
+    const h = fixture(definition, 'preflight-deny');
+    const hook = join(h.root, 'freeze-hook.sh');
+    // FLAG: Only the fixture's parent intercepts the actual trap builtin. Deliver
+    // TERM after branch selection but before signals freeze, without timing sleeps.
+    writeFileSync(
+      hook,
+      `trap() {
+  if [[ "$#" == 4 && "$1" == '' && "$2" == INT && "$3" == TERM && "$4" == HUP &&
+        "${'${PAIR_RELEASE_ADMISSION_OWNER_PID:-}'}" == "$BASHPID" && "${'${FIXTURE_MODE:-}'}" == preflight-deny ]]; then
+    printf 'observed\\n' >"$FIXTURE_ROOT/freeze-signal-observed"
+    kill -TERM "$BASHPID"
+  fi
+  builtin trap "$@"
+}
+`,
+      { mode: 0o600 },
+    );
+    h.env.BASH_ENV = hook;
+    const running = await launch(t, h, definition.args);
+    running.child.stdin.end(request);
+    assert.equal((await running.done)[0], 143, running.stderr());
+    assert.equal(existsSync(join(h.root, 'freeze-signal-observed')), true);
+    assert.equal(existsSync(join(h.lock.pair.state, 'admission.owner')), true);
+    assert.equal(h.kernelFree(h.lock.file), true);
+    assert.equal(h.kernelFree(h.lock.pair.file), true);
+    assert.notEqual(h.observe().status, 0);
+  },
+);
 
 async function launch(t, h, args) {
   const child = spawn('bash', [h.wrapper, ...args], {
@@ -172,7 +297,7 @@ async function launch(t, h, args) {
   const started = JSON.parse(first[0].toString());
   nodePid = started.pid;
   assert.notEqual(nodePid, child.pid);
-  assert.deepEqual(started.args, args);
+  assert.deepEqual(started.args, h.hostArgs);
   return { child, done, nodePid, stderr: () => stderr };
 }
 

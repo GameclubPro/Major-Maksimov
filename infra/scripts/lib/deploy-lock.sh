@@ -350,7 +350,12 @@ _maxim_deploy_signal_controller() {
 supervise_deploy_lock_command() {
   local command_pid='' command_start='' command_owner="$BASHPID" command_status=70
   local command_signal_count=0 command_signal_status=0 command_pending_signal='' signal_count_before
+  local source_preflight_completion=0 source_preflight_host
   (($# > 0)) || return 2
+  if (($# == 3)) && [[ "$1" == node && "$3" == --supervised-preflight ]]; then
+    source_preflight_host="$(readlink -e -- "${BASH_SOURCE[0]%/*}/../source-abandonment-host.mjs" 2>/dev/null)" || source_preflight_host=''
+    [[ -z "$source_preflight_host" || "$2" != "$source_preflight_host" ]] || source_preflight_completion=1
+  fi
   require_deploy_lock || return 1
   # FLAG: This terminal supervisor keeps the original admission owner alive. Only
   # an observed normal success may release it; interruption/failure keeps its evidence.
@@ -381,6 +386,20 @@ supervise_deploy_lock_command() {
     # FLAG: The controller ended normally; finish the exact owner's cleanup.
     trap '' INT TERM HUP
     release_deploy_lock || command_status=70
+  elif ((command_status == 3 && source_preflight_completion == 1)) && [[ -n "$command_start" ]]; then
+    # FLAG: Only this fixed controller can issue three after a fully returned,
+    # positively checked read-only preflight DENY. Unknown exits and any observed
+    # signal retain their owner. Preserve the public denial status after cleanup.
+    trap '' INT TERM HUP
+    # FLAG: A signal may have run after the outer branch check. Freeze first,
+    # then recheck the observed counter before admitting the exact owner's release.
+    if ((command_signal_count > 0)); then
+      command_status="$command_signal_status"
+    elif require_deploy_lock && release_deploy_lock; then
+      command_status=1
+    else
+      command_status=70
+    fi
   fi
   exit "$command_status"
 }

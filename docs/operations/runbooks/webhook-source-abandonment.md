@@ -169,8 +169,14 @@ Run the reviewed request through:
 ./infra/scripts/vps-connect.sh source-abandonment /absolute/private/request.json
 ```
 
-`preflight` is read-only and leaves producers running. Review its complete evidence
-before `prepare`. Preparation binds the exact generations, stops all fourteen API
+`preflight` is read-only and leaves producers running. A normally completed `DENY`
+keeps the public failure exit status. The fixed supervised profile may close only
+its own admission owner after checking the private matching denial, completed
+environment cleanup and absence of both exact client identities. Missing evidence,
+unknown failures, signals and `prepare` refusals retain their fence. This does not
+authorize stopping services or installation; interrupted historical owners follow
+the separate [admission recovery](pair-release-admission.md#pinned-refusal-before-cold-admission).
+Review the complete evidence before `prepare`. Preparation binds the exact generations, stops all fourteen API
 roles and both auxiliaries, fences all twenty-four webhook queues, and captures a
 bounded stable inventory. It does not install dispositions. A refused cold preview
 leaves the operation fenced; inspect the journal and use its exact recovery path.

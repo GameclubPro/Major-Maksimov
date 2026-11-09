@@ -2070,6 +2070,28 @@ yc_shell() {
   yc "${args[@]}"
 }
 
+# FLAG: New recovery commands belong after the installed protected source prefix.
+recover_pair_preadmission() (
+  set -euo pipefail
+  local controller_sha recovery_source
+  [[ "$MAXIM_VPS_REPO_DIR" == /var/www/Chat_bot ]] || return 2
+  [[ -z "$(git --no-replace-objects status --porcelain)" ]] || { echo 'Pre-admission recovery requires a clean exact controller.' >&2; return 2; }
+  controller_sha="$(git --no-replace-objects rev-parse HEAD)"
+  GIT_NO_REPLACE_OBJECTS=1 node --input-type=module - "$ROOT_DIR" "$@" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, ...args] = process.argv.slice(2);
+const { parsePreadmissionRecoveryArgs } = await import(pathToFileURL(`${root}/infra/scripts/pair-release-preadmission-recovery.mjs`));
+parsePreadmissionRecoveryArgs(args);
+NODE
+  GIT_NO_REPLACE_OBJECTS=1 node scripts/ci/assert-green.mjs "$controller_sha" --purpose production
+  recovery_source="$(mktemp)"
+  trap 'rm -f -- "$recovery_source"' EXIT
+  git --no-replace-objects show "$controller_sha:infra/scripts/pair-release-preadmission-recovery.mjs" >"$recovery_source"
+  # FLAG: The retained owner blocks source synchronization. Stream exact green bytes;
+  # the operator proves the pinned pre-admission boundary under all original locks.
+  remote_exec "$(shell_quote_args timeout --signal=TERM --kill-after=5s 90s node --input-type=module - "$@")" <"$recovery_source"
+)
+
 command="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -2100,6 +2122,9 @@ case "$command" in
     ;;
   recover-pair-backup-activation)
     recover_pair_backup_activation "$@"
+    ;;
+  recover-pair-preadmission)
+    recover_pair_preadmission "$@"
     ;;
   install-pair-release-admission)
     install_pair_release_admission "$@"
@@ -2288,6 +2313,7 @@ case "$command" in
     usage
     echo '  postgres-audit chat-moderation <chat-id> [--explain]'
     echo '  postgres-audit action-latency [--explain]'
+    echo '  recover-pair-preadmission preview|apply <reviewed identity flags>'
     echo '  commercial-llm workstation-pool-bridge pc-a-cpu-9b'
     ;;
   *)
