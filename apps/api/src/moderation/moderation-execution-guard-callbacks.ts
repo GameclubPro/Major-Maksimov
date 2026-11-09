@@ -167,6 +167,8 @@ export function createDuplicateSanctionNoticeDispatchOptions(
 ): ModerationNoticeImmediateOptions {
   return {
     immediate: true,
+    // FLAG: This caller consumes notice failure and retains no SEND continuation.
+    immediateFailurePolicy: 'terminal',
     beforeImmediateSendMutation: withMaxFinalAuthorityCheckpoint(async (beforeFinalAuthority) => {
       // FLAG: A durable SEND cannot serialize this duplicate stage's source/lease closure.
       // Keep the genuine binding in immediate dispatch, and deny unbound legacy notices.
@@ -479,6 +481,7 @@ export function buildModerationNoticeDispatchOptions(
     deleteBotMessagesEnabled: boolean;
     deleteBotMessagesDelayMinutes: number;
     immediate?: boolean;
+    immediateFailurePolicy?: ModerationNoticeImmediateOptions['immediateFailurePolicy'];
     userFacing?: boolean;
     botId?: string;
     idempotencyKey?: string;
@@ -497,6 +500,8 @@ export function buildModerationNoticeDispatchOptions(
   };
   if (params.botId) dispatchOptions.botId = params.botId;
   if (params.immediate === true) dispatchOptions.immediate = true;
+  if (params.immediateFailurePolicy)
+    dispatchOptions.immediateFailurePolicy = params.immediateFailurePolicy;
   if (params.idempotencyKey) dispatchOptions.idempotencyKey = params.idempotencyKey;
   if (params.beforeImmediateSendMutation)
     dispatchOptions.beforeImmediateSendMutation = params.beforeImmediateSendMutation;

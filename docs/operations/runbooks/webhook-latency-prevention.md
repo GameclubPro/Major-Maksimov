@@ -70,6 +70,12 @@ before editing it; copying these notes does not install a fix or prove the deplo
    ledger because the command retains no SEND continuation. It must not wait for stale-orphan
    repair to acquire a completion timestamp. Default immediate callers keep their existing
    recovery ownership; successful receipts and ambiguous SEND fences remain monotonic.
+   Duplicate-sanction notices also settle their one-shot immediate failure explicitly: their
+   original source/lease closure cannot be serialized, and the sanction caller consumes the
+   notice failure without retaining a SEND continuation. Preserve the original final authority
+   callback, no whole-handler/sanction replay and positive/ambiguous receipts. Cover the actual
+   helper and moderation sender with `max-immediate-send-ledger-postgres.spec.ts`, including
+   source-authority and local quota refusals; unrelated durable callers retain the default.
    Queued moderation notices may defer the same locked BullMQ job after a genuine local SEND
    admission refusal, only after its exact unattempted dispatch fence is safely released.
    Keep the ordinary HTTP retry budget, original job identity, source proof and deadline.

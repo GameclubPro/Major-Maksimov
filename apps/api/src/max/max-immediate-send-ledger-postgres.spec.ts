@@ -7,6 +7,9 @@ import Redis from 'ioredis';
 import { PrismaClient, createPrismaAdapter } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ActionHealthService } from '../system/action-health.service';
+import { createDuplicateSanctionNoticeDispatchOptions } from '../moderation/moderation-execution-guard-callbacks';
+import { deliverSanctionNotice } from '../moderation/moderation-sanction-notice-delivery';
+import { ModerationService } from '../moderation/moderation.service';
 import { MaxActionLedgerService } from './max-action-ledger.service';
 import { buildMaxActionIdempotencyKey } from './max-action-idempotency';
 import {
@@ -168,6 +171,76 @@ integration('Immediate SEND terminal policy on real PostgreSQL', () => {
       createdAt: new Date().toISOString(),
     };
   }
+
+  it.each(['authority', 'quota'] as const)(
+    'settles a duplicate-sanction one-shot %s refusal through its actual notice sender',
+    async (failure) => {
+      const refused =
+        failure === 'quota'
+          ? new MaxApiInternalRateLimitError('Synthetic shared capacity refusal', 1_000, 'bot')
+          : new Error('Synthetic original duplicate authority refusal');
+      const authority = jest.fn(async (beforeFinalAuthority?: () => Promise<void>) => {
+        await beforeFinalAuthority?.();
+        if (failure === 'authority') throw refused;
+      });
+      if (failure === 'quota') capacity.mockRejectedValueOnce(refused);
+      const moderation = new ModerationService(
+        db as unknown as PrismaService,
+        {} as never,
+        {} as never,
+        client,
+      );
+      type Sender = {
+        sendBotMessageWithOptionalAutoDelete: Parameters<typeof deliverSanctionNotice>[0]['send'];
+      };
+      const sender = moderation as unknown as Sender;
+      const logger = { warn: jest.fn() };
+
+      // FLAG: Duplicate sanction delivery deliberately consumes notice failure. Its
+      // source/lease closure has no serialized retry owner after this caller resolves.
+      await expect(
+        deliverSanctionNotice({
+          notice: {
+            chatId,
+            botId,
+            userId: 'synthetic-duplicate-user',
+            messageId: 'synthetic-duplicate-message',
+            userLabel: 'Synthetic participant',
+            deleteBotMessagesEnabled: false,
+            deleteBotMessagesDelayMinutes: 5,
+            idempotencyKey: requestedKey,
+            botSpeechStyle: null,
+            noticeDispatchOptions: createDuplicateSanctionNoticeDispatchOptions(authority),
+          },
+          action: 'UNBAN',
+          text: 'Synthetic duplicate sanction notice',
+          send: (input) => sender.sendBotMessageWithOptionalAutoDelete(input),
+          logger,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(authority).toHaveBeenCalledTimes(1);
+      expect(wasMaxPreDispatchGuardRejected(refused)).toBe(true);
+      expect(wasMaxMessageSendAttempted(refused)).toBe(false);
+      expect(request).not.toHaveBeenCalled();
+      const settled = await readLedger();
+      expect(settled).toMatchObject({
+        status: 'FAILED_RETRYABLE',
+        terminal: true,
+        ambiguous: false,
+        completedAt: expect.any(Date),
+        lastAttemptAt: expect.any(Date),
+        lastErrorCode: MAX_SEND_PRE_DISPATCH_GUARD_REJECTED_CODE,
+        dispatchToken: null,
+        dispatchStartedAt: null,
+        dispatchBotId: null,
+        remoteMessageId: null,
+      });
+      await expect(ledger.assertCanExecute(action())).rejects.toBeInstanceOf(UnrecoverableError);
+      expect(await readLedger()).toEqual(settled);
+    },
+  );
 
   it.each(['guard', 'quota'] as const)(
     'settles a one-shot %s refusal immediately without claiming a delivered message',

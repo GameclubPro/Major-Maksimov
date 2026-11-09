@@ -17994,6 +17994,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     deleteBotMessagesEnabled: boolean;
     deleteBotMessagesDelayMinutes: number;
     immediate?: boolean;
+    immediateFailurePolicy?: ModerationNoticeImmediateOptions['immediateFailurePolicy'];
     /** Route a user-visible sanction notice through the interactive lane without blocking this worker. */
     userFacing?: boolean;
     bypassNoticeBucket?: boolean;
@@ -18012,6 +18013,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       deleteBotMessagesEnabled,
       deleteBotMessagesDelayMinutes,
       immediate,
+      immediateFailurePolicy,
       userFacing,
       bypassNoticeBucket,
       idempotencyKey,
@@ -18054,6 +18056,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           deleteBotMessagesEnabled,
           deleteBotMessagesDelayMinutes,
           immediate,
+          immediateFailurePolicy,
           userFacing,
           botId,
           idempotencyKey,
