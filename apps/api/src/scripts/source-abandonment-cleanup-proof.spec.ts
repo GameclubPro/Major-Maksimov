@@ -770,9 +770,12 @@ describe('required subscription cleanup proves unrelated completed notice lineag
   });
 });
 
-function redisFixture(s: ReturnType<typeof fixture>) {
+function redisFixture(
+  s: ReturnType<typeof fixture>,
+  jobs: readonly Record<string, unknown>[] = [s.data],
+) {
   const reader = {
-    eval_ro: jest.fn(async (script: string) => {
+    eval_ro: jest.fn(async (script: string, _keyCount = 0, ...args: string[]) => {
       if (script.startsWith('-- source-abandonment:headers'))
         return [
           1,
@@ -787,7 +790,7 @@ function redisFixture(s: ReturnType<typeof fixture>) {
               0,
               0,
               0,
-              name === 'max-actions-background' ? 1 : 0,
+              name === 'max-actions-background' ? jobs.length : 0,
               0,
               0,
               0,
@@ -798,8 +801,22 @@ function redisFixture(s: ReturnType<typeof fixture>) {
       if (script.startsWith('-- source-abandonment:namespace-catalog'))
         return [1, 0, '0', 0, 0, 0, [], ['0']];
       if (script.startsWith('-- source-abandonment:owners')) return [1, 1, 1, []];
-      if (script.startsWith('-- source-abandonment:jobs'))
-        return [1, 1, 1, [['redis-cleanup', 'delayed', ['data', JSON.stringify(s.data)], 0, '1']]];
+      if (script.startsWith('-- source-abandonment:jobs')) {
+        const offset = Number(args[2]);
+        const page = jobs.slice(offset, offset + Number(args[3]));
+        return [
+          1,
+          1,
+          page.length,
+          page.map((data, index) => [
+            `redis-cleanup-${offset + index}`,
+            'delayed',
+            ['data', JSON.stringify(data)],
+            offset + index,
+            '1',
+          ]),
+        ];
+      }
       throw new Error('Unexpected Redis read');
     }),
     multi() {
@@ -833,11 +850,11 @@ describe('cleanup parent evidence participates in bounded repeated inventory', (
     const resolve = jest.fn<
       ReturnType<SourceAbandonmentRedisResolver>,
       Parameters<SourceAbandonmentRedisResolver>
-    >(async () => ({
-      row: null,
-      digest: 'f'.repeat(64),
+    >(async (_kind, keys) => ({
+      rows: keys.map((key) => ({ key, row: null, digest: 'f'.repeat(64) })),
       cost: { pages: 2, rows: 0, probes: 2, bytes: 256 },
       plans: [],
+      issue: null,
     }));
     const result = await inventorySourceAbandonmentRedis(
       redisFixture(s),
@@ -852,8 +869,8 @@ describe('cleanup parent evidence participates in bounded repeated inventory', (
     });
     expect(result.children).toEqual([]);
     expect(resolve.mock.calls.map(([kind, key]) => [kind, key])).toEqual([
-      ['action', 'cleanup-delete'],
-      ['action', 'parent-send'],
+      ['action', ['cleanup-delete']],
+      ['action', ['parent-send']],
     ]);
   });
   it('resolves only the child and exact parent, charges parent costs and retains its digest', async () => {
@@ -861,11 +878,15 @@ describe('cleanup parent evidence participates in bounded repeated inventory', (
     const resolve = jest.fn<
       ReturnType<SourceAbandonmentRedisResolver>,
       Parameters<SourceAbandonmentRedisResolver>
-    >(async (_kind, key) => ({
-      row: key === 'parent-send' ? s.ledger : null,
-      digest: sourceAbandonmentDigest(key === 'parent-send' ? s.ledger : null),
+    >(async (_kind, keys) => ({
+      rows: keys.map((key) => ({
+        key,
+        row: key === 'parent-send' ? s.ledger : null,
+        digest: sourceAbandonmentDigest(key === 'parent-send' ? s.ledger : null),
+      })),
       cost: { pages: 2, rows: 1, probes: 2, bytes: 256 },
       plans: [],
+      issue: null,
     }));
     const run = () =>
       inventorySourceAbandonmentRedis(
@@ -879,8 +900,8 @@ describe('cleanup parent evidence participates in bounded repeated inventory', (
     expect(first.issues).toEqual([]);
     expect(first.children).toEqual([]);
     expect(resolve.mock.calls.map(([kind, key]) => [kind, key])).toEqual([
-      ['action', 'cleanup-delete'],
-      ['action', 'parent-send'],
+      ['action', ['cleanup-delete']],
+      ['action', ['parent-send']],
     ]);
     expect(first.cost.rows).toBe(3);
     expect(first.cost.pages).toBeGreaterThanOrEqual(4);
@@ -889,18 +910,78 @@ describe('cleanup parent evidence participates in bounded repeated inventory', (
     expect(changed.issues).toEqual([]);
     expect(changed.stableDigest).not.toBe(first.stableDigest);
   });
+  it('deduplicates a shared parent within each page and refetches it on the next page and pass', async () => {
+    const s = fixture();
+    const jobs = Array.from({ length: 17 }, (_, index) => ({
+      ...s.data,
+      idempotencyKey: `cleanup-delete-${index}`,
+    }));
+    let revision = 0;
+    const resolve = jest.fn<
+      ReturnType<SourceAbandonmentRedisResolver>,
+      Parameters<SourceAbandonmentRedisResolver>
+    >(async (_kind, keys) => {
+      if (keys.includes('parent-send')) revision++;
+      return {
+        rows: keys.map((key) => {
+          const row =
+            key === 'parent-send'
+              ? {
+                  ...s.ledger,
+                  updatedAt: new Date(Date.parse(completedAt) + revision),
+                }
+              : null;
+          return { key, row, digest: sourceAbandonmentDigest(row === null ? [] : [row]) };
+        }),
+        cost: { pages: 2, rows: keys.length, probes: 2, bytes: 256 },
+        plans: [],
+        issue: null,
+      };
+    });
+    const run = () =>
+      inventorySourceAbandonmentRedis(
+        redisFixture(s, jobs),
+        selection,
+        [source],
+        { ...LEGACY_RECOVERY_LIVE_BUDGET, deadlineAtMs: Date.now() + 30_000 },
+        resolve,
+      );
+    const first = await run();
+    const second = await run();
+    expect(first.issues).toEqual([]);
+    expect(second.issues).toEqual([]);
+    expect(first.children).toEqual([]);
+    expect(first.cost.rows).toBe(36);
+    expect(second.cost.rows).toBe(36);
+    expect(second.stableDigest).not.toBe(first.stableDigest);
+    const pageOne = Array.from({ length: 16 }, (_, index) => `cleanup-delete-${index}`);
+    expect(resolve.mock.calls.map(([, keys]) => keys)).toEqual([
+      pageOne,
+      ['parent-send'],
+      ['cleanup-delete-16'],
+      ['parent-send'],
+      pageOne,
+      ['parent-send'],
+      ['cleanup-delete-16'],
+      ['parent-send'],
+    ]);
+  });
   it('keeps unresolved parent denial and propagates the unchanged shared budget', async () => {
     const s = fixture();
-    const resolve: SourceAbandonmentRedisResolver = async (_kind, key, allowance) => ({
-      row: key === 'parent-send' ? s.ledger : null,
-      digest: 'f'.repeat(64),
+    const resolve: SourceAbandonmentRedisResolver = async (_kind, keys, allowance) => ({
+      rows: keys.map((key) => ({
+        key,
+        row: key === 'parent-send' ? s.ledger : null,
+        digest: 'f'.repeat(64),
+      })),
       cost: {
-        pages: key === 'parent-send' ? allowance.pages + 1 : 0,
+        pages: keys.includes('parent-send') ? allowance.pages + 1 : 0,
         rows: 0,
         probes: 0,
         bytes: 0,
       },
       plans: [],
+      issue: null,
     });
     const result = await inventorySourceAbandonmentRedis(
       redisFixture(s),
