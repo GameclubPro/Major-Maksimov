@@ -61,6 +61,31 @@ test('moderation rights questions retain deletion permission alongside general g
   assert.ok(facts.some((entry) => entry.id === 'max-delete-rights'));
 });
 
+test('Publisher setup nouns do not report readiness while completed connections still do', () => {
+  for (const text of [
+    'Пришли инструкцию по подключению Публика.',
+    'Нужна инструкция подключения Публика к группе.',
+  ]) {
+    const request = classifySupportRequest(text);
+    assert.equal(request.eligible, true, text);
+    assert.equal(request.publisherRequest, true, text);
+    assert.equal(request.publisherConnectionReady, false, text);
+    assert.ok(request.primaryIds.includes('publik'), text);
+    assert.ok(request.primaryIds.includes('max-add-existing-bot-group'), text);
+    assert.equal(classifySupportRequest(text, [], { replyToOther: true }).eligible, false, text);
+  }
+  for (const text of [
+    'Публик уже подключён. Как создать обычный пост?',
+    'Подключён Публик. Как создать обычный пост?',
+    'Группа подключена к Публику. Как создать обычный пост?',
+    'Канал подключен к Публику. Как создать обычный пост?',
+  ]) {
+    const request = classifySupportRequest(text);
+    assert.equal(request.publisherConnectionReady, true, text);
+    assert.equal(request.primaryIds[0], 'publisher-post-create', text);
+  }
+});
+
 test('Lastik exclusion questions without named exception keywords retain the complete source', () => {
   for (const text of [
     'Я администратор. Как подключить Ластик и какие сообщения он не удаляет?',

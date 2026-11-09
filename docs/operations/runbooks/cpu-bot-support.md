@@ -99,6 +99,28 @@ customer histories. Update entries against current UI/code. The local installer 
 the knowledge and scripts in its immutable bundle; an update requires reinstalling that
 bundle. Knowledge digests must match across the PC and host.
 
+The owner-reviewed group onboarding cards are represented by two `onboardingGuides` entries:
+11 moderator cards and 11 Publik cards. The catalog retains only reviewed source references,
+ordered MAX photo identities and content digests. Original images, chat exports, CDN URLs and
+media tokens stay outside Git. The helper may select one symbolic guide ID for a clear eligible
+group setup request; channels, Lastik, troubleshooting, already completed setup and unrelated
+conversation do not automatically receive these group cards. Moderator cards use Major as their
+example; another moderator must use its own verified profile.
+
+For a selected guide, the host reads its exact pinned forwarded messages with the existing
+assigned moderator. It requires every image identity and its order to match before using only
+the fresh MAX image tokens. Forwarded text and URLs do not become model instructions or outgoing
+media. Both guides describe two alternatives after admin rights: an administrator's explicit
+`Старт` in the group, or forwarding a group message to the correct bot's private dialog. Publik
+also needs permission to send/publish; the card highlighting reading does not waive that right.
+
+A guide is sent as two ordered image batches of ten and one, with a short explanation. Every
+batch rechecks the user's exact source, access, holds, deadline and session heartbeat. Child
+Redis fences require the previous batch's confirmed receipt; the original source fence remains
+unchanged. Missing acknowledgements or a partial result remain fenced without automatic replay.
+Only all confirmed batches settle the full answer as sent. Preparation and delivery retain the
+same bounded lease; no guide response extends the source's original 180-second deadline.
+
 The reviewed public catalog contains eight bots: three main moderators (Максимов,
 Максимова, Рэкс), three reserve moderators (Максимов 2, Максимова 2, Рэкс 2), Публик
 and the separate Ластик. Main/reserve is the owner's product classification, not proof of
