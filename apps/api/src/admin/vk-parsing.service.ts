@@ -248,6 +248,9 @@ export class VkParsingService {
           autoPublishEnabled: nextAutoPublishEnabled,
           autoPublishEnabledAt: nextAutoPublishEnabled ? (autoPublishEnabledAt ?? now) : null,
           autoPublishKillSwitchEnabled: settingsPatch.autoPublishKillSwitchEnabled ?? false,
+          sourceLinkEnabled: settingsPatch.sourceLinkEnabled ?? false,
+          sourceLinkUrl: settingsPatch.sourceLinkUrl ?? '',
+          deleteAfterMinutes: settingsPatch.deleteAfterMinutes ?? null,
           stripLinksEnabled: settingsPatch.stripLinksEnabled ?? false,
           skipAdsEnabled: settingsPatch.skipAdsEnabled ?? false,
           appendChannelLinkEnabled: nextAppendChannelLinkEnabled,
@@ -417,6 +420,10 @@ export class VkParsingService {
 
   async reconcileAutoPublishSchedules(): Promise<number> {
     return this.publishService.reconcileAutoPublishSchedules();
+  }
+
+  async enqueueDueAutoDeletes(): Promise<number> {
+    return this.publishService.enqueueDueAutoDeletes();
   }
 
   async recoverStalePublisherRollbackJobs(): Promise<number> {

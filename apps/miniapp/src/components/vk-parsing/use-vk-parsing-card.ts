@@ -450,6 +450,9 @@ export function useVkParsingCard({ api, chatId, active, entityType }: UseVkParsi
   const feed = feedQuery.data;
   const settings = feed?.settings ?? {
     chatId,
+    sourceLinkEnabled: false,
+    sourceLinkUrl: '',
+    deleteAfterMinutes: null,
     autoPublishEnabled: false,
     autoPublishEnabledAt: null,
     autoPublishKillSwitchEnabled: false,

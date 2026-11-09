@@ -61,6 +61,12 @@ export class VkParsingRunnerService implements OnModuleInit, OnModuleDestroy {
       }
 
       try {
+        await this.vkParsingService.enqueueDueAutoDeletes();
+      } catch (error) {
+        this.logger.warn({ err: error, reason }, 'VK auto-delete scheduling failed');
+      }
+
+      try {
         await this.vkParsingService.recoverStalePublisherRollbackJobs();
       } catch (error) {
         this.logger.warn({ err: error, reason }, 'VK parsing rollback recovery failed');

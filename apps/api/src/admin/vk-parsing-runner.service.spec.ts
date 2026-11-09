@@ -1,3 +1,4 @@
+import type { VkParsingService } from './vk-parsing.service';
 import { VkParsingRunnerService } from './vk-parsing-runner.service';
 
 describe('VkParsingRunnerService', () => {
@@ -24,8 +25,18 @@ describe('VkParsingRunnerService', () => {
       syncDueSources: jest.fn().mockResolvedValue(0),
       reconcileAutoPublishSchedules: jest.fn().mockResolvedValue(0),
       recoverStalePublishJobs: jest.fn().mockResolvedValue(0),
+      enqueueDueAutoDeletes: jest.fn().mockResolvedValue(0),
       recoverStalePublisherRollbackJobs: jest.fn().mockResolvedValue(0),
-    };
+    } satisfies Pick<
+      VkParsingService,
+      | 'getSyncIntervalMs'
+      | 'getSchedulerIntervalMs'
+      | 'syncDueSources'
+      | 'reconcileAutoPublishSchedules'
+      | 'recoverStalePublishJobs'
+      | 'enqueueDueAutoDeletes'
+      | 'recoverStalePublisherRollbackJobs'
+    >;
     const runner = new VkParsingRunnerService(
       vkParsingService as never,
       {
@@ -50,6 +61,7 @@ describe('VkParsingRunnerService', () => {
 
     expect(vkParsingService.recoverStalePublishJobs).toHaveBeenCalledTimes(1);
     expect(vkParsingService.reconcileAutoPublishSchedules).toHaveBeenCalledTimes(1);
+    expect(vkParsingService.enqueueDueAutoDeletes).toHaveBeenCalledTimes(1);
     expect(vkParsingService.recoverStalePublisherRollbackJobs).toHaveBeenCalledTimes(1);
   });
 
@@ -64,6 +76,7 @@ describe('VkParsingRunnerService', () => {
     expect(vkParsingService.syncDueSources).not.toHaveBeenCalled();
     expect(vkParsingService.reconcileAutoPublishSchedules).not.toHaveBeenCalled();
     expect(vkParsingService.recoverStalePublishJobs).not.toHaveBeenCalled();
+    expect(vkParsingService.enqueueDueAutoDeletes).not.toHaveBeenCalled();
     expect(vkParsingService.recoverStalePublisherRollbackJobs).not.toHaveBeenCalled();
   });
 

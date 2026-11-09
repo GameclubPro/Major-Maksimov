@@ -943,6 +943,24 @@ describe('VkParsingService', () => {
     });
   });
 
+  it('persists attribution and deletion on first save without changing published posts', async () => {
+    const { service, prisma, publishQueue } = createFixture();
+    const patch = {
+      sourceLinkEnabled: true,
+      sourceLinkUrl: 'https://example.com/original',
+      deleteAfterMinutes: 1440,
+    };
+    await service.updateSettings('channel-1', { userId: '183470701' } as never, patch);
+    expect(prisma.vkParsingSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining(patch),
+        update: patch,
+      }),
+    );
+    expect(prisma.vkParsingPost.updateMany).not.toHaveBeenCalled();
+    expect(publishQueue.add).not.toHaveBeenCalled();
+  });
+
   it('updates VK parsing automation settings for a channel', async () => {
     const { service, prisma } = createFixture();
     prisma.vkParsingSettings.findUnique.mockResolvedValue({
@@ -10510,6 +10528,56 @@ describe('VkParsingService', () => {
     expect(publishQueue.add).toHaveBeenCalled();
   });
 
+  it('adds the original source after filtering and counts its final HTML', async () => {
+    const { publishService } = createFixture();
+    const prepare = (
+      publishService as unknown as {
+        prepareMaxMessageText: (
+          chatId: string,
+          payload: { text: string; textFormat: 'plain'; linkUrls: string[] },
+          settings: {
+            appendChannelLinkEnabled: boolean;
+            channelLinkText: string;
+            sourceLinkEnabled: boolean;
+            sourceLinkUrl: string;
+          },
+          trafficClass: 'background',
+          botId: string,
+          postUrl: string,
+        ) => Promise<{ text: string; textFormat: string; engagementText: string }>;
+      }
+    ).prepareMaxMessageText.bind(publishService);
+    const settings = {
+      appendChannelLinkEnabled: false,
+      channelLinkText: '',
+      sourceLinkEnabled: true,
+      sourceLinkUrl: '',
+    };
+    const message = await prepare(
+      'channel-1',
+      { text: 'Текст & <пример>', textFormat: 'plain', linkUrls: [] },
+      settings,
+      'background',
+      'publisher-bot',
+      'https://vk.com/wall-1_2',
+    );
+    expect(message).toEqual({
+      text: 'Текст &amp; &lt;пример&gt;\n\n<a href="https://vk.com/wall-1_2">Источник</a>',
+      textFormat: 'html',
+      engagementText: 'Текст & <пример>\n\n[Источник](https://vk.com/wall-1_2)',
+    });
+    await expect(
+      prepare(
+        'channel-1',
+        { text: 'x'.repeat(4000), textFormat: 'plain', linkUrls: [] },
+        settings,
+        'background',
+        'publisher-bot',
+        'https://vk.com/wall-1_2',
+      ),
+    ).rejects.toThrow('Текст вместе со ссылкой слишком длинный');
+  });
+
   it('enforces the final MAX HTML limit after adding the channel link', async () => {
     const { publishService, prisma } = createFixture();
     const signature = '<a href="https://max.ru/our-channel">Наш канал</a>';
@@ -11541,6 +11609,7 @@ describe('VkParsingService', () => {
       const { service, publishService, prisma, maxClient, publishQueue } = createFixture();
       const source = createSource();
       const settings = {
+        deleteAfterMinutes: 60,
         autoPublishEnabled: true,
         autoPublishEnabledAt: new Date('2026-09-04T08:00:00.000Z'),
         autoPublishKillSwitchEnabled: false,
@@ -11605,6 +11674,7 @@ describe('VkParsingService', () => {
           botId: 'publisher-bot',
           url: 'https://max.ru/channel-1/max-confirmed-message',
           publishedAtMax: new Date('2026-09-04T10:00:00.000Z'),
+          autoDeleteAt: new Date('2026-09-04T11:00:00.000Z'),
           autoPublishedAt: new Date('2026-09-04T10:00:00.000Z'),
           publishedContentHash: 'content-hash',
         }),
@@ -11617,6 +11687,7 @@ describe('VkParsingService', () => {
           publishedBotId: 'publisher-bot',
           publishedUrl: 'https://max.ru/channel-1/max-confirmed-message',
           publishedAtMax: new Date('2026-09-04T10:00:00.000Z'),
+          autoDeleteAt: new Date('2026-09-04T11:00:00.000Z'),
           autoPublishedAt: new Date('2026-09-04T10:00:00.000Z'),
           publishedContentHash: 'content-hash',
           publishLockedAt: null,

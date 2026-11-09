@@ -279,3 +279,19 @@ test('VK fallback link is not promised when publishable media is available', () 
   assert.equal(resolveVkParsingFallbackLink(post), null);
   assert.deepEqual(resolveVkParsingInitialLinkSelection(post, true), []);
 });
+
+test('VK preview counts source attribution after stripping body links', () => {
+  const sourceLinkHtml = '<a href="https://vk.com/wall-1_2">Источник</a>';
+  assert.equal(
+    measureVkParsingPublishTextLength({
+      text: 'Текст & https://example.com',
+      textFormat: 'plain',
+      linkUrls: [],
+      stripLinksEnabled: true,
+      appendChannelLinkEnabled: false,
+      channelLinkText: '',
+      sourceLinkHtml,
+    }),
+    `Текст &amp;\n\n${sourceLinkHtml}`.length,
+  );
+});

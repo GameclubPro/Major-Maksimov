@@ -1,4 +1,15 @@
 import { z } from 'zod';
+import {
+  normalizeVkParsingSourceLink,
+  VK_PARSING_MAX_DELETE_AFTER_MINUTES,
+  VK_PARSING_MAX_SOURCE_LINK_URL_LENGTH,
+} from './vk-parsing-common.js';
+export {
+  buildVkParsingSourceLink,
+  normalizeVkParsingSourceLink,
+  VK_PARSING_MAX_DELETE_AFTER_MINUTES,
+  VK_PARSING_MAX_SOURCE_LINK_URL_LENGTH,
+} from './vk-parsing-common.js';
 import { utcTimestampSchema } from './validator-compat.js';
 
 import { broadcastTextFormatSchema } from './broadcast-common.js';
@@ -103,7 +114,25 @@ export const vkParsingUnsupportedAttachmentSchema = z
   .passthrough();
 export type VkParsingUnsupportedAttachment = z.infer<typeof vkParsingUnsupportedAttachmentSchema>;
 
+export const vkParsingSourceLinkUrlSchema = z
+  .string()
+  .trim()
+  .max(VK_PARSING_MAX_SOURCE_LINK_URL_LENGTH)
+  .refine((value) => value === '' || normalizeVkParsingSourceLink(value) !== null, {
+    message: 'Укажите HTTPS-ссылку без логина и пароля.',
+  })
+  .transform((value) => (value === '' ? '' : normalizeVkParsingSourceLink(value)!));
+export const vkParsingDeleteAfterMinutesSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(VK_PARSING_MAX_DELETE_AFTER_MINUTES)
+  .nullable();
+
 export const vkParsingSettingsSchema = z.object({
+  sourceLinkEnabled: z.boolean().default(false),
+  sourceLinkUrl: vkParsingSourceLinkUrlSchema.default(''),
+  deleteAfterMinutes: vkParsingDeleteAfterMinutesSchema.default(null),
   chatId: z.string(),
   autoPublishEnabled: z.boolean().default(false),
   autoPublishEnabledAt: z.string().datetime().nullable().default(null),
@@ -211,6 +240,8 @@ export const vkParsingPostSchema = z.object({
   publishedContentHash: z.string().nullable().default(null),
   publishedMessageId: z.string().nullable(),
   publishedUrl: z.string().url().nullable(),
+  autoDeleteAt: z.string().datetime().nullable().default(null),
+  deletedAt: z.string().datetime().nullable().default(null),
   publishedAtMax: z.string().datetime().nullable(),
   autoPublishedAt: z.string().datetime().nullable().default(null),
   autoPublishError: z.string().nullable().default(null),
@@ -285,6 +316,9 @@ export const vkParsingFeedSchema = z.object({
     reason: null,
   }),
   settings: vkParsingSettingsSchema.default({
+    sourceLinkEnabled: false,
+    sourceLinkUrl: '',
+    deleteAfterMinutes: null,
     chatId: '',
     autoPublishEnabled: false,
     autoPublishEnabledAt: null,
@@ -340,6 +374,9 @@ export type VkParsingFeedQuery = z.infer<typeof vkParsingFeedQuerySchema>;
 
 export const updateVkParsingSettingsRequestSchema = z
   .object({
+    sourceLinkEnabled: z.boolean().optional(),
+    sourceLinkUrl: vkParsingSourceLinkUrlSchema.optional(),
+    deleteAfterMinutes: vkParsingDeleteAfterMinutesSchema.optional(),
     autoPublishMode: z.enum(['AUTO', 'MANUAL', 'PAUSED']).optional(),
     autoPublishEnabled: z.boolean().optional(),
     autoPublishKillSwitchEnabled: z.boolean().optional(),

@@ -19,6 +19,7 @@ export function measureVkParsingPublishTextLength(params: {
   channelLinkUrl?: string;
   customChannelLinkUrl?: string;
   preserveLinkUrls?: string[];
+  sourceLinkHtml?: string;
 }): number {
   const usesRichText = params.textFormat === 'markdown';
   const preservedLinks = new Set(params.preserveLinkUrls ?? []);
@@ -42,15 +43,24 @@ export function measureVkParsingPublishTextLength(params: {
   const renderedLinkHtml = missingLinkUrls.map(
     (url) => `<a href="${escapeHtmlAttribute(url)}">${escapeHtmlText(url)}</a>`,
   );
-  const contentHtml = usesRichText
+  let contentHtml = usesRichText
     ? [formattedText.trim(), ...renderedLinkHtml].filter(Boolean).join('\n')
     : formattedText;
 
+  if (params.sourceLinkHtml) {
+    contentHtml = [
+      usesRichText ? contentHtml.trim() : escapeHtmlText(contentHtml.trim()),
+      params.sourceLinkHtml,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
   if (!params.appendChannelLinkEnabled) {
     return Math.max(params.text.length, text.length, contentHtml.length);
   }
 
-  const baseHtml = usesRichText ? contentHtml : escapeHtmlText(formattedText);
+  const baseHtml =
+    usesRichText || params.sourceLinkHtml ? contentHtml : escapeHtmlText(formattedText);
   const normalizedChannelLink = params.customChannelLinkUrl?.trim()
     ? normalizePostSignatureLink(params.customChannelLinkUrl)
     : normalizeMaxChannelLink(params.channelLinkUrl);
