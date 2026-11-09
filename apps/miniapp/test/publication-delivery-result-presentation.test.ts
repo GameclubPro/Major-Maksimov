@@ -16,7 +16,7 @@ test('historical pending does not promise dispatch after authoritative stop', ()
 
 test('current work uses authoritative pending and preserves unresolved outcomes', () => {
   const result = getPublicationDeliveryResultPresentation({
-    delivery,
+    delivery: { ...delivery, ambiguous: 1 },
     actionableDelivery: { ...delivery, dispatchPending: 1, failed: 1, ambiguous: 1 },
   });
   assert.deepEqual(result.currentFacts, [
@@ -24,5 +24,14 @@ test('current work uses authoritative pending and preserves unresolved outcomes'
     'Нужно проверить: 1',
     'С ошибкой: 1',
   ]);
+  assert.equal(result.needsAttention, true);
+});
+
+test('old schedule uncertainty remains visible without offering dispatch for its old work', () => {
+  const result = getPublicationDeliveryResultPresentation({
+    delivery: { ...delivery, pending: 0, ambiguous: 1 },
+    actionableDelivery: { ...delivery, total: 0, pending: 0, dispatchPending: 0 },
+  });
+  assert.deepEqual(result.currentFacts, ['Нужно проверить: 1']);
   assert.equal(result.needsAttention, true);
 });

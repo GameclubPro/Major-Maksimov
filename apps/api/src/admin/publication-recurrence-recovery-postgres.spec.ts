@@ -14,6 +14,7 @@ import {
 } from './publication-execution-recovery';
 import { PublisherManagedBroadcastDispatch } from './publisher-managed-broadcast-dispatch';
 import { isPublicationScheduledWindowExpired } from './publication-late-policy';
+import { isTransientPublicationPrismaError } from './publication-prisma-retry';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const postgres = databaseUrl ? describe : describe.skip;
@@ -134,6 +135,152 @@ postgres('Publication recurrence failure fencing on PostgreSQL', () => {
     });
     return { occurrence, row, delivery };
   }
+
+  it.each([
+    ['timeout', '57014', true],
+    ['syntax', '42601', false],
+  ] as const)(
+    'handles a real raw SQL %s during occurrence preparation without losing failure certainty',
+    async (failureKind, sqlState, transient) => {
+      const occurrence = await createPastOccurrence();
+      const scheduledAt = new Date();
+      const deliveryDeadlineAt = new Date(scheduledAt.getTime() + 86_400_000);
+      await db.publicationOccurrence.update({
+        where: { id: occurrence.id },
+        data: { scheduledAt, deliveryDeadlineAt },
+      });
+      await db.publicationSchedule.update({
+        where: { id: occurrence.scheduleId },
+        data: {
+          rule: { mode: 'once', timezone: 'UTC', at: scheduledAt.toISOString() },
+        },
+      });
+      const cancelFutureWork = jest.fn(async () => {});
+      let preparationError: unknown;
+      const createExecution = jest.fn(async () => {
+        try {
+          await db.$transaction(async (tx) => {
+            if (failureKind === 'timeout') {
+              await tx.$executeRaw`SET LOCAL statement_timeout = '40ms'`;
+              await tx.$executeRaw`SELECT pg_sleep(0.15)`;
+            } else {
+              await tx.$executeRaw`SELEC invalid_publication_fixture`;
+            }
+          });
+        } catch (error: unknown) {
+          preparationError = error;
+          throw error;
+        }
+      });
+      const context: Parameters<typeof dispatchScheduledPublicationOccurrences>[0] = {
+        prisma: db as unknown as PrismaService,
+        publisherRouting: {
+          blockedRetryBefore: () => new Date(Date.now() - 60_000),
+          deferOccurrenceIfBlocked: jest.fn().mockResolvedValue(false),
+        } as unknown as PublicationPublisherRoutingService,
+        logger: { warn: jest.fn() },
+        resolveTargets: async () => [
+          {
+            chatId: 'raw-query-fixture',
+            entityType: 'chat',
+            title: 'Fixture',
+            avatarUrl: null,
+            link: null,
+          },
+        ],
+        createExecution,
+        cancelFutureWork,
+        lockCalendar,
+      };
+      const dispatch = dispatchScheduledPublicationOccurrences(context, 1, undefined, {
+        publicationId,
+      });
+      if (transient)
+        await expect(dispatch).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+      else await expect(dispatch).resolves.toBeUndefined();
+
+      expect(preparationError).toMatchObject({
+        code: 'P2010',
+        meta: { driverAdapterError: { cause: { originalCode: sqlState } } },
+      });
+      expect(isTransientPublicationPrismaError(preparationError)).toBe(transient);
+      expect(createExecution).toHaveBeenCalledTimes(1);
+      expect(cancelFutureWork).toHaveBeenCalledTimes(transient ? 0 : 1);
+      expect(
+        await db.publicationOccurrence.findUniqueOrThrow({ where: { id: occurrence.id } }),
+      ).toMatchObject({
+        status: transient ? 'SCHEDULED' : 'FAILED',
+        contentRevisionId: occurrence.contentRevisionId,
+        deliveryDeadlineAt,
+      });
+      expect(
+        await db.publication.findUniqueOrThrow({
+          where: { id: publicationId },
+          include: { schedule: true },
+        }),
+      ).toMatchObject({
+        lifecycle: transient ? 'ACTIVE' : 'ERROR',
+        schedule: { status: transient ? 'ACTIVE' : 'ERROR', revision: occurrence.scheduleRevision },
+      });
+      expect(
+        await db.managedBroadcast.count({ where: { publicationOccurrenceId: occurrence.id } }),
+      ).toBe(0);
+    },
+  );
+
+  it('defers a real advisory deadlock without terminalizing the schedule', async () => {
+    const schedule = await db.publicationSchedule.findUniqueOrThrow({ where: { publicationId } });
+    let participants = 0;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const contend = (first: number, second: number) =>
+      db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${publicationId}), ${first}::int)`;
+          if (++participants === 2) release();
+          await ready;
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${publicationId}), ${second}::int)`;
+        },
+        { timeout: 5_000 },
+      );
+    const outcomes = await Promise.allSettled([contend(1, 2), contend(2, 1)]);
+    const failed = outcomes.filter((outcome) => outcome.status === 'rejected');
+    expect(failed).toHaveLength(1);
+    const error: unknown = failed[0]!.reason;
+    expect(error).toMatchObject({
+      code: 'P2010',
+      meta: { driverAdapterError: { cause: { originalCode: '40P01' } } },
+    });
+    expect(isTransientPublicationPrismaError(error)).toBe(true);
+    const startedAt = Date.now();
+    await expect(
+      recoverPublicationRecurrencePreparationFailure({
+        prisma: db as unknown as PrismaService,
+        logger: { warn: jest.fn() },
+        schedule,
+        publicationVersion: 1,
+        error,
+        lockCalendar,
+      }),
+    ).resolves.toBe(true);
+    const current = await db.publication.findUniqueOrThrow({
+      where: { id: publicationId },
+      include: { schedule: true },
+    });
+    expect(current.lifecycle).toBe('ACTIVE');
+    expect(current.schedule).toMatchObject({
+      status: 'ACTIVE',
+      revision: schedule.revision,
+      lastError: 'PUBLICATION_PREPARATION_TRANSIENT',
+    });
+    expect(current.schedule!.nextMaterializeAt!.getTime()).toBeGreaterThanOrEqual(
+      startedAt + 60_000,
+    );
+    expect(current.schedule!.nextMaterializeAt!.getTime()).toBeLessThan(Date.now() + 75_000);
+    expect(await db.publicationOccurrence.count({ where: { publicationId } })).toBe(0);
+  });
 
   it('retains a new recoverable delivery after a 15-minute outage across a restart', async () => {
     const { occurrence, row, delivery } = await createLateEnvelope();

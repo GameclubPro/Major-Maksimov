@@ -187,6 +187,9 @@ export async function recoverManagedBroadcastDeliveriesForAutomaticRun(options: 
   let mutated = false;
 
   for (const delivery of options.deliveries) {
+    // FLAG: Publication FAILED rows require explicit retry authority. Historical free
+    // text cannot authorize cancellation, quarantine or replay of an accepted effect.
+    if (delivery.publicationOccurrenceId) continue;
     if (delivery.status !== ManagedBroadcastDeliveryStatus.FAILED) {
       continue;
     }

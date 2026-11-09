@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
+import { checkPublicationHistoryReview } from './publication-review.browser-helpers.mjs';
 import {
   allocateMiniappBaseUrl,
   ensureMiniappDevServer,
@@ -202,6 +203,7 @@ try {
   console.log(
     'PASS: ambiguous resolution requires confirmation and preserves its independent identity until success',
   );
+  await checkPublicationHistoryReview(browser, base);
 } finally {
   await browser?.close();
   await stopChildProcess(server);

@@ -216,7 +216,7 @@ export function resolvePublicationDetailsDispatchIssue(
 export function getPublicationFeedStatusLabel(publication: PublicationSummary): string {
   if (
     canReviewPublicationScheduleDecision(publication) &&
-    getPublicationActionableDelivery(publication).ambiguous === 0
+    getPublicationReviewCount(publication) === 0
   ) {
     return getPublicationDispatchIssuePresentation(
       publication.dispatchIssue,
@@ -227,7 +227,7 @@ export function getPublicationFeedStatusLabel(publication: PublicationSummary): 
   if (publication.lifecycle === 'ERROR') {
     return getPublicationLifecycleLabel(publication.lifecycle);
   }
-  if (getPublicationActionableDelivery(publication).ambiguous > 0) {
+  if (getPublicationReviewCount(publication) > 0) {
     return 'Нужно проверить';
   }
   if (publication.lifecycle !== 'ACTIVE') {
@@ -517,6 +517,13 @@ export function getPublicationActionableDelivery(
   publication: Pick<PublicationSummary, 'delivery' | 'actionableDelivery'>,
 ): PublicationDeliveryStats {
   return publication.actionableDelivery ?? publication.delivery;
+}
+
+export function getPublicationReviewCount(
+  publication: Pick<PublicationSummary, 'delivery'>,
+): number {
+  // FLAG: Unknown effects remain reviewable across schedule revisions and authoritative stops.
+  return publication.delivery.ambiguous;
 }
 
 export function getPublicationDispatchPendingCount(delivery: PublicationDeliveryStats): number {

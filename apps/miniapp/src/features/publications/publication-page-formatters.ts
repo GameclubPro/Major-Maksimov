@@ -7,6 +7,7 @@ import {
 import type { PublicationFeedTone } from './publication-feed-card';
 import {
   getPublicationActionableDelivery,
+  getPublicationReviewCount,
   getPublicationOnceSlot,
   getPublicationTargetTitle,
   hasPublicationScheduleError,
@@ -169,7 +170,7 @@ export function getLifecycleTone(publication: PublicationSummary): PublicationFe
   const delivery = getPublicationActionableDelivery(publication);
   if (
     publication.lifecycle === 'ERROR' ||
-    delivery.ambiguous > 0 ||
+    getPublicationReviewCount(publication) > 0 ||
     hasPublicationScheduleError(publication)
   ) {
     return 'danger';

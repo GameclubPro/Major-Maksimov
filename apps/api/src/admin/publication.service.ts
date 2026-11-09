@@ -106,6 +106,7 @@ import {
   type PublicationCalendarConflictOccurrence,
   type PublicationCalendarConflicts,
 } from './publication-calendar-conflicts';
+import { cancelUntouchedScheduledPublicationOccurrences } from './publication-stale-occurrence-cleanup';
 import {
   buildUnsafePublicationExecutionDeliveryWhere,
   cancelUnstartedPublicationExecutionBroadcasts,
@@ -1891,69 +1892,14 @@ export class PublicationService {
   }
 
   private async normalizeStalePublicationOccurrences(limit: number): Promise<void> {
-    if (!Number.isSafeInteger(limit) || limit <= 0) {
-      return;
-    }
+    if (!Number.isSafeInteger(limit) || limit <= 0) return;
     const now = new Date();
-    const boundedLimit = Math.min(limit, PUBLICATION_RECONCILE_BATCH);
-    // FLAG: Keep cross-row stale predicates and the delivery exclusion before LIMIT. A bounded
-    // ORM query followed by post-filtering can starve real revision mismatches behind valid rows.
-    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT po."id"
-      FROM "publication_occurrences" AS po
-      INNER JOIN "publication_schedules" AS ps ON ps."id" = po."schedule_id"
-      INNER JOIN "publications" AS p ON p."id" = po."publication_id"
-      WHERE po."status" = 'SCHEDULED'::"PublicationOccurrenceStatus"
-        AND (
-          po."schedule_revision" <> ps."revision"
-          OR ps."status" IN (
-            'DRAFT'::"PublicationScheduleStatus",
-            'COMPLETED'::"PublicationScheduleStatus",
-            'CANCELED'::"PublicationScheduleStatus"
-          )
-          OR p."lifecycle" IN (
-            'DRAFT'::"PublicationLifecycle",
-            'COMPLETED'::"PublicationLifecycle",
-            'CANCELED'::"PublicationLifecycle"
-          )
-          OR (
-            ps."status" = 'PAUSED'::"PublicationScheduleStatus"
-            AND po."scheduled_at" < ${now}
-          )
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM "managed_broadcast_deliveries" AS d
-          WHERE d."publication_occurrence_id" = po."id"
-            AND d."status" IN (
-              'SENDING'::"ManagedBroadcastDeliveryStatus",
-              'AMBIGUOUS'::"ManagedBroadcastDeliveryStatus"
-            )
-        )
-      ORDER BY po."scheduled_at" ASC, po."id" ASC
-      LIMIT ${boundedLimit}
-    `);
-    const staleIds = rows.map((row) => row.id);
-    if (staleIds.length === 0) {
-      return;
-    }
-
-    await this.prisma.publicationOccurrence.updateMany({
-      where: {
-        id: { in: staleIds },
-        status: PublicationOccurrenceStatus.SCHEDULED,
-        deliveries: {
-          none: {
-            status: {
-              in: [
-                ManagedBroadcastDeliveryStatus.SENDING,
-                ManagedBroadcastDeliveryStatus.AMBIGUOUS,
-              ],
-            },
-          },
-        },
-      },
-      data: { status: PublicationOccurrenceStatus.CANCELED },
+    await this.prisma.$transaction(async (tx) => {
+      await this.lockPublicationCalendar(tx);
+      await cancelUntouchedScheduledPublicationOccurrences(tx, {
+        now,
+        limit: Math.min(limit, PUBLICATION_RECONCILE_BATCH),
+      });
     });
   }
 
@@ -2824,24 +2770,7 @@ export class PublicationService {
         }
 
         if (action === 'pause') {
-          await tx.publicationOccurrence.updateMany({
-            where: {
-              publicationId,
-              status: PublicationOccurrenceStatus.SCHEDULED,
-              scheduledAt: { lt: now },
-              deliveries: {
-                none: {
-                  status: {
-                    in: [
-                      ManagedBroadcastDeliveryStatus.SENDING,
-                      ManagedBroadcastDeliveryStatus.AMBIGUOUS,
-                    ],
-                  },
-                },
-              },
-            },
-            data: { status: PublicationOccurrenceStatus.CANCELED },
-          });
+          await cancelUntouchedScheduledPublicationOccurrences(tx, { publicationId, now });
           await deleteUnstartedPublicationExecutionEnvelopes(tx, publicationId, {
             scheduledAfter: now,
           });
@@ -2863,24 +2792,7 @@ export class PublicationService {
             schedule.revision,
             now,
           );
-          await tx.publicationOccurrence.updateMany({
-            where: {
-              publicationId,
-              status: PublicationOccurrenceStatus.SCHEDULED,
-              scheduledAt: { lt: now },
-              deliveries: {
-                none: {
-                  status: {
-                    in: [
-                      ManagedBroadcastDeliveryStatus.SENDING,
-                      ManagedBroadcastDeliveryStatus.AMBIGUOUS,
-                    ],
-                  },
-                },
-              },
-            },
-            data: { status: PublicationOccurrenceStatus.CANCELED },
-          });
+          await cancelUntouchedScheduledPublicationOccurrences(tx, { publicationId, now });
           await tx.publicationSchedule.update({
             where: { id: schedule.id },
             data: {

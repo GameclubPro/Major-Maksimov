@@ -538,54 +538,44 @@ describe('PublicationService', () => {
     expect(materializeSpy).toHaveBeenCalledWith(2);
   });
 
-  it('cancels only provably stale scheduled occurrences during reconciliation', async () => {
+  it('rechecks stale and untouched execution after locking envelopes during reconciliation', async () => {
     const now = new Date('2026-07-10T09:00:00.000Z');
     jest.useFakeTimers().setSystemTime(now);
     try {
-      const updateMany = jest.fn().mockResolvedValue({ count: 3 });
-      const queryRaw = jest
-        .fn()
-        .mockResolvedValue([{ id: 'paused-past' }, { id: 'old-revision' }, { id: 'completed' }]);
+      const tx = {
+        $queryRaw: jest
+          .fn()
+          .mockResolvedValueOnce([{ id: 'paused-past' }, { id: 'old-revision' }])
+          .mockResolvedValueOnce([]),
+        $executeRaw: jest.fn().mockResolvedValue(2),
+      };
       const { service } = createService({
-        $queryRaw: queryRaw,
-        publicationOccurrence: {
-          updateMany,
-        },
+        $transaction: jest.fn((callback: (client: typeof tx) => unknown) => callback(tx)),
       });
+      await (
+        service as unknown as {
+          normalizeStalePublicationOccurrences(limit: number): Promise<void>;
+        }
+      ).normalizeStalePublicationOccurrences(500);
 
-      await (service as any).normalizeStalePublicationOccurrences(500);
-
-      const selectionSql = extractSqlText(queryRaw.mock.calls[0]?.[0]);
-      expect(extractSqlValues(queryRaw.mock.calls[0]?.[0])).toEqual([now, 200]);
-      expect(selectionSql).toContain('po."schedule_revision" <> ps."revision"');
-      expect(selectionSql).toContain(
-        'ps."status" = \'PAUSED\'::"PublicationScheduleStatus" AND po."scheduled_at" < ?',
+      const selection = extractSqlText(tx.$queryRaw.mock.calls[0]?.[0]);
+      const locked = extractSqlText(tx.$queryRaw.mock.calls[1]?.[0]);
+      const update = extractSqlText(tx.$executeRaw.mock.calls[1]?.[0]);
+      expect(extractSqlValues(tx.$queryRaw.mock.calls[0]?.[0])).toEqual([now, 200]);
+      expect(selection).toContain('po."schedule_revision" <> ps."revision"');
+      expect(selection).toContain('d."remote_message_id" IS NOT NULL');
+      expect(selection).toContain('d."attempt_count" > 0');
+      expect(selection).toContain('\'SENT\'::"ManagedBroadcastDeliveryStatus"');
+      expect(selection).toContain('envelope."lock_token" IS NOT NULL');
+      expect(selection).toMatch(/ORDER BY po\."scheduled_at" ASC, po\."id" ASC LIMIT \?$/u);
+      expect(locked).toContain('FOR NO KEY UPDATE');
+      expect(locked).not.toContain('updated_at');
+      expect(update).toContain('po."schedule_revision" <> ps."revision"');
+      expect(update).toContain('d."remote_message_id" IS NOT NULL');
+      expect(update).toContain('envelope."lock_token" IS NOT NULL');
+      expect(tx.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+        tx.$executeRaw.mock.invocationCallOrder[1]!,
       );
-      expect(selectionSql).toContain('AND NOT EXISTS');
-      expect(selectionSql).toContain(
-        '\'SENDING\'::"ManagedBroadcastDeliveryStatus", \'AMBIGUOUS\'::"ManagedBroadcastDeliveryStatus"',
-      );
-      expect(selectionSql).toMatch(
-        /WHERE .*po\."schedule_revision" <> ps\."revision".*AND NOT EXISTS .*ORDER BY po\."scheduled_at" ASC, po\."id" ASC LIMIT \?$/u,
-      );
-
-      expect(updateMany).toHaveBeenCalledWith({
-        where: {
-          id: { in: ['paused-past', 'old-revision', 'completed'] },
-          status: PublicationOccurrenceStatus.SCHEDULED,
-          deliveries: {
-            none: {
-              status: {
-                in: [
-                  ManagedBroadcastDeliveryStatus.SENDING,
-                  ManagedBroadcastDeliveryStatus.AMBIGUOUS,
-                ],
-              },
-            },
-          },
-        },
-        data: { status: PublicationOccurrenceStatus.CANCELED },
-      });
     } finally {
       jest.useRealTimers();
     }
@@ -2775,6 +2765,7 @@ describe('PublicationService', () => {
       const updateSchedule = jest.fn();
       const tx = {
         $executeRaw: jest.fn().mockResolvedValue(1),
+        $queryRaw: jest.fn().mockResolvedValue([]),
         publication: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
         publicationOccurrence: {
           findMany: jest.fn().mockResolvedValue([{ id: 'occurrence-future' }]),
