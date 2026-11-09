@@ -1,11 +1,16 @@
 import { withMarketplaceModerationMessage } from '../max/marketplace-publication-button';
 import type { BotSpeechStyle } from '@maxim/contracts/bot-speech';
-import type { MaxActionLedgerContext, MaxSendMessageOptions } from '../max/max-client.service';
+import type {
+  MaxActionDispatchOptions,
+  MaxActionLedgerContext,
+  MaxSendMessageOptions,
+} from '../max/max-client.service';
 import { withModerationReleaseButton } from './moderation-release-callback.util';
 import { warnModerationEffectFailure } from './moderation-effect-failure-diagnostics';
 
 export type ModerationNoticeImmediateOptions = {
   immediate?: boolean;
+  immediateFailurePolicy?: MaxActionDispatchOptions['immediateFailurePolicy'];
   beforeImmediateSendMutation?: (beforeFinalAuthority?: () => Promise<void>) => Promise<void>;
 };
 

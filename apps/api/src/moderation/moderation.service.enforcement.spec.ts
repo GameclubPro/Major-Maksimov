@@ -6025,6 +6025,12 @@ describe('ModerationService', () => {
       'chat-1',
       permanentBanNotice('Алексей'),
     );
+    expect(maxClient.sendMessage).toHaveBeenCalledWith(
+      'chat-1',
+      expect.any(String),
+      expect.any(Object),
+      expect.objectContaining({ immediate: true, immediateFailurePolicy: 'terminal' }),
+    );
   });
 
   it('uses permanent ban notice for duplicate BAN regardless of mute duration', async () => {

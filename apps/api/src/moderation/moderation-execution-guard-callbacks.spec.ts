@@ -46,6 +46,7 @@ describe('moderation execution guard callbacks', () => {
     const authority = jest.fn(async (_route?: () => Promise<void>) => undefined);
     const options = createDuplicateSanctionNoticeDispatchOptions(authority);
     expect(options.immediate).toBe(true);
+    expect(options).toHaveProperty('immediateFailurePolicy', 'terminal');
     await options.beforeImmediateSendMutation!(route);
     expect(authority).toHaveBeenCalledWith(route);
     const failure = new Error('Source SQL unavailable');
@@ -155,6 +156,7 @@ describe('moderation execution guard callbacks', () => {
       },
     });
     expect(options.immediate).toBeUndefined();
+    expect(options.immediateFailurePolicy).toBeUndefined();
     expect(options.botId).toBeUndefined();
     expect(options.beforeImmediateSendMutation).toBeUndefined();
     expect(options.ledgerContext?.moderationNoticeEnvelope).toEqual({ version: 1 });
@@ -230,6 +232,7 @@ describe('moderation execution guard callbacks', () => {
       [],
     )!;
     expect(dispatch.beforeImmediateSendMutation).toBe(options.beforeImmediateSendMutation);
+    expect(dispatch.immediateFailurePolicy).toBeUndefined();
   });
 
   it('passes the selected member route inside ordinary authority after preceding guards', async () => {
