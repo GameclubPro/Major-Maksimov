@@ -3,6 +3,7 @@ import { Client } from 'pg';
 import { createPrismaAdapter, Prisma, PrismaClient } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import {
+  chatContextFullQuery,
   chatContextShellQuery,
   readChatContextSource,
   type ChatContextShell,
@@ -182,6 +183,12 @@ native('coherent settings templates on native PostgreSQL', () => {
               : Prisma.DbNull,
           messageLimitsBlockedWords: ['baseline-word'],
           stopWordsPolicy: { version: 1, entries: [{ text: 'baseline-word', enabled: true }] },
+          greetingBotButtons: [{ text: 'Native button', url: 'https://example.test/button' }],
+          greetingDeleteBotMessageDelayMinutes: 1.5,
+          duplicatePhotoMatchPreset: 'MINOR_EDITS',
+          duplicatePhotoScope: 'CHAT',
+          botSpeechStyle: variant === 'media' ? 'POLICE' : null,
+          requiredSubscriptionExpiresAt: '2026-12-07T12:00:00.000Z',
           linkPolicyEffectiveAt: now,
           trafficPolicyEffectiveAt: now,
         },
@@ -193,6 +200,8 @@ native('coherent settings templates on native PostgreSQL', () => {
       const full = await read();
       const coldStatements = queries.length;
       const coldSelects = selectQueries().length;
+      expect(coldStatements).toBe(1);
+      expect(coldSelects).toBe(1);
       expect(full.mode).toBe('full');
       expect(full.row?.settings).toEqual(storedSettings);
       expect(full.row?.settings).toMatchObject({
@@ -239,10 +248,8 @@ native('coherent settings templates on native PostgreSQL', () => {
       });
     }
 
-    // FLAG: Measure serialized logical results, not PostgreSQL wire traffic. Cold statement
-    // counts are evidence for optimization; their current multi-query shape is not a contract.
-    expect(samples[0].coldSelects).toBeGreaterThanOrEqual(1);
-    expect(samples[1].coldSelects).toBeGreaterThanOrEqual(1);
+    // FLAG: These bytes describe serialized logical results, not PostgreSQL wire traffic.
+    // Both complete cold reads and verified compact reads require one coherent SELECT.
     expect(samples[1].serializedShellProjectionBytes).toBe(
       samples[0].serializedShellProjectionBytes,
     );
@@ -253,6 +260,21 @@ native('coherent settings templates on native PostgreSQL', () => {
       samples[1].serializedSettingsBytes,
     );
     console.info('Chat context source native baseline', JSON.stringify({ samples }));
+  });
+
+  it('falls back from a mismatched compact proof to one complete coherent SELECT', async () => {
+    const original = await read();
+    await db.chatSettings.update({ where: { chatId }, data: { antiSpamEnabled: true } });
+    const storedSettings = await db.chatSettings.findUniqueOrThrow({ where: { chatId } });
+    queries.length = 0;
+    const changed = await read(template(original));
+    expect(changed.mode).toBe('full');
+    expect(changed.row?.settings).toEqual(storedSettings);
+    expect(changed.proof).not.toEqual(original.proof);
+    expect(queries).toHaveLength(2);
+    expect(selectQueries()).toHaveLength(2);
+    expect(selectQueries()[0]).not.toContain('bot_speech_media');
+    expect(selectQueries()[1]).toContain('bot_speech_media');
   });
 
   it('loads roster completeness with the current compact shell rather than a saved settings template', async () => {
@@ -368,40 +390,119 @@ native('coherent settings templates on native PostgreSQL', () => {
     expect(next.row!.settings!.chatId).toBe(renamed);
   });
 
-  it('keeps settings and proof from one repeatable snapshot across a concurrent committed write', async () => {
-    const original = await read();
-    let snapshot!: { settingsId: string; revision: string };
-    const concurrent = new Proxy(db, {
-      get(target, property, receiver) {
-        if (property !== '$transaction') return Reflect.get(target, property, receiver);
-        return <T>(
-          callback: (tx: Prisma.TransactionClient) => Promise<T>,
-          options: { isolationLevel?: Prisma.TransactionIsolationLevel },
-        ) =>
-          db.$transaction(async (tx) => {
-            const [observed] = await tx.$queryRaw<{ settingsId: string; revision: string }[]>(
-              Prisma.sql`SELECT s.id AS "settingsId", v.revision::text
-              FROM chat_settings s JOIN chat_settings_cache_revisions v USING (chat_id)
-              WHERE s.chat_id = ${chatId}`,
-            );
-            snapshot = observed;
-            await raw.query(
-              'UPDATE chat_settings SET anti_spam_enabled = true WHERE chat_id = $1',
-              [chatId],
-            );
-            return callback(tx);
-          }, options);
-      },
+  it('keeps the complete source coherent across a real concurrent committed write', async () => {
+    await db.chatAdminAllowlist.create({ data: { chatId, userId: 'old-admin' } });
+    await db.domainAllowlist.create({ data: { chatId, domain: 'old.test' } });
+    await db.chatRules.create({
+      data: { chatId, publishedUrl: 'https://example.test/stable', publishedMessageId: 'stable' },
     });
-    const loaded = await readChatContextSource(concurrent as PrismaService, chatId, now, null);
-    expect(loaded.proof).toEqual(snapshot);
-    expect(loaded.proof).toEqual(original.proof);
-    expect(loaded.row!.settings!.antiSpamEnabled).toBe(false);
-    const after = await read(template(loaded));
-    expect(after.mode).toBe('full');
-    expect(after.row!.settings!.antiSpamEnabled).toBe(true);
-    expect(after.proof).not.toEqual(loaded.proof);
-  });
+    const original = await read();
+    const readerQueries: string[] = [];
+    const applicationName = `settings-source-race-${randomUUID()}`;
+    const reader = new PrismaClient({
+      adapter: createPrismaAdapter(databaseUrl, {
+        max: 1,
+        application_name: applicationName,
+        statement_timeout: 10_000,
+      }),
+      log: [{ emit: 'event', level: 'query' }],
+    });
+    reader.$on('query', ({ query }) => readerQueries.push(query));
+    const blocker = new Client({ connectionString: databaseUrl, statement_timeout: 10_000 });
+    let blockerTransaction = false;
+    let writerTransaction = false;
+    let pending: Promise<{ value: ChatContextSourceResult } | { error: unknown }> | undefined;
+    try {
+      await reader.$connect();
+      await blocker.connect();
+      const blockerPid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+        .rows[0].pid;
+      await blocker.query('BEGIN');
+      blockerTransaction = true;
+      await blocker.query('LOCK TABLE public.chat_rules IN ACCESS EXCLUSIVE MODE');
+      readerQueries.length = 0;
+      pending = readChatContextSource(reader as PrismaService, chatId, now, null).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
+
+      let observedWait: { pid: number; query_start: Date } | undefined;
+      const waitDeadline = Date.now() + 3_000;
+      while (Date.now() < waitDeadline) {
+        const { rows } = await raw.query<{
+          pid: number;
+          query_start: Date;
+          waiting_on_rules: boolean;
+          blocked_by_owner: boolean;
+        }>(
+          `SELECT a.pid, a.query_start,
+            EXISTS (SELECT 1 FROM pg_locks l WHERE l.pid = a.pid
+              AND l.relation = 'public.chat_rules'::regclass
+              AND l.mode = 'AccessShareLock' AND NOT l.granted) AS waiting_on_rules,
+            $2::integer = ANY(pg_blocking_pids(a.pid)) AS blocked_by_owner
+          FROM pg_stat_activity a WHERE a.application_name = $1
+            AND a.state = 'active' AND a.wait_event_type = 'Lock'`,
+          [applicationName, blockerPid],
+        );
+        observedWait = rows.find((row) => row.waiting_on_rules && row.blocked_by_owner);
+        if (observedWait) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(observedWait).toBeDefined();
+      expect(observedWait?.query_start).toBeInstanceOf(Date);
+
+      await raw.query('BEGIN');
+      writerTransaction = true;
+      await raw.query(
+        `UPDATE chat_settings SET anti_spam_enabled = true,
+          bot_speech_media = '{"greeting":{"base64":"bmF0aXZlLXJhY2U=","mimeType":"image/png"}}'::jsonb,
+          message_limits_blocked_words = ARRAY['new-word']::text[] WHERE chat_id = $1`,
+        [chatId],
+      );
+      await raw.query(
+        `UPDATE chats SET title = 'New title', bot_id = 'new-bot',
+          primary_bot_id = 'new-primary' WHERE id = $1`,
+        [chatId],
+      );
+      await raw.query('DELETE FROM chat_admin_allowlist WHERE chat_id = $1', [chatId]);
+      await raw.query(
+        `INSERT INTO chat_admin_allowlist (chat_id, user_id) VALUES ($1, 'new-admin')`,
+        [chatId],
+      );
+      await raw.query('DELETE FROM domain_allowlist WHERE chat_id = $1', [chatId]);
+      await raw.query(`INSERT INTO domain_allowlist (chat_id, domain) VALUES ($1, 'new.test')`, [
+        chatId,
+      ]);
+      await raw.query('COMMIT');
+      writerTransaction = false;
+      await blocker.query('ROLLBACK');
+      blockerTransaction = false;
+      const outcome = await pending;
+      if ('error' in outcome) throw outcome.error;
+      const after = await read();
+      expect(after.proof).not.toEqual(original.proof);
+      expect(after.row).toMatchObject({
+        title: 'New title',
+        botId: 'new-bot',
+        primaryBotId: 'new-primary',
+        admins: [{ userId: 'new-admin' }],
+        domains: [{ domain: 'new.test' }],
+        settings: { antiSpamEnabled: true, messageLimitsBlockedWords: ['new-word'] },
+      });
+      expect(after.row?.adminRosterState).not.toEqual(original.row?.adminRosterState);
+      // FLAG: A relation-lock wait proves overlap, not when PostgreSQL fixes the execution
+      // snapshot. The one SELECT must return the complete old or complete new source.
+      expect([original, after]).toContainEqual(outcome.value);
+      expect(readerQueries).toHaveLength(1);
+      expect(readerQueries[0].trimStart().startsWith('SELECT')).toBe(true);
+    } finally {
+      if (writerTransaction) await raw.query('ROLLBACK');
+      if (blockerTransaction) await blocker.query('ROLLBACK');
+      await pending;
+      await reader.$disconnect();
+      await blocker.end();
+    }
+  }, 20_000);
 
   it('does not turn a failed SQL proof into the metadata-free baseline', async () => {
     const original = await read();
@@ -426,148 +527,159 @@ native('coherent settings templates on native PostgreSQL', () => {
     expect(await read()).toEqual({ row: null, proof: null, mode: 'full' });
   });
 
-  it('bounds shell work on 10,000 chats with large settings and skewed shell relations', async () => {
-    let step = 0;
-    const started = performance.now();
-    const fixtureQuery = async (text: string, values?: unknown[]) => {
-      const queryStarted = performance.now();
-      const queryStep = ++step;
-      try {
-        return await raw.query(text, values);
-      } finally {
-        process.stdout.write(
-          `Chat context history fixture phase ${JSON.stringify({
-            step: queryStep,
-            operation: text.trim().split(/\s/u)[0],
-            durationMs: Math.round(performance.now() - queryStarted),
-            elapsedMs: Math.round(performance.now() - started),
-          })}\n`,
-        );
-      }
-    };
+  it('preserves absent full rules separately from an existing unpublished rules row', async () => {
+    const absent = await read();
+    expect(absent.row?.rules).toBeNull();
+    // FLAG: Verified shells retain their existing null-field rules object semantics.
+    expect((await read(template(absent))).row?.rules).toEqual({
+      publishedUrl: null,
+      publishedMessageId: null,
+    });
+    await db.chatRules.create({ data: { chatId } });
+    expect((await read()).row?.rules).toEqual({
+      publishedUrl: null,
+      publishedMessageId: null,
+    });
+  });
+
+  it('bounds full and compact source work on 10,000 chats with large settings and skewed relations', async () => {
     const prefix = `settings-plan-${randomUUID()}-`;
     const target = `${prefix}1`;
     const large = Buffer.from('native-heavy-template'.repeat(16_000)).toString('base64');
+    const fixtureRollback = new Error('Discard local chat context source plan fixture');
+    const tables = [
+      'chats',
+      'chat_settings',
+      'chat_settings_cache_revisions',
+      'chat_admin_allowlist',
+      'chat_admin_roster_states',
+      'domain_allowlist',
+      'chat_rules',
+    ] as const;
+    const startedAt = performance.now();
+    let setupCompletedAt = startedAt;
+    let checksCompletedAt = startedAt;
+    let rollbackCompletedAt = startedAt;
+    let statisticsRestoredAt = startedAt;
     try {
-      await fixtureQuery(
-        `INSERT INTO chats (id, title, updated_at)
-        SELECT $1 || n, 'History', now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await fixtureQuery(
-        `INSERT INTO chat_admin_allowlist (chat_id, user_id)
-        SELECT $1 || n, 'history-admin-' || u
-        FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) u`,
-        [prefix],
-      );
-      await fixtureQuery(
-        `INSERT INTO domain_allowlist (chat_id, domain)
-        SELECT $1 || n, 'history-domain-' || d || '.test'
-        FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) d`,
-        [prefix],
-      );
-      await fixtureQuery(
-        `INSERT INTO chat_rules (id, chat_id, updated_at)
-        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      await fixtureQuery(
-        `INSERT INTO chat_admin_allowlist (chat_id, user_id)
-        SELECT $1, 'skew-admin-' || n FROM generate_series(1,200) n`,
-        [target],
-      );
-      await fixtureQuery(
-        `INSERT INTO domain_allowlist (chat_id, domain)
-        SELECT $1, 'skew-domain-' || n || '.test' FROM generate_series(1,200) n`,
-        [target],
-      );
-      // Default settings are created last so domain policy triggers do not reread
-      // 30,200 wide rows for a policy that makes no changes to this fixture.
-      await fixtureQuery(
-        `INSERT INTO chat_settings (id, chat_id, updated_at)
-        SELECT $1 || n, $1 || n, now() FROM generate_series(1,10000) n`,
-        [prefix],
-      );
-      for (const table of [
-        'chats',
-        // The shell joins settings by chat_id and projects id; other settings columns
-        // cannot influence its plan. Keep the full rows, analyze its actual inputs.
-        'chat_settings (id, chat_id)',
-        'chat_settings_cache_revisions',
-        'chat_admin_allowlist',
-        'domain_allowlist',
-        'chat_rules',
-      ])
-        await fixtureQuery(`ANALYZE ${table}`);
+      // FLAG: Keep the full plan population in one real transaction. Rolling it back
+      // avoids 10,000 parent DELETE cascades without weakening the measured query bounds.
+      await db.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`INSERT INTO chats (id, title, updated_at)
+            SELECT ${prefix} || n, 'History', now() FROM generate_series(1,10000) n`;
+          await tx.$executeRaw`INSERT INTO chat_settings (id, chat_id, updated_at)
+            SELECT ${prefix} || n, ${prefix} || n, now() FROM generate_series(1,10000) n`;
+          // FLAG: Relation triggers query these new parents/settings. Refresh empty-table
+          // statistics before bulk child inserts so setup retains the real indexed paths.
+          await tx.$executeRaw`ANALYZE chats`;
+          await tx.$executeRaw`ANALYZE chat_settings`;
+          await tx.$executeRaw`INSERT INTO chat_admin_allowlist (chat_id, user_id)
+            SELECT ${prefix} || n, 'history-admin-' || u
+            FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) u`;
+          await tx.$executeRaw`INSERT INTO domain_allowlist (chat_id, domain)
+            SELECT ${prefix} || n, 'history-domain-' || d || '.test'
+            FROM generate_series(1,10000) n CROSS JOIN generate_series(1,3) d`;
+          await tx.$executeRaw`INSERT INTO chat_rules (id, chat_id, updated_at)
+            SELECT ${prefix} || n, ${prefix} || n, now() FROM generate_series(1,10000) n`;
+          await tx.$executeRaw`INSERT INTO chat_admin_allowlist (chat_id, user_id)
+            SELECT ${target}, 'skew-admin-' || n FROM generate_series(1,200) n`;
+          await tx.$executeRaw`INSERT INTO domain_allowlist (chat_id, domain)
+            SELECT ${target}, 'skew-domain-' || n || '.test' FROM generate_series(1,200) n`;
+          for (const table of tables)
+            await tx.$executeRaw(Prisma.sql`ANALYZE ${Prisma.raw(table)}`);
+          setupCompletedAt = performance.now();
 
-      for (const media of [{}, { greeting: { base64: large, mimeType: 'image/png' } }]) {
-        await db.chatSettings.update({
-          where: { chatId: target },
-          data: { botSpeechMedia: media },
-        });
-        const full = await readChatContextSource(db as PrismaService, target, now, null);
-        queries.length = 0;
-        const reused = await readChatContextSource(
-          db as PrismaService,
-          target,
-          now,
-          template(full),
-        );
-        expect(reused.mode).toBe('shell');
-        expect(reused.row!.settings!.botSpeechMedia).toEqual(media);
-        expect(reused.row!.admins).toHaveLength(203);
-        expect(reused.row!.domains).toHaveLength(203);
-        expect(selectQueries()).toHaveLength(1);
-        expect(selectQueries()[0]).not.toContain('bot_speech_media');
-      }
-      const statement = chatContextShellQuery(target, now);
-      const result = await fixtureQuery(
-        `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`,
-        statement.values,
+          const source = tx as unknown as PrismaService;
+          for (const media of [{}, { greeting: { base64: large, mimeType: 'image/png' } }]) {
+            await tx.chatSettings.update({
+              where: { chatId: target },
+              data: { botSpeechMedia: media },
+            });
+            queries.length = 0;
+            const full = await readChatContextSource(source, target, now, null);
+            expect(full.mode).toBe('full');
+            expect(full.row!.settings!.botSpeechMedia).toEqual(media);
+            expect(full.row!.admins).toHaveLength(203);
+            expect(full.row!.domains).toHaveLength(203);
+            expect(queries).toHaveLength(1);
+            expect(selectQueries()).toHaveLength(1);
+            queries.length = 0;
+            const reused = await readChatContextSource(source, target, now, template(full));
+            expect(reused.mode).toBe('shell');
+            expect(reused.row!.settings!.botSpeechMedia).toEqual(media);
+            expect(reused.row!.admins).toHaveLength(203);
+            expect(reused.row!.domains).toHaveLength(203);
+            expect(selectQueries()).toHaveLength(1);
+            expect(selectQueries()[0]).not.toContain('bot_speech_media');
+          }
+          for (const [mode, statement] of [
+            ['shell', chatContextShellQuery(target, now)],
+            ['full', chatContextFullQuery(target, now)],
+          ] as const) {
+            const result = await tx.$queryRaw<{ 'QUERY PLAN': { Plan: Plan }[] }[]>(
+              Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement}`,
+            );
+            const plans: Plan[] = [];
+            const visit = (node: Plan) => {
+              plans.push(node);
+              node.Plans?.forEach(visit);
+            };
+            visit(result[0]!['QUERY PLAN'][0]!.Plan);
+            const relevant = plans.filter((plan) => plan['Relation Name']);
+            expect(new Set(relevant.map((plan) => plan['Relation Name']))).toEqual(new Set(tables));
+            for (const scan of relevant) {
+              expect(scan['Node Type']).not.toBe('Seq Scan');
+              expect(
+                (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) *
+                  scan['Actual Loops'],
+              ).toBeLessThan(500);
+            }
+            console.info(
+              'Chat context source native indexed plan',
+              JSON.stringify({
+                mode,
+                relationScans: relevant.map((scan) => ({
+                  relation: scan['Relation Name'],
+                  nodeType: scan['Node Type'],
+                  examinedRows:
+                    (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) *
+                    scan['Actual Loops'],
+                })),
+              }),
+            );
+          }
+          checksCompletedAt = performance.now();
+          throw fixtureRollback;
+        },
+        { maxWait: 5_000, timeout: 20_000 },
       );
-      const plans: Plan[] = [];
-      const visit = (node: Plan) => {
-        plans.push(node);
-        node.Plans?.forEach(visit);
-      };
-      visit(result.rows[0]['QUERY PLAN'][0].Plan as Plan);
-      const relevant = plans.filter((plan) => plan['Relation Name']);
-      expect(new Set(relevant.map((plan) => plan['Relation Name']))).toEqual(
-        new Set([
-          'chats',
-          'chat_settings',
-          'chat_settings_cache_revisions',
-          'chat_admin_allowlist',
-          'chat_admin_roster_states',
-          'domain_allowlist',
-          'chat_rules',
-        ]),
-      );
-      for (const scan of relevant) {
-        expect(scan['Node Type']).not.toBe('Seq Scan');
-        expect(
-          (scan['Actual Rows'] + (scan['Rows Removed by Filter'] ?? 0)) * scan['Actual Loops'],
-        ).toBeLessThan(500);
-      }
+    } catch (error) {
+      if (error !== fixtureRollback) throw error;
     } finally {
-      // FLAG: Exact random fixture prefix only; cascades remove metadata/relations.
-      // Settings deletion recreates non-FK reconcile requests, so remove them last.
-      await fixtureQuery('DELETE FROM chats WHERE left(id, length($1)) = $1', [prefix]);
-      await fixtureQuery(
-        'DELETE FROM night_mode_transition_reconcile_requests WHERE left(chat_id, length($1)) = $1',
-        [prefix],
-      );
+      rollbackCompletedAt = performance.now();
+      // FLAG: ANALYZE statistics can outlive rollback. Restore them for following native cases.
+      for (const table of tables) await raw.query(`ANALYZE ${table}`);
+      statisticsRestoredAt = performance.now();
     }
+    expect(await db.chat.findUnique({ where: { id: target }, select: { id: true } })).toBeNull();
     expect(
-      (
-        await raw.query(
-          'SELECT count(*)::int AS remaining FROM night_mode_transition_reconcile_requests WHERE left(chat_id, length($1)) = $1',
-          [prefix],
-        )
-      ).rows[0].remaining,
+      await db.nightModeTransitionReconcileRequest.count({
+        where: { chatId: { startsWith: prefix } },
+      }),
     ).toBe(0);
     expect(
       await db.nightModeTransitionReconcileRequest.findUnique({ where: { chatId } }),
     ).not.toBeNull();
+    console.info(
+      'Chat context source native fixture phases',
+      JSON.stringify({
+        chats: 10_000,
+        setupMs: Math.round(setupCompletedAt - startedAt),
+        sourceChecksMs: Math.round(checksCompletedAt - setupCompletedAt),
+        rollbackMs: Math.round(rollbackCompletedAt - checksCompletedAt),
+        restoreStatisticsMs: Math.round(statisticsRestoredAt - rollbackCompletedAt),
+      }),
+    );
   }, 30_000);
 });

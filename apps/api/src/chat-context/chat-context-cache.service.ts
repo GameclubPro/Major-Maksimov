@@ -400,6 +400,12 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   private readonly chatContextInFlightLoads = new Map<string, Promise<ChatContext>>();
   private readonly chatContextReadGenerations = new Map<string, ChatContextReadGeneration>();
   private readonly cacheActivity = createChatContextCacheActivity();
+  private invalidationSubscriptionReady = false;
+  private invalidationSubscriptionEpoch = 0;
+  private invalidationSubscribePromise: Promise<void> | null = null;
+  private invalidationRetryTimer: NodeJS.Timeout | null = null;
+  private moduleInitPromise: Promise<void> | null = null;
+  private stopped = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -459,7 +465,11 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  async onModuleInit(): Promise<void> {
+  onModuleInit(): Promise<void> {
+    return (this.moduleInitPromise ??= this.initializeInvalidationSubscriber());
+  }
+
+  private async initializeInvalidationSubscriber(): Promise<void> {
     this.subscriber.on('message', (channel, payload) => {
       if (channel !== CHAT_CONTEXT_INVALIDATION_CHANNEL) {
         return;
@@ -473,8 +483,18 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
       this.applyLocalInvalidation(invalidation.chatId, invalidation.reason, 'remote');
       this.maxBotLinkService.forgetChatBotBinding(invalidation.chatId);
     });
-    await this.subscriber.subscribe(CHAT_CONTEXT_INVALIDATION_CHANNEL);
-    if (!this.localChatContextSweepTimer) {
+    for (const event of ['close', 'reconnecting', 'end'] as const) {
+      this.subscriber.on(event, () => this.invalidateSubscription());
+    }
+    this.subscriber.on('error', () => {
+      this.invalidateSubscription();
+      this.scheduleInvalidationSubscriptionRetry();
+    });
+    this.subscriber.on('ready', () => {
+      void this.subscribeToInvalidations().catch(() => {});
+    });
+    await this.subscribeToInvalidations();
+    if (!this.stopped && !this.localChatContextSweepTimer) {
       this.localChatContextSweepTimer = setInterval(
         () => this.localChatContextCache.sweepExpired(),
         this.localChatContextSweepIntervalMs,
@@ -484,6 +504,12 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.stopped = true;
+    this.invalidateSubscription();
+    if (this.invalidationRetryTimer) {
+      clearTimeout(this.invalidationRetryTimer);
+      this.invalidationRetryTimer = null;
+    }
     if (this.localChatContextSweepTimer) {
       clearInterval(this.localChatContextSweepTimer);
       this.localChatContextSweepTimer = null;
@@ -493,6 +519,70 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
     this.mediaCache.clear();
     await this.subscriber.quit();
     await this.redis.quit();
+  }
+
+  private invalidateSubscription(): void {
+    this.invalidationSubscriptionReady = false;
+    this.invalidationSubscriptionEpoch += 1;
+    this.invalidationSubscribePromise = null;
+    this.clearLocalContextReads();
+  }
+
+  private clearLocalContextReads(): void {
+    this.localChatContextCache.clear();
+    // FLAG: A connection gap loses publications. Retire every active reader on both sides
+    // of resubscription so delayed replies cannot restore pre-gap context or bot bindings.
+    for (const generation of this.chatContextReadGenerations.values()) {
+      generation.invalidated = true;
+    }
+    this.chatContextReadGenerations.clear();
+    this.chatContextInFlightLoads.clear();
+    this.maxBotLinkService.forgetAllChatBotBindings?.();
+  }
+
+  private subscribeToInvalidations(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.invalidationSubscribePromise) return this.invalidationSubscribePromise;
+    const epoch = this.invalidationSubscriptionEpoch;
+    const operation = this.subscriber
+      .subscribe(CHAT_CONTEXT_INVALIDATION_CHANNEL)
+      .then(() => {
+        if (this.stopped || epoch !== this.invalidationSubscriptionEpoch) return;
+        if (this.invalidationRetryTimer) {
+          clearTimeout(this.invalidationRetryTimer);
+          this.invalidationRetryTimer = null;
+        }
+        // FLAG: Redis 'ready' precedes ioredis automatic resubscription. Only this
+        // acknowledged subscription closes the gap; TTL and SQL template proofs stay intact.
+        this.clearLocalContextReads();
+        this.invalidationSubscriptionReady = true;
+      })
+      .catch((error: unknown) => {
+        if (!this.stopped && epoch === this.invalidationSubscriptionEpoch) {
+          this.invalidateSubscription();
+          this.scheduleInvalidationSubscriptionRetry();
+          this.logger.warn('Chat context invalidation subscription unavailable');
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.invalidationSubscribePromise === operation) {
+          this.invalidationSubscribePromise = null;
+        }
+      });
+    this.invalidationSubscribePromise = operation;
+    return operation;
+  }
+
+  private scheduleInvalidationSubscriptionRetry(): void {
+    if (this.stopped || this.invalidationRetryTimer) return;
+    this.invalidationRetryTimer = setTimeout(() => {
+      this.invalidationRetryTimer = null;
+      if (this.subscriber.status === 'ready') {
+        void this.subscribeToInvalidations().catch(() => {});
+      }
+    }, 1000);
+    this.invalidationRetryTimer.unref();
   }
 
   static cacheKey(chatId: string): string {
@@ -2536,7 +2626,12 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
         throw new Error(`Chat settings missing after initialization for chat ${chatId}`);
       }
 
-      this.maxBotLinkService.rememberChatBotBinding?.(chat.id, chat.primaryBotId ?? chat.botId);
+      if (
+        this.invalidationSubscriptionReady &&
+        this.isChatContextReadGenerationCurrent(chatId, generation)
+      ) {
+        this.maxBotLinkService.rememberChatBotBinding?.(chat.id, chat.primaryBotId ?? chat.botId);
+      }
       const resolvedTitle = title || chat.title;
       if (title && chat.title !== title) {
         void this.persistTitle(chatId, title);
@@ -2960,10 +3055,12 @@ export class ChatContextCacheService implements OnModuleInit, OnModuleDestroy {
   }
 
   private readLocalChatContext(chatId: string): ChatContext | null {
+    if (!this.invalidationSubscriptionReady) return null;
     return this.localChatContextCache.get(chatId);
   }
 
   private writeLocalChatContext(chatId: string, value: ChatContext, encodedBytes?: number): void {
+    if (!this.invalidationSubscriptionReady) return;
     this.localChatContextCache.set(chatId, value, encodedBytes);
   }
 

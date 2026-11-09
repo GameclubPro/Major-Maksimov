@@ -1,6 +1,14 @@
 import { Prisma, type ChatSettings } from '../../prisma/prisma-client';
 import type { PrismaService } from '../../prisma/prisma.service';
-import type { ChatContextShell, ChatContextSourceRow } from '../chat-context-source';
+import type {
+  ChatContextFullSource,
+  ChatContextShell,
+  ChatContextSourceRow,
+} from '../chat-context-source';
+import {
+  CHAT_SETTINGS_SQL_COLUMNS,
+  type ChatSettingsProjection,
+} from '../chat-settings-projection';
 
 type SourceFixtureRow = Omit<ChatContextSourceRow, 'botId' | 'primaryBotId' | 'settings'> & {
   botId?: string | null;
@@ -31,26 +39,18 @@ export function withChatContextSourceFixture<T extends object>(fixture: T): Pris
         : null,
     };
   };
-  const transaction = jest.fn(
-    async (
-      run: (tx: Prisma.TransactionClient) => Promise<unknown>,
-      options?: { isolationLevel?: Prisma.TransactionIsolationLevel },
-    ): Promise<unknown> => {
-      if (options?.isolationLevel !== Prisma.TransactionIsolationLevel.RepeatableRead)
-        throw new Error('Chat context full source must request RepeatableRead');
-      const tx = { ...fixture, chat: { ...chat, findUnique: read } };
-      return run(tx as unknown as Prisma.TransactionClient);
-    },
-  );
-  const query = jest.fn(async (sql: Prisma.Sql): Promise<ChatContextShell[]> => {
-    if (!sql.text.includes('chat_settings_cache_revisions'))
-      throw new Error('Chat context fixture received an unexpected SQL query');
-    const chatId = sql.values.at(-1);
-    if (typeof chatId !== 'string') throw new Error('Chat context shell chat id is missing');
-    const row = await read({ where: { id: chatId } });
-    if (!row) return [];
-    return [
-      {
+  const transaction = jest.fn(async (): Promise<never> => {
+    throw new Error('Chat context source must use one native SELECT without a transaction');
+  });
+  const query = jest.fn(
+    async (sql: Prisma.Sql): Promise<(ChatContextShell | ChatContextFullSource)[]> => {
+      if (!sql.text.includes('chat_settings_cache_revisions'))
+        throw new Error('Chat context fixture received an unexpected SQL query');
+      const chatId = sql.values.at(-1);
+      if (typeof chatId !== 'string') throw new Error('Chat context source chat id is missing');
+      const row = await read({ where: { id: chatId } });
+      if (!row) return [];
+      const shell = {
         id: row.id,
         title: row.title,
         botId: row.botId ?? null,
@@ -68,8 +68,18 @@ export function withChatContextSourceFixture<T extends object>(fixture: T): Pris
         adminRosterCompletedAt: row.adminRosterState?.completedAt
           ? new Date(row.adminRosterState.completedAt)
           : null,
-      } satisfies ChatContextShell,
-    ];
-  });
+      } satisfies ChatContextShell;
+      if (!sql.text.includes('AS "settings_id"')) return [shell];
+      // FLAG: Partial mock rows may omit settings; the real native projection is complete.
+      // Keep this conversion at the fixture boundary so source/fence logic stays unchanged.
+      const settings = Object.fromEntries(
+        (Object.keys(CHAT_SETTINGS_SQL_COLUMNS) as (keyof ChatSettings)[]).map((key) => [
+          `settings_${key}`,
+          row.settings ? row.settings[key] : null,
+        ]),
+      ) as ChatSettingsProjection;
+      return [{ ...shell, ...settings, rulesChatId: row.rules ? row.id : null }];
+    },
+  );
   return { ...fixture, $transaction: transaction, $queryRaw: query } as unknown as PrismaService;
 }

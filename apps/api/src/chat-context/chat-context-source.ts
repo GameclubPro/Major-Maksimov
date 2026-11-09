@@ -1,6 +1,11 @@
 import { Prisma, type ChatSettings } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ChatAdminRosterSnapshot } from '../max/chat-admin-roster-state';
+import {
+  CHAT_SETTINGS_SQL_PROJECTION,
+  readProjectedChatSettings,
+  type ChatSettingsProjection,
+} from './chat-settings-projection';
 
 export type ChatSettingsProof = { settingsId: string; revision: string | null };
 export type ChatSettingsTemplate = { proof: ChatSettingsProof; settings: ChatSettings };
@@ -38,6 +43,25 @@ export type ChatContextShell = {
 };
 
 export function chatContextShellQuery(chatId: string, sourceAt: Date): Prisma.Sql {
+  return chatContextQuery(chatId, sourceAt, Prisma.empty);
+}
+
+export type ChatContextFullSource = ChatContextShell &
+  ChatSettingsProjection & { rulesChatId: string | null };
+
+export function chatContextFullQuery(chatId: string, sourceAt: Date): Prisma.Sql {
+  return chatContextQuery(
+    chatId,
+    sourceAt,
+    Prisma.sql`, r.chat_id AS "rulesChatId", ${CHAT_SETTINGS_SQL_PROJECTION}`,
+  );
+}
+
+function chatContextQuery(
+  chatId: string,
+  sourceAt: Date,
+  additionalProjection: Prisma.Sql,
+): Prisma.Sql {
   return Prisma.sql`
     SELECT c.id, c.title, c.bot_id AS "botId", c.primary_bot_id AS "primaryBotId",
       s.id AS "settingsId", v.revision::text AS "settingsRevision",
@@ -52,12 +76,12 @@ export function chatContextShellQuery(chatId: string, sourceAt: Date): Prisma.Sq
         WHERE d.chat_id = c.id
           AND (d.remove_after_at IS NULL
             OR d.remove_after_at > ${sourceAt.toISOString()}::timestamp(3))),
-        '[]'::jsonb) AS "domainAllowlist"
-    FROM chats c
-    LEFT JOIN chat_settings s ON s.chat_id = c.id
-    LEFT JOIN chat_settings_cache_revisions v ON v.chat_id = s.chat_id
-    LEFT JOIN chat_rules r ON r.chat_id = c.id
-    LEFT JOIN chat_admin_roster_states ar ON ar.chat_id = c.id
+        '[]'::jsonb) AS "domainAllowlist" ${additionalProjection}
+    FROM "chats" c
+    LEFT JOIN "chat_settings" s ON s.chat_id = c.id
+    LEFT JOIN "chat_settings_cache_revisions" v ON v.chat_id = s.chat_id
+    LEFT JOIN "chat_rules" r ON r.chat_id = c.id
+    LEFT JOIN "chat_admin_roster_states" ar ON ar.chat_id = c.id
     WHERE c.id = ${chatId}
   `;
 }
@@ -106,54 +130,38 @@ export async function readChatContextSource(
     }
   }
 
-  // FLAG: Prisma may load relations in separate statements. Bind settings content,
-  // its UUID proof and the complete shell to the same RepeatableRead snapshot.
-  return prisma.$transaction(
-    async (tx) => {
-      const chat = await tx.chat.findUnique({
-        where: { id: chatId },
-        include: {
-          settings: { include: { cacheRevision: true } },
-          rules: { select: { publishedUrl: true, publishedMessageId: true } },
-          domains: {
-            where: { OR: [{ removeAfterAt: null }, { removeAfterAt: { gt: sourceAt } }] },
-            select: { domain: true },
-          },
-          admins: { select: { userId: true } },
-          adminRosterState: true,
-        },
-      });
-      if (!chat) return { row: null, proof: null, mode: 'full' };
-      let settings: ChatSettings | null = null;
-      let proof: ChatSettingsProof | null = null;
-      if (chat.settings) {
-        const { cacheRevision, ...scalars } = chat.settings;
-        settings = scalars;
-        proof = { settingsId: chat.settings.id, revision: cacheRevision?.revision ?? null };
-      }
-      return {
-        row: {
-          id: chat.id,
-          title: chat.title,
-          botId: chat.botId,
-          primaryBotId: chat.primaryBotId,
-          settings,
-          domains: chat.domains,
-          admins: chat.admins,
-          adminRosterState: chat.adminRosterState
-            ? {
-                revision: chat.adminRosterState.revision,
-                completeProbeStartedAt:
-                  chat.adminRosterState.completeProbeStartedAt?.toISOString() ?? null,
-                completedAt: chat.adminRosterState.completedAt?.toISOString() ?? null,
-              }
-            : null,
-          rules: chat.rules,
-        },
-        proof,
-        mode: 'full',
-      };
-    },
-    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+  // FLAG: One SELECT binds every setting, its UUID proof and all mutable shell
+  // relations to one MVCC snapshot. Never split the full projection into separate reads.
+  const [full] = await prisma.$queryRaw<ChatContextFullSource[]>(
+    chatContextFullQuery(chatId, sourceAt),
   );
+  if (!full) return { row: null, proof: null, mode: 'full' };
+  const settings = readProjectedChatSettings(full);
+  return {
+    row: {
+      id: full.id,
+      title: full.title,
+      botId: full.botId,
+      primaryBotId: full.primaryBotId,
+      settings,
+      domains: full.domainAllowlist.map((domain) => ({ domain })),
+      admins: full.adminUserIds.map((userId) => ({ userId })),
+      adminRosterState: full.adminRosterRevision
+        ? {
+            revision: full.adminRosterRevision,
+            completeProbeStartedAt: full.adminRosterCompleteProbeStartedAt?.toISOString() ?? null,
+            completedAt: full.adminRosterCompletedAt?.toISOString() ?? null,
+          }
+        : null,
+      rules:
+        full.rulesChatId === null
+          ? null
+          : {
+              publishedUrl: full.rulesPublishedUrl,
+              publishedMessageId: full.rulesPublishedMessageId,
+            },
+    },
+    proof: settings ? { settingsId: settings.id, revision: full.settingsRevision } : null,
+    mode: 'full',
+  };
 }
