@@ -11,11 +11,13 @@ import { fileURLToPath } from 'node:url';
 import Redis from 'ioredis';
 import bridge from './support-chat-bridge.cjs';
 import { supportChatSession } from './support-chat-worker.mjs';
+import { answerSupport } from './support-llm-client.mjs';
 
 const {
   CHAT_ID,
   CHAT_IDS,
   PilotFence,
+  PilotHistory,
   deliverAnswer,
   sourceMessage,
   supportGuideImages,
@@ -207,6 +209,49 @@ async function prepare(redis, state) {
   assert.equal(await fence.prepare(state.source.id), true);
   return fence;
 }
+
+test('generic onboarding and its confirmed image follow-up reach both fenced image batches', async (t) => {
+  t.mock.method(globalThis, 'fetch', () => {
+    assert.fail('reviewed onboarding must not fall through to model inference');
+  });
+  const history = new PilotHistory();
+  history.settle(
+    '42',
+    'Как подключить бота?',
+    'Если у вас есть права администратора, добавьте бота-модератора администратором с чтением, отправкой и удалением сообщений. Затем выполните подключение.',
+    'sent',
+  );
+  for (const [text, prior] of [
+    ['Как подключить бота?', []],
+    ['А где картинки?', history.read('42')],
+  ])
+    await t.test(text, async () => {
+      const answer = await answerSupport({ text, history: prior, api: true });
+      assert.equal(answer.action, 'reply');
+      assert.equal(answer.guideId, 'moderator-group');
+      assert.equal(answer.responseRoute, 'reviewed-guide');
+      assert.doesNotMatch(answer.text, /(?:не могу|невозможно).{0,35}(?:прикреп|картин|скрин)/iu);
+      await withRedis(async (redis) => {
+        const state = fixture();
+        state.original.body.text = text;
+        state.source = sourceMessage(state.original);
+        const fence = await prepare(redis, state);
+        assert.equal(
+          await deliverAnswer(state.runtime, fence, state.source, answer.text, {
+            ...state.bounds,
+            guideId: answer.guideId,
+          }),
+          'sent',
+        );
+        assert.deepEqual(
+          state.effects.map(({ attachments }) => attachments.length),
+          [10, 1],
+        );
+        assert.deepEqual(state.confirmed, ['confirmed-guide-1', 'confirmed-guide-2']);
+        assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-2');
+      });
+    });
+});
 
 test('guide readiness accepts only both reviewed, bounded 10+1 image packs', () => {
   const valid = guideCatalog();

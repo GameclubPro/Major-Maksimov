@@ -1286,11 +1286,16 @@ function semanticFacts(text, state) {
   if (test(/антимат|(?<![\p{L}])мат(?![\p{L}])|мата|оскорблен|бытов.{0,15}(?:руг|обзыв)/iu))
     add('profanity-sensitivity', 100);
   if (test(/стоп слов|стоп[- ]?(?:спис|лист)|запрещенн.{0,10}фраз/iu)) add('stop-words', 105);
+  // FLAG: Answer-format preferences must not become image-filter questions.
+  const imageComparisonText = text.replace(
+    /(?<![\p{L}])только\s+(?:текстом|словами)(?:\s*,?\s*без\s+(?:картинок|фото|изображений|карточек|скриншотов))?(?![\p{L}])/giu,
+    ' ',
+  );
   if (
-    test(
-      /(?:текст|провер|стоп слов|реклам).{0,25}(?:изображ|картин|фото)|(?:изображ|картин|фото).{0,25}(?:текст|реклам)|\bocr\b/iu,
+    /(?:текст|провер|стоп слов|реклам).{0,25}(?:изображ|картин|фото)|(?:изображ|картин|фото).{0,25}(?:текст|реклам)|\bocr\b/iu.test(
+      imageComparisonText,
     ) &&
-    (!publ || test(/стоп слов|реклам|\bocr\b/iu))
+    (!publ || /стоп слов|реклам|\bocr\b/iu.test(imageComparisonText))
   )
     add('image-text-versus-commercial', 105);
   const explicitLinkFilter = test(
@@ -1676,6 +1681,37 @@ export function createSupportRouter(knowledge) {
   const entries = knowledge.entries;
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const terms = new Map(entries.map((entry) => [entry.id, new Set(words(entry.keywords))]));
+  // FLAG: Only exact identities from the reviewed catalog can supply a bot name.
+  // Eligibility still uses the original text type/length and the human reply target.
+  const catalogIdentities = (knowledge.botCatalog ?? []).flatMap((bot) => {
+    const handle = /^https:\/\/max\.ru\/([a-z0-9_]+)$/iu.exec(bot.url ?? '')?.[1];
+    if (!handle || typeof bot.name !== 'string') return [];
+    const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return [
+      {
+        name: bot.name,
+        pattern: new RegExp(
+          `(?<![\\p{L}\\p{N}_@./?=&-])(?:${escape(bot.url)}|@?${escape(handle)})(?![\\p{L}\\p{N}_/=&-]|\\?[\\p{L}\\p{N}_%])`,
+          'giu',
+        ),
+      },
+    ];
+  });
+  const catalogText = (value) =>
+    typeof value === 'string'
+      ? catalogIdentities.reduce((text, { pattern, name }) => text.replace(pattern, name), value)
+      : value;
+  const conversationFor = (text, history) =>
+    conversation(
+      catalogText(text),
+      Array.isArray(history)
+        ? history.map((item) =>
+            item && typeof item.text === 'string'
+              ? { ...item, text: catalogText(item.text) }
+              : item,
+          )
+        : history,
+    );
   const factsFor = (state) => {
     const all = semanticFacts(state.focus, state);
     const direct = semanticFacts(state.current, state);
@@ -1687,7 +1723,7 @@ export function createSupportRouter(knowledge) {
     return [...scores].sort((a, b) => b[1] - a[1]).map(([id]) => id);
   };
   function classify(text, history = [], interaction = {}) {
-    const ctx = conversation(text, history);
+    const ctx = conversationFor(text, history);
     const role = roleOf(ctx.current, ctx.recent);
     const openerContext = ctx.recent.some(
       (item) => item.role === 'user' && supportOpener(item.text),
@@ -1928,7 +1964,7 @@ export function createSupportRouter(knowledge) {
       .slice(0, 5);
     if (!selected.length) {
       const query = new Set(words(text));
-      const context = new Set(words(conversation(text, history).focus));
+      const context = new Set(words(conversationFor(text, history).focus));
       const ranked = entries
         .filter(
           (entry) =>
