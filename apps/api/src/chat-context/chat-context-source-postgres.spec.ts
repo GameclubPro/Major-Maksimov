@@ -454,6 +454,8 @@ native('coherent settings templates on native PostgreSQL', () => {
         SELECT $1 || n, 'History', now() FROM generate_series(1,10000) n`,
         [prefix],
       );
+      // Refresh parent statistics before FK and statement-trigger lookups on the new history.
+      await fixtureQuery('ANALYZE chats');
       await fixtureQuery(
         `INSERT INTO chat_admin_allowlist (chat_id, user_id)
         SELECT $1 || n, 'history-admin-' || u

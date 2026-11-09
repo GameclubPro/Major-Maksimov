@@ -128,7 +128,10 @@ Keep the public wrapper and its generator locks in place.
 
 The runner requires a non-root Linux/macOS shell (WSL is supported). Each invocation creates a
 private directory, randomly named `race_test` database, fresh PostgreSQL credentials and independent loopback
-ports. PostgreSQL server and clients use UTC. Redis matches CI's host/port-only fixture contract,
+ports. PostgreSQL server and clients use UTC. The local cluster uses `C` collation; CI's
+`postgres:16` image initializes `en_US.utf8`. Inspect `pg_database.datcollate` when comparing
+fixture timings: text-index and trigger costs can differ despite matching timezones.
+Redis matches CI's host/port-only fixture contract,
 with persistence disabled and its owned process verified through a private Unix socket. Inherited `DATABASE_URL`,
 `REDIS_URL`, `CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL`, `MAXIM_TEST_POSTGRES_URL` and
 `MAXIM_TEST_REDIS_URL` are replaced only for child processes. URLs are not printed or written into
