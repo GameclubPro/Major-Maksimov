@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { maxUpdateSchema, type MaxUpdate } from '@maxim/contracts';
 import { createHash } from 'node:crypto';
+import { isPrivateDirectChatId } from '../common/chat-id.util';
 import { extractUrlsFromText as extractTextUrls } from '../common/url-text.util';
 import {
   normalizeMaxUserDisplayName,
@@ -36,12 +37,18 @@ export class WebhookParser {
     const membershipSenderName = this.extractMembershipSenderName(membershipPayload);
     const membershipInviterId = this.extractMembershipInviterId(membershipPayload, payload);
     const chatEntityType = this.extractChatEntityType(message, payload, membershipPayload);
+    const resolvedChatId = chatId || membershipChatId;
+    // FLAG: A synthetic forward ID belongs only to private recovery. Group moderation
+    // requires the real outer message ID; a linked source ID cannot identify this send.
+    const isPrivateRecoveryForward =
+      isPrivateDirectChatId(resolvedChatId) &&
+      chatEntityType !== 'channel' &&
+      this.isPureForwardMessageCreated(type, message);
     const resolvedMessageId =
       messageId ||
-      (this.isSyntheticMessageUpdateType(type) || this.isPureForwardMessageCreated(type, message)
+      (this.isSyntheticMessageUpdateType(type) || isPrivateRecoveryForward
         ? `${type}:${updateId}`
         : '');
-    const resolvedChatId = chatId || membershipChatId;
     const resolvedSenderId = senderId || membershipSenderId;
     const resolvedSenderName = senderName ?? membershipSenderName;
     const membership = this.extractMembershipChange(
@@ -586,7 +593,8 @@ export class WebhookParser {
 
     for (const value of candidates) {
       if (typeof value === 'string' || typeof value === 'number') {
-        return String(value);
+        const normalized = String(value).trim();
+        if (normalized) return normalized;
       }
     }
 

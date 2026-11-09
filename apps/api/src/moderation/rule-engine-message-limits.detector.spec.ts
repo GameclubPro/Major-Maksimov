@@ -9,13 +9,89 @@ import {
 
 class MockRedisCounterService implements Pick<
   RedisCounterService,
-  'incrementWithTtl' | 'claimEventCooldown' | 'replaceRevisionedSetMembershipsBeforeDeadline'
+  | 'incrementWithTtl'
+  | 'claimEventCooldown'
+  | 'claimMessageCountQuota'
+  | 'replaceRevisionedSetMembershipsBeforeDeadline'
 > {
   readonly calls: Array<{ key: string; ttlSec: number }> = [];
+  readonly quotaCalls: Parameters<RedisCounterService['claimMessageCountQuota']>[0][] = [];
   private readonly counters = new Map<string, number>();
   private readonly members = new Set<string>();
   private readonly cooldownResults = new Map<string, 'allowed' | 'blocked'>();
   private readonly windowResults = new Map<string, number>();
+  private readonly quotaDecisions = new Map<
+    string,
+    {
+      kind: 'allowed' | 'blocked';
+      eventTimestampMs: number;
+      policy: string;
+      publicationId?: string;
+      messageTimestamp: number;
+    }
+  >();
+  private readonly quotaPublications = new Map<
+    string,
+    { kind: 'allowed' | 'blocked'; eventTimestampMs: number; policy: string; publicationId: string }
+  >();
+
+  async claimMessageCountQuota(
+    input: Parameters<RedisCounterService['claimMessageCountQuota']>[0],
+  ): ReturnType<RedisCounterService['claimMessageCountQuota']> {
+    this.quotaCalls.push(input);
+    const scope = JSON.stringify([input.chatId, input.userId]);
+    const key = JSON.stringify([scope, input.messageId]);
+    const policy = `${input.maxMessages}:${input.windowSeconds}`;
+    const saved = this.quotaDecisions.get(key);
+    if (saved) {
+      if (saved.messageTimestamp !== input.eventTimestampMs) return { kind: 'stale' };
+      if (saved.kind === 'blocked' && saved.policy !== policy) return { kind: 'stale' };
+      return {
+        kind: saved.kind,
+        eventTimestampMs: saved.eventTimestampMs,
+        replayed: true,
+        ...(saved.publicationId ? { publicationId: saved.publicationId } : {}),
+      };
+    }
+    const publicationKey = input.publicationId && JSON.stringify([scope, input.publicationId]);
+    const publication = publicationKey ? this.quotaPublications.get(publicationKey) : undefined;
+    if (
+      publication &&
+      Math.abs(input.eventTimestampMs - publication.eventTimestampMs) < 300_000 &&
+      Date.now() < publication.eventTimestampMs + 300_000
+    ) {
+      if (publication.kind === 'blocked' && input.eventTimestampMs < publication.eventTimestampMs) {
+        return { kind: 'stale' };
+      }
+      if (publication.kind === 'blocked' && publication.policy !== policy) return { kind: 'stale' };
+      this.quotaDecisions.set(key, { ...publication, messageTimestamp: input.eventTimestampMs });
+      return { ...publication, replayed: true };
+    }
+    const count = this.counters.get(scope) ?? 0;
+    const kind = count < input.maxMessages ? 'allowed' : 'blocked';
+    if (kind === 'allowed') this.counters.set(scope, count + 1);
+    const decision: {
+      kind: 'allowed' | 'blocked';
+      eventTimestampMs: number;
+      policy: string;
+      publicationId?: string;
+    } = {
+      kind,
+      eventTimestampMs: input.eventTimestampMs,
+      policy,
+      ...(!publication && publicationKey && Date.now() < input.eventTimestampMs + 300_000
+        ? { publicationId: input.publicationId! }
+        : {}),
+    };
+    this.quotaDecisions.set(key, { ...decision, messageTimestamp: input.eventTimestampMs });
+    if (publicationKey && decision.publicationId) {
+      this.quotaPublications.set(publicationKey, {
+        ...decision,
+        publicationId: decision.publicationId,
+      });
+    }
+    return { ...decision, replayed: false };
+  }
 
   async replaceRevisionedSetMembershipsBeforeDeadline(
     params: Parameters<RedisCounterService['replaceRevisionedSetMembershipsBeforeDeadline']>[0],
@@ -91,6 +167,35 @@ function buildSettings(overrides: Partial<ChatSettings> = {}): ChatSettings {
 }
 
 describe('RuleEngineMessageLimitsDetector', () => {
+  it.each(['', ' ', '\t\n'])(
+    'never writes state for an explicitly empty message ID %j',
+    async (messageId) => {
+      const counters = new MockRedisCounterService();
+      const detector = new RuleEngineMessageLimitsDetector(counters);
+      const input = {
+        chatId: 'chat',
+        userId: 'user',
+        messageId,
+        eventTimestampMs: Date.now(),
+        settings: buildSettings({
+          messageCountLimitEnabled: true,
+          photoMessageCooldownEnabled: true,
+          stickerMessageCooldownEnabled: true,
+        }),
+      };
+      expect(await detector.detectAntiSpamBurstLimit(input)).toBeNull();
+      expect(await detector.detectMessageCountLimit(input)).toBeNull();
+      expect(
+        await detector.detectMediaCooldownLimits({
+          ...input,
+          hasPhotoAttachment: true,
+          hasStickerAttachment: true,
+        }),
+      ).toEqual([]);
+      expect(counters.calls).toEqual([]);
+    },
+  );
+
   it.each([
     ['anti-spam-burst', 120],
     ['message-count-limit', 250],
@@ -121,11 +226,16 @@ describe('RuleEngineMessageLimitsDetector', () => {
           ? detector.detectMessageCountLimit(input)
           : detector.detectMediaCooldownLimits(input);
     const isCount = rule === 'anti-spam-burst' || rule === 'message-count-limit';
-    const state = isCount
-      ? jest
-          .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
-          .mockResolvedValue({ kind: 'deadline_exceeded' })
-      : jest.spyOn(counters, 'claimEventCooldown').mockResolvedValue('deadline_exceeded');
+    const state =
+      rule === 'message-count-limit'
+        ? jest
+            .spyOn(counters, 'claimMessageCountQuota')
+            .mockResolvedValue({ kind: 'deadline_exceeded' })
+        : isCount
+          ? jest
+              .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+              .mockResolvedValue({ kind: 'deadline_exceeded' })
+          : jest.spyOn(counters, 'claimEventCooldown').mockResolvedValue('deadline_exceeded');
     try {
       await expect(call()).resolves.toEqual(isCount ? null : []);
       expect(observe.mock.calls).toEqual([[{ rule, reason: 'deadline' }]]);
@@ -194,42 +304,36 @@ describe('RuleEngineMessageLimitsDetector', () => {
     expect(observe).not.toHaveBeenCalled();
   });
 
-  it.each(['burst', 'count'] as const)(
-    'observes the legacy %s deadline without repeating the count',
-    async (kind) => {
-      jest.useFakeTimers();
-      const counters = new MockRedisCounterService();
-      const count = jest
-        .spyOn(counters, 'incrementWithTtl')
-        .mockImplementation(() => new Promise<number>(() => {}));
-      const observe = jest.fn<void, [MessageLimitStateObservation]>();
-      const detector = new RuleEngineMessageLimitsDetector(counters, observe);
-      try {
-        const input = {
-          chatId: 'chat',
-          userId: 'user',
-          settings: buildSettings({ messageCountLimitEnabled: true }),
-        };
-        const pending =
-          kind === 'burst'
-            ? detector.detectAntiSpamBurstLimit(input)
-            : detector.detectMessageCountLimit(input);
-        await jest.advanceTimersByTimeAsync(kind === 'burst' ? 120 : 250);
-        await expect(pending).resolves.toBeNull();
-        expect(observe.mock.calls).toEqual([
-          [
-            {
-              rule: kind === 'burst' ? 'anti-spam-burst' : 'message-count-limit',
-              reason: 'deadline',
-            },
-          ],
-        ]);
-        expect(count).toHaveBeenCalledTimes(1);
-      } finally {
-        jest.useRealTimers();
-      }
-    },
-  );
+  it('observes the legacy burst deadline without repeating the count', async () => {
+    jest.useFakeTimers();
+    const counters = new MockRedisCounterService();
+    const count = jest
+      .spyOn(counters, 'incrementWithTtl')
+      .mockImplementation(() => new Promise<number>(() => {}));
+    const observe = jest.fn<void, [MessageLimitStateObservation]>();
+    const detector = new RuleEngineMessageLimitsDetector(counters, observe);
+    try {
+      const input = {
+        chatId: 'chat',
+        userId: 'user',
+        settings: buildSettings({ messageCountLimitEnabled: true }),
+      };
+      const pending = detector.detectAntiSpamBurstLimit(input);
+      await jest.advanceTimersByTimeAsync(120);
+      await expect(pending).resolves.toBeNull();
+      expect(observe.mock.calls).toEqual([
+        [
+          {
+            rule: 'anti-spam-burst',
+            reason: 'deadline',
+          },
+        ],
+      ]);
+      expect(count).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 
   it('does not accept a forged no-dispatch error as an unavailable-state decision', async () => {
     const counters = new MockRedisCounterService();
@@ -299,7 +403,9 @@ describe('RuleEngineMessageLimitsDetector', () => {
       const method =
         kind === 'cooldown'
           ? 'claimEventCooldown'
-          : 'replaceRevisionedSetMembershipsBeforeDeadline';
+          : kind === 'count'
+            ? 'claimMessageCountQuota'
+            : 'replaceRevisionedSetMembershipsBeforeDeadline';
       const expired = kind === 'cooldown' ? 'deadline_exceeded' : { kind: 'deadline_exceeded' };
       const state = jest.spyOn(redisCounter, method).mockResolvedValue(expired as never);
       const expected = kind === 'cooldown' ? [] : null;
@@ -322,8 +428,7 @@ describe('RuleEngineMessageLimitsDetector', () => {
     const redisCounter = new MockRedisCounterService();
     const detector = new RuleEngineMessageLimitsDetector(redisCounter);
     const error = new Error('Redis response failed');
-    const method =
-      kind === 'cooldown' ? 'claimEventCooldown' : 'replaceRevisionedSetMembershipsBeforeDeadline';
+    const method = kind === 'cooldown' ? 'claimEventCooldown' : 'claimMessageCountQuota';
     const state = jest.spyOn(redisCounter, method).mockRejectedValue(error);
     const input = {
       chatId: 'chat-1',
@@ -495,6 +600,8 @@ describe('RuleEngineMessageLimitsDetector', () => {
         detector.detectMessageCountLimit({
           chatId: 'chat-1',
           userId: 'user-1',
+          messageId: `message-${index}`,
+          eventTimestampMs: Date.now(),
           settings,
         }),
       ).resolves.toBeNull();
@@ -504,14 +611,100 @@ describe('RuleEngineMessageLimitsDetector', () => {
       detector.detectMessageCountLimit({
         chatId: 'chat-1',
         userId: 'user-1',
+        messageId: 'excess',
+        eventTimestampMs: Date.now(),
         settings,
       }),
     ).resolves.toEqual(expect.objectContaining({ ruleCode: 'MESSAGE_COUNT_LIMIT' }));
-    expect(redisCounter.calls[0]).toEqual({
-      key: 'message:count-limit:v2:chat-1:user-1:10:24:legacy',
-      ttlSec: 24 * 60 * 60,
+    expect(redisCounter.quotaCalls[0]).toMatchObject({
+      chatId: 'chat-1',
+      userId: 'user-1',
+      maxMessages: 10,
+      windowSeconds: 24 * 60 * 60,
+    });
+    expect(redisCounter.calls).toEqual([]);
+  });
+
+  it.each([undefined, '', ' ', '\t'])(
+    'never uses a compatibility quota for missing identity %j',
+    async (messageId) => {
+      const counters = new MockRedisCounterService();
+      const detector = new RuleEngineMessageLimitsDetector(counters);
+      expect(
+        await detector.detectMessageCountLimit({
+          chatId: 'chat',
+          userId: 'user',
+          messageId,
+          eventTimestampMs: Date.now(),
+          settings: buildSettings({ messageCountLimitEnabled: true }),
+        }),
+      ).toBeNull();
+      expect(counters.quotaCalls).toEqual([]);
+      expect(counters.calls).toEqual([]);
+    },
+  );
+
+  it('binds an excess album to the original quota decision and forwards verified identity', async () => {
+    const counters = new MockRedisCounterService();
+    const detector = new RuleEngineMessageLimitsDetector(counters);
+    const eventTimestampMs = Date.now() - 1000;
+    const settings = buildSettings({
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 1,
+    });
+    const input = { chatId: 'chat', userId: 'user', eventTimestampMs, settings };
+    expect(await detector.detectMessageCountLimit({ ...input, messageId: 'first' })).toBeNull();
+    expect(
+      await detector.detectMessageCountLimit({
+        ...input,
+        messageId: 'album-first',
+        publicationId: 'verified-group',
+      }),
+    ).toMatchObject({
+      ruleCode: 'MESSAGE_COUNT_LIMIT',
+      metadata: {
+        quotaPolicyVersion: 3,
+        quotaPublicationId: 'verified-group',
+        quotaAnchorTimestampMs: eventTimestampMs,
+        quotaDecisionReplayed: false,
+      },
+    });
+    expect(
+      await detector.detectMessageCountLimit({
+        ...input,
+        eventTimestampMs: eventTimestampMs + 1,
+        messageId: 'album-second',
+        publicationId: 'verified-group',
+      }),
+    ).toMatchObject({
+      metadata: { quotaAnchorTimestampMs: eventTimestampMs, quotaDecisionReplayed: true },
     });
   });
+
+  it.each([undefined, 'original-group'])(
+    'uses only the actual quota publication %j in enforcement metadata',
+    async (publicationId) => {
+      const counters = new MockRedisCounterService();
+      const detector = new RuleEngineMessageLimitsDetector(counters);
+      jest.spyOn(counters, 'claimMessageCountQuota').mockResolvedValue({
+        kind: 'blocked',
+        replayed: false,
+        eventTimestampMs: Date.now(),
+        ...(publicationId ? { publicationId } : {}),
+      });
+      const violation = await detector.detectMessageCountLimit({
+        chatId: 'chat',
+        userId: 'user',
+        messageId: 'fresh-message',
+        publicationId: 'reused-requested-alias',
+        eventTimestampMs: Date.now(),
+        settings: buildSettings({ messageCountLimitEnabled: true }),
+      });
+      expect(violation?.ruleCode).toBe('MESSAGE_COUNT_LIMIT');
+      if (publicationId) expect(violation?.metadata?.quotaPublicationId).toBe(publicationId);
+      else expect(violation?.metadata).not.toHaveProperty('quotaPublicationId');
+    },
+  );
 
   it('enforces the built-in anti-spam burst window', async () => {
     const redisCounter = new MockRedisCounterService();

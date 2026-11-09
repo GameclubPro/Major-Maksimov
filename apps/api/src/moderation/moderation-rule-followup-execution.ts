@@ -336,6 +336,7 @@ export async function executeModerationRuleFollowUp(
               messageLimitsBlockedWord,
               settings.botSpeechStyle,
               settings.messageLimitsWarnMessageText,
+              settings,
             ),
             settings.messageLimitsAdminContactButtonEnabled,
             settings.messageLimitsAdminContactButtonUrl,
@@ -514,6 +515,7 @@ export async function executeModerationRuleFollowUp(
               actionMuteDurationHours,
               messageLimitsBlockedWord,
               settings.botSpeechStyle,
+              settings,
             )
           : undefined,
       botSpeechStyle: settings.botSpeechStyle,
@@ -573,6 +575,7 @@ export async function executeModerationRuleFollowUp(
             topViolation.ruleCode,
             messageLimitsBlockedWord,
             settings.botSpeechStyle,
+            settings,
           ),
           limitsMessageOptions ?? undefined,
         );

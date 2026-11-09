@@ -127,18 +127,12 @@ describe('bot speech styles', () => {
 
     const legacyLinkText = (service as any).buildLinkExplanation(userLabel, true, '', null);
     const policeLinkText = (service as any).buildLinkExplanation(userLabel, true, '', 'POLICE');
-    const legacyWarnText = (service as any).buildMessageLimitsWarnExplanation(
-      userLabel,
-      'MESSAGE_TOO_LONG',
-      null,
-      null,
-    );
-    const policeWarnText = (service as any).buildMessageLimitsWarnExplanation(
-      userLabel,
-      'MESSAGE_TOO_LONG',
-      null,
-      'POLICE',
-    );
+    const legacyWarnText = service
+      .getRuleFollowupHost()
+      .buildMessageLimitsWarnExplanation(userLabel, 'MESSAGE_TOO_LONG', null, null);
+    const policeWarnText = service
+      .getRuleFollowupHost()
+      .buildMessageLimitsWarnExplanation(userLabel, 'MESSAGE_TOO_LONG', null, 'POLICE');
 
     expect(legacyLinkText).toBe(
       '**Алексей**, сообщение удалено. Причина: эта ссылка запрещена настройками чата. Отправьте текст без этой ссылки.',
@@ -227,12 +221,9 @@ describe('bot speech styles', () => {
     ).toBe('**Алексей**, обнаружен повтор сообщения. Вынесено предупреждение.');
 
     expect(
-      (service as any).buildMessageLimitsWarnExplanation(
-        userLabel,
-        'MESSAGE_TOO_LONG',
-        null,
-        'ROBOT',
-      ),
+      service
+        .getRuleFollowupHost()
+        .buildMessageLimitsWarnExplanation(userLabel, 'MESSAGE_TOO_LONG', null, 'ROBOT'),
     ).toBe('**Алексей**, предупреждение: сообщение превышает допустимую длину.');
 
     expect((service as any).buildGreetingMessage(userLabel, '', 'POLICE')).toBe(
@@ -317,12 +308,9 @@ describe('bot speech styles', () => {
     ).toBe('**Алексей**, такое сообщение уже отправляли. Это предупреждение.');
 
     expect(
-      (service as any).buildMessageLimitsWarnExplanation(
-        userLabel,
-        'MESSAGE_TOO_LONG',
-        null,
-        'FRIENDLY',
-      ),
+      service
+        .getRuleFollowupHost()
+        .buildMessageLimitsWarnExplanation(userLabel, 'MESSAGE_TOO_LONG', null, 'FRIENDLY'),
     ).toBe('**Алексей**, предупреждение: сообщение превышает допустимую длину.');
     expect(
       (service as any).buildRequiredSubscriptionMuteExplanation(
@@ -544,9 +532,15 @@ describe('bot speech styles', () => {
             '',
             style,
           ),
-          service.buildMessageLimitsWarnExplanation(user, rule, 'тест', style),
-          service.buildMessageLimitsMuteExplanation(user, rule, 'тест', style),
-          service.buildMessageLimitsBanExplanation(user, rule, 6, 'тест', style),
+          service
+            .getRuleFollowupHost()
+            .buildMessageLimitsWarnExplanation(user, rule, 'тест', style),
+          service
+            .getRuleFollowupHost()
+            .buildMessageLimitsMuteExplanation(user, rule, 'тест', style),
+          service
+            .getRuleFollowupHost()
+            .buildMessageLimitsBanExplanation(user, rule, 6, 'тест', style),
         );
       }
       for (const fingerprint of ['exact', 'image', 'image_set']) {
@@ -624,6 +618,78 @@ describe('bot speech styles', () => {
     },
   );
 
+  it.each(BOT_SPEECH_STYLE_VALUES)(
+    'includes the saved quota in %s warnings, mutes and bans',
+    (style) => {
+      const host = createService().getRuleFollowupHost();
+      const quota = { messageCountLimitMessages: 2, messageCountLimitWindowHours: 6 };
+      const userLabel = '**Алексей**';
+      const messages = [
+        host.buildMessageLimitsWarnExplanation(
+          userLabel,
+          'MESSAGE_COUNT_LIMIT',
+          null,
+          style,
+          '',
+          quota,
+        ),
+        host.buildMessageLimitsMuteExplanation(
+          userLabel,
+          'MESSAGE_COUNT_LIMIT',
+          null,
+          style,
+          quota,
+        ),
+        host.buildMessageLimitsBanExplanation(
+          userLabel,
+          'MESSAGE_COUNT_LIMIT',
+          6,
+          null,
+          style,
+          quota,
+        ),
+      ];
+      for (const message of messages) {
+        expect(message).toContain('превышен лимит сообщений: 2 за 6 ч');
+        expect(message).not.toMatch(/\{[a-z_]+\}|undefined|NaN/u);
+      }
+    },
+  );
+
+  it('preserves custom quota warning sources and placeholders through the host facade', () => {
+    const host = createService().getRuleFollowupHost();
+    const quota = { messageCountLimitMessages: 3, messageCountLimitWindowHours: 24 };
+    const warn = (templateText: string) =>
+      host.buildMessageLimitsWarnExplanation(
+        '**Алексей**',
+        'MESSAGE_COUNT_LIMIT',
+        null,
+        'ROBOT',
+        templateText,
+        quota,
+      );
+
+    expect(warn('  Свой текст для {user}: {reason}.\n')).toBe(
+      '  Свой текст для **Алексей**: слишком частая отправка сообщений: не более 3 за 24ч.\n',
+    );
+    expect(warn('  Свой текст для {user}.\n')).toBe('  Свой текст для **Алексей**.\n');
+    expect(warn('   ')).toBe('   ');
+    expect(warn(getBotSpeechEditableTemplate('ROBOT', 'messageLimitsWarnMessageText'))).toBe(
+      '**Алексей**, предупреждение: слишком частая отправка сообщений: не более 3 за 24ч.',
+    );
+  });
+
+  it('keeps host quota sanctions without optional context compatible', () => {
+    const host = createService().getRuleFollowupHost();
+    for (const message of [
+      host.buildMessageLimitsWarnExplanation('Алексей', 'MESSAGE_COUNT_LIMIT', null, 'ROBOT'),
+      host.buildMessageLimitsMuteExplanation('Алексей', 'MESSAGE_COUNT_LIMIT', null, 'ROBOT'),
+      host.buildMessageLimitsBanExplanation('Алексей', 'MESSAGE_COUNT_LIMIT', 6, null, 'ROBOT'),
+    ]) {
+      expect(message).toContain('лимит сообщений за выбранный период превышен');
+    }
+  });
+
   it('keeps current sanction defaults gender-neutral for every bot persona', () => {
     expect(getBotSpeechEditableTemplate('POLICE', 'linkBotMessageText', 'female')).toBe(
       getBotSpeechEditableTemplate('POLICE', 'linkBotMessageText', 'male'),
@@ -653,12 +719,9 @@ describe('bot speech styles', () => {
     ).toBe('Ручной разбор для **Алексей**. Причина: в этом чате ссылки не проходят, без ссылок.');
 
     expect(
-      (service as any).buildMessageLimitsWarnExplanation(
-        userLabel,
-        'MESSAGE_TOO_LONG',
-        null,
-        'IRONIC',
-      ),
+      service
+        .getRuleFollowupHost()
+        .buildMessageLimitsWarnExplanation(userLabel, 'MESSAGE_TOO_LONG', null, 'IRONIC'),
     ).toBe('**Алексей**, предупреждение по правилам чата: сообщение превышает допустимую длину.');
 
     expect((service as any).buildLinkMuteExplanation(userLabel, 'IRONIC')).toBe(
@@ -793,12 +856,9 @@ describe('bot speech styles', () => {
       '**Алексей**, сообщение удалено. Ограничение чата: сообщение совпало со стоп-листом чата.',
     );
     expect(
-      (service as any).buildMessageLimitsMuteExplanation(
-        userLabel,
-        'VOICE_BLOCKED',
-        null,
-        'POLICE',
-      ),
+      service
+        .getRuleFollowupHost()
+        .buildMessageLimitsMuteExplanation(userLabel, 'VOICE_BLOCKED', null, 'POLICE'),
     ).toBe(
       '**Алексей**, действует мут. Причина: отправка голосовых сообщений в этом чате отключена.',
     );

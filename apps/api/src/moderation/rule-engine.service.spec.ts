@@ -21,6 +21,44 @@ class MockRedisCounterService {
     { revision: number; membershipKeys: string[]; countSnapshots: Map<string, number> }
   >();
   private readonly membershipSets = new Map<string, Map<string, number>>();
+  private readonly quotaDecisions = new Map<
+    string,
+    {
+      kind: 'allowed' | 'blocked';
+      eventTimestampMs: number;
+      publicationId?: string;
+    }
+  >();
+  private readonly admittedQuotaMessages = new Map<string, number[]>();
+
+  async claimMessageCountQuota(
+    params: Parameters<RedisCounterService['claimMessageCountQuota']>[0],
+  ): ReturnType<RedisCounterService['claimMessageCountQuota']> {
+    const scope = JSON.stringify([params.chatId, params.userId]);
+    const identity = JSON.stringify([
+      scope,
+      params.publicationId ? 'album' : 'message',
+      params.publicationId ?? params.messageId,
+    ]);
+    const saved = this.quotaDecisions.get(identity);
+    if (saved) return { ...saved, replayed: true };
+    const admitted = this.admittedQuotaMessages.get(scope) ?? [];
+    const inWindow = admitted.filter(
+      (timestamp) =>
+        timestamp > params.eventTimestampMs - params.windowSeconds * 1000 &&
+        timestamp <= params.eventTimestampMs,
+    ).length;
+    const kind = inWindow < params.maxMessages ? 'allowed' : 'blocked';
+    if (kind === 'allowed')
+      this.admittedQuotaMessages.set(scope, [...admitted, params.eventTimestampMs]);
+    const result = {
+      kind,
+      eventTimestampMs: params.eventTimestampMs,
+      ...(params.publicationId ? { publicationId: params.publicationId } : {}),
+    } as const;
+    this.quotaDecisions.set(identity, result);
+    return { ...result, replayed: false };
+  }
 
   async incrementWithTtl(key: string): Promise<number> {
     const next = (this.counters.get(key) ?? 0) + 1;
@@ -466,9 +504,15 @@ describe('RuleEngineService', () => {
         }),
       };
       const counters = new MockRedisCounterService();
-      jest
-        .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
-        .mockResolvedValue({ kind: 'deadline_exceeded' });
+      if (rule === 'message-count-limit') {
+        jest
+          .spyOn(counters, 'claimMessageCountQuota')
+          .mockResolvedValue({ kind: 'deadline_exceeded' });
+      } else {
+        jest
+          .spyOn(counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+          .mockResolvedValue({ kind: 'deadline_exceeded' });
+      }
       const timedOut = new RuleEngineService(
         counters as unknown as RedisCounterService,
         diagnosticsService,
@@ -3454,10 +3498,13 @@ describe('RuleEngineService', () => {
       messageCountLimitMessages: 2,
       messageCountLimitWindowHours: 3,
     });
+    const eventAt = Date.now();
 
     const first = await service.detect({
       chatId: 'chat-1',
       userId: 'u-1',
+      messageId: 'count-1',
+      duplicateStateEventTimestampMs: eventAt,
       text: 'первое сообщение',
       settings,
       domainAllowlist: [],
@@ -3466,6 +3513,8 @@ describe('RuleEngineService', () => {
     const second = await service.detect({
       chatId: 'chat-1',
       userId: 'u-1',
+      messageId: 'count-2',
+      duplicateStateEventTimestampMs: eventAt + 1,
       text: 'второе сообщение',
       settings,
       domainAllowlist: [],
@@ -3474,6 +3523,8 @@ describe('RuleEngineService', () => {
     const third = await service.detect({
       chatId: 'chat-1',
       userId: 'u-1',
+      messageId: 'count-3',
+      duplicateStateEventTimestampMs: eventAt + 2,
       text: 'третье сообщение',
       settings,
       domainAllowlist: [],
@@ -3482,6 +3533,105 @@ describe('RuleEngineService', () => {
     expect(first.violations.some((item) => item.ruleCode === 'MESSAGE_COUNT_LIMIT')).toBe(false);
     expect(second.violations.some((item) => item.ruleCode === 'MESSAGE_COUNT_LIMIT')).toBe(false);
     expect(third.violations.some((item) => item.ruleCode === 'MESSAGE_COUNT_LIMIT')).toBe(true);
+  });
+
+  it('counts verified pieces of one photo publication once while retaining each real message id', async () => {
+    const counters = new MockRedisCounterService();
+    const claim = jest.spyOn(counters, 'claimMessageCountQuota');
+    const service = new RuleEngineService(counters as never);
+    const input = {
+      chatId: 'chat-1',
+      userId: 'u-1',
+      duplicateStateEventType: 'message_created' as const,
+      duplicateStateEventTimestampMs: Date.now(),
+      text: '',
+      settings: buildSettings({
+        antiDuplicateEnabled: false,
+        messageCountLimitEnabled: true,
+        messageCountLimitMessages: 1,
+      }),
+      domainAllowlist: [],
+      hasPhotoAttachment: true,
+      messageCountPublicationId: 'album-1',
+    };
+    const first = await service.detect({ ...input, messageId: 'photo-1' });
+    const second = await service.detect({
+      ...input,
+      messageId: 'photo-2',
+      duplicateStateEventTimestampMs: input.duplicateStateEventTimestampMs + 1,
+    });
+    const next = await service.detect({
+      ...input,
+      messageId: 'photo-3',
+      messageCountPublicationId: 'album-2',
+      duplicateStateEventTimestampMs: input.duplicateStateEventTimestampMs + 2,
+    });
+
+    expect(first.violations).toEqual([]);
+    expect(second.violations).toEqual([]);
+    expect(next.violations).toEqual([expect.objectContaining({ ruleCode: 'MESSAGE_COUNT_LIMIT' })]);
+    expect(claim.mock.calls.map(([value]) => [value.messageId, value.publicationId])).toEqual([
+      ['photo-1', 'album-1'],
+      ['photo-2', 'album-1'],
+      ['photo-3', 'album-2'],
+    ]);
+  });
+
+  it.each([
+    ['non-photo content', false, 'message_created' as const],
+    ['unspecified event type', true, undefined],
+  ])(
+    'keeps %s as separate sends despite a supplied album hint',
+    async (_label, hasPhotoAttachment, duplicateStateEventType) => {
+      const counters = new MockRedisCounterService();
+      const claim = jest.spyOn(counters, 'claimMessageCountQuota');
+      const service = new RuleEngineService(counters as never);
+      const input = {
+        chatId: 'chat-1',
+        userId: 'u-1',
+        text: '',
+        domainAllowlist: [],
+        duplicateStateEventTimestampMs: Date.now(),
+        duplicateStateEventType,
+        settings: buildSettings({
+          antiDuplicateEnabled: false,
+          messageCountLimitEnabled: true,
+          messageCountLimitMessages: 1,
+        }),
+        hasPhotoAttachment,
+        messageCountPublicationId: 'album-1',
+      };
+      const first = await service.detect({ ...input, messageId: 'piece-1' });
+      const next = await service.detect({
+        ...input,
+        messageId: 'piece-2',
+        duplicateStateEventTimestampMs: input.duplicateStateEventTimestampMs + 1,
+      });
+      expect(first.violations).toEqual([]);
+      expect(next.violations).toEqual([
+        expect.objectContaining({ ruleCode: 'MESSAGE_COUNT_LIMIT' }),
+      ]);
+      expect(claim.mock.calls.every(([value]) => value.publicationId === undefined)).toBe(true);
+    },
+  );
+
+  it('propagates unknown quota failures through the current typed counter boundary', async () => {
+    const counters = new MockRedisCounterService();
+    const failure = new Error('quota write outcome unknown');
+    const claim = jest.spyOn(counters, 'claimMessageCountQuota').mockRejectedValue(failure);
+    const service = new RuleEngineService(counters as never);
+    await expect(
+      service.detect({
+        chatId: 'chat-1',
+        userId: 'u-1',
+        messageId: 'message-1',
+        duplicateStateEventTimestampMs: Date.now(),
+        text: '',
+        domainAllowlist: [],
+        settings: buildSettings({ antiDuplicateEnabled: false, messageCountLimitEnabled: true }),
+      }),
+    ).rejects.toBe(failure);
+    expect(claim).toHaveBeenCalledTimes(1);
   });
 
   it('detects MESSAGE_BLOCKED_WORD for configured stop words', async () => {
@@ -4587,46 +4737,55 @@ describe('RuleEngineService', () => {
     expect(nextMessage.duplicateDecision?.threshold).toBe(1);
   });
 
-  it('writes a duplicate tombstone for transferable edits while other stateful limits stay skipped', async () => {
-    const replaceRevisionedSetMembershipsBeforeDeadline = jest
-      .fn()
-      .mockResolvedValue({ kind: 'applied', counts: [] });
-    const incrementOncePerMemberWithTtl = jest
-      .fn()
-      .mockResolvedValue({ inserted: true, count: 99 });
-    const service = new RuleEngineService({
-      replaceRevisionedSetMembershipsBeforeDeadline,
-      incrementOncePerMemberWithTtl,
-    } as never);
+  it.each([undefined, false, true])(
+    'writes a duplicate tombstone for transferable edits while other stateful limits stay skipped (%s)',
+    async (skipStatefulMessageLimits) => {
+      const claimMessageCountQuota = jest.fn<
+        ReturnType<RedisCounterService['claimMessageCountQuota']>,
+        Parameters<RedisCounterService['claimMessageCountQuota']>
+      >();
+      const replaceRevisionedSetMembershipsBeforeDeadline = jest
+        .fn()
+        .mockResolvedValue({ kind: 'applied', counts: [] });
+      const incrementOncePerMemberWithTtl = jest
+        .fn()
+        .mockResolvedValue({ inserted: true, count: 99 });
+      const service = new RuleEngineService({
+        claimMessageCountQuota,
+        replaceRevisionedSetMembershipsBeforeDeadline,
+        incrementOncePerMemberWithTtl,
+      } as never);
 
-    await expect(
-      service.detect({
-        chatId: 'chat-1',
-        userId: 'u-1',
-        messageId: 'mid-1',
-        duplicateStateEventType: 'message_edited',
-        duplicateStateEventTimestampMs: 1_800_000_000_000,
-        text: DUPLICATE_SPAM_TEXT,
-        settings: buildSettings({
-          antiSpamEnabled: true,
-          messageCountLimitEnabled: true,
-          photoMessageCooldownEnabled: true,
+      await expect(
+        service.detect({
+          chatId: 'chat-1',
+          userId: 'u-1',
+          messageId: 'mid-1',
+          duplicateStateEventType: 'message_edited',
+          duplicateStateEventTimestampMs: 1_800_000_000_000,
+          text: DUPLICATE_SPAM_TEXT,
+          settings: buildSettings({
+            antiSpamEnabled: true,
+            messageCountLimitEnabled: true,
+            photoMessageCooldownEnabled: true,
+          }),
+          domainAllowlist: [],
+          hasPhotoAttachment: true,
+          skipStatefulMessageLimits,
         }),
-        domainAllowlist: [],
-        hasPhotoAttachment: true,
-        skipStatefulMessageLimits: true,
-      }),
-    ).resolves.toMatchObject({ violations: [] });
+      ).resolves.toMatchObject({ violations: [] });
 
-    expect(replaceRevisionedSetMembershipsBeforeDeadline).toHaveBeenCalledTimes(1);
-    expect(replaceRevisionedSetMembershipsBeforeDeadline).toHaveBeenCalledWith(
-      expect.objectContaining({
-        revision: 1_800_000_000_000,
-        membershipKeys: [],
-      }),
-    );
-    expect(incrementOncePerMemberWithTtl).not.toHaveBeenCalled();
-  });
+      expect(replaceRevisionedSetMembershipsBeforeDeadline).toHaveBeenCalledTimes(1);
+      expect(replaceRevisionedSetMembershipsBeforeDeadline).toHaveBeenCalledWith(
+        expect.objectContaining({
+          revision: 1_800_000_000_000,
+          membershipKeys: [],
+        }),
+      );
+      expect(incrementOncePerMemberWithTtl).not.toHaveBeenCalled();
+      expect(claimMessageCountQuota).not.toHaveBeenCalled();
+    },
+  );
 
   it('clears an edited message fingerprint when another rule rejects its new text', async () => {
     const service = new RuleEngineService(new MockRedisCounterService() as never);

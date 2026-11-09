@@ -4,6 +4,60 @@ import { extractManagedEntityForwardedRecoveryCandidate } from '../common/manage
 describe('WebhookParser', () => {
   const parser = new WebhookParser();
 
+  it('uses a real message ID after a blank outer alias', () => {
+    const parsed = parser.parse({
+      update_type: 'message_created',
+      timestamp: Date.now(),
+      message: {
+        message_id: ' ',
+        chat_id: '-100123',
+        sender_id: 'user',
+        body: { mid: 'real-mid', text: 'text' },
+      },
+    });
+    expect(parsed.message?.messageId).toBe('real-mid');
+  });
+
+  it('does not normalize a group message with only blank IDs', () => {
+    const parsed = parser.parse({
+      update_type: 'message_created',
+      timestamp: Date.now(),
+      message: {
+        message_id: ' ',
+        chat_id: '-100123',
+        sender_id: 'user',
+        body: { mid: '\t', text: 'text' },
+      },
+    });
+    expect(parsed.message).toBeUndefined();
+  });
+
+  it.each([
+    ['-100123', 'chat'],
+    ['-100124', 'channel'],
+    ['100124', 'channel'],
+  ])(
+    'does not invent a quota identity for a public pure forward in %s (%s)',
+    (chatId, chatType) => {
+      const parsed = parser.parse({
+        update_type: 'message_created',
+        update_id: 'per-bot-event',
+        timestamp: Date.now(),
+        message: {
+          recipient: { chat_id: chatId, chat_type: chatType },
+          sender: { user_id: 'user' },
+          body: null,
+          link: {
+            type: 'forward',
+            chat_id: '-100200',
+            message: { mid: 'linked-source', text: 'forwarded text' },
+          },
+        },
+      });
+      expect(parsed.message).toBeUndefined();
+    },
+  );
+
   it('uses a deterministic synthetic update id when MAX omits update_id', () => {
     const payload = {
       update_type: 'message_created',
@@ -195,28 +249,31 @@ describe('WebhookParser', () => {
     expect(parsed.message?.createdAt).toEqual(expect.any(String));
   });
 
-  it('uses the update timestamp rather than the original message timestamp for edits', () => {
-    const parsed = parser.parse({
-      type: 'message_edited',
-      timestamp: '2026-07-10T14:00:00.456Z',
-      message: {
-        timestamp: '2026-07-10T13:50:00.123Z',
-        body: {
-          mid: 'mid-edited-1',
-          text: 'edited text',
+  it.each(['message_created', 'message_edited'])(
+    'uses the update timestamp rather than the original message timestamp for %s',
+    (type) => {
+      const parsed = parser.parse({
+        type,
+        timestamp: '2026-07-10T14:00:00.456Z',
+        message: {
+          timestamp: '2026-07-10T13:50:00.123Z',
+          body: {
+            mid: 'mid-edited-1',
+            text: 'edited text',
+          },
+          recipient: {
+            chat_id: '-100123',
+          },
+          sender: {
+            user_id: 'user-1',
+          },
         },
-        recipient: {
-          chat_id: '-100123',
-        },
-        sender: {
-          user_id: 'user-1',
-        },
-      },
-    });
+      });
 
-    expect(parsed.eventTimestampSource).toBe('payload');
-    expect(parsed.message?.createdAt).toBe('2026-07-10T14:00:00.456Z');
-  });
+      expect(parsed.eventTimestampSource).toBe('payload');
+      expect(parsed.message?.createdAt).toBe('2026-07-10T14:00:00.456Z');
+    },
+  );
 
   it('extracts text from nested body.text when message.text is missing', () => {
     const parsed = parser.parse({

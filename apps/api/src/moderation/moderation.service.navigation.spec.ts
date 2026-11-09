@@ -3639,71 +3639,82 @@ describe('ModerationService', () => {
     expect(sanctionService.resolveAction).not.toHaveBeenCalled();
   });
 
-  it('includes configured message count window in MESSAGE_COUNT_LIMIT bot explanation', async () => {
-    const prisma = {
-      chat: {
-        upsert: jest.fn().mockResolvedValue({
-          id: 'chat-1',
-          title: 'Chat 1',
-          settings: createSettings({
-            messageCountLimitEnabled: true,
-            messageCountLimitMessages: 2,
-            messageCountLimitWindowHours: 6,
-            messageLimitsBotMessageEnabled: true,
+  it.each([1, 2, 3])(
+    'includes configured message count window in MESSAGE_COUNT_LIMIT bot explanation at violation %i',
+    async (violationCount) => {
+      const prisma = {
+        chat: {
+          upsert: jest.fn().mockResolvedValue({
+            id: 'chat-1',
+            title: 'Chat 1',
+            settings: createSettings({
+              messageCountLimitEnabled: true,
+              messageCountLimitMessages: 2,
+              messageCountLimitWindowHours: 6,
+              messageLimitsBotMessageEnabled: true,
+              messageLimitsWarnEnabled: true,
+              messageLimitsMuteEnabled: false,
+              messageLimitsBanEnabled: true,
+            }),
+            domains: [],
           }),
-          domains: [],
+        },
+        violation: {
+          create: jest.fn(),
+          count: jest.fn().mockResolvedValue(violationCount),
+        },
+        moderationEvent: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn(),
+        },
+        webhookEvent: {
+          findUnique: jest.fn(),
+          update: jest.fn(),
+        },
+      };
+      const ruleEngine = {
+        detect: jest.fn().mockResolvedValue({
+          violations: [
+            {
+              ruleCode: 'MESSAGE_COUNT_LIMIT',
+              score: 0.87,
+              reason: 'Message count limit hit',
+            },
+          ],
         }),
-      },
-      violation: {
-        create: jest.fn(),
-      },
-      moderationEvent: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-      },
-      webhookEvent: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-    };
-    const ruleEngine = {
-      detect: jest.fn().mockResolvedValue({
-        violations: [
-          {
-            ruleCode: 'MESSAGE_COUNT_LIMIT',
-            score: 0.87,
-            reason: 'Message count limit hit',
-          },
-        ],
-      }),
-    };
-    const sanctionService = {
-      resolveAction: jest.fn(),
-    };
-    const maxClient = {
-      deleteMessage: jest.fn(),
-      sendMessage: jest.fn(),
-      kickMember: jest.fn(),
-      banMember: jest.fn(),
-      notifyModerators: jest.fn(),
-    };
+      };
+      const sanctionService = {
+        resolveAction: jest.fn(),
+      };
+      const maxClient = {
+        deleteMessage: jest.fn(),
+        sendMessage: jest.fn(),
+        kickMember: jest.fn(),
+        banMember: jest.fn(),
+        notifyModerators: jest.fn(),
+      };
 
-    const service = new ModerationService(
-      prisma as never,
-      ruleEngine as never,
-      sanctionService as never,
-      maxClient as never,
-    );
-    installGuardedDeleteExecutorFixture(service);
+      const service = new ModerationService(
+        prisma as never,
+        ruleEngine as never,
+        sanctionService as never,
+        maxClient as never,
+      );
+      installGuardedDeleteExecutorFixture(service);
 
-    await service.handleUpdate(createUpdate());
+      await service.handleUpdate(createUpdate());
 
-    (expect(maxClient.sendMessage) as any).toHaveBeenCalledWithPrefix(
-      'chat-1',
-      majorExplanation('Алексей', 'удалено', 'превышен лимит сообщений: 2 за 6 ч'),
-    );
-    expect(sanctionService.resolveAction).not.toHaveBeenCalled();
-  });
+      (expect(maxClient.sendMessage) as any).toHaveBeenCalledWithPrefix(
+        'chat-1',
+        violationCount === 1
+          ? majorExplanation('Алексей', 'удалено', 'превышен лимит сообщений: 2 за 6 ч')
+          : violationCount === 2
+            ? messageLimitsWarnNotice('Алексей', 'превышен лимит сообщений: 2 за 6 ч')
+            : messageLimitsBanNotice('Алексей', 'превышен лимит сообщений: 2 за 6 ч'),
+      );
+      expect(sanctionService.resolveAction).not.toHaveBeenCalled();
+    },
+  );
 
   it('uploads configured bot-speech image with MESSAGE_COUNT_LIMIT explanation', async () => {
     const imageBytes = Buffer.from('bot-speech-image');

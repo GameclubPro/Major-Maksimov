@@ -69,7 +69,12 @@ export function bindModerationExecutionPolicy(
   if (MESSAGE_LIMITS_STATEFUL_RULES.has(`${violation.ruleCode}_DELETE`)) {
     violation.metadata = {
       ...violation.metadata,
-      ...bindMessageLimitEvidence(settings, eventTimestampMs, violation.ruleCode),
+      ...bindMessageLimitEvidence(
+        settings,
+        eventTimestampMs,
+        violation.ruleCode,
+        violation.metadata?.quotaAnchorTimestampMs,
+      ),
     };
   }
   return policySha256;

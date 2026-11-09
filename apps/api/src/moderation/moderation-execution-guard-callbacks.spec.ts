@@ -1,5 +1,6 @@
 import { SanctionAction } from '../prisma/prisma-client';
 import {
+  bindModerationExecutionPolicy,
   buildModerationNoticeDispatchOptions,
   createModerationNoticeGuard,
   createModerationSanctionCallbacks,
@@ -41,6 +42,26 @@ function fixture() {
 }
 
 describe('moderation execution guard callbacks', () => {
+  it('keeps an album quota decision anchored when a later photo receives its delete policy', () => {
+    const anchor = Date.now() - 10_000;
+    const violation = {
+      ruleCode: 'MESSAGE_COUNT_LIMIT',
+      metadata: {
+        quotaPolicyVersion: 3,
+        quotaPublicationId: 'album-1',
+        quotaAnchorTimestampMs: anchor,
+      },
+    };
+    bindModerationExecutionPolicy({} as never, violation, anchor + 9_000);
+    expect(violation.metadata).toMatchObject({
+      quotaPublicationId: 'album-1',
+      messageLimitEventTimestampMs: anchor,
+      messageLimitDeadlineAtMs: anchor + 300_000,
+    });
+    const other = { ruleCode: 'MESSAGE_RATE_LIMIT', metadata: { quotaAnchorTimestampMs: anchor } };
+    bindModerationExecutionPolicy({} as never, other, anchor + 9_000);
+    expect(other.metadata).toMatchObject({ messageLimitEventTimestampMs: anchor + 9_000 });
+  });
   it('keeps the original duplicate sanction authority in immediate SEND and rejects unbound notices', async () => {
     const route = async () => undefined;
     const authority = jest.fn(async (_route?: () => Promise<void>) => undefined);

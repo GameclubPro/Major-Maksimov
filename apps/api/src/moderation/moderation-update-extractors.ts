@@ -7,6 +7,13 @@ export {
 
 const MAX_FORWARD_SCAN_DEPTH = 8;
 const MAX_MEDIA_BATCH_ID_LENGTH = 512;
+const MAX_MESSAGE_COUNT_PUBLICATION_ID_LENGTH = 256;
+const MESSAGE_COUNT_PUBLICATION_ID_KEYS = [
+  'media_group_id',
+  'mediaGroupId',
+  'album_id',
+  'albumId',
+] as const;
 const MEDIA_BATCH_ID_KEYS = [
   'media_group_id',
   'mediaGroupId',
@@ -163,6 +170,89 @@ export function extractDirectMediaBatchId(update: MaxUpdate): string | null {
   }
 
   return null;
+}
+
+export function extractMessageCountPublicationId(update: MaxUpdate): string | null {
+  const rawRecord = asRecord(update.raw);
+  if (update.type !== 'message_created' || !rawRecord || !update.message?.messageId.trim()) {
+    return null;
+  }
+  const candidate = selectMaxMessageCandidate(rawRecord, update.type);
+  if (
+    !candidate ||
+    /(?:^|\.)(?:link|[^.]*forward[^.]*|[^.]*reply[^.]*)(?:\.|$)/i.test(candidate.path)
+  ) {
+    return null;
+  }
+  const node = candidate.node;
+  const body = asRecord(node.body);
+  const content = asRecord(node.content);
+  const data = asRecord(node.data);
+  const messageId = [
+    node.messageId,
+    node.message_id,
+    node.mid,
+    node.seq,
+    node.id,
+    body?.mid,
+    body?.seq,
+    body?.message_id,
+    body?.messageId,
+    body?.id,
+    content?.mid,
+    content?.seq,
+    content?.message_id,
+    content?.messageId,
+    content?.id,
+    data?.message_id,
+    data?.messageId,
+    data?.id,
+  ]
+    .map(readOpaqueIdentity)
+    .find((value) => value !== null);
+  if (messageId !== update.message.messageId.trim()) {
+    return null;
+  }
+  const containers = [node, body, content, asRecord(node.payload)];
+  const hasDirectPhoto = containers.some(
+    (container) =>
+      Array.isArray(container?.attachments) && container.attachments.some(isDirectPhotoAttachment),
+  );
+  if (!hasDirectPhoto) {
+    return null;
+  }
+
+  // FLAG: MAX's documented album is one MID with attachments[]. Only an explicit direct
+  // compatibility marker joins different sends; linked content and guessed groups never do.
+  const identities = new Set<string>();
+  for (const container of containers) {
+    if (!container) continue;
+    for (const key of MESSAGE_COUNT_PUBLICATION_ID_KEYS) {
+      if (!(key in container)) continue;
+      const identity = readOpaqueIdentity(container[key]);
+      if (!identity || identity.length > MAX_MESSAGE_COUNT_PUBLICATION_ID_LENGTH) return null;
+      identities.add(identity);
+    }
+  }
+  return identities.size === 1 ? ([...identities][0] ?? null) : null;
+}
+
+function readOpaqueIdentity(value: unknown): string | null {
+  if (typeof value !== 'string' && !(typeof value === 'number' && Number.isSafeInteger(value))) {
+    return null;
+  }
+  return String(value).trim() || null;
+}
+
+function isDirectPhotoAttachment(value: unknown): boolean {
+  const attachment = asRecord(value);
+  if (!attachment || !['image', 'photo'].includes(readLowerString(attachment.type) ?? '')) {
+    return false;
+  }
+  const payload = asRecord(attachment.payload);
+  return Boolean(
+    payload && [payload.photo_id, payload.url, payload.token].some(readOpaqueIdentity),
+  );
 }
 
 function hasDirectCurrentMessageText(messageNode: Record<string, unknown>): boolean {

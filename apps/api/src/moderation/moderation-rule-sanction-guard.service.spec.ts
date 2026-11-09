@@ -64,6 +64,30 @@ function fixture() {
   return { service, settings, input, prisma, max, immunity };
 }
 describe('own-rule sanction authorization', () => {
+  it('requires the same admitted-quota policy on the verified reason and follow-up', async () => {
+    const s = fixture();
+    Object.assign(s.settings, {
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 2,
+      messageCountLimitWindowHours: 6,
+    });
+    s.input.ruleCode = 'MESSAGE_COUNT_LIMIT_DELETE';
+    s.input.policySha256 = fingerprintModerationSettings(s.settings, s.input.ruleCode);
+    const reason = {
+      ruleCode: s.input.ruleCode,
+      userId: s.input.userId,
+      metadata: { moderationDeleteVerified: true, messageLimitPolicySha256: s.input.policySha256 },
+    };
+    s.prisma.moderationDeleteIntentReason.findUnique.mockResolvedValue(reason);
+    await expect(s.service.assertAllowed(s.input)).resolves.toBeUndefined();
+    s.prisma.moderationDeleteIntentReason.findUnique.mockResolvedValue({
+      ...reason,
+      metadata: { ...reason.metadata, messageLimitPolicySha256: '0'.repeat(64) },
+    });
+    await expect(s.service.assertAllowed(s.input)).rejects.toMatchObject({
+      code: 'moderation_rule_sanction_no_longer_authorized',
+    });
+  });
   it('rejects pre-upgrade length classification even with a confirmed old DELETE receipt', async () => {
     const s = fixture();
     const row = s.settings as Record<string, unknown>;

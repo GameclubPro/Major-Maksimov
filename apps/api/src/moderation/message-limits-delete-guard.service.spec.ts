@@ -268,6 +268,37 @@ describe('current message limit deletion authorization', () => {
     ).not.toBe(fingerprintModerationSettings(full, 'MESSAGE_TOO_LONG'));
   });
 
+  it('rejects attempts-based count evidence after the admitted-publication policy upgrade', async () => {
+    const s = fixture();
+    Object.assign(s.settings, {
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 2,
+      messageCountLimitWindowHours: 1,
+      messageLimitsBotMessageEnabled: true,
+      messageLimitsWarnEnabled: true,
+      messageLimitsMuteEnabled: false,
+      messageLimitsBanEnabled: true,
+      messageLimitsMuteDurationHours: 6,
+    });
+    const legacyPolicy = 'aa83147a83850e30f5bcc1e25692a5f17215c7515ec77a0c469ef81ab35a0a4c';
+    const metadata = bindMessageLimitEvidence(
+      s.settings as never,
+      Date.now(),
+      'MESSAGE_COUNT_LIMIT',
+    );
+    expect(metadata.messageLimitPolicySha256).not.toBe(legacyPolicy);
+    const reason = { ruleCode: 'MESSAGE_COUNT_LIMIT_DELETE', reasonKey: 'count', metadata };
+    await expect(s.service.authorize({ ...input, reasons: [reason] })).resolves.toMatchObject({
+      reasonKeys: ['count'],
+    });
+    await expect(
+      s.service.authorize({
+        ...input,
+        reasons: [{ ...reason, metadata: { ...metadata, messageLimitPolicySha256: legacyPolicy } }],
+      }),
+    ).rejects.toMatchObject({ code: 'message_limits_delete_no_longer_authorized' });
+  });
+
   it.each(['MESSAGE_BLOCKED_WORD', 'MESSAGE_BLOCKED_DOMAIN'])(
     'binds %s sanctions to the settings actually used by legacy and configured policies',
     (rule) => {

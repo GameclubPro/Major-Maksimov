@@ -50,12 +50,22 @@ export function bindMessageLimitEvidence(
   settings: ChatSettings,
   eventTimestampMs: number,
   ruleCode: string,
+  quotaAnchorTimestampMs?: unknown,
 ) {
+  // FLAG: Later parts of one album retain the original quota decision's expiry.
+  const evidenceTimestampMs =
+    ruleCode.replace(/_DELETE$/u, '') === 'MESSAGE_COUNT_LIMIT' &&
+    typeof quotaAnchorTimestampMs === 'number' &&
+    Number.isSafeInteger(quotaAnchorTimestampMs) &&
+    quotaAnchorTimestampMs > 0 &&
+    quotaAnchorTimestampMs <= eventTimestampMs
+      ? quotaAnchorTimestampMs
+      : eventTimestampMs;
   return {
     messageLimitEvidenceVersion: 1,
     messageLimitPolicySha256: fingerprintModerationSettings(settings, ruleCode),
-    messageLimitEventTimestampMs: eventTimestampMs,
-    messageLimitDeadlineAtMs: eventTimestampMs + 5 * 60_000,
+    messageLimitEventTimestampMs: evidenceTimestampMs,
+    messageLimitDeadlineAtMs: evidenceTimestampMs + 5 * 60_000,
   };
 }
 

@@ -43,6 +43,7 @@ import { NightModeTransitionEventService } from '../moderation/night-mode-transi
 import { LOCAL_CHAT_BAN_MODE } from '../moderation/local-chat-ban';
 import { WebhookParser } from './webhook.parser';
 import { isRedisCounterPreDispatchUnavailable } from '../moderation/redis-counter.service';
+import { buildMessageCountQuotaKeys } from '../moderation/message-count-quota';
 import { ModerationAccessService } from '../moderation/moderation-access.service';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
@@ -348,6 +349,140 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     expect(s.effects.filter((effect) => effect.method !== 'delete')).toEqual([]);
   });
 
+  it('counts new messages once across bot mirrors and edits before deleting the real quota excess', async () => {
+    const s = await fixture(2);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: false,
+      antiDuplicateEnabled: false,
+      commercialAdsFilterEnabled: false,
+      karavanStorefrontEnabled: false,
+      messageCountLimitEnabled: true,
+      messageCountLimitMessages: 2,
+      messageCountLimitWindowHours: 1,
+      messageLimitsBotMessageEnabled: false,
+      messageLimitsWarnEnabled: false,
+      messageLimitsMuteEnabled: false,
+      messageLimitsBanEnabled: false,
+    });
+    const key = `message:count-limit:v3:${chatId}:fixture-user:admitted`;
+    const counter = jest.spyOn(s.counters, 'claimMessageCountQuota');
+    const countWrites = () => counter.mock.calls.filter(([input]) => input.chatId === chatId);
+    const deliver = async (
+      messageId: string,
+      at: number,
+      type: 'message_created' | 'message_edited' = 'message_created',
+      photos = 0,
+    ) => {
+      const receipts = await Promise.all(
+        s.bots.map((bot) =>
+          s.ingest({
+            chatId: chatId!,
+            botId: bot.id,
+            messageId,
+            type,
+            at,
+            text: `Ordinary message ${type} ${at}`,
+            ...(photos
+              ? {
+                  attachments: Array.from({ length: photos }, (_, index) => ({
+                    type: 'image',
+                    payload: { photo_id: `quota-photo-${index}` },
+                  })),
+                }
+              : {}),
+          }),
+        ),
+      );
+      await s.drain();
+      const settledReceipts = await s.prisma.webhookEvent.findMany({
+        where: { id: { in: receipts } },
+        select: {
+          status: true,
+          processedAt: true,
+          errorMessage: true,
+          nextEnqueueAt: true,
+          timeoutQuarantineExpiresAt: true,
+        },
+      });
+      expect(settledReceipts).toHaveLength(receipts.length);
+      expect(settledReceipts.map((receipt) => receipt.status).sort()).toEqual([
+        'DUPLICATE',
+        'PROCESSED',
+      ]);
+      for (const receipt of settledReceipts) {
+        expect(receipt).toMatchObject({
+          processedAt: expect.any(Date),
+          errorMessage: null,
+          nextEnqueueAt: null,
+          timeoutQuarantineExpiresAt: null,
+        });
+      }
+      const claims = await s.prisma.webhookExecutionClaim.findMany({
+        where: { kind: 'EXECUTION', webhookEventId: { in: receipts } },
+      });
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({
+        status: 'COMPLETED',
+        completedAt: expect.any(Date),
+        commandResult: expect.objectContaining({ kind: 'EXECUTION_FINISHED' }),
+        leaseToken: null,
+        leaseExpiresAt: null,
+      });
+    };
+    try {
+      const originalAt = Date.now() - 10_000;
+      const first = `quota-first-${randomUUID()}`;
+      await deliver(first, originalAt, 'message_created', 3);
+      const original = await s.redis.zrange(key, 0, -1, 'WITHSCORES');
+      expect(original).toEqual([expect.any(String), String(originalAt)]);
+      expect(countWrites()).toHaveLength(1);
+      expect(s.messages.has(first)).toBe(true);
+      expect(s.effects).toEqual([]);
+      for (let index = 1; index <= 3; index++) {
+        await deliver(first, originalAt + index * 1000, 'message_edited', 3);
+        expect(await s.redis.zrange(key, 0, -1, 'WITHSCORES')).toEqual(original);
+        expect(countWrites()).toHaveLength(1);
+        expect(s.messages.has(first)).toBe(true);
+        expect(s.effects).toEqual([]);
+      }
+      const second = `quota-second-${randomUUID()}`;
+      await deliver(second, originalAt + 4000);
+      expect(await s.redis.zcard(key)).toBe(2);
+      expect(countWrites()).toHaveLength(2);
+      expect(s.messages.has(second)).toBe(true);
+      expect(s.effects).toEqual([]);
+      const excess = `quota-excess-${randomUUID()}`;
+      await deliver(excess, originalAt + 5000);
+      await waitForUserDelete(s, chatId!, excess);
+      const intent = await s.prisma.moderationDeleteIntent.findUniqueOrThrow({
+        where: { chatId_messageId: { chatId: chatId!, messageId: excess } },
+        include: { reasons: true },
+      });
+      expect(intent.reasons).toEqual([
+        expect.objectContaining({
+          ruleCode: 'MESSAGE_COUNT_LIMIT_DELETE',
+          metadata: expect.objectContaining({ moderationDeleteVerified: true }),
+        }),
+      ]);
+      expect(countWrites()).toHaveLength(3);
+      expect(await s.redis.zcard(key)).toBe(2);
+      expect(s.messages.has(first)).toBe(true);
+      expect(s.messages.has(second)).toBe(true);
+      expect(s.effects).toEqual([expect.objectContaining({ method: 'delete', messageId: excess })]);
+      expect(s.failures).toEqual([]);
+    } finally {
+      const keys = new Set(
+        countWrites().flatMap(([input]) => {
+          const keys = buildMessageCountQuotaKeys(input);
+          return [keys.historyKey, keys.decisionKey];
+        }),
+      );
+      counter.mockRestore();
+      if (keys.size) await s.redis.del(...keys);
+    }
+  });
+
   it('message limit Redis admission refusal preserves independent content deletion and next-event progress', async () => {
     const s = await fixture(2);
     const [chatId] = await s.seedCatalog(1, {
@@ -362,23 +497,24 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     const keys = new Set<string>();
     const refused: unknown[] = [];
     const command = jest.spyOn(s.counterRedis, 'sendCommand');
-    const replace = s.counters.replaceRevisionedSetMembershipsBeforeDeadline.bind(s.counters);
+    const claim = s.counters.claimMessageCountQuota.bind(s.counters);
     const counter = jest
-      .spyOn(s.counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .spyOn(s.counters, 'claimMessageCountQuota')
       .mockImplementation(async (params) => {
-        keys.add(params.stateKey);
-        for (const key of params.membershipKeys) keys.add(key);
-        if (refused.length || !params.stateKey.startsWith(`message:count-limit:v2:${chatId}:`)) {
-          return replace(params);
+        const quotaKeys = buildMessageCountQuotaKeys(params);
+        keys.add(quotaKeys.historyKey);
+        keys.add(quotaKeys.decisionKey);
+        if (refused.length || params.chatId !== chatId) {
+          return claim(params);
         }
         const beforeCommands = command.mock.calls.length;
         const previousStatus = s.counterRedis.status;
-        let result: ReturnType<typeof replace>;
+        let result: ReturnType<typeof claim>;
         // FLAG: Exercise the real service's pre-dispatch refusal without disconnecting Redis.
         // Restore readiness synchronously; no unrelated invocation sees an artificial outage.
         Reflect.set(s.counterRedis, 'status', 'end');
         try {
-          result = replace(params);
+          result = claim(params);
         } finally {
           Reflect.set(s.counterRedis, 'status', previousStatus);
         }
@@ -447,20 +583,18 @@ describeStores('native current-rule authorization across mirrored bot delivery',
       messageLimitsBlockedWords: ['casino'],
     });
     await s.pause();
-    type CounterInput = Parameters<
-      MultibotHarness['counters']['replaceRevisionedSetMembershipsBeforeDeadline']
-    >[0];
+    type CounterInput = Parameters<MultibotHarness['counters']['claimMessageCountQuota']>[0];
     const targetInputs: CounterInput[] = [];
     const keys = new Set<string>();
-    const replace = s.counters.replaceRevisionedSetMembershipsBeforeDeadline.bind(s.counters);
+    const claimQuota = s.counters.claimMessageCountQuota.bind(s.counters);
     const counter = jest
-      .spyOn(s.counters, 'replaceRevisionedSetMembershipsBeforeDeadline')
+      .spyOn(s.counters, 'claimMessageCountQuota')
       .mockImplementation((params) => {
-        keys.add(params.stateKey);
-        for (const key of params.membershipKeys) keys.add(key);
-        if (params.stateKey.startsWith(`message:count-limit:v2:${chatId}:`))
-          targetInputs.push(params);
-        return replace(params);
+        const quotaKeys = buildMessageCountQuotaKeys(params);
+        keys.add(quotaKeys.historyKey);
+        keys.add(quotaKeys.decisionKey);
+        if (params.chatId === chatId) targetInputs.push(params);
+        return claimQuota(params);
       });
     const injected = new Error('Fixture counter EVAL response lost after commit');
     const send = s.counterRedis.sendCommand.bind(s.counterRedis);
@@ -473,7 +607,7 @@ describeStores('native current-rule authorization across mirrored bot delivery',
         if (
           request.name !== 'eval' ||
           !target ||
-          String(request.args[2]) !== target.stateKey ||
+          String(request.args[2]) !== buildMessageCountQuotaKeys(target).historyKey ||
           Number(request.args[1]) <= 1
         ) {
           return send(request, stream);
@@ -499,12 +633,13 @@ describeStores('native current-rule authorization across mirrored bot delivery',
       expect(committedAt).toBeLessThan(target!.deadlineAtMs);
       expect(isRedisCounterPreDispatchUnavailable(injected)).toBe(false);
       expect(mutatingCommands).toBe(1);
-      const state = await s.redis.get(target!.stateKey);
+      const targetKeys = buildMessageCountQuotaKeys(target!);
+      const state = await s.redis.get(targetKeys.decisionKey);
       expect(state).not.toBeNull();
-      for (const key of target!.membershipKeys) {
-        expect(await s.redis.zcard(key)).toBe(1);
-        expect(await s.redis.zscore(key, target!.member)).toBe(String(target!.revision));
-      }
+      expect(await s.redis.zcard(targetKeys.historyKey)).toBe(1);
+      expect(await s.redis.zscore(targetKeys.historyKey, targetKeys.member)).toBe(
+        String(target!.eventTimestampMs),
+      );
       const failed = await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id } });
       expect(failed.status).toBe('FAILED');
       expect(failed.errorMessage).toContain(injected.message);
@@ -519,8 +654,8 @@ describeStores('native current-rule authorization across mirrored bot delivery',
       await s.moderation.processWebhookEvent(id);
       expect(handler).toHaveBeenCalledTimes(1);
       expect(mutatingCommands).toBe(1);
-      expect(await s.redis.get(target!.stateKey)).toBe(state);
-      for (const key of target!.membershipKeys) expect(await s.redis.zcard(key)).toBe(1);
+      expect(await s.redis.get(targetKeys.decisionKey)).toBe(state);
+      expect(await s.redis.zcard(targetKeys.historyKey)).toBe(1);
       expect(await s.prisma.webhookEvent.findUniqueOrThrow({ where: { id } })).toMatchObject({
         status: 'FAILED',
         errorMessage: failed.errorMessage,

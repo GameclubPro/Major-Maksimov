@@ -30,6 +30,24 @@ try {
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
     const panel = page.locator('.settings-drilldown__panel--limits');
     await panel.waitFor({ state: 'visible' });
+    await panel
+      .getByRole('button', { name: 'Пояснение для лимита сообщений', exact: true })
+      .click();
+    const countHint = panel.locator('#message-count-limit-hint');
+    await countHint.waitFor({ state: 'visible' });
+    assert.match(await countHint.innerText(), /Редактирование не расходует\s+лимит/u);
+    assert.match(await countHint.innerText(), /Попытки сверх лимита не продлевают ожидание/u);
+    assert.match(await countHint.innerText(), /фото одного альбома — как одна публикация/u);
+    await countHint.scrollIntoViewIfNeeded();
+    assert.equal(
+      await countHint.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+      true,
+    );
+    await page.screenshot({ path: join(screenshotDir, `${name}-count-hint.png`) });
+    await panel
+      .getByRole('button', { name: 'Пояснение для лимита сообщений', exact: true })
+      .click();
+    assert.equal(await countHint.count(), 0);
     const phones = panel.getByRole('checkbox', { name: 'Разрешить номера телефонов', exact: true });
     const explanation = panel.getByRole('checkbox', {
       name: 'Включить сообщение от бота для ограничений сообщений',
