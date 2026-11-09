@@ -377,12 +377,32 @@ test('requires duplicate, DELETE handoff, interval, Publisher, OCR, retention an
   assert.match(api, /MAXIM_TEST_REDIS_URL: redis:\/\/127\.0\.0\.1:6379/u);
   assert.match(
     api,
-    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|moderation-delete-intent-handoff\.redis-integration\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
+    /run: npm test --workspace @maxim\/api -- 'message-duplicate\|photo-duplicate-history\.redis\|rule-engine-media-cooldown\.redis\|traffic-protection\.redis\|publisher-dispatch-health\.redis\|chat-context-cache\.redis\|moderation-delete-intent-handoff\.redis-integration\|publisher-refresh-operation\.redis\|publisher-access-refresh\.redis\|publisher-suggestion-admin\[\.\]redis-integration\[\.\]spec\[\.\]ts\$\|publisher-auto-reply-\(backlog-quota\|flood-gate\)\\\.redis-integration\\\.spec\\\.ts\$\|commercial-ocr-admission\.redis\|marketplace-publisher-access\.redis\|statistics-access-demand\.redis-integration\|retention-priority-admission\.redis-integration\|message-retention-admission\.redis-integration\|commercial-llm-workstation'/u,
   );
   assert.doesNotMatch(api, /continue-on-error/u);
   const redis = parse(workflow).jobs.api.steps.find((step) => step.env?.MAXIM_TEST_REDIS_URL);
   assert.equal(redis.if, "matrix.part == 'checks'");
   assert.equal(parse(workflow).jobs.api.if, "needs.impact.outputs.api == 'true'");
+});
+
+test('runs Publisher suggestion review queue regressions in the blocking Redis lane', () => {
+  const step = parse(workflow).jobs.api.steps.find((value) => value.env?.MAXIM_TEST_REDIS_URL);
+  const pattern = step?.run.match(/^npm test --workspace @maxim\/api -- '([^']+)'$/u)?.[1];
+  assert.ok(pattern, 'Expected the public Redis test command');
+  const selection = new RegExp(pattern, 'u');
+  const path = resolve(
+    root,
+    'apps/api/src/admin/publisher-suggestion-admin.redis-integration.spec.ts',
+  );
+  assert.ok(statSync(path).isFile(), 'Missing Publisher suggestion native suite');
+  assert.ok(selection.test(path), 'Publisher suggestion queue regressions must execute with Redis');
+  assert.equal(selection.test(`${path}.disabled`), false);
+  assert.equal(
+    selection.test(
+      path.replace('publisher-suggestion-admin.', 'publisher-suggestion-admin-other.'),
+    ),
+    false,
+  );
 });
 
 test('selects Publisher auto-reply native Redis suites without widening their filenames', () => {

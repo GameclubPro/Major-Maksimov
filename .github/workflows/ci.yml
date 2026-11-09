@@ -161,7 +161,7 @@ jobs:
         if: matrix.part == 'checks'
         env:
           MAXIM_TEST_REDIS_URL: redis://127.0.0.1:6379
-        run: npm test --workspace @maxim/api -- 'message-duplicate|photo-duplicate-history.redis|rule-engine-media-cooldown.redis|traffic-protection.redis|publisher-dispatch-health.redis|chat-context-cache.redis|moderation-delete-intent-handoff.redis-integration|publisher-refresh-operation.redis|publisher-access-refresh.redis|publisher-auto-reply-(backlog-quota|flood-gate)\.redis-integration\.spec\.ts$|commercial-ocr-admission.redis|marketplace-publisher-access.redis|statistics-access-demand.redis-integration|retention-priority-admission.redis-integration|message-retention-admission.redis-integration|commercial-llm-workstation'
+        run: npm test --workspace @maxim/api -- 'message-duplicate|photo-duplicate-history.redis|rule-engine-media-cooldown.redis|traffic-protection.redis|publisher-dispatch-health.redis|chat-context-cache.redis|moderation-delete-intent-handoff.redis-integration|publisher-refresh-operation.redis|publisher-access-refresh.redis|publisher-suggestion-admin[.]redis-integration[.]spec[.]ts$|publisher-auto-reply-(backlog-quota|flood-gate)\.redis-integration\.spec\.ts$|commercial-ocr-admission.redis|marketplace-publisher-access.redis|statistics-access-demand.redis-integration|retention-priority-admission.redis-integration|message-retention-admission.redis-integration|commercial-llm-workstation'
       - name: Save API shard result
         if: always() && matrix.part != 'checks'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

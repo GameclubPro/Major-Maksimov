@@ -107,6 +107,38 @@ describe('suggestion subscription admission', () => {
       expect.objectContaining({ botId: 'publik' }),
     );
   });
+
+  it.each(['queued', 'direct'] as const)(
+    'returns the structured subscription refusal through the %s Publisher path',
+    async (path) => {
+      const f = fixture();
+      if (path === 'direct') f.bots.getBotById.mockReturnValue({ id: 'publik' } as never);
+      f.queue.checkSubscription.mockResolvedValue(false);
+      f.max.getChatMembersAccess.mockResolvedValue(new Map());
+
+      await expect(f.service.assertCanSubmit('-1', 'user', 'publisher')).rejects.toMatchObject({
+        response: { code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' },
+      });
+
+      expect(f.prisma.suggestionSubscriptionPublication.upsert).not.toHaveBeenCalled();
+      expect(f.prisma.suggestionSubscriptionWatch.upsert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([403, 404, 429, 500])(
+    'preserves an unknown Publisher MAX %s response as retryable verification failure',
+    async (status) => {
+      const f = fixture();
+      f.bots.getBotById.mockReturnValue({ id: 'publik' } as never);
+      f.max.getChatMembersAccess.mockRejectedValue({ response: { status } });
+
+      await expect(f.service.assertCanSubmit('-1', 'user', 'publisher')).rejects.toBeInstanceOf(
+        ServiceUnavailableException,
+      );
+      expect(f.queue.checkSubscription).not.toHaveBeenCalled();
+      expect(f.prisma.suggestionSubscriptionPublication.upsert).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('suggestion subscription deletion authority', () => {

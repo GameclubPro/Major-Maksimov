@@ -6,12 +6,15 @@
 - Publik module settings: `channelSuggestionsRequireSubscription` and `channelSuggestionsDeleteOnUnsubscribe`.
 - Both default to false and are independently configured per channel, not globally enabled during deploy.
 - Submission checks cover Major private-bot and mini app submissions and Publik mini app submissions. Admin approval rechecks the requirement. A signed dialog link does not bypass membership.
+- Publik approval checks the original author's subscription separately from the reviewing administrator's durable access. `SUGGESTION_SUBSCRIPTION_REQUIRED` produces an author-subscription notification, never an administrator-rights error. A refusal leaves the suggestion pending without a publication claim. Cancellation and already accepted claims retain their existing authority.
+- Terminal private-button review refusals log `Publisher suggestion review rejected` with the suggestion/bot identity, action, HTTP status and a fixed reason (`author_subscription_required`, `administrator_access_required`, `review_conflict` or `request_rejected`). No raw exception, author/editor identity or post content is logged. Temporary verification failures remain retryable and do not revoke rights.
 - MAX errors mean unknown membership: reject new restricted submissions with a retryable error and perform no subscription-driven deletion.
 - Deletion covers only confirmed suggestion publications enrolled while the deletion option was enabled. No historical backfill, channel member listing, or audit-log scan is performed. Publik suggestions converted to drafts are independent editor-owned publications and are not enrolled.
 - Turning deletion off pauses existing watches and cancels dispatch authority. Re-enabling resumes already enrolled posts. An administrator's explicit Publication deletion schedule remains independent.
 
 ## Execution And Budgets
 
+- The blocking API Redis CI lane runs the Publisher suggestion review queue regressions with real Redis, including terminal refusal and retryable verification failure.
 - `api-admin` cannot read the Publik token. Its targeted submission checks use the existing `publisher-suggestion-admin` queue, bounded to 100 outstanding jobs, one attempt, an eight-second deadline, and 30-second result retention. `api-publisher` is the sole consumer.
 - `SuggestionSubscriptionMonitorService` runs in `api-action` for Major and `api-publisher` for Publik. No new runtime role or queue is needed. Publisher dispatch-off disables its monitor; identity, health and background coordination remain mandatory.
 - One durable watch per channel/author/profile/bot consolidates all enrolled posts. A 30-second timer selects at most 25 due watches by `(profile, next_check_at, id)`, under the existing background governor and a ten-second sweep budget. A slow decision selects one watch.
@@ -55,7 +58,8 @@ requires the normal typed-journal and queue-fence adoption workflow.
 Focused checks:
 
 ```sh
-npm test --workspace @maxim/api -- suggestion-subscription publisher-suggestion publisher-publication-post-actions
+node scripts/agent/focused.mjs --test apps/api/src/suggestions/suggestion-subscription.service.spec.ts --test apps/api/src/admin/publisher-suggestion.service.spec.ts --test apps/api/src/admin/publisher-suggestion-admin.processor.spec.ts
+node scripts/agent/with-test-stores.mjs --migrate -- node scripts/agent/focused.mjs --test apps/api/src/admin/publisher-suggestion-admin.redis-integration.spec.ts
 npm run test:contracts
 npm run check:prisma
 ```

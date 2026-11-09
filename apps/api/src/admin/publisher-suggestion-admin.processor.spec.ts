@@ -1,11 +1,19 @@
 import type { Job } from 'bullmq';
 import {
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import {
   ChannelSuggestionAdminDeliveryStatus,
   ManagedEntityAccessRole,
   ManagedEntityAccessState,
 } from '../prisma/prisma-client';
 import type { PublisherSuggestionAdminJob } from '../publisher/publisher-suggestion-admin.queue';
 import { PublisherSuggestionAdminProcessor } from './publisher-suggestion-admin.processor';
+import type { PublisherSuggestionService } from './publisher-suggestion.service';
 
 function createFixture() {
   const prisma = {
@@ -28,7 +36,10 @@ function createFixture() {
     syncPublisherSuggestionAdminReviewMessages: jest.fn().mockResolvedValue(undefined),
   };
   const suggestions = {
-    review: jest.fn(),
+    review: jest.fn<
+      ReturnType<PublisherSuggestionService['review']>,
+      Parameters<PublisherSuggestionService['review']>
+    >(),
   };
   const queue = {
     enqueueSync: jest.fn().mockResolvedValue(undefined),
@@ -132,17 +143,20 @@ describe('PublisherSuggestionAdminProcessor', () => {
   const originalRole = process.env.APP_ROLE;
   const originalServiceName = process.env.APP_SERVICE_NAME;
   const originalPublisherBotId = process.env.MAX_PUBLISHER_BOT_ID;
+  let warning: jest.SpyInstance;
 
   beforeEach(() => {
     process.env.APP_ROLE = 'publisher';
     process.env.APP_SERVICE_NAME = 'api-publisher';
     process.env.MAX_PUBLISHER_BOT_ID = 'publisher-bot';
+    warning = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
     restoreEnv('APP_ROLE', originalRole);
     restoreEnv('APP_SERVICE_NAME', originalServiceName);
     restoreEnv('MAX_PUBLISHER_BOT_ID', originalPublisherBotId);
+    jest.restoreAllMocks();
   });
 
   it('refuses the dedicated queue outside api-publisher before running guards or domain work', async () => {
@@ -196,7 +210,7 @@ describe('PublisherSuggestionAdminProcessor', () => {
     );
   });
 
-  it('reviews only an exactly bound SENT card after a live admin recheck, acknowledges it, and enqueues terminal sync', async () => {
+  it('reviews only an exactly bound SENT card with a durable admin grant, acknowledges it, and enqueues terminal sync', async () => {
     const fixture = createFixture();
     fixture.prisma.auditLog.findFirst.mockResolvedValue({
       id: 'publisher-suggestion-1',
@@ -207,7 +221,16 @@ describe('PublisherSuggestionAdminProcessor', () => {
       new Map([['101', { isAdmin: true, isOwner: false }]]),
     );
     fixture.suggestions.review.mockResolvedValue({
-      suggestion: { reviewStatus: 'published' },
+      suggestion: {
+        id: 'publisher-suggestion-1',
+        text: 'Suggestion',
+        textFormat: 'plain',
+        authorDisplayName: null,
+        createdAt: '2026-09-01T18:00:00.000Z',
+        reviewStatus: 'published',
+        publicationId: 'publication-1',
+        imageCount: 0,
+      },
     });
 
     await fixture.processor.process(reviewJob());
@@ -275,6 +298,125 @@ describe('PublisherSuggestionAdminProcessor', () => {
       },
     );
   });
+
+  it.each([
+    new ForbiddenException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED', message: 'private detail' }),
+    new HttpException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' }, 403),
+  ])(
+    'explains the original author subscription refusal without denying the editor rights',
+    async (error) => {
+      const fixture = createFixture();
+      fixture.prisma.auditLog.findFirst.mockResolvedValue({
+        id: 'publisher-suggestion-1',
+        chatId: '-9001',
+      });
+      fixture.prisma.channelSuggestionAdminDelivery.findFirst.mockResolvedValue({
+        id: 'delivery-1',
+      });
+      fixture.suggestions.review.mockRejectedValue(error);
+
+      await expect(fixture.processor.process(reviewJob())).resolves.toBeUndefined();
+
+      expect(fixture.maxClient.answerCallback).toHaveBeenCalledWith(
+        'callback-1',
+        'Подписка автора предложки на канал не подтверждена. Включено требование подписки.',
+        undefined,
+        expect.objectContaining({ botId: 'publisher-bot', rateLimitEntityId: '7001' }),
+      );
+      expect(fixture.queue.enqueueSync).not.toHaveBeenCalled();
+      expect(warning).toHaveBeenCalledWith(
+        {
+          suggestionId: 'publisher-suggestion-1',
+          botId: 'publisher-bot',
+          action: 'publish',
+          statusCode: 403,
+          reason: 'author_subscription_required',
+        },
+        'Publisher suggestion review rejected',
+      );
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('private detail');
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('editor');
+    },
+  );
+
+  it.each([
+    [
+      new ForbiddenException('private detail'),
+      'administrator_access_required',
+      'Права администратора не подтверждены.',
+    ],
+    [
+      new ConflictException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' }),
+      'review_conflict',
+      'Состояние предложки уже изменилось.',
+    ],
+    [
+      new HttpException({ code: 'other', message: 'private detail' }, 400),
+      'request_rejected',
+      'Не удалось обработать предложку. Повторите позже.',
+    ],
+  ])(
+    'keeps other terminal review refusals distinct and logs only fixed metadata',
+    async (error, reason, notification) => {
+      const fixture = createFixture();
+      fixture.prisma.auditLog.findFirst.mockResolvedValue({
+        id: 'publisher-suggestion-1',
+        chatId: '-9001',
+      });
+      fixture.prisma.channelSuggestionAdminDelivery.findFirst.mockResolvedValue({
+        id: 'delivery-1',
+      });
+      fixture.suggestions.review.mockRejectedValue(error);
+
+      await expect(fixture.processor.process(reviewJob())).resolves.toBeUndefined();
+
+      expect(fixture.maxClient.answerCallback).toHaveBeenCalledWith(
+        'callback-1',
+        notification,
+        undefined,
+        expect.objectContaining({ botId: 'publisher-bot', rateLimitEntityId: '7001' }),
+      );
+      expect(warning).toHaveBeenCalledWith(
+        expect.objectContaining({ reason }),
+        'Publisher suggestion review rejected',
+      );
+      expect(JSON.stringify(warning.mock.calls)).not.toContain('private detail');
+      expect(fixture.queue.enqueueSync).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    new ServiceUnavailableException('private MAX failure'),
+    new HttpException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' }, 429),
+    Object.assign(new Error('private failure'), {
+      code: 'SUGGESTION_SUBSCRIPTION_REQUIRED',
+      status: 403,
+    }),
+  ])(
+    'preserves retryable failures and never treats an untyped code as a subscription denial',
+    async (error) => {
+      const fixture = createFixture();
+      fixture.prisma.auditLog.findFirst.mockResolvedValue({
+        id: 'publisher-suggestion-1',
+        chatId: '-9001',
+      });
+      fixture.prisma.channelSuggestionAdminDelivery.findFirst.mockResolvedValue({
+        id: 'delivery-1',
+      });
+      fixture.suggestions.review.mockRejectedValue(error);
+
+      await expect(fixture.processor.process(reviewJob())).rejects.toBe(error);
+
+      expect(fixture.maxClient.answerCallback).toHaveBeenCalledWith(
+        'callback-1',
+        'Не удалось обработать предложку. Повторите позже.',
+        undefined,
+        expect.objectContaining({ botId: 'publisher-bot', rateLimitEntityId: '7001' }),
+      );
+      expect(warning).not.toHaveBeenCalled();
+      expect(fixture.queue.enqueueSync).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects a callback whose admin, bot, dialog, or message does not bind to a SENT card', async () => {
     const fixture = createFixture();

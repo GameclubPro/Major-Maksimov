@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
+import { ForbiddenException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import {
   PUBLISHER_SUGGESTION_ADMIN_QUEUE,
   type PublisherSuggestionAdminJob,
 } from '../publisher/publisher-suggestion-admin.queue';
 import { PublisherSuggestionAdminProcessor } from './publisher-suggestion-admin.processor';
+import type { PublisherSuggestionService } from './publisher-suggestion.service';
 
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
 const integration = redisUrl ? describe : describe.skip;
@@ -17,6 +19,7 @@ integration('Publisher suggestion retries retain bounded diagnostics on real Bul
   const oldService = process.env.APP_SERVICE_NAME;
 
   beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const url = new URL(redisUrl);
     if (!['localhost', '127.0.0.1'].includes(url.hostname))
       throw new Error('Disposable local Redis required');
@@ -41,7 +44,101 @@ integration('Publisher suggestion retries retain bounded diagnostics on real Bul
     else process.env.APP_ROLE = oldRole;
     if (oldService === undefined) delete process.env.APP_SERVICE_NAME;
     else process.env.APP_SERVICE_NAME = oldService;
+    jest.restoreAllMocks();
   });
+
+  it.each(['author_subscription', 'administrator_access', 'verification_unavailable'] as const)(
+    'retains the real queue completion and retry boundary for %s review failures',
+    async (reason) => {
+      const failure =
+        reason === 'verification_unavailable'
+          ? new ServiceUnavailableException('Synthetic membership outage')
+          : new ForbiddenException({ code: 'SUGGESTION_SUBSCRIPTION_REQUIRED' });
+      const suggestions = {
+        review: jest
+          .fn<
+            ReturnType<PublisherSuggestionService['review']>,
+            Parameters<PublisherSuggestionService['review']>
+          >()
+          .mockRejectedValue(failure),
+      };
+      const callbacks = { answerCallback: jest.fn().mockResolvedValue(undefined) };
+      const sync = { enqueueSync: jest.fn() };
+      const processor = new PublisherSuggestionAdminProcessor(
+        {
+          auditLog: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-suggestion', chatId: '-1' }),
+          },
+          channelSuggestionAdminDelivery: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'synthetic-card' }),
+          },
+          managedEntityAccessEdge: {
+            findFirst: jest
+              .fn()
+              .mockResolvedValue(reason === 'administrator_access' ? null : { chatId: '-1' }),
+          },
+        } as never,
+        callbacks as never,
+        {} as never,
+        suggestions as never,
+        sync as never,
+        { assertAttested: jest.fn() } as never,
+        { assertDispatchAllowed: jest.fn() } as never,
+        { assertDispatchEnabled: jest.fn() } as never,
+        { getBotId: () => 'publisher-test' } as never,
+      );
+      const data: PublisherSuggestionAdminJob = {
+        version: 1,
+        kind: 'review',
+        suggestionId: 'synthetic-suggestion',
+        requiredBotId: 'publisher-test',
+        action: 'publish',
+        actor: {
+          userId: '101',
+          username: null,
+          displayName: null,
+          avatarUrl: null,
+          profileUrl: null,
+        },
+        callbackId: 'synthetic-callback',
+        privateChatId: '101',
+        messageId: 'synthetic-card',
+        webhookEventId: 'synthetic-event',
+        updateId: 'synthetic-update',
+        requestedAt: new Date().toISOString(),
+      };
+      const stored = await queue.add('review', data, { attempts: 2, removeOnComplete: false });
+      const job = (await worker.getNextJob('review-attempt'))!;
+
+      if (reason === 'verification_unavailable') {
+        await expect(processor.process(job, 'review-attempt')).rejects.toBe(failure);
+        await job.moveToFailed(failure, 'review-attempt', false);
+      } else {
+        await processor.process(job, 'review-attempt');
+        await job.moveToCompleted(undefined, 'review-attempt', false);
+      }
+
+      const retained = (await queue.getJob(stored.id!))!;
+      expect(retained.data).toEqual(data);
+      expect(retained.opts.attempts).toBe(2);
+      expect(await retained.getState()).toBe(
+        reason === 'verification_unavailable' ? 'waiting' : 'completed',
+      );
+      expect(retained.attemptsMade).toBe(1);
+      expect(sync.enqueueSync).not.toHaveBeenCalled();
+      expect(suggestions.review).toHaveBeenCalledTimes(reason === 'administrator_access' ? 0 : 1);
+      expect(callbacks.answerCallback).toHaveBeenCalledWith(
+        'synthetic-callback',
+        reason === 'author_subscription'
+          ? 'Подписка автора предложки на канал не подтверждена. Включено требование подписки.'
+          : reason === 'administrator_access'
+            ? 'Права администратора не подтверждены.'
+            : 'Не удалось обработать предложку. Повторите позже.',
+        undefined,
+        expect.objectContaining({ botId: 'publisher-test', rateLimitEntityId: '101' }),
+      );
+    },
+  );
 
   it.each(['guard', 'delivery'] as const)(
     'a retained job failing at %s sheds oversized stack diagnostics without changing its work or attempts',
