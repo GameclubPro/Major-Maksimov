@@ -129,6 +129,15 @@ exact runtime identities, released queues and no remaining operation actors or c
 Missing or changed evidence refuses recovery. This does not establish a recorded child exit,
 successful source admission or completion of the interrupted release.
 
+The parent directory may also contain older owner-private regular files. These remain opaque:
+the observer accepts only single-link `0600` files no larger than 64 KiB, with finite metadata
+times strictly before the owner and no modification time after their change time. It binds
+their sorted filename hashes and explicit metadata to the proof through a count and digest,
+without reading their contents or returning their names. Recent files, unsafe metadata,
+symlinks and other entry types refuse recovery. Operation directories retain their original
+ownership, `0700` mode and unique owner-window checks; the selected directory still has exactly
+its two pinned artifacts.
+
 All fourteen API generations and photo native must predate the owner. OCR must retain its
 original pre-owner container and exact image, with fresh health and the strict networkless,
 secretless isolation profile. Its latest process start and restart count are recorded and
