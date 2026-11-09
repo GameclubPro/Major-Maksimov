@@ -175,6 +175,15 @@ roles and both auxiliaries, fences all twenty-four webhook queues, and captures 
 bounded stable inventory. It does not install dispositions. A refused cold preview
 leaves the operation fenced; inspect the journal and use its exact recovery path.
 
+The host captures only the store credentials and optional internal Lastik hold-control
+pair from the exact admin generation. The cold client validates that complete private
+capture, then passes only the credentials needed by its phase through named Docker
+environment variables. Admission, inventory, queue control, absence checks, certificate
+creation, materialization and readback receive only PostgreSQL/Redis credentials.
+Only a store `install` or session batch `install` receives the captured Lastik control
+pair, preserving confirmation of independent source holds before installation.
+Credential values stay out of command arguments; no MAX bot token is forwarded.
+
 ## Several certificates in one maintenance session
 
 `infra/scripts/source-abandonment-session-cli.mjs` coordinates a complete finite

@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { assertLegacyColdStopped } from './legacy-cold-protocol.mjs';
+import { parseLegacyColdStoreEnvironment } from './legacy-cold-environment.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const digest = /^[0-9a-f]{64}$/u;
@@ -141,15 +142,27 @@ export function createLegacyColdClient({
       if (Buffer.byteLength(input) > (batch ? 256 : 64) * 1024 || request?.version !== 1)
         throw new Error('client_request_budget');
       privateFile(environmentFile, 16 * 1024, uid);
-      const environment = readFileSync(environmentFile, 'utf8').trimEnd().split('\n');
-      const keys = environment.map((line) => line.slice(0, line.indexOf('=')));
-      if (
-        new Set(keys).size !== keys.length ||
-        !keys.includes('DATABASE_URL') ||
-        keys.some((key) => !['DATABASE_URL', 'REDIS_URL'].includes(key)) ||
-        environment.some((line) => /[\r\0]/u.test(line) || !/^[A-Z_]+=\S+$/u.test(line))
-      )
+      let capturedEnvironment;
+      try {
+        capturedEnvironment = parseLegacyColdStoreEnvironment(
+          readFileSync(environmentFile, 'utf8'),
+        );
+      } catch {
         throw new Error('client_environment_not_allowlisted');
+      }
+      // FLAG: Only installation synchronizes independent Lastik holds. Keep its
+      // control pair out of every collector and readback, including ambient values.
+      const credentialNames = ['DATABASE_URL', 'REDIS_URL'];
+      if (
+        ((kind === 'store' && request.operation === 'install') ||
+          (batch && request.phase === 'install')) &&
+        capturedEnvironment.ERASER_CONTROL_URL !== undefined
+      )
+        credentialNames.push('ERASER_CONTROL_URL', 'ERASER_CONTROL_TOKEN');
+      const dockerEnvironment = { ...process.env };
+      for (const key of ['DATABASE_URL', 'REDIS_URL', 'ERASER_CONTROL_URL', 'ERASER_CONTROL_TOKEN'])
+        delete dockerEnvironment[key];
+      for (const key of credentialNames) dockerEnvironment[key] = capturedEnvironment[key];
       if (kind === 'store') privateFile(inventoryPath, 8 * 1024 * 1024, uid);
       let batchTimeout;
       if (batch) {
@@ -242,8 +255,7 @@ export function createLegacyColdClient({
         `${uid}:${gid}`,
         '--tmpfs',
         '/tmp:rw,size=16m,mode=1777',
-        '--env-file',
-        environmentFile,
+        ...credentialNames.flatMap((key) => ['--env', key]),
         '--env',
         `APP_SOURCE_SHA=${sourceSha}`,
         '--env',
@@ -317,7 +329,7 @@ export function createLegacyColdClient({
       let failed = false;
       try {
         attestColdSession();
-        const id = run(args);
+        const id = run(args, { env: dockerEnvironment });
         if (!digest.test(id)) throw new Error('client_create_identity_unproved');
         ownedId = id;
         const created = inspectOwned(id);

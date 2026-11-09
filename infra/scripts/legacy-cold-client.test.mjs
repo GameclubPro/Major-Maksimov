@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { createLegacyColdClient } from './legacy-cold-client.mjs';
+import { legacyColdStoreEnvironment } from './legacy-cold-host.mjs';
 import { LEGACY_COLD_API_SERVICES } from './multibot-legacy-cold-recovery.mjs';
 
 function fixture(t, options = {}) {
@@ -296,6 +297,193 @@ function batchRequest(phase = 'install') {
     items: [{ inventoryIndex: 0, request: { operation: 'readback' } }],
   };
 }
+
+const scopedCredentialNames = [
+  'DATABASE_URL',
+  'REDIS_URL',
+  'ERASER_CONTROL_URL',
+  'ERASER_CONTROL_TOKEN',
+];
+const capturedStores = {
+  DATABASE_URL: 'postgresql://captured.fixture/private-db',
+  REDIS_URL: 'redis://captured.fixture/6',
+};
+const capturedControl = {
+  ERASER_CONTROL_URL: 'http://eraser:3000',
+  ERASER_CONTROL_TOKEN: 'captured-control-'.padEnd(64, 'c'),
+};
+
+function withAmbientCredentials(callback) {
+  const ambient = {
+    DATABASE_URL: 'postgresql://ambient.fixture/never-use',
+    REDIS_URL: 'redis://ambient.fixture/9',
+    ERASER_CONTROL_URL: 'http://ambient.invalid',
+    ERASER_CONTROL_TOKEN: 'ambient-control-'.padEnd(64, 'a'),
+    MAX_BOT_TOKEN: 'ambient-max-token-must-not-reach-the-container',
+  };
+  const before = Object.fromEntries(Object.keys(ambient).map((key) => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, ambient);
+    callback(ambient);
+    for (const [key, value] of Object.entries(ambient)) assert.equal(process.env[key], value);
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function assertCredentialProjection(h, expected, ambient) {
+  const create = h.calls.find(({ args }) => args[0] === 'create');
+  assert.ok(create, 'the validated captured environment must reach Docker creation');
+  assert.equal(create.args.includes('--env-file'), false);
+  const passedNames = create.args.flatMap((value, index, args) =>
+    value === '--env' ? [args[index + 1]] : [],
+  );
+  const scopedNames = passedNames.filter((name) => scopedCredentialNames.includes(name));
+  assert.deepEqual([...scopedNames].sort(), Object.keys(expected).sort());
+  for (const key of scopedCredentialNames) {
+    assert.equal(Object.hasOwn(create.options.env, key), Object.hasOwn(expected, key));
+    assert.equal(create.options.env[key], expected[key]);
+  }
+  const containerEnvironment = Object.fromEntries(
+    passedNames.map((entry) => {
+      const separator = entry.indexOf('=');
+      return separator < 0
+        ? [entry, create.options.env[entry]]
+        : [entry.slice(0, separator), entry.slice(separator + 1)];
+    }),
+  );
+  assert.equal(Object.hasOwn(containerEnvironment, 'MAX_BOT_TOKEN'), false);
+  for (const value of [
+    ...Object.values(capturedStores),
+    ...Object.values(capturedControl),
+    ...Object.values(ambient),
+  ])
+    assert.equal(
+      create.args.some((argument) => argument.includes(value)),
+      false,
+    );
+  assert.equal(h.calls.filter(({ args }) => args[0] === 'create').length, 1);
+  assert.equal(h.calls.filter(({ args }) => args[0] === 'start').length, 1);
+  assert.equal(h.exists(), false);
+}
+
+const storePhases = ['certificate_create', 'install', 'readback', 'materialize'];
+for (const protocol of ['legacy', 'source-abandonment-v1']) {
+  const operations = [
+    { kind: 'admission', request: { version: 1, operation: 'admission_preview' } },
+    { kind: 'inventory', request: { version: 1, operation: 'inventory_preview' } },
+    ...storePhases.map((operation) => ({ kind: 'store', request: { version: 1, operation } })),
+    { kind: 'queues', request: { version: 1, operation: 'status' } },
+    ...(protocol === 'source-abandonment-v1'
+      ? [
+          {
+            kind: 'absence',
+            request: { version: 1, certificateId: '33333333-3333-4333-8333-333333333333' },
+          },
+        ]
+      : []),
+  ];
+  for (const { kind, request } of operations)
+    test(`${protocol} ${kind}/${request.operation ?? 'readback'} projects only its required captured credentials`, (t) => {
+      const h = fixture(t, { protocol });
+      const captured = legacyColdStoreEnvironment(
+        Object.entries({ ...capturedStores, ...capturedControl }).map(
+          ([key, value]) => `${key}=${value}`,
+        ),
+      );
+      writeFileSync(h.environmentFile, captured);
+      if (kind === 'queues') h.state.response = { queueCount: 24, pausedCount: 0, activeCount: 0 };
+      withAmbientCredentials((ambient) => {
+        h.client.invoke(kind, request);
+        assertCredentialProjection(
+          h,
+          {
+            ...capturedStores,
+            ...(kind === 'store' && request.operation === 'install' ? capturedControl : {}),
+          },
+          ambient,
+        );
+        assert.equal(readFileSync(h.environmentFile, 'utf8'), captured);
+        assert.equal(
+          h.calls.find(({ args }) => args[0] === 'start').options.input,
+          JSON.stringify(request),
+        );
+      });
+    });
+}
+
+for (const phase of ['install', 'materialize', 'readback'])
+  test(`source store batch/${phase} receives independent hold control only during installation`, (t) => {
+    const h = fixture(t, { protocol: 'source-abandonment-v1' });
+    const captured = legacyColdStoreEnvironment(
+      Object.entries({ ...capturedStores, ...capturedControl }).map(
+        ([key, value]) => `${key}=${value}`,
+      ),
+    );
+    writeFileSync(h.environmentFile, captured);
+    h.state.response = {
+      version: 1,
+      kind: 'source_abandonment_session_store_batch_result',
+      phase,
+      results: [{}],
+    };
+    const request = batchRequest(phase);
+    withAmbientCredentials((ambient) => {
+      h.client.invoke('source-store-batch', request);
+      assertCredentialProjection(
+        h,
+        { ...capturedStores, ...(phase === 'install' ? capturedControl : {}) },
+        ambient,
+      );
+      assert.equal(readFileSync(h.environmentFile, 'utf8'), captured);
+    });
+  });
+
+test('absent independent control remains absent for installation despite ambient credentials', (t) => {
+  const h = fixture(t, { protocol: 'source-abandonment-v1' });
+  const captured = legacyColdStoreEnvironment(
+    Object.entries(capturedStores).map(([key, value]) => `${key}=${value}`),
+  );
+  writeFileSync(h.environmentFile, captured);
+  withAmbientCredentials((ambient) => {
+    h.client.invoke('store', { version: 1, operation: 'install' });
+    assertCredentialProjection(h, capturedStores, ambient);
+    assert.equal(readFileSync(h.environmentFile, 'utf8'), captured);
+  });
+});
+
+for (const [name, extra] of [
+  ['partial control', ['ERASER_CONTROL_URL=http://eraser:3000']],
+  [
+    'invalid control token',
+    ['ERASER_CONTROL_URL=http://eraser:3000', 'ERASER_CONTROL_TOKEN=short'],
+  ],
+  [
+    'foreign control origin',
+    [
+      'ERASER_CONTROL_URL=https://external.invalid',
+      `ERASER_CONTROL_TOKEN=${capturedControl.ERASER_CONTROL_TOKEN}`,
+    ],
+  ],
+  ['duplicate store', [`DATABASE_URL=${capturedStores.DATABASE_URL}`]],
+  ['unknown MAX credential', ['MAX_BOT_TOKEN=must-not-be-forwarded']],
+])
+  test(`cold client refuses ${name} before any Docker call`, (t) => {
+    const h = fixture(t, { protocol: 'source-abandonment-v1' });
+    writeFileSync(
+      h.environmentFile,
+      `${[...Object.entries(capturedStores).map(([key, value]) => `${key}=${value}`), ...extra].join('\n')}\n`,
+    );
+    assert.throws(
+      () => h.client.invoke('admission', { version: 1, operation: 'admission_preview' }),
+      /client_environment_not_allowlisted/,
+    );
+    assert.equal(h.calls.length, 0);
+  });
+
 test('finite source writer batch mounts only the hash-bound harness and indexed inventory then removes the writer', (t) => {
   const h = fixture(t, { protocol: 'source-abandonment-v1' });
   h.state.response = {
@@ -511,7 +699,10 @@ test('MAX credentials, oversized stdin and unsafe input files are refused before
     () => h.client.invoke('store', { version: 1, input: 'x'.repeat(65_536) }),
     /request_budget/,
   );
-  writeFileSync(h.environmentFile, 'DATABASE_URL=postgresql://fixture/db\n');
+  writeFileSync(
+    h.environmentFile,
+    'DATABASE_URL=postgresql://fixture/db\nREDIS_URL=redis://fixture/0\n',
+  );
   chmodSync(h.inventoryPath, 0o644);
   assert.throws(
     () => h.client.invoke('store', { version: 1, operation: 'install' }),
