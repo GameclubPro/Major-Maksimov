@@ -17,6 +17,161 @@ function needsReply(text, history = []) {
   return route;
 }
 
+test('unspecified support openers ask about the task without unrelated module instructions', () => {
+  for (const text of [
+    'Здравствуйте, нужна помощь',
+    'Вы можете помочь?',
+    'Помогите',
+    'Не работает',
+  ]) {
+    needsReply(text);
+    assert.deepEqual(ids(text), ['support-dialogue', 'support-room', 'operator'], text);
+  }
+  for (const text of ['Привет', 'Всем привет!', 'Как дела?', 'Спасибо', 'Всё получилось, спасибо'])
+    assert.equal(router.classify(text).eligible, false, text);
+});
+
+test('generic help clarification accepts a named bot and keeps clarifying an unknown task', () => {
+  const history = [
+    user('Здравствуйте, нужна помощь'),
+    assistant('Помогу с ботами «Майор Максимов». С чем нужна помощь?'),
+  ];
+  needsReply('В Публике', history);
+  assert.ok(ids('В Публике', history).includes('publik'));
+  for (const text of ['Я администратор', 'Да']) {
+    needsReply(text, history);
+    assert.deepEqual(ids(text, history), ['support-dialogue', 'support-room', 'operator']);
+  }
+  for (const text of ['Спасибо', 'Всем хорошего дня!'])
+    assert.equal(router.classify(text, history).eligible, false, text);
+  assert.equal(
+    router.classify('В Публике', [...history, user('Всё решено, спасибо')]).eligible,
+    false,
+  );
+});
+
+test('stepwise and unresolved followups retain their support task and stop at completion', () => {
+  const history = [
+    user('Я администратор. Как запретить видео в моём чате?'),
+    assistant('В «Ограничениях» выключите разрешение видео и сохраните.'),
+  ];
+  for (const text of [
+    'Давай по шагам',
+    'По шагам, пожалуйста',
+    'Можно попроще?',
+    'Ничего не помогло',
+  ]) {
+    needsReply(text, history);
+    assert.ok(ids(text, history).includes('limits-attachments'), text);
+    assert.ok(!ids(text, history).includes('support-dialogue'), text);
+  }
+  assert.equal(router.classify('Давай по шагам').eligible, false);
+  assert.equal(
+    router.classify('Давай по шагам', [
+      ...history,
+      user('Спасибо, всё получилось'),
+      assistant('Рад помочь.'),
+    ]).eligible,
+    false,
+  );
+});
+
+test('audio attachment synonyms resolve to the actual message type controls', () => {
+  for (const text of [
+    'Как запретить аудиосообщения в чате?',
+    'Хочу запретить аудио в моём чате',
+    'Как разрешить войсы?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'limits-attachments', text);
+    assert.ok(!ids(text).includes('phone-numbers'), text);
+  }
+});
+
+test('MAX updates use reviewed freshness while API changes retain their technical scope', () => {
+  for (const text of [
+    'Что нового в MAX?',
+    'Какие последние обновления Макса?',
+    'Это актуальные данные MAX?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'max-platform-updates', text);
+    assert.ok(!ids(text).includes('publisher-import-max'), text);
+  }
+  assert.ok(ids('Что нового в API MAX?').includes('max-recent-api-changes'));
+  assert.equal(ids('Как добавить бота в MAX?').includes('max-platform-updates'), false);
+});
+
+test('API silent-send controls stay distinct from user notification preferences', () => {
+  for (const text of [
+    'Пишу бота: notify=false отключит push в канале?',
+    'Как через API отправить сообщение без уведомления?',
+  ]) {
+    assert.equal(needsReply(text).developer, true, text);
+    assert.equal(ids(text)[0], 'max-api-message-notifications', text);
+  }
+  const regular = 'Бот знает, включены ли у меня push-уведомления в MAX?';
+  assert.equal(needsReply(regular).developer, false);
+  assert.ok(ids(regular).includes('max-bot-notifications'));
+  assert.ok(!ids(regular).includes('max-api-message-notifications'));
+});
+
+test('VK source links and deletion use their own controls without ordinary post-editor steps', () => {
+  for (const text of [
+    'Как в Публике выбрать «Своя ссылка» для VK?',
+    'Как поставить свою ссылку в посте из ВК?',
+    'Хочу оставлять ссылку «Источник» на сайт в новых постах из VK. Как включить?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'publisher-vk-source-link', text);
+  }
+  for (const [text, expected] of [
+    ['Как в постах из VK включить первоисточник?', 'publisher-vk-source-link'],
+    ['Посты из VK: удалять ссылки включено, как оставить источник?', 'publisher-vk-source-link'],
+    ['Как настроить автоудаление публикаций из ВК через сутки?', 'publisher-vk-auto-delete'],
+    ['Как в Публике удалять посты из VK через 7 дней?', 'publisher-vk-auto-delete'],
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], expected, text);
+    assert.ok(!ids(text).includes('publisher-after-publish'), text);
+  }
+  assert.ok(
+    ids('Как в обычном посте Публика включить автоудаление?').includes('publisher-after-publish'),
+  );
+});
+
+test('chat shop recovery and storefront selection retrieve actual continuation controls', () => {
+  for (const text of [
+    'Подключение Каравана зависло: неясно, создался ли магазин. Начать заново?',
+    'Магазин чата: непонятно, закончено ли подключение. Что проверить?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'karavan-setup-recovery', text);
+  }
+  const text = 'Выбрал витрину, вижу «Выбор сохранён». Почему под старым объявлением нет кнопки?';
+  needsReply(text);
+  assert.equal(ids(text)[0], 'karavan-storefront-publishing');
+  const history = [
+    user(text),
+    assistant('Выбор сохранён ничего не отправляет. Отправьте отдельный $.'),
+  ];
+  const followup = 'Кнопка на $ пришла. Как разрешить её вызов только выбранным продавцам?';
+  needsReply(followup, history);
+  assert.ok(ids(followup, history).includes('karavan-storefront'));
+  assert.ok(!ids(followup, history).includes('karavan-chat-marketplace'));
+});
+
+test('commercial example checks retrieve the existing private preview tool', () => {
+  for (const text of [
+    'Как проверить, посчитает ли ИИ сообщение рекламой, без удаления в чате?',
+    'Реклама удаляет личную продажу, где проверить пример?',
+    'В «Проверить сообщение» написано «Недостаточно данных». Это значит, пост точно разрешён?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'commercial-message-preview', text);
+  }
+});
+
 test('a delivery followup retains the existing result alongside a new schedule task', () => {
   const history = [
     user(

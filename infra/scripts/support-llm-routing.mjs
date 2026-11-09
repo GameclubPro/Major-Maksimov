@@ -119,8 +119,21 @@ const actionRequest =
   /(?:^|[\s,.!])(?:закрой(?:те)?|закрывай(?:те)?|открой(?:те)?|включи(?:те)?|выключи(?:те)?|отключи(?:те)?|подключи(?:те)?|настрой(?:те)?|выставь(?:те)?|поставь(?:те)?|проверь(?:те)?|исправь(?:те)?|подтверди(?:те)?|покажи(?:те)?|расскаж(?:и|ите)|объясни(?:те)?|подскаж\p{L}*|дай(?:те)?|сделай(?:те)?|верни(?:те)?|найди(?:те)?|пришли(?:те)?|напиши(?:те)?|прими(?:те)?|поменяй(?:те)?|смени(?:те)?|замени(?:те)?|выгрузи(?:те)?|скачай(?:те)?|пригласи(?:те)?|удали(?:те)?|обнови(?:те)?|запусти(?:те)?|(?:о)?публикуй(?:те)?)(?![\p{L}])/iu;
 const unresolvedHelp =
   /не\s+(?:работа|заработ|открыва|пуска|получа|приход|могу|вижу|размещ|включ|сохраня|добавля|отправля|публику|загружа|появ|получил)|(?:все еще|по-прежнему|снова|опять|все равно).{0,30}(?:ошибк|сбо|удал|пропал|молчит)|(?:проблем|ошибк).{0,15}(?:остал|сохрани|не исчез)|недоступ|слетел/iu;
+const supportFollowup =
+  /по\s+шагам|пошагов|попроще|понятнее|подробнее|не\s+помогло|так\s+и\s+не\s+получилось/iu;
+const supportOpener = (text) =>
+  /^(?:нужна\s+помощь(?:\s+с\s+ботом)?|(?:вы\s+)?(?:можете|можешь)\s+помочь|помоги(?:те)?(?:,?\s+пожалуйста)?|подскажи(?:те)?|не\s+(?:работает|открывается))[.!?\s]*$/iu.test(
+    text.replace(/^(?:здравствуйте|здравствуй|привет)[,!\s]*(?:бот[,!\s]*)?/iu, ''),
+  );
+const platformUpdates = (text) =>
+  /\bmax\b|(?<![\p{L}])макс(?:а|е|у|ом)?(?![\p{L}])/iu.test(text) &&
+  /(?:что|какие).{0,20}(?:нов|измен|обнов)|последн.{0,15}(?:новост|обновлен|изменени)|актуальн.{0,20}(?:данн|справк|информац)/iu.test(
+    text,
+  );
+const storefrontPattern =
+  /караван|интернет.?витрин|магазин.{0,12}чат|витрин|ответ.{0,15}\$|\$.{0,25}(?:кнопк|продав|участник)|кнопк.{0,15}магазин/iu;
 const developerPattern =
-  /\bapi\b|разработ|webhook|longpoll|uploads|platform-api|\b(?:get|post|put|delete|patch)\s+\/|\/(?:chats|messages|uploads)(?:\/|\?|\b)/iu;
+  /\bapi\b|\bnotify\b|разработ|webhook|longpoll|uploads|platform-api|\b(?:get|post|put|delete|patch)\s+\/|\/(?:chats|messages|uploads)(?:\/|\?|\b)/iu;
 const commercialPattern =
   /(?<![\p{L}])ии(?![\p{L}])[\s-]*(?:модерац|анализ|реклам)|(?:реклам|объяв).{0,70}(?:(?<![\p{L}])ии(?![\p{L}])|искусственн)|(?:(?<![\p{L}])ии(?![\p{L}])|искусственн).{0,35}(?:реклам|модерир|фильтр|наблюдени)|наблюдени.{0,35}(?<![\p{L}])ии(?![\p{L}])|удалять рекламу|двойн.{0,6}проверк/iu;
 const subscriptionPattern =
@@ -152,7 +165,10 @@ const topicPatterns = [
   ],
   ['protection', /защит[ауые]|иммунитет/iu],
   ['links', /(?<![\p{L}])ссылк|домен|allowlist|whitelist/iu],
-  ['limits', /ограничен|длин.{0,15}сообщен|частот|флуд|антиспам|стикер|медленн.{0,8}режим/iu],
+  [
+    'limits',
+    /ограничен|длин.{0,15}сообщен|частот|флуд|антиспам|стикер|аудио|войс|медленн.{0,8}режим/iu,
+  ],
   ['reports', /жалоб|пожалова|жаловаться|\breport\b/iu],
   [
     'retention',
@@ -178,6 +194,8 @@ const topicPatterns = [
   ['commercial', commercialPattern],
   ['price', /цен[аыуе]|тариф|стоимост|платн|бесплат|оплат|сколько стоит/iu],
   ['developer', developerPattern],
+  ['max-updates', { test: platformUpdates }],
+  ['storefront', storefrontPattern],
 ];
 const topics = (text) =>
   topicPatterns.filter(([, pattern]) => pattern.test(text)).map(([id]) => id);
@@ -969,6 +987,9 @@ function semanticFacts(text, state) {
   const add = (id, priority = 50) => facts.push({ id, priority });
   const { publisherRequest: publ, developer, commercialAi, mixedTopics } = state;
   const test = (pattern) => pattern.test(text);
+  if (state.supportDialogue) return [{ id: 'support-dialogue', priority: 160 }];
+  if (platformUpdates(text))
+    add(developer ? 'max-recent-api-changes' : 'max-platform-updates', 160);
   if (
     test(/(?:что|какие).{0,35}(?:умеет|возможност|модули|функци)|обзор.{0,15}(?:проект|модул)/iu) &&
     test(/майор|проект|все.{0,10}модул|какие есть модули/iu)
@@ -991,11 +1012,19 @@ function semanticFacts(text, state) {
     add('duplicates-photo', 120);
   if (
     test(
-      /голосов|пересыл|переслан|тип.{0,10}(?:сообщен|вложен)|запрет.{0,15}(?:видео|файл|фото|стикер)/iu,
+      /голосов|аудио|войс|пересыл|переслан|тип.{0,10}(?:сообщен|вложен)|запрет.{0,15}(?:видео|файл|фото|стикер)/iu,
     ) &&
     test(/запрет|разреш|огранич|закрыть|выключ|отключ|тип.{0,10}(?:сообщен|вложен)/iu)
   )
     add('limits-attachments', 115);
+  if (
+    test(/проверить сообщение/iu) ||
+    (test(/реклам|коммерческ|разов.{0,15}продаж/iu) &&
+      test(
+        /провер.{0,60}(?:пример|посчитает|считается|сочтет|без удал)|(?:пример|сообщени).{0,35}проверить/iu,
+      ))
+  )
+    add('commercial-message-preview', 155);
   if (test(/жалоб/iu) && test(/истори|24 часа|меры|огранич|результат|журнал|отклон/iu))
     add('reports-outcomes', 120);
   if (test(/карточк.{0,15}участник|список участников|поиск.{0,12}участник|найти.{0,15}участник/iu))
@@ -1099,6 +1128,12 @@ function semanticFacts(text, state) {
     test(/\/chats\/[^\s]*members|добав.{0,20}(?:участник|подписчик)|метод.{0,30}подписчик/iu)
   )
     add('max-members-api-limits', 120);
+  if (
+    developer &&
+    (test(/\bnotify\b/iu) ||
+      (test(/отправ|редактир|\b(?:post|put)\b/iu) && test(/уведомлен|пуш|\bpush\b|тих/iu)))
+  )
+    add('max-api-message-notifications', 150);
   if (developer && test(/редактир|\bput\b|чуж.{0,12}(?:сообщен|пост)/iu))
     add('max-message-edit-scope', 115);
   if (developer && test(/изменени|changelog|webhook|longpoll|platform-api|\bget\s+\/chats/iu))
@@ -1416,11 +1451,20 @@ function semanticFacts(text, state) {
     if (test(/уведомлен|только ответы|остальные события/iu)) add('notifications', 110);
     else if (test(/комментари|обсужден/iu))
       add(test(/канал|под пост/iu) ? 'publisher-comments-channel' : 'comments', 100);
-    if (
-      test(
-        /\bvk\b|вконтакт|(?:^|\s)вк(?:\s|[.!?,]|$)|согласован.{0,15}личк|публиковать по очереди/iu,
+    const vkContext = test(
+      /\bvk\b|вконтакт|(?:^|\s)вк(?:\s|[.!?,]|$)|согласован.{0,15}личк|публиковать по очереди/iu,
+    );
+    const vkAutoDelete =
+      vkContext &&
+      test(/авто.?удал|(?:удал|убира).{0,35}(?:через|после|срок)|(?:срок|время).{0,20}удален/iu);
+    if (vkContext) {
+      if (
+        test(
+          /первоисточник|сво[яю]\s+ссылк|ссылк.{0,15}источник|(?:оставить|сохранить|добавить|включить).{0,30}(?:источник|ссылк.{0,15}источник)/iu,
+        )
       )
-    ) {
+        add('publisher-vk-source-link', 155);
+      if (vkAutoDelete) add('publisher-vk-auto-delete', 155);
       add(
         test(/согласован|личк|получатель:|получать посты мне|присылать посты|одобр/iu)
           ? 'vk-review'
@@ -1519,6 +1563,7 @@ function semanticFacts(text, state) {
     }
     if (test(/часов.{0,8}пояс|московск|время телефон/iu)) add('publisher-schedule-timezone', 110);
     if (
+      (!vkAutoDelete || test(/обычн.{0,20}пост|ручн.{0,20}пост|написать пост/iu)) &&
       test(
         /закреп|автоудал|автоматическ.{0,15}удален|удали.{0,15}автомат|сам[аио]?\s+удал|после публикац|удал.{0,80}после.{0,20}(?:выход|отправ|публикац)/iu,
       )
@@ -1578,9 +1623,11 @@ function semanticFacts(text, state) {
   if (test(/ночн/iu) && test(/публик/iu)) add('bots', 60);
   if (test(/комментари/iu) && !publ)
     add(test(/max|нативн/iu) ? 'max-native-channel-comments' : 'channel-settings', 100);
-  if (test(/караван|интернет.?витрин|магазин.{0,12}чат|витрин.{0,20}(?:доллар|\$)/iu)) {
+  if (storefrontPattern.test(text)) {
     add('karavan-storefront', 110);
-    const setupRecovery = test(/не подтверд|неизвестн|частичн|неопредел[её]н|продолжить подключ/iu);
+    const setupRecovery = test(
+      /не подтверд|неизвестн|частичн|неопредел[её]н|продолжить подключ|неясн|завис|непонятно.{0,30}(?:подключ|созда|законч)/iu,
+    );
     if (setupRecovery) add('karavan-setup-recovery', 145);
     if (
       (!setupRecovery || test(/(?:как|хочу|нужно).{0,15}создать/iu)) &&
@@ -1629,15 +1676,27 @@ export function createSupportRouter(knowledge) {
   function classify(text, history = []) {
     const ctx = conversation(text, history);
     const role = roleOf(ctx.current, ctx.recent);
+    const openerContext = ctx.recent.some(
+      (item) => item.role === 'user' && supportOpener(item.text),
+    );
+    const topicContext = ctx.recent.some(
+      (item) =>
+        (item.role === 'user' || !openerContext) &&
+        (domain.test(item.text) || topics(item.text).length || advert.test(item.text)),
+    );
+    const hasContext = topicContext || openerContext;
     const freshClarification =
       ctx.recent.at(-1)?.role === 'assistant' &&
       /\?|уточни|выберите|нужен|нужны/iu.test(ctx.recent.at(-1).text) &&
-      ctx.recent.some(
-        (item) => domain.test(item.text) || advert.test(item.text) || topics(item.text).length,
-      );
-    const hasContext = ctx.recent.some(
-      (item) => domain.test(item.text) || topics(item.text).length || advert.test(item.text),
-    );
+      hasContext;
+    const supportDialogue =
+      (!hasContext && supportOpener(ctx.current)) ||
+      (openerContext &&
+        freshClarification &&
+        !domain.test(ctx.current) &&
+        !topics(ctx.current).length &&
+        !advert.test(ctx.current) &&
+        !topicContext);
     const roleOnly =
       /^(?:(?:да|нет)[,.!\s]*)?(?:(?:я|мы|в|это|канал|чат)\s+)?(?:админ(?:истратор)?|владелец|участник|своем канале|моем чате|чужой группе|да|нет)[.!\s]*$/iu.test(
         ctx.current,
@@ -1667,7 +1726,9 @@ export function createSupportRouter(knowledge) {
       actionRequest.test(ctx.current) ||
       switchingModerator ||
       /дублиру|повторя|скоро|неизвестн.{0,15}(?:функц|возможност)/iu.test(ctx.current) ||
-      botDirectory;
+      botDirectory ||
+      (hasContext && supportFollowup.test(ctx.current)) ||
+      supportDialogue;
     const contextualReply = hasContext && (request || freshClarification);
     const keywords = new Set(words(ctx.current));
     const keywordHelp =
@@ -1686,6 +1747,7 @@ export function createSupportRouter(knowledge) {
           switchingModerator)) ||
         keywordHelp ||
         contextualReply ||
+        supportDialogue ||
         /^(?:цена|тарифы?|платно|бесплатно|не работает|не открывается|помогите|подскажите)[.!?\s]*$/iu.test(
           ctx.current,
         ));
@@ -1749,6 +1811,7 @@ export function createSupportRouter(knowledge) {
       eraserRequest,
       developer,
       commercialAi,
+      supportDialogue,
       aiIntents,
       botDirectory,
       botCatalogRequest,

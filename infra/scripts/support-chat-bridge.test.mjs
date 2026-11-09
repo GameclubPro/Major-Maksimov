@@ -231,6 +231,27 @@ test('followups use bounded context of the same participant', () => {
   assert.equal(history.users.size, 32);
 });
 
+test('bounded live history preserves the latest clarification and observation without the AI footer', () => {
+  const history = new PilotHistory();
+  const question = 'Какой результат появился после сохранения: ошибка или прежние настройки?';
+  history.push('alice', {
+    role: 'assistant',
+    text: `Проверьте выбранный чат. ${'Пояснение. '.repeat(70)}${question}\n\n${SUPPORT_ANSWER_FOOTER}`,
+  });
+  history.push('alice', {
+    role: 'user',
+    text: `Я сохранила настройки. ${'Подробность. '.repeat(60)}Ошибка: доступ запрещён.`,
+  });
+  const turns = history.read('alice');
+  assert.equal(turns.length, 2);
+  assert.ok(turns.every((turn) => turn.text.length <= 300));
+  assert.ok(turns[0].text.startsWith('Проверьте выбранный чат.'));
+  assert.ok(turns[0].text.endsWith(question));
+  assert.ok(!turns[0].text.includes(SUPPORT_ANSWER_FOOTER));
+  assert.ok(turns[1].text.endsWith('Ошибка: доступ запрещён.'));
+  assert.deepEqual(history.read('bob'), []);
+});
+
 test('bridge refuses unhealthy, mismatched or foreign containers', () => {
   const value = {
     Id: 'a'.repeat(64),

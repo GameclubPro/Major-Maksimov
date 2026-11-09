@@ -15,6 +15,20 @@ where needed, the implementing service. `projectReview` describes the module rev
 review fields identify newly checked instructions. Original MAX documentation retrieval dates
 remain separate and must not be refreshed without fetching those pages again.
 
+The owner's 9 November 2026 request retains support for the whole public project and adds concise
+conversational troubleshooting. The current review corrects the chat-shop setup, unified
+antiduplicate and participant controls, and adds VK source attribution/automatic deletion and the
+commercial-message preview. Generic support openers and contextual requests for steps need useful
+retrieval too; unrelated keyword matches cannot replace a clarification.
+Storefront caller access includes the separate «Добавить пользователя» handoff and its per-chat
+duration; seller admission and permission to request the bot's button remain distinct.
+
+Nineteen canonical official MAX pages were fetched on 9 November. Their resource hashes and
+HTTP modification times are recorded separately from product change dates. Selected official facts
+carry their verification date into inference; the assistant has a reviewed snapshot, without live
+account lookup. November's notification parameter clarification belongs to API questions;
+administrator answers do not acquire unnecessary developer details.
+
 | Area             | Covered customer modules                                                                                                                                                                                      |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Access           | Eight bots, moderator connection and selection, missing communities, mini app relaunch                                                                                                                        |
@@ -27,7 +41,7 @@ remain separate and must not be refreshed without fetching those pages again.
 | Channels         | Post action, quick buttons, comments in the application, suggestion intake and limits                                                                                                                         |
 | Communities      | Network composition, scoped settings application and per-target outcomes                                                                                                                                      |
 | Publisher        | Separate connection, posts, recipients, media, schedules and repeat, timezone, after-publication actions, delivery outcomes, MAX import, auto-replies, chat comments, VK review and automation, notifications |
-| Integrations     | Karavan storefront, chat-store setup and private publication choice, pilot marketplace profile and advertising placement in Svyazka                                                                            |
+| Integrations     | Karavan storefront, chat-store setup and private publication choice, pilot marketplace profile and advertising placement in Svyazka                                                                           |
 | Support          | Administrator incident evidence, participant advertisement redirection, operator handoff and unavailable live account state                                                                                   |
 
 The automated inventory comparison covers every section in
@@ -40,7 +54,7 @@ prove every possible question or every implementation field has been evaluated.
 
 - A visible setting is not proof that its enforcement is available. Invitation access cannot
   currently be activated; image checks and pilot integrations retain their availability conditions.
-- «Без сообщений» keeps a person in the chat while the bot deletes new messages for the selected
+- «Мут» keeps a person in the chat while the bot deletes new messages for the selected
   duration. Command defaults and the participant-card duration are separate. When MAX requires
   manual unblocking, the application's check does not perform that unblock.
 - Anonymous poll identities are hidden from administrators too. A poll has one current answer

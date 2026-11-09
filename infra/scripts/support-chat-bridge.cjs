@@ -213,6 +213,16 @@ class PilotFence {
   }
 }
 
+function supportHistoryText(text, role) {
+  const body =
+    role === 'assistant' && text.endsWith(`\n\n${ANSWER_FOOTER}`)
+      ? text.slice(0, -ANSWER_FOOTER.length - 2)
+      : text;
+  // FLAG: Keep the latest observation or clarifying question inside the existing history
+  // budget; clipping only the beginning silently loses the question a short reply answers.
+  return body.length <= 300 ? body : `${body.slice(0, 120)}\n…\n${body.slice(-177)}`;
+}
+
 class PilotHistory {
   constructor() {
     this.users = new Map();
@@ -223,7 +233,13 @@ class PilotHistory {
   push(userId, entry) {
     if (!this.users.has(userId) && this.users.size >= 32)
       this.users.delete(this.users.keys().next().value);
-    this.users.set(userId, [...this.read(userId), entry].slice(-6));
+    this.users.set(
+      userId,
+      [
+        ...this.read(userId),
+        { role: entry.role, text: supportHistoryText(entry.text, entry.role) },
+      ].slice(-6),
+    );
   }
 }
 
@@ -532,7 +548,7 @@ async function runBridge(runtime, { preview = false } = {}) {
             heartbeatAt: () => lastHeartbeat,
           });
           if (outcome === 'sent')
-            history.push(source.userId, { role: 'assistant', text: answer.text.slice(0, 300) });
+            history.push(source.userId, { role: 'assistant', text: answer.text });
           send({ type: 'settled', id: source.id, outcome });
         }
       }
@@ -562,7 +578,7 @@ async function runBridge(runtime, { preview = false } = {}) {
             issuedAt: Date.now(),
             deadline: source.timestamp + SOURCE_AGE_MS,
           });
-          history.push(source.userId, { role: 'user', text: source.text.slice(0, 300) });
+          history.push(source.userId, { role: 'user', text: source.text });
           break;
         }
       }
