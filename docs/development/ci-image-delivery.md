@@ -82,6 +82,11 @@ the tested image and a bounded identity record. Their artifact name includes SHA
 A separate GitHub-hosted registry job consumes that exact artifact after Docker succeeds. It:
 
 1. Loads the checksummed archive and compares source labels, platform, Docker image ID and size.
+   Before registry authentication or publication, prepares pinned Syft `v1.56.0` through the
+   same pinned action's `download-syft` entrypoint. Only installer/cache preparation retries:
+   at most three two-minute attempts, with 10/20-second delays after failure. A final failure
+   blocks publication. Preparation preserves upstream checksum verification; the subsequent
+   SBOM scan uses the same pinned tool from the action's local cache.
 2. Reads full package metadata for `ghcr.io/gameclubpro/major-maksimov-private-v1-COMPONENT` using
    the publication workflow's package credential. Before any Docker tag or push, it requires the
    exact container package name, private visibility and source repository ID/name binding.

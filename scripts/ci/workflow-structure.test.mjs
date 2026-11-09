@@ -53,6 +53,63 @@ test('image build and publication normalize the same default Docker store before
   }
 });
 
+test('registry prepares pinned Syft with bounded installer retries before image publication', () => {
+  const jobs = parse(workflow).jobs;
+  const steps = jobs.registry.steps;
+  const pin = 'e22c389904149dbc22b58101806040fa8d37a610';
+  const attempts = steps.filter((step) =>
+    step.uses?.startsWith('anchore/sbom-action/download-syft@'),
+  );
+  assert.equal(attempts.length, 3);
+  const load = steps.findIndex((step) => step.name === 'Load the exact smoke-tested image');
+  const auth = steps.findIndex((step) => step.name === 'Authenticate the isolated publication job');
+  const publish = steps.findIndex((step) => step.id === 'publish');
+  for (const [index, step] of attempts.entries()) {
+    assert.equal(step.id, `syft_prepare_${index + 1}`);
+    assert.equal(step.uses, `anchore/sbom-action/download-syft@${pin}`);
+    assert.deepEqual(step.with, { 'syft-version': 'v1.56.0' });
+    assert.equal(step['timeout-minutes'], 2);
+    assert.equal(step['continue-on-error'], index < 2 ? true : undefined);
+    assert.equal(
+      step.if,
+      index === 0 ? undefined : `steps.syft_prepare_${index}.outcome == 'failure'`,
+    );
+    assert.ok(steps.indexOf(step) > load);
+    assert.ok(steps.indexOf(step) < auth);
+    if (index > 0) {
+      const delay = steps[steps.indexOf(step) - 1];
+      assert.equal(delay.if, step.if);
+      assert.equal(delay.run, `sleep ${index * 10}`);
+      assert.equal(delay['timeout-minutes'], 1);
+      assert.equal(delay['continue-on-error'], undefined);
+      assert.ok(steps.indexOf(delay) > steps.indexOf(attempts[index - 1]));
+    }
+  }
+  assert.ok(auth < publish);
+  assert.equal(steps[auth].if, undefined);
+  assert.equal(steps[publish].if, undefined);
+  const scans = steps.filter((step) => step.uses === `anchore/sbom-action@${pin}`);
+  assert.equal(scans.length, 1);
+  const scan = scans[0];
+  assert.ok(steps.indexOf(scan) > publish);
+  assert.equal(scan.if, undefined);
+  assert.equal(scan['continue-on-error'], undefined);
+  assert.deepEqual(scan.with, {
+    image: 'docker:${{ matrix.image_repository }}:${{ github.sha }}',
+    format: 'spdx-json',
+    'output-file': 'image.spdx.json',
+    'syft-version': 'v1.56.0',
+    'upload-artifact': false,
+    'upload-release-assets': false,
+    'dependency-snapshot': false,
+  });
+  for (const step of steps) {
+    if (!attempts.slice(0, 2).includes(step)) assert.equal(step['continue-on-error'], undefined);
+  }
+  assert.equal(jobs.registry['continue-on-error'], undefined);
+  assert.ok(jobs.required.needs.includes('registry'));
+});
+
 test('registry attestations receive standard Docker auth and always restore it before source cleanup', () => {
   const jobs = parse(workflow).jobs;
   assert.equal(jobs.registry['runs-on'], 'ubuntu-latest');
