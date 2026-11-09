@@ -102,10 +102,21 @@ bundle. Knowledge digests must match across the PC and host.
 The owner-reviewed group onboarding cards are represented by two `onboardingGuides` entries:
 11 moderator cards and 11 Publik cards. The catalog retains only reviewed source references,
 ordered MAX photo identities and content digests. Original images, chat exports, CDN URLs and
-media tokens stay outside Git. The helper may select one symbolic guide ID for a clear eligible
-group setup request; channels, Lastik, troubleshooting, already completed setup and unrelated
-conversation do not automatically receive these group cards. Moderator cards use Major as their
-example; another moderator must use its own verified profile.
+media tokens stay outside Git. The owner's 10 November 2026 correction requires a pack for every
+eligible question about connecting or adding a project bot. Publik selects its own pack;
+moderators and an unnamed bot select the first pack. An explicit request such as «А где картинки?»
+may continue the latest confirmed setup exchange. Ordinary participant conversation, requests
+directed at another person and explicit image opt-outs retain their existing boundaries. Adding
+a post, photo, recipient, link or VK source is a different task and does not select bot setup cards.
+
+Pack selection preserves the complete answer to the current question. Channel setup, connection
+errors and mixed requests retain their relevant text instead of receiving a generic caption.
+The cards illustrate groups: channel answers explain their scope without applying group «Старт»
+to a channel. Lastik answers limit the first pack to the common administrator steps and retain
+Lastik's own period selection and activation procedure. Moderator cards use Major as their
+example; another bot must use its own verified profile. The model is told that the application
+can attach these reviewed packs; it must not deny that capability or promise arbitrary screenshots.
+Only application selection supplies the symbolic guide ID; model-authored JSON cannot select media.
 
 For a selected guide, the host reads its exact pinned forwarded messages with the existing
 assigned moderator. It requires every image identity and its order to match before using only
