@@ -33,8 +33,8 @@ test('PC profile and injected host bridge require the same pinned support model'
   assert.equal(bridge.MODEL_SHA, SUPPORT_MODEL.sha256);
 });
 
-test('only the two owner-approved chats can select a bridge before any remote access', async () => {
-  assert.deepEqual(bridge.CHAT_IDS, ['-78271094414679', '-79143082792210']);
+test('only the three owner-approved chats can select a bridge before any remote access', async () => {
+  assert.deepEqual(bridge.CHAT_IDS, ['-78271094414679', '-79143082792210', '-71583403182087']);
   await assert.rejects(supportChatRemote('preview', '-123'), /support_chat_refused/u);
   assert.throws(
     () =>
@@ -559,12 +559,13 @@ test(
       assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
       assert.equal(await owner.prepare(source.id), false);
       assert.equal(await owner.begin(source.id, Date.now() + 1000), false);
-      const second = JSON.parse(
-        execFileSync(
-          process.execPath,
-          [
-            '-e',
-            `
+      for (const chatId of bridge.CHAT_IDS.slice(1)) {
+        const additional = JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              '-e',
+              `
             const Redis = require(${JSON.stringify(fileURLToPath(import.meta.resolve('ioredis')))});
             const bridge = require(${JSON.stringify(fileURLToPath(new URL('./support-chat-bridge.cjs', import.meta.url)))});
             (async () => {
@@ -581,18 +582,22 @@ test(
               await redis.quit();
             })().catch(()=>process.exit(1));
           `,
-            socket,
-          ],
-          { env: { ...process.env, SUPPORT_CHAT_ID: '-79143082792210' }, timeout: 5000 },
-        ).toString(),
-      );
-      assert.equal(owner.lease, 'support-cpu-pilot:v1:-78271094414679:lease');
-      assert.equal(second.lease, 'support-cpu-pilot:v1:-79143082792210:lease');
-      assert.notEqual(second.key, owner.key(source.id));
-      assert.equal(second.acquired && second.prepared && second.begun && second.accepted, true);
-      assert.equal(second.foreign, null);
-      assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
-      assert.equal(await redis.get(second.key), 'UNKNOWN');
+              socket,
+            ],
+            { env: { ...process.env, SUPPORT_CHAT_ID: chatId }, timeout: 5000 },
+          ).toString(),
+        );
+        assert.equal(owner.lease, 'support-cpu-pilot:v1:-78271094414679:lease');
+        assert.equal(additional.lease, `support-cpu-pilot:v1:${chatId}:lease`);
+        assert.notEqual(additional.key, owner.key(source.id));
+        assert.equal(
+          additional.acquired && additional.prepared && additional.begun && additional.accepted,
+          true,
+        );
+        assert.equal(additional.foreign, null);
+        assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
+        assert.equal(await redis.get(additional.key), 'UNKNOWN');
+      }
       await owner.close();
       assert.equal(await other.acquire(), true);
       assert.equal(await other.prepare(source.id), false);

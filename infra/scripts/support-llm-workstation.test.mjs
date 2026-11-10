@@ -142,10 +142,10 @@ test('live chat status requires fresh observations for every authorized chat', a
   const controller = createSupportController({ root: previous.root });
   writeFileSync(statusPath, JSON.stringify(record), { mode: 0o600 });
   assert.equal((await controller.status(true)).ready, true);
-  record.chats[SUPPORT_CHAT_IDS[1]].lastSampleAt = new Date(now - 31_000).toISOString();
+  record.chats[SUPPORT_CHAT_IDS[2]].lastSampleAt = new Date(now - 31_000).toISOString();
   writeFileSync(statusPath, JSON.stringify(record));
   assert.equal((await controller.status(true)).ready, false);
-  delete record.chats[SUPPORT_CHAT_IDS[1]];
+  delete record.chats[SUPPORT_CHAT_IDS[2]];
   writeFileSync(statusPath, JSON.stringify(record));
   assert.equal((await controller.status(true)).ready, false);
 });

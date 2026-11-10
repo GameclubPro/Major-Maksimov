@@ -49,7 +49,8 @@ input.on('line',line=>{
  }
 });`;
 
-test('SSH selection is limited to the two owner-authorized chats', async () => {
+test('SSH selection is limited to the three owner-authorized chats', async () => {
+  assert.deepEqual(SUPPORT_CHAT_IDS, ['-78271094414679', '-79143082792210', '-71583403182087']);
   assert.deepEqual(SUPPORT_CHAT_IDS, bridge.CHAT_IDS);
   for (const chatId of SUPPORT_CHAT_IDS)
     assert.ok(supportChatSshArgs(chatId).at(-1).endsWith(` bridge ${chatId}`));
@@ -66,6 +67,43 @@ test('SSH selection is limited to the two owner-authorized chats', async () => {
       /support_chat_refused/u,
     );
   }
+});
+
+test('the third chat requires its own handshake and keeps namespaced usage', async () => {
+  const chatId = '-71583403182087',
+    observations = [],
+    outcomes = [];
+  await supportChatSession({
+    chatId,
+    api: true,
+    key: 'fixture',
+    signal: AbortSignal.timeout(3000),
+    command: process.execPath,
+    args: ['-e', peer.replaceAll(SUPPORT_CHAT_IDS[0], chatId)],
+    onUsage: (value) => observations.push(value),
+    onStatus: (value) => outcomes.push(value),
+    invoke: async () => ({ action: 'reply', text: presentedAnswer }),
+  });
+  assert.ok(outcomes.includes('sent'));
+  assert.equal(
+    observations[0].sourceDigest,
+    createHash('sha256').update(`${chatId}\0fixture-source`).digest('hex'),
+  );
+  let invoked = false;
+  await assert.rejects(
+    supportChatSession({
+      chatId,
+      key: 'fixture',
+      signal: AbortSignal.timeout(3000),
+      command: process.execPath,
+      args: ['-e', peer],
+      invoke: async () => {
+        invoked = true;
+      },
+    }),
+    /support_frame_refused/u,
+  );
+  assert.equal(invoked, false);
 });
 
 test('the second chat answers only after its exact handshake and keeps namespaced usage', async () => {
@@ -130,7 +168,7 @@ test('the worker sends only a symbolic reviewed guide ID beside the short answer
   assert.ok(outcomes.includes('sent'));
 });
 
-test('readiness requires fresh polls for both chats and old polls cannot survive reconnect', (t) => {
+test('readiness requires fresh polls for every chat and old polls cannot survive reconnect', (t) => {
   const now = 1_800_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const state = new SupportChatWorkerStatus();
@@ -138,17 +176,19 @@ test('readiness requires fresh polls for both chats and old polls cannot survive
   state.event(SUPPORT_CHAT_IDS[0], 'observation', { sampleAt: now });
   assert.equal(state.snapshot(now).ready, false);
   state.event(SUPPORT_CHAT_IDS[1], 'observation', { sampleAt: now });
+  assert.equal(state.snapshot(now).ready, false);
+  state.event(SUPPORT_CHAT_IDS[2], 'observation', { sampleAt: now });
   assert.equal(state.snapshot(now).ready, true);
   assert.equal(supportChatsReady(state.chats, now + 30_001), false);
-  state.event(SUPPORT_CHAT_IDS[1], 'disconnected', { failureCode: 'support_clock_skew' });
-  state.event(SUPPORT_CHAT_IDS[1], 'connected');
+  state.event(SUPPORT_CHAT_IDS[2], 'disconnected', { failureCode: 'support_clock_skew' });
+  state.event(SUPPORT_CHAT_IDS[2], 'connected');
   assert.equal(state.snapshot(now).ready, false);
   assert.equal(state.snapshot(now).chats[SUPPORT_CHAT_IDS[0]].reconnects, 0);
   assert.equal(
-    state.snapshot(now).chats[SUPPORT_CHAT_IDS[1]].lastFailureCode,
+    state.snapshot(now).chats[SUPPORT_CHAT_IDS[2]].lastFailureCode,
     'support_clock_skew',
   );
-  state.event(SUPPORT_CHAT_IDS[1], 'observation', { sampleAt: now });
+  state.event(SUPPORT_CHAT_IDS[2], 'observation', { sampleAt: now });
   assert.equal(state.snapshot(now).ready, true);
 });
 
@@ -178,11 +218,14 @@ test('one chat reconnects independently while the other retains its healthy sess
   assert.equal(controller.signal.aborted, true);
   assert.equal(calls.get(SUPPORT_CHAT_IDS[0]), 2);
   assert.equal(calls.get(SUPPORT_CHAT_IDS[1]), 1);
+  assert.equal(calls.get(SUPPORT_CHAT_IDS[2]), 1);
   const healthy = snapshots.find((value) => value.ready);
   assert.equal(healthy.chats[SUPPORT_CHAT_IDS[0]].errors, 1);
   assert.equal(healthy.chats[SUPPORT_CHAT_IDS[0]].reconnects, 1);
   assert.equal(healthy.chats[SUPPORT_CHAT_IDS[1]].errors, 0);
   assert.equal(healthy.chats[SUPPORT_CHAT_IDS[1]].reconnects, 0);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[2]].errors, 0);
+  assert.equal(healthy.chats[SUPPORT_CHAT_IDS[2]].reconnects, 0);
 });
 
 test('CPU calls in separate chats serialize raw cancellation cleanup and skip cancelled waiting calls', async () => {
@@ -344,7 +387,7 @@ setInterval(()=>console.log(JSON.stringify({type:'heartbeat',sampleAt:Date.now()
         await pause(20);
       }
       assert.ok(value?.lastSampleAt, 'Expected a real closed-fixture poll sample');
-      assert.equal(value.errors, 2);
+      assert.equal(value.errors, SUPPORT_CHAT_IDS.length);
       assert.equal(value.replies, 0);
       assert.equal(value.ready, true);
       for (const chatId of SUPPORT_CHAT_IDS) {

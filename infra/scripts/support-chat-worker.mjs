@@ -16,7 +16,11 @@ import {
 const root = join(homedir(), '.local/share/maxim-support-llm');
 const state = join(root, 'service');
 const bundle = dirname(fileURLToPath(import.meta.url));
-export const SUPPORT_CHAT_IDS = Object.freeze(['-78271094414679', '-79143082792210']);
+export const SUPPORT_CHAT_IDS = Object.freeze([
+  '-78271094414679',
+  '-79143082792210',
+  '-71583403182087',
+]);
 export function supportChatSshArgs(chatId = SUPPORT_CHAT_IDS[0]) {
   if (!SUPPORT_CHAT_IDS.includes(chatId)) throw new Error('support_chat_refused');
   return [
