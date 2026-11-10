@@ -75,7 +75,8 @@ selection file, start the verified CPU model, then start the worker again; prese
   tokenization, completed structured answers and the existing 120-second request deadline
   before enabling the pilot.
 - The owner-approved recipients are **CHAT `-78271094414679`** and
-  **CHAT `-79143082792210`** (owner request of 9 November 2026). Each bridge process
+  **CHAT `-79143082792210`** (owner request of 9 November 2026), plus
+  **CHAT `-71583403182087`** (owner request of 10 November 2026). Each bridge process
   selects exactly one allowlisted chat, with independent history, Redis lease and source
   fences. The original chat keeps its existing Redis namespace and uncertain-send fences.
   The bridge
@@ -262,11 +263,11 @@ do not change the API image or require rebuilding application services. Then:
 ~/.local/bin/maxim-support stop
 ```
 
-The preview checks both approved chats sequentially and posts nothing. A bridge invocation may
+The preview checks all three approved chats sequentially and posts nothing. A bridge invocation may
 select one exact approved chat as its second argument; any other chat is refused before access.
 The singleton workstation supervisor maintains one independent session and reconnect policy per
 chat. Local status includes each chat's phase, polling timestamps and delivery counts; readiness
-requires fresh successful polling from both. CPU inference retains one shared slot, while API
+requires fresh successful polling from every approved chat. CPU inference retains one shared slot, while API
 inference is bounded to one outstanding question per chat.
 Local status is content-free and records exact PID/start identity,
 heartbeat and successful reply counts. A connected worker proves transport availability,

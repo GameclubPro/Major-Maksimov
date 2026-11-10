@@ -2,7 +2,7 @@
 // chat's Redis namespace unchanged so uncertain sends remain fenced across upgrades.
 const { createHash, randomUUID } = require('node:crypto');
 const { setTimeout: pause } = require('node:timers/promises');
-const CHAT_IDS = Object.freeze(['-78271094414679', '-79143082792210']);
+const CHAT_IDS = Object.freeze(['-78271094414679', '-79143082792210', '-71583403182087']);
 const CHAT_ID = process.env.SUPPORT_CHAT_ID ?? CHAT_IDS[0];
 if (!CHAT_IDS.includes(CHAT_ID)) throw new Error('support_chat_refused');
 const PREFIX = `support-cpu-pilot:v1:${CHAT_ID}`;
