@@ -65,11 +65,40 @@ test('renders heading blocks and fenced code blocks', () => {
   );
 });
 
-test('uses the MAX publication heading markup in raw mode', () => {
+test('preserves each interior blank row beside formatted text and links', () => {
+  for (const blockMode of ['inline', 'editor'] as const) {
+    for (const blankRows of [0, 1, 2, 4]) {
+      const source = `Новокузнецк и близлежащие районы\n${'\n'.repeat(blankRows)}**Подписаться на нас 👇**\n[Барахолка Новокузнецк](https://max.ru/example)`;
+      assert.equal(
+        renderSupportedMarkdownAsHtml(source, { blockMode }),
+        `Новокузнецк и близлежащие районы${'<br>'.repeat(blankRows + 1)}<strong>Подписаться на нас 👇</strong><br><a href="https://max.ru/example">Барахолка Новокузнецк</a>`,
+        `${blockMode}: ${blankRows} blank rows`,
+      );
+    }
+  }
+});
+
+test('preserves repeated blank rows around semantic blocks and inside code', () => {
+  const source = '# Заголовок\n\n\n```\nfirst\n\nsecond\n```\n\n\n> Цитата';
   assert.equal(
-    renderSupportedMarkdownAsHtml('# Анонс', { blockMode: 'raw' }),
-    '<h1>Анонс</h1>',
+    renderSupportedMarkdownAsHtml(source, { blockMode: 'inline' }),
+    '<strong data-max-block="heading" data-max-heading-level="1">Заголовок</strong><br><br><br><code data-max-block="code">first\n\nsecond</code><br><br><br><span data-max-block="quote">Цитата</span>',
   );
+  assert.equal(
+    renderSupportedMarkdownAsHtml(source, { blockMode: 'editor' }),
+    '<h1>Заголовок</h1><br><br><br><pre>first\n\nsecond</pre><br><br><br><blockquote>Цитата</blockquote>',
+  );
+});
+
+test('keeps the existing leading and trailing blank-row policy', () => {
+  for (const blockMode of ['inline', 'editor'] as const) {
+    assert.equal(renderSupportedMarkdownAsHtml('\n\nТекст\n\n\n', { blockMode }), 'Текст<br><br>');
+    assert.equal(renderSupportedMarkdownAsHtml('\n\n', { blockMode }), '');
+  }
+});
+
+test('uses the MAX publication heading markup in raw mode', () => {
+  assert.equal(renderSupportedMarkdownAsHtml('# Анонс', { blockMode: 'raw' }), '<h1>Анонс</h1>');
 });
 
 test('renders official MAX highlight and quote syntax without leaking delimiters', () => {
@@ -83,7 +112,10 @@ test('renders official MAX highlight and quote syntax without leaking delimiters
     renderSupportedMarkdownAsHtml(source, { blockMode: 'inline' }),
     '<strong data-max-block="heading" data-max-heading-level="2">Раздел</strong><br><span data-max-block="quote"><strong>Важная</strong> цитата</span><br><mark>Фокус <em>сейчас</em></mark>',
   );
-  assert.equal(stripSupportedMarkdownToPlainText(source), 'Раздел\n\nВажная цитата\n\nФокус сейчас');
+  assert.equal(
+    stripSupportedMarkdownToPlainText(source),
+    'Раздел\n\nВажная цитата\n\nФокус сейчас',
+  );
 });
 
 test('keeps inline previews phrasing-only while editor mode retains semantic blocks', () => {

@@ -122,8 +122,9 @@ async function assertManualLinkDraftRoundTrip(browser) {
     const editor = page.getByRole('textbox', { name: 'Текст публикации', exact: true });
     const label = 'Ручная ссылка';
     const text = `${label} без HTML-вставки`;
+    const callToAction = 'Подписаться на нас 👇';
     const href = 'https://example.com/manual-only?source=publik&read=1';
-    const markdown = `[${label}](${href}) без HTML-вставки`;
+    const markdown = `[${label}](${href}) без HTML-вставки\n\n**${callToAction}**`;
     await editor.fill(text);
     await editor.evaluate((element, length) => {
       const range = document.createRange();
@@ -137,6 +138,19 @@ async function assertManualLinkDraftRoundTrip(browser) {
     await page.getByRole('button', { name: 'Ссылка', exact: true }).click();
     await page.getByRole('textbox', { name: 'Адрес ссылки', exact: true }).fill(href);
     await page.getByRole('button', { name: 'Применить', exact: true }).click();
+    await editor.evaluate((element) => {
+      element.focus();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      const selection = document.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Enter');
+    await page.getByRole('button', { name: 'Жирный', exact: true }).click();
+    await page.keyboard.insertText(callToAction);
     await page.locator('.publication-target-picker__summary').click();
     const picker = page.getByRole('dialog', { name: 'Получатели', exact: true });
     await picker
@@ -153,6 +167,8 @@ async function assertManualLinkDraftRoundTrip(browser) {
         ({ request, response }) => request?.content && response?.publication?.lifecycle === 'DRAFT',
       ),
     );
+    assert.equal(saved.request.content.text, markdown);
+    assert.equal(saved.request.content.textFormat, 'markdown');
     assert.equal(saved.response.publication.content.text, markdown);
     assert.equal(saved.response.publication.content.textFormat, 'markdown');
     const draftId = saved.response.publication.id;
@@ -162,8 +178,9 @@ async function assertManualLinkDraftRoundTrip(browser) {
       .getByRole('button', { name: new RegExp(text, 'u') })
       .click();
     await editor.waitFor();
-    assert.equal(await editor.innerText(), text);
+    assert.equal(await editor.innerText(), `${text}\n\n${callToAction}`);
     assert.equal(await editor.locator('a').getAttribute('href'), href);
+    assert.equal(await editor.locator('strong, b').innerText(), callToAction);
     const reopened = await page.evaluate(
       (draftId) =>
         window.__manualLinkApi.findLast(
@@ -174,10 +191,21 @@ async function assertManualLinkDraftRoundTrip(browser) {
     assert.equal(reopened.response.publication.content.text, markdown);
     assert.equal(reopened.response.publication.content.textFormat, 'markdown');
     await page.getByRole('button', { name: 'Проверить пост', exact: true }).click();
-    await page
-      .getByRole('dialog', { name: 'Проверка публикации', exact: true })
-      .getByRole('button', { name: 'Опубликовать', exact: true })
-      .click();
+    const review = page.getByRole('dialog', { name: 'Проверка публикации', exact: true });
+    const preview = review.locator('.publication-preview__text');
+    const previewCallToAction = preview.locator('strong');
+    await previewCallToAction.waitFor();
+    assert.equal(await preview.locator('br').count(), 2);
+    assert.equal(await previewCallToAction.innerText(), callToAction);
+    assert.equal(
+      await previewCallToAction.evaluate(
+        (element) =>
+          element.previousSibling?.nodeName === 'BR' &&
+          element.previousSibling.previousSibling?.nodeName === 'BR',
+      ),
+      true,
+    );
+    await review.getByRole('button', { name: 'Опубликовать', exact: true }).click();
     await page.locator('.publications-page:not(.is-editor)').waitFor();
     const published = await page.evaluate(() =>
       window.__manualLinkApi.findLast(({ request }) => request?.intent === 'publish'),
@@ -188,7 +216,7 @@ async function assertManualLinkDraftRoundTrip(browser) {
     assert.equal(await page.evaluate(() => window.__manualLinkPasteCount), 0);
     assert.deepEqual(errors, []);
     console.log(
-      'PASS manual-only: Link button, saved draft response, reopen GET and publish payload; no paste',
+      'PASS manual-only: Link button, native blank paragraph and bold CTA survive draft save, reopen GET, review and publish; no paste',
     );
   } catch (error) {
     await page.screenshot({ path: `${output}/manual-only-failure.png` });
