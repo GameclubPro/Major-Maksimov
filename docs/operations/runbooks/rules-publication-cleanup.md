@@ -33,11 +33,25 @@ Its receipt identifies `operation` as `created` or `updated`; do not describe an
 publication. The miniapp offers both modes and defaults to a new post. Omitted mode preserves the
 legacy conditional behavior described below.
 
+After removing the current post, an explicit new-message request first confirms that exact
+pending reset through the existing durable DELETE owner. Only confirmed deletion or exact
+message-absence proof permits publication; accepted work, missing capability, generic 403/404
+and unknown SEND outcomes remain blocked. A fresh state read and conditional write preserve
+concurrent draft saves and reject a newer publication or operation.
+
+The reset response retains the published receipt while deletion is only accepted. The miniapp
+must keep that receipt, show deletion as pending and preserve unsaved draft content when reading
+its result. A completed reset, including one finalized by the durable worker before the HTTP
+handler, returns the current receipt metadata. Never announce deletion merely because the
+request succeeded; the bounded local browser and PostgreSQL regressions cover these boundaries.
+The private-bot reset confirmation follows the same returned receipt: a message ID or URL still
+present requires checking the publication, and a missing response cannot confirm completion.
+
 When an older republish cleanup is pending but the current rules post has a stored author bot,
 the regular publish operation updates that exact post in place. Fresh bot membership and the exact
 remote message author must agree, and MAX must return `success: true`. Text, image, and buttons
 are replaced from the saved draft; the link stays stable. No new post is sent and the older cleanup
-is neither cleared nor falsely marked successful. Pending reset and ambiguous send fences still block.
+is neither cleared nor falsely marked successful. Unconfirmed reset and ambiguous send fences still block.
 
 For an operator-reviewed recovery, the API image includes
 `apps/api/dist/apps/api/src/scripts/repair-pending-rules-update.js`. Run only inside `api-admin`

@@ -174,7 +174,7 @@ test('rules expose an explicit save action and commit successful saves to query 
   );
   assert.match(
     rulesControllerSource,
-    /handlePublishRules\(\)[\s\S]*?runRulesSaveAttempt\([\s\S]*?if \(!attempt\.isCurrent\)[\s\S]*?Правила изменились[\s\S]*?return;[\s\S]*?publishRulesMutation\.mutate\(\{[\s\S]*?mode: hasPublishedRules \? rulesPublicationMode : 'new_message'/u,
+    /handlePublishRules\(\)[\s\S]*?runRulesSaveAttempt\([\s\S]*?if \(!attempt\.isCurrent\)[\s\S]*?Правила изменились[\s\S]*?return;[\s\S]*?publishRulesMutation\.mutate\(\{[\s\S]*?mode: hasPublishedRules && !isRulesResetPending \? rulesPublicationMode : 'new_message'/u,
   );
 });
 
@@ -183,7 +183,13 @@ test('rules publication errors keep their actionable detail visible', () => {
   assert.match(rulesControllerSource, /description: formatApiError\(error\)/u);
   assert.match(
     broadcastAutopostPolishSource,
-    /body\.settings-drilldown-open \.toast--danger \.toast__body p \{[\s\S]*?display: -webkit-box;/u,
+    /body\.settings-drilldown-open \.toast--danger \.toast__body p \{[\s\S]*?display: block;/u,
+  );
+  assert.doesNotMatch(
+    broadcastAutopostPolishSource.match(
+      /body\.settings-drilldown-open \.toast--danger \.toast__body p \{[^}]*\}/u,
+    )?.[0] ?? '',
+    /line-clamp|overflow: hidden/u,
   );
 });
 

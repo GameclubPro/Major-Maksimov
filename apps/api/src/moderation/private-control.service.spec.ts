@@ -3432,6 +3432,47 @@ describe('PrivateControlService', () => {
     expect(getLastSentText(maxClient)).toContain('Не удалось подтвердить публикацию правил.');
   });
 
+  it.each([
+    { publishedMessageId: 'pending-or-newer-post', publishedUrl: null },
+    { publishedMessageId: null, publishedUrl: 'https://max.ru/rules-post' },
+  ])('does not announce a reset while its response retains a publication: %o', async (receipt) => {
+    const resetPublishedRules = jest
+      .fn<
+        ReturnType<AdminService['resetPublishedRules']>,
+        Parameters<AdminService['resetPublishedRules']>
+      >()
+      .mockResolvedValue(createRules(receipt));
+    const { service, maxClient, chats } = createHarness({
+      adminService: { resetPublishedRules },
+    });
+
+    await service.handleUpdate(createPrivateCallbackUpdate(`pc2|chat_select|${chats[0].id}`));
+    await service.handleUpdate(createPrivateCallbackUpdate('pc2|rules_reset_publication'));
+
+    expect(resetPublishedRules).toHaveBeenCalledTimes(1);
+    expect(resetPublishedRules).toHaveBeenCalledWith(
+      chats[0].id,
+      expect.objectContaining({ userId: 'user-1' }),
+      'private_bot',
+    );
+    expect(getLastUiText(maxClient)).toContain(
+      'Пост правил пока опубликован. Проверьте его в мини-приложении.',
+    );
+    expect(getLastUiText(maxClient)).not.toContain('Публикация правил сброшена.');
+  });
+
+  it('does not announce a reset when the rules service returns no result', async () => {
+    const { service, maxClient, chats } = createHarness({
+      adminService: { resetPublishedRules: jest.fn().mockResolvedValue(undefined) },
+    });
+
+    await service.handleUpdate(createPrivateCallbackUpdate(`pc2|chat_select|${chats[0].id}`));
+    await service.handleUpdate(createPrivateCallbackUpdate('pc2|rules_reset_publication'));
+
+    expect(getLastSentText(maxClient)).toContain('Не удалось подтвердить удаление правил.');
+    expect(getLastUiText(maxClient)).not.toContain('Публикация правил сброшена.');
+  });
+
   it('surfaces publish error when rules text is empty', async () => {
     const { service, maxClient, chats } = createHarness({
       adminService: {

@@ -197,7 +197,7 @@ import {
 import { buildPrivateChatRulesDraft } from './private-control-rules-draft';
 import { buildPrivateRulesScreenTextPreview } from './private-control-rules-preview';
 import { buildPrivateRulesTextItems } from './private-control-rules-text-renderer';
-import { publishPrivateRules } from './private-control-rules-publication';
+import { publishPrivateRules, resetPrivateRules } from './private-control-rules-publication';
 import { resolvePrivateControlSetFieldInputText } from './private-control-forward-routing';
 import { PrivateControlSessionStore } from './private-control-session.store';
 import { PrivateControlSessionBotContext } from './private-control-session-bot-context';
@@ -3261,16 +3261,16 @@ export class PrivateControlService {
 
       case 'rules_reset_publication': {
         this.assertSelectedEntityType(session, 'chat');
-        await this.adminService.resetPublishedRules(
+        const notice = await resetPrivateRules(
+          this.adminService,
           session.selectedChatId!,
           context.actor,
-          'private_bot',
         );
         session.screen = 'rules';
-        const view = await this.renderRulesScreen(context, session, 'Публикация правил сброшена.');
+        const view = await this.renderRulesScreen(context, session, notice.text);
         await this.respondWithFreshMessage(context, session, view, {
           callbackId: context.callbackId,
-          notification: 'Публикация сброшена',
+          notification: notice.notification,
         });
         return;
       }

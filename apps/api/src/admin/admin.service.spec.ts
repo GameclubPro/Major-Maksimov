@@ -11,7 +11,11 @@ import {
   ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { ChatBotMembershipStatus, ChatEntityType } from '../prisma/prisma-client';
+import {
+  ChatBotMembershipStatus,
+  ChatEntityType,
+  type ChatRules as PersistedChatRules,
+} from '../prisma/prisma-client';
 import { buildDuplicateUserPattern } from '../moderation/duplicate-state';
 import { buildDeveloperForcedGlobalSpammerCacheKey } from '../moderation/developer-forced-global-spammer-cache';
 import { buildActiveMuteStateKey } from '../moderation/moderation-state.util';
@@ -30842,40 +30846,44 @@ describe('AdminService chat rules', () => {
 
   it('records private bot as the rules source in audit log payloads', async () => {
     const prisma = createPrismaMock();
-    prisma.chatRules.upsert.mockResolvedValue({
+    const storedRules: PersistedChatRules = {
       id: 'rules-1',
       chatId: 'chat-1',
       text: 'Правила от бота',
+      textFormat: 'markdown',
       imageBase64: '',
       imageMimeType: '',
       imageFileName: '',
       autoTextEnabled: false,
+      buttons: [],
       buttonEnabled: false,
       buttonUrl: '',
       buttonText: 'Открыть',
+      adminContactButtonEnabled: false,
+      adminContactButtonUrl: '',
       publishedMessageId: 'mid-rules-7',
+      publishedBotId: null,
       publishedUrl: 'https://max.ru/chats/chat-1/message/777',
       publishedAt: new Date('2026-03-09T11:00:00.000Z'),
+      publishOperationId: null,
+      publishOperationBotId: null,
+      publishSendStartedAt: null,
+      pendingCleanupMessageId: null,
+      pendingCleanupBotId: null,
+      pendingCleanupIntentId: null,
+      pendingCleanupKind: null,
       createdAt: new Date('2026-03-09T09:00:00.000Z'),
       updatedAt: new Date('2026-03-09T11:00:00.000Z'),
-    });
-    prisma.chatRules.update.mockResolvedValue({
-      id: 'rules-1',
-      chatId: 'chat-1',
-      text: 'Правила от бота',
-      imageBase64: '',
-      imageMimeType: '',
-      imageFileName: '',
-      autoTextEnabled: false,
-      buttonEnabled: false,
-      buttonUrl: '',
-      buttonText: 'Открыть',
+    };
+    prisma.chatRules.upsert.mockResolvedValue(storedRules);
+    const clearedRules: PersistedChatRules = {
+      ...storedRules,
       publishedMessageId: null,
       publishedUrl: null,
       publishedAt: null,
-      createdAt: new Date('2026-03-09T09:00:00.000Z'),
       updatedAt: new Date('2026-03-09T11:05:00.000Z'),
-    });
+    };
+    prisma.chatRules.findUnique.mockResolvedValue(clearedRules);
 
     const maxClient = {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
@@ -30917,7 +30925,14 @@ describe('AdminService chat rules', () => {
       'private_bot',
     );
     await service.publishRules('chat-1', actor, 'private_bot');
-    await service.resetPublishedRules('chat-1', actor, 'private_bot');
+    const reset = await service.resetPublishedRules('chat-1', actor, 'private_bot');
+
+    expect(reset).toMatchObject({
+      revision: clearedRules.updatedAt.toISOString(),
+      publishedMessageId: null,
+      publishedUrl: null,
+      publishedAt: null,
+    });
 
     expect(prisma.auditLog.create).toHaveBeenNthCalledWith(
       1,
@@ -30956,42 +30971,45 @@ describe('AdminService chat rules', () => {
 
   it('resets published rules and deletes the existing MAX post', async () => {
     const prisma = createPrismaMock();
-    prisma.chatRules.upsert.mockResolvedValue({
+    const storedRules: PersistedChatRules = {
       id: 'rules-1',
       chatId: 'chat-1',
       text: 'Правила чата',
+      textFormat: 'markdown',
       imageBase64: '',
       imageMimeType: '',
       imageFileName: '',
       autoTextEnabled: false,
+      buttons: [],
       buttonEnabled: false,
       buttonUrl: '',
       buttonText: 'Открыть',
+      adminContactButtonEnabled: false,
+      adminContactButtonUrl: '',
       publishedMessageId: 'mid-rules-4',
       publishedBotId: 'rules-author-bot',
       publishedUrl: 'https://max.ru/chats/chat-1/message/654',
       publishedAt: new Date('2026-03-09T11:00:00.000Z'),
+      publishOperationId: null,
+      publishOperationBotId: null,
+      publishSendStartedAt: null,
+      pendingCleanupMessageId: null,
+      pendingCleanupBotId: null,
+      pendingCleanupIntentId: null,
+      pendingCleanupKind: null,
       createdAt: new Date('2026-03-09T09:00:00.000Z'),
       updatedAt: new Date('2026-03-09T11:00:00.000Z'),
-    });
-    prisma.chatRules.update.mockResolvedValue({
-      id: 'rules-1',
-      chatId: 'chat-1',
-      text: 'Правила чата',
-      imageBase64: '',
-      imageMimeType: '',
-      imageFileName: '',
-      autoTextEnabled: false,
-      buttonEnabled: false,
-      buttonUrl: '',
-      buttonText: 'Открыть',
+    };
+    prisma.chatRules.upsert.mockResolvedValue(storedRules);
+    const clearedRules: PersistedChatRules = {
+      ...storedRules,
       publishedMessageId: null,
       publishedBotId: null,
       publishedUrl: null,
       publishedAt: null,
-      createdAt: new Date('2026-03-09T09:00:00.000Z'),
       updatedAt: new Date('2026-03-09T11:05:00.000Z'),
-    });
+    };
+    prisma.chatRules.findUnique.mockResolvedValue(clearedRules);
 
     const maxClient = {
       deleteMessage: jest.fn().mockResolvedValue(undefined),
@@ -31039,7 +31057,16 @@ describe('AdminService chat rules', () => {
     expect(prisma.chatRules.updateMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        where: { chatId: 'chat-1', publishedMessageId: 'mid-rules-4' },
+        where: {
+          chatId: 'chat-1',
+          publishedMessageId: 'mid-rules-4',
+          publishedBotId: 'rules-author-bot',
+          publishOperationId: null,
+          publishSendStartedAt: null,
+          pendingCleanupMessageId: 'mid-rules-4',
+          pendingCleanupBotId: 'rules-author-bot',
+          pendingCleanupKind: 'reset_current',
+        },
         data: expect.objectContaining({
           publishedMessageId: null,
           pendingCleanupMessageId: null,
@@ -31048,7 +31075,7 @@ describe('AdminService chat rules', () => {
       }),
     );
     expect(result).toEqual({
-      revision: '2026-03-09T11:00:00.000Z',
+      revision: clearedRules.updatedAt.toISOString(),
       text: 'Правила чата',
       textFormat: 'markdown',
       imageBase64: '',
