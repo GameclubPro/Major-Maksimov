@@ -562,17 +562,23 @@ try {
       const editor = rulesPanel.getByRole('textbox', { name: 'Текст правил', exact: true });
       await editor.getByText('Авторские правила — сохранить дословно.', { exact: true }).waitFor();
       assert.equal(writes.filter((write) => write.pathname.endsWith('/rules')).length, 0);
-      const generatedSaved = page.waitForResponse(
-        (response) => response.url().endsWith('/rules') && response.request().method() === 'PUT',
+      const autoTextToggle = rulesPanel.locator(
+        'label[aria-label="Включить автотекст правил из настроек"] input',
       );
-      await rulesPanel
-        .locator('label[aria-label="Включить автотекст правил из настроек"] input')
-        .check();
       const scheduleText =
         'Антидубль действует ежедневно с 23:00 до 18:00 следующего дня (Asia/Vladivostok). Вне этого периода повторы разрешены.';
-      await editor.getByText(scheduleText, { exact: false }).waitFor();
+      const [generatedResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) => response.url().endsWith('/rules') && response.request().method() === 'PUT',
+        ),
+        (async () => {
+          // The switch changes after the lazy generator succeeds, preserving drafts on failure.
+          await autoTextToggle.click();
+          await editor.getByText(scheduleText, { exact: false }).waitFor();
+          assert.equal(await autoTextToggle.isChecked(), true);
+        })(),
+      ]);
       const generatedText = (await editor.innerText()).trim();
-      const generatedResponse = await generatedSaved;
       const generatedBody = generatedResponse.request().postDataJSON();
       assert.equal(generatedBody.autoTextEnabled, true);
       assert.equal(generatedBody.textFormat, 'plain');
