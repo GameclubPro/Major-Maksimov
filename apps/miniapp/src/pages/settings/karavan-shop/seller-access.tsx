@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
-import { canShareNativeContent, openMaxBotLink, shareNativeContent } from '../../../lib/max-bridge';
+import { canShareNativeContent, shareNativeContent } from '../../../lib/max-bridge';
 import { MutationFailure, useShop, useShopMutation } from './runtime';
 import { sellerApplicationUrl } from './shop-journey';
+import { useSellerPlacementLink } from './storefront-management';
 
 function useSellerAccessState() {
   const { module } = useShop();
@@ -135,19 +136,24 @@ export function AddOwnOfferAction({
 }) {
   const { module } = useShop();
   const target = module.marketplace;
-  const url =
-    target && target.status !== 'archived'
-      ? sellerApplicationUrl(module.sellerBotUrl, target.id, storeId)
-      : null;
-  if (!url) return null;
+  const link = useSellerPlacementLink(Boolean(target && target.status !== 'archived'));
+  if (!target || target.format !== 'community' || target.status === 'archived') return null;
   return (
-    <button
-      type="button"
-      className={primary ? 'karavan-module__primary' : undefined}
-      onClick={() => openMaxBotLink(url)}
-    >
-      {storeId ? 'Добавить в мой магазин' : 'Добавить свой товар или услугу'}
-    </button>
+    <>
+      <button
+        type="button"
+        className={primary ? 'karavan-module__primary' : undefined}
+        disabled={link.disabled}
+        onClick={() => void link.open()}
+      >
+        {link.opening
+          ? 'Открываем…'
+          : storeId
+            ? 'Управлять своим размещением'
+            : 'Добавить свой товар или услугу'}
+      </button>
+      {link.error ? <p role="alert">{link.error}</p> : null}
+    </>
   );
 }
 export function SellerAccessAction({ primary = false }: { primary?: boolean }) {

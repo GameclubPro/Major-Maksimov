@@ -17,14 +17,16 @@ const pages = {
   home: 'Магазин чата',
   catalog: 'Товары и услуги',
   applications: 'Заявки',
-  appearance: 'Оформление',
   categories: 'Категории и правила',
   chats: 'Подключённые чаты',
   publications: 'Объявления в чате',
   settings: 'Настройки',
   seller_access: 'Добавить продавца',
 } as const;
-export type StorefrontPage = keyof typeof pages;
+type ActiveStorefrontPage = keyof typeof pages;
+// FLAG: Legacy journals retain this page alongside the original command and media.
+// Navigation resolves it to settings; retiring the screen must not discard an unknown result.
+export type StorefrontPage = ActiveStorefrontPage | 'appearance';
 type Navigation = {
   page: StorefrontPage;
   visited: ReadonlySet<StorefrontPage>;
@@ -104,7 +106,7 @@ export function StorefrontWorkspace({
   footer?: ReactNode;
   children: ReactNode;
 }) {
-  const [page, setPage] = useState<StorefrontPage>('home');
+  const [page, setPage] = useState<ActiveStorefrontPage>('home');
   const [publicationsParent, setPublicationsParent] = useState<'home' | 'settings'>('home');
   const [visited, setVisited] = useState<ReadonlySet<StorefrontPage>>(() => new Set(['home']));
   const [drafts, setDrafts] = useState<Record<string, boolean>>({});
@@ -148,10 +150,12 @@ export function StorefrontWorkspace({
   }, [open]);
   const navigate = useCallback(
     (next: StorefrontPage) => {
+      const destination = next === 'appearance' ? 'settings' : next;
       positions.current.set(page, body()?.scrollTop ?? 0);
-      if (next === 'publications') setPublicationsParent(page === 'settings' ? 'settings' : 'home');
-      setVisited((value) => (value.has(next) ? value : new Set([...value, next])));
-      setPage(next);
+      if (destination === 'publications')
+        setPublicationsParent(page === 'settings' ? 'settings' : 'home');
+      setVisited((value) => (value.has(destination) ? value : new Set([...value, destination])));
+      setPage(destination);
     },
     [page],
   );
@@ -182,7 +186,7 @@ export function StorefrontWorkspace({
   const parent =
     page === 'publications'
       ? publicationsParent
-      : ['appearance', 'categories', 'chats'].includes(page)
+      : ['categories', 'chats'].includes(page)
         ? 'settings'
         : 'home';
   const goBack = customBack ?? (page !== 'home' ? () => navigate(parent) : undefined);

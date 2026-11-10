@@ -142,6 +142,7 @@ export const karavanMarketplaceHandoffDestinationSchema = z.enum([
   'view',
   'preview',
   'storefront',
+  'placement',
 ]);
 export type KaravanMarketplaceHandoffDestination = z.infer<
   typeof karavanMarketplaceHandoffDestinationSchema
@@ -290,6 +291,7 @@ export const karavanMarketplaceModuleSchema = z.object({
   administrationStores: z.array(karavanAdministrationStoreSchema).max(100).optional(),
   administrationStoreCount: z.number().int().nonnegative().optional(),
   bindings: z.array(karavanMarketplaceBindingSchema).max(48).optional(),
+  connectedChats: z.array(karavanMarketplaceBindingSchema).max(100).optional(),
 });
 export type KaravanMarketplaceModule = z.infer<typeof karavanMarketplaceModuleSchema>;
 export const karavanMarketplaceCategories = [

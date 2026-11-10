@@ -7,6 +7,14 @@ import { useShopCommands } from './command-runtime';
 import { useShop } from './runtime';
 
 export function useAdministrationStorefrontLink(enabled: boolean) {
+  return useSellerHandoffLink(enabled, 'storefront');
+}
+
+export function useSellerPlacementLink(enabled: boolean) {
+  return useSellerHandoffLink(enabled, 'placement');
+}
+
+function useSellerHandoffLink(enabled: boolean, destination: 'storefront' | 'placement') {
   const { api, scope, module } = useShop();
   const commands = useShopCommands();
   const client = useQueryClient();
@@ -25,8 +33,12 @@ export function useAdministrationStorefrontLink(enabled: boolean) {
   const shopManagement = (module.chatShopFlowVersion ?? 1) >= 2;
   const disabled =
     !enabled ||
-    (!shopManagement && !knownStore) ||
-    !module.permissions.includes('manage_marketplace') ||
+    (destination === 'storefront' &&
+      ((!shopManagement && !knownStore) || !module.permissions.includes('manage_marketplace'))) ||
+    (destination === 'placement' &&
+      (!module.permissions.length ||
+        module.marketplace?.format !== 'community' ||
+        module.marketplace.status === 'archived')) ||
     commands.blocked ||
     opening;
   useEffect(() => {
@@ -57,17 +69,17 @@ export function useAdministrationStorefrontLink(enabled: boolean) {
     setOpening(true);
     setError(null);
     try {
-      // FLAG: The server derives the administrative shop scope from its verified
-      // binding. Never launch a remembered personal store or a browser-supplied store id.
+      // FLAG: The server derives the shop scope from its verified binding.
+      // Store selection stays in the seller app under its own current permissions.
       const handoff = await openKaravanMarketplace(
         api,
         scope.chatId,
         scope.marketplaceId,
-        'storefront',
+        destination,
       );
       if (!current()) return;
       if (!openKaravanStorefront(handoff.url))
-        throw new Error('Не удалось открыть витрину. Повторите переход.');
+        throw new Error('Не удалось открыть Караван Партнёры. Повторите переход.');
       returning.current = true;
     } catch (cause) {
       if (current())

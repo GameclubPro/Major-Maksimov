@@ -92,6 +92,8 @@ test('unknown outcomes, arbitrary provider codes and lost authority keep their o
 });
 
 for (const [code, status, kind] of [
+  ['MARKETPLACE_APPEARANCE_RETIRED', 410, 'refresh'],
+  ['MARKETPLACE_ADMINISTRATION_MOVED', 410, 'refresh'],
   ['ADMINISTRATION_STORE_UNAVAILABLE', 409, 'refresh'],
   ['MARKETPLACE_LISTING_LIMIT', 409, 'validation'],
   ['MARKETPLACE_GRANTS_UNAVAILABLE', 409, 'refresh'],

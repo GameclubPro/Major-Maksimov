@@ -323,7 +323,6 @@ function Offers({ search, canArrange }: { search: string; canArrange: boolean })
   });
   useEffect(() => {
     const saved = mutation.pendingCommand;
-    if (saved?.operation === 'pins_save') setArranging(true);
     if (saved?.operation !== 'moderate_content') return;
     setKind(saved.input.propertyId ? 'property' : 'product');
     const subject = offers.find(

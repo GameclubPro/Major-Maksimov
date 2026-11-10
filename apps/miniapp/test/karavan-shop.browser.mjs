@@ -22,6 +22,17 @@ async function runDailyChecks({ page, url, theme, shot }) {
     );
   const begin = async (scenario, screen) => {
     await page.goto(`${url}?theme=${theme}&scenario=${scenario}`);
+    // Independent synthetic scenarios reuse one shop scope; recovery is tested within a scenario.
+    await page.evaluate(async () => {
+      for (const database of await indexedDB.databases())
+        if (database.name)
+          await new Promise((resolve, reject) => {
+            const deletion = indexedDB.deleteDatabase(database.name);
+            deletion.onsuccess = resolve;
+            deletion.onerror = reject;
+            deletion.onblocked = reject;
+          });
+    });
     await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
     await page
       .getByRole('dialog', { name: 'Магазин чата', exact: true })
@@ -63,7 +74,11 @@ async function runDailyChecks({ page, url, theme, shot }) {
       { status, code },
     );
     await panel.getByRole('button', { name: 'Отклонить заявку', exact: true }).click();
-    await panel.getByRole('alert').waitFor();
+    if (status === 503)
+      await panel
+        .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
+        .waitFor();
+    else await panel.getByRole('alert').waitFor();
     assert.equal(await refusal.inputValue(), 'Добавьте фотографию товара');
     if (status === 403) {
       assert.equal(await refusal.isDisabled(), true);
@@ -95,7 +110,9 @@ async function runDailyChecks({ page, url, theme, shot }) {
         'unknown command stays dirty across a cancelled close',
       );
       await shot(`daily-unknown-${status}`, panel);
-      await panel.getByRole('button', { name: 'Повторить проверку', exact: true }).click();
+      await panel
+        .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
+        .click();
       await panel.getByText('Новых заявок нет', { exact: true }).waitFor();
       const writes = await requests('decide');
       assert.equal(writes.length, 2);
@@ -234,9 +251,7 @@ async function runDailyChecks({ page, url, theme, shot }) {
   await panel.getByRole('button', { name: 'Готово', exact: true }).click();
   assert.equal(await panel.getByRole('button', { name: /^Выше:|^Ниже:/u }).count(), 0);
   await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
-  await panel
-    .getByRole('button', { name: 'Сохранить', exact: true })
-    .waitFor({ state: 'detached' });
+  await panel.locator('.storefront-workspace__actions button').waitFor({ state: 'detached' });
   assert.equal((await requests('rules_preview')).length, 1);
   assert.equal((await requests('rules_update')).length, 1, 'safe save performs one domain write');
   const preview = (await requests('rules_preview'))[0].body.command.input;
@@ -257,57 +272,24 @@ async function runDailyChecks({ page, url, theme, shot }) {
   );
   await shot('daily-safe-categories', panel);
 
-  for (const scenario of ['daily_appearance', 'daily_appearance_closed']) {
-    panel = await setting(scenario, 'Оформление');
-    const statusBefore = await page.evaluate(() => window.__shopMarket.status);
-    await panel.getByLabel('Название', { exact: true }).fill('Магазин соседей после сохранения');
-    await panel.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
-    await panel.getByText('Оформление сохранено', { exact: true }).waitFor();
-    assert.equal((await requests('appearance_apply')).length, 1);
-    assert.equal((await requests('appearance_save')).length, 0);
-    assert.equal((await requests('appearance_publish')).length, 0);
-    assert.equal(
-      (await requests('status')).length,
-      0,
-      'appearance does not close or open the marketplace',
-    );
-    assert.equal(
-      await page.evaluate(() => window.__shopPublished.name),
-      'Магазин соседей после сохранения',
-    );
-    assert.equal(await page.evaluate(() => window.__shopMarket.status), statusBefore);
-    assert.equal(
-      await page.evaluate(
-        () => window.__shopRequests.filter((row) => row.body?.command?.input?.commandId).length,
-      ),
-      1,
-      'ordinary appearance save sends exactly one domain command',
-    );
-    await shot(scenario, panel);
+  for (const scenario of ['daily_retired_appearance', 'daily_appearance_closed']) {
+    panel = await begin(scenario, 'Настройки');
+    assert.equal(await panel.getByRole('button', { name: /Оформление/ }).count(), 0);
+    assert.equal(await panel.locator('input[type="file"]').count(), 0);
+    assert.equal(await panel.getByLabel('Название', { exact: true }).count(), 0);
+    assert.equal(await panel.getByLabel('Описание', { exact: true }).count(), 0);
+    for (const operation of [
+      'appearance',
+      'appearance_apply',
+      'appearance_save',
+      'appearance_publish',
+      'image',
+    ])
+      assert.equal((await requests(operation)).length, 0, 'retired design has no new calls');
+    await shot('daily-without-marketplace-design', panel);
   }
-  panel = await setting('daily_appearance_unknown', 'Оформление');
-  await panel.getByLabel('Название', { exact: true }).fill('Сохраняемый магазин');
-  await page.evaluate(() => {
-    window.__shopNextFailure = {
-      operation: 'appearance_apply',
-      status: 503,
-      code: 'KARAVAN_COMMAND_UNKNOWN',
-    };
-  });
-  await panel.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
-  await panel.getByRole('button', { name: 'Повторить проверку', exact: true }).waitFor();
-  assert.equal(await panel.getByLabel('Название', { exact: true }).isDisabled(), true);
-  await panel.getByRole('button', { name: 'Повторить проверку', exact: true }).click();
-  await panel.getByText('Оформление сохранено', { exact: true }).waitFor();
-  const appearanceWrites = await requests('appearance_apply');
-  assert.equal(appearanceWrites.length, 2);
-  assert.deepEqual(
-    appearanceWrites[1].body,
-    appearanceWrites[0].body,
-    'appearance unknown outcome keeps the entire original command',
-  );
   console.log(
-    'Daily UX: reason/error outcomes, page append, reorder, permissions, safe categories and atomic appearance passed.',
+    'Daily UX: decisions, page append, reorder, permissions, categories and retired Marketplace design passed.',
   );
 }
 const fixtures = resolve(import.meta.dirname, '../build/shop-browser-fixtures');
@@ -389,12 +371,7 @@ try {
               await page.getByRole('dialog', { name, exact: true }).waitFor();
               await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
               if (
-                [
-                  'Оформление',
-                  'Категории и правила',
-                  'Подключённые чаты',
-                  'Объявления в чате',
-                ].includes(name)
+                ['Категории и правила', 'Подключённые чаты', 'Объявления в чате'].includes(name)
               ) {
                 await page.getByRole('dialog', { name: 'Настройки', exact: true }).waitFor();
                 await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
@@ -418,24 +395,31 @@ try {
               !process.env.SHOP_BROWSER_GROUP ||
               process.env.SHOP_BROWSER_GROUP === 'seller-entry'
             ) {
-              for (const [scenario, screen, label, suffix] of [
-                ['empty', 'Товары и услуги', 'Добавить свой товар или услугу', ''],
-                [
-                  'own_profile',
-                  'Заявки',
-                  'Добавить в мой магазин',
-                  '__s_bb669048-0279-4a35-987c-60f94593163e',
-                ],
+              for (const [scenario, screen, label] of [
+                ['empty', 'Товары и услуги', 'Добавить свой товар или услугу'],
+                ['own_profile', 'Заявки', 'Управлять своим размещением'],
               ]) {
                 await page.goto(`${url}?theme=${theme}&scenario=${scenario}`);
                 await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
                 await home.getByRole('button', { name: screen, exact: true }).click();
                 const destination = page.getByRole('dialog', { name: screen, exact: true });
                 await destination.getByRole('button', { name: label, exact: true }).click();
+                await page.waitForFunction(() => window.__shopOpened.length > 0);
                 const opened = await page.evaluate(() => window.__shopOpened.at(-1));
+                assert.equal(new URL(opened).searchParams.get('startapp'), `mh_${'x'.repeat(43)}`);
+                const handoffs = await page.evaluate(() =>
+                  window.__shopRequests.filter((row) => row.path.endsWith('/handoffs')),
+                );
+                assert.equal(handoffs.length, 1);
+                assert.equal(handoffs[0].body.destination, 'placement');
                 assert.equal(
-                  new URL(opened).searchParams.get('startapp'),
-                  `placement_a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10${suffix}`,
+                  handoffs[0].body.marketplaceId,
+                  'a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10',
+                );
+                assert.equal(
+                  Object.hasOwn(handoffs[0].body, 'storeId'),
+                  false,
+                  'server handoff does not trust a browser-selected Store',
                 );
                 assert.equal(
                   await destination.getByRole('button', { name: 'Одобрить', exact: true }).count(),
@@ -543,29 +527,11 @@ try {
               await panel.getByRole('button', { name: 'Снять ограничение', exact: true }).waitFor();
               await shot('catalog', panel);
               await close('Товары и услуги');
-              await openSetting('Оформление');
-              panel = page.getByRole('dialog', { name: 'Оформление', exact: true });
-              await panel.getByLabel('Название', { exact: true }).waitFor();
-              const swatches = await panel
-                .locator('[data-accent]')
-                .evaluateAll((nodes) =>
-                  nodes.map((node) => getComputedStyle(node).backgroundColor),
-                );
-              assert.equal(
-                new Set(swatches).size,
-                5,
-                'accent choices must show their distinct colors',
-              );
-              assert.ok(swatches.every((value) => value !== 'rgba(0, 0, 0, 0)'));
-              await panel.getByLabel('Название', { exact: true }).fill('Новая главная соседей');
-              await close('Оформление');
-              await openSetting('Оформление');
-              assert.equal(
-                await panel.getByLabel('Название', { exact: true }).inputValue(),
-                'Новая главная соседей',
-                'internal Back preserves unsaved design',
-              );
-              await close('Оформление');
+              await home.getByRole('button', { name: 'Настройки', exact: true }).click();
+              panel = page.getByRole('dialog', { name: 'Настройки', exact: true });
+              assert.equal(await panel.getByRole('button', { name: /Оформление/ }).count(), 0);
+              assert.equal(await panel.locator('input[type="file"]').count(), 0);
+              await close('Настройки');
               await openSetting('Подключённые чаты');
               await page.getByRole('button', { name: 'Подключить чаты', exact: true }).click();
               await page.getByText('Другие чаты', { exact: true }).waitFor();
@@ -576,79 +542,6 @@ try {
               await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
               await page.getByRole('button', { name: 'Подключить чаты', exact: true }).waitFor();
               await close('Подключённые чаты');
-              await openSetting('Оформление');
-              assert.equal(
-                await panel.getByLabel('Название', { exact: true }).inputValue(),
-                'Новая главная соседей',
-                'connecting chats preserves other editor drafts',
-              );
-              await panel
-                .locator('summary')
-                .filter({ hasText: /^Дополнительные действия$/u })
-                .click();
-              await panel.getByRole('button', { name: 'Сохранить на потом', exact: true }).click();
-              await panel
-                .getByRole('button', { name: 'Сохранить изменения', exact: true })
-                .waitFor();
-              assert.equal(
-                await page.evaluate(() => window.__shopPublished.name),
-                'Магазин соседей',
-              );
-              await panel
-                .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
-                .click();
-              assert.equal(
-                await page.evaluate(() => window.__shopOpened.at(-1)),
-                'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
-              );
-              assert.equal(
-                await page.evaluate(
-                  () =>
-                    window.__shopRequests.filter((row) => row.path.endsWith('/handoffs')).length,
-                ),
-                0,
-              );
-              const publishedBeforeUpload = await page.evaluate(() => window.__shopPublished);
-              await panel.getByLabel('Загрузить логотип').setInputFiles({
-                name: 'logo.png',
-                mimeType: 'image/png',
-                buffer: Buffer.from(
-                  await page.evaluate(() => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = canvas.height = 16;
-                    canvas.getContext('2d').fillRect(0, 0, 16, 16);
-                    return canvas.toDataURL('image/png').split(',')[1];
-                  }),
-                  'base64',
-                ),
-              });
-              await page.waitForFunction(() => typeof window.__finishShopImage === 'function');
-              assert.equal(
-                await panel
-                  .getByRole('button', { name: 'Сохранить изменения', exact: true })
-                  .isDisabled(),
-                true,
-                'applying the previous saved design must be blocked during image upload',
-              );
-              assert.deepEqual(
-                await page.evaluate(() => window.__shopPublished),
-                publishedBeforeUpload,
-              );
-              await page.evaluate(() => window.__finishShopImage());
-              await panel
-                .locator('summary')
-                .filter({ hasText: /^Дополнительные действия$/u })
-                .click();
-              await panel.getByRole('button', { name: 'Сохранить на потом', exact: true }).click();
-              await panel
-                .getByRole('button', { name: 'Сохранить изменения', exact: true })
-                .waitFor();
-              await shot('appearance', panel);
-              await panel.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
-              await page.waitForFunction(
-                () => window.__shopPublished.name === 'Новая главная соседей',
-              );
-              await close('Оформление');
               await openSetting('Категории и правила');
               panel = page.getByRole('dialog', { name: 'Категории и правила', exact: true });
               await panel.getByText('Услуги', { exact: true }).first().click();

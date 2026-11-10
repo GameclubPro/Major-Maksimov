@@ -1,6 +1,8 @@
 import { HttpException } from '@nestjs/common';
 import { z } from 'zod';
 const messages: Record<string, string> = {
+  MARKETPLACE_APPEARANCE_RETIRED: 'Оформление магазина больше не используется. Обновите экран.',
+  MARKETPLACE_ADMINISTRATION_MOVED: 'Управление магазином находится в Майоре. Откройте настройки чата.',
   MARKETPLACE_REVISION_CONFLICT: 'Магазин изменился. Обновите экран перед сохранением.',
   MARKETPLACE_BINDING_CHANGED: 'Магазин чата изменился. Откройте его заново.',
   MARKETPLACE_IMPACT_CHANGED: 'Состав каталога изменился. Проверьте последствия ещё раз.',
@@ -53,7 +55,7 @@ const messages: Record<string, string> = {
 export class KaravanManagementRejected extends HttpException {}
 
 export async function throwKnownKaravanManagementError(response: Response): Promise<void> {
-  if (![400, 403, 404, 409, 422].includes(response.status)) return;
+  if (![400, 403, 404, 409, 410, 422].includes(response.status)) return;
   try {
     const parsed = z.object({ error: z.string().max(100) }).safeParse(await response.json());
     if (parsed.success && messages[parsed.data.error])

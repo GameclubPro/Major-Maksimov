@@ -59,7 +59,8 @@ export default function ShopFormatSimple({ readOnly = false }: { readOnly?: bool
                     : 'Покупатели увидят допущенные витрины участников.'}
                 </p>
                 <p>
-                  Затронутые витрины: {preview.data.affectedStores}. Ожидающие заявки:{' '}
+                  Затронутые чаты: {preview.data.affectedChats}. Витрины:{' '}
+                  {preview.data.affectedStores}. Ожидающие заявки:{' '}
                   {preview.data.pendingApplications}.
                 </p>
                 <p>Витрины, товары и история сохранятся.</p>

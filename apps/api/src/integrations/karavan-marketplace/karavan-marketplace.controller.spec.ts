@@ -113,22 +113,37 @@ describe('Karavan module destination permissions', () => {
     expect(handoffs.issue).not.toHaveBeenCalled();
   });
 
-  it('opens private preview for a reviewer and live buyer view only for an active shop', async () => {
+  it('retires appearance preview and opens the buyer view only for an active shop', async () => {
     const { state, invoke, handoffs } = fixture();
-    await expect(invoke('preview')).resolves.toHaveProperty('url');
+    await expect(invoke('preview')).rejects.toThrow('Предпросмотр');
     await expect(invoke('view')).rejects.toThrow('недоступен');
     state.marketplace!.status = 'active';
     await expect(invoke('view')).resolves.toHaveProperty('url');
-    await expect(invoke('preview')).resolves.toHaveProperty('url');
+    await expect(invoke('preview')).rejects.toThrow('Предпросмотр');
     state.permissions = [];
     await expect(invoke('view')).rejects.toThrow('недоступно');
-    expect(handoffs.issue).toHaveBeenCalledTimes(3);
+    expect(handoffs.issue).toHaveBeenCalledTimes(1);
   });
   it('does not expose a destination after marketplace membership was revoked', async () => {
     const { state, invoke, handoffs } = fixture();
     state.permissions = [];
     await expect(invoke('manage')).rejects.toThrow('недоступно');
     expect(handoffs.issue).not.toHaveBeenCalled();
+  });
+  it('opens own placement with a current chat binding without granting administration of seller stores', async () => {
+    const { state, invoke, handoffs } = fixture();
+    state.marketplace!.format = 'community';
+    state.access = { reason: 'allowed', canRecover: false };
+    await expect(invoke('placement')).resolves.toHaveProperty('url');
+    state.marketplace!.format = 'storefront';
+    await expect(invoke('placement')).rejects.toThrow('Размещение');
+    state.marketplace!.format = 'community';
+    state.marketplace!.status = 'archived';
+    await expect(invoke('placement')).rejects.toThrow('Размещение');
+    state.marketplace!.status = 'active';
+    state.binding!.state = 'disconnected';
+    await expect(invoke('placement')).rejects.toThrow('недоступно');
+    expect(handoffs.issue).toHaveBeenCalledTimes(1);
   });
   it('previews the same route as the relay and never substitutes a general catalog after enrollment', async () => {
     const { state, invokeModule, resolver } = fixture();

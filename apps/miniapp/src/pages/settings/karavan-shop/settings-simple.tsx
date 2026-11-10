@@ -91,14 +91,6 @@ export default function ShopSettingsSimple({
               controls="karavan-shop-categories"
               onClick={() => workspace?.navigate('categories')}
             />
-            <SettingsSectionToggle
-              title="Оформление магазина"
-              icon="spark"
-              tone="sky"
-              open={false}
-              controls="karavan-shop-appearance"
-              onClick={() => workspace?.navigate('appearance')}
-            />
             {current === 'selected' ? (
               <SettingsSectionToggle
                 title="Доступ продавцов"
@@ -142,6 +134,9 @@ export default function ShopSettingsSimple({
           <summary>Другие чаты и подключения</summary>
           <button type="button" onClick={() => workspace?.navigate('chats')}>
             Подключённые чаты
+          </button>
+          <button type="button" onClick={() => workspace?.navigate('chats')}>
+            Отключить этот чат
           </button>
         </details>
       ) : null}

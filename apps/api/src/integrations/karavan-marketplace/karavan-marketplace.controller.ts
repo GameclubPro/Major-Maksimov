@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   ForbiddenException,
+  GoneException,
   Get,
   Param,
   Post,
@@ -367,6 +368,8 @@ export class KaravanMarketplaceController {
   ) {
     const chatId = karavanMarketplaceChatIdSchema.parse(rawChatId);
     const input = karavanMarketplaceHandoffIssueSchema.parse(body);
+    if (input.destination === 'preview')
+      throw new GoneException('Предпросмотр оформления больше не используется.');
     const principal = this.authority.principal(user, request.miniappAuth);
     const module = await this.proxy.module(
       chatId,
@@ -377,7 +380,7 @@ export class KaravanMarketplaceController {
     const requiredPermission =
       input.destination === 'applications'
         ? 'review_listing'
-        : ['manage', 'view', 'preview'].includes(input.destination)
+        : ['manage', 'view', 'preview', 'placement'].includes(input.destination)
           ? null
           : 'manage_marketplace';
     if (
@@ -388,6 +391,13 @@ export class KaravanMarketplaceController {
     )
       throw new ForbiddenException('Управление этим магазином недоступно.');
     if (
+      input.destination === 'placement' &&
+      (module.marketplace.format !== 'community' ||
+        module.marketplace.status === 'archived' ||
+        module.access?.reason !== 'allowed')
+    )
+      throw new ForbiddenException('Размещение в этом магазине недоступно.');
+    if (
       input.destination === 'storefront' &&
       (module.marketplace.format !== 'storefront' ||
         module.access?.reason !== 'allowed' ||
@@ -397,9 +407,7 @@ export class KaravanMarketplaceController {
     )
       throw new ForbiddenException('Общая витрина не подтверждена.');
     if (
-      (input.destination === 'view' && module.marketplace.status !== 'active') ||
-      (input.destination === 'preview' &&
-        !['draft', 'paused', 'active'].includes(module.marketplace.status))
+      input.destination === 'view' && module.marketplace.status !== 'active'
     )
       throw new ForbiddenException('Просмотр этого магазина недоступен.');
     return this.handoffs.issue(chatId, user.userId, input, principal);

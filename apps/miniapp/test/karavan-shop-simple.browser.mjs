@@ -119,6 +119,186 @@ try {
             await page.screenshot({ path: `${output}/${name}-${width}-${theme}-${label}.png` });
           };
           const back = () => page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
+          if (!process.env.SHOP_SIMPLE_ONLY || process.env.SHOP_SIMPLE_ONLY === 'network') {
+            await begin('simple_community_network');
+            await home.getByRole('button', { name: 'Настройки', exact: true }).click();
+            const settings = page.getByRole('dialog', { name: 'Настройки', exact: true });
+            assert.equal(await settings.getByRole('button', { name: /Оформление/ }).count(), 0);
+            assert.equal(await settings.locator('input[type="file"]').count(), 0);
+            await settings
+              .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+              .click();
+            assert.deepEqual(
+              await settings
+                .getByRole('list', { name: 'Затронутые чаты', exact: true })
+                .getByRole('listitem')
+                .allTextContents(),
+              ['Соседи', 'Соседи второго дома'],
+            );
+            assert.equal(
+              (await requests('status')).length,
+              0,
+              'showing the affected chats sends no status command',
+            );
+            await settings
+              .getByRole('list', { name: 'Затронутые чаты', exact: true })
+              .scrollIntoViewIfNeeded();
+            await shot('network-pause', settings);
+            await settings
+              .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+              .click();
+            await settings
+              .getByRole('button', { name: 'Включить магазин сети', exact: true })
+              .waitFor();
+            assert.equal((await requests('status'))[0].body.command.input.status, 'paused');
+            await settings
+              .getByRole('button', { name: 'Включить магазин сети', exact: true })
+              .click();
+            assert.equal(
+              (await requests('status')).length,
+              1,
+              'opening the network also waits for scope confirmation',
+            );
+            await settings.getByRole('button', { name: 'Отмена', exact: true }).click();
+            await settings.getByRole('button', { name: 'Изменить формат', exact: true }).click();
+            await settings.getByRole('button', { name: /^Администрация/ }).click();
+            await settings.getByText(/Затронутые чаты: 2\./u).waitFor();
+            await settings.getByRole('button', { name: 'Отмена', exact: true }).click();
+            await settings.getByText('Другие чаты и подключения', { exact: true }).click();
+            await settings.getByRole('button', { name: 'Отключить этот чат', exact: true }).click();
+            const chats = page.getByRole('dialog', { name: 'Подключённые чаты', exact: true });
+            await chats.getByRole('button', { name: 'Отключить этот чат', exact: true }).click();
+            await chats
+              .getByText(
+                'Этот чат перестанет открывать магазин. Если он последний, просмотр приостановится. Витрины и заказы сохранятся.',
+                { exact: true },
+              )
+              .waitFor();
+            assert.equal(
+              (await requests('status')).length,
+              1,
+              'disconnecting one chat is separate from a network status change',
+            );
+            await shot('network-disconnect', chats);
+
+            await begin('simple_community_network_100');
+            await home.getByRole('button', { name: 'Настройки', exact: true }).click();
+            await settings
+              .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+              .click();
+            assert.equal(
+              await settings
+                .getByRole('list', { name: 'Затронутые чаты', exact: true })
+                .getByRole('listitem')
+                .count(),
+              100,
+              'complete connectedChats projection is independent from legacy bindings48',
+            );
+            assert.equal(
+              await settings
+                .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+                .isEnabled(),
+              true,
+            );
+            assert.equal((await requests('status')).length, 0);
+
+            await begin('simple_community_network_incomplete');
+            await home.getByRole('button', { name: 'Настройки', exact: true }).click();
+            await settings
+              .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+              .click();
+            await settings
+              .getByRole('alert')
+              .getByText('Не удалось получить все чаты. Обновите подключение магазина.', {
+                exact: true,
+              })
+              .waitFor();
+            assert.equal(
+              await settings
+                .getByRole('button', { name: 'Приостановить магазин сети', exact: true })
+                .isDisabled(),
+              true,
+            );
+            assert.equal((await requests('status')).length, 0);
+
+            await begin('simple_community_retired_recovery');
+            const original = await page.evaluate(async () => {
+              const journal =
+                await import('/app/src/pages/settings/karavan-shop/command-journal.ts');
+              const client = await import('/app/src/lib/api/karavan-shop-client.ts');
+              const scope = {
+                actorMaxUserId: '777',
+                chatId: '-123',
+                marketplaceId: window.__shopMarket.id,
+                expectedBindingGeneration: 1,
+              };
+              const appearance = {
+                name: 'Старое сохранённое оформление',
+                description: null,
+                logoImageUrl: null,
+                coverImageUrl: null,
+                accent: 'blue',
+                blocks: [
+                  { id: 'categories', visible: true },
+                  { id: 'pinned', visible: true },
+                  { id: 'sellers', visible: true },
+                ],
+              };
+              const request = client.prepareShopRequest(scope, {
+                operation: 'appearance_apply',
+                input: { commandId: crypto.randomUUID(), expectedRevision: 1, appearance },
+              });
+              const pending = await journal.reserveShopCommand(scope, request, {
+                owner: 'retired-appearance',
+                page: 'appearance',
+              });
+              const dispatched = await journal.releaseShopCommand(
+                await journal.claimShopCommand(pending),
+              );
+              return { request, hash: dispatched.pending.hash };
+            });
+            await page.reload();
+            await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
+            await home.getByRole('button', { name: 'Открыть действие', exact: true }).click();
+            await settings.waitFor();
+            await settings
+              .getByRole('button', { name: 'Категории и правила', exact: true })
+              .waitFor();
+            assert.equal(await settings.getByRole('button', { name: /Оформление/ }).count(), 0);
+            assert.equal(
+              (await requests('appearance_apply')).length,
+              0,
+              'opening the retired route does not replay the command',
+            );
+            const restored = await page.evaluate(async () => {
+              const journal =
+                await import('/app/src/pages/settings/karavan-shop/command-journal.ts');
+              const stored = await journal.loadShopCommandJournal({
+                actorMaxUserId: '777',
+                chatId: '-123',
+                marketplaceId: window.__shopMarket.id,
+                expectedBindingGeneration: 1,
+              });
+              return {
+                request: await journal.restoreShopCommand(stored),
+                hash: stored.pending.hash,
+                page: stored.pending.ui.page,
+              };
+            });
+            assert.deepEqual(restored.request, original.request);
+            assert.equal(restored.hash, original.hash);
+            assert.equal(
+              restored.page,
+              'appearance',
+              'only navigation is normalized; the saved command remains original',
+            );
+            await shot('retired-appearance-recovery', settings);
+            assert.deepEqual(errors, []);
+            console.log(
+              `${name}/${width}/${theme}: absent Marketplace design, explicit network scope and legacy recovery route passed`,
+            );
+            if (process.env.SHOP_SIMPLE_ONLY === 'network') continue;
+          }
           if (process.env.SHOP_SIMPLE_ONLY === 'categories') {
             await begin('simple_setup_community');
             await home.getByRole('button', { name: 'Включить магазин', exact: true }).click();
@@ -356,7 +536,7 @@ try {
             assert.equal(await home.getByRole('textbox').count(), 0);
             await shot('who');
             await home.getByRole('button', { name: /^Администрация/ }).click();
-            await home.getByRole('button', { name: /^Создать и оформить витрину/ }).waitFor();
+            await home.getByRole('button', { name: /^Добавить витрину/ }).waitFor();
             const setup = await requests('setup');
             assert.equal(setup.length, 1);
             assert.equal(setup[0].body.create.setupVersion, 2);
@@ -369,7 +549,7 @@ try {
                 .at(-1)
                 .includes('startapp=m_synthetic-shop'),
             );
-            await home.getByRole('button', { name: /^Создать и оформить витрину/ }).click();
+            await home.getByRole('button', { name: /^Добавить витрину/ }).click();
             assert.equal(
               (
                 await page.evaluate(() =>
@@ -386,7 +566,7 @@ try {
             );
             await shot('admin-empty');
             await page.evaluate(() => window.__setAdministrationStores(1));
-            await home.getByRole('button', { name: /^Оформить витрину/ }).waitFor();
+            await home.getByRole('button', { name: /^Управлять витриной/ }).waitFor();
             await home.getByRole('button', { name: /^Посмотреть витрину/ }).waitFor();
             await page.evaluate(() => window.__setAdministrationStores(2));
             await home.getByRole('button', { name: /^Управлять витринами/ }).waitFor();

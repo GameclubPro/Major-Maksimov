@@ -15,6 +15,16 @@ import {
 } from '../src/karavan-marketplace-management.js';
 
 describe('Karavan command boundary', () => {
+  it('keeps own-placement handoff scoped to a marketplace without browser-supplied store authority', () => {
+    const input = {
+      commandId: 'bc5f73aa-2e17-49a4-9ccd-8dc656150ff3',
+      marketplaceId: '001b341a-d73f-4f87-827a-5d48dcce1260',
+      destination: 'placement',
+    };
+    expect(karavanMarketplaceHandoffIssueSchema.parse(input)).toEqual(input);
+    expect(karavanMarketplaceHandoffIssueSchema.safeParse({ ...input, storeId: input.marketplaceId }).success).toBe(false);
+    expect(karavanMarketplaceHandoffIssueSchema.safeParse({ ...input, returnUrl: 'https://example.test' }).success).toBe(false);
+  });
   const scope = {
     proofId: 'x'.repeat(43),
     actorMaxUserId: '123',
