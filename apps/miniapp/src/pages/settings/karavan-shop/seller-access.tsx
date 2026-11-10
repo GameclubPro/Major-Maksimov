@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { canShareNativeContent, shareNativeContent } from '../../../lib/max-bridge';
 import { MutationFailure, useShop, useShopMutation } from './runtime';
 import { sellerApplicationUrl } from './shop-journey';
+import { useStorefrontWorkspace } from '../storefront-workspace';
 import { useSellerPlacementLink } from './storefront-management';
 
 function useSellerAccessState() {
@@ -10,6 +11,7 @@ function useSellerAccessState() {
   const allowed = module.permissions.includes('manage_marketplace') && market.status !== 'archived';
   const mode = market.admissionMode ?? market.admissionPolicy;
   const invitation = mode === 'invitation';
+  const selected = mode === 'selected';
   const publicUrl = sellerApplicationUrl(module.sellerBotUrl, market.id);
   const [link, setLink] = useState<{ id: string; url: string | null; expiresAt: number } | null>(
     null,
@@ -58,7 +60,7 @@ function useSellerAccessState() {
   }, [allowed, invitation, mutation.isSuccess, mutation.receipt]);
   const url = invitation ? (link?.url ?? null) : publicUrl;
   const share = async (copyOnly = false) => {
-    if (!allowed || mutation.blocked || sharing) return;
+    if (!allowed || selected || mutation.blocked || sharing) return;
     const current = ++epoch.current;
     setSharing(true);
     setCopied(false);
@@ -103,6 +105,7 @@ function useSellerAccessState() {
   return {
     allowed,
     invitation,
+    selected,
     link,
     url,
     revealed,
@@ -158,9 +161,20 @@ export function AddOwnOfferAction({
 }
 export function SellerAccessAction({ primary = false }: { primary?: boolean }) {
   const access = useSellerAccess();
+  const workspace = useStorefrontWorkspace();
   const { module } = useShop();
   const simple = (module.chatShopFlowVersion ?? 1) >= 2;
   if (!access.allowed) return null;
+  if (access.selected)
+    return (
+      <button
+        type="button"
+        className={primary ? 'karavan-module__primary' : undefined}
+        onClick={() => workspace?.navigate('seller_access')}
+      >
+        Добавить продавца
+      </button>
+    );
   const disabled =
     access.sharing ||
     access.mutation.blocked ||

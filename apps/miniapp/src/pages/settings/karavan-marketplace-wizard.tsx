@@ -296,7 +296,10 @@ function LegacyMarketplaceWizard({
                 name: draft.name,
                 format: draft.format ?? 'community',
                 ...(draft.format === 'storefront'
-                  ? { administrationStoreId: draft.administrationStoreId ?? null }
+                  ? {
+                      administrationStoreId: draft.administrationStoreId ?? null,
+                      ...(draft.administrationStoreId ? { confirmSharedManagement: true } : {}),
+                    }
                   : {}),
                 admissionPolicy: draft.admissionPolicy,
                 rules: {
@@ -794,6 +797,13 @@ function LegacyMarketplaceWizard({
                   </li>
                 ))}
               </ul>
+            ) : null}
+            {creating && draft.format === 'storefront' && draft.administrationStoreId ? (
+              <p>
+                Администраторы всех подключённых чатов получат доступ к каталогу, заказам и
+                перепискам витрины из всех источников. Самостоятельная ссылка станет недоступна;
+                отключение от чата не восстановит её без переноса прав.
+              </p>
             ) : null}
             <fieldset className="karavan-module__choices">
               <label>

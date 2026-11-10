@@ -29,6 +29,7 @@ import { useKaravanMarketplaceBinding } from './use-karavan-marketplace-binding'
 import { shopSetupDraftKey, type ShopSetupIntent } from './karavan-shop/setup-intent';
 import { readShopSetupRecovery, type ShopSetupRecovery } from './karavan-shop/setup-recovery';
 import ConnectionRecovery from './karavan-connection-recovery';
+import { continueShopSetup } from './karavan-shop/setup-continuation';
 import { Spinner } from '../../components/ui/spinner';
 import '../../styles/karavan-marketplace.css';
 
@@ -63,6 +64,12 @@ export default function KaravanMarketplacePanel({
   const storageKey = module ? `${module.actorMaxUserId}:${chatId}` : null;
   const liveStorageKey = useRef(storageKey);
   liveStorageKey.current = storageKey;
+  useEffect(
+    () => () => {
+      liveStorageKey.current = null;
+    },
+    [],
+  );
   const [setupIntent, setSetupIntent] = useState<ShopSetupIntent | null>(null);
   const [saved, setSaved] = useState<KaravanMarketplaceSetup | null>(null);
   const [operation, setOperation] = useState<KaravanMarketplaceOperation | null>(null);
@@ -194,7 +201,14 @@ export default function KaravanMarketplacePanel({
     }
   };
   const setup = useMutation({
-    mutationFn: (input: KaravanMarketplaceSetup) => setupKaravanMarketplace(api, chatId, input),
+    mutationFn: (input: KaravanMarketplaceSetup) =>
+      continueShopSetup(
+        input,
+        (request) => setupKaravanMarketplace(api, chatId, request),
+        () =>
+          liveStorageKey.current === storageKey &&
+          submittedSetup.current?.operationId === input.operationId,
+      ),
     onSuccess: (state) => {
       // FLAG: Late responses cannot replace another actor/chat or a newer intent.
       if (
@@ -736,9 +750,7 @@ export default function KaravanMarketplacePanel({
                   optionalDraftRecovery
                   onSubmit={start}
                 />
-                {!marketplace &&
-                (module.chatShopFlowVersion ?? 1) < 2 &&
-                (!setupIntent || setupIntent.kind === 'create') ? (
+                {!marketplace && (!setupIntent || setupIntent.kind === 'create') ? (
                   <details>
                     <summary>Другие варианты</summary>
                     <button

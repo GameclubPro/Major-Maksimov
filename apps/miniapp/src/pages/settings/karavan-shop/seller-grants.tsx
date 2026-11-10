@@ -21,7 +21,10 @@ function GrantRow({ grant }: { grant: MarketplaceSellerGrant }) {
   const expired = !grant.claimedAt && Date.parse(grant.expiresAt) <= Date.now();
   return (
     <article className="karavan-shop__row">
-      <strong>Аккаунт MAX {grant.targetMaxUserId}</strong>
+      <strong>
+        {grant.targetName ?? grant.storeName ?? `Аккаунт MAX ${grant.targetMaxUserId}`}
+      </strong>
+      {grant.targetName && grant.storeName ? <p>{grant.storeName}</p> : null}
       <p>
         {grant.revokedAt
           ? 'Доступ отозван'
@@ -48,6 +51,13 @@ function GrantRow({ grant }: { grant: MarketplaceSellerGrant }) {
         >
           Отозвать доступ
         </button>
+      ) : null}
+      {!grant.revokedAt && !grant.claimedAt && !expired && grant.url ? (
+        <ShopShareLink
+          url={grant.url}
+          disabled={mutation.blocked || !module.permissions.includes('manage_marketplace')}
+          label="Отправить приглашение снова"
+        />
       ) : null}
       <MutationFailure mutation={mutation} />
     </article>

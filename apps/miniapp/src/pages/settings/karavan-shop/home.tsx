@@ -114,19 +114,7 @@ export default function ShopHome({
   const canView = active && Boolean(module.buyerUrl);
   const empty = (module.counts.approvedListings ?? module.counts.listings) === 0;
   const sellerEntry =
-    canManage && !archived ? (
-      policy === 'selected' ? (
-        <button
-          type="button"
-          className="karavan-module__primary"
-          onClick={() => workspace?.navigate('seller_access')}
-        >
-          Добавить продавца
-        </button>
-      ) : (
-        <SellerAccessAction />
-      )
-    ) : null;
+    canManage && !archived ? <SellerAccessAction primary={policy === 'selected'} /> : null;
   const pages: StorefrontPage[] = [
     'settings',
     ...(!administration ? (['catalog', 'categories', 'seller_access'] as const) : []),

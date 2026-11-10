@@ -221,7 +221,8 @@ try {
           await home.getByRole('button', { name: 'Создать витрину чата', exact: true }).click();
           await home.getByText('Закрыт для покупателей', { exact: true }).waitFor();
           const created = await requests('setup');
-          assert.equal(created.length, 1);
+          assert.equal(created.length, 2);
+          assert.deepEqual(created[1].body, created[0].body);
           assert.equal(created[0].body.create.format, 'storefront');
           assert.equal(created[0].body.create.administrationStoreId, null);
           assert.equal((await requests('status')).length, 0, 'creation never opens buyer access');
@@ -240,7 +241,7 @@ try {
             connection.operation.operation,
             'explicit status reads the original committed setup receipt',
           );
-          assert.equal((await requests('setup')).length, 1, 'receipt reads never dispatch setup');
+          assert.equal((await requests('setup')).length, 2, 'receipt reads never dispatch setup');
           await page.reload();
           await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
           await home.getByText('Закрыт для покупателей', { exact: true }).waitFor();

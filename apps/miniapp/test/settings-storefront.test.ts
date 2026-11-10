@@ -187,3 +187,26 @@ test('a closed administrative storefront keeps only its own button settings with
   assert.ok(!html.includes('id="karavanStorefrontCatalogButtonText"'));
   assert.ok(!html.includes('id="karavanStorefrontCreateButtonText"'));
 });
+
+test('administration shop preview uses the common catalog text for both one and many stores', () => {
+  const html = renderToStaticMarkup(
+    createElement(
+      StorefrontPublicationPreviewContext.Provider,
+      { value: { mode: 'chat_marketplace', administrationTarget: 'shop' } },
+      createElement(SettingsStorefrontTextEditor, {
+        draft: {
+          karavanStorefrontMessageText: 'Товары нашего чата',
+          karavanStorefrontOpenButtonText: 'Личная витрина',
+          karavanStorefrontCatalogButtonText: 'Наш магазин',
+          karavanStorefrontCreateButtonText: 'Создать',
+        },
+        onChange: () => undefined,
+      }),
+    ),
+  );
+  assert.ok(html.includes('<span>Наш магазин</span>'));
+  assert.ok(html.includes('Кнопка магазина'));
+  assert.ok(!html.includes('Сценарий примера'));
+  assert.ok(!html.includes('id="karavanStorefrontOpenButtonText"'));
+  assert.ok(!html.includes('id="karavanStorefrontCreateButtonText"'));
+});

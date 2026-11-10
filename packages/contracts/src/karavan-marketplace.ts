@@ -236,12 +236,17 @@ export const karavanMarketplaceBindingSchema = z.object({
 });
 export const karavanPublicationPreviewSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('catalog') }),
-  z.object({ mode: z.literal('chat_marketplace') }),
+  // Keep the existing discriminator readable by already-open MAX shells.
+  z.object({
+    mode: z.literal('chat_marketplace'),
+    administrationTarget: z.literal('shop').optional(),
+  }),
   z.object({ mode: z.literal('administration_storefront') }),
   z.object({
     mode: z.literal('unavailable'),
     reason: z.enum(['closed', 'connection', 'verification']),
     format: karavanShopFormatSchema.optional(),
+    administrationTarget: z.enum(['storefront', 'shop']).optional(),
   }),
 ]);
 export type KaravanPublicationPreview = z.infer<typeof karavanPublicationPreviewSchema>;
@@ -326,6 +331,7 @@ export const karavanMarketplaceCreateSchema = z
     // FLAG: Omitted format fields stay omitted so persisted pre-format command hashes remain valid.
     format: karavanShopFormatSchema.optional(),
     administrationStoreId: karavanMarketplaceIdSchema.nullable().optional(),
+    confirmSharedManagement: z.literal(true).optional(),
     rules: z.object({
       text: z.string().trim().min(1).max(12000),
       allowedCategoryIds: z.array(categoryIdSchema).min(1).max(40),

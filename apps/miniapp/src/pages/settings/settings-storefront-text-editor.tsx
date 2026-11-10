@@ -99,7 +99,14 @@ function StorefrontTextField({
 export function SettingsStorefrontTextEditor(props: Props) {
   const publication = useStorefrontPublicationPreview();
   const network = props.scope === 'network';
+  const administrationShop =
+    (publication?.mode === 'chat_marketplace' && publication.administrationTarget === 'shop') ||
+    (publication?.mode === 'unavailable' && publication.administrationTarget === 'shop');
+  const administrationButton = administrationShop
+    ? 'karavanStorefrontCatalogButtonText'
+    : 'karavanStorefrontOpenButtonText';
   const administration =
+    administrationShop ||
     publication?.mode === 'administration_storefront' ||
     (publication?.mode === 'unavailable' && publication.format === 'storefront');
   const available = !network && !!publication && publication.mode !== 'unavailable';
@@ -126,7 +133,7 @@ export function SettingsStorefrontTextEditor(props: Props) {
       network ||
       !administration ||
       field === 'karavanStorefrontMessageText' ||
-      field === 'karavanStorefrontOpenButtonText',
+      field === administrationButton,
   );
   const hasCustomText = paths.some((field) => {
     const value = state(field);
@@ -137,8 +144,9 @@ export function SettingsStorefrontTextEditor(props: Props) {
   useEffect(() => {
     if (hasFieldErrors) setEditing(true);
   }, [hasFieldErrors]);
-  const previewButtons =
-    administration || variant === 'storefront'
+  const previewButtons = administration
+    ? [preview(administrationButton)]
+    : variant === 'storefront'
       ? [preview('karavanStorefrontOpenButtonText')]
       : publication?.mode === 'chat_marketplace'
         ? [preview('karavanStorefrontCatalogButtonText')]
@@ -162,7 +170,7 @@ export function SettingsStorefrontTextEditor(props: Props) {
   );
   const shownButtons =
     !network && administration
-      ? buttonFields.slice(0, 1)
+      ? buttonFields.filter(([field]) => field === administrationButton)
       : available && publication?.mode === 'chat_marketplace'
         ? buttonFields.slice(0, 2)
         : buttonFields;
@@ -235,10 +243,14 @@ export function SettingsStorefrontTextEditor(props: Props) {
               textField(
                 field,
                 field === 'karavanStorefrontCatalogButtonText' &&
-                  publication?.mode === 'chat_marketplace'
-                  ? 'Кнопка магазина чата'
+                  (publication?.mode === 'chat_marketplace' || administrationShop)
+                  ? administrationShop
+                    ? 'Кнопка магазина'
+                    : 'Кнопка магазина чата'
                   : field === 'karavanStorefrontOpenButtonText' && administration
-                    ? 'Кнопка витрины чата'
+                    ? administrationShop
+                      ? 'Кнопка магазина'
+                      : 'Кнопка витрины чата'
                     : label,
               ),
             )}

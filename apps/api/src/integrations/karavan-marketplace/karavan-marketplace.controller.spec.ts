@@ -1,5 +1,6 @@
 import type { KaravanMarketplaceResolverService } from './karavan-marketplace-resolver.service';
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import { ConfigService } from '@nestjs/config';
 import type { FastifyRequest } from 'fastify';
 import type { KaravanMarketplaceModule } from '@maxim/contracts/karavan-marketplace';
@@ -254,7 +255,7 @@ describe('Karavan module destination permissions', () => {
     expect(handoffs.issue).toHaveBeenCalledTimes(1);
   });
 
-  it('uses connected v2 storefront count for the publication route and requires a published store', async () => {
+  it('keeps the v2 shop preview readable by cached shells and requires a published store', async () => {
     const { state, invokeModule } = fixture();
     state.chatShopFlowVersion = 2;
     state.marketplace!.format = 'storefront';
@@ -284,12 +285,27 @@ describe('Karavan module destination permissions', () => {
     });
     state.counts.readyListings = 1;
     await expect(invokeModule()).resolves.toMatchObject({
-      publicationPreview: { mode: 'administration_storefront' },
+      publicationPreview: { mode: 'chat_marketplace', administrationTarget: 'shop' },
+    });
+    // Frozen pre-change reader: unknown optional fields are stripped, new modes are rejected.
+    const cachedPreview = z.discriminatedUnion('mode', [
+      z.object({ mode: z.literal('catalog') }),
+      z.object({ mode: z.literal('chat_marketplace') }),
+      z.object({ mode: z.literal('administration_storefront') }),
+      z.object({
+        mode: z.literal('unavailable'),
+        reason: z.enum(['closed', 'connection', 'verification']),
+      }),
+    ]);
+    const compatibleModule = await invokeModule();
+    if (!compatibleModule.enabled) throw new Error('Expected the enabled chat-shop module');
+    expect(cachedPreview.parse(compatibleModule.publicationPreview)).toEqual({
+      mode: 'chat_marketplace',
     });
     // The other connected store may be hidden or still being completed.
     state.administrationStoreCount = 2;
     await expect(invokeModule()).resolves.toMatchObject({
-      publicationPreview: { mode: 'chat_marketplace' },
+      publicationPreview: { mode: 'chat_marketplace', administrationTarget: 'shop' },
     });
     state.administrationStores[0].status = 'BLOCKED';
     await expect(invokeModule()).resolves.toMatchObject({
