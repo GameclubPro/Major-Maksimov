@@ -121,7 +121,7 @@ Only application selection supplies the symbolic guide ID; model-authored JSON c
 
 For a selected guide, the host reads its exact pinned forwarded messages with the source bot
 from the reviewed catalog. Every read checks that exact bot's current administrator access and
-read execution proof in the source chat. The destination keeps its own assigned moderator and
+read-all execution proof using the API's `moderation` purpose in the source chat. The destination keeps its own assigned moderator and
 independent send checks; a different destination bot does not authorize reading another source.
 Missing source access refuses the entire pack. Every image identity and its order must match
 before using only the fresh MAX image tokens. Forwarded text and URLs do not become model instructions or outgoing

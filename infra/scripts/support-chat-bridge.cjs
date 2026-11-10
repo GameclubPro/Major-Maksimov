@@ -127,6 +127,7 @@ function supportGuideImages(row, part, chatId) {
 async function supportGuideReadOptions({ client, registry, links, supportGuideCatalog }, guide) {
   // FLAG: A destination moderator never grants access to the guide source. Only the
   // reviewed catalog's exact bot/chat pair may read it, with fresh source access.
+  // The execution-proof contract names read-all access "moderation".
   if (
     !validateSupportGuideCatalog(supportGuideCatalog).some(
       (reviewed) =>
@@ -153,7 +154,7 @@ async function supportGuideReadOptions({ client, registry, links, supportGuideCa
     !(await links.getFreshChatBotExecutionProof({
       chatId: guide.sourceChatId,
       botId: guide.sourceBotId,
-      purpose: 'read',
+      purpose: 'moderation',
     }))
   )
     throw new Error('support_guide_access_refused');

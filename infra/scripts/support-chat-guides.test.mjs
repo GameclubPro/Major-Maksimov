@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Redis from 'ioredis';
+import ts from 'typescript';
 import bridge from './support-chat-bridge.cjs';
 import { supportChatSession } from './support-chat-worker.mjs';
 import { answerSupport } from './support-llm-client.mjs';
@@ -26,6 +28,24 @@ const {
 const FOOTER = '✦ Ответ подготовлен ИИ-помощником «Майор Максимов»';
 const CAPTION = `Инструкция подключения к группе. Выберите один из двух способов.\n\n${FOOTER}`;
 const BOT_ID = 'id900000001_1_bot';
+const executionProofSource = ts.createSourceFile(
+  'max-execution-route-proof.ts',
+  readFileSync(
+    new URL('../../apps/api/src/max/max-execution-route-proof.ts', import.meta.url),
+    'utf8',
+  ),
+  ts.ScriptTarget.Latest,
+);
+const executionPurpose = executionProofSource.statements.find(
+  (node) => ts.isTypeAliasDeclaration(node) && node.name.text === 'MaxExecutionPurpose',
+);
+assert.ok(executionPurpose && ts.isUnionTypeNode(executionPurpose.type));
+const executionPurposes = new Set(
+  executionPurpose.type.types.map((node) => {
+    assert.ok(ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal));
+    return node.literal.text;
+  }),
+);
 
 function guideCatalog() {
   return ['moderator-group', 'publisher-group'].map((id, guideIndex) => ({
@@ -175,6 +195,10 @@ function attachGuideReader(state, destinationBotId = BOT_ID) {
     registry: { getActionableBots: () => (state.guideActionable ? [{ id: BOT_ID }] : []) },
     links: {
       getFreshChatBotExecutionProof: async (params) => {
+        assert.ok(
+          executionPurposes.has(params.purpose),
+          'The guide reader must use a purpose from the real API execution-proof contract',
+        );
         state.guideAccessCalls.push({ operation: 'proof', ...params });
         return state.guideProof ? { botId: params.botId } : null;
       },
@@ -483,7 +507,7 @@ test('guide reads require the exact reviewed source bot and fresh read access', 
     ['snapshot', 'access', 'proof'],
   );
   assert.ok(state.guideAccessCalls.every(({ chatId }) => chatId === state.guide.sourceChatId));
-  assert.equal(state.guideAccessCalls[2].purpose, 'read');
+  assert.equal(state.guideAccessCalls[2].purpose, 'moderation');
   assert.equal(state.guideAccessCalls[2].botId, BOT_ID);
   state.guideReadable = false;
   await assert.rejects(state.runtime.guideOptions(state.guide), /support_guide_access_refused/u);
