@@ -392,7 +392,7 @@ const api = {
     if (setupStatus) {
       const operation = backend.setups.find((item) => item.operationId === setupStatus[1]);
       if (!operation) throw new ApiRequestError(404, '{}', 'Подключение не найдено.');
-      return structuredClone(operation);
+      return karavanMarketplaceOperationSchema.parse(structuredClone(operation));
     }
     if (path.includes('/karavan-storefront/allowlist')) {
       if (init.method === 'DELETE') {
@@ -421,7 +421,12 @@ const api = {
         hasMore: false,
         nextCursor: null,
       };
-    if (path.includes('/available')) return { marketplaces: [], nextCursor: null };
+    if (path.includes('/available'))
+      return {
+        marketplaces:
+          scenario === 'simple_setup_existing' ? [{ marketplace: market, permissions }] : [],
+        nextCursor: null,
+      };
     if (path.endsWith('/preview'))
       return {
         target: body.marketplaceId
@@ -451,7 +456,23 @@ const api = {
       const prior = backend.setups.find((item) => item.operationId === request.operationId);
       if (prior) {
         sameRequest(prior.request, request);
-        return structuredClone(prior);
+        if (prior.state === 'pending') {
+          const next = prior.checkpoints.bindings.find((item) => item.state === 'pending');
+          if (next)
+            Object.assign(next, {
+              state: 'connected',
+              bindingId: binding.id,
+              generation: binding.generation,
+            });
+          if (prior.checkpoints.bindings.every((item) => item.state === 'connected')) {
+            prior.state = 'complete';
+            backend.connection.blocked = false;
+            formatConnected = true;
+          }
+          backend.connection.revision++;
+          persistBackend();
+        }
+        return karavanMarketplaceOperationSchema.parse(structuredClone(prior));
       }
       checkConnectionRevision(request.expectedConnectionRevision);
       if (!request.chatIds.includes(fixtureChatId)) conflict('MARKETPLACE_BINDING_CHANGED');
@@ -468,7 +489,6 @@ const api = {
       backend.connection.blocked = true;
       backend.connection.revision++;
       persistBackend();
-      formatConnected = true;
       if (request.create) {
         market.status = request.create.setupVersion === 2 ? 'active' : 'draft';
         market.name = request.create.name;
@@ -485,20 +505,23 @@ const api = {
         }
       }
       if (administrationStore) administrationStore = { ...administrationStore, status: 'DRAFT' };
-      operation.state = 'complete';
+      operation.state = 'pending';
       operation.checkpoints = {
         marketplaceId: market.id,
-        bindings: request.chatIds.map((chatId) => ({
-          chatId,
-          state: 'connected',
-          bindingId: binding.id,
-          generation: binding.generation,
-        })),
+        bindings: request.chatIds.map((chatId, index) =>
+          !request.create && index === 0
+            ? { chatId, state: 'connected', bindingId: binding.id, generation: binding.generation }
+            : { chatId, state: 'pending', bindingId: null, generation: null },
+        ),
       };
-      backend.connection.blocked = false;
+      if (operation.checkpoints.bindings.every((item) => item.state === 'connected')) {
+        operation.state = 'complete';
+        backend.connection.blocked = false;
+        formatConnected = true;
+      }
       backend.connection.revision++;
       persistBackend();
-      return structuredClone(operation);
+      return karavanMarketplaceOperationSchema.parse(structuredClone(operation));
     }
     if (path.endsWith('/setup-options'))
       return {
@@ -561,7 +584,19 @@ const api = {
           stores: scenario.includes('_new_seller') ? [] : [administrationStore],
         };
       } else if (operation === 'seller_grants')
-        data = { grants: grant ? [grant.grant] : [], nextCursor: null };
+        data = {
+          grants: grant
+            ? [
+                {
+                  ...grant.grant,
+                  targetName: 'Анна Цветкова',
+                  storeName: null,
+                  url: grant.grant.revokedAt ? null : grant.url,
+                },
+              ]
+            : [],
+          nextCursor: null,
+        };
       else if (operation === 'seller_grant_create') {
         const previous = scenario.includes('_unknown')
           ? sessionStorage.getItem(`grant-receipt:${input.commandId}`)
@@ -799,7 +834,11 @@ const api = {
         data = {
           applications: simple
             ? simpleApplications.filter(
-                (application) => input.state === 'all' || application.state === input.state,
+                (application) =>
+                  input.state === 'all' ||
+                  (input.state === 'completed'
+                    ? application.state !== 'pending'
+                    : application.state === input.state),
               )
             : pendingApplication
               ? [
@@ -994,9 +1033,16 @@ const api = {
         publicationPreview:
           market.status === 'active'
             ? market.format === 'storefront'
-              ? { mode: 'administration_storefront' }
+              ? { mode: simple ? 'administration_shop' : 'administration_storefront' }
               : { mode: 'chat_marketplace' }
-            : { mode: 'unavailable', reason: 'closed', format: market.format ?? 'community' },
+            : {
+                mode: 'unavailable',
+                reason: 'closed',
+                format: market.format ?? 'community',
+                ...(market.format === 'storefront'
+                  ? { administrationTarget: simple ? 'shop' : 'storefront' }
+                  : {}),
+              },
         setupOperation:
           backend.connection.operation?.kind === 'setup'
             ? structuredClone(backend.connection.operation.operation)

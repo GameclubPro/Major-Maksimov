@@ -162,16 +162,27 @@ export default function ShopFormatSettings({ readOnly = false }: { readOnly?: bo
                     needsTerms ||
                     (format === 'storefront' && !administrationSupported)
                   }
-                  onClick={() =>
+                  onClick={() => {
+                    if (
+                      format === 'storefront' &&
+                      storeId &&
+                      !window.confirm(
+                        'Сделать витрину общей? Администраторы всех подключённых чатов получат доступ к её каталогу, заказам и перепискам из всех источников. Самостоятельная ссылка станет недоступна; отключение от чата не восстановит её без переноса прав.',
+                      )
+                    )
+                      return;
                     mutation.mutate({
                       operation: 'format_update',
                       input: {
                         ...input,
+                        ...(format === 'storefront' && storeId
+                          ? { confirmSharedManagement: true as const }
+                          : {}),
                         commandId: crypto.randomUUID(),
                         fingerprint: preview.data!.fingerprint,
                       },
-                    })
-                  }
+                    });
+                  }}
                 >
                   Подтвердить смену формата
                 </button>

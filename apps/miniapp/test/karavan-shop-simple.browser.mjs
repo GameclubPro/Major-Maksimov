@@ -300,6 +300,28 @@ try {
             if (process.env.SHOP_SIMPLE_ONLY === 'network') continue;
           }
           if (process.env.SHOP_SIMPLE_ONLY === 'categories') {
+            await begin('simple_setup_existing');
+            await home.getByText('Другие варианты', { exact: true }).click();
+            await home
+              .getByRole('button', { name: 'Подключить существующий магазин', exact: true })
+              .click();
+            await home.getByRole('radio', { name: 'Магазин соседей', exact: true }).check();
+            await home
+              .getByRole('checkbox', {
+                name: 'Подтверждаю выбранные чаты и правила магазина',
+                exact: true,
+              })
+              .check();
+            await home.getByRole('button', { name: 'Подключить', exact: true }).click();
+            await home.getByRole('button', { name: 'Пригласить продавцов', exact: true }).waitFor();
+            const existing = await requests('setup');
+            assert.equal(existing.length, 1);
+            assert.equal(
+              existing[0].body.existingMarketplaceId,
+              'a0d9b7ce-0040-4c85-a7ec-e3cf6da94c10',
+            );
+            assert.equal(existing[0].body.create, undefined);
+
             await begin('simple_setup_community');
             await home.getByRole('button', { name: 'Включить магазин', exact: true }).click();
             await home.getByRole('button', { name: /^Участники/ }).click();
@@ -538,7 +560,8 @@ try {
             await home.getByRole('button', { name: /^Администрация/ }).click();
             await home.getByRole('button', { name: /^Добавить витрину/ }).waitFor();
             const setup = await requests('setup');
-            assert.equal(setup.length, 1);
+            assert.equal(setup.length, 2, 'one create and one confirmed binding continuation');
+            assert.deepEqual(setup[1].body, setup[0].body, 'same operation and original payload');
             assert.equal(setup[0].body.create.setupVersion, 2);
             assert.equal(setup[0].body.create.name, 'Соседи');
             assert.equal(Object.hasOwn(setup[0].body.create, 'administrationStoreId'), false);
@@ -627,8 +650,21 @@ try {
               'empty queue hidden',
             );
           }
-          await begin('simple_community_selected_empty_new_seller');
-          await home.getByRole('button', { name: 'Добавить продавца', exact: true }).click();
+          await begin('simple_community_selected_new_seller');
+          await home.getByRole('button', { name: 'Витрины', exact: true }).click();
+          const selectedCatalog = page.getByRole('dialog', {
+            name: 'Товары и услуги',
+            exact: true,
+          });
+          assert.equal(
+            await selectedCatalog
+              .getByRole('button', { name: 'Пригласить продавцов', exact: true })
+              .count(),
+            0,
+          );
+          await selectedCatalog
+            .getByRole('button', { name: 'Добавить продавца', exact: true })
+            .click();
           const seller = page.getByRole('dialog', { name: 'Добавить продавца', exact: true });
           await page.setViewportSize({ width, height: 420 });
           await seller.getByRole('searchbox', { name: 'Продавец', exact: true }).fill('Анна');
@@ -659,6 +695,16 @@ try {
           assert.equal(grant[0].body.command.input.targetMaxUserId, '888');
           assert.equal(grant[0].body.command.input.storeId, null);
           await shot('personal-access', seller);
+          await seller.getByText('Предоставленный доступ', { exact: true }).click();
+          const accessRow = seller.locator('article').filter({ hasText: 'Анна Цветкова' });
+          await accessRow
+            .getByRole('button', { name: 'Отправить приглашение снова', exact: true })
+            .click();
+          assert.equal(
+            (await requests('seller_grant_create')).length,
+            1,
+            'resending reuses the existing grant',
+          );
 
           if (process.env.SHOP_SIMPLE_ONLY !== 'grant') {
             await begin('simple_community_selected_empty');

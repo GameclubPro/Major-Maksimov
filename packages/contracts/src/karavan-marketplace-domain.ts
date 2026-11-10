@@ -68,6 +68,7 @@ export const marketplaceApplicationPageQuerySchema = /* @__PURE__ */ (() =>
         'rejected',
         'superseded',
         'withdrawn',
+        'completed',
         'all',
       ])
       .optional()

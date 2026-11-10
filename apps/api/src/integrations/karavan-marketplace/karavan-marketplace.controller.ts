@@ -86,12 +86,7 @@ export class KaravanMarketplaceController {
                   (module.counts.readyListings ?? 0) > 0 &&
                   hasPublishedAdministrationStore &&
                   !!module.buyerUrl
-                  ? {
-                      mode:
-                        connectedStoreCount === 1
-                          ? 'administration_storefront'
-                          : 'chat_marketplace',
-                    }
+                  ? { mode: 'administration_shop' }
                   : { mode: 'unavailable', reason: 'closed' }
                 : module.administrationStore?.id === module.marketplace.administrationStoreId &&
                     module.administrationStore?.status === 'ACTIVE' &&
@@ -106,7 +101,13 @@ export class KaravanMarketplaceController {
       ...module,
       publicationPreview:
         publicationPreview.mode === 'unavailable' && module.marketplace?.format
-          ? { ...publicationPreview, format: module.marketplace.format }
+          ? {
+              ...publicationPreview,
+              format: module.marketplace.format,
+              ...(module.marketplace.format === 'storefront'
+                ? { administrationTarget: module.chatShopFlowVersion === 2 ? 'shop' : 'storefront' }
+                : {}),
+            }
           : publicationPreview,
       publicationChoices: (await this.resolver.listChoices({ actorMaxUserId: user.userId, chatId }))
         .choices,
@@ -406,9 +407,7 @@ export class KaravanMarketplaceController {
             module.administrationStore.id !== module.marketplace.administrationStoreId)))
     )
       throw new ForbiddenException('Общая витрина не подтверждена.');
-    if (
-      input.destination === 'view' && module.marketplace.status !== 'active'
-    )
+    if (input.destination === 'view' && module.marketplace.status !== 'active')
       throw new ForbiddenException('Просмотр этого магазина недоступен.');
     return this.handoffs.issue(chatId, user.userId, input, principal);
   }

@@ -65,6 +65,7 @@ export const marketplaceFormatImpactSchema = z.object({
 });
 export const marketplaceFormatUpdateRequestSchema = marketplaceFormatPreviewRequestSchema
   .extend({
+    confirmSharedManagement: z.literal(true).optional(),
     commandId: z.string().regex(/^[A-Za-z0-9._:-]{8,120}$/u),
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
   })
@@ -99,7 +100,13 @@ const administrationChange = /* @__PURE__ */ (() =>
 export const marketplaceAdministrationStoreChangeSchema = /* @__PURE__ */ (() =>
   z.discriminatedUnion('action', [
     administrationChange.extend({ action: z.literal('create') }).strict(),
-    administrationChange.extend({ action: z.literal('attach'), storeId: id }).strict(),
+    administrationChange
+      .extend({
+        action: z.literal('attach'),
+        storeId: id,
+        confirmSharedManagement: z.literal(true).optional(),
+      })
+      .strict(),
     administrationChange.extend({ action: z.literal('detach'), storeId: id }).strict(),
   ]))();
 export const marketplaceAdministrationStoresResponseSchema = /* @__PURE__ */ (() =>
@@ -139,6 +146,9 @@ export const marketplaceSellerGrantSchema = /* @__PURE__ */ (() =>
     targetMaxUserId: maxUserId,
     storeId: id.nullable(),
     revision,
+    targetName: z.string().nullable().optional(),
+    storeName: z.string().nullable().optional(),
+    url: z.string().url().nullable().optional(),
     expiresAt: z.string().datetime(),
     revokedAt: z.string().datetime().nullable(),
     claimedAt: z.string().datetime().nullable(),

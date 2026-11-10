@@ -264,7 +264,7 @@ function SimpleApplications() {
   const queue = useRef<HTMLDivElement>(null);
   const query = useShopPages<'applications'>({
     operation: 'applications',
-    input: { cursor: null, limit: 24, state: history ? 'all' : 'pending' },
+    input: { cursor: null, limit: 24, state: history ? 'completed' : 'pending' },
   });
   const applications = uniqueShopItems(query.data?.pages.map((page) => page.applications) ?? []);
   const pending = applications.filter((application) => application.state === 'pending');

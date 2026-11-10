@@ -284,12 +284,12 @@ describe('Karavan module destination permissions', () => {
     });
     state.counts.readyListings = 1;
     await expect(invokeModule()).resolves.toMatchObject({
-      publicationPreview: { mode: 'administration_storefront' },
+      publicationPreview: { mode: 'administration_shop' },
     });
     // The other connected store may be hidden or still being completed.
     state.administrationStoreCount = 2;
     await expect(invokeModule()).resolves.toMatchObject({
-      publicationPreview: { mode: 'chat_marketplace' },
+      publicationPreview: { mode: 'administration_shop' },
     });
     state.administrationStores[0].status = 'BLOCKED';
     await expect(invokeModule()).resolves.toMatchObject({

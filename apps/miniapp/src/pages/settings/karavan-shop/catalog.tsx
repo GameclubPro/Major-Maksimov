@@ -107,7 +107,11 @@ function Sellers({
                 />
               ) : null}
             </div>
-            <p>{publicationReasons[listing.publicationReason]}</p>
+            <p>
+              {listing.reviewState === 'not_submitted'
+                ? 'Заявка не отправлена'
+                : publicationReasons[listing.publicationReason]}
+            </p>
             <ListingContentDisclosure listingId={listing.id} />
             {['approved', 'suspended'].includes(listing.reviewState) ? (
               <>
