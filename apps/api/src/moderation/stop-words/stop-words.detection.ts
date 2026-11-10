@@ -46,6 +46,8 @@ export function detectStopWordsViolations(params: {
     ...matcher.detect({ ...params, policy: { ...policy, domains: [] }, limit: 1 }),
     ...matcher.detect({ ...params, policy: { ...policy, rules: [] }, limit: 1 }),
   ];
+  if (matches.length === 0) return [];
+  const sourceSha256 = fingerprintStopWordsSource(params);
   const seen = new Set<string>();
   return matches.flatMap((match): RuleViolation[] => {
     const ruleCode = match.kind === 'DOMAIN' ? 'MESSAGE_BLOCKED_DOMAIN' : 'MESSAGE_BLOCKED_WORD';
@@ -60,7 +62,7 @@ export function detectStopWordsViolations(params: {
           stopWordsRuleId: match.ruleId,
           stopWordsPolicyVersion: policy.version,
           stopWordsRevision: params.settings.stopWordsRevision ?? 0,
-          stopWordsSourceSha256: fingerprintStopWordsSource(params),
+          stopWordsSourceSha256: sourceSha256,
           matchKind: match.matchKind,
           ...(match.kind === 'DOMAIN'
             ? { blockedDomain: match.value, matchedLink: match.fragment }

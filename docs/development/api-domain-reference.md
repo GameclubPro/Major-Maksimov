@@ -340,6 +340,12 @@ Statistics exchange does not grant advertising or shop authority.
 - Night-mode startup must not synthesize a pre-start catch-up. It may finish a current boundary only from an exact v4 durable registry/Bull intent, from an older intent whose boundary was still future when that process started, or from an exact terminal pre-dispatch access rejection after fresh actionable admin/owner access and a successful ledger CAS reset. A missing ledger without a durable intent remains a skip. Runtime recovery is exact-session only: stale Redis state must not replay, delete, or announce an older session inline.
 - Historical night-mode close recovery discovery is owned by `api-moderation-background`, never `api-enqueue`; keep the global discovery scan aligned with `20260823170000_add_night_mode_recovery_discovery_index`, the per-chat missing-event anti-join aligned with `20260830014000_add_night_mode_per_chat_recovery_index`, and preserve the page backoff.
 - Stop words include blocked words and domains. Blocked domains match exact hosts/subdomains independently of link moderation; an explicit allowlist suppresses that URL hit.
+- Link allowlist preparation shares one parsed snapshot within a detection or fresh recheck;
+  it never caches authorization across messages. Stop-word compiled tokens use the existing
+  bounded content cache, while current domains and allowlist exceptions remain request-local.
+  Word-only matching skips URL extraction; word/domain hits retain separate evidence and the
+  identical source fingerprint. Commercial policy reads batch `GET` operations, retaining
+  wrong-type errors, revision agreement and the existing authority deadline.
 - Selective link policy v1 is stored in nullable `ChatSettings.linkRulesPolicy`. Null retains
   the legacy enum/allowlist behavior; present unsupported storage grants no link-delete
   authority and is never repaired by GET or an unrelated settings write. Four modes are

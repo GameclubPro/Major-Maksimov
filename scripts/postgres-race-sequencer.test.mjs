@@ -62,9 +62,9 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 159 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 159);
-  assert.equal(new Set(nativePaths).size, 159);
+test('all 160 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 160);
+  assert.equal(new Set(nativePaths).size, 160);
   assert.ok(nativePaths.includes('src/admin/admin-chat-rules-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/moderation/message-count-quota.redis-integration.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/night-mode-comments-postgres.spec.ts'));
@@ -83,8 +83,11 @@ test('all 159 native suites execute exactly once with only the two approved owne
   );
   assert.ok(nativePaths.includes('src/admin/admin-manual-command.redis-integration.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/admin-commercial-ads-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/moderation/commercial/commercial-text-policy-redis.spec.ts'));
   assert.ok(
-    nativePaths.includes('src/moderation/commercial/commercial-llm-preview.redis-integration.spec.ts'),
+    nativePaths.includes(
+      'src/moderation/commercial/commercial-llm-preview.redis-integration.spec.ts',
+    ),
   );
   assert.ok(nativePaths.includes('src/max/chat-admin-roster-state-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/admin-settings-entry-protection-postgres.spec.ts'));

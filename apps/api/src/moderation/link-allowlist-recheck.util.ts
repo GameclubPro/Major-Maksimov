@@ -4,7 +4,7 @@ import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.u
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import type { RuleViolation } from './rule-engine.contract';
 import type { MessageLimitsBlockedDomainDetector } from './rule-engine-blocked-domains.detector';
-import { createAllowlistLinkMatcher, detectBlockedLink } from './rule-engine-link-detector';
+import { prepareLinkAllowlist, detectBlockedLink } from './rule-engine-link-detector';
 import { detectStopWordsViolations } from './stop-words/stop-words.detection';
 import { isRuntimeLinkPolicyActive } from './link-rules-policy.runtime';
 import type { PrismaService } from '../prisma/prisma.service';
@@ -78,12 +78,13 @@ export function recalculateFreshLinkAllowlistViolations(params: {
   violations: readonly RuleViolation[];
   blockedDomainDetector: MessageLimitsBlockedDomainDetector;
 }): RuleViolation[] {
-  const freshAllowlistMatcher = createAllowlistLinkMatcher(params.freshDomainAllowlist);
+  const freshAllowlist = prepareLinkAllowlist(params.freshDomainAllowlist);
+  const freshAllowlistMatcher = freshAllowlist.link;
   const linkViolation = detectBlockedLink(
     params.text,
     params.settings.linkPolicy,
     params.freshDomainAllowlist,
-    freshAllowlistMatcher,
+    freshAllowlist,
     params.navigationTargets,
     params.settings.linkRulesPolicy,
   );
