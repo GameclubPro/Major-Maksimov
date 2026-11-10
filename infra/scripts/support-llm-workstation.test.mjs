@@ -746,9 +746,9 @@ test('installed API inference works with the CPU stopped and still rejects bundl
     calls++;
     assert.equal(url.href, 'https://5x2.gptclaudegemini.xyz/v1/chat/completions');
     assert.equal(options.headers.Authorization, 'Bearer sk-private-fixture-key-123456789');
-    assert.equal(JSON.parse(options.body).reasoning_effort, 'max');
+    assert.equal(JSON.parse(options.body).reasoning_effort, 'high');
     return Response.json({
-      model: 'gpt-6.1-terra',
+      model: 'gpt-6.1-sol',
       choices: [
         {
           finish_reason: 'stop',

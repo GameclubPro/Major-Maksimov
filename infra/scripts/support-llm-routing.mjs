@@ -18,6 +18,28 @@ const domain =
 const publisherName = /публик(?:а|у|ом|е)?(?![\p{L}])|\bpublik\b/iu;
 const eraserName = /(?<![\p{L}\p{N}_])ластик(?:а|у|ом|е)?(?![\p{L}\p{N}_])/iu;
 const moderatorName = /максимов|майор|р[эе]кс/iu;
+function moderatorFailure(ctx, state) {
+  if (
+    state.publisherRequest ||
+    state.eraserRequest ||
+    state.developer ||
+    state.botCatalogRequest ||
+    state.botDirectory ||
+    moderatorSwitchRequest(ctx.current)
+  )
+    return false;
+  const symptoms = [
+    /не\s+(?:удаляет|удаляют|чистит|убирает)|перестал\p{L}*\s+удалять/iu,
+    /не\s+(?:отвечает|реагирует)\p{L}*.{0,30}команд|команд\p{L}*.{0,20}не\s+работа/iu,
+    /не\s+(?:банит|блокирует)/iu,
+  ].filter((pattern) => pattern.test(ctx.current)).length;
+  const knownModerator = moderatorName.test(ctx.focus) || /модератор/iu.test(ctx.focus);
+  return (
+    symptoms >= 2 ||
+    (knownModerator &&
+      /не\s+работает|перестал\p{L}*\s+работать|молчит|не\s+реагирует/iu.test(ctx.current))
+  );
+}
 const moderatorSwitchRequest = (text) =>
   [
     ...text.matchAll(
@@ -1001,6 +1023,10 @@ function semanticFacts(text, state) {
   const { publisherRequest: publ, developer, commercialAi, mixedTopics } = state;
   const test = (pattern) => pattern.test(text);
   if (state.supportDialogue) return [{ id: 'support-dialogue', priority: 160 }];
+  if (state.moderatorTroubleshooting) {
+    add('max-delete-rights', 200);
+    add('connect', 195);
+  }
   if (platformUpdates(text))
     add(developer ? 'max-recent-api-changes' : 'max-platform-updates', 160);
   if (
@@ -1822,6 +1848,7 @@ export function createSupportRouter(knowledge) {
       (!roleOnly || freshClarification) &&
       ((request &&
         (domain.test(ctx.current) ||
+          /модератор/iu.test(ctx.current) ||
           advert.test(ctx.current) ||
           topics(ctx.current).length ||
           projectSubject.test(ctx.current) ||
@@ -1902,6 +1929,7 @@ export function createSupportRouter(knowledge) {
       nightSources: nightSources(ctx, role),
       reviewedIntents: reviewedIntents(ctx),
     };
+    state.moderatorTroubleshooting = moderatorFailure(ctx, state);
     state.lastikWaitingOnly = atomicLastikWaiting(ctx, state);
     state.lastikSetupOnly = atomicLastikSetup(ctx, state);
     const mixedTopics = mixedRequests(ctx, state);
@@ -1937,6 +1965,7 @@ export function createSupportRouter(knowledge) {
       publisherConnectionReady: state.publisherConnectionReady,
       eraserRequest,
       developer,
+      moderatorTroubleshooting: state.moderatorTroubleshooting,
       botDirectory,
       botCatalogRequest,
       primaryIds,

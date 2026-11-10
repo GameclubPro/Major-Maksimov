@@ -4,7 +4,7 @@ The selected CPU support profile is Gemma 4 26B-A4B UD-Q5_K_M through an indepen
 llama.cpp b11804 installation. This is retrieval from reviewed customer instructions, not fine-tuning.
 The existing GPU commercial classifier and server moderation remain separate.
 
-An optional owner-selected API profile uses `gpt-6.1-terra` with `reasoning_effort: max`
+An optional owner-selected API profile uses `gpt-6.1-sol` with `reasoning_effort: high`
 through the pinned third-party HTTPS gateway in `infra/scripts/support-llm-provider.mjs`.
 The gateway's model label and acceptance of a parameter do not independently establish its
 underlying implementation or pricing. Reviewed support facts and bounded question/history are
