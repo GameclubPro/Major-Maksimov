@@ -1195,8 +1195,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     isPreparingRulesPublish,
     rulesResetConfirmationOpen,
     setRulesResetConfirmationOpen,
-    reportRulesAutofillError,
-    buildRulesDraftFromCurrentSettings,
+    handleRulesAutoTextChange,
     saveRulesDraftNow,
     handleSaveRulesDraft,
     handlePublishRules,
@@ -1207,6 +1206,8 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     hasRulesChanges,
     rulesPublishedUrl,
     hasPublishedRules,
+    isRulesResetPending,
+    isCheckingRulesPublication,
     isSavingRules,
     isPublishingRules,
     isResettingPublishedRules,
@@ -1216,6 +1217,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     api,
     chatId,
     serverRules: rulesQuery.data,
+    rulesModuleOpen: expandedSections.rules,
     currentRulesTextSource,
     isUpdatingRulesAttachment: updateRulesAttachMutation.isPending,
     pushToast,
@@ -3473,6 +3475,11 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         hasPublishedRules && 'rules-publish-bar--with-reset',
       )}
     >
+      {isRulesResetPending ? (
+        <div className="broadcast-publish-bar__copy" role="status">
+          <strong>Прежний пост ещё удаляется</strong>
+        </div>
+      ) : null}
       {rulesPublishIssueLabels.length > 0 ? (
         <div className="broadcast-publish-bar__copy">
           <strong>{rulesFooterTitle}</strong>
@@ -3486,7 +3493,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         </div>
       ) : null}
 
-      {hasPublishedRules ? (
+      {hasPublishedRules && !isRulesResetPending ? (
         <SegmentedControl
           className="rules-publication-mode"
           ariaLabel="Действие с правилами"
@@ -3514,9 +3521,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
             type="button"
             className="button button--ghost broadcast-publish-bar__test rules-publish-bar__reset"
             onClick={handleResetPublishedRules}
-            disabled={isResettingPublishedRules}
-            aria-label="Сбросить публикацию"
-            title="Сбросить публикацию"
+            disabled={isRulesBusy || isCheckingRulesPublication}
+            aria-label={isRulesResetPending ? 'Проверить удаление' : 'Удалить пост правил'}
+            title={isRulesResetPending ? 'Проверить удаление' : 'Удалить пост правил'}
           >
             <ResetIcon />
           </button>
@@ -3541,12 +3548,14 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
             {isPreparingRulesPublish
               ? 'Сохраняем...'
               : isPublishingRules
-                ? hasPublishedRules && rulesPublicationMode === 'update'
+                ? hasPublishedRules && !isRulesResetPending && rulesPublicationMode === 'update'
                   ? 'Обновляем...'
                   : 'Публикуем...'
-                : hasPublishedRules && rulesPublicationMode === 'update'
+                : hasPublishedRules && !isRulesResetPending && rulesPublicationMode === 'update'
                   ? 'Обновить пост'
-                  : 'Опубликовать в чат'}
+                  : isRulesResetPending
+                    ? 'Проверить и опубликовать'
+                    : 'Опубликовать в чат'}
           </span>
         </button>
       </div>
@@ -5578,31 +5587,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                                     value: Boolean(rulesDraft.autoTextEnabled),
                                   }}
                                   autoTextSummary={rulesAutoFillSummary}
-                                  onAutoTextChange={(enabled) => {
-                                    if (!enabled) {
-                                      setRulesTextError('');
-                                      setRulesDraft((current) =>
-                                        current
-                                          ? {
-                                              ...current,
-                                              autoTextEnabled: false,
-                                            }
-                                          : current,
-                                      );
-                                      return;
-                                    }
-
-                                    try {
-                                      const nextDraft = buildRulesDraftFromCurrentSettings({
-                                        ...rulesDraft,
-                                        autoTextEnabled: true,
-                                      });
-                                      setRulesTextError('');
-                                      setRulesDraft(nextDraft);
-                                    } catch (error) {
-                                      reportRulesAutofillError(error);
-                                    }
-                                  }}
+                                  onAutoTextChange={(enabled) =>
+                                    void handleRulesAutoTextChange(enabled)
+                                  }
                                   adminContact={
                                     chatId ? (
                                       <>

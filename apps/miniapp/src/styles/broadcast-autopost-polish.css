@@ -32,10 +32,8 @@
   }
 
   body.settings-drilldown-open .toast--danger .toast__body p {
-    display: -webkit-box;
-    overflow: hidden;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
+    display: block;
+    overflow: visible;
     font-size: 0.72rem;
     line-height: 1.25;
   }

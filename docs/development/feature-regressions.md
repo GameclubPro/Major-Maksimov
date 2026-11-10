@@ -31,6 +31,29 @@ to its `/app/` URL; the scripts have different default ports. Run only the affec
 and stop the server owned by the task afterward. Use the scoped miniapp visual workflow
 for light/dark, narrow screens, native Back and safe-area review.
 
+## Rules Publication
+
+A new rules post may follow a reset only after the exact pending deletion is confirmed.
+Unknown SEND outcomes, unconfirmed deletion and concurrent replacement remain fenced.
+An accepted reset keeps the published receipt visible; it is not a deletion confirmation.
+Private-bot reset feedback also requires a returned result without a message ID or URL before
+announcing completion; a retained receipt or missing response cannot prove deletion.
+Reset responses and bounded readbacks preserve the current revision and unsaved local text.
+A revision conflict pauses automatic saves across further typing; only unchanged server content
+permits rebasing a dirty draft to a newer receipt revision. Late reads cannot replace newer writes.
+Actionable errors must remain fully readable on narrow screens.
+
+| Boundary                                                                 | Focused checks                                                                                                                                   |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Explicit new post after reset, exact absence, unsafe continuation        | [Rules unit](../../apps/api/src/admin/admin-chat-rules.spec.ts), [settings callers](../../apps/api/src/admin/admin-settings.service.spec.ts)     |
+| Concurrent publication and worker/reset finalization, fresh revision     | [Rules PostgreSQL](../../apps/api/src/admin/admin-chat-rules-postgres.spec.ts)                                                                   |
+| Private-bot reset feedback and current persisted response                | [Private control](../../apps/api/src/moderation/private-control.service.spec.ts), [admin caller](../../apps/api/src/admin/admin.service.spec.ts) |
+| Pending deletion, dirty draft, scoped refresh and mutation serialization | [Rules browser](../../apps/miniapp/test/settings-rules.browser.mjs), [draft state](../../apps/miniapp/test/settings-rules-state.test.ts)         |
+
+The rules browser owns its local Vite server and cleanup. Native cases require the disposable
+test-store wrapper. See the [rules cleanup runbook](../operations/runbooks/rules-publication-cleanup.md)
+for the bounded production metadata report; local checks do not confirm delivery in a user chat.
+
 ## Sanctions And Participant Activity
 
 Commercial category settings, participant grants, text preview and advertising journal use

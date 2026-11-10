@@ -11,13 +11,14 @@ import {
   type ChatSettingsScreenResponse,
 } from '@maxim/contracts';
 import {
-  buildRulesTextFromSettingsScreen,
   getRulesPublicationFeedback,
   mergeSavedRulesIntoSettingsScreen,
+  mergeRulesPublicationIntoDraft,
   runRulesSaveAttempt,
   serializeRulesDraftPayload,
   shouldHydrateRulesDraftFromServer,
 } from '../src/pages/settings-rules-state';
+import { buildRulesTextFromSettingsScreen } from '../src/pages/settings-rules-text';
 
 test('publication feedback never describes an existing-post edit as a new publication', () => {
   assert.deepEqual(getRulesPublicationFeedback({ operation: 'updated', messageId: 'old' }, 'old'), {
@@ -132,6 +133,33 @@ test('mergeSavedRulesIntoSettingsScreen makes a successful save the new server s
   assert.equal(next?.rules.text, 'Сохранённый черновик');
   assert.equal(next?.settings, current.settings);
   assert.equal(mergeSavedRulesIntoSettingsScreen(undefined, saved), undefined);
+});
+
+test('publication readback preserves dirty text and advances only a receipt-only revision', () => {
+  const base = createRules({ text: 'Сохранённый текст', revision: '2026-11-10T06:00:00.000Z' });
+  const dirty = { ...base, text: 'Новая редакция', publishedMessageId: 'old-post' };
+  const removed = {
+    ...base,
+    revision: '2026-11-10T06:01:00.000Z',
+    publishedMessageId: null,
+    publishedUrl: null,
+    publishedAt: null,
+  };
+  const merged = mergeRulesPublicationIntoDraft(dirty, removed, serializeRulesDraftPayload(base));
+  assert.equal(merged.text, 'Новая редакция');
+  assert.equal(merged.revision, removed.revision);
+  assert.equal(merged.publishedMessageId, null);
+
+  const conflicting = { ...removed, text: 'Правка другого администратора' };
+  const conflict = mergeRulesPublicationIntoDraft(
+    dirty,
+    conflicting,
+    serializeRulesDraftPayload(base),
+  );
+  assert.equal(conflict.text, 'Новая редакция');
+  assert.equal(conflict.revision, base.revision);
+  assert.equal(conflict.publishedMessageId, null);
+  assert.equal(mergeRulesPublicationIntoDraft(null, removed, ''), removed);
 });
 
 test('runRulesSaveAttempt detects edits made while a save is in flight', async () => {

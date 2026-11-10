@@ -16,8 +16,14 @@ import {
   type ChatSettingsScreenResponse,
 } from '@maxim/contracts/settings';
 import type { ApiTransport } from '../../lib/api/transport';
+import { ApiRequestError } from '../../lib/api-request-error';
 import type { UpdateChatRulesPayload } from '../../lib/api/shared-types';
-import { updateRules, publishRules, resetPublishedRules } from '../../lib/api/chat-settings-client';
+import {
+  getRules,
+  updateRules,
+  publishRules,
+  resetPublishedRules,
+} from '../../lib/api/chat-settings-client';
 import {
   buildBroadcastLinkButtonLegacyFields,
   createEmptyBroadcastLinkButton,
@@ -27,11 +33,12 @@ import {
 } from '../../lib/broadcast-link-buttons';
 import { maxNotify } from '../../lib/max-bridge';
 import type { useToast } from '../../components/ui/toast';
+import type { RulesTextScreenState } from '../settings-rules-text';
 import {
-  buildRulesTextFromSettingsScreen,
   getRulesPublicationFeedback,
   type RulesPublicationMode,
   mergeSavedRulesIntoSettingsScreen,
+  mergeRulesPublicationIntoDraft,
   runRulesSaveAttempt,
   serializeRulesDraftPayload,
   shouldHydrateRulesDraftFromServer,
@@ -45,7 +52,8 @@ type Dependencies = {
   api: ApiTransport;
   chatId: string | undefined;
   serverRules: ChatRules | undefined;
-  currentRulesTextSource: Parameters<typeof buildRulesTextFromSettingsScreen>[0] | null;
+  rulesModuleOpen?: boolean;
+  currentRulesTextSource: RulesTextScreenState | null;
   isUpdatingRulesAttachment: boolean;
   pushToast: ReturnType<typeof useToast>['pushToast'];
 };
@@ -53,6 +61,7 @@ export function useSettingsRules({
   api,
   chatId,
   serverRules,
+  rulesModuleOpen = false,
   currentRulesTextSource,
   isUpdatingRulesAttachment,
   pushToast,
@@ -82,9 +91,16 @@ export function useSettingsRules({
   const [rulesButtonRevealSignal, setRulesButtonRevealSignal] = useState(0);
   const [rulesResetConfirmationOpen, setRulesResetConfirmationOpen] = useState(false);
   const [rulesFailedSnapshot, setRulesFailedSnapshot] = useState('');
+  const [rulesSaveConflict, setRulesSaveConflict] = useState(false);
   const [isPreparingRulesPublish, setIsPreparingRulesPublish] = useState(false);
+  const rulesPreparationRef = useRef(false);
+  const [rulesResetPendingMessageId, setRulesResetPendingMessageId] = useState<string | null>(null);
+  const [isCheckingRulesPublication, setIsCheckingRulesPublication] = useState(false);
+  const checkingRulesPublicationRef = useRef<typeof identity | null>(null);
+  const rulesReadEpochRef = useRef(0);
   const rulesDraftRef = useRef<ChatRules | null>(null);
   const previousRulesServerSnapshotRef = useRef('');
+  const rulesDraftBaseSnapshotRef = useRef('');
   useLayoutEffect(() => {
     rulesDraftRef.current = rulesDraft;
   }, [rulesDraft]);
@@ -94,6 +110,7 @@ export function useSettingsRules({
     setOwnedRulesDraft(null);
     rulesDraftRef.current = null;
     previousRulesServerSnapshotRef.current = '';
+    rulesDraftBaseSnapshotRef.current = '';
     rulesImagePreparingRef.current = false;
     setIsPreparingRulesImage(false);
     setRulesPublicationMode('new_message');
@@ -104,8 +121,13 @@ export function useSettingsRules({
     setRulesButtonsSheetOpen(false);
     setRulesButtonRevealSignal(0);
     setRulesFailedSnapshot('');
+    setRulesSaveConflict(false);
     setIsPreparingRulesPublish(false);
+    rulesPreparationRef.current = false;
     setRulesResetConfirmationOpen(false);
+    setRulesResetPendingMessageId(null);
+    setIsCheckingRulesPublication(false);
+    checkingRulesPublicationRef.current = null;
     saveRulesMutation.reset();
     publishRulesMutation.reset();
     resetPublishedRulesMutation.reset();
@@ -127,6 +149,11 @@ export function useSettingsRules({
     }
 
     const nextServerDraft = chatRulesSchema.parse(serverRules);
+    setRulesResetPendingMessageId((pending) =>
+      pending && (nextServerDraft.publishedMessageId ?? nextServerDraft.publishedUrl) === pending
+        ? pending
+        : null,
+    );
     const shouldHydrate = shouldHydrateRulesDraftFromServer({
       currentDraft: rulesDraftRef.current,
       previousServerSnapshot: previousRulesServerSnapshotRef.current,
@@ -134,10 +161,15 @@ export function useSettingsRules({
     });
     previousRulesServerSnapshotRef.current = serializeRulesDraftPayload(nextServerDraft);
     if (!shouldHydrate) {
+      setRulesDraft((current) =>
+        mergeRulesPublicationIntoDraft(current, nextServerDraft, rulesDraftBaseSnapshotRef.current),
+      );
       return;
     }
 
+    rulesDraftBaseSnapshotRef.current = serializeRulesDraftPayload(nextServerDraft);
     setRulesDraft(nextServerDraft);
+    setRulesSaveConflict(false);
     setRulesTextError('');
     setRulesButtonErrors([]);
     setRulesButtonFieldsTouched(false);
@@ -161,19 +193,74 @@ export function useSettingsRules({
   const rulesPublishedMessageId = rulesPublication?.publishedMessageId ?? null;
   const rulesPublishedUrl = rulesPublication?.publishedUrl ?? null;
   const hasPublishedRules = Boolean(rulesPublishedMessageId || rulesPublishedUrl);
+  const isRulesResetPending = Boolean(rulesResetPendingMessageId);
+  const refreshRulesPublication = useCallback(
+    async (reportError = false) => {
+      if (!identity.chatId || active.current !== identity || checkingRulesPublicationRef.current) {
+        return;
+      }
+      checkingRulesPublicationRef.current = identity;
+      const requestEpoch = rulesReadEpochRef.current;
+      setIsCheckingRulesPublication(true);
+      try {
+        const updated = await getRules(api, identity.chatId);
+        // FLAG: An older read cannot overwrite a newer write or a later visit to the same chat.
+        if (active.current !== identity || rulesReadEpochRef.current !== requestEpoch) return;
+        queryClient.setQueryData<ChatSettingsScreenResponse | undefined>(
+          ['settings-screen', identity.chatId],
+          (current) => mergeSavedRulesIntoSettingsScreen(current, updated),
+        );
+      } catch (error) {
+        if (reportError && active.current === identity) {
+          pushToast({
+            tone: 'danger',
+            title: 'Не удалось проверить удаление',
+            description: formatApiError(error),
+          });
+        }
+      } finally {
+        if (checkingRulesPublicationRef.current === identity) {
+          checkingRulesPublicationRef.current = null;
+        }
+        if (active.current === identity) setIsCheckingRulesPublication(false);
+      }
+    },
+    [api, identity, pushToast, queryClient],
+  );
+  useEffect(() => {
+    if (!rulesModuleOpen || !rulesResetPendingMessageId) return;
+    const delays = [1_000, 3_000, 8_000];
+    let stopped = false;
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      if (stopped || attempt === delays.length) return;
+      timer = setTimeout(() => {
+        attempt += 1;
+        void refreshRulesPublication().finally(schedule);
+      }, delays[attempt]);
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [rulesModuleOpen, rulesResetPendingMessageId, refreshRulesPublication]);
   const saveRulesMutation = useMutation({
     mutationFn: (request: { identity: typeof identity; payload: UpdateChatRulesPayload }) =>
       updateRules(api, request.identity.chatId ?? '', request.payload),
     onSuccess: (saved, { identity: requestScope, payload }) => {
+      if (active.current !== requestScope) {
+        void queryClient.invalidateQueries({ queryKey: ['settings-screen', requestScope.chatId] });
+        return;
+      }
+      rulesReadEpochRef.current += 1;
       const payloadSnapshot = serializeRulesDraftPayload(payload);
       queryClient.setQueryData<ChatSettingsScreenResponse | undefined>(
         ['settings-screen', requestScope.chatId],
         (current) => mergeSavedRulesIntoSettingsScreen(current, saved),
       );
-      if (active.current !== requestScope) {
-        void queryClient.invalidateQueries({ queryKey: ['settings-screen', requestScope.chatId] });
-        return;
-      }
+      rulesDraftBaseSnapshotRef.current = serializeRulesDraftPayload(saved);
       setRulesDraft((current) => {
         if (!current) {
           return saved;
@@ -186,10 +273,16 @@ export function useSettingsRules({
       setRulesButtonFieldsTouched(false);
       setRulesButtonRevealSignal(0);
       setRulesFailedSnapshot('');
+      setRulesSaveConflict(false);
       void queryClient.invalidateQueries({ queryKey: ['settings-screen', requestScope.chatId] });
     },
     onError: (error, { identity: requestScope, payload }) => {
       if (active.current !== requestScope) return;
+      rulesReadEpochRef.current += 1;
+      if (error instanceof ApiRequestError && error.status === 409) {
+        setRulesSaveConflict(true);
+        void refreshRulesPublication();
+      }
       setRulesFailedSnapshot(serializeRulesDraftPayload(payload));
       pushToast({
         tone: 'danger',
@@ -202,12 +295,17 @@ export function useSettingsRules({
   const isSavingRules = saveRulesMutation.isPending;
   const mutateRules = useCallback(
     (payload: UpdateChatRulesPayload) => {
-      if (active.current === identity) saveRulesMutation.mutate({ identity, payload });
+      if (active.current === identity) {
+        rulesReadEpochRef.current += 1;
+        saveRulesMutation.mutate({ identity, payload });
+      }
     },
     [identity, saveRulesMutation.mutate],
   );
-  const mutateRulesAsync = (payload: UpdateChatRulesPayload) =>
-    saveRulesMutation.mutateAsync({ identity, payload });
+  const mutateRulesAsync = (payload: UpdateChatRulesPayload) => {
+    rulesReadEpochRef.current += 1;
+    return saveRulesMutation.mutateAsync({ identity, payload });
+  };
 
   const publishRulesMutation = useMutation({
     mutationFn: (request: {
@@ -216,10 +314,12 @@ export function useSettingsRules({
       previousMessageId: string | null;
     }) => publishRules(api, request.identity.chatId ?? '', { mode: request.mode }),
     onSuccess: (result, request) => {
+      if (active.current === request.identity) rulesReadEpochRef.current += 1;
       void queryClient.invalidateQueries({
         queryKey: ['settings-screen', request.identity.chatId],
       });
       if (active.current !== request.identity) return;
+      setRulesResetPendingMessageId(null);
       const updated = chatRulesSchema.parse({
         ...(rulesDraft ?? serverRules ?? {}),
         publishedMessageId: result.messageId,
@@ -234,6 +334,10 @@ export function useSettingsRules({
       maxNotify('success');
     },
     onError: (error, request) => {
+      if (active.current === request.identity) rulesReadEpochRef.current += 1;
+      void queryClient.invalidateQueries({
+        queryKey: ['settings-screen', request.identity.chatId],
+      });
       if (active.current !== request.identity) return;
       pushToast({
         tone: 'danger',
@@ -246,25 +350,48 @@ export function useSettingsRules({
   const isPublishingRules = publishRulesMutation.isPending;
 
   const resetPublishedRulesMutation = useMutation({
-    mutationFn: (requestScope: typeof identity) =>
-      resetPublishedRules(api, requestScope.chatId ?? ''),
-    onSuccess: (updated, requestScope) => {
-      void queryClient.invalidateQueries({ queryKey: ['settings-screen', requestScope.chatId] });
-      if (active.current !== requestScope) return;
-      const nextDraft = chatRulesSchema.parse({
-        ...(rulesDraft ?? updated),
-        publishedMessageId: null,
-        publishedUrl: null,
-        publishedAt: null,
+    mutationFn: (request: {
+      identity: typeof identity;
+      serverSnapshot: string;
+      targetReceipt: string | null;
+    }) => resetPublishedRules(api, request.identity.chatId ?? ''),
+    onSuccess: (updated, request) => {
+      if (active.current !== request.identity) {
+        void queryClient.invalidateQueries({
+          queryKey: ['settings-screen', request.identity.chatId],
+        });
+        return;
+      }
+      rulesReadEpochRef.current += 1;
+      queryClient.setQueryData<ChatSettingsScreenResponse | undefined>(
+        ['settings-screen', request.identity.chatId],
+        (current) => mergeSavedRulesIntoSettingsScreen(current, updated),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: ['settings-screen', request.identity.chatId],
       });
-      setRulesDraft(nextDraft);
+      const returnedReceipt = updated.publishedMessageId ?? updated.publishedUrl;
+      const resetPending = Boolean(returnedReceipt && returnedReceipt === request.targetReceipt);
+      setRulesResetPendingMessageId(resetPending ? returnedReceipt : null);
+      setRulesDraft((current) =>
+        mergeRulesPublicationIntoDraft(current, updated, request.serverSnapshot),
+      );
       pushToast({
-        tone: 'success',
-        title: 'Пост правил удалён',
+        tone: returnedReceipt ? 'info' : 'success',
+        title: resetPending
+          ? 'Пост правил ещё удаляется'
+          : returnedReceipt
+            ? 'В чате уже другой пост правил'
+            : 'Пост правил удалён',
+        ...(resetPending ? { description: 'Подождите немного и повторите публикацию.' } : {}),
       });
     },
-    onError: (error, requestScope) => {
-      if (active.current !== requestScope) return;
+    onError: (error, request) => {
+      if (active.current === request.identity) rulesReadEpochRef.current += 1;
+      void queryClient.invalidateQueries({
+        queryKey: ['settings-screen', request.identity.chatId],
+      });
+      if (active.current !== request.identity) return;
       pushToast({
         tone: 'danger',
         title: 'Не удалось удалить пост правил',
@@ -329,6 +456,7 @@ export function useSettingsRules({
     };
   }
   function reportRulesAutofillError(error: unknown) {
+    if (!isCurrentRulesScope()) return;
     const description = error instanceof Error ? error.message : 'Не удалось собрать текст правил.';
     setRulesTextError(description);
     pushToast({
@@ -338,25 +466,76 @@ export function useSettingsRules({
     });
     maxNotify('error');
   }
-  function buildRulesDraftFromCurrentSettings(value: ChatRules): ChatRules {
+  async function buildRulesDraftFromCurrentSettings(value: ChatRules): Promise<ChatRules | null> {
     if (!currentRulesTextSource) {
       throw new Error('Настройки чата ещё загружаются.');
     }
-
+    const snapshot = serializeRulesDraftPayload(value);
+    const { buildRulesTextFromSettingsScreen } = await import('../settings-rules-text').catch(
+      () => {
+        throw new Error('Не удалось загрузить автотекст правил. Проверьте соединение и повторите.');
+      },
+    );
+    // FLAG: Lazy preparation belongs to this visit and must not replace edits made while loading.
+    if (
+      !isCurrentRulesScope() ||
+      rulesImagePreparingRef.current ||
+      !rulesDraftRef.current ||
+      serializeRulesDraftPayload(rulesDraftRef.current) !== snapshot
+    ) {
+      return null;
+    }
     return {
-      ...value,
+      ...rulesDraftRef.current,
       autoTextEnabled: true,
       text: buildRulesTextFromSettingsScreen(currentRulesTextSource),
       textFormat: 'plain',
     };
   }
-  function prepareRulesDraftForSubmit(value: ChatRules): ChatRules | null {
+  function beginRulesPreparation(): boolean {
+    if (
+      !isCurrentRulesScope() ||
+      rulesPreparationRef.current ||
+      isRulesBusy ||
+      rulesImagePreparingRef.current
+    )
+      return false;
+    rulesPreparationRef.current = true;
+    setIsPreparingRulesPublish(true);
+    return true;
+  }
+  function endRulesPreparation() {
+    if (!isCurrentRulesScope()) return;
+    rulesPreparationRef.current = false;
+    setIsPreparingRulesPublish(false);
+  }
+  async function handleRulesAutoTextChange(enabled: boolean) {
+    if (!rulesDraft || !beginRulesPreparation()) return;
+    try {
+      if (!enabled) {
+        setRulesTextError('');
+        setRulesDraft((current) => (current ? { ...current, autoTextEnabled: false } : current));
+        return;
+      }
+      const nextDraft = await buildRulesDraftFromCurrentSettings(rulesDraft);
+      if (!isCurrentRulesScope() || !nextDraft) return;
+      setRulesTextError('');
+      rulesDraftRef.current = nextDraft;
+      setRulesDraft(nextDraft);
+    } catch (error) {
+      reportRulesAutofillError(error);
+    } finally {
+      endRulesPreparation();
+    }
+  }
+  async function prepareRulesDraftForSubmit(value: ChatRules): Promise<ChatRules | null> {
     if (!value.autoTextEnabled) {
       return value;
     }
 
     try {
-      const nextDraft = buildRulesDraftFromCurrentSettings(value);
+      const nextDraft = await buildRulesDraftFromCurrentSettings(value);
+      if (!isCurrentRulesScope() || !nextDraft) return null;
       setRulesTextError('');
       if (serializeRulesDraftPayload(nextDraft) !== serializeRulesDraftPayload(value)) {
         const applyAutofill = (current: ChatRules | null) =>
@@ -394,16 +573,13 @@ export function useSettingsRules({
     return mutateRulesAsync(payload);
   }
   async function handleSaveRulesDraft() {
-    if (!rulesDraft || !hasRulesChanges || isRulesBusy) {
+    if (!rulesDraft || !hasRulesChanges || !beginRulesPreparation()) {
       return;
     }
-
-    const preparedRulesDraft = prepareRulesDraftForSubmit(rulesDraft);
-    if (!preparedRulesDraft) {
-      return;
-    }
-
     try {
+      const preparedRulesDraft = await prepareRulesDraftForSubmit(rulesDraft);
+      if (!isCurrentRulesScope() || !preparedRulesDraft) return;
+      setIsPreparingRulesPublish(false);
       const attempt = await runRulesSaveAttempt({
         submittedDraft: preparedRulesDraft,
         save: () =>
@@ -420,41 +596,38 @@ export function useSettingsRules({
       maxNotify('success');
     } catch {
       // The mutation reports the actionable error and keeps the draft available for retry.
+    } finally {
+      endRulesPreparation();
     }
   }
   async function handlePublishRules() {
-    if (!chatId || !rulesDraft || isRulesBusy || rulesImagePreparingRef.current) {
+    if (!chatId || !rulesDraft || !beginRulesPreparation()) {
       return;
     }
-
-    const preparedRulesDraft = prepareRulesDraftForSubmit(rulesDraft);
-    if (!preparedRulesDraft) {
-      return;
-    }
-
-    if (!preparedRulesDraft.autoTextEnabled && !preparedRulesDraft.text.trim()) {
-      setRulesTextError('Введите текст правил перед публикацией.');
-      return;
-    }
-    setRulesTextError('');
-
-    if (preparedRulesDraft.text.length > MAX_CHAT_RULES_TEXT_LENGTH) {
-      setRulesTextError(`Максимум ${MAX_CHAT_RULES_TEXT_LENGTH} символов.`);
-      return;
-    }
-
-    const nextRulesSnapshot = serializeRulesDraftPayload(preparedRulesDraft);
-    const shouldSavePreparedRules = nextRulesSnapshot !== rulesServerSnapshot;
-
-    if (
-      !shouldSavePreparedRules &&
-      !validateRulesDraft(preparedRulesDraft, { forceButtonErrors: true })
-    ) {
-      return;
-    }
-
-    setIsPreparingRulesPublish(true);
     try {
+      const preparedRulesDraft = await prepareRulesDraftForSubmit(rulesDraft);
+      if (!isCurrentRulesScope() || !preparedRulesDraft) return;
+      if (!preparedRulesDraft.autoTextEnabled && !preparedRulesDraft.text.trim()) {
+        setRulesTextError('Введите текст правил перед публикацией.');
+        return;
+      }
+      setRulesTextError('');
+
+      if (preparedRulesDraft.text.length > MAX_CHAT_RULES_TEXT_LENGTH) {
+        setRulesTextError(`Максимум ${MAX_CHAT_RULES_TEXT_LENGTH} символов.`);
+        return;
+      }
+
+      const nextRulesSnapshot = serializeRulesDraftPayload(preparedRulesDraft);
+      const shouldSavePreparedRules = nextRulesSnapshot !== rulesServerSnapshot;
+
+      if (
+        !shouldSavePreparedRules &&
+        !validateRulesDraft(preparedRulesDraft, { forceButtonErrors: true })
+      ) {
+        return;
+      }
+
       if (shouldSavePreparedRules) {
         const attempt = await runRulesSaveAttempt({
           submittedDraft: preparedRulesDraft,
@@ -480,27 +653,51 @@ export function useSettingsRules({
       }
 
       if (!isCurrentRulesScope()) return;
+      rulesReadEpochRef.current += 1;
       publishRulesMutation.mutate({
         identity,
-        mode: hasPublishedRules ? rulesPublicationMode : 'new_message',
+        mode: hasPublishedRules && !isRulesResetPending ? rulesPublicationMode : 'new_message',
         previousMessageId: rulesPublishedMessageId,
       });
     } catch {
       // The save mutation reports the actionable error and preserves the latest draft.
     } finally {
-      if (isCurrentRulesScope()) setIsPreparingRulesPublish(false);
+      endRulesPreparation();
     }
   }
   function handleResetPublishedRules() {
-    if (!chatId || !hasPublishedRules || isResettingPublishedRules) {
+    if (
+      !chatId ||
+      !hasPublishedRules ||
+      isRulesBusy ||
+      rulesPreparationRef.current ||
+      rulesImagePreparingRef.current
+    ) {
+      return;
+    }
+    if (isRulesResetPending) {
+      void refreshRulesPublication(true);
       return;
     }
 
     setRulesResetConfirmationOpen(true);
   }
   function confirmResetPublishedRules() {
+    if (
+      !chatId ||
+      !hasPublishedRules ||
+      isRulesBusy ||
+      rulesPreparationRef.current ||
+      rulesImagePreparingRef.current
+    )
+      return;
     setRulesResetConfirmationOpen(false);
-    resetPublishedRulesMutation.mutate(identity);
+    rulesReadEpochRef.current += 1;
+    resetPublishedRulesMutation.mutate({
+      identity,
+      serverSnapshot: rulesDraftBaseSnapshotRef.current,
+      targetReceipt: rulesPublishedMessageId ?? rulesPublishedUrl,
+    });
   }
   function handleRulesButtonsEnabledChange(enabled: boolean) {
     setRulesButtonFieldsTouched(true);
@@ -563,7 +760,9 @@ export function useSettingsRules({
       isSavingRules ||
       isPreparingRulesImage ||
       isPreparingRulesPublish ||
-      isPublishingRules
+      isPublishingRules ||
+      isResettingPublishedRules ||
+      rulesSaveConflict
     ) {
       return;
     }
@@ -578,7 +777,7 @@ export function useSettingsRules({
     }
 
     const timeoutId = window.setTimeout(() => {
-      if (!rulesImagePreparingRef.current) mutateRules(parsed);
+      if (!rulesImagePreparingRef.current && !rulesPreparationRef.current) mutateRules(parsed);
     }, AUTO_SAVE_DELAY_MS);
 
     return () => {
@@ -590,12 +789,14 @@ export function useSettingsRules({
     isPreparingRulesImage,
     isPreparingRulesPublish,
     isPublishingRules,
+    isResettingPublishedRules,
     isSavingRules,
     mutateRules,
     rulesButtonFieldsTouched,
     rulesDraft,
     rulesDraftSnapshot,
     rulesFailedSnapshot,
+    rulesSaveConflict,
   ]);
 
   return {
@@ -620,8 +821,7 @@ export function useSettingsRules({
     isPreparingRulesPublish,
     rulesResetConfirmationOpen,
     setRulesResetConfirmationOpen,
-    reportRulesAutofillError,
-    buildRulesDraftFromCurrentSettings,
+    handleRulesAutoTextChange,
     saveRulesDraftNow,
     handleSaveRulesDraft,
     handlePublishRules,
@@ -632,6 +832,8 @@ export function useSettingsRules({
     hasRulesChanges,
     rulesPublishedUrl,
     hasPublishedRules,
+    isRulesResetPending,
+    isCheckingRulesPublication,
     isSavingRules,
     isPublishingRules,
     isResettingPublishedRules,

@@ -858,12 +858,21 @@ export async function publishChatRules(params: {
   expectedUpdatedAt?: Date;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<PublishChatRulesResult> {
-  const storedRules = await ensureChatRules({ prisma: params.prisma, chatId: params.chatId });
+  let storedRules = await ensureChatRules({ prisma: params.prisma, chatId: params.chatId });
   if (
     params.expectedUpdatedAt &&
     storedRules.updatedAt.getTime() !== params.expectedUpdatedAt.getTime()
   ) {
     throw new BadRequestException('Правила изменились после проверки. Повторите проверку.');
+  }
+  // FLAG: A new post may follow a reset only after its exact deletion is confirmed.
+  // Reuse the guarded cleanup path; an active or ambiguous SEND must remain fenced.
+  if (params.mode === 'new_message' && storedRules.pendingCleanupKind === 'reset_current') {
+    storedRules = await reconcilePendingChatRulesCleanup({
+      ...params,
+      deleteMessage: params.deletePreviousPublishedMessage,
+      rules: storedRules,
+    });
   }
   const pendingRepublish = Boolean(
     storedRules.pendingCleanupKind === 'republish_previous' &&
@@ -878,7 +887,7 @@ export async function publishChatRules(params: {
     !storedRules.pendingCleanupBotId &&
     !storedRules.pendingCleanupIntentId;
   // FLAG: Only an explicit new-message request may append a post while old cleanup stays owned.
-  // Never clear that cleanup, delete a previous/pinned post, or bypass a reset/ambiguous send.
+  // Never clear that cleanup, delete a previous/pinned post, or bypass an unconfirmed reset/SEND.
   const publishNew =
     params.mode === 'new_message' && idlePublication && (noPendingCleanup || pendingRepublish);
   if (params.mode === 'new_message' && !publishNew) {
@@ -1386,6 +1395,7 @@ export async function resetPublishedChatRules(params: {
           where: {
             chatId: params.chatId,
             publishedMessageId,
+            publishOperationId: null,
             publishSendStartedAt: null,
             pendingCleanupMessageId: null,
           },
@@ -1433,13 +1443,19 @@ export async function resetPublishedChatRules(params: {
     }
   }
 
-  let updatedRules = rules;
   if (cleanupOutcome === 'confirmed' && publishedMessageId) {
     try {
-      const cleared = await params.prisma.chatRules.updateMany({
+      // FLAG: Confirming this deletion cannot clear a newer publication or cleanup.
+      await params.prisma.chatRules.updateMany({
         where: {
           chatId: params.chatId,
           publishedMessageId,
+          publishedBotId: rules.publishedBotId,
+          publishOperationId: null,
+          publishSendStartedAt: null,
+          pendingCleanupMessageId: publishedMessageId,
+          pendingCleanupBotId: deleteBotId ?? null,
+          pendingCleanupKind: 'reset_current',
         },
         data: {
           publishedMessageId: null,
@@ -1452,19 +1468,6 @@ export async function resetPublishedChatRules(params: {
           pendingCleanupKind: null,
         },
       });
-      if (cleared.count === 1) {
-        updatedRules = {
-          ...rules,
-          publishedMessageId: null,
-          publishedBotId: null,
-          publishedUrl: null,
-          publishedAt: null,
-          pendingCleanupMessageId: null,
-          pendingCleanupBotId: null,
-          pendingCleanupIntentId: null,
-          pendingCleanupKind: null,
-        };
-      }
     } catch (error: unknown) {
       params.logger.warn(
         {
@@ -1514,6 +1517,14 @@ export async function resetPublishedChatRules(params: {
     );
   }
 
+  // FLAG: Both accepted cleanup and confirmed finalization advance the stored revision.
+  // Return one fresh snapshot, including any intervening draft save or executor completion.
+  const updatedRules = publishedMessageId
+    ? await params.prisma.chatRules.findUnique({ where: { chatId: params.chatId } })
+    : rules;
+  if (!updatedRules) {
+    throw new BadRequestException('Не удалось обновить состояние правил. Обновите экран.');
+  }
   return mapChatRules(updatedRules);
 }
 

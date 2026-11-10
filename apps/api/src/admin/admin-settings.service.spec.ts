@@ -3273,6 +3273,13 @@ describe('AdminSettingsService chat rules', () => {
   });
 
   it('resets published rules without routing through legacy resetPublishedRules', async () => {
+    const cleared = createPersistedChatRules({
+      publishedMessageId: null,
+      publishedBotId: null,
+      publishedUrl: null,
+      publishedAt: null,
+      updatedAt: new Date('2026-03-09T10:00:00.000Z'),
+    });
     const { chatContextCache, legacyAdminService, maxClient, prisma, service } = createService({
       botAssignmentData: {
         botId: 'bot-1',
@@ -3283,16 +3290,13 @@ describe('AdminSettingsService chat rules', () => {
         publishedUrl: 'https://max.ru/chats/chat-1/message/1',
         publishedAt: new Date('2026-03-09T09:30:00.000Z'),
       }),
-      persistedRulesUpdate: createPersistedChatRules({
-        publishedMessageId: null,
-        publishedUrl: null,
-        publishedAt: null,
-      }),
     });
+    prisma.chatRules.findUnique.mockResolvedValue(cleared);
 
     const result = await service.resetPublishedRules('chat-1', user as never);
 
     expect(result.publishedMessageId).toBeNull();
+    expect(result.revision).toBe(cleared.updatedAt.toISOString());
     expect(legacyAdminService.assertManagedEntityAdminAccess).toHaveBeenCalledWith(
       'chat-1',
       'admin-1',
@@ -3325,7 +3329,16 @@ describe('AdminSettingsService chat rules', () => {
     expect(prisma.chatRules.updateMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        where: { chatId: 'chat-1', publishedMessageId: 'message-1' },
+        where: {
+          chatId: 'chat-1',
+          publishedMessageId: 'message-1',
+          publishedBotId: null,
+          publishOperationId: null,
+          publishSendStartedAt: null,
+          pendingCleanupMessageId: 'message-1',
+          pendingCleanupBotId: 'bot-1',
+          pendingCleanupKind: 'reset_current',
+        },
         data: expect.objectContaining({
           publishedMessageId: null,
           pendingCleanupMessageId: null,
