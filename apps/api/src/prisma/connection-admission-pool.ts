@@ -1,6 +1,10 @@
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { currentConnectionAdmissionBudget } from './connection-admission-budget';
+import {
+  connectionAdmissionMetrics,
+  type ConnectionAdmissionPoolState,
+} from './connection-admission-metrics';
 
 type ConnectCallback = (
   error: Error | undefined,
@@ -10,6 +14,24 @@ type ConnectCallback = (
 
 export class ConnectionAdmissionPool extends Pool {
   private budgetedAdmissions = 0;
+
+  constructor(config?: PoolConfig) {
+    super(config);
+    connectionAdmissionMetrics.registerPool(this);
+  }
+
+  readConnectionAdmissionState(): ConnectionAdmissionPoolState {
+    return {
+      capacity: this.options.max,
+      total: this.totalCount,
+      idle: this.idleCount,
+      waiting: this.waitingCount,
+      budgetedInFlight: this.budgetedAdmissions,
+      ending: this.ending,
+      ended: this.ended,
+    };
+  }
+
   override connect(): Promise<PoolClient>;
   override connect(callback: ConnectCallback): void;
   override connect(callback?: ConnectCallback): Promise<PoolClient> | void {
@@ -24,59 +46,79 @@ export class ConnectionAdmissionPool extends Pool {
     }
 
     const budget = currentConnectionAdmissionBudget();
+    const finish = connectionAdmissionMetrics.begin(budget ? 'budgeted' : 'ordinary');
+    const handoff: ConnectCallback = (error, client, release) => {
+      finish(Boolean(error) || !client);
+      callback(error, client, release);
+    };
     if (budget) {
       try {
         budget.check();
-        // FLAG: Expired Prisma maxWait callers can leave a pg waiter behind. Bound that
-        // backlog, and never hand a late connection to Prisma (which would issue BEGIN).
-        if (this.budgetedAdmissions >= 16) throw new Error('Read admission capacity exhausted');
       } catch (error) {
-        callback(
+        connectionAdmissionMetrics.increment('budgetRejectedBefore');
+        handoff(
           error instanceof Error ? error : new Error('Read admission expired'),
           undefined,
           () => {},
         );
         return;
       }
+      // FLAG: Expired Prisma maxWait callers can leave a pg waiter behind. Bound that
+      // backlog, and never hand a late connection to Prisma (which would issue BEGIN).
+      if (this.budgetedAdmissions >= 16) {
+        connectionAdmissionMetrics.increment('capacityRejected');
+        handoff(new Error('Read admission capacity exhausted'), undefined, () => {});
+        return;
+      }
       this.budgetedAdmissions++;
     }
     let retried = false;
     const acquire = () => {
-      super.connect((error, client, release) => {
-        if (budget) {
-          this.budgetedAdmissions--;
-          try {
-            budget.check();
-          } catch (expired) {
-            if (client) release();
-            callback(
-              expired instanceof Error ? expired : new Error('Read admission expired'),
-              undefined,
-              () => {},
-            );
+      try {
+        super.connect((error, client, release) => {
+          if (budget) {
+            this.budgetedAdmissions--;
+            try {
+              budget.check();
+            } catch (expired) {
+              connectionAdmissionMetrics.increment('budgetRejectedAfter');
+              if (client) {
+                release();
+                connectionAdmissionMetrics.increment('lateReleases');
+              }
+              handoff(
+                expired instanceof Error ? expired : new Error('Read admission expired'),
+                undefined,
+                () => {},
+              );
+              return;
+            }
+            // A budgeted read gets one bounded admission, never the ordinary second wait.
+            handoff(error, client, release);
             return;
           }
-          // A budgeted read gets one bounded admission, never the ordinary second wait.
-          callback(error, client, release);
-          return;
-        }
-        // FLAG: Retry only pg-pool's expired waiting-list admission, before a client
-        // or SQL reaches the caller. Query, transaction, commit and socket failures
-        // never enter this branch. The pool limit and each acquisition timeout stay fixed;
-        // total admission is bounded by two waits (5s + 5s with production configuration).
-        if (
-          !retried &&
-          !client &&
-          !this.ending &&
-          error instanceof Error &&
-          error.message === 'timeout exceeded when trying to connect'
-        ) {
-          retried = true;
-          acquire();
-          return;
-        }
-        callback(error, client, release);
-      });
+          // FLAG: Retry only pg-pool's expired waiting-list admission, before a client
+          // or SQL reaches the caller. Query, transaction, commit and socket failures
+          // never enter this branch. The pool limit and each acquisition timeout stay fixed;
+          // total admission is bounded by two waits (5s + 5s with production configuration).
+          if (
+            !retried &&
+            !client &&
+            !this.ending &&
+            error instanceof Error &&
+            error.message === 'timeout exceeded when trying to connect'
+          ) {
+            retried = true;
+            connectionAdmissionMetrics.increment('retryTimeouts');
+            acquire();
+            return;
+          }
+          handoff(error, client, release);
+        });
+      } catch (error) {
+        finish(true);
+        throw error;
+      }
     };
     acquire();
   }
