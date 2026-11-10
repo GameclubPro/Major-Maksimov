@@ -9,7 +9,7 @@ const PREFIX = `support-cpu-pilot:v1:${CHAT_ID}`;
 const SOURCE_AGE_MS = 180_000;
 const RETENTION_MS = 7 * 86400_000;
 const MODEL_SHA = '769d386a69d43782321c1bad04d41d29a2e84b2c06e6a277cd99fd6265ec0e80';
-const API_PROFILE_SHA = '6d528271f60ea9dfb2005f8fa9f68ba231b4564ebf8c840065d3d64ebe84656b';
+const API_PROFILE_SHA = '200733444f94e2153810b20d981865be2bc9a746947beee99a316b4d32c48db6';
 const DIGEST = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ANSWER_FOOTER = '✦ Ответ подготовлен ИИ-помощником «Майор Максимов»';
 const HISTORY_TTL_MS = 5 * 60_000;

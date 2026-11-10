@@ -81,6 +81,17 @@ function setupContext(text, knowledge, request = {}, confirmed = false) {
     return null;
   const mentions = botMentions(text, knowledge);
   for (const action of [...text.matchAll(setupAction)].reverse()) {
+    const clause =
+      text
+        .slice(0, action.index)
+        .split(/[.!?;\n]/u)
+        .at(-1) + text.slice(action.index).split(/[.!?;\n]/u)[0];
+    if (
+      /^подключени/iu.test(action[0]) &&
+      /провер(?:ил(?:а|и)?|ено|ены)(?![\p{L}])/iu.test(clause) &&
+      !/как|инструкц|пришл|скин|покаж/iu.test(clause)
+    )
+      continue;
     const after = action.index + action[0].length;
     const location =
       /^\s+(?:в|через|из)\s+(?:(?:мини[-\s]?приложени\p{L}*\s+)?публик\p{L}*|(?:(?:нов\p{L}*|этот)\s+)?(?:пост|редактор)\p{L}*(?:\s+публик\p{L}*)?)\s+/iu.exec(

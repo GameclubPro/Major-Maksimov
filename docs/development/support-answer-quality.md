@@ -56,6 +56,14 @@ links. A source ID in generated JSON does not prove every sentence is supported.
 Maintain the [project module inventory](support-project-knowledge.md) when public modules change;
 new facts also need semantic retrieval and followup coverage.
 
+The owner decision of 2026-11-10 keeps moderator failure triage independent of its name:
+when the moderator category is clear and several actions fail or the named moderator is silent,
+first offer the verified bot administrator/reading/sending/deletion rights and human administrator/
+connection checks. Do not ask which moderator before those shared checks. Preserve already completed
+checks and continue from their result. A bare unknown-bot failure may still need clarification;
+a specific filter-setting question and Publisher/Lastik retain their own task. Regression covers
+the actual multi-symptom complaint, completed checks and these adjacent exclusions.
+
 Application-authored answer requirements may highlight conditions in retained facts. Keep them
 separate from the facts and untrusted question/history; rebuild them after context trimming.
 Scope reminders to the current task, not every retrieved prerequisite. Keep allow/block/inspect
