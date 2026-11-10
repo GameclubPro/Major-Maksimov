@@ -75,6 +75,34 @@ const reportedPublisherReady = (text, publisherRequest) =>
   );
 const publisherTask =
   /автоответ|автопост|предложк|согласован.{0,15}личк|\bvk\b|(?:^|\s)вк(?:\s|[.!?,]|$)|импорт.{0,20}пост|пост.{0,20}импорт|отложенн.{0,20}пост|пост.{0,20}отлож|регулярн.{0,20}пост|переехал.{0,20}публикац|майор.{0,35}пост|пост.{0,35}майор/iu;
+function autoReplyRequest(text) {
+  if (/автоответ|автоматическ.{0,8}ответ|ответ.{0,20}ключев/iu.test(text)) return true;
+  // FLAG: A word alone is not an auto-reply: require a reply intent, preserving moderation/chatter.
+  if (
+    /через\s+ии|генерир|каждый раз.{0,20}(?:нов|разн)|(?:текущ|актуальн).{0,25}(?:курс|данн|погод)|не\s+(?:заранее|готов|подготовлен|задан)/iu.test(
+      text,
+    )
+  )
+    return false;
+  const response =
+    /(?:бот\p{L}*|(?<![\p{L}])он)\s+.{0,25}(?:присыл|пришл|отправ|выда|выдал|отвеч|ответ)|(?:ему|человеку|участнику)\s+(?:приход|приш|отправ|присыл)|(?:получа|получил)\p{L}*.{0,20}(?:ответ|список|текст|ссылк)|(?:в\s+ответ|ответ\p{L}*).{0,20}(?:текст|список|ссылк|фото)/iu.test(
+      text,
+    ) ||
+    (publisherName.test(text) && /триггер/iu.test(text) && /присыл|отправ|выда|ответ/iu.test(text));
+  const phrase =
+    /ключев\p{L}*\s+(?:слов|фраз)|привяз\p{L}*.{0,25}(?:слов|фраз)|(?:по|на)\s+(?:слов|фраз)|(?:пиш|напис|введ|отправ)\p{L}*.{0,25}(?:слов|фраз|[«"„])/iu.test(
+      text,
+    ) ||
+    (/заранее|сохраненн|подготовлен|готов\p{L}*\s+текст/iu.test(text) &&
+      /(?:пиш|напис|введ)\p{L}*\s+\p{L}+.{0,25}(?:\sи\s|\sа\s|чтобы|чтоб)/iu.test(text));
+  const trigger = /(?<![\p{L}])триггер\p{L}*(?![\p{L}])/iu.test(text);
+  return (
+    response &&
+    (phrase || trigger) &&
+    !(/стоп[\s-]*слов/iu.test(text) && !/подготов|заранее|моим?\s+текст|список/iu.test(text))
+  );
+}
+const isPublisherTask = (text) => publisherTask.test(text) || autoReplyRequest(text);
 const eraserTask =
   /стар.{0,15}(?:сообщен|переписк)|очист.{0,15}(?:истор|переписк)|удаление по срок/iu;
 const chatClosure = /закр[ыо]\p{L}*[^.!?\n]{0,65}чат|чат[^.!?\n]{0,65}закр[ыо]/iu;
@@ -124,7 +152,7 @@ function productOf(text) {
   if (publisher && eraser) return 'mixed';
   if (eraser) return 'eraser';
   if (publisher) return 'publisher';
-  if (publisherTask.test(text)) return 'publisher';
+  if (isPublisherTask(text)) return 'publisher';
   if (eraserTask.test(text)) return 'eraser';
   if (moderatorName.test(text) && moderatorForwardingRequest(text)) return 'major';
   if (moderatorName.test(text) && /резерв|выбран|модерац/iu.test(text)) return 'major';
@@ -214,7 +242,7 @@ const topicPatterns = [
     'delivery',
     /[«"„]нужно проверить[»"“]|статус.{0,20}нужно проверить|результат.{0,20}(?:отправ|неизвест)|достав|(?:отправ|публиков).{0,25}(?:еще раз|повтор|заново)|(?:повтор|заново).{0,25}(?:отправ|публиков)/iu,
   ],
-  ['auto-replies', /автоответ|автоматическ.{0,8}ответ|ответ.{0,20}ключев/iu],
+  ['auto-replies', { test: autoReplyRequest }],
   ['vk', /\bvk\b|(?:^|\s)вк(?:\s|[.!?,]|$)|вконтакт|согласован.{0,15}личк/iu],
   [
     'suggestions',
@@ -439,7 +467,7 @@ function mixedRequests(ctx, state) {
     state.publisherRequest &&
     eraserName.test(ctx.current) &&
     productOf(ctx.current) === 'mixed' &&
-    (placement.test(ctx.current) || publisherTask.test(ctx.current))
+    (placement.test(ctx.current) || isPublisherTask(ctx.current))
   )
     return true;
   if (
@@ -1477,14 +1505,14 @@ function semanticFacts(text, state) {
     add(test(/профил|скрыть/iu) ? 'marketplace-profile' : 'advertising-capability', 100);
   if (publ) {
     add('publik', 40);
-    if (test(/автоответ|автоматическ.{0,8}ответ|ответ.{0,20}ключев/iu)) {
+    if (autoReplyRequest(text)) {
       add(
         test(
           /опечат|не срабатыв|совпад|целое|внутри|пауз|частот|повторен|слишком часто|отдельное слово|галочк/iu,
         )
           ? 'publisher-auto-replies-matching'
           : 'publisher-auto-replies-create',
-        110,
+        140,
       );
       add('publisher-auto-replies-create', 60);
     }
@@ -1810,7 +1838,7 @@ export function createSupportRouter(knowledge) {
         /(?:удалил[ао]?|снес|перестал)(?![\p{L}])/iu.test(ctx.current)) ||
       /(?:^|\s)нуж(?:на|ен|ны)\s/iu.test(ctx.current) ||
       configurationIntent.test(ctx.current) ||
-      /(?:^|\s)хочу\s/iu.test(ctx.current) ||
+      /(?:^|\s)хочу[\s,]/iu.test(ctx.current) ||
       unresolvedHelp.test(ctx.current) ||
       actionRequest.test(ctx.current) ||
       switchingModerator ||
@@ -1826,7 +1854,7 @@ export function createSupportRouter(knowledge) {
           (/(?:^|\s)(?:это|этот|эта|эти|этого|этом|так|там|тут|туда|он|его|ее|их|ему|теперь|тем же)(?![\p{L}])/iu.test(
             ctx.current,
           ) ||
-            /^(?:а\s+)?(?:что дальше|можно повторить|как проверить результат|можно выбрать другую модель)|^а\s+.*(?:как|где|что|можно|кто увидит)(?![\p{L}])/iu.test(
+            /^(?:а\s+)?(?:что дальше|можно повторить|как проверить результат|можно выбрать другую модель)|^а\s+(?:если|.*(?:как|где|что|можно|кто увидит))(?![\p{L}])/iu.test(
               ctx.current,
             ))) ||
         (freshClarification && !request && clarificationAnswer));
@@ -1874,13 +1902,14 @@ export function createSupportRouter(knowledge) {
     const majorOnly =
       /(?:в|через|у)\s+майор/iu.test(ctx.current) &&
       !publisherName.test(ctx.current) &&
-      !/автоответ|автопост/iu.test(ctx.current) &&
+      !autoReplyRequest(ctx.current) &&
+      !/автопост/iu.test(ctx.current) &&
       !publishingMigration;
     const publisherRequest =
       !majorOnly &&
       !eraserOnly &&
       Boolean(
-        publisherTask.test(ctx.focus) ||
+        isPublisherTask(ctx.focus) ||
         latestProduct?.product === 'publisher' ||
         (latestProduct?.product === 'mixed' &&
           publisherName.test(ctx.current) &&
