@@ -304,4 +304,85 @@ const busyKeys = [legacy, pool].flatMap((entry) => [
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it('drains dispatched HTTP after the caller deadline and releases only its completed CPU lease', async () => {
+    let accept!: () => void;
+    let respond!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      accept = resolve;
+    });
+    const server = createServer((request, response) => {
+      request.resume();
+      respond = () => {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(
+          JSON.stringify({
+            model: result.modelAlias,
+            choices: [
+              {
+                finish_reason: 'stop',
+                message: {
+                  role: 'assistant',
+                  content: JSON.stringify({
+                    classification: result.classification,
+                    reasonCodes: result.reasonCodes,
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+      };
+      accept();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Loopback fixture missing');
+    const shutdown = new AbortController();
+    let work: Promise<void> | undefined;
+    try {
+      const first = submit();
+      const task = await take();
+      const lease = new CommercialLlmShadowLease(redis);
+      const scheduler = new CommercialLlmSecondaryScheduler(
+        lease,
+        new CommercialLlmClient({ endpoint: `http://127.0.0.1:${address.port}` }),
+      );
+      let finished = false;
+      work = processCommercialLlmPreview(
+        mailbox,
+        task,
+        scheduler,
+        async () => true,
+        shutdown.signal,
+      ).then(() => {
+        finished = true;
+      });
+      await accepted;
+      const token = await redis.get(COMMERCIAL_LLM_LEASE_KEY);
+      expect(token).not.toBeNull();
+      await expect(first.response).rejects.toMatchObject({ kind: 'ABORTED' });
+      await pause(50);
+      expect(finished).toBe(false);
+      expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBe(token);
+      expect(await redis.pttl(COMMERCIAL_LLM_LEASE_KEY)).toBe(-1);
+
+      // FLAG: A late terminal response may settle only its physical computation.
+      // It cannot publish a result or clear a newer diagnostic owner.
+      const next = { ...task.request, id: randomUUID(), deadlineAtMs: Date.now() + 20_000 };
+      const raw = JSON.stringify(next);
+      await redis.set(keys.request, raw, 'PX', 20_000);
+      await redis.set(keys.claim, next.id, 'PX', 20_000);
+      respond();
+      await work;
+      expect(await redis.exists(COMMERCIAL_LLM_LEASE_KEY, keys.result + task.request.id)).toBe(0);
+      expect(await redis.get(keys.request)).toBe(raw);
+      expect(await redis.get(keys.claim)).toBe(next.id);
+    } finally {
+      shutdown.abort();
+      await work;
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 30_000);
 });
