@@ -519,8 +519,8 @@ async function deliverAnswer(
     if (guideId !== undefined && !guide) throw new Error('support_guide_refused');
     const loadImages = (part) => loadSupportGuideImages(runtime, guide, part);
     if (guide) {
-      // FLAG: A bounded image pack can take longer than one SEND. Preserve the same
-      // lease throughout preparation and both batches; losing it fences the next effect.
+      // FLAG: Keep the same lease while preparing and rechecking both reviewed sources.
+      // All eleven cards share one SEND; an uncertain result must never be replayed.
       leaseAlive = await fence.renew();
       if (!leaseAlive) throw new Error('support_lease_lost');
       renewTimer = setInterval(() => {
@@ -539,75 +539,65 @@ async function deliverAnswer(
           });
       }, 4000);
     }
-    const batches = [];
+    // FLAG: Source messages are catalog provenance, not outgoing batches. MAX accepts
+    // up to twelve attachments; send this reviewed eleven-card pack with one caption.
+    const attachments = guide ? [] : null;
     if (guide)
-      for (const part of guide.sourceMessages)
-        batches.push({ part, attachments: await loadImages(part) });
-    else batches.push({ part: null, attachments: null });
-    let lastId;
-    for (const [index, batch] of batches.entries()) {
-      const message =
-        index === 0
-          ? presented
-          : renderSupportMessage(
-              `${guide.title}: карточка 11 из 11.\n\n${ANSWER_FOOTER}`,
-              runtime.supportBotCatalog,
-            );
-      const result = await runtime.client.sendMessageImmediateWithId(
-        CHAT_ID,
-        message.text,
-        {
-          textFormat: message.textFormat,
-          messageLink: { type: 'reply', mid: source.id },
-          ...(batch.attachments ? { attachments: batch.attachments } : {}),
-          beforeSend: async () => {
-            if (
-              signal.aborted ||
-              !leaseAlive ||
-              Date.now() > source.timestamp + SOURCE_AGE_MS ||
-              Date.now() - heartbeatAt() > 15000
-            )
-              throw new Error('support_source_expired');
-            await runtime.assertSourceAllowed(source);
-            const exact = sourceMessage(
-              await runtime.client.getExactMessageRow(CHAT_ID, source.id, runtime.options()),
-            );
-            if (!exact || exact.fingerprint !== source.fingerprint)
-              throw new Error('support_source_changed');
-            await runtime.assertAccess();
-            if (batch.part) await loadImages(batch.part);
-            if (
-              signal.aborted ||
-              !leaseAlive ||
-              Date.now() > sessionEnd ||
-              Date.now() - heartbeatAt() > 15000 ||
-              !(await (guide
-                ? fence.beginPart(
-                    source.id,
-                    index,
-                    Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS),
-                  )
-                : fence.begin(source.id, Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS))))
-            )
-              throw new Error('support_send_refused');
-            attempted = true;
-            activePart = guide ? index : null;
-          },
+      for (const part of guide.sourceMessages) attachments.push(...(await loadImages(part)));
+    const result = await runtime.client.sendMessageImmediateWithId(
+      CHAT_ID,
+      presented.text,
+      {
+        textFormat: presented.textFormat,
+        messageLink: { type: 'reply', mid: source.id },
+        ...(attachments ? { attachments } : {}),
+        beforeSend: async () => {
+          if (
+            signal.aborted ||
+            !leaseAlive ||
+            Date.now() > source.timestamp + SOURCE_AGE_MS ||
+            Date.now() - heartbeatAt() > 15000
+          )
+            throw new Error('support_source_expired');
+          await runtime.assertSourceAllowed(source);
+          const exact = sourceMessage(
+            await runtime.client.getExactMessageRow(CHAT_ID, source.id, runtime.options()),
+          );
+          if (!exact || exact.fingerprint !== source.fingerprint)
+            throw new Error('support_source_changed');
+          await runtime.assertAccess();
+          if (guide) for (const part of guide.sourceMessages) await loadImages(part);
+          if (
+            signal.aborted ||
+            !leaseAlive ||
+            Date.now() > sessionEnd ||
+            Date.now() - heartbeatAt() > 15000 ||
+            !(await (guide
+              ? fence.beginPart(
+                  source.id,
+                  0,
+                  Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS),
+                )
+              : fence.begin(source.id, Math.min(sessionEnd, source.timestamp + SOURCE_AGE_MS))))
+          )
+            throw new Error('support_send_refused');
+          attempted = true;
+          activePart = guide ? 0 : null;
         },
-        {
-          ...runtime.options(),
-          trafficClass: 'interactive',
-          actionHealthLane: 'interactive',
-          timeoutMs: 12000,
-        },
-      );
-      if (!messageId(result?.messageId)) throw new Error('support_ack_missing');
-      if (guide && Number(await fence.settlePart(source.id, index, result.messageId)) !== 1)
-        throw new Error('support_receipt_lost');
-      activePart = null;
-      lastId = result.messageId;
-      if (guide) onSent?.(result.messageId);
-    }
+      },
+      {
+        ...runtime.options(),
+        trafficClass: 'interactive',
+        actionHealthLane: 'interactive',
+        timeoutMs: 12000,
+      },
+    );
+    if (!messageId(result?.messageId)) throw new Error('support_ack_missing');
+    if (guide && Number(await fence.settlePart(source.id, 0, result.messageId)) !== 1)
+      throw new Error('support_receipt_lost');
+    activePart = null;
+    const lastId = result.messageId;
+    if (guide) onSent?.(lastId);
     if (Number(await fence.settle(source.id, `SENT:${lastId}`)) !== 1)
       throw new Error('support_receipt_lost');
     if (!guide) onSent?.(lastId);
@@ -822,7 +812,7 @@ async function runBridge(runtime, { preview = false } = {}) {
         let pages = 0;
         for (const part of guide.sourceMessages)
           pages += (await loadSupportGuideImages(runtime, guide, part)).length;
-        guides.push({ id: guide.id, pages, batches: guide.sourceMessages.length });
+        guides.push({ id: guide.id, pages, batches: 1 });
       }
       send({ type: 'preview', chatId: CHAT_ID, ...identity, guides, readOnly: true });
       return;

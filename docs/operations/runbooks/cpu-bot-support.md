@@ -125,12 +125,16 @@ media. Both guides describe two alternatives after admin rights: an administrato
 `Старт` in the group, or forwarding a group message to the correct bot's private dialog. Publik
 also needs permission to send/publish; the card highlighting reading does not waive that right.
 
-A guide is sent as two ordered image batches of ten and one, with a short explanation. Every
-batch rechecks the user's exact source, access, holds, deadline and session heartbeat. Child
-Redis fences require the previous batch's confirmed receipt; the original source fence remains
-unchanged. Missing acknowledgements or a partial result remain fenced without automatic replay.
-Only all confirmed batches settle the full answer as sent. Preparation and delivery retain the
-same bounded lease; no guide response extends the source's original 180-second deadline.
+The owner's 10 November 2026 correction requires all eleven cards in one message with the
+ordinary short connection steps. Omit card counts and unsolicited notes about other moderators.
+[MAX POST /messages](https://dev.max.ru/docs-api/methods/POST/messages), reviewed on that date,
+permits twelve total attachments; the catalog's two original source messages do not require two
+outgoing messages. Read and recheck both ordered sources before the single SEND, along with the
+user's exact source, access, holds, deadline and session heartbeat. The existing parent fence and
+first child fence protect the whole pack; retained older batch fences still block replay. Missing
+acknowledgements remain fenced without automatic retry. Only the confirmed complete message
+settles the answer as sent. Preparation and delivery retain the same bounded lease; no guide
+response extends the source's original 180-second deadline.
 
 The reviewed public catalog contains eight bots: three main moderators (Максимов,
 Максимова, Рэкс), three reserve moderators (Максимов 2, Максимова 2, Рэкс 2), Публик

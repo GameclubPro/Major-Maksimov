@@ -49,7 +49,11 @@ test('reviewed onboarding packs return a brief caption without a model key or re
     assert.equal(result.guideId, guideId);
     assert.equal(result.durationMs, 0);
     assert.deepEqual(result.sourceIds, [sourceId]);
-    assert.ok(presentedBody(result).length <= 600);
+    assert.ok(presentedBody(result).length <= 330);
+    assert.doesNotMatch(
+      result.text,
+      /\d+\s+карточ|друг(?:ого|ой)\s+модератор|показан\s+Максимов/iu,
+    );
     assert.match(result.text, /«Старт»/u);
     assert.match(result.text, /провер/iu);
     assert.equal(result.usage, undefined);

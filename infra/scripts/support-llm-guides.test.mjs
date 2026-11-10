@@ -193,10 +193,13 @@ test('reviewed packs pin eleven ordered photos without exporting attachment cred
     assert.equal(guide.sourceBotId, 'id613070470872_9_bot');
     assert.equal(guide.sourceChatId, '-78271094414679');
     assert.deepEqual(guide.sourceIds, [guide.id === 'moderator-group' ? 'connect' : 'publik']);
-    assert.ok(guide.caption.length <= 600);
-    assert.match(guide.caption, /11 карточек по порядку/u);
+    assert.ok(guide.caption.length <= 330);
+    assert.doesNotMatch(
+      guide.caption,
+      /\d+\s+карточ|друг(?:ого|ой)\s+модератор|показан\s+Максимов/iu,
+    );
     assert.match(guide.caption, /администратор/u);
-    assert.match(guide.caption, /«Старт».*(?:личк|пересыл)/iu);
+    assert.match(guide.caption, /«Старт».*(?:личк|личный|пересыл)/iu);
     assert.match(guide.caption, /провер/iu);
     assert.deepEqual(
       guide.sourceMessages.map(({ photos }) => photos.length),
