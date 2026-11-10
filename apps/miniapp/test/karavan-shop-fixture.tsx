@@ -1033,7 +1033,9 @@ const api = {
         publicationPreview:
           market.status === 'active'
             ? market.format === 'storefront'
-              ? { mode: simple ? 'administration_shop' : 'administration_storefront' }
+              ? simple
+                ? { mode: 'chat_marketplace', administrationTarget: 'shop' }
+                : { mode: 'administration_storefront' }
               : { mode: 'chat_marketplace' }
             : {
                 mode: 'unavailable',

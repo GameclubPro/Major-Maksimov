@@ -236,9 +236,12 @@ export const karavanMarketplaceBindingSchema = z.object({
 });
 export const karavanPublicationPreviewSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('catalog') }),
-  z.object({ mode: z.literal('chat_marketplace') }),
+  // Keep the existing discriminator readable by already-open MAX shells.
+  z.object({
+    mode: z.literal('chat_marketplace'),
+    administrationTarget: z.literal('shop').optional(),
+  }),
   z.object({ mode: z.literal('administration_storefront') }),
-  z.object({ mode: z.literal('administration_shop') }),
   z.object({
     mode: z.literal('unavailable'),
     reason: z.enum(['closed', 'connection', 'verification']),

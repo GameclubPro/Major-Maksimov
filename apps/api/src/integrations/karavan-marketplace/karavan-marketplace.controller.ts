@@ -86,7 +86,7 @@ export class KaravanMarketplaceController {
                   (module.counts.readyListings ?? 0) > 0 &&
                   hasPublishedAdministrationStore &&
                   !!module.buyerUrl
-                  ? { mode: 'administration_shop' }
+                  ? { mode: 'chat_marketplace', administrationTarget: 'shop' }
                   : { mode: 'unavailable', reason: 'closed' }
                 : module.administrationStore?.id === module.marketplace.administrationStoreId &&
                     module.administrationStore?.status === 'ACTIVE' &&

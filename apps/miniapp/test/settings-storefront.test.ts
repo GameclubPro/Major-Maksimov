@@ -192,7 +192,7 @@ test('administration shop preview uses the common catalog text for both one and 
   const html = renderToStaticMarkup(
     createElement(
       StorefrontPublicationPreviewContext.Provider,
-      { value: { mode: 'administration_shop' } },
+      { value: { mode: 'chat_marketplace', administrationTarget: 'shop' } },
       createElement(SettingsStorefrontTextEditor, {
         draft: {
           karavanStorefrontMessageText: 'Товары нашего чата',

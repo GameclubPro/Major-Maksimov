@@ -100,7 +100,7 @@ export function SettingsStorefrontTextEditor(props: Props) {
   const publication = useStorefrontPublicationPreview();
   const network = props.scope === 'network';
   const administrationShop =
-    publication?.mode === 'administration_shop' ||
+    (publication?.mode === 'chat_marketplace' && publication.administrationTarget === 'shop') ||
     (publication?.mode === 'unavailable' && publication.administrationTarget === 'shop');
   const administrationButton = administrationShop
     ? 'karavanStorefrontCatalogButtonText'
