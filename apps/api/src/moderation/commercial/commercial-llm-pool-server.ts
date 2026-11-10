@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import { readBoundedResponseBuffer } from '../../common/bounded-response-buffer';
 import {
   commercialLlmCompletionUrl,
+  COMMERCIAL_LLM_DEFAULT_TIMEOUT_MS,
   CommercialLlmError,
   parseCommercialLlmEnvelope,
   parseCommercialLlmCompletionContent,
@@ -76,7 +77,11 @@ export class CommercialLlmPoolServer {
     }
   }
 
-  async dispatch(reservation: CommercialLlmPoolReservation, signal?: AbortSignal): Promise<void> {
+  async dispatch(
+    reservation: CommercialLlmPoolReservation,
+    signal?: AbortSignal,
+    shutdownSignal?: AbortSignal,
+  ): Promise<void> {
     if (reservation.nodeId !== 'server-9b') throw new CommercialLlmError('INVALID_INPUT');
     if (
       this.closed ||
@@ -85,7 +90,8 @@ export class CommercialLlmPoolServer {
       !this.registered ||
       reservation.session !== this.session ||
       reservation.deadlineAtMs - Date.now() < COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS ||
-      signal?.aborted
+      signal?.aborted ||
+      shutdownSignal?.aborted
     ) {
       await this.mailbox.releaseUndispatched(reservation);
       throw new CommercialLlmError('BUSY');
@@ -103,21 +109,27 @@ export class CommercialLlmPoolServer {
       if (
         !token ||
         !(await this.hasHeadroom()) ||
+        this.closed ||
         signal?.aborted ||
+        shutdownSignal?.aborted ||
         reservation.deadlineAtMs - Date.now() < COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS
       )
         throw new CommercialLlmError('BUSY');
       await this.mailbox.refreshWorker('server-9b', this.session, false);
-      const workSignal = AbortSignal.any([
-        ...(signal ? [signal] : []),
-        AbortSignal.timeout(Math.max(1, reservation.deadlineAtMs - Date.now())),
-      ]);
       if (
         !(await this.lease.retainUntilReleased(token)) ||
-        workSignal.aborted ||
+        this.closed ||
+        signal?.aborted ||
+        shutdownSignal?.aborted ||
         reservation.deadlineAtMs - Date.now() < COMMERCIAL_LLM_POOL_CPU_MIN_REMAINING_MS
       )
         throw new CommercialLlmError('BUSY');
+      // FLAG: Source expiry revokes publication, not proof of physical completion. Drain an
+      // accepted CPU request under the existing client limit; only shutdown may abort it early.
+      const workSignal = AbortSignal.any([
+        ...(shutdownSignal ? [shutdownSignal] : []),
+        AbortSignal.timeout(COMMERCIAL_LLM_DEFAULT_TIMEOUT_MS),
+      ]);
       dispatched = true;
       const response = await this.fetchImpl(this.url, {
         method: 'POST',
@@ -148,12 +160,20 @@ export class CommercialLlmPoolServer {
       // FLAG: Retain the actual terminal response before decision validation, as GPU workers do.
       // It lets exact-attempt cleanup release the pool slot even for an invalid decision;
       // mailbox readers still validate the decision before marking any job complete.
-      if (!workSignal.aborted && (await this.lease.owns(token)))
+      if (
+        (await this.lease.owns(token)) &&
+        !this.closed &&
+        !signal?.aborted &&
+        !workSignal.aborted &&
+        Date.now() < reservation.deadlineAtMs
+      )
         await this.mailbox.respond('server-9b', reservation.session, reservation.id, body);
       parseCommercialLlmEnvelope(envelope, modelAlias);
     } catch (error) {
       if (error instanceof CommercialLlmError) throw error;
-      throw new CommercialLlmError(signal?.aborted ? 'ABORTED' : 'UNAVAILABLE');
+      throw new CommercialLlmError(
+        signal?.aborted || shutdownSignal?.aborted ? 'ABORTED' : 'UNAVAILABLE',
+      );
     } finally {
       // FLAG: An aborted HTTP request is not evidence that llama.cpp stopped computing.
       // /slots can overtake queued inference. Keep the pinned lease until managed recovery;

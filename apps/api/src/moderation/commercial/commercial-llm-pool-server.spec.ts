@@ -276,6 +276,42 @@ describe('pool server physical capacity containment', () => {
     expect(release).toHaveBeenCalledWith(lease);
   });
 
+  it('does not publish when source cancellation arrives during the final ownership read', async () => {
+    const source = new AbortController();
+    jest.mocked(CommercialLlmShadowLease.prototype.owns).mockImplementation(async () => {
+      source.abort();
+      return true;
+    });
+    await server.dispatch(reservation(), source.signal);
+    expect(mailbox.respond).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(lease);
+  });
+
+  it('does not publish when the original deadline expires during the final ownership read', async () => {
+    const request = reservation();
+    jest.mocked(CommercialLlmShadowLease.prototype.owns).mockImplementation(async () => {
+      now = request.deadlineAtMs;
+      return true;
+    });
+    await server.dispatch(request);
+    expect(mailbox.respond).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(lease);
+  });
+
+  it('does not post after close begins during lease retention', async () => {
+    let closing: Promise<void> | undefined;
+    jest
+      .mocked(CommercialLlmShadowLease.prototype.retainUntilReleased)
+      .mockImplementation(async () => {
+        closing = server.close();
+        return true;
+      });
+    await expect(server.dispatch(reservation())).rejects.toMatchObject({ kind: 'BUSY' });
+    await closing;
+    expect(fetchImpl.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+    expect(release).toHaveBeenCalledWith(lease);
+  });
+
   it.each([
     ['absent endpoint', () => new Response('{}', { status: 501 })],
     ['wrong media type', () => new Response('[]')],

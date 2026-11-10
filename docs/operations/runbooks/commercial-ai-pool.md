@@ -84,7 +84,12 @@ expiry. A bounded, exact-model terminal envelope (`finish_reason=stop`, one assi
 message, no reasoning, refusal or tools) proves the physical request finished and
 releases only its own lease. Decision JSON and classification/reason consistency are
 validated separately: an invalid decision still fails, supplies no accepted result or deletion
-authority, and does not quarantine completed CPU work. Wrong model identity, malformed
+authority, and does not quarantine completed CPU work. The original twenty-second inference
+deadline still ends source classification and expires the pool reservation. After HTTP handoff,
+the CPU adapter drains under the existing sixty-second client limit and a separate process-shutdown
+signal. A late terminal response releases only its own physical lease; it is never published to
+an expired or cancelled source. Shutdown still aborts physical work and retains an uncertain lease.
+Wrong model identity, malformed
 envelopes, non-stop finishes and ambiguous transport failures retain the lease and
 withdraw CPU capacity, including across an API restart while
 Redis retains the key. Neither a later idle observation nor the former 120-second
