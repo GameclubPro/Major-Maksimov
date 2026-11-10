@@ -24,20 +24,9 @@ import {
   type CommercialLlmSource,
 } from './commercial-llm-enforcement.protocol';
 import type { CommercialLlmObservationResult } from './commercial-llm.protocol';
+import { deterministicCommercialCategories } from './commercial-ads-deterministic-categories';
 
 let detector: CommercialAdDetector | undefined;
-const CATEGORY_BY_SUBTYPE: Readonly<Record<string, CommercialAdCategory | undefined>> = {
-  SERVICES: 'SERVICES',
-  INFO_PRODUCT: 'SERVICES',
-  PROPERTY_AGENT: 'SERVICES',
-  GOODS: 'BUSINESS',
-  GOODS_RETAIL: 'BUSINESS',
-  BUYOUT: 'BUSINESS',
-  PROPERTY_COMMERCIAL: 'BUSINESS',
-  RECRUITMENT: 'BUSINESS',
-  GROUP_PROMOTION: 'COMMUNITIES',
-  CHANNEL_PLACEMENT: 'COMMUNITIES',
-};
 
 export function commercialAdsDetectionCategories(
   detection: CommercialDetection | null,
@@ -50,13 +39,9 @@ export function commercialAdsDetectionCategories(
   }
   if (result?.classification === 'UNSURE') return [];
   if (detection?.safeContextBucket === 'private_one_off_sale') return ['PERSONAL_SALE'];
-  const categories = new Set<CommercialAdCategory>();
-  if (detection) {
-    for (const subtype of [detection.primarySubtype, ...detection.supportingSubtypes]) {
-      const category = CATEGORY_BY_SUBTYPE[subtype];
-      if (category) categories.add(category);
-    }
-  }
+  const categories = new Set<CommercialAdCategory>(
+    detection ? deterministicCommercialCategories(detection) : [],
+  );
   if (result?.reasonCodes.includes('COMMERCIAL_COMMUNITY')) categories.add('COMMUNITIES');
   return [...categories];
 }

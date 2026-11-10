@@ -148,19 +148,6 @@ export function resolveCommercialAdsPolicy({
     : result('KEEP', 'PARTICIPANT_EXCEPTION', [], [...matchedIds]);
 }
 
-export const commercialAdsPreviewRequestSchema = z
-  .object({
-    text: z
-      .string()
-      .max(COMMERCIAL_ADS_PREVIEW_TEXT_MAX, 'До 2500 символов.')
-      .refine((text) => text.trim().length > 0, 'Введите сообщение.'),
-    policy: commercialAdsPolicySchema.nullable(),
-    userId: commercialAdsUserIdSchema.nullable().optional(),
-    enabled: z.boolean(),
-  })
-  .strict();
-export type CommercialAdsPreviewRequest = z.infer<typeof commercialAdsPreviewRequestSchema>;
-
 export const commercialAdsPreviewResponseSchema = z
   .object({
     decision: z.enum(['DELETE', 'KEEP', 'UNSURE', 'UNAVAILABLE']),

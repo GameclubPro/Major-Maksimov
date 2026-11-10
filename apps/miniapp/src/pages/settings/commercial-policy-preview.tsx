@@ -3,13 +3,12 @@ import {
   COMMERCIAL_ADS_PREVIEW_TEXT_MAX,
   type CommercialAdsPolicy,
   type CommercialAdsPreviewResponse,
+  type CommercialSettingsProfile,
 } from '@maxim/contracts/settings';
 import { previewCommercialAds } from '../../lib/api/commercial-ads-client';
 import { COMMERCIAL_CATEGORY_LABELS } from '../../lib/commercial-ads-category-labels';
-import {
-  commercialPreviewExplanation,
-  type CommercialAuthor,
-} from '../../lib/commercial-ads-policy';
+import type { CommercialAuthor } from '../../lib/commercial-ads-policy';
+import { commercialPreviewExplanation } from '../../lib/commercial-preview-explanation';
 import { describeUserFacingError } from '../../lib/user-facing-error';
 import { AppIcon } from '../../components/ui/app-icon';
 import { SettingsDrilldownPanel } from '../../components/ui/settings-drilldown-panel';
@@ -21,12 +20,14 @@ export function CommercialPreviewSheet({
   scope,
   policy,
   enabled,
+  classification,
   dirty,
   onClose,
 }: {
   scope: CommercialSettingsScope;
   policy: CommercialAdsPolicy | null;
   enabled: boolean;
+  classification: CommercialSettingsProfile;
   dirty: boolean;
   onClose: () => void;
 }) {
@@ -40,7 +41,14 @@ export function CommercialPreviewSheet({
   const [error, setError] = useState<{ key: string; message: string } | null>(null);
   const controller = useRef<AbortController | null>(null);
   const resultElement = useRef<HTMLDivElement | null>(null);
-  const key = JSON.stringify([scope.chatId, text, author?.userId ?? null, enabled, policy]);
+  const key = JSON.stringify([
+    scope.chatId,
+    text,
+    author?.userId ?? null,
+    enabled,
+    policy,
+    classification,
+  ]);
   const activeKey = useRef(key);
   activeKey.current = key;
   const resultId = useId();
@@ -57,7 +65,7 @@ export function CommercialPreviewSheet({
       const value = await previewCommercialAds(
         scope.api,
         scope.chatId,
-        { text, policy, enabled, userId: author?.userId ?? null },
+        { text, policy, enabled, classification, userId: author?.userId ?? null },
         request.signal,
       );
       if (!request.signal.aborted && activeKey.current === submitted)

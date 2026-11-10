@@ -30,6 +30,8 @@ import {
 } from './commercial-llm-pool-admission.mailbox';
 import { CommercialAiObservationService } from './commercial-ai-observation.service';
 import { CommercialAiObservationGate } from './commercial-ai-runtime-observation';
+import { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
+import { processCommercialLlmPreview } from './commercial-llm-preview.processor';
 
 @Injectable()
 export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -43,6 +45,9 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
   private polling: Promise<void> | null = null;
   private readonly active = new Set<Promise<void>>();
   private secondary: CommercialLlmSecondaryScheduler | null = null;
+  private preview: CommercialLlmPreviewMailbox | null = null;
+  private previewWork: Promise<void> | null = null;
+  private previewPolling: Promise<void> | null = null;
   private pool: CommercialLlmPoolMailbox | null = null;
   private poolServer: CommercialLlmPoolServer | null = null;
   private readonly retiredPoolServers = new Set<Promise<void>>();
@@ -101,9 +106,13 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
   async onModuleDestroy(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.controller.abort();
+    await this.preview?.withdraw(this.worker).catch(() => undefined);
     await this.polling;
+    await this.previewPolling;
+    await this.preview?.withdraw(this.worker).catch(() => undefined);
     // FLAG: Drain actual work before closing Redis; a stopped poll never releases an unfinished model lease.
     await Promise.allSettled([...this.active]);
+    await this.previewWork;
     await this.poolServer?.close();
     await Promise.allSettled([...this.retiredPoolServers]);
     await this.admission
@@ -188,6 +197,28 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
     };
   }
 
+  private async pollPreview(): Promise<void> {
+    // FLAG: Diagnostic admission is best effort; a malformed preview key cannot stall moderation.
+    try {
+      if (this.controller.signal.aborted) return;
+      await this.preview!.advertise(this.worker);
+      if (this.previewWork || this.controller.signal.aborted) return;
+      const task = await this.preview!.take(this.worker);
+      if (!task) return;
+      this.previewWork = processCommercialLlmPreview(
+        this.preview!,
+        task,
+        this.secondary!,
+        async () => (await this.mayRun()) && (await commercialLlmHostHasHeadroom()),
+        this.controller.signal,
+      ).finally(() => {
+        this.previewWork = null;
+      });
+    } catch {
+      // FLAG: No model dispatch or enforcement authority follows diagnostic dependency failure.
+    }
+  }
+
   private async poll(): Promise<void> {
     if (this.controller.signal.aborted) return;
     const mailbox = this.admission.enabled() ? await this.admission.mailbox() : null;
@@ -203,6 +234,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
       this.redis?.disconnect();
       this.redis = createCommercialLlmRedis(this.config.getOrThrow<string>('REDIS_URL'));
       await this.redis.connect();
+      this.preview = new CommercialLlmPreviewMailbox(this.redis);
       const client = new CommercialLlmClient({
         endpoint: this.config.getOrThrow<string>('COMMERCIAL_LLM_ENDPOINT'),
       });
@@ -234,8 +266,14 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
     if (!mailbox || this.controller.signal.aborted) return;
     if (Date.now() - this.lastStatusAt >= 10_000) await this.writeStatus();
     if (!(await this.mayRun())) {
+      await this.preview?.withdraw(this.worker).catch(() => undefined);
       await mailbox.withdraw(this.worker);
       return;
+    }
+    if (!this.previewPolling) {
+      this.previewPolling = this.pollPreview().finally(() => {
+        this.previewPolling = null;
+      });
     }
     const poolHasNoCapacity =
       !!this.admission.poolPolicy() && !(await this.pool!.available()).length;

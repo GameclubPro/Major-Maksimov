@@ -431,14 +431,43 @@ export function splitCommercialAssertions(rawLoweredText: string): string[] {
   return inspectCommercialAssertions(rawLoweredText).assertions;
 }
 
+export function inspectUnprotectedCommercialAssertions(
+  rawLoweredText: string,
+): Readonly<{ blocks: string[][]; complete: boolean }> {
+  const inspection = inspectCommercialAssertions(rawLoweredText);
+  const assertions = classifyAssertions(
+    inspection.assertions,
+    [],
+    true,
+    collectAttributedCommercialReportAssertionIndexes(inspection.assertions),
+    collectStandaloneEditorialQuoteAssertionIndexes(inspection.assertions),
+    true,
+  );
+  const blocks: string[][] = [];
+  let block: string[] | null = null;
+  for (const assertion of assertions) {
+    if (assertion.protectedFrame) {
+      block = null;
+      continue;
+    }
+    if (!block) {
+      block = [];
+      blocks.push(block);
+    }
+    block.push(assertion.text);
+  }
+  return { complete: inspection.complete, blocks };
+}
+
+const CATEGORY_QUOTED_FRAME_PATTERN =
+  /(?:отзыв|слова|цитата)\s+(?:клиента|покупателя|участника)[^.!?;\n]{0,60}[«"“]/iu;
+
 export type CommercialAssertionInspection = Readonly<{
   assertions: string[];
   complete: boolean;
 }>;
 
-export function inspectCommercialAssertions(
-  rawLoweredText: string,
-): CommercialAssertionInspection {
+export function inspectCommercialAssertions(rawLoweredText: string): CommercialAssertionInspection {
   const boundedText = rawLoweredText
     .slice(0, MAX_LOCAL_CONTEXT_LENGTH)
     .replace(CLOSING_QUOTE_ASSERTION_BOUNDARY, '$1$2\n')
@@ -507,6 +536,7 @@ function classifyAssertions(
   includeOrdinaryProtectedContext: boolean,
   attributedCommercialReportAssertionIndexes: ReadonlySet<number>,
   standaloneEditorialQuoteAssertionIndexes: ReadonlySet<number>,
+  protectCategoryExamples = false,
 ): LocalAssertion[] {
   const assertions: LocalAssertion[] = [];
   let protectedCarry = 0;
@@ -523,6 +553,9 @@ function classifyAssertions(
       hasQualifiedEditorialQuoteContext(assertionTexts, index);
     const attributedCommercialReport = attributedCommercialReportAssertionIndexes.has(index);
     const intrinsicProtected =
+      (protectCategoryExamples &&
+        (QUALIFIED_SOURCE_SIDE_PROTECTED_CONTEXT_PATTERN.test(text) ||
+          CATEGORY_QUOTED_FRAME_PATTERN.test(text))) ||
       isProtectedAssertion(text, riskPatterns.length > 0) ||
       qualifiedEditorialQuote ||
       attributedCommercialReport ||
@@ -584,6 +617,9 @@ function classifyAssertions(
     const canOpenProtectedQuote =
       (intrinsicProtected || protectedQuote) &&
       (QUOTED_REPORT_INTRO_PATTERN.test(text) ||
+        (protectCategoryExamples &&
+          (QUALIFIED_SOURCE_SIDE_PROTECTED_CONTEXT_PATTERN.test(text) ||
+            CATEGORY_QUOTED_FRAME_PATTERN.test(text))) ||
         QUOTED_AD_EXAMPLE_FRAME_PATTERN.test(text) ||
         qualifiedEditorialQuote);
     if (protectedQuote) {

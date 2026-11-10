@@ -27,6 +27,17 @@ export function CommercialPolicyTools({
   const disabled = fields.readOnly || !policy;
   const enabled = fields.read('commercialAdsFilterEnabled');
   const policyState = fields.read('commercialAdsPolicy');
+  const sensitivity = fields.read('commercialAdsSensitivity');
+  const warn = fields.read('commercialAdsWarnThreshold');
+  const deletion = fields.read('commercialAdsDeleteThreshold');
+  const classification =
+    sensitivity.kind === 'common' && warn.kind === 'common' && deletion.kind === 'common'
+      ? {
+          commercialAdsSensitivity: sensitivity.value,
+          commercialAdsWarnThreshold: warn.value,
+          commercialAdsDeleteThreshold: deletion.value,
+        }
+      : null;
   return (
     <>
       <nav className="commercial-policy__tools" aria-label="Инструменты рекламы">
@@ -39,7 +50,7 @@ export function CommercialPolicyTools({
         </button>
         <button
           type="button"
-          disabled={disabled || enabled.kind !== 'common'}
+          disabled={disabled || enabled.kind !== 'common' || !classification}
           onClick={() => setView('preview')}
         >
           <span className="commercial-policy__tool-icon">
@@ -73,13 +84,18 @@ export function CommercialPolicyTools({
             }}
           />
         ) : null}
-        {policy && view === 'preview' && enabled.kind === 'common' ? (
+        {policy && view === 'preview' && enabled.kind === 'common' && classification ? (
           <CommercialPreviewSheet
             scope={scope}
             policy={policyState.kind === 'common' ? policyState.value : null}
             enabled={enabled.value}
+            classification={classification}
             dirty={
-              fields.isDirty('commercialAdsPolicy') || fields.isDirty('commercialAdsFilterEnabled')
+              fields.isDirty('commercialAdsPolicy') ||
+              fields.isDirty('commercialAdsFilterEnabled') ||
+              fields.isDirty('commercialAdsSensitivity') ||
+              fields.isDirty('commercialAdsWarnThreshold') ||
+              fields.isDirty('commercialAdsDeleteThreshold')
             }
             onClose={() => setView(null)}
           />

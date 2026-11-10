@@ -100,7 +100,17 @@ test('preview client sends exact unsaved policy and author with cancellation, fe
   };
   const policy = { ...createDefaultCommercialAdsPolicy(), exceptions: [exception] };
   const controller = new AbortController();
-  const input = { text: 'Товары в наличии', policy, enabled: true, userId: exception.userId };
+  const input = {
+    text: 'Товары в наличии',
+    policy,
+    enabled: true,
+    userId: exception.userId,
+    classification: {
+      commercialAdsSensitivity: 'STRICT' as const,
+      commercialAdsWarnThreshold: 38,
+      commercialAdsDeleteThreshold: 55,
+    },
+  };
   const result = await previewCommercialAds(api, 'chat/1', input, controller.signal);
   assert.equal(calls[0].path, '/chats/chat%2F1/commercial-ads/preview');
   assert.deepEqual(JSON.parse(String(calls[0].init?.body)), input);
