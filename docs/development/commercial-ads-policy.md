@@ -73,6 +73,11 @@ claim and pre-dispatch checks yield to pending/live moderation in both admission
 An unavailable worker, busy CPU, pressure or expired original twenty-second deadline produces
 `UNAVAILABLE`. The actual CPU handoff also requires six seconds remaining. A preview failure
 cannot interrupt enforcement polling; shutdown withdraws readiness and drains actual inference.
+After HTTP dispatch, diagnostic expiry revokes only the preview result. The worker continues
+reading the bounded terminal response under the existing sixty-second model-client limit, even
+if the caller has already received `UNAVAILABLE`. A validated late completion releases only its
+own physical CPU token and never publishes the expired result. A slow cold prompt can exceed
+the preview deadline; it must not quarantine the model merely because the caller stopped waiting.
 Cancelling or expiring the diagnostic request never releases an uncertain physical CPU lease;
 only its scheduler or the named guarded recovery procedure may settle that lease.
 
