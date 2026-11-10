@@ -1,3 +1,4 @@
+import { buildDeleteDueHeadQuery, DeleteDueContinuation } from './moderation-delete-due-selection';
 import {
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE,
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE,
@@ -784,6 +785,7 @@ export class ModerationDeleteIntentService {
   private readonly capabilityRetryMs: number;
   private readonly leaseMs: number;
   private readonly sweepBatchSize: number;
+  private readonly dueContinuation = new DeleteDueContinuation();
   private readonly recoveryBatchSize: number;
   private readonly deleteTimeoutMs: number;
   private readonly retentionDays: number;
@@ -3481,55 +3483,84 @@ export class ModerationDeleteIntentService {
         (intents) => intents.length,
       );
       metrics.selectedCount = addDueSweepCount(metrics.selectedCount, dueIntents.length);
-      await this.measureDueSweepStage(
-        'handoff',
-        async () => {
-          let acknowledged = 0;
-          metrics.handoffAttemptedCount = addDueSweepCount(
-            metrics.handoffAttemptedCount,
-            dueIntents.length,
-          );
-          const handoffs = await handoffModerationDeleteSweepJobs(
-            this.queue,
-            dueIntents.map((intent) => intent.id),
-            DELETE_QUEUE_PRIORITY_BACKGROUND,
-          );
-          handoffs.forEach((result, index) => {
-            if (result.status === 'fulfilled') {
-              const handoff = result.value;
-              acknowledged++;
-              metrics.handoffAcknowledgedCount = addDueSweepCount(metrics.handoffAcknowledgedCount);
-              const outcomes = metrics.handoffOutcomes;
-              if (handoff.insertion === 'unknown') {
-                metrics.handoffInsertionUnknownCount = addDueSweepCount(
-                  metrics.handoffInsertionUnknownCount,
+      const handoff = (dueIntents: Array<{ id: string }>) =>
+        this.measureDueSweepStage(
+          'handoff',
+          async () => {
+            let acknowledged = 0;
+            let reused = 0;
+            metrics.handoffAttemptedCount = addDueSweepCount(
+              metrics.handoffAttemptedCount,
+              dueIntents.length,
+            );
+            const handoffs = await handoffModerationDeleteSweepJobs(
+              this.queue,
+              dueIntents.map((intent) => intent.id),
+              DELETE_QUEUE_PRIORITY_BACKGROUND,
+            );
+            handoffs.forEach((result, index) => {
+              if (result.status === 'fulfilled') {
+                const handoff = result.value;
+                acknowledged++;
+                metrics.handoffAcknowledgedCount = addDueSweepCount(
+                  metrics.handoffAcknowledgedCount,
                 );
-              } else if (handoff.insertion === 'inserted') {
-                outcomes.insertedCount = addDueSweepCount(outcomes.insertedCount);
+                const outcomes = metrics.handoffOutcomes;
+                if (handoff.insertion === 'unknown') {
+                  metrics.handoffInsertionUnknownCount = addDueSweepCount(
+                    metrics.handoffInsertionUnknownCount,
+                  );
+                } else if (handoff.insertion === 'inserted') {
+                  outcomes.insertedCount = addDueSweepCount(outcomes.insertedCount);
+                } else {
+                  outcomes.existingCount = addDueSweepCount(outcomes.existingCount);
+                }
+                if (handoff.reused) {
+                  reused++;
+                  outcomes.reusedCount = addDueSweepCount(outcomes.reusedCount);
+                }
+                outcomes.observationErrorCount = addDueSweepCount(
+                  outcomes.observationErrorCount,
+                  handoff.observationErrors,
+                );
               } else {
-                outcomes.existingCount = addDueSweepCount(outcomes.existingCount);
+                metrics.handoffErrorCount = addDueSweepCount(metrics.handoffErrorCount);
+                this.logger.warn(
+                  { intentId: dueIntents[index].id, err: this.errorMessage(result.reason) },
+                  'Failed to enqueue due moderation delete intent; DB state remains retryable',
+                );
               }
-              if (handoff.reused) outcomes.reusedCount = addDueSweepCount(outcomes.reusedCount);
-              outcomes.observationErrorCount = addDueSweepCount(
-                outcomes.observationErrorCount,
-                handoff.observationErrors,
-              );
-            } else {
-              metrics.handoffErrorCount = addDueSweepCount(metrics.handoffErrorCount);
-              this.logger.warn(
-                { intentId: dueIntents[index].id, err: this.errorMessage(result.reason) },
-                'Failed to enqueue due moderation delete intent; DB state remains retryable',
-              );
-            }
-          });
-          return acknowledged;
-        },
-        (count) => count,
-      );
+            });
+            return { acknowledged, reused };
+          },
+          (result) => result.acknowledged,
+        );
+      const headHandoff = await handoff(dueIntents);
+      let selectedCount = dueIntents.length;
+      // FLAG: Preserve the entire old head and its next-sweep repair. Only proven
+      // Redis reuse frees add attempts for continuation; rejected/unknown handoffs
+      // consume their original budget. At most 2B observations and B adds per tick.
+      if (dueIntents.length === this.sweepBatchSize && headHandoff.reused > 0) {
+        const continuation = await this.measureDueSweepStage(
+          'select',
+          () =>
+            this.dueContinuation.select(this.prisma, {
+              now: new Date(),
+              limit: headHandoff.reused,
+              rolloutFilter: this.buildSweepRolloutFilter(),
+              headIds: new Set(dueIntents.map((intent) => intent.id)),
+            }),
+          (page) => page.ids.length,
+        );
+        selectedCount += continuation.ids.length;
+        metrics.selectedCount = addDueSweepCount(metrics.selectedCount, continuation.ids.length);
+        if (continuation.ids.length) await handoff(continuation.ids);
+        continuation.commit();
+      }
       metrics.completed = addDueSweepCount(metrics.completed);
       // FLAG: Preserve the historical selected-row return contract. Observed existing
       // jobs/add acknowledgements do not prove deletion; failed handoffs remain DB-retryable.
-      return dueIntents.length;
+      return selectedCount;
     } catch (error: unknown) {
       metrics.errors = addDueSweepCount(metrics.errors);
       throw error;
@@ -6598,70 +6629,9 @@ export class ModerationDeleteIntentService {
   }
 
   private async selectDueIntentIds(): Promise<Array<{ id: string }>> {
-    const now = new Date();
-    const rolloutFilter = this.buildSweepRolloutFilter();
-    const selectStatus = (status: Prisma.Sql, leaseFilter = Prisma.empty) => Prisma.sql`
-        SELECT intent."id", intent."next_attempt_at", intent."created_at"
-        FROM "moderation_delete_intents" intent
-        WHERE intent."status" = ${status}
-          AND ((intent."remote_delete_succeeded_at" IS NOT NULL AND intent."remote_delete_succeeded_bot_id" IS NOT NULL)
-            OR (NOT EXISTS (SELECT 1 FROM "webhook_source_abandonments" held
-              WHERE held."chat_id" = intent."chat_id" AND held."message_id" = intent."message_id") AND NOT EXISTS (SELECT 1 FROM "webhook_backlog_receipts" cancelled
-              WHERE cancelled."chat_id" = intent."chat_id" AND cancelled."message_id" = intent."message_id")))
-          AND intent."execute_at" <= ${now}
-          AND intent."retention_owned" = FALSE
-          AND intent."next_attempt_at" <= ${now}
-          AND (
-            intent."retry_until_at" > ${now}
-            OR intent."remote_delete_succeeded_at" IS NOT NULL
-            OR intent."remote_delete_succeeded_bot_id" IS NOT NULL
-            OR intent."delete_dispatch_started_at" IS NOT NULL
-            OR intent."delete_dispatch_started_bot_id" IS NOT NULL
-          )
-          AND ${rolloutFilter}
-          ${leaseFilter}
-        ORDER BY intent."next_attempt_at" ASC, intent."created_at" ASC
-        LIMIT ${this.sweepBatchSize}
-        FOR UPDATE SKIP LOCKED
-    `;
-    // FLAG: A fixed status lets the existing (status, next_attempt_at, execute_at)
-    // index find each ordered prefix without sorting the whole mixed-status population.
-    // Every lane keeps all eligibility/authority predicates. Locks are statement-local,
-    // at most five batch prefixes; only the original total batch is handed to workers.
-    // FLAG: Interleave those bounded status prefixes so retained ambiguous effects
-    // cannot occupy every slot ahead of new PENDING/RETRYABLE moderation deletes.
-    // This schedules existing authority only; workers retain every claim and effect guard.
-    return this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      WITH pending AS MATERIALIZED (
-        ${selectStatus(Prisma.sql`CAST('PENDING' AS "ModerationDeleteIntentStatus")`)}
-      ), retryable AS MATERIALIZED (
-        ${selectStatus(Prisma.sql`CAST('RETRYABLE' AS "ModerationDeleteIntentStatus")`)}
-      ), waiting AS MATERIALIZED (
-        ${selectStatus(Prisma.sql`CAST('WAITING_CAPABILITY' AS "ModerationDeleteIntentStatus")`)}
-      ), ambiguous AS MATERIALIZED (
-        ${selectStatus(Prisma.sql`CAST('AMBIGUOUS' AS "ModerationDeleteIntentStatus")`)}
-      ), in_progress AS MATERIALIZED (
-        ${selectStatus(
-          Prisma.sql`CAST('IN_PROGRESS' AS "ModerationDeleteIntentStatus")`,
-          Prisma.sql`AND intent."lease_expires_at" < ${now}`,
-        )}
-      ), candidates AS (
-        SELECT *, 0 AS lane FROM pending
-        UNION ALL SELECT *, 1 AS lane FROM retryable
-        UNION ALL SELECT *, 2 AS lane FROM waiting
-        UNION ALL SELECT *, 3 AS lane FROM ambiguous
-        UNION ALL SELECT *, 4 AS lane FROM in_progress
-      ), ranked AS (
-        SELECT *, row_number() OVER (
-          PARTITION BY lane ORDER BY next_attempt_at, created_at, id
-        ) AS lane_position
-        FROM candidates
-      )
-      SELECT ranked."id"
-      FROM ranked
-      ORDER BY ranked.lane_position, ranked."next_attempt_at", ranked."created_at", ranked."id"
-      LIMIT ${this.sweepBatchSize}
-    `);
+    return this.prisma.$queryRaw<Array<{ id: string }>>(
+      buildDeleteDueHeadQuery(new Date(), this.sweepBatchSize, this.buildSweepRolloutFilter()),
+    );
   }
 
   private async finishRetryableAttempt(
