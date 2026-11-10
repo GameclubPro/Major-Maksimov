@@ -119,9 +119,12 @@ example; another bot must use its own verified profile. The model is told that t
 can attach these reviewed packs; it must not deny that capability or promise arbitrary screenshots.
 Only application selection supplies the symbolic guide ID; model-authored JSON cannot select media.
 
-For a selected guide, the host reads its exact pinned forwarded messages with the existing
-assigned moderator. It requires every image identity and its order to match before using only
-the fresh MAX image tokens. Forwarded text and URLs do not become model instructions or outgoing
+For a selected guide, the host reads its exact pinned forwarded messages with the source bot
+from the reviewed catalog. Every read checks that exact bot's current administrator access and
+read execution proof in the source chat. The destination keeps its own assigned moderator and
+independent send checks; a different destination bot does not authorize reading another source.
+Missing source access refuses the entire pack. Every image identity and its order must match
+before using only the fresh MAX image tokens. Forwarded text and URLs do not become model instructions or outgoing
 media. Both guides describe two alternatives after admin rights: an administrator's explicit
 `Старт` in the group, or forwarding a group message to the correct bot's private dialog. Publik
 also needs permission to send/publish; the card highlighting reading does not waive that right.

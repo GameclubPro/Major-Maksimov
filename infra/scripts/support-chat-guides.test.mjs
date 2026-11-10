@@ -153,6 +153,36 @@ function fixture() {
   return state;
 }
 
+function attachGuideReader(state, destinationBotId = BOT_ID) {
+  state.guideReadable = true;
+  state.guideProof = true;
+  state.guideActionable = true;
+  state.guideAccessCalls = [];
+  state.runtime.options = () => ({ botId: destinationBotId });
+  Object.assign(state.runtime.client, {
+    getChatSnapshot: async (chatId, options) => {
+      state.guideAccessCalls.push({ operation: 'snapshot', chatId, options });
+      return { entityType: 'chat' };
+    },
+    getCurrentChatMemberAccess: async (chatId, options) => {
+      state.guideAccessCalls.push({ operation: 'access', chatId, options });
+      return { isAdmin: state.guideReadable, isOwner: false };
+    },
+  });
+  const dependencies = {
+    client: state.runtime.client,
+    supportGuideCatalog: state.catalog,
+    registry: { getActionableBots: () => (state.guideActionable ? [{ id: BOT_ID }] : []) },
+    links: {
+      getFreshChatBotExecutionProof: async (params) => {
+        state.guideAccessCalls.push({ operation: 'proof', ...params });
+        return state.guideProof ? { botId: params.botId } : null;
+      },
+    },
+  };
+  state.runtime.guideOptions = (guide) => bridge.supportGuideReadOptions(dependencies, guide);
+}
+
 async function withRedis(run) {
   const directory = await mkdtemp(join(tmpdir(), 'maxim-support-guide-redis-'));
   const socket = join(directory, 'redis.sock');
@@ -439,6 +469,116 @@ test(
       });
   },
 );
+
+test('guide reads require the exact reviewed source bot and fresh read access', async () => {
+  const state = fixture();
+  attachGuideReader(state, 'id900000002_1_bot');
+  const options = await state.runtime.guideOptions(state.guide);
+  assert.equal(options.botId, BOT_ID);
+  assert.equal(options.bypassCache, true);
+  assert.equal(options.trafficClass, 'background');
+  assert.equal(options.timeoutMs, 5000);
+  assert.deepEqual(
+    state.guideAccessCalls.map(({ operation }) => operation),
+    ['snapshot', 'access', 'proof'],
+  );
+  assert.ok(state.guideAccessCalls.every(({ chatId }) => chatId === state.guide.sourceChatId));
+  assert.equal(state.guideAccessCalls[2].purpose, 'read');
+  assert.equal(state.guideAccessCalls[2].botId, BOT_ID);
+  state.guideReadable = false;
+  await assert.rejects(state.runtime.guideOptions(state.guide), /support_guide_access_refused/u);
+  assert.equal(state.guideAccessCalls.filter(({ operation }) => operation === 'access').length, 2);
+});
+
+test('unreviewed sources, disabled source bots and lost read proofs stay refused', async (t) => {
+  for (const [name, change, code] of [
+    ['another source chat', (state) => ({ ...state.guide, sourceChatId: CHAT_IDS[1] }), 'source'],
+    [
+      'another source bot',
+      (state) => ({ ...state.guide, sourceBotId: 'id900000003_1_bot' }),
+      'source',
+    ],
+    [
+      'disabled source bot',
+      (state) => {
+        state.guideActionable = false;
+        return state.guide;
+      },
+      'bot',
+    ],
+    [
+      'lost read proof',
+      (state) => {
+        state.guideProof = false;
+        return state.guide;
+      },
+      'access',
+    ],
+  ])
+    await t.test(name, async () => {
+      const state = fixture();
+      attachGuideReader(state);
+      await assert.rejects(
+        state.runtime.guideOptions(change(state)),
+        new RegExp(`support_guide_${code}_refused`, 'u'),
+      );
+      assert.deepEqual(state.effects, []);
+    });
+});
+
+test('real Redis sends one guide through the destination bot while the reviewed bot reads it', async () => {
+  await withRedis(async (redis) => {
+    const state = fixture();
+    const destinationBotId = 'id900000002_1_bot';
+    attachGuideReader(state, destinationBotId);
+    const getRow = state.runtime.client.getExactMessageRow;
+    state.runtime.client.getExactMessageRow = (chatId, id, options) => {
+      assert.equal(options.botId, id === state.source.id ? destinationBotId : BOT_ID);
+      return getRow(chatId, id, options);
+    };
+    const fence = await prepare(redis, state);
+    try {
+      assert.equal(
+        await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
+        'sent',
+      );
+      assert.equal(state.effects.length, 1);
+      assert.equal(state.effects[0].attachments.length, 11);
+      assert.equal(state.effects[0].requestOptions.botId, destinationBotId);
+      const partIds = state.guide.sourceMessages.map(({ messageId }) => messageId);
+      assert.deepEqual(state.assetReads, [...partIds, ...partIds]);
+      assert.equal(
+        state.guideAccessCalls.filter(({ operation }) => operation === 'proof').length,
+        4,
+      );
+      assert.equal(await redis.get(fence.key(state.source.id)), 'SENT:confirmed-guide-1');
+    } finally {
+      await fence.close();
+    }
+  });
+});
+
+test('real Redis refuses the whole guide if its source bot loses access before final recheck', async () => {
+  await withRedis(async (redis) => {
+    const state = fixture();
+    attachGuideReader(state, 'id900000002_1_bot');
+    state.beforeAsset = async (_id, count) => {
+      if (count === 2) state.guideReadable = false;
+    };
+    const fence = await prepare(redis, state);
+    try {
+      assert.equal(
+        await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
+        'refused',
+      );
+      assert.deepEqual(state.effects, []);
+      assert.equal(state.assetReads.length, 2);
+      assert.equal(await redis.get(fence.key(state.source.id)), 'REFUSED');
+    } finally {
+      await fence.close();
+    }
+  });
+});
 
 test(
   'final safety checks refuse the entire pack before its single SEND',
