@@ -920,18 +920,30 @@ function serializeEditorMarkdown(
   root: HTMLElement,
   options: RichTextSerializationOptions = {},
 ): string {
-  return serializeChildNodes(root.childNodes, options)
-    .replace(/\n{3,}/gu, '\n\n')
-    .trimEnd();
+  return serializeChildNodes(root.childNodes, options).trimEnd();
 }
 
 function serializeChildNodes(
   nodes: NodeListOf<ChildNode> | ChildNode[],
   options: RichTextSerializationOptions = {},
 ): string {
-  return Array.from(nodes)
-    .map((node) => serializeNode(node, options))
-    .join('');
+  let content = '';
+  for (const node of Array.from(nodes)) {
+    const serialized = serializeNode(node, options);
+    if (serialized && node.nodeType === Node.ELEMENT_NODE) {
+      const element = node as HTMLElement;
+      const tag = element.tagName.toLowerCase();
+      const isBlock =
+        BLOCK_TAGS.has(tag) ||
+        tag === 'pre' ||
+        isHeadingElement(element, tag) ||
+        element.dataset.maxBlock === 'quote';
+      // FLAG: Native Enter can leave the first line unwrapped before div/p siblings.
+      if (isBlock && content && !content.endsWith('\n')) content += '\n';
+    }
+    content += serialized;
+  }
+  return content;
 }
 
 function serializeNode(node: Node, options: RichTextSerializationOptions = {}): string {
