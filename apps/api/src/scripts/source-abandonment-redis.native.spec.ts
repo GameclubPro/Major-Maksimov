@@ -9,6 +9,7 @@ import {
 import {
   inventorySourceAbandonmentRedis,
   type SourceAbandonmentRedisReader,
+  type SourceAbandonmentRedisResolver,
   type SourceAbandonmentRedisSource,
 } from './source-abandonment-live-redis';
 import { LEGACY_RECOVERY_LIVE_BUDGET } from './legacy-recovery-live-budget';
@@ -20,6 +21,12 @@ import { SOURCE_ABANDONMENT_CHANNEL_PROFILE } from '../webhook/webhook-source-ab
 const url = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
 const native = url ? describe : describe.skip;
 jest.setTimeout(60_000);
+const resolve: SourceAbandonmentRedisResolver = async (_kind, keys) => ({
+  rows: keys.map((key) => ({ key, row: null, digest: 'f'.repeat(64) })),
+  plans: [],
+  cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
+  issue: null,
+});
 
 // FLAG: Only this fixture's initially empty localhost Redis DB may be mutated.
 // Production readers receive EVAL_RO and read-only cost transactions, no Queue/Worker.
@@ -59,12 +66,6 @@ native('modern full namespace census on Redis 7', () => {
     majorBotIds: ['major-1'],
   };
   const source = { chatId: 'chat-a', messageId: 'message-a', userId: 'user-a' };
-  const resolve = async () => ({
-    row: null,
-    digest: 'f'.repeat(64),
-    plans: [],
-    cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
-  });
   const fixtureStats = (calls: string) =>
     `# Commandstats\r\ncmdstat_eval_ro:calls=${calls},usec=100,usec_per_call=10.00,rejected_calls=0,failed_calls=0\r\n`;
 
@@ -441,17 +442,22 @@ native('modern full namespace census on Redis 7', () => {
       fastPath: false,
     };
     const job = await queue.add('observation', data, { jobId: 'fanout-job', delay: 60_000 });
+    const resolveObservation: SourceAbandonmentRedisResolver = async (_kind, keys) => ({
+      rows: keys.map((key) => ({
+        key,
+        row: { ...data, id: data.observationId, messageId: null },
+        digest: 'a'.repeat(64),
+      })),
+      cost: { pages: 1, rows: 1, probes: 1, bytes: 128 },
+      plans: [],
+      issue: null,
+    });
     const result = await inventorySourceAbandonmentRedis(
       reader(),
       selection,
       [channel],
       { ...LEGACY_RECOVERY_LIVE_BUDGET, deadlineAtMs: deadline() },
-      async () => ({
-        row: { ...data, id: data.observationId, messageId: null },
-        digest: 'a'.repeat(64),
-        cost: { pages: 1, rows: 1, probes: 1, bytes: 128 },
-        plans: [],
-      }),
+      resolveObservation,
     );
     expect(result.issues[0]?.code).toBe('OBSERVATION_SOURCE_UNPROVED');
     expect(result.children).toEqual([]);
@@ -512,11 +518,18 @@ native('modern full namespace census on Redis 7', () => {
     const key = 'bull:max-actions-background:retained-cleanup';
     const before = await redis.hgetall(key);
     let retainedParent: typeof parent | null = parent;
-    const resolver = jest.fn(async (_kind: string, jobId: string) => ({
-      row: jobId === parent.jobId ? retainedParent : null,
-      digest: sourceAbandonmentDigest(jobId === parent.jobId ? retainedParent : null),
+    const resolver = jest.fn<
+      ReturnType<SourceAbandonmentRedisResolver>,
+      Parameters<SourceAbandonmentRedisResolver>
+    >(async (_kind, keys) => ({
+      rows: keys.map((key) => ({
+        key,
+        row: key === parent.jobId ? retainedParent : null,
+        digest: sourceAbandonmentDigest(key === parent.jobId ? retainedParent : null),
+      })),
       plans: [],
       cost: { pages: 2, rows: 1, probes: 2, bytes: 256 },
+      issue: null,
     }));
     const observe = () =>
       inventorySourceAbandonmentRedis(
@@ -532,10 +545,10 @@ native('modern full namespace census on Redis 7', () => {
     expect(first.children).toEqual([]);
     expect(second.stableDigest).toBe(first.stableDigest);
     expect(resolver.mock.calls.map(([, jobId]) => jobId)).toEqual([
-      'cleanup-delete',
-      'completed-parent',
-      'cleanup-delete',
-      'completed-parent',
+      ['cleanup-delete'],
+      ['completed-parent'],
+      ['cleanup-delete'],
+      ['completed-parent'],
     ]);
     retainedParent = null;
     expect((await observe()).issues).toContainEqual({
@@ -629,12 +642,7 @@ native('source abandonment inventory ordering on a live Redis queue', () => {
       selection,
       [source],
       { ...LEGACY_RECOVERY_LIVE_BUDGET, deadlineAtMs: Date.now() + 30_000 },
-      async () => ({
-        row: null,
-        digest: 'f'.repeat(64),
-        plans: [],
-        cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
-      }),
+      resolve,
       nonce,
     );
   const fence = async () => {

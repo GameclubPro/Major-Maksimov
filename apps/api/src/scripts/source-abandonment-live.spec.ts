@@ -4,8 +4,10 @@ import {
   classifySourceAbandonmentAction,
   inventorySourceAbandonmentRedis,
   isUnrelatedSourceAbandonmentFanoutObservation,
+  type SourceAbandonmentRedisResolver,
   type SourceAbandonmentRedisSource,
 } from './source-abandonment-live-redis';
+import * as cleanupProof from './source-abandonment-cleanup-proof';
 import { SOURCE_ABANDONMENT_CHANNEL_PROFILE } from '../webhook/webhook-source-abandonment.contract';
 import { mergeSourceAbandonmentChildren } from './source-abandonment-collect';
 import {
@@ -20,6 +22,7 @@ import {
   parseSourceAbandonmentSelection,
   SOURCE_ABANDONMENT_OBSERVATION_QUEUE,
   SOURCE_ABANDONMENT_CHANNEL_MARKER_QUEUE,
+  sourceAbandonmentDigest,
 } from './source-abandonment-live-protocol';
 
 const source = { chatId: 'chat-1', messageId: 'message-1', userId: 'user-1' };
@@ -47,11 +50,14 @@ const action = (fields: Record<string, unknown> = {}) =>
     ...fields,
   });
 const allowance = () => ({ ...LEGACY_RECOVERY_LIVE_BUDGET, deadlineAtMs: Date.now() + 30000 });
-const resolve = jest.fn(async () => ({
-  row: null,
-  digest: 'f'.repeat(64),
+const resolve = jest.fn<
+  ReturnType<SourceAbandonmentRedisResolver>,
+  Parameters<SourceAbandonmentRedisResolver>
+>(async (_kind, keys) => ({
+  rows: keys.map((key) => ({ key, row: null, digest: 'f'.repeat(64) })),
   cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
   plans: [],
+  issue: null,
 }));
 const commandstats = (calls = 10, usec = 100, rejected = 0, failed = 0) =>
   `# Commandstats\r\ncmdstat_eval_ro:calls=${calls},usec=${usec},usec_per_call=10.00,rejected_calls=${rejected},failed_calls=${failed}\r\n`;
@@ -111,6 +117,36 @@ function redisFixture(keys: string[] = []) {
       if (script.startsWith('-- source-abandonment:owners'))
         return [1, 1, JSON.parse(args[1]).length, []];
       throw new Error('Unexpected read');
+    }),
+  });
+}
+
+function actionPagesFixture(data: readonly Record<string, unknown>[]) {
+  const base = redisFixture();
+  return measuredFixture({
+    eval_ro: jest.fn(async (script: string, keyCount: number, ...args: string[]) => {
+      if (script.startsWith('-- source-abandonment:jobs')) {
+        const offset = Number(args[2]);
+        const page = data.slice(offset, offset + Number(args[3]));
+        return [
+          1,
+          1,
+          page.length,
+          page.map((value, index) => [
+            `job-${offset + index}`,
+            'wait',
+            ['data', JSON.stringify(value)],
+            offset + index,
+            '',
+          ]),
+        ];
+      }
+      const reply = await base.eval_ro(script, keyCount, ...args);
+      if (script.startsWith('-- source-abandonment:headers')) {
+        const rows = reply[2] as unknown as Array<Array<string | number>>;
+        rows.find((row) => row[0] === 'max-actions-background')![4] = data.length;
+      }
+      return reply;
     }),
   });
 }
@@ -453,11 +489,14 @@ describe('exact source abandonment bounded evidence', () => {
         return reply;
       }),
     });
-    const resolver = jest.fn(async () => ({
-      row: persisted,
-      digest: 'a'.repeat(64),
+    const resolver = jest.fn<
+      ReturnType<SourceAbandonmentRedisResolver>,
+      Parameters<SourceAbandonmentRedisResolver>
+    >(async (_kind, keys) => ({
+      rows: keys.map((key) => ({ key, row: persisted, digest: 'a'.repeat(64) })),
       cost: { pages: 2, rows: 2, probes: 2, bytes: 100 },
       plans: [],
+      issue: null,
     }));
     const result = await inventorySourceAbandonmentRedis(
       redis,
@@ -467,7 +506,7 @@ describe('exact source abandonment bounded evidence', () => {
       resolver,
       'nonce',
     );
-    expect(resolver).toHaveBeenCalledWith('observation', data.observationId, expect.any(Object));
+    expect(resolver).toHaveBeenCalledWith('observation', [data.observationId], expect.any(Object));
     expect(result.children).toEqual([]);
     if (!testCase.allowed) {
       expect(result.issues[0]?.code).toBe('OBSERVATION_SOURCE_UNPROVED');
@@ -476,10 +515,10 @@ describe('exact source abandonment bounded evidence', () => {
     expect(result.issues).toEqual([]);
     expect(result.cost.rows).toBeGreaterThanOrEqual(2);
     resolver.mockResolvedValue({
-      row: persisted,
-      digest: 'b'.repeat(64),
+      rows: [{ key: data.observationId, row: persisted, digest: 'b'.repeat(64) }],
       cost: { pages: 2, rows: 2, probes: 2, bytes: 100 },
       plans: [],
+      issue: null,
     });
     const changed = await inventorySourceAbandonmentRedis(
       redis,
@@ -558,17 +597,21 @@ describe('exact source abandonment bounded evidence', () => {
           return reply;
         }),
       });
-      const resolver = async () => ({
-        row: {
-          jobId: 'action-1',
-          chatId: source.chatId,
-          userId: source.userId,
-          messageId: null,
-          ...state,
-        },
-        digest: 'f'.repeat(64),
+      const resolver: SourceAbandonmentRedisResolver = async (_kind, keys) => ({
+        rows: keys.map((key) => ({
+          key,
+          row: {
+            jobId: 'action-1',
+            chatId: source.chatId,
+            userId: source.userId,
+            messageId: null,
+            ...state,
+          },
+          digest: 'f'.repeat(64),
+        })),
         cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
         plans: [],
+        issue: null,
       });
       const result = await inventorySourceAbandonmentRedis(
         redis,
@@ -585,6 +628,238 @@ describe('exact source abandonment bounded evidence', () => {
       }
     },
   );
+  it.each(['missing', 'duplicate', 'extra'])(
+    'refuses a %s batch key before attributing a queued action',
+    async (malformation) => {
+      const resolver: SourceAbandonmentRedisResolver = async (_kind, keys) => {
+        expect(keys).toEqual(['action-1', 'action-2']);
+        const rows = keys.map((key) => ({ key, row: null, digest: 'f'.repeat(64) }));
+        if (malformation === 'missing') rows.pop();
+        if (malformation === 'duplicate') rows[1] = { ...rows[0]! };
+        if (malformation === 'extra')
+          rows[1] = { key: 'unrequested', row: null, digest: 'e'.repeat(64) };
+        return { rows, cost: { pages: 2, rows: 2, probes: 2, bytes: 128 }, plans: [], issue: null };
+      };
+      const result = await inventorySourceAbandonmentRedis(
+        actionPagesFixture([action().data, action({ idempotencyKey: 'action-2' }).data]),
+        selection,
+        [source],
+        allowance(),
+        resolver,
+        'nonce',
+      );
+      expect(result.children).toEqual([]);
+      expect(result.issues).toEqual([
+        { code: 'SQL_BATCH_REPLY_UNPROVED', descriptor: 'redis:max-actions-background' },
+      ]);
+    },
+  );
+
+  it('accepts an explicit null ledger result while retaining the exact requested key', async () => {
+    const resolver = jest.fn<
+      ReturnType<SourceAbandonmentRedisResolver>,
+      Parameters<SourceAbandonmentRedisResolver>
+    >(async (_kind, keys) => ({
+      rows: keys.map((key) => ({ key, row: null, digest: sourceAbandonmentDigest([]) })),
+      cost: { pages: 2, rows: 1, probes: 2, bytes: 128 },
+      plans: [],
+      issue: null,
+    }));
+    const result = await inventorySourceAbandonmentRedis(
+      actionPagesFixture([action().data]),
+      selection,
+      [source],
+      allowance(),
+      resolver,
+      'nonce',
+    );
+    expect(result.issues).toEqual([]);
+    expect(result.children).toMatchObject([{ jobKey: 'action-1', ...source }]);
+    expect(resolver.mock.calls.map(([kind, keys]) => [kind, keys])).toEqual([
+      ['action', ['action-1']],
+    ]);
+  });
+
+  it('retains a SQL refusal descriptor and charges its partial batch cost and plan once', async () => {
+    const redis = actionPagesFixture([action().data]);
+    const plan = {
+      descriptor: 'sql:max_action_ledger',
+      querySha256: 'a'.repeat(64),
+      planSha256: 'b'.repeat(64),
+      indexes: ['max_action_ledger_job_id_key'],
+      returnedRows: 0,
+      examinedRows: 2,
+      probes: 1,
+    };
+    const resolver: SourceAbandonmentRedisResolver = async () => ({
+      rows: [],
+      cost: { pages: 2, rows: 3, probes: 7, bytes: 257 },
+      plans: [plan],
+      issue: { code: 'sql_budget_exceeded', descriptor: 'sql:max_action_ledger' },
+    });
+    const result = await inventorySourceAbandonmentRedis(
+      redis,
+      selection,
+      [source],
+      allowance(),
+      resolver,
+      'nonce',
+    );
+    const reads = redis.eval_ro.mock.calls.filter(([script]) =>
+      /^-- source-abandonment:(headers|owners|jobs)/u.test(script),
+    ).length;
+    expect(result.issues).toEqual([
+      { code: 'sql_budget_exceeded', descriptor: 'sql:max_action_ledger' },
+    ]);
+    expect(result.children).toEqual([]);
+    expect(result.cost).toMatchObject({ pages: reads + 2, rows: 4, probes: reads + 7 });
+    expect(result.cost.bytes).toBeGreaterThanOrEqual(257);
+    expect(result.sqlPlans).toEqual([plan]);
+  });
+
+  it('preserves a completed SQL deadline refusal after the shared allowance expires', async () => {
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const budget = { ...LEGACY_RECOVERY_LIVE_BUDGET, deadlineAtMs: now + 30_000 };
+      const redis = actionPagesFixture([action().data]);
+      const plan = {
+        descriptor: 'sql:max_action_ledger',
+        querySha256: 'a'.repeat(64),
+        planSha256: 'b'.repeat(64),
+        indexes: ['max_action_ledger_job_id_key'],
+        returnedRows: 0,
+        examinedRows: 2,
+        probes: 1,
+      };
+      const resolver: SourceAbandonmentRedisResolver = async () => {
+        clock.mockReturnValue(budget.deadlineAtMs);
+        return {
+          rows: [],
+          cost: { pages: 1, rows: 0, probes: 1, bytes: 64 },
+          plans: [plan],
+          issue: { code: 'sql_deadline_exceeded', descriptor: 'sql:max_action_ledger' },
+        };
+      };
+      const result = await inventorySourceAbandonmentRedis(
+        redis,
+        selection,
+        [source],
+        budget,
+        resolver,
+        'nonce',
+      );
+      const reads = redis.eval_ro.mock.calls.filter(([script]) =>
+        /^-- source-abandonment:(headers|owners|jobs)/u.test(script),
+      ).length;
+      expect(result.issues).toEqual([
+        { code: 'sql_deadline_exceeded', descriptor: 'sql:max_action_ledger' },
+      ]);
+      expect(result.children).toEqual([]);
+      expect(result.cost).toMatchObject({ pages: reads + 1, rows: 1, probes: reads + 1 });
+      expect(result.cost.bytes).toBeGreaterThanOrEqual(64);
+      expect(result.sqlPlans).toEqual([plan]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('refetches a repeated key on page 17 and on the next inventory instead of caching a ledger', async () => {
+    const data = Array.from(
+      { length: 17 },
+      (_, index) => action({ idempotencyKey: `action-${index % 16}` }).data,
+    );
+    let revision = 0;
+    const resolver = jest.fn<
+      ReturnType<SourceAbandonmentRedisResolver>,
+      Parameters<SourceAbandonmentRedisResolver>
+    >(async (_kind, keys) => {
+      if (keys.length === 1) revision++;
+      return {
+        rows: keys.map((key) => {
+          const row = {
+            jobId: key,
+            actionType: 'DELETE_MESSAGE',
+            ...source,
+            updatedAt: new Date(Date.parse('2026-10-01T00:00:00.000Z') + revision),
+          };
+          return { key, row, digest: sourceAbandonmentDigest([row]) };
+        }),
+        cost: { pages: 2, rows: keys.length, probes: 2, bytes: 256 },
+        plans: [],
+        issue: null,
+      };
+    });
+    const observe = () =>
+      inventorySourceAbandonmentRedis(
+        actionPagesFixture(data),
+        selection,
+        [source],
+        allowance(),
+        resolver,
+        'nonce',
+      );
+    const first = await observe();
+    const second = await observe();
+    expect(first.issues).toEqual([]);
+    expect(second.issues).toEqual([]);
+    expect(first.children).toHaveLength(16);
+    expect(second.stableDigest).not.toBe(first.stableDigest);
+    const firstKeys = Array.from({ length: 16 }, (_, index) => `action-${index}`);
+    expect(resolver.mock.calls.map(([, keys]) => keys)).toEqual([
+      firstKeys,
+      ['action-0'],
+      firstKeys,
+      ['action-0'],
+    ]);
+  });
+
+  it('skips a fenced ambiguous member job before deriving or resolving its apparent parent', async () => {
+    const helper = jest.spyOn(cleanupProof, 'sourceAbandonmentCleanupParentKey');
+    try {
+      const data = action({
+        actionType: 'BAN_MEMBER',
+        messageId: undefined,
+        sendAutoDelete: { sourceMessageId: null, sourceSendJobId: 'unread-parent' },
+      }).data;
+      const resolver = jest.fn<
+        ReturnType<SourceAbandonmentRedisResolver>,
+        Parameters<SourceAbandonmentRedisResolver>
+      >(async (_kind, keys) => ({
+        rows: keys.map((key) => ({
+          key,
+          row: {
+            jobId: key,
+            ...source,
+            messageId: null,
+            actionType: 'BAN_MEMBER',
+            status: 'IN_PROGRESS',
+            ambiguous: false,
+            terminal: false,
+          },
+          digest: 'f'.repeat(64),
+        })),
+        cost: { pages: 2, rows: 1, probes: 2, bytes: 128 },
+        plans: [],
+        issue: null,
+      }));
+      const result = await inventorySourceAbandonmentRedis(
+        actionPagesFixture([data]),
+        selection,
+        [source],
+        allowance(),
+        resolver,
+        'nonce',
+      );
+      expect(result.issues).toEqual([]);
+      expect(result.children).toEqual([]);
+      expect(resolver.mock.calls.map(([, keys]) => keys)).toEqual([['action-1']]);
+      expect(helper).not.toHaveBeenCalled();
+    } finally {
+      helper.mockRestore();
+    }
+  });
+
   it('reserves probes before issuing Redis work', async () => {
     const redis = redisFixture();
     const result = await inventorySourceAbandonmentRedis(

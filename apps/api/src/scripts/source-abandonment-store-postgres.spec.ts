@@ -1538,6 +1538,441 @@ native('modern exact-source offline inventory and store PostgreSQL authority', (
     return queue;
   }
 
+  it('bounds two independent passes of 80 cleanup actions and parents within the unchanged page cap', async () => {
+    const suffix = randomUUID();
+    const cleanupChat = '-200';
+    const createdAt = new Date(Date.now() - 1000).toISOString();
+    const completedAt = new Date().toISOString();
+    const delay = MANAGED_HANDSHAKE_CONFIRMATION_AUTO_DELETE_DELAY_MS;
+    const actions = Array.from({ length: 80 }, (_, index) => ({
+      parentKey: buildMaxActionIdempotencyKey('explicit', [
+        'SEND_MESSAGE',
+        `managed-handshake-start:groupcmd:v1:${suffix}-${index}`,
+      ]),
+      childKey: `batch-cleanup-${suffix}-${index}`,
+      remoteMessageId: `batch-confirmed-${suffix}-${index}`,
+    }));
+    const historyKeys = Array.from(
+      { length: 1024 },
+      (_, index) => `batch-history-${suffix}-${index}`,
+    );
+    const ownedKeys = [
+      ...historyKeys,
+      ...actions.flatMap(({ parentKey, childKey }) => [parentKey, childKey]),
+    ];
+    const metadata = {
+      createdAt,
+      hasText: true,
+      textLength: 42,
+      autoDeleteDelayMs: delay,
+      sendAutoDelete: null,
+      hasOptions: true,
+      optionKeys: ['buttons'],
+      ledgerContext: null,
+    };
+    const queue = await actionQueue();
+    try {
+      // FLAG: This disposable retained-history/skew fixture requires every action
+      // and completed parent on both fresh passes. Point lookups alone cost 640
+      // pages before headers/source proof, exceeding the unchanged 512-page cap.
+      await db.maxActionLedgerEntry.createMany({
+        data: [
+          ...actions.map(({ parentKey, remoteMessageId }) => ({
+            jobId: parentKey,
+            chatId: cleanupChat,
+            actionType: 'SEND_MESSAGE',
+            messageId: null,
+            userId: null,
+            sourceTag: 'managed_handshake',
+            status: 'SUCCEEDED' as const,
+            terminal: true,
+            ambiguous: false,
+            remoteMessageId,
+            dispatchBotId: 'major-1',
+            completedAt: new Date(completedAt),
+            metadata,
+          })),
+          ...actions.map(({ childKey, remoteMessageId }) => ({
+            jobId: childKey,
+            chatId: cleanupChat,
+            actionType: 'DELETE_MESSAGE',
+            messageId: remoteMessageId,
+            status: 'ENQUEUED' as const,
+          })),
+          ...historyKeys.map((jobId) => ({
+            jobId,
+            chatId: cleanupChat,
+            actionType: 'SEND_MESSAGE',
+            status: 'SUCCEEDED' as const,
+            terminal: true,
+          })),
+        ] satisfies Prisma.MaxActionLedgerEntryCreateManyInput[],
+      });
+      await db.$executeRaw`ANALYZE max_action_ledger`;
+      await queue.addBulk(
+        actions.map(({ parentKey, childKey, remoteMessageId }) => ({
+          name: 'action',
+          data: {
+            actionType: 'DELETE_MESSAGE',
+            idempotencyKey: childKey,
+            chatId: cleanupChat,
+            messageId: remoteMessageId,
+            botId: 'major-1',
+            sourceTag: 'managed_handshake',
+            sendAutoDelete: {
+              version: 2,
+              sourceSendJobId: parentKey,
+              sourceChatId: cleanupChat,
+              sourceMessageId: null,
+              sourceUserId: null,
+              sourceCreatedAt: createdAt,
+              sourceSendCompletedAt: completedAt,
+              requestedDelayMs: delay,
+              originBotId: 'major-1',
+            },
+          },
+          opts: { jobId: childKey, delay },
+        })),
+      );
+      const result = await readonlyDb.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+          return collectSourceAbandonmentAdmission(tx, redis, {
+            version: 1,
+            operation: 'admission_preview',
+            sourceSha: liveRequest.binding.sourceSha,
+            imageId: liveRequest.binding.imageId,
+            selection,
+          });
+        },
+        { timeout: 50_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+      );
+      expect(result.issues).toEqual([]);
+      expect(result.decision).toBe('READY_FOR_COLD_REVIEW');
+      expect(result.selectedOwners).toHaveLength(1);
+      expect(result.redisCatalogs).toHaveLength(2);
+      expect(result.redisCatalogs.every((catalog) => catalog.complete && !catalog.issue)).toBe(
+        true,
+      );
+      const plans = result.sqlPlans.filter((plan) => plan.descriptor === 'sql:max_action_ledger');
+      expect(plans).toHaveLength(20);
+      expect(plans.every((plan) => plan.indexes.includes('max_action_ledger_job_id_key'))).toBe(
+        true,
+      );
+      expect(result.cost.pages).toBeLessThan(256);
+      expect(result.activationAuthorized).toBe(false);
+      expect(result.stoppingAuthorized).toBe(false);
+      expect(result.applied).toBe(false);
+      expect(await redis.zcard('bull:max-actions-background:delayed')).toBe(actions.length);
+      expect(await db.maxActionLedgerEntry.count({ where: { jobId: { in: ownedKeys } } })).toBe(
+        ownedKeys.length,
+      );
+      expect(
+        await db.webhookSourceAbandonment.findUnique({ where: { ownerWebhookEventId: ownerId } }),
+      ).toBeNull();
+    } finally {
+      await db.maxActionLedgerEntry.deleteMany({ where: { jobId: { in: ownedKeys } } });
+    }
+  });
+
+  function resolverAllowance(overrides: Partial<sourceSql.SourceInventoryAllowance> = {}) {
+    return {
+      pages: 512,
+      rows: 10_000,
+      probes: 50_000,
+      bytes: 8 * 1024 * 1024,
+      deadlineAtMs: Date.now() + 30_000,
+      ...overrides,
+    } satisfies sourceSql.SourceInventoryAllowance;
+  }
+
+  async function prepareResolverTransaction(tx: Prisma.TransactionClient) {
+    // FLAG: The real collector and store set these transaction preferences before
+    // calling the resolver. Reproduce that caller context for direct batch reads;
+    // retained history and strict EXPLAIN identity/scan guards remain required.
+    await tx.$executeRaw`SET LOCAL enable_seqscan = off`;
+    await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`;
+  }
+
+  it.each(['action', 'observation'] as const)(
+    'resolves fresh bounded %s batches with exact missing and Date evidence',
+    async (kind) => {
+      const suffix = randomUUID();
+      const keys = Array.from({ length: 16 }, (_, index) => `batch-${suffix}-${index}`);
+      const completedAt = new Date('2026-01-02T03:04:05.000Z');
+      const actionData = (jobId: string) => ({
+        jobId,
+        chatId,
+        actionType: 'SEND_MESSAGE',
+        status: 'SUCCEEDED' as const,
+        completedAt,
+      });
+      const observationData = (id: string) => ({
+        id,
+        chatId,
+        userId: `batch-user-${suffix}`,
+        source: 'FANOUT_HIGH',
+        score: 1,
+        reason: 'Native batch source proof',
+        evidenceHash: id,
+        expiresAt: new Date(Date.now() + 60_000),
+        observedAt: completedAt,
+      });
+      if (kind === 'action') {
+        await db.maxActionLedgerEntry.createMany({
+          data: [
+            keys[0]!,
+            keys[1]!,
+            ...Array.from({ length: 512 }, (_, index) => `skew-${suffix}-${index}`),
+          ].map(actionData),
+        });
+        await db.$executeRaw`ANALYZE max_action_ledger`;
+      } else {
+        await db.spammerObservation.createMany({ data: keys.slice(0, 2).map(observationData) });
+        await db.$executeRaw`ANALYZE spammer_observations`;
+      }
+      const expected =
+        kind === 'action'
+          ? await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: keys[0] } })
+          : await db.spammerObservation.findUniqueOrThrow({ where: { id: keys[0] } });
+      await readonlyDb.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+          await prepareResolverTransaction(tx);
+          const resolveRows = sourceSql.sourceAbandonmentSqlResolver(tx);
+          const first = await resolveRows(kind, keys, resolverAllowance());
+          expect(first.issue).toBeNull();
+          expect(first.rows.map((row) => row.key)).toEqual(keys);
+          expect(first.rows[0]).toEqual({
+            key: keys[0],
+            row: expected,
+            digest: sourceAbandonmentDigest([expected]),
+          });
+          expect(
+            first.rows
+              .slice(2)
+              .every((row) => row.row === null && row.digest === sourceAbandonmentDigest([])),
+          ).toBe(true);
+          expect(
+            first.rows[0]!.row![kind === 'action' ? 'completedAt' : 'observedAt'],
+          ).toBeInstanceOf(Date);
+          expect(first.cost.pages).toBe(2);
+          expect(first.cost.rows).toBe(18);
+          expect(first.plans).toHaveLength(1);
+          expect(first.plans[0]!.indexes).toContain(
+            kind === 'action' ? 'max_action_ledger_job_id_key' : 'spammer_observations_pkey',
+          );
+          expect(first.plans[0]!.examinedRows).toBe(32);
+
+          // FLAG: Commit mutations on a separate connection between fresh calls
+          // through the same resolver. A missing row and a deleted/updated parent
+          // must never survive as cached READ COMMITTED evidence.
+          if (kind === 'action') {
+            await db.maxActionLedgerEntry.update({
+              where: { jobId: keys[0] },
+              data: { status: 'FAILED_TERMINAL' },
+            });
+            await db.maxActionLedgerEntry.delete({ where: { jobId: keys[1] } });
+            await db.maxActionLedgerEntry.create({ data: actionData(keys[2]!) });
+          } else {
+            await db.spammerObservation.update({
+              where: { id: keys[0] },
+              data: { reason: 'Changed committed proof' },
+            });
+            await db.spammerObservation.delete({ where: { id: keys[1] } });
+            await db.spammerObservation.create({ data: observationData(keys[2]!) });
+          }
+          const second = await resolveRows(kind, keys, resolverAllowance());
+          expect(second.issue).toBeNull();
+          expect(second.rows[0]!.digest).not.toBe(first.rows[0]!.digest);
+          expect(second.rows[1]).toEqual({
+            key: keys[1],
+            row: null,
+            digest: sourceAbandonmentDigest([]),
+          });
+          expect(second.rows[2]!.row).not.toBeNull();
+          expect(second.cost.pages).toBe(2);
+          expect(second.plans).toHaveLength(1);
+        },
+        { timeout: 30_000, isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+      );
+    },
+  );
+
+  it('suppresses a whole oversized batch before transferring individually bounded row payloads', async () => {
+    const suffix = randomUUID();
+    const keys = [`batch-large-${suffix}-0`, `batch-large-${suffix}-1`];
+    await db.maxActionLedgerEntry.createMany({
+      data: [
+        ...keys.map((jobId) => ({
+          jobId,
+          chatId,
+          actionType: 'SEND_MESSAGE',
+          metadata: { fixture: 'x'.repeat(280_000) },
+        })),
+        ...Array.from({ length: 512 }, (_, index) => ({
+          jobId: `batch-large-history-${suffix}-${index}`,
+          chatId,
+          actionType: 'SEND_MESSAGE',
+        })),
+      ],
+    });
+    await db.$executeRaw`ANALYZE max_action_ledger`;
+    await db.$transaction(async (tx) => {
+      await prepareResolverTransaction(tx);
+      const resolveRows = sourceSql.sourceAbandonmentSqlResolver(tx);
+      for (const key of keys) {
+        const single = await resolveRows('action', [key], resolverAllowance());
+        expect(single.issue).toBeNull();
+        expect(single.rows[0]!.row).not.toBeNull();
+      }
+      const combined = await resolveRows('action', keys, resolverAllowance());
+      expect(combined.rows).toEqual([]);
+      expect(combined.issue).toEqual({
+        code: 'sql_page_saturated_or_oversize',
+        descriptor: 'sql:max_action_ledger',
+      });
+      expect(combined.cost.pages).toBe(2);
+      expect(combined.cost.bytes).toBeLessThan(64 * 1024);
+      expect(combined.plans).toHaveLength(1);
+    });
+  });
+
+  it('refuses malformed batches and exhausted pre-query limits without SQL reads', async () => {
+    await db.$transaction(async (tx) => {
+      const query = jest.spyOn(tx, '$queryRaw');
+      try {
+        const resolveRows = sourceSql.sourceAbandonmentSqlResolver(tx);
+        const malformed: unknown[] = [
+          [],
+          ['same', 'same'],
+          Array.from({ length: 17 }, (_, index) => `key-${index}`),
+          [''],
+          [' surrounding '],
+          ['line\nbreak'],
+          ['x'.repeat(513)],
+          [null],
+          null,
+        ];
+        for (const keys of malformed) {
+          const result = await resolveRows(
+            'action',
+            keys as readonly string[],
+            resolverAllowance(),
+          );
+          expect(result).toEqual({
+            rows: [],
+            cost: { pages: 0, rows: 0, probes: 0, bytes: 0 },
+            plans: [],
+            issue: { code: 'sql_batch_request_invalid', descriptor: 'sql:resolver' },
+          });
+        }
+        expect(
+          (await resolveRows('unknown' as 'action', ['key'], resolverAllowance())).issue,
+        ).toEqual({ code: 'sql_batch_request_invalid', descriptor: 'sql:resolver' });
+        for (const allowance of [
+          { pages: 1 },
+          { probes: 1 },
+          { rows: 2 },
+          { bytes: 64 * 1024 },
+          { deadlineAtMs: Date.now() - 1 },
+        ]) {
+          const result = await resolveRows('action', ['key'], resolverAllowance(allowance));
+          expect(result.rows).toEqual([]);
+          expect(result.cost).toEqual({ pages: 0, rows: 0, probes: 0, bytes: 0 });
+          expect(result.plans).toEqual([]);
+          expect(result.issue).toEqual({
+            code: 'deadlineAtMs' in allowance ? 'sql_deadline_exceeded' : 'sql_budget_exceeded',
+            descriptor: 'sql:max_action_ledger',
+          });
+        }
+        expect(query).not.toHaveBeenCalled();
+      } finally {
+        query.mockRestore();
+      }
+    });
+  });
+
+  it('retains completed batch SQL cost when plans, cardinality or row envelopes are refused', async () => {
+    const key = `batch-refusal-${randomUUID()}`;
+    await db.maxActionLedgerEntry.createMany({
+      data: [key, ...Array.from({ length: 512 }, (_, index) => `${key}-history-${index}`)].map(
+        (jobId) => ({ jobId, chatId, actionType: 'SEND_MESSAGE' }),
+      ),
+    });
+    await db.$executeRaw`ANALYZE max_action_ledger`;
+    await db.$transaction(async (tx) => {
+      await prepareResolverTransaction(tx);
+      const query = jest.spyOn(tx, '$queryRaw');
+      try {
+        const resolveRows = sourceSql.sourceAbandonmentSqlResolver(tx);
+        const first = await resolveRows('action', [key], resolverAllowance());
+        expect(first.issue).toBeNull();
+        const plan = await query.mock.results[0]!.value;
+        const raw = (await query.mock.results[1]!.value) as Array<{
+          ordinal: number;
+          key: string;
+          count: number;
+          bytes: number;
+          rows: Record<string, unknown>[];
+        }>;
+        const page = raw[0]!;
+        const cases = [
+          { rows: [], code: 'sql_batch_identity_unproved' },
+          { rows: [{ ...page, key: 'unrequested-key' }], code: 'sql_batch_identity_unproved' },
+          { rows: [{ ...page, ordinal: 1 }], code: 'sql_batch_identity_unproved' },
+          {
+            rows: [{ ...page, count: 2, rows: [page.rows[0], page.rows[0]] }],
+            code: 'sql_page_saturated_or_oversize',
+          },
+          {
+            rows: [{ ...page, bytes: 524289, rows: null }],
+            code: 'sql_page_saturated_or_oversize',
+          },
+          {
+            rows: [{ ...page, rows: [{ ...page.rows[0], job_id: 'wrong-row-key' }] }],
+            code: 'sql_batch_identity_unproved',
+          },
+        ];
+        for (const refused of cases) {
+          query.mockResolvedValueOnce(plan).mockResolvedValueOnce(refused.rows);
+          const result = await resolveRows('action', [key], resolverAllowance());
+          expect(result.rows).toEqual([]);
+          expect(result.issue).toEqual({ code: refused.code, descriptor: 'sql:max_action_ledger' });
+          expect(result.cost.pages).toBe(2);
+          expect(result.cost.probes).toBe(2);
+          expect(result.cost.bytes).toBeGreaterThan(0);
+          expect(result.plans).toHaveLength(1);
+        }
+        for (const rejectedPlan of [
+          { 'Node Type': 'Seq Scan', 'Relation Name': 'max_action_ledger' },
+          {
+            'Node Type': 'Bitmap Heap Scan',
+            'Relation Name': 'max_action_ledger',
+            Plans: [
+              { 'Node Type': 'Bitmap Index Scan', 'Index Name': 'max_action_ledger_job_id_key' },
+            ],
+          },
+        ]) {
+          query.mockResolvedValueOnce([{ 'QUERY PLAN': [{ Plan: rejectedPlan }] }]);
+          const beforePlanRefusal = query.mock.calls.length;
+          const refused = await resolveRows('action', [key], resolverAllowance());
+          expect(refused.rows).toEqual([]);
+          expect(refused.issue).toEqual({
+            code: 'sql_residual_work_unproved',
+            descriptor: 'sql:max_action_ledger',
+          });
+          expect(refused.cost.pages).toBe(1);
+          expect(refused.cost.probes).toBe(1);
+          expect(refused.plans).toEqual([]);
+          expect(query.mock.calls.length - beforePlanRefusal).toBe(1);
+        }
+      } finally {
+        query.mockRestore();
+      }
+    });
+  });
+
   async function storeFixture(observed?: SourceAbandonmentLiveOutput) {
     const output = observed ?? (await collect());
     expect(output.issues).toEqual([]);

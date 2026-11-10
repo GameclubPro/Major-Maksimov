@@ -159,6 +159,18 @@ new combination remains disjoint from all selected chats, including numeric alia
 unknown or mixed feature contexts remain refused. These checks prove retained
 cleanup lineage only and do not renew an expired source deadline or permit replay.
 
+Each actionable Redis page resolves at most sixteen exact job keys in one bounded
+SQL batch, then independently resolves the required cleanup parents for that page.
+Already fenced history keeps its existing skip rule before parent lookup. Every
+key retains its own indexed equality seek, saturation sentinel and explicit missing
+result; the batch retains the original plan, row and byte checks. A shared parent
+may be read once within that parent batch. Every later page and both independent
+inventory passes read the required facts again, including previously missing rows.
+No mutable lookup result is cached across pages or passes. Completed SQL reads and
+plans remain charged when a batch refuses, and its exact SQL refusal is preserved.
+The common effect budget remains 512 pages; batching does not raise any limit or
+omit action provenance.
+
 Admission never authorizes stopping services or installing holds.
 The frozen inventory independently repeats the full check under `RepeatableRead`
 after producers stop; source selection, cutoff and equality checks remain unchanged.

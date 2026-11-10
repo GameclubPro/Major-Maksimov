@@ -17,6 +17,7 @@ export { SourceInventoryRefused } from './source-abandonment-sql-row';
 import {
   SOURCE_ABANDONMENT_CHANNEL_MARKER_QUEUE,
   SOURCE_ABANDONMENT_OBSERVATION_QUEUE,
+  isSourceAbandonmentIdentity,
   sourceAbandonmentDigest,
   sourceAbandonmentSelectedOwner,
   type SourceAbandonmentChildEvidence,
@@ -543,33 +544,124 @@ export async function inventorySourceAbandonmentSql(
   };
 }
 
+export type SourceAbandonmentSqlResolution = {
+  rows: Array<{ key: string; row: Record<string, unknown> | null; digest: string }>;
+  cost: { pages: number; rows: number; probes: number; bytes: number };
+  plans: LegacyRecoveryLivePlanProof[];
+  issue: { code: string; descriptor: string } | null;
+};
+
 export function sourceAbandonmentSqlResolver(tx: Prisma.TransactionClient) {
   return async (
     kind: 'action' | 'observation',
-    key: string,
+    keys: readonly string[],
     allowance: SourceInventoryAllowance,
-  ) => {
+  ): Promise<SourceAbandonmentSqlResolution> => {
     const meter = new SourceInventorySqlMeter(tx, allowance);
-    const rows =
-      kind === 'action'
-        ? await meter.rows<Record<string, unknown>>(
-            'max_action_ledger',
-            Prisma.sql`t.job_id = ${key}`,
-            ['job_id'],
-            1,
-          )
-        : await meter.rows<Record<string, unknown>>(
-            'spammer_observations',
-            Prisma.sql`t.id = ${key}`,
-            ['id'],
-            1,
-          );
-    return {
-      row: rows[0] ?? null,
-      digest: sourceAbandonmentDigest(rows),
-      cost: meter.cost,
-      plans: meter.plans,
-    };
+    try {
+      meter.lastDescriptor = 'sql:resolver';
+      if (
+        !['action', 'observation'].includes(kind) ||
+        !Array.isArray(keys) ||
+        keys.length < 1 ||
+        keys.length > 16 ||
+        keys.some((key) => !isSourceAbandonmentIdentity(key, 512)) ||
+        new Set(keys).size !== keys.length
+      )
+        throw new SourceInventoryRefused('sql_batch_request_invalid');
+      const table = kind === 'action' ? 'max_action_ledger' : 'spammer_observations';
+      const column = kind === 'action' ? 'job_id' : 'id';
+      // FLAG: Each finite VALUES key drives its own indexed equality seek and
+      // LIMIT 2 saturation sentinel. Do not replace this with an IN scan, omit a
+      // missing-key result, or reuse mutable evidence in another batch/pass.
+      // The window sum suppresses every payload before transfer if the complete
+      // batch exceeds the existing SQL page byte cap; no ordering is required.
+      const pages = await meter.read<{
+        ordinal: number;
+        key: string;
+        count: number;
+        bytes: number;
+        rows: Record<string, unknown>[] | null;
+      }>(
+        `sql:${table}`,
+        Prisma.sql`WITH requested(ordinal, key) AS (
+          VALUES ${Prisma.join(keys.map((key, ordinal) => Prisma.sql`(${ordinal}::int, ${key}::text)`))}
+        ) SELECT requested.ordinal, requested.key, page.count, page.bytes,
+          CASE WHEN sum(page.bytes) OVER () <= 524288 THEN page.rows ELSE NULL END AS rows
+        FROM requested CROSS JOIN LATERAL (
+          WITH picked AS MATERIALIZED (
+            SELECT to_jsonb(t) AS value FROM ${Prisma.raw(`"${table}"`)} t
+            WHERE ${Prisma.raw(`t."${column}"`)} = requested.key LIMIT 2
+          ) SELECT count(*)::int AS count,
+            coalesce(sum(octet_length(value::text)), 0)::int AS bytes,
+            CASE WHEN coalesce(sum(octet_length(value::text)), 0) <= 524288
+              THEN coalesce(jsonb_agg(value), '[]'::jsonb) ELSE NULL END AS rows
+          FROM picked
+        ) page`,
+        { [table]: [column] },
+        keys.length,
+        keys.length * 2,
+        1024 * 1024,
+      );
+      if (pages.length !== keys.length)
+        throw new SourceInventoryRefused('sql_batch_identity_unproved');
+      const resolved = new Map<number, SourceAbandonmentSqlResolution['rows'][number]>();
+      for (const page of pages) {
+        if (
+          !record(page) ||
+          Object.keys(page).sort().join(',') !== 'bytes,count,key,ordinal,rows' ||
+          !Number.isSafeInteger(page.ordinal) ||
+          page.ordinal < 0 ||
+          page.ordinal >= keys.length ||
+          resolved.has(page.ordinal) ||
+          page.key !== keys[page.ordinal]
+        )
+          throw new SourceInventoryRefused('sql_batch_identity_unproved');
+        if (
+          !Number.isSafeInteger(page.count) ||
+          page.count < 0 ||
+          page.count > 1 ||
+          !Number.isSafeInteger(page.bytes) ||
+          page.bytes < 0 ||
+          page.bytes > 524288 ||
+          !Array.isArray(page.rows) ||
+          page.rows.length !== page.count ||
+          (page.count === 0) !== (page.bytes === 0) ||
+          page.rows.some((row) => !record(row))
+        )
+          throw new SourceInventoryRefused('sql_page_saturated_or_oversize');
+        meter.cost.rows += page.count;
+        meter.check();
+        // FLAG: Decode only the existing schema DateTime columns in this realm;
+        // [] and [decoded row] keep the original per-key proof digest semantics.
+        const rows = page.rows.map((row) => sourceInventoryPrismaRow(table, row));
+        if (rows[0] && rows[0][kind === 'action' ? 'jobId' : 'id'] !== page.key)
+          throw new SourceInventoryRefused('sql_batch_identity_unproved');
+        resolved.set(page.ordinal, {
+          key: page.key,
+          row: rows[0] ?? null,
+          digest: sourceAbandonmentDigest(rows),
+        });
+      }
+      return {
+        rows: keys.map((_, ordinal) => resolved.get(ordinal)!),
+        cost: meter.cost,
+        plans: meter.plans,
+        issue: null,
+      };
+    } catch (error) {
+      // FLAG: A refused batch grants no rows, but its completed SQL reads still
+      // consume the shared budget and retain their exact plan/descriptor evidence.
+      return {
+        rows: [],
+        cost: meter.cost,
+        plans: meter.plans,
+        issue: {
+          code: error instanceof SourceInventoryRefused ? error.code : 'sql_store_refused',
+          descriptor: meter.lastDescriptor,
+        },
+      };
+    }
   };
 }
 

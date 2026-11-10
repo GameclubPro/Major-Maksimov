@@ -223,7 +223,10 @@ function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 class Refused extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly descriptor?: string,
+  ) {
     super(code);
   }
 }
@@ -338,15 +341,20 @@ export function isUnrelatedSourceAbandonmentFanoutObservation(
   );
 }
 
-export type SourceAbandonmentRedisResolver = (
-  kind: 'action' | 'observation',
-  key: string,
-  allowance: SourceInventoryAllowance,
-) => Promise<{
+type SourceAbandonmentResolvedRow = {
+  key: string;
   row: Record<string, unknown> | null;
   digest: string;
+};
+export type SourceAbandonmentRedisResolver = (
+  kind: 'action' | 'observation',
+  keys: readonly string[],
+  allowance: SourceInventoryAllowance,
+) => Promise<{
+  rows: SourceAbandonmentResolvedRow[];
   cost: { pages: number; rows: number; probes: number; bytes: number };
   plans: LegacyRecoveryLivePlanProof[];
+  issue: { code: string; descriptor: string } | null;
 }>;
 const queueNames = [...LEGACY_RECOVERY_LIVE_QUEUE_NAMES].sort();
 const actionQueues = new Set<string>(MAX_ACTION_ALL_QUEUE_NAMES);
@@ -516,20 +524,65 @@ export async function inventorySourceAbandonmentRedis(
     check();
     return reply;
   };
-  const resolveRow = async (kind: 'action' | 'observation', key: string) => {
+  const resolveRows = async (kind: 'action' | 'observation', keys: readonly string[]) => {
     check();
-    const result = await resolve(kind, key, {
+    const uniqueKeys = [...new Set(keys)];
+    if (!uniqueKeys.length || uniqueKeys.length > 16 || uniqueKeys.some((key) => !identity(key)))
+      throw new Refused('SQL_BATCH_REPLY_UNPROVED');
+    const result = await resolve(kind, uniqueKeys, {
       pages: allowance.pages - cost.pages,
       rows: allowance.rows - cost.rows,
       probes: allowance.probes - cost.probes,
       bytes: allowance.bytes - cost.bytes,
       deadlineAtMs: allowance.deadlineAtMs,
     });
+    if (
+      !record(result) ||
+      !record(result.cost) ||
+      (['pages', 'rows', 'probes', 'bytes'] as const).some(
+        (field) => !integer(result.cost[field]),
+      ) ||
+      !Array.isArray(result.plans)
+    )
+      throw new Refused('SQL_BATCH_REPLY_UNPROVED');
+    // FLAG: A refused SQL batch still spent its completed reads. Charge those
+    // reads once before propagating the exact refusal into this inventory.
     for (const field of ['pages', 'rows', 'probes', 'bytes'] as const)
       cost[field] += result.cost[field];
     sqlPlans.push(...result.plans);
-    proofs.push({ kind, keyDigest: sourceAbandonmentDigest(key), digest: result.digest });
+    if (result.issue !== null) {
+      if (
+        !record(result.issue) ||
+        !identity(result.issue.code) ||
+        !identity(result.issue.descriptor)
+      )
+        throw new Refused('SQL_BATCH_REPLY_UNPROVED');
+      throw new Refused(result.issue.code, result.issue.descriptor);
+    }
     check();
+    if (
+      !Array.isArray(result.rows) ||
+      result.rows.length !== uniqueKeys.length ||
+      new Set(result.rows.map((row) => row?.key)).size !== uniqueKeys.length ||
+      result.rows.some(
+        (row) =>
+          !record(row) ||
+          !uniqueKeys.includes(row.key) ||
+          (row.row !== null && !record(row.row)) ||
+          !/^[0-9a-f]{64}$/u.test(row.digest),
+      )
+    )
+      throw new Refused('SQL_BATCH_REPLY_UNPROVED');
+    return new Map(result.rows.map((row) => [row.key, row]));
+  };
+  const resolvedRow = (
+    kind: 'action' | 'observation',
+    key: string,
+    rows: Awaited<ReturnType<typeof resolveRows>>,
+  ) => {
+    const result = rows.get(key);
+    if (!result) throw new Refused('SQL_BATCH_REPLY_UNPROVED');
+    proofs.push({ kind, keyDigest: sourceAbandonmentDigest(key), digest: result.digest });
     return result.row;
   };
   const addChild = (child: SourceAbandonmentChildEvidence) => {
@@ -644,19 +697,41 @@ export async function inventorySourceAbandonmentRedis(
             String(take),
           ]);
           const jobs = decodeJobs(reply[3]);
-          if (reply[2] !== jobs.length || !jobs.length || offset + jobs.length > count)
+          if (
+            reply[2] !== jobs.length ||
+            !jobs.length ||
+            jobs.length > take ||
+            offset + jobs.length > count
+          )
             throw new Refused('ACTION_PAGE_UNPROVED');
           cost.rows += jobs.length;
           check();
-          for (const job of jobs) {
+          const page = jobs.map((job) => {
             if (seen.has(job.id)) throw new Refused('ACTION_MULTIPLE_STATES');
             seen.add(job.id);
             assertJobAncestry(job);
             const data = record(job.data);
             if (!data) throw new Refused('ACTION_PAYLOAD_UNPROVED');
-            if (actionQueues.has(queue.queueName)) {
-              if (!identity(data.idempotencyKey)) throw new Refused('ACTION_KEY_UNPROVED');
-              const ledger = await resolveRow('action', data.idempotencyKey);
+            const key = actionQueues.has(queue.queueName)
+              ? data.idempotencyKey
+              : data.observationId;
+            if (!identity(key))
+              throw new Refused(
+                actionQueues.has(queue.queueName)
+                  ? 'ACTION_KEY_UNPROVED'
+                  : 'OBSERVATION_JOB_SOURCE_UNPROVED',
+              );
+            return { job, data, key };
+          });
+          // FLAG: These maps belong only to this exact Redis page. Every later
+          // page and independent inventory rereads all required SQL facts.
+          if (actionQueues.has(queue.queueName)) {
+            const ownRows = await resolveRows(
+              'action',
+              page.map(({ key }) => key),
+            );
+            const actions = page.map(({ job, data, key }) => {
+              const ledger = ownRows.get(key)!.row;
               if (
                 ledger &&
                 (ledger.jobId !== data.idempotencyKey ||
@@ -683,21 +758,41 @@ export async function inventorySourceAbandonmentRedis(
                     ledger.status === 'AMBIGUOUS' &&
                     (data.actionType !== 'SEND_MESSAGE' || ledger.remoteMessageId == null)))
               )
-                continue;
-              const cleanupParentKey = sourceAbandonmentCleanupParentKey(data);
+                return { job, data, key, skipped: true, cleanupParentKey: null };
+              return {
+                job,
+                data,
+                key,
+                skipped: false,
+                cleanupParentKey: sourceAbandonmentCleanupParentKey(data),
+              };
+            });
+            const parentKeys = actions.flatMap(({ cleanupParentKey }) =>
+              cleanupParentKey ? [cleanupParentKey] : [],
+            );
+            const parentRows = parentKeys.length
+              ? await resolveRows('action', parentKeys)
+              : new Map<string, SourceAbandonmentResolvedRow>();
+            for (const { job, key, skipped, cleanupParentKey } of actions) {
+              resolvedRow('action', key, ownRows);
+              if (skipped) continue;
               const cleanupParent = cleanupParentKey
                 ? {
-                    ledger: await resolveRow('action', cleanupParentKey),
+                    ledger: resolvedRow('action', cleanupParentKey, parentRows),
                     majorBotIds: selection.majorBotIds,
                     ...(publisherBotId ? { publisherBotId } : {}),
                   }
                 : undefined;
               const child = classifySourceAbandonmentAction(job, sources, cleanupParent);
               if (child) addChild({ ...child, queueName: queue.queueName });
-            } else {
-              if (!identity(data.observationId))
-                throw new Refused('OBSERVATION_JOB_SOURCE_UNPROVED');
-              const observation = await resolveRow('observation', data.observationId);
+            }
+          } else {
+            const observations = await resolveRows(
+              'observation',
+              page.map(({ key }) => key),
+            );
+            for (const { data, key } of page) {
+              const observation = resolvedRow('observation', key, observations);
               if (isUnrelatedSourceAbandonmentFanoutObservation(data, observation, sources))
                 continue;
               if (
@@ -717,7 +812,7 @@ export async function inventorySourceAbandonmentRedis(
                 throw new Refused('OBSERVATION_SOURCE_CONFLICT');
               if (related[0])
                 addChild({
-                  jobKey: data.observationId,
+                  jobKey: key,
                   queueName: SOURCE_ABANDONMENT_OBSERVATION_QUEUE,
                   jobPayloadDigest: sourceAbandonmentDigest(observation),
                   chatId: related[0].chatId,
@@ -740,7 +835,7 @@ export async function inventorySourceAbandonmentRedis(
   } catch (error) {
     issues.push({
       code: error instanceof Refused ? error.code : 'REDIS_STORE_OR_SOURCE_REFUSED',
-      descriptor,
+      descriptor: error instanceof Refused ? (error.descriptor ?? descriptor) : descriptor,
     });
   }
   return {
