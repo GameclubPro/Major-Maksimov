@@ -124,10 +124,47 @@ function supportGuideImages(row, part, chatId) {
   return attachments.map(({ payload }) => ({ type: 'image', payload: { token: payload.token } }));
 }
 
+async function supportGuideReadOptions({ client, registry, links, supportGuideCatalog }, guide) {
+  // FLAG: A destination moderator never grants access to the guide source. Only the
+  // reviewed catalog's exact bot/chat pair may read it, with fresh source access.
+  if (
+    !validateSupportGuideCatalog(supportGuideCatalog).some(
+      (reviewed) =>
+        reviewed.id === guide.id &&
+        reviewed.sourceBotId === guide.sourceBotId &&
+        reviewed.sourceChatId === guide.sourceChatId,
+    )
+  )
+    throw new Error('support_guide_source_refused');
+  if (!registry.getActionableBots().some((bot) => bot.id === guide.sourceBotId))
+    throw new Error('support_guide_bot_refused');
+  const options = {
+    botId: guide.sourceBotId,
+    bypassCache: true,
+    trafficClass: 'background',
+    timeoutMs: 5000,
+    sourceTag: 'support_cpu_pilot',
+  };
+  const snapshot = await client.getChatSnapshot(guide.sourceChatId, options);
+  const access = await client.getCurrentChatMemberAccess(guide.sourceChatId, options);
+  if (
+    snapshot.entityType !== 'chat' ||
+    (!access.isAdmin && !access.isOwner) ||
+    !(await links.getFreshChatBotExecutionProof({
+      chatId: guide.sourceChatId,
+      botId: guide.sourceBotId,
+      purpose: 'read',
+    }))
+  )
+    throw new Error('support_guide_access_refused');
+  return options;
+}
+
 async function loadSupportGuideImages(runtime, guide, part) {
-  if (runtime.options().botId !== guide.sourceBotId) throw new Error('support_guide_bot_refused');
+  const options = runtime.guideOptions ? await runtime.guideOptions(guide) : runtime.options();
+  if (options.botId !== guide.sourceBotId) throw new Error('support_guide_bot_refused');
   return supportGuideImages(
-    await runtime.client.getExactMessageRow(guide.sourceChatId, part.messageId, runtime.options()),
+    await runtime.client.getExactMessageRow(guide.sourceChatId, part.messageId, options),
     part,
     guide.sourceChatId,
   );
@@ -771,6 +808,8 @@ async function createRuntime() {
         }),
       supportBotCatalog,
       supportGuideCatalog,
+      guideOptions: (guide) =>
+        supportGuideReadOptions({ client, registry, links, supportGuideCatalog }, guide),
       close,
     };
   } catch (error) {
@@ -951,6 +990,7 @@ module.exports = {
   validateSupportBotCatalog,
   validateSupportGuideCatalog,
   supportGuideImages,
+  supportGuideReadOptions,
   loadSupportGuideImages,
   renderSupportMessage,
   runBridge,
