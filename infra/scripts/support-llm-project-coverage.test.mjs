@@ -193,6 +193,66 @@ test('short followups retain the module, but completed tasks and ordinary conver
   assert.equal(router.classify('Спасибо, получилось!', history).eligible, false);
 });
 
+test('described word-to-response requests retrieve Publik auto-replies without a feature name', () => {
+  for (const text of [
+    'Здравствуйте . подскажите можно ли в данном боте сделать к примеру привязку к слово к примеру человек пишет слова группы и ему приходит список групп который к примеру админ сделал',
+    'Можно привязать к слову «группы», чтобы человеку приходил список ссылок, который я написал?',
+    'Хочу, чтобы человек пишет «прайс», а бот присылает мой текст с ценами',
+    'Как сделать триггер на слово, чтобы бот ответил списком ссылок?',
+    'В боте как сделать чтоб написали адрес и он выдал мой текст с адресом офиса, который я сам заранее добавлю?',
+    'Как в Публике завести триггер «каталог», чтобы отправлял мой готовый текст и фотографию?',
+    'В Майоре можно сделать ответ по слову «правила», чтобы бот отправлял мой текст?',
+    'Как привязать к слову «группы», чтобы бот отправлял список, но не удалял сообщения?',
+    'Как сделать, чтобы бот на слово «правила» отвечал моим текстом, и как удалять сообщения со спамом?',
+  ]) {
+    const route = router.classify(text);
+    assert.equal(route.requiredReply, true, text);
+    assert.equal(route.publisherRequest, true, text);
+    assert.equal(ids(text)[0], 'publisher-auto-replies-create', text);
+    assert.equal(ids(text).includes('networks-compose'), false, text);
+    assert.equal(router.classify(text, [], { replyToOther: true }).eligible, false, text);
+  }
+  const history = [
+    { role: 'user', text: 'Как сделать триггер: слово «группы» — бот присылает список?' },
+  ];
+  assert.ok(
+    ids('А если слово внутри длинного сообщения?', history).includes(
+      'publisher-auto-replies-matching',
+    ),
+  );
+  const followup = 'А если отвечать только когда сообщение целиком «меню», какую галочку убрать?';
+  assert.equal(router.classify(followup, history).requiredReply, true);
+  assert.ok(ids(followup, history).includes('publisher-auto-replies-matching'));
+  assert.equal(router.classify('Спасибо, получилось!', history).eligible, false);
+});
+
+test('auto-reply descriptions preserve moderation, other modules and human conversations', () => {
+  for (const [text, expected] of [
+    ['Как сделать триггер стоп-слова, чтобы бот удалял сообщение?', 'stop-words'],
+    ['Быстрые кнопки: что писать в строке нового поста?', 'channel-quick-buttons'],
+    ['В сетке где статистика аудитории всех групп?', 'networks-audience-statistics'],
+    ['Как настроить обязательную подписку на канал?', 'subscription'],
+  ]) {
+    assert.ok(ids(text).includes(expected), `${text}: ${ids(text).join(', ')}`);
+    assert.equal(
+      ids(text).some((id) => id.startsWith('publisher-auto-replies-')),
+      false,
+      text,
+    );
+  }
+  for (const text of [
+    'Меня это триггерит',
+    'Лена, ты пишешь слово, а я присылаю список, договорились?',
+  ])
+    assert.equal(router.classify(text).eligible, false, text);
+  for (const text of [
+    'Можно сделать, чтобы бот на слово «вопрос» отвечал сам через ИИ, каждый раз новым текстом?',
+    'Как сделать чтобы бот по слову «курс» отправлял текущий курс доллара из интернета?',
+    'Как сделать, чтобы бот на стоп-слова отвечал предупреждением и удалял сообщение?',
+  ])
+    assert.equal(router.classify(text).publisherRequest, false, text);
+});
+
 test('module context does not replace an independent question or the support role boundary', () => {
   const combined = ids('Я админ: как создать опрос и подключить Ластика для старых сообщений?');
   assert.ok(combined.includes('poll-create'));

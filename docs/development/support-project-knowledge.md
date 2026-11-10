@@ -82,6 +82,13 @@ Update semantic retrieval as well as keywords: existing primary facts suppress f
 retrieval. Topic inheritance must support short followups and stop at a completed task or ordinary
 conversation. Preserve the concise Russian response contract and verified catalog link rendering.
 
+Publik auto-replies must also be found from a description such as “a person writes a word and
+receives the administrator's prepared list”, without the product or feature name. Use the same
+intent for product selection, topic inheritance and fact retrieval. A list of group links can be
+the prepared response text; it does not imply network management or automatic group discovery.
+Replies appear in the same chat, as a reply to the participant. A word or “trigger” alone must
+not turn moderation, ordinary conversation or generative AI requests into auto-reply setup.
+
 [Project coverage tests](../../infra/scripts/support-llm-project-coverage.test.mjs) check module
 retrieval, shared registry coverage, key product limits, followups and neighboring boundaries.
 Run these with the existing routing, knowledge, client and answer-policy cases before the selected
