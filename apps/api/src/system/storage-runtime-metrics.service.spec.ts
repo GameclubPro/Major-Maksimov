@@ -4,6 +4,10 @@ import { getHeapStatistics } from 'node:v8';
 import { createChatContextCacheActivity } from '../chat-context/chat-context-cache-metrics';
 import { RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 import {
+  connectionAdmissionMetrics,
+  type ConnectionAdmissionSnapshot,
+} from '../prisma/connection-admission-metrics';
+import {
   sanitizeStorageRuntimeSnapshot,
   STORAGE_DELETE_DUE_SWEEP_STAGES,
   STORAGE_DELETE_RECONCILER_PHASES,
@@ -33,6 +37,7 @@ let mockGcCallback:
   | ((list: { getEntries(): Array<{ entryType: string; duration: number }> }) => void)
   | null = null;
 jest.mock('node:perf_hooks', () => ({
+  ...jest.requireActual<typeof import('node:perf_hooks')>('node:perf_hooks'),
   PerformanceObserver: jest.fn((callback) => {
     mockGcCallback = callback;
     return mockGcObserver;
@@ -47,6 +52,54 @@ const memoryFixture = {
   external: 512,
   arrayBuffers: 256,
 };
+
+function connectionAdmissionSnapshot(): ConnectionAdmissionSnapshot {
+  return {
+    lanes: {
+      ordinary: {
+        calls: 4,
+        errors: 1,
+        unknownClock: 1,
+        totalMs: 650,
+        maxMs: 500,
+        under100Ms: 1,
+        under500Ms: 1,
+        under2000Ms: 1,
+        under10000Ms: 0,
+        atLeast10000Ms: 0,
+      },
+      budgeted: {
+        calls: 1,
+        errors: 0,
+        unknownClock: 0,
+        totalMs: 5,
+        maxMs: 5,
+        under100Ms: 1,
+        under500Ms: 0,
+        under2000Ms: 0,
+        under10000Ms: 0,
+        atLeast10000Ms: 0,
+      },
+    },
+    counters: {
+      retryTimeouts: 1,
+      budgetRejectedBefore: 0,
+      capacityRejected: 0,
+      budgetRejectedAfter: 0,
+      lateReleases: 0,
+      registryOverflows: 0,
+    },
+    gauges: {
+      pools: 2,
+      capacity: 12,
+      total: 6,
+      idle: 1,
+      waiting: 2,
+      budgetedInFlight: 2,
+      endingPools: 0,
+    },
+  };
+}
 
 function deleteReconcilerSnapshot() {
   return {
@@ -124,6 +177,93 @@ describe('bounded storage-runtime metrics', () => {
   afterEach(async () => {
     await metrics.onModuleDestroy();
     jest.restoreAllMocks();
+  });
+
+  it('publishes and reads fixed admission measurements with the existing report epoch and TTL', async () => {
+    const fixture = connectionAdmissionSnapshot();
+    const privateFixture = {
+      ...fixture,
+      lanes: {
+        ...fixture.lanes,
+        ordinary: { ...fixture.lanes.ordinary, sql: 'private-query-fixture' },
+        'private-lane': fixture.lanes.ordinary,
+      },
+      counters: { ...fixture.counters, botId: 'private-bot-fixture' },
+      gauges: { ...fixture.gauges!, application_name: 'private-application-fixture' },
+      connectionString: 'private-connection-fixture',
+    };
+    const snapshot = jest
+      .spyOn(connectionAdmissionMetrics, 'snapshot')
+      .mockReturnValue(privateFixture);
+    const before = metrics.getLocalSnapshot()!;
+    expect(before.prismaAdmission).toEqual(fixture);
+    await metrics.publish();
+    const [key, encoded, expiration, ttl] = mockRedis.set.mock.calls[0];
+    const report = JSON.parse(encoded);
+    expect(key).toBe('runtime:storage-cost:v1:api-admin');
+    expect([expiration, ttl]).toEqual(['PX', 90_000]);
+    expect(report.startedAt).toBe(before.startedAt);
+    expect(report.prismaAdmission).toEqual(fixture);
+    expect(encoded).not.toContain('private-');
+    expect(snapshot).toHaveBeenCalledTimes(2);
+    mockRedis.mget.mockResolvedValueOnce([
+      JSON.stringify({ ...report, prismaAdmission: privateFixture }),
+      ...Array(RUNTIME_SERVICE_NAMES.length - 1).fill(null),
+    ]);
+    const fleet = await metrics.getFleetSnapshot();
+    expect(fleet.services[0].snapshot?.prismaAdmission).toEqual(fixture);
+    expect(JSON.stringify(fleet)).not.toContain('private-');
+    expect(snapshot).toHaveBeenCalledTimes(2);
+  });
+  it('keeps older and corrupt optional admission measurements independent of other metrics', () => {
+    const report = metrics.getLocalSnapshot()!;
+    const fixture = connectionAdmissionSnapshot();
+    const older = Object.fromEntries(
+      Object.entries(report).filter(([field]) => field !== 'prismaAdmission'),
+    );
+    expect(sanitizeStorageRuntimeSnapshot(older)).toMatchObject({
+      prismaAdmission: null,
+      counters: report.counters,
+      optimization: report.optimization,
+    });
+    for (const prismaAdmission of [
+      null,
+      [],
+      {},
+      { ...fixture, lanes: { ...fixture.lanes, budgeted: [] } },
+      { ...fixture, counters: { ...fixture.counters, retryTimeouts: -1 } },
+      { ...fixture, counters: { ...fixture.counters, lateReleases: 0.5 } },
+      {
+        ...fixture,
+        lanes: { ...fixture.lanes, ordinary: { ...fixture.lanes.ordinary, calls: NaN } },
+      },
+    ])
+      expect(sanitizeStorageRuntimeSnapshot({ ...report, prismaAdmission })).toMatchObject({
+        prismaAdmission: null,
+        counters: report.counters,
+        optimization: report.optimization,
+        processMemory: report.processMemory,
+      });
+    for (const prismaAdmission of [
+      { ...fixture, gauges: null },
+      { ...fixture, gauges: { ...fixture.gauges!, total: -1 } },
+      { ...fixture, counters: { ...fixture.counters, registryOverflows: 1 } },
+    ])
+      expect(
+        sanitizeStorageRuntimeSnapshot({ ...report, prismaAdmission })?.prismaAdmission,
+      ).toEqual({
+        lanes: fixture.lanes,
+        counters: prismaAdmission.counters,
+        gauges: null,
+      });
+    jest.spyOn(connectionAdmissionMetrics, 'snapshot').mockImplementation(() => {
+      throw new Error('private-admission-fixture');
+    });
+    expect(metrics.getLocalSnapshot()).toMatchObject({
+      prismaAdmission: null,
+      counters: report.counters,
+      optimization: report.optimization,
+    });
   });
 
   it('persists only fixed scalars and bounds the lifetime of every report', async () => {
@@ -598,7 +738,30 @@ describe('bounded storage-runtime metrics', () => {
       deleteDueSweep: null,
     });
   });
-  it('keeps a complete report at maximum scalar widths inside the fleet decoder size budget', () => {
+  it('keeps a complete report at maximum scalar widths inside the fleet decoder size budget', async () => {
+    jest
+      .spyOn(connectionAdmissionMetrics, 'snapshot')
+      .mockReturnValue(connectionAdmissionSnapshot());
+    const automaticDeleteAuthors = { roster: 1, protected: 1, legacy: 1, membership: 1, shared: 1 };
+    const vkMediaAdmission = {
+      budgetBytes: 1,
+      reservedBytes: 1,
+      active: 1,
+      waiting: 1,
+      peakReservedBytes: 1,
+      peakWaiting: 1,
+      stopping: false,
+    };
+    const templateSegments = {
+      compactBytes: 1,
+      maxCompactBytes: 1,
+      maxCompactEntryBytes: 1,
+      mediaBytes: 1,
+      maxMediaBytes: 1,
+      mediaEntries: 1,
+      sharedMediaReuses: 1,
+      mediaCapacityEvictions: 1,
+    };
     metrics.onModuleInit();
     mockEventLoopDelay.count = 1;
     mockEventLoopDelay.mean = 100_000_000;
@@ -606,6 +769,8 @@ describe('bounded storage-runtime metrics', () => {
     mockEventLoopDelay.percentile.mockReturnValue(100_000_000);
     metrics.registerDeleteReconcilerSnapshot(deleteReconcilerSnapshot);
     metrics.registerDeleteDueSweepSnapshot(deleteDueSweepSnapshot);
+    metrics.registerAutomaticDeleteAuthorSnapshot(() => automaticDeleteAuthors);
+    metrics.registerVkMediaAdmissionSnapshot(() => vkMediaAdmission);
     metrics.registerChatContextCacheSnapshot(() => ({
       entries: 1,
       estimatedBytes: 1,
@@ -635,6 +800,7 @@ describe('bounded storage-runtime metrics', () => {
         fullLoads: 1,
         shellReads: 1,
         reuses: 1,
+        segments: templateSegments,
       },
     }));
     metrics.registerVkPersistenceSnapshot(() => ({
@@ -649,17 +815,30 @@ describe('bounded storage-runtime metrics', () => {
       if (typeof value === 'number')
         return field === 'schemaVersion' || field === 'resolutionMs'
           ? value
-          : Number.MAX_SAFE_INTEGER;
+          : field === 'registryOverflows'
+            ? 0
+            : Number.MAX_SAFE_INTEGER;
       if (value && typeof value === 'object')
         return Object.fromEntries(
           Object.entries(value).map(([key, entry]) => [key, widen(entry, key)]),
         );
       return value;
     };
-    const widest = widen(metrics.getLocalSnapshot());
+    const local = metrics.getLocalSnapshot();
+    expect(local?.prismaAdmission).toEqual(connectionAdmissionSnapshot());
+    expect(local?.automaticDeleteAuthors).toEqual(automaticDeleteAuthors);
+    expect(local?.vkMediaAdmission).toEqual(vkMediaAdmission);
+    expect(local?.chatContextCache?.settingsTemplates?.segments).toEqual(templateSegments);
+    const widest = widen(local);
     const encoded = JSON.stringify(widest);
     expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(STORAGE_RUNTIME_MAX_REPORT_BYTES);
     expect(sanitizeStorageRuntimeSnapshot(JSON.parse(encoded))).toEqual(widest);
+    jest.spyOn(Date, 'now').mockReturnValue(Number.MAX_SAFE_INTEGER);
+    mockRedis.mget.mockResolvedValueOnce([
+      encoded,
+      ...Array(RUNTIME_SERVICE_NAMES.length - 1).fill(null),
+    ]);
+    expect((await metrics.getFleetSnapshot()).services[0].snapshot).toEqual(widest);
   });
   it('publishes only fixed reconciliation phases with the existing process epoch and report', async () => {
     const fixture = deleteReconcilerSnapshot();
@@ -734,13 +913,13 @@ describe('bounded storage-runtime metrics', () => {
       ...metrics.getLocalSnapshot(),
       observedAt: Date.now() - 100_000,
     });
-    mockRedis.mget.mockResolvedValueOnce([
-      healthy,
-      stale,
-      '{',
-      'x'.repeat(10_000),
-      ...Array(11).fill(null),
-    ]);
+    const oversized = JSON.stringify({
+      ...metrics.getLocalSnapshot(),
+      unexpected: 'x'.repeat(STORAGE_RUNTIME_MAX_REPORT_BYTES),
+    });
+    expect(Buffer.byteLength(oversized)).toBeGreaterThan(STORAGE_RUNTIME_MAX_REPORT_BYTES);
+    expect(sanitizeStorageRuntimeSnapshot(JSON.parse(oversized))).not.toBeNull();
+    mockRedis.mget.mockResolvedValueOnce([healthy, stale, '{', oversized, ...Array(11).fill(null)]);
     const fleet = await metrics.getFleetSnapshot();
     expect(mockRedis.mget.mock.calls[0]).toHaveLength(RUNTIME_SERVICE_NAMES.length);
     expect(fleet.services[0].snapshot).not.toBeNull();

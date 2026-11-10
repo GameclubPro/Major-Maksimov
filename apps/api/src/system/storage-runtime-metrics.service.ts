@@ -16,6 +16,11 @@ import {
   CHAT_CONTEXT_INVALIDATION_REASONS,
 } from '../chat-context/chat-context-cache-metrics';
 import { isRuntimeServiceName, RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
+import {
+  connectionAdmissionMetrics,
+  sanitizeConnectionAdmissionMetrics,
+  type ConnectionAdmissionSnapshot,
+} from '../prisma/connection-admission-metrics';
 
 export const STORAGE_RUNTIME_METRICS_PREFIX = 'runtime:storage-cost:v1:';
 export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 24_576;
@@ -288,6 +293,9 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
     (source.deleteReconciler != null && !deleteReconciler)
   )
     return null;
+  const prismaAdmission: ConnectionAdmissionSnapshot | null = sanitizeConnectionAdmissionMetrics(
+    source.prismaAdmission,
+  );
   return {
     schemaVersion: 1,
     startedAt: source.startedAt,
@@ -315,6 +323,7 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
       source.deleteDueSweep == null ? null : sanitizeDeleteDueSweepSnapshot(source.deleteDueSweep),
     automaticDeleteAuthors: checkedNumbers(source.automaticDeleteAuthors, DELETE_AUTHOR_FIELDS),
     optimization: sanitizeOptimizationRuntimeMetrics(source.optimization),
+    prismaAdmission,
     processMemory:
       source.processMemory == null
         ? null
@@ -522,6 +531,7 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
       deleteDueSweep: readProvider(this.deleteDueSweepProvider),
       automaticDeleteAuthors: readProvider(this.deleteAuthorProvider),
       optimization: this.optimization.snapshot(),
+      prismaAdmission: readProvider(() => connectionAdmissionMetrics.snapshot()),
       processMemory: this.readProcessMemory(),
       processPerformance: this.readProcessPerformance(),
       vkMediaAdmission: readProvider(this.vkMediaAdmissionProvider),
