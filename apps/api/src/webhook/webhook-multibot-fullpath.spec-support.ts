@@ -77,6 +77,7 @@ export type MultibotHarnessOptions = {
   bots: number;
   mode?: 'off' | 'shadow' | 'on';
   quotaProfile?: 'production' | 'fixture';
+  tokenRps?: 25 | 30;
   productionEnqueueCapacity?: boolean;
   productionOutboxSelection?: boolean;
   recoverDueDeletes?: boolean;
@@ -97,6 +98,8 @@ export const MULTIBOT_HARNESS_POOLS = {
 } as const;
 export type MultibotHarnessRole = keyof typeof MULTIBOT_HARNESS_POOLS;
 export type SimulatedMaxEffect = {
+  callId: string;
+  observedAtMs: number;
   method: string;
   path: string;
   botId: string;
@@ -209,7 +212,8 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     APP_SERVICE_NAME: split?.role ?? 'api-moderation',
     MODERATION_BACKGROUND_TASKS_ENABLED: false,
     CHANNEL_AUTO_POST_SCAN_MAX_CHANNELS: 0,
-    MAX_API_GLOBAL_RPS: 30,
+    MAX_API_GLOBAL_RPS: options.tokenRps ?? 30,
+    ...(options.tokenRps === undefined ? {} : { MAX_API_GLOBAL_BURST: 0 }),
     ...(split
       ? {
           MAX_API_GLOBAL_RPS_CRITICAL: 12,
@@ -339,6 +343,8 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
           const method = request.method.toLowerCase();
           const messageId = String(request.params?.message_id ?? request.params?.message_ids ?? '');
           const call = {
+            callId: randomUUID(),
+            observedAtMs: Date.now(),
             method,
             path,
             botId: bot.id,
@@ -1245,6 +1251,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     capacity: { sqlPoolMax, preparationPoolMax, enqueueConcurrency },
     failures,
     messages,
+    hasSimulatedMessage: async (messageId: string) => !!(await readMessage(messageId)),
     messageLookupFailures,
     seedCatalog,
     ingest,

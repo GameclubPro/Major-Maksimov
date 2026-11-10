@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { Client } from 'pg';
+import { Queue } from 'bullmq';
 import { Prisma } from '../prisma/prisma-client';
 import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import {
+  MODERATION_DELETE_INTENT_QUEUE,
+  type ModerationDeleteIntentJob,
+} from './moderation-delete-intent.queue';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -16,6 +21,7 @@ describePostgres('PostgreSQL delete due selection', () => {
   let explain = false;
   let plan: Plan;
   let service: ModerationDeleteIntentService;
+  let queue: Queue<ModerationDeleteIntentJob> | undefined;
   let createService: (overrides?: Record<string, unknown>) => ModerationDeleteIntentService;
 
   beforeAll(async () => {
@@ -51,6 +57,9 @@ describePostgres('PostgreSQL delete due selection', () => {
     await client.query(
       'CREATE INDEX due_idx ON moderation_delete_intents(status, next_attempt_at, execute_at)',
     );
+    await client.query(
+      'CREATE INDEX status_created_id_idx ON moderation_delete_intents(status, created_at, id)',
+    );
     await client.query(`CREATE TABLE moderation_delete_intent_reasons (
       intent_id text NOT NULL, rule_code text NOT NULL, reason_key text NOT NULL, metadata jsonb,
       id text NOT NULL DEFAULT 'fixture-reason',
@@ -78,7 +87,7 @@ describePostgres('PostgreSQL delete due selection', () => {
         prisma as never,
         {} as never,
         {} as never,
-        {} as never,
+        queue as never,
         new ConfigService({
           MODERATION_DELETE_INTENT_MODE: 'shadow',
           COMMERCIAL_OCR_ROLLOUT_MODE: 'baseline',
@@ -108,6 +117,15 @@ describePostgres('PostgreSQL delete due selection', () => {
     await client.query('TRUNCATE moderation_delete_intent_reasons, moderation_delete_intents');
   });
 
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    if (queue) {
+      await queue.obliterate({ force: true });
+      await queue.close();
+      queue = undefined;
+    }
+  });
+
   const select = () =>
     (
       service as unknown as { selectDueIntentIds(): Promise<Array<{ id: string }>> }
@@ -127,6 +145,60 @@ describePostgres('PostgreSQL delete due selection', () => {
     await client.query('ANALYZE moderation_delete_intents');
     await client.query('ANALYZE moderation_delete_intent_reasons');
   }
+
+  it('repairs a missing tail wakeup behind existing jobs while the real queue is paused', async () => {
+    const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim();
+    if (!redisUrl) throw new Error('This recovery case requires disposable PostgreSQL and Redis');
+    const url = new URL(redisUrl);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname))
+      throw new Error('Disposable local Redis required');
+    queue = new Queue(MODERATION_DELETE_INTENT_QUEUE, {
+      connection: { host: url.hostname, port: Number(url.port || 6379) },
+      prefix: `delete-due-recovery-${randomUUID()}`,
+    });
+    await queue.pause();
+    service = createService();
+    // FLAG: Isolate scheduling from unchanged expiry; real SQL selects and real Redis
+    // handoffs remain in the test. A failed initial enqueue leaves this durable state.
+    jest
+      .spyOn(service as unknown as { expireDueIntents(): Promise<number> }, 'expireDueIntents')
+      .mockResolvedValue(0);
+    await client.query(`INSERT INTO moderation_delete_intents
+      (id,status,next_attempt_at,created_at)
+      SELECT 'recover-'||lpad(n::text,3,'0'),'PENDING',
+        TIMESTAMP '2026-01-01' + n*INTERVAL '1 millisecond',
+        TIMESTAMP '2026-01-01' + n*INTERVAL '1 millisecond'
+      FROM generate_series(1,101)n;
+      INSERT INTO moderation_delete_intent_reasons(intent_id,rule_code,reason_key,metadata)
+      SELECT id,'BOT_MESSAGE_AUTO_DELETE','fixture','{}'::jsonb FROM moderation_delete_intents;`);
+    await queue.addBulk(
+      Array.from({ length: 100 }, (_, index) => {
+        const intentId = `recover-${String(index + 1).padStart(3, '0')}`;
+        return {
+          name: 'execute-moderation-delete-intent',
+          data: { intentId },
+          opts: {
+            jobId: `mdi-${intentId}`,
+            priority: 1,
+            removeOnComplete: true,
+            removeOnFail: true,
+          },
+        };
+      }),
+    );
+    for (let tick = 0; tick < 8; tick++) await service.sweepDueIntents();
+    expect(await queue.getJob('mdi-recover-101')).toBeDefined();
+    expect(await queue.isPaused()).toBe(true);
+    expect((await queue.getJob('mdi-recover-001'))?.opts.priority).toBe(1);
+
+    await (await queue.getJob('mdi-recover-001'))!.remove();
+    await service.sweepDueIntents();
+    expect(await queue.getJob('mdi-recover-001')).toBeDefined();
+    const retained = await client.query(
+      "SELECT count(*)::int AS count FROM moderation_delete_intents WHERE status='PENDING'",
+    );
+    expect(retained.rows[0].count).toBe(101);
+  });
 
   it.each(['base', 'optional', 'guarded'])(
     'bounds intent and reason scans with scope %s',

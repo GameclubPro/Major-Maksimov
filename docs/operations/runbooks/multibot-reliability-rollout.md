@@ -265,6 +265,25 @@ receipt and text/length rules; it does not measure native IMAGE decoding or OCR.
 The driver reports its hardware, offered rate, latency and final backlog. Finite
 local samples cannot certify a production maximum or replace daily observation.
 
+Use `--profiles=mixed --quota=25 --violations=50` to interleave four hot chats with
+quiet events during the same stream. This profile requires at least five chats and
+5–10,000 messages. The catalog driver defaults to a 25 rps token quota with no burst;
+`--quota=30` is an explicit comparison profile. Existing standalone harness callers
+retain their original defaults. Record topology, enqueue mode, quota and offered rate.
+For a single-process `--enqueue=production` run, set `PRISMA_PG_POOL_MAX=24` in the
+child environment. Split runs use `with-test-stores.mjs --profile=split-load` and
+retain their existing per-role pool allocation.
+
+The mixed report includes the expected manifest and its hash before ingress, with
+KEEP/DELETE, exact executor, target and cohort expectations. Per-cohort outcome and
+confirmed-delete clocks start at logical ingress and require completed ownership,
+positive delete/verification evidence and the simulated message state. Missing,
+unfinished, quarantined, expired and unknown outcomes remain in the denominator;
+incomplete timing sets have no complete-population percentiles. Use `--latency=p95,p99`
+to set an explicit millisecond gate. Without it, latency is observational and cannot
+be described as a passed speed target. These synthetic labels do not establish
+classifier precision on real messages or native OCR/media capacity.
+
 ## Local catalog measurements, 2026-10-05
 
 PostgreSQL 16, Redis 7, BullMQ and Node 24.21 ran on Linux with an Intel
