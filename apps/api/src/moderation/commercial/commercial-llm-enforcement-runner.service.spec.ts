@@ -13,6 +13,7 @@ import {
 } from './commercial-llm-enforcement.mailbox';
 import { CommercialLlmEnforcementProcessor } from './commercial-llm-enforcement.processor';
 import { CommercialLlmWorkstationMailbox } from './commercial-llm-workstation.mailbox';
+import { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
 import { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
 import {
   buildCommercialLlmOffer,
@@ -124,6 +125,9 @@ describe('commercial AI runner resource lifecycle', () => {
     jest.spyOn(redis, 'connect').mockResolvedValue(undefined);
     jest.spyOn(redis, 'disconnect').mockImplementation(() => undefined);
     jest.spyOn(redis, 'set').mockResolvedValue('OK');
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'advertise').mockResolvedValue(undefined);
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'withdraw').mockResolvedValue(undefined);
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'take').mockResolvedValue(null);
     jest.spyOn(shadowLease, 'createCommercialLlmRedis').mockReturnValue(redis);
     jest.spyOn(shadowProcessor, 'commercialLlmHostHasHeadroom').mockResolvedValue(true);
     mailbox = new CommercialLlmEnforcementMailbox(redis);
@@ -155,6 +159,19 @@ describe('commercial AI runner resource lifecycle', () => {
     jest.restoreAllMocks();
     redis.disconnect();
     jest.useRealTimers();
+  });
+
+  it('continues moderation polling when the independent preview mailbox fails', async () => {
+    jest
+      .mocked(CommercialLlmPreviewMailbox.prototype.take)
+      .mockRejectedValue(new Error('WRONGTYPE diagnostic request'));
+    const run = jest
+      .spyOn(CommercialLlmEnforcementProcessor.prototype, 'run')
+      .mockResolvedValue({ outcome: 'idle' });
+    runner!.onModuleInit();
+    await jest.advanceTimersByTimeAsync(500);
+    expect(mailbox.advertise).toHaveBeenCalled();
+    expect(run).toHaveBeenCalled();
   });
 
   function pendingJob() {

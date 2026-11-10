@@ -3,12 +3,12 @@ import {
   COMMERCIAL_ADS_EXCEPTIONS_MAX,
   commercialAdsExceptionSchema,
   commercialAdsPolicySchema,
-  commercialAdsPreviewRequestSchema,
   commercialAdsPreviewResponseSchema,
   createDefaultCommercialAdsPolicy,
   resolveCommercialAdsPolicy,
   type CommercialAdsException,
 } from '../src/commercial-policy.js';
+import { commercialAdsPreviewRequestSchema } from '../src/commercial-preview.js';
 import { chatSettingsSchema } from '../src/core.js';
 
 const nowMs = Date.parse('2026-11-04T12:00:00.000Z');
@@ -250,6 +250,54 @@ describe('commercial category policy resolution', () => {
 });
 
 describe('commercial policy preview boundary', () => {
+  it('validates a complete optional draft profile and preserves a one point threshold gap', () => {
+    const request = { text: 'Сообщение', policy: null, enabled: true };
+    for (const [warn, deletion] of [
+      [10, 20],
+      [60, 61],
+      [90, 100],
+    ]) {
+      const classification = {
+        commercialAdsSensitivity: 'STRICT',
+        commercialAdsWarnThreshold: warn,
+        commercialAdsDeleteThreshold: deletion,
+      };
+      expect(
+        commercialAdsPreviewRequestSchema.parse({ ...request, classification }).classification,
+      ).toEqual(classification);
+    }
+    for (const classification of [
+      { commercialAdsSensitivity: 'STRICT', commercialAdsWarnThreshold: 45 },
+      {
+        commercialAdsSensitivity: 'UNKNOWN',
+        commercialAdsWarnThreshold: 45,
+        commercialAdsDeleteThreshold: 65,
+      },
+      {
+        commercialAdsSensitivity: 'STRICT',
+        commercialAdsWarnThreshold: 45.5,
+        commercialAdsDeleteThreshold: 65,
+      },
+      {
+        commercialAdsSensitivity: 'STRICT',
+        commercialAdsWarnThreshold: 9,
+        commercialAdsDeleteThreshold: 65,
+      },
+      {
+        commercialAdsSensitivity: 'STRICT',
+        commercialAdsWarnThreshold: 45,
+        commercialAdsDeleteThreshold: 45,
+      },
+      {
+        commercialAdsSensitivity: 'STRICT',
+        commercialAdsWarnThreshold: 45,
+        commercialAdsDeleteThreshold: 101,
+      },
+    ])
+      expect(
+        commercialAdsPreviewRequestSchema.safeParse({ ...request, classification }).success,
+      ).toBe(false);
+  });
   it('requires a bounded draft, explicit module state and valid optional author', () => {
     const request = { text: 'Проверяемый текст', enabled: true, policy: null };
     expect(commercialAdsPreviewRequestSchema.parse(request)).toEqual(request);

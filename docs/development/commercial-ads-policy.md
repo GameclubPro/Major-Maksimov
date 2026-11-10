@@ -19,7 +19,11 @@ rules, immunity, source identity or deadlines. Bulk category application preserv
 recipient chat's own grants; it cannot copy another chat's participant permissions.
 Settings revision checks serialize concurrent writes.
 
-Deterministic category evidence reuses the commercial detector's subtypes and safe context.
+Deterministic category evidence requires a real commercial detector result and preserves its
+safe context. A separate bounded resolver inspects every unprotected offer block; ranked
+subtypes alone do not provide the full category inventory. It excludes incidental fulfillment
+and material/brand mentions, retains independently offered work and commercial community
+invitations without requiring a link, and refuses incomplete original-text inspection.
 The pinned `commercial-categories-v2` AI prompt reports `SERVICE_OFFER`, `BUSINESS_OFFER`
 and `COMMERCIAL_COMMUNITY` directly. Mixed offers retain every reported category;
 incidental delivery, material or contact language does not add another category.
@@ -55,6 +59,23 @@ is displayed as «Недостаточно данных» with a warning icon, i
 mixed-category explanations never imply that every category is blocked.
 Completed results scroll into view above the action footer on small phones.
 
+The optional `classification` request field carries the complete unsaved sensitivity and both
+thresholds, with the same valid ranges and strict delete-above-warn relation. Older clients that
+omit it retain saved classification settings. Changing any draft classification field invalidates
+the displayed preview and participates in its unsaved-settings notice.
+Request validation and preview explanations have focused modules so ordinary settings and
+network recovery do not load preview-only code. Existing production route budgets remain binding.
+
+AI preview uses one expiring Redis diagnostic request, separate from enforcement sources and
+proofs. Only the current `api-moderation-background` worker may claim it and reach the private
+CPU model network; `api-admin` never starts model HTTP or owns a physical CPU lease. Submit,
+claim and pre-dispatch checks yield to pending/live moderation in both admission namespaces.
+An unavailable worker, busy CPU, pressure or expired original twenty-second deadline produces
+`UNAVAILABLE`. The actual CPU handoff also requires six seconds remaining. A preview failure
+cannot interrupt enforcement polling; shutdown withdraws readiness and drains actual inference.
+Cancelling or expiring the diagnostic request never releases an uncertain physical CPU lease;
+only its scheduler or the named guarded recovery procedure may settle that lease.
+
 COMMERCIAL journal filtering happens before pagination using bounded indexed heads for
 `COMMERCIAL_AD` and `COMMERCIAL_LLM_DELETE`. New cursors bind chat, period and filter.
 Feedback validates an exact feed row and records an idempotent actor/chat/event audit report.
@@ -87,9 +108,14 @@ bounded cost for the approved policy feature after removing unrelated initial lo
 - Native: `admin-commercial-ads-postgres.spec.ts` and
   `commercial-llm-delete-guard-postgres.spec.ts` cover persistence, CAS, bounded history,
   feedback idempotency and fresh deletion guards through the test-store wrapper.
+- Native Redis: `commercial-llm-preview.redis-integration.spec.ts` covers bounded diagnostic
+  handoff, priority, exact ownership, cancellation and the pre-dispatch CPU budget;
+  `commercial-llm-cpu-lease.redis-integration.spec.ts` preserves uncertain HTTP fencing.
 - Mobile: `apps/miniapp/test/commercial-ads-policy.test.ts` and
   `node apps/miniapp/test/settings-commercial.browser.mjs` cover draft/save/discard,
   exceptions, preview, journal, widths 320–430, light/dark and keyboard/short viewports.
+  `node apps/miniapp/test/commercial-preview-draft.browser.mjs` additionally checks complete
+  draft-profile transport, result invalidation and superseded asynchronous responses.
 - Rollback: `infra/scripts/commercial-text-deploy-guards.test.mjs` refuses sources missing
   the policy and v3 readers. Browser evidence does not prove behavior in a physical MAX client.
 

@@ -13,9 +13,16 @@ export class CommercialLlmBudgetedSecondary implements CommercialLlmClassifier {
     private readonly client: CommercialLlmHttpClassifier,
   ) {}
 
-  async classify(excerpt: string, signal?: AbortSignal, mayContinue?: () => Promise<boolean>) {
+  async classify(
+    excerpt: string,
+    signal?: AbortSignal,
+    mayContinue?: () => Promise<boolean>,
+    deadlineAtMs = Infinity,
+  ) {
     if (signal?.aborted || (mayContinue && !(await mayContinue())))
       throw new CommercialLlmError('ABORTED');
+    const mayDispatch = () => deadlineAtMs - Date.now() >= 6_000;
+    if (!mayDispatch()) throw new CommercialLlmError('ABORTED');
     const token = await this.lease.acquire();
     if (!token) throw new CommercialLlmError('BUSY');
     const scope = new CommercialLlmCpuLeaseScope(this.lease, token);
@@ -23,7 +30,9 @@ export class CommercialLlmBudgetedSecondary implements CommercialLlmClassifier {
       !signal?.aborted && (await this.lease.owns(token)) && (!mayContinue || (await mayContinue()));
     try {
       if (!(await valid())) throw new CommercialLlmError('ABORTED');
-      const result = await scope.classifier(this.client).classify(excerpt, signal, valid);
+      const result = await scope
+        .classifier(this.client, mayDispatch)
+        .classify(excerpt, signal, valid);
       // FLAG: A server result cannot escape a lost lease or revive expired source authority.
       if (!(await valid())) throw new CommercialLlmError('ABORTED');
       return result;

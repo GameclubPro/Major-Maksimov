@@ -47,7 +47,7 @@ export class CommercialLlmCpuLeaseScope {
             dispatched: () => {
               // FLAG: finish can run between beforeDispatch's resolved promise and fetch.
               // This synchronous guard must precede the actual handoff without another await.
-              if (this.finished || !this.running || signal?.aborted)
+              if (this.finished || !this.running || signal?.aborted || !mayDispatch())
                 throw new CommercialLlmError('ABORTED');
               this.uncertain = true;
             },

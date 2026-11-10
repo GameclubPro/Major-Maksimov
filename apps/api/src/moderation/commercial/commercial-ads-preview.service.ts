@@ -5,7 +5,6 @@ import {
   type CommercialAdsPreviewRequest,
   type CommercialAdsPreviewResponse,
 } from '@maxim/contracts/settings';
-import { BackgroundRuntimeGovernorService } from '../../system/background-runtime-governor.service';
 import { CommercialAdDetector } from './commercial-ad.detector';
 import { isCommercialMessageDeleteEligible } from './commercial-action-policy';
 import {
@@ -20,13 +19,10 @@ import { collectCommercialSignals } from './commercial-features';
 import { deriveCommercialSafeContextBucket } from './commercial-safe-context';
 import { resolveCommercialThresholds } from '../rule-engine-commercial-thresholds';
 import type { CommercialDeleteSettings } from './commercial-delete-binding';
-import { CommercialLlmClient, CommercialLlmError } from './commercial-llm.client';
+import { CommercialLlmError } from './commercial-llm.client';
 import { commercialLlmHasPinnedServerIdentity } from './commercial-llm-enforcement.protocol';
-import { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
-import { CommercialLlmShadowLease, createCommercialLlmRedis } from './commercial-llm-shadow.lease';
-import { commercialLlmHostHasHeadroom } from './commercial-llm-shadow.processor';
-import { COMMERCIAL_LLM_ENFORCEMENT_KEYS } from './commercial-llm-enforcement.mailbox';
-import { COMMERCIAL_LLM_POOL_ADMISSION_KEYS } from './commercial-llm-pool-admission.mailbox';
+import { createCommercialLlmRedis } from './commercial-llm-shadow.lease';
+import { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
 import {
   sanitizeCommercialCorpusText,
   hasResidualCommercialContactCandidate,
@@ -37,10 +33,7 @@ export class CommercialAdsPreviewService {
   private readonly detector = new CommercialAdDetector();
   private busy = false;
 
-  constructor(
-    private readonly config: ConfigService,
-    private readonly governor: BackgroundRuntimeGovernorService,
-  ) {}
+  constructor(private readonly config: ConfigService) {}
 
   async preview(
     input: CommercialAdsPreviewRequest,
@@ -49,6 +42,7 @@ export class CommercialAdsPreviewService {
     if (!input.enabled) return { decision: 'KEEP', categories: [], reason: 'FILTER_DISABLED' };
     const effective = {
       ...settings,
+      ...input.classification,
       commercialAdsFilterEnabled: true,
       commercialAdsPolicy: input.policy,
     };
@@ -75,7 +69,7 @@ export class CommercialAdsPreviewService {
       const state = collectCommercialSignals({
         normalizedText: normalizePreparedCommercialText(rawLoweredText),
         rawLoweredText,
-        profile: resolveCommercialThresholds(settings),
+        profile: resolveCommercialThresholds(effective),
         commercialCampaignContext: null,
       });
       // FLAG: Existing safe-context evidence can explain a private sale; it never grants
@@ -106,29 +100,7 @@ export class CommercialAdsPreviewService {
           return this.unavailable();
         redis = createCommercialLlmRedis(this.config.getOrThrow<string>('REDIS_URL'));
         await redis.connect();
-        const signal = AbortSignal.timeout(20_000);
-        const keys = [COMMERCIAL_LLM_ENFORCEMENT_KEYS, COMMERCIAL_LLM_POOL_ADMISSION_KEYS].flatMap(
-          (entry) => [entry.slot, entry.slotNext, entry.active, entry.primary, entry.secondary],
-        );
-        // FLAG: Preview never enters the enforcement mailbox or its proofs. Yield shared CPU
-        // admission to pending/live moderation and never occupy its waiting-confirmation slot.
-        const mayContinue = async () => {
-          if (signal.aborted || (await redis!.exists(...keys)) !== 0) return false;
-          const decision = await this.governor.decide({
-            component: 'commercial-llm-shadow',
-            sourceTag: 'commercial-llm-shadow',
-          });
-          return decision.action === 'run' && commercialLlmHostHasHeadroom();
-        };
-        if (!(await mayContinue())) return this.unavailable();
-        const scheduler = new CommercialLlmSecondaryScheduler(
-          new CommercialLlmShadowLease(redis),
-          new CommercialLlmClient({
-            endpoint: this.config.getOrThrow<string>('COMMERCIAL_LLM_ENDPOINT'),
-            timeoutMs: 20_000,
-          }),
-        );
-        const result = await scheduler.classifyAudit(excerpt, signal, mayContinue);
+        const result = await new CommercialLlmPreviewMailbox(redis).classify(excerpt);
         if (!commercialLlmHasPinnedServerIdentity(result))
           throw new CommercialLlmError('INVALID_RESPONSE');
         categories = detectCommercialAdsCategories(input.text, effective, result);

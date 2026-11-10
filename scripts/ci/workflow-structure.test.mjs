@@ -496,6 +496,7 @@ test('native race lane lists existing literal test paths without shell operators
     'src/admin/safety-desk-commercial-ai.redis-integration.spec.ts',
     'src/admin/safety-desk-commercial-ai-pool.redis-integration.spec.ts',
     'src/moderation/commercial/commercial-llm-cpu-lease.redis-integration.spec.ts',
+    'src/moderation/commercial/commercial-llm-preview.redis-integration.spec.ts',
   ]) {
     assert.ok(paths.includes(path), `Missing critical native regression: ${path}`);
   }

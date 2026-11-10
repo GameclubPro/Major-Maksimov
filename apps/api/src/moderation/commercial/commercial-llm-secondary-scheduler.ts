@@ -24,12 +24,18 @@ export class CommercialLlmSecondaryScheduler {
       undefined,
   ) {}
 
-  async classifyAudit(excerpt: string, signal?: AbortSignal, mayContinue?: () => Promise<boolean>) {
+  async classifyAudit(
+    excerpt: string,
+    signal?: AbortSignal,
+    mayContinue?: () => Promise<boolean>,
+    deadlineAtMs = Infinity,
+  ) {
     if (this.waiting) throw new CommercialLlmError('BUSY');
     return new CommercialLlmBudgetedSecondary(this.lease, this.client).classify(
       excerpt,
       signal,
       mayContinue,
+      deadlineAtMs,
     );
   }
 

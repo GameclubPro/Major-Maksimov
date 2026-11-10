@@ -1,10 +1,8 @@
 import { ConfigService } from '@nestjs/config';
 import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import { CommercialAdsPreviewService } from './commercial-ads-preview.service';
-import type { BackgroundRuntimeGovernorService } from '../../system/background-runtime-governor.service';
 import * as shadowLease from './commercial-llm-shadow.lease';
-import * as shadowProcessor from './commercial-llm-shadow.processor';
-import { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
+import { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
 import { COMMERCIAL_LLM_POOL_PROFILES } from './commercial-llm-pool.protocol';
 import {
   COMMERCIAL_LLM_POLICY_VERSION,
@@ -26,24 +24,88 @@ const settings = {
 const text =
   'Ремонтируем стиральные машины. Выезд ежедневно, гарантия. Принимаем заказы, запись по телефону +7 900 000 10 42.';
 function fixture(ai = false) {
-  const governor = {
-    decide: jest.fn<
-      ReturnType<BackgroundRuntimeGovernorService['decide']>,
-      Parameters<BackgroundRuntimeGovernorService['decide']>
-    >(),
-  };
   const service = new CommercialAdsPreviewService(
     new ConfigService({
       COMMERCIAL_LLM_ENFORCEMENT_ENABLED: ai,
       REDIS_URL: 'redis://127.0.0.1:1',
       COMMERCIAL_LLM_ENDPOINT: 'http://127.0.0.1:1',
     }),
-    governor as never,
   );
-  return { service, governor };
+  return { service };
 }
 describe('commercial preview without moderation effects', () => {
   afterEach(() => jest.restoreAllMocks());
+  it('uses the complete unsaved sensitivity profile without changing saved settings', async () => {
+    const { service } = fixture();
+    const saved = { ...settings, commercialAdsWarnThreshold: 60, commercialAdsDeleteThreshold: 82 };
+    const request = {
+      text: 'ГРУЗОПЕРЕВОЗКИ +7 900 000 10 42',
+      enabled: true,
+      policy: null,
+      classification: {
+        commercialAdsSensitivity: 'STRICT' as const,
+        commercialAdsWarnThreshold: 38,
+        commercialAdsDeleteThreshold: 55,
+      },
+    };
+    const before = JSON.stringify({ saved, request });
+    expect((await service.preview({ ...request, classification: undefined }, saved)).decision).toBe(
+      'KEEP',
+    );
+    expect(await service.preview(request, saved)).toMatchObject({
+      decision: 'DELETE',
+      categories: ['SERVICES'],
+    });
+    expect(JSON.stringify({ saved, request })).toBe(before);
+  });
+
+  it.each([
+    {
+      commercialAdsSensitivity: 'BALANCED' as const,
+      commercialAdsWarnThreshold: 60,
+      commercialAdsDeleteThreshold: 82,
+    },
+    settings,
+    {
+      commercialAdsSensitivity: 'STRICT' as const,
+      commercialAdsWarnThreshold: 38,
+      commercialAdsDeleteThreshold: 55,
+    },
+  ])('keeps incidental delivery out of the service category with profile %j', async (profile) => {
+    const { service } = fixture();
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.BUSINESS = 'ALLOW';
+    expect(
+      await service.preview(
+        {
+          text: 'Наш магазин продаёт краску. Поможем подобрать цвет, доставка включена. Принимаем заказы. +7 900 000 10 42',
+          enabled: true,
+          policy,
+        },
+        { ...settings, ...profile },
+      ),
+    ).toMatchObject({ decision: 'KEEP', categories: ['BUSINESS'] });
+  });
+
+  it('retains a separate service and commercial channel without requiring a link', async () => {
+    const { service } = fixture();
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.BUSINESS = 'ALLOW';
+    policy.categories.SERVICES = 'ALLOW';
+    expect(
+      await service.preview(
+        {
+          text: 'Продаём краску. Отдельно выполняем покраску. Вступайте в наш канал с каталогом. +7 900 000 10 42.',
+          enabled: true,
+          policy,
+        },
+        settings,
+      ),
+    ).toMatchObject({
+      decision: 'DELETE',
+      categories: expect.arrayContaining(['BUSINESS', 'SERVICES', 'COMMUNITIES']),
+    });
+  });
   it('checks unsaved rules using the real text detector', async () => {
     const { service } = fixture();
     const policy = createDefaultCommercialAdsPolicy();
@@ -82,7 +144,8 @@ describe('commercial preview without moderation effects', () => {
   });
 
   it('keeps disabled and ordinary text without contacting the model', async () => {
-    const { service, governor } = fixture();
+    const { service } = fixture();
+    const classify = jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'classify');
     expect(await service.preview({ text, policy: null, enabled: false }, settings)).toMatchObject({
       decision: 'KEEP',
       reason: 'FILTER_DISABLED',
@@ -93,7 +156,7 @@ describe('commercial preview without moderation effects', () => {
         settings,
       ),
     ).toMatchObject({ decision: 'KEEP', reason: 'NOT_ADVERTISING' });
-    expect(governor.decide).not.toHaveBeenCalled();
+    expect(classify).not.toHaveBeenCalled();
   });
   it('reports classifier unavailability separately from an allowed message', async () => {
     jest.spyOn(shadowLease, 'createCommercialLlmRedis').mockImplementation(() => {
@@ -114,7 +177,6 @@ describe('commercial preview without moderation effects', () => {
     jest.spyOn(redis, 'disconnect').mockImplementation(() => undefined);
     jest.spyOn(redis, 'exists').mockResolvedValue(0);
     jest.spyOn(shadowLease, 'createCommercialLlmRedis').mockReturnValue(redis);
-    jest.spyOn(shadowProcessor, 'commercialLlmHostHasHeadroom').mockResolvedValue(true);
     const result: CommercialLlmObservationResult = {
       ...COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity,
       classification: 'COMMERCIAL',
@@ -122,11 +184,8 @@ describe('commercial preview without moderation effects', () => {
       policyVersion: COMMERCIAL_LLM_POLICY_VERSION,
       durationMs: 1,
     };
-    jest
-      .spyOn(CommercialLlmSecondaryScheduler.prototype, 'classifyAudit')
-      .mockResolvedValue(result);
-    const { service, governor } = fixture(true);
-    governor.decide.mockResolvedValue({ action: 'run', reason: 'normal', retryAfterMs: 0 });
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'classify').mockResolvedValue(result);
+    const { service } = fixture(true);
     const policy = createDefaultCommercialAdsPolicy();
     const shortOffer = 'Мастерская принимает заказы на ремонт мебели. Работаем по договору.';
     expect(
@@ -136,7 +195,7 @@ describe('commercial preview without moderation effects', () => {
     expect(
       await service.preview({ text: shortOffer, policy, enabled: true }, settings),
     ).toMatchObject({ decision: 'KEEP', categories: ['SERVICES'] });
-    jest.spyOn(CommercialLlmSecondaryScheduler.prototype, 'classifyAudit').mockResolvedValue({
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'classify').mockResolvedValue({
       ...result,
       reasonCodes: ['SERVICE_OFFER', 'BUSINESS_OFFER'],
     });
@@ -156,7 +215,7 @@ describe('commercial preview without moderation effects', () => {
     expect(
       await service.preview({ text: shortOffer, policy, enabled: true, userId: '124' }, settings),
     ).toMatchObject({ decision: 'DELETE' });
-    jest.spyOn(CommercialLlmSecondaryScheduler.prototype, 'classifyAudit').mockResolvedValue({
+    jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'classify').mockResolvedValue({
       ...result,
       reasonCodes: ['COMMERCIAL_OFFER'],
     });
