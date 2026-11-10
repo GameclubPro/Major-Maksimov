@@ -1,6 +1,10 @@
 import { LinkPolicy } from '../prisma/prisma-client';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
-import { createAllowlistLinkMatcher, detectBlockedLink } from './rule-engine-link-detector';
+import {
+  createAllowlistLinkMatcher,
+  detectBlockedLink as detectWithMatcher,
+  prepareLinkAllowlist,
+} from './rule-engine-link-detector';
 
 function target(
   kind: NavigationTargetEvidence['kind'],
@@ -18,7 +22,39 @@ function target(
   };
 }
 
-describe('typed link moderation', () => {
+describe.each(['standalone', 'prepared'] as const)('typed link moderation (%s)', (mode) => {
+  const detectBlockedLink: typeof detectWithMatcher = (
+    text,
+    policy,
+    allowlist,
+    matcher,
+    targets,
+    rules,
+  ) =>
+    detectWithMatcher(
+      text,
+      policy,
+      allowlist,
+      matcher ?? (mode === 'prepared' ? prepareLinkAllowlist(allowlist) : undefined),
+      targets,
+      rules,
+    );
+
+  it('prepares independent snapshots of current allowlist entries', () => {
+    const entries = ['domain:first.example'];
+    const first = prepareLinkAllowlist(entries);
+    entries[0] = 'domain:second.example';
+    const second = prepareLinkAllowlist(entries);
+    for (const [prepared, allowed, denied] of [
+      [first, 'first.example', 'second.example'],
+      [second, 'second.example', 'first.example'],
+    ] as const) {
+      expect(prepared.link(`https://${allowed}/path`)).toBe(true);
+      expect(prepared.link(`https://${denied}/path`)).toBe(false);
+      expect(prepared.navigation(target('external_url', `https://${allowed}/path`))).toBe(true);
+      expect(prepared.navigation(target('external_url', `https://${denied}/path`))).toBe(false);
+    }
+  });
   it('blocks a selected exact URL while allowing the rest of its domain and supports an exact exception', () => {
     const policy = {
       version: 1,

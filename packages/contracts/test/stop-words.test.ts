@@ -161,3 +161,77 @@ describe('stop-word case matching', () => {
     ).toEqual(['final-sigma', 'sigma']);
   });
 });
+
+describe('stop-word matching preparation', () => {
+  it('preserves exact phrase source boundaries and observes edited rules after cached calls', () => {
+    const matcher = new StopWordsMatcher();
+    const policy = stopWordsPolicySchema.parse({
+      enabled: true,
+      rules: [{ id: 'phrase', kind: 'PHRASE', value: 'Доход без вложений' }],
+    });
+    const fragment = 'ДОХОД\tбез вложений';
+    const text = `🙂 ${fragment}!`;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expect(matcher.detect({ policy, text })).toEqual([
+        {
+          ruleId: 'phrase',
+          value: 'Доход без вложений',
+          kind: 'PHRASE',
+          matchKind: 'exact',
+          fragment,
+          start: 3,
+          end: 3 + fragment.length,
+        },
+      ]);
+      expect(matcher.detect({ policy, text: 'доход\n\nбез вложений' })).toEqual([]);
+      expect(
+        matcher.detect({
+          policy,
+          text: 'доход без вложений',
+          textSegments: ['доход', 'без вложений'],
+        }),
+      ).toEqual([]);
+    }
+    policy.rules[0]!.value = 'Работа без вложений';
+    expect(matcher.detect({ policy, text })).toEqual([]);
+    expect(matcher.detect({ policy, text: 'РАБОТА без вложений' })).toEqual([
+      expect.objectContaining({ value: 'Работа без вложений', fragment: 'РАБОТА без вложений' }),
+    ]);
+  });
+
+  it('uses current domains and allowlist exceptions independently of cached word rules', () => {
+    const matcher = new StopWordsMatcher();
+    const policy = stopWordsPolicySchema.parse({
+      enabled: true,
+      rules: [{ id: 'word', kind: 'WORD', value: 'казино' }],
+    });
+    const link = 'https://promo.casino.example/path';
+    const text = `КАЗИНО ${link}`;
+    const wordMatch = {
+      ruleId: 'word',
+      value: 'казино',
+      kind: 'WORD',
+      matchKind: 'exact',
+      fragment: 'КАЗИНО',
+      start: 0,
+      end: 6,
+    };
+    expect(matcher.detect({ policy, text })).toEqual([wordMatch]);
+    policy.domains.push('casino.example');
+    expect(matcher.detect({ policy, text })).toEqual([
+      wordMatch,
+      {
+        ruleId: 'domain:casino.example',
+        value: 'casino.example',
+        kind: 'DOMAIN',
+        matchKind: 'domain',
+        fragment: link,
+        start: 7,
+        end: text.length,
+      },
+    ]);
+    expect(matcher.detect({ policy, text, isLinkAllowlisted: () => true })).toEqual([wordMatch]);
+    policy.domains = [];
+    expect(matcher.detect({ policy, text })).toEqual([wordMatch]);
+  });
+});

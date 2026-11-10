@@ -4,6 +4,7 @@ import {
   detectLegacyStopWordsViolations,
   detectStopWordsViolations,
   extractStopWordsTextSegments,
+  fingerprintStopWordsSource,
 } from './stop-words.detection';
 
 function rawMessage(content: Record<string, unknown>) {
@@ -34,6 +35,45 @@ function detect(content: Record<string, unknown>, value = 'casino') {
 }
 
 describe('stop-word visible source text', () => {
+  it('retains one source identity and separate first word/domain evidence', () => {
+    const source = {
+      text: 'casino https://blocked.example/path',
+      textSegments: ['casino', 'https://blocked.example/path'],
+      navigationTargets: [
+        {
+          kind: 'external_url' as const,
+          target: 'https://blocked.example/path',
+          normalizedTarget: 'https://blocked.example/path',
+          enforceable: true,
+          origins: [],
+        },
+      ],
+    };
+    const settings = {
+      stopWordsPolicy: stopWordsPolicySchema.parse({
+        enabled: true,
+        rules: [{ id: 'word', kind: 'WORD', value: 'casino' }],
+        domains: ['blocked.example'],
+      }),
+      stopWordsRevision: 7,
+    };
+    const hits = detectStopWordsViolations({ ...source, settings });
+    expect(hits.map((hit) => hit.ruleCode)).toEqual([
+      'MESSAGE_BLOCKED_WORD',
+      'MESSAGE_BLOCKED_DOMAIN',
+    ]);
+    for (const hit of hits)
+      expect(hit.metadata).toMatchObject({
+        stopWordsSourceSha256: fingerprintStopWordsSource(source),
+        stopWordsRevision: 7,
+      });
+    const edited = { ...source, textSegments: ['casino changed', source.textSegments[1]] };
+    const editedHits = detectStopWordsViolations({ ...edited, settings });
+    expect(editedHits[0].metadata?.stopWordsSourceSha256).not.toBe(
+      hits[0].metadata?.stopWordsSourceSha256,
+    );
+  });
+
   it.each([
     { text: 'доход\n\nбез вложений' },
     { text: 'доход\r\rбез вложений' },

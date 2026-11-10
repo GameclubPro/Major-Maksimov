@@ -71,9 +71,9 @@ export class CommercialTextRuntimePolicyService {
 
   async snapshot(): Promise<{ revision: number; control: CommercialTextControl | null }> {
     const [raw, revisionRaw] = await raceWithTimeout({
-      operation: Promise.all([
-        this.redis.getString(COMMERCIAL_TEXT_CONTROL_KEY),
-        this.redis.getString(`${COMMERCIAL_TEXT_CONTROL_KEY}:revision`),
+      operation: this.redis.getStrings([
+        COMMERCIAL_TEXT_CONTROL_KEY,
+        `${COMMERCIAL_TEXT_CONTROL_KEY}:revision`,
       ]),
       timeoutMs: 750,
       onTimeout: () => {

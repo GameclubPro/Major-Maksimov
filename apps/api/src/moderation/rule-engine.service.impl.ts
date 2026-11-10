@@ -52,7 +52,7 @@ import { RuleEngineDuplicateDetector } from './rule-engine-duplicate-detector';
 import type { DetectionResult, RuleViolation } from './rule-engine.contract';
 import { hasCompetingModerationViolation } from './moderation-rule-competition';
 import {
-  createAllowlistLinkMatcher,
+  prepareLinkAllowlist,
   detectBlockedLink,
   extractUrlsFromText,
 } from './rule-engine-link-detector';
@@ -1239,13 +1239,14 @@ export class RuleEngineService {
     }
     markRuleEngineDetectStage(profile, 'commercial-ad');
 
-    const allowlistLinkMatcher =
-      domainAllowlist.length > 0 ? createAllowlistLinkMatcher(domainAllowlist) : undefined;
+    const preparedAllowlist =
+      domainAllowlist.length > 0 ? prepareLinkAllowlist(domainAllowlist) : undefined;
+    const allowlistLinkMatcher = preparedAllowlist?.link;
     const linkViolation = detectBlockedLink(
       text,
       settings.linkPolicy,
       domainAllowlist,
-      allowlistLinkMatcher,
+      preparedAllowlist,
       navigationTargets,
       settings.linkRulesPolicy,
     );

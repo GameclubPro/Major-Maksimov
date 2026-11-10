@@ -1,4 +1,5 @@
 import { COMMERCIAL_OCR_DETECTOR_SOURCE_SHA256 } from '../commercial-ocr/commercial-ocr-detector-source.generated';
+import type { RedisCounterService } from '../redis-counter.service';
 import { COMMERCIAL_ENGINE_CONFIG } from './commercial-config';
 import {
   COMMERCIAL_INTENT_QUALITY_COHORT,
@@ -11,9 +12,27 @@ import {
 } from './commercial-text-runtime-policy.service';
 
 function harness() {
-  const redis = {
-    getString: jest.fn().mockResolvedValue(null),
-    compareAndSetRevisionedControl: jest.fn().mockResolvedValue({ applied: true, revision: 1 }),
+  const redis: jest.Mocked<
+    Pick<RedisCounterService, 'getString' | 'getStrings' | 'compareAndSetRevisionedControl'>
+  > = {
+    getString: jest
+      .fn<
+        ReturnType<RedisCounterService['getString']>,
+        Parameters<RedisCounterService['getString']>
+      >()
+      .mockResolvedValue(null),
+    getStrings: jest
+      .fn<
+        ReturnType<RedisCounterService['getStrings']>,
+        Parameters<RedisCounterService['getStrings']>
+      >()
+      .mockResolvedValue([null, null]),
+    compareAndSetRevisionedControl: jest
+      .fn<
+        ReturnType<RedisCounterService['compareAndSetRevisionedControl']>,
+        Parameters<RedisCounterService['compareAndSetRevisionedControl']>
+      >()
+      .mockResolvedValue({ applied: true, revision: 1 }),
   };
   const prisma = {
     commercialQualityPolicyStop: {
@@ -24,7 +43,10 @@ function harness() {
   return {
     redis,
     prisma,
-    service: new CommercialTextRuntimePolicyService(redis as never, prisma as never),
+    service: new CommercialTextRuntimePolicyService(
+      redis as unknown as RedisCounterService,
+      prisma as never,
+    ),
   };
 }
 const control = (mode = 'canary') => ({
@@ -43,19 +65,23 @@ const control = (mode = 'canary') => ({
 
 describe('commercial text shared authority', () => {
   it('runs the released deterministic rules without an experimental control', async () => {
-    await expect(harness().service.authority('chat')).resolves.toMatchObject({
+    const h = harness();
+    await expect(h.service.authority('chat')).resolves.toMatchObject({
       baselineAllowed: true,
       promotedPolicyCohorts: ['owned-service-contrast-v1', 'sliding-campaign-v1'],
       revision: 0,
     });
+    expect(h.redis.getStrings).toHaveBeenCalledWith([
+      COMMERCIAL_TEXT_CONTROL_KEY,
+      `${COMMERCIAL_TEXT_CONTROL_KEY}:revision`,
+    ]);
+    expect(h.redis.getString).not.toHaveBeenCalled();
   });
   it.each(['shadow', 'baseline', 'off', 'canary', 'on'])(
     'enforces %s with explicit cohort membership',
     async (mode) => {
       const h = harness();
-      h.redis.getString.mockImplementation(async (key) =>
-        key === COMMERCIAL_TEXT_CONTROL_KEY ? JSON.stringify(control(mode)) : '1',
-      );
+      h.redis.getStrings.mockResolvedValue([JSON.stringify(control(mode)), '1']);
       const selected = await h.service.authority('test-chat', 'b'.repeat(64));
       const other = await h.service.authority('other-chat', 'b'.repeat(64));
       expect(selected.baselineAllowed).toBe(mode !== 'off');
@@ -71,15 +97,12 @@ describe('commercial text shared authority', () => {
     'fails unknown %s authority closed',
     async (failure) => {
       const h = harness();
-      if (failure === 'transport') h.redis.getString.mockRejectedValue(new Error('offline'));
+      if (failure === 'transport') h.redis.getStrings.mockRejectedValue(new Error('offline'));
       else
-        h.redis.getString.mockImplementation(async (key) =>
-          key === COMMERCIAL_TEXT_CONTROL_KEY
-            ? failure === 'malformed'
-              ? '{}'
-              : JSON.stringify(control())
-            : '2',
-        );
+        h.redis.getStrings.mockResolvedValue([
+          failure === 'malformed' ? '{}' : JSON.stringify(control()),
+          '2',
+        ]);
       await expect(h.service.authority('test-chat', 'b'.repeat(64))).resolves.toMatchObject({
         baselineAllowed: false,
         promotedPolicyCohorts: [],
@@ -87,13 +110,48 @@ describe('commercial text shared authority', () => {
       });
     },
   );
+  it.each(['01', '-1', '1.0', 'NaN', '9007199254740992'])(
+    'rejects the invalid revision %s even without a live control',
+    async (revision) => {
+      const h = harness();
+      h.redis.getStrings.mockResolvedValue([null, revision]);
+      await expect(h.service.authority('chat')).resolves.toMatchObject({
+        revision: -1,
+        baselineAllowed: false,
+        promotedPolicyCohorts: [],
+        mode: 'unavailable',
+      });
+    },
+  );
+  it('keeps the 750ms policy budget when the batched read never completes', async () => {
+    jest.useFakeTimers();
+    try {
+      const h = harness();
+      h.redis.getStrings.mockReturnValue(new Promise(() => {}));
+      const settled = jest.fn();
+      const result = h.service.authority('chat').then((value) => {
+        settled();
+        return value;
+      });
+      await jest.advanceTimersByTimeAsync(749);
+      expect(settled).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toMatchObject({
+        revision: -1,
+        baselineAllowed: false,
+        promotedPolicyCohorts: [],
+        mode: 'unavailable',
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
   it('does not lend expired recall to new deletes and checks revision on write', async () => {
     const h = harness();
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify({ ...control(), expiresAt: new Date(Date.now() - 1).toISOString() })
-        : '1',
-    );
+    h.redis.getStrings.mockResolvedValue([
+      JSON.stringify({ ...control(), expiresAt: new Date(Date.now() - 1).toISOString() }),
+      '1',
+    ]);
     await expect(h.service.authority('test-chat', 'b'.repeat(64))).resolves.toMatchObject({
       baselineAllowed: true,
       promotedPolicyCohorts: ['owned-service-contrast-v1', 'sliding-campaign-v1'],
@@ -114,34 +172,20 @@ describe('commercial text shared authority', () => {
   it('never promotes the quality cohort from baseline or a baseline-version artifact', async () => {
     const h = harness();
     const candidate = { ...control(), promotedPolicyCohorts: [COMMERCIAL_INTENT_QUALITY_COHORT] };
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify(candidate)
-        : key.endsWith(':revision')
-          ? '1'
-          : null,
-    );
+    h.redis.getStrings.mockResolvedValue([JSON.stringify(candidate), '1']);
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual(
       [],
     );
     await expect(h.service.set(candidate, 0)).rejects.toThrow('current detector');
     const reviewed = { ...candidate, decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION };
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify(reviewed)
-        : key.endsWith(':revision')
-          ? '1'
-          : null,
-    );
+    h.redis.getStrings.mockResolvedValue([JSON.stringify(reviewed), '1']);
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual([
       COMMERCIAL_INTENT_QUALITY_COHORT,
     ]);
     expect((await h.service.authority('other-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual(
       [],
     );
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY ? JSON.stringify({ ...reviewed, mode: 'baseline' }) : '1',
-    );
+    h.redis.getStrings.mockResolvedValue([JSON.stringify({ ...reviewed, mode: 'baseline' }), '1']);
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual([
       'owned-service-contrast-v1',
       'sliding-campaign-v1',
@@ -169,13 +213,7 @@ describe('commercial text shared authority', () => {
       promotedPolicyCohorts: [COMMERCIAL_INTENT_QUALITY_COHORT],
       canaryStartedAt: new Date(Date.now() - 8 * 86_400_000).toISOString(),
     };
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify(previous)
-        : key === `${COMMERCIAL_TEXT_CONTROL_KEY}:revision`
-          ? '1'
-          : null,
-    );
+    h.redis.getStrings.mockImplementation(async () => [JSON.stringify(previous), '1']);
     const next = { ...previous, revision: 2 };
     await h.service.set(next, 1);
     expect(
@@ -212,14 +250,9 @@ describe('commercial text shared authority', () => {
       decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION,
       promotedPolicyCohorts: [COMMERCIAL_INTENT_QUALITY_COHORT],
     };
+    h.redis.getStrings.mockResolvedValue([JSON.stringify(candidate), '1']);
     h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify(candidate)
-        : key === `${COMMERCIAL_TEXT_CONTROL_KEY}:revision`
-          ? '1'
-          : key === commercialQualityStopKey(COMMERCIAL_OCR_DETECTOR_SOURCE_SHA256)
-            ? 'stopped'
-            : null,
+      key === commercialQualityStopKey(COMMERCIAL_OCR_DETECTOR_SOURCE_SHA256) ? 'stopped' : null,
     );
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual(
       [],
@@ -239,13 +272,7 @@ describe('commercial text shared authority', () => {
       decisionVersion: COMMERCIAL_INTENT_QUALITY_DECISION_VERSION,
       promotedPolicyCohorts: [COMMERCIAL_INTENT_QUALITY_COHORT],
     };
-    h.redis.getString.mockImplementation(async (key) =>
-      key === COMMERCIAL_TEXT_CONTROL_KEY
-        ? JSON.stringify(candidate)
-        : key === `${COMMERCIAL_TEXT_CONTROL_KEY}:revision`
-          ? '1'
-          : null,
-    );
+    h.redis.getStrings.mockResolvedValue([JSON.stringify(candidate), '1']);
     h.prisma.commercialQualityPolicyStop.findUnique.mockResolvedValue({ stoppedAt: new Date() });
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).promotedPolicyCohorts).toEqual(
       [],
@@ -254,7 +281,9 @@ describe('commercial text shared authority', () => {
       new Error('database unavailable'),
     );
     expect((await h.service.authority('test-chat', 'b'.repeat(64))).baselineAllowed).toBe(false);
-    const missing = new CommercialTextRuntimePolicyService(h.redis as never);
+    const missing = new CommercialTextRuntimePolicyService(
+      h.redis as unknown as RedisCounterService,
+    );
     expect((await missing.authority('test-chat', 'b'.repeat(64))).baselineAllowed).toBe(false);
   });
 });

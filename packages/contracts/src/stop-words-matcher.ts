@@ -12,6 +12,7 @@ type TextView = { text: string; starts: number[]; ends: number[] };
 type CompiledRule = {
   rule: StopWordsRule;
   normalizedValue: string;
+  exactTokens: readonly string[];
   prefilter: string;
   pattern: RegExp | null;
 };
@@ -76,6 +77,7 @@ function compileRule(rule: StopWordsRule): CompiledRule {
   return {
     rule,
     normalizedValue,
+    exactTokens: rule.matchMode === 'EXACT' ? normalizedValue.split(' ') : [],
     prefilter: rule.matchMode === 'MASKED' ? compactMaskedText(normalizedValue) : normalizedValue,
     pattern: null,
   };
@@ -217,7 +219,7 @@ export class StopWordsMatcher {
         const { rule, normalizedValue } = entry;
         if (seen.has(rule.id)) continue;
         if (rule.matchMode === 'EXACT') {
-          if (!normalizedValue.split(' ').every((token) => exactTokens.has(token))) continue;
+          if (!entry.exactTokens.every((token) => exactTokens.has(token))) continue;
           const match = findLiteral(exactView, normalizedValue, text);
           if (match) {
             matches.push({
@@ -261,6 +263,7 @@ export class StopWordsMatcher {
         if (matches.length >= limit) return matches;
       }
     }
+    if (params.policy.domains.length === 0) return matches;
     const links = new Set([
       ...extractUrlsFromText(params.text),
       ...(params.navigationTargets ?? [])

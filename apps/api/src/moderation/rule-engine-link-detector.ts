@@ -21,6 +21,10 @@ type AllowlistMatchers = {
 
 export type AllowlistLinkMatcher = (value: string) => boolean;
 export type NavigationAllowlistMatcher = (value: NavigationTargetEvidence) => boolean;
+export type PreparedLinkAllowlist = Readonly<{
+  link: AllowlistLinkMatcher;
+  navigation: NavigationAllowlistMatcher;
+}>;
 
 type ResolvedLink = {
   raw: string;
@@ -36,7 +40,7 @@ export function detectBlockedLink(
   text: string,
   policy: LinkPolicy,
   allowlist: readonly string[],
-  allowlistMatcher?: AllowlistLinkMatcher,
+  allowlistMatcher?: AllowlistLinkMatcher | PreparedLinkAllowlist,
   navigationTargets?: readonly NavigationTargetEvidence[],
   linkRulesPolicy?: unknown,
 ): string | null {
@@ -74,7 +78,10 @@ export function detectBlockedLink(
       return 'Links are not allowed by policy';
     }
 
-    const isAllowlisted = createNavigationAllowlistMatcher(allowlist);
+    const isAllowlisted =
+      typeof allowlistMatcher === 'object'
+        ? allowlistMatcher.navigation
+        : createNavigationAllowlistMatcher(allowlist);
     const blockedTarget = enforceableTargets.find((target) => !isAllowlisted(target));
     return blockedTarget ? `Link ${blockedTarget.normalizedTarget} is not in allowlist` : null;
   }
@@ -91,7 +98,9 @@ export function detectBlockedLink(
 
   const resolvedLinks = resolveDetectedLinks(
     links,
-    allowlistMatcher ?? createAllowlistLinkMatcher(allowlist),
+    typeof allowlistMatcher === 'object'
+      ? allowlistMatcher.link
+      : (allowlistMatcher ?? createAllowlistLinkMatcher(allowlist)),
   );
   const allowlistedExplicitDomains = new Set(
     resolvedLinks
@@ -133,6 +142,10 @@ export function extractUrlsFromText(value: string): string[] {
 
 export function createAllowlistLinkMatcher(allowlist: readonly string[]): AllowlistLinkMatcher {
   const matchers = buildAllowlistMatchers(allowlist);
+  return createLinkMatcher(matchers);
+}
+
+function createLinkMatcher(matchers: AllowlistMatchers): AllowlistLinkMatcher {
   return (value: string) => {
     const match = resolveAllowlistMatch(value);
     return match ? isAllowlistedLink(matchers, match) : false;
@@ -142,7 +155,15 @@ export function createAllowlistLinkMatcher(allowlist: readonly string[]): Allowl
 export function createNavigationAllowlistMatcher(
   allowlist: readonly string[],
 ): NavigationAllowlistMatcher {
+  return createNavigationMatcher(buildAllowlistMatchers(allowlist));
+}
+
+export function prepareLinkAllowlist(allowlist: readonly string[]): PreparedLinkAllowlist {
   const matchers = buildAllowlistMatchers(allowlist);
+  return { link: createLinkMatcher(matchers), navigation: createNavigationMatcher(matchers) };
+}
+
+function createNavigationMatcher(matchers: AllowlistMatchers): NavigationAllowlistMatcher {
   return (value) =>
     buildNavigationTargetAllowlistPolicyKeys(value).some((key) =>
       isAllowlistedNavigationPolicyKey(matchers, key),
