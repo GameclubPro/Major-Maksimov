@@ -552,7 +552,8 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
   let endpoint: string;
   let now: number;
   let processing: boolean;
-  let completionMode: 'disconnect' | 'complete' | 'invalid-decision';
+  let completionMode: 'disconnect' | 'complete' | 'invalid-decision' | 'deferred';
+  let completeDeferred: (() => void) | undefined;
   let leaseTtlAtPost: number | undefined;
   let slotsMode: 'valid' | 'missing' | 'malformed' | 'timeout';
   let jobKey: string;
@@ -591,6 +592,7 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     jest.spyOn(Date, 'now').mockImplementation(() => now);
     processing = false;
     completionMode = 'disconnect';
+    completeDeferred = undefined;
     leaseTtlAtPost = undefined;
     slotsMode = 'valid';
     requests.length = 0;
@@ -628,24 +630,29 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
               leaseTtlAtPost = ttl;
               if (completionMode === 'disconnect') response.destroy();
               else {
-                processing = false;
-                response.end(
-                  JSON.stringify({
-                    model: COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity.modelAlias,
-                    choices: [
-                      {
-                        finish_reason: 'stop',
-                        message: {
-                          role: 'assistant',
-                          content:
-                            completionMode === 'invalid-decision'
-                              ? '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}'
-                              : '{"classification":"NOT_COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+                const complete = () => {
+                  if (response.writableEnded || response.destroyed) return;
+                  processing = false;
+                  response.end(
+                    JSON.stringify({
+                      model: COMMERCIAL_LLM_POOL_PROFILES['server-9b'].identity.modelAlias,
+                      choices: [
+                        {
+                          finish_reason: 'stop',
+                          message: {
+                            role: 'assistant',
+                            content:
+                              completionMode === 'invalid-decision'
+                                ? '{"classification":"COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}'
+                                : '{"classification":"NOT_COMMERCIAL","reasonCodes":["ORDINARY_DISCUSSION"]}',
+                          },
                         },
-                      },
-                    ],
-                  }),
-                );
+                      ],
+                    }),
+                  );
+                };
+                if (completionMode === 'deferred') completeDeferred = complete;
+                else complete();
               }
             },
             () => response.destroy(),
@@ -748,6 +755,82 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     expect(await mailbox.wait(reservation)).toMatchObject({ outcome: 'COMPLETE' });
   });
 
+  it('expires the original client at twenty seconds while draining CPU HTTP without publishing its late result', async () => {
+    jest.spyOn(Date, 'now').mockRestore();
+    now = Date.now();
+    completionMode = 'deferred';
+    let settled = false;
+    let dispatchWork: Promise<void> | undefined;
+    const respond = jest.spyOn(mailbox, 'respond');
+    const heartbeatErrors: unknown[] = [];
+    const heartbeat = setInterval(() => {
+      void server.tick().catch((error) => heartbeatErrors.push(error));
+    }, 500);
+    const client = new CommercialLlmPoolClient(
+      mailbox,
+      (reservation, signal) => {
+        dispatchWork = server.dispatch(reservation, signal);
+        void dispatchWork.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        return dispatchWork;
+      },
+      {
+        jobId: jobKey.slice(jobKey.lastIndexOf(':') + 1),
+        deadlineAtMs: Date.now() + 20_000,
+        policy: 'direct-4b',
+        primaryFinished: async () => undefined,
+        canStartConsultation: async () => false,
+      },
+    );
+    const originalJobKey = jobKey;
+    try {
+      const startedAt = Date.now();
+      await expect(client.classify('Обсуждаем погоду')).rejects.toMatchObject({ kind: 'TIMEOUT' });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(19_900);
+      await pause(25);
+      expect(completeDeferred).toBeDefined();
+      expect(settled).toBe(false);
+      expect(leaseTtlAtPost).toBe(-1);
+      expect(await redis.pttl(COMMERCIAL_LLM_LEASE_KEY)).toBe(-1);
+      expect(await new CommercialLlmShadowLease(redis).acquire()).toBeNull();
+      expect(await mailbox.available()).not.toContain('server-9b');
+      expect(respond).not.toHaveBeenCalled();
+      const peerSession = randomUUID();
+      expect(await mailbox.acquireWorker('pc-b-9b', peerSession)).toBe(true);
+      await mailbox.refreshWorker('pc-b-9b', peerSession, true);
+      expect(await mailbox.available()).toContain('pc-b-9b');
+
+      completeDeferred!();
+      await dispatchWork;
+      expect(settled).toBe(true);
+      expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBeNull();
+      expect(await redis.get(keys.response)).toBeNull();
+      expect(respond).not.toHaveBeenCalled();
+      expect(await redis.get(originalJobKey)).toBeNull();
+      await pause(1_010);
+      await server.tick();
+      expect(await mailbox.available()).toContain('server-9b');
+      completionMode = 'complete';
+      now = Date.now();
+      jobKey = commercialLlmPoolJobKey(randomUUID());
+      const next = await reserve();
+      await server.dispatch(next);
+      expect(await mailbox.wait(next)).toMatchObject({ outcome: 'COMPLETE' });
+      expect(heartbeatErrors).toEqual([]);
+    } finally {
+      clearInterval(heartbeat);
+      completeDeferred?.();
+      await dispatchWork?.catch(() => undefined);
+      await redis.del(originalJobKey);
+    }
+  }, 30_000);
+
   it('rejects an invalid decision, releases only completed physical work and accepts the next request', async () => {
     completionMode = 'invalid-decision';
     const rejected = await reserve();
@@ -780,6 +863,44 @@ const url = process.env.MAXIM_TEST_REDIS_URL ?? '';
     } finally {
       await redis.del(previousJobKey);
     }
+  });
+
+  it('retains uncertain physical capacity when the separate shutdown signal aborts accepted HTTP', async () => {
+    completionMode = 'deferred';
+    const shutdown = new AbortController();
+    const respond = jest.spyOn(mailbox, 'respond');
+    const work = server.dispatch(await reserve(), undefined, shutdown.signal);
+    const rejected = expect(work).rejects.toMatchObject({ kind: 'ABORTED' });
+    for (let attempt = 0; attempt < 100 && !completeDeferred; attempt += 1) await pause(10);
+    expect(completeDeferred).toBeDefined();
+    const token = await redis.get(COMMERCIAL_LLM_LEASE_KEY);
+    shutdown.abort();
+    await rejected;
+    await server.close();
+    expect(respond).not.toHaveBeenCalled();
+    expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBe(token);
+    expect(await redis.pttl(COMMERCIAL_LLM_LEASE_KEY)).toBe(-1);
+    server = adapter();
+    await server.tick();
+    expect(await mailbox.available()).not.toContain('server-9b');
+    expect(await new CommercialLlmShadowLease(redis).acquire()).toBeNull();
+  });
+
+  it('does not release a replacement physical owner after an obsolete source finishes draining', async () => {
+    completionMode = 'deferred';
+    const source = new AbortController();
+    const respond = jest.spyOn(mailbox, 'respond');
+    const work = server.dispatch(await reserve(), source.signal);
+    for (let attempt = 0; attempt < 100 && !completeDeferred; attempt += 1) await pause(10);
+    expect(completeDeferred).toBeDefined();
+    source.abort();
+    const replacement = randomUUID();
+    await redis.set(COMMERCIAL_LLM_LEASE_KEY, replacement);
+    completeDeferred!();
+    await work;
+    expect(await redis.get(COMMERCIAL_LLM_LEASE_KEY)).toBe(replacement);
+    expect(await redis.pttl(COMMERCIAL_LLM_LEASE_KEY)).toBe(-1);
+    expect(respond).not.toHaveBeenCalled();
   });
 
   it('cannot retain or release a replacement owner and never posts after losing ownership', async () => {

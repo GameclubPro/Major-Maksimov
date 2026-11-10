@@ -298,7 +298,7 @@ export class CommercialLlmEnforcementRunnerService implements OnModuleInit, OnMo
           const server = this.poolServer!;
           return new CommercialLlmPoolClient(
             this.pool!,
-            (reservation, signal) => server.dispatch(reservation, signal),
+            (reservation, signal) => server.dispatch(reservation, signal, this.controller.signal),
             {
               jobId: request.source.nonce,
               routingStats: this.poolRoutingStats,
