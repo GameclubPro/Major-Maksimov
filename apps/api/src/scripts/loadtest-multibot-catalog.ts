@@ -1,4 +1,11 @@
-import { isCatalogViolation, parseCatalogViolationPercent } from './multibot-catalog-workload';
+import { parseCatalogViolationPercent } from './multibot-catalog-workload';
+import {
+  buildCatalogManifest,
+  evaluateCatalogOutcomes,
+  parseCatalogTokenRps,
+  type CatalogEventObservation,
+  type CatalogProfile,
+} from './multibot-catalog-acceptance';
 import { evaluateCatalogLatency, parseCatalogLatencyTargets } from './multibot-catalog-latency';
 import {
   collectFixtureBatches,
@@ -8,7 +15,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { cpus, totalmem } from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   createMultibotHarness,
   type MultibotHarness,
@@ -19,14 +26,13 @@ import {
 } from '../webhook/webhook-multibot-split.spec-support';
 import { ModerationDeleteIntentStatus } from '../prisma/prisma-client';
 
-type Profile = 'uniform' | 'hot' | 'cold' | 'media';
-const profilesAllowed = new Set<Profile>(['uniform', 'hot', 'cold', 'media']);
+const profilesAllowed = new Set<CatalogProfile>(['uniform', 'hot', 'cold', 'media', 'mixed']);
 const args = Object.fromEntries(
   process.argv.slice(2).map((arg) => {
     const match = /^--([a-z]+)=(.+)$/u.exec(arg);
     if (!match)
       throw new Error(
-        'Use --chats=10000,12000,30000 --bots=6 --messages=120 --rate=2 --routing=legacy|fixed --enqueue=fixture|production --topology=single|split --profiles=uniform,hot,cold,media --violations=100 --latency=2000,10000 --output=path',
+        'Use --chats=10000,12000,30000 --bots=6 --messages=120 --rate=2 --routing=legacy|fixed --enqueue=fixture|production --topology=single|split --profiles=uniform,hot,cold,media,mixed --quota=25|30 --violations=100 --latency=2000,10000 --output=path',
       );
     return [match[1]!, match[2]!];
   }),
@@ -44,6 +50,7 @@ for (const key of Object.keys(args))
       'profiles',
       'latency',
       'violations',
+      'quota',
       'output',
     ].includes(key)
   )
@@ -60,6 +67,7 @@ const catalogs = (args.chats ?? '10000,12000,30000')
 const bots = positive(args.bots ?? '9', 'bots');
 const messageCount = positive(args.messages ?? '120', 'messages');
 const rate = positive(args.rate ?? '2', 'rate');
+const tokenRps = parseCatalogTokenRps(args.quota);
 const routing = args.routing ?? 'legacy';
 if (routing !== 'legacy' && routing !== 'fixed') throw new Error('Unsupported routing mode');
 const enqueue = args.enqueue ?? 'fixture';
@@ -71,9 +79,14 @@ if (topology === 'split' && (enqueue !== 'production' || messageCount > 10_000 |
   throw new Error(
     'Split fixture requires production selection and at most 10,000 messages / 12 bots',
   );
-const profiles = (args.profiles ?? 'uniform,hot,cold,media').split(',') as Profile[];
+const profiles = (args.profiles ?? 'uniform,hot,cold,media').split(',') as CatalogProfile[];
 if (profiles.some((profile) => !profilesAllowed.has(profile)))
   throw new Error('Unsupported profile');
+if (
+  profiles.includes('mixed') &&
+  (catalogs.some((catalog) => catalog < 5) || messageCount < 5 || messageCount > 10_000)
+)
+  throw new Error('Mixed profile requires at least 5 chats and 5..10,000 messages');
 const latencyTargets = parseCatalogLatencyTargets(args.latency);
 const violationPercent = parseCatalogViolationPercent(args.violations);
 const databaseUrl = process.env.MAXIM_TEST_POSTGRES_URL;
@@ -103,6 +116,7 @@ async function main() {
       bots,
       mode: 'on',
       quotaProfile: 'production',
+      tokenRps,
       productionEnqueueCapacity: enqueue === 'production',
       productionOutboxSelection: enqueue === 'production',
       recoverDueDeletes: true,
@@ -141,13 +155,28 @@ async function main() {
       const seedMs = performance.now() - seededAt;
       for (const profile of profiles) {
         const caseId = `load-${randomUUID()}`;
-        const beforeEffects = harness.effects.length;
+        const beforeEffectIds = new Set(harness.effects.map((effect) => effect.callId));
         const beforeRequests = harness.requests.length;
         const beforeViolations = await harness.prisma.violation.count({
           where: { chatId: { in: chats } },
         });
-        const expectedDeleteIds = new Set<string>();
-        const executorMessageCounts = new Map<string, number>();
+        const expectedManifest = buildCatalogManifest({
+          caseId,
+          chats,
+          executorByChat: assignedBots,
+          messages: messageCount,
+          bots,
+          fixedRouting: routing === 'fixed',
+          profile,
+          violationPercent,
+        });
+        const expectedDeleteIds = new Set(
+          expectedManifest
+            .filter((event) => event.decision === 'DELETE')
+            .map((event) => event.messageId),
+        );
+        const ingressClocks = new Map<string, number>();
+        const receiptsByMessage = new Map<string, string[]>();
         const receiptIds: string[] = [];
         const unsettledReceiptIds = new Set<string>();
         const touchedChatIds = new Set<string>();
@@ -163,6 +192,148 @@ async function main() {
         let pumpError: unknown;
         const startedAt = performance.now();
         let productionFinishedAt = startedAt;
+        const collectOutcomeAcceptance = async () => {
+          const [receiptRows, claims, intentRows] = await Promise.all([
+            collectFixtureBatches(receiptIds, (ids) =>
+              harness.prisma.webhookEvent.findMany({
+                where: { id: { in: ids } },
+                select: {
+                  id: true,
+                  botId: true,
+                  normalizedPayload: true,
+                  status: true,
+                  executionDeadlineAt: true,
+                },
+              }),
+            ),
+            collectFixtureBatches(receiptIds, (ids) =>
+              harness.prisma.webhookExecutionClaim.findMany({
+                where: { kind: 'EXECUTION', webhookEventId: { in: ids } },
+                select: {
+                  webhookEventId: true,
+                  status: true,
+                  executionBotId: true,
+                  completedAt: true,
+                },
+              }),
+            ),
+            collectFixtureBatches(messageIds, (ids) =>
+              harness.prisma.moderationDeleteIntent.findMany({
+                where: { messageId: { in: ids } },
+                select: {
+                  messageId: true,
+                  chatId: true,
+                  status: true,
+                  succeededBotId: true,
+                  remoteDeleteSucceededAt: true,
+                  remoteDeleteSucceededBotId: true,
+                  completedAt: true,
+                  deleteDispatchStartedAt: true,
+                  reasons: {
+                    where: { ruleCode: 'MESSAGE_TOO_LONG_DELETE' },
+                    select: { metadata: true },
+                    take: 1,
+                  },
+                },
+              }),
+            ),
+          ]);
+          const receiptById = new Map(receiptRows.map((row) => [row.id, row]));
+          const claimsByReceipt = new Map<string, typeof claims>();
+          for (const claim of claims) {
+            if (!claim.webhookEventId) continue;
+            const rows = claimsByReceipt.get(claim.webhookEventId) ?? [];
+            rows.push(claim);
+            claimsByReceipt.set(claim.webhookEventId, rows);
+          }
+          const intentsByMessage = new Map<string, typeof intentRows>();
+          for (const intent of intentRows) {
+            const rows = intentsByMessage.get(intent.messageId) ?? [];
+            rows.push(intent);
+            intentsByMessage.set(intent.messageId, rows);
+          }
+          const deletesByMessage = new Map<string, typeof harness.effects>();
+          for (const effect of harness.effects) {
+            if (effect.method !== 'delete' || effect.path !== '/messages' || !effect.messageId)
+              continue;
+            const rows = deletesByMessage.get(effect.messageId) ?? [];
+            rows.push(effect);
+            deletesByMessage.set(effect.messageId, rows);
+          }
+          const observations = new Map<string, CatalogEventObservation>();
+          // FLAG: Compare the whole pre-ingress oracle, including unsubmitted and missing work.
+          for (const event of expectedManifest) {
+            const ingressAtMs = ingressClocks.get(event.messageId);
+            if (ingressAtMs === undefined) continue;
+            const ids = new Set(receiptsByMessage.get(event.messageId) ?? []);
+            observations.set(event.messageId, {
+              ingressAtMs,
+              receipts: [...ids].flatMap((id) => {
+                const row = receiptById.get(id);
+                const payload = row?.normalizedPayload;
+                const message =
+                  payload &&
+                  typeof payload === 'object' &&
+                  !Array.isArray(payload) &&
+                  payload.message &&
+                  typeof payload.message === 'object' &&
+                  !Array.isArray(payload.message)
+                    ? payload.message
+                    : null;
+                return row
+                  ? [
+                      {
+                        botId: row.botId,
+                        chatId: typeof message?.chatId === 'string' ? message.chatId : null,
+                        messageId:
+                          typeof message?.messageId === 'string' ? message.messageId : null,
+                        status: row.status,
+                        deadlineAtMs: row.executionDeadlineAt?.getTime() ?? null,
+                      },
+                    ]
+                  : [];
+              }),
+              claims: [...ids]
+                .flatMap((id) => claimsByReceipt.get(id) ?? [])
+                .map((claim) => ({
+                  status: claim.status,
+                  botId: claim.executionBotId,
+                  completedAtMs: claim.completedAt?.getTime() ?? null,
+                })),
+              intents: (intentsByMessage.get(event.messageId) ?? []).map((intent) => ({
+                status: intent.status,
+                chatId: intent.chatId,
+                botId: intent.succeededBotId,
+                remoteBotId: intent.remoteDeleteSucceededBotId,
+                remoteSucceededAtMs: intent.remoteDeleteSucceededAt?.getTime() ?? null,
+                completedAtMs: intent.completedAt?.getTime() ?? null,
+                dispatchStarted: intent.deleteDispatchStartedAt !== null,
+                verified: intent.reasons.some(
+                  (reason) =>
+                    (reason.metadata as Record<string, unknown> | null)
+                      ?.moderationDeleteVerified === true,
+                ),
+              })),
+              deletes: (deletesByMessage.get(event.messageId) ?? []).map((effect) => ({
+                botId: effect.botId,
+                observedAtMs: effect.observedAtMs,
+              })),
+              messagePresent: await harness.hasSimulatedMessage(event.messageId),
+            });
+          }
+          return evaluateCatalogOutcomes(
+            expectedManifest,
+            observations,
+            harness.bots.map((bot) => bot.id),
+            latencyTargets,
+            Date.now(),
+          );
+        };
+        const manifest = {
+          version: 1,
+          sha256: createHash('sha256').update(JSON.stringify(expectedManifest)).digest('hex'),
+          events: expectedManifest,
+        };
         failureSnapshot = async (error) => {
           const effectsComplete = harness.snapshotEffects
             ? await harness.snapshotEffects().catch(() => false)
@@ -179,8 +350,11 @@ async function main() {
                 ? 'internal_quota'
                 : 'benchmark_failed',
             logicalMessagesSubmitted: messageIds.length,
-            expectedDeletesSubmitted: expectedDeleteIds.size,
-            expectedKeptSubmitted: messageIds.length - expectedDeleteIds.size,
+            expectedDeletesSubmitted: messageIds.filter((id) => expectedDeleteIds.has(id)).length,
+            expectedKeptSubmitted: messageIds.filter((id) => !expectedDeleteIds.has(id)).length,
+            manifest,
+            outcomeAcceptance: await collectOutcomeAcceptance(),
+            quotas: { perTokenRps: tokenRps, globalBurst: 0 },
             receipts: receiptIds.length,
             requestedLogicalRatePerSec: rate,
             elapsedMs: Math.round(performance.now() - startedAt),
@@ -194,7 +368,7 @@ async function main() {
             }),
             effectsComplete,
             remoteDeletesObserved: harness.effects
-              .slice(beforeEffects)
+              .filter((effect) => !beforeEffectIds.has(effect.callId))
               .filter((effect) => effect.method === 'delete').length,
           };
         };
@@ -214,18 +388,8 @@ async function main() {
         try {
           for (let index = 0; index < messageCount; index += 1) {
             if (pumpError) throw pumpError;
-            const spreadIndex = Math.floor((index * chats.length) / messageCount) % chats.length;
-            const chatId =
-              chats[
-                profile === 'hot'
-                  ? index % Math.min(4, chats.length)
-                  : routing === 'fixed'
-                    ? Math.min(
-                        chats.length - 1,
-                        spreadIndex - (spreadIndex % bots) + (index % bots),
-                      )
-                    : spreadIndex
-              ]!;
+            const event = expectedManifest[index]!;
+            const { chatId, messageId, executorId } = event;
             if (profile === 'cold') {
               harness.links.forgetChatBotBinding(chatId);
               await harness.cache.invalidate(chatId);
@@ -237,21 +401,15 @@ async function main() {
                 },
               });
             }
-            const messageId = `${caseId}-${index}`;
             messageIds.push(messageId);
-            const executorId = assignedBots.get(chatId)!;
-            const executorIndex = executorMessageCounts.get(executorId) ?? 0;
-            executorMessageCounts.set(executorId, executorIndex + 1);
-            // FLAG: A global every-Nth pattern can select only some round-robin bots.
-            // Apply the assumed fraction within each executor's own traffic instead.
-            const violation = isCatalogViolation(executorIndex, violationPercent);
-            if (violation) expectedDeleteIds.add(messageId);
+            const violation = event.decision === 'DELETE';
             touchedChatIds.add(chatId);
             expectedExecutors.set(messageId, executorId);
             const at = Date.now();
             const enteredAt = performance.now();
+            ingressClocks.set(messageId, at);
             producerLatenessMs.push(Math.max(0, enteredAt - (startedAt + (index * 1000) / rate)));
-            const mirrors = await Promise.all(
+            const mirrorResults = await Promise.allSettled(
               harness.bots.map((bot) =>
                 harness.ingest({
                   chatId,
@@ -275,7 +433,13 @@ async function main() {
                 }),
               ),
             );
+            const mirrors = mirrorResults.flatMap((result) =>
+              result.status === 'fulfilled' ? [result.value] : [],
+            );
+            receiptsByMessage.set(messageId, mirrors);
             receiptIds.push(...mirrors);
+            const rejected = mirrorResults.find((result) => result.status === 'rejected');
+            if (rejected?.status === 'rejected') throw rejected.reason;
             for (const id of mirrors) unsettledReceiptIds.add(id);
             ingressLatencyMs.push(performance.now() - enteredAt);
             if (index % 10 === 0) {
@@ -339,7 +503,9 @@ async function main() {
         const intents = await harness.prisma.moderationDeleteIntent.count({
           where: { messageId: { in: messageIds } },
         });
-        const observedEffects = harness.effects.slice(beforeEffects);
+        const observedEffects = harness.effects.filter(
+          (effect) => !beforeEffectIds.has(effect.callId),
+        );
         const unexpectedMutations = observedEffects.filter(
           (effect) => effect.method !== 'delete' || effect.path !== '/messages',
         ).length;
@@ -392,7 +558,9 @@ async function main() {
             Math.max(0, (intent.completedAt?.getTime() ?? Date.now()) - intent.createdAt.getTime()),
           )
           .sort((a, b) => a - b);
+        const outcomeAcceptance = await collectOutcomeAcceptance();
         if (
+          outcomeAcceptance.correctnessStatus === 'failed' ||
           finalPendingReceipts ||
           finalPendingActions ||
           wrongExecutorEffects ||
@@ -420,7 +588,10 @@ async function main() {
           latencyTargets,
         );
         const report = {
-          status: latencyAcceptance.status === 'failed' ? 'failed' : 'passed',
+          status:
+            latencyAcceptance.status === 'failed' || outcomeAcceptance.status === 'failed'
+              ? 'failed'
+              : 'passed',
           correctnessStatus: 'passed',
           syntheticWorkload: {
             violationPercent,
@@ -431,6 +602,8 @@ async function main() {
           unexpectedDeletions,
           unexpectedMutations,
           latencyAcceptance,
+          outcomeAcceptance,
+          manifest,
           catalog,
           bots,
           routing,
@@ -445,7 +618,8 @@ async function main() {
           wrongExecutorEffects,
           executorsExercised: new Set(deletes.map((effect) => effect.botId)).size,
           quotas: {
-            perTokenRps: 30,
+            perTokenRps: tokenRps,
+            globalBurst: 0,
             perBotChatRps: 5,
             managedRefreshRps: 2,
             perTargetMutationRps: 2,
@@ -499,7 +673,8 @@ async function main() {
         reports.push(report);
         process.stdout.write(`${JSON.stringify(report)}\n`);
         await saveReports();
-        if (latencyAcceptance.status === 'failed') process.exitCode = 1;
+        if (latencyAcceptance.status === 'failed' || outcomeAcceptance.status === 'failed')
+          process.exitCode = 1;
         failureSnapshot = undefined;
       }
     } catch (error) {
@@ -530,7 +705,7 @@ async function saveReports() {
       logicalCpus: cpus().length,
       memoryBytes: totalmem(),
     },
-    transport: 'local simulated MAX with production quota defaults; no external requests',
+    transport: 'local simulated MAX with explicitly recorded token quota; no external requests',
     fixtureTopology: {
       processes: topology === 'split' ? 10 : 1,
       outboxSelection:
@@ -549,10 +724,15 @@ async function saveReports() {
       dynamicLeaseWorkers: false,
       nativeMedia: false,
     },
+    tokenQuota: { perTokenRps: tokenRps, globalBurst: 0 },
     quotaServiceLanes:
       topology === 'split'
         ? { criticalRps: 12, interactiveRps: 10, backgroundRps: '4; action/background roles 3' }
-        : { criticalRps: 13, interactiveRps: 10, backgroundRps: 7 },
+        : {
+            criticalRps: Math.floor(tokenRps * 0.45),
+            interactiveRps: Math.floor(tokenRps * 0.35),
+            backgroundRps: tokenRps - Math.floor(tokenRps * 0.45) - Math.floor(tokenRps * 0.35),
+          },
     workload: {
       kind: 'synthetic_length_rule',
       violationPercent,

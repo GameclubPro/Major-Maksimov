@@ -11941,6 +11941,101 @@ describe('ModerationDeleteIntentService', () => {
     });
   });
 
+  it('spends only confirmed head reuse on continuation and retains the original add-attempt cap', async () => {
+    const head = [{ id: 'head-existing' }, { id: 'head-rejected' }, { id: 'head-unknown' }];
+    const { service, queue } = createService(
+      { MODERATION_DELETE_INTENT_SWEEP_BATCH_SIZE: 3 },
+      { $queryRaw: jest.fn().mockResolvedValue(head) },
+    );
+    queue.getJob.mockImplementation(async (id) =>
+      id === 'mdi-head-existing'
+        ? new Job(
+            unitJobQueue,
+            'execute-moderation-delete-intent',
+            { intentId: 'head-existing' },
+            { priority: 1 },
+            id,
+          )
+        : undefined,
+    );
+    queue.add.mockRejectedValueOnce(new Error('head enqueue rejected'));
+    const commit = jest.fn();
+    const continuation = jest
+      .spyOn(
+        (
+          service as unknown as {
+            dueContinuation: import('./moderation-delete-due-selection').DeleteDueContinuation;
+          }
+        ).dueContinuation,
+        'select',
+      )
+      .mockResolvedValue({ ids: [{ id: 'tail' }], commit });
+
+    await expect(service.sweepDueIntents()).resolves.toBe(4);
+
+    expect(continuation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ limit: 1 }),
+    );
+    expect(queue.add).toHaveBeenCalledTimes(3); // Two head attempts, one tail, including rejection.
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(service.getDueSweepRuntimeSnapshot()).toMatchObject({
+      selectedCount: 4,
+      handoffAttemptedCount: 4,
+      handoffErrorCount: 1,
+      handoffOutcomes: { reusedCount: 1 },
+    });
+  });
+
+  it('keeps continuation progressing after rejected tail handoffs without treating them as completion', async () => {
+    const { service, queue } = createService(
+      { MODERATION_DELETE_INTENT_SWEEP_BATCH_SIZE: 1 },
+      { $queryRaw: jest.fn().mockResolvedValue([{ id: 'head' }]) },
+    );
+    queue.getJob.mockResolvedValue(
+      new Job(
+        unitJobQueue,
+        'execute-moderation-delete-intent',
+        { intentId: 'head' },
+        { priority: 1 },
+        'mdi-head',
+      ),
+    );
+    const commit = jest.fn();
+    jest
+      .spyOn(
+        (
+          service as unknown as {
+            dueContinuation: import('./moderation-delete-due-selection').DeleteDueContinuation;
+          }
+        ).dueContinuation,
+        'select',
+      )
+      .mockResolvedValue({ ids: [{ id: 'tail' }], commit });
+    queue.getJob.mockImplementation(async (id) =>
+      id === 'mdi-head'
+        ? new Job(
+            unitJobQueue,
+            'execute-moderation-delete-intent',
+            { intentId: 'head' },
+            { priority: 1 },
+            id,
+          )
+        : undefined,
+    );
+    queue.add.mockRejectedValue(new Error('tail enqueue rejected'));
+
+    await expect(service.sweepDueIntents()).resolves.toBe(2);
+
+    expect(queue.add).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(service.getDueSweepRuntimeSnapshot()).toMatchObject({
+      handoffAcknowledgedCount: 1,
+      handoffErrorCount: 1,
+      handoffOutcomes: { insertedCount: 0, reusedCount: 1 },
+    });
+  });
+
   it('records expiry failure and propagates it before selection or Redis handoff', async () => {
     const error = new Error('private-expiry-failure');
     const queryRaw = jest.fn();
