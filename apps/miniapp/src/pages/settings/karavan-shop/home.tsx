@@ -13,10 +13,10 @@ import { ShopCommandRecovery } from './command-runtime';
 import { useAdministrationStorefrontLink } from './storefront-management';
 import { SellerAccessAction } from './seller-access';
 import { ShopShareLink } from './share-link';
+import { ShopAvailabilityScope, shopAvailabilityScope } from './availability-scope';
 
 const Catalog = lazy(() => import('./catalog'));
 const Applications = lazy(() => import('./applications'));
-const Appearance = lazy(() => import('./appearance'));
 const Categories = lazy(() => import('./categories'));
 const Settings = lazy(() => import('./settings-simple'));
 const SellerGrants = lazy(() => import('./seller-grants'));
@@ -41,17 +41,21 @@ export default function ShopHome({
   const canReview = module.permissions.includes('review_listing');
   const active = market.status === 'active';
   const archived = market.status === 'archived';
+  const availabilityScope = shopAvailabilityScope(module);
+  const pauseLabel = availabilityScope.network ? 'Приостановить магазин сети' : 'Выключить магазин';
+  const openLabel = availabilityScope.network ? 'Включить магазин сети' : 'Включить магазин';
   const count =
     module.administrationStoreCount ??
     module.administrationStores?.length ??
     (module.administrationStore ? 1 : 0);
   const policy = market.admissionMode ?? market.admissionPolicy;
   const store = useAdministrationStorefrontLink(administration);
-  const [confirmClose, setConfirmClose] = useState(false);
+  const [confirmClose, setConfirmClose] = useState<'active' | 'paused' | null>(null);
   const availability = useShopMutation({ owner: 'availability', page: 'settings' }, () =>
-    setConfirmClose(false),
+    setConfirmClose(null),
   );
-  const changeStatus = (status: 'active' | 'paused') =>
+  const changeStatus = (status: 'active' | 'paused') => {
+    if (!availabilityScope.complete) return;
     availability.mutate({
       operation: 'status',
       input: {
@@ -61,25 +65,32 @@ export default function ShopHome({
         allowEmpty: true,
       },
     });
+  };
   const availabilityControl =
     canManage && !archived ? (
       <section className="karavan-shop__availability">
         {confirmClose ? (
           <>
             <p>
-              Магазин этого чата закроется для покупателей. Витрины, товары и настройки сохранятся.
+              {availabilityScope.network
+                ? confirmClose === 'paused'
+                  ? 'Магазин сети закроется для покупателей во всех подключённых чатах.'
+                  : 'Магазин сети откроется для покупателей во всех подключённых чатах.'
+                : 'Магазин этого чата закроется для покупателей.'}{' '}
+              Витрины, товары и настройки сохранятся.
             </p>
+            <ShopAvailabilityScope module={module} />
             <button
               type="button"
-              disabled={busy || availability.blocked}
-              onClick={() => changeStatus('paused')}
+              disabled={busy || availability.blocked || !availabilityScope.complete}
+              onClick={() => changeStatus(confirmClose)}
             >
-              Выключить магазин
+              {confirmClose === 'paused' ? pauseLabel : openLabel}
             </button>
             <button
               type="button"
               disabled={availability.uncertain}
-              onClick={() => setConfirmClose(false)}
+              onClick={() => setConfirmClose(null)}
             >
               Отмена
             </button>
@@ -88,9 +99,13 @@ export default function ShopHome({
           <button
             type="button"
             disabled={busy || availability.blocked}
-            onClick={() => (active ? setConfirmClose(true) : changeStatus('active'))}
+            onClick={() =>
+              active || availabilityScope.network
+                ? setConfirmClose(active ? 'paused' : 'active')
+                : changeStatus('active')
+            }
           >
-            {active ? 'Выключить магазин' : 'Включить магазин'}
+            {active ? pauseLabel : openLabel}
           </button>
         )}
         <MutationFailure mutation={availability} />
@@ -114,7 +129,7 @@ export default function ShopHome({
     ) : null;
   const pages: StorefrontPage[] = [
     'settings',
-    ...(!administration ? (['catalog', 'appearance', 'categories', 'seller_access'] as const) : []),
+    ...(!administration ? (['catalog', 'categories', 'seller_access'] as const) : []),
     ...(canReview ? (['applications'] as const) : []),
     ...(module.permissions.includes('bind_chat') ? (['chats'] as const) : []),
     ...(publications ? (['publications'] as const) : []),
@@ -143,9 +158,14 @@ export default function ShopHome({
               <button
                 type="button"
                 disabled={busy || availability.blocked}
-                onClick={() => changeStatus('active')}
+                onClick={() => {
+                  if (availabilityScope.network) {
+                    setConfirmClose('active');
+                    workspace?.navigate('settings');
+                  } else changeStatus('active');
+                }}
               >
-                Включить магазин
+                {openLabel}
               </button>
             ) : null}
             <MutationFailure mutation={availability} />
@@ -166,9 +186,9 @@ export default function ShopHome({
                     {store.opening
                       ? 'Открываем…'
                       : count === 0
-                        ? 'Создать и оформить витрину'
+                        ? 'Добавить витрину'
                         : count === 1
-                          ? 'Оформить витрину'
+                          ? 'Управлять витриной'
                           : 'Управлять витринами'}
                   </strong>
                   <span>Товары, фотографии и описание</span>
@@ -271,7 +291,6 @@ export default function ShopHome({
                 <Catalog canArrange={module.permissions.includes('arrange_listings')} />
               ) : null}
               {page === 'applications' ? <Applications /> : null}
-              {page === 'appearance' ? <Appearance onView={canView ? open : undefined} /> : null}
               {page === 'categories' ? <Categories /> : null}
               {page === 'seller_access' ? <SellerGrants /> : null}
               {page === 'chats' ? chats : null}

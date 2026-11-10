@@ -15,6 +15,8 @@ export function isConfirmedShopCommandResult(
 
 type ShopFailureKind = 'validation' | 'refresh' | 'forbidden' | 'unknown';
 const accessRejections = {
+  MARKETPLACE_APPEARANCE_RETIRED: { status: 410, kind: 'refresh' },
+  MARKETPLACE_ADMINISTRATION_MOVED: { status: 410, kind: 'refresh' },
   ADMINISTRATION_STORE_UNAVAILABLE: { status: 409, kind: 'refresh' },
   MARKETPLACE_LISTING_LIMIT: { status: 409, kind: 'validation' },
   MARKETPLACE_GRANTS_UNAVAILABLE: { status: 409, kind: 'refresh' },
@@ -27,7 +29,7 @@ const accessRejections = {
   MARKETPLACE_RULES_CHANGED: { status: 409, kind: 'refresh' },
 } as const satisfies Record<
   string,
-  { status: 400 | 403 | 409; kind: Exclude<ShopFailureKind, 'unknown'> }
+  { status: 400 | 403 | 409 | 410; kind: Exclude<ShopFailureKind, 'unknown'> }
 >;
 
 function knownAccessRejection(error: ApiRequestError) {

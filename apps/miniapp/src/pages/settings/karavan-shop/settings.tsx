@@ -37,8 +37,9 @@ export default function ShopSettings({
     )
       setPolicy(mutation.pendingCommand.input.admissionPolicy);
   }, [mutation.pendingCommand]);
-  const value = policy ?? marketplace.admissionPolicy;
-  const dirty = value !== marketplace.admissionPolicy;
+  const current = marketplace.admissionMode ?? marketplace.admissionPolicy;
+  const value = policy ?? current;
+  const dirty = value !== current;
   useStorefrontDirty('admission', dirty);
   return (
     <>
@@ -55,14 +56,6 @@ export default function ShopSettings({
         ) : null}
         {canManage && !administration ? (
           <>
-            <SettingsSectionToggle
-              title="Оформление"
-              icon="spark"
-              tone="sky"
-              open={false}
-              controls="karavan-shop-appearance"
-              onClick={() => workspace?.navigate('appearance')}
-            />
             <SettingsSectionToggle
               title="Категории и правила"
               icon="tools"
@@ -98,10 +91,12 @@ export default function ShopSettings({
           className="karavan-module__choices"
           disabled={mutation.editingBlocked || access.sharing || access.mutation.editingBlocked}
         >
-          <legend>Кто может подать заявку</legend>
+          <legend>Как добавлять продавцов</legend>
           {(
             [
+              ['open', 'Свободно'],
               ['applications', 'Все желающие'],
+              ['selected', 'Выбранные продавцы'],
               ['invitation', 'По приглашению'],
             ] as const
           ).map(([key, label]) => (
@@ -117,13 +112,12 @@ export default function ShopSettings({
           ))}
         </fieldset>
       ) : null}
-      {canManage && !administration ? <p>Витрины появляются после вашего одобрения.</p> : null}
+      {canManage && !administration && ['applications', 'invitation'].includes(value) ? (
+        <p>Витрины появляются после вашего одобрения.</p>
+      ) : null}
       <MutationFailure mutation={mutation} />
       {canManage && !administration && !dirty ? <SellerAccessAction /> : null}
-      {canManage &&
-      !administration &&
-      value === 'invitation' &&
-      marketplace.admissionPolicy === 'invitation' ? (
+      {canManage && !administration && value === 'invitation' && current === 'invitation' ? (
         <Suspense fallback={<ShopLoading />}>
           <Invitations />
         </Suspense>

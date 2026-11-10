@@ -76,92 +76,6 @@
     margin: 0;
     border: 0;
   }
-  body[data-miniapp-profile='moderation'] .karavan-shop__appearance-options > summary {
-    min-height: 44px;
-    box-sizing: border-box;
-    padding-block: 12px;
-    cursor: pointer;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__media {
-    display: grid;
-    grid-template-columns: 1fr 2fr;
-    gap: 12px;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__media > div {
-    display: grid;
-    align-content: start;
-    gap: 8px;
-    min-width: 0;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__media img {
-    width: 100%;
-    aspect-ratio: 1;
-    object-fit: cover;
-    border-radius: 14px;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__media .is-cover img {
-    aspect-ratio: 3;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__upload {
-    position: relative;
-    display: grid;
-    min-height: 44px;
-    place-items: center;
-    border: 1px solid var(--color-border);
-    border-radius: 12px;
-    font-size: 13px;
-    font-weight: 650;
-    overflow: hidden;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__upload input {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0;
-    cursor: pointer;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__upload:focus-within {
-    outline: 3px solid var(--accent);
-    outline-offset: 2px;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__accents {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-  body[data-miniapp-profile='moderation']
-    .karavan-module
-    .karavan-shop__accents
-    button[data-accent] {
-    width: 44px;
-    height: 44px;
-    border: 4px solid transparent;
-    background: var(--shop-swatch);
-    box-shadow: inset 0 0 0 2px var(--color-surface);
-    border-radius: 50%;
-  }
-  body[data-miniapp-profile='moderation']
-    .karavan-module
-    .karavan-shop__accents
-    button[aria-pressed='true'] {
-    border-color: var(--text-primary);
-  }
-  body[data-miniapp-profile='moderation'] [data-accent='blue'] {
-    --shop-swatch: #435ee9;
-  }
-  body[data-miniapp-profile='moderation'] [data-accent='violet'] {
-    --shop-swatch: #7954d6;
-  }
-  body[data-miniapp-profile='moderation'] [data-accent='teal'] {
-    --shop-swatch: #007e80;
-  }
-  body[data-miniapp-profile='moderation'] [data-accent='rose'] {
-    --shop-swatch: #bb376d;
-  }
-  body[data-miniapp-profile='moderation'] [data-accent='graphite'] {
-    --shop-swatch: #343d51;
-  }
   body[data-miniapp-profile='moderation'] .karavan-shop__block {
     display: grid;
     grid-template-columns: 1fr 44px 44px;
@@ -304,19 +218,6 @@
     border-radius: 22px;
     background: var(--shop-hero-surface);
     color: var(--shop-hero-text);
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__cover {
-    width: calc(100% + 44px);
-    max-width: none;
-    margin: -22px -22px 0;
-    aspect-ratio: 3 / 1;
-    object-fit: cover;
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__logo {
-    width: 64px;
-    height: 64px;
-    object-fit: cover;
-    border-radius: 18px;
   }
   body[data-miniapp-profile='moderation'] .karavan-shop__hero .karavan-module__identity h3 {
     color: var(--shop-hero-text);
@@ -467,9 +368,6 @@
     padding: 16px 0;
     border-radius: 0;
     border-bottom: 1px solid var(--color-border);
-  }
-  body[data-miniapp-profile='moderation'] .karavan-shop__draft-status {
-    padding-block: 8px;
   }
   body[data-miniapp-profile='moderation'] .karavan-module__setup-rules {
     display: grid;

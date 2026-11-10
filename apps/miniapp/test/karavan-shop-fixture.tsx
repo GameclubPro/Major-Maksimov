@@ -51,6 +51,8 @@ const market: NonNullable<KaravanMarketplaceModule['marketplace']> =
     name: 'Магазин соседей',
     description: null,
     kind: 'chat',
+    format: 'community',
+    formatRevision: 1,
     status: ['draft', 'draft_empty', 'daily_appearance_closed'].includes(
       params.get('scenario') ?? '',
     )
@@ -166,6 +168,22 @@ if (simple) {
   )
     Object.assign(counts, { listings: 0, readyListings: 0, approvedListings: 0 });
 }
+const network = scenario.includes('_network');
+if (network) counts.chats = scenario.includes('_100') ? 100 : 2;
+const connectedChats =
+  network && !scenario.includes('_incomplete')
+    ? Array.from({ length: counts.chats }, (_, index) =>
+        index === 0
+          ? binding
+          : {
+              ...binding,
+              id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+              chatId: String(-456 - index),
+              chatTitle: index === 1 ? 'Соседи второго дома' : `Соседи дома ${index + 1}`,
+            },
+      )
+    : [binding];
+const bindings = connectedChats.slice(0, 48);
 const detailCounts =
   (window as Window & { __shopProviderDetailCounts?: typeof counts }).__shopProviderDetailCounts ??
   counts;
@@ -407,7 +425,7 @@ const api = {
     if (path.endsWith('/preview'))
       return {
         target: body.marketplaceId
-          ? { marketplace: market, rules, permissions, counts, bindings: [binding] }
+          ? { marketplace: market, rules, permissions, counts, bindings }
           : null,
         chats: body.chatIds.map((chatId: string) => ({
           chatId,
@@ -423,7 +441,7 @@ const api = {
       }
       return {
         url:
-          `https://max.ru/${body.destination === 'storefront' ? 'synthetic_seller_bot' : 'synthetic_buyer_bot'}?startapp=mh_` +
+          `https://max.ru/${['storefront', 'placement'].includes(body.destination) ? 'synthetic_seller_bot' : 'synthetic_buyer_bot'}?startapp=mh_` +
           'x'.repeat(43),
         expiresAt: new Date(Date.now() + 120000).toISOString(),
       };
@@ -580,7 +598,7 @@ const api = {
           format: input.format,
           administrationStoreId: input.administrationStoreId ?? null,
           affectedStores: 2,
-          affectedChats: 1,
+          affectedChats: counts.chats,
           pendingApplications: 1,
         };
       } else if (operation === 'format_update') {
@@ -609,7 +627,7 @@ const api = {
           scheduledRules: null,
           permissions,
           counts: detailCounts,
-          bindings: [binding],
+          bindings,
         };
       } else if (operation === 'catalog') {
         if (
@@ -899,7 +917,7 @@ const api = {
             ? 0
             : 1,
           emptiedStores: 0,
-          affectedChats: 1,
+          affectedChats: counts.chats,
           stores: [],
           hasMoreStores: false,
         };
@@ -957,7 +975,9 @@ const api = {
               : null
             : 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
         previewUrl: 'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop',
-        bindings: params.get('scenario') === 'unbound' || !formatConnected ? [] : [binding],
+        bindings: params.get('scenario') === 'unbound' || !formatConnected ? [] : bindings,
+        connectedChats:
+          params.get('scenario') === 'unbound' || !formatConnected ? [] : connectedChats,
         publicationChoices:
           scenario === 'format_storefront'
             ? [

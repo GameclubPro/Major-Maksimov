@@ -139,6 +139,17 @@ describe('native Major shop commands', () => {
       expect(JSON.stringify((error as HttpException).getResponse())).not.toContain('database');
     }
   });
+  it.each(['MARKETPLACE_APPEARANCE_RETIRED', 'MARKETPLACE_ADMINISTRATION_MOVED'])(
+    'preserves the definite retirement result %s for original command recovery',
+    async (code) => {
+      const { service, fetchMock, payload } = setup();
+      fetchMock.mockResolvedValue(Response.json({ error: code, message: 'private provider detail' }, { status: 410 }));
+      await expect(service.manage('-123', '777', payload, principal)).rejects.toMatchObject({
+        status: 410,
+        response: { code },
+      });
+    },
+  );
   it('relays a personal grant with the exact recipient and original command identity', async () => {
     const { service, authority, fetchMock, payload } = setup();
     const expiresAt = '2026-12-01T00:00:00.000Z';

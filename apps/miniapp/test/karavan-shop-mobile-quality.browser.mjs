@@ -75,29 +75,7 @@ try {
         await settleVisualFrame(page);
         await page.screenshot({ path: `${output}/${engine.name()}-${width}-${name}.png` });
       };
-      let panel = await begin('daily_appearance', 'Оформление');
-      const name = panel.getByRole('textbox', { name: 'Название', exact: true });
-      await name.fill('');
-      await panel.getByText('Цвет и разделы', { exact: true }).click();
-      await panel.locator('.settings-drilldown__body').evaluate((body) => {
-        body.scrollTop = body.scrollHeight;
-      });
-      await panel.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
-      await panel.getByRole('alert').waitFor();
-      assert.equal(await name.getAttribute('aria-invalid'), 'true');
-      assert.equal(await name.evaluate((input) => document.activeElement === input), true);
-      await visible(panel.getByRole('alert'));
-      await shot('appearance-error');
-      await name.fill('Магазин соседей');
-      const blocks = panel.getByRole('group', { name: 'Главная магазина', exact: true });
-      for (const checkbox of await blocks.getByRole('checkbox').all()) await checkbox.uncheck();
-      await panel.getByText('Цвет и разделы', { exact: true }).click();
-      await panel.getByRole('button', { name: 'Сохранить изменения', exact: true }).click();
-      await blocks.getByRole('alert').waitFor();
-      await visible(blocks.getByRole('alert'));
-      assert.equal(await blocks.evaluate((fieldset) => document.activeElement === fieldset), true);
-      await shot('appearance-blocks');
-
+      let panel;
       panel = await begin('daily_full_categories', 'Категории и правила');
       await panel.locator('.karavan-shop__category').first().waitFor();
       assert.equal(await panel.locator('.karavan-shop__category').count(), 17);
@@ -157,7 +135,7 @@ try {
       await shot('listing-pages');
       assert.deepEqual(errors, []);
       console.log(
-        `${engine.name()}/${width}/${theme}: field errors, consequence review and retained pages passed`,
+        `${engine.name()}/${width}/${theme}: consequence review and retained pages passed`,
       );
     } finally {
       await context.close();

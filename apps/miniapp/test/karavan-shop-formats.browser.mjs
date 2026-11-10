@@ -350,11 +350,13 @@ try {
           assert.equal((await handoffs()).length, 0, 'public view uses authoritative buyer URL');
           await home.getByRole('button', { name: 'Товары и услуги', exact: true }).click();
           await page.waitForFunction(() => window.__shopOpened.length === 2);
-          await home.getByRole('button', { name: 'Оформление', exact: true }).click();
-          await page.waitForFunction(() => window.__shopOpened.length === 3);
+          assert.equal(
+            await home.getByRole('button', { name: 'Оформление', exact: true }).count(),
+            0,
+          );
           assert.deepEqual(
             (await handoffs()).map((row) => row.body.destination),
-            ['storefront', 'storefront'],
+            ['storefront'],
           );
           assert.ok((await handoffs()).every((row) => !Object.hasOwn(row.body, 'storeId')));
           await shot('administration-home');

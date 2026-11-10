@@ -261,7 +261,7 @@ export default function SellerGrants() {
                           checked={storeId === null}
                           onChange={() => setStoreId(null)}
                         />
-                        Создаст новую витрину
+                        Выберет или создаст витрину
                       </label>
                     </fieldset>
                   ) : (
