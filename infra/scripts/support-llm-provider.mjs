@@ -5,8 +5,8 @@ import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 
 const apiProfile = {
   endpoint: 'https://5x2.gptclaudegemini.xyz',
-  model: 'gpt-6.1-terra',
-  reasoningEffort: 'max',
+  model: 'gpt-6.1-sol',
+  reasoningEffort: 'high',
   protocol: 'chat-completions',
   // Application budgets, not claims about the provider's model context or prices.
   inputBytes: 24000,

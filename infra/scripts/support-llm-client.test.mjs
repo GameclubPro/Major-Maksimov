@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   answerSupport,
+  classifySupportRequest,
   eligibleQuestion,
   knowledge,
   selectKnowledge,
@@ -31,6 +32,45 @@ test('human conversations skip before any model call or reviewed public answer',
       await answerSupport({ ...input, history, endpoint: 'http://127.0.0.1:1', key: 'unused' }),
       { action: 'skip', text: '', sourceIds: [] },
     );
+});
+
+test('broad moderator failures receive shared access checks without a bot-name prerequisite', async (t) => {
+  const fixture = await completionFixture(t, {
+    action: 'reply',
+    text: 'Проверьте права и подключение модератора.',
+    sourceIds: ['operator'],
+  });
+  for (const text of [
+    'Здравствуйте, у меня Бот не работает что-то 🤷‍♀️.... Не удаляет ссылки... Не отвечает на команды совсем ... Не банит, не удаляет',
+    'Модератор вообще не работает. Что проверить?',
+    'Бот не реагирует на команды и не удаляет спам. Что делать?',
+    'Права и подключение модератора уже проверил. Почему он всё ещё не удаляет ссылки и не отвечает на команды?',
+  ]) {
+    const request = classifySupportRequest(text);
+    assert.equal(request.moderatorTroubleshooting, true, text);
+    assert.deepEqual(request.primaryIds.slice(0, 2), ['max-delete-rights', 'connect']);
+    const result = await answerSupport({ ...fixture.input, text });
+    assert.equal(result.responseRoute, 'model-inference');
+    assert.equal(result.guideId, undefined);
+    const input = fixture.inputs.at(-1);
+    for (const id of ['max-delete-rights', 'connect'])
+      assert.ok(input.verifiedKnowledge.some((fact) => fact.id === id));
+    const reminder =
+      input.answerRequirements.find((item) => item.sourceId === 'max-delete-rights')?.instruction ??
+      '';
+    assert.match(reminder, /не спрашивай название/iu);
+    assert.match(reminder, /чтени.*всех сообщений.*отправк.*удалени/iu);
+    assert.match(reminder, /прав.*человека.*подключени/iu);
+    assert.match(reminder, /уже проверенные.*не повторяй/iu);
+  }
+  for (const text of [
+    'Бот не работает',
+    'Ластик не удаляет сообщения и не отвечает на команды. Что делать?',
+    'Публик не работает и не отвечает на команды. Что делать?',
+    'Бот не удаляет ссылки. Какой режим фильтра выбрать?',
+    'Добавил Максимова 2 в запас, первый Максимов молчит. Почему резерв сам не перехватил и кто сейчас выбран?',
+  ])
+    assert.equal(classifySupportRequest(text).moderatorTroubleshooting, false, text);
 });
 
 test('reviewed onboarding packs return a brief caption without a model key or request', async () => {
