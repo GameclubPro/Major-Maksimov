@@ -263,6 +263,9 @@ try {
   await waitCount(3);
   assert.equal(requests[2].request().postDataJSON().expectedRevision, removed.revision);
   await reply(2, 200, { ...removed, ...requests[2].request().postDataJSON() });
+  await page.waitForFunction(
+    () => JSON.parse(document.querySelector('[data-testid="state"]').textContent).dirty === false,
+  );
   assert.equal((await read()).dirty, false);
   console.log(
     'PASS: conflict pauses autosave and receipt-only refresh permits explicit save retry',
@@ -647,6 +650,8 @@ try {
       await screenPage.screenshot({ path: path.join(screenshots, `${name}-error.png`) });
       await danger.getByRole('button', { name: 'Закрыть уведомление' }).click();
       for (const toast of await screenPage.locator('.toast__close').all()) await toast.click();
+      // FLAG: Keep the receipt pending until the click; automatic readback can remove this button.
+      await panel.getByRole('button', { name: 'Проверить удаление', exact: true }).click();
       rules = {
         ...rules,
         revision: '2026-11-10T06:02:00.000Z',
@@ -654,7 +659,6 @@ try {
         publishedUrl: null,
         publishedAt: null,
       };
-      await panel.getByRole('button', { name: 'Проверить удаление', exact: true }).click();
       await panel.getByRole('button', { name: 'Опубликовать в чат', exact: true }).waitFor();
       assert.equal(await panel.getByRole('button', { name: 'Открыть', exact: true }).count(), 0);
       assert.equal(deleteCalls, 1, 'Checking a queued delete must not submit another DELETE');
