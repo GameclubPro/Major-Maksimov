@@ -23,16 +23,15 @@ export async function processCommercialLlmPreview(
       hasResidualCommercialContactCandidate(request.excerpt)
     )
       return;
-    const signal = AbortSignal.any([
-      shutdown,
-      AbortSignal.timeout(request.deadlineAtMs - Date.now()),
-    ]);
+    // FLAG: The caller deadline revokes the result, not an already dispatched computation.
+    // Drain its bounded terminal response under the client's existing timeout; aborting on
+    // diagnostic expiry would leave the shared CPU quarantined after a slow cold prompt.
     const valid = async () =>
-      !signal.aborted && (await mailbox.current(raw, request)) && (await mayRun());
+      !shutdown.aborted && (await mailbox.current(raw, request)) && (await mayRun());
     if (!(await valid())) return;
     const response = await secondary.classifyAudit(
       request.excerpt,
-      signal,
+      shutdown,
       valid,
       request.deadlineAtMs,
     );
