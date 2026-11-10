@@ -131,6 +131,14 @@ a preset must not enable sources or publish history. VK errors and malformed/par
 responses never prove that a source post disappeared. Keep feed polling bounded and
 diagnostics separate from the ordinary feed; do not return global aggregates to that path.
 
+Publik text preserves ordinary line breaks and the number of interior blank rows through
+native Enter, review, draft save and reopening. Native editors may leave the first line as
+a text node before `div`/`p` siblings; serialization must include the boundary before those
+blocks. Neither serialization nor Markdown editor/preview rendering may cap interior gaps.
+Verify this with the [spacing browser](../../apps/miniapp/test/max-rich-text-spacing.browser.mjs)
+(Chromium and WebKit, light/dark) and the composer browser's saved draft/publish payload case.
+The browser flows use local fixtures/preview transport and never publish to MAX.
+
 | Boundary                                                               | Focused checks                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Publisher catalog, virtualized lists, last-row access, cross-route CSS | [Catalog browser](../../apps/miniapp/test/publisher-catalog-layout.browser.mjs)                                                                                                                                                                                                                 |

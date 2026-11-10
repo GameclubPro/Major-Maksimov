@@ -218,6 +218,10 @@ export function renderSupportedMarkdownAsHtml(
     const inlineSafe = options.blockMode === 'inline';
     const lines: string[] = [];
     const rawLines = normalized.split('\n');
+    let lastContentLineIndex = rawLines.length - 1;
+    while (lastContentLineIndex >= 0 && !rawLines[lastContentLineIndex]?.trim()) {
+      lastContentLineIndex -= 1;
+    }
     let previousWasGap = false;
     let previousWasBlock = false;
 
@@ -243,8 +247,8 @@ export function renderSupportedMarkdownAsHtml(
       const trimmedLine = line.trim();
 
       if (!trimmedLine) {
-        if (lines.length > 0 && !previousWasGap) {
-          lines.push('<br><br>');
+        if (lines.length > 0 && (!previousWasGap || index < lastContentLineIndex)) {
+          lines.push(previousWasGap ? '<br>' : '<br><br>');
           previousWasGap = true;
           previousWasBlock = false;
         }
