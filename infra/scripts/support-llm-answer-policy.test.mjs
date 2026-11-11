@@ -297,3 +297,77 @@ test('confirmed yes/no role answers remain meaningful on later troubleshooting t
     ),
   );
 });
+
+test('assistant capabilities and named product auto-replies retain their own meaning', () => {
+  const interaction = { addressedToSupport: true };
+  const question = 'Он будет брать фразы из контекста или точечная фраза должна быть?';
+  assert.equal(selectKnowledge(question, [], interaction)[0].id, 'support-assistant-capabilities');
+  for (const text of [
+    'В Публике автоответ будет брать фразы из контекста или точечная фраза должна быть?',
+    'Как подключить этого помощника Публика к группе?',
+  ])
+    assert.equal(
+      selectKnowledge(text, [], interaction).some((x) => x.id === 'support-assistant-capabilities'),
+      false,
+      text,
+    );
+  const aiHistory = [{ role: 'user', text: 'Как вы понимаете вопросы, используете LLM?' }];
+  assert.equal(
+    selectKnowledge(
+      'Он заточен только под поддержку или может на другие темы отвечать?',
+      aiHistory,
+      interaction,
+    )[0].id,
+    'support-assistant-capabilities',
+  );
+  const publisherHistory = [{ role: 'user', text: 'Как настроить автоответы Публика?' }];
+  assert.equal(
+    selectKnowledge(
+      'А можно такого помощника как ты к себе в чат?',
+      publisherHistory,
+      interaction,
+    )[0].id,
+    'support-assistant-capabilities',
+  );
+  assert.ok(
+    selectKnowledge(
+      'В Публике автоответ будет брать фразы из контекста или точечная фраза должна быть?',
+      [],
+      interaction,
+    ).some((x) => x.id === 'publisher-auto-replies-create'),
+  );
+  assert.equal(
+    selectKnowledge(
+      'В Публике автоответ будет брать фразы из контекста или точечная фраза должна быть?',
+      [],
+      interaction,
+    )[0].id,
+    'publisher-auto-replies-matching',
+  );
+  assert.equal(
+    selectKnowledge(question, publisherHistory, interaction).some(
+      (x) => x.id === 'support-assistant-capabilities',
+    ),
+    false,
+  );
+  assert.equal(
+    selectKnowledge(question, aiHistory, interaction)[0].id,
+    'support-assistant-capabilities',
+  );
+  assert.equal(
+    selectKnowledge(
+      'Он заточен только под поддержку или может на другие темы отвечать?',
+      publisherHistory,
+      interaction,
+    ).some((x) => x.id === 'support-assistant-capabilities'),
+    false,
+  );
+  const mixed = selectKnowledge(
+    'Хочу такого помощника как ты. И как запретить видео в группе?',
+    publisherHistory,
+    interaction,
+  ).map((x) => x.id);
+  assert.ok(mixed.includes('support-assistant-capabilities'));
+  assert.ok(mixed.includes('limits-attachments'));
+  assert.equal(mixed.includes('publisher-auto-replies-create'), false);
+});

@@ -88,7 +88,11 @@ function setupContext(text, knowledge, request = {}, confirmed = false) {
         .at(-1) + text.slice(action.index).split(/[.!?;\n]/u)[0];
     if (
       /^подключени/iu.test(action[0]) &&
-      /провер(?:ил(?:а|и)?|ено|ены)(?![\p{L}])/iu.test(clause) &&
+      [
+        ...clause.matchAll(
+          /(?<![\p{L}])(?:провер(?:ил(?:а|и)?|ено|ены)|подтвержден[оы]|успешно)(?![\p{L}])/giu,
+        ),
+      ].some((match) => !/(?:не|не\s+был[аои]?)\s*$/iu.test(clause.slice(0, match.index))) &&
       !/как|инструкц|пришл|скин|покаж/iu.test(clause)
     )
       continue;

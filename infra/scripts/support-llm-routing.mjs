@@ -314,9 +314,40 @@ function ordinaryConversation(text) {
   );
 }
 
-function supportAssistantRequest(text) {
-  return /(?:такого|такой|этого|этот|ии|интеллектуальн)\p{L}*\s+(?:ии[ -]?)?помощник|как\s+(?:вы|ты).{0,20}(?:отвеча|понима)|(?:фраз|ответ).{0,25}из контекст|контекст.{0,25}(?:фраз|ответ)|(?<![\p{L}])llm(?![\p{L}])/iu.test(
-    text,
+function namedSupportProduct(text) {
+  return (
+    publisherName.test(text) ||
+    eraserName.test(text) ||
+    moderatorName.test(text) ||
+    autoReplyRequest(text)
+  );
+}
+
+function supportAssistantRequest(text, recent = []) {
+  const explicit =
+    /(?<![\p{L}])(?:ии|llm)(?![\p{L}])|интеллектуальн|как\s+(?:вы|ты).{0,20}(?:отвеча|понима)|помощник\p{L}*\s+как\s+(?:ты|вы)/iu.test(
+      text,
+    );
+  if (namedSupportProduct(text) && !explicit) return false;
+  const direct =
+    /(?:такого|такой|этого|этот|ии|интеллектуальн)\p{L}*\s+(?:ии[ -]?)?помощник|как\s+(?:вы|ты).{0,20}(?:отвеча|понима)|(?:фраз|ответ).{0,25}из контекст|контекст.{0,25}(?:фраз|ответ)|(?<![\p{L}])llm(?![\p{L}])/iu.test(
+      text,
+    );
+  if (explicit && direct) return true;
+  const previous = recent.findLast(
+    (item) =>
+      item.role === 'user' &&
+      (namedSupportProduct(item.text) || supportAssistantRequest(item.text)),
+  );
+  if (previous && namedSupportProduct(previous.text) && !supportAssistantRequest(previous.text))
+    return false;
+  return (
+    direct ||
+    Boolean(
+      previous &&
+      supportAssistantRequest(previous.text) &&
+      /^(?:а\s+)?(?:он|этот\s+помощник).{0,50}(?:заточен|поддержк|умеет|отвеча)/iu.test(text),
+    )
   );
 }
 
@@ -1073,8 +1104,10 @@ function semanticFacts(text, state) {
   const add = (id, priority = 50) => facts.push({ id, priority });
   const { publisherRequest: publ, developer, commercialAi, mixedTopics } = state;
   const test = (pattern) => pattern.test(text);
-  if (supportAssistantRequest(state.current)) add('support-assistant-capabilities', 170);
-  if (state.supportDialogue) return [{ id: 'support-dialogue', priority: 160 }];
+  if (supportAssistantRequest(state.current, state.recent)) {
+    add('support-assistant-capabilities', 170);
+  }
+  if (state.supportDialogue && !facts.length) return [{ id: 'support-dialogue', priority: 160 }];
   if (state.moderatorTroubleshooting) {
     add('max-delete-rights', 200);
     add('connect', 195);
@@ -1573,7 +1606,7 @@ function semanticFacts(text, state) {
     if (autoReplyRequest(text)) {
       add(
         test(
-          /опечат|не срабатыв|совпад|целое|внутри|пауз|частот|повторен|слишком часто|отдельное слово|галочк/iu,
+          /опечат|не срабатыв|совпад|целое|внутри|пауз|частот|повторен|слишком часто|отдельное слово|галочк|контекст|точечн|точн.{0,15}фраз/iu,
         )
           ? 'publisher-auto-replies-matching'
           : 'publisher-auto-replies-create',
@@ -1843,6 +1876,9 @@ export function createSupportRouter(knowledge) {
   };
   function classify(text, history = [], interaction = {}) {
     const ctx = conversationFor(text, history);
+    const assistantTopic =
+      supportAssistantRequest(ctx.current, ctx.recent) && !namedSupportProduct(ctx.current);
+    if (assistantTopic) ctx.focus = ctx.current;
     const role = roleOf(ctx.current, ctx.recent);
     const openerContext = ctx.recent.some(
       (item) => item.role === 'user' && supportOpener(item.text),
@@ -1941,6 +1977,7 @@ export function createSupportRouter(knowledge) {
       addressed &&
       request &&
       !hasContext &&
+      !supportAssistantRequest(ctx.current, ctx.recent) &&
       !domain.test(ctx.current) &&
       !topics(ctx.current).length
     )
@@ -1964,7 +2001,7 @@ export function createSupportRouter(knowledge) {
           /модератор/iu.test(ctx.current) ||
           advert.test(ctx.current) ||
           topics(ctx.current).length ||
-          supportAssistantRequest(ctx.current) ||
+          supportAssistantRequest(ctx.current, ctx.recent) ||
           projectSubject.test(ctx.current) ||
           switchingModerator)) ||
         (request && configurationHelp) ||
@@ -1992,6 +2029,7 @@ export function createSupportRouter(knowledge) {
       !/автопост/iu.test(ctx.current) &&
       !publishingMigration;
     const publisherRequest =
+      !assistantTopic &&
       !majorOnly &&
       !eraserOnly &&
       Boolean(
@@ -2005,6 +2043,7 @@ export function createSupportRouter(knowledge) {
           !topics(ctx.focus).includes('rules')),
       );
     const eraserRequest = Boolean(
+      !assistantTopic &&
       eraserOnly &&
       (eraserName.test(ctx.current) ||
         !topics(ctx.current).length ||
