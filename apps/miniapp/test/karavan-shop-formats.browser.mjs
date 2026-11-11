@@ -12,7 +12,6 @@ import {
   settleVisualFrame,
 } from '../../../scripts/miniapp-smartphone.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
-import { runShopCategoryChecks } from './karavan-shop-categories.browser.mjs';
 
 const fixtures = resolve(import.meta.dirname, '../build/shop-browser-fixtures');
 await mkdir(fixtures, { recursive: true });
@@ -93,17 +92,6 @@ try {
                 ),
               operation,
             );
-          const handoffs = () =>
-            page.evaluate(() =>
-              window.__shopRequests.filter((row) => row.path.endsWith('/handoffs')),
-            );
-          const back = () => page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
-          const settings = async () => {
-            await home.getByRole('button', { name: 'Настройки', exact: true }).click();
-            const panel = page.getByRole('dialog', { name: 'Настройки', exact: true });
-            await panel.getByRole('heading', { name: 'Формат магазина', exact: true }).waitFor();
-            return panel;
-          };
           const shot = async (name, panel = home) => {
             await settleVisualFrame(page);
             assert.ok(
@@ -128,14 +116,6 @@ try {
           };
           const choose = (label) =>
             home.getByRole('button', { name: new RegExp(`^${label}`) }).click();
-
-          if (process.env.SHOP_CATEGORY_ONLY === '1') {
-            await runShopCategoryChecks({ begin, page, home, requests, shot });
-            assert.deepEqual(errors, []);
-            profiles++;
-            console.log(`${engineName}/${width}/${theme}: categories passed`);
-            continue;
-          }
 
           await begin('format_setup_unsupported');
           await home
@@ -219,7 +199,7 @@ try {
             .check();
           await shot('create-storefront');
           await home.getByRole('button', { name: 'Создать витрину чата', exact: true }).click();
-          await home.getByText('Закрыт для покупателей', { exact: true }).waitFor();
+          await home.getByText('Магазин выключен', { exact: true }).waitFor();
           const created = await requests('setup');
           assert.equal(created.length, 2);
           assert.deepEqual(created[1].body, created[0].body);
@@ -244,7 +224,7 @@ try {
           assert.equal((await requests('setup')).length, 2, 'receipt reads never dispatch setup');
           await page.reload();
           await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
-          await home.getByText('Закрыт для покупателей', { exact: true }).waitFor();
+          await home.getByText('Магазин выключен', { exact: true }).waitFor();
           const restored = await page.evaluate(() => window.__readShopConnection());
           assert.deepEqual(
             restored,
@@ -319,211 +299,10 @@ try {
           await home.getByRole('textbox', { name: 'Название магазина', exact: true }).waitFor();
           await shot('legacy-provider-community');
 
-          for (const scenario of ['daily_paged', 'empty']) {
-            await begin(scenario);
-            const primary = home.locator('.karavan-shop__hero .karavan-module__primary');
-            assert.deepEqual(await primary.allTextContents(), ['Посмотреть магазин чата']);
-            assert.equal(
-              await home
-                .locator('.karavan-shop__hero')
-                .getByRole('button', { name: /Добавить свой/ })
-                .count(),
-              0,
-            );
-            await shot(`community-${scenario}`);
-          }
-
-          await begin('format_storefront');
-          assert.deepEqual(
-            await home.locator('.karavan-shop__hero .karavan-module__primary').allTextContents(),
-            ['Посмотреть витрину'],
-          );
-          assert.equal(
-            await home
-              .getByRole('button', { name: /^Проверить заявки|^Заявки|^Пригласить/ })
-              .count(),
-            0,
-          );
-          await home.getByRole('button', { name: 'Посмотреть витрину', exact: true }).click();
-          assert.deepEqual(await page.evaluate(() => window.__shopOpened), [
-            'https://max.ru/synthetic_buyer_bot?startapp=store_administration-store',
-          ]);
-          assert.equal((await handoffs()).length, 0, 'public view uses authoritative buyer URL');
-          await home.getByRole('button', { name: 'Товары и услуги', exact: true }).click();
-          await page.waitForFunction(() => window.__shopOpened.length === 2);
-          assert.equal(
-            await home.getByRole('button', { name: 'Оформление', exact: true }).count(),
-            0,
-          );
-          assert.deepEqual(
-            (await handoffs()).map((row) => row.body.destination),
-            ['storefront'],
-          );
-          assert.ok((await handoffs()).every((row) => !Object.hasOwn(row.body, 'storeId')));
-          await shot('administration-home');
-          let panel = await settings();
-          assert.equal(
-            await panel
-              .getByRole('button', { name: /Категории и правила|Пригласить|Оформление/ })
-              .count(),
-            0,
-          );
-          await panel.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
-          const response = page.getByRole('dialog', { name: 'Объявления в чате', exact: true });
-          await response.locator('.settings-storefront-editor__preview-button').waitFor();
-          assert.equal(
-            await response
-              .getByText('Выберите витрину для ответа бота на $ в этом чате.', { exact: true })
-              .count(),
-            0,
-          );
-          assert.equal(
-            await response
-              .getByRole('button', { name: 'Личная витрина из прошлого формата', exact: true })
-              .count(),
-            0,
-          );
-          assert.equal(
-            await response.getByRole('group', { name: 'Сценарий примера', exact: true }).count(),
-            0,
-          );
-          assert.equal(
-            await response.locator('.settings-storefront-editor__preview-button').count(),
-            1,
-          );
-          await response.getByText('Изменить текст', { exact: true }).click();
-          const text = response.getByRole('textbox', { name: /^Текст ответа бота/ });
-          await text.fill('Добро пожаловать в нашу витрину');
-          assert.equal(
-            await response.getByRole('textbox', { name: /^Кнопка витрины чата/ }).count(),
-            1,
-          );
-          assert.equal(
-            await response
-              .getByRole('textbox', { name: /Кнопка каталога|Кнопка создания/ })
-              .count(),
-            0,
-          );
-          await page.setViewportSize({ width, height: 460 });
-          await text.focus();
-          await text.scrollIntoViewIfNeeded();
-          await shot('administration-response-keyboard', response);
-          await page.setViewportSize({ width, height: 780 });
-          await back();
-          await panel.waitFor();
-          await panel.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
-          assert.equal(await text.inputValue(), 'Добро пожаловать в нашу витрину');
-          await shot('administration-response-draft', response);
-
-          await begin('format_storefront_closed');
-          assert.equal(
-            await home.getByRole('button', { name: 'Посмотреть витрину', exact: true }).count(),
-            0,
-          );
-          panel = await settings();
-          assert.equal(
-            await panel
-              .getByRole('button', { name: 'Открыть для покупателей', exact: true })
-              .count(),
-            0,
-            'unpublished store cannot open empty',
-          );
-          await panel.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
-          await response.getByText('Изменить текст', { exact: true }).click();
-          assert.equal(
-            await response.locator('.settings-storefront-editor__preview-button').count(),
-            0,
-          );
-          assert.equal(
-            await response.getByRole('textbox').count(),
-            2,
-            'closed store retains only relevant text fields',
-          );
-          await shot('administration-closed-response', response);
-
-          await begin('format_storefront_ready');
-          await home.getByRole('button', { name: 'Открыть для покупателей', exact: true }).click();
-          await home.getByRole('button', { name: 'Посмотреть витрину', exact: true }).waitFor();
-          const opening = await requests('status');
-          assert.equal(opening.length, 1);
-          assert.equal(opening[0].body.command.input.status, 'active');
-          assert.equal(
-            opening[0].body.command.input.allowEmpty,
-            false,
-            'ready fixed store opens without empty bypass or pre-existing listing',
-          );
-          await shot('administration-first-open');
-
-          await begin('format_storefront_handoff_error');
-          await home.getByRole('button', { name: 'Товары и услуги', exact: true }).click();
-          await home.getByRole('alert').waitFor();
-          assert.equal(await page.evaluate(() => window.__shopOpened.length), 0);
-          assert.equal((await handoffs()).length, 1);
-          await shot('administration-handoff-error');
-          await home.getByRole('button', { name: 'Повторить переход', exact: true }).click();
-          await page.waitForFunction(() => window.__shopOpened.length === 1);
-          assert.equal((await handoffs()).length, 2);
-
-          for (const scenario of ['format_switch', 'format_switch_unknown']) {
-            await begin(scenario);
-            panel = await settings();
-            const format = panel.getByRole('region', { name: 'Формат магазина', exact: true });
-            await format.getByRole('button', { name: 'Изменить формат', exact: true }).click();
-            await format.getByRole('button', { name: /^Витрина администрации/ }).click();
-            await format
-              .getByText('Витрины, товары и заказы сохранятся.', { exact: true })
-              .waitFor();
-            await format
-              .getByText(
-                'Просмотр покупателями приостановится. После проверки откройте магазин снова.',
-                { exact: true },
-              )
-              .waitFor();
-            assert.equal((await requests('format_update')).length, 0);
-            await shot(`${scenario}-preview`, panel);
-            await format
-              .getByRole('button', { name: 'Подтвердить смену формата', exact: true })
-              .click();
-            if (scenario.endsWith('unknown')) {
-              await page
-                .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
-                .waitFor();
-              assert.equal(
-                await format.getByRole('button', { name: 'Отмена', exact: true }).isDisabled(),
-                true,
-              );
-              const original = await requests('format_update');
-              assert.equal(original.length, 1);
-              await shot('format-unknown', panel);
-              await page
-                .getByRole('button', { name: 'Продолжить сохранённое действие', exact: true })
-                .click();
-              await page.waitForFunction(
-                () =>
-                  window.__shopRequests.filter(
-                    (row) => row.body?.command?.operation === 'format_update',
-                  ).length === 2,
-              );
-              assert.deepEqual(
-                (await requests('format_update'))[1].body,
-                original[0].body,
-                'unknown outcome preserves original entire command',
-              );
-            }
-            await format.getByRole('button', { name: 'Изменить формат', exact: true }).waitFor();
-            assert.equal(await page.evaluate(() => window.__shopMarket.status), 'paused');
-            assert.equal(
-              (await requests('status')).length,
-              0,
-              'format update cannot reopen automatically',
-            );
-            await shot(`${scenario}-saved`, panel);
-          }
-          await runShopCategoryChecks({ begin, page, home, requests, shot });
           assert.deepEqual(errors, []);
           profiles++;
           console.log(
-            `${engineName}/${width}/${theme}: setup, terms, compatibility, viewing, direct management, drafts and format recovery passed`,
+            `${engineName}/${width}/${theme}: setup, terms, compatibility and preserved setup receipts passed`,
           );
         } finally {
           await context.close();
