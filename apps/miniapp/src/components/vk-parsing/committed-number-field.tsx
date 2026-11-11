@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef } from 'react';
+import { useEffect, useId, useReducer, useRef, useState } from 'react';
 import { cn } from '../../lib/cn';
 import {
   createVkParsingNumberDraftState,
@@ -31,6 +31,8 @@ export function CommittedNumberField({
   className,
   onCommit,
 }: CommittedNumberFieldProps) {
+  const feedbackId = useId();
+  const [feedback, setFeedback] = useState('');
   const serverDraft = value === '' ? '' : String(value);
   const serverDraftRef = useRef(serverDraft);
   const availableRef = useRef(available);
@@ -44,12 +46,21 @@ export function CommittedNumberField({
   availableRef.current = available;
 
   useEffect(() => {
+    setFeedback('');
     dispatch(available ? { type: 'sync', serverDraft } : { type: 'reset', serverDraft: '' });
   }, [available, serverDraft]);
 
   const commit = async () => {
     const nextValue = parseVkParsingIntegerDraft(state.draft, min, max);
     if (nextValue === null) {
+      if (state.draft !== serverDraftRef.current) {
+        const retained = mixed
+          ? 'Прежние значения сохранены.'
+          : serverDraftRef.current
+            ? `Оставлено: ${serverDraftRef.current}.`
+            : 'Значение не изменено.';
+        setFeedback(`${label}: нужно целое число от ${min} до ${max}. ${retained}`);
+      }
       dispatch({
         type: 'reset',
         serverDraft: availableRef.current ? serverDraftRef.current : '',
@@ -88,11 +99,20 @@ export function CommittedNumberField({
         step={1}
         aria-label={ariaLabel}
         aria-busy={pending || undefined}
+        aria-invalid={
+          state.editing &&
+          state.draft !== serverDraft &&
+          parseVkParsingIntegerDraft(state.draft, min, max) === null
+        }
+        aria-describedby={feedback ? feedbackId : undefined}
         value={available ? state.draft : ''}
         placeholder={available && mixed ? 'Разные' : undefined}
         disabled={fieldDisabled}
         onFocus={() => dispatch({ type: 'focus' })}
-        onChange={(event) => dispatch({ type: 'change', draft: event.target.value })}
+        onChange={(event) => {
+          setFeedback('');
+          dispatch({ type: 'change', draft: event.target.value });
+        }}
         onBlur={() => {
           if (suppressBlurCommitRef.current) {
             suppressBlurCommitRef.current = false;
@@ -108,7 +128,9 @@ export function CommittedNumberField({
             event.currentTarget.blur();
           } else if (event.key === 'Escape') {
             event.preventDefault();
+            event.stopPropagation();
             suppressBlurCommitRef.current = true;
+            setFeedback('');
             dispatch({
               type: 'reset',
               serverDraft: availableRef.current ? serverDraftRef.current : '',
@@ -117,6 +139,11 @@ export function CommittedNumberField({
           }
         }}
       />
+      {feedback ? (
+        <span id={feedbackId} className="vk-number-feedback" role="status">
+          {feedback}
+        </span>
+      ) : null}
     </label>
   );
 }

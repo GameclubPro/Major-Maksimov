@@ -775,16 +775,21 @@
 
   .publisher-auto-reply-editor__tester {
     min-width: 0;
-    display: grid;
-    gap: 7px;
     padding-top: 10px;
     border-top: 1px solid var(--color-border);
   }
 
-  .publisher-auto-reply-editor__tester > label {
+  .publisher-auto-reply-editor__tester > summary {
+    min-height: 44px;
+    align-content: center;
+    cursor: pointer;
     color: var(--color-ink-muted);
     font-size: 0.73rem;
     font-weight: 780;
+  }
+
+  .publisher-auto-reply-editor__tester[open] > :not(summary) {
+    margin-top: 7px;
   }
 
   .publisher-auto-reply-editor__tester-row input {

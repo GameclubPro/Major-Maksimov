@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { checkReportsPeriod } from './reports-period.browser.mjs';
 import { chromium } from 'playwright';
 import { clickSettingsOverviewEntry } from './settings-overview-browser-helpers.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
@@ -74,6 +75,7 @@ try {
       await panel.getByRole('tab', { name: 'Журнал', exact: true }).click();
       await panel.locator('.reports-journal__item').first().waitFor();
       await assertStableMobilePanel();
+      await checkReportsPeriod({ page, output: screenshots, name });
       await panel.getByRole('tab', { name: 'Настройки', exact: true }).click();
     }
     await panel.getByRole('switch', { name: 'Жалобы участников', exact: true }).check();

@@ -526,9 +526,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const [applyTargetPreview, setApplyTargetPreview] = useState<Awaited<
     ReturnType<typeof previewApplySettingsSectionTarget>
   > | null>(null);
-  const [applyPartialResult, setApplyPartialResult] = useState<SettingsApplyPartialError | null>(
-    null,
-  );
+  const [applyPartialResult, setApplyPartialResult] = useState<{
+    result: SettingsApplyPartialError;
+    recipientTitles: Readonly<Record<string, string>>;
+  } | null>(null);
   const [applyTargetPreviewLoading, setApplyTargetPreviewLoading] = useState(false);
   const [applyTargetPreviewError, setApplyTargetPreviewError] = useState<string | null>(null);
   const applyTargetSavedSourceRef = useRef<SettingsApplySavedSource | null>(null);
@@ -1512,7 +1513,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           });
           return;
         }
-        setApplyPartialResult(partial);
+        setApplyPartialResult({
+          result: partial,
+          recipientTitles: variables.reviewedTargetTitles ?? {},
+        });
         setApplyTargetSheet(null);
         void queryClient.invalidateQueries({
           queryKey: ['settings-screen', variables.sourceChatId],
@@ -2065,6 +2069,20 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     if (feedback.first || feedback.moduleError)
       revealStopWordsFeedback(feedback.first, feedback.moduleError);
   }
+  function revealSharedSettingsErrors() {
+    if (sharedFieldErrors.linkRulesPolicy) {
+      setExpandedSections({ ...INITIAL_EXPANDED_SECTIONS, links: true });
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+          '.links-panel__editor input, .links-panel__editor textarea',
+        );
+        input?.focus();
+        input?.scrollIntoView({ block: 'center' });
+      });
+      return;
+    }
+    revealSharedStopWordsErrors();
+  }
   function applyStopWordsServerValidation(error: unknown) {
     if (!(error instanceof ApiRequestError) || error.status !== 400) return;
     const issues = Array.isArray(error.payload?.issues) ? error.payload.issues : [];
@@ -2097,10 +2115,12 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       feedback.moduleError ?? (feedback.first ? null : 'Проверьте настройки стоп-слов.'),
     );
   }
-  function validateDraft(value: ChatSettings): ChatSettings | null {
+  function validateDraft(value: ChatSettings, section?: ApplySectionKey): ChatSettings | null {
     if (isReloadingStopWords) return null;
-    if (Object.keys(sharedFieldErrors).length) {
-      revealSharedStopWordsErrors();
+    const paths = section ? new Set(settingsSectionPaths('chat', section)) : null;
+    if (Object.keys(sharedFieldErrors).some((path) => !paths || paths.has(path))) {
+      if (section === 'stopWords') revealSharedStopWordsErrors();
+      else revealSharedSettingsErrors();
       return null;
     }
     if (
@@ -4328,7 +4348,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       draftSettings = { ...draft, stopWordsPolicy: prepared.policy };
     }
 
-    return validateDraft(mergeSectionSettings(baseSettings, draftSettings, section));
+    return validateDraft(mergeSectionSettings(baseSettings, draftSettings, section), section);
   }
 
   async function handleSaveSection(section: ApplySectionKey) {
@@ -4358,6 +4378,14 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     const payload = buildSectionPayload(section);
     if (!payload) {
       if (section === 'stopWords') return;
+      if (section === 'links' && sharedFieldErrors.linkRulesPolicy) {
+        const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+          '.links-panel__editor input, .links-panel__editor textarea',
+        );
+        input?.focus();
+        input?.scrollIntoView({ block: 'center' });
+        return;
+      }
       pushToast({
         replaceKey: `settings-validation:${section}`,
         tone: 'danger',
@@ -4394,6 +4422,14 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     const payload = buildSectionPayload(section);
     if (!payload) {
       if (section === 'stopWords') return;
+      if (section === 'links' && sharedFieldErrors.linkRulesPolicy) {
+        const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+          '.links-panel__editor input, .links-panel__editor textarea',
+        );
+        input?.focus();
+        input?.scrollIntoView({ block: 'center' });
+        return;
+      }
       pushToast({
         replaceKey: `settings-validation:${section}`,
         tone: 'danger',
@@ -4463,6 +4499,11 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         sourceChatId: applyTargetSheet.sourceChatId,
         confirmedTargetChatIds:
           applyTargetSheet.section === 'reports' ? applyTargetPreview?.appliedChatIds : undefined,
+        reviewedTargetTitles: Object.fromEntries(
+          applyTargetPreview.sampleChats
+            .filter((chat) => applyTargetPreview.appliedChatIds.includes(chat.id))
+            .map((chat) => [chat.id, chat.title]),
+        ),
       });
       if (applyTargetSheet.isCurrentScope?.() !== false) closeSection(applyTargetSheet.section);
     } catch {
@@ -5942,6 +5983,14 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   isSectionDirty={isSectionDirty}
                   limitsCardStatus={limitsCardStatus}
                   limitsRulesEnabledCount={limitsRulesEnabledCount}
+                  onMaxMessageLengthError={(message) =>
+                    setSharedFieldErrors((current) => {
+                      const next = { ...current };
+                      if (message) next.maxMessageLength = message;
+                      else delete next.maxMessageLength;
+                      return next;
+                    })
+                  }
                   messageLimitsBotButtonErrors={messageLimitsBotButtonErrors}
                   openBotEditorKey={openBotEditorKey}
                   openHintKey={openHintKey}
@@ -6714,7 +6763,8 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       {applyPartialResult && (
         <Suspense fallback={null}>
           <LazySettingsApplyPartialResult
-            result={applyPartialResult}
+            result={applyPartialResult.result}
+            recipientTitles={applyPartialResult.recipientTitles}
             onClose={() => setApplyPartialResult(null)}
           />
         </Suspense>

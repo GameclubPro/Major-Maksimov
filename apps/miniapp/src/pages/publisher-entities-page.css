@@ -283,8 +283,15 @@
   }
 
   .publisher-entities-page__list.is-virtual .publisher-entity-row {
-    height: 120px;
+    height: var(--publisher-entity-row-height, 120px);
     overflow: hidden;
+  }
+
+  .publisher-entities-page__row-scale {
+    position: absolute;
+    height: 0;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .publisher-entity-row__main {

@@ -30,6 +30,94 @@ try {
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
     const panel = page.locator('.settings-drilldown__panel--limits');
     await panel.waitFor({ state: 'visible' });
+    const lengthEnabled = panel.getByRole('checkbox', {
+      name: 'Включить ограничение длины сообщения',
+      exact: true,
+    });
+    await lengthEnabled.check();
+    const length = panel.getByRole('spinbutton', { name: 'Лимит длины сообщения, символы' });
+    const lengthSlider = panel.getByRole('slider', { name: 'Лимит длины сообщения', exact: true });
+    await length.fill('137');
+    await lengthSlider.focus();
+    await lengthSlider.blur();
+    assert.equal(
+      await length.inputValue(),
+      '137',
+      'focusing a stepped range preserves exact input',
+    );
+    for (const invalid of ['49', '1501', '1.5', '']) {
+      await length.fill(invalid);
+      assert.equal(await length.getAttribute('aria-invalid'), 'true');
+      const errorId = await length.getAttribute('aria-describedby');
+      assert.ok(errorId);
+      assert.match(await page.locator(`[id="${errorId}"]`).innerText(), /от 50 до 1500/u);
+    }
+    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    assert.equal(await panel.isVisible(), true, 'invalid numeric draft blocks Save');
+    assert.equal(await length.inputValue(), '');
+    const dismissToasts = async () => {
+      const close = page.getByRole('button', { name: 'Закрыть уведомление', exact: true });
+      while (await close.count()) await close.first().click();
+    };
+    await dismissToasts();
+    for (const valid of ['50', '1500', '137']) {
+      await length.fill(valid);
+      assert.notEqual(await length.getAttribute('aria-invalid'), 'true');
+      assert.equal(await lengthSlider.getAttribute('aria-valuetext'), `${valid} символов`);
+    }
+    await length.fill('49');
+    await lengthEnabled.uncheck();
+    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.waitFor({ state: 'hidden' });
+    await dismissToasts();
+    await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
+    assert.equal(
+      await lengthEnabled.isChecked(),
+      false,
+      'disabling explicitly cancels the invalid numeric draft',
+    );
+    await lengthEnabled.check();
+    assert.equal(await length.inputValue(), '137', 'last valid length remains saved');
+    await lengthSlider.focus();
+    await lengthSlider.press('Home');
+    await lengthSlider.press('ArrowRight');
+    assert.equal(await length.inputValue(), '60', 'range retains its original step of ten');
+    await length.fill('137');
+    if (width === 320 || width === 412) {
+      await length.focus();
+      await page.setViewportSize({ width, height: Math.max(320, height - 260) });
+      await length.scrollIntoViewIfNeeded();
+      assert.equal(
+        await panel
+          .locator('.settings-length-limit__value-row > .settings-native-toggle__title')
+          .evaluate((element) => {
+            const text = document.createRange();
+            text.selectNodeContents(element);
+            return text.getClientRects().length === 1;
+          }),
+        true,
+        'maximum label stays on one line beside or above numeric field',
+      );
+      assert.equal(
+        await length.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return (
+            box.height >= 44 &&
+            box.left >= 0 &&
+            box.right <= innerWidth &&
+            box.top >= 0 &&
+            box.bottom <= innerHeight &&
+            element ===
+              document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+          );
+        }),
+        true,
+        'exact numeric input remains reachable above keyboard-sized viewport',
+      );
+      await page.screenshot({ path: join(screenshotDir, `${name}-exact-length-keyboard.png`) });
+      await length.blur();
+      await page.setViewportSize({ width, height });
+    }
     await panel
       .getByRole('button', { name: 'Пояснение для лимита сообщений', exact: true })
       .click();
@@ -80,6 +168,11 @@ try {
     if (await panel.isVisible())
       await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
+    assert.equal(
+      await length.inputValue(),
+      '137',
+      'exact numeric limit persists after Save/reopen',
+    );
     assert.equal(await phones.isChecked(), false);
     assert.equal(await explanation.isChecked(), true);
     assert.equal(await slow.inputValue(), '90');

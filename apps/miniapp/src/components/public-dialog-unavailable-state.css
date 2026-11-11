@@ -1,0 +1,6 @@
+@layer workspace {
+  .public-dialog-unavailable {
+    padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right));
+    overflow-wrap: anywhere;
+  }
+}

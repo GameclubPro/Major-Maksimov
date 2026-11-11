@@ -12,6 +12,7 @@ import {
   settleVisualFrame,
 } from '../../../scripts/miniapp-smartphone.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
+import { runShopNativeShareChecks } from './karavan-shop-native-share.browser.mjs';
 import { runShopCategoryChecks } from './karavan-shop-categories.browser.mjs';
 
 const fixtures = resolve(import.meta.dirname, '../build/shop-browser-fixtures');
@@ -29,6 +30,13 @@ let profiles = 0;
 console.log(`Shop format artifacts: ${output}`);
 try {
   server = await ensureMiniappDevServer(base);
+  if (
+    !process.env.SHOP_FORMAT_ENGINE &&
+    !process.env.SHOP_FORMAT_THEME &&
+    process.env.SHOP_CATEGORY_ONLY !== '1' &&
+    process.env.SHOP_FORMAT_ONLY_CHOICE !== '1'
+  )
+    await runShopNativeShareChecks({ base, url });
   for (const [engineName, engine, width] of [
     ['chromium', chromium, 360],
     ['webkit', webkit, 390],

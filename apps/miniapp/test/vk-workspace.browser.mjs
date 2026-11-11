@@ -106,6 +106,37 @@ try {
         .getByRole('dialog')
         .filter({ has: page.getByRole('combobox', { name: 'Способ доставки постов группы' }) });
       await sourceDialog.waitFor();
+      await sourceDialog
+        .getByRole('combobox', { name: 'Способ доставки постов группы' })
+        .selectOption('QUEUE');
+      const interval = sourceDialog.getByRole('spinbutton', { name: /^Интервал публикаций для/u });
+      await interval.waitFor({ timeout: 5_000 }).catch(async (error) => {
+        await page.screenshot({ path: path.join(screenshots, `${name}-source-failure.png`) });
+        console.error(`Source failure screenshot: ${screenshots}`);
+        throw error;
+      });
+      const previousInterval = await interval.inputValue();
+      for (const invalid of ['0', '10081', '1.5', '']) {
+        await interval.fill(invalid);
+        assert.equal(await interval.getAttribute('aria-invalid'), 'true');
+        await interval.press('Tab');
+        await sourceDialog
+          .getByRole('status')
+          .filter({ hasText: /нужно целое число от 5 до 10080/u })
+          .waitFor();
+        assert.equal(await interval.inputValue(), previousInterval);
+        assert.ok(await interval.getAttribute('aria-describedby'));
+      }
+      await interval.fill('0');
+      await interval.press('Escape');
+      assert.equal(await interval.inputValue(), previousInterval);
+      assert.equal(await sourceDialog.locator('.vk-number-feedback').count(), 0);
+      await interval.fill('5');
+      await interval.press('Tab');
+      await page.waitForFunction(
+        () => !document.querySelector('.vk-source-config input[type="number"]')?.disabled,
+      );
+      assert.equal(await interval.inputValue(), '5');
       await page.screenshot({ path: path.join(screenshots, `${name}-source.png`) });
       await sourceDialog.getByRole('button', { name: 'Отключить группу', exact: true }).click();
       await page
@@ -204,6 +235,15 @@ try {
       assert.equal(await allDay.isChecked(), true);
       await allDay.uncheck();
       await page.getByRole('button', { name: /^Время публикаций: с/u }).waitFor();
+      assert.equal(await page.locator('.vk-autopost-panel__schedule').isVisible(), false);
+      assert.equal(
+        await page
+          .locator('.vk-schedule-time-panel')
+          .getByText('09:00 - 22:00', { exact: true })
+          .count(),
+        0,
+      );
+      await page.screenshot({ path: path.join(screenshots, `${name}-time.png`) });
       await page.getByRole('button', { name: 'Об автоматической публикации', exact: true }).click();
       const info = page.getByRole('dialog', { name: 'Об автоматической публикации', exact: true });
       await info.waitFor();
@@ -214,6 +254,33 @@ try {
       await page.getByRole('button', { name: 'Редактировать', exact: true }).first().click();
       const editor = page.locator('.vk-editor-dialog');
       await editor.waitFor();
+      const selectedPhoto = editor.getByRole('button', { name: 'Убрать фото 1', exact: true });
+      await page.route('**/vk-photo-unavailable', (route) => route.abort());
+      await selectedPhoto.locator('img').evaluate((image, url) => {
+        image.src = url;
+      }, `${baseUrl}vk-photo-unavailable`);
+      await editor.getByText('Фото 1 недоступно', { exact: true }).waitFor({ timeout: 5_000 });
+      assert.equal(await selectedPhoto.getAttribute('aria-pressed'), 'true');
+      assert.ok(await selectedPhoto.getAttribute('aria-describedby'));
+      assert.match(
+        await selectedPhoto.evaluate(
+          (button) => document.getElementById(button.getAttribute('aria-describedby'))?.textContent,
+        ),
+        /Фото 1 недоступно/u,
+      );
+      await page.screenshot({ path: path.join(screenshots, `${name}-photo-unavailable.png`) });
+      const retryPhoto = editor.getByRole('button', {
+        name: 'Повторить загрузку фото 1',
+        exact: true,
+      });
+      await retryPhoto.focus();
+      await retryPhoto.press('Enter');
+      assert.equal(
+        await selectedPhoto.evaluate((button) => button === document.activeElement),
+        true,
+      );
+      await selectedPhoto.locator('img').waitFor();
+      assert.equal(await selectedPhoto.getAttribute('aria-pressed'), 'true');
       await editor.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
       await editor.waitFor({ state: 'hidden' });
       await page.getByRole('button', { name: 'Редактировать', exact: true }).first().click();
@@ -275,6 +342,25 @@ try {
         await page.getByRole('tab', { name: /Группы/u }).click();
         await page.waitForFunction(() => document.querySelectorAll('.vk-source-card').length === 1);
       }
+      await page.goto(
+        `${baseUrl}publisher/channel/preview-channel?preview=1&profile=publisher&focus=vk`,
+      );
+      await page.locator('.vk-parsing-workspace').waitFor();
+      await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
+      await page.locator('.vk-parsing-workspace').waitFor({ state: 'hidden' });
+      const vkTrigger = page.locator('[data-publisher-module="vk"] [aria-expanded]');
+      assert.equal(await vkTrigger.getAttribute('aria-expanded'), 'false');
+      await page.evaluate(() => {
+        const url = new URL(location.href);
+        url.searchParams.set('unrelated', '1');
+        history.pushState({}, '', url);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+      assert.equal(
+        await vkTrigger.getAttribute('aria-expanded'),
+        'false',
+        'Manual close survives unrelated URL changes',
+      );
       assert.deepEqual(errors, []);
       console.log(`${name}: passed`);
     } finally {

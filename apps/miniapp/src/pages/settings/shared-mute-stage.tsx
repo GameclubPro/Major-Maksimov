@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ChatSettingsFieldAdapter } from '../../features/network-settings/field-model';
 import type {
   ChatBooleanField,
@@ -18,6 +18,7 @@ export function SharedMuteStage({
   title,
   onChange,
   activationLabel = title,
+  durationLabel = title,
 }: {
   fields: ChatSettingsFieldAdapter;
   enabledPath: ChatBooleanField;
@@ -25,7 +26,11 @@ export function SharedMuteStage({
   title: string;
   onChange: (enabled: boolean) => void;
   activationLabel?: string;
+  durationLabel?: string;
 }) {
+  const id = useId();
+  const editorId = `${id}-duration`;
+  const errorId = `${id}-error`;
   const [open, setOpen] = useState(false);
   const [buffer, setBuffer] = useState<string | null>(null);
   const ref = useRef<HTMLInputElement>(null);
@@ -57,6 +62,8 @@ export function SharedMuteStage({
               className={`settings-duration-editor__preset settings-duration-editor__preset--trigger${open ? ' is-active' : ''}`}
               aria-label={`Срок: ${display}`}
               aria-expanded={open}
+              aria-controls={open ? editorId : undefined}
+              aria-describedby={error ? errorId : undefined}
               disabled={disabled}
               onClick={() => setOpen(!open)}
             >
@@ -83,7 +90,12 @@ export function SharedMuteStage({
       </div>
       {enabled.kind === 'mixed' ? <p className="field__hint">Разные значения</p> : null}
       {open ? (
-        <div className="settings-duration-editor">
+        <div
+          id={editorId}
+          className="settings-duration-editor"
+          role="group"
+          aria-label={`Срок ограничения: ${durationLabel}`}
+        >
           <div className="settings-native-toggle__row">
             <div className="settings-native-toggle__title-wrap">
               <AppIcon icon="Clock" />
@@ -99,6 +111,7 @@ export function SharedMuteStage({
                 key={preset}
                 type="button"
                 disabled={disabled}
+                aria-pressed={hours === preset}
                 className={`settings-duration-editor__preset${hours === preset ? ' is-active' : ''}`}
                 onClick={() => {
                   setBuffer(null);
@@ -114,6 +127,7 @@ export function SharedMuteStage({
               <button
                 type="button"
                 className="ban-duration-stepper__button"
+                aria-label={`Уменьшить срок: ${durationLabel}`}
                 disabled={disabled || hours === null || hours <= 1}
                 onClick={() => {
                   if (hours !== null) {
@@ -130,6 +144,7 @@ export function SharedMuteStage({
               <button
                 type="button"
                 className="ban-duration-stepper__button"
+                aria-label={`Увеличить срок: ${durationLabel}`}
                 disabled={disabled || hours === null || hours >= 168}
                 onClick={() => {
                   if (hours !== null) {
@@ -148,7 +163,9 @@ export function SharedMuteStage({
                 min={1}
                 max={168}
                 step={1}
-                aria-label="Часы"
+                aria-label={`Срок ограничения в часах: ${durationLabel}`}
+                aria-invalid={Boolean(error) || undefined}
+                aria-describedby={error ? errorId : undefined}
                 disabled={disabled}
                 value={buffer ?? (hours === null ? '' : String(hours))}
                 placeholder={duration.kind === 'mixed' ? 'Разные значения' : undefined}
@@ -169,7 +186,7 @@ export function SharedMuteStage({
         </div>
       ) : null}
       {error ? (
-        <small className="field__hint" role="alert">
+        <small id={errorId} className="field__hint" role="alert">
           {error}
         </small>
       ) : null}

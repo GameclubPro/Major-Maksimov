@@ -35,6 +35,8 @@ const MODES: Array<{ value: LinkRulesMode; label: string; icon: AppIconName }> =
   { value: 'ALLOW_SELECTED', label: 'Разрешать по списку', icon: 'CheckSquare' },
   { value: 'DENY_ALL', label: 'Удалять все', icon: 'ShieldAlert' },
 ];
+const PENDING_RULE_MESSAGE = 'Добавьте правило или отмените ввод перед сохранением.';
+
 type RuleEditor = { effect: LinkRuleEffect; rule?: LinkRule; exception: boolean };
 
 function ModeGrid({
@@ -156,6 +158,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
   };
   const closeEditor = () => {
     setEditor(null);
+    fields.setError('linkRulesPolicy', null);
     requestAnimationFrame(() => addRef.current?.focus());
   };
   const removeRule = (rule: LinkRule) => {
@@ -176,7 +179,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
           <button
             type="button"
             className="links-panel__rule-copy"
-            disabled={disabled}
+            disabled={disabled || Boolean(editor)}
             aria-label={`Изменить правило ${displayLinkRuleTarget(rule)}`}
             onClick={() =>
               setEditor({ effect: rule.effect, rule, exception: rule.effect !== primary })
@@ -193,7 +196,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
             type="button"
             className="links-panel__icon links-panel__remove"
             aria-label={`Удалить правило ${displayLinkRuleTarget(rule)}`}
-            disabled={disabled}
+            disabled={disabled || Boolean(editor)}
             onClick={() => removeRule(rule)}
           >
             <AppIcon icon="Trash" />
@@ -230,7 +233,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
         </div>
         <ModeGrid
           mode={policy?.mode ?? null}
-          disabled={disabled || (!ready && state.kind !== 'mixed')}
+          disabled={disabled || Boolean(editor) || (!ready && state.kind !== 'mixed')}
           onChange={selectMode}
         />
         <p className="links-panel__mode-note">{note}</p>
@@ -253,7 +256,10 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
       ) : null}
       {context.linkRules?.error ? <p role="alert">{context.linkRules.error}</p> : null}
       {error ? (
-        <p role="alert" className="links-panel__error">
+        <p
+          role={error === PENDING_RULE_MESSAGE ? 'status' : 'alert'}
+          className={error === PENDING_RULE_MESSAGE ? 'links-panel__hint' : 'links-panel__error'}
+        >
           {error}
         </p>
       ) : null}
@@ -295,7 +301,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
               type="button"
               className="links-panel__add"
               aria-label="Добавить"
-              disabled={disabled || rules.length >= LINK_RULES_MAX}
+              disabled={disabled || Boolean(editor) || rules.length >= LINK_RULES_MAX}
               onClick={() => setEditor({ effect: primary, exception: false })}
             >
               <AppIcon icon="Plus" />
@@ -330,6 +336,7 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
               className="links-panel__text-button"
               disabled={
                 disabled ||
+                Boolean(editor) ||
                 !mainRules.some((rule) => rule.kind === 'WEB_DOMAIN') ||
                 rules.length >= LINK_RULES_MAX
               }
@@ -350,6 +357,9 @@ export function SharedLinkSettingsFields({ fields, context, sanctions }: Props) 
           policy={policy}
           disabled={disabled}
           onClose={closeEditor}
+          onPendingChange={(pending) =>
+            fields.setError('linkRulesPolicy', pending ? PENDING_RULE_MESSAGE : null)
+          }
           onSave={(next) => {
             update(next);
             closeEditor();
@@ -428,12 +438,14 @@ function LinkRuleEditor({
   policy,
   disabled,
   onClose,
+  onPendingChange,
   onSave,
 }: {
   editor: RuleEditor;
   policy: LinkRulesPolicy;
   disabled: boolean;
   onClose: () => void;
+  onPendingChange: (pending: boolean) => void;
   onSave: (policy: LinkRulesPolicy) => void;
 }) {
   const [input, setInput] = useState(editor.rule ? displayLinkRuleTarget(editor.rule) : '');
@@ -445,6 +457,24 @@ function LinkRuleEditor({
   const initialExpiry = localExpiryParts(editor.rule?.expiresAt ?? null);
   const [expiryDay, setExpiryDay] = useState(initialExpiry.day);
   const [expiryTime, setExpiryTime] = useState(initialExpiry.time);
+  const dirty =
+    (Boolean(editor.rule) || Boolean(input.trim()) || Boolean(expiryDay)) &&
+    (input !== (editor.rule ? displayLinkRuleTarget(editor.rule) : '') ||
+      kind !== (editor.rule?.kind ?? 'WEB_EXACT') ||
+      bulk ||
+      enabled !== (editor.rule?.enabled ?? true) ||
+      expiryDay !== initialExpiry.day ||
+      expiryTime !== initialExpiry.time);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const pendingCallback = useRef(onPendingChange);
+  pendingCallback.current = onPendingChange;
+  useEffect(() => {
+    pendingCallback.current(dirty);
+  }, [dirty]);
+  const requestClose = () => {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
+  };
   const inputId = useId();
   const errorId = useId();
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -456,7 +486,7 @@ function LinkRuleEditor({
   }, []);
   useNativeBackHandler(
     () => {
-      onClose();
+      requestClose();
       return true;
     },
     { priority: 710 },
@@ -540,9 +570,9 @@ function LinkRuleEditor({
       className="links-panel__editor"
       aria-label={editor.rule ? 'Изменение правила' : 'Добавление правила'}
       onKeyDown={(event) => {
-        if (event.key === 'Escape') {
+        if (event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
           event.preventDefault();
-          onClose();
+          requestClose();
         }
       }}
     >
@@ -552,7 +582,7 @@ function LinkRuleEditor({
           type="button"
           className="links-panel__icon"
           aria-label="Закрыть редактор правила"
-          onClick={onClose}
+          onClick={requestClose}
         >
           <AppIcon icon="Xmark" />
         </button>
@@ -681,13 +711,22 @@ function LinkRuleEditor({
         </p>
       ) : null}
       <div className="links-panel__editor-actions">
-        <button type="button" className="button button--ghost" onClick={onClose}>
+        <button type="button" className="button button--ghost" onClick={requestClose}>
           Отмена
         </button>
         <button type="button" className="button button--accent" disabled={disabled} onClick={save}>
           {editor.rule ? 'Применить' : 'Добавить'}
         </button>
       </div>
+      <ActionConfirmSheet
+        id="link-rule-discard"
+        open={confirmDiscard}
+        title="Отменить изменения правила?"
+        confirmLabel="Отменить изменения"
+        cancelLabel="Продолжить редактирование"
+        onClose={() => setConfirmDiscard(false)}
+        onConfirm={onClose}
+      />
     </section>
   );
 }

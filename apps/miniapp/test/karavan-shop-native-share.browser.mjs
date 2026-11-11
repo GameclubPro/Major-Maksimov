@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runShopManualShareChecks } from './shop-share-link.browser.mjs';
 import { chromium, webkit } from 'playwright';
 import {
   allocateMiniappBaseUrl,
@@ -15,6 +16,9 @@ import {
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
 
 export async function runShopNativeShareChecks({ base, url }) {
+  const output = await mkdtemp('/tmp/maxim-shop-share-');
+  console.log(`Shop share artifacts: ${output}`);
+  await runShopManualShareChecks({ base, output });
   for (const [name, engine] of [
     ['chromium', chromium],
     ['webkit', webkit],

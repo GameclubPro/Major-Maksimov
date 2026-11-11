@@ -1,5 +1,7 @@
 @layer pages {
   .publication-retained-media {
+    --publication-video-play-surface: #20252ecc;
+    --publication-video-play-ink: white;
     min-height: 44px;
     display: flex;
     align-items: center;
@@ -65,5 +67,47 @@
 
   .publication-retained-media.has-previews > button {
     grid-column: 3;
+  }
+  .publication-retained-media.has-previews > .publication-retained-media__open {
+    grid-column: 1 / 3;
+    width: auto;
+    height: auto;
+    min-width: 0;
+    min-height: 48px;
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 10px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .publication-retained-media__open > span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .publication-retained-media__open .publication-retained-media__previews {
+    position: relative;
+    width: 48px;
+  }
+
+  .publication-retained-media__open .publication-retained-media__previews svg {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    transform: translate(-50%, -50%);
+    padding: 3px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: var(--publication-video-play-ink);
+    background: var(--publication-video-play-surface);
+  }
+
+  .publication-retained-media__open:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 3px;
+    border-radius: 6px;
   }
 }

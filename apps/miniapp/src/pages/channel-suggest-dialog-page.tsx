@@ -51,6 +51,7 @@ import { maxSelectionChanged, setMaxClosingConfirmation } from '../lib/max-bridg
 import { queryKeys } from '../lib/query-keys';
 import { describeUserFacingError } from '../lib/user-facing-error';
 import '../styles/channel-dialog-suggest.css';
+import '../styles/channel-dialog-mobile-actions.css';
 
 const SUGGEST_DRAFT_MAX_LENGTH = 2_000;
 const ATTACHMENT_SELECTION_DEDUPE_MS = 2_500;
@@ -1432,15 +1433,20 @@ export function ChannelSuggestDialogPage({
       )}
 
       <label
-        className={cn('channel-suggest-composer__tool', isComposerBusy && 'is-disabled')}
+        className={cn(
+          'channel-suggest-composer__tool',
+          'channel-suggest-composer__video-tool',
+          isComposerBusy && 'is-disabled',
+        )}
         title="Добавить видео до 24 МБ"
       >
         <IconoirSprite variant="iconoir" icon="VideoCamera" aria-hidden />
+        <span aria-hidden>до 24 МБ</span>
         <input
           className="channel-dialog-compose__attach-input"
           type="file"
           accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.webm,.mkv"
-          aria-label="Добавить видео"
+          aria-label="Добавить видео до 24 МБ"
           disabled={isComposerBusy}
           onClick={blurSuggestComposerFocus}
           onChange={(event) => {

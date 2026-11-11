@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { PublicationVideoPreview } from './publication-video-preview';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import type { PublicationAsset } from '@maxim/contracts/publication';
 
@@ -16,11 +18,16 @@ export function PublicationRetainedMedia({
   disabled: boolean;
   onRemove: (assetId: string) => void;
 }) {
+  const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   if (assets.length === 0) {
     return null;
   }
   const previewByAssetId = new Map(previews.map((preview) => [preview.assetId, preview.url]));
 
+  const previewAsset = assets.find(
+    (asset) => asset.id === previewAssetId && asset.type === 'video',
+  );
+  const videoUrl = previewAsset ? previewByAssetId.get(previewAsset.id) : null;
   return (
     <>
       {assets.map((asset, index) => {
@@ -32,16 +39,29 @@ export function PublicationRetainedMedia({
             key={asset.id}
             className={cn('publication-retained-media', previewUrl && 'has-previews')}
           >
-            {previewUrl ? (
-              <div className="publication-retained-media__previews" aria-hidden>
-                {asset.type === 'video' ? (
+            {asset.type === 'video' && previewUrl ? (
+              <button
+                type="button"
+                className="publication-retained-media__open"
+                aria-label={`Посмотреть видео: ${label}`}
+                onClick={() => setPreviewAssetId(asset.id)}
+              >
+                <span className="publication-retained-media__previews" aria-hidden>
                   <video src={previewUrl} muted playsInline preload="metadata" />
-                ) : (
-                  <img src={previewUrl} alt="" />
-                )}
-              </div>
-            ) : null}
-            <span>{label}</span>
+                  <IconoirSprite variant="iconoir" icon="Play" aria-hidden />
+                </span>
+                <span>{label}</span>
+              </button>
+            ) : (
+              <>
+                {previewUrl ? (
+                  <div className="publication-retained-media__previews" aria-hidden>
+                    <img src={previewUrl} alt="" />
+                  </div>
+                ) : null}
+                <span>{label}</span>
+              </>
+            )}
             <button
               type="button"
               onClick={() => onRemove(asset.id)}
@@ -56,6 +76,14 @@ export function PublicationRetainedMedia({
           </div>
         );
       })}
+      {previewAsset && videoUrl ? (
+        <PublicationVideoPreview
+          key={videoUrl}
+          url={videoUrl}
+          label={previewAsset.fileName.trim() || 'Видео публикации'}
+          onClose={() => setPreviewAssetId(null)}
+        />
+      ) : null}
     </>
   );
 }

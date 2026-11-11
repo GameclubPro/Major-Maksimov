@@ -1,3 +1,4 @@
+import { PublicationVideoPlayer } from './publication-video-preview';
 import { useState } from 'react';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
 import { ActionConfirmSheet } from '../../components/ui/action-confirm-sheet';
@@ -101,12 +102,10 @@ export function PublicationReviewSheet({
                 <div key={item.id}>
                   {item.url ? (
                     item.type === 'video' ? (
-                      <video
-                        controls
-                        playsInline
-                        preload="metadata"
-                        src={item.url}
-                        aria-label={item.name || 'Видео публикации'}
+                      <PublicationVideoPlayer
+                        key={item.url}
+                        url={item.url}
+                        label={item.name || 'Видео публикации'}
                       />
                     ) : (
                       <img src={item.url} alt={item.name || `Фото ${index + 1}`} />

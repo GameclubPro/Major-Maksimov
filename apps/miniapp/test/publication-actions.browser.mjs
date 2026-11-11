@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
+import {
+  applyNativeVisualMode,
+  installNativeVisualModeInitScript,
+} from '../../../scripts/miniapp-native-visual-mode.mjs';
 import { checkPublicationHistoryReview } from './publication-review.browser-helpers.mjs';
 import {
   allocateMiniappBaseUrl,
@@ -204,6 +211,94 @@ try {
     'PASS: ambiguous resolution requires confirmation and preserves its independent identity until success',
   );
   await checkPublicationHistoryReview(browser, base);
+  const footerScreenshots = await mkdtemp(join(tmpdir(), 'maxim-publication-delivery-cta-'));
+  for (const width of [320, 412]) {
+    for (const colorScheme of ['light', 'dark']) {
+      const context = await browser.newContext({
+        viewport: { width, height: width === 320 ? 568 : 915 },
+        isMobile: true,
+        hasTouch: true,
+        colorScheme,
+        reducedMotion: 'reduce',
+      });
+      try {
+        await context.route('**/*', (route) =>
+          new URL(route.request().url()).origin === new URL(base).origin
+            ? route.continue()
+            : route.abort(),
+        );
+        await context.route('**/src/lib/api/preview-transport-runtime.ts', async (route) => {
+          const response = await route.fetch();
+          const source = await response.text();
+          const marker = 'if (result !== PREVIEW_NOT_HANDLED) {';
+          assert.ok(source.includes(marker));
+          await route.fulfill({
+            response,
+            body: source.replace(
+              marker,
+              `${marker} (window.__deliveryCtaReads ??= []).push({path:context.url.pathname,method:context.method});`,
+            ),
+          });
+        });
+        await installMaxBridgeShimInitScript(context, {}, { platform: 'android', colorScheme });
+        await installNativeVisualModeInitScript(context);
+        const feed = await context.newPage();
+        await feed.goto(`${base}publications?preview=1&profile=publisher`);
+        const cta = feed.getByRole('button', { name: /^Проверить отправку:/u }).first();
+        await cta.waitFor();
+        assert.equal(
+          (await applyNativeVisualMode(feed, { safeTop: 0, safeBottom: 0 }))
+            .previewScaffoldDetached,
+          true,
+        );
+        const title = (await cta.getAttribute('aria-label')).replace('Проверить отправку: ', '');
+        const postsBefore = await feed.evaluate(
+          () =>
+            (window.__deliveryCtaReads ?? []).filter((request) => request.method === 'POST').length,
+        );
+        for (const activation of ['tap', 'Enter', 'Space']) {
+          await cta.evaluate((button) => button.scrollIntoView({ block: 'center' }));
+          const touch = await cta.boundingBox();
+          assert.ok(touch.height >= 44 && touch.width >= 44);
+          await feed.screenshot({
+            path: join(footerScreenshots, `${width}-${colorScheme}-${activation}-before.png`),
+          });
+          if (activation === 'tap') await cta.tap();
+          else {
+            await cta.focus();
+            await cta.press(activation);
+          }
+          const details = feed.locator('.publication-details-sheet');
+          await details.waitFor();
+          assert.equal(await details.count(), 1);
+          assert.match(
+            await details.innerText(),
+            new RegExp(title.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'),
+          );
+          await feed.screenshot({
+            path: join(footerScreenshots, `${width}-${colorScheme}-${activation}.png`),
+          });
+          await feed.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
+          await details.waitFor({ state: 'detached' });
+        }
+        assert.equal(
+          await feed.evaluate(
+            () =>
+              (window.__deliveryCtaReads ?? []).filter((request) => request.method === 'POST')
+                .length,
+          ),
+          postsBefore,
+          'Checking delivery opens details without retry/send/resolution effects',
+        );
+        console.log(
+          `PASS delivery CTA ${width}/${colorScheme}: touch44px, tap/Enter/Space matching details and no POST`,
+        );
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  console.log(`Delivery CTA screenshots: ${footerScreenshots}`);
 } finally {
   await browser?.close();
   await stopChildProcess(server);

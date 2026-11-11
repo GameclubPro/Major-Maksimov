@@ -50,6 +50,17 @@ export function VkTimeRange({
   const dirty = draft.start !== (start ?? '') || draft.end !== (end ?? '');
   const incomplete =
     Boolean(draft.start) !== Boolean(draft.end) || (!optional && (!draft.start || !draft.end));
+  const scheduleNote = incomplete
+    ? 'Укажите начало и конец'
+    : !draft.start && !draft.end
+      ? 'Нет перерыва'
+      : draft.start === draft.end
+        ? optional
+          ? 'Публикации остановлены на весь день'
+          : 'Круглосуточно'
+        : draft.start > draft.end
+          ? 'Через полночь'
+          : null;
   async function save() {
     if (disabled || saving || incomplete) return;
     setSaving(true);
@@ -87,46 +98,38 @@ export function VkTimeRange({
           }}
         />
       </div>
-      <div className="vk-time-range__footer">
-        <span>
-          {incomplete
-            ? 'Укажите начало и конец'
-            : !draft.start && !draft.end
-              ? 'Нет перерыва'
-              : draft.start === draft.end
-                ? optional
-                  ? 'Публикации остановлены на весь день'
-                  : 'Круглосуточно'
-                : draft.start > draft.end
-                  ? 'Через полночь'
-                  : `${draft.start} - ${draft.end}`}
-        </span>
-        {optional && (draft.start || draft.end) ? (
-          <button
-            type="button"
-            title="Отключить тихие часы"
-            aria-label="Отключить тихие часы"
-            onClick={() => {
-              setEditing(true);
-              setDraft({ start: '', end: '' });
-            }}
-          >
-            <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-          </button>
-        ) : null}
-        {dirty ? (
-          <button
-            type="button"
-            disabled={incomplete}
-            aria-label={`Сохранить: ${label}`}
-            title="Сохранить время"
-            onClick={() => void save()}
-          >
-            <IconoirSprite variant="iconoir" icon="Check" aria-hidden />
-            <span>{saving ? 'Сохраняю' : 'Сохранить'}</span>
-          </button>
-        ) : null}
-      </div>
+      {scheduleNote || dirty || (optional && (draft.start || draft.end)) ? (
+        <div className="vk-time-range__footer">
+          {scheduleNote ? (
+            <span role={incomplete ? 'status' : undefined}>{scheduleNote}</span>
+          ) : null}
+          {optional && (draft.start || draft.end) ? (
+            <button
+              type="button"
+              title="Отключить тихие часы"
+              aria-label="Отключить тихие часы"
+              onClick={() => {
+                setEditing(true);
+                setDraft({ start: '', end: '' });
+              }}
+            >
+              <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
+            </button>
+          ) : null}
+          {dirty ? (
+            <button
+              type="button"
+              disabled={incomplete}
+              aria-label={`Сохранить: ${label}`}
+              title="Сохранить время"
+              onClick={() => void save()}
+            >
+              <IconoirSprite variant="iconoir" icon="Check" aria-hidden />
+              <span>{saving ? 'Сохраняю' : 'Сохранить'}</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </fieldset>
   );
 }

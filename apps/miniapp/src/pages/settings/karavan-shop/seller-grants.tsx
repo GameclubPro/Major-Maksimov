@@ -243,7 +243,13 @@ export default function SellerGrants() {
               {created ? (
                 <>
                   <p role="status">Доступ разрешён</p>
-                  <ShopShareLink url={created.url} label="Отправить приглашение" />
+                  <ShopShareLink
+                    url={created.url}
+                    disabled={
+                      mutation.blocked || !module.permissions.includes('manage_marketplace')
+                    }
+                    label="Отправить приглашение"
+                  />
                 </>
               ) : (
                 <>

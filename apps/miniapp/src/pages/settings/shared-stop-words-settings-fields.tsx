@@ -46,6 +46,8 @@ type Props = Pick<SharedChatSettingsSectionProps, 'fields' | 'context'> & {
   presentation?: 'words' | 'sites';
 };
 const shown = (state: SettingsFieldState<boolean>) => state.kind !== 'common' || state.value;
+const PENDING_INPUT_MESSAGE = 'Добавьте введённые записи или очистите ввод.';
+const PENDING_EDIT_MESSAGE = 'Примените изменение записи или отмените ввод.';
 
 function Toggle({
   label,
@@ -186,6 +188,8 @@ function StopWordsListEditor(props: ListProps) {
     Boolean(editingRule) &&
     JSON.stringify(editingRule) !==
       JSON.stringify(rules.find((rule) => rule.id === editingRule?.id));
+  const fieldError = fields.error(path);
+  const pending = fieldError === PENDING_INPUT_MESSAGE || fieldError === PENDING_EDIT_MESSAGE;
   const clearError = () => fields.setError(path, null);
   const cancelRule = () => {
     setEditingRule(null);
@@ -239,7 +243,7 @@ function StopWordsListEditor(props: ListProps) {
           value={input}
           maxLength={160000}
           aria-label={mode === 'words' ? 'Добавить слова и фразы' : 'Добавить запрещённые сайты'}
-          aria-invalid={Boolean(fields.error(path) || prepared.errors.length)}
+          aria-invalid={Boolean((fieldError && !pending) || prepared.errors.length)}
           aria-describedby={resultId}
           placeholder={mode === 'words' ? 'Слово или фраза' : 'example.com'}
           inputMode={mode === 'domains' ? 'url' : 'text'}
@@ -248,10 +252,7 @@ function StopWordsListEditor(props: ListProps) {
           spellCheck={false}
           onChange={(event) => {
             setInput(event.target.value);
-            fields.setError(
-              path,
-              event.target.value.trim() ? 'Добавьте введённые записи или очистите ввод.' : null,
-            );
+            fields.setError(path, event.target.value.trim() ? PENDING_INPUT_MESSAGE : null);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -272,7 +273,7 @@ function StopWordsListEditor(props: ListProps) {
         </button>
       </div>
       <div id={resultId} className="stop-words-editor__input-result" aria-live="polite">
-        {fields.error(path) ? <p role="alert">{fields.error(path)}</p> : null}
+        {fieldError ? <p role={pending ? 'status' : 'alert'}>{fieldError}</p> : null}
         {prepared.errors.map((message, index) => (
           <p role="alert" key={index}>
             {message}
@@ -471,7 +472,7 @@ function StopWordsListEditor(props: ListProps) {
               onChange={(event) => {
                 setEditError('');
                 setEditingRule({ ...editingRule, value: event.target.value });
-                fields.setError(path, 'Примените изменение записи или отмените ввод.');
+                fields.setError(path, PENDING_EDIT_MESSAGE);
               }}
             />
             <Toggle
@@ -480,7 +481,7 @@ function StopWordsListEditor(props: ListProps) {
               state={{ kind: 'common', value: editingRule.enabled }}
               onChange={(enabled) => {
                 setEditingRule({ ...editingRule, enabled });
-                fields.setError(path, 'Примените изменение записи или отмените ввод.');
+                fields.setError(path, PENDING_EDIT_MESSAGE);
               }}
             />
             <Toggle
@@ -489,7 +490,7 @@ function StopWordsListEditor(props: ListProps) {
               state={{ kind: 'common', value: editingRule.matchMode === 'MASKED' }}
               onChange={(masked) => {
                 setEditingRule({ ...editingRule, matchMode: masked ? 'MASKED' : 'EXACT' });
-                fields.setError(path, 'Примените изменение записи или отмените ввод.');
+                fields.setError(path, PENDING_EDIT_MESSAGE);
               }}
             />
             {editError ? (

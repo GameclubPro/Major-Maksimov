@@ -109,3 +109,15 @@ test('composer keeps the normalization retry independent from disabled outer too
     /<MaxRichTextEditor[\s\S]*?disabled=\{editorDisabled\}[\s\S]*?onNormalizationReadyChange/u,
   );
 });
+
+test('single-line card previews remain ready when the multiline resource failed', async () => {
+  const resource = createMarkdownNormalizerResource(async () => {
+    throw new Error('chunk unavailable');
+  });
+  await resource.load();
+  const source = '**Первая\nВторая**'.replace(/\s+/gu, ' ').trim();
+  assert.deepEqual(resolveNormalizedMarkdownSource(resource, source, true), {
+    status: 'ready',
+    value: source,
+  });
+});
