@@ -227,7 +227,7 @@ try {
             const group = page.getByRole('radiogroup', { name: 'Режим модерации ссылок' });
             await group.waitFor();
             await applyNativeVisualMode(page, { safeTop: 20, safeBottom: 12 });
-            for (const fontSize of [16, 20]) {
+            for (const fontSize of [16, 20, 32]) {
               await page.evaluate(async (size) => {
                 document.documentElement.style.fontSize = `${size}px`;
                 await document.fonts.ready;

@@ -46,7 +46,7 @@
     font-size: 0.75rem;
     white-space: nowrap;
   }
-  .channel-suggest-composer__bar {
+  .channel-suggest-composer__bar:not([hidden]) {
     display: flex;
     flex-wrap: wrap;
   }

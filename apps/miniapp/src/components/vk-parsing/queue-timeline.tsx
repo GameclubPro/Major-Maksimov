@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 
 import type { VkParsingPost } from '@maxim/contracts';
 import { TimeField } from '../ui/time-field';
+import { DateField } from '../ui/date-field';
 import { ActionConfirmSheet } from '../ui/action-confirm-sheet';
 import { parseVkQueueDate, resolveVkQueueQuickSlot } from './queue-time';
 import { formatTimezoneLabel } from '../../lib/timezone-label';
@@ -71,19 +72,17 @@ function QueueItem({
               : 'Пост без текста')}
       </div>
       <div className="vk-queue-item__schedule">
-        <label>
-          <span>Дата</span>
-          <input
-            type="date"
-            aria-label={`Дата публикации: ${post.sourceTitle}`}
-            value={date}
-            disabled={unavailable}
-            onChange={(event) => {
-              setEditing(true);
-              setDraft(`${event.target.value}T${time}`);
-            }}
-          />
-        </label>
+        <DateField
+          label="Дата"
+          aria-label={`Дата публикации: ${post.sourceTitle}`}
+          placeholder="дд.мм.гггг"
+          value={date}
+          disabled={unavailable}
+          onChange={(value) => {
+            setEditing(true);
+            setDraft(`${value}T${time}`);
+          }}
+        />
         <div className="vk-queue-item__time">
           <span>Время</span>
           <TimeField

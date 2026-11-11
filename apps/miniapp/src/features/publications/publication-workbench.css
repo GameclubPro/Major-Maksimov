@@ -437,7 +437,7 @@
     min-width: 0;
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 4rem), 1fr));
     gap: 4px;
   }
 
@@ -446,7 +446,8 @@
     .broadcast-content-composer__tool {
     width: 100%;
     min-width: 0;
-    height: 52px;
+    min-height: 52px;
+    height: auto;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -472,8 +473,12 @@
   .publications-page.is-publisher.is-editor
     .publication-content-composer
     .broadcast-content-composer__tool-label {
+    max-width: 100%;
     font-size: 0.7rem;
     font-weight: 800;
+    line-height: 1.2;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .publications-page.is-publisher.is-editor
@@ -517,6 +522,7 @@
   }
 
   .publications-page.is-publisher.is-editor .publication-timing-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 6rem), 1fr));
     min-height: 44px;
     gap: 2px;
     padding: 2px;
@@ -524,9 +530,12 @@
   }
 
   .publications-page.is-publisher.is-editor .publication-timing-tabs button {
-    min-height: 40px;
+    min-height: 44px;
+    padding: 8px 6px;
     border-radius: 6px;
     font-size: 0.72rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .publications-page.is-publisher.is-editor .publications-publish-bar {

@@ -3,6 +3,7 @@ import type { ChannelDialogMessage } from '@maxim/contracts/channel-dialog';
 
 import { resolveSuggestionStatus } from '../lib/channel-suggestion-status';
 import { cn } from '../lib/cn';
+import { openLink } from '../lib/max-bridge';
 import { MaxMarkdownPreview } from './max-markdown-preview';
 
 function formatMessageTime(value: string): string {
@@ -102,6 +103,22 @@ export default function ChannelSuggestionHistory({
                   href={message.publishedUrl}
                   target="_blank"
                   rel="noreferrer"
+                  onClick={(event) => {
+                    if (
+                      event.button !== 0 ||
+                      event.metaKey ||
+                      event.ctrlKey ||
+                      event.shiftKey ||
+                      event.altKey
+                    ) {
+                      return;
+                    }
+                    try {
+                      if (openLink(event.currentTarget.href) !== 'noop') event.preventDefault();
+                    } catch {
+                      // Keep ordinary navigation available if the native bridge fails.
+                    }
+                  }}
                 >
                   Открыть пост
                 </a>

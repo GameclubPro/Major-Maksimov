@@ -27,16 +27,20 @@ not historical membership. An unavailable roster does not prove an empty chat.
 Settings overview entries follow the [current design](../miniapp-settings-overview-design.md),
 including its prohibition on summary/status copy in menu entries.
 
-| Boundary                                                     | Focused checks                                                                                                                                         |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Feed identity, pagination, stale responses, retry            | [Feed unit tests](../../apps/miniapp/test/chat-participants-feed.test.ts), [browser](../../apps/miniapp/test/participants-feed.browser.mjs)            |
-| Restriction list, accessible actions, keyboard and scrolling | [Moderation layout](../../apps/miniapp/test/moderation-design.browser.mjs), [participant sheet](../../apps/miniapp/test/participant-sheet.browser.mjs) |
-| Current bulk-apply selection and confirmation                | [Settings apply](../../apps/miniapp/test/settings-apply-target.browser.mjs)                                                                            |
+| Boundary                                                                             | Focused checks                                                                                                                                         |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Feed identity, pagination, stale responses, retry                                    | [Feed unit tests](../../apps/miniapp/test/chat-participants-feed.test.ts), [browser](../../apps/miniapp/test/participants-feed.browser.mjs)            |
+| Restriction list, accessible actions, keyboard and scrolling                         | [Moderation layout](../../apps/miniapp/test/moderation-design.browser.mjs), [participant sheet](../../apps/miniapp/test/participant-sheet.browser.mjs) |
+| Mute input buffer, participant state descriptions, Links/Rules/Commands at 200% text | [Major mobile controls](../../apps/miniapp/test/major-mobile-controls.browser.mjs)                                                                     |
+| Current bulk-apply selection and confirmation                                        | [Settings apply](../../apps/miniapp/test/settings-apply-target.browser.mjs)                                                                            |
 
 These browser cases require an existing local Vite server. Set `MINIAPP_TEST_BASE_URL`
 to its `/app/` URL; the scripts have different default ports. Run only the affected cases
 and stop the server owned by the task afterward. Use the scoped miniapp visual workflow
 for light/dark, narrow screens, native Back and safe-area review.
+The Major mobile controls browser can own its local server; to reuse one, also set
+`MINIAPP_TEST_REUSE_SERVER=1`. It checks Chromium/WebKit, portrait/landscape, touch
+hint dismissal and 100%/200% text without applying moderation actions.
 
 ## Rules Publication
 
@@ -136,6 +140,28 @@ Comment moderation accepts `COMMENT_MODERATION_BASE_URL`; inspect the helper's o
 and reuse rules before choosing a port. Vite reads contract sources; an extra build lock
 around a dev browser session is unnecessary.
 
+## Public Dialogs And Legal Navigation
+
+The [public dialog layout browser](../../apps/miniapp/test/public-dialog-mobile-layout.browser.mjs)
+checks that suggestion history hides sending and attachments while preserving the draft,
+marks a truncated history with a partial count, and opens published MAX posts through the Bridge.
+It also checks tab hit targets during editor focus on short screens, notification settings at
+200% text, and the current legal document's accessible navigation state in Chromium/WebKit,
+both themes. The keyboard fallback preserves room below the heading and tabs; measured
+occlusion and viewport shrink still take precedence. Its
+[focused keyboard cases](../../apps/miniapp/test/channel-suggestion-keyboard-layout.test.ts)
+cover those calculations without relying on physical MAX keyboard behavior.
+The browser runner owns a server by default; reuse requires `PUBLIC_DIALOG_BASE_URL` and
+`PUBLIC_DIALOG_REUSE_SERVER=1`. `PUBLIC_DIALOG_ENGINE`, `PUBLIC_DIALOG_THEME` and
+`PUBLIC_DIALOG_OUTPUT` narrow the run and select artifacts.
+
+The [comment image viewer browser](../../apps/miniapp/test/comment-image-viewer.browser.mjs)
+checks that tapping an image keeps it open, zoom/pan/swipe/pinch work, and closing restores
+focus at 320/393/412px and 667px landscape in both themes and engines. Chromium uses trusted
+touch input through CDP; WebKit uses synthetic PointerEvents because Playwright has no
+equivalent touch API there. These observations do not replace physical MAX acceptance.
+It requires an existing local Vite server selected with `MINIAPP_TEST_BASE_URL`.
+
 ## Publisher And VK
 
 Preserve server-owned drafts/revisions, explicit final confirmation, saved recipients,
@@ -157,6 +183,7 @@ The browser flows use local fixtures/preview transport and never publish to MAX.
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Publisher catalog, virtualized lists, last-row access, cross-route CSS | [Catalog browser](../../apps/miniapp/test/publisher-catalog-layout.browser.mjs)                                                                                                                                                                                                                 |
 | Long post, recipients, keyboard, review and return to editing          | [Composer browser](../../apps/miniapp/test/publication-composer-usability.browser.mjs)                                                                                                                                                                                                          |
+| Mobile text, touch targets, native Back and shared date field          | [Mobile audit regressions](../../apps/miniapp/test/publisher-mobile-audit.browser.mjs)                                                                                                                                                                                                          |
 | Date/time validation, expired review and saved scheduled post          | [Scheduling browser](../../apps/miniapp/test/publication-scheduling-submit.browser.mjs), [time picker](../../apps/miniapp/test/publication-time-picker.browser.mjs)                                                                                                                             |
 | Direct upload and native file-picker presentation                      | [Video browser](../../apps/miniapp/test/publication-video-picker.browser.mjs)                                                                                                                                                                                                                   |
 | Draft consistency and private Test isolation                           | [Draft service](../../apps/api/src/admin/publication-drafts.service.spec.ts), [Test boundary](../../apps/api/src/admin/admin-managed-broadcast-runtime-publication-test-boundary.spec.ts), [shared media/access PostgreSQL](../../apps/api/src/admin/publication-admin-access-postgres.spec.ts) |
@@ -188,13 +215,13 @@ both shop formats, ordinary public Karavan navigation, exact bindings and recove
 of historical appearance/image commands. Network availability changes show all
 verified chats; disconnecting one chat remains a separate exact binding action.
 
-| Boundary                                                         | Focused checks                                                                                                                                                                                                          |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connection, public/admin links, publication settings | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [actual settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs) |
-| Setup authority, changed rules and partial outcomes | [Integration browser](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [setup review](../../apps/miniapp/test/karavan-marketplace-setup-review.test.ts), [setup browser](../../apps/miniapp/test/karavan-shop-formats.browser.mjs) |
-| Moved editors, paused/empty shop, missing target, legacy recovery | Compact shop with `SHOP_SIMPLE_ONLY=categories`, `boundaries`, `queue` |
-| Durable browser commands and uncertain results                   | [Command journal](../../apps/miniapp/test/karavan-shop-command-journal.browser.mjs), [command runtime](../../apps/miniapp/test/karavan-shop-command-runtime.browser.mjs)                                                |
-| Final authorized publication choice                              | [PostgreSQL](../../apps/api/src/integrations/karavan-marketplace/karavan-publication-choice-postgres.spec.ts)                                                                                                           |
+| Boundary                                                          | Focused checks                                                                                                                                                                                                                              |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection, public/admin links, publication settings              | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [actual settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs)                                                                                    |
+| Setup authority, changed rules and partial outcomes               | [Integration browser](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [setup review](../../apps/miniapp/test/karavan-marketplace-setup-review.test.ts), [setup browser](../../apps/miniapp/test/karavan-shop-formats.browser.mjs) |
+| Moved editors, paused/empty shop, missing target, legacy recovery | Compact shop with `SHOP_SIMPLE_ONLY=categories`, `boundaries`, `queue`                                                                                                                                                                      |
+| Durable browser commands and uncertain results                    | [Command journal](../../apps/miniapp/test/karavan-shop-command-journal.browser.mjs), [command runtime](../../apps/miniapp/test/karavan-shop-command-runtime.browser.mjs)                                                                    |
+| Final authorized publication choice                               | [PostgreSQL](../../apps/api/src/integrations/karavan-marketplace/karavan-publication-choice-postgres.spec.ts)                                                                                                                               |
 
 Inspect each browser entrypoint's server and environment options before running it.
 Major's synthetic fixtures do not validate Karavan's seller implementation or live MAX.
