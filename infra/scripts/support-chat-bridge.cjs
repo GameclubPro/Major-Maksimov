@@ -12,7 +12,7 @@ const MODEL_SHA = '769d386a69d43782321c1bad04d41d29a2e84b2c06e6a277cd99fd6265ec0
 const API_PROFILE_SHA = '200733444f94e2153810b20d981865be2bc9a746947beee99a316b4d32c48db6';
 const DIGEST = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const ANSWER_FOOTER = '✦ Ответ подготовлен ИИ-помощником «Майор Максимов»';
-const HISTORY_TTL_MS = 5 * 60_000;
+const HISTORY_TTL_MS = 15 * 60_000;
 
 function supportProfileMatches(value) {
   // FLAG: API configuration identity is distinct from a CPU weight digest. Require exactly
@@ -510,21 +510,36 @@ class PilotHistory {
   constructor() {
     this.users = new Map();
   }
-  read(userId, now = Date.now()) {
+  read(userId, now = Date.now(), interaction = {}) {
     const saved = this.users.get(userId);
     if (!saved) return [];
     if (now >= saved.confirmedAt + HISTORY_TTL_MS) {
       this.users.delete(userId);
       return [];
     }
-    return saved.turns.slice();
+    // FLAG: An interrupted bare yes/no cannot answer a stale clarification. An explicit
+    // reply to support can resume it; preserve every reported user fact in either case.
+    const last = saved.turns.at(-1);
+    return saved.peerInterrupted &&
+      !interaction.addressedToSupport &&
+      last?.role === 'assistant' &&
+      /\?|(?:^|\s)(?:уточните|выберите|подскажите)(?![\p{L}])/iu.test(last.text)
+      ? saved.turns.slice(0, -1)
+      : saved.turns.slice();
   }
-  settle(userId, userText, assistantText, outcome, now = Date.now()) {
-    if (outcome === 'skipped') this.users.delete(userId);
+  settle(userId, userText, assistantText, outcome, now = Date.now(), interaction = {}) {
+    // FLAG: Talking to another participant neither replaces nor refreshes an active support
+    // exchange. Ordinary skipped conversation still clears it; no skipped turn is stored.
+    if (outcome === 'skipped' && !(interaction.replyToOther && !interaction.addressedToSupport))
+      this.users.delete(userId);
+    if (outcome === 'skipped' && interaction.replyToOther && !interaction.addressedToSupport) {
+      const saved = this.users.get(userId);
+      if (saved) saved.peerInterrupted = true;
+    }
     if (outcome !== 'sent') return;
     // FLAG: Only a confirmed SEND stores both sides of an exchange or refreshes its TTL.
     const turns = [
-      ...this.read(userId, now),
+      ...this.read(userId, now, { addressedToSupport: true }),
       { role: 'user', text: supportHistoryText(userText, 'user') },
       { role: 'assistant', text: supportHistoryText(assistantText, 'assistant') },
     ].slice(-6);
@@ -913,7 +928,14 @@ async function runBridge(runtime, { preview = false } = {}) {
         busy = null;
         if (!answer.reply || !answer.text.trim()) {
           await fence.settle(source.id, 'SKIPPED', 'PREPARED');
-          history.settle(source.userId, source.text, answer.text, 'skipped');
+          history.settle(
+            source.userId,
+            source.text,
+            answer.text,
+            'skipped',
+            Date.now(),
+            supportInteraction(source, identity.botUserId, confirmedAnswers),
+          );
         } else {
           const outcome = await deliverAnswer(runtime, fence, source, answer.text, {
             signal: controller.signal,
@@ -952,7 +974,11 @@ async function runBridge(runtime, { preview = false } = {}) {
             type: 'question',
             id: source.id,
             text: source.text,
-            history: history.read(source.userId),
+            history: history.read(
+              source.userId,
+              Date.now(),
+              supportInteraction(source, identity.botUserId, confirmedAnswers),
+            ),
             interaction: supportInteraction(source, identity.botUserId, confirmedAnswers),
             issuedAt: Date.now(),
             deadline: source.timestamp + SOURCE_AGE_MS,
