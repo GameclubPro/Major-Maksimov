@@ -5,7 +5,7 @@ import type {
   ChatSanctionsPage,
 } from '@maxim/contracts';
 
-import { useEffect, useEffectEvent, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useEffectEvent, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { useNativeBackHandler } from '../../lib/native-back';
 import { isTopmostModalDialog } from '../../lib/dialog-focus';
 import { PersonAvatar } from '../ui/person-avatar';
@@ -325,6 +325,7 @@ export function ChatParticipantSheet({
   onMute,
   onBan,
 }: ChatParticipantSheetProps) {
+  const stateDescriptionId = useId();
   const [activeComposer, setActiveComposer] = useState<'mute' | 'immunity' | null>(null);
   const [muteDurationHours, setMuteDurationHours] = useState(24);
   const [immunityMode, setImmunityMode] = useState<ImmunityMode>('limited');
@@ -605,6 +606,7 @@ export function ChatParticipantSheet({
                     {item.immunity ? (
                       <span
                         className="participant-sheet__chip participant-sheet__chip--immune"
+                        role="img"
                         aria-label={immunityDescription}
                         title={immunityDescription}
                       >
@@ -673,6 +675,7 @@ export function ChatParticipantSheet({
                   <button
                     type="button"
                     aria-label="Защита"
+                    aria-describedby={`${stateDescriptionId}-protection`}
                     className="participant-sheet__action participant-sheet__action--immunity"
                     disabled={isBusy || !canManageParticipant}
                     onClick={(event) => {
@@ -688,13 +691,14 @@ export function ChatParticipantSheet({
                   >
                     <IconoirSprite variant="iconoir" icon="ShieldCheck" aria-hidden />
                     <span>
-                      Защита<small>{protectionLabel}</small>
+                      Защита<small id={`${stateDescriptionId}-protection`}>{protectionLabel}</small>
                     </span>
                     <IconoirSprite variant="iconoir" icon="NavArrowRight" aria-hidden />
                   </button>
                   <button
                     type="button"
                     aria-label="Мут"
+                    aria-describedby={`${stateDescriptionId}-mute`}
                     className="participant-sheet__action participant-sheet__action--mute"
                     disabled={isBusy || !canMute}
                     onClick={(event) => {
@@ -704,7 +708,7 @@ export function ChatParticipantSheet({
                   >
                     <IconoirSprite variant="iconoir" icon="SoundOff" aria-hidden />
                     <span>
-                      Мут<small>{muteLabel}</small>
+                      Мут<small id={`${stateDescriptionId}-mute`}>{muteLabel}</small>
                     </span>
                     <IconoirSprite variant="iconoir" icon="NavArrowRight" aria-hidden />
                   </button>

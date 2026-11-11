@@ -101,6 +101,10 @@ import '../styles/channel-dialog-mobile-actions.css';
 const LazyChannelDialogNotificationSheet = lazy(
   () => import('../components/channel-dialog-notification-sheet'),
 );
+const CommentImageFrame = lazy(async () => {
+  const module = await import('../components/comment-image-frame');
+  return { default: module.CommentImageFrame };
+});
 const CommentThemeSheet = lazy(() => import('../components/comment-theme-sheet'));
 const CommentCopyAction = lazy(() => import('../components/comment-copy-action'));
 const CommentComposeEmojiPicker = lazy(() => import('../components/comment-compose-emoji-picker'));
@@ -4822,7 +4826,11 @@ export function ChannelDialogPage({
               >
                 <div className="channel-dialog-image-viewer__topbar">
                   {imageViewer.attachments.length > 1 ? (
-                    <div className="channel-dialog-image-viewer__counter">
+                    <div
+                      className="channel-dialog-image-viewer__counter"
+                      aria-live="polite"
+                      aria-atomic="true"
+                    >
                       {imageViewer.activeIndex + 1} / {imageViewer.attachments.length}
                     </div>
                   ) : (
@@ -4839,11 +4847,7 @@ export function ChannelDialogPage({
                   </button>
                 </div>
 
-                <div
-                  className="channel-dialog-image-viewer__stage"
-                  onClick={closeCommentImageAlbum}
-                  aria-label="Закрыть фото"
-                >
+                <div className="channel-dialog-image-viewer__stage">
                   {imageViewer.attachments.length > 1 ? (
                     <button
                       type="button"
@@ -4858,13 +4862,23 @@ export function ChannelDialogPage({
                     </button>
                   ) : null}
 
-                  <div className="channel-dialog-image-viewer__frame">
-                    <img
+                  <Suspense
+                    fallback={
+                      <div className="channel-dialog-image-viewer__counter" role="status">
+                        Загружаем фото…
+                      </div>
+                    }
+                  >
+                    <CommentImageFrame
+                      key={`${imageViewer.activeIndex}:${activeViewerImageSrc}`}
                       src={activeViewerImageSrc}
                       alt={activeViewerAttachment.fileName?.trim() || 'Фото комментария'}
-                      loading="eager"
+                      onPrevious={
+                        imageViewer.attachments.length > 1 ? showPreviousCommentImage : undefined
+                      }
+                      onNext={imageViewer.attachments.length > 1 ? showNextCommentImage : undefined}
                     />
-                  </div>
+                  </Suspense>
 
                   {imageViewer.attachments.length > 1 ? (
                     <button

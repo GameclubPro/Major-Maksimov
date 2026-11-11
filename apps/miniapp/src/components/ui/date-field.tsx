@@ -6,6 +6,7 @@ import './date-field.css';
 type DateFieldProps = {
   value: string;
   label: string;
+  'aria-label'?: string;
   min?: string;
   disabled?: boolean;
   error?: string;
@@ -24,6 +25,7 @@ export const DateField = forwardRef<HTMLInputElement, DateFieldProps>(function D
   {
     value,
     label,
+    'aria-label': ariaLabel,
     min,
     disabled = false,
     error,
@@ -58,7 +60,7 @@ export const DateField = forwardRef<HTMLInputElement, DateFieldProps>(function D
           value={value}
           min={min}
           disabled={disabled}
-          aria-label={label}
+          aria-label={ariaLabel ?? label}
           aria-invalid={Boolean(error)}
           aria-describedby={errorId}
           onChange={(event) => onChange(event.target.value)}

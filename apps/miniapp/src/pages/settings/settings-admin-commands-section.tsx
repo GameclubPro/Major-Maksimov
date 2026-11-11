@@ -127,7 +127,7 @@ export function SettingsAdminCommandsSection({
                             >
                               <div className="settings-command-card__row">
                                 <span className="settings-command-card__copy">
-                                  <span className="settings-native-toggle__title-wrap">
+                                  <span className="settings-command-card__title">
                                     <label htmlFor={`settings-command-${item.key}`}>
                                       <strong>{item.title}</strong>
                                     </label>

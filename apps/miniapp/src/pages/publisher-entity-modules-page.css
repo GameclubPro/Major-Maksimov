@@ -45,6 +45,14 @@
     height: 20px;
   }
 
+  html[data-max-client='native'] .publisher-entity-modules-page__header {
+    grid-template-columns: 42px minmax(0, 1fr) 44px;
+  }
+
+  html[data-max-client='native'] .publisher-entity-modules-page__back {
+    display: none;
+  }
+
   .publisher-entity-modules-page__back:focus-visible,
   .publisher-entity-modules-page__refresh:focus-visible,
   .publisher-entity-modules-page__recheck:focus-visible,

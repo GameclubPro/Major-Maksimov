@@ -58,6 +58,7 @@ const ATTACHMENT_SELECTION_DEDUPE_MS = 2_500;
 const MAX_SUGGEST_IMAGES = 10;
 const MAX_SUGGEST_IMAGE_BASE64_LENGTH = 8_000_000;
 const MAX_SUGGEST_ATTACHMENTS_TOTAL_BASE64 = 24_000_000;
+const MIN_SUGGEST_COMPOSER_VISIBLE_SPACE_PX = 100;
 
 function LazySuggestionChunkLoadFailure() {
   return (
@@ -348,6 +349,7 @@ export function ChannelSuggestDialogPage({
   }, [chatId, dialogQuery.error, dialogQueryKey, queryClient, terminalDialogError, token]);
 
   const messages = dialogQuery.data?.messages ?? [];
+  const hasMoreMessages = dialogQuery.data?.hasMoreMessages === true;
   const introText = dialogQuery.data?.introText?.trim() ?? '';
   const draftLength = draft.trim().length;
   const isPreparingImage = preparingImageState !== null;
@@ -521,6 +523,13 @@ export function ChannelSuggestDialogPage({
         visualOffsetTop: visualViewport?.offsetTop ?? 0,
         containerBottom: screen.getBoundingClientRect().bottom,
         keyboardOverlap: readKeyboardOverlap(),
+        fallbackMaxReservePx: Math.max(
+          0,
+          screen.getBoundingClientRect().bottom -
+            viewport.getBoundingClientRect().top -
+            (suggestBarRef.current?.getBoundingClientRect().height ?? 0) -
+            MIN_SUGGEST_COMPOSER_VISIBLE_SPACE_PX,
+        ),
         baseline,
       });
     };
@@ -1544,7 +1553,10 @@ export function ChannelSuggestDialogPage({
             [
               { value: 'compose', label: 'Написать' },
               { value: 'preview', label: 'Предпросмотр' },
-              { value: 'history', label: `Мои${messages.length ? ` · ${messages.length}` : ''}` },
+              {
+                value: 'history',
+                label: `Мои${messages.length ? ` · ${messages.length}${hasMoreMessages ? '+' : ''}` : ''}`,
+              },
             ] as const
           ).map((tab) => (
             <button
@@ -1790,6 +1802,11 @@ export function ChannelSuggestDialogPage({
 
               {view === 'history' ? (
                 <section role="tabpanel" id="suggest-history" aria-labelledby="suggest-tab-history">
+                  {hasMoreMessages && messages.length > 0 ? (
+                    <p className="channel-suggest-empty" role="status">
+                      Показаны последние {messages.length}
+                    </p>
+                  ) : null}
                   {messages.length ? (
                     <Suspense
                       fallback={

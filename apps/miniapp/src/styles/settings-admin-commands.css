@@ -69,6 +69,30 @@
     line-height: 1.4;
   }
 
+  .settings-command-card__title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: start;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .settings-command-card__title > label {
+    flex: 1 1 min-content;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: break-word;
+  }
+
+  .settings-command-card__title > .channel-settings-hint-anchor {
+    flex: 0 0 auto;
+    margin-inline-start: auto;
+  }
+
+  .settings-admin-commands .settings-command-card .settings-command-card__row {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  }
+
   .settings-command-card__field {
     margin: 0;
   }

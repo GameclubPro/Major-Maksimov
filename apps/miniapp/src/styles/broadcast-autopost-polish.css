@@ -3531,6 +3531,7 @@
     grid-column: 1 / -1;
     grid-row: auto;
     display: flex;
+    flex-wrap: wrap;
     align-items: stretch;
     gap: 6px;
     min-width: 0;
@@ -3541,89 +3542,36 @@
     grid-column: auto;
     grid-row: auto;
     min-width: 0;
-    min-height: 38px;
+    max-width: 100%;
+    min-height: 44px;
+    height: auto;
+    white-space: normal;
   }
 
   .settings-drilldown__panel--rules-screen .rules-publish-bar__open,
   .settings-drilldown__panel--rules-screen .rules-publish-bar__save {
-    flex: 1 1 92px;
+    flex: 1 1 auto;
     width: auto;
   }
 
-  .settings-drilldown__panel--rules-screen .rules-publish-bar__open > span,
-  .settings-drilldown__panel--rules-screen .rules-publish-bar__save > span {
-    display: inline;
+  .settings-drilldown__panel--rules-screen .rules-publish-bar__commands > .button > span {
+    display: block;
+    max-width: 100%;
     overflow: visible;
     text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .settings-drilldown__panel--rules-screen .rules-publish-bar__commands .rules-publish-bar__reset {
-    flex: 0 0 38px;
-    width: 38px;
+    flex: 0 0 44px;
+    width: 44px;
   }
 
   .settings-drilldown__panel--rules-screen
     .rules-publish-bar__commands
     .broadcast-publish-bar__button {
-    flex: 1.25 1 126px;
+    flex: 1.25 1 auto;
     width: auto;
-  }
-
-  @media (max-width: 520px) {
-    .settings-drilldown__panel--rules-screen .rules-publish-bar__commands {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr);
-      grid-template-areas:
-        'save reset open'
-        'primary primary primary';
-    }
-
-    .settings-drilldown__panel--rules-screen .rules-publish-bar__save {
-      grid-area: save;
-    }
-
-    .settings-drilldown__panel--rules-screen .rules-publish-bar__open {
-      grid-area: open;
-    }
-
-    .settings-drilldown__panel--rules-screen
-      .rules-publish-bar__commands
-      .rules-publish-bar__reset {
-      grid-area: reset;
-    }
-
-    .settings-drilldown__panel--rules-screen
-      .rules-publish-bar__commands
-      .broadcast-publish-bar__button {
-      grid-area: primary;
-    }
-
-    .settings-drilldown__panel--rules-screen
-      .rules-publish-bar__commands:not(:has(.rules-publish-bar__reset)):has(
-        .rules-publish-bar__open
-      ) {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      grid-template-areas:
-        'save open'
-        'primary primary';
-    }
-
-    .settings-drilldown__panel--rules-screen
-      .rules-publish-bar__commands:has(.rules-publish-bar__reset):not(
-        :has(.rules-publish-bar__open)
-      ) {
-      grid-template-columns: minmax(0, 1fr) 38px;
-      grid-template-areas:
-        'save reset'
-        'primary primary';
-    }
-
-    .settings-drilldown__panel--rules-screen
-      .rules-publish-bar__commands:not(:has(.rules-publish-bar__reset)):not(
-        :has(.rules-publish-bar__open)
-      ) {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      grid-template-areas: 'save primary';
-    }
   }
 }

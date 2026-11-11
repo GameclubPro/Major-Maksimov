@@ -16,6 +16,7 @@ type SuggestionKeyboardLayoutInput = {
   visualOffsetTop: number;
   containerBottom: number;
   keyboardOverlap: number;
+  fallbackMaxReservePx?: number;
   baseline: SuggestionKeyboardViewportBaseline;
 };
 
@@ -43,9 +44,7 @@ export function resolveSuggestionKeyboardLayout(
   const layoutShrink = Math.max(0, baselineLayoutHeight - layoutHeight);
   const visualShrink = Math.max(0, baselineVisualHeight - visualHeight);
   const viewportShrinkPx = Math.ceil(Math.max(layoutShrink, visualShrink));
-  const visualOcclusionPx = Math.ceil(
-    Math.max(0, layoutHeight - (visualOffsetTop + visualHeight)),
-  );
+  const visualOcclusionPx = Math.ceil(Math.max(0, layoutHeight - (visualOffsetTop + visualHeight)));
   const hasMeasuredOverlap = keyboardOverlap >= KEYBOARD_OPEN_THRESHOLD_PX;
   const hasViewportShrink =
     viewportShrinkPx >= KEYBOARD_OPEN_THRESHOLD_PX ||
@@ -53,6 +52,7 @@ export function resolveSuggestionKeyboardLayout(
   const fallbackReservePx =
     input.focused && input.fallbackEligible && !hasMeasuredOverlap && !hasViewportShrink
       ? Math.min(
+          normalizeDimension(input.fallbackMaxReservePx ?? layoutHeight),
           MAX_FALLBACK_KEYBOARD_RESERVE_PX,
           Math.max(
             MIN_FALLBACK_KEYBOARD_RESERVE_PX,

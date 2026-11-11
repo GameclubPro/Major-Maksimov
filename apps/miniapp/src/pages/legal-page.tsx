@@ -255,14 +255,22 @@ function LegalPage({ kind }: { kind: LegalDocumentKind }) {
         <span className="legal-hero__eyebrow">Правовые документы</span>
         <h1 id="legal-title">{title}</h1>
         <p>{lead}</p>
-        <div className="legal-hero__nav" aria-label="Документы">
-          <Link to="/legal/agreement" className={!isPrivacy ? 'is-active' : undefined}>
+        <nav className="legal-hero__nav" aria-label="Документы">
+          <Link
+            to="/legal/agreement"
+            className={!isPrivacy ? 'is-active' : undefined}
+            aria-current={!isPrivacy ? 'page' : undefined}
+          >
             Соглашение
           </Link>
-          <Link to="/legal/privacy" className={isPrivacy ? 'is-active' : undefined}>
+          <Link
+            to="/legal/privacy"
+            className={isPrivacy ? 'is-active' : undefined}
+            aria-current={isPrivacy ? 'page' : undefined}
+          >
             Данные
           </Link>
-        </div>
+        </nav>
       </header>
 
       <section className="legal-summary" aria-label="Сведения о приложении">

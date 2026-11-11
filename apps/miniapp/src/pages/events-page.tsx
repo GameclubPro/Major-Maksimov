@@ -1718,6 +1718,18 @@ function ViolationModerationControls({
 }) {
   const releaseAction = resolveReleaseAction(violation);
   const [muteDurationHours, setMuteDurationHours] = useState(6);
+  const [muteDurationInput, setMuteDurationInput] = useState('6');
+  const parsedMuteDuration = Number(muteDurationInput);
+  const isMuteDurationValid =
+    muteDurationInput.trim() !== '' &&
+    Number.isInteger(parsedMuteDuration) &&
+    parsedMuteDuration >= MUTE_DURATION_MIN_HOURS &&
+    parsedMuteDuration <= MUTE_DURATION_MAX_HOURS;
+  const updateMuteDuration = (hours: number) => {
+    const normalized = clampMuteDurationHours(hours);
+    setMuteDurationHours(normalized);
+    setMuteDurationInput(String(normalized));
+  };
   const [muteExpanded, setMuteExpanded] = useState(false);
   const [pendingScopeChoice, setPendingScopeChoice] = useState<ManualModerationScopeChoice | null>(
     null,
@@ -1899,7 +1911,7 @@ function ViolationModerationControls({
                 }`}
                 disabled={applyMutation.isPending}
                 aria-pressed={muteDurationHours === hours}
-                onClick={() => setMuteDurationHours(hours)}
+                onClick={() => updateMuteDuration(hours)}
               >
                 {formatMuteDurationCompact(hours)}
               </button>
@@ -1911,7 +1923,7 @@ function ViolationModerationControls({
               <button
                 type="button"
                 className="ban-duration-stepper__button"
-                onClick={() => setMuteDurationHours((prev) => clampMuteDurationHours(prev - 1))}
+                onClick={() => updateMuteDuration(muteDurationHours - 1)}
                 disabled={applyMutation.isPending || muteDurationHours <= MUTE_DURATION_MIN_HOURS}
                 aria-label="Уменьшить срок ограничения"
               >
@@ -1923,7 +1935,7 @@ function ViolationModerationControls({
               <button
                 type="button"
                 className="ban-duration-stepper__button"
-                onClick={() => setMuteDurationHours((prev) => clampMuteDurationHours(prev + 1))}
+                onClick={() => updateMuteDuration(muteDurationHours + 1)}
                 disabled={applyMutation.isPending || muteDurationHours >= MUTE_DURATION_MAX_HOURS}
                 aria-label="Увеличить срок ограничения"
               >
@@ -1938,20 +1950,37 @@ function ViolationModerationControls({
                 min={MUTE_DURATION_MIN_HOURS}
                 max={MUTE_DURATION_MAX_HOURS}
                 step={1}
-                value={muteDurationHours}
+                value={muteDurationInput}
                 disabled={applyMutation.isPending}
-                onChange={(event) =>
-                  setMuteDurationHours(clampMuteDurationHours(Number(event.target.value)))
+                aria-invalid={muteDurationInput !== '' && !isMuteDurationValid}
+                aria-describedby={`violation-mute-range-${violation.id}`}
+                onChange={(event) => {
+                  const input = event.target.value;
+                  setMuteDurationInput(input);
+                  const hours = Number(input);
+                  if (
+                    input.trim() !== '' &&
+                    Number.isInteger(hours) &&
+                    hours >= MUTE_DURATION_MIN_HOURS &&
+                    hours <= MUTE_DURATION_MAX_HOURS
+                  ) {
+                    setMuteDurationHours(hours);
+                  }
+                }}
+                onBlur={() =>
+                  updateMuteDuration(
+                    muteDurationInput.trim() === '' ? muteDurationHours : parsedMuteDuration,
+                  )
                 }
               />
-              <small>1–336ч</small>
+              <small id={`violation-mute-range-${violation.id}`}>1–336ч</small>
             </label>
           </div>
 
           <button
             type="button"
             className="button button--accent logs-violation-item__apply-button"
-            disabled={applyMutation.isPending}
+            disabled={applyMutation.isPending || !isMuteDurationValid}
             onClick={() => openScopeAction('MUTE', muteDurationHours)}
           >
             {applyMutation.isPending

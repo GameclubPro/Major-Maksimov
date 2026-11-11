@@ -54,6 +54,42 @@ test('bounds the overlay fallback reserve', () => {
   assert.equal(tall.fallbackReservePx, 320);
 });
 
+test('keeps the unmeasured keyboard fallback below tabs and a usable composer', () => {
+  for (const available of [0, 44, 96]) {
+    const layout = resolveSuggestionKeyboardLayout({
+      focused: true,
+      fallbackEligible: true,
+      layoutHeight: 320,
+      visualHeight: 320,
+      visualOffsetTop: 0,
+      containerBottom: 320,
+      keyboardOverlap: 0,
+      fallbackMaxReservePx: available,
+      baseline: { layoutHeight: 320, visualHeight: 320 },
+    });
+    assert.equal(layout.fallbackReservePx, available);
+    assert.equal(layout.visibleBottomPx, 320 - available);
+    assert.equal(layout.barReservePx, available);
+  }
+});
+
+test('the composer space limit does not hide measured keyboard occlusion', () => {
+  const layout = resolveSuggestionKeyboardLayout({
+    focused: true,
+    fallbackEligible: true,
+    layoutHeight: 760,
+    visualHeight: 760,
+    visualOffsetTop: 0,
+    containerBottom: 760,
+    keyboardOverlap: 280,
+    fallbackMaxReservePx: 0,
+    baseline,
+  });
+  assert.equal(layout.fallbackReservePx, 0);
+  assert.equal(layout.barReservePx, 280);
+  assert.equal(layout.visibleBottomPx, 480);
+});
+
 test('uses visual viewport occlusion without adding the overlay fallback', () => {
   assert.deepEqual(
     resolveSuggestionKeyboardLayout({
