@@ -4024,6 +4024,8 @@ model ManagedGiveaway {
   @@index([sourceChatId, id], map: "managed_giveaways_eraser_bootstrap_idx")
   @@index([status, startsAt], map: "managed_giveaways_status_starts_at_idx")
   @@index([status, endsAt], map: "managed_giveaways_status_ends_at_idx")
+  @@index([status, startsAt, id], map: "managed_giveaways_status_starts_at_id_idx")
+  @@index([status, endsAt, id], map: "managed_giveaways_status_ends_at_id_idx")
   @@index([status, lockedAt], map: "managed_giveaways_status_locked_at_idx")
   @@index([sourceChatId, publicationMessageId], map: "managed_giveaways_chat_publication_message_idx")
   @@index([sourceChatId, resultsMessageId], map: "managed_giveaways_chat_results_message_idx")

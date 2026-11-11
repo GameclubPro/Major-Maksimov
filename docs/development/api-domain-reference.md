@@ -203,6 +203,7 @@ Statistics exchange does not grant advertising or shop authority.
 - Managed poll list endpoints select/expose persisted `imageCount` only; raw poll images belong to the details endpoint.
 - Poll vote admission checks the persisted poll/chat/message/token/bot binding. Message-bearing callback answers retain the original publication bot, including the exact-object exception after a fixed-moderator change. Final transport admission checks current SQL access and capabilities again after quota waits; a typed local refusal acknowledges the vote separately and retains render repair without claiming an ambiguous HTTP edit.
 - Poll draft creation has no durable request identity: the mini app disables automatic retry after an ambiguous transport failure. The one-time 405/preferred-host tunnel remains allowed; a manual retry has no duplicate-prevention guarantee.
+- Managed giveaway due work rotates four indexed status/time families with process-local tuple cursors. Raw pages precede access, lock and Redis checks; only inspected prefixes advance. Preserve alternate ACTIVE bot access, current reload/CAS and all effect/deadline fences. See [giveaway progress and index release](../operations/runbooks/managed-giveaway-due-progress.md) for budgets, sweep limits and native validation.
 - Settings audit payloads contain only requested allowlisted keys and bounded media metadata. Keep the settings mutation and audit insert in one transaction; never copy base64 media, filenames, or full settings snapshots into the audit log.
 
 ## Managed Entities And Multi-Bot

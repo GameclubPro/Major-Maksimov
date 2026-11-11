@@ -14,6 +14,10 @@ import {
   ManagedGiveawayMembershipLookupUnavailableError,
   ManagedGiveawayService,
 } from './managed-giveaway.service';
+import {
+  buildManagedGiveawayDuePageQuery,
+  type ManagedGiveawayDueRow,
+} from './managed-giveaway-due-selection';
 
 function createConfigMock(options: { token?: string; previousToken?: string } = {}) {
   return {
@@ -88,7 +92,28 @@ function createPrismaMock() {
     $queryRaw: jest.fn() as jest.MockedFunction<Prisma.TransactionClient['$queryRaw']>,
   };
   prisma.$transaction.mockImplementation(async (callback) => callback(prisma));
+  prisma.$queryRaw.mockResolvedValue([]);
   return prisma;
+}
+
+function createDueGiveawayRow(
+  overrides: Pick<ManagedGiveawayDueRow, 'id'> & Partial<Omit<ManagedGiveawayDueRow, 'id'>>,
+): ManagedGiveawayDueRow {
+  return {
+    sourceChatId: `source-${overrides.id}`,
+    lockedAt: null,
+    dueAt: new Date('2026-03-20T12:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+type ManagedGiveawayRunnerMethods = {
+  processDueManagedGiveaway: ManagedGiveawayService['processDueManagedGiveaway'];
+  getManagedGiveawayRunnerDeferRemainingMs: ManagedGiveawayService['getManagedGiveawayRunnerDeferRemainingMs'];
+};
+
+function getDuePageQueries(prisma: ReturnType<typeof createPrismaMock>): Prisma.Sql[] {
+  return prisma.$queryRaw.mock.calls.map(([query]) => query as Prisma.Sql);
 }
 
 function createMaxApiError(status: number, message: string, code?: string): Error {
@@ -4929,7 +4954,6 @@ describe('ManagedGiveawayService', () => {
 
   it('drains completed winner notification intents on every runner pass', async () => {
     const prisma = createPrismaMock();
-    prisma.managedGiveaway.findMany.mockResolvedValue([]);
     const service = new ManagedGiveawayService(
       prisma as never,
       createMaxClientMock() as never,
@@ -4953,9 +4977,9 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-1' },
-        { id: 'giveaway-2' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-1' }),
+        createDueGiveawayRow({ id: 'giveaway-2' }),
       ]);
 
       const chatContextCache = createChatContextCacheMock({
@@ -5008,7 +5032,7 @@ describe('ManagedGiveawayService', () => {
       sourceTag: 'giveaway_draw_background',
     });
     expect(prisma.managedGiveawayWinner.findMany).not.toHaveBeenCalled();
-    expect(prisma.managedGiveaway.findMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
     expect(processSpy).not.toHaveBeenCalled();
   });
 
@@ -5017,9 +5041,9 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-denied', sourceChatId: 'source-denied' },
-        { id: 'giveaway-open', sourceChatId: 'source-open' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-denied', sourceChatId: 'source-denied' }),
+        createDueGiveawayRow({ id: 'giveaway-open', sourceChatId: 'source-open' }),
       ]);
       prisma.managedEntityAccessEdge.findMany
         .mockResolvedValueOnce([{ chatId: 'source-denied', botId: 'lost-bot' }])
@@ -5057,8 +5081,8 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-denied', sourceChatId: 'source-denied' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-denied', sourceChatId: 'source-denied' }),
       ]);
       prisma.managedEntityAccessEdge.findMany
         .mockResolvedValueOnce([{ chatId: 'source-denied', botId: 'lost-bot' }])
@@ -5088,8 +5112,8 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-shared', sourceChatId: 'source-shared' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-shared', sourceChatId: 'source-shared' }),
       ]);
       prisma.managedEntityAccessEdge.findMany
         .mockResolvedValueOnce([{ chatId: 'source-shared', botId: 'lost-bot' }])
@@ -5134,8 +5158,8 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-shared', sourceChatId: 'source-shared' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-shared', sourceChatId: 'source-shared' }),
       ]);
       prisma.managedEntityAccessEdge.findMany
         .mockResolvedValueOnce([{ chatId: 'source-shared', botId: 'lost-bot' }])
@@ -5184,9 +5208,9 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
-      prisma.managedGiveaway.findMany.mockResolvedValue([
-        { id: 'giveaway-1' },
-        { id: 'giveaway-2' },
+      prisma.$queryRaw.mockResolvedValueOnce([
+        createDueGiveawayRow({ id: 'giveaway-1' }),
+        createDueGiveawayRow({ id: 'giveaway-2' }),
       ]);
 
       const chatContextCache = createChatContextCacheMock({
@@ -5212,6 +5236,180 @@ describe('ManagedGiveawayService', () => {
     }
   });
 
+  it('continues after the inspected candidate when a per-candidate read fails', async () => {
+    const initialNow = new Date('2026-03-21T13:25:00.000Z');
+    jest.useFakeTimers().setSystemTime(initialNow);
+
+    try {
+      const prisma = createPrismaMock();
+      const first = createDueGiveawayRow({ id: 'giveaway-1' });
+      const second = createDueGiveawayRow({ id: 'giveaway-2' });
+      prisma.$queryRaw
+        .mockResolvedValueOnce([first, second])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([second]);
+      const service = new ManagedGiveawayService(
+        prisma as never,
+        createMaxClientMock() as never,
+        createChatContextCacheMock() as never,
+        {} as never,
+        createConfigMock() as never,
+      );
+      const runner = service as unknown as ManagedGiveawayRunnerMethods;
+      const readError = new Error('candidate read unavailable');
+      jest
+        .spyOn(runner, 'getManagedGiveawayRunnerDeferRemainingMs')
+        .mockRejectedValueOnce(readError)
+        .mockResolvedValue(0);
+      const processSpy = jest
+        .spyOn(runner, 'processDueManagedGiveaway')
+        .mockResolvedValue(undefined);
+
+      await expect(service.processDueManagedGiveaways('scheduled')).rejects.toBe(readError);
+      expect(processSpy).not.toHaveBeenCalled();
+      jest.setSystemTime(new Date(initialNow.getTime() + 60_000));
+      await service.processDueManagedGiveaways('scheduled');
+
+      expect(processSpy).toHaveBeenCalledTimes(1);
+      expect(processSpy).toHaveBeenCalledWith(second.id, 'scheduled', expect.any(Date));
+      const resumed = getDuePageQueries(prisma).at(-1)!;
+      expect(resumed.text).toContain('source."starts_at" AS "dueAt"');
+      expect(resumed.values).toContainEqual(initialNow);
+      expect(resumed.values).toContainEqual(first.dueAt);
+      expect(resumed.values).toContain(first.id);
+      expect(resumed.values).not.toContain(second.id);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retains the whole page when its batch access read fails', async () => {
+    const initialNow = new Date('2026-03-21T13:25:00.000Z');
+    jest.useFakeTimers().setSystemTime(initialNow);
+
+    try {
+      const prisma = createPrismaMock();
+      const rows = [
+        createDueGiveawayRow({ id: 'giveaway-1' }),
+        createDueGiveawayRow({ id: 'giveaway-2' }),
+      ];
+      prisma.$queryRaw
+        .mockResolvedValueOnce(rows)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(rows);
+      const readError = new Error('access read unavailable');
+      prisma.managedEntityAccessEdge.findMany.mockRejectedValueOnce(readError);
+      const service = new ManagedGiveawayService(
+        prisma as never,
+        createMaxClientMock() as never,
+        createChatContextCacheMock() as never,
+        {} as never,
+        createConfigMock() as never,
+      );
+      const runner = service as unknown as ManagedGiveawayRunnerMethods;
+      const processSpy = jest
+        .spyOn(runner, 'processDueManagedGiveaway')
+        .mockResolvedValue(undefined);
+
+      await expect(service.processDueManagedGiveaways('scheduled')).rejects.toBe(readError);
+      expect(processSpy).not.toHaveBeenCalled();
+      jest.setSystemTime(new Date(initialNow.getTime() + 60_000));
+      await service.processDueManagedGiveaways('scheduled');
+
+      expect(processSpy.mock.calls.map(([id]) => id)).toEqual(rows.map(({ id }) => id));
+      const resumed = getDuePageQueries(prisma).at(-1)!;
+      expect(resumed.text).toContain('source."starts_at" AS "dueAt"');
+      expect(resumed.values).toContainEqual(initialNow);
+      for (const row of rows) {
+        expect(resumed.values).not.toContain(row.id);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('preserves the sweep cutoff, cursor and family rotation across a governor pause', async () => {
+    const initialNow = new Date('2026-03-21T13:25:00.000Z');
+    jest.useFakeTimers().setSystemTime(initialNow);
+
+    try {
+      const prisma = createPrismaMock();
+      const firstPage = Array.from({ length: 20 }, (_, index) =>
+        createDueGiveawayRow({ id: `giveaway-${String(index).padStart(3, '0')}` }),
+      );
+      const tail = createDueGiveawayRow({ id: 'giveaway-020' });
+      prisma.$queryRaw
+        .mockResolvedValueOnce(firstPage)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([tail]);
+      const backgroundRuntimeGovernor = {
+        decide: jest
+          .fn()
+          .mockResolvedValueOnce({ action: 'run', retryAfterMs: 0, reason: 'available' })
+          .mockResolvedValueOnce({ action: 'pause', retryAfterMs: 60_000, reason: 'pressure' })
+          .mockResolvedValueOnce({ action: 'run', retryAfterMs: 0, reason: 'available' }),
+      };
+      const service = new ManagedGiveawayService(
+        prisma as never,
+        createMaxClientMock() as never,
+        createChatContextCacheMock() as never,
+        {} as never,
+        createConfigMock() as never,
+        undefined,
+        undefined,
+        undefined,
+        backgroundRuntimeGovernor as never,
+      );
+      const runner = service as unknown as ManagedGiveawayRunnerMethods;
+      const processSpy = jest
+        .spyOn(runner, 'processDueManagedGiveaway')
+        .mockResolvedValue(undefined);
+
+      await service.processDueManagedGiveaways('scheduled');
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(processSpy).toHaveBeenCalledTimes(20);
+      await service.processDueManagedGiveaways('scheduled');
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+      expect(processSpy).toHaveBeenCalledTimes(20);
+      jest.setSystemTime(new Date(initialNow.getTime() + 120_000));
+      await service.processDueManagedGiveaways('scheduled');
+
+      const queries = getDuePageQueries(prisma);
+      expect(queries).toHaveLength(5);
+      expect(queries[1]!.text).toContain('source."ends_at" AS "dueAt"');
+      expect(queries[1]!.values).toContain('SCHEDULED');
+      expect(queries[4]!.text).toContain('source."starts_at" AS "dueAt"');
+      expect(queries[4]!.values).toContainEqual(initialNow);
+      expect(queries[4]!.values).toContain(firstPage.at(-1)!.id);
+      expect(processSpy.mock.calls.map(([id]) => id)).toEqual([
+        ...firstPage.map(({ id }) => id),
+        tail.id,
+      ]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it.each([0, -1, 21, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects the unbounded due page size %s',
+    (take) => {
+      expect(() =>
+        buildManagedGiveawayDuePageQuery({
+          family: 'activeEnd',
+          cutoff: new Date(),
+          after: null,
+          take,
+        }),
+      ).toThrow('integer take between 1 and 20');
+    },
+  );
+
   it('expires selected winners whose claim deadline has passed before processing due giveaways', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-23T13:30:00.000Z'));
 
@@ -5220,6 +5418,11 @@ describe('ManagedGiveawayService', () => {
       prisma.managedGiveawayWinner.findMany.mockResolvedValueOnce([
         { id: 'winner-1', giveawayId: 'giveaway-1' },
       ]);
+      prisma.managedGiveaway.findMany.mockResolvedValueOnce([
+        { id: 'giveaway-1', sourceChatId: 'source-1' },
+      ] satisfies Prisma.ManagedGiveawayGetPayload<{
+        select: { id: true; sourceChatId: true };
+      }>[]);
       prisma.managedGiveaway.findUnique.mockResolvedValue(
         createGiveaway({
           status: ManagedGiveawayStatus.COMPLETED,
@@ -5227,8 +5430,6 @@ describe('ManagedGiveawayService', () => {
           resultsMessageId: 'results-1',
         }),
       );
-      prisma.managedGiveaway.findMany.mockResolvedValue([]);
-
       const service = new ManagedGiveawayService(
         prisma as never,
         createMaxClientMock() as never,
