@@ -67,6 +67,10 @@ image lanes. The Docker context guard requires a new review if these host paths 
 inputs. Other shared tooling, build inputs, CI policy and unknown paths retain full coverage.
 `Required` recomputes the entire frozen plan and requires the selected static matrix to succeed.
 
+Ubuntu system dependency preparation uses the official archive and security endpoints over HTTPS.
+The bounded rewrite preserves suites, signing keys, other package sources and mirror-file indirection;
+Redis and browser lanes retain strict update failures and their existing installation deadlines.
+
 Preparation failures report a fixed phase and exit status before returning the original failure.
 Admission refusals retain the bounded known reason or `unknown`; captured remote output remains
 private. Establish the current source, manifest and failed phase before continuing an interrupted
