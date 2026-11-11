@@ -285,9 +285,9 @@ commercial benchmark and the affected API image. Shared contracts select all the
 Tests alone do not build unrelated runtime images. CodeQL remains a separate exact-SHA gate.
 
 Browser dependency setup uses HTTPS Ubuntu sources, omits package translation indexes and bounds
-network retries. Browser and owned Redis setup use the Ubuntu Azure archive over HTTPS instead of
-redirecting it to the main archive endpoint; Ubuntu archive signatures remain required. It fails on
-incomplete apt updates and has its own three-minute step budget, so
+network retries. Browser and owned Redis setup use the Linux Kernel Archives' HTTPS Ubuntu mirror
+for archive and security pockets; Ubuntu archive signatures and the existing keyring remain
+required. Setup fails on incomplete apt updates and has its own three-minute step budget, so
 an unavailable mirror cannot silently consume most of the browser test deadline. All miniapp
 shards and Safety Desk keep their complete test inventories and existing job budgets. The miniapp
 partitions preserve each browser command once, with per-job dependency setup and contract builds;
