@@ -397,6 +397,11 @@ try {
       publishedUrl: 'https://max.ru/post-from-newer-visit',
     };
     await reply(1, 200, newer);
+    // FLAG: Observe hydration before releasing the stale response from the previous visit.
+    await page.waitForFunction((expected) => {
+      const draft = JSON.parse(document.querySelector('[data-testid="state"]').textContent).draft;
+      return draft?.text === expected.text && draft.revision === expected.revision;
+    }, newer);
     assert.equal((await read()).draft.text, newer.text);
     await reply(0, 200, earlierResponse);
     const currentVisit = await read();

@@ -573,11 +573,7 @@ try {
               ),
               1,
             );
-            await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-            assert.equal(
-              await page.getByRole('radio', { name: 'Все желающие', exact: true }).isDisabled(),
-              false,
-            );
+            assert.equal(await page.getByRole('button', { name: 'Управлять магазином', exact: true }).isDisabled(), false);
             assert.deepEqual(errors, []);
             await geometry(page, scenario);
             await page.screenshot({
@@ -669,11 +665,7 @@ try {
                 null,
                 'A late setup response cannot write another actor recovery journal',
               );
-              await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-              assert.equal(
-                await page.getByRole('radio', { name: 'Все желающие', exact: true }).isDisabled(),
-                false,
-              );
+              assert.equal(await page.getByRole('button', { name: 'Управлять магазином', exact: true }).isDisabled(), false);
               assert.equal(
                 await page.evaluate(
                   () =>
@@ -704,7 +696,7 @@ try {
             assert.equal(await page.evaluate(() => window.__karavanOpened.length), 0);
             assert.equal(
               await page
-                .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
+                .getByRole('button', { name: 'Открыть магазин', exact: true })
                 .count(),
               0,
             );
@@ -760,7 +752,7 @@ try {
               if (scenario === 'partial_bound') {
                 await page.getByRole('button', { name: 'Настроить черновик' }).click();
                 const panel = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
-                await panel.getByRole('button', { name: 'Товары и услуги', exact: true }).waitFor();
+                await panel.getByRole('button', { name: 'Управлять магазином', exact: true }).waitFor();
                 assert.equal(await page.evaluate(() => window.__karavanOpened.length), 0);
                 await panel.getByRole('button', { name: 'Назад' }).waitFor();
                 await page.keyboard.press('Escape');
@@ -782,8 +774,7 @@ try {
                 .waitFor();
             } else
               await page
-                .locator('.karavan-module__identity p')
-                .filter({ hasText: /^(Черновик|Закрыт для покупателей)/u })
+                .getByText('Магазин выключен', { exact: true })
                 .waitFor();
             const requests = await page.evaluate(() =>
               window.__karavanRequests.filter((item) => item.path.endsWith('/setup')),
@@ -796,8 +787,7 @@ try {
             ]);
             assert.equal(requests[0].body.bindingExpectations.length, 1);
             if (['setup', 'unknown'].includes(scenario)) {
-              await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-              await page.getByRole('button', { name: 'Подключённые чаты', exact: true }).click();
+              await page.getByRole('button', { name: 'Подключение', exact: true }).click();
               await page.getByRole('button', { name: 'Подключить чаты', exact: true }).click();
               assert.equal(
                 await page.getByRole('textbox', { name: 'Название магазина', exact: true }).count(),
@@ -967,8 +957,7 @@ try {
             );
           }
           if (scenario === 'choice') {
-            await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-            await page.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+            await page.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
             await page.getByRole('button', { name: 'Вторая витрина', exact: true }).click();
             await page
               .getByText(
@@ -985,8 +974,7 @@ try {
             await page.getByRole('button', { name: 'Назад', exact: true }).click();
           }
           if (scenario === 'replace') {
-            await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-            await page.getByRole('button', { name: 'Подключённые чаты', exact: true }).click();
+            await page.getByRole('button', { name: 'Подключение', exact: true }).click();
             await page.getByRole('button', { name: 'Выбрать другой магазин', exact: true }).click();
             await page.getByRole('radio', { name: 'Другой магазин', exact: true }).check();
             assert.equal(
@@ -1060,8 +1048,7 @@ try {
             );
           }
           if (scenario === 'disconnect') {
-            await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-            await page.getByRole('button', { name: 'Подключённые чаты', exact: true }).click();
+            await page.getByRole('button', { name: 'Подключение', exact: true }).click();
             await page.getByRole('button', { name: 'Отключить этот чат' }).click();
             assert.equal(
               await page.evaluate(
@@ -1076,7 +1063,7 @@ try {
             await page.getByText('Чат отключён от магазина.').waitFor();
           }
           if (scenario === 'reviewer') {
-            await page.getByRole('button', { name: 'Заявки', exact: true }).waitFor();
+            await page.getByRole('button', { name: 'Управлять магазином', exact: true }).waitFor();
             assert.equal(
               await page.getByRole('button', { name: 'Категории и правила', exact: true }).count(),
               0,
@@ -1091,7 +1078,7 @@ try {
           await geometry(page, `${width}-${theme}-${scenario}`);
           if (['active', 'public_view', 'bridge_error'].includes(scenario)) {
             await page
-              .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
+              .getByRole('button', { name: 'Открыть магазин', exact: true })
               .click();
             if (scenario === 'bridge_error') {
               await page
@@ -1130,7 +1117,7 @@ try {
           if (['draft', 'draft_empty', 'paused', 'preview_missing'].includes(scenario)) {
             assert.equal(
               await page
-                .getByRole('button', { name: /^(Посмотреть магазин чата|Предпросмотр)$/u })
+                .getByRole('button', { name: /^(Открыть магазин|Управлять магазином)$/u })
                 .count(),
               0,
             );
@@ -1151,7 +1138,7 @@ try {
             await page.evaluate(() => window.__switchKaravanChat());
             await page.getByRole('heading', { name: 'Другой магазин' }).waitFor();
             await page
-              .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
+              .getByRole('button', { name: 'Открыть магазин', exact: true })
               .click();
             assert.deepEqual(await page.evaluate(() => window.__karavanOpened), [
               'https://max.ru/synthetic_buyer_bot?startapp=m_other-shop',
