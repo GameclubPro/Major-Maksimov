@@ -672,11 +672,13 @@ function ProfiledAppRoutes({
   launchInitData,
   launchRouteResolver,
   queryClient,
+  showMaxApiNotice = true,
 }: {
   apiClient: ReturnType<typeof createApiTransport>;
   launchInitData: string | null;
   launchRouteResolver: (initData: string) => string | null;
   queryClient: ReturnType<typeof createAuthQueryClient>;
+  showMaxApiNotice?: boolean;
 }) {
   const [me, setMe] = useState<Me | null>();
   const location = useLocation();
@@ -765,7 +767,7 @@ function ProfiledAppRoutes({
     /^\/(?:chat|channel)\/[^/]+\/settings\/?$/u.test(location.pathname);
   return (
     <>
-      {isMaxApiNoticeActive() ? (
+      {showMaxApiNotice && isMaxApiNoticeActive() ? (
         <Suspense fallback={null}>
           <LazyMaxApiNotice key={me.userId} userId={me.userId} />
         </Suspense>
@@ -1045,6 +1047,7 @@ export function App() {
             <PreviewScaffold initialDevice={preview.device}>
               <ProfiledAppRoutes
                 apiClient={apiClient}
+                showMaxApiNotice={false}
                 launchInitData={null}
                 launchRouteResolver={launchRouteResolver}
                 queryClient={queryClient}

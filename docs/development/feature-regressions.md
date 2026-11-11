@@ -14,7 +14,8 @@ The impact planner and staged commit helper still own final validation.
 ## Participants And Moderation UI
 
 The temporary MAX API notice uses an absolute campaign deadline, shared across bot profiles;
-acknowledgement is mirrored per verified user and campaign on the device. It must close at expiry
+acknowledgement is mirrored per verified user and campaign on the device. Design preview excludes live notices.
+It must close at expiry
 and remain absent after acknowledgement or expiry. Check [time boundaries](../../apps/miniapp/test/max-api-notice.test.ts)
 and [entry, acknowledgement and mobile layout](../../apps/miniapp/test/max-api-notice.browser.mjs).
 The browser case owns its local Vite server and uses a fixed clock, so it remains valid after expiry.

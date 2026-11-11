@@ -150,6 +150,10 @@ try {
             await page.reload();
             await page.getByText('Не удалось открыть приложение', { exact: true }).waitFor();
             assert.equal(await dialog.count(), 0, 'profile authorization is required');
+            await page.goto(`${base}chat/preview-chat/settings?preview=1`);
+            await page.getByRole('button', { name: 'Система жалоб', exact: true }).waitFor();
+            assert.equal(await dialog.count(), 0, 'design preview is independent of live notices');
+            await page.getByRole('button', { name: 'Система жалоб', exact: true }).click();
             assert.deepEqual(errors, []);
             console.log(
               `PASS MAX notice ${name} ${theme} ${profile}: entry, focus, acknowledgement, user isolation, short viewport, expiry, auth`,
