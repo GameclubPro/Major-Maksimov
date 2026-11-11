@@ -31,10 +31,15 @@ workspace plan "$WORKSPACE_TASK" --json
 ```
 
 The coordinator starts from its configured base ref, which may be the production `main`
-rather than the newest remote commit. Inspect source/checkout SHAs and fetch before
+rather than the newest remote commit. The configured source must be the maintained
+primary checkout, not a former task worktree. Compare source HEAD, base SHA and branch
+with `workspace inspect`; use `workspace configure` to correct a stale registry after
+preserving the intended private local configuration. Do not switch or delete the old
+checkout merely to make the registry match. Inspect source/checkout SHAs and fetch before
 selecting the task baseline; advance only the idle task branch when appropriate. Keep
 production `main` and another task's worktree untouched. `--no-install` is appropriate
-for read-only/docs work; use `workspace prepare` when this checkout needs dependencies.
+for initial read-only/docs discovery; run `workspace prepare` before checks/submission
+when this checkout lacks dependencies, including Markdown-only submissions.
 Never change checkout inputs while one of its operations is active.
 
 `workspace check` accepts exact `major:path` tests, with `--native` for real stores.
@@ -131,15 +136,17 @@ inside `with-test-stores.mjs --migrate --`; this interface never silently starts
 
 Select both repositories when a changed boundary requires it. Ordinary text/UI work stays within
 the affected product. Major owns its DTO validation, exact MAX authority and command proxy;
-Karavan owns marketplace data and application of commands. Keep the code map and acceptance profile
+Karavan owns marketplace data, application of commands and the inline buyer admin UI.
+Major owns creation, chat connections and publication settings, with `m_`/`ma_` links
+into Karavan; retained proxy/recovery code does not define the current editor location. Keep the code map and acceptance profile
 aligned with the [maintained integration runbook](../operations/runbooks/karavan-chat-marketplaces.md).
 
 | Boundary                                    | Major owner / relevant evidence                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Canonical commands, authority, payload hash | [Shared schemas](../../packages/contracts/src/karavan-marketplace.ts), [proxy](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-proxy.service.ts), [management tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-management.spec.ts).                                                                             |
 | Current human/bot authority and binding     | [Authority service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority.service.ts), [binding status](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-binding-status.service.ts), [native authority tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority-postgres.spec.ts). |
-| One-time transition to Karavan              | [Handoff service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-handoff.service.ts), [integration controller tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-integration.controller.spec.ts).                                                                                                                |
-| Admin path and uncertain command outcome    | [Browser flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                                                                                                                                                                                               |
+| Retained one-time seller/historical handoff | [Handoff service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-handoff.service.ts), [integration controller tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-integration.controller.spec.ts).                                                                                                                |
+| Current shop entry and uncertain commands | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [management link](../../apps/miniapp/test/karavan-shop-management-link.test.ts), [connection/recovery flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                                                                                                                                                                                               |
 
 Karavan's matching handlers and release configuration remain documented in its own
 `docs/chat-marketplaces-release.md`. Pair configuration checks do not prove protocol or runtime
