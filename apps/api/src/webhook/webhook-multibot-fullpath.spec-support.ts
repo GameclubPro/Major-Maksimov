@@ -254,6 +254,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     getDefaultBot: () => bots[0]!,
     getEntryBot: () => bots[0]!,
     getAllBots: () => bots,
+    getActionableBots: () => bots,
     getBotById: (id?: string | null) => bots.find((bot) => bot.id === id) ?? null,
     isKnownBotUserId: (id?: string | null) => bots.some((bot) => bot.id === id),
     resolveBotIdFromUserId: (id?: string | null) => bots.find((bot) => bot.id === id)?.id ?? null,
@@ -315,6 +316,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
   const deniedBots = new Set<string>();
   const rateLimitedDeleteBots = new Set<string>();
   const ownMemberProbeOverrides = new Map<string, SimulatedOwnMemberProbe>();
+  const absentChatMembers = new Map<string, Set<string>>();
   const botPermissions = new Map(
     bots.map((bot) => [bot.id, ['read_all_messages', 'write', 'add_remove_members']]),
   );
@@ -428,6 +430,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
                 request.params?.user_ids ?? url.searchParams.get('user_ids') ?? 'fixture-user',
               )
                 .split(',')
+                .filter((id) => !absentChatMembers.get(path.split('/')[2]!)?.has(id))
                 .map((id) =>
                   member(
                     id,
@@ -1214,6 +1217,7 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     redis,
     counterRedis,
     bots,
+    registry,
     config,
     links,
     max,
@@ -1294,6 +1298,15 @@ export async function createMultibotHarness(options: MultibotHarnessOptions) {
     },
     setBotPermissions: (botId: string, permissions: string[]) => {
       botPermissions.set(botId, [...permissions]);
+    },
+    setChatMemberAbsent: (chatId: string, userId: string, absent: boolean) => {
+      if (!absent) {
+        absentChatMembers.get(chatId)?.delete(userId);
+        return;
+      }
+      const users = absentChatMembers.get(chatId) ?? new Set<string>();
+      users.add(userId);
+      absentChatMembers.set(chatId, users);
     },
     mediaCoverage: 'ingress-and-caption-rules-without-native-photo-or-ocr' as const,
     receiptIds,

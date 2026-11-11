@@ -42,6 +42,13 @@ import { SuggestionSubscriptionService } from '../suggestions/suggestion-subscri
 import { MaxMemberRestoreUnavailableError } from '../max/max-member-restore-capability';
 import { attemptManualMemberUnban } from './manual-member-unban-attempt';
 import {
+  assertCurrentManualMemberAuthority,
+  assertManualBotCanManageMembers,
+  captureManualModerationBotAccess,
+  isAddRemoveMembersPermission,
+  type ManualModerationBotAccessEvidence,
+} from './manual-member-bot-access';
+import {
   assertChannelMemberBanScope,
   describeManualBanResult,
   prepareManualBanFanoutTarget,
@@ -9072,6 +9079,7 @@ export class AdminService implements OnModuleDestroy {
         ...options,
         expectedSanctionEventId: options.expectedSanctionEventId ?? localUnban.id,
       };
+    let botAccessEvidence: ManualModerationBotAccessEvidence | undefined;
     const resolvedBotId =
       actionRequest.action === 'UNMUTE' || localUnban
         ? undefined
@@ -9081,6 +9089,9 @@ export class AdminService implements OnModuleDestroy {
             {
               preferredBotId: options.preferredBotId,
               entityType: options.entityType,
+              onAccessVerified: (evidence) => {
+                botAccessEvidence = evidence;
+              },
             },
           );
     const targetDisplayName =
@@ -9103,6 +9114,7 @@ export class AdminService implements OnModuleDestroy {
             user,
             actionRequest,
             resolvedBotId,
+            botAccessEvidence,
             targetDisplayName,
             source,
             options,
@@ -9123,6 +9135,7 @@ export class AdminService implements OnModuleDestroy {
     user: AuthUser,
     actionRequest: ManualModerationActionRequest,
     resolvedBotId: string | undefined,
+    botAccessEvidence: ManualModerationBotAccessEvidence | undefined,
     targetDisplayName: string | null,
     source: AdminActionSource,
     options: ManualModerationExecutionOptions,
@@ -9461,8 +9474,16 @@ export class AdminService implements OnModuleDestroy {
           'BAN',
           resolvedBotId,
           source === 'miniapp' && !isChannel,
+          botAccessEvidence,
         );
         if (targetState === 'former') {
+          if (botAccessEvidence)
+            await assertCurrentManualMemberAuthority(
+              this.maxClient,
+              this.maxBotLinkService,
+              chatId,
+              resolvedBotId,
+            );
           const followUp = shouldFanoutManualAction
             ? await this.resolveManualBanFollowUpSummaries({
                 sourceChatId: chatId,
@@ -9844,7 +9865,8 @@ export class AdminService implements OnModuleDestroy {
       this.maxClient,
       leaseGuard,
       this.assertExpectedManualModerationSanctionState.bind(this),
-      this.assertBotCanManageMembers.bind(this),
+      (chatId, action, botId) =>
+        this.assertBotCanManageMembers(chatId, action, botId, botAccessEvidence),
       actionRequest.action,
     );
     if (unbanAttempt) return unbanAttempt;
@@ -9880,7 +9902,7 @@ export class AdminService implements OnModuleDestroy {
         }
       } else {
         try {
-          await this.assertBotCanManageMembers(chatId, 'UNBAN', resolvedBotId);
+          await this.assertBotCanManageMembers(chatId, 'UNBAN', resolvedBotId, botAccessEvidence);
         } catch (error: unknown) {
           this.throwManualModerationTransientMaxError(error);
           throw error;
@@ -12901,9 +12923,10 @@ export class AdminService implements OnModuleDestroy {
     action: ManualMemberModerationAction,
     botId?: string,
     allowFormerParticipant = false,
+    botAccessEvidence?: ManualModerationBotAccessEvidence,
   ): Promise<'present' | 'former'> {
     if (action === 'BAN') {
-      await this.assertBotCanManageMembers(chatId, action, botId);
+      await this.assertBotCanManageMembers(chatId, action, botId, botAccessEvidence);
     } else {
       await this.assertBotCanDeleteMessages(chatId, botId);
     }
@@ -12920,56 +12943,9 @@ export class AdminService implements OnModuleDestroy {
     chatId: string,
     action: ManualMemberManageMembersAction,
     botId?: string,
+    evidence?: ManualModerationBotAccessEvidence,
   ): Promise<void> {
-    const maxClientWithAccess = this.maxClient as MaxClientService & {
-      getCurrentChatMemberAccess?: (chatId: string) => Promise<MaxChatMemberAccess>;
-    };
-    if (typeof maxClientWithAccess.getCurrentChatMemberAccess !== 'function') {
-      return;
-    }
-
-    let botAccess: MaxChatMemberAccess;
-    try {
-      botAccess = await maxClientWithAccess.getCurrentChatMemberAccess(chatId, {
-        trafficClass: 'critical',
-        actionHealthLane: ADMIN_ACTION_HEALTH_LANE,
-        ...(botId ? { botId } : {}),
-      } as never);
-    } catch (error: unknown) {
-      if (isBotAdminLookupDeniedError(error)) {
-        throw new ForbiddenException(
-          'Действие недоступно: бот больше не состоит в этом чате MAX или утратил права администратора.',
-        );
-      }
-      throw error;
-    }
-
-    if (botAccess.isOwner) {
-      return;
-    }
-
-    if (!botAccess.isAdmin) {
-      throw new ForbiddenException(
-        action === 'BAN'
-          ? 'Для бана боту нужны права администратора этого чата MAX.'
-          : action === 'UNBAN'
-            ? 'Чтобы снять блокировку и вернуть участника, боту нужны права администратора этого чата MAX.'
-            : 'Для модерации участников боту нужны права администратора этого чата MAX.',
-      );
-    }
-
-    if (
-      botAccess.permissions.length > 0 &&
-      !botAccess.permissions.some((permission) => this.isAddRemoveMembersPermission(permission))
-    ) {
-      throw new ForbiddenException(
-        action === 'BAN'
-          ? 'В правах бота нет управления участниками (add_remove_members), поэтому бан недоступен.'
-          : action === 'UNBAN'
-            ? 'В правах бота нет управления участниками (add_remove_members), поэтому снять блокировку нельзя.'
-            : 'В правах бота нет управления участниками (add_remove_members), поэтому действие недоступно.',
-      );
-    }
+    await assertManualBotCanManageMembers(this.maxClient, chatId, action, botId, evidence);
   }
 
   private async assertBotCanDeleteMessages(
@@ -13263,29 +13239,6 @@ export class AdminService implements OnModuleDestroy {
 
   private extractHttpErrorMessage(error: unknown): string {
     return extractHttpErrorMessage(error);
-  }
-
-  private isAddRemoveMembersPermission(permission: string): boolean {
-    const normalized = permission
-      .trim()
-      .toLowerCase()
-      .replace(/[-\s]+/gu, '_');
-    return (
-      normalized === 'add_remove_members' ||
-      normalized === 'can_add_remove_members' ||
-      normalized === 'remove_members' ||
-      normalized === 'can_remove_members' ||
-      normalized === 'manage_members' ||
-      normalized === 'can_manage_members' ||
-      normalized === 'kick_members' ||
-      normalized === 'can_kick_members' ||
-      normalized === 'ban_members' ||
-      normalized === 'can_ban_members' ||
-      normalized === 'ban_users' ||
-      normalized === 'can_ban_users' ||
-      normalized === 'delete_members' ||
-      normalized === 'can_delete_members'
-    );
   }
 
   private normalizeStoredModerationUserId(value: string): string | null {
@@ -19845,6 +19798,9 @@ export class AdminService implements OnModuleDestroy {
               preferredBotId,
             ))
           ) {
+            options.onAccessVerified?.(
+              captureManualModerationBotAccess(normalizedChatId, preferredBotId, action, access),
+            );
             return preferredBotId;
           }
         } catch (error: unknown) {
@@ -20005,6 +19961,9 @@ export class AdminService implements OnModuleDestroy {
           ))
         ) {
           await persistRecoveredCandidateIfNeeded(candidateBotId);
+          options.onAccessVerified?.(
+            captureManualModerationBotAccess(normalizedChatId, candidateBotId, action, access),
+          );
           return candidateBotId;
         }
       } catch (error: unknown) {
@@ -20100,7 +20059,7 @@ export class AdminService implements OnModuleDestroy {
     if (access.permissions.length === 0) {
       return true;
     }
-    return access.permissions.some((permission) => this.isAddRemoveMembersPermission(permission));
+    return access.permissions.some((permission) => isAddRemoveMembersPermission(permission));
   }
 
   private async resolveLegacyManualModerationActionBotAssignment(
