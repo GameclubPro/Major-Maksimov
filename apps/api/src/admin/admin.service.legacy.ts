@@ -46,6 +46,8 @@ import {
   assertManualBotCanManageMembers,
   captureManualModerationBotAccess,
   isAddRemoveMembersPermission,
+  throwManualMemberSelectionFailure,
+  type ManualMemberBotAccessProbe,
   type ManualModerationBotAccessEvidence,
 } from './manual-member-bot-access';
 import {
@@ -19761,6 +19763,7 @@ export class AdminService implements OnModuleDestroy {
 
     const preferredBotId = this.normalizeManualModerationBotId(options.preferredBotId);
     const entityType = options.entityType ?? ChatEntityType.CHAT;
+    const verifiedAccessProbes = new Map<string, ManualMemberBotAccessProbe>();
     const maxClientWithAccess = this.maxClient as MaxClientService & {
       getCurrentChatMemberAccess?: MaxClientService['getCurrentChatMemberAccess'];
     };
@@ -19785,6 +19788,12 @@ export class AdminService implements OnModuleDestroy {
             checkedAt: probeStartedAt,
             source: 'admin_manual_moderation_preferred',
           });
+          if (persisted)
+            verifiedAccessProbes.set(preferredBotId, {
+              access,
+              checkedAt: probeStartedAt,
+              source: 'admin_manual_moderation_preferred',
+            });
           if (
             persisted &&
             this.hasManualModerationBotActionAccess(access, action, entityType) &&
@@ -19947,6 +19956,12 @@ export class AdminService implements OnModuleDestroy {
           checkedAt: probeStartedAt,
           source: 'admin_manual_moderation_candidate',
         });
+        if (persisted)
+          verifiedAccessProbes.set(candidateBotId, {
+            access,
+            checkedAt: probeStartedAt,
+            source: 'admin_manual_moderation_candidate',
+          });
         if (
           persisted &&
           this.hasManualModerationBotActionAccess(access, action, entityType) &&
@@ -19992,6 +20007,12 @@ export class AdminService implements OnModuleDestroy {
       );
     }
 
+    if (action === 'moderate_member')
+      return throwManualMemberSelectionFailure(
+        this.maxBotLinkService,
+        normalizedChatId,
+        verifiedAccessProbes,
+      );
     throw new ForbiddenException(
       'Не найден бот MAX с подтвержденным правом выполнить действие модерации в этом чате.',
     );

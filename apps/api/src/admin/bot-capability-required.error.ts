@@ -9,6 +9,7 @@ export type BotCapabilityPermission =
   | 'bot_connection';
 
 export type BotCapabilityAffectedEntity = { id: string; title: string };
+export type BotCapabilityOperation = 'member_moderation';
 
 export class BotCapabilityRequiredException extends ConflictException {
   readonly missingPermissions: readonly BotCapabilityPermission[];
@@ -26,11 +27,15 @@ export class BotCapabilityRequiredException extends ConflictException {
     stale?: boolean;
     canRecheck?: boolean;
     affectedEntities?: readonly BotCapabilityAffectedEntity[];
+    operation?: BotCapabilityOperation;
   }) {
     super({
       statusCode: HttpStatus.CONFLICT,
       error: 'Conflict',
-      message: 'Боту не хватает прав для включения выбранной функции.',
+      message:
+        params.operation === 'member_moderation'
+          ? 'Боту не хватает подтверждённых прав для модерации участников.'
+          : 'Боту не хватает прав для включения выбранной функции.',
       code: BOT_CAPABILITY_REQUIRED_CODE,
       missingPermissions: [...params.missingPermissions],
       featureKeys: [...params.featureKeys],
@@ -38,6 +43,7 @@ export class BotCapabilityRequiredException extends ConflictException {
       blockerCode: params.blockerCode ?? 'bot_capability_missing',
       stale: params.stale ?? false,
       canRecheck: params.canRecheck ?? true,
+      ...(params.operation ? { operation: params.operation } : {}),
       ...(params.affectedEntities
         ? {
             affectedEntities: params.affectedEntities.slice(0, 20).map((entity) => ({
@@ -63,17 +69,22 @@ export class BotCapabilityCheckUnavailableException extends ServiceUnavailableEx
     checkedAt?: string | null;
     blockerCode?: string;
     canRecheck?: boolean;
+    operation?: BotCapabilityOperation;
   }) {
     super({
       statusCode: HttpStatus.SERVICE_UNAVAILABLE,
       error: 'Service Unavailable',
-      message: 'Не удалось подтвердить права бота MAX. Повторите попытку позже.',
+      message:
+        params.operation === 'member_moderation'
+          ? 'Не удалось подтвердить права бота для модерации участников. Обновите список и проверьте права бота в MAX.'
+          : 'Не удалось подтвердить права бота MAX. Повторите попытку позже.',
       code: 'BOT_CAPABILITY_CHECK_UNAVAILABLE',
       featureKeys: [...params.featureKeys],
       checkedAt: params.checkedAt ?? null,
       blockerCode: params.blockerCode ?? 'bot_capability_check_unavailable',
       stale: true,
       canRecheck: params.canRecheck ?? true,
+      ...(params.operation ? { operation: params.operation } : {}),
     });
     this.name = 'BotCapabilityCheckUnavailableException';
   }

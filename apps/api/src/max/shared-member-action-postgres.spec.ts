@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { chatSummarySchema } from '@maxim/contracts';
 import { Job, Queue, QueueEvents, Worker } from 'bullmq';
@@ -18,6 +17,7 @@ import { RedisCounterService } from '../moderation/redis-counter.service';
 import { ModerationSanctionStateLockService } from '../moderation/moderation-sanction-state-lock.service';
 import { MaxActionLedgerWatchdogService } from '../system/max-action-ledger-watchdog.service';
 import { AdminService } from '../admin/admin.service';
+import { BotCapabilityCheckUnavailableException } from '../admin/bot-capability-required.error';
 import type { AdminManualModerationRuntimeContext } from '../admin/admin-manual-moderation-runtime-context';
 import {
   createMultibotHarness,
@@ -271,7 +271,17 @@ stores('shared production member identity on PostgreSQL/Redis/BullMQ', () => {
     s.setBotPermissions(botId, ['read_all_messages', 'delete']);
 
     await withManualModeration(s, async (admin) => {
-      await expect(applyChannelBan(admin, chatId)).rejects.toBeInstanceOf(ForbiddenException);
+      const error: unknown = await applyChannelBan(admin, chatId).catch(
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(BotCapabilityCheckUnavailableException);
+      if (!(error instanceof BotCapabilityCheckUnavailableException)) throw error;
+      expect(error.getResponse()).toMatchObject({
+        statusCode: 503,
+        code: 'BOT_CAPABILITY_CHECK_UNAVAILABLE',
+        operation: 'member_moderation',
+      });
+      expect(error.getResponse()).not.toHaveProperty('missingPermissions');
     });
 
     expect(s.effects).toEqual([]);
@@ -399,7 +409,21 @@ stores('shared production member identity on PostgreSQL/Redis/BullMQ', () => {
         },
       );
 
-      expect(outcome).toMatchObject({ status: 'rejected', reason: expect.any(ForbiddenException) });
+      expect(outcome).toMatchObject({
+        status: 'rejected',
+        reason: expect.any(BotCapabilityCheckUnavailableException),
+      });
+      if (
+        outcome.status !== 'rejected' ||
+        !(outcome.reason instanceof BotCapabilityCheckUnavailableException)
+      )
+        throw new Error('Expected unavailable current member authority');
+      expect(outcome.reason.getResponse()).toMatchObject({
+        statusCode: 503,
+        code: 'BOT_CAPABILITY_CHECK_UNAVAILABLE',
+        operation: 'member_moderation',
+      });
+      expect(outcome.reason.getResponse()).not.toHaveProperty('missingPermissions');
       expect(s.effects).toEqual([]);
       expect(
         s.requests.filter(

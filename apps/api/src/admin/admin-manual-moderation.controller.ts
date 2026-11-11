@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { InitDataGuard } from '../auth/init-data.guard';
 import { CurrentUser, type AuthUser } from '../common/decorators/current-user.decorator';
+import { wasMaxMemberMutationConfirmed } from '../max/max-client.service';
 import {
   ModerationSanctionStateChangedError,
   ModerationSanctionStateLockBusyError,
@@ -21,6 +22,7 @@ import {
   ModerationSanctionStateLockUnavailableError,
 } from '../moderation/moderation-sanction-state-lock.service';
 import { ManualModerationService } from './manual-moderation.service';
+import { isAmbiguousAttemptedMaxMemberMutation } from './admin-manual-moderation-values';
 
 @Controller('v1')
 @UseGuards(InitDataGuard)
@@ -230,6 +232,19 @@ export class AdminManualModerationController {
   }
 
   private throwModerationActionError(error: unknown): never {
+    // FLAG: A confirmed or ambiguous attempted effect must never invite a second mutation.
+    if (
+      wasMaxMemberMutationConfirmed(error) ||
+      isAmbiguousAttemptedMaxMemberMutation(error) ||
+      error instanceof ModerationSanctionStateLockUnavailableError ||
+      error instanceof ModerationSanctionStateLockLeaseLostError
+    ) {
+      throw new ServiceUnavailableException({
+        code: 'MODERATION_ACTION_STATUS_UNCERTAIN',
+        message: 'Статус действия временно недоступен. Обновите список участников.',
+        retryable: false,
+      });
+    }
     if (error instanceof ModerationSanctionStateLockBusyError) {
       throw new ConflictException({
         code: 'MODERATION_ACTION_IN_PROGRESS',
@@ -240,15 +255,6 @@ export class AdminManualModerationController {
       throw new ConflictException({
         code: 'MODERATION_ACTION_STATE_CHANGED',
         message: 'Состояние участника уже изменилось. Обновите список участников.',
-      });
-    }
-    if (
-      error instanceof ModerationSanctionStateLockUnavailableError ||
-      error instanceof ModerationSanctionStateLockLeaseLostError
-    ) {
-      throw new ServiceUnavailableException({
-        code: 'MODERATION_ACTION_STATUS_UNCERTAIN',
-        message: 'Статус действия временно недоступен. Обновите список участников.',
       });
     }
     throw error;

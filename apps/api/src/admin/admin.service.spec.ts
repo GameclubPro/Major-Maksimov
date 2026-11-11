@@ -2487,14 +2487,17 @@ describe('AdminService.applyManualModerationAction', () => {
     expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
   });
 
-  it('rejects manual ban when no live-verified bot has add_remove_members', async () => {
+  it('reports unavailable manual ban capability when candidate denials cannot establish assigned bot rights', async () => {
     const prisma = createPrismaMock();
     const candidateBotIds = ['bot-1', 'bot-2', 'bot-3', 'bot-4', 'bot-5', 'bot-6'];
     const maxClient = {
       getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
       getCurrentChatMemberAccess: jest
-        .fn()
-        .mockImplementation(async (_chatId: string, options?: { botId?: string }) => ({
+        .fn<
+          ReturnType<MaxClientService['getCurrentChatMemberAccess']>,
+          Parameters<MaxClientService['getCurrentChatMemberAccess']>
+        >()
+        .mockImplementation(async (_chatId, options) => ({
           userId: options?.botId ?? 'bot-1',
           isAdmin: true,
           isOwner: false,
@@ -2550,11 +2553,18 @@ describe('AdminService.applyManualModerationAction', () => {
         },
         { action: 'BAN' },
       ),
-    ).rejects.toThrow('Не найден бот MAX с подтвержденным правом выполнить действие модерации');
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        statusCode: 503,
+        code: 'BOT_CAPABILITY_CHECK_UNAVAILABLE',
+        operation: 'member_moderation',
+      }),
+    });
 
     expect(maxClient.banMember).not.toHaveBeenCalled();
     expect(maxClient.kickMember).not.toHaveBeenCalled();
     expect(maxClient.getChatMemberAccess).not.toHaveBeenCalled();
+    expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
   });
 
   it('continues manual ban candidate probing until the sixth bot has add_remove_members', async () => {
@@ -3175,12 +3185,18 @@ describe('AdminService.applyManualModerationAction', () => {
     const prisma = createPrismaMock();
     const maxClient = {
       getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-      getCurrentChatMemberAccess: jest.fn().mockResolvedValue({
-        userId: 'bot-1',
-        isAdmin: true,
-        isOwner: false,
-        permissions: ['change_chat_info'],
-      }),
+      getCurrentChatMemberAccess: jest
+        .fn<
+          ReturnType<MaxClientService['getCurrentChatMemberAccess']>,
+          Parameters<MaxClientService['getCurrentChatMemberAccess']>
+        >()
+        .mockResolvedValue({
+          userId: 'bot-1',
+          isAdmin: true,
+          isOwner: false,
+          permissionsKnown: true,
+          permissions: ['change_chat_info'],
+        }),
       getChatMemberAccess: jest.fn().mockResolvedValue({
         userId: 'user-3',
         isAdmin: false,
@@ -3209,11 +3225,17 @@ describe('AdminService.applyManualModerationAction', () => {
         },
         { action: 'BAN' },
       ),
-    ).rejects.toThrow(
-      'В правах бота нет управления участниками (add_remove_members), поэтому бан недоступен.',
-    );
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        statusCode: 409,
+        code: 'BOT_CAPABILITY_REQUIRED',
+        operation: 'member_moderation',
+        missingPermissions: ['add_remove_members'],
+      }),
+    });
 
     expect(maxClient.banMember).not.toHaveBeenCalled();
+    expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
   });
 
   it('returns clear error when manual ban target is no longer in chat', async () => {
@@ -3959,12 +3981,18 @@ describe('AdminService.applyManualModerationAction', () => {
     const prisma = createPrismaMock();
     const maxClient = {
       getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-      getCurrentChatMemberAccess: jest.fn().mockResolvedValue({
-        userId: 'bot-1',
-        isAdmin: true,
-        isOwner: false,
-        permissions: ['change_chat_info'],
-      }),
+      getCurrentChatMemberAccess: jest
+        .fn<
+          ReturnType<MaxClientService['getCurrentChatMemberAccess']>,
+          Parameters<MaxClientService['getCurrentChatMemberAccess']>
+        >()
+        .mockResolvedValue({
+          userId: 'bot-1',
+          isAdmin: true,
+          isOwner: false,
+          permissionsKnown: true,
+          permissions: ['change_chat_info'],
+        }),
       getChatMemberAccess: jest.fn().mockResolvedValue(null),
       cancelScheduledUnban: jest.fn().mockResolvedValue(undefined),
       unbanMember: jest.fn(),
@@ -3989,12 +4017,18 @@ describe('AdminService.applyManualModerationAction', () => {
         },
         { action: 'UNBAN' },
       ),
-    ).rejects.toThrow(
-      'В правах бота нет управления участниками (add_remove_members), поэтому снять блокировку нельзя.',
-    );
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        statusCode: 409,
+        code: 'BOT_CAPABILITY_REQUIRED',
+        operation: 'member_moderation',
+        missingPermissions: ['add_remove_members'],
+      }),
+    });
 
     expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-4');
     expect(maxClient.unbanMember).not.toHaveBeenCalled();
+    expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
   });
 
   it('returns a clearer fallback when MAX rejects manual unban without details', async () => {

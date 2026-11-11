@@ -818,6 +818,7 @@ function ChannelStatsWorkspace({ api }: { api: ApiTransport }) {
             channelTitle={resolvedTitle}
             target={banTarget.item}
             onApplied={() => void activityFeed.refresh()}
+            onRefresh={() => void activityFeed.retry()}
             onClose={() => setBanTarget((current) => (current === banTarget ? null : current))}
           />
         </Suspense>

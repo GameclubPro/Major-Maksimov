@@ -39,6 +39,7 @@ import {
 } from './managed-entity-activation.util';
 import { readWebhookEventTimestamp } from '../webhook/webhook-semantic-event-key';
 import { withMaxFinalAuthorityCheckpoint } from './max-action-pre-dispatch-guard';
+import { resolveExplicitMembershipAccessDenial } from './max-membership-access-error';
 
 export const MANAGED_ENTITY_HANDSHAKE_START_CALLBACK_PAYLOAD =
   'managed_entity_handshake:start_hint';
@@ -81,6 +82,11 @@ type HandshakeBotProbe = {
   access: MaxChatMemberAccess;
   startedAt: Date;
   channelReadVerified: boolean;
+};
+
+type ForwardedSourceProbeState = {
+  stage: 'source_snapshot' | 'bot_access';
+  context: ManagedEntityHandshakeContext | null;
 };
 
 @Injectable()
@@ -156,28 +162,52 @@ export class ManagedEntityHandshakeService {
       return 'rate_limited';
     }
 
+    const sourceProbe: ForwardedSourceProbeState = { stage: 'source_snapshot', context: null };
     try {
       const { context, probe } = await this.resolveForwardedSource(
         update,
         candidate,
         resolvedBot.id,
+        sourceProbe,
       );
       return this.processContext(context, true, probe);
     } catch (error: unknown) {
       this.releaseRateLimitKey(rateLimitKey);
       const denied = this.isBotAccessDeniedError(error);
+      let outcomeRecordingFailed = false;
+      if (sourceProbe.context) {
+        try {
+          await this.recordOutcome(
+            sourceProbe.context,
+            denied
+              ? ManagedEntityHandshakeOutcomeStatus.BOT_DENIED
+              : ManagedEntityHandshakeOutcomeStatus.FAILED,
+            denied ? 'bot_access_denied' : 'bot_access_unknown',
+          );
+        } catch {
+          // FLAG: Outcome telemetry cannot suppress the private reply or bounded source diagnostic.
+          outcomeRecordingFailed = true;
+        }
+      }
       await this.sendReplySafely({
         update,
         botId: resolvedBot.id,
         replyChatId: candidate.privateChatId,
         sourceChatId: candidate.sourceChatId,
         text: denied
-          ? 'Не удалось проверить доступ к источнику пересылки. Перешлите сообщение непосредственно из нужного чата или канала. Если бот уже администратор, повторно добавлять его не нужно.'
-          : 'Не удалось проверить доступ. Перешлите сообщение еще раз позже.',
+          ? 'Нет доступа к источнику пересылки. Проверьте, что именно этот бот назначен администратором нужного чата или канала, и перешлите сообщение еще раз.'
+          : 'Не удалось проверить источник пересылки. Попробуйте переслать сообщение позже.',
+        buttons: this.buildReceivingBotProfileButton(resolvedBot.id),
       });
       this.logger.warn(
         {
+          stage: sourceProbe.stage,
+          entityType: sourceProbe.context?.entityType ?? null,
+          interaction: 'forwarded_private',
+          outcome: denied ? 'denied' : 'failed_unknown',
+          outcomeRecordingFailed,
           updateId: update.updateId,
+          actorId: candidate.forwarderUserId,
           chatId: candidate.sourceChatId,
           botId: resolvedBot.id,
           status: this.extractStatusCode(error),
@@ -193,6 +223,7 @@ export class ManagedEntityHandshakeService {
     update: MaxUpdate,
     candidate: ManagedEntityForwardedRecoveryCandidate,
     replyBotId: string,
+    sourceProbe: ForwardedSourceProbeState,
   ): Promise<{ context: ManagedEntityHandshakeContext; probe: HandshakeBotProbe }> {
     // FLAG: A forward activates only the bot that received the administrator's DM.
     // Membership of another bot never authorizes probing or reactivating it here.
@@ -218,7 +249,6 @@ export class ManagedEntityHandshakeService {
     const snapshot = await this.maxClient.getChatSnapshot(candidate.sourceChatId, options);
     if (snapshot.chatId !== candidate.sourceChatId)
       throw new Error('Forwarded source identity changed');
-    const access = await this.maxClient.getCurrentChatMemberAccess(candidate.sourceChatId, options);
     const entityType = snapshot.entityType;
     const context: ManagedEntityHandshakeContext = {
       update,
@@ -241,6 +271,9 @@ export class ManagedEntityHandshakeService {
       interactionMessageId: candidate.incomingMessageId,
       interaction: 'forwarded_private',
     };
+    sourceProbe.context = context;
+    sourceProbe.stage = 'bot_access';
+    const access = await this.maxClient.getCurrentChatMemberAccess(candidate.sourceChatId, options);
     return { context, probe: { access, startedAt, channelReadVerified: entityType === 'channel' } };
   }
 
@@ -824,22 +857,14 @@ export class ManagedEntityHandshakeService {
   }
 
   private isBotAccessDeniedError(error: unknown): boolean {
-    const status = this.extractStatusCode(error);
-    if (status !== 403 && status !== 404) {
-      return false;
-    }
-
-    const code = this.extractErrorCode(error);
-    if (!code) {
-      return true;
-    }
-
-    return code === 'chat.denied' || code === 'chat.not.found' || code === 'bot.denied';
+    return resolveExplicitMembershipAccessDenial(error) !== null;
   }
 
   private extractStatusCode(error: unknown): number | null {
     const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
-    return typeof status === 'number' && Number.isInteger(status) ? status : null;
+    return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+      ? status
+      : null;
   }
 
   private extractErrorCode(error: unknown): string | null {
@@ -849,7 +874,9 @@ export class ManagedEntityHandshakeService {
     }
 
     const code = (data as Record<string, unknown>).code;
-    return typeof code === 'string' && code.trim().length > 0 ? code.trim() : null;
+    return typeof code === 'string' && /^[a-z0-9._-]{1,96}$/iu.test(code.trim())
+      ? code.trim().toLowerCase()
+      : null;
   }
 
   private buildRosterSyncJob(context: ManagedEntityHandshakeContext): MaxChatAdminRosterSyncJob {
@@ -1087,7 +1114,25 @@ export class ManagedEntityHandshakeService {
           : actor === 'bot_permissions'
             ? `У бота нет права удалять сообщения ${entityLabel}. Включите это право и перешлите сообщение еще раз.`
             : `Подключить ${entityAccusative} может только владелец или администратор.`;
-    await this.replySafely(context, text);
+    await this.replySafely(
+      context,
+      text,
+      actor === 'user' ? undefined : this.buildReceivingBotProfileButton(context.replyBotId),
+    );
+  }
+
+  private buildReceivingBotProfileButton(
+    botId: string,
+  ): NonNullable<Parameters<MaxClientService['sendMessageImmediateWithId']>[2]>['buttons'] {
+    return [
+      [
+        {
+          type: 'link',
+          text: 'Профиль этого бота',
+          url: `https://max.ru/${encodeURIComponent(botId)}`,
+        },
+      ],
+    ];
   }
 
   private buildSuccessReply(context: ManagedEntityHandshakeContext, wasConnected: boolean): string {
