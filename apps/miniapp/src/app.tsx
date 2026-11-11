@@ -40,6 +40,7 @@ import {
 import { PUBLIC_ROUTER_BASENAME } from './lib/public-config';
 import { isPublicLegalPathnameFromWindow } from './lib/public-legal-route';
 import { isRetiredPublishingSettingsRoute } from './lib/retired-publishing-route';
+import { isMaxApiNoticeActive } from './lib/max-api-notice';
 import {
   LazyChannelDialogPage,
   LazyChannelSuggestDialogPage,
@@ -99,6 +100,11 @@ const LazyAppStartupState = lazy(async () => {
 const LazyPublikHandoff = lazy(async () => {
   const module = await import('./components/publik-handoff');
   return { default: module.PublikHandoff };
+});
+
+const LazyMaxApiNotice = lazy(async () => {
+  const module = await import('./components/max-api-notice');
+  return { default: module.MaxApiNotice };
 });
 
 function MajorSettingsRoute({ children }: { children: ReactNode }) {
@@ -757,14 +763,23 @@ function ProfiledAppRoutes({
     location.pathname === '/networks' ||
     location.pathname.startsWith('/networks/') ||
     /^\/(?:chat|channel)\/[^/]+\/settings\/?$/u.test(location.pathname);
-  return me.profile === 'moderation' && needsFavorites ? (
-    <Suspense fallback={<RouteLoadingFallback />}>
-      <LazyHomeEntityFavoritesProvider api={apiClient} verifiedUserId={me.userId}>
-        {routes}
-      </LazyHomeEntityFavoritesProvider>
-    </Suspense>
-  ) : (
-    routes
+  return (
+    <>
+      {isMaxApiNoticeActive() ? (
+        <Suspense fallback={null}>
+          <LazyMaxApiNotice key={me.userId} userId={me.userId} />
+        </Suspense>
+      ) : null}
+      {me.profile === 'moderation' && needsFavorites ? (
+        <Suspense fallback={<RouteLoadingFallback />}>
+          <LazyHomeEntityFavoritesProvider api={apiClient} verifiedUserId={me.userId}>
+            {routes}
+          </LazyHomeEntityFavoritesProvider>
+        </Suspense>
+      ) : (
+        routes
+      )}
+    </>
   );
 }
 
