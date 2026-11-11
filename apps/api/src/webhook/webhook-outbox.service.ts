@@ -31,6 +31,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import { getAppRole, roleRunsEnqueue } from '../runtime/app-role';
 import { RuntimeWorkerOwner, type RuntimeWorker } from '../runtime/runtime-worker-shutdown';
 import { SystemModeService } from '../system/system-mode.service';
+import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
+import {
+  addWebhookMetric,
+  WebhookOutboxRuntimeMetrics,
+  sanitizeWebhookOutboxSnapshot,
+} from './webhook-runtime-metrics';
 import {
   ALL_WEBHOOK_QUEUE_NAMES,
   DEFAULT_WEBHOOK_QUEUE_NAMES,
@@ -493,6 +499,7 @@ export class WebhookOutboxService
   implements OnModuleInit, OnModuleDestroy
 {
   private readonly logger = new Logger(WebhookOutboxService.name);
+  private readonly runtimeMetrics = new WebhookOutboxRuntimeMetrics();
   private readonly enabled: boolean;
   private readonly pollIntervalMs: number;
   private readonly batchSize: number;
@@ -563,6 +570,7 @@ export class WebhookOutboxService
     private readonly systemModeService: SystemModeService,
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
     @Optional() private readonly dependencyQuarantine?: WebhookDependencyQuarantineService,
+    @Optional() storageRuntimeMetrics?: StorageRuntimeMetricsService,
   ) {
     super();
     this.enabled = roleRunsEnqueue(getAppRole());
@@ -600,6 +608,7 @@ export class WebhookOutboxService
         this.resolveShardQueue(queueName),
       ]),
     ) as Record<DefaultWebhookQueueName, Queue<ProcessWebhookJob>>;
+    storageRuntimeMetrics?.registerWebhookOutboxSnapshot(() => this.getRuntimeSnapshot());
     this.queuesByName = {
       [WEBHOOK_QUEUE_CRITICAL]: this.criticalQueue,
       ...this.joinShardQueuesByName,
@@ -607,6 +616,26 @@ export class WebhookOutboxService
       [WEBHOOK_QUEUE_BACKGROUND]: this.backgroundQueue,
       [LEGACY_WEBHOOK_QUEUE]: this.legacyQueue,
     };
+  }
+
+  getRuntimeSnapshot() {
+    return sanitizeWebhookOutboxSnapshot({
+      ...this.runtimeMetrics,
+      inFlightWorkUnits: this.activeEnqueueUnits.size,
+      retention: {
+        ...this.runtimeMetrics.retention,
+        cleaning: this.cleaning,
+        maintenancePending: this.retentionMaintenanceDue,
+        config: {
+          webhookCompletedRetentionEnabled: this.webhookCompletedRetentionEnabled,
+          webhookFailedRetentionEnabled: this.webhookFailedRetentionEnabled,
+          webhookRetentionDays: this.webhookRetentionDays,
+          webhookFailedRetentionHours: this.webhookFailedRetentionHours,
+          moderationRetentionDays: this.moderationRetentionDays,
+          userDisplayNameRetentionDays: this.userDisplayNameRetentionDays,
+        },
+      },
+    });
   }
 
   private resolveShardQueue(
@@ -724,161 +753,214 @@ export class WebhookOutboxService
   }
 
   private async enqueueBatch() {
-    const now = new Date();
-    if (
-      this.dependencyQuarantine &&
-      !this.quarantineReconcileInFlight &&
-      now.getTime() >= this.nextQuarantineReconcileAt
-    ) {
-      this.nextQuarantineReconcileAt = now.getTime() + 1_000;
-      // FLAG: A bounded SQL-only recovery lane owns one task across polls. Slow recovery
-      // cannot stop independent admission, and shutdown drains it before closing Prisma.
-      this.quarantineReconcileInFlight = this.dependencyQuarantine
-        .reconcileDue()
-        .then(() => undefined)
-        .catch(() => this.logger.warn('Dependency quarantine reconciliation unavailable'))
-        .finally(() => {
-          this.quarantineReconcileInFlight = null;
-        });
-    }
-    const admission = await this.resolveEnqueueAdmission(now);
-    const scopedCandidates = await this.readDeferredEnqueueRepresentatives(
-      now,
-      Math.max(1, Math.floor(admission.batchSize / 4)),
-    );
-    const pendingCandidates = await this.readPendingEnqueueRepresentatives(
-      now,
-      admission.batchSize - scopedCandidates.length,
-    );
-    const admissionFinishedAtMs = Date.now();
-    const retainedCandidates = this.mergeEnqueueCandidates(
-      [...scopedCandidates, ...pendingCandidates],
-      admission.batchSize,
-    );
-    const refilledUnits = new Set(this.activeEnqueueUnits.keys());
-    let selectionFinishedAtMs = admissionFinishedAtMs;
-    let selectionDone = false;
-    let finishSelection!: () => void;
-    const selectionFinished = new Promise<void>((resolve) => {
-      finishSelection = resolve;
-    });
-    // FLAG: Re-read bounded retained identities before using them. Refill from that
-    // current snapshot while the single SQL selector runs; carried preparations can
-    // otherwise finish and leave every slot idle throughout a slow history scan.
-    // Await both operations even on failure, and finish this dispatcher before the
-    // fresh selection starts dispatching. No previous payload queue is retained.
-    const [selection, refill] = await Promise.allSettled([
-      (async () => {
-        try {
-          return await this.selectEnqueueCandidates(now, admission, scopedCandidates.length);
-        } finally {
-          selectionDone = true;
-          finishSelection();
-          selectionFinishedAtMs = Date.now();
-          // FLAG: Leave live/due-only polls after slow or failed recovery scans too.
-          if (admission.includeCompletedTimeoutRepair) {
-            this.nextCompletedTimeoutRepairAtMs = Date.now() + COMPLETED_TIMEOUT_REPAIR_INTERVAL_MS;
-          }
-        }
-      })(),
-      this.refillDuringSelection(
-        retainedCandidates,
-        admission,
-        refilledUnits,
-        () => selectionDone,
-        selectionFinished,
-      ),
-    ]);
-    if (selection.status === 'rejected') throw selection.reason;
-    if (refill.status === 'rejected') {
-      // FLAG: Successful selection has already advanced scan cursors. Its current
-      // representatives must still reach normal dispatch if the optional refill fails.
-      this.logger.warn('Failed to refill retained webhook preparations; using current selection');
-    }
-    const undispatchedCandidates = [...retainedCandidates, ...selection.value].filter(
-      (candidate) => {
-        const key = this.candidateWorkUnitKey(candidate);
-        if (!refilledUnits.has(key)) return true;
-        // FLAG: A completed early dispatch has already released its active map entry.
-        // Never redispatch this poll's stale same-chat snapshot. Preserve any scanned
-        // successor as scalar debt so advancing the SQL cursor cannot lose that work.
-        if (candidate.isBacklogScan || candidate.isDeferredScopeScan) {
-          this.deferredEnqueueScopes.capture(null, key, {
-            id: candidate.id,
-            createdAt: candidate.createdAt,
+    const finishBatchTiming = this.runtimeMetrics.startTiming();
+    let finishStageTiming = this.runtimeMetrics.startTiming('admission');
+    try {
+      const now = new Date();
+      if (
+        this.dependencyQuarantine &&
+        !this.quarantineReconcileInFlight &&
+        now.getTime() >= this.nextQuarantineReconcileAt
+      ) {
+        this.nextQuarantineReconcileAt = now.getTime() + 1_000;
+        // FLAG: A bounded SQL-only recovery lane owns one task across polls. Slow recovery
+        // cannot stop independent admission, and shutdown drains it before closing Prisma.
+        this.quarantineReconcileInFlight = this.dependencyQuarantine
+          .reconcileDue()
+          .then(() => undefined)
+          .catch(() => this.logger.warn('Dependency quarantine reconciliation unavailable'))
+          .finally(() => {
+            this.quarantineReconcileInFlight = null;
           });
-        }
-        return false;
-      },
-    );
-    const candidates = this.mergeEnqueueCandidates(
-      undispatchedCandidates,
-      this.resolvePrioritySelectionWindowSize(admission.batchSize),
-    );
-
-    const prioritizedCandidates = await this.prioritizeCandidates(
-      candidates,
-      now,
-      admission.batchSize,
-    );
-    let expandedCandidates = prioritizedCandidates;
-    if (admission.expandSelectedChats) {
-      try {
-        expandedCandidates = await this.expandSelectedChatCandidates(
-          prioritizedCandidates,
-          now,
-          admission.includeCompletedTimeoutRepair,
-        );
-      } catch (error: unknown) {
-        this.logger.warn(
-          {
-            err: error instanceof Error ? error.message : String(error),
-            selectedCandidateCount: prioritizedCandidates.length,
-            selectedChatCount: new Set(
-              prioritizedCandidates.flatMap((candidate) => {
-                const chatId = this.extractPriorityChatId(candidate.normalizedPayload);
-                return chatId ? [chatId] : [];
-              }),
-            ).size,
-          },
-          'Failed to expand selected webhook chats; enqueueing the selected heads only',
-        );
       }
-    }
-
-    const prioritizationFinishedAtMs = Date.now();
-    const progress = await this.enqueueCandidates(expandedCandidates, admission.enqueueConcurrency);
-    if (refill.status === 'fulfilled') {
-      for (const key of Object.keys(progress) as Array<keyof EnqueueProgress>) {
-        progress[key] += refill.value[key];
-      }
-    }
-    const finishedAtMs = Date.now();
-    const durationMs = finishedAtMs - now.getTime();
-    if (
-      (durationMs >= SLOW_ENQUEUE_BATCH_MS || candidates.length > 0) &&
-      finishedAtMs >= this.nextSlowEnqueueBatchLogAtMs
-    ) {
-      this.nextSlowEnqueueBatchLogAtMs = finishedAtMs + SLOW_ENQUEUE_BATCH_LOG_INTERVAL_MS;
-      const log = durationMs >= SLOW_ENQUEUE_BATCH_MS ? 'warn' : 'log';
-      this.logger[log](
-        {
-          durationMs,
-          admissionMs: admissionFinishedAtMs - now.getTime(),
-          selectionMs: selectionFinishedAtMs - admissionFinishedAtMs,
-          prioritizationMs: prioritizationFinishedAtMs - selectionFinishedAtMs,
-          enqueueMs: finishedAtMs - prioritizationFinishedAtMs,
-          candidateCount: candidates.length,
-          selectedCount: expandedCandidates.length,
-          degraded: admission.degraded,
-          completedTimeoutRepair: admission.includeCompletedTimeoutRepair,
-          progress,
-          inFlightWorkUnits: this.activeEnqueueUnits.size,
-        },
-        durationMs >= SLOW_ENQUEUE_BATCH_MS
-          ? 'Slow webhook enqueue batch'
-          : 'Webhook enqueue batch progress',
+      const admission = await this.resolveEnqueueAdmission(now);
+      const scopedCandidates = await this.readDeferredEnqueueRepresentatives(
+        now,
+        Math.max(1, Math.floor(admission.batchSize / 4)),
       );
+      const pendingCandidates = await this.readPendingEnqueueRepresentatives(
+        now,
+        admission.batchSize - scopedCandidates.length,
+      );
+      const admissionFinishedAtMs = Date.now();
+      finishStageTiming();
+      if (admission.degraded)
+        this.runtimeMetrics.degradedBatches = addWebhookMetric(this.runtimeMetrics.degradedBatches);
+      if (admission.includeCompletedTimeoutRepair)
+        this.runtimeMetrics.completedTimeoutRepairBatches = addWebhookMetric(
+          this.runtimeMetrics.completedTimeoutRepairBatches,
+        );
+      const retainedCandidates = this.mergeEnqueueCandidates(
+        [...scopedCandidates, ...pendingCandidates],
+        admission.batchSize,
+      );
+      const refilledUnits = new Set(this.activeEnqueueUnits.keys());
+      let selectionFinishedAtMs = admissionFinishedAtMs;
+      let selectionDone = false;
+      let finishSelection!: () => void;
+      const selectionFinished = new Promise<void>((resolve) => {
+        finishSelection = resolve;
+      });
+      // FLAG: Re-read bounded retained identities before using them. Refill from that
+      // current snapshot while the single SQL selector runs; carried preparations can
+      // otherwise finish and leave every slot idle throughout a slow history scan.
+      // Await both operations even on failure, and finish this dispatcher before the
+      // fresh selection starts dispatching. No previous payload queue is retained.
+      const finishSelectionTiming = this.runtimeMetrics.startTiming('selection');
+      const finishRefillTiming = this.runtimeMetrics.startTiming('refill');
+      const [selection, refill] = await Promise.allSettled([
+        (async () => {
+          let failed = true;
+          try {
+            const selected = await this.selectEnqueueCandidates(
+              now,
+              admission,
+              scopedCandidates.length,
+            );
+            failed = false;
+            return selected;
+          } finally {
+            finishSelectionTiming(failed);
+            selectionDone = true;
+            finishSelection();
+            selectionFinishedAtMs = Date.now();
+            // FLAG: Leave live/due-only polls after slow or failed recovery scans too.
+            if (admission.includeCompletedTimeoutRepair) {
+              this.nextCompletedTimeoutRepairAtMs =
+                Date.now() + COMPLETED_TIMEOUT_REPAIR_INTERVAL_MS;
+            }
+          }
+        })(),
+        this.refillDuringSelection(
+          retainedCandidates,
+          admission,
+          refilledUnits,
+          () => selectionDone,
+          selectionFinished,
+        ).then(
+          (progress) => {
+            finishRefillTiming();
+            this.runtimeMetrics.addProgress(progress);
+            return progress;
+          },
+          (error: unknown) => {
+            finishRefillTiming(true);
+            throw error;
+          },
+        ),
+      ]);
+      if (selection.status === 'rejected') throw selection.reason;
+      if (refill.status === 'rejected') {
+        // FLAG: Successful selection has already advanced scan cursors. Its current
+        // representatives must still reach normal dispatch if the optional refill fails.
+        this.logger.warn('Failed to refill retained webhook preparations; using current selection');
+      }
+      finishStageTiming = this.runtimeMetrics.startTiming('prioritization');
+      const undispatchedCandidates = [...retainedCandidates, ...selection.value].filter(
+        (candidate) => {
+          const key = this.candidateWorkUnitKey(candidate);
+          if (!refilledUnits.has(key)) return true;
+          // FLAG: A completed early dispatch has already released its active map entry.
+          // Never redispatch this poll's stale same-chat snapshot. Preserve any scanned
+          // successor as scalar debt so advancing the SQL cursor cannot lose that work.
+          if (candidate.isBacklogScan || candidate.isDeferredScopeScan) {
+            this.deferredEnqueueScopes.capture(null, key, {
+              id: candidate.id,
+              createdAt: candidate.createdAt,
+            });
+          }
+          return false;
+        },
+      );
+      const candidates = this.mergeEnqueueCandidates(
+        undispatchedCandidates,
+        this.resolvePrioritySelectionWindowSize(admission.batchSize),
+      );
+
+      const prioritizedCandidates = await this.prioritizeCandidates(
+        candidates,
+        now,
+        admission.batchSize,
+      );
+      let expandedCandidates = prioritizedCandidates;
+      if (admission.expandSelectedChats) {
+        try {
+          expandedCandidates = await this.expandSelectedChatCandidates(
+            prioritizedCandidates,
+            now,
+            admission.includeCompletedTimeoutRepair,
+          );
+        } catch (error: unknown) {
+          this.logger.warn(
+            {
+              err: error instanceof Error ? error.message : String(error),
+              selectedCandidateCount: prioritizedCandidates.length,
+              selectedChatCount: new Set(
+                prioritizedCandidates.flatMap((candidate) => {
+                  const chatId = this.extractPriorityChatId(candidate.normalizedPayload);
+                  return chatId ? [chatId] : [];
+                }),
+              ).size,
+            },
+            'Failed to expand selected webhook chats; enqueueing the selected heads only',
+          );
+        }
+      }
+
+      const prioritizationFinishedAtMs = Date.now();
+      finishStageTiming();
+      this.runtimeMetrics.candidateCount = addWebhookMetric(
+        this.runtimeMetrics.candidateCount,
+        candidates.length,
+      );
+      this.runtimeMetrics.selectedCount = addWebhookMetric(
+        this.runtimeMetrics.selectedCount,
+        expandedCandidates.length,
+      );
+      finishStageTiming = this.runtimeMetrics.startTiming('enqueue');
+      const progress = await this.enqueueCandidates(
+        expandedCandidates,
+        admission.enqueueConcurrency,
+      );
+      this.runtimeMetrics.addProgress(progress);
+      finishStageTiming();
+      if (refill.status === 'fulfilled') {
+        for (const key of Object.keys(progress) as Array<keyof EnqueueProgress>) {
+          progress[key] += refill.value[key];
+        }
+      }
+      const finishedAtMs = Date.now();
+      const durationMs = finishedAtMs - now.getTime();
+      if (
+        (durationMs >= SLOW_ENQUEUE_BATCH_MS || candidates.length > 0) &&
+        finishedAtMs >= this.nextSlowEnqueueBatchLogAtMs
+      ) {
+        this.nextSlowEnqueueBatchLogAtMs = finishedAtMs + SLOW_ENQUEUE_BATCH_LOG_INTERVAL_MS;
+        const log = durationMs >= SLOW_ENQUEUE_BATCH_MS ? 'warn' : 'log';
+        this.logger[log](
+          {
+            durationMs,
+            admissionMs: admissionFinishedAtMs - now.getTime(),
+            selectionMs: selectionFinishedAtMs - admissionFinishedAtMs,
+            prioritizationMs: prioritizationFinishedAtMs - selectionFinishedAtMs,
+            enqueueMs: finishedAtMs - prioritizationFinishedAtMs,
+            candidateCount: candidates.length,
+            selectedCount: expandedCandidates.length,
+            degraded: admission.degraded,
+            completedTimeoutRepair: admission.includeCompletedTimeoutRepair,
+            progress,
+            inFlightWorkUnits: this.activeEnqueueUnits.size,
+          },
+          durationMs >= SLOW_ENQUEUE_BATCH_MS
+            ? 'Slow webhook enqueue batch'
+            : 'Webhook enqueue batch progress',
+        );
+      }
+      finishBatchTiming();
+    } catch (error: unknown) {
+      finishStageTiming(true);
+      finishBatchTiming(true);
+      throw error;
     }
   }
 
@@ -3564,14 +3646,21 @@ export class WebhookOutboxService
 
   private async cleanupRetention() {
     if (this.cleaning) {
+      this.runtimeMetrics.retention.skippedInFlight = addWebhookMetric(
+        this.runtimeMetrics.retention.skippedInFlight,
+      );
       return;
     }
+    this.runtimeMetrics.retention.calls = addWebhookMetric(this.runtimeMetrics.retention.calls);
     this.cleaning = true;
     let runMaintenance = false;
     try {
       const nowMs = Date.now();
       runMaintenance = this.retentionMaintenanceDue;
       if (runMaintenance) {
+        this.runtimeMetrics.retention.maintenanceCalls = addWebhookMetric(
+          this.runtimeMetrics.retention.maintenanceCalls,
+        );
         this.retentionMaintenanceDue = false;
       }
 
@@ -3675,6 +3764,7 @@ export class WebhookOutboxService
         'Retention cleanup finished',
       );
     } catch (error: unknown) {
+      this.runtimeMetrics.retention.errors = addWebhookMetric(this.runtimeMetrics.retention.errors);
       if (runMaintenance) {
         this.retentionMaintenanceDue = true;
       }
@@ -3691,10 +3781,13 @@ export class WebhookOutboxService
     phase: RetentionCleanupPhase,
   ): Promise<RetentionCleanupPhaseResult> {
     const startedAtMs = Date.now();
+    const telemetryStartedAt = performance.now();
     let rows = 0;
     let scannedRows = 0;
     let batches = 0;
     let lastBatchRows = 0;
+    let failed = true;
+    let budgetExhausted = false;
 
     try {
       while (batches < phase.maxBatches) {
@@ -3711,13 +3804,14 @@ export class WebhookOutboxService
         }
       }
 
+      budgetExhausted =
+        batches === phase.maxBatches && lastBatchRows === RETENTION_CLEANUP_BATCH_SIZE;
       const result: RetentionCleanupPhaseResult = {
         rows,
         scannedRows,
         batches,
         durationMs: Date.now() - startedAtMs,
-        budgetExhausted:
-          batches === phase.maxBatches && lastBatchRows === RETENTION_CLEANUP_BATCH_SIZE,
+        budgetExhausted,
       };
       this.logger.log(
         {
@@ -3728,6 +3822,7 @@ export class WebhookOutboxService
         },
         'Retention cleanup phase finished',
       );
+      failed = false;
       return result;
     } catch (error: unknown) {
       this.logger.warn(
@@ -3743,6 +3838,19 @@ export class WebhookOutboxService
         'Retention cleanup phase failed',
       );
       throw error;
+    } finally {
+      // FLAG: Preserve completed batches even when a later batch or its delay fails.
+      this.runtimeMetrics.finishRetentionPhase(
+        phase.name,
+        {
+          rows,
+          scannedRows,
+          batches,
+          durationMs: performance.now() - telemetryStartedAt,
+          budgetExhausted: !failed && budgetExhausted,
+        },
+        failed,
+      );
     }
   }
 

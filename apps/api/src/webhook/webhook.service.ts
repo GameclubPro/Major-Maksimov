@@ -15,6 +15,7 @@ import { settleOperatorDiscardedMirror } from './webhook-operator-discard-mirror
 import { buildWebhookReceiptSemanticKey } from './webhook-receipt-semantic-key';
 import { WebhookLegacyHoldService } from './webhook-legacy-hold.service';
 import { RuntimeDiagnosticsService } from '../system/runtime-diagnostics.service';
+import { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
 import {
   WebhookPreparationAdmission,
   type WebhookPreparationSchedulingState,
@@ -359,11 +360,15 @@ export class WebhookService extends RuntimeWorkerOwner implements OnModuleDestro
     @Optional() private readonly legacyHolds?: WebhookLegacyHoldService,
     @Optional() private readonly permissionEventRegistry?: MaxBotRegistryService,
     @Optional() private readonly dependencyQuarantine?: WebhookDependencyQuarantineService,
+    @Optional() storageRuntimeMetrics?: StorageRuntimeMetricsService,
   ) {
     super();
     this.preparationAdmission = new WebhookPreparationAdmission(
       readPrismaPoolConfig().max ?? 10,
       (metric) => this.logger.log(metric, 'Webhook bounded preparation'),
+    );
+    storageRuntimeMetrics?.registerWebhookPreparationSnapshot(() =>
+      this.preparationAdmission.runtimeSnapshot(),
     );
     const configuredPublisherBotId = configService.get<unknown>('MAX_PUBLISHER_BOT_ID');
     this.publisherBotId = buildPublisherBotDescriptor({

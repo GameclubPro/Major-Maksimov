@@ -78,9 +78,10 @@ type RetentionInternals = {
   runRetentionCleanupPhase: (phase: {
     name: string;
     maxBatches: number;
-    deleteBatch: () => Promise<number>;
+    deleteBatch: () => Promise<number | { removed: number; scanned: number }>;
   }) => Promise<{
     rows: number;
+    scannedRows: number;
     batches: number;
     durationMs: number;
     budgetExhausted: boolean;
@@ -4692,6 +4693,81 @@ describe('WebhookOutboxService', () => {
     await cleanup;
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
     expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
+  });
+
+  it('retains successful cleanup batches when a later batch fails, without changing the error', async () => {
+    const { service } = createService();
+    const internals = service as unknown as RetentionInternals;
+    internals.retentionBatchDelayMs = 0;
+    const error = new Error('private-retention-failure');
+    const deleteBatch = jest
+      .fn()
+      .mockResolvedValueOnce({ removed: 3, scanned: 500 })
+      .mockRejectedValueOnce(error);
+    await expect(
+      internals.runRetentionCleanupPhase({
+        name: 'webhookProcessedOrDuplicate',
+        maxBatches: 10,
+        deleteBatch,
+      }),
+    ).rejects.toBe(error);
+    expect(deleteBatch).toHaveBeenCalledTimes(2);
+    expect(service.getRuntimeSnapshot()).toMatchObject({
+      retention: {
+        config: { webhookCompletedRetentionEnabled: false, webhookFailedRetentionEnabled: false },
+        phases: {
+          webhookProcessedOrDuplicate: {
+            calls: 1,
+            errors: 1,
+            removed: 3,
+            scanned: 500,
+            batches: 1,
+            budgetHits: 0,
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(service.getRuntimeSnapshot())).not.toContain('private');
+  });
+
+  it('records an admission failure without reporting unreached stages as completed', async () => {
+    const { service, prisma } = createService();
+    const internals = service as unknown as EnqueueAdmissionInternals & {
+      enqueueBatch: () => Promise<void>;
+    };
+    const error = new Error('private-admission-failure');
+    jest.spyOn(internals, 'resolveEnqueueAdmission').mockRejectedValueOnce(error);
+    await expect(internals.enqueueBatch()).rejects.toBe(error);
+    expect(service.getRuntimeSnapshot()).toMatchObject({
+      batch: { calls: 1, errors: 1 },
+      stages: {
+        admission: { calls: 1, errors: 1 },
+        selection: { calls: 0 },
+        refill: { calls: 0 },
+        prioritization: { calls: 0 },
+        enqueue: { calls: 0 },
+      },
+    });
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('exports every empty batch independently of throttled progress logs', async () => {
+    const { service } = createService();
+    const internals = service as unknown as { enqueueBatch: () => Promise<void> };
+    await internals.enqueueBatch();
+    await internals.enqueueBatch();
+    expect(service.getRuntimeSnapshot()).toMatchObject({
+      batch: { calls: 2, errors: 0 },
+      stages: {
+        admission: { calls: 2 },
+        selection: { calls: 2 },
+        refill: { calls: 2 },
+        prioritization: { calls: 2 },
+        enqueue: { calls: 2 },
+      },
+      candidateCount: 0,
+      selectedCount: 0,
+    });
   });
 
   it('repeats full retention batches and stops after a partial batch', async () => {

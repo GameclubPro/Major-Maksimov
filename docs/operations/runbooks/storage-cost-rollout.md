@@ -35,6 +35,93 @@ publish every 30 seconds and expire after 90 seconds; collect after the first
 publication. Missing, malformed, stale or unavailable reports are missing
 coverage, not zero work. Reporting failure must not block bot work.
 
+### Webhook preparation, outbox and retention attribution
+
+The optional `webhookPreparation` and `webhookOutbox` blocks use the same fixed
+report, 30-second publication and 90-second expiry. Their counters are cumulative
+within the report's `startedAt` epoch and survive the preparation logger's separate
+60-second resets. Missing or malformed blocks from older writers remain `null`.
+They add no per-event Redis writes or SQL queries.
+
+Preparation counts admitted, deferred, completed and failed attempts by the three
+fixed work classes; a completed attempt can have failed. Active work and peak
+concurrency are separate gauges. Duration covers the admitted task through its
+result, including errors; it excludes deferred work. Outbox batch and stage timings
+use monotonic clocks, retain errors and unknown clocks, and have disjoint duration
+buckets. These new timing blocks use `totalMs`, `maxMs` and `buckets`; the existing
+optimization fields retain their names. Admission includes the effective-mode and retained-representative reads.
+Selection and retained refill run concurrently and overlap; prioritization starts
+after both settle and includes optional chat expansion. Enqueue covers the selected
+work-unit dispatch call. The batch total overlaps all stages. Timings do not prove
+handler completion or a successful external action.
+
+Progress accumulates only returned dispatch/refill summaries, including refill
+that completed before a selection failure. Candidate and selected counts cover
+polls that reached dispatch; they are observations, not unique receipts. A failed
+refill can coexist with a successful batch because current selection still runs.
+Gauges describe the snapshot instant; completed counters can lag admitted work.
+
+Retention exports effective enable flags and retention periods, maintenance and
+overlap outcomes, and fixed per-phase calls, errors, scanned/removed rows, completed
+batches, total monotonic duration (`totalMs`) and exhausted budgets (`budgetHits`).
+Per-phase `scanned` and `removed` count rows; retention `unknownClocks` identifies
+missing duration observations without discarding row outcomes. An increase in this
+counter makes the retention duration interval incomplete. Successful batches before
+a later failure remain counted. The completed/held webhook phase shares its existing one-page
+budget; these measurements do not enable cleanup. Scanned rows, removed rows and
+source-history growth measure different populations. Their difference does not
+identify a pin reason or prove a leak. Compare bounded inventory samples across a
+comparable interval before estimating retention efficiency or capacity.
+
+### Bounded fleet baseline collection
+
+After deploying the telemetry reader, collect an owner-private baseline inside the
+existing admin container:
+
+```bash
+./infra/scripts/vps-connect.sh exec docker compose -f infra/docker-compose.yml exec -T api-admin node apps/api/dist/apps/api/src/scripts/audit-fleet-baseline.js --window-sec 60
+```
+
+The command starts no Nest workers and makes no MAX calls, PostgreSQL queries,
+Redis writes or keyspace scans. The existing runtime reader uses the fixed service
+keys and trusts the bounded writers; it rejects reports above 24 KiB after reading.
+MAX observations use read-only Lua with length/type admission, a catalog cardinality
+limit of 512 and 256 KiB materialization cap, at most 32 configured tokens and
+120,000 logical counters in batches of 200. Collection has an eight-second MAX read
+budget, one-second Redis command deadlines, a twelve-second disconnect deadline
+and a 512 KiB output limit. An unavailable or oversized catalog refuses collection;
+it never bootstraps, repairs or truncates the catalog to make coverage appear complete.
+
+`--window-sec` accepts 60, 120 or 300. Optional `--until` is an exact UTC minute
+(`YYYY-MM-DDTHH:mm:00Z`); otherwise the latest minute closed for at least 30 seconds
+is selected. The whole interval must remain inside the six-hour logical counter
+retention. The report sums disjoint legacy strings and minute fields. Its basis is
+recorded request admissions and limiter outcomes, not every HTTP attempt or a count
+of confirmed effects. Unknown source labels fold into the fixed `other` label.
+`populationComplete: false` and `zeroOrMissingCounters` remain explicit; absent
+counters cannot establish idle traffic or instrumentation completeness.
+
+Tokens leave the process only as sorted aliases and a catalog fingerprint. Compare
+aliases only when fingerprints match. Global stack counters can include observations
+outside the configured catalog; source totals and global totals also have different
+best-effort coverage, so their residual does not establish wasted calls or savings.
+`coverage.rolesFresh` requires all fourteen distributed roles; the alternative
+`api-all` profile cannot replace one. Preparation and outbox coverage requires the
+new blocks from `api-enqueue`, separately from freshness. Zero observed counters,
+missing roles, missing new blocks or an unreadable MAX report produce exit 1 while
+preserving the partial JSON. `collectionReady` establishes readable observations,
+not representative traffic or successful bot actions.
+
+Retain a start/end runtime sample with each role's independent `startedAt` epoch,
+the exact deployed image and closed MAX intervals. Take sequential reviewed
+`postgres-audit storage` samples for history growth; relation bytes and estimated
+rows are inventory, not exact deletable backlog. Record sample time, workload and
+statistics/reset boundaries. The cumulative retention block exposes effective
+switches and completed cleanup work; disabled cleanup or no completed maintenance
+is an explicit limitation. A short nighttime sample is a collection acceptance
+check. Obtain comparable peak/day coverage before estimating fleet capacity,
+retention efficiency or savings.
+
 ### Permission and SEND attribution
 
 The additive `optimization` report uses fixed module names and counters only. Its

@@ -2,6 +2,8 @@ import { ConfigService } from '@nestjs/config';
 import { monitorEventLoopDelay, PerformanceObserver } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
 import { createChatContextCacheActivity } from '../chat-context/chat-context-cache-metrics';
+import { WebhookOutboxRuntimeMetrics } from '../webhook/webhook-runtime-metrics';
+import { WebhookPreparationAdmission } from '../webhook/webhook-preparation-admission';
 import { RUNTIME_SERVICE_NAMES } from '../runtime/runtime-topology';
 import {
   connectionAdmissionMetrics,
@@ -152,6 +154,27 @@ function deleteDueSweepSnapshot() {
         },
       ]),
     ),
+  };
+}
+
+function webhookOutboxSnapshot() {
+  const metrics = new WebhookOutboxRuntimeMetrics();
+  return {
+    ...metrics,
+    inFlightWorkUnits: 0,
+    retention: {
+      ...metrics.retention,
+      cleaning: false,
+      maintenancePending: false,
+      config: {
+        webhookCompletedRetentionEnabled: false,
+        webhookFailedRetentionEnabled: false,
+        webhookRetentionDays: 7,
+        webhookFailedRetentionHours: 24,
+        moderationRetentionDays: 90,
+        userDisplayNameRetentionDays: 180,
+      },
+    },
   };
 }
 
@@ -767,6 +790,10 @@ describe('bounded storage-runtime metrics', () => {
     mockEventLoopDelay.mean = 100_000_000;
     mockEventLoopDelay.max = 100_000_000;
     mockEventLoopDelay.percentile.mockReturnValue(100_000_000);
+    metrics.registerWebhookOutboxSnapshot(webhookOutboxSnapshot);
+    metrics.registerWebhookPreparationSnapshot(() =>
+      new WebhookPreparationAdmission(4, jest.fn()).runtimeSnapshot(),
+    );
     metrics.registerDeleteReconcilerSnapshot(deleteReconcilerSnapshot);
     metrics.registerDeleteDueSweepSnapshot(deleteDueSweepSnapshot);
     metrics.registerAutomaticDeleteAuthorSnapshot(() => automaticDeleteAuthors);
@@ -840,6 +867,54 @@ describe('bounded storage-runtime metrics', () => {
     ]);
     expect((await metrics.getFleetSnapshot()).services[0].snapshot).toEqual(widest);
   });
+  it('publishes sanitized webhook attribution through the existing report and tolerates missing writers', async () => {
+    const fixture = webhookOutboxSnapshot();
+    metrics.registerWebhookOutboxSnapshot(() => ({
+      ...fixture,
+      payload: 'private-payload',
+      stages: { ...fixture.stages, 'private-stage': {} },
+    }));
+    metrics.registerWebhookPreparationSnapshot(() =>
+      new WebhookPreparationAdmission(4, jest.fn()).runtimeSnapshot(),
+    );
+    const before = metrics.getLocalSnapshot()!;
+    await metrics.publish();
+    expect(mockRedis.set).toHaveBeenCalledTimes(1);
+    const encoded = mockRedis.set.mock.calls[0][1];
+    expect(JSON.parse(encoded)).toMatchObject({
+      startedAt: before.startedAt,
+      webhookOutbox: fixture,
+    });
+    expect(encoded).not.toContain('private');
+    const older = { ...before, webhookOutbox: undefined, webhookPreparation: undefined };
+    expect(sanitizeStorageRuntimeSnapshot(older)).toMatchObject({
+      webhookOutbox: null,
+      webhookPreparation: null,
+    });
+    expect(
+      sanitizeStorageRuntimeSnapshot({
+        ...before,
+        webhookOutbox: { ...fixture, selectedCount: -1 },
+      }),
+    ).toMatchObject({ webhookOutbox: null, webhookPreparation: before.webhookPreparation });
+    metrics.registerWebhookOutboxSnapshot(() => ({
+      get inFlightWorkUnits() {
+        throw new Error('private');
+      },
+    }));
+    expect(metrics.getLocalSnapshot()).toMatchObject({
+      webhookOutbox: null,
+      webhookPreparation: before.webhookPreparation,
+    });
+    metrics.registerWebhookOutboxSnapshot(() => {
+      throw new Error('private');
+    });
+    expect(metrics.getLocalSnapshot()).toMatchObject({
+      webhookOutbox: null,
+      webhookPreparation: before.webhookPreparation,
+    });
+  });
+
   it('publishes only fixed reconciliation phases with the existing process epoch and report', async () => {
     const fixture = deleteReconcilerSnapshot();
     fixture.phases.privateLabel = { ...fixture.phases.dueSweep };

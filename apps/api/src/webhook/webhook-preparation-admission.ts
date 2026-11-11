@@ -1,4 +1,5 @@
 import { WebhookPreparationDeferredError } from '../common/webhook-preparation-deferred.error';
+import { addWebhookMetric, WebhookPreparationRuntimeMetrics } from './webhook-runtime-metrics';
 
 type WorkClass = 'ordinary' | 'interactive' | 'lifecycle';
 type ReservedWorkClass = Exclude<WorkClass, 'ordinary'>;
@@ -18,6 +19,7 @@ export class WebhookPreparationAdmission {
   private readonly reservations = new Map<ReservedWorkClass, number>();
   private windowStartedAt = Date.now();
   private metrics = this.emptyMetrics();
+  private readonly runtimeMetrics = new WebhookPreparationRuntimeMetrics();
 
   constructor(
     poolMax: number,
@@ -104,6 +106,9 @@ export class WebhookPreparationAdmission {
       // FLAG: Work blocked by its own bot/class quota cannot reserve idle shared capacity.
       this.reserveNextSlot(workClass, availability);
       this.metrics.deferred[workClass] += 1;
+      this.runtimeMetrics.deferred[workClass] = addWebhookMetric(
+        this.runtimeMetrics.deferred[workClass],
+      );
       this.flushIfDue();
       return Promise.reject(
         new WebhookPreparationDeferredError('Webhook preparation capacity unavailable', 1_000),
@@ -116,7 +121,8 @@ export class WebhookPreparationAdmission {
     this.byBot.set(botId, botCounts);
     this.byClass[workClass] += 1;
     const startedAt = performance.now();
-    const finish = () => {
+    const finish = (failed: boolean) => {
+      this.runtimeMetrics.finish(workClass, startedAt, failed);
       this.active.delete(tracked);
       botCounts[workClass] -= 1;
       if (Object.values(botCounts).every((count) => count === 0)) this.byBot.delete(botId);
@@ -130,11 +136,11 @@ export class WebhookPreparationAdmission {
       .then(task)
       .then(
         (value) => {
-          finish();
+          finish(false);
           return value;
         },
         (error: unknown) => {
-          finish();
+          finish(true);
           throw error;
         },
       );
@@ -145,6 +151,10 @@ export class WebhookPreparationAdmission {
     this.active.add(tracked);
     this.metrics.peakInFlight = Math.max(this.metrics.peakInFlight, this.active.size);
     this.metrics.admitted[workClass] += 1;
+    this.runtimeMetrics.admitted[workClass] = addWebhookMetric(
+      this.runtimeMetrics.admitted[workClass],
+    );
+    this.runtimeMetrics.peakInFlight = Math.max(this.runtimeMetrics.peakInFlight, this.active.size);
     return operation;
   }
 
@@ -156,6 +166,26 @@ export class WebhookPreparationAdmission {
   }
   snapshot() {
     return { inFlight: this.active.size, pending: 0, botScopes: this.byBot.size, ...this.byClass };
+  }
+
+  runtimeSnapshot() {
+    const { inFlight, botScopes, ordinary, interactive, lifecycle } = this.snapshot();
+    return {
+      maxInFlight: this.maxInFlight,
+      inFlight,
+      botScopes,
+      active: { ordinary, interactive, lifecycle },
+      closed: this.closed,
+      admitted: { ...this.runtimeMetrics.admitted },
+      deferred: { ...this.runtimeMetrics.deferred },
+      completed: { ...this.runtimeMetrics.completed },
+      errors: { ...this.runtimeMetrics.errors },
+      peakInFlight: this.runtimeMetrics.peakInFlight,
+      duration: {
+        ...this.runtimeMetrics.duration,
+        buckets: { ...this.runtimeMetrics.duration.buckets },
+      },
+    };
   }
 
   flush(): void {
