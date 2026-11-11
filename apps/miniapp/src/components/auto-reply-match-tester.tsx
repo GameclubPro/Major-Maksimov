@@ -209,8 +209,8 @@ export function AutoReplyMatchTester({
   const result = resultState?.requestKey === requestKey ? resultState.result : null;
 
   return (
-    <div className="publisher-auto-reply-editor__tester">
-      <label htmlFor="publisher-auto-reply-preview-message">Проверить совпадение</label>
+    <details className="publisher-auto-reply-editor__tester">
+      <summary>Проверить совпадение</summary>
       <div className="publisher-auto-reply-editor__tester-row">
         <input
           id="publisher-auto-reply-preview-message"
@@ -218,6 +218,7 @@ export function AutoReplyMatchTester({
           maxLength={MAX_PUBLISHER_AUTO_REPLY_PREVIEW_MESSAGE_LENGTH}
           disabled={disabled || previewMutation.isPending}
           placeholder="Сообщение участника"
+          aria-label="Сообщение участника"
           enterKeyHint="go"
           aria-describedby={issue ? 'publisher-auto-reply-preview-error' : undefined}
           aria-invalid={Boolean(issue)}
@@ -251,6 +252,6 @@ export function AutoReplyMatchTester({
         </small>
       ) : null}
       {result ? <MatchFeedback result={result} /> : null}
-    </div>
+    </details>
   );
 }

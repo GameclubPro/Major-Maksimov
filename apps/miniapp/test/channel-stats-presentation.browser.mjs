@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium } from 'playwright';
 
 const base = new URL(process.env.MINIAPP_TEST_BASE_URL ?? 'http://127.0.0.1:3015/app/');
@@ -6,6 +9,7 @@ if (!['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)) {
   throw new Error('Local server required');
 }
 const browser = await chromium.launch();
+const screenshots = mkdtempSync(join(tmpdir(), 'maxim-channel-stats-reflow-'));
 try {
   for (const width of [280, 320, 393, 430, 1280]) {
     for (const theme of ['light', 'dark']) {
@@ -145,6 +149,116 @@ await import('/app/test/fixtures/channel-stats-presentation-harness.tsx');
           `${width}px ${theme} stress=${stress}: ${JSON.stringify(issues)}`,
         );
       }
+      if (width <= 430) {
+        await page.evaluate(() => {
+          document.documentElement.style.fontSize = '32px';
+          window.renderStatistics();
+        });
+        const clipping = await page.evaluate(() => {
+          const issues = [];
+          const selectors = [
+            '.channel-summary-card--compact > small',
+            '.channel-audience-board__heading strong',
+            '.channel-insights__overview-toolbar .segmented-control__item',
+            '.channel-audience-selection strong',
+          ];
+          for (const selector of selectors) {
+            const elements = document.querySelectorAll(selector);
+            if (!elements.length) issues.push(`Missing reflow target: ${selector}`);
+            for (const element of elements) {
+              const bounds = element.getBoundingClientRect();
+              const range = document.createRange();
+              range.selectNodeContents(element);
+              if (
+                element.scrollWidth > element.clientWidth + 1 ||
+                element.scrollHeight > element.clientHeight + 1
+              )
+                issues.push(`Clipped text: ${element.textContent}`);
+              const container = element
+                .closest(
+                  '.channel-summary-card--compact, .channel-audience-board__heading, .channel-insights__range, .channel-audience-selection',
+                )
+                .getBoundingClientRect();
+              for (const rect of range.getClientRects()) {
+                if (
+                  rect.left < bounds.left - 1 ||
+                  rect.right > bounds.right + 1 ||
+                  rect.top < bounds.top - 1 ||
+                  rect.bottom > bounds.bottom + 1
+                )
+                  issues.push(`Text outside element: ${element.textContent}`);
+                if (
+                  rect.left < container.left - 1 ||
+                  rect.right > container.right + 1 ||
+                  rect.top < container.top - 1 ||
+                  rect.bottom > container.bottom + 1
+                )
+                  issues.push(`Text outside container: ${element.textContent}`);
+              }
+            }
+          }
+          const scroll = document.querySelector('.channel-summary-table-scroll');
+          if (!scroll) issues.push('Missing day-table scroll region');
+          else {
+            const bounds = scroll.getBoundingClientRect();
+            if (
+              bounds.left < -1 ||
+              bounds.right > innerWidth + 1 ||
+              scroll.scrollHeight > scroll.clientHeight + 1
+            )
+              issues.push('Day-table scroll region clips or leaves viewport');
+            for (const element of scroll.querySelectorAll('th, td')) {
+              if (
+                element.scrollWidth > element.clientWidth + 1 ||
+                element.scrollHeight > element.clientHeight + 1
+              )
+                issues.push(`Clipped day-table cell: ${element.textContent}`);
+              const texts = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+              while (texts.nextNode()) {
+                if (!texts.currentNode.textContent.trim()) continue;
+                const range = document.createRange();
+                range.selectNodeContents(texts.currentNode);
+                const lines = new Set(
+                  [...range.getClientRects()]
+                    .filter((rect) => rect.width > 0)
+                    .map((rect) => Math.round(rect.top)),
+                );
+                if (lines.size > 1)
+                  issues.push(`Day-table text split: ${texts.currentNode.textContent}`);
+              }
+            }
+          }
+          return issues;
+        });
+        assert.deepEqual(clipping, [], `${width}px ${theme} 200% text`);
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
+          true,
+        );
+        const scroll = page.getByRole('region', { name: 'Таблица по дням', exact: true });
+        await scroll.focus();
+        await scroll.evaluate((element) => {
+          element.scrollLeft = element.scrollWidth;
+        });
+        assert.equal(
+          await scroll.evaluate((element) => {
+            const end = element
+              .querySelector('tbody tr:last-child td:last-child')
+              .getBoundingClientRect();
+            const bounds = element.getBoundingClientRect();
+            return end.right <= bounds.right + 1;
+          }),
+          true,
+          'last day-table column is reachable inside contained scroller',
+        );
+        await scroll.evaluate((element) => {
+          element.scrollLeft = 0;
+        });
+        await page.screenshot({
+          path: join(screenshots, `${width}-${theme}-200-percent.png`),
+          fullPage: true,
+        });
+      }
       for (const scenario of ['empty', 'unavailable']) {
         await page.evaluate((scenario) => window.renderStatistics(scenario), scenario);
         await page.locator('.channel-stats-graph__empty').waitFor();
@@ -170,6 +284,7 @@ await import('/app/test/fixtures/channel-stats-presentation-harness.tsx');
       await page.close();
     }
   }
+  console.log(`Statistics reflow screenshots: ${screenshots}`);
 } finally {
   await browser.close();
 }

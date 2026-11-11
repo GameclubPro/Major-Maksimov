@@ -42,6 +42,7 @@ export type SettingsLimitsSectionProps = SettingsSectionShellProps &
     adjustStickerMessageCooldown: (deltaMinutes: number) => void;
     deleteSpammersRuntimeStatus: string;
     fieldErrors: FieldErrors;
+    onMaxMessageLengthError: (message: string | null) => void;
     hasMessageLimitsBotButtonError: boolean;
     limitsCardStatus: string;
     limitsRulesEnabledCount: number;

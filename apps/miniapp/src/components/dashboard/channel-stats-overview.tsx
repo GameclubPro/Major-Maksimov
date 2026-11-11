@@ -1568,90 +1568,97 @@ export function ChannelStatsOverview({
                 </button>
               ) : null}
             </div>
-            <table
-              id="channel-daily-table"
-              className="channel-summary-table"
-              aria-label="Динамика подписчиков по дням"
+            <div
+              className="channel-summary-table-scroll"
+              role="region"
+              aria-label="Таблица по дням"
+              tabIndex={0}
             >
-              <thead>
-                <tr>
-                  <th scope="col">День</th>
-                  <th scope="col" aria-label="Всего подписчиков">
-                    Всего
-                  </th>
-                  <th scope="col">Прирост</th>
-                  <th scope="col">Вход / выход</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summaryDailyRows.map((row, index) => {
-                  const joined = row.joined ?? null;
-                  const left = row.left ?? null;
-                  const hasFlow = joined !== null || left !== null;
-                  const joinedFlow = joined ?? 0;
-                  const leftFlow = left ?? 0;
-                  const isCurrent = index === 0;
+              <table
+                id="channel-daily-table"
+                className="channel-summary-table"
+                aria-label="Динамика подписчиков по дням"
+              >
+                <thead>
+                  <tr>
+                    <th scope="col">День</th>
+                    <th scope="col" aria-label="Всего подписчиков">
+                      Всего
+                    </th>
+                    <th scope="col">Прирост</th>
+                    <th scope="col">Вход / выход</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summaryDailyRows.map((row, index) => {
+                    const joined = row.joined ?? null;
+                    const left = row.left ?? null;
+                    const hasFlow = joined !== null || left !== null;
+                    const joinedFlow = joined ?? 0;
+                    const leftFlow = left ?? 0;
+                    const isCurrent = index === 0;
 
-                  return (
-                    <tr key={row.date} className={isCurrent ? 'is-current' : undefined}>
-                      <td className="channel-summary-table__date">
-                        <time dateTime={row.date} aria-current={isCurrent ? 'date' : undefined}>
-                          {formatSummaryTableDate(row.date)}
-                        </time>
-                      </td>
-                      <td className="channel-summary-table__total">
-                        <span className="channel-summary-table__total-value">
-                          {formatAudienceCount(row.subscribers, row.confidence)}
-                        </span>
-                      </td>
-                      <td
-                        className={`channel-summary-table__growth is-${getSignedTone(row.delta)}`}
-                      >
-                        <span className="channel-summary-table__growth-value">
-                          {formatDenseSignedCount(row.delta)}
-                        </span>
-                      </td>
-                      <td className="channel-summary-table__movement">
-                        {hasFlow ? (
-                          <span className="channel-summary-table__movement-pair">
-                            <span
-                              role="img"
-                              className={`channel-summary-table__movement-pill ${
-                                joined === null ? 'is-neutral' : 'is-positive'
-                              }`}
-                              aria-label={
-                                joined === null
-                                  ? 'Вступления: нет данных'
-                                  : `Вступили: ${formatDenseCount(joinedFlow)}`
-                              }
-                            >
-                              <span aria-hidden="true">↗</span>
-                              <em aria-hidden="true">{formatDenseCount(joined)}</em>
-                            </span>
-                            <span
-                              role="img"
-                              className={`channel-summary-table__movement-pill ${
-                                left === null ? 'is-neutral' : 'is-negative'
-                              }`}
-                              aria-label={
-                                left === null
-                                  ? 'Выходы: нет данных'
-                                  : `Вышли: ${formatDenseCount(leftFlow)}`
-                              }
-                            >
-                              <span aria-hidden="true">↘</span>
-                              <em aria-hidden="true">{formatDenseCount(left)}</em>
-                            </span>
+                    return (
+                      <tr key={row.date} className={isCurrent ? 'is-current' : undefined}>
+                        <td className="channel-summary-table__date">
+                          <time dateTime={row.date} aria-current={isCurrent ? 'date' : undefined}>
+                            {formatSummaryTableDate(row.date)}
+                          </time>
+                        </td>
+                        <td className="channel-summary-table__total">
+                          <span className="channel-summary-table__total-value">
+                            {formatAudienceCount(row.subscribers, row.confidence)}
                           </span>
-                        ) : (
-                          <span className="channel-summary-table__movement-empty">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        </td>
+                        <td
+                          className={`channel-summary-table__growth is-${getSignedTone(row.delta)}`}
+                        >
+                          <span className="channel-summary-table__growth-value">
+                            {formatDenseSignedCount(row.delta)}
+                          </span>
+                        </td>
+                        <td className="channel-summary-table__movement">
+                          {hasFlow ? (
+                            <span className="channel-summary-table__movement-pair">
+                              <span
+                                role="img"
+                                className={`channel-summary-table__movement-pill ${
+                                  joined === null ? 'is-neutral' : 'is-positive'
+                                }`}
+                                aria-label={
+                                  joined === null
+                                    ? 'Вступления: нет данных'
+                                    : `Вступили: ${formatDenseCount(joinedFlow)}`
+                                }
+                              >
+                                <span aria-hidden="true">↗</span>
+                                <em aria-hidden="true">{formatDenseCount(joined)}</em>
+                              </span>
+                              <span
+                                role="img"
+                                className={`channel-summary-table__movement-pill ${
+                                  left === null ? 'is-neutral' : 'is-negative'
+                                }`}
+                                aria-label={
+                                  left === null
+                                    ? 'Выходы: нет данных'
+                                    : `Вышли: ${formatDenseCount(leftFlow)}`
+                                }
+                              >
+                                <span aria-hidden="true">↘</span>
+                                <em aria-hidden="true">{formatDenseCount(left)}</em>
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="channel-summary-table__movement-empty">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </section>
         ) : null}
       </div>

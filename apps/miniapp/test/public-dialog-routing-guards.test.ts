@@ -59,6 +59,7 @@ test('public dialog pages keep terminal failures in the public flow', () => {
   }
 
   assert.match(unavailableStateSource, /onClick=\{\(\) => closeMaxMiniApp\(\)\}/u);
+  assert.match(unavailableStateSource, /typeof getMaxBridge\(\)\?\.close === 'function'/u);
   assert.match(unavailableStateSource, /Закрыть приложение/u);
 });
 

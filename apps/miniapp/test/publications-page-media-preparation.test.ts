@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { getPublicationVideoPreviewSessionKey } from '../src/features/publications/use-local-publication-video-preview';
 
 const sessionSource = readFileSync(
   new URL('../src/features/publications/use-publication-editor-session.ts', import.meta.url),
@@ -165,4 +166,42 @@ test('video preparation preserves existing media until success and always releas
   assert.match(handler, /finally \{[\s\S]*?setVideoPreparing\(false\)/u);
   assert.doesNotMatch(handler, /catch \(error\)/u);
   assert.match(videoToolSource, /\.finally\(\(\) => \{\s*input.value = '';/u);
+});
+
+test('local video preview identity survives a revision rebase and separates editor contexts', () => {
+  const original = {
+    kind: 'edit' as const,
+    publicationId: 'publication-a',
+    expectedRevision: 1,
+    editScope: null,
+  };
+  const key = getPublicationVideoPreviewSessionKey(original);
+  assert.equal(getPublicationVideoPreviewSessionKey({ ...original, expectedRevision: 2 }), key);
+  assert.notEqual(
+    getPublicationVideoPreviewSessionKey({ ...original, publicationId: 'publication-b' }),
+    key,
+  );
+  assert.notEqual(
+    getPublicationVideoPreviewSessionKey({
+      kind: 'draft',
+      publicationId: 'publication-a',
+      expectedRevision: 1,
+    }),
+    key,
+  );
+  assert.equal(getPublicationVideoPreviewSessionKey(null), null);
+  const imported = {
+    kind: 'import' as const,
+    publicationId: 'publication-a',
+    expectedRevision: 1,
+    sessionId: 'import-a',
+  };
+  assert.equal(
+    getPublicationVideoPreviewSessionKey({ ...imported, expectedRevision: 2 }),
+    getPublicationVideoPreviewSessionKey(imported),
+  );
+  assert.notEqual(
+    getPublicationVideoPreviewSessionKey({ ...imported, sessionId: 'import-b' }),
+    getPublicationVideoPreviewSessionKey(imported),
+  );
 });

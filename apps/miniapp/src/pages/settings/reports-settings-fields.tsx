@@ -177,7 +177,7 @@ export function ReportsSettingsFields({
               {reportsEnabled === undefined
                 ? 'Разные значения'
                 : reportsEnabled
-                  ? 'Включены в этом чате'
+                  ? 'Включены'
                   : 'Включите после настройки мер'}
             </small>
           </span>

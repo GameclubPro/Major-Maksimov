@@ -167,6 +167,14 @@ try {
             requestState.saved[id] = structuredClone(requestState.seed.settings);
             requestState.saved[id].stopWordsRevision = id === 'chat-a' ? 7 : 21;
           }
+          if (requestState.links) {
+            requestState.saved['chat-a'].linkRulesPolicy = {
+              version: 1,
+              mode: 'DENY_SELECTED',
+              rules: [],
+            };
+            requestState.saved['chat-a'].linkRulesStorageStatus = 'valid';
+          }
           if (requestState.large)
             requestState.saved['chat-a'].stopWordsPolicy.rules = Array.from(
               { length: 125 },
@@ -351,6 +359,22 @@ try {
         page.getByRole('dialog', { name: 'Загрузить сохранённый список?', exact: true });
 
       await fresh();
+      await words().fill('каталог');
+      assert.notEqual(
+        await words().getAttribute('aria-invalid'),
+        'true',
+        'valid pending input is a draft, not a validation error',
+      );
+      await panel.getByRole('status').filter({ hasText: 'Добавьте введённые записи' }).waitFor();
+      assert.equal(
+        await panel.getByRole('alert').filter({ hasText: 'Добавьте введённые записи' }).count(),
+        0,
+      );
+      await save().click();
+      assert.equal(state.writes.length, 0, 'pending entries cannot be silently omitted by Save');
+      assert.equal(await words().inputValue(), 'каталог');
+      assert.equal(await panel.isVisible(), true);
+      await words().fill('');
       assert.equal(
         await panel
           .getByRole('radiogroup', { name: 'Запрещённые слова и сайты', exact: true })
@@ -690,6 +714,58 @@ try {
       assert.equal(await words(true).isDisabled(), true);
       assert.equal(state.writes.length, 0);
       console.log('PASS real page: replacement approval cannot survive A→B→A');
+
+      await fresh({ links: true });
+      await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+      await page.getByRole('button', { name: 'Ссылки', exact: true }).click();
+      const links = page.locator('.links-panel');
+      const sites = links
+        .locator('details')
+        .filter({ has: page.getByText('Сайты из стоп-слов', { exact: true }) });
+      await sites.locator(':scope > summary').click();
+      await sites
+        .getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true })
+        .fill('new.example');
+      await sites.getByRole('button', { name: 'Добавить записи', exact: true }).click();
+      await links.getByRole('button', { name: 'Добавить', exact: true }).click();
+      const pendingLink = links.getByRole('textbox', { name: 'Ссылка или сайт', exact: true });
+      await pendingLink.fill('https://example.com/pending');
+      await sites.getByRole('button', { name: 'Сохранить сайты', exact: true }).click();
+      await waitUntil(
+        () => state.writes.length === 1 && state.saved['chat-a'].stopWordsRevision === 8,
+        'sites save independently of pending link',
+      );
+      assert.equal(state.writes[0].pathname, '/api/chats/chat-a/stop-words');
+      assert.equal(state.writes[0].body.expectedRevision, 7);
+      assert.deepEqual(state.writes[0].body.policy.domains, ['blocked.example', 'new.example']);
+      assert.equal(await pendingLink.inputValue(), 'https://example.com/pending');
+      await page.getByRole('link', { name: 'Чат B', exact: true }).click();
+      const leaveLink = page.getByRole('dialog', { name: 'Сохранить изменения?', exact: true });
+      await leaveLink.getByRole('button', { name: 'Сохранить и перейти', exact: true }).click();
+      await leaveLink.getByRole('button', { name: 'Сохранить и перейти', exact: true }).waitFor();
+      await leaveLink.getByRole('button', { name: 'Отмена', exact: true }).click();
+      await leaveLink.waitFor({ state: 'hidden' });
+      assert.equal(state.writes.length, 1, 'global Save retains the pending-rule barrier');
+      assert.equal(await links.isVisible(), true, 'global Save returns to Links');
+      assert.equal(await pendingLink.inputValue(), 'https://example.com/pending');
+      await links
+        .getByRole('region', { name: 'Добавление правила', exact: true })
+        .getByRole('button', { name: 'Добавить', exact: true })
+        .click();
+      await page
+        .locator('.settings-drilldown__panel--links')
+        .getByRole('button', { name: 'Сохранить', exact: true })
+        .click();
+      await links.waitFor({ state: 'hidden' });
+      assert.equal(state.writes.length, 2);
+      assert.equal(state.writes[1].pathname, '/api/chats/chat-a/settings/section');
+      assert.equal(
+        state.writes[1].body.changes.linkRulesPolicy.rules[0].target,
+        'https://example.com/pending',
+      );
+      console.log(
+        `PASS ${name}: sites revision saves with pending link; global Save returns to Links; explicit Add then saves link policy`,
+      );
       assert.deepEqual(errors, []);
     } catch (error) {
       if (page) {

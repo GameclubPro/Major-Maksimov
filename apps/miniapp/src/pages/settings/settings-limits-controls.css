@@ -1,0 +1,29 @@
+@layer pages {
+  .settings-drilldown .settings-native-toggle__row.settings-length-limit__value-row {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .settings-drilldown .settings-length-limit__value-row > .settings-native-toggle__title {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .settings-length-limit__number {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+  }
+
+  .settings-length-limit__number input {
+    width: 5.5rem;
+    max-width: 100%;
+    min-height: 44px;
+    text-align: center;
+    font: inherit;
+    font-weight: 700;
+  }
+}

@@ -1,9 +1,11 @@
 import { createElement, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { HomeEntityFavoritesProvider } from '../../src/lib/home-entity-favorites-context';
 import { getPreviewApiPrincipalUserId } from '../../src/lib/api/preview-principal';
 import { SettingsApplyTargetSheet } from '../../src/pages/settings/settings-apply-target-sheet';
+import { SettingsApplyPartialResult } from '../../src/pages/settings/settings-apply-partial-result';
 import { createDefaultApplySettingsTarget } from '../../src/pages/settings/settings-apply-target';
 import { createPreviewApiTransport } from '../../src/lib/api/preview-transport';
 import { createPreviewState } from '../../src/lib/api/preview-transport-state';
@@ -12,7 +14,9 @@ import '../../src/styles.css';
 import '../../src/styles/moderation-workspace.css';
 
 type Props = ComponentProps<typeof SettingsApplyTargetSheet>;
-type Options = Partial<Pick<Props, 'sheet' | 'preview' | 'previewLoading' | 'isApplying'>>;
+type Options = Partial<Pick<Props, 'sheet' | 'preview' | 'previewLoading' | 'isApplying'>> & {
+  partial?: Omit<ComponentProps<typeof SettingsApplyPartialResult>, 'onClose'> | null;
+};
 type Target = NonNullable<Props['sheet']>['target'];
 
 const api = createPreviewApiTransport();
@@ -44,29 +48,37 @@ const render = (next: Options = {}) => {
   root.render(
     <QueryClientProvider client={queryClient}>
       <HomeEntityFavoritesProvider api={api} verifiedUserId={verifiedUserId}>
-        {createElement(SettingsApplyTargetSheet, {
-          api,
-          sheet: null,
-          preview: null,
-          previewLoading: false,
-          previewError: null,
-          sectionLabel: 'Ссылки',
-          overlayStyle: undefined,
-          isApplying: false,
-          ...options,
-          onClose: () => {
-            actions.push({ kind: 'close' });
-            render({ sheet: null });
-          },
-          onTargetChange: (target) => {
-            actions.push({ kind: 'target', target });
-            render({ sheet: { section: 'links', target } });
-          },
-          onConfirm: () => {
-            actions.push({ kind: 'confirm', target: options.sheet!.target });
-            render({ isApplying: true });
-          },
-        })}
+        <MemoryRouter>
+          {createElement(SettingsApplyTargetSheet, {
+            api,
+            sheet: null,
+            preview: null,
+            previewLoading: false,
+            previewError: null,
+            sectionLabel: 'Ссылки',
+            overlayStyle: undefined,
+            isApplying: false,
+            ...options,
+            onClose: () => {
+              actions.push({ kind: 'close' });
+              render({ sheet: null });
+            },
+            onTargetChange: (target) => {
+              actions.push({ kind: 'target', target });
+              render({ sheet: { section: 'links', target } });
+            },
+            onConfirm: () => {
+              actions.push({ kind: 'confirm', target: options.sheet!.target });
+              render({ isApplying: true });
+            },
+          })}
+          {options.partial ? (
+            <SettingsApplyPartialResult
+              {...options.partial}
+              onClose={() => render({ partial: null })}
+            />
+          ) : null}
+        </MemoryRouter>
       </HomeEntityFavoritesProvider>
     </QueryClientProvider>,
   );

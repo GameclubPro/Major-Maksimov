@@ -115,7 +115,7 @@ export function ReportJournal({ api, chatId }: { api: ApiTransport; chatId: stri
                 onChange={(event) => setTo(event.target.value)}
               />
             </label>
-            <button type="submit" className="button button--secondary">
+            <button type="submit" className="button button--ghost">
               Применить период
             </button>
           </div>
@@ -448,7 +448,7 @@ function ReportJournalResults({
                 {['COLLECTING', 'PENDING'].includes(item.status) && (
                   <button
                     type="button"
-                    className="button button--secondary"
+                    className="button button--ghost"
                     disabled={dismiss.isPending || detail.isError}
                     onClick={() => setConfirmDismiss(item.id)}
                   >
@@ -466,7 +466,7 @@ function ReportJournalResults({
       {nextCursor && (
         <button
           type="button"
-          className="button button--secondary"
+          className="button button--ghost"
           disabled={loadOlder.isPending}
           onClick={() => loadOlder.mutate(nextCursor)}
         >

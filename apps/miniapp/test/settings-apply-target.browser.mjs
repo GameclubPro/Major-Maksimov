@@ -121,6 +121,104 @@ try {
       true,
     );
   }
+  await page.evaluate(() =>
+    window.settingsApplyTargetTest.render({
+      sheet: null,
+      partial: {
+        recipientTitles: { 'chat-a': 'Новости района', 'chat-b': '<img src=x onerror=alert(1)>' },
+        result: {
+          code: 'SETTINGS_APPLY_PARTIAL',
+          partialApplied: true,
+          sourceChatId: 'chat-a',
+          message: 'Часть настроек применена',
+          targetCount: 4,
+          appliedCount: 1,
+          unchangedCount: 3,
+          failedCount: 2,
+          notAttemptedCount: 1,
+          appliedChatIds: ['chat-a'],
+          unchangedChatIds: ['chat-b', 'toString', 'chat-d'],
+          outcomes: [
+            { chatId: 'chat-a', status: 'APPLIED' },
+            { chatId: 'chat-b', status: 'FAILED', message: 'Нет прав' },
+            { chatId: 'toString', status: 'FAILED' },
+            { chatId: 'chat-d', status: 'NOT_ATTEMPTED' },
+          ],
+          outcomesTruncated: true,
+          causeCode: 'SETTINGS_WRITE_FAILED',
+          causeMessage: 'Не все чаты обновлены.',
+        },
+      },
+    }),
+  );
+  const partial = page.getByRole('dialog', { name: 'Часть настроек применена' });
+  await partial.waitFor();
+  assert.equal(
+    await partial.getByRole('link', { name: 'Новости района', exact: true }).getAttribute('href'),
+    '/chat/chat-a/settings',
+  );
+  assert.equal(
+    await partial.getByRole('link', { name: '<img src=x onerror=alert(1)>', exact: true }).count(),
+    1,
+  );
+  assert.equal(await partial.locator('img').count(), 0, 'recipient titles render as safe text');
+  assert.equal(await partial.getByRole('link', { name: 'Чат toString', exact: true }).count(), 1);
+  assert.equal(
+    await partial.getByRole('link').count(),
+    3,
+    'not-attempted outcomes retain separate count semantics',
+  );
+  assert.match(await partial.innerText(), /Новости района — обновлён/u);
+  assert.match(await partial.innerText(), /ошибка: Нет прав/u);
+  assert.match(await partial.innerText(), /Показана часть чатов/u);
+  for (const width of [320, 412]) {
+    for (const theme of ['light', 'dark']) {
+      await page.setViewportSize({ width, height: 740 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.evaluate((theme) => {
+        document.documentElement.dataset.maxTheme = theme;
+      }, theme);
+      assert.equal(
+        await partial.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return (
+            bounds.left >= -1 &&
+            bounds.right <= innerWidth + 1 &&
+            element.scrollWidth <= element.clientWidth + 1
+          );
+        }),
+        true,
+        'partial result and recipient names fit mobile width',
+      );
+      const confirm = partial.getByRole('button', { name: 'Понятно', exact: true });
+      await confirm.scrollIntoViewIfNeeded();
+      assert.equal(
+        await confirm.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return (
+            bounds.width >= 44 &&
+            bounds.height >= 44 &&
+            bounds.top >= -1 &&
+            bounds.bottom <= innerHeight + 1 &&
+            element.contains(
+              document.elementFromPoint(
+                bounds.left + bounds.width / 2,
+                bounds.top + bounds.height / 2,
+              ),
+            )
+          );
+        }),
+        true,
+        'mobile partial result action remains reachable',
+      );
+      await page.screenshot({ path: join(screenshotDir, `partial-${width}-${theme}.png`) });
+    }
+  }
+  await partial.getByRole('button', { name: 'Понятно', exact: true }).click();
+  await partial.waitFor({ state: 'hidden' });
+  console.log(
+    'PASS partial result: reviewed names, safe id fallback, exact statuses and no replay',
+  );
   assert.deepEqual(errors, []);
   console.log(
     `PASS: mobile and desktop target controls fit both themes; screenshots: ${screenshotDir}`,

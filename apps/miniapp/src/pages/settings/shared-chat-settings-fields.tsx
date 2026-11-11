@@ -297,6 +297,18 @@ function Sanctions({
         enabledPath={boolean('MuteEnabled')}
         durationPath={number('MuteDurationHours')}
         title="3. Ограничение"
+        durationLabel={
+          {
+            link: 'за ссылки',
+            profanity: 'за нецензурную лексику',
+            textFilters: 'за рекламу',
+            duplicate: 'за повторы',
+            messageLimits: 'за нарушения ограничений',
+            phoneNumbers: 'за номера телефонов',
+            requiredSubscription: 'за сообщения без подписки',
+            invitationAccess: 'за сообщения без приглашения',
+          }[prefix]
+        }
         onChange={(enabled) => setChatBoolean(fields, boolean('MuteEnabled'), enabled)}
       />
       <SharedNativeSettingsToggle

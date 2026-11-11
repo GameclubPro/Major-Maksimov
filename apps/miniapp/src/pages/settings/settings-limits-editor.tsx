@@ -311,6 +311,7 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
               onChange={(event) => {
                 const enabled = event.target.checked;
                 setFieldValue('maxMessageLengthEnabled', enabled);
+                if (!enabled) props.onMaxMessageLengthError(null);
                 if (enabled) {
                   enableDefaultSanctionStages(setFieldValue, 'messageLimits');
                 }
@@ -328,6 +329,8 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
             min={MESSAGE_LENGTH_MIN}
             max={MESSAGE_LENGTH_MAX}
             step={MESSAGE_LENGTH_STEP}
+            error={fieldErrors.maxMessageLength}
+            onError={props.onMaxMessageLengthError}
             onCommit={(value) =>
               setFieldValue('maxMessageLength', value as ChatSettings['maxMessageLength'])
             }
@@ -342,7 +345,7 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
           </p>
         ) : null}
 
-        {fieldErrors.maxMessageLength ? (
+        {fieldErrors.maxMessageLength && !draft.maxMessageLengthEnabled ? (
           <small className="field__hint">{fieldErrors.maxMessageLength}</small>
         ) : null}
       </div>

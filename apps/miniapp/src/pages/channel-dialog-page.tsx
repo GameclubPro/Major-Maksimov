@@ -37,6 +37,7 @@ import {
 import { createPortal } from 'react-dom';
 import { useLocation, useParams, useSearchParams } from 'react-router';
 import { MAX_MARKDOWN_TOOL_DEFINITIONS, type MaxMarkdownTool } from '../lib/max-markdown-tools';
+import { useCommentDeleteConfirmation } from './channel-comment-delete-confirm';
 import { PublicDialogUnavailableState } from '../components/public-dialog-unavailable-state';
 import type { MaxRichTextEditorHandle } from '../components/max-rich-text-editor';
 import { StatusState } from '../components/ui/status-state';
@@ -95,6 +96,7 @@ import '../styles/channel-dialog-comments.css';
 import '../styles/channel-dialog-image-viewer.css';
 import '../styles/channel-dialog-native-comments.css';
 import '../styles/channel-dialog-themes.css';
+import '../styles/channel-dialog-mobile-actions.css';
 
 const LazyChannelDialogNotificationSheet = lazy(
   () => import('../components/channel-dialog-notification-sheet'),
@@ -631,7 +633,7 @@ function DialogAvatar({
     return (
       <button
         type="button"
-        className={cn('channel-dialog-message__avatar', 'is-clickable', showImage && 'has-image')}
+        className="channel-dialog-message__avatar-target"
         aria-label={`Открыть профиль ${normalizedLabel}`}
         onClick={(event) => {
           event.preventDefault();
@@ -640,7 +642,9 @@ function DialogAvatar({
         }}
         disabled={disabled}
       >
-        {avatarContent}
+        <span className={cn('channel-dialog-message__avatar', showImage && 'has-image')}>
+          {avatarContent}
+        </span>
       </button>
     );
   }
@@ -3186,25 +3190,20 @@ export function ChannelDialogPage({
     requestAnimationFrame(() => composeFieldRef.current?.focus());
   };
 
-  const handleDelete = (message: ChannelDialogMessage) => {
-    if (deleteMutation.isPending || (!message.canDelete && !message.canDeleteAsAdmin)) {
-      return;
-    }
-
-    const confirmationText =
-      message.canDeleteAsAdmin && !message.canDelete
-        ? 'Удалить чужой комментарий как администратор?'
-        : 'Удалить комментарий?';
-    if (typeof window !== 'undefined' && !window.confirm(confirmationText)) {
-      return;
-    }
-
-    maxImpact('medium');
-    deleteMutation.mutate({
-      messageId: message.id,
-      deletedByAdmin: message.canDeleteAsAdmin && !message.canDelete,
-    });
-  };
+  const deleteConfirmation = useCommentDeleteConfirmation({
+    api,
+    scope: JSON.stringify([currentUserId, entityType, chatId, dialogType, token]),
+    enabled: shouldLoadDialog && dialogQuery.isSuccess,
+    busy: isCommentActionPending,
+    messages,
+    getMessage: (id) =>
+      queryClient
+        .getQueryData<ChannelDialogResponse>(dialogQueryKey)
+        ?.messages.find((message) => message.id === id),
+    onDismiss: dismissMessageActions,
+    onDelete: (value) => deleteMutation.mutateAsync(value),
+  });
+  const handleDelete = deleteConfirmation.request;
 
   const handleReactionToggle = (
     messageId: string,
@@ -5214,6 +5213,7 @@ export function ChannelDialogPage({
         </Suspense>
       ) : null}
 
+      {deleteConfirmation.dialog}
       {canManageCommentNotifications && dialogType === 'comments' && isNotificationSettingsOpen ? (
         <Suspense fallback={null}>
           <LazyChannelDialogNotificationSheet

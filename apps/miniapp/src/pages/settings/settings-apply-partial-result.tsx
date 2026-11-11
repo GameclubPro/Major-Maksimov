@@ -4,9 +4,11 @@ import { ActionConfirmSheet } from '../../components/ui/action-confirm-sheet';
 
 export function SettingsApplyPartialResult({
   result,
+  recipientTitles = {},
   onClose,
 }: {
   result: SettingsApplyPartialError;
+  recipientTitles?: Readonly<Record<string, string>>;
   onClose: () => void;
 }) {
   return (
@@ -27,8 +29,11 @@ export function SettingsApplyPartialResult({
               .map((outcome) => (
                 <li key={outcome.chatId}>
                   <Link to={`/chat/${encodeURIComponent(outcome.chatId)}/settings`}>
-                    {outcome.status === 'APPLIED' ? 'Обновлённый чат' : 'Чат с ошибкой'}
+                    {(Object.hasOwn(recipientTitles, outcome.chatId) &&
+                      recipientTitles[outcome.chatId]?.trim()) ||
+                      `Чат ${outcome.chatId}`}
                   </Link>
+                  {outcome.status === 'APPLIED' ? ' — обновлён' : ' — ошибка'}
                   {outcome.message ? `: ${outcome.message}` : ''}
                 </li>
               ))}

@@ -80,7 +80,7 @@ try {
     },
     {
       name: 'compact',
-      device: { viewport: { width: 320, height: 480 } },
+      device: { viewport: { width: 320, height: 480 }, isMobile: true, hasTouch: true },
       platform: 'ios',
       safeTop: 20,
       safeBottom: 34,
@@ -170,7 +170,7 @@ try {
       await page.locator('.publisher-entity-row').first().waitFor();
       await assertCatalogBounds(page);
 
-      if (profile.name === 'se' || profile.name === 'android') {
+      if (['se', 'android', 'compact'].includes(profile.name)) {
         await page.goto(`${base}?preview=1&profile=publisher&publisherState=large`);
         await page.locator('.publisher-entity-row').first().waitFor();
         await applyNativeVisualMode(page, profile);
@@ -185,6 +185,80 @@ try {
         await assertLastRowReachable(page);
         await assertCatalogBounds(page);
         await page.screenshot({ path: `${output}/${profile.name}-${colorScheme}-virtual.png` });
+        await page.evaluate(() => {
+          document.documentElement.style.fontSize = '32px';
+          document.querySelector('.publisher-entities-page__list').scrollTop = 0;
+        });
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.publisher-entity-row')?.getBoundingClientRect().height >= 240,
+        );
+        const clippedText = await page.locator('.publisher-entity-row').evaluateAll((rows) =>
+          rows.flatMap((row) => {
+            const bounds = row.getBoundingClientRect();
+            return [
+              ...row.querySelectorAll('.publisher-entity-row__copy, .publisher-entity-row__status'),
+            ]
+              .filter((copy) => {
+                const box = copy.getBoundingClientRect();
+                return box.top < bounds.top - 1 || box.bottom > bounds.bottom + 1;
+              })
+              .map((copy) => copy.textContent);
+          }),
+        );
+        assert.deepEqual(clippedText, [], '200% text fits virtual rows without clipping');
+        for (const label of ['Все', 'Готовы', 'Внимание']) {
+          const button = page.getByRole('button', { name: label, exact: true });
+          await button.scrollIntoViewIfNeeded();
+          assert.ok(
+            await button.evaluate((node) => {
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              const text = range.getBoundingClientRect();
+              const box = node.getBoundingClientRect();
+              return text.left >= box.left - 1 && text.right <= box.right + 1;
+            }),
+            `${label} stays readable at 200%`,
+          );
+          await button.tap();
+          assert.equal(await button.getAttribute('aria-pressed'), 'true');
+        }
+        await page.getByRole('button', { name: 'Все', exact: true }).tap();
+        await page.locator('.publisher-entities-page__list.is-virtual').waitFor();
+        await page.screenshot({ path: `${output}/${profile.name}-${colorScheme}-200pct.png` });
+        await page.locator('.publisher-entities-page__list').evaluate((list) => {
+          list.scrollTop = list.scrollHeight;
+        });
+        await page.waitForFunction(() => {
+          const row = document.querySelector('.publisher-entity-row:last-of-type');
+          return row?.getAttribute('aria-posinset') === '200';
+        });
+        const lastStatus = page.locator('.publisher-entity-row__status').last();
+        await lastStatus.scrollIntoViewIfNeeded();
+        assert.ok(
+          await lastStatus.evaluate((node) => {
+            const bounds = node.getBoundingClientRect();
+            const list = node.closest('.publisher-entities-page__list').getBoundingClientRect();
+            return (
+              bounds.top >= list.top - 1 &&
+              bounds.bottom <= list.bottom + 1 &&
+              node.contains(
+                document.elementFromPoint(
+                  bounds.left + bounds.width / 2,
+                  bounds.top + bounds.height / 2,
+                ),
+              )
+            );
+          }),
+          'Last status remains reachable even when a large-text row exceeds the viewport',
+        );
+        await page.evaluate(() => {
+          document.documentElement.style.fontSize = '16px';
+        });
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.publisher-entity-row')?.getBoundingClientRect().height === 120,
+        );
         await page.setViewportSize({
           width: profile.device.viewport.height,
           height: profile.device.viewport.width,

@@ -126,10 +126,9 @@ export function PublisherEntityModulesPage({ api }: { api: ApiTransport }) {
     params.entityType === 'chat' || params.entityType === 'channel' ? params.entityType : null;
   const entityId = params.entityId?.trim() ?? '';
   const location = useLocation();
+  const focusVk = new URLSearchParams(location.search).get('focus') === 'vk';
   const smartphoneLayout = useSmartphoneLayout();
-  const [vkOpen, setVkOpen] = useState(
-    () => new URLSearchParams(location.search).get('focus') === 'vk',
-  );
+  const [vkOpen, setVkOpen] = useState(focusVk);
   const [permissionBlocker, setPermissionBlocker] = useState<BotPermissionBlocker | null>(null);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [entityRecheckPhase, setEntityRecheckPhase] = useState<PublisherEntityRecheckPhase | null>(
@@ -191,13 +190,16 @@ export function PublisherEntityModulesPage({ api }: { api: ApiTransport }) {
   });
 
   useEffect(() => {
-    setVkOpen(false);
     setSuggestionsOpen(false);
     entityRecheckAbortRef.current?.abort();
     entityRecheckAbortRef.current = null;
     setEntityRecheckPhase(null);
     setPermissionBlocker(null);
   }, [entityId, entityType]);
+
+  useEffect(() => {
+    setVkOpen(focusVk);
+  }, [entityId, entityType, focusVk]);
 
   useEffect(() => {
     mountedRef.current = true;

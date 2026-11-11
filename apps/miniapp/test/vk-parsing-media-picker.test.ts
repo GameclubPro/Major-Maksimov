@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isValidElement, type ReactElement } from 'react';
-import { PostMediaPicker } from '../src/components/vk-parsing/post-media-picker';
+import { PostMediaPicker, PostPhotoChoice } from '../src/components/vk-parsing/post-media-picker';
 import {
   isDirectVkParsingVideoUrl,
   PostVideoChoice,
@@ -68,13 +68,12 @@ test('VK media picker keeps photo buttons and uses the video preview choice', ()
     onToggleLink: () => undefined,
   });
 
-  const photoButtons = collectElements(
-    tree,
-    (element) => element.type === 'button' && hasClass(element, 'vk-parsing-photo-choice'),
-  );
+  const photoButtons = collectElements(tree, (element) => element.type === PostPhotoChoice);
   const videoChoices = collectElements(tree, (element) => element.type === PostVideoChoice);
 
   assert.equal(photoButtons.length, 2);
+  assert.equal((photoButtons[0]?.props as { checked?: unknown }).checked, true);
+  assert.equal((photoButtons[1]?.props as { checked?: unknown }).checked, false);
   assert.equal(videoChoices.length, 1);
   assert.equal((videoChoices[0]?.props as { url?: unknown }).url, videoUrl);
 });

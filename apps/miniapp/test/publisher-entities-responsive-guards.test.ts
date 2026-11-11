@@ -26,16 +26,14 @@ const pickerCss = readFileSync(
   'utf8',
 );
 
-test('publisher virtual list uses the same stable row height in TypeScript and CSS', () => {
+test('publisher virtual list shares its text-scaled row height with CSS', () => {
   const sourceHeight = Number(pageSource.match(/PUBLISHER_ENTITY_ROW_HEIGHT = (\d+);/u)?.[1]);
-  const cssHeight = Number(
-    pageCss.match(
-      /\.publisher-entities-page__list\.is-virtual \.publisher-entity-row \{[\s\S]*?height: (\d+)px;/u,
-    )?.[1],
-  );
-
   assert.equal(sourceHeight, 120);
-  assert.equal(cssHeight, sourceHeight);
+  assert.match(pageCss, /height: var\(--publisher-entity-row-height, 120px\);/u);
+  assert.match(pageSource, /rowHeight: entityRowHeight/u);
+  assert.match(pageSource, /startIndex \* entityRowHeight/u);
+  assert.match(pageSource, /rootFontSize \* PUBLISHER_ENTITY_ROW_REM/u);
+  assert.match(pageSource, /observer.observe\(document.documentElement\)/u);
   assert.match(pageCss, /-webkit-line-clamp: 2;/u);
   assert.match(pageCss, /overflow-y: auto;[\s\S]*?touch-action: pan-y;/u);
   const listBlock = pageCss.match(/\.publisher-entities-page__list \{[\s\S]*?\n {2}\}/u)?.[0] ?? '';
@@ -114,7 +112,7 @@ test('publisher entity pagination stays inside the only list scroll owner', () =
 
   assert.ok(scrollHandlerStart >= 0 && scrollHandlerEnd > scrollHandlerStart);
   assert.ok(listStart >= 0 && paginationStart > listStart && listEnd > paginationStart);
-  assert.match(pageSource, /PUBLISHER_ENTITY_AUTO_LOAD_THRESHOLD/u);
+  assert.match(scrollHandlerSource, /threshold: entityRowHeight \* 2/u);
   assert.match(pageSource, /shouldLoadPublisherEntitiesNextPage\(\{/u);
   assert.match(pageSource, /onScroll=\{handleEntityListScroll\}/u);
   assert.match(pageSource, /nextPageRequestRef\.current/u);
