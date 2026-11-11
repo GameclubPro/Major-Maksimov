@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { chatSummarySchema } from '@maxim/contracts';
 import { Job, Queue, QueueEvents, Worker } from 'bullmq';
@@ -11,9 +12,10 @@ import {
   wasMaxPreDispatchGuardRejected,
 } from './max-action-pre-dispatch-guard';
 import { wasMaxMemberMutationAttempted } from './max-member-error.util';
-import { Prisma } from '../prisma/prisma-client';
+import { ChatEntityType, Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisCounterService } from '../moderation/redis-counter.service';
+import { ModerationSanctionStateLockService } from '../moderation/moderation-sanction-state-lock.service';
 import { MaxActionLedgerWatchdogService } from '../system/max-action-ledger-watchdog.service';
 import { AdminService } from '../admin/admin.service';
 import type { AdminManualModerationRuntimeContext } from '../admin/admin-manual-moderation-runtime-context';
@@ -38,6 +40,114 @@ function fixtureAdmissionFailureKeys(botId: string): string[] {
 
 type ManualBanFanout = Pick<AdminManualModerationRuntimeContext, 'applyManualSystemBanFanout'>;
 type ManualBanFanoutInput = Parameters<ManualBanFanout['applyManualSystemBanFanout']>[0];
+
+async function withManualModeration<T>(
+  s: MultibotHarness,
+  operation: (admin: AdminService, counters: RedisCounterService) => Promise<T>,
+): Promise<T> {
+  s.config.set('MAX_BOT_TOKEN', s.bots[0]!.token);
+  const counters = new RedisCounterService(s.config);
+  let admin: AdminService | undefined;
+  try {
+    admin = new AdminService(
+      s.prisma as never,
+      s.max,
+      s.cache,
+      s.config,
+      undefined,
+      counters,
+      undefined,
+      undefined,
+      s.links,
+      s.registry as never,
+    );
+    return await operation(admin, counters);
+  } finally {
+    await admin?.onModuleDestroy();
+    await counters.onModuleDestroy();
+  }
+}
+
+async function runManualActionAfterLockWait(
+  s: MultibotHarness,
+  chatId: string,
+  action: (admin: AdminService) => ReturnType<AdminService['applyManualModerationAction']>,
+  whileWaiting: () => Promise<void>,
+) {
+  let signalAcquired!: () => void;
+  let releaseLock!: () => void;
+  const acquired = new Promise<void>((resolve) => {
+    signalAcquired = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+  const blocker = new ModerationSanctionStateLockService(s.counters).runExclusive(
+    { chatId, userId: 'fixture-user' },
+    async () => {
+      signalAcquired();
+      await held;
+    },
+  );
+  try {
+    await Promise.race([acquired, blocker]);
+    return await withManualModeration(s, async (admin, counters) => {
+      let signalWaiting!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        signalWaiting = resolve;
+      });
+      const acquireLock = counters.acquireLockBeforeDeadline.bind(counters);
+      const acquisition = jest
+        .spyOn(counters, 'acquireLockBeforeDeadline')
+        .mockImplementation(async (...args) => {
+          const result = await acquireLock(...args);
+          if (result.kind === 'busy') signalWaiting();
+          return result;
+        });
+      const outcome = action(admin).then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      );
+      try {
+        await Promise.race([
+          waiting,
+          outcome.then(() => {
+            throw new Error('Manual BAN completed before sanction lock contention');
+          }),
+        ]);
+        await whileWaiting();
+        releaseLock();
+        await blocker;
+        return await outcome;
+      } finally {
+        releaseLock();
+        await blocker;
+        await outcome;
+        acquisition.mockRestore();
+      }
+    });
+  } finally {
+    releaseLock();
+    await blocker;
+  }
+}
+
+function applyChannelBan(admin: AdminService, chatId: string, preferredBotId?: string) {
+  return admin.applyManualModerationAction(
+    chatId,
+    'fixture-user',
+    { userId: 'fixture-admin', username: null, displayName: null, chatTitle: null },
+    { action: 'BAN', scope: 'current_chat' },
+    'miniapp',
+    {
+      actorAlreadyVerified: true,
+      entityType: ChatEntityType.CHANNEL,
+      targetDisplayNameHint: 'Fixture user',
+      allowTargetDisplayNameRemoteLookup: false,
+      ...(preferredBotId ? { preferredBotId } : {}),
+    },
+  );
+}
 
 async function withManualBanFanout(
   s: MultibotHarness,
@@ -92,9 +202,12 @@ stores('shared production member identity on PostgreSQL/Redis/BullMQ', () => {
       await owned?.dispose();
     }
   });
-  async function fixture(bots = 4) {
+  async function fixture(bots = 4, entityType: ChatEntityType = ChatEntityType.CHAT) {
     h = await createMultibotHarness({ databaseUrl, redisUrl, bots, mode: 'on' });
-    const [chatId] = await h.seedCatalog(1);
+    if (entityType === ChatEntityType.CHANNEL)
+      for (const bot of h.bots)
+        h.setBotPermissions(bot.id, ['read_all_messages', 'delete', 'add_remove_members']);
+    const [chatId] = await h.seedCatalog(1, {}, entityType);
     return { s: h, chatId: chatId! };
   }
   function job(
@@ -112,6 +225,193 @@ stores('shared production member identity on PostgreSQL/Redis/BullMQ', () => {
       createdAt: new Date().toISOString(),
     };
   }
+
+  it.each(['candidate', 'preferred'] as const)(
+    'uses fresh manual channel rights evidence despite a cached member-management denial via %s selection',
+    async (selection) => {
+      const { s, chatId } = await fixture(1, ChatEntityType.CHANNEL);
+      const botId = s.bots[0]!.id;
+      s.setBotPermissions(botId, ['read_all_messages', 'delete']);
+      const cached = await s.max.getCurrentChatMemberAccess(chatId, { botId });
+      expect(cached.permissions).not.toContain('add_remove_members');
+      s.setBotPermissions(botId, ['read_all_messages', 'delete', 'add_remove_members']);
+      const ownMemberReads = () =>
+        s.requests.filter(
+          (call) => call.method === 'get' && call.path === `/chats/${chatId}/members/me`,
+        );
+      const readsBeforeAction = ownMemberReads().length;
+
+      await withManualModeration(s, async (admin) => {
+        await expect(
+          applyChannelBan(admin, chatId, selection === 'preferred' ? botId : undefined),
+        ).resolves.toMatchObject({
+          message: 'Бан включён.',
+        });
+      });
+
+      expect(s.effects).toMatchObject([
+        { method: 'delete', path: `/chats/${chatId}/members`, botId, params: { block: true } },
+      ]);
+      expect(ownMemberReads()).toHaveLength(readsBeforeAction + 1);
+      expect(await s.max.getCurrentChatMemberAccess(chatId, { botId })).toMatchObject({
+        permissions: cached.permissions,
+      });
+      expect(ownMemberReads()).toHaveLength(readsBeforeAction + 1);
+      expect(
+        await s.prisma.moderationEvent.count({ where: { chatId, ruleCode: 'MANUAL_BAN' } }),
+      ).toBe(1);
+    },
+  );
+
+  it('rejects fresh manual channel rights denial despite cached member-management permission', async () => {
+    const { s, chatId } = await fixture(1, ChatEntityType.CHANNEL);
+    const botId = s.bots[0]!.id;
+    const cached = await s.max.getCurrentChatMemberAccess(chatId, { botId });
+    expect(cached.permissions).toContain('add_remove_members');
+    s.setBotPermissions(botId, ['read_all_messages', 'delete']);
+
+    await withManualModeration(s, async (admin) => {
+      await expect(applyChannelBan(admin, chatId)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    expect(s.effects).toEqual([]);
+    expect(
+      s.requests.filter(
+        (call) => call.method === 'delete' && call.path === `/chats/${chatId}/members`,
+      ),
+    ).toEqual([]);
+    expect(await s.prisma.moderationEvent.count({ where: { chatId } })).toBe(0);
+    expect(await s.prisma.maxActionLedgerEntry.count({ where: { chatId } })).toBe(0);
+  });
+
+  it('rejects manual channel rights evidence revoked while waiting for the real sanction lock', async () => {
+    const { s, chatId } = await fixture(1, ChatEntityType.CHANNEL);
+    const botId = s.bots[0]!.id;
+    await s.max.getCurrentChatMemberAccess(chatId, { botId });
+    const banMember = s.max.banMember.bind(s.max);
+    let dispatchRejection: unknown;
+    const mutation = jest.spyOn(s.max, 'banMember').mockImplementation(async (...args) => {
+      try {
+        return await banMember(...args);
+      } catch (error: unknown) {
+        dispatchRejection = error;
+        throw error;
+      }
+    });
+    try {
+      const outcome = await runManualActionAfterLockWait(
+        s,
+        chatId,
+        (admin) => applyChannelBan(admin, chatId),
+        () => s.demote(chatId, botId),
+      );
+      expect(outcome).toMatchObject({
+        status: 'rejected',
+        reason: expect.any(Error),
+      });
+      expect(dispatchRejection).toMatchObject({ code: 'max_action_executor_proof_rejected' });
+    } finally {
+      mutation.mockRestore();
+    }
+
+    expect(s.effects).toEqual([]);
+    expect(
+      s.requests.filter(
+        (call) => call.method === 'delete' && call.path === `/chats/${chatId}/members`,
+      ),
+    ).toEqual([]);
+    expect(await s.prisma.moderationEvent.count({ where: { chatId } })).toBe(0);
+    expect(
+      await s.prisma.maxActionLedgerEntry.count({ where: { chatId, status: 'SUCCEEDED' } }),
+    ).toBe(0);
+  });
+
+  it('rejects former-participant local ban after manual chat rights are revoked during sanction lock wait', async () => {
+    const { s, chatId } = await fixture(1);
+    const botId = s.bots[0]!.id;
+    s.setChatMemberAbsent(chatId, 'fixture-user', true);
+    const canonicalKey = `${chatId}:fixture-user`;
+    await s.prisma.chatMembershipActivityFeedItem.create({
+      data: {
+        canonicalKey,
+        sourceEventId: randomUUID(),
+        botId,
+        chatId,
+        userId: 'fixture-user',
+        eventType: 'user_removed',
+        eventAt: new Date(),
+        sourceCreatedAt: new Date(),
+      },
+    });
+    try {
+      expect(
+        await s.max.getChatMemberAccess(chatId, 'fixture-user', { botId, bypassCache: true }),
+      ).toBeNull();
+      expect(
+        await s.links.getFreshChatBotExecutionProof({ chatId, botId, purpose: 'moderate_member' }),
+      ).not.toBeNull();
+
+      const outcome = await runManualActionAfterLockWait(
+        s,
+        chatId,
+        (admin) =>
+          admin.applyManualModerationAction(
+            chatId,
+            'fixture-user',
+            { userId: 'fixture-admin', username: null, displayName: null, chatTitle: null },
+            { action: 'BAN', scope: 'current_chat' },
+            'miniapp',
+            {
+              actorAlreadyVerified: true,
+              entityType: ChatEntityType.CHAT,
+              targetDisplayNameHint: 'Fixture user',
+              allowTargetDisplayNameRemoteLookup: false,
+            },
+          ),
+        async () => {
+          const permissions = ['read_all_messages', 'write'];
+          s.setBotPermissions(botId, permissions);
+          expect(
+            await s.links.recordBotAccessProbe({
+              chatId,
+              botId,
+              access: { isAdmin: true, isOwner: false, permissionsKnown: true, permissions },
+              checkedAt: new Date(),
+              source: 'fixture-member-management-revoked',
+              allowMembershipRecovery: false,
+            }),
+          ).toBe(true);
+          await s.cache.invalidate(chatId);
+          expect(
+            await s.links.getFreshChatBotExecutionProof({
+              chatId,
+              botId,
+              purpose: 'moderate_member',
+            }),
+          ).toBeNull();
+          expect(
+            await s.links.getFreshChatBotExecutionProof({
+              chatId,
+              botId,
+              purpose: 'delete_message',
+            }),
+          ).not.toBeNull();
+        },
+      );
+
+      expect(outcome).toMatchObject({ status: 'rejected', reason: expect.any(ForbiddenException) });
+      expect(s.effects).toEqual([]);
+      expect(
+        s.requests.filter(
+          (call) => call.method === 'delete' && call.path === `/chats/${chatId}/members`,
+        ),
+      ).toEqual([]);
+      expect(await s.prisma.moderationEvent.count({ where: { chatId } })).toBe(0);
+      expect(await s.prisma.maxActionLedgerEntry.count({ where: { chatId } })).toBe(0);
+    } finally {
+      await s.prisma.chatMembershipActivityFeedItem.deleteMany({ where: { canonicalKey } });
+    }
+  });
 
   it.each(
     [1, 4, 9, 3, 6, 12].flatMap((bots) =>

@@ -1,3 +1,4 @@
+import type { ManualModerationBotAccessEvidence } from './manual-member-bot-access';
 import {
   BOT_SPEECH_EDITABLE_FIELD_KEYS,
   chatSettingsSchema,
@@ -270,6 +271,7 @@ export type ManualModerationExecutionOptions = {
   onAlreadyApplied?: () => void;
 };
 export type ResolveManualModerationActionBotAssignmentOptions = {
+  onAccessVerified?: (evidence: ManualModerationBotAccessEvidence) => void;
   preferredBotId?: string | null;
   entityType?: ChatEntityType;
 };

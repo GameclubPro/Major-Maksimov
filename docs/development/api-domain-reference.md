@@ -216,6 +216,14 @@ Statistics exchange does not grant advertising or shop authority.
 
 - The fleet has six moderation bots (two Major, two Majorsha and two Rex) plus a separate Publisher that works alongside them. Publisher never replaces a moderator: keep its configured identity outside the non-Publisher runtime route registry and moderation candidate pool, and keep its lifecycle in `PublisherEntityBinding` without assigning `Chat.botId`, `primaryBotId` or `ChatBotMembership`.
 - Confirmed bot access has no time expiry. `botAccessExpiresAt` is legacy/negative diagnostic data, never positive execution authority. Keep explicit activation, exact-bot denial/removal, capability ceilings and SQL proof fences. Fleet permission timers are retired; retained scheduled bot/maintenance jobs drain without MAX calls. Connection rosters and exact-user mini app demand use the existing bounded queues; Publisher human authority is also durable; imminent-publication preparation only nominates genuinely missing evidence. See the [current access runbook](../operations/runbooks/publisher-access-refresh-rollout.md).
+- Manual member actions carry the selected exact-bot, exact-entity fresh access snapshot within
+  that command after persisted probe and authoritative route validation. The immediate permission
+  precondition must not reread an older passive self cache. Never publish this snapshot to shared
+  cache or reuse it after changing executor; final SQL route/access epochs and sanction leases
+  still gate dispatch. Former-participant local bans recheck current SQL member-action authority
+  before local sanctions and follow-ups because they have no remote mutation guard.
+  Native stale-denial, fresh-denial and lock-wait revocation coverage lives
+  in `shared-member-action-postgres.spec.ts`.
 
 - Ownership is `Chat.primaryBotId` plus `ChatBotMembership`; `Chat.botId` is transitional compatibility.
 - Centralize primary-bot scoring in `src/max/max-bot-access-policy.util.ts`; routing and ownership repair share this policy.
