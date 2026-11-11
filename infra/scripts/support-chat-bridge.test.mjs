@@ -10,7 +10,12 @@ import { fileURLToPath } from 'node:url';
 import Redis from 'ioredis';
 import bridge from './support-chat-bridge.cjs';
 import { supportChatRemote, verifySupportContainer } from './support-chat-remote.mjs';
-import { answerSupport, knowledge, SUPPORT_ANSWER_FOOTER } from './support-llm-client.mjs';
+import {
+  answerSupport,
+  classifySupportRequest,
+  knowledge,
+  SUPPORT_ANSWER_FOOTER,
+} from './support-llm-client.mjs';
 import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 const {
   CHAT_ID,
@@ -418,17 +423,17 @@ test('failed exchanges cannot append or renew context and skip ends only its par
   assert.equal(history.read('participant-b', now + 1000).length, 2);
 });
 
-test('context expires five minutes after the last confirmed exchange', () => {
+test('context expires fifteen minutes after the last confirmed exchange', () => {
   const history = new PilotHistory();
   const now = Date.now();
   history.settle('participant-a', 'Первый вопрос', 'Первый ответ', 'sent', now);
-  assert.equal(history.read('participant-a', now + 299999).length, 2);
-  history.settle('participant-a', 'Потерянный вопрос', 'Потерянный ответ', 'unknown', now + 299999);
-  assert.deepEqual(history.read('participant-a', now + 300000), []);
+  assert.equal(history.read('participant-a', now + 899999).length, 2);
+  history.settle('participant-a', 'Потерянный вопрос', 'Потерянный ответ', 'unknown', now + 899999);
+  assert.deepEqual(history.read('participant-a', now + 900000), []);
   history.settle('participant-a', 'Новый вопрос', 'Новый ответ', 'sent', now + 400000);
   history.settle('participant-a', 'Уточнение', 'Уточняющий ответ', 'sent', now + 500000);
-  assert.equal(history.read('participant-a', now + 799999).length, 4);
-  assert.deepEqual(history.read('participant-a', now + 800000), []);
+  assert.equal(history.read('participant-a', now + 1399999).length, 4);
+  assert.deepEqual(history.read('participant-a', now + 1400000), []);
 });
 
 test('bounded live history preserves the latest clarification and observation without the AI footer', () => {
@@ -714,3 +719,78 @@ test(
     }
   },
 );
+
+test('peer replies preserve a bounded active case without storing or refreshing ignored messages', () => {
+  const history = new PilotHistory();
+  const now = Date.now();
+  history.settle(
+    'alice',
+    'Я администратор. Как настроить предложку Публика?',
+    'Включите предложения.',
+    'sent',
+    now,
+  );
+  const before = history.read('alice', now);
+  history.settle('alice', 'Совет другому человеку', '', 'skipped', now + 420000, {
+    replyToOther: true,
+    addressedToSupport: false,
+  });
+  assert.deepEqual(history.read('alice', now + 420001), before);
+  assert.deepEqual(history.read('bob', now + 420001), []);
+  assert.deepEqual(history.read('alice', now + 900000), []);
+  history.settle('alice', 'Новая задача', 'Следующий шаг', 'sent', now + 1000000);
+  history.settle('alice', 'Обсудим погоду', '', 'skipped', now + 1000001);
+  assert.deepEqual(history.read('alice', now + 1000002), []);
+});
+
+test('a peer interruption invalidates a bare clarification but an explicit support reply resumes it', () => {
+  const history = new PilotHistory();
+  const now = Date.now();
+  history.settle('alice', 'Почему удаляют объявление?', 'Вы администратор?', 'sent', now);
+  const before = history.read('alice', now);
+  history.settle('alice', 'Ответ человеку', '', 'skipped', now + 1000, { replyToOther: true });
+  assert.deepEqual(history.read('alice', now + 1001), before.slice(0, -1));
+  assert.equal(classifySupportRequest('Да', history.read('alice', now + 1001)).eligible, false);
+  assert.equal(
+    classifySupportRequest('Да', history.read('alice', now + 1001, { addressedToSupport: true }), {
+      addressedToSupport: true,
+    }).role,
+    'admin',
+  );
+  assert.deepEqual(history.read('alice', now + 1001, { addressedToSupport: true }), before);
+  history.settle('alice', 'Да', 'Проверьте права бота.', 'sent', now + 2000);
+  assert.ok(history.read('alice', now + 2001).some((turn) => turn.text === 'Вы администратор?'));
+  assert.equal(
+    classifySupportRequest('Не помогло', history.read('alice', now + 2001)).role,
+    'admin',
+  );
+  assert.deepEqual(history.read('alice', now + 902000), []);
+});
+
+test('confirmed colloquial member exchanges retain the role through the actual removal sequence', () => {
+  const history = new PilotHistory();
+  const now = Date.now();
+  history.settle(
+    'alice',
+    'Нет я подписчики просто, хочу удалить все свои объявления',
+    'Попросите администрацию своей группы.',
+    'sent',
+    now,
+  );
+  for (const [i, text] of [
+    'Удалить будет да',
+    'Как у меня не получается удалить свои объявления',
+    'Я хотел этого объявления удалить пять объявлений Я хочу всё удалить у меня не получается',
+  ].entries()) {
+    const decision = classifySupportRequest(text, history.read('alice', now + (i + 1) * 1000));
+    assert.equal(decision.eligible, true, text);
+    assert.equal(decision.role, 'member', text);
+    history.settle(
+      'alice',
+      text,
+      'Обратитесь к администраторам той группы.',
+      'sent',
+      now + (i + 1) * 1000,
+    );
+  }
+});

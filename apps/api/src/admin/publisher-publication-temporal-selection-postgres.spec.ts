@@ -547,6 +547,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
         let completed = false;
         let insertedBroadcasts = 0;
         let completedBroadcastTransactions = 0;
+        const broadcastTransactionTimingsMs: number[] = [];
         try {
           if (shouldStop()) return;
           prefix = `execution-parent-${randomUUID()}`;
@@ -559,12 +560,14 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
           stageStarted = performance.now();
           // FLAG: This fixture stresses parent selection, not a large audience under one parent.
           // Each retained or stale envelope has one immutable recipient; all rows are test-owned.
+          // FLAG: Vary synthetic keys at the start so route and FK lookups do not repeatedly
+          // collate a shared 65-character prefix. Keep every parent and its real constraints.
           await db.$executeRaw(Prisma.sql`
             INSERT INTO "publication_occurrences" (
               "id", "publication_id", "schedule_id", "content_revision_id", "schedule_revision",
               "scheduled_at", "status", "dispatch_profile", "required_bot_id", "delivery_deadline_at", "updated_at"
             )
-            SELECT ${prefix} || '-occurrence-' || n::text, ${publicationId}, ${scheduleId},
+            SELECT lpad(n::text, 6, '0') || '-o-' || ${prefix}, ${publicationId}, ${scheduleId},
               ${contentRevisionId}, 1, ${now}::timestamp - interval '1 day' + n * interval '1 millisecond',
               CASE WHEN n <= ${parents} THEN 'SCHEDULED'::"PublicationOccurrenceStatus" ELSE 'SENT'::"PublicationOccurrenceStatus" END,
               'PUBLIK_V1', ${botId}, ${new Date(now.getTime() + 86_400_000)}, ${now}
@@ -582,10 +585,10 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               "id", "source_chat_id", "actor_user_id", "target_chat_ids", "buttons", "status",
               "publication_occurrence_id", "publication_content_revision_id", "dispatch_profile", "required_bot_id", "next_send_at", "updated_at"
             )
-            SELECT ${prefix} || '-broadcast-' || n::text, ${sourceChatId}, ${sourceChatId},
+            SELECT lpad(n::text, 6, '0') || '-b-' || ${prefix}, ${sourceChatId}, ${sourceChatId},
               ${JSON.stringify([sourceChatId])}::jsonb, '[]'::jsonb,
               CASE WHEN n <= ${parents} THEN 'ACTIVE'::"ManagedBroadcastStatus" ELSE 'COMPLETED'::"ManagedBroadcastStatus" END,
-              ${prefix} || '-occurrence-' || n::text, ${previousContent.id}, 'PUBLIK_V1', ${botId},
+              lpad(n::text, 6, '0') || '-o-' || ${prefix}, ${previousContent.id}, 'PUBLIK_V1', ${botId},
               ${now}::timestamp - interval '1 day' + n * interval '1 millisecond', ${now}
             FROM generate_series(${first}::integer, ${Math.min(first + broadcastBatchSize - 1, parents + retained)}::integer) AS n
           `);
@@ -598,9 +601,14 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
             first += broadcastStatementsPerTransaction
           ) {
             if (shouldStop()) return;
-            insertedBroadcasts += await seedIndexedBatches(
-              broadcastStatements.slice(first, first + broadcastStatementsPerTransaction),
-            );
+            const transactionStarted = performance.now();
+            try {
+              insertedBroadcasts += await seedIndexedBatches(
+                broadcastStatements.slice(first, first + broadcastStatementsPerTransaction),
+              );
+            } finally {
+              broadcastTransactionTimingsMs.push(performance.now() - transactionStarted);
+            }
             completedBroadcastTransactions += 1;
           }
           expect(insertedBroadcasts).toBe(parents + retained);
@@ -619,6 +627,7 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
                 (parents + retained) / (broadcastBatchSize * broadcastStatementsPerTransaction),
               ),
               completedBroadcastTransactions,
+              broadcastTransactionTimingsMs,
               insertedBroadcasts,
               completed,
               stopRequested: shouldStop(),
@@ -653,8 +662,9 @@ postgres('Publisher temporal selection boundaries on PostgreSQL', () => {
               "publisher_dialog_context", "publication_policy_revision", "status", "attempt_count",
               "bot_id", "remote_message_id", "sent_at", "updated_at"
             )
-            SELECT ${prefix} || '-delivery-' || n::text, ${prefix} || '-broadcast-' || n::text,
-              1, ${sourceChatId}, ${prefix} || '-occurrence-' || n::text, ${previousContent.id},
+            SELECT lpad(n::text, 6, '0') || '-d-' || ${prefix},
+              lpad(n::text, 6, '0') || '-b-' || ${prefix},
+              1, ${sourceChatId}, lpad(n::text, 6, '0') || '-o-' || ${prefix}, ${previousContent.id},
               'PUBLIK_V1', ${botId}, ${deliveryRoute.dialogBotId},
               ${JSON.stringify(deliveryRoute.publisherDialogContext)}::jsonb, ${deliveryRoute.publicationPolicyRevision},
               CASE WHEN n <= ${parents} THEN 'PENDING'::"ManagedBroadcastDeliveryStatus" ELSE 'SENT'::"ManagedBroadcastDeliveryStatus" END,

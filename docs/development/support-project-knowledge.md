@@ -52,6 +52,14 @@ prove every possible question or every implementation field has been evaluated.
 
 ## Preserve the product distinctions
 
+- The support assistant interprets meaning and a bounded conversation history. Publisher
+  auto-replies use administrator-prepared phrases and responses; neither installing Publisher
+  nor connecting a moderator activates this support assistant in another chat.
+- Publisher channel suggestions use «Каналы» → channel → «Предложения» →
+  «Включить предложения», applied immediately, and the post button «✍️ Предложить объявление».
+  Major's separate suggestion controls do not describe that Publisher screen.
+- Membership leave events are available in statistics → «События». They do not imply a
+  public departure notification; no separate public-notification setting is documented.
 - A visible setting is not proof that its enforcement is available. Invitation access cannot
   currently be activated; image checks and pilot integrations retain their availability conditions.
 - «Мут» keeps a person in the chat while the bot deletes new messages for the selected

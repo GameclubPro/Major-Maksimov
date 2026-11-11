@@ -84,6 +84,21 @@ test('explicit image followups use the latest confirmed setup pair, including th
   }
 });
 
+test('completed connection diagnostics do not resend onboarding cards', () => {
+  for (const text of [
+    'Я администратор, подключение подтверждено, чтение, отправка и удаление включены. Модератор всё ещё пропускает ссылки.',
+    'Подключение бота успешно, почему он не удаляет ссылки?',
+  ])
+    assert.equal(select(text), null, text);
+  assert.equal(select('Подключение подтверждено. Как подключить Публика?')?.id, 'publisher-group');
+  for (const text of [
+    'Подключение бота не подтверждено, что делать?',
+    'Подключение бота неуспешно, что проверить?',
+  ])
+    assert.equal(select(text)?.id, 'moderator-group', text);
+  assert.equal(select('Подключение Публика не подтверждено. Что делать?')?.id, 'publisher-group');
+});
+
 test('packs preserve opt-outs, human addressing and the object of the requested action', () => {
   const setup = [
     { role: 'user', text: 'Как подключить бота?' },
@@ -219,4 +234,20 @@ test('reviewed packs pin eleven ordered photos without exporting attachment cred
     }
   }
   assert.equal(photoIds.size, 22);
+});
+
+test('generic connection failures and contextual permission refusals keep the first pack and diagnosis', () => {
+  assert.equal(select('Не получается подключить чат')?.id, 'moderator-group');
+  assert.equal(select('Не получается подключить чат')?.atomic, false);
+  const scenario = {
+    history: [
+      { role: 'user', text: 'Как подключить Максимова к моей группе?' },
+      { role: 'assistant', text: 'Перешлите сообщение этому боту.' },
+    ],
+    interaction: { addressedToSupport: true },
+  };
+  assert.equal(
+    select('Дошёл до пересылки, получил отказ проверки доступа.', scenario)?.id,
+    'moderator-group',
+  );
 });

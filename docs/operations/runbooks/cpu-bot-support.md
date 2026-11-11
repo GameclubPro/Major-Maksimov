@@ -178,7 +178,9 @@ project questions and incident reports remain eligible without a mention. A gene
 shared with the knowledge base, a launch-plan announcement or any question after earlier
 support is insufficient. A real clarification or a continuation of the current support task
 can retain context. The bridge keeps only confirmed user/assistant pairs, expires them after
-five minutes and clears the user's context on a skip. No diagnostic messages are posted to
+fifteen minutes and clears the user's context on ordinary skipped conversation. A skipped
+reply directed at another participant preserves the bounded active case without storing that
+message or refreshing its expiry. No diagnostic messages are posted to
 verify these rules.
 
 An interrupted publication send retrieves result-verification instructions before creation steps;
