@@ -491,6 +491,58 @@ describe('Webhook durable preparation admission', () => {
     }
   });
 
+  it('keeps cumulative attribution across log flushes, failures and reporting errors', async () => {
+    const report = jest.fn();
+    const admission = new WebhookPreparationAdmission(2, report);
+    const pending = gate();
+    const running = admission.run('private-bot', 'ordinary', () => pending.promise);
+    try {
+      await expect(
+        admission.run('private-bot', 'ordinary', async () => undefined),
+      ).rejects.toBeInstanceOf(WebhookPreparationDeferredError);
+      expect(admission.runtimeSnapshot()).toMatchObject({
+        inFlight: 1,
+        peakInFlight: 1,
+        admitted: { ordinary: 1 },
+        deferred: { ordinary: 1 },
+        completed: { ordinary: 0 },
+      });
+    } finally {
+      pending.release();
+      await running;
+    }
+    admission.flush();
+    const error = new Error('private-error');
+    await expect(
+      admission.run('private-bot', 'lifecycle', async () => {
+        throw error;
+      }),
+    ).rejects.toBe(error);
+    admission.flush();
+    expect(report.mock.calls[0][0].admitted).toEqual({ ordinary: 1, interactive: 0, lifecycle: 0 });
+    expect(report.mock.calls[1][0].admitted).toEqual({ ordinary: 0, interactive: 0, lifecycle: 1 });
+    report.mockImplementation(() => {
+      throw error;
+    });
+    expect(() => admission.flush()).not.toThrow();
+    const snapshot = admission.runtimeSnapshot();
+    expect(snapshot).toMatchObject({
+      inFlight: 0,
+      botScopes: 0,
+      peakInFlight: 1,
+      admitted: { ordinary: 1, lifecycle: 1 },
+      deferred: { ordinary: 1 },
+      completed: { ordinary: 1, lifecycle: 1 },
+      errors: { lifecycle: 1 },
+      duration: { calls: 2, errors: 1, unknownClocks: 0 },
+    });
+    snapshot.admitted.ordinary = 999;
+    snapshot.duration.buckets.under100Ms = 999;
+    expect(admission.runtimeSnapshot().admitted.ordinary).toBe(1);
+    expect(admission.runtimeSnapshot().duration.buckets.under100Ms).not.toBe(999);
+    expect(JSON.stringify(admission.runtimeSnapshot())).not.toContain('private');
+  });
+
   it.each([NaN, Infinity, 0, -1])(
     'rejects invalid pool budget %s instead of losing the bound',
     (pool) => {

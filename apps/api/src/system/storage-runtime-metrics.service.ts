@@ -8,6 +8,10 @@ import {
 } from 'node:perf_hooks';
 import { getHeapStatistics } from 'node:v8';
 import {
+  sanitizeWebhookOutboxSnapshot,
+  sanitizeWebhookPreparationSnapshot,
+} from '../webhook/webhook-runtime-metrics';
+import {
   OptimizationRuntimeMetrics,
   sanitizeOptimizationRuntimeMetrics,
 } from './optimization-runtime-metrics';
@@ -324,6 +328,8 @@ export function sanitizeStorageRuntimeSnapshot(value: unknown) {
     automaticDeleteAuthors: checkedNumbers(source.automaticDeleteAuthors, DELETE_AUTHOR_FIELDS),
     optimization: sanitizeOptimizationRuntimeMetrics(source.optimization),
     prismaAdmission,
+    webhookOutbox: sanitizeWebhookOutboxSnapshot(source.webhookOutbox),
+    webhookPreparation: sanitizeWebhookPreparationSnapshot(source.webhookPreparation),
     processMemory:
       source.processMemory == null
         ? null
@@ -387,6 +393,8 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
   private deleteReconcilerProvider: (() => unknown) | null = null;
   private deleteDueSweepProvider: (() => unknown) | null = null;
   private deleteAuthorProvider: (() => unknown) | null = null;
+  private webhookOutboxProvider: (() => unknown) | null = null;
+  private webhookPreparationProvider: (() => unknown) | null = null;
   private gcObserver: PerformanceObserver | null = null;
   private eventLoopDelay: IntervalHistogram | null = null;
   private readonly gcCounters = { count: 0, totalDurationUs: 0 };
@@ -440,6 +448,13 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
   }
   registerAutomaticDeleteAuthorSnapshot(provider: () => unknown): void {
     this.deleteAuthorProvider = provider;
+  }
+
+  registerWebhookOutboxSnapshot(provider: () => unknown): void {
+    this.webhookOutboxProvider = provider;
+  }
+  registerWebhookPreparationSnapshot(provider: () => unknown): void {
+    this.webhookPreparationProvider = provider;
   }
 
   private startProcessMonitoring(): void {
@@ -530,6 +545,8 @@ export class StorageRuntimeMetricsService implements OnModuleInit, OnModuleDestr
       deleteReconciler: readProvider(this.deleteReconcilerProvider),
       deleteDueSweep: readProvider(this.deleteDueSweepProvider),
       automaticDeleteAuthors: readProvider(this.deleteAuthorProvider),
+      webhookOutbox: readProvider(this.webhookOutboxProvider),
+      webhookPreparation: readProvider(this.webhookPreparationProvider),
       optimization: this.optimization.snapshot(),
       prismaAdmission: readProvider(() => connectionAdmissionMetrics.snapshot()),
       processMemory: this.readProcessMemory(),

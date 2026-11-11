@@ -62,9 +62,9 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 162 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 162);
-  assert.equal(new Set(nativePaths).size, 162);
+test('all 163 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 163);
+  assert.equal(new Set(nativePaths).size, 163);
   assert.ok(nativePaths.includes('src/moderation/moderation-delete-continuation-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/scripts/multibot-catalog-acceptance-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/admin-chat-rules-postgres.spec.ts'));
@@ -94,6 +94,7 @@ test('all 162 native suites execute exactly once with only the two approved owne
   assert.ok(nativePaths.includes('src/max/chat-admin-roster-state-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/admin-settings-entry-protection-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/managed-giveaway-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/system/max-api-baseline-reader.redis-integration.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/managed-poll-render-retry-postgres.spec.ts'));
   for (const path of [
     'src/integrations/karavan-marketplace/karavan-connection-journal-postgres.spec.ts',
