@@ -62,12 +62,14 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 163 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 163);
-  assert.equal(new Set(nativePaths).size, 163);
+test('all 165 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 165);
+  assert.equal(new Set(nativePaths).size, 165);
   assert.ok(nativePaths.includes('src/moderation/moderation-delete-continuation-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/scripts/multibot-catalog-acceptance-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/admin-chat-rules-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/admin/managed-giveaway-due-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/admin/managed-giveaway-due-migration-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/moderation/message-count-quota.redis-integration.spec.ts'));
   assert.ok(nativePaths.includes('src/admin/night-mode-comments-postgres.spec.ts'));
   for (const path of [

@@ -43,6 +43,8 @@ before editing it; copying these notes does not install a fix or prove the deplo
    bounded materialization and primary-key payload reads. Keep due work separate from terminal
    FAILED history. Test representative retained history, timestamp ties and planner skew in real
    PostgreSQL; review a plain plan before a new production query. Never run live `EXPLAIN ANALYZE`.
+   [Managed giveaway selection](managed-giveaway-due-progress.md) applies the same bounded
+   raw-page rule before access, lock and Redis skips, with inspected-prefix continuation.
 3. **Keep atomic hot-path writes cheap.** Receipt-only/payload-only changes that fit one SQL
    statement should keep their conditional status/CAS and JSON no-op checks in that statement.
    Do not add BEGIN/COMMIT around a single atomic update. Multi-step invariants still require

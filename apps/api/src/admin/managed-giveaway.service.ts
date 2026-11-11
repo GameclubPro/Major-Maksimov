@@ -99,6 +99,13 @@ import { shouldRecreateEditableMessage } from './admin-editable-message';
 import { ChannelPostSignatureService } from './channel-post-signature.service';
 import { isPrismaKnownError, mapWithConcurrencyLimit } from './admin-legacy-utils';
 import { MANAGED_ENTITY_ACCESS_EDGE_LEGACY_GRACE_MS } from './admin.service.support';
+import {
+  buildManagedGiveawayDuePageQuery,
+  MANAGED_GIVEAWAY_DUE_FAMILIES,
+  type ManagedGiveawayDueCursor,
+  type ManagedGiveawayDueFamily,
+  type ManagedGiveawayDueRow,
+} from './managed-giveaway-due-selection';
 
 type GiveawayActionSource = 'miniapp' | 'private_bot' | 'runner' | 'private_claim';
 
@@ -277,6 +284,11 @@ export class ManagedGiveawayService {
   private readonly giveawayRunnerBackoffUntilMs = new Map<string, number>();
   private readonly giveawayRunnerDeferredUntilMs = new Map<string, number>();
   private giveawayRunnerThrottleLogAtMs = 0;
+  private readonly giveawayDueScans = new Map<
+    ManagedGiveawayDueFamily,
+    { cutoff: Date; after: ManagedGiveawayDueCursor | null }
+  >();
+  private giveawayDueFirstFamily = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -1429,6 +1441,8 @@ export class ManagedGiveawayService {
     }
 
     const now = new Date();
+    const firstFamily = this.giveawayDueFirstFamily;
+    this.giveawayDueFirstFamily = (firstFamily + 1) % MANAGED_GIVEAWAY_DUE_FAMILIES.length;
     await this.processWinnerNotificationOutbox(
       'runner',
       undefined,
@@ -1439,68 +1453,81 @@ export class ManagedGiveawayService {
     );
     await this.expireDueGiveawayClaims(now);
     const staleLockBefore = new Date(now.getTime() - GIVEAWAY_LOCK_STALE_MS);
-    const rows = await this.prisma.managedGiveaway.findMany({
-      where: {
-        status: {
-          in: [
-            ManagedGiveawayStatus.SCHEDULED,
-            ManagedGiveawayStatus.ACTIVE,
-            ManagedGiveawayStatus.DRAWING,
-          ],
-        },
-        AND: [
-          {
-            OR: [{ lockedAt: null }, { lockedAt: { lt: staleLockBefore } }],
-          },
-          {
-            OR: [
-              {
-                status: ManagedGiveawayStatus.SCHEDULED,
-                startsAt: {
-                  lte: now,
-                },
-              },
-              {
-                endsAt: {
-                  lte: now,
-                },
-              },
-            ],
-          },
-        ],
-      },
-      orderBy: [{ endsAt: 'asc' }, { startsAt: 'asc' }],
-      take:
-        decision.action === 'slow'
-          ? Math.max(1, Math.floor(GIVEAWAY_DUE_FETCH_BATCH_SIZE / 2))
-          : GIVEAWAY_DUE_FETCH_BATCH_SIZE,
-      select: { id: true, sourceChatId: true },
-    });
-    const accessBlockedSourceChatIds = await this.findAccessBlockedGiveawaySourceChatIds(
-      rows.map((row) => row.sourceChatId),
-    );
-
-    let processed = 0;
     const processingLimit =
       decision.action === 'slow'
         ? Math.max(1, Math.floor(GIVEAWAY_DUE_BATCH_SIZE / 2))
         : GIVEAWAY_DUE_BATCH_SIZE;
-    for (const row of rows) {
-      if (processed >= processingLimit) {
-        break;
-      }
-      const sourceChatId = this.normalizeNonEmptyString(row.sourceChatId);
-      if (sourceChatId && accessBlockedSourceChatIds.has(sourceChatId)) {
+    let fetchRemaining =
+      decision.action === 'slow'
+        ? Math.max(1, Math.floor(GIVEAWAY_DUE_FETCH_BATCH_SIZE / 2))
+        : GIVEAWAY_DUE_FETCH_BATCH_SIZE;
+    const exhaustedFamilies = new Set<ManagedGiveawayDueFamily>();
+    const inspectedIds = new Set<string>();
+    let processed = 0;
+    let familyIndex = firstFamily;
+    while (
+      processed < processingLimit &&
+      fetchRemaining > 0 &&
+      exhaustedFamilies.size < MANAGED_GIVEAWAY_DUE_FAMILIES.length
+    ) {
+      const family = MANAGED_GIVEAWAY_DUE_FAMILIES[familyIndex]!;
+      familyIndex = (familyIndex + 1) % MANAGED_GIVEAWAY_DUE_FAMILIES.length;
+      if (exhaustedFamilies.has(family)) {
         continue;
       }
-      if ((await this.getManagedGiveawayRunnerDeferRemainingMs(row.id)) > 0) {
-        continue;
+
+      let scan = this.giveawayDueScans.get(family);
+      if (!scan) {
+        scan = { cutoff: now, after: null };
+        this.giveawayDueScans.set(family, scan);
       }
-      if ((await this.getManagedGiveawayRunnerBackoffRemainingMs(row.id)) > 0) {
-        continue;
+      const take = Math.min(processingLimit, fetchRemaining);
+      const rows = await this.prisma.$queryRaw<ManagedGiveawayDueRow[]>(
+        buildManagedGiveawayDuePageQuery({ family, ...scan, take }),
+      );
+      fetchRemaining -= rows.length;
+      const accessBlockedSourceChatIds = await this.findAccessBlockedGiveawaySourceChatIds(
+        rows.map((row) => row.sourceChatId),
+      );
+
+      let inspected = 0;
+      for (const row of rows) {
+        if (processed >= processingLimit) {
+          break;
+        }
+        // FLAG: Checkpoint only the inspected prefix before fallible per-row work.
+        // This hint grants no effect authority; failures revisit after wrap. A
+        // failed batch access read above leaves the entire page unadvanced.
+        scan.after = { dueAt: row.dueAt, id: row.id };
+        inspected += 1;
+        if (inspectedIds.has(row.id)) {
+          continue;
+        }
+        inspectedIds.add(row.id);
+        if (row.lockedAt && row.lockedAt.getTime() >= staleLockBefore.getTime()) {
+          continue;
+        }
+        const sourceChatId = this.normalizeNonEmptyString(row.sourceChatId);
+        if (sourceChatId && accessBlockedSourceChatIds.has(sourceChatId)) {
+          continue;
+        }
+        if ((await this.getManagedGiveawayRunnerDeferRemainingMs(row.id)) > 0) {
+          continue;
+        }
+        if ((await this.getManagedGiveawayRunnerBackoffRemainingMs(row.id)) > 0) {
+          continue;
+        }
+        processed += 1;
+        await this.processDueManagedGiveaway(row.id, reason, staleLockBefore);
       }
-      await this.processDueManagedGiveaway(row.id, reason, staleLockBefore);
-      processed += 1;
+
+      // FLAG: A short page proves exhaustion only after its whole suffix was
+      // inspected. Never wrap a family again in this pass or skip fetched rows
+      // when the separate invocation budget stopped inside a page.
+      if (inspected === rows.length && rows.length < take) {
+        this.giveawayDueScans.delete(family);
+        exhaustedFamilies.add(family);
+      }
     }
   }
 
