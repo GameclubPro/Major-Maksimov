@@ -1,8 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import {
+  markMaxMemberMutationAttempted,
+  markMaxMemberMutationConfirmed,
+} from '../max/max-client.service';
 import {
   ModerationSanctionStateLockBusyError,
   ModerationSanctionStateLockUnavailableError,
@@ -13,6 +18,11 @@ import { AdminDialogController } from './admin-dialog.controller';
 import { AdminManualModerationController } from './admin-manual-moderation.controller';
 import { AdminManagedEntitiesController } from './admin-managed-entities.controller';
 import { AdminSettingsController } from './admin-settings.controller';
+import {
+  BotCapabilityCheckUnavailableException,
+  BotCapabilityRequiredException,
+} from './bot-capability-required.error';
+import type { ManualModerationService } from './manual-moderation.service';
 
 describe('admin domain controllers', () => {
   const user = {
@@ -44,6 +54,108 @@ describe('admin domain controllers', () => {
       ConflictException,
     );
     expect(service.banChannelMember).toHaveBeenCalledTimes(1);
+  });
+
+  describe.each(['channel', 'chat'] as const)('%s mutation failure boundary', (entry) => {
+    async function invoke(error: unknown) {
+      const service = {
+        banChannelMember: jest
+          .fn<
+            ReturnType<ManualModerationService['banChannelMember']>,
+            Parameters<ManualModerationService['banChannelMember']>
+          >()
+          .mockRejectedValue(error),
+        applyManualModerationAction: jest
+          .fn<
+            ReturnType<ManualModerationService['applyManualModerationAction']>,
+            Parameters<ManualModerationService['applyManualModerationAction']>
+          >()
+          .mockRejectedValue(error),
+      } satisfies Pick<ManualModerationService, 'banChannelMember' | 'applyManualModerationAction'>;
+      const controller = new AdminManualModerationController(
+        service as unknown as ManualModerationService,
+      );
+      const result = await (
+        entry === 'channel'
+          ? controller.banChannelMember('channel-1', 'user-1', user)
+          : controller.applyManualModerationAction('chat-1', 'user-1', user, {
+              action: 'BAN',
+              scope: 'current_chat',
+            })
+      ).then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      expect(
+        entry === 'channel' ? service.banChannelMember : service.applyManualModerationAction,
+      ).toHaveBeenCalledTimes(1);
+      expect(
+        entry === 'channel' ? service.applyManualModerationAction : service.banChannelMember,
+      ).not.toHaveBeenCalled();
+      return result;
+    }
+
+    it.each([
+      ['timeout', () => markMaxMemberMutationAttempted(new Error('MAX request timed out'))],
+      [
+        'connection reset',
+        () =>
+          markMaxMemberMutationAttempted(
+            Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }),
+          ),
+      ],
+      [
+        'wrapped attempted timeout',
+        () =>
+          markMaxMemberMutationAttempted(
+            Object.assign(new ServiceUnavailableException('Temporary MAX failure'), {
+              cause: Object.assign(new Error('upstream timed out'), {
+                response: { status: 504 },
+              }),
+            }),
+          ),
+      ],
+      [
+        'confirmed mutation with a failed follow-up',
+        () => markMaxMemberMutationConfirmed(new Error('result persistence failed')),
+      ],
+      [
+        'confirmed mutation followed by a misleading conflict',
+        () =>
+          markMaxMemberMutationConfirmed(
+            new ModerationSanctionStateLockBusyError({ chatId: 'chat-1', userId: 'user-1' }),
+          ),
+      ],
+    ])('returns uncertain status for %s without retrying', async (_label, makeError) => {
+      const result = await invoke(makeError());
+      expect(result).toBeInstanceOf(ServiceUnavailableException);
+      expect((result as ServiceUnavailableException).getResponse()).toEqual({
+        code: 'MODERATION_ACTION_STATUS_UNCERTAIN',
+        message: 'Статус действия временно недоступен. Обновите список участников.',
+        retryable: false,
+      });
+    });
+
+    it.each([400, 403, 500])('preserves a definitive attempted HTTP %i failure', async (status) => {
+      const error = markMaxMemberMutationAttempted(
+        Object.assign(new Error('MAX rejected mutation'), { response: { status } }),
+      );
+      expect(await invoke(error)).toBe(error);
+    });
+
+    it.each([
+      () =>
+        new BotCapabilityRequiredException({
+          missingPermissions: ['add_remove_members'],
+          featureKeys: [],
+        }),
+      () => new BotCapabilityCheckUnavailableException({ featureKeys: [] }),
+      () => new ForbiddenException('Human administrator access required'),
+      () => new Error('unattempted lookup timeout'),
+    ])('preserves a pre-mutation failure without inventing an outcome', async (makeError) => {
+      const error = makeError();
+      expect(await invoke(error)).toBe(error);
+    });
   });
 
   it('removes allowlist rule via query parameter', async () => {
@@ -271,6 +383,7 @@ describe('admin domain controllers', () => {
     expect((error as ServiceUnavailableException).getResponse()).toEqual({
       code: 'MODERATION_ACTION_STATUS_UNCERTAIN',
       message: 'Статус действия временно недоступен. Обновите список участников.',
+      retryable: false,
     });
   });
 

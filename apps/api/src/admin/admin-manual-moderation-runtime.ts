@@ -12,6 +12,7 @@ import {
   escapeMarkdownPlainText,
 } from './admin-manual-moderation-values';
 import { readTrimmedString } from './admin-legacy-utils';
+import { BotCapabilityRequiredException } from './bot-capability-required.error';
 import { extractMaxApiErrorMessage } from './admin-chat-rules';
 import {
   BadRequestException,
@@ -1110,7 +1111,11 @@ export class AdminManualModerationRuntime {
   }
 
   extractExpectedManualGroupCommandErrorMessage(error: unknown): string | null {
-    if (error instanceof BadRequestException || error instanceof ForbiddenException) {
+    if (
+      error instanceof BadRequestException ||
+      error instanceof ForbiddenException ||
+      error instanceof BotCapabilityRequiredException
+    ) {
       const response = error.getResponse();
       if (typeof response === 'string' && response.trim()) {
         return this.normalizeManualModerationUserErrorMessage(response);

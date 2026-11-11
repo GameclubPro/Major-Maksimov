@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 import { banChannelMember } from '../../lib/api/channel-stats-client';
 import type { ApiTransport } from '../../lib/api/transport';
-import { describeUserFacingError } from '../../lib/user-facing-error';
+import { describeChannelMemberBanError } from '../../lib/channel-member-ban-error';
 import { ActionConfirmSheet } from '../ui/action-confirm-sheet';
 import { useToast } from '../ui/toast';
 
@@ -14,6 +14,7 @@ export function ChannelMemberBanSheet({
   target,
   onClose,
   onApplied,
+  onRefresh,
 }: {
   api: ApiTransport;
   chatId: string;
@@ -21,10 +22,12 @@ export function ChannelMemberBanSheet({
   target: MembershipActivityItem;
   onClose: () => void;
   onApplied: () => void;
+  onRefresh: () => void;
 }) {
   const queryClient = useQueryClient();
   const { pushToast } = useToast();
   const submitting = useRef(false);
+  const retryBlocked = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -43,10 +46,14 @@ export function ChannelMemberBanSheet({
         onClose();
       }
     },
+    onError: (error) => {
+      retryBlocked.current = !describeChannelMemberBanError(error).allowRetry;
+    },
     onSettled: () => {
       submitting.current = false;
     },
   });
+  const failure = mutation.error ? describeChannelMemberBanError(mutation.error) : null;
 
   return (
     <ActionConfirmSheet
@@ -57,22 +64,24 @@ export function ChannelMemberBanSheet({
       summary={`Только в канале «${channelTitle}».`}
       previewTitle={target.userDisplayName.trim() || 'Участник'}
       previewMeta={
-        mutation.error ? (
-          <span role="alert">
-            {describeUserFacingError(mutation.error, 'Не удалось заблокировать участника.')}
-          </span>
-        ) : (
-          `ID: ${target.userId}`
-        )
+        mutation.error ? <span role="alert">{failure?.message}</span> : `ID: ${target.userId}`
       }
       confirmLabel="Заблокировать"
       confirmBusyLabel="Блокируем..."
+      confirmDisabled={failure?.allowRetry === false}
       isBusy={mutation.isPending}
+      extraActionLabel={failure?.allowRetry === false ? 'Обновить события' : undefined}
+      onExtraAction={() => {
+        if (submitting.current) return;
+        void queryClient.invalidateQueries({ queryKey: ['channel-stats', chatId] });
+        onRefresh();
+        onClose();
+      }}
       onClose={() => {
         if (!submitting.current) onClose();
       }}
       onConfirm={() => {
-        if (submitting.current) return;
+        if (submitting.current || retryBlocked.current) return;
         submitting.current = true;
         mutation.mutate();
       }}

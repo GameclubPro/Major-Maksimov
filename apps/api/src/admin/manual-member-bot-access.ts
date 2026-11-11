@@ -1,7 +1,12 @@
-import { ForbiddenException } from '@nestjs/common';
 import type { MaxChatMemberAccess, MaxClientService } from '../max/max-client.service';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
+import { normalizeMembershipAccessSnapshot } from '../max/max-bot-access-policy.util';
 import { isBotAdminLookupDeniedError } from './admin-legacy-utils';
+import {
+  BotCapabilityCheckUnavailableException,
+  BotCapabilityRequiredException,
+  type BotCapabilityPermission,
+} from './bot-capability-required.error';
 import {
   ADMIN_ACTION_HEALTH_LANE,
   type ManualMemberManageMembersAction,
@@ -14,6 +19,9 @@ export type ManualModerationBotAccessEvidence = Readonly<{
   action: ManualModerationBotAction;
   access: Readonly<Pick<MaxChatMemberAccess, 'isOwner' | 'isAdmin'>> & {
     readonly permissions: readonly string[];
+    readonly permissionsKnown?: boolean;
+    readonly explicitNonPrivilegeEvidence?: boolean;
+    readonly activationCapabilityCeiling?: readonly string[];
   };
 }>;
 
@@ -30,9 +38,92 @@ export function captureManualModerationBotAccess(
     access: Object.freeze({
       isOwner: access.isOwner,
       isAdmin: access.isAdmin,
+      permissionsKnown: access.permissionsKnown,
+      explicitNonPrivilegeEvidence: access.explicitNonPrivilegeEvidence,
       permissions: Object.freeze([...access.permissions]),
+      ...(access.activationCapabilityCeiling
+        ? { activationCapabilityCeiling: Object.freeze([...access.activationCapabilityCeiling]) }
+        : {}),
     }),
   });
+}
+
+export type ManualMemberBotAccessProbe = Readonly<{
+  access: MaxChatMemberAccess;
+  checkedAt: Date;
+  source: string;
+}>;
+
+function memberCapabilityUnavailable(): BotCapabilityCheckUnavailableException {
+  return new BotCapabilityCheckUnavailableException({
+    operation: 'member_moderation',
+    featureKeys: ['manualMemberModeration'],
+    canRecheck: false,
+  });
+}
+
+function memberCapabilityRequired(
+  permission: BotCapabilityPermission,
+  checkedAt?: string,
+): BotCapabilityRequiredException {
+  return new BotCapabilityRequiredException({
+    operation: 'member_moderation',
+    missingPermissions: [permission],
+    featureKeys: ['manualMemberModeration'],
+    checkedAt,
+    canRecheck: false,
+  });
+}
+
+export async function throwManualMemberSelectionFailure(
+  links: Partial<Pick<MaxBotLinkService, 'loadChatExecutionOwnerState'>> | undefined,
+  chatId: string,
+  probes: ReadonlyMap<string, ManualMemberBotAccessProbe>,
+): Promise<never> {
+  let owner: Awaited<ReturnType<MaxBotLinkService['loadChatExecutionOwnerState']>>;
+  try {
+    owner = (await links?.loadChatExecutionOwnerState?.(chatId)) ?? null;
+  } catch {
+    throw memberCapabilityUnavailable();
+  }
+  if (owner?.chatId !== chatId) throw memberCapabilityUnavailable();
+  const assignedBotId =
+    owner?.fixedModeratorBotId ??
+    (owner?.candidates.length === 1 && owner.candidates[0]?.botId === owner.primaryBotId
+      ? owner.primaryBotId
+      : null);
+  const membership = owner?.candidates.find((candidate) => candidate.botId === assignedBotId);
+  const probe = assignedBotId ? probes.get(assignedBotId) : undefined;
+  const snapshot = normalizeMembershipAccessSnapshot(membership?.permissionsSnapshot);
+  // FLAG: A registry peer's denial or an older probe cannot explain the assigned bot's
+  // failure. Only this command's acknowledged exact SQL access epoch proves missing rights.
+  if (
+    membership &&
+    probe &&
+    snapshot &&
+    membership.botAccessCheckedAt?.getTime() === probe.checkedAt.getTime() &&
+    membership.botAccessSource === probe.source &&
+    snapshot.checkedAt === probe.checkedAt.toISOString() &&
+    snapshot.isAdmin === probe.access.isAdmin &&
+    snapshot.isOwner === probe.access.isOwner &&
+    !snapshot.isOwner
+  ) {
+    if (!snapshot.isAdmin && probe.access.explicitNonPrivilegeEvidence === true)
+      throw memberCapabilityRequired('administrator', probe.checkedAt.toISOString());
+    if (
+      snapshot.isAdmin &&
+      snapshot.permissionsKnown === true &&
+      probe.access.permissionsKnown === true &&
+      (!snapshot.activationCapabilityCeiling ||
+        snapshot.activationCapabilityCeiling.includes('moderate_member')) &&
+      (!probe.access.activationCapabilityCeiling ||
+        probe.access.activationCapabilityCeiling.includes('moderate_member')) &&
+      !snapshot.permissions.some(isAddRemoveMembersPermission) &&
+      !probe.access.permissions.some(isAddRemoveMembersPermission)
+    )
+      throw memberCapabilityRequired('add_remove_members', probe.checkedAt.toISOString());
+  }
+  throw memberCapabilityUnavailable();
 }
 
 export function isAddRemoveMembersPermission(permission: string): boolean {
@@ -62,16 +153,14 @@ export async function assertCurrentManualMemberAuthority(
     purpose: 'moderate_member',
   });
   if (!proof) {
-    throw new ForbiddenException(
-      'Действие недоступно: права бота или его назначение в этом чате изменились.',
-    );
+    throw memberCapabilityUnavailable();
   }
 }
 
 export async function assertManualBotCanManageMembers(
   maxClient: Partial<Pick<MaxClientService, 'getCurrentChatMemberAccess'>>,
   chatId: string,
-  action: ManualMemberManageMembersAction,
+  _action: ManualMemberManageMembersAction,
   botId?: string,
   evidence?: ManualModerationBotAccessEvidence,
 ): Promise<void> {
@@ -93,32 +182,28 @@ export async function assertManualBotCanManageMembers(
           });
   } catch (error: unknown) {
     if (isBotAdminLookupDeniedError(error)) {
-      throw new ForbiddenException(
-        'Действие недоступно: бот больше не состоит в этом чате MAX или утратил права администратора.',
-      );
+      throw memberCapabilityUnavailable();
     }
     throw error;
   }
   if (botAccess.isOwner) return;
   if (!botAccess.isAdmin) {
-    throw new ForbiddenException(
-      action === 'BAN'
-        ? 'Для бана боту нужны права администратора этого чата MAX.'
-        : action === 'UNBAN'
-          ? 'Чтобы снять блокировку и вернуть участника, боту нужны права администратора этого чата MAX.'
-          : 'Для модерации участников боту нужны права администратора этого чата MAX.',
-    );
+    if (botAccess.explicitNonPrivilegeEvidence === true)
+      throw memberCapabilityRequired('administrator');
+    throw memberCapabilityUnavailable();
   }
+  // FLAG: Passive access may withhold a newly granted right until explicit activation.
+  // Its effective permission list cannot prove that the corresponding MAX right is absent.
   if (
-    botAccess.permissions.length > 0 &&
+    botAccess.activationCapabilityCeiling &&
+    !botAccess.activationCapabilityCeiling.includes('moderate_member')
+  )
+    throw memberCapabilityUnavailable();
+  if (
+    (botAccess.permissionsKnown === true || botAccess.permissions.length > 0) &&
     !botAccess.permissions.some(isAddRemoveMembersPermission)
   ) {
-    throw new ForbiddenException(
-      action === 'BAN'
-        ? 'В правах бота нет управления участниками (add_remove_members), поэтому бан недоступен.'
-        : action === 'UNBAN'
-          ? 'В правах бота нет управления участниками (add_remove_members), поэтому снять блокировку нельзя.'
-          : 'В правах бота нет управления участниками (add_remove_members), поэтому действие недоступно.',
-    );
+    if (botAccess.permissionsKnown === true) throw memberCapabilityRequired('add_remove_members');
+    throw memberCapabilityUnavailable();
   }
 }

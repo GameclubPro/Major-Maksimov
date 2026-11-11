@@ -1,6 +1,7 @@
 import { readObjectPayloadOrNull } from './admin-value-readers';
 export { readObjectPayloadOrNull } from './admin-value-readers';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BotCapabilityRequiredException } from './bot-capability-required.error';
 import {
   manualModerationActionResultSchema,
   type ManualModerationActionResult,
@@ -92,7 +93,11 @@ export function isManualModerationTransientMaxError(error: unknown): boolean {
 }
 
 export function isRetryableManualFanoutPreparationError(error: unknown): boolean {
-  return !(error instanceof BadRequestException || error instanceof ForbiddenException);
+  return !(
+    error instanceof BadRequestException ||
+    error instanceof ForbiddenException ||
+    error instanceof BotCapabilityRequiredException
+  );
 }
 
 export function isManualModerationOrderingFailure(error: unknown): boolean {
