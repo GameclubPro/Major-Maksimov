@@ -1,12 +1,9 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import {
   markMaxMemberMutationAttempted,
   markMaxMemberMutationConfirmed,
   type MaxActionDispatchOptions,
+  type MaxClientService,
   wasMaxMemberMutationAttempted,
   wasMaxMemberMutationConfirmed,
 } from '../max/max-client.service';
@@ -397,12 +394,26 @@ describe('existing sanction-button unban attempt', () => {
 
   it('requires the bot to have member-management rights', async () => {
     const { maxClient, run, mutation } = fixture();
-    maxClient.getCurrentChatMemberAccess.mockResolvedValue({
-      isAdmin: false,
-      isOwner: false,
-      permissions: [],
+    maxClient.getCurrentChatMemberAccess = jest
+      .fn<
+        ReturnType<MaxClientService['getCurrentChatMemberAccess']>,
+        Parameters<MaxClientService['getCurrentChatMemberAccess']>
+      >()
+      .mockResolvedValue({
+        userId: 'bot-1',
+        isAdmin: true,
+        isOwner: false,
+        permissionsKnown: true,
+        permissions: [],
+      });
+    await expect(run()).rejects.toMatchObject({
+      response: expect.objectContaining({
+        statusCode: 409,
+        code: 'BOT_CAPABILITY_REQUIRED',
+        operation: 'member_moderation',
+        missingPermissions: ['add_remove_members'],
+      }),
     });
-    await expect(run()).rejects.toBeInstanceOf(ForbiddenException);
     expect(maxClient.attemptUnbanMember).not.toHaveBeenCalled();
     expect(mutation).not.toHaveBeenCalled();
   });

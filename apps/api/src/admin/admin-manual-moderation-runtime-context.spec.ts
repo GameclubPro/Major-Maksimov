@@ -1,4 +1,10 @@
+import { ConflictException } from '@nestjs/common';
 import { AdminManualModerationRuntime } from './admin-manual-moderation-runtime';
+import { isRetryableManualFanoutPreparationError } from './admin-manual-moderation-values';
+import {
+  BotCapabilityCheckUnavailableException,
+  BotCapabilityRequiredException,
+} from './bot-capability-required.error';
 import { buildModerationReleaseCallbackPayload } from '../moderation/moderation-release-callback.util';
 import { ManualGroupCommandNoticeAuthorityRejectedError } from './admin-manual-group-command-notice-authority';
 import {
@@ -95,6 +101,39 @@ describe('AdminManualModerationRuntimeContext', () => {
       'legacy:fanout:manual_group_moderation_command',
     );
     expect(target.logger.warn).toHaveBeenCalledWith('legacy:super-ban:job-1');
+  });
+});
+
+describe('manual moderation capability error callers', () => {
+  const required = new BotCapabilityRequiredException({
+    operation: 'member_moderation',
+    missingPermissions: ['add_remove_members'],
+    featureKeys: ['manualMemberModeration'],
+    canRecheck: false,
+  });
+  const unavailable = new BotCapabilityCheckUnavailableException({
+    operation: 'member_moderation',
+    featureKeys: ['manualMemberModeration'],
+    canRecheck: false,
+  });
+
+  it('recognizes the specific missing bot capability as an expected command error', () => {
+    const runtime = new AdminManualModerationRuntime(baseContext());
+    expect(runtime.extractExpectedManualGroupCommandErrorMessage(required)).toBe(
+      'Боту не хватает подтверждённых прав для модерации участников.',
+    );
+    expect(runtime.extractExpectedManualGroupCommandErrorMessage(unavailable)).toBeNull();
+    expect(
+      runtime.extractExpectedManualGroupCommandErrorMessage(new ConflictException('Lock conflict')),
+    ).toBeNull();
+  });
+
+  it('stops fanout preparation only for a proven missing capability', () => {
+    expect(isRetryableManualFanoutPreparationError(required)).toBe(false);
+    expect(isRetryableManualFanoutPreparationError(unavailable)).toBe(true);
+    expect(isRetryableManualFanoutPreparationError(new ConflictException('Lock conflict'))).toBe(
+      true,
+    );
   });
 });
 

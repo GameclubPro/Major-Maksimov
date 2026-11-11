@@ -17,6 +17,7 @@ import { WebhookParser } from '../webhook/webhook.parser';
 import { createGroupCommandAuthorityMock } from '../common/group-command-authority.spec-support';
 import { buildGroupCommandKey } from '../common/group-command-authority.service';
 import { ManagedEntityActivationRequiredError } from './managed-entity-activation.util';
+import type { Logger } from '@nestjs/common';
 
 function createUpdate(overrides: Record<string, unknown> = {}) {
   const messageOverrides =
@@ -49,6 +50,7 @@ const FORWARDED_SOURCE_AVATAR_URL = 'https://example.test/news-max.jpg';
 const FORWARDED_ACTOR_BURST_LIMIT_MS = 5_000;
 
 type ForwardedUpdateOptions = {
+  botId?: string;
   updateId?: string;
   incomingMessageId?: string;
   privateChatId?: string;
@@ -85,7 +87,7 @@ function createForwardedUpdate(options: ForwardedUpdateOptions = {}) {
 
   return {
     updateId: options.updateId ?? 'u-forward-1',
-    botId: 'bot-1',
+    botId: options.botId ?? 'bot-1',
     type: 'message_created',
     message: {
       messageId: incomingMessageId,
@@ -259,9 +261,16 @@ function createFixture() {
     handshakeOutcomes as never,
     groupCommandAuthority as never,
   );
+  const logger = {
+    warn: jest.fn<ReturnType<Logger['warn']>, Parameters<Logger['warn']>>(),
+    log: jest.fn<ReturnType<Logger['log']>, Parameters<Logger['log']>>(),
+    debug: jest.fn<ReturnType<Logger['debug']>, Parameters<Logger['debug']>>(),
+  };
+  Object.assign(service, { logger });
 
   return {
     service,
+    logger,
     prisma,
     maxClient,
     maxBotLinkService,
@@ -1881,6 +1890,207 @@ describe('ManagedEntityHandshakeService', () => {
     );
   });
 
+  it.each(
+    (['source_snapshot', 'bot_access'] as const).flatMap((stage) =>
+      [
+        { label: 'explicit access denial', status: 403, code: 'access.denied', result: 'denied' },
+        { label: 'explicit chat denial', status: 403, code: 'CHAT.DENIED', result: 'denied' },
+        { label: 'explicit missing chat', status: 404, code: 'chat.not.found', result: 'denied' },
+        { label: 'bare 403', status: 403, code: null, result: 'failed' },
+        { label: 'bare 404', status: 404, code: null, result: 'failed' },
+        { label: 'missing user', status: 404, code: 'user.not.found', result: 'failed' },
+        { label: 'missing message', status: 404, code: 'message.not.found', result: 'failed' },
+        { label: 'opaque bot denial', status: 403, code: 'bot.denied', result: 'failed' },
+        { label: 'rate limit', status: 429, code: 'chat.denied', result: 'failed' },
+        { label: 'remote unavailable', status: 503, code: 'chat.denied', result: 'failed' },
+        { label: 'timeout', status: null, code: null, result: 'failed' },
+        { label: 'unbounded diagnostics', status: 999, code: 'x'.repeat(512), result: 'failed' },
+      ].map((failure) => ({ stage, ...failure })),
+    ),
+  )(
+    'classifies $stage $label without inventing access or source type',
+    async ({ stage, status, code, result }) => {
+      const fixture = createFixture();
+      const error = Object.assign(
+        new Error('Untrusted MAX response details'),
+        status === null ? { code: 'ETIMEDOUT' } : { response: { status, data: { code } } },
+      );
+      if (stage === 'source_snapshot')
+        fixture.maxClient.getChatSnapshot.mockRejectedValueOnce(error);
+      else fixture.maxClient.getCurrentChatMemberAccess.mockRejectedValueOnce(error);
+
+      await expect(fixture.service.handleWebhookUpdate(createForwardedUpdate())).resolves.toBe(
+        result,
+      );
+
+      const expectedCode = code && code.length <= 96 ? code.toLowerCase() : null;
+      expect(fixture.logger.warn).toHaveBeenCalledWith(
+        {
+          stage,
+          entityType: stage === 'source_snapshot' ? null : 'channel',
+          interaction: 'forwarded_private',
+          outcome: result === 'denied' ? 'denied' : 'failed_unknown',
+          outcomeRecordingFailed: false,
+          updateId: 'u-forward-1',
+          actorId: FORWARDED_USER_ID,
+          chatId: FORWARDED_SOURCE_CHAT_ID,
+          botId: 'bot-1',
+          status: status !== null && status <= 599 ? status : null,
+          code: expectedCode,
+        },
+        'Failed to resolve forwarded managed entity handshake source',
+      );
+      expect(JSON.stringify(fixture.logger.warn.mock.calls)).not.toContain(error.message);
+      expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
+        FORWARDED_PRIVATE_CHAT_ID,
+        result === 'denied'
+          ? 'Нет доступа к источнику пересылки. Проверьте, что именно этот бот назначен администратором нужного чата или канала, и перешлите сообщение еще раз.'
+          : 'Не удалось проверить источник пересылки. Попробуйте переслать сообщение позже.',
+        expect.objectContaining({
+          buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+        }),
+        expect.objectContaining({ botId: 'bot-1' }),
+      );
+      if (stage === 'source_snapshot') {
+        expect(fixture.handshakeOutcomes.recordOutcome).not.toHaveBeenCalled();
+        expect(fixture.maxClient.getCurrentChatMemberAccess).not.toHaveBeenCalled();
+      } else {
+        expect(fixture.handshakeOutcomes.recordOutcome).toHaveBeenCalledWith(
+          expect.objectContaining({
+            chatId: FORWARDED_SOURCE_CHAT_ID,
+            userId: FORWARDED_USER_ID,
+            botId: 'bot-1',
+            entityType: ChatEntityType.CHANNEL,
+            status:
+              result === 'denied'
+                ? ManagedEntityHandshakeOutcomeStatus.BOT_DENIED
+                : ManagedEntityHandshakeOutcomeStatus.FAILED,
+            reason: result === 'denied' ? 'bot_access_denied' : 'bot_access_unknown',
+          }),
+        );
+      }
+      expect(fixture.maxClient.getChatMembersAccess).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.getChatExecutionBinding).not.toHaveBeenCalled();
+      expect(fixture.prisma.managedEntityAccessEdge.upsert).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.recordBotAccessProbe).not.toHaveBeenCalled();
+      expect(fixture.maxClient.sendMessage).not.toHaveBeenCalled();
+      expect(fixture.maxClient.deleteMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { code: 'chat.denied', result: 'denied' },
+    { code: null, result: 'failed' },
+  ])(
+    'keeps the private $result reply and bounded diagnostic when early outcome storage rejects',
+    async ({ code, result }) => {
+      const fixture = createFixture();
+      fixture.maxClient.getCurrentChatMemberAccess.mockRejectedValueOnce({
+        response: { status: 403, data: { code } },
+      });
+      fixture.handshakeOutcomes.recordOutcome.mockRejectedValueOnce(
+        new Error('Untrusted outcome storage failure details'),
+      );
+
+      await expect(fixture.service.handleWebhookUpdate(createForwardedUpdate())).resolves.toBe(
+        result,
+      );
+
+      expect(fixture.handshakeOutcomes.recordOutcome).toHaveBeenCalledTimes(1);
+      expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
+        FORWARDED_PRIVATE_CHAT_ID,
+        result === 'denied'
+          ? expect.stringContaining('именно этот бот')
+          : 'Не удалось проверить источник пересылки. Попробуйте переслать сообщение позже.',
+        expect.objectContaining({
+          buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+        }),
+        expect.objectContaining({ botId: 'bot-1' }),
+      );
+      expect(fixture.logger.warn).toHaveBeenCalledWith(
+        {
+          stage: 'bot_access',
+          entityType: 'channel',
+          interaction: 'forwarded_private',
+          outcome: result === 'denied' ? 'denied' : 'failed_unknown',
+          outcomeRecordingFailed: true,
+          updateId: 'u-forward-1',
+          actorId: FORWARDED_USER_ID,
+          chatId: FORWARDED_SOURCE_CHAT_ID,
+          botId: 'bot-1',
+          status: 403,
+          code,
+        },
+        'Failed to resolve forwarded managed entity handshake source',
+      );
+      expect(JSON.stringify(fixture.logger.warn.mock.calls)).not.toContain(
+        'Untrusted outcome storage failure details',
+      );
+      expect(fixture.maxClient.getChatMembersAccess).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.recordBotAccessProbe).not.toHaveBeenCalled();
+      expect(fixture.prisma.managedEntityAccessEdge.upsert).not.toHaveBeenCalled();
+      expect(fixture.maxClient.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['bot-1', 'bot-2'])(
+    'links only the exact receiving %s profile when configured bots share a name',
+    async (receivingBotId) => {
+      const fixture = createFixture();
+      const bots = ['bot-1', 'bot-2'].map((id) => ({ id, label: 'Бот', state: 'active' as const }));
+      fixture.maxBotRegistry.getBotById.mockImplementation(
+        (id) => bots.find((bot) => bot.id === id) ?? null,
+      );
+      fixture.maxBotRegistry.getAllBots.mockReturnValue(bots);
+      fixture.maxClient.getChatSnapshot.mockRejectedValueOnce({
+        response: { status: 403, data: { code: 'chat.denied' } },
+      });
+
+      await expect(
+        fixture.service.handleWebhookUpdate(createForwardedUpdate({ botId: receivingBotId })),
+      ).resolves.toBe('denied');
+
+      expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
+        FORWARDED_PRIVATE_CHAT_ID,
+        expect.stringContaining('именно этот бот'),
+        expect.objectContaining({
+          buttons: [
+            [{ type: 'link', text: 'Профиль этого бота', url: `https://max.ru/${receivingBotId}` }],
+          ],
+        }),
+        expect.objectContaining({ botId: receivingBotId }),
+      );
+      expect(
+        fixture.maxClient.getChatSnapshot.mock.calls.map(([, options]) => options.botId),
+      ).toEqual([receivingBotId]);
+      expect(fixture.maxBotRegistry.getAllBots).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.buildEntryMiniappStartUrlSync).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.buildMiniappStartUrlSync).not.toHaveBeenCalled();
+      expect(fixture.prisma.managedEntityAccessEdge.upsert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([403, 404, 429, 503])(
+    'keeps an unknown public bot access HTTP %i failure silent',
+    async (status) => {
+      const fixture = createFixture();
+      fixture.maxClient.getCurrentChatMemberAccess.mockRejectedValueOnce({ response: { status } });
+
+      await expect(fixture.service.handleWebhookUpdate(createUpdate())).resolves.toBe('failed');
+
+      expect(fixture.handshakeOutcomes.recordOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: ManagedEntityHandshakeOutcomeStatus.FAILED,
+        }),
+      );
+      expect(fixture.maxClient.sendMessageImmediateWithId).not.toHaveBeenCalled();
+      expect(fixture.maxClient.sendMessage).not.toHaveBeenCalled();
+      expect(fixture.maxClient.deleteMessage).not.toHaveBeenCalled();
+      expect(fixture.maxBotLinkService.recordBotAccessProbe).not.toHaveBeenCalled();
+      expect(fixture.prisma.managedEntityAccessEdge.upsert).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['snapshot_denied', 'not_admin', 'member_denied', 'timeout'])(
     'never substitutes another configured bot when the receiving DM bot has %s',
     async (failure) => {
@@ -1920,7 +2130,9 @@ describe('ManagedEntityHandshakeService', () => {
       expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
         FORWARDED_PRIVATE_CHAT_ID,
         expect.any(String),
-        undefined,
+        expect.objectContaining({
+          buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+        }),
         expect.objectContaining({ botId: 'bot-1' }),
       );
       expect(fixture.maxClient.deleteMessage).not.toHaveBeenCalled();
@@ -1952,7 +2164,7 @@ describe('ManagedEntityHandshakeService', () => {
     });
     fixture.maxClient.getChatSnapshot.mockRejectedValue({ response: { status: 403 } });
     await expect(fixture.service.handleWebhookUpdate(createForwardedUpdate())).resolves.toBe(
-      'denied',
+      'failed',
     );
     expect(
       fixture.maxClient.getChatSnapshot.mock.calls.map(([, options]) => options.botId),
@@ -2174,7 +2386,9 @@ describe('ManagedEntityHandshakeService', () => {
       1,
       FORWARDED_PRIVATE_CHAT_ID,
       'Бот не администратор канала. Назначьте бота администратором и перешлите сообщение еще раз.',
-      undefined,
+      expect.objectContaining({
+        buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+      }),
       expect.objectContaining({ botId: 'bot-1', sourceTag: 'managed_handshake' }),
     );
     expect(fixture.maxClient.deleteMessage).not.toHaveBeenCalled();
@@ -2214,7 +2428,9 @@ describe('ManagedEntityHandshakeService', () => {
       1,
       FORWARDED_PRIVATE_CHAT_ID,
       'У бота нет доступа ко всем сообщениям чата. Включите это право и перешлите сообщение еще раз.',
-      undefined,
+      expect.objectContaining({
+        buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+      }),
       expect.objectContaining({ botId: 'bot-1', sourceTag: 'managed_handshake' }),
     );
     expect(fixture.handshakeOutcomes.recordOutcome).toHaveBeenCalledWith(
@@ -2275,8 +2491,10 @@ describe('ManagedEntityHandshakeService', () => {
     expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenNthCalledWith(
       1,
       FORWARDED_PRIVATE_CHAT_ID,
-      'Не удалось проверить доступ к источнику пересылки. Перешлите сообщение непосредственно из нужного чата или канала. Если бот уже администратор, повторно добавлять его не нужно.',
-      undefined,
+      'Нет доступа к источнику пересылки. Проверьте, что именно этот бот назначен администратором нужного чата или канала, и перешлите сообщение еще раз.',
+      expect.objectContaining({
+        buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+      }),
       expect.objectContaining({ botId: 'bot-1', sourceTag: 'managed_handshake' }),
     );
   });
@@ -2300,8 +2518,10 @@ describe('ManagedEntityHandshakeService', () => {
     expect(fixture.maxClient.sendMessageImmediateWithId).toHaveBeenNthCalledWith(
       1,
       FORWARDED_PRIVATE_CHAT_ID,
-      'Не удалось проверить доступ. Перешлите сообщение еще раз позже.',
-      undefined,
+      'Не удалось проверить источник пересылки. Попробуйте переслать сообщение позже.',
+      expect.objectContaining({
+        buttons: [[{ type: 'link', text: 'Профиль этого бота', url: 'https://max.ru/bot-1' }]],
+      }),
       expect.objectContaining({ botId: 'bot-1', sourceTag: 'managed_handshake' }),
     );
   });

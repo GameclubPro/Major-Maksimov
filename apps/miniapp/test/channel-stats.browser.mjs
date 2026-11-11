@@ -14,6 +14,308 @@ if (!['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))
   throw new Error('Local server required');
 const output = mkdtempSync(join(tmpdir(), 'maxim-channel-stats-'));
 const browser = await chromium.launch();
+
+async function checkBanErrors(page, targetName, width, theme) {
+  await page.evaluate(async () => {
+    const transportUrl = performance
+      .getEntriesByType('resource')
+      .findLast((entry) => new URL(entry.name).pathname.endsWith('/preview-transport.ts')).name;
+    const { PREVIEW_REQUEST_HANDLERS } = await import(transportUrl);
+    const { PREVIEW_NOT_HANDLED } = await import(
+      new URL('preview-transport-runtime.ts', transportUrl).href
+    );
+    const { createApiRequestError } = await import(
+      new URL('../api-request-error.ts', transportUrl).href
+    );
+    const { buildApiErrorMessage } = await import(new URL('../api-error.ts', transportUrl).href);
+    const fixture = {
+      scenario: null,
+      attempts: 0,
+      reads: 0,
+      release: null,
+      paginated: false,
+      cursors: [],
+    };
+    const handler = async (context) => {
+      if (
+        context.method === 'GET' &&
+        context.url.pathname === '/channels/preview-channel/activity-feed'
+      ) {
+        fixture.reads += 1;
+        fixture.cursors.push(context.url.searchParams.get('cursor'));
+        if (fixture.paginated) {
+          const more = context.url.searchParams.has('cursor');
+          return {
+            items: context.state.channelActivity.slice(more ? 2 : 0, more ? 3 : 2),
+            hasMore: !more,
+            nextCursor: more ? null : 'ban-error-page-2',
+          };
+        }
+      }
+      if (
+        !fixture.scenario ||
+        context.method !== 'POST' ||
+        !/^\/channels\/preview-channel\/members\/[^/]+\/ban$/u.test(context.url.pathname)
+      )
+        return PREVIEW_NOT_HANDLED;
+      fixture.attempts += 1;
+      fixture.retryMutationOnTransportError = context.init.retryMutationOnTransportError;
+      const scenario = fixture.scenario;
+      await new Promise((resolve) => {
+        fixture.release = resolve;
+      });
+      fixture.release = null;
+      if (scenario.network) throw new TypeError('Failed to fetch');
+      const body = JSON.stringify(scenario.payload);
+      throw createApiRequestError(
+        scenario.status,
+        body,
+        buildApiErrorMessage(scenario.status, body, 'application/json'),
+      );
+    };
+    PREVIEW_REQUEST_HANDLERS.unshift(handler);
+    window.channelBanErrorFixture = fixture;
+    window.removeChannelBanErrorFixture = () => {
+      fixture.release?.();
+      const index = PREVIEW_REQUEST_HANDLERS.indexOf(handler);
+      if (index >= 0) PREVIEW_REQUEST_HANDLERS.splice(index, 1);
+    };
+  });
+
+  const unknownMessage =
+    'Результат блокировки пока не подтверждён. Обновите события перед повтором.';
+  const scenarios = [
+    {
+      name: 'member-right',
+      status: 409,
+      payload: {
+        code: 'BOT_CAPABILITY_REQUIRED',
+        missingPermissions: ['add_remove_members'],
+        message: 'MAXIM SQL add_remove_members exception',
+        botId: 'internal-bot-id',
+      },
+      message: 'Боту нужно право «Управлять участниками» в этом канале.',
+      allowRetry: true,
+    },
+    {
+      name: 'administrator',
+      status: 409,
+      payload: {
+        code: 'BOT_CAPABILITY_REQUIRED',
+        missingPermissions: ['administrator'],
+        canRecheck: false,
+      },
+      message: 'Назначьте бота администратором канала.',
+      allowRetry: false,
+    },
+    {
+      name: 'actor-denied',
+      status: 403,
+      payload: { code: 'ACCESS_DENIED', message: 'Секретная диагностика сервера' },
+      message: 'Недостаточно прав для этого действия.',
+      allowRetry: false,
+    },
+    {
+      name: 'check-unavailable',
+      status: 503,
+      payload: { code: 'BOT_CAPABILITY_CHECK_UNAVAILABLE' },
+      message: 'Не удалось проверить права бота. Попробуйте позже.',
+      allowRetry: true,
+    },
+    {
+      name: 'target-left',
+      status: 400,
+      payload: { message: 'Участник уже вышел из канала или был удалён.' },
+      message: 'Участник уже вышел из канала или был удалён.',
+      allowRetry: true,
+    },
+    {
+      name: 'uncertain',
+      status: 503,
+      payload: { code: 'MODERATION_ACTION_STATUS_UNCERTAIN' },
+      message: unknownMessage,
+      allowRetry: false,
+    },
+    {
+      name: 'network',
+      network: true,
+      message: unknownMessage,
+      allowRetry: false,
+    },
+    {
+      name: 'server-error',
+      status: 500,
+      payload: { code: 'BOT_CAPABILITY_REQUIRED', missingPermissions: ['add_remove_members'] },
+      message: unknownMessage,
+      allowRetry: false,
+    },
+    {
+      name: 'in-progress',
+      status: 409,
+      payload: { code: 'MODERATION_ACTION_IN_PROGRESS' },
+      message: 'Действие для этого участника уже выполняется. Обновите события.',
+      allowRetry: false,
+    },
+    {
+      name: 'state-changed',
+      status: 409,
+      payload: { code: 'MODERATION_ACTION_STATE_CHANGED' },
+      message: 'Состояние участника изменилось. Обновите события.',
+      allowRetry: false,
+    },
+  ];
+
+  try {
+    for (const scenario of scenarios) {
+      const context = `${width}px ${theme}: ${scenario.name}`;
+      const before = await page.evaluate((value) => {
+        window.channelBanErrorFixture.scenario = value;
+        return window.channelBanErrorFixture.attempts;
+      }, scenario);
+      const dialog = page.getByRole('alertdialog');
+      const confirm = dialog.getByRole('button', { name: 'Заблокировать', exact: true });
+      await confirm.evaluate((button) => {
+        button.click();
+        button.click();
+      });
+      await page.waitForFunction(() => window.channelBanErrorFixture.release !== null);
+      await dialog.getByRole('button', { name: 'Блокируем...', exact: true }).waitFor();
+      assert.equal(
+        await dialog.getByRole('button', { name: 'Отмена', exact: true }).isDisabled(),
+        true,
+        `${context}: cancellation stays disabled while the command is pending`,
+      );
+      await page.evaluate(() => window.channelBanErrorFixture.release());
+      await dialog.getByRole('alert').waitFor();
+      assert.equal(await dialog.getByRole('alert').textContent(), scenario.message, context);
+      assert.equal(await confirm.isEnabled(), scenario.allowRetry, context);
+      assert.doesNotMatch(
+        await dialog.innerText(),
+        /add_remove_members|MAXIM|SQL|internal-bot-id/u,
+        context,
+      );
+      const state = await page.evaluate(() => ({
+        attempts: window.channelBanErrorFixture.attempts,
+        retry: window.channelBanErrorFixture.retryMutationOnTransportError,
+      }));
+      assert.deepEqual(state, { attempts: before + 1, retry: false }, context);
+      if (scenario.name === 'member-right' || scenario.name === 'uncertain') {
+        await page
+          .waitForFunction(
+            () => {
+              const panel = document.querySelector(
+                '.action-confirm-sheet__panel[role="alertdialog"]',
+              );
+              const backdrop = panel?.parentElement?.querySelector(
+                '.action-confirm-sheet__backdrop',
+              );
+              return [panel, backdrop].every(
+                (surface) =>
+                  surface &&
+                  Number.parseFloat(getComputedStyle(surface).opacity) === 1 &&
+                  surface
+                    .getAnimations()
+                    .every((animation) => ['finished', 'idle'].includes(animation.playState)),
+              );
+            },
+            null,
+            { timeout: 3_000 },
+          )
+          .catch((error) => {
+            throw new Error(`${context}: error dialog did not finish appearing`, { cause: error });
+          });
+        await page.screenshot({
+          path: join(output, `${width}-${theme}-ban-${scenario.name}.png`),
+          animations: 'disabled',
+        });
+      }
+      if (scenario.allowRetry) {
+        await dialog.getByRole('button', { name: 'Отмена', exact: true }).click();
+      } else {
+        await confirm.evaluate((button) => button.click());
+        assert.equal(
+          await page.evaluate(() => window.channelBanErrorFixture.attempts),
+          before + 1,
+          `${context}: a disabled confirmation never sends another command`,
+        );
+        const readsBefore = await page.evaluate(() => window.channelBanErrorFixture.reads);
+        await dialog.getByRole('button', { name: 'Обновить события', exact: true }).click();
+        await page.waitForFunction(
+          (count) => window.channelBanErrorFixture.reads > count,
+          readsBefore,
+        );
+        assert.equal(
+          await page.evaluate(() => window.channelBanErrorFixture.attempts),
+          before + 1,
+          `${context}: refreshing events never sends another command`,
+        );
+      }
+      await dialog.waitFor({ state: 'hidden' });
+      await page.getByRole('button', { name: targetName, exact: true }).first().click();
+      await page.getByRole('alertdialog').waitFor();
+    }
+
+    await page
+      .getByRole('alertdialog')
+      .getByRole('button', { name: 'Отмена', exact: true })
+      .click();
+    await page.evaluate(() => {
+      window.channelBanErrorFixture.paginated = true;
+      window.channelBanErrorFixture.cursors = [];
+    });
+    await page.getByRole('button', { name: 'Обновить события', exact: true }).click();
+    await page.waitForFunction(
+      () => document.querySelectorAll('.membership-feed__item').length === 2,
+    );
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+    await page.waitForFunction(
+      () => document.querySelectorAll('.membership-feed__item').length === 3,
+    );
+    assert.deepEqual(await page.evaluate(() => window.channelBanErrorFixture.cursors), [
+      null,
+      'ban-error-page-2',
+    ]);
+    await page.getByRole('button', { name: targetName, exact: true }).first().click();
+    const dialog = page.getByRole('alertdialog');
+    const attemptsBefore = await page.evaluate(
+      (scenario) => {
+        window.channelBanErrorFixture.scenario = scenario;
+        return window.channelBanErrorFixture.attempts;
+      },
+      scenarios.find((scenario) => scenario.name === 'uncertain'),
+    );
+    await dialog.getByRole('button', { name: 'Заблокировать', exact: true }).click();
+    await page.waitForFunction(() => window.channelBanErrorFixture.release !== null);
+    await page.evaluate(() => window.channelBanErrorFixture.release());
+    await dialog.getByRole('alert').waitFor();
+    await dialog.getByRole('button', { name: 'Обновить события', exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    await page.waitForFunction(
+      () => document.querySelectorAll('.membership-feed__item').length === 2,
+    );
+    assert.deepEqual(await page.evaluate(() => window.channelBanErrorFixture.cursors), [
+      null,
+      'ban-error-page-2',
+      null,
+    ]);
+    assert.equal(
+      await page.evaluate(() => window.channelBanErrorFixture.attempts),
+      attemptsBefore + 1,
+    );
+    await page.evaluate(() => {
+      window.channelBanErrorFixture.paginated = false;
+    });
+    await page.getByRole('button', { name: 'Обновить события', exact: true }).click();
+    await page.waitForFunction(
+      () => document.querySelectorAll('.membership-feed__item').length > 3,
+    );
+    await page.getByRole('button', { name: targetName, exact: true }).first().click();
+    await page.getByRole('alertdialog').waitFor();
+  } finally {
+    await page.evaluate(() => window.removeChannelBanErrorFixture());
+  }
+}
+
 try {
   for (const [width, height] of process.argv.includes('--state-only')
     ? []
@@ -108,6 +410,7 @@ try {
         path: join(output, `${width}-${theme}-confirm.png`),
         animations: 'disabled',
       });
+      if (width <= 393) await checkBanErrors(page, targetName, width, theme);
       const before = await page.locator('.membership-feed__item').count();
       await dialog
         .getByRole('button', { name: 'Заблокировать', exact: true })
@@ -129,7 +432,11 @@ try {
       dialog = page.getByRole('alertdialog');
       await dialog.getByRole('button', { name: 'Заблокировать', exact: true }).click();
       await dialog.getByRole('alert').waitFor();
-      assert.match(await dialog.innerText(), /вышел|удалён/);
+      assert.match(await dialog.innerText(), /Результат блокировки пока не подтверждён/u);
+      assert.equal(
+        await dialog.getByRole('button', { name: 'Заблокировать', exact: true }).isDisabled(),
+        true,
+      );
       await page.keyboard.press('Escape');
       await dialog.waitFor({ state: 'hidden' });
 
