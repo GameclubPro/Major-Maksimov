@@ -2246,3 +2246,49 @@ test('tokenizer budget trims history and facts, keeps policy, and refuses unavai
     await once(server, 'close');
   }
 });
+
+test('advertiser protection keeps the participant-card path and full exemption scope', async (t) => {
+  const fixture = await completionFixture(t, {
+    action: 'reply',
+    text: 'Откройте карточку участника и включите «Защиту».',
+    sourceIds: ['participant-protection'],
+  });
+  const text = 'Владелец.';
+  const history = [
+    { role: 'user', text: 'А может бот пропускать коммерческие объявления по договорённости?' },
+    {
+      role: 'assistant',
+      text: 'Вы администратор группы или хотите разместить объявление как участник?',
+    },
+  ];
+  await answerSupport({ ...fixture.input, text, history });
+  const input = fixture.inputs.at(-1);
+  const fact = input.verifiedKnowledge.find((entry) => entry.id === 'participant-protection');
+  assert.match(fact.answer, /статистике.*«Участники».*карточк.*«Защит/iu);
+  const reminder =
+    input.answerRequirements.find((entry) => entry.sourceId === 'participant-protection')
+      ?.instruction ?? '';
+  assert.match(reminder, /всей автоматической модерации/iu);
+  assert.match(reminder, /Ручные ограничения и блокировку.*не отменяет/iu);
+  assert.match(reminder, /не придумывай.*Исключения/iu);
+});
+
+test('recurrence instructions finish by saving the schedule without an immediate post', async (t) => {
+  const fixture = await completionFixture(t, {
+    action: 'reply',
+    text: 'В расписании выберите повтор и сохраните расписание.',
+    sourceIds: ['publisher-schedule-recurrence'],
+  });
+  await answerSupport({
+    ...fixture.input,
+    text: 'Как в Публике публиковать рекламу три раза в день?',
+  });
+  const input = fixture.inputs.at(-1);
+  const reminder =
+    input.answerRequirements.find((entry) => entry.sourceId === 'publisher-schedule-recurrence')
+      ?.instruction ?? '';
+  assert.match(reminder, /«Проверить расписание».*«Сохранить расписание»/iu);
+  assert.match(reminder, /не добавляй.*«Проверить пост».*«Опубликовать»/iu);
+  assert.match(reminder, /«Когда».*заголовок.*не кнопка/iu);
+  assert.match(reminder, /календарн.*«По дате».*число отправок.*не гарантирует/iu);
+});

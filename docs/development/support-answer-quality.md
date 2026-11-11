@@ -125,7 +125,16 @@ connection, then the affected module. Preserve reported checks without claiming 
 verification. A missing journal is an access symptom, not an automatic operator handoff;
 an explicit request for incident evidence still receives that procedure.
 
-Unaddressed instructions to another participant stay silent. A skipped reply to somebody else
+Unaddressed instructions to another participant stay silent. This includes standalone followup
+advice such as «А также можете…»: embedded «сколько раз» or «в какие дни» in an explanation
+does not address the assistant. Preserve personal questions and explicit assistant replies/mentions.
+A bare owner-role answer to the assistant's fresh clarification continues the existing case;
+the same role declaration without that context stays silent. Agreed advertiser exceptions retrieve
+participant protection, whose scope is the person in that chat, with the existing manual-sanction
+boundary. Publisher frequency and weekday questions retrieve recurring schedules; unresolved prior
+sends still require result verification first.
+
+A skipped reply to somebody else
 neither stores that message nor refreshes the user's active support history; it also does not
 cancel that case. Other skipped conversation clears context. Context expires fifteen minutes
 after the last confirmed exchange and remains isolated by user, limited to six turns and 32 users.

@@ -1714,3 +1714,71 @@ test('Lastik connection intent follows live user context without manufacturing a
   ];
   assert.equal(needsReply('А что дальше?', assistantClaim).lastikConnectionIntent, 'setup');
 });
+
+test('agreed advertiser exceptions retrieve participant protection and retain owner clarification', () => {
+  const question = 'А может бот, пропускать коммерческие объявления, по договорённости 🤔??';
+  for (const text of [
+    question,
+    'Как разрешить рекламу определённому участнику, чтобы бот не удалял её?',
+    'Можно сделать исключение для рекламы одного человека?',
+    'Я владелец чата. Хочу, чтобы объявления нашего спонсора проходили без удаления, а модерация для остальных осталась. Как это настроить?',
+    'Как разрешить рекламодателю его объявления в моём чате?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'participant-protection', text);
+  }
+  const history = [
+    user(question),
+    assistant('Вы администратор этой группы или хотите разместить объявление как участник?'),
+  ];
+  assert.equal(needsReply('Владелец.', history).role, 'admin');
+  assert.equal(ids('Владелец.', history)[0], 'participant-protection');
+  assert.equal(router.classify('Владелец.').eligible, false);
+  assert.equal(router.classify('Владелец.', history, { replyToOther: true }).eligible, false);
+  for (const text of [
+    'Бот пропускает рекламу, хотя должен удалять. Что делать?',
+    'Как в Публике разместить рекламу по расписанию?',
+  ])
+    assert.notEqual(ids(text)[0], 'participant-protection', text);
+});
+
+test('publisher frequency and weekday questions retrieve recurring schedules', () => {
+  for (const text of [
+    'Как в Публике разместить рекламу по расписанию: сколько раз в день, в какие дни и сколько дней публиковать?',
+    'Как настроить в Публике пост три раза в день в течение недели?',
+    'Как в Публике публиковать рекламу один раз в день?',
+    'Как в Публике публиковать рекламу один раз каждый день?',
+    'Как в Публике сделать пост по вторникам и четвергам два раза в день?',
+  ]) {
+    needsReply(text);
+    assert.equal(ids(text)[0], 'publisher-schedule-recurrence', text);
+  }
+  for (const text of [
+    'Как в Публике отправить пост один раз завтра, без повторов?',
+    'В Публике хочу отправить пост завтра, не каждый день. Как настроить?',
+  ])
+    assert.equal(ids(text)[0], 'publisher-schedule-once', text);
+  const history = [
+    user('В Публике отправил пост, но сеть отвалилась. В канале поста нет.'),
+    assistant('Проверьте результат.'),
+  ];
+  assert.equal(
+    ids('Пост уже появился. Как отправлять его три раза в день?', history)[0],
+    'publisher-schedule-recurrence',
+  );
+  const combined = ids(
+    'Пост всё ещё не появился. Можно повторить и настроить отправку три раза в день?',
+    history,
+  );
+  assert.equal(combined[0], 'publisher-delivery-status');
+  assert.ok(combined.includes('publisher-schedule-recurrence'));
+});
+
+test('advertising exceptions do not replace the explicit participant room policy', () => {
+  for (const text of [
+    'Я участник. Можно сделать исключение для моей рекламы?',
+    'Я участник. Можно размещать мои коммерческие объявления по договорённости?',
+    'Я участник. Почему удаляют мою рекламу, ведь с админом есть договорённость?',
+  ])
+    assert.equal(needsReply(text).participantAdvertisement, true, text);
+});

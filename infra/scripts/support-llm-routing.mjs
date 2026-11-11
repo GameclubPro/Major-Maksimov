@@ -5,6 +5,15 @@ const calendarDates = new RegExp(
   `${calendarDay}(?:\\s*[,и]\\s*${calendarDay})+\\s+${calendarMonth}|${calendarDay}\\s+${calendarMonth}[^.!?\\n]{0,20}${calendarDay}\\s+${calendarMonth}`,
   'iu',
 );
+const recurringFrequency =
+  /раз(?:а)?\s+(?:в|за)\s+(?:день|недел|сутк)|по (?:понедельник|вторник|сред|четверг|пятниц|суббот|воскресень)|в какие дни.{0,45}(?:публиков|отправ)/iu;
+const recurringSchedule = (text) =>
+  (recurringFrequency.test(text) ||
+    /ежеднев|еженедель|регулярн.{0,15}пост|кажд.{0,12}(?:день|недел)|повтор|без лимита|сохранить расписание/iu.test(
+      text,
+    )) &&
+  !/не повтор|без повтор|не.{0,10}кажд|кажд.{0,15}не надо/iu.test(text) &&
+  !/один раз(?!\s+(?:в|за|кажд))/iu.test(text);
 const normalize = (value) =>
   String(value ?? '')
     .toLowerCase()
@@ -240,7 +249,7 @@ const topicPatterns = [
   ['networks', /сетк|избранн|категори/iu],
   [
     'delivery',
-    /[«"„]нужно проверить[»"“]|статус.{0,20}нужно проверить|результат.{0,20}(?:отправ|неизвест)|достав|(?:отправ|публиков).{0,25}(?:еще раз|повтор|заново)|(?:повтор|заново).{0,25}(?:отправ|публиков)/iu,
+    /[«"„]нужно проверить[»"“]|статус.{0,20}нужно проверить|отправ\p{L}*[^.!?\n]{0,35}(?:сеть|связь|интернет)[^.!?\n]{0,20}(?:отвал|оборвал|пропал)|результат.{0,20}(?:отправ|неизвест)|достав|(?:отправ|публиков).{0,25}(?:еще раз|повтор|заново)|(?:повтор|заново).{0,25}(?:отправ|публиков)/iu,
   ],
   ['auto-replies', { test: autoReplyRequest }],
   ['vk', /\bvk\b|(?:^|\s)вк(?:\s|[.!?,]|$)|вконтакт|согласован.{0,15}личк/iu],
@@ -352,14 +361,51 @@ function supportAssistantRequest(text, recent = []) {
 }
 
 function peerAdvice(text) {
+  if (botProfileRequest(text)) return false;
   if (
-    /(?:^|\s)(?:мне|меня|мой|моем|моего|нам|наш|сам|сами|помогите|подскажите)(?![\p{L}])/iu.test(
+    /(?:^|\s)(?:мне|меня|мо[йяеию]|мое(?:го|му|м|й|ю)?|моих|моими|нам|наш\p{L}*|хочу|хотим|сам|сами|помогите|подскажите)(?![\p{L}])/iu.test(
       text,
     )
   )
     return false;
-  return /(?:^|[.!]\s*)(?:а\s+)?(?:вы|вам).{0,65}(?:включите|откройте|нажмите|попробуйте|мешает)|^(?:установите|добавьте|назначьте).{0,100}(?:дайте|напишите|нажмите|откройте)/iu.test(
-    text,
+  if (
+    /(?:^|[.!]\s*)(?:а\s+)?(?:вы|вам).{0,65}(?:включите|откройте|нажмите|попробуйте|мешает)|^(?:установите|добавьте|назначьте).{0,100}(?:дайте|напишите|нажмите|откройте)/iu.test(
+      text,
+    )
+  )
+    return true;
+  if (unresolvedHelp.test(text) && !/(?:^|[\s,.])если(?![\p{L}])/iu.test(text)) return false;
+  // FLAG: Embedded question words in standalone advice do not address the assistant.
+  // Preserve personal/information requests before recognizing procedural or declarative advice.
+  if (
+    /\?|(?:^|\s)(?:помоги\p{L}*|подскажи\p{L}*|объясни\p{L}*|расскажи\p{L}*|скажите|пришлите|покажите)(?![\p{L}])/iu.test(
+      text,
+    )
+  )
+    return false;
+  const imperatives = [
+    ...text.matchAll(
+      /(?<![\p{L}])(?:откройте|укажите|выберите|настройте|включите|отключите|добавьте|дайте|нажмите|отметьте|разместите|выставьте|попробуйте|проверьте|перешлите|публикуйте|сохраните|создайте|поставьте|назначьте|зайдите)(?![\p{L}])/giu,
+    ),
+  ];
+  if (/^(?:а\s+)?(?:как|почему|где|куда|зачем|(?:вы\s+)?можете)(?![\p{L}])/iu.test(text))
+    return false;
+  if (/^(?:а\s+)?можно(?![\p{L}])/iu.test(text) && !(imperatives.length && /:/u.test(text)))
+    return false;
+  const thirdPerson =
+    /(?:^|\s)(?:его|ее|их|ему|ей|им|этого\s+участника|этой\s+участницы|участнику|человеку|рекламодателю)(?![\p{L}])/iu.test(
+      text,
+    );
+  return (
+    /^(?:я|мы)\s+(?:обычно|всегда|тоже).{0,45}(?:делаю|делаем|настраива|публику)/iu.test(text) ||
+    (thirdPerson &&
+      (imperatives.length > 0 || /(?:^|\s)(?:можете|можно)(?![\p{L}])/iu.test(text))) ||
+    /(?:бот\p{L}*|публик\p{L}*|майор\p{L}*)\s+(?:позволяет|умеет|поддерживает)(?![\p{L}])/iu.test(
+      text,
+    ) ||
+    /(?:^|\s)(?:в|через)\s+публик\p{L}*\s+(?:можно\s+(?:задать|выбрать|настроить)|выберите|укажите|настройте)/iu.test(
+      text,
+    )
   );
 }
 
@@ -1483,7 +1529,18 @@ function semanticFacts(text, state) {
     if (state.subscriptionIntent === 'participation') add('subscription-participant', 110);
   }
   if (test(topicPatterns.find(([id]) => id === 'rules')[1])) add('chat-rules', 110);
-  if (test(/защит[ауые]|иммунитет/iu)) add('participant-protection', 100);
+  const advertiserException =
+    advert.test(text) &&
+    !developer &&
+    /договоренност|спонсор|рекламодател|исключени|(?:разреш|пропуска)\p{L}*.{0,35}(?:определенн|конкретн|одн)\p{L}*.{0,15}(?:участник|человек)/iu.test(
+      text,
+    ) &&
+    !publisherName.test(text) &&
+    !isPublisherTask(text);
+  if (advertiserException && state.role !== 'member') {
+    add('participant-protection', 155);
+    add('participants', 95);
+  } else if (test(/защит[ауые]|иммунитет/iu)) add('participant-protection', 100);
   if (test(/команд|мут 88|бан!|тишина выкл/iu) && !developer) add('admin-commands', 90);
   if (
     test(
@@ -1682,6 +1739,7 @@ function semanticFacts(text, state) {
       interruptedSendIn(state.focus) || unknownDeliveryLabel.test(state.focus);
     const explicitCurrentSchedule =
       calendarDates.test(state.current) ||
+      recurringFrequency.test(state.current) ||
       /отложенн|завтра|(?<![\p{L}])дат(?:[аеуы]|ам|ами|ах)?(?![\p{L}])|расписан|ежеднев|еженедель|регулярн|кажд.{0,12}(?:день|недел)|(?:\d{1,2}\s*[,и]\s*){2}\d{1,2}/iu.test(
         state.current,
       );
@@ -1713,6 +1771,7 @@ function semanticFacts(text, state) {
       ) || test(calendarDates);
     if (
       (selectedDates ||
+        recurringSchedule(text) ||
         test(
           /отложенн|завтра|(?<![\p{L}])дат(?:[аеуы]|ам|ами|ах)?(?![\p{L}])|расписан|заплан|регулярн.{0,15}пост|кажд.{0,12}(?:день|недел)|ежеднев|еженедель|по понедельник|повтор/iu,
         )) &&
@@ -1722,9 +1781,7 @@ function semanticFacts(text, state) {
       add(
         selectedDates
           ? 'publisher-schedule-dates'
-          : test(
-                /ежеднев|еженедель|регулярн.{0,15}пост|кажд.{0,12}(?:день|недел)|по (?:понедельник|вторник|сред|пятниц)|повтор|без лимита|сохранить расписание/iu,
-              ) && !test(/не повтор|не.{0,10}кажд|один раз|кажд.{0,15}не надо/iu)
+          : recurringSchedule(text)
             ? 'publisher-schedule-recurrence'
             : 'publisher-schedule-once',
         100,
@@ -1895,7 +1952,7 @@ export function createSupportRouter(knowledge) {
       hasContext;
     const clarificationAnswer =
       ctx.current.length <= 160 &&
-      (/^(?:я\s+(?:админ|участ|владел)|админ|участ|да(?![\p{L}])|нет(?![\p{L}])|в\s|во\s|на\s|у меня\s|мне\s|только\s|одному\s|здесь\s|два\s|две\s|три\s|один\s|одна\s|\d)/iu.test(
+      (/^(?:я\s+(?:админ|участ|владел)|админ|участ|владел|да(?![\p{L}])|нет(?![\p{L}])|в\s|во\s|на\s|у меня\s|мне\s|только\s|одному\s|здесь\s|два\s|две\s|три\s|один\s|одна\s|\d)/iu.test(
         ctx.current,
       ) ||
         (ctx.current.split(/\s+/u).length <= 6 &&
