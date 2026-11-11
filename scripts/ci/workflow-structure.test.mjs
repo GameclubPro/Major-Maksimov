@@ -173,11 +173,11 @@ function assertBoundedHttpsAptPolicy(run) {
     'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
   ].join('\n');
   const expected = [
-    'https://archive.ubuntu.com/ubuntu/',
-    'https://archive.ubuntu.com/ubuntu/',
-    'deb https://archive.ubuntu.com/ubuntu noble main',
+    'https://azure.archive.ubuntu.com/ubuntu/',
+    'https://azure.archive.ubuntu.com/ubuntu/',
+    'deb https://azure.archive.ubuntu.com/ubuntu noble main',
     'URIs: https://security.ubuntu.com/ubuntu/',
-    'URIs: https://archive.ubuntu.com/ubuntu/',
+    'URIs: https://azure.archive.ubuntu.com/ubuntu/',
     'URIs: https://packages.microsoft.com/ubuntu/24.04/prod',
     'URIs: mirror+file:/etc/apt/apt-mirrors.txt',
   ].join('\n');

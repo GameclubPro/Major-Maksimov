@@ -93,7 +93,7 @@ jobs:
           if ! command -v redis-server >/dev/null; then
             for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
               if [[ -f "$apt_source_file" ]]; then
-                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://azure.archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
               fi
             done
             printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
@@ -223,7 +223,7 @@ jobs:
           if ! command -v redis-server >/dev/null; then
             for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
               if [[ -f "$apt_source_file" ]]; then
-                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://azure.archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
               fi
             done
             printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
@@ -339,7 +339,7 @@ jobs:
         run: |
           for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
             if [[ -f "$apt_source_file" ]]; then
-              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://azure.archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
             fi
           done
           printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
@@ -446,7 +446,7 @@ jobs:
         run: |
           for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
             if [[ -f "$apt_source_file" ]]; then
-              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
+              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://azure.archive.ubuntu.com/#g; s#http://security\.ubuntu\.com/#https://security.ubuntu.com/#g' "$apt_source_file"
             fi
           done
           printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
