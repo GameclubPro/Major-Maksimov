@@ -60,6 +60,8 @@ function LimitsSwitch({ fields, path }: FieldsProps & { path: ChatBooleanField }
           fields.setError(path, null);
           if (cascadedFlags.has(path)) setChatBoolean(fields, path, event.target.checked);
           else fields.setScalar(path, event.target.checked);
+          if (path === 'maxMessageLengthEnabled' && !event.target.checked)
+            fields.setError('maxMessageLength', null);
         } catch (cause) {
           fields.setError(path, cause instanceof Error ? cause.message : 'Проверьте значение.');
         }
@@ -159,6 +161,8 @@ function SharedMessageLengthSlider({ fields }: FieldsProps) {
       max={MESSAGE_LENGTH_MAX}
       step={MESSAGE_LENGTH_STEP}
       disabled={fields.readOnly}
+      error={fields.error('maxMessageLength')}
+      onError={(message) => fields.setError('maxMessageLength', message)}
       onCommit={(value) => fields.setScalar('maxMessageLength', value)}
     />
   ) : (
@@ -547,7 +551,7 @@ export function SharedSettingsLimitsFields({
           </p>
         ) : null}
 
-        {fields.error('maxMessageLength') ? (
+        {fields.error('maxMessageLength') && fields.read('maxMessageLength').kind !== 'common' ? (
           <small className="field__hint">{fields.error('maxMessageLength')}</small>
         ) : null}
       </div>

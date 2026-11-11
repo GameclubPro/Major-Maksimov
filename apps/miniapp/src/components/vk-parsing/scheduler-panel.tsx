@@ -118,6 +118,7 @@ export function SchedulerPanel({
   onUpdateSources,
 }: SchedulerPanelProps) {
   const [section, setSection] = useState<'publication' | 'time' | 'safety'>('publication');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [pendingMode, setPendingMode] = useState<VkParsingAutopostMode | null>(null);
   const automaticSources = sources.filter(
     (source) => source.publishMode !== 'BOT_REVIEW' && source.publishMode !== 'REVIEW',
@@ -191,7 +192,7 @@ export function SchedulerPanel({
         />
       </div>
 
-      <div className="vk-autopost-panel__schedule">
+      <div className="vk-autopost-panel__schedule" hidden={advancedOpen && section === 'time'}>
         <IconoirSprite variant="iconoir" icon="Clock" aria-hidden />
         <span>
           {settings.workHoursStart === settings.workHoursEnd
@@ -201,7 +202,10 @@ export function SchedulerPanel({
         <span>{formatTimezoneLabel(settings.schedulerTimezone)}</span>
       </div>
 
-      <details className="vk-autopost-advanced">
+      <details
+        className="vk-autopost-advanced"
+        onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
+      >
         <summary>Параметры публикации</summary>
         <div className="vk-autopost-advanced__body">
           <div

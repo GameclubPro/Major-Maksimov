@@ -13,6 +13,7 @@ import {
   applyNativeVisualMode,
 } from '../../../scripts/miniapp-native-visual-mode.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
+import { runPublicMobileChecks } from './public-mobile-actions.browser.mjs';
 import { checkStatisticsLaunchNavigation } from './statistics-launch-navigation.browser.mjs';
 
 const base = await allocateMiniappBaseUrl('http://127.0.0.1:3000/app/');
@@ -22,6 +23,7 @@ let browser;
 try {
   browser = await chromium.launch();
   await checkStatisticsLaunchNavigation(browser, base);
+  await runPublicMobileChecks({ browser, base, output });
   for (const [deviceName, device] of [
     ['iphone', devices['iPhone 15']],
     ['android', devices['Pixel 7']],

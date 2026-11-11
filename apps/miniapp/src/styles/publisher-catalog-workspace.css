@@ -18,7 +18,7 @@
   body[data-miniapp-profile='publisher'] .publisher-entities-page__filters {
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(max-content, 1fr));
     padding: 3px;
     border-radius: 7px;
     background: var(--color-surface-muted);

@@ -299,6 +299,26 @@ try {
         2,
       );
       await diagnostics.getByText('Проверка и история', { exact: true }).click();
+      const durationTrigger = panel.locator('.settings-duration-editor__preset--trigger');
+      await durationTrigger.click();
+      const duration = panel.getByRole('group', { name: 'Срок ограничения: за повторы' });
+      const durationHours = duration.getByRole('spinbutton', {
+        name: 'Срок ограничения в часах: за повторы',
+      });
+      const initialHours = await durationHours.inputValue();
+      await duration.getByRole('button', { name: 'Увеличить срок: за повторы' }).waitFor();
+      await duration.getByRole('button', { name: 'Уменьшить срок: за повторы' }).waitFor();
+      for (const invalid of ['0', '169', '']) {
+        await durationHours.fill(invalid);
+        assert.equal(await durationHours.getAttribute('aria-invalid'), 'true');
+        const errorId = await durationHours.getAttribute('aria-describedby');
+        assert.ok(errorId);
+        assert.match(await page.locator(`[id="${errorId}"]`).innerText(), /от 1 до 168/u);
+      }
+      await durationHours.fill(initialHours);
+      assert.notEqual(await durationHours.getAttribute('aria-invalid'), 'true');
+      assert.equal(await durationHours.getAttribute('aria-describedby'), null);
+      await durationTrigger.click();
       const compare = panel.getByRole('combobox', { name: 'Сравнение сообщений' });
       assert.equal(await compare.count(), 0);
       const scope = panel.getByRole('radiogroup', { name: 'Чьи картинки сравнивать' });

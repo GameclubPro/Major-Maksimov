@@ -52,10 +52,10 @@ import '../styles/publisher-catalog-workspace.css';
 const PUBLISHER_ENTITIES_QUERY_ROOT = ['publications', 'sources', 'publisher'] as const;
 const PUBLISHER_ENTITY_PAGE_SIZE = 30;
 const PUBLISHER_ENTITY_ROW_HEIGHT = 120;
+const PUBLISHER_ENTITY_ROW_REM = PUBLISHER_ENTITY_ROW_HEIGHT / 16;
 const PUBLISHER_ENTITY_LIST_INITIAL_HEIGHT = 680;
 const PUBLISHER_ENTITY_VIRTUALIZATION_THRESHOLD = 60;
 const PUBLISHER_ENTITY_LIST_OVERSCAN = 4;
-const PUBLISHER_ENTITY_AUTO_LOAD_THRESHOLD = PUBLISHER_ENTITY_ROW_HEIGHT * 2;
 const PUBLISHER_ENTITY_SEARCH_DEBOUNCE_MS = 250;
 const PUBLISHER_BULK_REFRESH_POLL_DELAYS_MS = [1_200, 2_400, 4_200, 7_200] as const;
 
@@ -123,6 +123,7 @@ export function PublisherEntitiesPage({
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [readinessFilter, setReadinessFilter] = useState<PublisherEntityReadinessFilter>('all');
   const [listScrollTop, setListScrollTop] = useState(0);
+  const [entityRowHeight, setEntityRowHeight] = useState(PUBLISHER_ENTITY_ROW_HEIGHT);
   const [listViewportHeight, setListViewportHeight] = useState(
     PUBLISHER_ENTITY_LIST_INITIAL_HEIGHT,
   );
@@ -131,6 +132,7 @@ export function PublisherEntitiesPage({
   const [openingBotDialog, setOpeningBotDialog] = useState(false);
   const [lastSummary, setLastSummary] = useState<PublisherEntitiesSummary | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const rowScaleRef = useRef<HTMLSpanElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const autoLoadArmedRef = useRef(true);
   const nextPageRequestRef = useRef(false);
@@ -205,15 +207,15 @@ export function PublisherEntitiesPage({
         itemCount: entities.length,
         scrollTop: listScrollTop,
         viewportHeight: listViewportHeight,
-        rowHeight: PUBLISHER_ENTITY_ROW_HEIGHT,
+        rowHeight: entityRowHeight,
         overscan: PUBLISHER_ENTITY_LIST_OVERSCAN,
       }),
-    [entities.length, listScrollTop, listViewportHeight],
+    [entities.length, entityRowHeight, listScrollTop, listViewportHeight],
   );
   const renderedEntities = shouldVirtualize
     ? entities.slice(virtualRange.startIndex, virtualRange.endIndex)
     : entities;
-  const renderedOffset = virtualRange.startIndex * PUBLISHER_ENTITY_ROW_HEIGHT;
+  const renderedOffset = virtualRange.startIndex * entityRowHeight;
 
   useEffect(() => {
     if (currentSummary) setLastSummary(currentSummary);
@@ -229,11 +231,21 @@ export function PublisherEntitiesPage({
     const measure = () => {
       setListScrollTop(list.scrollTop);
       setListViewportHeight(list.clientHeight);
+      const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      setEntityRowHeight(
+        Math.max(PUBLISHER_ENTITY_ROW_HEIGHT, rootFontSize * PUBLISHER_ENTITY_ROW_REM),
+      );
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(list);
-    return () => observer.disconnect();
+    observer.observe(document.documentElement);
+    if (rowScaleRef.current) observer.observe(rowScaleRef.current);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+    };
   }, [entities.length, searchSettling, shouldVirtualize]);
 
   useEffect(() => {
@@ -530,7 +542,7 @@ export function PublisherEntitiesPage({
       scrollTop: list.scrollTop,
       scrollHeight: list.scrollHeight,
       clientHeight: list.clientHeight,
-      threshold: PUBLISHER_ENTITY_AUTO_LOAD_THRESHOLD,
+      threshold: entityRowHeight * 2,
     });
     if (!nearEnd) {
       autoLoadArmedRef.current = true;
@@ -835,8 +847,15 @@ export function PublisherEntitiesPage({
           className={cn('publisher-entities-page__list', shouldVirtualize && 'is-virtual')}
           role="list"
           aria-label={view === 'channel' ? 'Каналы Публика' : 'Чаты Публика'}
+          style={{ '--publisher-entity-row-height': `${entityRowHeight}px` } as CSSProperties}
           onScroll={handleEntityListScroll}
         >
+          <span
+            ref={rowScaleRef}
+            className="publisher-entities-page__row-scale"
+            style={{ width: `${PUBLISHER_ENTITY_ROW_REM}rem` }}
+            aria-hidden="true"
+          />
           {shouldVirtualize ? (
             <div
               className="publisher-entities-page__virtual-spacer"

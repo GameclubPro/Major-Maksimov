@@ -1,3 +1,4 @@
+import { useId, useRef, useState } from 'react';
 import { AppIcon as IconoirSprite } from '../ui/app-icon';
 
 import { cn } from '../../lib/cn';
@@ -16,6 +17,62 @@ type PostMediaPickerProps = {
   onToggleVideo: (url: string) => void;
   onToggleLink: (url: string) => void;
 };
+
+export function PostPhotoChoice({
+  url,
+  index,
+  checked,
+  disabled,
+  onToggle,
+}: {
+  url: string;
+  index: number;
+  checked: boolean;
+  disabled: boolean;
+  onToggle: (url: string) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const errorId = useId();
+  const choiceRef = useRef<HTMLButtonElement | null>(null);
+  return (
+    <div className="vk-parsing-photo-option">
+      <button
+        ref={choiceRef}
+        type="button"
+        className={cn('vk-parsing-photo-choice', checked && 'is-selected')}
+        aria-pressed={checked}
+        aria-describedby={failed ? errorId : undefined}
+        aria-label={`${checked ? 'Убрать' : 'Вернуть'} фото ${index + 1}`}
+        title={checked ? 'Убрать фото' : 'Вернуть фото'}
+        disabled={disabled}
+        onClick={() => onToggle(url)}
+      >
+        {failed ? (
+          <span id={errorId} className="vk-parsing-photo-choice__unavailable">
+            Фото {index + 1} недоступно
+          </span>
+        ) : (
+          <img src={url} alt="" loading="lazy" onError={() => setFailed(true)} />
+        )}
+        <IconoirSprite variant="iconoir" icon="Camera" aria-hidden />
+      </button>
+      {failed ? (
+        <button
+          type="button"
+          className="vk-parsing-photo-option__retry"
+          aria-label={`Повторить загрузку фото ${index + 1}`}
+          disabled={disabled}
+          onClick={(event) => {
+            if (document.activeElement === event.currentTarget) choiceRef.current?.focus();
+            setFailed(false);
+          }}
+        >
+          Повторить
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 export function PostMediaPicker({
   photoUrls,
@@ -37,19 +94,14 @@ export function PostMediaPicker({
           {photoUrls.map((url, index) => {
             const checked = selectedPhotoUrls.includes(url);
             return (
-              <button
-                type="button"
+              <PostPhotoChoice
                 key={url}
-                className={cn('vk-parsing-photo-choice', checked && 'is-selected')}
-                aria-pressed={checked}
-                aria-label={`${checked ? 'Убрать' : 'Вернуть'} фото ${index + 1}`}
-                title={checked ? 'Убрать фото' : 'Вернуть фото'}
+                url={url}
+                index={index}
+                checked={checked}
                 disabled={disabled}
-                onClick={() => onTogglePhoto(url)}
-              >
-                <img src={url} alt="" loading="lazy" />
-                <IconoirSprite variant="iconoir" icon="Camera" aria-hidden />
-              </button>
+                onToggle={onTogglePhoto}
+              />
             );
           })}
         </div>

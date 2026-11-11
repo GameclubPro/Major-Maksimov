@@ -1,0 +1,15 @@
+@layer components {
+  .karavan-shop__manual-link {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+  .karavan-shop__manual-link textarea {
+    width: 100%;
+    min-height: 72px;
+    resize: vertical;
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+}

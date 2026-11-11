@@ -432,6 +432,7 @@ export function SharedDuplicateSettingsFields({ fields, context }: Props) {
             enabledPath="duplicateMuteEnabled"
             durationPath="duplicateMuteDurationHours"
             title="Ограничить отправку"
+            durationLabel="за повторы"
             activationLabel="Включить ограничение сообщений за повторы"
             onChange={(enabled) => setChatBoolean(fields, 'duplicateMuteEnabled', enabled)}
           />

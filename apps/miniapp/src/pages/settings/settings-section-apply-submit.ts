@@ -19,6 +19,7 @@ import {
 export type SettingsApplySubmission = {
   sourceChatId: string;
   confirmedTargetChatIds?: string[];
+  reviewedTargetTitles?: Readonly<Record<string, string>>;
   section: ApplySectionKey;
   sourceSettings: ChatSettings;
   target: ApplySettingsTarget;

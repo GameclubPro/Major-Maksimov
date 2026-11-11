@@ -124,7 +124,8 @@ import '../features/publications/publication-workbench.css';
 import { PublicationPostPublishFields } from '../features/publications/publication-post-publish-fields';
 import { publicationPostPublishLabels } from '../features/publications/publication-post-actions-presentation';
 import { savePublicationWithAccessRefresh } from '../features/publications/publication-save-access-refresh';
-import { usePublicationAssetPreviews } from '../features/publications/use-publication-asset-previews';
+import { useLocalPublicationVideoPreview } from '../features/publications/use-local-publication-video-preview';
+import { PublicationDeliveryNote } from '../features/publications/publication-delivery-note';
 import {
   PublicationDraftSaveIndicator,
   PublicationDraftStatus,
@@ -314,14 +315,17 @@ export function PublicationsPage({
   const contentSectionRef = useRef<HTMLElement | null>(null);
   const targetsSectionRef = useRef<HTMLElement | null>(null);
   const timingSectionRef = useRef<HTMLElement | null>(null);
-  const savedAssetPreviews = usePublicationAssetPreviews(
+  const { previews: assetPreviews, rememberVideo } = useLocalPublicationVideoPreview({
     api,
-    draft.cloudDraft?.id ??
+    userId,
+    session: isEditor ? editorContext : null,
+    publicationId:
+      draft.cloudDraft?.id ??
       (editorContext?.kind === 'edit' || editorContext?.kind === 'import'
         ? editorContext.publicationId
         : null),
-    draft.retainedAssets,
-  );
+    assets: draft.retainedAssets,
+  });
 
   const targetSources = usePublicationTargetSources(api, isPublisherProfile);
   const scopedTargetRecheck = publicationTargetRecheck.usePublicationTargetRecheck(api);
@@ -1050,17 +1054,12 @@ export function PublicationsPage({
         onDuplicate={() => openPublicationEditor(publication, 'duplicate')}
         onCancel={() => setActionTarget({ publication, action: 'cancel' })}
         footer={
-          delivery.ambiguous > 0 ? (
-            <span className="publication-delivery-note is-danger">Проверьте отправку</span>
-          ) : delivery.failed > 0 || delivery.canceled > 0 ? (
-            <span className="publication-delivery-note is-danger">
-              Есть недоставленные сообщения
-            </span>
-          ) : delivery.sent > 0 ? (
-            <span className="publication-delivery-note">
-              Доставлено {delivery.sent} из {delivery.total}
-            </span>
-          ) : null
+          <PublicationDeliveryNote
+            delivery={delivery}
+            title={publication.title || formatPublicationTargets(publication)}
+            pending={pending}
+            onReview={() => setDetailsTarget(publication)}
+          />
         }
       />
     );
@@ -1521,6 +1520,7 @@ export function PublicationsPage({
         mediaMimeType: '',
         mediaFileName: '',
       }));
+      rememberVideo(asset.id, file);
       discardMissingImages();
       setFieldError('');
     } finally {
@@ -1690,7 +1690,7 @@ export function PublicationsPage({
               setDraft={setDraft}
               importing={editorContext?.kind === 'import'}
               importOmissions={importOmissions}
-              importedAssetPreviews={savedAssetPreviews}
+              importedAssetPreviews={assetPreviews}
               customButtons={visibleCustomButtons}
               systemButtons={systemButtons}
               previewTargets={draft.targets}
@@ -1814,7 +1814,7 @@ export function PublicationsPage({
             <LazyPublicationReviewSheet
               open={pendingReview}
               draft={draft}
-              previews={savedAssetPreviews}
+              previews={assetPreviews}
               facts={[
                 `Кому · ${formatTargetSummary(draft.targets)}`,
                 editScope === 'retry' ? null : formatTimezoneLabel(draft.scheduleTimezone),

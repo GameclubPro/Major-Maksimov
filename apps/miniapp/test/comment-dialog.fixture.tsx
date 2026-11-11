@@ -5,8 +5,14 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { ToastProvider } from '../src/components/ui/toast';
 import { ChannelDialogPage } from '../src/pages/channel-dialog-page';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
-import { syncMaxNativeEnvironment } from '../src/lib/max-bridge';
-import type { ChannelDialogResponse } from '@maxim/contracts/channel-dialog';
+import { bindMaxBackButton, syncMaxNativeEnvironment } from '../src/lib/max-bridge';
+import { runNativeBackHandlers } from '../src/lib/native-back';
+import type {
+  ChannelDialogMessage,
+  ChannelDialogResponse,
+  DeleteChannelDialogMessageResponse,
+  ToggleChannelDialogReactionResponse,
+} from '@maxim/contracts/channel-dialog';
 import type { ApiTransport } from '../src/lib/api/transport';
 
 const preview = createPreviewApiTransport();
@@ -31,6 +37,10 @@ const message = (
 let data = { ...initial, messages: Array.from({ length: 24 }, () => message()) };
 let pendingSend: { resolve: () => void; reject: (error: Error) => void } | null = null;
 let holdSend = false;
+let holdDelete = false;
+let pendingDelete: { resolve: () => void; reject: (error: Error) => void } | null = null;
+const profileRequests: string[] = [];
+const deleteRequests: { id: string; token: string | null }[] = [];
 let failNotificationSave = false;
 const profile =
   new URLSearchParams(location.search).get('profile') === 'publisher' ? 'publisher' : 'moderation';
@@ -41,6 +51,10 @@ const api: ApiTransport = {
       return structuredClone(data) as never;
     }
     const payload = JSON.parse(String(init.body ?? '{}'));
+    if (path.endsWith('/profile/handoff') && init.method === 'POST') {
+      profileRequests.push(path);
+      return { botUrl: 'https://max.ru/synthetic_profile_bot?start=profile' } as never;
+    }
     if (path.endsWith('/notifications') && init.method === 'PUT') {
       if (failNotificationSave) {
         failNotificationSave = false;
@@ -80,6 +94,43 @@ const api: ApiTransport = {
       data = { ...data, messages: [...data.messages, next] };
       return { ok: true, message: next } as never;
     }
+    if (init.method === 'DELETE' && path.includes('/messages/')) {
+      const url = new URL(path, 'http://fixture.invalid');
+      const id = decodeURIComponent(url.pathname.split('/').at(-1)!);
+      deleteRequests.push({ id, token: payload.token ?? url.searchParams.get('token') });
+      if (holdDelete)
+        await new Promise<void>((resolve, reject) => {
+          pendingDelete = { resolve, reject };
+        });
+      const selected = data.messages.find((item) => item.id === id);
+      if (!selected || (!selected.canDelete && !selected.canDeleteAsAdmin))
+        throw new Error('Комментарий недоступен');
+      data = { ...data, messages: data.messages.filter((item) => item.id !== id) };
+      const response: DeleteChannelDialogMessageResponse = { ok: true, deletedMessageId: id };
+      return response as never;
+    }
+    if (init.method === 'POST' && path.includes('/reactions')) {
+      const id = decodeURIComponent(path.split('/').at(-2)!);
+      const selected = data.messages.find((item) => item.id === id)!;
+      const reaction = selected.reactionGroups.find((item) => item.emoji === payload.emoji);
+      const next = {
+        ...selected,
+        reactionGroups: reaction
+          ? selected.reactionGroups.map((item) =>
+              item.emoji === payload.emoji
+                ? {
+                    ...item,
+                    reactedByMe: !item.reactedByMe,
+                    count: item.count + (item.reactedByMe ? -1 : 1),
+                  }
+                : item,
+            )
+          : [...selected.reactionGroups, { emoji: payload.emoji, count: 1, reactedByMe: true }],
+      };
+      data = { ...data, messages: data.messages.map((item) => (item.id === id ? next : item)) };
+      const response: ToggleChannelDialogReactionResponse = { ok: true, message: next };
+      return response as never;
+    }
     if (init.method === 'PATCH' && path.includes('/messages/')) {
       const id = path.split('/').at(-1);
       const next = { ...data.messages.find((item) => item.id === id)!, text: payload.text };
@@ -94,6 +145,27 @@ const root = createRoot(document.getElementById('root')!);
 
 Object.assign(window, {
   commentTest: {
+    deleteRequests,
+    profileRequests,
+    holdDelete() {
+      holdDelete = true;
+    },
+    finishDelete(fail = false) {
+      if (!pendingDelete) throw new Error('No pending delete');
+      if (fail) pendingDelete.reject(new Error('Не удалось удалить комментарий'));
+      else pendingDelete.resolve();
+      holdDelete = false;
+      pendingDelete = null;
+    },
+    async updateMessage(id: string, change: Partial<ChannelDialogMessage> | null) {
+      data = {
+        ...data,
+        messages: data.messages.flatMap((item) =>
+          item.id !== id ? [item] : change ? [{ ...item, ...change }] : [],
+        ),
+      };
+      await client.invalidateQueries();
+    },
     setUserId(userId: string) {
       renderFixture(userId);
     },
@@ -150,4 +222,6 @@ function renderFixture(userId = 'preview-admin') {
 }
 
 syncMaxNativeEnvironment();
+const unbindBack = bindMaxBackButton(runNativeBackHandlers);
+window.addEventListener('pagehide', unbindBack, { once: true });
 renderFixture();

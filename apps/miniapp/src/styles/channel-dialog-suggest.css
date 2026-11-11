@@ -419,8 +419,8 @@
     right: 5px;
     display: grid;
     place-items: center;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     border: 1px solid var(--suggest-line);
     border-radius: 6px;
@@ -447,13 +447,13 @@
 
   .channel-suggest-composer__image-order {
     display: flex;
-    gap: 2px;
+    gap: 4px;
   }
   .channel-suggest-composer__image-order button {
     display: grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     border: 0;
     border-radius: 4px;

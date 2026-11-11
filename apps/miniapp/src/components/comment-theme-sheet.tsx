@@ -7,6 +7,7 @@ import { useDialogFocusTrap } from '../lib/dialog-focus';
 import { maxSelectionChanged } from '../lib/max-bridge';
 import { useNativeBackHandler } from '../lib/native-back';
 import { resolveRadioGroupNavigationIndex } from '../lib/radio-group-navigation';
+import './comment-theme-sheet.css';
 
 type CommentThemeSheetProps = {
   portalTarget: Element;

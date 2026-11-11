@@ -190,6 +190,28 @@ try {
       await page.locator('.design-preview__device').waitFor();
       await applyNativeVisualMode(page, capture.profile);
       const { phrase, text, footer } = await openEditor(page);
+      const tester = page.locator('.publisher-auto-reply-editor__tester');
+      await tester.waitFor();
+      assert.equal(await tester.getAttribute('open'), null);
+      await tester.locator('summary').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: join(output, `${width}-${mode}-tester-collapsed.png`) });
+      await tester.locator('summary').click();
+      const sample = tester.getByRole('textbox', { name: 'Сообщение участника', exact: true });
+      await sample.fill('Каталог');
+      await sample.press('Enter');
+      const feedback = tester.getByRole('status');
+      await feedback.waitFor();
+      const result = await feedback.innerText();
+      await tester.locator('summary').click();
+      assert.equal(await sample.isVisible(), false);
+      await tester.locator('summary').click();
+      assert.equal(await sample.inputValue(), 'Каталог');
+      assert.equal(await feedback.innerText(), result);
+      await sample.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: join(output, `${width}-${mode}-tester-expanded.png`) });
+      await tester.locator('summary').click();
+      await text.click();
+
       await text.pressSequentially(longReply, { delay: 1, timeout: 60_000 });
       let expectedText = longReply;
       assert.equal((await text.innerText()).trimEnd(), expectedText);

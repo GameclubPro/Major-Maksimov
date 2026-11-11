@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { registerHooks } from 'node:module';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
-import {
+const cssHook = registerHooks({
+  load(url, context, nextLoad) {
+    return url.endsWith('.css')
+      ? { format: 'module', source: '', shortCircuit: true }
+      : nextLoad(url, context);
+  },
+});
+const {
   MESSAGE_COUNT_LIMIT_MAX,
   MESSAGE_COUNT_LIMIT_MIN,
   MESSAGE_COUNT_LIMIT_WINDOW_MAX_HOURS,
@@ -19,7 +27,8 @@ import {
   PHOTO_COOLDOWN_MIN_HOURS,
   STICKER_COOLDOWN_MAX_MINUTES,
   STICKER_COOLDOWN_MIN_MINUTES,
-} from '../src/pages/settings/settings-limits-controls';
+} = await import('../src/pages/settings/settings-limits-controls');
+cssHook.deregister();
 
 function readSettingsSource(name: string) {
   return readFileSync(new URL(`../src/pages/settings/${name}.tsx`, import.meta.url), 'utf8');
@@ -127,6 +136,7 @@ test('extracted length slider renders its accessible value and configured bounds
       max: MESSAGE_LENGTH_MAX,
       step: MESSAGE_LENGTH_STEP,
       onCommit: () => undefined,
+      onError: () => undefined,
     }),
   );
   assert.match(html, /aria-label="Лимит длины сообщения"/u);
@@ -134,5 +144,8 @@ test('extracted length slider renders its accessible value and configured bounds
   assert.match(html, /max="1500"/u);
   assert.match(html, /step="10"/u);
   assert.match(html, /value="120"/u);
-  assert.match(html, /120 симв\./u);
+  assert.match(html, /aria-label="Лимит длины сообщения, символы"/u);
+  assert.match(html, /type="number"/u);
+  assert.match(html, /step="1"/u);
+  assert.match(html, />симв\.</u);
 });
