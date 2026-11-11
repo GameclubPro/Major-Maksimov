@@ -19,6 +19,7 @@ export async function checkStatisticsLaunchNavigation(browser, base) {
     try {
       await installMaxBridgeShimInitScript(context, {}, { colorScheme });
       const page = await context.newPage();
+      await page.clock.setFixedTime(new Date('2026-11-12T00:00:00Z'));
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));
       // FLAG: Exercise the authenticated App/router with fixture API responses only.
