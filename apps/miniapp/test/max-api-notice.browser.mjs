@@ -72,7 +72,7 @@ try {
             const dialog = page.getByRole('alertdialog', { name: 'Нестабильная работа API MAX' });
             await dialog.waitFor();
             assert.ok(
-              (await dialog.innerText()).includes('Проблема предположительно на стороне платформы'),
+              (await dialog.innerText()).includes('Предположительно, сбой происходит на стороне MAX'),
             );
             const button = dialog.getByRole('button', { name: 'Ознакомлен', exact: true });
             assert.equal(await dialog.getByRole('button').count(), 1);
