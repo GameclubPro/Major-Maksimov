@@ -181,7 +181,7 @@ It starts an owned local server and uses WebKit/Chromium with both keyboard mode
 
 ## Chat Shop
 
-Use the [current product decisions](miniapp-product-decisions.md#miniapp-shop-03-управление-магазином-без-лишних-шагов)
+Use the [current product decisions](miniapp-product-decisions.md#miniapp-shop-07-магазин-чата--покупательский-караван-без-отдельного-оформления)
 and [integration runbook](../operations/runbooks/karavan-chat-marketplaces.md).
 Marketplace design is retired by MINIAPP-SHOP-07. Preserve seller Store images,
 both shop formats, ordinary public Karavan navigation, exact bindings and recovery
