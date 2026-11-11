@@ -107,18 +107,14 @@ try {
         });
         const home = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
         await home.waitFor();
-        await home.getByRole('button', { name: 'Посмотреть магазин чата', exact: true }).waitFor();
-        assert.deepEqual(await home.locator('.karavan-shop__menu button').allTextContents(), [
-          'Товары и услуги',
-          'Заявки',
-          'Настройки',
-        ]);
+        await home.getByRole('button', { name: 'Открыть магазин', exact: true }).waitFor();
+        await home.getByRole('button', { name: 'Управлять магазином', exact: true }).waitFor();
+        assert.equal(await home.getByRole('button', { name: /^(?:Товары и услуги|Заявки|Настройки)$/u }).count(), 0);
         assert.equal(await home.locator('#karavanStorefrontMessageText').count(), 0);
         await settleVisualFrame(page);
         await page.screenshot({ path: `${output}/${engineName}-home.png` });
-        await home.getByRole('button', { name: 'Настройки', exact: true }).click();
-        const settings = page.getByRole('dialog', { name: 'Настройки', exact: true });
-        await settings.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+        const settings = home;
+        await home.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
         const publications = page.getByRole('dialog', { name: 'Объявления в чате', exact: true });
         await publications.getByRole('checkbox', { name: 'Ответ бота на $' }).check();
         await publications
@@ -166,7 +162,7 @@ try {
         await settleVisualFrame(page);
         await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
         await settings.waitFor();
-        await settings.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+        await home.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
         await message.waitFor();
         assert.equal(
           await message.inputValue(),
@@ -181,8 +177,7 @@ try {
         await publications.getByRole('button', { name: 'Сохранить', exact: true }).click();
         await page.getByText('Блок «Магазин чата» сохранен', { exact: true }).waitFor();
         await page.getByRole('button', { name: 'Магазин чата', exact: true }).click();
-        await home.getByRole('button', { name: 'Настройки', exact: true }).click();
-        await settings.getByRole('button', { name: 'Объявления в чате', exact: true }).click();
+        await home.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
         await publications.getByText('Изменить текст', { exact: true }).click();
         assert.equal(await message.inputValue(), 'Объявления нашего чата');
         await settleVisualFrame(page);
@@ -256,56 +251,22 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
   page.on('pageerror', (error) => errors.push(error.message));
   try {
     await page.goto(`${base}build/shop-browser-fixtures/${fixture.split('/').at(-1)}/index.html`);
-    // Current management opens directly; connection recovery is loaded in its own screen.
-    await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-    const settings = page.getByRole('dialog', { name: 'Настройки', exact: true });
-    const invitation = settings.getByRole('radio', { name: 'По приглашению', exact: true });
-    await invitation.check();
-    await page.keyboard.press('Escape');
-    await page
-      .getByRole('dialog', { name: 'Магазин чата', exact: true })
-      .getByRole('button', { name: 'Настройки', exact: true })
-      .click();
-    assert.equal(
-      await invitation.isChecked(),
-      true,
-      'ordinary internal Back retains the local draft',
-    );
-    const settle = () =>
-      page.evaluate(
-        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
-      );
-    await page.evaluate(() => window.__changeProbeScope('complete'));
-    await settle();
-    await invitation.waitFor();
-    assert.equal(
-      await invitation.isChecked(),
-      true,
-      'partial → normal in the same actor/chat/marketplace/generation retains the draft',
-    );
-    for (const scope of ['marketplace', 'generation', 'actor', 'chat']) {
-      await invitation.check();
-      const reads = await page.evaluate(() => window.__probeReads);
-      await page.evaluate((scope) => window.__changeProbeScope(scope), scope);
-      await page.waitForFunction((reads) => window.__probeReads > reads, reads);
-      await settle();
-      await settings.getByRole('radio', { name: 'Все желающие', exact: true }).waitFor();
-      assert.equal(
-        await settings.getByRole('radio', { name: 'Все желающие', exact: true }).isChecked(),
-        true,
-        `${scope} switches cannot inherit another scope's draft`,
-      );
-    }
-    await page.keyboard.press('Escape');
-    await page.evaluate(() => window.__changeProbeScope('arrange'));
     const home = page.getByRole('dialog', { name: 'Магазин чата', exact: true });
-    await home.getByRole('button', { name: 'Товары и услуги', exact: true }).waitFor();
-    await home.getByRole('button', { name: 'Заявки', exact: true }).waitFor({ state: 'detached' });
-    assert.equal(await home.getByRole('button', { name: 'Заявки', exact: true }).count(), 0);
+    const management = home.getByRole('button', { name: 'Управлять магазином', exact: true });
+    await management.waitFor();
+    await page.evaluate(() => window.__changeProbeScope('complete'));
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(node => node.textContent === 'Управлять магазином' && !node.disabled));
+    for (const scope of ['marketplace', 'generation', 'actor', 'chat']) {
+      const reads = await page.evaluate(() => window.__probeReads);
+      await page.evaluate(scope => window.__changeProbeScope(scope), scope);
+      await page.waitForFunction(reads => window.__probeReads > reads, reads);
+      await management.waitFor();
+      assert.equal(await home.getByRole('button', { name: 'Заявки', exact: true }).count(), 0);
+    }
     assert.deepEqual(await page.evaluate(() => window.__probeWrites), []);
     assert.deepEqual(errors, []);
     console.log(
-      `Shop scopes ${engineName}: internal Back/partial continuity + actor/chat/marketplace/generation isolation + arrange-only catalog passed`,
+      `Shop scopes ${engineName}: partial recovery + actor/chat/marketplace/generation changes without commerce writes passed`,
     );
   } catch (error) {
     console.error(

@@ -190,21 +190,19 @@ verified chats; disconnecting one chat remains a separate exact binding action.
 
 | Boundary                                                         | Focused checks                                                                                                                                                                                                          |
 | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shop navigation, drafts, applications, admission and public link | [Shop browser](../../apps/miniapp/test/karavan-shop.browser.mjs), [route](../../apps/miniapp/test/karavan-shop-route.browser.mjs)                                                                                       |
-| Setup authority, changed rules and partial outcomes              | [Integration browser](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [setup review](../../apps/miniapp/test/karavan-marketplace-setup-review.test.ts)                                                        |
-| Formats, readiness, categories and preview                       | [Formats](../../apps/miniapp/test/karavan-shop-formats.browser.mjs), [readiness](../../apps/miniapp/test/karavan-shop-readiness.browser.mjs), [categories](../../apps/miniapp/test/karavan-shop-categories.browser.mjs) |
-| Marketplace design retirement, network scope and legacy route    | [Simple shop browser](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), focused with `SHOP_SIMPLE_ONLY=network`                                                                                                 |
+| Connection, public/admin links, publication settings | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [actual settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs) |
+| Setup authority, changed rules and partial outcomes | [Integration browser](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [setup review](../../apps/miniapp/test/karavan-marketplace-setup-review.test.ts), [setup browser](../../apps/miniapp/test/karavan-shop-formats.browser.mjs) |
+| Moved editors, paused/empty shop, missing target, legacy recovery | Compact shop with `SHOP_SIMPLE_ONLY=categories`, `boundaries`, `queue` |
 | Durable browser commands and uncertain results                   | [Command journal](../../apps/miniapp/test/karavan-shop-command-journal.browser.mjs), [command runtime](../../apps/miniapp/test/karavan-shop-command-runtime.browser.mjs)                                                |
 | Final authorized publication choice                              | [PostgreSQL](../../apps/api/src/integrations/karavan-marketplace/karavan-publication-choice-postgres.spec.ts)                                                                                                           |
 
 Inspect each browser entrypoint's server and environment options before running it.
 Major's synthetic fixtures do not validate Karavan's seller implementation or live MAX.
-The daily shop case preserves explicit reorder controls: ordinary pinning does not enter
-reorder mode; an unknown write remains in shared recovery with its original request.
+Karavan owns listing order/pins, applications, seller admission, categories/rules and
+availability. Its `client-shop-admin.spec.ts` covers the new UI; Major retains exact
+command recovery and connection/publication behavior.
 For Birzhik advertising/profile cases, use the separate
 [marketplace regression map](marketplace-integration.md#focused-evidence).
 
-[Shop mobile quality](../../apps/miniapp/test/karavan-shop-mobile-quality.browser.mjs) checks
-the category consequence review before applying changes and retained listing pages
-with a section switch. It runs the real components with the existing typed
-shop fixture on narrow WebKit and Android Chromium profiles.
+The former commerce-editor browser scripts are superseded by the Karavan administration
+suite. Actual MAX acceptance remains separate from Chromium/WebKit emulation.

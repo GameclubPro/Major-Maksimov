@@ -1006,13 +1006,7 @@ const api = {
         permissions,
         counts,
         canManage: true,
-        buyerUrl: simple
-          ? 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop'
-          : market.format === 'storefront'
-            ? market.status === 'active' && administrationStore?.status === 'ACTIVE'
-              ? 'https://max.ru/synthetic_buyer_bot?startapp=store_administration-store'
-              : null
-            : 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
+        buyerUrl: scenario === 'simple_missing_buyer_link' ? null : 'https://max.ru/synthetic_buyer_bot?startapp=m_synthetic-shop',
         previewUrl: 'https://max.ru/synthetic_buyer_bot?startapp=mp_synthetic-shop',
         bindings: params.get('scenario') === 'unbound' || !formatConnected ? [] : bindings,
         connectedChats:

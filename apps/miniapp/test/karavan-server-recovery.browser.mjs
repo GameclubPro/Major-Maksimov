@@ -345,7 +345,7 @@ try {
             } else {
               await page.getByRole('heading', { name: marketplace.name, exact: true }).waitFor();
               await page
-                .getByRole('button', { name: 'Посмотреть магазин чата', exact: true })
+                .getByRole('button', { name: 'Открыть магазин', exact: true })
                 .click();
               assert.ok(
                 await page.evaluate(() =>
@@ -354,8 +354,7 @@ try {
                   ),
                 ),
               );
-              await page.getByRole('button', { name: 'Настройки', exact: true }).click();
-              await page.getByRole('button', { name: 'Подключённые чаты', exact: true }).click();
+              await page.getByRole('button', { name: 'Подключение', exact: true }).click();
               await page.getByText('Соседи', { exact: true }).first().waitFor();
               if (['missing-capability', 'foreign-blocked'].includes(scenario)) {
                 assert.equal(

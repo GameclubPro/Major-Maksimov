@@ -371,7 +371,7 @@ export function useShopCommands() {
   if (!value) throw new Error('Missing shop commands');
   return value;
 }
-export function ShopCommandRecovery() {
+export function ShopCommandRecovery({ showNavigation = true }: { showNavigation?: boolean } = {}) {
   const commands = useShopCommands();
   const workspace = useStorefrontWorkspace();
   if (commands.loading) return <p role="status">Проверяем сохранённые действия…</p>;
@@ -418,7 +418,7 @@ export function ShopCommandRecovery() {
       >
         {commands.busy ? 'Продолжаем…' : 'Продолжить сохранённое действие'}
       </button>
-      {workspace && workspace.page !== pending.ui.page ? (
+      {showNavigation && workspace && workspace.page !== pending.ui.page ? (
         <button type="button" onClick={() => workspace.navigate(pending.ui.page)}>
           Открыть действие
         </button>
