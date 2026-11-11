@@ -172,6 +172,23 @@ export function selectSupportOnboardingGuide({ text, request, knowledge, history
   if (imageOptOut(current)) return null;
   let setup = setupContext(current, knowledge, request);
   let followup = false;
+  if (!setup && request.connectionTroubleshooting) {
+    const userText = [
+      current,
+      ...history
+        .filter((turn) => turn?.role === 'user')
+        .map((turn) => normalize(turn.text))
+        .reverse(),
+    ];
+    const target = userText
+      .map((value) =>
+        botMentions(value, knowledge)
+          .filter((mention) => !mention.generic)
+          .at(-1),
+      )
+      .find(Boolean);
+    setup = { product: target?.product ?? 'moderator', text: current };
+  }
   if (!setup && imageRequest(current)) {
     const [previous, answer] = history.slice(-2);
     if (

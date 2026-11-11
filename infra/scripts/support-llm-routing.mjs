@@ -14,7 +14,7 @@ const normalize = (value) =>
     .replace(/стоп[\s-]*слов/gu, 'стоп слов')
     .replace(/анти[\s-]*дубл/gu, 'антидубл');
 const domain =
-  /(?<![\p{L}\p{N}_])бот(?:ы|а|у|ом|е|ов|ам|ами|ах)?(?![\p{L}\p{N}_])|максимов|майор|рэкс|публик|(?<![\p{L}\p{N}_])ластик(?:а|у|ом|е)?(?![\p{L}\p{N}_])|модерац|антидубл|антимат|антиспам|ночн.{0,8}режим|стоп слов|предложк|автопост|автоответ|\b(?:max|vk|api)\b|(?:^|\s)(?:вк|макс)(?:\s|[.!?,]|$)/iu;
+  /(?<![\p{L}\p{N}_])бот(?:ы|а|у|ом|е|ов|ам|ами|ах)?(?![\p{L}\p{N}_])|максимов|майор|рэкс|публик|(?<![\p{L}\p{N}_])ластик(?:а|у|ом|е)?(?![\p{L}\p{N}_])|модерац|антидубл|антимат|антиспам|ночн.{0,8}режим|стоп слов|предложк|автопост|автоответ|помощник|\b(?:max|vk|api)\b|(?:^|\s)(?:вк|макс)(?:\s|[.!?,]|$)/iu;
 const publisherName = /публик(?:а|у|ом|е)?(?![\p{L}])|\bpublik\b/iu;
 const eraserName = /(?<![\p{L}\p{N}_])ластик(?:а|у|ом|е)?(?![\p{L}\p{N}_])/iu;
 const moderatorName = /максимов|майор|р[эе]кс/iu;
@@ -175,7 +175,7 @@ const supportFollowup =
 const supportQuestion =
   /\?|нужна помощь|(?:^|\s)(?:как|почему|где|куда|зачем|какой|какие|что|можно|сколько|вопрос|подскаж\p{L}*|помог\p{L}*|объясн\p{L}*)(?:\s|$)/iu;
 const supportIncident =
-  /удаля(?:ет|ют|ется|ются)|удалили|удален|снес(?:ли|ен)|снос|исчез|пропал|заблок|ошибк|слетел|дублиру|повторя|(?:нет|не видно).{0,30}(?:чат|канал|доступ|кноп|модул)/iu;
+  /удаля(?:ет|ют|ется|ются)|удалили|удален|снес(?:ли|ен)|снос|исчез|пропал|заблок|ошибк|слетел|отказ.{0,25}(?:провер|доступ)|дублиру|повторя|(?:нет|не видно).{0,30}(?:чат|канал|доступ|кноп|модул)/iu;
 const configurationIntent =
   /(?:хочу|нужно|надо|нужен|нужна).{0,45}(?:включить|выключить|отключить|настроить|запре(?:тить|щать)|разреш(?:ить|ать)|подключить|добавить|удал(?:ить|ять)|очистить|опубликовать|разместить|запостить|создать|сохранить|закры(?:ть|вать)|открыть|изменить|обновить|оставить)/iu;
 const configurationSubject =
@@ -281,6 +281,7 @@ const words = (text) =>
     .filter((word) => word.length >= 3);
 
 function ordinaryConversation(text) {
+  if (/^(?:этот\s+)?бот\s+заказал.{0,70}(?:яхт|эскорт|проститут|шлюх)/iu.test(text)) return true;
   if (
     /^(?:все[,!.\s]*)?(?:всем\s+)?(?:спасибо|благодарю|доброе утро|добрый вечер|спокойной ночи|хорошего.{0,12}дня|понял[аи]?|разобрал[аи]?ся|получилось|договорились|наконец-то)(?:[^?]*)$/iu.test(
       text,
@@ -310,6 +311,24 @@ function ordinaryConversation(text) {
       text,
     ) ||
       /^(?:продам|куплю|сдам|сниму)\s/iu.test(text))
+  );
+}
+
+function supportAssistantRequest(text) {
+  return /(?:такого|такой|этого|этот|ии|интеллектуальн)\p{L}*\s+(?:ии[ -]?)?помощник|как\s+(?:вы|ты).{0,20}(?:отвеча|понима)|(?:фраз|ответ).{0,25}из контекст|контекст.{0,25}(?:фраз|ответ)|(?<![\p{L}])llm(?![\p{L}])/iu.test(
+    text,
+  );
+}
+
+function peerAdvice(text) {
+  if (
+    /(?:^|\s)(?:мне|меня|мой|моем|моего|нам|наш|сам|сами|помогите|подскажите)(?![\p{L}])/iu.test(
+      text,
+    )
+  )
+    return false;
+  return /(?:^|[.!]\s*)(?:а\s+)?(?:вы|вам).{0,65}(?:включите|откройте|нажмите|попробуйте|мешает)|^(?:установите|добавьте|назначьте).{0,100}(?:дайте|напишите|нажмите|откройте)/iu.test(
+    text,
   );
 }
 
@@ -350,7 +369,7 @@ function conversation(text, history) {
 }
 
 const admin = String.raw`(?:админ(?:истратор)?(?:ом|ы|ами|у|а)?|владел(?:ец|ьцем|ьцы|ьцами)|владелиц(?:а|ей|ы|ами))`;
-const member = String.raw`(?:участник(?:ом|и|ами)?|участниц(?:а|ей|ы|ами)|подписчик(?:ом)?|пользовател(?:ь|ем|и|ями))`;
+const member = String.raw`(?:участник(?:ом|и|ами)?|участниц(?:а|ей|ы|ами)|подписчик(?:ом|и|ами)?|подписчиц(?:а|ей|ы|ами)|пользовател(?:ь|ем|и|ями))`;
 const self = String.raw`(?<![\p{L}\p{N}_])(?:я|мы)\s*(?:[—–-]\s*)?(?:(?:теперь|сейчас|уже|тут|здесь|сам|сама|сами|его|ее|являюсь|являемся|обычный|обычная|обычные|простой|простая|простые)\s+)*`;
 const end = String.raw`(?![\p{L}\p{N}_])`;
 const rolePatterns = [
@@ -373,7 +392,9 @@ const rolePatterns = [
 ];
 function roleOf(current, recent) {
   let role = 'unknown';
-  for (const item of [...recent.filter((item) => item.role === 'user'), { text: current }]) {
+  const turns = [...recent, { role: 'user', text: current }];
+  for (const [index, item] of turns.entries()) {
+    if (item.role !== 'user') continue;
     const found = rolePatterns.flatMap(([value, pattern]) =>
       [...item.text.matchAll(pattern)].map((match) => ({
         value,
@@ -383,15 +404,17 @@ function roleOf(current, recent) {
     );
     found.sort((a, b) => a.index - b.index || a.length - b.length);
     if (found.length) role = found.at(-1).value;
+    else {
+      const preceding = turns[index - 1];
+      if (
+        /^(?:да|нет)[.!\s]*$/iu.test(item.text) &&
+        preceding?.role === 'assistant' &&
+        /вы.{0,12}админ/iu.test(preceding.text) &&
+        !/или|участник/iu.test(preceding.text)
+      )
+        role = /^да/iu.test(item.text) ? 'admin' : 'member';
+    }
   }
-  const last = recent.at(-1);
-  if (
-    /^(?:да|нет)[.!\s]*$/iu.test(current) &&
-    last?.role === 'assistant' &&
-    /вы.{0,12}админ/iu.test(last.text) &&
-    !/или|участник/iu.test(last.text)
-  )
-    role = /^да/iu.test(current) ? 'admin' : 'member';
   return role;
 }
 
@@ -446,7 +469,7 @@ function reviewedIntents(ctx) {
   );
   const evidence =
     incident &&
-    /(?:какие|что|куда|как).{0,35}(?:данн|присл|переда|описать|сообщить|подгот|прилож|написать)|(?:что|какие).{0,25}(?:дать|отправить).{0,35}(?:разбор|оператор|поддержк)|(?:нет|не вижу|недоступ|не открыва).{0,35}(?:событ|журнал)|(?:событ|журнал).{0,25}(?:нет|не вижу|недоступ|не открыва)|(?:можете|можешь|прошу).{0,15}(?:посмотреть|проверить).{0,15}(?:событ|журнал)|(?:токен|парол|код вход).{0,20}нуж/iu.test(
+    /(?:какие|что|куда|как).{0,35}(?:данн|присл|переда|описать|сообщить|подгот|прилож|написать)|(?:что|какие).{0,25}(?:дать|отправить).{0,35}(?:разбор|оператор|поддержк)|(?:токен|парол|код вход).{0,20}нуж/iu.test(
       ctx.current,
     );
   return { eligibility, evidence };
@@ -1050,6 +1073,7 @@ function semanticFacts(text, state) {
   const add = (id, priority = 50) => facts.push({ id, priority });
   const { publisherRequest: publ, developer, commercialAi, mixedTopics } = state;
   const test = (pattern) => pattern.test(text);
+  if (supportAssistantRequest(state.current)) add('support-assistant-capabilities', 170);
   if (state.supportDialogue) return [{ id: 'support-dialogue', priority: 160 }];
   if (state.moderatorTroubleshooting) {
     add('max-delete-rights', 200);
@@ -1067,7 +1091,9 @@ function semanticFacts(text, state) {
   if (test(/доступ за приглаш|сколько.{0,15}пригласить|приглас\p{L}*.{0,15}(?:участник|друз)/iu))
     add('invitation-access', 115);
   if (
-    test(/сообщения и боты|других ботов/iu) ||
+    test(
+      /сообщения и боты|других ботов|(?:боты|ботов).{0,40}(?:скидыва|присыла|спам|реклам)|(?:защит|от).{0,20}ботов/iu,
+    ) ||
     (test(/бот|модератор|майор|рэкс/iu) &&
       test(/(?:сво\p{L}*|собственн\p{L}*).{0,12}(?:сообщен|ответ)/iu))
   )
@@ -1150,10 +1176,32 @@ function semanticFacts(text, state) {
     test(/канал|действие под публикац/iu)
   )
     add('channel-post-action', 120);
-  if (test(/предложк|предложения|прием.{0,15}предлож/iu)) add('channel-suggestions-entry', 115);
   if (
     test(
-      /срок входа[^.!?\n]{0,40}истек|нужно открыть приложение заново|мини.?приложен.{0,30}(?:вход|открыть заново)|настройки.{0,20}не загружа/iu,
+      /предложк|предложения|прием.{0,15}предлож|предложить.{0,20}(?:запись|пост|объяв)|(?:запись|пост|объяв).{0,20}предложить|(?:читател|подписчик).{0,40}(?:присылать|отправлять|прислать).{0,20}(?:материал|запис|пост)|при[её]м\s+материал/iu,
+    )
+  )
+    add(
+      publisherName.test(state.focus) ? 'publisher-suggestions-entry' : 'channel-suggestions-entry',
+      130,
+    );
+  if (
+    test(
+      /(?:участник|человек).{0,30}(?:вышел|выход|покинул)|(?:уход|выход).{0,20}(?:участник|человек)/iu,
+    ) &&
+    test(/оповест|уведом|сообщить|писал.{0,15}(?:об этом|остальн)/iu)
+  )
+    add('membership-leave-notifications', 135);
+  if (
+    !state.reviewedIntents.evidence &&
+    test(
+      /(?:нет доступа|не (?:вижу|могу|открыва)|недоступ).{0,30}(?:журнал|событи)|(?:журнал|событи).{0,25}(?:нет|не вижу|недоступ|не открыва)/iu,
+    )
+  )
+    add('community-access', 135);
+  if (
+    test(
+      /срок входа[^.!?\n]{0,40}истек|нужно открыть приложение заново|мини.?приложен.{0,30}(?:вход|открыть заново)|настройки.{0,20}не загружа|(?:нет доступа|недоступ|не могу открыть).{0,25}настройк/iu,
     )
   )
     add('miniapp-relaunch', 120);
@@ -1305,6 +1353,18 @@ function semanticFacts(text, state) {
     /(?:нет|не вид|не нахож|пропал|не появ|исчез).{0,25}(?:чат|канал|получател|спис|доступ)|(?:чат|канал).{0,25}(?:не вид|пропал|не появ)|нет доступа|(?:прав.{0,15}(?:вернул|забрал|снял)|(?:вернул|забрал|снял).{0,15}прав)|обновить.{0,15}(?:доступ|спис)|потеряли.{0,20}(?:три|чат|групп)|(?:в|у)\s+публик.{0,12}нет/iu,
   );
   if (missingCommunity) add('community-access', 95);
+  if (
+    !publ &&
+    !state.eraserRequest &&
+    !developer &&
+    test(/бот|майор|максимов|модератор|рэкс/iu) &&
+    test(
+      /(?:не\s+(?:удаляет|удаляют|чистит)|перестал\p{L}*\s+удалять|пропуска\p{L}*).{0,35}(?:ссылк|спам)|(?:ссылк|спам).{0,35}(?:пропуска|перестал)/iu,
+    )
+  ) {
+    add('max-delete-rights', 90);
+    add('community-access', 85);
+  }
   // FLAG: A recipient picker cannot onboard a community; preserve the separate Publik connection procedure.
   if (connectingPublisher && (connecting || missingCommunity)) add('publik', 120);
   const switchingModerator = moderatorSwitchRequest(state.current);
@@ -1339,7 +1399,12 @@ function semanticFacts(text, state) {
     add('duplicates', 100);
   if (test(/антимат|(?<![\p{L}])мат(?![\p{L}])|мата|оскорблен|бытов.{0,15}(?:руг|обзыв)/iu))
     add('profanity-sensitivity', 100);
-  if (test(/стоп слов|стоп[- ]?(?:спис|лист)|запрещенн.{0,10}фраз/iu)) add('stop-words', 105);
+  if (
+    test(
+      /стоп слов|стоп[- ]?(?:спис|лист)|запрещенн.{0,10}фраз|(?:запрет|удал|блокир)\p{L}*.{0,30}(?:конкретн|определенн|заданн|любое|это|нужн)\p{L}*.{0,15}(?:слов|фраз)|(?:слов|фраз).{0,35}(?:запрет|удалять|блокир)/iu,
+    )
+  )
+    add('stop-words', 125);
   // FLAG: Answer-format preferences must not become image-filter questions.
   const imageComparisonText = text.replace(
     /(?<![\p{L}])только\s+(?:текстом|словами)(?:\s*,?\s*без\s+(?:картинок|фото|изображений|карточек|скриншотов))?(?![\p{L}])/giu,
@@ -1846,9 +1911,22 @@ export function createSupportRouter(knowledge) {
       botDirectory ||
       (hasContext && supportFollowup.test(ctx.current)) ||
       supportDialogue;
+    const settingObservation =
+      hasContext &&
+      freshClarification &&
+      /^(?:стоит|выбран|включен|режим|поставил|сохранил)[а-я\s«»'"-]{0,90}$/iu.test(ctx.current) &&
+      /ссылк|фильтр|режим|настройк/iu.test(ctx.focus);
+    const removalFollowup =
+      hasContext &&
+      advert.test(ctx.focus) &&
+      /^(?:а\s+)?(?:удалить|удалят|удалится|удалятся)(?:\s+(?:будет|можно|получится|да|нет)){1,3}[?!.\s]*$/iu.test(
+        ctx.current,
+      );
     const contextualReply =
       hasContext &&
-      (supportFollowup.test(ctx.current) ||
+      (settingObservation ||
+        removalFollowup ||
+        supportFollowup.test(ctx.current) ||
         unresolvedHelp.test(ctx.current) ||
         (request &&
           (/(?:^|\s)(?:это|этот|эта|эти|этого|этом|так|там|тут|туда|он|его|ее|их|ему|теперь|тем же)(?![\p{L}])/iu.test(
@@ -1859,7 +1937,13 @@ export function createSupportRouter(knowledge) {
             ))) ||
         (freshClarification && !request && clarificationAnswer));
     const addressed = interaction?.addressedToSupport === true;
-    if (addressed && request && !domain.test(ctx.current) && !topics(ctx.current).length)
+    if (
+      addressed &&
+      request &&
+      !hasContext &&
+      !domain.test(ctx.current) &&
+      !topics(ctx.current).length
+    )
       supportDialogue = true;
     const configurationHelp =
       configurationSubject.test(ctx.current) &&
@@ -1873,12 +1957,14 @@ export function createSupportRouter(knowledge) {
       text.length <= 1200 &&
       !(interaction?.replyToOther === true && !addressed) &&
       !ordinaryConversation(ctx.current) &&
+      (addressed || !peerAdvice(ctx.current)) &&
       (!roleOnly || freshClarification) &&
       ((request &&
         (domain.test(ctx.current) ||
           /модератор/iu.test(ctx.current) ||
           advert.test(ctx.current) ||
           topics(ctx.current).length ||
+          supportAssistantRequest(ctx.current) ||
           projectSubject.test(ctx.current) ||
           switchingModerator)) ||
         (request && configurationHelp) ||
@@ -1995,6 +2081,15 @@ export function createSupportRouter(knowledge) {
       eraserRequest,
       developer,
       moderatorTroubleshooting: state.moderatorTroubleshooting,
+      connectionTroubleshooting:
+        /не получается|не могу|ошибк|отказ|не подключ/iu.test(ctx.current) &&
+        /подключ|пересыл/iu.test(ctx.current) &&
+        /бот|чат|групп|сообществ|пересыл/iu.test(ctx.current) &&
+        !/\bvk\b|(?<![\p{L}])вк(?![\p{L}])|токен|аккаунт/iu.test(ctx.current),
+      accessTroubleshooting:
+        /(?:нет доступа|не (?:вижу|могу|получается|открыва)|недоступ|не появ|не подключ|не получается подключить).{0,45}(?:настройк|чат|канал|журнал|событи)|(?:журнал|событи|настройк).{0,30}(?:недоступ|не открыва|не вижу)/iu.test(
+          ctx.current,
+        ),
       botDirectory,
       botCatalogRequest,
       primaryIds,

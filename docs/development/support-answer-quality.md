@@ -117,6 +117,24 @@ retrieval, API paths, mandatory policy retention, source/link validation, honest
 intent-specific FAQ. The installer must include every imported runtime module in its immutable
 manifest. Keep the bridge's per-user history and uncertain-send fences intact.
 
+The owner's 11 November 2026 correction scopes access limitations to an actual request
+for an unavailable action or account inspection. Ordinary help begins with the useful next
+step, not a repeated lack-of-access disclaimer. Diagnose only missing prerequisites: human
+administrator role, selected bot's administrator/reading/sending/deletion rights and confirmed
+connection, then the affected module. Preserve reported checks without claiming independent
+verification. A missing journal is an access symptom, not an automatic operator handoff;
+an explicit request for incident evidence still receives that procedure.
+
+Unaddressed instructions to another participant stay silent. A skipped reply to somebody else
+neither stores that message nor refreshes the user's active support history; it also does not
+cancel that case. Other skipped conversation clears context. Context expires fifteen minutes
+after the last confirmed exchange and remains isolated by user, limited to six turns and 32 users.
+This is conversational information, never an authorization decision. Colloquial self-declarations
+such as «я подписчики» retain the participant role; descriptions of somebody else's subscribers do not.
+
+Publik's channel suggestions use their own reviewed entry and button beneath posts. Do not
+substitute Major's configurable suggestion fields for Publik's switch and mini app form.
+
 The bridge keeps six turns of at most 300 characters each. For a longer turn it preserves the
 beginning and end, removing the assistant's redundant signature. This retains a final clarification
 and the user's latest observed result; it is bounded context, not complete conversation memory.

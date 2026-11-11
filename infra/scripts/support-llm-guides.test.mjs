@@ -220,3 +220,19 @@ test('reviewed packs pin eleven ordered photos without exporting attachment cred
   }
   assert.equal(photoIds.size, 22);
 });
+
+test('generic connection failures and contextual permission refusals keep the first pack and diagnosis', () => {
+  assert.equal(select('Не получается подключить чат')?.id, 'moderator-group');
+  assert.equal(select('Не получается подключить чат')?.atomic, false);
+  const scenario = {
+    history: [
+      { role: 'user', text: 'Как подключить Максимова к моей группе?' },
+      { role: 'assistant', text: 'Перешлите сообщение этому боту.' },
+    ],
+    interaction: { addressedToSupport: true },
+  };
+  assert.equal(
+    select('Дошёл до пересылки, получил отказ проверки доступа.', scenario)?.id,
+    'moderator-group',
+  );
+});
