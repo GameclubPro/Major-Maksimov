@@ -21,6 +21,7 @@ const {
   CHAT_ID,
   sourceMessage,
   supportInteraction,
+  supportAuthorReplyAllowed,
   PilotFence,
   PilotHistory,
   deliverAnswer,
@@ -32,6 +33,15 @@ const row = (text = 'Как подключить бота?') => ({
   sender: { user_id: 42, is_bot: false },
   timestamp: Date.now(),
   body: { mid: 'question-1', text },
+});
+const memberAccess = (userId = '42') => ({
+  userId,
+  isBot: false,
+  isAdmin: false,
+  isOwner: false,
+  explicitPrivilegeEvidence: false,
+  explicitNonPrivilegeEvidence: true,
+  permissions: [],
 });
 
 test('PC profile and injected host bridge require the same pinned support model', () => {
@@ -201,6 +211,9 @@ test('expanded HTML budget fails before any client call or SEND fence transition
   const runtime = {
     supportBotCatalog: knowledge.botCatalog,
     client: {
+      getChatMemberAccess: async () => {
+        calls++;
+      },
       sendMessageImmediateWithId: async () => {
         calls++;
       },
@@ -301,6 +314,156 @@ test('mentions use exact selected MAX user identity and bounded compatible marku
   );
 });
 
+test('unaddressed administrators and owners are silent while fresh ordinary membership permits support', async (t) => {
+  const options = {
+    botId: 'assigned-fixture',
+    trafficClass: 'background',
+    sourceTag: 'support_cpu_pilot',
+    timeoutMs: 5000,
+  };
+  const admin = {
+    ...memberAccess(),
+    isAdmin: true,
+    explicitPrivilegeEvidence: true,
+    explicitNonPrivilegeEvidence: false,
+  };
+  const owner = { ...admin, isOwner: true };
+  for (const [role, access, allowed] of [
+    ['administrator', admin, false],
+    ['owner', owner, false],
+    ['ordinary member', memberAccess(), true],
+  ]) {
+    await t.test(role, async () => {
+      for (const text of [
+        'Как подключить бота?',
+        'Я администратор. Почему бот не отвечает на команды?',
+        'Я обычный участник, не админ. Как добавить бота?',
+        'Откройте настройки Публика и проверьте автоответы. Как добавить бота — показано выше.',
+        'Старт',
+        'тишина вкл',
+      ]) {
+        const calls = [];
+        const runtime = {
+          options: () => options,
+          client: {
+            getChatMemberAccess: async (...args) => {
+              calls.push(args);
+              return access;
+            },
+          },
+        };
+        assert.equal(
+          await supportAuthorReplyAllowed(runtime, sourceMessage(row(text)), '900'),
+          allowed,
+          text,
+        );
+        assert.deepEqual(calls, [[CHAT_ID, '42', { ...options, bypassCache: true }]], text);
+      }
+    });
+  }
+});
+
+test('unaddressed author role lookup fails closed for absent, incomplete, mismatched or failed evidence', async () => {
+  for (const access of [
+    null,
+    undefined,
+    {},
+    memberAccess('84'),
+    { ...memberAccess(), userId: 42 },
+    { ...memberAccess(), isAdmin: undefined },
+    { ...memberAccess(), isOwner: undefined },
+    { ...memberAccess(), isAdmin: 'false' },
+    { ...memberAccess(), explicitNonPrivilegeEvidence: undefined },
+    { ...memberAccess(), explicitNonPrivilegeEvidence: false },
+    { ...memberAccess(), explicitPrivilegeEvidence: true },
+  ]) {
+    const runtime = {
+      options: () => ({ botId: 'assigned-fixture' }),
+      client: { getChatMemberAccess: async () => access },
+    };
+    assert.equal(
+      await supportAuthorReplyAllowed(runtime, sourceMessage(row()), '900'),
+      false,
+      JSON.stringify(access),
+    );
+  }
+  for (const runtime of [
+    { options: () => ({}), client: {} },
+    {
+      options: () => ({}),
+      client: {
+        getChatMemberAccess: async () => {
+          throw new Error('private role lookup unavailable');
+        },
+      },
+    },
+  ])
+    assert.equal(await supportAuthorReplyAllowed(runtime, sourceMessage(row()), '900'), false);
+});
+
+test('explicit AI questions and exact support replies permit administrators without trusting product names or native commands', async () => {
+  let lookups = 0;
+  const runtime = {
+    options: () => ({ botId: 'assigned-fixture' }),
+    client: {
+      getChatMemberAccess: async () => {
+        lookups++;
+        return {
+          ...memberAccess(),
+          isAdmin: true,
+          explicitPrivilegeEvidence: true,
+          explicitNonPrivilegeEvidence: false,
+        };
+      },
+    },
+  };
+  const mentioned = (text, userId = 900) => ({
+    ...row(text),
+    markup: [{ type: 'user_mention', from: 0, length: 5, user_id: userId }],
+  });
+  const markedReply = replyRow(900, true, `Проверьте права.\n\n${SUPPORT_ANSWER_FOOTER}`);
+  markedReply.body.text = 'Как проверить подключение бота?';
+  const confirmedReply = replyRow(900, true);
+  confirmedReply.body.text = 'Да, какие права нужны?';
+  for (const [raw, confirmed] of [
+    [markedReply, new Set()],
+    [confirmedReply, new Set(['earlier-answer'])],
+    [mentioned('Майор, как подключить бота?'), new Set()],
+    [mentioned('Майор, какой бот нужен для публикаций?'), new Set()],
+    [mentioned('Майор, бот перестал удалять спам'), new Set()],
+    [row('ИИ, как подключить бота?'), new Set()],
+    [row('ИИ-помощник, почему не работают автоответы Публика?'), new Set()],
+    [row('Ассистент, какие права нужны боту?'), new Set()],
+  ]) {
+    assert.equal(
+      await supportAuthorReplyAllowed(runtime, sourceMessage(raw), '900', confirmed),
+      true,
+      raw.body.text,
+    );
+    assert.equal(lookups, 0, 'explicit assistant addressing does not need an author role lookup');
+  }
+  for (const raw of [
+    mentioned('Майор, тишина вкл'),
+    mentioned('Майор, откройте настройки Публика. Как подключить бота — объяснил выше.'),
+    mentioned('Майор, Старт'),
+    mentioned('Майор, бан!'),
+    mentioned('Майор, ?'),
+    mentioned('Майор, как подключить бота?', 901),
+    replyRow(901, true, markedReply.link.message.text),
+    replyRow(84, false, markedReply.link.message.text),
+    row('Майор, как подключить бота?'),
+    row('Помощник, как подключить бота?'),
+    row('Включил для ИИ режим наблюдения, а сообщения всё равно удаляются. Почему?'),
+    row('Объясняю участнику, как подключить ИИ-помощника и какие права ему дать.'),
+  ])
+    assert.equal(
+      await supportAuthorReplyAllowed(runtime, sourceMessage(raw), '900'),
+      false,
+      raw.body.text,
+    );
+  assert.ok(lookups > 0, 'unaddressed messages need fresh author evidence');
+});
+
 test('source fingerprint binds reply identity, footer marker and mention target and span', () => {
   const original = replyRow();
   const fingerprint = sourceMessage(original).fingerprint;
@@ -361,8 +524,9 @@ test('final exact source check refuses addressing edits before SEND and records 
     const runtime = {
       options: () => ({}),
       assertSourceAllowed: async () => {},
-      assertAccess: async () => {},
+      assertAccess: async () => ({ botUserId: '900' }),
       client: {
+        getChatMemberAccess: async () => memberAccess(),
         getExactMessageRow: async () =>
           outcome === 'refused'
             ? {
@@ -535,8 +699,9 @@ test(
         supportBotCatalog: knowledge.botCatalog,
         options: () => ({ botId: 'assigned-fixture' }),
         assertSourceAllowed: async () => {},
-        assertAccess: async () => {},
+        assertAccess: async () => ({ botUserId: '900' }),
         client: {
+          getChatMemberAccess: async () => memberAccess(),
           getExactMessageRow: async () => raw,
           async sendMessageImmediateWithId(chatId, text, options) {
             assert.equal(chatId, CHAT_ID);
@@ -564,6 +729,71 @@ test(
       assert.equal(await redis.get(owner.key(source.id)), 'UNKNOWN');
       assert.equal(await owner.prepare(source.id), false);
       assert.equal(await owner.begin(source.id, Date.now() + 1000), false);
+      await t.test(
+        'fresh promotion refuses final SEND before its Redis transition and cannot replay',
+        async () => {
+          const promotedRow = {
+            ...row(),
+            body: { mid: 'promoted-before-send', text: 'Как подключить бота?' },
+          };
+          const promotedSource = sourceMessage(promotedRow);
+          let promoted = false,
+            roleReads = 0,
+            promotionSends = 0;
+          const promotionRuntime = {
+            supportBotCatalog: knowledge.botCatalog,
+            options: () => ({ botId: 'assigned-fixture' }),
+            assertSourceAllowed: async () => {},
+            assertAccess: async () => ({ botUserId: '900' }),
+            client: {
+              getExactMessageRow: async () => promotedRow,
+              getChatMemberAccess: async (chatId, userId, options) => {
+                assert.equal(chatId, CHAT_ID);
+                assert.equal(userId, '42');
+                assert.equal(options.botId, 'assigned-fixture');
+                assert.equal(options.bypassCache, true);
+                roleReads++;
+                return {
+                  ...memberAccess(),
+                  isAdmin: promoted,
+                  explicitPrivilegeEvidence: promoted,
+                  explicitNonPrivilegeEvidence: !promoted,
+                };
+              },
+              sendMessageImmediateWithId: async (_chatId, _text, options) => {
+                await options.beforeSend();
+                promotionSends++;
+                return { messageId: 'prohibited-promotion-receipt' };
+              },
+            },
+          };
+          assert.deepEqual(
+            await promotionRuntime.client.getChatMemberAccess(CHAT_ID, '42', {
+              ...promotionRuntime.options(),
+              bypassCache: true,
+            }),
+            memberAccess(),
+          );
+          assert.equal(await owner.prepare(promotedSource.id), true);
+          assert.equal(await redis.get(owner.key(promotedSource.id)), `PREPARED:${owner.owner}`);
+          promoted = true;
+          assert.equal(
+            await deliverAnswer(
+              promotionRuntime,
+              owner,
+              promotedSource,
+              'Проверьте права бота.',
+              bounds,
+            ),
+            'refused',
+          );
+          assert.equal(roleReads, 2);
+          assert.equal(promotionSends, 0);
+          assert.equal(await redis.get(owner.key(promotedSource.id)), 'REFUSED');
+          assert.equal(await owner.prepare(promotedSource.id), false);
+          assert.equal(await owner.begin(promotedSource.id, Date.now() + 1000), false);
+        },
+      );
       for (const chatId of bridge.CHAT_IDS.slice(1)) {
         const additional = JSON.parse(
           execFileSync(
@@ -625,11 +855,39 @@ test(
         const redis = new Redis({path:process.argv[2],retryStrategy:null,maxRetriesPerRequest:0});
         redis.on('error',()=>{});
         const source = {recipient:{chat_id:CHAT_ID},sender:{user_id:42,is_bot:false},timestamp:Date.now()+1000,body:{mid:'clock-source',text:'Как подключить бота?'}};
+        const mode = process.argv[3];
+        const guarded = ['admin','owner','role-unknown','role-error'].includes(mode);
+        const ignoredTexts = [
+          'Откройте настройки Публика и проверьте автоответы. Как подключить бота — объяснил выше.',
+          'Как подключить бота?',
+          'Какие боты есть?',
+          'Старт',
+          'тишина вкл',
+          'Майор, тишина вкл',
+          'Майор, ?',
+          'Включил для ИИ режим наблюдения, а сообщения всё равно удаляются. Почему?',
+        ];
+        const ignored = ignoredTexts.map((text,index)=>({
+          ...source,
+          timestamp:source.timestamp+index,
+          body:{mid:mode+'-ignored-'+index,text},
+          ...(text.startsWith('Майор,') ? {markup:[{type:'user_mention',from:0,length:5,user_id:900}]} : {}),
+        }));
+        const successor = {...source,sender:{user_id:84,is_bot:false},timestamp:source.timestamp+20,body:{mid:mode+'-member-successor',text:'Как проверить права бота?'}};
         runBridge({
           redis,
-          assertAccess:async()=>({closedFixture:true,fixtureSourceAt:source.timestamp}),
-          options:()=>({}),
-          client:{listMessages:async()=>process.argv[3]==='question'?[source]:[]},
+          assertAccess:async()=>({closedFixture:true,fixtureSourceAt:source.timestamp,botUserId:'900'}),
+          options:()=>({botId:'assigned-fixture'}),
+          client:{
+            listMessages:async()=>guarded?[...ignored,successor]:mode==='question'?[source]:[],
+            getChatMemberAccess:async(chatId,userId,options)=>{
+              await redis.rpush('private-role-reads:'+mode,JSON.stringify({chatId,userId,options}));
+              if(userId==='42'&&mode==='role-error')throw Error('private role unavailable');
+              if(userId==='42'&&mode==='role-unknown')return null;
+              const privileged = userId==='42'&&guarded;
+              return {userId,isBot:false,isAdmin:privileged,isOwner:privileged&&mode==='owner',explicitPrivilegeEvidence:privileged,explicitNonPrivilegeEvidence:!privileged,permissions:[]};
+            },
+          },
           close:()=>redis.quit(),
         }).catch(error=>{
           process.stderr.write(error.message+'\\n');
@@ -643,6 +901,10 @@ test(
         ['unsupported frame', '{"type":"unsupported"}\n', 'support_frame_refused'],
         ['clean EOF', null, null],
         ['question', null, null],
+        ['admin', null, null],
+        ['owner', null, null],
+        ['role-unknown', null, null],
+        ['role-error', null, null],
       ]) {
         await t.test(`bridge preserves ${name}`, { timeout: 7000 }, async () => {
           const child = spawn(process.execPath, [fixture, socket, name], {
@@ -666,7 +928,7 @@ test(
               pending = pending.slice(newline + 1);
               if (value.type === 'hello') {
                 helloFrame = value;
-                if (name !== 'question') {
+                if (!['question', 'admin', 'owner', 'role-unknown', 'role-error'].includes(name)) {
                   if (input === null) child.stdin.end();
                   else child.stdin.write(input);
                 }
@@ -701,6 +963,32 @@ test(
               );
               assert.ok(
                 questionFrame.deadline <= questionFrame.issuedAt + bridge.SOURCE_AGE_MS + 5000,
+              );
+            }
+            if (['admin', 'owner', 'role-unknown', 'role-error'].includes(name)) {
+              assert.equal(questionFrame?.id, `${name}-member-successor`);
+              assert.deepEqual(questionFrame.history, []);
+              assert.deepEqual(questionFrame.interaction, {
+                addressedToSupport: false,
+                replyToOther: false,
+              });
+              for (let index = 0; index < 8; index++)
+                assert.equal(await redis.get(owner.key(`${name}-ignored-${index}`)), 'SKIPPED');
+              const reads = (await redis.lrange(`private-role-reads:${name}`, 0, -1)).map((value) =>
+                JSON.parse(value),
+              );
+              assert.equal(reads.length, 9);
+              assert.ok(
+                reads.every(
+                  (read) =>
+                    read.chatId === CHAT_ID &&
+                    read.options.botId === 'assigned-fixture' &&
+                    read.options.bypassCache === true,
+                ),
+              );
+              assert.deepEqual(
+                reads.map((read) => read.userId),
+                [...Array(8).fill('42'), '84'],
               );
             }
           } finally {

@@ -183,6 +183,23 @@ reply directed at another participant preserves the bounded active case without 
 message or refreshing its expiry. No diagnostic messages are posted to
 verify these rules.
 
+The owner's 12 November 2026 correction requires silence on messages from administrators
+and the owner of the current support chat unless they explicitly address the assistant. This
+includes commands, member-facing explanations, greetings and questions addressed to the room.
+Before emitting a question to the worker, the bridge obtains fresh exact sender membership with
+`bypassCache: true`. Ordinary unsolicited support requires explicit nonprivileged membership;
+missing, ambiguous or failed evidence stays silent. A user's claim to administer their own group
+does not make them an administrator of this support chat.
+
+A reply to a confirmed AI answer, a narrow opening vocative such as «ИИ, подскажи…» or
+«ИИ-помощник, …», or an exact mention of the selected bot with a current support question can
+establish explicit address. A shared moderator-account mention with «Старт», «тишина вкл»,
+«бан» or only a question mark cannot. A product name, discussion about AI, old case history or a
+bare acknowledgement also cannot grant this exception. The bridge repeats admission after exact
+source/access and final guide provenance checks, immediately before the SEND fence, so promotion
+of an ordinary member during preparation blocks publication. Skipped administrator messages do
+not enter support history or refresh it. Failed checks produce no MAX notice.
+
 An interrupted publication send retrieves result-verification instructions before creation steps;
 an explicit request to switch to a named moderator retrieves both the selection procedure and
 the bot catalog. These requests require an explanation, never an executed action or an assumed
@@ -231,7 +248,7 @@ Every five seconds the bridge reads at most 30 messages through the ordinary sha
 admission/cooldown. It does not use `getUpdates`. Only explicit human messages newer than
 session startup and at most three minutes old are eligible. Bot messages and old history
 are ignored. A single question is outstanding; ordinary conversation is skipped. Relevant
-bot questions and contextual followups do not require a mention.
+bot questions and contextual followups from verified ordinary members do not require a mention.
 
 Before sending, the bridge rechecks the source fingerprint through an exact message GET,
 current bot assignment/access, legacy source/user/global holds, the session heartbeat and
