@@ -468,7 +468,11 @@ export function PublicationTargetPicker({
         <div
           ref={editorRef}
           id={editorId}
-          className={cn('publication-target-picker__editor', remoteSource && 'is-sheet')}
+          className={cn(
+            'publication-target-picker__editor',
+            remoteSource && 'is-sheet',
+            typeof sheetStyle?.height === 'number' && sheetStyle.height <= 440 && 'is-compact',
+          )}
           style={remoteSource ? sheetStyle : undefined}
           tabIndex={-1}
           role={remoteSource ? 'dialog' : 'region'}

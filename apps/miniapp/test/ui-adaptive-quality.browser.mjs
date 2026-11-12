@@ -13,6 +13,7 @@ import {
 } from '../../../scripts/miniapp-native-visual-mode.mjs';
 import {
   captureBrowserLaunchOptions,
+  setPhoneKeyboard,
   settleVisualFrame,
 } from '../../../scripts/miniapp-smartphone.mjs';
 
@@ -102,7 +103,9 @@ try {
           await context.route('**/src/main.tsx*', (route) =>
             route.fulfill({
               contentType: 'application/javascript',
-              body: `import ${JSON.stringify(new URL('test/fixtures/publication-mobile-editors-harness.tsx', base).href)};`,
+              body: `import ${JSON.stringify(new URL('test/fixtures/publication-mobile-editors-harness.tsx', base).href)};
+                import { syncMaxNativeEnvironment } from ${JSON.stringify(new URL('src/lib/max-bridge.ts', base).href)};
+                syncMaxNativeEnvironment();`,
             }),
           );
           await page.goto(base);
@@ -136,7 +139,46 @@ try {
             });
             await last.click();
           }
-          await picker.getByRole('button', { name: 'Завершить выбор получателей' }).click();
+          await page.setViewportSize({ width: 320, height: 504 });
+          const done = picker.getByRole('button', { name: 'Завершить выбор получателей' });
+          for (const mode of ['visual', 'resize']) {
+            await picker.getByRole('searchbox').focus();
+            await setPhoneKeyboard(page, { height: 204, mode });
+            await page.waitForFunction(() => {
+              const list = document.querySelector('.publication-target-picker__list');
+              const done = document.querySelector('.publication-target-picker__done');
+              return done.getBoundingClientRect().bottom <= list.getBoundingClientRect().top;
+            });
+            const keyboardLayout = await list.evaluate((node) => ({
+              height: node.clientHeight,
+              rowHeight: node.querySelector('.publication-target-row').getBoundingClientRect()
+                .height,
+              bottom: node.getBoundingClientRect().bottom,
+              viewport: visualViewport.height,
+            }));
+            assert.ok(
+              keyboardLayout.height >= keyboardLayout.rowHeight * 1.5,
+              JSON.stringify(keyboardLayout),
+            );
+            assert.ok(
+              keyboardLayout.bottom <= keyboardLayout.viewport + 1,
+              JSON.stringify(keyboardLayout),
+            );
+            await list.evaluate((node) => {
+              node.scrollTop = node.scrollHeight;
+            });
+            const finalRecipient = list
+              .locator('.publication-target-row')
+              .filter({ hasText: 'Канал 200 ·' });
+            await finalRecipient.click();
+            assert.equal(await finalRecipient.getAttribute('aria-pressed'), 'true');
+            await page.screenshot({
+              path: `${output}/${engine.name()}-${theme}-picker-keyboard-${mode}.png`,
+            });
+            await finalRecipient.click();
+            await setPhoneKeyboard(page, { mode, open: false });
+          }
+          await done.click();
           await picker.waitFor({ state: 'detached' });
           assert.deepEqual(errors, []);
           console.log(
