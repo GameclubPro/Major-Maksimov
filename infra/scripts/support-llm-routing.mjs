@@ -114,8 +114,19 @@ function autoReplyRequest(text) {
 const isPublisherTask = (text) => publisherTask.test(text) || autoReplyRequest(text);
 const eraserTask =
   /стар.{0,15}(?:сообщен|переписк)|очист.{0,15}(?:истор|переписк)|удаление по срок/iu;
-const chatClosure = /закр[ыо]\p{L}*[^.!?\n]{0,65}чат|чат[^.!?\n]{0,65}закр[ыо]/iu;
+const correspondenceClosure = /(?:выключ|отключ|останов|огранич)\p{L}*[^.!?\n]{0,30}переписк/iu;
+const chatClosure = new RegExp(
+  String.raw`закр[ыо]\p{L}*[^.!?\n]{0,65}(?:чат|групп)|(?:чат|групп)[^.!?\n]{0,65}закр[ыо]|(?:чат|групп)[^.!?\n]{0,90}(?:${correspondenceClosure.source})|(?:${correspondenceClosure.source})[^.!?\n]{0,65}(?:чат|групп)`,
+  'iu',
+);
+const nightTopic = new RegExp(
+  `${chatClosure.source}|ночн|тишин|ручн.{0,20}(?:закр[ыо]|откр)|(?:закр[ыо]|откр).{0,20}ручн`,
+  'iu',
+);
 const closeAction = /(?<![\p{L}])(?:закры(?:ть|вать)|закрой(?:те)?|закрывай(?:те)?)(?![\p{L}])/giu;
+const groupEntry = /вступ|присоедин|приватн|приглаш|вход|заход/iu;
+const recurringClosure =
+  /кажд|ежеднев|еженедел|по\s+(?:будн|выходн|понедельник|вторник|сред|четверг|пятниц|суббот|воскресень)|на\s+ночь|по\s+времени/iu;
 const liveAction =
   /(?<![\p{L}])(?:закрой(?:те)?|закрывай(?:те)?|открой(?:те)?|включи(?:те)?|выключи(?:те)?|отключи(?:те)?|подключи(?:те)?|настрой(?:те)?|поставь(?:те)?|сохрани(?:те)?|запусти(?:те)?|опубликуй(?:те)?)(?![\p{L}])/giu;
 const lastikConnectionRecovery =
@@ -223,7 +234,7 @@ const topicPatterns = [
     'invitations',
     /доступ за приглаш|сколько.{0,15}пригласить|приглас\p{L}*.{0,15}(?:участник|друз)/iu,
   ],
-  ['night', /ночн|закрыв.{0,20}чат|закры.{0,20}(?:чат|расписан)|чат.{0,20}закры|тишин/iu],
+  ['night', nightTopic],
   [
     'duplicates',
     /антидубл|дублиру.{0,20}сообщен|дословн.{0,15}повтор|повтор.{0,20}(?:текст|подпис|сообщени)/iu,
@@ -360,7 +371,7 @@ function supportAssistantRequest(text, recent = []) {
   );
 }
 
-function peerAdvice(text) {
+function peerAdvice(text, original) {
   if (botProfileRequest(text)) return false;
   if (
     /(?:^|\s)(?:мне|меня|мо[йяеию]|мое(?:го|му|м|й|ю)?|моих|моими|нам|наш\p{L}*|хочу|хотим|сам|сами|помогите|подскажите)(?![\p{L}])/iu.test(
@@ -388,6 +399,21 @@ function peerAdvice(text) {
       /(?<![\p{L}])(?:откройте|укажите|выберите|настройте|включите|отключите|добавьте|дайте|нажмите|отметьте|разместите|выставьте|попробуйте|проверьте|перешлите|публикуйте|сохраните|создайте|поставьте|назначьте|зайдите)(?![\p{L}])/giu,
     ),
   ];
+  const addressee =
+    typeof original === 'string'
+      ? /^\s*([\p{Lu}][\p{Ll}]{1,30}(?:[ -][\p{Lu}][\p{Ll}]{1,30})?),\s/u.exec(original)?.[1]
+      : null;
+  if (
+    addressee &&
+    imperatives.length >= 2 &&
+    !namedSupportProduct(addressee) &&
+    !help.test(addressee) &&
+    !actionRequest.test(addressee) &&
+    !/^(?:здравствуйте|здравствуй|привет|пожалуйста|бот|помощник|поддержка|оператор)$/iu.test(
+      addressee,
+    )
+  )
+    return true;
   if (/^(?:а\s+)?(?:как|почему|где|куда|зачем|(?:вы\s+)?можете)(?![\p{L}])/iu.test(text))
     return false;
   if (/^(?:а\s+)?можно(?![\p{L}])/iu.test(text) && !(imperatives.length && /:/u.test(text)))
@@ -660,6 +686,7 @@ function atomicLastikWaiting(ctx, state) {
     '',
   );
   const explicitNightTask =
+    chatClosure.test(waitingQuestion) ||
     /ночн|закрыв.{0,20}чат|закры.{0,20}(?:чат|расписан)|чат.{0,20}закры|(?:включ|выключ|настро|команд|режим).{0,25}тишин|тишина\s+(?:вкл|выкл)/iu.test(
       waitingQuestion,
     );
@@ -785,7 +812,11 @@ function reviewedAtomicIntents(ctx, state, primaryIds) {
       ),
     ].some((match) => !negatedAt(ctx.current, match.index)) &&
     only(['night-manual', 'night-permissions', 'night', 'settings', 'admin-commands', 'bots']) &&
-    !/закры(?:ть|вать)\s+(?:(?:чат|его)\s+)?не\s+(?:хочу|надо|нужно|буду)/iu.test(ctx.current) &&
+    !groupEntry.test(ctx.current) &&
+    !recurringClosure.test(ctx.current) &&
+    !/закры(?:ть|вать)\s+(?:(?:чат|группу|его|ее)\s+)?не\s+(?:хочу|надо|нужно|буду)/iu.test(
+      ctx.current,
+    ) &&
     Boolean(nightManualIntent) &&
     reviewedTaskCovered(
       ctx.current,
@@ -1060,8 +1091,7 @@ function linkPolicyIntent(ctx, state, primaryIds) {
 }
 
 function nightSources(ctx, role) {
-  const relevant = (text) =>
-    chatClosure.test(text) || /ночн|тишин|ручн.{0,20}откр|откр.{0,20}ручн/iu.test(text);
+  const relevant = (text) => nightTopic.test(text);
   if (!relevant(ctx.focus)) return [];
   const detect = (text) => {
     const result = [];
@@ -1080,11 +1110,22 @@ function nightSources(ctx, role) {
     )
       result.push('night-manual');
     if (
-      /расписан|часов.{0,10}пояс|закрывать с|открывать в|кажд.{0,8}ноч|(?:с|до)\s+\d{1,2}(?::\d{2})?|(?:включ|настро|выключ|отключ).{0,30}ночн|ночн.{0,30}(?:включ|настро|выключ|отключ)/iu.test(
+      recurringClosure.test(text) ||
+      /расписан|часов.{0,10}пояс|закрывать с|открывать в|(?:с|до)\s+\d{1,2}(?::\d{2})?|(?:включ|настро|выключ|отключ).{0,30}ночн|ночн.{0,30}(?:включ|настро|выключ|отключ)/iu.test(
         text,
       )
     )
       result.push('night');
+    // FLAG: A direct closing question without a schedule asks for manual controls.
+    // Group/chat synonyms must select the same procedure without widening human conversation.
+    if (
+      chatClosure.test(text) &&
+      !result.includes('night') &&
+      !result.includes('night-manual') &&
+      ([...text.matchAll(closeAction)].some((match) => !negatedAt(text, match.index)) ||
+        correspondenceClosure.test(text))
+    )
+      result.push('night-manual');
     return result;
   };
   const current = detect(ctx.current);
@@ -2051,7 +2092,7 @@ export function createSupportRouter(knowledge) {
       text.length <= 1200 &&
       !(interaction?.replyToOther === true && !addressed) &&
       !ordinaryConversation(ctx.current) &&
-      (addressed || !peerAdvice(ctx.current)) &&
+      (addressed || !peerAdvice(ctx.current, text)) &&
       (!roleOnly || freshClarification) &&
       ((request &&
         (domain.test(ctx.current) ||
