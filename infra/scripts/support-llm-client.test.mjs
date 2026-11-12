@@ -34,6 +34,28 @@ test('human conversations skip before any model call or reviewed public answer',
     );
 });
 
+test('a direct group-closing question gets the complete reviewed procedure without inference', async () => {
+  const result = await answerSupport({
+    text: 'Здравствуйте, как настроить, чтобы закрыть группу?',
+    endpoint: 'http://127.0.0.1:1',
+    key: 'unused',
+  });
+  assert.equal(result.action, 'reply');
+  assert.equal(result.responseRoute, 'reviewed-faq');
+  assert.ok(result.sourceIds.includes('night-manual'));
+  assert.match(result.text, /администратор/iu);
+  assert.match(result.text, /«Ночной режим».*блок «Закрыть сейчас»/su);
+  assert.match(result.text, /Включите «Закрыть вручную»/u);
+  assert.match(result.text, /срок.*«Без срока».*«Сохранить»/su);
+  assert.match(result.text, /удалять новые сообщения участников/iu);
+  assert.match(result.text, /администраторы смогут писать/iu);
+  assert.match(result.text, /независимо от ночного расписания/iu);
+  assert.doesNotMatch(
+    result.text,
+    /нет доступа|не могу|нажмите «Закрыть сейчас»|Закрывать по расписанию/iu,
+  );
+});
+
 test('broad moderator failures receive shared access checks without a bot-name prerequisite', async (t) => {
   const fixture = await completionFixture(t, {
     action: 'reply',

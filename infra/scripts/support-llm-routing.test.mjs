@@ -179,6 +179,73 @@ test('infinitive moderator changes and explicit AI observation reports retain th
   assert.ok(observation.some((entry) => entry.id === 'commercial-ai-evidence'));
 });
 
+test('group closing questions select manual controls while scheduled and human conversations stay distinct', () => {
+  const question = 'Здравствуйте, как настроить, чтобы закрыть группу?';
+  for (const text of [question, 'Как закрыть чат?', 'Как закрыть группу прямо сейчас?']) {
+    const route = classifySupportRequest(text);
+    assert.equal(route.eligible, true, text);
+    assert.equal(route.primaryIds[0], 'night-manual', text);
+    assert.equal(route.nightManualOnly, true, text);
+    assert.equal(route.nightManualIntent, 'close', text);
+    assert.equal(selectKnowledge(text)[0].id, 'night-manual', text);
+  }
+  const opening = classifySupportRequest('Как открыть группу после ручного закрытия?');
+  assert.equal(opening.eligible, true);
+  assert.equal(opening.primaryIds[0], 'night-manual');
+  assert.equal(opening.nightManualIntent, 'open');
+  for (const text of [
+    'Как закрывать группу каждую ночь с 23:00 до 07:00?',
+    'Как настроить закрытие группы по расписанию?',
+    'Можно ли закрывать группу на ночь?',
+    'Как закрывать чат по будням?',
+    'Как закрывать группу по выходным?',
+    'Как закрывать группу каждую пятницу?',
+    'В моей группе надо автоматически выключать переписку по вторникам и четвергам с 21:30 до 06:15. Где выбрать дни?',
+  ]) {
+    const route = classifySupportRequest(text);
+    assert.equal(route.eligible, true, text);
+    assert.equal(route.primaryIds[0], 'night', text);
+    assert.equal(route.nightManualOnly, false, text);
+  }
+  for (const text of [
+    'Можете закрыть группу вручную и выбрать срок.',
+    'Я закрыл группу, завтра продолжим разговор.',
+    'Анна, включите «Закрыть вручную» на два часа и сохраните. Ночное расписание оставьте как есть.',
+  ])
+    assert.equal(eligibleQuestion(text), false, text);
+  assert.equal(eligibleQuestion('Оля, как закрыть группу?', [], { replyToOther: true }), false);
+  assert.equal(eligibleQuestion(question, [], { replyToOther: true }), false);
+  assert.equal(
+    eligibleQuestion(question, [], { replyToOther: true, addressedToSupport: true }),
+    true,
+  );
+  assert.equal(
+    classifySupportRequest('Как закрыть группу и настроить запрет ссылок?').nightManualOnly,
+    false,
+  );
+  for (const text of [
+    'Как закрыть группу, чтобы в неё не могли вступать?',
+    'Как вручную закрыть группу для вступления новых людей?',
+    'Закройте группу каждую ночь с 23 до 7',
+    'Закройте группу каждую субботу в 21:00',
+    'Как закрыть группу сейчас и потом закрывать её каждый вечер?',
+  ]) {
+    const route = classifySupportRequest(text);
+    assert.equal(route.eligible, true, text);
+    assert.equal(route.nightManualOnly, false, text);
+  }
+});
+
+test('the manual-close control selects its fact without a chat or night-mode keyword', () => {
+  const text =
+    'Я администратор. Влияет ли «Закрыть вручную» на вход по пригласительной ссылке? Хочу ограничить только новые сообщения.';
+  const route = classifySupportRequest(text);
+  assert.equal(route.eligible, true);
+  assert.equal(route.primaryIds[0], 'night-manual');
+  assert.equal(route.nightManualOnly, false);
+  assert.equal(selectKnowledge(text)[0].id, 'night-manual');
+});
+
 test('manual close imperatives select the procedure while open and mixed requests stay distinct', () => {
   for (const text of [
     'Закройте, пожалуйста, мой чат сейчас без срока. Я администратор.',

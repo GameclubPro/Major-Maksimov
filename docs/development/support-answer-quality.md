@@ -91,6 +91,10 @@ of automatic AI deletion, independent filters and the available operator evidenc
 procedures may cover several parts of one task; an additional unrelated or unknown task retains
 inference. Both activation checks and the request-based waiting window remain in the neural facts
 and reminders as well as the reviewed Lastik replies.
+The owner's 12 November 2026 correction requires a reply to a direct group-closing question,
+including «Здравствуйте, как настроить, чтобы закрыть группу?». Group and chat select the same
+manual controls when no schedule is requested; explicit recurring/time-based closing retains
+the schedule procedure. Human advice, conversation and replies to another participant stay silent.
 Forwarding questions for a moderator retain the connection prerequisites. An offered community
 link is not a link-filter task; a reported ready connection is not an onboarding request.
 Named reserve comparisons retain catalog roles and the selection procedure. Moderator selection
