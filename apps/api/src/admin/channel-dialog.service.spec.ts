@@ -1,3 +1,6 @@
+import type { Prisma } from '../prisma/prisma-client';
+import { channelDialogResponseSchema } from '@maxim/contracts';
+import type { PrismaService } from '../prisma/prisma.service';
 import { createHmac } from 'node:crypto';
 import type { ChannelDialogLegacyPort } from './channel-dialog-legacy.port';
 import { ChannelDialogService } from './channel-dialog.service';
@@ -50,6 +53,14 @@ function createService(
   options: { postSuggestionsEnabled?: boolean; routeBotId?: string | null } = {},
 ) {
   const legacyAdminService = {
+    getChannelDialog: jest
+      .fn<
+        ReturnType<ChannelDialogLegacyPort['getChannelDialog']>,
+        Parameters<ChannelDialogLegacyPort['getChannelDialog']>
+      >()
+      .mockResolvedValue(
+        channelDialogResponseSchema.parse({ chatId: 'channel-1', type: 'suggest', messages: [] }),
+      ),
     getChannelSuggestionRedirect: jest.fn(),
     toggleChannelDialogReaction: jest.fn(),
     toggleChatDialogReaction: jest.fn(),
@@ -103,13 +114,22 @@ function createService(
       )}`;
     }),
   };
+  const findUnique = jest
+    .fn<
+      Promise<Prisma.ChatGetPayload<{ select: { title: true } }> | null>,
+      [Pick<Prisma.ChatFindUniqueArgs, 'where' | 'select'>]
+    >()
+    .mockResolvedValue({ title: 'Новости района' });
+  const prisma = { chat: { findUnique } } as unknown as PrismaService;
   const service = new ChannelDialogService(
     legacyAdminService as never,
     createConfigMock() as never,
+    prisma,
     maxBotLinkService as never,
   );
 
   return {
+    findUnique,
     legacyAdminService,
     maxBotLinkService,
     service,
@@ -226,5 +246,59 @@ describe('ChannelDialogService reactions', () => {
       emoji: '👍',
       dialogProfile: 'moderation',
     });
+  });
+});
+
+describe('ChannelDialogService destination identity', () => {
+  it.each(['publisher', 'moderation'] as const)(
+    'returns the stored destination only after %s dialog access succeeds',
+    async (profile) => {
+      const { service, findUnique, legacyAdminService } = createService();
+      const result = await service.getChannelDialog(
+        'channel-1',
+        user,
+        'suggest',
+        'signed-token',
+        profile,
+      );
+      expect(result.entityTitle).toBe('Новости района');
+      expect(legacyAdminService.getChannelDialog).toHaveBeenCalledWith(
+        'channel-1',
+        user,
+        'suggest',
+        'signed-token',
+        profile,
+      );
+      expect(findUnique).toHaveBeenCalledWith({
+        where: { id: 'channel-1' },
+        select: { title: true },
+      });
+      expect(legacyAdminService.getChannelDialog.mock.invocationCallOrder[0]).toBeLessThan(
+        findUnique.mock.invocationCallOrder[0]!,
+      );
+    },
+  );
+  it('does not read destination metadata for a rejected dialog', async () => {
+    const { service, findUnique, legacyAdminService } = createService();
+    legacyAdminService.getChannelDialog.mockRejectedValue(new Error('Доступ запрещён'));
+    await expect(service.getChannelDialog('channel-1', user, 'suggest', 'invalid')).rejects.toThrow(
+      'Доступ запрещён',
+    );
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+  it('keeps an unknown title explicit and leaves comments unchanged', async () => {
+    const { service, findUnique, legacyAdminService } = createService();
+    findUnique.mockResolvedValue(null);
+    expect(
+      (await service.getChannelDialog('channel-1', user, 'suggest', 'signed-token')).entityTitle,
+    ).toBeNull();
+    findUnique.mockClear();
+    legacyAdminService.getChannelDialog.mockResolvedValue(
+      channelDialogResponseSchema.parse({ chatId: 'channel-1', type: 'comments', messages: [] }),
+    );
+    expect(
+      (await service.getChannelDialog('channel-1', user, 'comments', 'signed-token')).entityTitle,
+    ).toBeUndefined();
+    expect(findUnique).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,5 @@
+import { RefreshNotice } from '../../components/ui/refresh-notice';
+import { StatusState } from '../../components/ui/status-state';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 
 import {
@@ -41,6 +43,10 @@ type PublicationTargetPickerProps = {
     entityFilter: PublicationEntityFilter;
     settling: boolean;
     loading: boolean;
+    failed: boolean;
+    refreshFailed: boolean;
+    retrying: boolean;
+    onRetry: () => void;
     filteredTotal: number | null;
     hasNextPage: boolean;
     fetchingNextPage: boolean;
@@ -553,6 +559,11 @@ export function PublicationTargetPicker({
             aria-label="Получатели"
             onScroll={handleTargetListScroll}
           >
+            {remoteSource?.refreshFailed && !remoteSource.settling ? (
+              <RefreshNotice pending={remoteSource.retrying} onRetry={remoteSource.onRetry}>
+                Не удалось обновить получателей. Показан предыдущий список.
+              </RefreshNotice>
+            ) : null}
             {filteredChoices.length > 0 ? (
               shouldVirtualize ? (
                 <div
@@ -573,6 +584,21 @@ export function PublicationTargetPicker({
               <span className="publication-target-picker__empty" role="status">
                 Загружаю получателей
               </span>
+            ) : remoteSource?.failed ? (
+              <StatusState
+                tone="danger"
+                title="Не удалось загрузить получателей"
+                action={
+                  <button
+                    type="button"
+                    className="publication-target-picker__load-more"
+                    disabled={remoteSource.retrying}
+                    onClick={remoteSource.onRetry}
+                  >
+                    {remoteSource.retrying ? 'Загрузка…' : 'Повторить'}
+                  </button>
+                }
+              />
             ) : (
               <span className="publication-target-picker__empty" role="status">
                 Ничего не найдено

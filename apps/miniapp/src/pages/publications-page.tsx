@@ -1,3 +1,4 @@
+import { PublicationFeedFeedback } from '../features/publications/publication-feed-feedback';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import { PublicationLatePolicyFields } from '../features/publications/publication-late-policy-fields';
 import { SearchField } from '../components/ui/search-field';
@@ -1069,44 +1070,33 @@ export function PublicationsPage({
     return (
       <>
         {renderFilters()}
-        {currentListQuery.isLoading ? (
-          <StatusState tone="neutral" title="Загружаю публикации" />
-        ) : currentListQuery.isError && !currentListQuery.data ? (
-          <StatusState
-            tone="danger"
-            title="Не удалось загрузить"
-            description={describeUserFacingError(currentListQuery.error, 'Повторите ещё раз.')}
-            action={
-              <button
-                type="button"
-                className="button button--ghost"
-                onClick={() => void currentListQuery.refetch()}
-              >
-                Обновить
-              </button>
-            }
-          />
-        ) : visibleItems.length === 0 ? (
-          <div className="publications-empty">
-            <strong>
-              {query.trim() || entityFilter !== 'all' || statusFilter !== 'all'
-                ? 'Ничего не найдено'
-                : view === 'history'
-                  ? 'История пока пустая'
-                  : view === 'schedules'
-                    ? 'Расписаний пока нет'
-                    : 'Текущих постов нет'}
-            </strong>
-            {isPublisherProfile && view !== 'history' && !query.trim() && publisherCanCreate ? (
-              <button type="button" className="publications-primary" onClick={requestCreateEditor}>
-                <IconoirSprite variant="iconoir" icon="Plus" aria-hidden />
-                <span>Новая публикация</span>
-              </button>
-            ) : null}
-          </div>
-        ) : (
-          <div className="publications-feed">{visibleItems.map(renderPublicationCard)}</div>
-        )}
+        <PublicationFeedFeedback query={currentListQuery}>
+          {visibleItems.length === 0 ? (
+            <div className="publications-empty">
+              <strong>
+                {query.trim() || entityFilter !== 'all' || statusFilter !== 'all'
+                  ? 'Ничего не найдено'
+                  : view === 'history'
+                    ? 'История пока пустая'
+                    : view === 'schedules'
+                      ? 'Расписаний пока нет'
+                      : 'Текущих постов нет'}
+              </strong>
+              {isPublisherProfile && view !== 'history' && !query.trim() && publisherCanCreate ? (
+                <button
+                  type="button"
+                  className="publications-primary"
+                  onClick={requestCreateEditor}
+                >
+                  <IconoirSprite variant="iconoir" icon="Plus" aria-hidden />
+                  <span>Новая публикация</span>
+                </button>
+              ) : null}
+            </div>
+          ) : (
+            <div className="publications-feed">{visibleItems.map(renderPublicationCard)}</div>
+          )}
+        </PublicationFeedFeedback>
         {currentListQuery.hasNextPage && currentListQuery.data ? (
           <button
             type="button"
@@ -1647,6 +1637,10 @@ export function PublicationsPage({
                       entityFilter: targetSources.publisherEntityFilter,
                       settling: targetSources.publisherSearchSettling,
                       loading: sourcesLoading,
+                      failed: targetSources.hasError,
+                      refreshFailed: targetSources.refreshError,
+                      retrying: targetSources.fetching,
+                      onRetry: () => void targetSources.retryRead(),
                       filteredTotal: targetSources.filteredTotal,
                       hasNextPage: targetSources.hasNextPage,
                       fetchingNextPage: targetSources.fetchingNextPage,

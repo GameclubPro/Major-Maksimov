@@ -1,3 +1,4 @@
+import { RefreshNotice } from '../components/ui/refresh-notice';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import type { ChannelDialogMessage, ChannelDialogResponse } from '@maxim/contracts/channel-dialog';
 import type { MiniappProfile } from '@maxim/contracts/publisher';
@@ -333,6 +334,11 @@ export function ChannelSuggestDialogPage({
       return view === 'history' ? 8_000 : false;
     },
   });
+
+  const canRenderDialog =
+    Boolean(dialogQuery.data) &&
+    !terminalDialogError &&
+    !(dialogQuery.error && isTerminalDialogApiMessage(normalizeApiError(dialogQuery.error)));
 
   useEffect(() => {
     if (terminalDialogError) {
@@ -1504,36 +1510,30 @@ export function ChannelSuggestDialogPage({
     </Suspense>
   );
 
-  const suggestBar =
-    !dialogQuery.isLoading && !dialogQuery.error ? (
-      <div
-        ref={suggestBarRef}
-        className="channel-suggest-composer__bar channel-suggest-composer__bar--anchored"
-        hidden={view === 'history'}
-      >
-        {suggestImageControl}
-        <span />
+  const suggestBar = canRenderDialog ? (
+    <div
+      ref={suggestBarRef}
+      className="channel-suggest-composer__bar channel-suggest-composer__bar--anchored"
+      hidden={view === 'history'}
+    >
+      {suggestImageControl}
+      <span />
 
-        <button
-          type="button"
-          className="channel-suggest-composer__submit"
-          onClick={onSubmit}
-          disabled={submitDisabled}
-        >
-          {isSubmitPending ? (
-            <span className="channel-dialog-submit__loader" aria-hidden />
-          ) : (
-            <IconoirSprite
-              variant="iconoir"
-              icon="SendDiagonalSolid"
-              aria-hidden
-              focusable="false"
-            />
-          )}
-          <span>{isSubmitPending ? 'Отправка' : 'Отправить'}</span>
-        </button>
-      </div>
-    ) : null;
+      <button
+        type="button"
+        className="channel-suggest-composer__submit"
+        onClick={onSubmit}
+        disabled={submitDisabled}
+      >
+        {isSubmitPending ? (
+          <span className="channel-dialog-submit__loader" aria-hidden />
+        ) : (
+          <IconoirSprite variant="iconoir" icon="SendDiagonalSolid" aria-hidden focusable="false" />
+        )}
+        <span>{isSubmitPending ? 'Отправка' : 'Отправить'}</span>
+      </button>
+    </div>
+  ) : null;
 
   return (
     <div
@@ -1545,7 +1545,18 @@ export function ChannelSuggestDialogPage({
 
       <div className="channel-dialog-shell channel-dialog-shell--suggest">
         <header className="channel-suggest-heading">
-          <h1>Предложить объявление</h1>
+          <div className="channel-suggest-heading__copy">
+            <h1>Предложить объявление</h1>
+            {dialogQuery.data?.entityTitle ? (
+              <p
+                className="channel-suggest-heading__destination"
+                title={dialogQuery.data.entityTitle}
+                aria-label={`Канал-получатель: ${dialogQuery.data.entityTitle}`}
+              >
+                {dialogQuery.data.entityTitle}
+              </p>
+            ) : null}
+          </div>
           <span>{profile === 'publisher' ? 'Публик' : 'Майор'}</span>
         </header>
         <div className="channel-suggest-tabs" role="tablist" aria-label="Предложения">
@@ -1613,7 +1624,14 @@ export function ChannelSuggestDialogPage({
             </div>
           ) : null}
 
-          {dialogQuery.error ? (
+          {dialogQuery.error && canRenderDialog ? (
+            <RefreshNotice
+              pending={dialogQuery.isFetching}
+              onRetry={() => void dialogQuery.refetch()}
+            >
+              Не удалось обновить предложения. Показаны последние данные.
+            </RefreshNotice>
+          ) : dialogQuery.error ? (
             <div className="channel-dialog-error">
               <StatusState
                 tone="danger"
@@ -1635,7 +1653,7 @@ export function ChannelSuggestDialogPage({
             </div>
           ) : null}
 
-          {!dialogQuery.isLoading && !dialogQuery.error ? (
+          {canRenderDialog ? (
             <div className="channel-suggest-workspace">
               {introText && view === 'compose' ? <SuggestionRequirements text={introText} /> : null}
 

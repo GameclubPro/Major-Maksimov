@@ -118,6 +118,8 @@ export function usePublicationTargetSources(api: ApiTransport, enabled: boolean)
     fetching: enabled && (publisher.isFetching || publisherRechecking),
     rechecking: enabled && publisherRechecking,
     hasError: enabled && publisherInitialError,
+    refreshError: enabled && publisher.isRefetchError && !publisher.isFetchNextPageError,
+    retryRead: () => publisher.refetch(),
     unavailable: enabled && publisherInitialError,
     ready: enabled && (publisher.isSuccess || publisherHasData),
     chatsFailed: false,

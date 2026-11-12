@@ -127,7 +127,7 @@ test('publisher target selection is a full-screen sheet with stable virtual rows
   );
   assert.match(
     pickerCss,
-    /\.publication-target-picker__editor\.is-sheet \.publication-target-picker__list \{[\s\S]*?min-height: 0;[\s\S]*?overflow-y: auto;[\s\S]*?touch-action: pan-y;[\s\S]*?-webkit-overflow-scrolling: touch;/u,
+    /\.publication-target-picker__editor\.is-sheet \.publication-target-picker__list \{[\s\S]*?overflow-y: auto;[\s\S]*?touch-action: pan-y;[\s\S]*?-webkit-overflow-scrolling: touch;/u,
   );
 });
 

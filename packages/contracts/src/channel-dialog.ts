@@ -394,6 +394,7 @@ export type ChannelDialogNotificationSettings = z.infer<
 
 export const channelDialogResponseSchema = /*#__PURE__*/ z.object({
   chatId: z.string(),
+  entityTitle: z.string().trim().nullable().optional(),
   type: channelDialogTypeSchema,
   introText: z.string().nullable().default(null),
   messages: z.array(channelDialogMessageSchema),

@@ -21,7 +21,12 @@ describe('WebhookRateLimitService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 0, 1));
     process.env.APP_ROLE = 'ingress';
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   afterAll(() => {
@@ -82,6 +87,11 @@ describe('WebhookRateLimitService', () => {
       }),
     } as never);
 
+    await expect(service.isAllowed('127.0.0.1')).resolves.toBe(true);
+    await expect(service.isAllowed('127.0.0.1')).resolves.toBe(true);
+    await expect(service.isAllowed('127.0.0.1')).resolves.toBe(false);
+
+    jest.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 0, 1) + 1_000);
     await expect(service.isAllowed('127.0.0.1')).resolves.toBe(true);
     await expect(service.isAllowed('127.0.0.1')).resolves.toBe(true);
     await expect(service.isAllowed('127.0.0.1')).resolves.toBe(false);

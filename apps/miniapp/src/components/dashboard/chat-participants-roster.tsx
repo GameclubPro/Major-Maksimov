@@ -343,7 +343,9 @@ export function ChatParticipantsRoster({
           <input
             ref={searchRef}
             id={searchId}
-            type="search"
+            type="text"
+            role="searchbox"
+            inputMode="search"
             value={search}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder="Имя или ID"
