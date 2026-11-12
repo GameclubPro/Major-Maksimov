@@ -116,6 +116,20 @@ starts a new request window and still requires both rights checks before automat
 Catalog links prefer the bot's item or canonical name over an introductory project alias, while
 retaining alias-only links and the separate unlinked AI signature.
 
+The owner's later 12 November correction requires practical basic MAX help. Treat removing a bot
+as removing a group participant, with the relevant administrator condition and verified client
+steps. Keep private stopping, platform-wide deletion and project controls separate. Preserve the
+object of an action: deleting a bot, deleting its message and deleting a saved draft are different
+tasks. An administrator's answer in chat is evidence to check against the UI/contracts or official
+help, not an automatically trusted training fact. The real-answer audit exposed omitted daily
+Antiduplicate periods and Publisher draft controls; their exact procedures and retrieval regressions
+now live beside the module facts. Never infer absent functionality from an incomplete knowledge
+entry. When the media editor is unknown, clarify it or scope the Publisher answer conditionally.
+Unaddressed procedural advice such as «Удалите бота… сначала снимите админа» stays silent;
+personal questions and explicit assistant addresses still receive help. A completed case followed
+by thanks does not reopen the procedure. When restoring an unspecified moderator, use the exact
+canonical catalog name so the application can render its verified profile link.
+
 Focused tests cover eligibility and required replies together, role changes, contextual topic
 retrieval, API paths, mandatory policy retention, source/link validation, honest AI identity and
 intent-specific FAQ. The installer must include every imported runtime module in its immutable

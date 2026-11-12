@@ -1351,7 +1351,7 @@ test('reviewed knowledge has real local sources and pinned official provenance',
   assert.equal(pages.size, knowledge.officialSources.length);
   for (const page of knowledge.officialSources) {
     const url = new URL(page.url);
-    assert.equal(url.origin, 'https://dev.max.ru');
+    assert.ok(['https://dev.max.ru', 'https://help.max.ru'].includes(url.origin), page.url);
     assert.match(page.sha256, /^[a-f0-9]{64}$/u);
     assert.ok(Number.isFinite(Date.parse(page.retrievedAt)));
     assert.ok(page.lastModified === null || Number.isFinite(Date.parse(page.lastModified)));
