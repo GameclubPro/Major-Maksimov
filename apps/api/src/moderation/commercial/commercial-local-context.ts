@@ -40,6 +40,10 @@ const MAX_LOCAL_WINDOW_ASSERTIONS = 6;
 const MAX_ATTRIBUTED_REPORT_WINDOW_LENGTH = 1_600;
 const MAX_STANDALONE_EDITORIAL_INTRO_LENGTH = 240;
 const MAX_STANDALONE_EDITORIAL_QUOTE_LENGTH = 1_200;
+const REPORTED_SCAM_QUOTE_INTRO_PATTERN =
+  /^(?:в\s+(?:чате|группе|канале)\s+(?:написали|прислали|опубликовали)|(?:мне|нам)\s+прислали(?:\s+сообщение)?)\s*:\s*[«"“„]/iu;
+const REPORTED_SCAM_QUOTE_DISCLAIMER_PATTERN =
+  /[»"”“]\s*[.!?;…]*\s*(?:это\s+)?(?:мошенники|спам|обман)\s*[,;:—–-]?\s*не\s+(?:звоните|пишите|переходите|переводите|отправляйте|верьте)(?=$|[^\p{L}\p{N}_-])/iu;
 const TRANSPORT_DEMAND_PATTERN =
   /(?:^|[^\p{L}\p{N}_-])(?:нуж(?:ен|на|но|ны)|ищу|требуется)(?:[^.!?;\n]{0,48})(?:такси|машин[ау]|грузоперевозк[а-яё]*|перевозчик[а-яё]*|\d+\s+мест[ао])(?=$|[^\p{L}\p{N}_-])/iu;
 
@@ -767,7 +771,9 @@ function hasQualifiedEditorialQuoteContext(
     : assertionTexts[index];
   const introStartsAtPreviousAssertion =
     Boolean(previousAssertion) && QUALIFIED_EDITORIAL_QUOTE_INTRO_PATTERN.test(introWindow);
+  const reportedScamQuote = REPORTED_SCAM_QUOTE_INTRO_PATTERN.test(assertionTexts[index]);
   if (
+    !reportedScamQuote &&
     !introStartsAtPreviousAssertion &&
     !QUALIFIED_EDITORIAL_QUOTE_INTRO_PATTERN.test(assertionTexts[index])
   ) {
@@ -786,7 +792,12 @@ function hasQualifiedEditorialQuoteContext(
       break;
     }
     window = nextWindow;
-    if (QUALIFIED_EDITORIAL_QUOTE_DISCLAIMER_PATTERN.test(window)) {
+    // FLAG: Only the attributed, closed quote is protected; later independent offers remain visible.
+    if (
+      reportedScamQuote
+        ? REPORTED_SCAM_QUOTE_DISCLAIMER_PATTERN.test(window)
+        : QUALIFIED_EDITORIAL_QUOTE_DISCLAIMER_PATTERN.test(window)
+    ) {
       return true;
     }
   }

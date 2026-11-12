@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { setTimeout as pause } from 'node:timers/promises';
 import { Injectable } from '@nestjs/common';
 import {
   COMMERCIAL_AI_QUALITY_MAX_ATTEMPTS,
@@ -23,6 +24,7 @@ import { commercialReviewEvidenceHash, type Candidate } from './commercial-revie
 import { fingerprintCommercialDeleteText } from './commercial-delete-binding';
 import {
   commercialLlmMayDelete,
+  commercialLlmPolicyMayDeletePersonalSale,
   commercialLlmSourceCurrent,
   commercialLlmSourceKey,
   commercialLlmSourceSchema,
@@ -58,6 +60,7 @@ export type CommercialAiObservationSeed = {
 export type CommercialAiObservationUpdate = {
   source: CommercialLlmSource;
   inputSha256: string;
+  waitForSeed?: boolean;
 } & Partial<
   Pick<CommercialAiQualityAttempt, 'admission' | 'analysis' | 'registration' | 'execution'>
 >;
@@ -433,6 +436,27 @@ export class CommercialAiObservationService {
   }
 
   async update(input: CommercialAiObservationUpdate): Promise<CommercialAiObservationWriteStatus> {
+    // FLAG: Only sampled live requests wait for a producer's original snapshot. This
+    // bounded evidence-only retry never seeds history, retries inference or renews authority.
+    const started = Date.now();
+    let status = await this.updateOnce(input);
+    if (input.waitForSeed !== true) return status;
+    for (const delay of [50, 150, 350, 750]) {
+      if (
+        status !== 'missing' ||
+        Date.now() + delay - started > 1500 ||
+        !commercialLlmSourceCurrent(input.source)
+      )
+        break;
+      await pause(delay);
+      status = await this.updateOnce(input);
+    }
+    return status;
+  }
+
+  private async updateOnce(
+    input: CommercialAiObservationUpdate,
+  ): Promise<CommercialAiObservationWriteStatus> {
     const parsedSource = commercialLlmSourceSchema.safeParse(input.source);
     if (
       !parsedSource.success ||
@@ -457,12 +481,19 @@ export class CommercialAiObservationService {
         if (!attempt) return 'conflict';
         const valid = commercialAiQualityAttemptSchema.safeParse(attempt);
         if (!valid.success) return 'invalid';
-        if (
-          valid.data.analysis.result &&
-          valid.data.analysis.policyDeleteEligible !==
-            commercialLlmMayDelete(valid.data.analysis.result, source)
-        )
-          return 'conflict';
+        const result = valid.data.analysis.result;
+        if (result) {
+          const modelAllows = commercialLlmMayDelete(result, source);
+          // FLAG: Classification and current category policy are separate. V3 may veto
+          // a commercial result or explicitly block a pinned 9B personal-sale result.
+          const invalidPermission =
+            source.version === 3
+              ? valid.data.analysis.policyDeleteEligible === true &&
+                !modelAllows &&
+                !commercialLlmPolicyMayDeletePersonalSale(result, source)
+              : valid.data.analysis.policyDeleteEligible !== modelAllows;
+          if (invalidPermission) return 'conflict';
+        }
         const next = { ...parsed.data, attempts: [...parsed.data.attempts] };
         next.attempts[index] = valid.data;
         if (isDeepStrictEqual(next, parsed.data)) return 'unchanged';

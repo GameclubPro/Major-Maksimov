@@ -128,6 +128,28 @@ const completed = (value = result()) => ({
 });
 
 describe('bounded commercial AI quality observation contracts', () => {
+  it('preserves a pinned personal-sale policy permission only on an explicit-policy source', () => {
+    const personal = result({ classification: 'NOT_COMMERCIAL', reasonCodes: ['PERSONAL_SALE'] });
+    const analysis = { ...completed(personal), policyDeleteEligible: true };
+    expect(
+      commercialAiQualityAttemptSchema.safeParse(attempt({ sourceVersion: 3, analysis })).success,
+    ).toBe(true);
+    for (const sourceVersion of [1, 2] as const)
+      expect(
+        commercialAiQualityAttemptSchema.safeParse(attempt({ sourceVersion, analysis })).success,
+      ).toBe(false);
+    const fourB = {
+      ...personal,
+      pool: { ...personal.pool!, nodeId: 'pc-a-4b' as const, policy: 'direct-4b' as const },
+    };
+    expect(
+      commercialAiQualityAnalysisSchema.safeParse({ ...analysis, result: fourB }).success,
+    ).toBe(false);
+    expect(
+      commercialAiQualityAnalysisSchema.safeParse({ ...analysis, result: result() }).success,
+    ).toBe(false);
+  });
+
   it('accepts the independent CPU 9B on direct and consulted routes with the same bounded reasons', () => {
     const direct = result({
       classification: 'COMMERCIAL',

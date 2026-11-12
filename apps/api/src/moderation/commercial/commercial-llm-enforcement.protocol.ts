@@ -181,6 +181,8 @@ export const commercialLlmRequestSchema = z
     excerpt: z.string().min(1).max(2500),
     submittedAtMs: z.number().int().positive().safe(),
     worker: z.uuid(),
+    // FLAG: Optional sampling hint grants no execution authority and contains no source text.
+    observationRequested: z.literal(true).optional(),
   })
   .strict();
 export type CommercialLlmRequest = z.infer<typeof commercialLlmRequestSchema>;

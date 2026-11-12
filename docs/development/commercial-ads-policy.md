@@ -42,6 +42,13 @@ cannot be enabled while that runtime is unavailable; existing stored policy stay
 and processing fails conservatively. Preview returns UNSURE for an unsupported deterministic
 personal-sale block, never a false promise of deletion.
 
+Quoted offers introduced as reported speech and followed by an explicit scam warning
+remain protected. Protection ends at the closed quote; an independent offer in the
+author’s own later text still participates in category detection. Default-ignorable
+format characters inside words (including soft hyphen and invisible operators) are
+removed only from the detection representation. Original text, regional letters,
+combining marks and source fingerprints remain intact.
+
 Both deterministic and AI final dispatch guards re-read current settings, category policy,
 exact participant grants and expiry. Any relevant settings change revokes earlier bound
 authority. All shared-image roles and both rollback paths must retain the policy resolver,

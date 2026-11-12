@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { setTimeout as pause } from 'node:timers/promises';
+import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import {
   COMMERCIAL_AI_QUALITY_MAX_ENVELOPE_BYTES,
   commercialAiQualityEnvelopeSchema,
@@ -389,6 +391,69 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
         }),
       ).toBe('conflict');
     });
+
+    it('records an actual sampled result after another writer commits the delayed original seed', async () => {
+      const input = seed();
+      const reader = new CommercialAiObservationService(prisma as unknown as PrismaService);
+      const complete = analysis(input);
+      const result = reader.update({ ...binding(input), analysis: complete, waitForSeed: true });
+      await pause(100);
+      expect(await writer.seed(input)).toBe('written');
+      expect(await result).toBe('written');
+      expect((await envelope(input)).attempts[0]?.analysis).toEqual(complete);
+      expect((await envelope(input)).attempts[0]?.admission.state).toBe('ACCEPTED');
+    });
+
+    it('keeps a missing sampled seed a bounded gap without creating or reviving a source', async () => {
+      const input = seed();
+      const started = Date.now();
+      expect(
+        await writer.update({ ...binding(input), analysis: analysis(input), waitForSeed: true }),
+      ).toBe('missing');
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(
+        await prisma.commercialReviewSample.count({
+          where: { evidenceHash: commercialAiObservationEvidenceHash(input.request.source) },
+        }),
+      ).toBe(0);
+    });
+
+    it.each(['allowed-commercial', 'blocked-personal-sale'] as const)(
+      'records the actual category-policy outcome for %s',
+      async (scenario) => {
+        const input = seed();
+        const policy = createDefaultCommercialAdsPolicy();
+        policy.categories.SERVICES = 'ALLOW';
+        policy.categories.PERSONAL_SALE = 'BLOCK';
+        const offer = buildCommercialLlmOffer(
+          {
+            chatId,
+            messageId: input.request.source.messageId,
+            userId: input.request.source.userId,
+            originBotId: input.request.source.originBotId,
+            text: input.candidate.text!,
+            eventAt: new Date(input.request.source.eventAtMs).toISOString(),
+            settings: { ...settings, commercialAdsPolicy: policy },
+            origin: input.request.source.origin,
+          },
+          Date.now(),
+          'confirm-positive',
+        )!;
+        input.request = { ...offer, submittedAtMs: input.request.submittedAtMs };
+        expect(input.request.source.version).toBe(3);
+        expect(await writer.seed(input)).toBe('written');
+        const complete = analysis(
+          input,
+          scenario === 'allowed-commercial' ? 'COMMERCIAL' : 'NOT_COMMERCIAL',
+        );
+        complete.result!.reasonCodes =
+          scenario === 'allowed-commercial' ? ['SERVICE_OFFER'] : ['PERSONAL_SALE'];
+        complete.result!.protocolVersion = 2;
+        complete.policyDeleteEligible = scenario === 'blocked-personal-sale';
+        expect(await writer.update({ ...binding(input), analysis: complete })).toBe('written');
+        expect((await envelope(input)).attempts[0]?.analysis).toEqual(complete);
+      },
+    );
 
     it('preserves human ratings and etags while enriching separate AI and shadow observations', async () => {
       const input = seed();

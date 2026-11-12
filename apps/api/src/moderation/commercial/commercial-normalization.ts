@@ -3,8 +3,9 @@ import { normalizeCommercialPhoneConfusables } from './commercial-phone';
 
 const SPACED_LETTER_SEQUENCE_PATTERN =
   /(?:^|(?<=[\s.,:;!?/+-]))\p{L}(?:[\s.,:;!?/+-]+\p{L}){2,}(?=$|[\s.,:;!?/+-])/gu;
-const ZERO_WIDTH_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/gu;
-const ZERO_WIDTH_TEST_PATTERN = /[\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/u;
+// FLAG: Normalize a detection copy only; preserve combining marks and regional letters.
+const ZERO_WIDTH_PATTERN = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/gu;
+const ZERO_WIDTH_TEST_PATTERN = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/u;
 const COMPATIBILITY_FORM_PATTERN = /[\u{1D400}-\u{1D7FF}\uFF01-\uFF5E]/u;
 const COMMERCIAL_LATIN_PATTERN = /[a-z]/iu;
 const COMMERCIAL_CYRILLIC_PATTERN = /[а-яё]/iu;

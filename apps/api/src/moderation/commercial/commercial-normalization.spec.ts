@@ -6,6 +6,20 @@ import {
 } from './commercial-normalization';
 
 describe('normalizeCommercialText', () => {
+  it.each(['\u2061', '\u2062', '\u2063', '\u2064', '\u00ad'])(
+    'removes invisible format controls inside commercial words: %j',
+    (separator) => {
+      const plain = 'Ремонтируем стиральные машины. Выезд мастера 1000 рублей.';
+      const obfuscated = plain.replace(/(?<=[а-яё])(?=[а-яё])/giu, separator);
+      expect(normalizeCommercialRawText(obfuscated)).toBe(normalizeCommercialRawText(plain));
+      expect(normalizeCommercialText(obfuscated)).toBe(normalizeCommercialText(plain));
+    },
+  );
+
+  it('preserves regional letters, combining accents and emoji variation', () => {
+    expect(normalizeCommercialRawText('Өң, үү, ң; а\u0301; ❤️')).toBe('өң, үү, ң; а\u0301; ❤️');
+  });
+
   it.each([
     'П Р О Д А Е М мебель',
     'hxxps://max dot ru/join/sale',

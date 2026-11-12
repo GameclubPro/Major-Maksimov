@@ -68,6 +68,37 @@ function detect(
 }
 
 describe('commercial public and object-condition safe contexts', () => {
+  it.each([STRICT_SETTINGS, BALANCED_SETTINGS])(
+    'protects a quoted paid offer explicitly reported as a scam',
+    (settings) => {
+      const text =
+        'В чате написали: «Ремонтируем стиральные машины. Выезд мастера 1000 рублей. Звоните +7 900 000 10 42». Это мошенники, не звоните.';
+      const result = detect(text, undefined, settings);
+      expect(result?.actionable ?? false).toBe(false);
+      expect(['ALLOW', 'REVIEW_ONLY']).toContain(result?.actionBand ?? 'ALLOW');
+    },
+  );
+
+  it.each([
+    'Ремонтируем стиральные машины. Выезд мастера 1000 рублей. Звоните +7 900 000 10 42.',
+    'В чате написали: «Ремонтируем стиральные машины. Звоните +7 900 000 10 42». Это мошенники, не звоните. Отдельно: наша мастерская ремонтирует холодильники. Выезд мастера 2000 рублей, звоните +7 900 000 10 43.',
+  ])('keeps an actual own service offer actionable: %s', (text) => {
+    expect(detect(text, undefined, BALANCED_SETTINGS)?.actionable).toBe(true);
+  });
+
+  it.each(['\u2061', '\u2063', '\u00ad'])(
+    'keeps service detection stable through invisible Unicode: %j',
+    (separator) => {
+      const plain =
+        'Ремонтируем стиральные машины. Выезд мастера 1000 рублей. Звоните +7 900 000 10 42.';
+      const obfuscated = plain.replace(/(?<=[а-яё])(?=[а-яё])/giu, separator);
+      expect(detect(obfuscated, undefined, BALANCED_SETTINGS)?.actionBand).toBe(
+        detect(plain, undefined, BALANCED_SETTINGS)?.actionBand,
+      );
+      expect(detect(obfuscated, undefined, BALANCED_SETTINGS)?.actionable).toBe(true);
+    },
+  );
+
   it('does not read apartment appliances plus cosmetic repair as an appliance-repair offer', () => {
     const text =
       '🌼 Продается 2-х квартира, очень теплая, 4 этаж. В ванной умещается стиральная машинка. Остается вся мебель, холодильник, телевизор. Требуется косметический ремонт. Вся информация по тел. [phone], пишите, звоните. Собственник, торг.';

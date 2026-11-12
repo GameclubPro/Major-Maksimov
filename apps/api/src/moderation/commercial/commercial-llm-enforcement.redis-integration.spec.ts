@@ -187,25 +187,37 @@ const previousPendingKey = 'commercial-llm-enforcement:v2:slot';
       if (!item) throw new Error('Expected bounded primary admission');
       return item;
     }
-    it('seeds the exact original request before admission without changing wire or clocks', async () => {
-      await ready();
-      const source = offer();
-      let captured:
-        | Parameters<NonNullable<Parameters<typeof mailbox.offerDetailed>[1]>>[0]
-        | undefined;
-      expect(
-        await mailbox.offerDetailed(source, async (request) => {
-          captured = request;
-          expect(await redis.get(keys.slot)).toBeNull();
-          await new Promise<void>((resolve) => setTimeout(resolve, 20));
-        }),
-      ).toBe('accepted');
-      const stored = JSON.parse((await redis.get(keys.slot))!);
-      expect(stored).toEqual(captured);
-      expect(Object.keys(stored).sort()).toEqual(['excerpt', 'source', 'submittedAtMs', 'worker']);
-      expect(stored.source).toEqual(source.source);
-      expect(await redis.pexpiretime(keys.slot)).toBe(source.source.deadlineAtMs);
-    });
+    it.each([false, true])(
+      'preserves exact request, deadlines and optional sampling hint (%s)',
+      async (sampled) => {
+        await ready();
+        const source = offer();
+        let captured:
+          | Parameters<NonNullable<Parameters<typeof mailbox.offerDetailed>[1]>>[0]
+          | undefined;
+        expect(
+          await mailbox.offerDetailed(source, async (request) => {
+            captured = request;
+            if (sampled) request.observationRequested = true;
+            expect(await redis.get(keys.slot)).toBeNull();
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+          }),
+        ).toBe('accepted');
+        const stored = JSON.parse((await redis.get(keys.slot))!);
+        expect(stored).toEqual(captured);
+        expect(Object.keys(stored).sort()).toEqual(
+          [
+            'excerpt',
+            'source',
+            'submittedAtMs',
+            'worker',
+            ...(sampled ? ['observationRequested'] : []),
+          ].sort(),
+        );
+        expect(stored.source).toEqual(source.source);
+        expect(await redis.pexpiretime(keys.slot)).toBe(source.source.deadlineAtMs);
+      },
+    );
     it('contains a failed optional pre-admission observer and keeps ordinary admission', async () => {
       await ready();
       expect(

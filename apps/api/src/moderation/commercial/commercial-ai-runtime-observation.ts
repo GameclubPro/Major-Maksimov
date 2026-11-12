@@ -92,21 +92,59 @@ export function buildCommercialAiObservationContext(
 @Injectable()
 export class CommercialAiObservationGate {
   private readonly pending = new Set<Promise<void>>();
+  private readonly ordered = new Map<string, { tail: Promise<void>; queued: number }>();
   private readonly counts = { completed: 0, failed: 0, timedOut: 0, capacitySkipped: 0 };
   private readonly statuses: Record<string, number> = {};
 
   snapshot() {
-    return { ...this.counts, statuses: { ...this.statuses }, unsettled: this.pending.size };
+    return {
+      ...this.counts,
+      statuses: { ...this.statuses },
+      unsettled: this.pending.size + this.ordered.size,
+    };
   }
 
   // FLAG: Callers never await optional evidence at business admission. The 100ms
   // observation timeout neither retries moderation nor releases an unsettled SQL slot.
   async run(operation: () => Promise<unknown>): Promise<void> {
-    if (this.pending.size >= 2) {
+    if (this.pending.size + this.ordered.size >= 2) {
       this.counts.capacitySkipped += 1;
       return;
     }
-    const work = Promise.resolve()
+    const work = this.execute(operation).finally(() => this.pending.delete(work));
+    this.pending.add(work);
+    await this.observe(work);
+  }
+
+  // FLAG: At most two source chains and four writes per chain. Timeout never drops a
+  // predecessor or releases its capacity; admission and other sources do not await SQL.
+  async runOrdered(key: string, operation: () => Promise<unknown>): Promise<void> {
+    let chain = this.ordered.get(key);
+    if (!chain) {
+      if (this.pending.size + this.ordered.size >= 2) {
+        this.counts.capacitySkipped += 1;
+        return;
+      }
+      chain = { tail: Promise.resolve(), queued: 0 };
+      this.ordered.set(key, chain);
+    }
+    if (chain.queued >= 4) {
+      this.counts.capacitySkipped += 1;
+      return;
+    }
+    const owned = chain;
+    owned.queued += 1;
+    const work =
+      owned.queued === 1 ? this.execute(operation) : owned.tail.then(() => this.execute(operation));
+    owned.tail = work.finally(() => {
+      owned.queued -= 1;
+      if (owned.queued === 0) this.ordered.delete(key);
+    });
+    await this.observe(owned.tail);
+  }
+
+  private execute(operation: () => Promise<unknown>): Promise<void> {
+    return Promise.resolve()
       .then(operation)
       .then(
         (status) => {
@@ -129,9 +167,10 @@ export class CommercialAiObservationGate {
         () => {
           this.counts.failed += 1;
         },
-      )
-      .finally(() => this.pending.delete(work));
-    this.pending.add(work);
+      );
+  }
+
+  private async observe(work: Promise<void>): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([
       work,
