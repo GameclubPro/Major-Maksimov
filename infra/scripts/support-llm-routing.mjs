@@ -111,7 +111,105 @@ function autoReplyRequest(text) {
     !(/стоп[\s-]*слов/iu.test(text) && !/подготов|заранее|моим?\s+текст|список/iu.test(text))
   );
 }
-const isPublisherTask = (text) => publisherTask.test(text) || autoReplyRequest(text);
+const isPublisherTask = (text) =>
+  publisherTask.test(text) ||
+  autoReplyRequest(text) ||
+  (!/удал|антидубл/iu.test(text) &&
+    /повтор[^.!?\n]{0,25}(?:пост|публикац)|(?:пост|публикац)[^.!?\n]{0,25}повтор/iu.test(text) &&
+    /кажд|расписан|ежеднев|день|час|недел/iu.test(text)) ||
+  /(?:пост|публикац)[^.!?\n]{0,55}(?:неизвестн.{0,10}результат|результат.{0,20}неизвест)/iu.test(
+    text,
+  );
+const publicationDraftTask = (text) =>
+  /черновик/iu.test(text) ||
+  /(?:дублиров|копи(?:я|ю|и|ровать))[^.!?\n]{0,35}(?:пост|публикац)|(?:пост|публикац)[^.!?\n]{0,35}(?:дублиров|копи)/iu.test(
+    text,
+  );
+const duplicatePeriodTask = (text) =>
+  (/антидубл/iu.test(text) ||
+    (!/публик|пост|публикац/iu.test(text) &&
+      /(?<![\p{L}])(?:дубли|дублей|повторы|повторов)(?![\p{L}])/iu.test(text))) &&
+  /времен|интервал|час|календарн|днем|день|ночью|открыти|закрыти|расписан|ежеднев|после первого|с\s+\d{1,2}\b/iu.test(
+    text,
+  );
+
+function botMembershipIntent(text) {
+  const clauses = text.split(
+    /[.!?;\n]|\s+(?:и|а|также|заодно)\s+(?=(?:как|где|удал|убр|выг|настро|включ|закры))/iu,
+  );
+  const removal =
+    /(?<![\p{L}])(?:удали(?:ть|те|л[аи]?|ли)|убра(?:ть|л[аи]?|ли)|убери(?:те)?|выгна(?:ть|л[аи]?|ли)|выгони(?:те)?|кикну(?:ть|ли)|исключи(?:ть|те|ли))(?![\p{L}])/iu;
+  const object =
+    /(?<![\p{L}])(?:бота|модератора|майора|максимов(?:а|ой)|р[эе]кса|публика|ластика)(?![\p{L}])/giu;
+  for (const [index, clause] of clauses.entries()) {
+    const preceding = clauses.slice(0, index).join('. ');
+    const priorBot =
+      /бот|модератор|майор|максимов|р[эе]кс|публик|ластик/iu.test(preceding) &&
+      !/пост|публикаци|черновик|сообщени|ответ/iu.test(clauses[index - 1] ?? '');
+    const botSubject = /бот/iu.test(clause) || priorBot;
+    // FLAG: Match the action's object and scope within its clause. An owned bot can still
+    // be removed from just one group; a post mentioning Publik is never the bot itself.
+    if (
+      botSubject &&
+      !/(?:а|но)\s+не\s+(?:просто\s+)?(?:снять|лишить|убрать)/iu.test(clause) &&
+      /(?:убрать|снять|удалить).{0,45}(?:из админов|из администратор)|(?:снять|лишить).{0,45}(?:прав|роли)|(?:убрать\s+(?:права|роль)|(?:прав|роль).{0,35}(?:снять|убрать))/iu.test(
+        clause,
+      )
+    )
+      return 'demote';
+    if (/других ботов|из админов|из администратор|оставив.{0,20}участник/iu.test(clause)) continue;
+    if (
+      botSubject &&
+      /(?:запретить|перестал|не хочу|остановить|отключить).{0,30}(?:писать|сообщен|личк)/iu.test(
+        clause,
+      ) &&
+      /мне|личк|личн/iu.test(clause)
+    )
+      return 'private';
+    const action = removal.exec(clause);
+    if (!action || negatedAt(clause, action.index)) continue;
+    if (/^\s+не\s+(?:хочу|нужно|надо)/iu.test(clause.slice(action.index + action[0].length)))
+      continue;
+    const privateDialog = /бот/iu.test(clause) && /личн|личк|у себя|диалог/iu.test(clause);
+    const objects = [
+      ...clause.matchAll(object),
+      ...(priorBot ? clause.matchAll(/(?<![\p{L}])(?:его|ее|их)(?![\p{L}])/giu) : []),
+    ];
+    const botObject = objects.find((match) => {
+      const span = clause.slice(
+        Math.min(action.index, match.index),
+        Math.max(action.index, match.index),
+      );
+      const prefix = match.index < action.index ? clause.slice(0, match.index) : '';
+      return (
+        span.length <= 80 && !/публикац|сообщен|пост|черновик|участник|ответ/iu.test(span + prefix)
+      );
+    });
+    if (!botObject && !privateDialog) continue;
+    if (privateDialog && !botObject && /сообщен|пост|черновик|ответ/iu.test(clause)) continue;
+    if (
+      /вернуть|восстанов|заново|снова|подключ|пришлите|настроить|добав/iu.test(text) &&
+      /случайно|удалил|удалила|удалили|убрал/iu.test(clause)
+    )
+      return 'restore';
+    if (
+      /из\s+(?:(?:мо\p{L}*|наше\p{L}*|эт\p{L}*|одн\p{L}*|сво\p{L}*)\s+){0,3}(?:групп|чат|участник|канал)/iu.test(
+        clause,
+      )
+    )
+      return /из\s+(?:\p{L}+\s+){0,3}канал/iu.test(clause) ? 'channel' : 'group';
+    if (privateDialog) return 'private';
+    const positiveScope = clause.split(/\s+(?:без|но не|а не|не на)\s+/iu)[0];
+    if (
+      /партнерск|платформ[аеуы]|аккаунт.{0,25}бот|(?:навсегда|полностью).{0,30}(?:собственн|своего|созданн)/iu.test(
+        positiveScope,
+      )
+    )
+      return 'platform';
+    return 'group';
+  }
+  return null;
+}
 const eraserTask =
   /стар.{0,15}(?:сообщен|переписк)|очист.{0,15}(?:истор|переписк)|удаление по срок/iu;
 const correspondenceClosure = /(?:выключ|отключ|останов|огранич)\p{L}*[^.!?\n]{0,30}переписк/iu;
@@ -126,7 +224,7 @@ const nightTopic = new RegExp(
 const closeAction = /(?<![\p{L}])(?:закры(?:ть|вать)|закрой(?:те)?|закрывай(?:те)?)(?![\p{L}])/giu;
 const groupEntry = /вступ|присоедин|приватн|приглаш|вход|заход/iu;
 const recurringClosure =
-  /кажд|ежеднев|еженедел|по\s+(?:будн|выходн|понедельник|вторник|сред|четверг|пятниц|суббот|воскресень)|на\s+ночь|по\s+времени/iu;
+  /кажд|ежеднев|еженедел|по\s+(?:будн|выходн|понедельник|вторник|сред|четверг|пятниц|суббот|воскресень)|на\s+ночь|по\s+времени|закрывать.{0,40}ночью|ночью.{0,40}закрывать/iu;
 const liveAction =
   /(?<![\p{L}])(?:закрой(?:те)?|закрывай(?:те)?|открой(?:те)?|включи(?:те)?|выключи(?:те)?|отключи(?:те)?|подключи(?:те)?|настрой(?:те)?|поставь(?:те)?|сохрани(?:те)?|запусти(?:те)?|опубликуй(?:те)?)(?![\p{L}])/giu;
 const lastikConnectionRecovery =
@@ -172,7 +270,7 @@ function productOf(text) {
   if (publisher && eraser) return 'mixed';
   if (eraser) return 'eraser';
   if (publisher) return 'publisher';
-  if (isPublisherTask(text)) return 'publisher';
+  if (isPublisherTask(text) || publicationDraftTask(text)) return 'publisher';
   if (eraserTask.test(text)) return 'eraser';
   if (moderatorName.test(text) && moderatorForwardingRequest(text)) return 'major';
   if (moderatorName.test(text) && /резерв|выбран|модерац/iu.test(text)) return 'major';
@@ -222,6 +320,8 @@ const commercialPattern =
 const subscriptionPattern =
   /подписк|подписан|подписал|подписать|подписаться|подписыва|подпиш(?!и)|подпиши(?:те|сь|тесь)?\s+(?:(?:меня|нас|аккаунт|участник\p{L}*)\s+)?на\s+(?:(?:нужн\p{L}*|все|выбранн\p{L}*)\s+)?(?:канал|источник|групп)/iu;
 const topicPatterns = [
+  ['bot-membership', { test: (text) => Boolean(botMembershipIntent(text)) }],
+  ['publication-drafts', { test: publicationDraftTask }],
   ['polls', /(?<![\p{L}])опрос\p{L}*|голосован|проголосова/iu],
   ['giveaways', /розыгрыш|розыграш|конкурс|призов.{0,8}мест/iu],
   [
@@ -237,7 +337,13 @@ const topicPatterns = [
   ['night', nightTopic],
   [
     'duplicates',
-    /антидубл|дублиру.{0,20}сообщен|дословн.{0,15}повтор|повтор.{0,20}(?:текст|подпис|сообщени)/iu,
+    {
+      test: (text) =>
+        duplicatePeriodTask(text) ||
+        /антидубл|дублиру.{0,20}сообщен|дословн.{0,15}повтор|повтор.{0,20}(?:текст|подпис|сообщени)/iu.test(
+          text,
+        ),
+    },
   ],
   ['profanity', /антимат|\bмат\b|мата|оскорблен|бытов.{0,15}(?:руг|обзыв)/iu],
   ['stop-words', /стоп слов|стоп[- ]?(?:спис|лист)|запрещенн.{0,10}фраз/iu],
@@ -302,6 +408,12 @@ const words = (text) =>
 
 function ordinaryConversation(text) {
   if (/^(?:этот\s+)?бот\s+заказал.{0,70}(?:яхт|эскорт|проститут|шлюх)/iu.test(text)) return true;
+  if (
+    /спасибо|благодарю/iu.test(text) &&
+    /все получилось|все работает|разобрался|разобралась/iu.test(text) &&
+    !/\?|как|почему|помог|подскаж|не работает/iu.test(text)
+  )
+    return true;
   if (
     /^(?:все[,!.\s]*)?(?:всем\s+)?(?:спасибо|благодарю|доброе утро|добрый вечер|спокойной ночи|хорошего.{0,12}дня|понял[аи]?|разобрал[аи]?ся|получилось|договорились|наконец-то)(?:[^?]*)$/iu.test(
       text,
@@ -396,7 +508,7 @@ function peerAdvice(text, original) {
     return false;
   const imperatives = [
     ...text.matchAll(
-      /(?<![\p{L}])(?:откройте|укажите|выберите|настройте|включите|отключите|добавьте|дайте|нажмите|отметьте|разместите|выставьте|попробуйте|проверьте|перешлите|публикуйте|сохраните|создайте|поставьте|назначьте|зайдите)(?![\p{L}])/giu,
+      /(?<![\p{L}])(?:откройте|укажите|выберите|настройте|включите|отключите|добавьте|дайте|нажмите|отметьте|разместите|выставьте|попробуйте|проверьте|перешлите|публикуйте|сохраните|создайте|поставьте|назначьте|зайдите|удалите|уберите|снимите|исключите)(?![\p{L}])/giu,
     ),
   ];
   const addressee =
@@ -423,6 +535,7 @@ function peerAdvice(text, original) {
       text,
     );
   return (
+    (imperatives.length >= 2 && /(?:^|\s)(?:сначала|затем|потом)(?![\p{L}])/iu.test(text)) ||
     /^(?:я|мы)\s+(?:обычно|всегда|тоже).{0,45}(?:делаю|делаем|настраива|публику)/iu.test(text) ||
     (thirdPerson &&
       (imperatives.length > 0 || /(?:^|\s)(?:можете|можно)(?![\p{L}])/iu.test(text))) ||
@@ -1091,6 +1204,13 @@ function linkPolicyIntent(ctx, state, primaryIds) {
 }
 
 function nightSources(ctx, role) {
+  if (
+    duplicatePeriodTask(ctx.current) &&
+    !/ночн.{0,10}режим|закры(?:ть|вать)[^.!?\n]{0,40}(?:чат|групп)|(?:чат|групп)[^.!?\n]{0,40}закры(?:ть|вать)/iu.test(
+      ctx.current,
+    )
+  )
+    return [];
   const relevant = (text) => nightTopic.test(text);
   if (!relevant(ctx.focus)) return [];
   const detect = (text) => {
@@ -1191,6 +1311,60 @@ function semanticFacts(text, state) {
   const add = (id, priority = 50) => facts.push({ id, priority });
   const { publisherRequest: publ, developer, commercialAi, mixedTopics } = state;
   const test = (pattern) => pattern.test(text);
+  if (state.botMembership) {
+    const id = {
+      group: 'max-remove-bot-group',
+      channel: 'max-remove-bot-channel',
+      private: 'max-stop-private-bot',
+      platform: 'max-delete-owned-bot',
+      demote: 'max-demote-bot',
+    }[state.botMembership];
+    if (id) {
+      add(id, 210);
+      if (!state.mixedTopics) return facts;
+    } else if (state.eraserRequest) {
+      add('lastik-connect', 205);
+    } else if (publ) {
+      add('publik', 205);
+    } else {
+      add('connect', 205);
+      add('moderator-profile', 190);
+    }
+  }
+  if (duplicatePeriodTask(text)) add('duplicates-period', 150);
+  if (publicationDraftTask(text)) {
+    if (
+      text
+        .split(/[.!?;\n]/u)
+        .some(
+          (clause) =>
+            /(?:удал|почист|убрать|убери)[^.!?\n]{0,60}черновик|черновик[^.!?\n]{0,60}(?:удал|убрать|убери)|очист[^.!?\n]{0,30}черновики/iu.test(
+              clause,
+            ) &&
+            !/не\s+(?:хочу|нужно|надо|буду).{0,20}(?:удал|убир)|(?:удал|убир).{0,20}не\s+хочу/iu.test(
+              clause,
+            ),
+        )
+    )
+      add('publisher-draft-delete', 165);
+    if (
+      test(
+        /очист.{0,20}(?:открыт|содержим|редактор)|очист.{0,35}(?:текст|вложени)|очист.{0,20}черновик(?![и\p{L}])|сброс.{0,20}содержим|заново.{0,20}напис/iu,
+      )
+    )
+      add('publisher-draft-clear', 165);
+    if (test(/дублиров|копи(?:я|ю|и|ровать)/iu)) add('publisher-copy', 155);
+  }
+  if (
+    (/ссылк.{0,20}(?:на )?бот/iu.test(text) &&
+      !moderatorName.test(text) &&
+      !publisherName.test(text) &&
+      !eraserName.test(text)) ||
+    (moderatorName.test(state.current) &&
+      state.recent.at(-1)?.role === 'assistant' &&
+      /как называл|какого бота|какой бот/iu.test(state.recent.at(-1).text))
+  )
+    add('moderator-profile', 160);
   if (supportAssistantRequest(state.current, state.recent)) {
     add('support-assistant-capabilities', 170);
   }
@@ -1242,6 +1416,8 @@ function semanticFacts(text, state) {
     add('reports-outcomes', 120);
   if (test(/карточк.{0,15}участник|список участников|поиск.{0,12}участник|найти.{0,15}участник/iu))
     add('participants', 105);
+  if (test(/(?<![\p{L}])мут(?![\p{L}])/iu) && test(/где|найти|карточк|участник|поставить/iu))
+    add('participant-mute', 120);
   if (
     test(
       /без сообщений|(?:временно|на время|срок|участник|ему).{0,25}(?:запретить(?: ему)? писать|ограничить сообщен)|(?:оставить|остался).{0,35}(?:писать|сообщен)/iu,
@@ -1382,7 +1558,7 @@ function semanticFacts(text, state) {
     add('max-own-bot-creation', 105);
   if (
     test(
-      /(?:ник|никнейм|переимен|владельц|владение).{0,30}бот|бот.{0,30}(?:ник|переимен|передать)|токен|парол|код вход|компрометац/iu,
+      /(?<![\p{L}])(?:ник(?:нейм)?)(?![\p{L}]).{0,30}бот|(?:переимен|владельц|владение).{0,30}бот|бот.{0,30}(?:(?<![\p{L}])ник(?:нейм)?(?![\p{L}])|переимен|передать)|токен|парол|код вход|компрометац/iu,
     )
   )
     add('max-bot-token-and-ownership', 105);
@@ -1514,7 +1690,9 @@ function semanticFacts(text, state) {
   }
   if (
     test(/антидубл/iu) ||
-    (!publ && test(/дубл|дословн.{0,15}повтор|повтор.{0,20}(?:текст|подпис|сообщени)/iu))
+    (!publ &&
+      !publicationDraftTask(text) &&
+      test(/дубл|дословн.{0,15}повтор|повтор.{0,20}(?:текст|подпис|сообщени)/iu))
   )
     add('duplicates', 100);
   if (test(/антимат|(?<![\p{L}])мат(?![\p{L}])|мата|оскорблен|бытов.{0,15}(?:руг|обзыв)/iu))
@@ -1974,6 +2152,25 @@ export function createSupportRouter(knowledge) {
   };
   function classify(text, history = [], interaction = {}) {
     const ctx = conversationFor(text, history);
+    let botMembership = botMembershipIntent(ctx.current);
+    const recentBot = ctx.recent.filter((item) => item.role === 'user').at(-1);
+    if (
+      !botMembership &&
+      recentBot &&
+      ((ctx.current.length <= 140 &&
+        /(?:его|ее|их)(?![\p{L}])/iu.test(ctx.current) &&
+        /(?:как|можно).{0,45}(?:удалить|убрать)/iu.test(ctx.current) &&
+        !/пост|сообщен|публикац|черновик/iu.test(ctx.current)) ||
+        /^(?:нет кнопки удалить|с группы)[?!.\s]*$/iu.test(ctx.current)) &&
+      !/пост|сообщен|черновик|правил|других ботов/iu.test(recentBot.text) &&
+      /бот|майор|максимов|р[эе]кс|публик|ластик/iu.test(recentBot.text)
+    )
+      botMembership = botMembershipIntent(recentBot.text) ?? 'group';
+    if (
+      botMembership &&
+      !/\s(?:и|также|заодно)\s.{0,25}(?:как|настро|включ|закры)/iu.test(ctx.current)
+    )
+      ctx.focus = ctx.current;
     const assistantTopic =
       supportAssistantRequest(ctx.current, ctx.recent) && !namedSupportProduct(ctx.current);
     if (assistantTopic) ctx.focus = ctx.current;
@@ -1998,7 +2195,15 @@ export function createSupportRouter(knowledge) {
       ) ||
         (ctx.current.split(/\s+/u).length <= 6 &&
           (domain.test(ctx.current) || topics(ctx.current).length > 0)));
+    const ambiguousMedia =
+      /фото|снимк|картин/iu.test(ctx.current) &&
+      /загружа|отправ|повор|перевер|переверн/iu.test(ctx.current) &&
+      /не все|не загру|не отправ|боком|вверх дном|перевер|переверн/iu.test(ctx.current) &&
+      !publisherName.test(ctx.focus) &&
+      !/публик|редактор.{0,15}пост/iu.test(ctx.focus);
     let supportDialogue =
+      ambiguousMedia ||
+      /(?:удалить|убрать)[^.!?\n]{0,25}ответ(?:ы)?\s+бота/iu.test(ctx.current) ||
       (!hasContext && supportOpener(ctx.current)) ||
       (openerContext &&
         freshClarification &&
@@ -2173,6 +2378,8 @@ export function createSupportRouter(knowledge) {
       developer,
       commercialAi,
       supportDialogue,
+      ambiguousMedia,
+      botMembership,
       aiIntents,
       botDirectory,
       botCatalogRequest,
@@ -2184,7 +2391,15 @@ export function createSupportRouter(knowledge) {
     state.moderatorTroubleshooting = moderatorFailure(ctx, state);
     state.lastikWaitingOnly = atomicLastikWaiting(ctx, state);
     state.lastikSetupOnly = atomicLastikSetup(ctx, state);
-    const mixedTopics = mixedRequests(ctx, state);
+    const mixedTopics =
+      mixedRequests(ctx, state) ||
+      Boolean(
+        botMembership &&
+        (topics(ctx.current).some((id) => !['bot-membership', 'links'].includes(id)) ||
+          /(?:[?!.]\s*(?:еще|ещё|а)?\s*|\s+(?:и|а|также|заодно)\s+)(?:как|где|настро|включ|закры|удалить\s+(?:\p{L}+\s+){0,3}(?:пост|сообщен)|найти\s+мут)/iu.test(
+            ctx.current,
+          )),
+      );
     state.mixedTopics = mixedTopics;
     const primaryIds = factsFor(state);
     const productHelp = primaryIds.some(
@@ -2218,6 +2433,8 @@ export function createSupportRouter(knowledge) {
       eraserRequest,
       developer,
       moderatorTroubleshooting: state.moderatorTroubleshooting,
+      ambiguousMedia,
+      botMembership,
       connectionTroubleshooting:
         /не получается|не могу|ошибк|отказ|не подключ/iu.test(ctx.current) &&
         /подключ|пересыл/iu.test(ctx.current) &&
@@ -2260,6 +2477,7 @@ export function createSupportRouter(knowledge) {
           (entry) =>
             !mandatoryIds.has(entry.id) &&
             entry.delivery !== 'reviewed' &&
+            entry.retrieval !== 'semantic' &&
             (entry.audience !== 'developer' || state.developer),
         )
         .map((entry) => ({
