@@ -1,6 +1,6 @@
 import { OptimizationRuntimeMetrics } from '../system/optimization-runtime-metrics';
 import type { StorageRuntimeMetricsService } from '../system/storage-runtime-metrics.service';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
 import type { HttpService } from '@nestjs/axios';
@@ -74,6 +74,121 @@ function nativeTransportFixture(
     classKey: `maxapi:gcra:v1:service:${serviceScope}:bot:${botId}:class:background`,
   };
 }
+
+describeRedis('MAX transport wait lifetime', () => {
+  it('does not reserve or dispatch when a timer resumes after the wait budget and cooldown', async () => {
+    const { service, internals, request, tokenKey } = nativeTransportFixture(undefined, {
+      MAX_API_RATE_LIMIT_WAIT_MS_BACKGROUND: 20,
+    });
+    const sleeper = service as unknown as { sleep(ms: number): Promise<void> };
+    const sleep = jest.spyOn(sleeper, 'sleep').mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // FLAG: Model a late scheduler wake with capacity now available in real Redis.
+      await internals.limiterRedis.del(`${tokenKey}:cooldown`);
+    });
+    try {
+      await internals.limiterRedis.set(`${tokenKey}:cooldown`, '1', 'PX', 10_000);
+      await expect(service.getOwnProfile({ trafficClass: 'background' })).rejects.toMatchObject({
+        code: 'MAX_API_INTERNAL_RATE_LIMIT',
+        preDispatch: true,
+      });
+      expect(request).not.toHaveBeenCalled();
+      expect(await internals.limiterRedis.zcard(`${tokenKey}:window:v1`)).toBe(0);
+    } finally {
+      sleep.mockRestore();
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('refuses a cooldown beyond the caller budget even when the retry floor would outlive it', async () => {
+    const fixture = nativeTransportFixture(undefined, {
+      MAX_API_RATE_LIMIT_WAIT_MS_BACKGROUND: 20,
+      MAX_API_RATE_LIMIT_RETRY_FLOOR_MS: 250,
+    });
+    const { service, internals, request, tokenKey } = fixture;
+    try {
+      await internals.limiterRedis.set(`${tokenKey}:cooldown`, '1', 'PX', 150);
+      await expect(service.getOwnProfile({ trafficClass: 'background' })).rejects.toMatchObject({
+        code: 'MAX_API_INTERNAL_RATE_LIMIT',
+        preDispatch: true,
+        limitScope: 'external_cooldown',
+      });
+      expect(request).not.toHaveBeenCalled();
+      expect(await internals.limiterRedis.zcard(`${tokenKey}:window:v1`)).toBe(0);
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
+  it.each(['quota', 'keyboard'] as const)(
+    'settles a pending %s wait when the client stops without dispatching HTTP',
+    async (kind) => {
+      const { service, internals, request, tokenKey } = nativeTransportFixture(undefined, {
+        MAX_API_RATE_LIMIT_WAIT_MS_BACKGROUND: 5_000,
+      });
+      const messageId = `shutdown-edit-${randomUUID()}`;
+      const lockKey = `max:message-keyboard-edit:v1:${createHash('sha256').update(messageId).digest('hex')}`;
+      let enteredWait!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        enteredWait = resolve;
+      });
+      const sleeper = service as unknown as { sleep(ms: number): Promise<void> };
+      const originalSleep = sleeper.sleep.bind(service);
+      const sleep = jest.spyOn(sleeper, 'sleep').mockImplementation((ms) => {
+        const result = originalSleep(ms);
+        enteredWait();
+        return result;
+      });
+      let deadline: NodeJS.Timeout | undefined;
+      let shutdown: Promise<void> | undefined;
+      try {
+        await internals.limiterRedis.set(
+          kind === 'quota' ? `${tokenKey}:cooldown` : lockKey,
+          'held-by-other-operation',
+          'PX',
+          10_000,
+        );
+        const operation =
+          kind === 'quota'
+            ? service.getOwnProfile({ trafficClass: 'background' })
+            : service.editMessageInlineKeyboard('chat-shutdown', messageId, 'Fixture');
+        const outcome = operation.then(
+          () => 'dispatched',
+          () => 'rejected',
+        );
+        await waiting;
+        shutdown = service.onModuleDestroy();
+        await shutdown;
+        expect(
+          await Promise.race([
+            outcome,
+            new Promise<string>((resolve) => {
+              deadline = setTimeout(() => resolve('unsettled'), 250);
+            }),
+          ]),
+        ).toBe('rejected');
+        expect(request).not.toHaveBeenCalled();
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        sleep.mockRestore();
+        await (shutdown ?? service.onModuleDestroy());
+      }
+    },
+  );
+
+  it('passes the caller timeout to the chat title HTTP request', async () => {
+    const { service, request } = nativeTransportFixture();
+    request.mockReturnValue(of({ status: 200, data: { title: 'Fixture title' } }));
+    try {
+      await expect(service.getChatTitle('chat-title', { timeoutMs: 123 })).resolves.toBe(
+        'Fixture title',
+      );
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({ timeout: 123 }));
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+});
 
 describeRedis('MAX targeted member shared cache fill', () => {
   function gate() {
