@@ -1481,9 +1481,13 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
     ]);
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
     const proof = await service.issue(scope(), principal);
+    const expiredCheckedAt = Date.now() - 120_000;
     await db.karavanMarketplaceAuthorityGrant.updateMany({
       where: { chatId },
-      data: { checkedAt: new Date(Date.now() - 120_000), expiresAt: new Date(Date.now() - 60_000) },
+      data: {
+        checkedAt: new Date(expiredCheckedAt),
+        expiresAt: new Date(expiredCheckedAt + 60_000),
+      },
     });
     await expect(service.introspect(proof)).rejects.toThrow('устарело');
   });
