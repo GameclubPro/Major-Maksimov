@@ -234,6 +234,18 @@
     display: none;
   }
 
+  html[data-max-keyboard-open='true'] .publication-target-picker__sheet-header {
+    min-height: 44px;
+    padding-bottom: 0;
+  }
+
+  html[data-max-keyboard-open='true']
+    .publication-target-picker__editor.is-sheet
+    .publication-target-picker__list {
+    min-height: 58px;
+    flex-basis: 58px;
+  }
+
   @media (min-width: 600px) and (max-height: 440px) {
     .publication-target-picker__editor.is-sheet {
       display: grid;
