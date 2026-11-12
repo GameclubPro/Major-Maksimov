@@ -1158,6 +1158,8 @@ export class MaxClientService implements OnModuleDestroy {
   private readonly muteApiBudget: MaxModerationApiBudget;
   private readonly muteApiProtectionEnabled: boolean;
   private readonly pendingTimeouts = new Set<NodeJS.Timeout>();
+  private readonly pendingSleeps = new Map<NodeJS.Timeout, () => void>();
+  private stopping = false;
   private readonly higherPriorityActivityTimers = new Map<string, NodeJS.Timeout>();
   private readonly pendingHigherPriorityActivityReleases = new Set<Promise<void>>();
   private readonly priorityHttpSource = new AsyncLocalStorage<string | null>();
@@ -1366,6 +1368,14 @@ export class MaxClientService implements OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.stopping = true;
+    // FLAG: Clearing a wait timer alone strands its caller forever. Reject only
+    // local waits; started HTTP effects and their durable fences keep their ownership.
+    for (const [timer, reject] of this.pendingSleeps) {
+      clearTimeout(timer);
+      reject();
+    }
+    this.pendingSleeps.clear();
     this.muteApiBudget.close();
     this.actionFailureLog.close();
     this.mediaUploadValidationCache.clear();
@@ -3615,9 +3625,13 @@ export class MaxClientService implements OnModuleDestroy {
   }
 
   async getChatTitle(chatId: string, options: MaxApiRequestOptions = {}): Promise<string | null> {
+    const timeoutMs = this.normalizeTimeoutMs(options.timeoutMs);
     const data = await this.executeChatRequest(
       chatId,
-      async () => this.request<Record<string, unknown>>('get', `/chats/${chatId}`),
+      async () =>
+        this.request<Record<string, unknown>>('get', `/chats/${chatId}`, {
+          ...(timeoutMs ? { timeout: timeoutMs } : {}),
+        }),
       options,
     );
     return this.readTrimmedString(data.title ?? data.name);
@@ -8670,8 +8684,9 @@ export class MaxClientService implements OnModuleDestroy {
         ? undefined
         : randomUUID();
 
-    while (true) {
-      const reservation = await this.tryReserveRateLimitSlot(
+    const reserve = () => {
+      if (this.stopping) throw new Error('MAX client is stopping');
+      return this.tryReserveRateLimitSlot(
         botId,
         chatId,
         trafficClass,
@@ -8679,12 +8694,9 @@ export class MaxClientService implements OnModuleDestroy {
         messageMutation,
         activityId,
       );
-      if (reservation.ok) {
-        if (activityId) this.renewHigherPriorityActivity(activityId);
-        this.recordRateLimitUsageWithoutWaiting(botId, trafficClass, sourceTag);
-        return activityId;
-      }
-
+    };
+    let reservation = await reserve();
+    while (!reservation.ok) {
       const elapsedMs = Date.now() - startedAtMs;
       const remainingWaitMs = maxWaitMs - elapsedMs;
       if (remainingWaitMs <= 0 || reservation.limitScope === 'retention_priority') {
@@ -8709,9 +8721,15 @@ export class MaxClientService implements OnModuleDestroy {
       }
 
       await this.sleep(
-        Math.max(this.rateLimitRetryFloorMs, Math.min(reservation.retryAfterMs, remainingWaitMs)),
+        Math.min(remainingWaitMs, Math.max(this.rateLimitRetryFloorMs, reservation.retryAfterMs)),
       );
+      // FLAG: An expired local wait cannot acquire fresh quota or dispatch HTTP,
+      // even if a delayed timer wakes after the remote cooldown has ended.
+      if (Date.now() - startedAtMs < maxWaitMs) reservation = await reserve();
     }
+    if (activityId) this.renewHigherPriorityActivity(activityId);
+    this.recordRateLimitUsageWithoutWaiting(botId, trafficClass, sourceTag);
+    return activityId;
   }
 
   private shouldApplyManagedRefreshSourceLimit(
@@ -9233,6 +9251,7 @@ export class MaxClientService implements OnModuleDestroy {
     let ownershipDeadlineAtMs = 0;
 
     while (!acquired) {
+      if (this.stopping) throw new Error('MAX client is stopping');
       const checkedAtMs = Date.now();
       const result = await this.limiterRedis.eval(
         MAX_MESSAGE_EDIT_LOCK_ACQUIRE_SCRIPT,
@@ -9349,13 +9368,14 @@ export class MaxClientService implements OnModuleDestroy {
   }
 
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => {
+    if (this.stopping) return Promise.reject(new Error('MAX client is stopping'));
+    return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        this.pendingTimeouts.delete(timeout);
+        this.pendingSleeps.delete(timeout);
         resolve();
       }, ms);
       timeout.unref?.();
-      this.pendingTimeouts.add(timeout);
+      this.pendingSleeps.set(timeout, () => reject(new Error('MAX client is stopping')));
     });
   }
 
