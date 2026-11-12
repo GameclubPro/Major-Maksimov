@@ -345,7 +345,7 @@ function sourceAddressing(row, text) {
   };
 }
 
-function supportInteraction(source, botUserId, confirmedAnswers = new Set()) {
+function supportAddress(source, botUserId, confirmedAnswers) {
   const selected = maxUserId(botUserId);
   const { link, mentions } = source.addressing;
   // FLAG: Reply metadata establishes context only. A bot flag alone never identifies our AI;
@@ -358,13 +358,73 @@ function supportInteraction(source, botUserId, confirmedAnswers = new Set()) {
     (link.chatId === null || link.chatId === CHAT_ID) &&
     (confirmedAnswers.has(link.messageId) || link.aiFooter),
   );
-  const addressedToSupport =
-    supportReply || mentions.some((mention) => mention.userId === selected);
+  const vocative = source.text.match(
+    /^(?:(?:здравствуйте|здравствуй|привет)[,!\s]+)?(?:ии(?:[- ]помощник)?|ассистент)\s*[,!:]\s*(?=\S)/iu,
+  );
+  const aiVocative = Boolean(
+    vocative &&
+    !mentions.some((mention) => mention.from < vocative[0].length && mention.userId !== selected),
+  );
+  return { supportReply, aiVocative, selectedMention: mentions.some((m) => m.userId === selected) };
+}
+
+function supportInteraction(source, botUserId, confirmedAnswers = new Set()) {
+  const { supportReply, aiVocative, selectedMention } = supportAddress(
+    source,
+    botUserId,
+    confirmedAnswers,
+  );
+  const { link, mentions } = source.addressing;
+  const addressedToSupport = supportReply || aiVocative || selectedMention;
   return {
     addressedToSupport,
     replyToOther:
       (link?.type === 'reply' && !supportReply) || (mentions.length > 0 && !addressedToSupport),
   };
+}
+
+async function supportAuthorReplyAllowed(runtime, source, botUserId, confirmedAnswers = new Set()) {
+  try {
+    const address = supportAddress(source, botUserId, confirmedAnswers);
+    if (address.supportReply || address.aiVocative) return true;
+    if (address.selectedMention) {
+      // FLAG: The moderator and AI share a MAX identity. A mention in a native command
+      // is insufficient; require a current request for help, never old support history.
+      const text = source.text.split('');
+      for (const mention of source.addressing.mentions)
+        text.fill(' ', mention.from, mention.from + mention.length);
+      const request = text
+        .join('')
+        .replace(/^[\s,.:;!?—-]+/u, '')
+        .replace(/^(?:здравствуйте|здравствуй|привет)[,!:\s]+/iu, '');
+      if (
+        /^(?:как|почему|зачем|где|како[йе]|какая|какие|когда|что\s+(?:делать|проверить|нужно|значит)|подскаж(?:и|ите)|помо(?:ги|гите)|объясни(?:те)?|расскажи(?:те)?)(?=$|[^\p{L}\p{N}_])/iu.test(
+          request,
+        ) ||
+        /^(?:(?:бот|майор|публик|ластик)\s+)?(?:не\s+(?:работает|работают|отвечает|отвечают|удаляет|удаляют|публикует|публикуют)|перестал[аио]?)(?=$|[^\p{L}\p{N}_])/iu.test(
+          request,
+        )
+      )
+        return true;
+    }
+    // FLAG: Textual self-reports do not establish a destination-chat role. Missing MAX
+    // privilege fields can parse as false; only explicit ordinary membership permits
+    // unsolicited support. Unknown/error stays silent at selection and before SEND.
+    const access = await runtime.client.getChatMemberAccess(CHAT_ID, source.userId, {
+      ...runtime.options(),
+      bypassCache: true,
+    });
+    return Boolean(
+      access?.userId === source.userId &&
+      access.isBot !== true &&
+      access.isAdmin === false &&
+      access.isOwner === false &&
+      access.explicitNonPrivilegeEvidence === true &&
+      access.explicitPrivilegeEvidence !== true,
+    );
+  } catch {
+    return false;
+  }
 }
 
 function sourceMessage(row, now = Date.now()) {
@@ -554,7 +614,7 @@ async function deliverAnswer(
   fence,
   source,
   answer,
-  { signal, sessionEnd, heartbeatAt, onSent, guideId },
+  { signal, sessionEnd, heartbeatAt, onSent, guideId, confirmedAnswers },
 ) {
   let attempted = false,
     activePart = null,
@@ -618,8 +678,17 @@ async function deliverAnswer(
           );
           if (!exact || exact.fingerprint !== source.fingerprint)
             throw new Error('support_source_changed');
-          await runtime.assertAccess();
+          const identity = await runtime.assertAccess();
           if (guide) for (const part of guide.sourceMessages) await loadImages(part);
+          if (
+            !(await supportAuthorReplyAllowed(
+              runtime,
+              exact,
+              identity?.botUserId,
+              confirmedAnswers,
+            ))
+          )
+            throw new Error('support_author_refused');
           if (
             signal.aborted ||
             !leaseAlive ||
@@ -942,6 +1011,7 @@ async function runBridge(runtime, { preview = false } = {}) {
             sessionEnd: endAt,
             heartbeatAt: () => lastHeartbeat,
             guideId: answer.guideId,
+            confirmedAnswers,
             onSent: (id) => {
               confirmedAnswers.add(id);
               if (confirmedAnswers.size > 256)
@@ -969,6 +1039,17 @@ async function runBridge(runtime, { preview = false } = {}) {
           .sort((a, b) => a.timestamp - b.timestamp);
         for (const source of fresh) {
           if (!(await fence.prepare(source.id))) continue;
+          if (
+            !(await supportAuthorReplyAllowed(
+              runtime,
+              source,
+              identity.botUserId,
+              confirmedAnswers,
+            ))
+          ) {
+            await fence.settle(source.id, 'SKIPPED', 'PREPARED');
+            continue;
+          }
           busy = source;
           send({
             type: 'question',
@@ -1011,6 +1092,7 @@ module.exports = {
   SOURCE_AGE_MS,
   sourceMessage,
   supportInteraction,
+  supportAuthorReplyAllowed,
   PilotFence,
   PilotHistory,
   deliverAnswer,

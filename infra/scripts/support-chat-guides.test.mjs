@@ -118,6 +118,7 @@ function fixture() {
     assetReads,
     allowed: true,
     accessible: true,
+    authorIsAdmin: false,
     heartbeat: () => Date.now(),
     beforeMutation: async () => {},
     beforeAsset: async () => {},
@@ -135,6 +136,17 @@ function fixture() {
       if (!state.accessible) throw new Error('support_access_refused');
     },
     client: {
+      getChatMemberAccess: async (chatId, userId, options) => {
+        assert.equal(chatId, CHAT_ID);
+        assert.equal(userId, state.source.userId);
+        assert.equal(options.bypassCache, true);
+        return {
+          userId,
+          isAdmin: state.authorIsAdmin,
+          isOwner: false,
+          explicitNonPrivilegeEvidence: !state.authorIsAdmin,
+        };
+      },
       getExactMessageRow: async (chatId, id) => {
         if (id === original.body.mid) {
           assert.equal(chatId, CHAT_ID);
@@ -441,6 +453,33 @@ test(
     });
   },
 );
+
+test('fresh author promotion during final guide reads blocks every image before SEND', async () => {
+  await withRedis(async (redis) => {
+    const state = fixture();
+    let roleReads = 0;
+    const readRole = state.runtime.client.getChatMemberAccess;
+    state.runtime.client.getChatMemberAccess = async (...args) => {
+      roleReads++;
+      return readRole(...args);
+    };
+    state.beforeAsset = async (_id, count) => {
+      if (count === 4) state.authorIsAdmin = true;
+    };
+    const fence = await prepare(redis, state);
+    assert.equal(
+      await deliverAnswer(state.runtime, fence, state.source, CAPTION, state.bounds),
+      'refused',
+    );
+    assert.equal(roleReads, 1, 'author role must be checked after final guide provenance reads');
+    assert.deepEqual(state.effects, []);
+    assert.deepEqual(state.confirmed, []);
+    assert.equal(await redis.get(fence.key(state.source.id)), 'REFUSED');
+    assert.equal(await redis.get(fence.partKey(state.source.id, 0)), null);
+    assert.equal(await fence.prepare(state.source.id), false);
+    await fence.close();
+  });
+});
 
 test(
   'invalid guide sources and a mismatched bot cause no publication',
@@ -831,6 +870,7 @@ test(
           assertAccess:async()=>({botId:seed.catalog[0].sourceBotId,botUserId:'900001',title:'Closed guide protocol'}),
           assertSourceAllowed:async()=>{},
           client:{
+            getChatMemberAccess:async(_chatId,userId)=>({userId,isAdmin:false,isOwner:false,explicitNonPrivilegeEvidence:true}),
             listMessages:async()=>{
               await redis.rpush(recordKey+':polls',String(Date.now()));
               return [seed.question];
