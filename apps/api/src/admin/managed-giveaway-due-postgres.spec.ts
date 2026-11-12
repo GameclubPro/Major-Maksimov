@@ -562,8 +562,12 @@ native('managed giveaway due nomination on PostgreSQL and Redis', () => {
     const due = new Date(cutoff.getTime() - 60_000);
     const future = new Date(cutoff.getTime() + 60 * 60_000);
     await db.chat.create({ data: { id: 'plan-source', title: 'Synthetic retained history' } });
-    await client.query(
-      `INSERT INTO managed_giveaways
+    for (let first = 1; first <= 50_000; first += 5_000) {
+      const last = first + 4_999;
+      const started = performance.now();
+      try {
+        await client.query(
+          `INSERT INTO managed_giveaways
         (id, source_chat_id, actor_user_id, title, status, starts_at, ends_at, locked_at, updated_at)
       SELECT 'plan-' || lpad(n::text, 6, '0'), 'plan-source', 'synthetic-admin', 'Synthetic plan',
         CASE WHEN n <= 40000 THEN
@@ -577,9 +581,15 @@ native('managed giveaway due nomination on PostgreSQL and Redis', () => {
         CASE WHEN n > 49000 THEN $2::timestamp ELSE $1::timestamp END,
         CASE WHEN n % 7 = 0 THEN $3::timestamp ELSE NULL END,
         $3::timestamp
-      FROM generate_series(1, 50000) n`,
-      [due, future, cutoff],
-    );
+      FROM generate_series($4::int, $5::int) n`,
+          [due, future, cutoff, first, last],
+        );
+      } finally {
+        process.stdout.write(
+          `[giveaway-fixture] seed=${first}-${last} durationMs=${Math.round(performance.now() - started)}\n`,
+        );
+      }
+    }
     await client.query('ANALYZE managed_giveaways');
     expect(await db.managedGiveaway.count()).toBe(50_000);
     const indexes = await client.query<{

@@ -69,6 +69,7 @@ describe('comment moderation HTTP boundary', () => {
     const service = new ChannelDialogService(
       {} as never,
       config as never,
+      {} as never,
       undefined,
       undefined,
       publisher,

@@ -15,7 +15,7 @@
     flex: 1;
     min-width: 0;
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) 32px;
+    grid-template-columns: 18px minmax(0, 1fr) 44px;
     gap: 8px;
     align-items: center;
     min-height: 44px;
@@ -48,13 +48,10 @@
     color: var(--text-secondary);
     opacity: 1;
   }
-  .participants-roster__search input::-webkit-search-cancel-button {
-    appearance: none;
-  }
   .participants-roster__search-end {
     display: grid;
     place-items: center;
-    width: 32px;
+    width: 44px;
     height: 44px;
   }
   .participants-roster__icon-button {
@@ -71,7 +68,7 @@
     cursor: pointer;
   }
   .participants-roster__search-end .participants-roster__icon-button {
-    width: 32px;
+    width: 44px;
     border: 0;
     background: transparent;
   }

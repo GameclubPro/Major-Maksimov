@@ -206,6 +206,16 @@ keyboard/caret visibility are covered by [mobile UI quality](../../apps/miniapp/
 It starts an owned local server and uses WebKit/Chromium with both keyboard models.
 `MOBILE_QUALITY_WIDTH` selects one of its viewport profiles for a focused rerun.
 
+The [UI recovery browser](../../apps/miniapp/test/ui-recovery.browser.mjs) covers an empty editor
+and first character under both keyboard models, failed recipient searches and retry, cached
+publication/comment/suggestion refresh failures, terminal access denial, and obsolete save toasts.
+The [adaptive UI browser](../../apps/miniapp/test/ui-adaptive-quality.browser.mjs) covers rotation
+with a settings search, trusted suggestion destination identity, and a virtualized recipient list
+on short landscape screens. The [control quality browser](../../apps/miniapp/test/ui-controls-quality.browser.mjs)
+checks active navigation contrast across the complete gradient, participant search/clear and
+publication timing targets. Each owns its local preview server; `MINIAPP_TEST_BASE_URL` reuses an
+explicit local server. These browser checks do not establish acceptance on a physical MAX client.
+
 ## Chat Shop
 
 Use the [current product decisions](miniapp-product-decisions.md#miniapp-shop-07-магазин-чата--покупательский-караван-без-отдельного-оформления)

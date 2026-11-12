@@ -337,6 +337,7 @@ export function buildPreviewDialogResponse(
 
   return channelDialogResponseSchema.parse({
     chatId,
+    entityTitle: dialogType === 'suggest' ? 'Новости Южного' : null,
     type: dialogType,
     introText:
       profile === 'publisher' && dialogType === 'suggest' ? null : normalizedBucket.introText,

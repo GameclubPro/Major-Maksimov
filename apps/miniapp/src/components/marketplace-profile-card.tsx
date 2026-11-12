@@ -73,9 +73,10 @@ export function MarketplaceProfileCard(props: MarketplaceProfileCardProps) {
   return (
     <section
       className={
-        'marketplace-profile-card channel-settings-card' +
-        (smartphone ? ' settings-section settings-home-entry' : '')
+        'marketplace-profile-card channel-settings-card settings-home-entry' +
+        (smartphone ? ' settings-section' : '')
       }
+      data-settings-search="Рекламная биржа Биржик реклама взаимопиар"
       style={{ order: 32 }}
     >
       {smartphone ? (
@@ -84,7 +85,6 @@ export function MarketplaceProfileCard(props: MarketplaceProfileCardProps) {
             type="button"
             className="settings-section__toggle is-stateless"
             data-settings-navigation-entry="true"
-            data-settings-search="Рекламная биржа Биржик реклама взаимопиар"
             aria-label="Рекламная биржа"
             aria-expanded={open}
             aria-controls={id}

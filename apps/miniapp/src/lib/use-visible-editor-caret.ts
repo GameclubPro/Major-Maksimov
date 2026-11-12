@@ -34,11 +34,26 @@ export function useVisibleEditorCaret(editorRef: RefObject<HTMLElement | null>) 
           caret.setStart(selection.focusNode, offset);
           caret.setEnd(selection.focusNode, offset + 1);
         }
-        if (!caret.getBoundingClientRect().height) return;
+        const caretBounds = () => {
+          const rect = caret.getBoundingClientRect();
+          if (rect.height) return rect;
+          // Empty contenteditables have no measurable Range in WebKit. Use their
+          // first text line, recomputing its position after each ancestor scroll.
+          const anchor = selection.focusNode instanceof Element ? selection.focusNode : editor;
+          const bounds = anchor.getBoundingClientRect();
+          const style = getComputedStyle(anchor);
+          const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.4;
+          const top =
+            bounds.top +
+            parseFloat(style.borderTopWidth) +
+            parseFloat(style.paddingTop) -
+            anchor.scrollTop;
+          return { top, bottom: top + lineHeight };
+        };
         const top = (viewport?.offsetTop ?? 0) + 12;
         const bottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? innerHeight) - 12;
         const delta = (start: number, end: number) => {
-          const rect = caret.getBoundingClientRect();
+          const rect = caretBounds();
           return rect.top < start ? rect.top - start : rect.bottom > end ? rect.bottom - end : 0;
         };
         for (

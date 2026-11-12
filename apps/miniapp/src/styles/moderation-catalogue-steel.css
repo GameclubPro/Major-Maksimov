@@ -30,6 +30,7 @@
     ) {
     --steel-nav-start: #ffffff;
     --steel-nav-end: #f4f8ff;
+    --steel-nav-active-ink: var(--steel-blue);
     --steel-nav-active-start: #e4edfd;
     --steel-nav-active-end: #f2f6ff;
     --steel-important-ink: #8a6200;
@@ -54,6 +55,7 @@
     ) {
     --steel-nav-start: #1b293f;
     --steel-nav-end: #101a2b;
+    --steel-nav-active-ink: #9ac2ff;
     --steel-nav-active-start: #244573;
     --steel-nav-active-end: #162b48;
     --steel-important-ink: #ffd84a;
@@ -139,7 +141,7 @@
     .bottom-nav__item.is-active {
     border: 0;
     background: linear-gradient(150deg, var(--steel-nav-active-start), var(--steel-nav-active-end));
-    color: var(--steel-blue);
+    color: var(--steel-nav-active-ink);
     box-shadow: 0 1px 0 var(--steel-glint) inset;
     transform: none;
   }

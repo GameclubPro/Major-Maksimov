@@ -418,6 +418,12 @@
     background: var(--color-surface);
   }
 
+  .publications-page.is-publisher.is-editor.is-keyboard-open
+    .publication-content-composer
+    .broadcast-content-composer__toolbar {
+    position: static;
+  }
+
   .publications-page.is-publisher.is-editor
     .publication-content-composer
     .broadcast-content-composer__bar {
@@ -533,7 +539,7 @@
     min-height: 44px;
     padding: 8px 6px;
     border-radius: 6px;
-    font-size: 0.72rem;
+    font-size: 0.8125rem;
     white-space: normal;
     overflow-wrap: anywhere;
   }

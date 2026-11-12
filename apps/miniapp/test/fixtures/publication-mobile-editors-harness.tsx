@@ -6,6 +6,7 @@ import { PublicationTargetPicker } from '../../src/features/publications/publica
 import { runNativeBackHandlers } from '../../src/lib/native-back';
 import type { PublicationTarget } from '../../src/features/publications/publication-model';
 import '../../src/styles.css';
+import '../../src/styles/publications-page.css';
 import '../../src/styles/publisher-workspace.css';
 import '../../src/styles/publisher-publications-workspace.css';
 
@@ -52,6 +53,10 @@ function Harness() {
           entityFilter: 'all',
           settling: false,
           loading: false,
+          failed: false,
+          refreshFailed: false,
+          retrying: false,
+          onRetry() {},
           filteredTotal: 200,
           hasNextPage: false,
           fetchingNextPage: false,

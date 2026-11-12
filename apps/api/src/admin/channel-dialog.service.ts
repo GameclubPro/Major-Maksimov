@@ -1,3 +1,4 @@
+import { PrismaService } from '../prisma/prisma.service';
 import {
   BadRequestException,
   Inject,
@@ -34,6 +35,7 @@ export class ChannelDialogService {
     @Inject(CHANNEL_DIALOG_LEGACY_PORT)
     private readonly legacyAdminService: ChannelDialogLegacyPort,
     configService: ConfigService,
+    private readonly prisma: PrismaService,
     @Optional() private readonly maxBotLinkService?: MaxBotLinkService,
     @Optional() private readonly maxBotRegistry?: MaxBotRegistryService,
     @Optional() private readonly publisherDialogLinks?: PublisherDialogLinkService,
@@ -89,14 +91,26 @@ export class ChannelDialogService {
     });
   }
 
-  getChannelDialog(
+  async getChannelDialog(
     chatId: string,
     user: AuthUser,
     dialogType: string,
     token: string | null,
     profile: MiniappProfile = 'moderation',
   ): ReturnType<ChannelDialogLegacyPort['getChannelDialog']> {
-    return this.legacyAdminService.getChannelDialog(chatId, user, dialogType, token, profile);
+    const dialog = await this.legacyAdminService.getChannelDialog(
+      chatId,
+      user,
+      dialogType,
+      token,
+      profile,
+    );
+    if (dialog.type !== 'suggest') return dialog;
+    const channel = await this.prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { title: true },
+    });
+    return { ...dialog, entityTitle: channel?.title.trim() || null };
   }
 
   createChannelDialogMessage(
