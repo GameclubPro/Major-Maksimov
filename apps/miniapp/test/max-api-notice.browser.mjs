@@ -13,7 +13,7 @@ import {
 const base = await allocateMiniappBaseUrl('http://127.0.0.1/app/');
 const server = await ensureMiniappDevServer(base);
 const output = await mkdtemp(path.join(tmpdir(), 'maxim-max-api-notice-'));
-const startsAt = Date.parse('2026-11-11T13:15:00Z');
+const startsAt = Date.parse('2026-11-12T12:30:00Z');
 const expiresAt = startsAt + 6 * 60 * 60 * 1000;
 const entry = `${base}channel/-123/dialog/comments?token=notice-test`;
 
@@ -35,6 +35,9 @@ try {
           });
           try {
             await installMaxBridgeShimInitScript(context, { platform }, { colorScheme: theme });
+            await context.addInitScript(() => {
+              localStorage.setItem('maxim:notice:max-api-2026-11-11:900719925', '1');
+            });
             let userId = '900719925';
             let denied = false;
             await context.route('**/*', async (route) => {
@@ -69,11 +72,12 @@ try {
             page.on('pageerror', (error) => errors.push(error.message));
             await page.clock.install({ time: startsAt + 60_000 });
             await page.goto(entry);
-            const dialog = page.getByRole('alertdialog', { name: 'Нестабильная работа API MAX' });
+            const dialog = page.getByRole('alertdialog', { name: 'Сбой на стороне MAX' });
             await dialog.waitFor();
             assert.ok(
-              (await dialog.innerText()).includes('Предположительно, сбой происходит на стороне MAX'),
+              (await dialog.innerText()).includes('На стороне платформы MAX произошёл сбой.'),
             );
+            assert.ok((await dialog.innerText()).includes('11–12.11.2026'));
             const button = dialog.getByRole('button', { name: 'Ознакомлен', exact: true });
             assert.equal(await dialog.getByRole('button').count(), 1);
             const contrast = await button.evaluate((node) => {

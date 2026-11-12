@@ -1,11 +1,11 @@
 export const MAX_API_NOTICE = {
-  id: 'max-api-2026-11-11',
-  date: '11.11.2026',
-  title: 'Нестабильная работа API MAX',
+  id: 'max-api-2026-11-12',
+  date: '11–12.11.2026',
+  title: 'Сбой на стороне MAX',
   message:
-    'Бот может пропускать отдельные события из-за нестабильной работы API платформы MAX. Предположительно, сбой происходит на стороне MAX. Ожидаем восстановления стабильной работы платформы.',
-  startsAt: Date.parse('2026-11-11T13:15:00Z'),
-  expiresAt: Date.parse('2026-11-11T19:15:00Z'),
+    'На стороне платформы MAX произошёл сбой. Из-за этого бот может пропускать отдельные события. Ожидаем восстановления стабильной работы MAX.',
+  startsAt: Date.parse('2026-11-12T12:30:00Z'),
+  expiresAt: Date.parse('2026-11-12T18:30:00Z'),
 } as const;
 
 export function isMaxApiNoticeActive(now = Date.now()): boolean {

@@ -15,6 +15,8 @@ The impact planner and staged commit helper still own final validation.
 
 The temporary MAX API notice uses an absolute campaign deadline, shared across bot profiles;
 acknowledgement is mirrored per verified user and campaign on the device. Design preview excludes live notices.
+An explicitly requested reissue for everyone uses a new campaign ID so an earlier acknowledgement
+does not suppress it; acknowledgement still hides the renewed campaign after confirmation.
 It must close at expiry
 and remain absent after acknowledgement or expiry. Check [time boundaries](../../apps/miniapp/test/max-api-notice.test.ts)
 and [entry, acknowledgement and mobile layout](../../apps/miniapp/test/max-api-notice.browser.mjs).

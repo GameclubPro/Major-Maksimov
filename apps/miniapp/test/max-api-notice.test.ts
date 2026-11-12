@@ -18,4 +18,5 @@ test('MAX API notice has one absolute six-hour window and never restarts per lau
 test('notice acknowledgement is isolated by user and incident, shared across bot profiles', () => {
   assert.notEqual(maxApiNoticeAcknowledgementKey('alice'), maxApiNoticeAcknowledgementKey('bob'));
   assert.ok(maxApiNoticeAcknowledgementKey('alice').includes(MAX_API_NOTICE.id));
+  assert.notEqual(maxApiNoticeAcknowledgementKey('alice'), 'maxim:notice:max-api-2026-11-11:alice');
 });
