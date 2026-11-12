@@ -63,10 +63,11 @@ export class CommercialLlmEnforcementProcessor {
     }) => {
       if (patch.analysis) observedAnalysis = patch.analysis;
       if (this.evidence)
-        void this.evidence.gate.run(() =>
+        void this.evidence.gate.runOrdered(commercialLlmSourceKey(source), () =>
           this.evidence!.writer.update({
             source,
             inputSha256: commercialAiObservationInputSha256(item.request.excerpt),
+            waitForSeed: item.request.observationRequested === true,
             admission: { state: 'ACCEPTED', reason: null },
             ...(observedAnalysis ? { analysis: observedAnalysis } : {}),
             ...patch,

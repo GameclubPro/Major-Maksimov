@@ -32,6 +32,7 @@ import type { Candidate } from './commercial-review.service';
 import {
   buildCommercialLlmOffer,
   prepareCommercialLlmOffer,
+  commercialLlmSourceKey,
   type CommercialLlmOfferRejection,
   type CommercialLlmSource,
   type CommercialLlmPoolPolicy,
@@ -285,15 +286,17 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
       return;
     }
     this.offering = true;
+    const observationKey = commercialLlmSourceKey(offer.source);
     void this.mailbox()
       .then((mailbox) =>
         mailbox.offerDetailed(
           offer,
           input.observation && this.observations
             ? (request) => {
-                // FLAG: Start the exact preselected snapshot before admission, but never
-                // hold producer capacity for optional SQL. A missed update stays a gap.
-                void this.observationGate.run(() =>
+                // FLAG: Start the exact snapshot without delaying business admission.
+                // Its admission observation follows that seed in the same bounded chain.
+                request.observationRequested = true;
+                void this.observationGate.runOrdered(observationKey, () =>
                   this.observations!.seed({
                     ...input.observation!,
                     request,
@@ -306,7 +309,7 @@ export class CommercialLlmEnforcementService implements OnModuleDestroy, OnModul
       )
       .then((outcome) => {
         if (input.observation && this.observations)
-          void this.observationGate.run(() =>
+          void this.observationGate.runOrdered(observationKey, () =>
             this.observations!.update({
               source: offer.source,
               inputSha256: commercialAiObservationInputSha256(offer.excerpt),

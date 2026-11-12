@@ -69,7 +69,11 @@ describe('commercial AI eligibility accounting', () => {
         expect(value.request.submittedAtMs).toBe(now);
         return pending;
       });
-      jest.spyOn(writer, 'update').mockResolvedValue('missing');
+      const update = jest.spyOn(writer, 'update').mockImplementation(async (value) => {
+        events.push(`updated:${value.source.messageId}`);
+        expect(value.admission).toEqual({ state: 'ACCEPTED', reason: null });
+        return settlement === 'resolve' ? 'written' : 'missing';
+      });
       const gate = new CommercialAiObservationGate();
       const service = new CommercialLlmEnforcementService(
         new ConfigService({ COMMERCIAL_LLM_ENFORCEMENT_ENABLED: true }),
@@ -87,6 +91,7 @@ describe('commercial AI eligibility accounting', () => {
             submittedAtMs: now,
           });
           await beforeAdmission?.(request);
+          expect(request.observationRequested).toBe(true);
           events.push(`accepted:${offer.source.messageId}`);
           return 'accepted';
         });
@@ -137,6 +142,7 @@ describe('commercial AI eligibility accounting', () => {
         expect(submit).toHaveBeenCalledTimes(2);
         expect(seed).toHaveBeenCalledTimes(2);
         expect(events).toEqual(['seed:first', 'accepted:first', 'seed:second', 'accepted:second']);
+        expect(update).not.toHaveBeenCalled();
         expect(Date.now()).toBe(now);
         expect(gate.snapshot().unsettled).toBe(2);
         expect(JSON.stringify(logs.mock.calls)).not.toContain('producer_busy');
@@ -147,6 +153,8 @@ describe('commercial AI eligibility accounting', () => {
         redis.disconnect();
       }
       expect(submit).toHaveBeenCalledTimes(2);
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(events.slice(-2)).toEqual(['updated:first', 'updated:second']);
       expect(gate.snapshot().unsettled).toBe(0);
     },
   );

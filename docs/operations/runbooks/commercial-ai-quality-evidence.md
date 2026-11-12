@@ -21,7 +21,9 @@ capped receipt sample is a diagnostic cohort, not a probability sample of traffi
 Repeated messages, authors and campaigns are correlated observations.
 
 Use only complete inputs that pass the privacy checker. Obfuscated digits and
-contacts are masked using a separate scan representation; original moderation text
+contacts are masked using a separate scan representation, including bare Telegram
+accounts next to an explicit contact invitation or platform label. Product codes and
+ordinary platform names remain intact. Original moderation text
 and phone-detection evidence remain separate. Unresolved contact candidates refuse
 audit output and model input. Record omissions explicitly rather than assigning a
 negative classification. Preserve layout and original fingerprints when exporting.
@@ -65,12 +67,24 @@ before the independent rating. Its absence means not observed. The
 schema and reporter alone do not install a durable production observation writer.
 The source-bound runtime writer starts the exact preselected snapshot before
 admission, without waiting for its database commit or delaying producer capacity.
-Results update only that exact existing attempt; updates preceding a delayed seed,
-expired and historical observations retain explicit gaps rather than backfilled
-classifications. Exports lacking the field retain an
+Same-source observation writes follow the original seed in bounded order: at most
+two active source chains and four queued writes per chain. A 100ms caller timeout
+never releases unsettled capacity. A sampled request carries an optional
+`observationRequested` hint; another process may wait for that exact seed with
+bounded delays (50/150/350/750ms, within a 1500ms retry budget). This hint grants no
+execution authority and never renews source or inference deadlines. Missing, expired
+and historical observations remain explicit gaps; retries never create a seed or
+reconstruct classifications. Deploy shared-image roles together with the normal
+pending-work drain because older strict request readers reject the additive hint. Exports lacking the field retain an
 explicit evidence gap. Existing synchronous
 capture for AI mode uses a distinct asynchronous identity and no completed
 classification. It must not be interpreted as a deterministic KEEP or model result.
+
+For source v3, a commercial classification may be kept by category ALLOW, and a
+pinned 9B personal-sale classification may be blocked by explicit policy. The writer
+records classification and actual policy eligibility separately and checks model and
+source identity. Legacy source versions keep their existing validation. These
+observations do not relax the separate frozen-policy quality certification gates.
 
 ## Independent quality evaluation
 

@@ -215,6 +215,10 @@ export const commercialAiQualityAnalysisSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    const personalSale =
+      value.result?.classification === 'NOT_COMMERCIAL' &&
+      value.result.reasonCodes.length === 1 &&
+      value.result.reasonCodes[0] === 'PERSONAL_SALE';
     if (
       (value.state === 'COMPLETE') !== (value.result !== null) ||
       (value.result === null &&
@@ -240,12 +244,14 @@ export const commercialAiQualityAnalysisSchema = z
           value.result?.pool?.consultationOutcome ?? '',
         )) ||
       (value.policyDeleteEligible === true &&
-        (value.result?.classification !== 'COMMERCIAL' ||
+        (value.result === null ||
+          (!personalSale && value.result.classification !== 'COMMERCIAL') ||
           (!value.result.pool && !value.result.cascade) ||
-          (value.result.pool?.nodeId === 'pc-a-4b' && value.result.pool.policy !== 'direct-4b') ||
+          (value.result.pool?.nodeId === 'pc-a-4b' &&
+            (personalSale || value.result.pool.policy !== 'direct-4b')) ||
           (value.result.cascade !== undefined &&
             (!value.result.cascade.route.startsWith('secondary_') ||
-              value.result.cascade.primaryClassification === 'NOT_COMMERCIAL'))))
+              (!personalSale && value.result.cascade.primaryClassification === 'NOT_COMMERCIAL')))))
     )
       context.addIssue({ code: 'custom', message: 'Missing classifications remain unevaluated.' });
   });
@@ -347,6 +353,11 @@ export const commercialAiQualityAttemptSchema = z
       (value.analysis.observedAt !== null &&
         Date.parse(value.analysis.observedAt) < value.submittedAtMs) ||
       (value.registration.state === 'REGISTERED' && value.analysis.policyDeleteEligible !== true) ||
+      // FLAG: Personal-sale permission describes explicit category policy only. The runtime
+      // writer independently pins the 9B identity and source policy; this schema grants no effect.
+      (value.analysis.policyDeleteEligible === true &&
+        value.analysis.result?.classification === 'NOT_COMMERCIAL' &&
+        value.sourceVersion !== 3) ||
       (['CONFIRMED_DELETE', 'ALREADY_ABSENT', 'PENDING'].includes(value.execution.state) &&
         value.registration.state !== 'REGISTERED')
     )

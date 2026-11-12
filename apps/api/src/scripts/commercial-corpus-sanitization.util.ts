@@ -18,6 +18,34 @@ const PAYMENT_CARD_CANDIDATE_PATTERN = new RegExp(
 );
 const MAX_DEEP_LINK_PATTERN = /max:\/\/[^\s<>'"`()[\]{}]+/giu;
 const HANDLE_PATTERN = /@[a-z0-9_]{4,32}/giu;
+const BARE_HANDLE_PATTERN = /(?<![\p{L}\p{N}_@[])[a-z][a-z0-9_]{3,31}(?![\p{L}\p{N}_\]])/giu;
+const MESSENGER_LABEL = String.raw`(?:telegram|телеграм(?:м)?|тг|tg)`;
+const HANDLE_LABEL_BEFORE = new RegExp(
+  String.raw`(?:^|[^\p{L}\p{N}_])${MESSENGER_LABEL}[\p{Zs}\t]*[:=—–-][\p{Zs}\t]*$`,
+  'iu',
+);
+const HANDLE_INVITATION_BEFORE = new RegExp(
+  String.raw`(?:^|[^\p{L}\p{N}_])(?:пишите|напишите|связь)[\p{Zs}\t]+(?:в[\p{Zs}\t]+)?${MESSENGER_LABEL}[\p{Zs}\t]+$`,
+  'iu',
+);
+const HANDLE_LABEL_AFTER = new RegExp(
+  String.raw`^[\p{Zs}\t]+${MESSENGER_LABEL}(?![\p{L}\p{N}_])`,
+  'iu',
+);
+
+// FLAG: A bare Latin token is private only beside an explicit contact instruction/label.
+// Match on the privacy copy but replace original spans, including hidden format controls.
+function isContextualHandle(handle: string, start: number, source: string): boolean {
+  const before = source.slice(Math.max(0, start - 80), start);
+  return (
+    HANDLE_LABEL_BEFORE.test(before) ||
+    HANDLE_INVITATION_BEFORE.test(before) ||
+    (/(?:^|[^\p{L}\p{N}_])(?:пишите|напишите|контакт)[\p{Zs}\t]*[:—–-]?[\p{Zs}\t]*$/iu.test(
+      before,
+    ) &&
+      HANDLE_LABEL_AFTER.test(source.slice(start + handle.length, start + handle.length + 20)))
+  );
+}
 const FINANCIAL_CONTEXT_TERM = String.raw`(?:р\s*[/.\\-]\s*с|расч[её]тн\p{L}*\s+сч[её]т\p{L}*|банковск\p{L}*\s+сч[её]т\p{L}*|корр?(?:еспондентск\p{L}*)?\.?\s*сч[её]т\p{L}*|сч[её]т\s+(?:получателя|банка)|номер\s+сч[её]та|карт(?:а|ы|у|е|ой)|card|pan|сч[её]т)`;
 const ADJACENT_CONTEXT_SEPARATOR = String.raw`[\s:;,#№()./\\‐‑‒–—―-]`;
 const FINANCIAL_CONTEXT_BEFORE_PATTERN = new RegExp(
@@ -244,10 +272,16 @@ export function sanitizeCommercialCorpusText(
   const withoutUrls = replacePrivacyPattern(withoutWebUrls, MAX_DEEP_LINK_PATTERN, '[url]');
   // FLAG: Explicit account/card spans precede phones; an unlabelled Luhn match cannot eat a price.
   const withoutExplicitFinancials = redactFinancialNumbers(withoutUrls, true);
-  const sanitized = replacePrivacyPattern(
+  const withoutHandles = replacePrivacyPattern(
     redactFinancialNumbers(redactPrivacyPhones(withoutExplicitFinancials)),
     HANDLE_PATTERN,
     '@[handle]',
+  );
+  const sanitized = replacePrivacyPattern(
+    withoutHandles,
+    BARE_HANDLE_PATTERN,
+    '[handle]',
+    isContextualHandle,
   );
   return (options.preserveLayout ? sanitized : sanitized.replace(/\s+/gu, ' ')).trim();
 }
@@ -264,6 +298,15 @@ export function hasResidualCommercialContactCandidate(value: string): boolean {
   const scan = privacyScan(value).text;
   const phoneText = phoneScanWithoutOrdinalLists(scan);
   return (
+    /@[a-z0-9_]{4,32}/iu.test(scan) ||
+    new RegExp(
+      String.raw`(?:${MESSENGER_LABEL}[\p{Zs}\t]*[:=—–-][\p{Zs}\t]*|(?:пишите|напишите|связь)[\p{Zs}\t]+(?:в[\p{Zs}\t]+)?${MESSENGER_LABEL}[\p{Zs}\t]+)[a-z][a-z0-9_]{3,31}(?![\p{L}\p{N}_])`,
+      'iu',
+    ).test(scan) ||
+    new RegExp(
+      String.raw`(?:пишите|напишите|контакт)[\p{Zs}\t]*[:—–-]?[\p{Zs}\t]*[a-z][a-z0-9_]{3,31}[\p{Zs}\t]+${MESSENGER_LABEL}(?![\p{L}\p{N}_])`,
+      'iu',
+    ).test(scan) ||
     new RegExp(String.raw`(?<!\d)\+?[78](?:${PRIVACY_PHONE_SEPARATOR}*\d){10}(?!\d)`, 'u').test(
       phoneText,
     ) ||

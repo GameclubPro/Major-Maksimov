@@ -6,6 +6,32 @@ import {
 import { parseCommercialPhones } from '../moderation/commercial/commercial-phone';
 
 describe('commercial corpus sanitization', () => {
+  it.each([
+    ['Пишите в Telegram: audit_example_2001', 'Пишите в Telegram: [handle]'],
+    ['Пишите: audit_example_2001 TG', 'Пишите: [handle] TG'],
+    ['Telegram: exampleuser', 'Telegram: [handle]'],
+    ['ТГ — example_user', 'ТГ — [handle]'],
+    ['Пишите в телеграм exampleuser', 'Пишите в телеграм [handle]'],
+    ['Пишите: au\u2063dit_example_2001 TG', 'Пишите: [handle] TG'],
+    ['Telegram @audit_example_2001', 'Telegram @[handle]'],
+  ])('redacts contextual accounts without requiring @: %s', (input, expected) => {
+    expect(hasResidualCommercialContactCandidate(input)).toBe(true);
+    expect(sanitizeCommercialCorpusText(input)).toBe(expected);
+    expect(hasResidualCommercialContactCandidate(expected)).toBe(false);
+    expect(isCommercialCorpusTextSanitized(expected)).toBe(true);
+  });
+
+  it.each([
+    'Артикул TG_2001, цена 2001 руб.',
+    'Установите Telegram Desktop.',
+    'Изучаем Telegram Bot API.',
+    'Пишите отзыв о модели audit_example_2001.',
+    'Telegram: [handle]. Цена 2500 руб.',
+  ])('preserves product codes, ordinary prose and account placeholders: %s', (input) => {
+    expect(sanitizeCommercialCorpusText(input)).toBe(input);
+    expect(hasResidualCommercialContactCandidate(input)).toBe(false);
+  });
+
   it.each(['+7 900 000 10 42', '8 900 000 10 42', '+44 20 7946 0101'])(
     'preserves a next-line price when redacting %s',
     (phone) => {
