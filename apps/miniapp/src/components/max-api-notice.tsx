@@ -89,7 +89,7 @@ export function MaxApiNotice({ userId }: { userId: string }) {
         aria-describedby="max-api-notice-message"
         tabIndex={-1}
       >
-        <time dateTime="2026-11-11">{MAX_API_NOTICE.date}</time>
+        <time dateTime="2026-11-12">{MAX_API_NOTICE.date}</time>
         <h2 id="max-api-notice-title">{MAX_API_NOTICE.title}</h2>
         <p id="max-api-notice-message">{MAX_API_NOTICE.message}</p>
         <button
