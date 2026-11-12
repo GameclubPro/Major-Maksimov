@@ -17,3 +17,21 @@ describe('comment history coverage', () => {
     ).toBe(false);
   });
 });
+
+describe('dialog destination identity', () => {
+  const response = { chatId: 'channel-1', type: 'suggest', messages: [] };
+  it('keeps older servers compatible without inventing a title', () => {
+    expect(channelDialogResponseSchema.parse(response).entityTitle).toBeUndefined();
+  });
+  it('preserves the server title and explicit absence', () => {
+    expect(
+      channelDialogResponseSchema.parse({ ...response, entityTitle: ' Новости ' }).entityTitle,
+    ).toBe('Новости');
+    expect(
+      channelDialogResponseSchema.parse({ ...response, entityTitle: null }).entityTitle,
+    ).toBeNull();
+    expect(channelDialogResponseSchema.safeParse({ ...response, entityTitle: 123 }).success).toBe(
+      false,
+    );
+  });
+});

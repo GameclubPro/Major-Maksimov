@@ -1113,4 +1113,44 @@
       transform: translateY(0);
     }
   }
+
+  :root .channel-dialog-screen--comments[data-comment-theme] {
+    --channel-dialog-comments-bubble-max-width: min(calc(100% - 58px), 34rem);
+    --channel-dialog-comments-bubble-medium-max-width: min(calc(100% - 64px), 30rem);
+    --channel-dialog-comments-bubble-compact-max-width: min(calc(100% - 72px), 24rem);
+    --channel-dialog-comments-bubble-own-medium-max-width: min(calc(100% - 64px), 30rem);
+    --channel-dialog-comments-bubble-own-compact-max-width: min(calc(100% - 72px), 24rem);
+  }
+  .channel-dialog-screen--comments .channel-dialog-message__avatar-target {
+    display: grid;
+    place-items: center;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+  }
+  .channel-dialog-screen--comments .channel-dialog-message__avatar-target:focus-visible {
+    outline: 2px solid var(--comment-accent);
+    outline-offset: 2px;
+  }
+  :root
+    .channel-dialog-screen--comments[data-comment-theme]
+    .channel-dialog-message__avatar-spacer {
+    width: 44px;
+    height: 44px;
+  }
+  :root
+    .channel-dialog-screen--comments[data-comment-theme]
+    :is(
+      .channel-dialog-reaction-pill,
+      .channel-dialog-new-comments__pill,
+      .channel-dialog-jump-latest
+    ) {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }

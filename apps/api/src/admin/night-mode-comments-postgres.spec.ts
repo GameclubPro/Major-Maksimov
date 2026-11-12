@@ -86,7 +86,7 @@ native('night close comments with independently saved PostgreSQL settings', () =
       cache as unknown as ChatContextCacheService,
       config,
     );
-    dialogs = new ChannelDialogService(admin, config);
+    dialogs = new ChannelDialogService(admin, config, db as PrismaService);
   });
   afterEach(async () => {
     await db.chat.delete({ where: { id: chatId } });

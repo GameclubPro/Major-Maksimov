@@ -818,6 +818,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     },
     onSaved: (section) => {
       pushToast({
+        replaceKey: `settings-save:${chatId}:${section}`,
         tone: 'success',
         title:
           section === 'links' || (section === 'stopWords' && expandedSections.links)
@@ -830,6 +831,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       if (section === 'stopWords') applyStopWordsServerValidation(error);
       if (!permission)
         pushToast({
+          replaceKey: `settings-save:${chatId}:${section}`,
           tone: 'danger',
           title:
             section === 'stopWords' && expandedSections.links

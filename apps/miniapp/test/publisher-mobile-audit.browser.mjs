@@ -213,6 +213,7 @@ try {
           }, fontSize);
           await page.evaluate(() => document.fonts.ready);
           await check(`${id}: editor tools`, async () => {
+            await page.locator('.broadcast-content-composer__tool-label').first().waitFor();
             const metrics = await assertTextFits(
               page.locator('.broadcast-content-composer__tool-label'),
             );

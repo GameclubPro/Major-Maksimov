@@ -1,3 +1,4 @@
+import { RefreshNotice } from '../components/ui/refresh-notice';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import type {
   ChannelDialogAttachment,
@@ -96,7 +97,6 @@ import '../styles/channel-dialog-comments.css';
 import '../styles/channel-dialog-image-viewer.css';
 import '../styles/channel-dialog-native-comments.css';
 import '../styles/channel-dialog-themes.css';
-import '../styles/channel-dialog-mobile-actions.css';
 
 const LazyChannelDialogNotificationSheet = lazy(
   () => import('../components/channel-dialog-notification-sheet'),
@@ -1311,6 +1311,11 @@ export function ChannelDialogPage({
       return 8_000;
     },
   });
+
+  const canRenderDialog =
+    Boolean(dialogQuery.data) &&
+    !terminalDialogError &&
+    !(dialogQuery.error && isTerminalDialogApiMessage(normalizeApiError(dialogQuery.error)));
 
   const moderationContext = { api, profile, entityType, chatId, token };
   const moderationQuery = useQuery({
@@ -3862,7 +3867,14 @@ export function ChannelDialogPage({
               </div>
             ) : null}
 
-            {dialogQuery.error ? (
+            {dialogQuery.error && canRenderDialog ? (
+              <RefreshNotice
+                pending={dialogQuery.isFetching}
+                onRetry={() => void dialogQuery.refetch()}
+              >
+                Не удалось обновить комментарии. Показаны последние данные.
+              </RefreshNotice>
+            ) : dialogQuery.error ? (
               <div className="channel-dialog-error">
                 <StatusState
                   tone="danger"
@@ -3886,7 +3898,7 @@ export function ChannelDialogPage({
               </div>
             ) : null}
 
-            {!dialogQuery.isLoading && !dialogQuery.error ? (
+            {canRenderDialog ? (
               dialogType === 'suggest' ? (
                 <div className="channel-suggest-workspace">
                   {introText ? <SuggestionRequirements text={introText} /> : null}
