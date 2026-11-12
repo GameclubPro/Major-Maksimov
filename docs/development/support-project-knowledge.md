@@ -29,6 +29,28 @@ carry their verification date into inference; the assistant has a reviewed snaps
 account lookup. November's notification parameter clarification belongs to API questions;
 administrator answers do not acquire unnecessary developer details.
 
+The owner's 12 November correction adds basic bot lifecycle help. Official MAX participant
+removal, private stopping and deletion of an owned bot are separate tasks; their newly fetched
+sources retain their own dates. Removing a group bot uses ordinary participant removal and the
+group administrator's rights, without partner-platform deletion or stopping the private dialog.
+Client-specific labels come from official help; the Windows browser helper failed before window
+selection, so this review does not establish a live interface observation. Do not infer a generic
+mini app disconnect button or loss of saved settings from group membership removal.
+Removing a bot from one channel is also membership removal, even when the user owns that bot.
+The official API confirms this scope but does not establish consumer button sequences for it;
+clarify the client rather than importing group gestures. Only an explicit platform/account
+deletion task selects irreversible platform deletion. Bot-message removal and demotion retain
+their own objects, and a negated alternative cannot select that alternative's procedure.
+
+The same correction covers observed knowledge omissions: Antiduplicate's «Интервал» versus
+«По времени», saved Publisher draft deletion versus clearing editor content, and making a copy
+without publishing it. Keep their source-backed procedures atomic. A daily duplicate period and
+night closing have independent schedules and timezones. Copying clears the old schedule and does
+not itself send; unknown results of an already started send retain their verification boundary.
+The known alias «Майор Максимов» can identify moderator Максимов; an unspecified variant need
+not block common instructions. Publisher media limits must remain conditional when the editor
+has not been identified. For a location question, include the entry to the participant card.
+
 | Area             | Covered customer modules                                                                                                                                                                                      |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Access           | Eight bots, moderator connection and selection, missing communities, mini app relaunch                                                                                                                        |
@@ -89,6 +111,13 @@ atomic; a module's full manual should not become every answer to that module.
 Update semantic retrieval as well as keywords: existing primary facts suppress fallback keyword
 retrieval. Topic inheritance must support short followups and stop at a completed task or ordinary
 conversation. Preserve the concise Russian response contract and verified catalog link rendering.
+Bot membership removal must replace an unrelated old filter/setup topic; a pronominal continuation
+requires a recent unambiguous bot subject. Preserve automatic removal of other bots, message
+deletion, Lastik retention and moderator selection as their own tasks. A substring such as «ник»
+inside «участников» is not a request to rename a bot.
+Preserve the sentence boundary and negation when selecting draft deletion. Repeating Publisher
+posts is distinct from moderation of duplicate messages, including colloquial «повторы каждый
+день». Multi-task questions must retain the existing-send inspection even alongside bot removal.
 
 Publik auto-replies must also be found from a description such as “a person writes a word and
 receives the administrator's prepared list”, without the product or feature name. Use the same
