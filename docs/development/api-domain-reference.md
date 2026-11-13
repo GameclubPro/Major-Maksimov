@@ -159,6 +159,8 @@ Statistics exchange does not grant advertising or shop authority.
 
 ## Publishing And Outbound Actions
 
+Native administrator suggestion editing and rejection use the [private-card review contract](suggestion-review.md).
+
 - With `MAX_PUBLISHER_DISPATCH_ENABLED=false`, `api-publisher` may run identity attestation, heartbeat, webhook reconciliation, and passive lifecycle handling only; do not start publication, binding, suggestion, or chat/channel-comment recovery scans and do not probe MAX entity access.
 - Publik entity discovery and user authorization are Publisher-owned. Use the exact `PublisherEntityBinding`, the Publisher bot catalog row, and a confirmed `ManagedEntityAccessEdge` whose `botId` is the Publisher bot; never require a Major `ChatBotMembership` or copy a Major access edge into this scope.
 - An authenticated Publisher `bot_added` or explicit `Старт` handshake may create the shared `Chat` shell and exact Publisher catalog/binding, but must not set `Chat.botId`, `primaryBotId`, or any `ChatBotMembership`. Grant user access only after the Publisher token confirms both bot and user admin/owner access.

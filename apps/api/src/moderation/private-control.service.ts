@@ -1,3 +1,4 @@
+import { SuggestionNativeQueueService } from '../publisher/suggestion-native.queue';
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
@@ -49,6 +50,7 @@ export class PrivateControlService extends LegacyPrivateControlService {
     private readonly managedEntityHandshakeService?: ManagedEntityHandshakeService,
     @Optional() karavanStorefrontAllowlistService?: KaravanStorefrontAllowlistService,
     @Optional() legacyHolds?: WebhookLegacyHoldService,
+    @Optional() private readonly nativeReview?: SuggestionNativeQueueService,
   ) {
     super(
       maxClient,
@@ -70,6 +72,7 @@ export class PrivateControlService extends LegacyPrivateControlService {
 
   override handleUpdate(update: MaxUpdate): Promise<void> {
     return this.runWithUpdateSessionBot(update, async () => {
+      if (await this.nativeReview?.observeWebhook(update)) return;
       const forwardedRecovery = isManagedEntityForwardedRecoveryMessage(update);
       const userId = update.message?.senderId?.trim();
       let preferContentInput = false;

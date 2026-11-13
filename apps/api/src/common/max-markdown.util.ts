@@ -1,4 +1,4 @@
-type InlineToken =
+export type InlineToken =
   | { type: 'text'; content: string }
   | { type: 'bold' | 'italic' | 'underline' | 'strike' | 'highlight'; children: InlineToken[] }
   | { type: 'code'; content: string }
@@ -301,7 +301,7 @@ function collectInlineTokenLinks(tokens: InlineToken[], links: Set<string>): voi
  * Pair delimiters in one bounded scan, then close and reopen active entities at
  * line boundaries so MAX never receives raw generated markers.
  */
-function normalizeMultilineStrongMarkdown(source: string): string {
+export function normalizeMultilineStrongMarkdown(source: string): string {
   if (!source.includes('\n')) {
     return source;
   }
@@ -720,7 +720,7 @@ function renderCodeBlockHtml(content: string): string {
   return `<pre>${escapeHtmlPreservingWhitespace(content)}</pre>`;
 }
 
-function readFencedCodeBlock(
+export function readFencedCodeBlock(
   lines: string[],
   startIndex: number,
 ): { content: string; nextIndex: number } | null {
@@ -748,7 +748,7 @@ function readFencedCodeBlock(
   };
 }
 
-function parseInlineTokens(source: string): InlineToken[] {
+export function parseInlineTokens(source: string): InlineToken[] {
   const tokens: InlineToken[] = [];
   let cursor = 0;
   let plainText = '';

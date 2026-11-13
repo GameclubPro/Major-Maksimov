@@ -19,7 +19,7 @@ import {
 } from '../publisher/publisher-suggestion-admin.queue';
 import { buildChannelSuggestionAdminMessagePayload } from './admin-channel-suggestion-presentation';
 import { readChannelSuggestionTextMarkup } from './admin-channel-dialog-values';
-import { buildSuggestionReviewButtons, suggestionReviewUrl } from './suggestion-review-links';
+import { buildSuggestionReviewButtons } from './suggestion-review-links';
 import { suggestionRevision } from './suggestion-review-content';
 
 export const suggestionObject = (value: unknown): Record<string, unknown> =>
@@ -143,6 +143,70 @@ export class SuggestionReviewEffectsService {
     }
   }
 
+  async upgradeNativeCards(profile: MiniappProfile): Promise<void> {
+    const state = await this.prisma.suggestionReviewCardUpgrade.upsert({
+      where: { profile },
+      create: { profile },
+      update: {},
+    });
+    if (state.completed) return;
+    // FLAG: Walk primary keys before payload/status predicates; historical density cannot enlarge a page.
+    const cards = await this.prisma.channelSuggestionAdminDelivery.findMany({
+      where: { id: { gt: state.cursor } },
+      orderBy: { id: 'asc' },
+      take: 25,
+      select: { id: true, auditLogId: true, status: true, botId: true, botKey: true },
+    });
+    await this.prisma.$transaction(async (tx) => {
+      const changed = await tx.suggestionReviewCardUpgrade.updateMany({
+        where: { profile, cursor: state.cursor, completed: false },
+        data: { cursor: cards.at(-1)?.id ?? state.cursor, completed: cards.length < 25 },
+      });
+      if (changed.count !== 1) return;
+      for (const card of cards) {
+        if (
+          card.status !== 'SENT' ||
+          !card.botId ||
+          card.botKey.startsWith('publisher:') !== (profile === 'publisher')
+        )
+          continue;
+        const row = await tx.auditLog.findUnique({
+          where: { id: card.auditLogId },
+          select: { action: true, payload: true },
+        });
+        const payload = suggestionObject(row?.payload);
+        if (
+          row?.action !==
+            (profile === 'publisher'
+              ? 'PUBLISHER_CHANNEL_DIALOG_SUGGESTION'
+              : 'CHANNEL_DIALOG_SUGGESTION') ||
+          (payload.reviewStatus ?? 'pending') !== 'pending'
+        )
+          continue;
+        const revision = suggestionRevision(payload);
+        await tx.suggestionReviewEffect.upsert({
+          where: {
+            suggestionId_kind_revision_botId: {
+              suggestionId: card.auditLogId,
+              kind: 'native-sync',
+              revision,
+              botId: card.botId,
+            },
+          },
+          create: {
+            suggestionId: card.auditLogId,
+            profile,
+            botId: card.botId,
+            kind: 'native-sync',
+            revision,
+            payload: {},
+          },
+          update: {},
+        });
+      }
+    });
+  }
+
   async recover(profile: MiniappProfile): Promise<void> {
     const stale = new Date(Date.now() - STALE_MS);
     for (const status of ['PROCESSING', 'SENDING']) {
@@ -194,7 +258,7 @@ export class SuggestionReviewEffectsService {
     let attempted = false;
     let remoteMessageId: string | null = null;
     try {
-      if (row.kind === 'sync') {
+      if (row.kind === 'sync' || row.kind === 'native-sync') {
         await this.sync(row, token);
         await this.finish(id, token, 'SENT');
         return;
@@ -313,14 +377,15 @@ export class SuggestionReviewEffectsService {
         ? storedStatus
         : 'pending';
     const profile = effect.profile as MiniappProfile;
-    const url = suggestionReviewUrl(this.links, profile, row.id, 'publish');
     const buttons =
-      status === 'pending' && url
-        ? buildSuggestionReviewButtons(this.links, profile, row.id, {
-            type: 'link',
-            text: '📰 В публикацию',
-            url,
-          })
+      status === 'pending'
+        ? buildSuggestionReviewButtons(
+            this.links,
+            profile,
+            row.id,
+            undefined,
+            suggestionRevision(payload),
+          )
         : [];
     const message = buildChannelSuggestionAdminMessagePayload({
       status,
@@ -344,6 +409,18 @@ export class SuggestionReviewEffectsService {
     });
     for (const card of cards) {
       if (!card.privateChatId || !card.remoteMessageId) continue;
+      const dialog = await this.prisma.suggestionReviewDialog.findUnique({
+        where: { deliveryId: card.id },
+      });
+      // FLAG: Synchronization must not erase a private draft of this same revision.
+      if (
+        status === 'pending' &&
+        dialog &&
+        dialog.mode !== 'idle' &&
+        dialog.revision === suggestionRevision(payload) &&
+        dialog.expiresAt > new Date()
+      )
+        continue;
       const current = await this.prisma.auditLog.findUnique({
         where: { id: row.id },
         select: { payload: true },
@@ -362,8 +439,22 @@ export class SuggestionReviewEffectsService {
           {
             buttons,
             textFormat: message.textFormat,
+            requireAllAttachmentsPreserved: true,
             beforeEditMutation: async () => {
               await this.assertDispatchAccess(row.chatId, effect.botId, profile, card.adminUserId);
+              const active = await this.prisma.suggestionReviewDialog.findUnique({
+                where: { deliveryId: card.id },
+              });
+              // FLAG: This checkpoint runs under the MAX message lock, before any competing editor PUT.
+              if (
+                active &&
+                (active.lockToken ||
+                  (status === 'pending' &&
+                    active.mode !== 'idle' &&
+                    active.revision === suggestionRevision(payload) &&
+                    active.expiresAt > new Date()))
+              )
+                throw new Error('Native editor owns this card');
               const owned = await this.prisma.suggestionReviewEffect.updateMany({
                 where: { id: effect.id, status: 'PROCESSING', lockToken: token },
                 data: { lockedAt: new Date() },
@@ -405,7 +496,7 @@ export class SuggestionReviewEffectsService {
     }
   }
 
-  private async assertDispatchAccess(
+  async assertDispatchAccess(
     chatId: string,
     botId: string,
     profile: MiniappProfile,

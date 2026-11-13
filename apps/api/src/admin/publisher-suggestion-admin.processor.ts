@@ -1,5 +1,5 @@
+import { SuggestionNativeService } from './suggestion-native.service';
 import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
-import { suggestionReviewUrl } from './suggestion-review-links';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { ForbiddenException, HttpException, Logger, Optional } from '@nestjs/common';
@@ -50,6 +50,7 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
     @Optional() private readonly vkReviews?: VkBotReviewService,
     @Optional() private readonly reviewEffects?: SuggestionReviewEffectsService,
     @Optional() private readonly links?: MaxBotLinkService,
+    @Optional() private readonly nativeReview?: SuggestionNativeService,
   ) {
     super();
   }
@@ -68,6 +69,12 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
     await assertPublisherIdentityOrDelay(this.identityAttestation, job, token);
     await assertPublisherDispatchAllowedOrDelay(this.dispatchHealth, job, token);
 
+    if (job.data.kind === 'suggestion-native') {
+      if (!this.nativeReview || job.data.profile !== 'publisher')
+        throw new Error('Native review unavailable');
+      await this.nativeReview.process(job.data);
+      return;
+    }
     if (job.data.kind === 'review-effect') {
       if (!this.reviewEffects) throw new Error('Review effect worker unavailable');
       await this.reviewEffects.process(job.data.effectId, 'publisher', job.data.requiredBotId);
@@ -175,24 +182,20 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
       }
 
       if (job.action === 'cancel') {
-        const url = this.links
-          ? suggestionReviewUrl(this.links, 'publisher', row.id, 'reject')
-          : null;
-        await this.maxClient.answerCallback(
-          job.callbackId,
-          'Выберите причину отказа.',
-          url
-            ? {
-                text: 'Выберите причину отказа и проверьте ответ автору.',
-                options: { buttons: [[{ type: 'link', text: 'Выбрать причину', url }]] },
-              }
-            : undefined,
-          {
-            botId: job.requiredBotId,
-            rateLimitEntityId: job.privateChatId,
-            sourceTag: MAX_API_SOURCE_TAGS.CALLBACK_ANSWER,
-          },
-        );
+        if (!this.nativeReview) throw new Error('Native review unavailable');
+        await this.nativeReview.process({
+          version: 1,
+          kind: 'suggestion-native',
+          profile: 'publisher',
+          requiredBotId: job.requiredBotId,
+          actorId: job.actor.userId,
+          privateChatId: job.privateChatId,
+          messageId: job.messageId,
+          callbackId: job.callbackId,
+          callback: { action: 'reject', id: row.id, revision: -1, version: 0 },
+          eventId: job.updateId,
+          requestedAt: job.requestedAt,
+        });
         return;
       }
       const result = await this.suggestions.review(

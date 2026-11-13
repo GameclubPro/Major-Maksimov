@@ -1,4 +1,5 @@
-import { buildSuggestionReviewButtons, suggestionReviewUrl } from './suggestion-review-links';
+import { suggestionRevision } from './suggestion-review-content';
+import { buildSuggestionReviewButtons } from './suggestion-review-links';
 import { resolveModerationSanctionExpiry } from '../moderation/moderation-sanction-expiry.util';
 import { resolveEffectiveChatClosure } from '../moderation/night-mode-transition-time.util';
 import { resolveAdminBotUserId } from './admin-bot-identity';
@@ -437,7 +438,6 @@ import { PublisherDialogContextService } from './publisher-dialog-context.servic
 import { PublisherDialogLinkService } from '../publisher/publisher-dialog-link.service';
 import { PublisherCommentNotificationService } from '../publisher/publisher-comment-notification.service';
 import {
-  buildPublisherSuggestionAdminReviewCallbackPayload,
   buildPublisherSuggestionAdminSyncMarker,
   PublisherSuggestionAdminQueueService,
 } from '../publisher/publisher-suggestion-admin.queue';
@@ -17402,6 +17402,7 @@ export class AdminService implements OnModuleDestroy {
         mediaBotId: this.readTrimmedString(payload.mediaBotId),
       },
       scope,
+      suggestionRevision(payload),
     );
     if (ledgerBotKey) {
       await this.applyChannelSuggestionDeliveryResult(
@@ -17871,6 +17872,7 @@ export class AdminService implements OnModuleDestroy {
       requiredBotId: null,
       publisherOwned: false,
     },
+    revision = 0,
   ): Promise<ChannelSuggestionDeliveryResult> {
     const deliveryAttemptedAt = new Date().toISOString();
     const ledgerBotKey = scope.publisherOwned ? scope.botKey : undefined;
@@ -18082,8 +18084,8 @@ export class AdminService implements OnModuleDestroy {
       }
     }
     const buttons = scope.publisherOwned
-      ? this.buildPublisherSuggestionAdminReviewButtons(suggestionId)
-      : this.buildChannelSuggestionAdminReviewButtons(suggestionId);
+      ? this.buildPublisherSuggestionAdminReviewButtons(suggestionId, revision)
+      : this.buildChannelSuggestionAdminReviewButtons(suggestionId, revision);
     const messageOptionsByBotId = new Map<
       string,
       Promise<
@@ -18547,44 +18549,29 @@ export class AdminService implements OnModuleDestroy {
     return failures.some((failure) => !failure.terminal && failure.recoverable);
   }
 
-  private buildChannelSuggestionAdminReviewButtons(suggestionId: string): MaxMessageButton[][] {
-    const url = this.maxBotLinkService
-      ? suggestionReviewUrl(this.maxBotLinkService, 'moderation', suggestionId, 'publish')
-      : null;
+  private buildChannelSuggestionAdminReviewButtons(
+    suggestionId: string,
+    revision = 0,
+  ): MaxMessageButton[][] {
     return buildSuggestionReviewButtons(
       this.maxBotLinkService,
       'moderation',
       suggestionId,
-      url
-        ? { type: 'link', text: '📰 В публикацию', url }
-        : {
-            type: 'callback',
-            text: '📰 В публикацию',
-            payload: this.buildPrivateControlCallbackPayload(
-              'suggestion_review_publish',
-              suggestionId,
-            ),
-            intent: 'positive',
-          },
+      undefined,
+      revision,
     );
   }
 
-  private buildPublisherSuggestionAdminReviewButtons(suggestionId: string): MaxMessageButton[][] {
-    const url = this.maxBotLinkService
-      ? suggestionReviewUrl(this.maxBotLinkService, 'publisher', suggestionId, 'publish')
-      : null;
+  private buildPublisherSuggestionAdminReviewButtons(
+    suggestionId: string,
+    revision = 0,
+  ): MaxMessageButton[][] {
     return buildSuggestionReviewButtons(
       this.maxBotLinkService,
       'publisher',
       suggestionId,
-      url
-        ? { type: 'link', text: '📰 В публикацию', url }
-        : {
-            type: 'callback',
-            text: '📰 В публикацию',
-            payload: buildPublisherSuggestionAdminReviewCallbackPayload('publish', suggestionId),
-            intent: 'positive',
-          },
+      undefined,
+      revision,
     );
   }
 

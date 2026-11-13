@@ -47,7 +47,10 @@ export class SuggestionReviewEffectsRecoveryService implements OnModuleInit, OnM
         component: 'suggestion-review-effects',
         sourceTag: MAX_API_SOURCE_TAGS.SUGGESTION_DELIVERY,
       });
-      if (decision.action !== 'pause') await this.effects.recover(profile);
+      if (decision.action !== 'pause') {
+        await this.effects.upgradeNativeCards(profile);
+        await this.effects.recover(profile);
+      }
     } catch {
       this.logger.warn('Suggestion review effect recovery unavailable');
     } finally {

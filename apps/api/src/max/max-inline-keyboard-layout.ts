@@ -204,7 +204,8 @@ function normalizeMaxInlineKeyboardButton(button: unknown): Record<string, unkno
       };
     }
     case 'clipboard': {
-      const payload = readTrimmedString(source.payload);
+      const payload =
+        typeof source.payload === 'string' && source.payload.length <= 1024 ? source.payload : '';
       if (!payload) {
         return null;
       }

@@ -3147,6 +3147,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         actorUserId: 'subscriber-1',
         authorDisplayName: 'Подписчик',
         text: 'Новая публикация',
+        reviewContentRevision: 7,
         textFormat: 'plain',
         delivered: false,
         deliveredToUserIds: [],
@@ -3228,12 +3229,18 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         buttons: [
           [
             expect.objectContaining({
-              text: '📰 В публикацию',
-              payload: 'psa:v1:publish:publisher-suggestion-delivery-1',
+              text: 'Опубликовать',
+              payload: 'sr1|publish|publisher-suggestion-delivery-1|7|0',
+            }),
+          ],
+          [
+            expect.objectContaining({
+              text: 'Править',
+              payload: 'sr1|edit|publisher-suggestion-delivery-1|7|0',
             }),
             expect.objectContaining({
-              text: '✖️ Отклонить',
-              payload: 'psa:v1:cancel:publisher-suggestion-delivery-1',
+              text: 'Отклонить',
+              payload: 'sr1|reject|publisher-suggestion-delivery-1|7|0',
             }),
           ],
         ],
@@ -3782,9 +3789,10 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         imagePayload: { token: 'upload-suggest-1' },
         textFormat: 'markdown',
         buttons: [
+          [expect.objectContaining({ text: 'Опубликовать', type: 'callback' })],
           [
-            expect.objectContaining({ text: '📰 В публикацию', type: 'callback' }),
-            expect.objectContaining({ text: '✖️ Отклонить', type: 'callback' }),
+            expect.objectContaining({ text: 'Править', type: 'callback' }),
+            expect.objectContaining({ text: 'Отклонить', type: 'callback' }),
           ],
         ],
       }),
@@ -3921,9 +3929,10 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         ],
         textFormat: 'markdown',
         buttons: [
+          [expect.objectContaining({ text: 'Опубликовать', type: 'callback' })],
           [
-            expect.objectContaining({ text: '📰 В публикацию', type: 'callback' }),
-            expect.objectContaining({ text: '✖️ Отклонить', type: 'callback' }),
+            expect.objectContaining({ text: 'Править', type: 'callback' }),
+            expect.objectContaining({ text: 'Отклонить', type: 'callback' }),
           ],
         ],
       }),
@@ -4029,9 +4038,10 @@ describe('AdminService.publishChannelEngagementMessage', () => {
         attachments: [{ type: 'video', payload: { token: 'uploaded-video-1' } }],
         textFormat: 'markdown',
         buttons: [
+          [expect.objectContaining({ text: 'Опубликовать', type: 'callback' })],
           [
-            expect.objectContaining({ text: '📰 В публикацию', type: 'callback' }),
-            expect.objectContaining({ text: '✖️ Отклонить', type: 'callback' }),
+            expect.objectContaining({ text: 'Править', type: 'callback' }),
+            expect.objectContaining({ text: 'Отклонить', type: 'callback' }),
           ],
         ],
       }),

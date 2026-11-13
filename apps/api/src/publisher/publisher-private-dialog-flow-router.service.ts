@@ -1,3 +1,4 @@
+import { SuggestionNativeQueueService } from './suggestion-native.queue';
 import type { MaxUpdate } from '@maxim/contracts';
 import { Injectable, Optional } from '@nestjs/common';
 import { PublisherVkBotReviewQueueService } from './publisher-vk-bot-review.queue';
@@ -14,6 +15,7 @@ export class PublisherPrivateDialogFlowRouterService {
     private readonly postImport: PublisherPostImportService,
     private readonly start: PublisherStartQueueService,
     @Optional() private readonly vkReview?: PublisherVkBotReviewQueueService,
+    @Optional() private readonly nativeReview?: SuggestionNativeQueueService,
   ) {}
 
   async observeWebhook(
@@ -21,6 +23,7 @@ export class PublisherPrivateDialogFlowRouterService {
     webhookEventId: string | null,
     options: { duplicate?: boolean } = {},
   ): Promise<boolean> {
+    if (await this.nativeReview?.observeWebhook(update)) return true;
     if (await this.vkReview?.observeWebhook(update)) return true;
     if (await this.suggestionAdminCallbacks.observeWebhook(update, webhookEventId, options)) {
       return true;

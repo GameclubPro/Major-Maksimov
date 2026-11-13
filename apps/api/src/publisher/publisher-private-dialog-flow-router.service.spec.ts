@@ -1,6 +1,23 @@
 import { PublisherPrivateDialogFlowRouterService } from './publisher-private-dialog-flow-router.service';
 
 describe('PublisherPrivateDialogFlowRouterService', () => {
+  it('consumes native card replies before auto-reply, import or legacy review', async () => {
+    const other = { observeWebhook: jest.fn().mockResolvedValue(true) };
+    const native = { observeWebhook: jest.fn().mockResolvedValue(true) };
+    const router = new PublisherPrivateDialogFlowRouterService(
+      other as never,
+      other as never,
+      other as never,
+      other as never,
+      other as never,
+      native as never,
+    );
+    await expect(
+      router.observeWebhook({ updateId: 'native', type: 'message_created' } as never, null),
+    ).resolves.toBe(true);
+    expect(other.observeWebhook).not.toHaveBeenCalled();
+  });
+
   it('routes suggestion review callbacks before other Publisher private flows', async () => {
     const suggestionAdminCallbacks = { observeWebhook: jest.fn().mockResolvedValue(true) };
     const autoReplyAuthoring = { observeWebhook: jest.fn() };

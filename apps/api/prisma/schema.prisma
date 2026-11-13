@@ -3066,6 +3066,7 @@ model ChannelSuggestionAdminDelivery {
   updatedAt       DateTime                             @updatedAt @map("updated_at")
 
   auditLog AuditLog @relation(fields: [auditLogId], references: [id], onDelete: Cascade)
+  reviewDialog SuggestionReviewDialog?
 
   @@unique([auditLogId, adminUserId, botKey], map: "channel_suggestion_admin_deliveries_scope_key")
   @@index([auditLogId, status], map: "channel_suggestion_admin_deliveries_audit_status_idx")
@@ -5284,4 +5285,50 @@ model SuggestionReviewEffect {
   @@index([profile, status, nextAttemptAt, id], map: "suggestion_review_effects_due_idx")
   @@index([profile, status, lockedAt, id], map: "suggestion_review_effects_stale_idx")
   @@map("suggestion_review_effects")
+}
+
+// FLAG: Native review is bound to one delivered private card; it grants no publication authority.
+model SuggestionReviewDialog {
+  deliveryId String @id @map("delivery_id")
+  botId String @map("bot_id")
+  actorId String @map("actor_id")
+  privateChatId String @map("private_chat_id")
+  cardMessageId String @map("card_message_id")
+  profile String
+  revision Int @default(0)
+  version Int @default(0)
+  mode String @default("idle")
+  openedAt DateTime @default(now()) @map("opened_at")
+  draft Json?
+  inputMessageId String? @map("input_message_id")
+  inputAt DateTime? @map("input_at")
+  lastEventId String? @map("last_event_id")
+  lockToken String? @map("lock_token")
+  lockedAt DateTime? @map("locked_at")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  delivery ChannelSuggestionAdminDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade, map: "suggestion_review_dialog_delivery_fk")
+
+  @@unique([botId, actorId, privateChatId, cardMessageId], map: "suggestion_review_dialog_card_key")
+  @@index([botId, actorId, privateChatId, inputMessageId], map: "suggestion_review_dialog_input_idx")
+  @@map("suggestion_review_dialogs")
+}
+
+model SuggestionReviewContact {
+  channelId String @id @map("channel_id")
+  url String
+  actorId String @map("actor_id")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("suggestion_review_contacts")
+}
+
+model SuggestionReviewCardUpgrade {
+  profile String @id
+  cursor String @default("")
+  completed Boolean @default(false)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("suggestion_review_card_upgrades")
 }
