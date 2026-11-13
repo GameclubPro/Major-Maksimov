@@ -650,9 +650,12 @@ native('coherent settings templates on native PostgreSQL', () => {
             );
           }
           checksCompletedAt = performance.now();
+          // FLAG: Fixture writes/ANALYZE must not consume the source-check budget.
+          // Keep the measured phase bounded separately from the larger setup envelope.
+          expect(checksCompletedAt - setupCompletedAt).toBeLessThan(20_000);
           throw fixtureRollback;
         },
-        { maxWait: 5_000, timeout: 20_000 },
+        { maxWait: 5_000, timeout: 60_000 },
       );
     } catch (error) {
       if (error !== fixtureRollback) throw error;
@@ -681,5 +684,5 @@ native('coherent settings templates on native PostgreSQL', () => {
         restoreStatisticsMs: Math.round(statisticsRestoredAt - rollbackCompletedAt),
       }),
     );
-  }, 30_000);
+  }, 90_000);
 });
