@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import type { ManagedEntityFavoriteType, ManagedEntityType } from '@maxim/contracts';
 import { CompactStickyHeader } from '../../components/ui/compact-sticky-header';
 import { useHomeEntityFavorites } from '../../lib/home-entity-favorites-context';
-import { HOME_ENTITY_FAVORITE_TYPES } from '../../lib/home-entity-favorites';
+import {
+  HOME_ENTITY_FAVORITE_LABEL_MAX_LENGTH,
+  HOME_ENTITY_FAVORITE_TYPES,
+} from '../../lib/home-entity-favorites';
 import { useNativeBackHandler } from '../../lib/native-back';
 import { useAutoHideHeader } from '../../lib/use-auto-hide-header';
 import { formatNetworkEntityCount, NetworkCategoryIcon } from './network-identity';
@@ -81,6 +84,31 @@ function NetworkWorkspaceIdentity({
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const menu = useRef<HTMLDetailsElement>(null);
+  const menuButton = useRef<HTMLElement>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renaming = rename !== null;
+  useEffect(() => {
+    if (renaming) renameInput.current?.focus();
+  }, [renaming]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !menu.current?.contains(event.target)) setMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      setMenuOpen(false);
+      menuButton.current?.focus();
+    };
+    document.addEventListener('pointerdown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [menuOpen]);
   const { isCompact } = useAutoHideHeader();
   useNativeBackHandler(
     () => {
@@ -149,11 +177,21 @@ function NetworkWorkspaceIdentity({
         aside={
           favoriteType ? (
             <details
+              ref={menu}
               className="network-workspace-menu"
               open={menuOpen}
               onToggle={(event) => setMenuOpen(event.currentTarget.open)}
             >
-              <summary aria-label="Выбрать сетку и действия" aria-expanded={menuOpen}>
+              <summary
+                ref={menuButton}
+                aria-label="Выбрать сетку и действия"
+                aria-expanded={menuOpen}
+                aria-disabled={busy || undefined}
+                onClick={(event) => {
+                  event.preventDefault();
+                  if (!busy) setMenuOpen((open) => !open);
+                }}
+              >
                 <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden focusable="false">
                   <circle cx="5" cy="12" r="1.8" fill="currentColor" />
                   <circle cx="12" cy="12" r="1.8" fill="currentColor" />
@@ -230,19 +268,27 @@ function NetworkWorkspaceIdentity({
             Название сетки
             <input
               aria-label="Название сетки"
-              maxLength={32}
+              ref={renameInput}
+              maxLength={HOME_ENTITY_FAVORITE_LABEL_MAX_LENGTH}
               disabled={busy}
               value={rename.value}
               onChange={(event) => setRename({ ...rename, value: event.target.value })}
             />
           </label>
-          <p>Общее название избранного для чатов и каналов на главной.</p>
+          <p>Название изменится и у чатов, и у каналов.</p>
           {error ? <p role="alert">{error}</p> : null}
           <div>
             <button type="submit" disabled={busy || !rename.value.trim()}>
               {busy ? 'Сохраняем…' : 'Сохранить название'}
             </button>
-            <button type="button" disabled={busy} onClick={() => setRename(null)}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setRename(null);
+                menuButton.current?.focus();
+              }}
+            >
               Отмена
             </button>
           </div>

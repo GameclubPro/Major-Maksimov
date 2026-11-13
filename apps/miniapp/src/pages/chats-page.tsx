@@ -270,7 +270,12 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     searchParams.get('view'),
     readLastEntityType(),
   ) as ManagedTab;
-  const initialHomeSnapshot = readHomeSnapshotFromRouteState(location.state, activeTab);
+  const requestedCategory = HOME_ENTITY_FAVORITE_TYPES.find(
+    (type) => type === searchParams.get('editCategory'),
+  );
+  const initialHomeSnapshot = requestedCategory
+    ? null
+    : readHomeSnapshotFromRouteState(location.state, activeTab);
   const [query, setQuery] = useState(() => initialHomeSnapshot?.query ?? '');
   const { snapshot: favoritesSnapshot, actions: favoritesActions } = useHomeEntityFavorites();
   const currentUserId = favoritesSnapshot.actor.userId;
@@ -296,7 +301,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
         : 'loading';
   const [favoriteFilter, setFavoriteFilter] = useState<
     ManagedEntityFavoriteType | typeof FAVORITE_FILTER_ALL
-  >(() => initialHomeSnapshot?.filter ?? FAVORITE_FILTER_ALL);
+  >(() => requestedCategory ?? initialHomeSnapshot?.filter ?? FAVORITE_FILTER_ALL);
   const [favoritePicker, setFavoritePicker] = useState<{
     entityType: ManagedTab;
     entity: ManagedHomeEntity;
@@ -304,7 +309,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   const [favoriteFilterPickerOpen, setFavoriteFilterPickerOpen] = useState(false);
   const [favoriteLabelsEditorOpen, setFavoriteLabelsEditorOpen] = useState(false);
   const [connectSheetOpen, setConnectSheetOpen] = useState(false);
-  const [categoryEditMode, setCategoryEditMode] = useState(false);
+  const [categoryEditMode, setCategoryEditMode] = useState(Boolean(requestedCategory));
   const [savingFavoriteEntityKey, setSavingFavoriteEntityKey] = useState<string | null>(null);
   const homeOverlayOpen =
     connectSheetOpen ||
@@ -325,6 +330,12 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
 
   useEffect(() => {
     if (homeSnapshotRestoreAttemptRef.current === homeSnapshotRestoreKey) {
+      return;
+    }
+
+    if (requestedCategory) {
+      homeSnapshotRestoreAttemptRef.current = homeSnapshotRestoreKey;
+      pendingHomeSnapshotRestoreRef.current = null;
       return;
     }
 
@@ -356,7 +367,14 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     };
     setQuery(snapshot.query);
     setFavoriteFilter(snapshot.filter);
-  }, [activeTab, currentUserId, homeSnapshotRestoreKey, location.key, location.state]);
+  }, [
+    activeTab,
+    currentUserId,
+    homeSnapshotRestoreKey,
+    location.key,
+    location.state,
+    requestedCategory,
+  ]);
 
   useNativeBackHandler(
     () => {
@@ -754,9 +772,15 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   }, [activeTab]);
 
   useEffect(() => {
-    setCategoryEditMode(false);
+    setCategoryEditMode(Boolean(requestedCategory));
     setFavoritePicker(null);
-  }, [activeTab]);
+    if (requestedCategory) {
+      setQuery('');
+      setFavoriteFilter(requestedCategory);
+      const frame = window.requestAnimationFrame(() => categoryEditDoneRef.current?.focus());
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [activeTab, requestedCategory, location.key]);
 
   useEffect(() => {
     if (pendingHomeSnapshotRestoreRef.current?.restoreKey === homeSnapshotRestoreKey) {
@@ -1174,6 +1198,11 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   function exitCategoryEditMode() {
     setFavoritePicker(null);
     setCategoryEditMode(false);
+    if (requestedCategory) {
+      const nextSearch = new URLSearchParams(searchParams);
+      nextSearch.delete('editCategory');
+      navigate({ pathname: location.pathname, search: nextSearch.toString() }, { replace: true });
+    }
     window.requestAnimationFrame(() => favoriteFilterTriggerRef.current?.focus());
   }
 

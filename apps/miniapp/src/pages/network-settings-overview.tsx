@@ -111,7 +111,6 @@ export function NetworkSettingsOverview({
       <div className="settings-section__head settings-section__head--interactive">
         <SettingsSectionToggle
           title={entry.title}
-          summary="Состояние не проверено"
           icon={entry.icon}
           tone={entry.tone}
           open={section === entry.section}

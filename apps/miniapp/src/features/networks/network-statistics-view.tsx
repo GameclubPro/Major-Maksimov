@@ -273,11 +273,9 @@ export function NetworkStatisticsView({
               ? 'Состав сетки изменился'
               : 'Загружаем статистику'}
         </strong>
-        <p>
-          {state.phase === 'error' || state.phase === 'stale'
-            ? (state.error?.message ?? 'Обновите данные, чтобы продолжить.')
-            : 'Проверяем доступ к статистике сообществ.'}
-        </p>
+        {state.phase === 'error' || state.phase === 'stale' ? (
+          <p>{state.error?.message ?? 'Обновите данные, чтобы продолжить.'}</p>
+        ) : null}
         {(state.phase === 'error' || state.phase === 'stale') &&
         state.error?.retryable !== false ? (
           <button type="button" className="networks-secondary" onClick={state.refresh}>

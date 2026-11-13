@@ -18,7 +18,9 @@ export type NetworkEntriesState = {
   pageCount: number;
   loading: boolean;
   error: string | null;
+  accessDenied: boolean;
 };
+export const NETWORK_ENTITY_SEARCH_MAX_LENGTH = 100;
 const empty = (): NetworkEntriesState => ({
   items: [],
   version: null,
@@ -26,6 +28,7 @@ const empty = (): NetworkEntriesState => ({
   pageCount: 0,
   loading: true,
   error: null,
+  accessDenied: false,
 });
 class NetworkListReadError extends Error {}
 
@@ -107,20 +110,34 @@ export function useNetworkEntries({
           pageCount: session.value.pageCount + 1,
           loading: false,
           error: null,
+          accessDenied: false,
         };
         setState({ identity: session.identity, value: session.value });
         return true;
       } catch (error) {
         if (active.current !== session || session.controller.signal.aborted) return false;
+        const status = error instanceof ApiRequestError ? error.status : null;
+        const accessDenied = status === 401 || status === 403;
+        const invalidated = accessDenied || status === 409 || error instanceof NetworkListReadError;
         const message =
-          error instanceof ApiRequestError && error.status === 409
-            ? 'Состав изменился. Обновите список.'
-            : error instanceof ApiRequestError
-              ? 'Не удалось загрузить сообщества. Попробуйте ещё раз.'
-              : error instanceof NetworkListReadError
-                ? error.message
-                : 'Не удалось загрузить сообщества.';
-        session.value = { ...session.value, loading: false, error: message };
+          status === 401
+            ? 'Сессия истекла. Откройте приложение заново.'
+            : status === 403
+              ? 'Доступ к сообществам изменился. Обновите список.'
+              : status === 409
+                ? 'Состав изменился. Обновите список.'
+                : error instanceof ApiRequestError
+                  ? 'Не удалось загрузить сообщества. Попробуйте ещё раз.'
+                  : error instanceof NetworkListReadError
+                    ? error.message
+                    : 'Не удалось загрузить сообщества.';
+        // FLAG: A denied or invalidated page cannot leave old recipients available for selection.
+        session.value = {
+          ...(invalidated ? empty() : session.value),
+          loading: false,
+          error: message,
+          accessDenied,
+        };
         setState({ identity: session.identity, value: session.value });
         return false;
       } finally {
