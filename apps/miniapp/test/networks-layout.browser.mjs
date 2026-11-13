@@ -570,6 +570,47 @@ for (const profile of profiles) {
     await pageFits(page, `${profile.name} access error`);
 
     if (profile.name === 'android-light') {
+      await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
+      const sheet = page.locator('.network-composition-sheet');
+      await sheet.getByRole('checkbox').first().uncheck();
+      await sheet.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+      await sheet
+        .getByText('Доступ к сообществам изменился. Обновите список.', { exact: true })
+        .waitFor();
+      const save = sheet.getByRole('button', { name: 'Сохранить состав', exact: true });
+      assert.equal(await save.isDisabled(), true, 'access denial blocks the existing draft');
+      await page.evaluate(async () => {
+        const find = (name) =>
+          performance
+            .getEntriesByType('resource')
+            .findLast((entry) => new URL(entry.name).pathname.endsWith('/' + name))?.name;
+        const { PREVIEW_REQUEST_HANDLERS } = await import(find('preview-transport.ts'));
+        const { PREVIEW_NOT_HANDLED } = await import(find('preview-transport-runtime.ts'));
+        let hold = true;
+        PREVIEW_REQUEST_HANDLERS.unshift(async (context) => {
+          if (hold && context.method === 'GET' && context.url.pathname.endsWith('/entities')) {
+            hold = false;
+            await new Promise((resolve) => {
+              window.__networkUxReleasePage = resolve;
+            });
+          }
+          return PREVIEW_NOT_HANDLED;
+        });
+      });
+      await sheet.getByRole('button', { name: 'Обновить список', exact: true }).click();
+      await page.waitForFunction(() => typeof window.__networkUxReleasePage === 'function');
+      await sheet.getByText('Загружаем…', { exact: true }).waitFor();
+      await settleVisualFrame(page);
+      assert.equal(await save.isDisabled(), true, 'pending access recheck cannot unlock saving');
+      await page.evaluate(() => window.__networkUxReleasePage());
+      await sheet.getByRole('checkbox').first().waitFor();
+      assert.equal(await save.isEnabled(), true, 'successful reload restores the preserved draft');
+      await sheet.getByRole('button', { name: 'Закрыть', exact: true }).click();
+      await page.getByRole('button', { name: 'Сбросить и закрыть', exact: true }).click();
+      await sheet.waitFor({ state: 'hidden' });
+    }
+
+    if (profile.name === 'android-light') {
       for (const [type, title, addLabel, countLabel] of [
         ['chat', 'Районный чат 104', 'Добавить чаты', '1 чат'],
         ['channel', 'Городской канал 104', 'Добавить каналы', '1 канал'],

@@ -169,6 +169,7 @@ export function NetworkCompositionSheet({
     reviewing ||
     requiresReview ||
     entries.accessDenied ||
+    entries.pageCount === 0 ||
     draft.phase === 'saved-refresh-pending';
   useEffect(() => {
     if (requiresReview || error || draft.phase === 'saved-refresh-pending')
@@ -456,7 +457,8 @@ export function NetworkCompositionSheet({
                 reviewing ||
                 requiresReview ||
                 draft.phase === 'saved-refresh-pending' ||
-                entries.accessDenied
+                entries.accessDenied ||
+                entries.pageCount === 0
               }
               onClick={() => void save()}
             >

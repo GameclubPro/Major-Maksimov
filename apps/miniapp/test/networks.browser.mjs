@@ -1030,11 +1030,17 @@ for (const profile of profiles.filter(
     await firstAssignment.selectOption(desiredAssignment);
     await back(page);
     await page.getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Продолжить редактирование', exact: true }).click();
+    await page
+      .getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true })
+      .waitFor({ state: 'hidden' });
+    assert.equal(await sheet.isVisible(), true, 'confirmation cancellation returns to the editor');
+    await back(page);
+    await page.getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true }).waitFor();
     await back(page);
     await page
       .getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true })
       .waitFor({ state: 'hidden' });
-    assert.equal(await sheet.isVisible(), true, 'Native Back closes confirmation before editor');
     assert.equal(
       await firstAssignment.inputValue(),
       desiredAssignment,
