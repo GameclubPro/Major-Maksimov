@@ -437,6 +437,189 @@ for (const profile of profiles) {
       animations: 'disabled',
     });
 
+    await open('networks?type=chat&category=service', '.network-empty-start');
+    assert.equal(
+      await page.locator('.network-detail-metrics').count(),
+      0,
+      'empty networks have no meaningless metrics',
+    );
+    assert.equal(
+      await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
+      true,
+    );
+    await page.getByRole('button', { name: 'Добавить чаты', exact: true }).click();
+    await page.locator('.chats-home.is-category-editing').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('view'), 'chat');
+    assert.equal(new URL(page.url()).searchParams.get('editCategory'), 'service');
+    await page.getByRole('button', { name: 'Готово', exact: true }).click();
+    await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+    assert.equal(
+      await page.locator('.home-category-chip.is-service').getAttribute('aria-pressed'),
+      'true',
+    );
+    await page.goBack();
+    await page.locator('.network-empty-start').waitFor();
+    await page.screenshot({
+      path: join(output, `${profile.name}-empty.png`),
+      animations: 'disabled',
+    });
+
+    const actionsMenu = page.locator('.network-workspace-menu');
+    const actionsTrigger = actionsMenu.locator('summary');
+    await actionsTrigger.click();
+    await actionsMenu.getByRole('button', { name: 'Переименовать', exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await actionsMenu
+      .getByRole('button', { name: 'Переименовать', exact: true })
+      .waitFor({ state: 'hidden' });
+    assert.equal(
+      await actionsTrigger.evaluate((node) => node === document.activeElement),
+      true,
+      'Escape restores menu focus',
+    );
+    await actionsTrigger.click();
+    await page.locator('.network-workspace-icon').click();
+    await actionsMenu
+      .getByRole('button', { name: 'Переименовать', exact: true })
+      .waitFor({ state: 'hidden' });
+    await actionsTrigger.click();
+    await actionsMenu.getByRole('button', { name: 'Переименовать', exact: true }).click();
+    const renameField = page.getByRole('textbox', { name: 'Название сетки', exact: true });
+    await renameField.waitFor();
+    assert.equal(
+      await renameField.evaluate((node) => node === document.activeElement),
+      true,
+      'rename focuses its input',
+    );
+    await renameField.fill('');
+    await renameField.pressSequentially('Длинное название новой сетки для чатов');
+    const enteredName = await renameField.inputValue();
+    assert.equal(
+      enteredName.length,
+      24,
+      'input uses the same length bound as favorite persistence',
+    );
+    await page.getByRole('button', { name: 'Сохранить название', exact: true }).click();
+    await renameField.waitFor({ state: 'hidden' });
+    assert.equal(
+      await page.locator('.network-workspace-heading h1').innerText(),
+      enteredName,
+      'saving never silently truncates the displayed name',
+    );
+
+    await open('networks?type=chat&category=important&tab=communities', '.network-community-row');
+    const memberSearch = page.getByRole('searchbox', { name: 'Поиск в составе', exact: true });
+    await memberSearch.fill('я'.repeat(101));
+    assert.equal(
+      (await memberSearch.inputValue()).length,
+      100,
+      'member search respects the API bound',
+    );
+    await page.getByText('Ничего не найдено', { exact: true }).waitFor();
+    assert.equal(
+      await page.locator('.network-community-list [role="alert"]').count(),
+      0,
+      'long search is not a failed request',
+    );
+    await page.getByRole('button', { name: 'Очистить: Поиск в составе', exact: true }).click();
+    await page.locator('.network-community-row').first().waitFor();
+    assert.equal(
+      await memberSearch.evaluate((node) => node === document.activeElement),
+      true,
+      'clearing search retains focus',
+    );
+    await page.evaluate(async () => {
+      const find = (name) =>
+        performance
+          .getEntriesByType('resource')
+          .findLast((entry) => new URL(entry.name).pathname.endsWith('/' + name))?.name;
+      const { PREVIEW_REQUEST_HANDLERS } = await import(find('preview-transport.ts'));
+      const { PREVIEW_NOT_HANDLED } = await import(find('preview-transport-runtime.ts'));
+      const { ApiRequestError } = await import('/app/src/lib/api-request-error.ts');
+      window.__networkUxPageStatus = 500;
+      PREVIEW_REQUEST_HANDLERS.unshift(async (context) => {
+        if (
+          context.method === 'GET' &&
+          context.url.pathname.endsWith('/entities') &&
+          context.url.searchParams.get('cursor')
+        )
+          throw new ApiRequestError(window.__networkUxPageStatus, '{}', 'Fixture page failure');
+        return PREVIEW_NOT_HANDLED;
+      });
+    });
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+    await page.locator('.network-community-list [role="alert"]').waitFor();
+    assert.equal(
+      await page.locator('.network-community-row').count(),
+      50,
+      'transient pagination failure preserves loaded communities',
+    );
+    await page.getByRole('button', { name: 'Обновить список', exact: true }).click();
+    await page.locator('.network-community-row').first().waitFor();
+    await page.evaluate(() => {
+      window.__networkUxPageStatus = 403;
+    });
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+    await page
+      .getByText('Доступ к сообществам изменился. Обновите список.', { exact: true })
+      .waitFor();
+    assert.equal(
+      await page.locator('.network-community-row').count(),
+      0,
+      'access denial clears obsolete rows',
+    );
+    await pageFits(page, `${profile.name} access error`);
+
+    if (profile.name === 'android-light') {
+      for (const [type, title, addLabel, countLabel] of [
+        ['chat', 'Районный чат 104', 'Добавить чаты', '1 чат'],
+        ['channel', 'Городской канал 104', 'Добавить каналы', '1 канал'],
+      ]) {
+        await open(`networks?type=${type}&category=test`, '.network-empty-start');
+        await page.getByRole('button', { name: addLabel, exact: true }).click();
+        await page.locator('.chats-home.is-category-editing').waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('view'), type);
+        await page.locator('#chat-search').fill(title);
+        await page.locator('.chat-card__category-editor').first().click();
+        const sheet = page.locator('.home-sheet--favorite');
+        await sheet.locator('.favorite-picker__option.is-test').click();
+        await sheet.waitFor({ state: 'hidden' });
+        await page.getByRole('button', { name: 'Готово', exact: true }).click();
+        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+        assert.equal(
+          await page.locator('.home-category-chip.is-test').getAttribute('aria-pressed'),
+          'true',
+        );
+        await page.goBack();
+        await page
+          .locator('.network-workspace-heading')
+          .getByText(countLabel, { exact: true })
+          .waitFor();
+        await page.locator('.network-detail-metrics').waitFor();
+        assert.equal(await page.locator('.network-empty-start').count(), 0);
+        await page.getByRole('button', { name: 'Состав', exact: true }).click();
+        await page.locator('.network-community-list').getByText(title, { exact: true }).waitFor();
+        assert.equal(await page.getByRole('button', { name: 'Добавить', exact: true }).count(), 0);
+        await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
+        await page.locator('.chats-home.is-category-editing').waitFor();
+        assert.equal(await page.locator('#chat-search').inputValue(), '');
+        await page.locator('#chat-search').fill(title);
+        await page.locator('.chat-card__category-editor').first().click();
+        await sheet.getByRole('button', { name: 'Убрать из избранного', exact: true }).click();
+        await sheet.waitFor({ state: 'hidden' });
+        await page.keyboard.press('Escape');
+        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+        await page.goBack();
+        await page.getByText('В сетке пока пусто', { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'Статистика', exact: true }).click();
+        await page.locator('.network-empty-start').waitFor();
+        assert.equal(
+          await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
+          true,
+        );
+      }
+    }
+
     const networkStyles = await page.locator('style[data-vite-dev-id]').evaluateAll((nodes) =>
       nodes
         .filter((node) =>

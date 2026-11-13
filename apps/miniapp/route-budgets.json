@@ -55,8 +55,7 @@
       "label": "Networks catalogue and overview",
       "entries": [
         "src/pages/networks-page.tsx",
-        "src/features/networks/network-statistics-view.tsx",
-        "src/features/networks/network-composition-sheet.tsx"
+        "src/features/networks/network-statistics-view.tsx"
       ],
       "baseline": "startup",
       "limits": {

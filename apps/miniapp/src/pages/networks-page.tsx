@@ -7,6 +7,7 @@ import { AppIcon } from '../components/ui/app-icon';
 import { SegmentedControl } from '../components/ui/segmented-control';
 import { Spinner } from '../components/ui/spinner';
 import { EntityAvatar } from '../components/ui/entity-avatar';
+import { SearchField } from '../components/ui/search-field';
 import { useHomeEntityFavorites } from '../lib/home-entity-favorites-context';
 import { useHomeEntityNetworkCatalogue } from '../lib/home-entity-networks-context';
 import { useNativeBackHandler } from '../lib/native-back';
@@ -18,7 +19,10 @@ import {
   networkStatisticsQueryKey,
   useNetworkStatistics,
 } from '../features/networks/network-statistics';
-import { useNetworkEntries } from '../features/networks/network-community-list';
+import {
+  NETWORK_ENTITY_SEARCH_MAX_LENGTH,
+  useNetworkEntries,
+} from '../features/networks/network-community-list';
 import {
   buildNetworkRoute,
   captureNetworkListPosition,
@@ -43,9 +47,6 @@ const NetworkOperationHistory = lazy(async () => ({
 }));
 const NetworkStatisticsView = lazy(async () => ({
   default: (await import('../features/networks/network-statistics-view')).NetworkStatisticsView,
-}));
-const NetworkCompositionSheet = lazy(async () => ({
-  default: (await import('../features/networks/network-composition-sheet')).NetworkCompositionSheet,
 }));
 const compactNumber = new Intl.NumberFormat('ru-RU', {
   notation: 'compact',
@@ -169,11 +170,11 @@ function SummaryCard({
         <div className="network-summary-card__metrics">
           <Metric
             label={type === 'chat' ? 'Участники' : 'Подписчики'}
-            value={stats.data?.audience.value}
+            value={stale ? null : stats.data?.audience.value}
           />
           <Metric
             label={`Прирост · ${range === '7d' ? 7 : 30} дн.`}
-            value={stats.data?.netGrowth.value}
+            value={stale ? null : stats.data?.netGrowth.value}
             growth
           />
         </div>
@@ -181,18 +182,20 @@ function SummaryCard({
         stats.data?.audience.coverage.status !== 'ready' ||
         stats.data?.netGrowth.coverage.status !== 'ready' ? (
           <p className="network-summary-card__status" role="status">
-            {stats.phase === 'checking'
-              ? 'Проверяем доступ…'
-              : stats.phase === 'loading' || stats.phase === 'idle'
-                ? 'Загружаем данные…'
-                : stats.phase === 'error' || stats.phase === 'stale'
-                  ? 'Данные временно недоступны'
-                  : stats.data?.audience.coverage.status !== 'ready' ||
-                      stats.data?.netGrowth.coverage.status !== 'ready'
-                    ? stats.data?.audience.coverage.includedEntities !== card.entityCount
-                      ? `Аудитория по ${stats.data?.audience.coverage.includedEntities ?? 0} из ${card.entityCount}`
-                      : 'История прироста может быть неполной'
-                    : null}
+            {stale
+              ? 'Состав сетки нужно обновить'
+              : stats.phase === 'checking'
+                ? 'Проверяем доступ…'
+                : stats.phase === 'loading' || stats.phase === 'idle'
+                  ? 'Загружаем данные…'
+                  : stats.phase === 'error' || stats.phase === 'stale'
+                    ? (stats.error?.message ?? 'Не удалось загрузить статистику')
+                    : stats.data?.audience.coverage.status !== 'ready' ||
+                        stats.data?.netGrowth.coverage.status !== 'ready'
+                      ? stats.data?.audience.coverage.includedEntities !== card.entityCount
+                        ? `Аудитория по ${stats.data?.audience.coverage.includedEntities ?? 0} из ${card.entityCount}`
+                        : 'История прироста может быть неполной'
+                      : null}
           </p>
         ) : null}
       </div>
@@ -239,10 +242,12 @@ function NetworkDetail({
   const { snapshot } = useHomeEntityFavorites();
   const navigate = useNavigate();
   const location = useLocation();
-  const [compositionOpen, setCompositionOpen] = useState<'members' | 'add' | null>(null);
   const searchKey = `members:${state.entityType}:${state.favoriteType}`;
   const [memberQuery, setMemberQuery] = useState(() =>
-    readNetworkViewPreference(snapshot.actor.scope, searchKey),
+    readNetworkViewPreference(snapshot.actor.scope, searchKey).slice(
+      0,
+      NETWORK_ENTITY_SEARCH_MAX_LENGTH,
+    ),
   );
   const [memberSearch, setMemberSearch] = useState(memberQuery);
   useEffect(
@@ -275,7 +280,7 @@ function NetworkDetail({
     favoriteType: card.favoriteType,
     range: state.range,
     compositionVersion: card.compositionVersion,
-    enabled: !stale && state.tab === 'overview',
+    enabled: !stale && card.entityCount > 0 && state.tab === 'overview',
     onScopeInvalidated: (reason) => {
       setNotice(
         reason === 'access' ? 'Доступ к сообществам изменился.' : 'Состав сетки изменился.',
@@ -342,11 +347,15 @@ function NetworkDetail({
       onRoute({ ...state, favoriteType: null, tab: 'overview' });
       return true;
     },
-    { enabled: !compositionOpen, priority: 100 },
+    { priority: 100 },
   );
   const route = (next: NetworkRouteState) => {
     savePosition();
     onRoute(next);
+  };
+  const editComposition = () => {
+    savePosition();
+    navigate(`/?view=${state.entityType}&editCategory=${card.favoriteType}`);
   };
   const openSettings = () => {
     savePosition();
@@ -359,7 +368,7 @@ function NetworkDetail({
         settingsDisabled={stale || card.entityCount === 0}
         onChange={(tab) => (tab === 'settings' ? openSettings() : route({ ...state, tab }))}
       />
-      {state.tab === 'overview' ? (
+      {state.tab === 'overview' && card.entityCount > 0 ? (
         <div className="network-detail-navigation">
           <span className="networks-caption">Период статистики</span>
           <SegmentedControl
@@ -381,7 +390,7 @@ function NetworkDetail({
       ) : null}
       {stale ? (
         <div className="networks-notice" role="status">
-          <span>Обновляем состав сетки…</span>
+          <span>Состав сетки нужно обновить.</span>
           <button
             type="button"
             onClick={() =>
@@ -392,7 +401,18 @@ function NetworkDetail({
           </button>
         </div>
       ) : null}
-      {state.tab === 'overview' ? (
+      {state.tab === 'overview' && card.entityCount === 0 ? (
+        <div className="networks-empty network-empty-start">
+          <span className="network-empty-start__icon" aria-hidden>
+            <NetworkCategoryIcon favoriteType={card.favoriteType} />
+          </span>
+          <h2>В сетке пока пусто</h2>
+          <button type="button" className="networks-primary" onClick={editComposition}>
+            <AppIcon icon="Plus" />
+            {state.entityType === 'chat' ? 'Добавить чаты' : 'Добавить каналы'}
+          </button>
+        </div>
+      ) : state.tab === 'overview' ? (
         <Suspense
           fallback={
             <div className="networks-loading">
@@ -439,33 +459,19 @@ function NetworkDetail({
             </span>
           </div>
           <div className="network-community-actions">
-            <button
-              type="button"
-              className="networks-secondary"
-              onClick={() => setCompositionOpen('members')}
-            >
+            <button type="button" className="networks-secondary" onClick={editComposition}>
               <AppIcon icon="Group" />
               Изменить состав
             </button>
-            <button
-              type="button"
-              className="networks-primary"
-              onClick={() => setCompositionOpen('add')}
-            >
-              <AppIcon icon="Plus" />
-              Добавить
-            </button>
           </div>
-          <label className="networks-search">
-            <AppIcon icon="Search" />
-            <input
-              type="search"
-              aria-label="Поиск в составе"
-              placeholder="Найти сообщество"
-              value={memberQuery}
-              onChange={(event) => setMemberQuery(event.target.value)}
-            />
-          </label>
+          <SearchField
+            className="network-search-field"
+            label="Поиск в составе"
+            placeholder="Найти сообщество"
+            value={memberQuery}
+            onChange={setMemberQuery}
+            inputProps={{ maxLength: NETWORK_ENTITY_SEARCH_MAX_LENGTH }}
+          />
           <div className="network-community-list" aria-busy={entries.loading}>
             {entries.items.map((item) => (
               <button
@@ -519,9 +525,7 @@ function NetworkDetail({
                   >
                     Сбросить поиск
                   </button>
-                ) : (
-                  <p>Добавьте {state.entityType === 'chat' ? 'чаты' : 'каналы'} из избранного.</p>
-                )}
+                ) : null}
               </div>
             ) : null}
             {entries.loading ? (
@@ -546,23 +550,6 @@ function NetworkDetail({
           </div>
         </>
       )}
-      {compositionOpen ? (
-        <Suspense
-          fallback={
-            <div className="networks-loading" role="status">
-              Открываем состав…
-            </div>
-          }
-        >
-          <NetworkCompositionSheet
-            api={api}
-            entityType={state.entityType}
-            favoriteType={card.favoriteType}
-            initialMode={compositionOpen}
-            onClose={() => setCompositionOpen(null)}
-          />
-        </Suspense>
-      ) : null}
     </>
   );
 }
@@ -789,10 +776,7 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
           </div>
           {emptyCards.length ? (
             <details className="networks-empty-categories" open={!populated.length}>
-              <summary>{populated.length ? 'Другие категории' : 'Выберите избранное'}</summary>
-              {!populated.length ? (
-                <p>Отметьте чаты и каналы на главной — они появятся здесь.</p>
-              ) : null}
+              <summary>{populated.length ? 'Другие сетки' : 'Выберите сетку'}</summary>
               <div>
                 {emptyCards.map((card) => (
                   <button
