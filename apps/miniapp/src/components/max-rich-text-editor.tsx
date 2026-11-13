@@ -38,6 +38,7 @@ export type MaxRichTextEditorProps = {
   placeholder: string;
   disabled?: boolean;
   preserveCurlyBracePlaceholders?: boolean;
+  preserveWhitespace?: boolean;
   curlyBracePlaceholderLabels?: Readonly<Record<string, string>>;
   ariaLabel: string;
   ariaInvalid?: boolean;
@@ -76,6 +77,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       placeholder,
       disabled = false,
       preserveCurlyBracePlaceholders = false,
+      preserveWhitespace = false,
       curlyBracePlaceholderLabels,
       ariaLabel,
       ariaInvalid = false,
@@ -119,10 +121,12 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
               blockMode: 'editor',
               linkMode: 'anchor',
               preserveCurlyBracePlaceholders,
+              preserveWhitespace,
               curlyBracePlaceholderLabels,
             }),
       [
         curlyBracePlaceholderLabels,
+        preserveWhitespace,
         normalizationReady,
         normalizedValue.value,
         preserveCurlyBracePlaceholders,
@@ -139,12 +143,13 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
 
       const nextMarkdown = serializeEditorMarkdown(editor, {
         preserveCurlyBracePlaceholders,
+        preserveWhitespace,
       });
       if (nextMarkdown === lastEmittedMarkdownRef.current) return;
       lastEmittedMarkdownRef.current = nextMarkdown;
       lastRenderedSourceFormatRef.current = 'markdown';
       onChange(nextMarkdown);
-    }, [onChange, preserveCurlyBracePlaceholders]);
+    }, [onChange, preserveCurlyBracePlaceholders, preserveWhitespace]);
 
     const syncActiveTools = useCallback(() => {
       const editor = editorRef.current;
@@ -472,6 +477,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
                 pastedMarkdown &&
                 insertSupportedMarkdownAtCurrentRange(pastedMarkdown, {
                   preserveCurlyBracePlaceholders,
+                  preserveWhitespace,
                   curlyBracePlaceholderLabels,
                 })
               ) {
@@ -838,6 +844,7 @@ function insertPlainTextAtCurrentRange(text: string): void {
 
 type RichTextSerializationOptions = {
   preserveCurlyBracePlaceholders?: boolean;
+  preserveWhitespace?: boolean;
   curlyBracePlaceholderLabels?: Readonly<Record<string, string>>;
 };
 
@@ -859,6 +866,7 @@ function insertSupportedMarkdownAtCurrentRange(
     blockMode: 'editor',
     linkMode: 'anchor',
     preserveCurlyBracePlaceholders: options.preserveCurlyBracePlaceholders,
+    preserveWhitespace: options.preserveWhitespace,
     curlyBracePlaceholderLabels: options.curlyBracePlaceholderLabels,
   });
   if (!html) {
@@ -920,7 +928,17 @@ function serializeEditorMarkdown(
   root: HTMLElement,
   options: RichTextSerializationOptions = {},
 ): string {
-  return serializeChildNodes(root.childNodes, options).trimEnd();
+  const content = serializeChildNodes(root.childNodes, options);
+  if (!options.preserveWhitespace) return content.trimEnd();
+  const last = root.lastElementChild;
+  return last instanceof HTMLElement &&
+    last === root.lastChild &&
+    (BLOCK_TAGS.has(last.tagName.toLowerCase()) ||
+      last.tagName === 'PRE' ||
+      isHeadingElement(last, last.tagName.toLowerCase())) &&
+    content.endsWith('\n')
+    ? content.slice(0, -1)
+    : content;
 }
 
 function serializeChildNodes(
@@ -970,17 +988,21 @@ function serializeNode(node: Node, options: RichTextSerializationOptions = {}): 
   }
 
   if (tagName === 'code') {
-    return `\`${serializeCodeText(element.textContent ?? '')}\``;
+    return `\`${serializeCodeText(options.preserveWhitespace ? (element.textContent ?? '').replace(/\u00a0/gu, ' ') : (element.textContent ?? ''))}\``;
   }
 
   if (tagName === 'pre') {
-    return appendBlockBreak(`\`\`\`\n${serializeCodeBlockText(element.textContent ?? '')}\n\`\`\``);
+    return appendBlockBreak(
+      `\`\`\`\n${serializeCodeBlockText(options.preserveWhitespace ? (element.textContent ?? '').replace(/\u00a0/gu, ' ') : (element.textContent ?? ''))}\n\`\`\``,
+    );
   }
 
   const content = serializeChildNodes(element.childNodes, options);
 
   if (isHeadingElement(element, tagName)) {
-    const headingContent = content.replace(/\n+/gu, ' ').trim();
+    const headingContent = options.preserveWhitespace
+      ? content.replace(/\n$/u, '')
+      : content.replace(/\n+/gu, ' ').trim();
     const level = /^h([1-6])$/u.exec(tagName)?.[1] ?? element.dataset.maxHeadingLevel ?? '1';
     const normalizedLevel = /^[1-6]$/u.test(level) ? level : '1';
     return headingContent
@@ -1015,6 +1037,8 @@ function serializeNode(node: Node, options: RichTextSerializationOptions = {}): 
     case 'a':
       return serializeEditorLinkMarkdown(content, element.getAttribute('href') || '');
     default:
+      if (options.preserveWhitespace && BLOCK_TAGS.has(tagName))
+        return content === '\n' ? '\n' : `${content}\n`;
       return BLOCK_TAGS.has(tagName) ? appendBlockBreak(content) : content;
   }
 }

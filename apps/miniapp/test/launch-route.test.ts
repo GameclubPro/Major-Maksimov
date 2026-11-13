@@ -645,3 +645,19 @@ test('rejects unsupported publications launcher parameters', () => {
 
   assert.equal(resolveLaunchRoute(''), null);
 });
+
+test('opens only exact suggestion review routes without injected query state', () => {
+  for (const mode of ['edit', 'publish', 'reject']) {
+    const route = `/suggestions/suggestion-42/${mode}`;
+    assignWindow(`https://major-maksimov.ru/app/?startapp=${encodeRouteStartParam(route)}`);
+    assert.equal(resolveLaunchRoute(''), route);
+  }
+  for (const route of [
+    '/suggestions/suggestion-42/delete',
+    '/suggestions/suggestion-42/edit?author=999',
+    '/suggestions/../publish',
+  ]) {
+    assignWindow(`https://major-maksimov.ru/app/?startapp=${encodeRouteStartParam(route)}`);
+    assert.equal(resolveLaunchRoute(''), null);
+  }
+});

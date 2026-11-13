@@ -836,7 +836,8 @@ describe('AdminChannelSuggestionPublicationRuntime', () => {
     );
     prisma.$queryRaw.mockImplementation(async () => {
       const claimSql = prisma.$executeRaw.mock.calls[0]?.[0] as { values: unknown[] };
-      const [claimedAt, userId, label, token, protocol, jobId] = claimSql.values;
+      const [contentPatch, claimedAt, userId, label, token, protocol, jobId] = claimSql.values;
+      expect(contentPatch).toBe('{}');
       return [
         {
           id: 'suggestion-1',

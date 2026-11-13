@@ -1,6 +1,20 @@
+import type { SuggestionReviewWrite } from '@maxim/contracts/publisher';
+import {
+  assertSuggestionPublicationLength,
+  suggestionContentPatch,
+  suggestionRevision,
+  hasSuggestionRequest,
+  suggestionRequestPatch,
+  publicationEditorInput,
+} from './suggestion-review-content';
 import type { ChannelSettings } from '@maxim/contracts';
 import type { SuggestionSubscriptionService } from '../suggestions/suggestion-subscription.service';
-import { BadRequestException, ServiceUnavailableException, type Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ServiceUnavailableException,
+  type Logger,
+} from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 
 import type { AuthUser } from '../common/decorators/current-user.decorator';
@@ -214,6 +228,7 @@ export class AdminChannelSuggestionPublicationRuntime {
     suggestionId: string,
     user: AuthUser,
     action: ChannelSuggestionReviewAction,
+    editor?: SuggestionReviewWrite,
   ): Promise<ChannelSuggestionReviewResult> {
     const normalizedSuggestionId = suggestionId.trim();
     if (!normalizedSuggestionId) {
@@ -244,6 +259,11 @@ export class AdminChannelSuggestionPublicationRuntime {
       throw new BadRequestException('Предложка не найдена.');
     }
     const currentReviewStatus = this.context.readLowerString(payload.reviewStatus);
+    if (editor) {
+      const same = hasSuggestionRequest(payload, 'publish', user.userId, editor);
+      if (currentReviewStatus && currentReviewStatus !== 'pending' && !same)
+        throw new ConflictException('По предложке уже принято другое решение. Обновите её.');
+    }
     if (currentReviewStatus === 'published' || currentReviewStatus === 'cancelled') {
       await this.syncCommittedReviewMessages(row, payload);
       return {
@@ -298,6 +318,15 @@ export class AdminChannelSuggestionPublicationRuntime {
       });
     }
 
+    const contentPatch = suggestionContentPatch(
+      canonicalPayload,
+      editor
+        ? publicationEditorInput(canonicalPayload, user.userId, editor)
+        : { expectedRevision: 0, requestId: '00000000-0000-4000-8000-000000000000' },
+      user.userId,
+    );
+    Object.assign(canonicalPayload, contentPatch);
+    assertSuggestionPublicationLength(row.actorUserId, canonicalPayload);
     const publisherRoute = await this.resolvePublisherSuggestionRoute(row.chatId, canonicalPayload);
     if (publisherRoute && !this.context.publisherSuggestionPublicationQueue) {
       throw new ServiceUnavailableException(
@@ -320,9 +349,27 @@ export class AdminChannelSuggestionPublicationRuntime {
       userId: user.userId,
       userDisplayName: reviewerLabel,
       publisherRoute,
+      expectedRevision: editor
+        ? publicationEditorInput(payload, user.userId, editor).expectedRevision
+        : 0,
+      contentPatch: {
+        ...contentPatch,
+        ...(editor
+          ? {
+              reviewContentRequestId: editor.requestId,
+              ...suggestionRequestPatch(
+                payload,
+                'publish',
+                user.userId,
+                editor,
+                suggestionRevision(canonicalPayload),
+              ),
+            }
+          : {}),
+      },
     });
     if (!claim) {
-      return this.readReviewResult(row.id);
+      return this.readReviewResult(row.id, { requireClaim: true, editor, userId: user.userId });
     }
 
     if (publisherRoute) {
@@ -694,13 +741,15 @@ export class AdminChannelSuggestionPublicationRuntime {
     userId: string;
     userDisplayName: string;
     publisherRoute: PublisherSuggestionRoute | null;
+    expectedRevision?: number;
+    contentPatch?: Record<string, unknown>;
   }): Promise<ChannelSuggestionPublicationClaimV1 | null> {
     const claimedAt = new Date().toISOString();
     const claimToken = randomUUID();
     const ledgerJobId = buildChannelSuggestionPublicationLedgerJobId(params.suggestionId);
     const updated = await this.context.prisma.$executeRaw(Prisma.sql`
       UPDATE audit_logs
-      SET payload = payload::jsonb || jsonb_strip_nulls(jsonb_build_object(
+      SET payload = payload::jsonb || ${JSON.stringify(params.contentPatch ?? {})}::jsonb || jsonb_strip_nulls(jsonb_build_object(
         'reviewStatus', 'publishing',
         'reviewClaimedAt', ${claimedAt}::text,
         'reviewClaimedByUserId', ${params.userId}::text,
@@ -719,6 +768,7 @@ export class AdminChannelSuggestionPublicationRuntime {
         AND action = ${CHANNEL_DIALOG_ACTION_SUGGEST}::text
         AND payload->>'type' = 'suggest'
         AND COALESCE(NULLIF(payload->>'reviewStatus', ''), 'pending') = 'pending'
+        AND COALESCE((payload->>'reviewContentRevision')::integer, 0) = ${params.expectedRevision ?? 0}
     `);
     if (Number(updated) === 0) {
       return null;
@@ -1159,7 +1209,10 @@ export class AdminChannelSuggestionPublicationRuntime {
     });
   }
 
-  private async readReviewResult(suggestionId: string): Promise<ChannelSuggestionReviewResult> {
+  private async readReviewResult(
+    suggestionId: string,
+    options?: { requireClaim: boolean; editor?: SuggestionReviewWrite; userId: string },
+  ): Promise<ChannelSuggestionReviewResult> {
     const latest = await this.context.prisma.auditLog.findFirst({
       where: { id: suggestionId, action: CHANNEL_DIALOG_ACTION_SUGGEST },
       select: { payload: true },
@@ -1169,6 +1222,14 @@ export class AdminChannelSuggestionPublicationRuntime {
     }
     const payload = this.context.readObjectPayload(latest.payload);
     const reviewStatus = this.context.readLowerString(payload.reviewStatus);
+    if (
+      options?.requireClaim &&
+      (!reviewStatus ||
+        reviewStatus === 'pending' ||
+        (options.editor &&
+          !hasSuggestionRequest(payload, 'publish', options.userId, options.editor)))
+    )
+      throw new ConflictException('Предложку уже изменили. Обновите её перед решением.');
     if (reviewStatus === 'published' || reviewStatus === 'cancelled') {
       return {
         status: 'already_reviewed',

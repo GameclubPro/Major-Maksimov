@@ -32,6 +32,7 @@ function Fixture() {
           maxLength={4000}
           placeholder="Greeting"
           ariaLabel="Greeting"
+          preserveWhitespace={params.has('preserve')}
         />
       )}
       <MaxMarkdownPreview value={value} preserveLinks />

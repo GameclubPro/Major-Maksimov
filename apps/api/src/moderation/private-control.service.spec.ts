@@ -4370,6 +4370,17 @@ describe('PrivateControlService', () => {
     expect(maxClient.sendMessage).not.toHaveBeenCalled();
   });
 
+  it('opens rejection selection without deciding or replying to the author', async () => {
+    const { service, adminService, maxClient } = createHarness();
+    await service.handleUpdate(
+      createPrivateCallbackUpdate('pc2|suggestion_review_cancel|suggestion-42', {
+        userId: 'admin-1',
+      }),
+    );
+    expect(adminService.reviewChannelSuggestionByAdmin).not.toHaveBeenCalled();
+    expect(getLastEditedText(maxClient)).toContain('Выберите причину отказа');
+  });
+
   it('does not expose raw MAX transport errors from suggestion review callbacks', async () => {
     const { service, maxClient } = createHarness({
       adminService: {
@@ -4380,7 +4391,7 @@ describe('PrivateControlService', () => {
     });
 
     await service.handleUpdate(
-      createPrivateCallbackUpdate('pc2|suggestion_review_cancel|suggestion-42', {
+      createPrivateCallbackUpdate('pc2|suggestion_review_publish|suggestion-42', {
         userId: 'admin-1',
         displayName: 'Главный редактор',
       }),

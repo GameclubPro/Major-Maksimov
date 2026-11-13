@@ -369,6 +369,7 @@ describe('PublisherSuggestionService', () => {
       user,
       'draft',
       expect.objectContaining({ actorUserId: '42' }),
+      undefined,
     );
     expect(fixture.publicationQueue.enqueue).toHaveBeenCalledWith('suggestion-1', 'claim-1', {
       recycleCompleted: true,
@@ -634,7 +635,7 @@ describe('PublisherSuggestionService', () => {
     'freezes the subscriber link and native contact markup for a new %s claim',
     async (action) => {
       const fixture = createFixture({
-        actorUserId: '999',
+        actorUserId: '42',
         authorDisplayName: 'Анна [QA] & Редактор',
         text: 'Связь: Иван',
         textFormat: 'plain',

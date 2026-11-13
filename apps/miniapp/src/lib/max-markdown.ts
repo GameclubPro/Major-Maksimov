@@ -9,6 +9,7 @@ type RenderMarkdownOptions = {
   resolveLinkHref?: (value: string) => string | null;
   linkMode?: 'anchor' | 'underline';
   blockMode?: 'paragraphs' | 'raw' | 'inline' | 'editor';
+  preserveWhitespace?: boolean;
   preserveCurlyBracePlaceholders?: boolean;
   curlyBracePlaceholderLabels?: Readonly<Record<string, string>>;
 };
@@ -167,6 +168,34 @@ export function renderSupportedMarkdownAsHtml(
   const normalized = source.replace(/\r/g, '');
   if (!normalized.trim()) {
     return '';
+  }
+
+  if (options.blockMode === 'editor' && options.preserveWhitespace) {
+    const lines = normalized.split('\n');
+    const output: string[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const fenced = readFencedCodeBlock(lines, index);
+      if (fenced) {
+        output.push(renderCodeBlockHtml(fenced.content));
+        index = fenced.nextIndex - 1;
+        continue;
+      }
+      const line = lines[index] ?? '';
+      const heading = HEADING_LINE_PATTERN.exec(line);
+      const quote = QUOTE_LINE_PATTERN.exec(line);
+      const html = renderInlineTokens(
+        parseInlineTokens(heading?.[2] ?? quote?.[1] ?? line, options),
+        options,
+      );
+      output.push(
+        heading
+          ? renderHeadingHtml(html, heading[1] ?? '#')
+          : quote
+            ? renderQuoteHtml(html)
+            : `<div data-max-preserved-line="true">${html || '<br>'}</div>`,
+      );
+    }
+    return output.join('');
   }
 
   if (options.blockMode === 'raw') {

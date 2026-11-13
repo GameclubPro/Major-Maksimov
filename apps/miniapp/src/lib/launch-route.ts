@@ -257,6 +257,13 @@ function normalizeRouteLaunchPath(value: string): string | null {
       return `${parsed.pathname}${parsed.search}`;
     }
 
+    if (
+      /^\/suggestions\/[A-Za-z0-9_-]{1,160}\/(edit|reject|publish)$/u.test(pathname) &&
+      !parsed.search
+    ) {
+      return pathname;
+    }
+
     if (/^\/chat\/[^/?#]+\/events$/u.test(pathname) && !parsed.search) {
       return pathname;
     }

@@ -26,6 +26,14 @@ describe('renderSupportedMarkdownAsHtml', () => {
     expect(prepareFormattedTextForMaxDelivery('<b>x</b>', 'html', 7)).toBeNull();
   });
 
+  it('preserves indentation, trailing spaces and whitespace-only rows for outgoing posts', () => {
+    expect(
+      renderSupportedMarkdownAsHtml('  **Пост**  \n   \n# Заголовок  \n', { blockMode: 'raw' }),
+    ).toBe(
+      '&nbsp;&nbsp;<strong>Пост</strong>&nbsp;&nbsp;\n&nbsp;&nbsp;&nbsp;\n<h1>Заголовок&nbsp;&nbsp;</h1>\n',
+    );
+  });
+
   it('renders supported formatting and links to html', () => {
     expect(
       renderSupportedMarkdownAsHtml(

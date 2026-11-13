@@ -91,6 +91,10 @@ const LazyNetworkSettingsRoute = lazy(async () => {
   return { default: module.NetworkSettingsRoute };
 });
 
+const LazySuggestionReviewPage = lazy(async () => ({
+  default: (await import('./pages/suggestion-review-page')).SuggestionReviewPage,
+}));
+
 const LazyAppStartupState = lazy(async () => {
   const module = await import('./components/app-startup-state');
   return { default: module.AppStartupState };
@@ -571,6 +575,12 @@ function AppRoutes({
             path="/chat/:chatId/dialog/comments"
             element={
               <LazyChannelDialogPage api={apiClient} profile={me.profile} userId={me.userId} />
+            }
+          />
+          <Route
+            path="/suggestions/:suggestionId/:mode"
+            element={
+              <LazySuggestionReviewPage api={apiClient} profile={me.profile} userId={me.userId} />
             }
           />
           <Route

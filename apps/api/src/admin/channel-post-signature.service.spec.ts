@@ -278,6 +278,14 @@ describe('ChannelPostSignatureService', () => {
     );
   });
 
+  it('retains authored trailing spaces and blank lines before the signature', async () => {
+    const { service } = createFixture();
+    const result = await service.preparePostText('channel-1', { text: '  Пост  \n\n\n' });
+    expect(result.text).toBe(
+      '  Пост  \n\n\n<a href="https://max.ru/channel/news">Читать канал</a>',
+    );
+  });
+
   it('uses an explicit signature URL without resolving the channel link', async () => {
     const { maxClient, prisma, service } = createFixture();
     prisma.channelSettings.findUnique.mockResolvedValue({

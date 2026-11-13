@@ -13,6 +13,7 @@ export function MaxMarkdownPreview({
   className,
   normalizeWhitespace = false,
   preserveLinks = false,
+  preserveWhitespace = false,
   fallback = null,
 }: {
   value: string;
@@ -20,6 +21,7 @@ export function MaxMarkdownPreview({
   className?: string;
   normalizeWhitespace?: boolean;
   preserveLinks?: boolean;
+  preserveWhitespace?: boolean;
   fallback?: ReactNode;
 }) {
   const source = normalizeWhitespace
@@ -27,7 +29,7 @@ export function MaxMarkdownPreview({
     : value;
   const normalizedSource = useNormalizedMarkdownSource(source, sourceFormat === 'markdown');
   if (sourceFormat === 'plain') {
-    const plainText = source.trim();
+    const plainText = preserveWhitespace ? source : source.trim();
     if (!plainText) {
       return fallback ? <>{fallback}</> : null;
     }
@@ -41,7 +43,10 @@ export function MaxMarkdownPreview({
 
   if (normalizedSource.status === 'error') {
     return (
-      <span className={cn('max-markdown-preview', 'is-normalization-error', className)} role="alert">
+      <span
+        className={cn('max-markdown-preview', 'is-normalization-error', className)}
+        role="alert"
+      >
         <span>Не удалось отобразить форматированный текст.</span>
         <button type="button" onClick={normalizedSource.retry}>
           Повторить
@@ -57,12 +62,14 @@ export function MaxMarkdownPreview({
   }
 
   const html = renderSupportedMarkdownAsHtml(normalizedSource.value, {
-    blockMode: 'inline',
+    blockMode: preserveWhitespace ? 'editor' : 'inline',
+    preserveWhitespace,
     linkMode: preserveLinks ? 'anchor' : 'underline',
   });
 
+  const Container = preserveWhitespace ? 'div' : 'span';
   return (
-    <span
+    <Container
       className={cn('max-markdown-preview', className)}
       dangerouslySetInnerHTML={{ __html: html }}
     />

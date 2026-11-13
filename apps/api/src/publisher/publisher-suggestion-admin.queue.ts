@@ -19,6 +19,13 @@ export type PublisherSuggestionAdminReviewActor = {
 };
 
 export type PublisherSuggestionAdminJob =
+  | {
+      version: 1;
+      kind: 'review-effect';
+      effectId: string;
+      requiredBotId: string;
+      requestedAt: string;
+    }
   | VkBotReviewJob
   | {
       version: 1;

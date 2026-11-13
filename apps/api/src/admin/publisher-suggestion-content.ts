@@ -18,6 +18,14 @@ export function buildPublisherSuggestionPublicationText(
   actorUserId: string,
   payload: Record<string, unknown>,
 ): string {
+  if (typeof payload.actorUserId === 'string' && payload.actorUserId !== actorUserId)
+    payload = {
+      ...payload,
+      authorDisplayName: null,
+      authorMentionDisplayName: null,
+      authorUsername: null,
+      authorProfileUrl: null,
+    };
   const markup = (Array.isArray(payload.textMarkup) ? payload.textMarkup : []).flatMap((item) => {
     const parsed = storedMarkupSchema.safeParse(item);
     if (!parsed.success) return [];
