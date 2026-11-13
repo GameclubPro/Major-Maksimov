@@ -24,6 +24,19 @@ for (const module of knowledge.moduleCoverage ?? [])
     }
   });
 
+test('network guidance uses the existing home category editor', () => {
+  for (const id of ['networks-management', 'networks-compose']) {
+    const fact = knowledge.entries.find((entry) => entry.id === id);
+    assert.match(fact.answer, /«Изменить состав»/u);
+    assert.match(fact.answer, /на главной/u);
+    assert.match(fact.answer, /«Готово»/u);
+    assert.doesNotMatch(fact.answer, /«В сетке»|«Сохранить состав»|раздел «Состав»/u);
+    assert.ok(fact.sources.includes('apps/miniapp/src/pages/chats-page.tsx'));
+  }
+  assert.match(source('apps/miniapp/src/pages/networks-page.tsx'), /&editCategory=/u);
+  assert.match(source('apps/miniapp/src/pages/chats-page.tsx'), /Готово/u);
+});
+
 test('the module inventory covers every shared chat and channel settings section', () => {
   const registry = source('apps/miniapp/src/pages/settings/settings-workspace-sections.ts');
   for (const [kind, constant] of [

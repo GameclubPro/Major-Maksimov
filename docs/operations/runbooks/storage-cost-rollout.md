@@ -242,8 +242,9 @@ byte budget is 16 MiB and 2,048 entries. `CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_BYT
 `CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_MEDIA_BYTES` and
 `CHAT_CONTEXT_SETTINGS_TEMPLATE_MAX_ENTRIES` configure bounded retention; the media
 budget must be smaller than the total. Production's four realtime moderation roles
-use 72 MiB total, 8 MiB media and 8,192 entries, leaving 64 MiB for compact settings.
-Other roles retain the defaults. This cache never establishes freshness. Every
+use 136 MiB total, 8 MiB media and 8,192 entries, leaving 128 MiB for compact settings.
+The join role uses 40 MiB total, 8 MiB media and 2,048 entries, leaving 32 MiB for
+compact settings. Other roles retain the defaults. This cache never establishes freshness. Every
 source refresh with a candidate reads the exact settings ID and nullable UUID
 revision together with fresh title, bot binding, administrators, active domains
 and rules publication fields in one SQL snapshot. An exact match reuses a cloned
@@ -280,12 +281,17 @@ and dates; immutable base64 strings can be shared. These budgets exclude in-flig
 results and do not guarantee total process RSS. Retain regression coverage in
 `chat-settings-template-cache.spec.ts` and `chat-context-settings-cache-postgres.spec.ts`.
 
-The realtime expansion addresses observed compact-segment churn; it adds at most
-224 MiB of estimated retained capacity across the four processes. Compare matching
+The realtime and join expansion addresses observed compact-segment churn. Relative
+to the previous 72 MiB realtime and 16 MiB join totals, it adds at most 280 MiB of
+estimated retained capacity across five processes (504 MiB above their default
+budgets). Check shared-host headroom and compare matching
 process epochs and workload intervals for `capacityEvictions`, `fullLoads`, `reuses`,
 compact/media occupancy, heap/RSS and actual action latency. A larger cache or a
 synthetic reuse result alone does not prove lower production p95/p99. Reverting the
-three overrides restores the defaults without changing persisted data or rights.
+total-byte overrides to 72 MiB for realtime and 16 MiB for join restores the previous
+capacity. Removing the three overrides from each affected role restores its defaults
+without changing persisted data or rights. A normal guarded all-role API release
+owns either configuration rollback; do not clear shared caches or queues.
 
 The additive metadata table and static trigger advance the UUID on every settings
 INSERT or UPDATE, including older runtime and raw SQL writers. Existing unchanged
