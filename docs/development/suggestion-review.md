@@ -1,58 +1,92 @@
 # Suggestion review in Major and Publik
 
-Administrator cards open `/suggestions/:id/edit`, `/publish` or `/reject` through the
-existing profile-specific `mr-` mini app links. The full publication workspace remains
-Publik-only. Old rejection callbacks open the reason selector without making a decision.
-Old publication callbacks cannot publish a suggestion edited after their original revision.
+The primary administrator flow is the private bot card: `Опубликовать`, `Править`,
+`Отклонить`. The user's explicit correction on 2026-11-14 supersedes mandatory mini app
+navigation for these actions. Native callbacks must work identically in Major and Publik.
+Existing explicit `/suggestions/:id/edit|publish|reject` mini app URLs remain compatible;
+they are not used by new card buttons. The full publication workspace remains Publik-only.
 
-The shared editor accepts only text, expected content revision and a UUID operation ID.
-The audit record owns author identity, original content, profile, channel and media.
-Unchanged editor content keeps the original native markup; changed content is stored as
-Markdown. UTF-16 offsets apply to the untrimmed original. Malformed or unsafe native
-formatting stops editing with an explanation. The author link is outside the editable body.
-Whitespace, paragraphs, links, mentions and supported formatting survive editor round trips
-and final rendering, including channel signature insertion. Saved media is not uploaded again.
+## Native card interaction
 
-Save and rejection lock the suggestion row. Publication uses the existing atomic claims with
-an expected revision and freezes the edited content in the same update. Stored operation
-hashes bind action, actor and request body; a reused ID cannot authorize a different decision.
-Rejected, publishing and transferred suggestions cannot be edited. A conflicting personal
-mini app draft remains available separately, and pending request identities survive reopening.
+`Править` edits the existing bot card into its body-only source. The administrator replies
+to that exact card with corrected text, then sees the final publication preview including
+original author attribution, channel signature and retained media. `Опубликовать` saves
+and publishes atomically; `Сохранить` leaves the edited suggestion pending. `Отмена` leaves
+shared suggestion content unchanged. Editing the administrator's bound input message updates
+its preview only while that editing session is active. Other messages/commands and replies to
+other cards do not become post content or overwrite other private authoring sessions.
 
-The four version-1 rejection templates are `paid`, `details`, `topic` and `rules`:
+MAX has no documented composer-prefill/force-reply operation. A clipboard button is an
+optional shortcut only for bodies of at most 1024 characters; its exact whitespace must survive
+normalization. Longer text uses native message copying. Editor UI uses existing-message PUTs,
+not new SENDs. Preserve every media attachment when replacing its text or keyboard.
+
+Native input retains MAX entities and untrimmed UTF-16 text. Unchanged ranges keep original
+styles and URLs; edits inside a style inherit it when correspondence is unambiguous. Changed
+or ambiguous link labels and edits crossing style boundaries require an explicit formatting
+choice or a new formatted input. Never silently attach a URL to another equal label. The
+original remains retained, and author identity/profile URL are outside the editable body.
+
+The four version-1 rejection templates are `paid`, `details`, `topic`, `rules`:
 «Платное размещение», «Нужно дополнить», «Не по теме», «Не по правилам».
-The paid template explicitly states that the announcement is paid and requires an administrator
-contact in MAX. It never invents a price, accepts payment or publishes a post. An optional
-explanation is included in the exact saved answer. Silent rejection sends no author message.
+`Отклонить` exposes these buttons on the same card. Selecting a template commits the decision
+and exact answer without another confirmation. Silent rejection sends no author message.
+The paid text explicitly states that placement is paid, never invents a price, accepts payment
+or publishes a post. Its MAX administrator contact is saved once per channel in the bot. The
+first contact input is previewed and committed by «Сохранить и отправить»; later paid refusals
+reuse it. A separate secondary action changes the contact.
 
-Rejection and notification intent commit together in `suggestion_review_effects`. Major effects
-run on the action role; Publik effects use its own worker and identity/dispatch gates. Replies
-use the submission bot and audit author. Final dispatch rechecks current bot and reviewer
-access. Preparation can retry for up to 24 hours; persisted SEND start is never replay authority.
-A timeout, crash after SEND or unknown outcome remains ambiguous. A positive receipt is retained
-without resending even if its first SQL write fails. Card edits are repeatable, version-aware
-and also scheduled after late initial delivery. Queue failure leaves durable work for recovery.
+## Authority and persistence
 
-The schema migration only adds the effect journal and indexes. Existing audit statuses and
-publication fences retain their meaning. All API roles must use the shared release image.
-Rollback must preserve the new journal: never delete/requeue attempted notifications or reset
-publishing suggestions. An older binary does not process new review effects; restore a compatible
-reader to resume only positively unstarted work. Confirmed/ambiguous effects remain evidence.
+`SuggestionReviewDialog` binds a delivered card, exact bot, administrator and private chat.
+Content revision, view version, input message/edit time and editing epoch prevent stale replies,
+buttons and competing administrators from changing another revision. A personal preview does
+not mutate shared content until save/publication. Pending sessions are independent of generic
+Major inputs and Publik import/auto-reply leases because only exact replies or bound edits are
+consumed. Native callbacks, including old rejection callbacks, precede those routers.
+
+Shared review service row locks, operation hashes, publication claims and effect journal remain
+authoritative. Operation IDs bind action, actor and request body. Rejected, publishing and
+transferred suggestions cannot be edited. Publication freezes the same revision it accepts.
+The mini app's strict text/revision/UUID contract remains unchanged.
+
+Major dialog jobs execute on `admin-suggestion-delivery` in the action role. Publik uses
+`publisher-suggestion-admin` in `api-publisher`, retaining identity/dispatch gates. Fresh exact
+bot/actor checks precede processing; card edits recheck ownership, access and content revision
+at mutation. Jobs retain original source timestamps and a five-minute command admission window.
+
+Rejection and notification intent commit together in `suggestion_review_effects`. Replies use
+the submission bot and audit author. Final dispatch rechecks current bot and reviewer access.
+Preparation can retry for up to 24 hours; persisted SEND start is never replay authority.
+Timeout/crash/unknown outcomes stay ambiguous. Confirmed receipts survive persistence retries
+without another SEND. Card edits remain repeatable and version-aware; they do not erase an
+active personal draft of the same content revision. Queue failure leaves durable recovery work.
+
+A bounded, persisted primary-key walk upgrades already-delivered pending cards to native buttons.
+Each page selects at most 25 delivery keys before profile/status/payload checks; terminal rows
+are skipped and native sync intents are idempotent. Existing historical suggestions are neither
+resent nor reopened. Runtime governor and profile-owned recovery remain in force.
+
+The additive migration creates only dialog, contact and upgrade-progress tables with indexes on
+new empty tables. Existing suggestion/effect statuses and publication fences retain their meaning.
+All API roles use the shared release image. Rollback preserves these tables and the notification
+journal; never delete/requeue attempted notifications or reset publishing suggestions. An older
+binary cannot process native dialog jobs/buttons: restore a compatible reader to resume them.
 
 ## Regression checks
 
-- [Contracts](../../packages/contracts/test/suggestion-review.spec.ts): author protection,
-  request validation, paid contact and exact template copy.
-- [Content](../../apps/api/src/admin/suggestion-review-content.spec.ts) and
-  [bot cards](../../apps/api/src/admin/suggestion-review-links.spec.ts): original markup,
-  author binding, malformed formatting, revisions and profile-specific links.
-- [Native service tests](../../apps/api/src/admin/suggestion-review-postgres.spec.ts): actual
-  PostgreSQL/Redis, competing administrators, atomic publication/save, rejection and outbox,
-  duplicate requests, queue failures, crash recovery and bounded indexed selection.
-- [Browser](../../apps/miniapp/test/suggestion-review.browser.mjs): Chromium/Android and
-  WebKit/iPhone sizes, both profiles/themes, whitespace/code/list round trips, edits, paid
-  replies, conflicting drafts and network recovery. This owns a local Vite server and never
-  sends to MAX. Screenshots live in a temporary directory printed by the runner.
+- [Content and protocol](../../apps/api/src/admin/suggestion-native-content.spec.ts): native and
+  Markdown round trips, UTF-16 offsets, whitespace, hidden links, changed labels and ambiguity.
+- [Bot cards](../../apps/api/src/admin/suggestion-review-links.spec.ts) and
+  [clipboard](../../apps/api/src/max/max-inline-keyboard-layout.spec.ts): native revisioned actions,
+  compatible explicit mini app URLs and exact bounded copy payloads.
+- [Native dialog](../../apps/api/src/admin/suggestion-native-postgres.spec.ts): PostgreSQL/Redis,
+  both bot profiles, exact reply routing, session epochs, edits, contacts, four refusals, silent
+  rejection, stale/conflicting requests, retained media and old-card upgrades.
+- [Review service](../../apps/api/src/admin/suggestion-review-postgres.spec.ts): actual stores,
+  competing administrators, atomic save/publication/rejection, effect recovery and uncertain SEND.
+- [Mini app browser](../../apps/miniapp/test/suggestion-review.browser.mjs): the retained editor's
+  Chromium/Android and WebKit/iPhone round trips, profiles/themes, conflicts and network recovery.
 
-Browser fixtures do not prove physical MAX rendering or author delivery. Record local checks,
-exact-SHA CI, deployment and actual MAX acceptance separately for each release.
+Mocks/browser fixtures do not prove physical MAX rendering, clipboard behavior or author receipt.
+Report local checks, exact-SHA CI, deployment and actual MAX acceptance separately.

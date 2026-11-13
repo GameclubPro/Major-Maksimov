@@ -1,5 +1,4 @@
-import { PRIVATE_CONTROL_CALLBACK_PREFIX } from './admin.service.support';
-import { buildPublisherSuggestionAdminReviewCallbackPayload } from '../publisher/publisher-suggestion-admin.queue';
+import { suggestionNativeButtons } from './suggestion-native-protocol';
 import type { MiniappProfile } from '@maxim/contracts/publisher';
 import type { MaxMessageButton } from '../max/max-client.service';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
@@ -18,28 +17,11 @@ export function suggestionReviewUrl(
 }
 
 export function buildSuggestionReviewButtons(
-  links: MaxBotLinkService | undefined,
-  profile: MiniappProfile,
+  _links: MaxBotLinkService | undefined,
+  _profile: MiniappProfile,
   id: string,
-  publish: MaxMessageButton,
+  _publish?: MaxMessageButton,
+  revision = 0,
 ): MaxMessageButton[][] {
-  const fallbackReject: MaxMessageButton = {
-    type: 'callback',
-    text: '✖️ Отклонить',
-    intent: 'negative',
-    payload:
-      profile === 'publisher'
-        ? buildPublisherSuggestionAdminReviewCallbackPayload('cancel', id)
-        : `${PRIVATE_CONTROL_CALLBACK_PREFIX}|suggestion_review_cancel|${id}`,
-  };
-  if (!links) return [[publish, fallbackReject]];
-  const edit = suggestionReviewUrl(links, profile, id, 'edit');
-  const reject = suggestionReviewUrl(links, profile, id, 'reject');
-  return [
-    ...(edit ? [[{ type: 'link' as const, text: '✏️ Редактировать', url: edit }]] : []),
-    [
-      publish,
-      reject ? { type: 'link' as const, text: '✖️ Отклонить', url: reject } : fallbackReject,
-    ],
-  ];
+  return suggestionNativeButtons(id, revision);
 }

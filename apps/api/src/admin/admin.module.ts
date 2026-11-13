@@ -1,3 +1,4 @@
+import { SuggestionNativeService } from './suggestion-native.service';
 import { SuggestionReviewService } from './suggestion-review.service';
 import { SuggestionReviewController } from './suggestion-review.controller';
 import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
@@ -289,6 +290,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
   ],
   providers: [
     SuggestionReviewService,
+    SuggestionNativeService,
     SuggestionReviewEffectsService,
     ...(roleRunsAction(getAppRole()) || roleRunsPublisher(getAppRole())
       ? [SuggestionReviewEffectsRecoveryService]

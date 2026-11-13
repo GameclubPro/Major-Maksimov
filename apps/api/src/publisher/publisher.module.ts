@@ -1,3 +1,5 @@
+import { SuggestionNativeQueueService } from './suggestion-native.queue';
+import { ADMIN_SUGGESTION_DELIVERY_QUEUE } from '../admin/admin-suggestion-delivery.queue';
 import { PublisherAccessRefreshPolicy } from './publisher-access-refresh-policy';
 import { PublisherAccessRefreshEvidenceService } from './publisher-access-refresh-evidence.service';
 import { registerRuntimeQueues } from '../runtime/runtime-queues';
@@ -97,6 +99,7 @@ const publisherRuntimeProviders = roleRunsPublisher(getAppRole())
   : [];
 
 const sharedPublisherProviders = [
+  SuggestionNativeQueueService,
   PublisherAccessRefreshPolicy,
   PublisherCommentNotificationService,
   PublisherBackgroundWorkCoordinatorService,
@@ -133,6 +136,7 @@ const sharedPublisherProviders = [
     MaxModule,
     SystemModule,
     ...registerRuntimeQueues(
+      ADMIN_SUGGESTION_DELIVERY_QUEUE,
       PUBLISHER_BINDING_REFRESH_QUEUE,
       PUBLISHER_CHAT_COMMENT_QUEUE,
       PUBLISHER_POST_IMPORT_QUEUE,

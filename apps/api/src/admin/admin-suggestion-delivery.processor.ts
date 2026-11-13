@@ -1,3 +1,4 @@
+import { SuggestionNativeService } from './suggestion-native.service';
 import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
@@ -18,6 +19,7 @@ export class AdminSuggestionDeliveryProcessor extends WorkerHost {
   constructor(
     private readonly channelDialogService: ChannelDialogService,
     private readonly reviewEffects: SuggestionReviewEffectsService,
+    private readonly nativeReview: SuggestionNativeService,
   ) {
     super();
   }
@@ -27,6 +29,11 @@ export class AdminSuggestionDeliveryProcessor extends WorkerHost {
       throw new Error('Admin suggestion delivery job received by a non-action API role');
     }
 
+    if ('kind' in job.data && job.data.kind === 'suggestion-native') {
+      if (job.data.profile !== 'moderation') throw new Error('Wrong native review worker');
+      await this.nativeReview.process(job.data);
+      return;
+    }
     if ('kind' in job.data && job.data.kind === 'review-effect') {
       await this.reviewEffects.process(job.data.effectId, 'moderation');
       return;

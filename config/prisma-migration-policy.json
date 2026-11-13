@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261113170000_add_suggestion_review_effects",
-  "baselineNamesSha256": "155cc89013b4e02c6b2969d2080585cf4d470a70e72ff13369407cc598422c13",
-  "baselineContentsSha256": "e64e8ee143cea9a26ac401c8bb5bfa7ac5f2f84c837bd092f43ae86da5778e6f",
+  "baselineThrough": "20261114010000_add_suggestion_review_dialogs",
+  "baselineNamesSha256": "8d851adaf6893aae92be3f387d42426e71f49594658e23e4c1b7c97d886fd1f9",
+  "baselineContentsSha256": "51a5b5834ff5dd3d66c0b1a1d34ab0b25d3b39e337e6e328e322ba2fb5c9d8f3",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -329,6 +329,9 @@
     },
     "20261113170000_add_suggestion_review_effects": {
       "reason": "All indexes belong only to the new empty suggestion_review_effects journal and are created before runtime can write effects. No retained audit, delivery or publication history is scanned, backfilled or indexed."
+    },
+    "20261114010000_add_suggestion_review_dialogs": {
+      "reason": "All indexes belong only to new empty private review state tables. No retained suggestions, deliveries or publication history is indexed, scanned or rewritten by the migration."
     }
   }
 }

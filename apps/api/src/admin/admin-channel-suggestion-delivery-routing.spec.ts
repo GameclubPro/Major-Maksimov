@@ -153,6 +153,31 @@ function createRoutingHarness(params: {
 }
 
 describe('AdminService channel suggestion delivery routing', () => {
+  it('binds initial buttons to the same content snapshot even after another edit', async () => {
+    const harness = createRoutingHarness({ routeLookup: () => 'private-admin' });
+    harness.prisma.auditLog.findUnique.mockResolvedValue({
+      payload: { text: 'Other edit', reviewContentRevision: 8 },
+    });
+    await (harness.service as any).deliverSuggestionToAdminPrivates(
+      'snapshot-1',
+      'channel-1',
+      actor,
+      { text: 'Shown snapshot' },
+      undefined,
+      7,
+    );
+    expect(harness.maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
+      'private-admin',
+      expect.stringContaining('Shown snapshot'),
+      expect.objectContaining({
+        buttons: expect.arrayContaining([
+          [expect.objectContaining({ payload: 'sr1|publish|snapshot-1|7|0' })],
+        ]),
+      }),
+      expect.any(Object),
+    );
+  });
+
   it('uses a known active alternate when the preferred bot has no admin dialog', async () => {
     const harness = createRoutingHarness({
       routeLookup: (botId) => (botId === 'alternate-bot' ? 'private-alternate' : null),

@@ -1,3 +1,4 @@
+import type { SuggestionNativeJob } from './suggestion-native.queue';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, ServiceUnavailableException, type OnModuleDestroy } from '@nestjs/common';
 import { QueueEvents, type Queue } from 'bullmq';
@@ -19,6 +20,7 @@ export type PublisherSuggestionAdminReviewActor = {
 };
 
 export type PublisherSuggestionAdminJob =
+  | SuggestionNativeJob
   | {
       version: 1;
       kind: 'review-effect';
