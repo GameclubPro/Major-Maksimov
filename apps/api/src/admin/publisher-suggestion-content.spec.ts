@@ -63,6 +63,17 @@ describe('Publisher suggestion publication content', () => {
     );
   });
 
+  it('never attributes the audit author to a mismatched stored profile', () => {
+    expect(
+      buildPublisherSuggestionPublicationText('42', {
+        actorUserId: '999',
+        authorDisplayName: 'Другой',
+        authorProfileUrl: 'https://max.ru/other',
+        text: 'Пост',
+      }),
+    ).toBe('От подписчика 42\n\nПост');
+  });
+
   it('does not invent a contact when only an ID is known', () => {
     expect(buildPublisherSuggestionPublicationText('123456', { authorDisplayName: '123456' })).toBe(
       'От подписчика 123456',

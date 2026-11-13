@@ -1,3 +1,6 @@
+import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
+import { suggestionReviewUrl } from './suggestion-review-links';
+import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { ForbiddenException, HttpException, Logger, Optional } from '@nestjs/common';
 import { VkBotReviewService } from './vk-bot-review.service';
@@ -45,6 +48,8 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
     private readonly runtimeBoundary: PublisherRuntimeBoundaryService,
     private readonly credentials: PublisherActionCredentialService,
     @Optional() private readonly vkReviews?: VkBotReviewService,
+    @Optional() private readonly reviewEffects?: SuggestionReviewEffectsService,
+    @Optional() private readonly links?: MaxBotLinkService,
   ) {
     super();
   }
@@ -62,6 +67,12 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
     await assertPublisherRuntimeEnabledOrDelay(this.runtimeBoundary, job, token);
     await assertPublisherIdentityOrDelay(this.identityAttestation, job, token);
     await assertPublisherDispatchAllowedOrDelay(this.dispatchHealth, job, token);
+
+    if (job.data.kind === 'review-effect') {
+      if (!this.reviewEffects) throw new Error('Review effect worker unavailable');
+      await this.reviewEffects.process(job.data.effectId, 'publisher', job.data.requiredBotId);
+      return;
+    }
 
     if (job.data.kind === 'subscription') {
       if (Date.now() - Date.parse(job.data.requestedAt) > 8_000) {
@@ -105,6 +116,7 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
         job.data.suggestionId,
         job.data.requiredBotId,
       );
+      await this.reviewEffects?.syncAfterDelivery(job.data.suggestionId, 'publisher');
       return;
     }
     if (job.data.kind === 'sync') {
@@ -162,6 +174,27 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
         throw new ForbiddenException('Publisher administrator access is not granted.');
       }
 
+      if (job.action === 'cancel') {
+        const url = this.links
+          ? suggestionReviewUrl(this.links, 'publisher', row.id, 'reject')
+          : null;
+        await this.maxClient.answerCallback(
+          job.callbackId,
+          'Выберите причину отказа.',
+          url
+            ? {
+                text: 'Выберите причину отказа и проверьте ответ автору.',
+                options: { buttons: [[{ type: 'link', text: 'Выбрать причину', url }]] },
+              }
+            : undefined,
+          {
+            botId: job.requiredBotId,
+            rateLimitEntityId: job.privateChatId,
+            sourceTag: MAX_API_SOURCE_TAGS.CALLBACK_ANSWER,
+          },
+        );
+        return;
+      }
       const result = await this.suggestions.review(
         row.chatId,
         row.id,

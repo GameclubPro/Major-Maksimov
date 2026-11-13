@@ -254,9 +254,10 @@ export class ChannelPostSignatureService {
     ])!;
     const normalizedBaseHtml = baseHtml.trimEnd();
     const signatureAlreadyPresent = normalizedBaseHtml.endsWith(signatureHtml);
-    const text = signatureAlreadyPresent
-      ? normalizedBaseHtml
-      : [normalizedBaseHtml, signatureHtml].filter(Boolean).join('\n\n');
+    // FLAG: Keep authored spaces and blank lines when appending the channel signature.
+    const separator =
+      !baseHtml || baseHtml.endsWith('\n\n') ? '' : baseHtml.endsWith('\n') ? '\n' : '\n\n';
+    const text = signatureAlreadyPresent ? baseHtml : `${baseHtml}${separator}${signatureHtml}`;
     const maxLength = options.maxLength ?? CHANNEL_POST_MAX_TEXT_LENGTH;
     if (text.length > maxLength) {
       throw new BadRequestException(

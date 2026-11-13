@@ -146,6 +146,7 @@ export function expectChatRulesDeleteOptions(overrides: Record<string, unknown> 
 
 export function createAdminMaxBotLinkMock(overrides: Record<string, unknown> = {}) {
   return {
+    getContextOrDefaultBotId: jest.fn(() => '777000_bot'),
     getBotTokenSync: jest.fn().mockReturnValue('test-max-bot-token'),
     getValidationTokens: jest.fn().mockReturnValue(['test-max-bot-token']),
     resolveBotId: jest.fn().mockResolvedValue('777000_bot'),

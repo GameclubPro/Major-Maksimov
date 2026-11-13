@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261111011411_index_managed_giveaway_due_end",
-  "baselineNamesSha256": "0d2e6da8ceba60c721aa2b07c514cf907e090ba8fdcd9cc03a9c43f20a62f608",
-  "baselineContentsSha256": "3a6c318b5481af72cdfae8b44fff08049c1fbc45cc673c172345e74ede0db43a",
+  "baselineThrough": "20261113170000_add_suggestion_review_effects",
+  "baselineNamesSha256": "155cc89013b4e02c6b2969d2080585cf4d470a70e72ff13369407cc598422c13",
+  "baselineContentsSha256": "e64e8ee143cea9a26ac401c8bb5bfa7ac5f2f84c837bd092f43ae86da5778e6f",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -326,6 +326,9 @@
     },
     "20261104123000_karavan_connection_journal": {
       "reason": "Both ordinary indexes belong only to the new empty karavan_marketplace_connection_scopes table created in this additive migration. Existing operation history is not indexed or backfilled here; its five partial indexes are isolated in separate CONCURRENTLY migrations."
+    },
+    "20261113170000_add_suggestion_review_effects": {
+      "reason": "All indexes belong only to the new empty suggestion_review_effects journal and are created before runtime can write effects. No retained audit, delivery or publication history is scanned, backfilled or indexed."
     }
   }
 }

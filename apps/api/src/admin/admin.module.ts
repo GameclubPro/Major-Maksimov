@@ -1,3 +1,7 @@
+import { SuggestionReviewService } from './suggestion-review.service';
+import { SuggestionReviewController } from './suggestion-review.controller';
+import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
+import { SuggestionReviewEffectsRecoveryService } from './suggestion-review-effects-recovery.service';
 import { MarketplaceEditorialService } from '../integrations/marketplace/marketplace-editorial.service';
 import { MarketplaceEditorialAccessService } from '../integrations/marketplace/marketplace-editorial-access.service';
 import {
@@ -242,6 +246,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     PublisherModule,
   ],
   controllers: [
+    SuggestionReviewController,
     AdminMessageRetentionController,
     AdminReportsController,
     AdvertisingPlacementController,
@@ -283,6 +288,11 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     SupportRequestsController,
   ],
   providers: [
+    SuggestionReviewService,
+    SuggestionReviewEffectsService,
+    ...(roleRunsAction(getAppRole()) || roleRunsPublisher(getAppRole())
+      ? [SuggestionReviewEffectsRecoveryService]
+      : []),
     ...(roleRunsAction(getAppRole()) || roleRunsPublisher(getAppRole())
       ? [SuggestionSubscriptionMonitorService]
       : []),

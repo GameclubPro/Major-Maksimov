@@ -1,3 +1,12 @@
+import type { SuggestionReviewWrite } from '@maxim/contracts/publisher';
+import {
+  assertSuggestionPublicationLength,
+  suggestionContentPatch,
+  suggestionRevision,
+  hasSuggestionRequest,
+  suggestionRequestPatch,
+  publicationEditorInput,
+} from './suggestion-review-content';
 import { SuggestionSubscriptionService } from '../suggestions/suggestion-subscription.service';
 import {
   publisherSuggestionSchema,
@@ -187,6 +196,11 @@ export class PublisherSuggestionService {
       payload = this.readPayload(row.payload);
       currentStatus = this.readStatus(payload.reviewStatus);
     }
+    if (parsed.data.editor) {
+      const same = hasSuggestionRequest(payload, 'publish', user.userId, parsed.data.editor);
+      if (currentStatus !== 'pending' && !same)
+        throw new ConflictException('По предложке уже принято другое решение. Обновите её.');
+    }
     const durableClaim = readPublisherSuggestionReviewClaim(payload, row.id, {
       allowPending: true,
     });
@@ -239,11 +253,23 @@ export class PublisherSuggestionService {
       throw new BadRequestException('В предложке нет текста или фото.');
     }
     await this.suggestionSubscriptions?.assertCanSubmit(row.chatId, row.actorUserId, 'publisher');
-    const claimed = await this.claimPending(row.id, entityId, user, reviewAction, row);
+    const claimed = await this.claimPending(
+      row.id,
+      entityId,
+      user,
+      reviewAction,
+      row,
+      parsed.data.editor,
+    );
     if (!claimed) {
       const latest = await this.requireRow(row.id, entityId);
       const latestPayload = this.readPayload(latest.payload);
       const latestStatus = this.readStatus(latestPayload.reviewStatus);
+      if (
+        parsed.data.editor &&
+        !hasSuggestionRequest(latestPayload, 'publish', user.userId, parsed.data.editor)
+      )
+        throw new ConflictException('Предложку уже изменили. Обновите её перед решением.');
       if (latestStatus === 'cancelled') {
         throw new ConflictException('Предложка уже отклонена.');
       }
@@ -306,7 +332,8 @@ export class PublisherSuggestionService {
         logger: this.logger,
       });
       // FLAG: Freeze new claim text before dispatch; legacy claims keep their original request hash.
-      const publicationText = this.readString(payload.reviewPublicationText);
+      const publicationText =
+        typeof payload.reviewPublicationText === 'string' ? payload.reviewPublicationText : null;
       const text = publicationText ?? this.readString(payload.text) ?? '';
       if (!text && images.length === 0) {
         await this.releaseTerminalClaim(row, claim, 'В предложке нет текста или фото.');
@@ -417,13 +444,37 @@ export class PublisherSuggestionService {
     user: AuthUser,
     action: PublisherSuggestionReviewClaim['action'],
     source: PublisherSuggestionStoredRow,
+    editor?: SuggestionReviewWrite,
   ): Promise<PublisherSuggestionStoredRow | null> {
+    const sourcePayload = this.readPayload(source.payload);
+    const contentPatch = suggestionContentPatch(
+      sourcePayload,
+      editor
+        ? publicationEditorInput(sourcePayload, user.userId, editor)
+        : { expectedRevision: 0, requestId: '00000000-0000-4000-8000-000000000000' },
+      user.userId,
+    );
+    const effectivePayload = { ...sourcePayload, ...contentPatch };
+    assertSuggestionPublicationLength(source.actorUserId, effectivePayload);
     const claimToken = randomUUID();
     const claimPatch = {
+      ...contentPatch,
+      ...(editor
+        ? {
+            reviewContentRequestId: editor.requestId,
+            ...suggestionRequestPatch(
+              sourcePayload,
+              'publish',
+              user.userId,
+              editor,
+              suggestionRevision(effectivePayload),
+            ),
+          }
+        : {}),
       reviewStatus: 'publishing',
       reviewPublicationText: buildPublisherSuggestionPublicationText(
         source.actorUserId,
-        this.readPayload(source.payload),
+        effectivePayload,
       ),
       reviewAction: action,
       reviewDispatchProfile: PUBLISHER_SUGGESTION_DISPATCH_PROFILE,
@@ -442,7 +493,7 @@ export class PublisherSuggestionService {
       reviewedByUserId: user.userId,
       reviewClaimMigratedFrom: null,
       reviewError: null,
-    } satisfies Prisma.InputJsonObject;
+    };
     const rows = await this.prisma.$queryRaw<PublisherSuggestionStoredRow[]>(Prisma.sql`
       UPDATE audit_logs
       SET payload = payload::jsonb || ${JSON.stringify(claimPatch)}::jsonb
@@ -452,6 +503,7 @@ export class PublisherSuggestionService {
         AND payload->>'type' = 'suggest'
         AND COALESCE(NULLIF(LOWER(payload->>'reviewStatus'), ''), 'pending') = 'pending'
         AND payload->>'reviewClaimToken' IS NULL
+        AND COALESCE((payload->>'reviewContentRevision')::integer, 0) = ${suggestionRevision(sourcePayload)}
       RETURNING id, chat_id AS "chatId", actor_user_id AS "actorUserId", payload, created_at AS "createdAt"
     `);
     return rows[0] ?? null;

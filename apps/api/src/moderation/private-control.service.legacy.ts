@@ -1,3 +1,5 @@
+import { suggestionReviewResultView } from './private-control-suggestion-review-view';
+import { suggestionReviewUrl } from '../admin/suggestion-review-links';
 import { BadRequestException, Injectable, Logger, Optional } from '@nestjs/common';
 import * as settingsRenderer from './private-control-settings-renderer';
 import * as legacyHoldAdvisory from './private-control-legacy-hold-advisory';
@@ -2041,7 +2043,23 @@ export class PrivateControlService {
     if (!suggestionId) {
       throw new BadRequestException('Не удалось определить предложку.');
     }
-
+    if (action === 'cancel') {
+      const url = this.maxBotLinkService
+        ? suggestionReviewUrl(this.maxBotLinkService, 'moderation', suggestionId, 'reject')
+        : null;
+      await this.respond(
+        context,
+        session,
+        {
+          text: 'Выберите причину отказа и проверьте ответ автору.',
+          ...(url
+            ? { options: { buttons: [[{ type: 'link', text: 'Выбрать причину', url }]] } }
+            : {}),
+        },
+        { callbackId: context.callbackId, notification: 'Выберите причину отказа' },
+      );
+      return;
+    }
     const result = await this.adminService
       .reviewChannelSuggestionByAdmin(suggestionId, context.actor, action)
       .catch((error: unknown) => {
@@ -2062,37 +2080,7 @@ export class PrivateControlService {
       return;
     }
     const publishedUrl = result.publishedUrl?.trim() ?? '';
-    const view: PrivateView =
-      result.reviewStatus === 'published'
-        ? {
-            text: [
-              privateMarkdownTitle('✅ Предложка опубликована'),
-              '',
-              ...(publishedUrl ? [`Пост: [Открыть пост](${publishedUrl})`, ''] : []),
-              'Решение сохранено.',
-            ].join('\n'),
-            ...(publishedUrl
-              ? {
-                  options: {
-                    buttons: [
-                      [
-                        {
-                          type: 'link',
-                          text: 'Открыть пост',
-                          url: publishedUrl,
-                        },
-                      ],
-                    ],
-                  },
-                }
-              : {}),
-          }
-        : {
-            text: [privateMarkdownTitle('✖️ Предложка отклонена'), '', 'Решение сохранено.'].join(
-              '\n',
-            ),
-          };
-
+    const view = suggestionReviewResultView(result.reviewStatus, publishedUrl);
     await this.respond(context, session, view, {
       callbackId: context.callbackId,
       notification:

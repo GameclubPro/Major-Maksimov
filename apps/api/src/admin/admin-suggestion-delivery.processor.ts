@@ -1,3 +1,4 @@
+import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import type { Job } from 'bullmq';
@@ -14,7 +15,10 @@ import { ChannelDialogService } from './channel-dialog.service';
 export class AdminSuggestionDeliveryProcessor extends WorkerHost {
   private readonly logger = new Logger(AdminSuggestionDeliveryProcessor.name);
 
-  constructor(private readonly channelDialogService: ChannelDialogService) {
+  constructor(
+    private readonly channelDialogService: ChannelDialogService,
+    private readonly reviewEffects: SuggestionReviewEffectsService,
+  ) {
     super();
   }
 
@@ -23,8 +27,14 @@ export class AdminSuggestionDeliveryProcessor extends WorkerHost {
       throw new Error('Admin suggestion delivery job received by a non-action API role');
     }
 
+    if ('kind' in job.data && job.data.kind === 'review-effect') {
+      await this.reviewEffects.process(job.data.effectId, 'moderation');
+      return;
+    }
+    if (!('auditLogId' in job.data)) return;
     try {
       await this.channelDialogService.processChannelSuggestionDeliveryJob(job.data.auditLogId);
+      await this.reviewEffects.syncAfterDelivery(job.data.auditLogId, 'moderation');
     } catch (error: unknown) {
       const maxAttempts = typeof job.opts.attempts === 'number' ? job.opts.attempts : 1;
       try {

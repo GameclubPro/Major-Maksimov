@@ -206,6 +206,20 @@
       }
     },
     {
+      "id": "suggestion-review",
+      "label": "Suggestion review cold launch",
+      "entries": [
+        "index.html",
+        "src/lib/api/me-client.ts",
+        "src/lib/api/miniapp-server-session.ts",
+        "src/pages/suggestion-review-page.tsx"
+      ],
+      "limits": {
+        "jsGzipBytes": 163840,
+        "cssGzipBytes": 26624
+      }
+    },
+    {
       "id": "stats",
       "label": "Channel stats",
       "entries": ["src/pages/channel-stats-page.tsx"],

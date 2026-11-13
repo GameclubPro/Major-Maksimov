@@ -1,3 +1,4 @@
+import { buildSuggestionReviewButtons, suggestionReviewUrl } from './suggestion-review-links';
 import { resolveModerationSanctionExpiry } from '../moderation/moderation-sanction-expiry.util';
 import { resolveEffectiveChatClosure } from '../moderation/night-mode-transition-time.util';
 import { resolveAdminBotUserId } from './admin-bot-identity';
@@ -16924,6 +16925,8 @@ export class AdminService implements OnModuleDestroy {
                 mediaFileName: params.mediaFileName ?? null,
               }),
           mediaBotId: params.mediaBotId ?? null,
+          suggestionSourceBotId:
+            params.mediaBotId ?? this.maxBotLinkService?.getContextOrDefaultBotId() ?? null,
         },
         ...(mediaRows.length
           ? {
@@ -18545,47 +18548,44 @@ export class AdminService implements OnModuleDestroy {
   }
 
   private buildChannelSuggestionAdminReviewButtons(suggestionId: string): MaxMessageButton[][] {
-    return [
-      [
-        {
-          type: 'callback',
-          text: '📰 В публикацию',
-          payload: this.buildPrivateControlCallbackPayload(
-            'suggestion_review_publish',
-            suggestionId,
-          ),
-          intent: 'positive',
-        },
-        {
-          type: 'callback',
-          text: '✖️ Отклонить',
-          payload: this.buildPrivateControlCallbackPayload(
-            'suggestion_review_cancel',
-            suggestionId,
-          ),
-          intent: 'negative',
-        },
-      ],
-    ];
+    const url = this.maxBotLinkService
+      ? suggestionReviewUrl(this.maxBotLinkService, 'moderation', suggestionId, 'publish')
+      : null;
+    return buildSuggestionReviewButtons(
+      this.maxBotLinkService,
+      'moderation',
+      suggestionId,
+      url
+        ? { type: 'link', text: '📰 В публикацию', url }
+        : {
+            type: 'callback',
+            text: '📰 В публикацию',
+            payload: this.buildPrivateControlCallbackPayload(
+              'suggestion_review_publish',
+              suggestionId,
+            ),
+            intent: 'positive',
+          },
+    );
   }
 
   private buildPublisherSuggestionAdminReviewButtons(suggestionId: string): MaxMessageButton[][] {
-    return [
-      [
-        {
-          type: 'callback',
-          text: '📰 В публикацию',
-          payload: buildPublisherSuggestionAdminReviewCallbackPayload('publish', suggestionId),
-          intent: 'positive',
-        },
-        {
-          type: 'callback',
-          text: '✖️ Отклонить',
-          payload: buildPublisherSuggestionAdminReviewCallbackPayload('cancel', suggestionId),
-          intent: 'negative',
-        },
-      ],
-    ];
+    const url = this.maxBotLinkService
+      ? suggestionReviewUrl(this.maxBotLinkService, 'publisher', suggestionId, 'publish')
+      : null;
+    return buildSuggestionReviewButtons(
+      this.maxBotLinkService,
+      'publisher',
+      suggestionId,
+      url
+        ? { type: 'link', text: '📰 В публикацию', url }
+        : {
+            type: 'callback',
+            text: '📰 В публикацию',
+            payload: buildPublisherSuggestionAdminReviewCallbackPayload('publish', suggestionId),
+            intent: 'positive',
+          },
+    );
   }
 
   private buildChannelSuggestionAdminReviewedButtons(

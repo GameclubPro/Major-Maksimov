@@ -1,3 +1,4 @@
+import { suggestionReviewWriteSchema } from './suggestion-review.js';
 import { z } from 'zod';
 import { broadcastTextFormatSchema } from './broadcast-common.js';
 
@@ -52,6 +53,7 @@ export const reviewPublisherSuggestionRequestSchema = z
   .object({
     action: z.enum(['publish', 'draft', 'cancel']),
     responseVersion: z.literal(2).optional(),
+    editor: suggestionReviewWriteSchema.optional(),
   })
   .strict();
 export type ReviewPublisherSuggestionRequest = z.infer<

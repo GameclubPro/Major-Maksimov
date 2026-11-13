@@ -1721,6 +1721,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
     const maxBotLinkService = {
+      ...createAdminMaxBotLinkMock(),
       buildMiniappStartUrlSync: jest
         .fn()
         .mockImplementation(
@@ -4673,6 +4674,7 @@ describe('AdminService.publishChannelEngagementMessage', () => {
       invalidate: jest.fn(),
     };
     const maxBotLinkService = {
+      ...createAdminMaxBotLinkMock(),
       getBotTokenSync: jest.fn().mockReturnValue('test-max-bot-token'),
       getValidationTokens: jest.fn().mockReturnValue(['test-max-bot-token']),
       getEntryBotId: jest.fn().mockReturnValue('777000_bot'),

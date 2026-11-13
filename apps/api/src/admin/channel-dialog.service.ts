@@ -9,7 +9,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { collectBotTokenSecrets } from '../common/bot-token.util';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
-import type { MiniappProfile } from '@maxim/contracts/publisher';
+import type { MiniappProfile, SuggestionReviewWrite } from '@maxim/contracts/publisher';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { PublisherDialogLinkService } from '../publisher/publisher-dialog-link.service';
@@ -60,6 +60,15 @@ export class ChannelDialogService {
       maxBotLinkService: this.maxBotLinkService,
       maxBotRegistry: this.maxBotRegistry,
     });
+  }
+
+  reviewSuggestion(id: string, user: AuthUser, editor: SuggestionReviewWrite) {
+    return this.legacyAdminService.channelSuggestionPublicationRuntime.review(
+      id,
+      user,
+      'publish',
+      editor,
+    );
   }
 
   resolveCommentThread(

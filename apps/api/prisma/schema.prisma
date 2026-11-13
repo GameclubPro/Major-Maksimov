@@ -3020,6 +3020,7 @@ model AuditLog {
   chat                             Chat                             @relation(fields: [chatId], references: [id], onDelete: Cascade)
   channelSuggestionAdminDeliveries ChannelSuggestionAdminDelivery[]
   channelSuggestionImageAssets     ChannelSuggestionImageAsset[]
+  suggestionReviewEffects          SuggestionReviewEffect[]
 
   @@index([chatId, createdAt])
   @@index([chatId, action, createdAt], map: "audit_logs_chat_action_created_at_idx")
@@ -5258,4 +5259,29 @@ model MarketplaceButtonCaption {
   revision Int @default(0)
   @@id([entityId, kind])
   @@map("marketplace_button_captions")
+}
+
+model SuggestionReviewEffect {
+  id              String   @id @default(cuid())
+  suggestionId    String   @map("suggestion_id")
+  profile         String
+  botId           String   @map("bot_id")
+  kind            String
+  revision        Int
+  status          String   @default("PENDING")
+  payload         Json
+  nextAttemptAt   DateTime @default(now()) @map("next_attempt_at")
+  lockedAt        DateTime? @map("locked_at")
+  lockToken       String? @map("lock_token")
+  attemptedAt     DateTime? @map("attempted_at")
+  remoteMessageId String? @map("remote_message_id")
+  lastError       String? @map("last_error")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  suggestion      AuditLog @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
+
+  @@unique([suggestionId, kind, revision, botId], map: "suggestion_review_effects_identity_key")
+  @@index([profile, status, nextAttemptAt, id], map: "suggestion_review_effects_due_idx")
+  @@index([profile, status, lockedAt, id], map: "suggestion_review_effects_stale_idx")
+  @@map("suggestion_review_effects")
 }

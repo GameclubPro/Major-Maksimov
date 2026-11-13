@@ -157,6 +157,10 @@ It requires an existing local Vite server selected with `MINIAPP_TEST_BASE_URL`.
 
 ## Publisher And VK
 
+Suggestion editing, protected attribution, four rejection templates and delivery recovery
+follow the [suggestion review reference](suggestion-review.md), including its native and
+mobile browser checks for both profiles.
+
 Preserve server-owned drafts/revisions, explicit final confirmation, saved recipients,
 schedule time zones and uncertain-effect fences. Private Test uses the Publisher path;
 it must never restore the retired Major publishing runtime. Opening an editor or selecting

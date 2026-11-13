@@ -81,21 +81,29 @@ export function renderSupportedMarkdownAsHtml(
       const rawLine = lines[index] ?? '';
       const trimmedLine = rawLine.trim();
       if (!trimmedLine) {
-        renderedLines.push('');
+        renderedLines.push(escapeHtmlPreservingWhitespace(rawLine));
         continue;
       }
 
-      const headingMatch = HEADING_LINE_PATTERN.exec(trimmedLine);
+      const headingMatch = HEADING_LINE_PATTERN.exec(rawLine.trimStart());
       if (headingMatch) {
         const content = renderInlineTokens(parseInlineTokens(headingMatch[2] ?? ''), options);
-        renderedLines.push(renderHeadingHtml(content, headingMatch[1] ?? '#'));
+        renderedLines.push(
+          escapeHtmlPreservingWhitespace(
+            rawLine.slice(0, rawLine.length - rawLine.trimStart().length),
+          ) + renderHeadingHtml(content, headingMatch[1] ?? '#'),
+        );
         continue;
       }
 
-      const quoteMatch = QUOTE_LINE_PATTERN.exec(trimmedLine);
+      const quoteMatch = QUOTE_LINE_PATTERN.exec(rawLine.trimStart());
       if (quoteMatch) {
         const content = renderInlineTokens(parseInlineTokens(quoteMatch[1] ?? ''), options);
-        renderedLines.push(renderQuoteHtml(content));
+        renderedLines.push(
+          escapeHtmlPreservingWhitespace(
+            rawLine.slice(0, rawLine.length - rawLine.trimStart().length),
+          ) + renderQuoteHtml(content),
+        );
         continue;
       }
 
