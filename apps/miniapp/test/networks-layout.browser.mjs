@@ -448,16 +448,17 @@ for (const profile of profiles) {
       true,
     );
     await page.getByRole('button', { name: 'Добавить чаты', exact: true }).click();
-    const emptySheet = page.locator('.network-composition-sheet');
-    await emptySheet.getByRole('radio', { name: 'Добавить', exact: true }).waitFor();
+    await page.locator('.chats-home.is-category-editing').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('view'), 'chat');
+    assert.equal(new URL(page.url()).searchParams.get('editCategory'), 'service');
+    await page.getByRole('button', { name: 'Готово', exact: true }).click();
+    await page.locator('.chats-home:not(.is-category-editing)').waitFor();
     assert.equal(
-      await emptySheet
-        .getByRole('radio', { name: 'Добавить', exact: true })
-        .getAttribute('aria-checked'),
+      await page.locator('.home-category-chip.is-service').getAttribute('aria-pressed'),
       'true',
     );
-    await emptySheet.getByRole('button', { name: 'Закрыть', exact: true }).click();
-    await emptySheet.waitFor({ state: 'hidden' });
+    await page.goBack();
+    await page.locator('.network-empty-start').waitFor();
     await page.screenshot({
       path: join(output, `${profile.name}-empty.png`),
       animations: 'disabled',
@@ -570,83 +571,51 @@ for (const profile of profiles) {
     await pageFits(page, `${profile.name} access error`);
 
     if (profile.name === 'android-light') {
-      await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
-      const sheet = page.locator('.network-composition-sheet');
-      await sheet.getByRole('checkbox').first().uncheck();
-      await sheet.getByRole('button', { name: 'Показать ещё', exact: true }).click();
-      await sheet
-        .getByText('Доступ к сообществам изменился. Обновите список.', { exact: true })
-        .waitFor();
-      const save = sheet.getByRole('button', { name: 'Сохранить состав', exact: true });
-      assert.equal(await save.isDisabled(), true, 'access denial blocks the existing draft');
-      await page.evaluate(async () => {
-        const find = (name) =>
-          performance
-            .getEntriesByType('resource')
-            .findLast((entry) => new URL(entry.name).pathname.endsWith('/' + name))?.name;
-        const { PREVIEW_REQUEST_HANDLERS } = await import(find('preview-transport.ts'));
-        const { PREVIEW_NOT_HANDLED } = await import(find('preview-transport-runtime.ts'));
-        let hold = true;
-        PREVIEW_REQUEST_HANDLERS.unshift(async (context) => {
-          if (hold && context.method === 'GET' && context.url.pathname.endsWith('/entities')) {
-            hold = false;
-            await new Promise((resolve) => {
-              window.__networkUxReleasePage = resolve;
-            });
-          }
-          return PREVIEW_NOT_HANDLED;
-        });
-      });
-      await sheet.getByRole('button', { name: 'Обновить список', exact: true }).click();
-      await page.waitForFunction(() => typeof window.__networkUxReleasePage === 'function');
-      await sheet.getByText('Загружаем…', { exact: true }).waitFor();
-      await settleVisualFrame(page);
-      assert.equal(await save.isDisabled(), true, 'pending access recheck cannot unlock saving');
-      await page.evaluate(() => window.__networkUxReleasePage());
-      await sheet.getByRole('checkbox').first().waitFor();
-      assert.equal(await save.isEnabled(), true, 'successful reload restores the preserved draft');
-      await sheet.getByRole('button', { name: 'Закрыть', exact: true }).click();
-      await page.getByRole('button', { name: 'Сбросить и закрыть', exact: true }).click();
-      await sheet.waitFor({ state: 'hidden' });
-    }
-
-    if (profile.name === 'android-light') {
       for (const [type, title, addLabel, countLabel] of [
         ['chat', 'Районный чат 104', 'Добавить чаты', '1 чат'],
         ['channel', 'Городской канал 104', 'Добавить каналы', '1 канал'],
       ]) {
         await open(`networks?type=${type}&category=test`, '.network-empty-start');
         await page.getByRole('button', { name: addLabel, exact: true }).click();
-        const sheet = page.locator('.network-composition-sheet');
-        const search = sheet.getByRole('searchbox', { name: 'Поиск сообществ', exact: true });
-        assert.equal(await search.getAttribute('maxlength'), '100');
-        await search.fill(title);
-        await sheet.getByRole('checkbox', { name: `Добавить ${title}`, exact: true }).check();
-        await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).click();
+        await page.locator('.chats-home.is-category-editing').waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('view'), type);
+        await page.locator('#chat-search').fill(title);
+        await page.locator('.chat-card__category-editor').first().click();
+        const sheet = page.locator('.home-sheet--favorite');
+        await sheet.locator('.favorite-picker__option.is-test').click();
         await sheet.waitFor({ state: 'hidden' });
+        await page.getByRole('button', { name: 'Готово', exact: true }).click();
+        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+        assert.equal(
+          await page.locator('.home-category-chip.is-test').getAttribute('aria-pressed'),
+          'true',
+        );
+        await page.goBack();
         await page
           .locator('.network-workspace-heading')
           .getByText(countLabel, { exact: true })
           .waitFor();
         await page.locator('.network-detail-metrics').waitFor();
-        assert.equal(
-          await page.locator('.network-empty-start').count(),
-          0,
-          `${type}: adding the first community opens statistics`,
-        );
+        assert.equal(await page.locator('.network-empty-start').count(), 0);
         await page.getByRole('button', { name: 'Состав', exact: true }).click();
         await page.locator('.network-community-list').getByText(title, { exact: true }).waitFor();
+        assert.equal(await page.getByRole('button', { name: 'Добавить', exact: true }).count(), 0);
         await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
-        await sheet.getByRole('checkbox', { name: `Оставить ${title}`, exact: true }).uncheck();
-        await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).click();
+        await page.locator('.chats-home.is-category-editing').waitFor();
+        assert.equal(await page.locator('#chat-search').inputValue(), '');
+        await page.locator('#chat-search').fill(title);
+        await page.locator('.chat-card__category-editor').first().click();
+        await sheet.getByRole('button', { name: 'Убрать из избранного', exact: true }).click();
         await sheet.waitFor({ state: 'hidden' });
+        await page.keyboard.press('Escape');
+        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+        await page.goBack();
         await page.getByText('В сетке пока пусто', { exact: true }).waitFor();
         await page.getByRole('button', { name: 'Статистика', exact: true }).click();
         await page.locator('.network-empty-start').waitFor();
         assert.equal(
           await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
           true,
-          `${type}: removing the last community disables settings`,
         );
       }
     }

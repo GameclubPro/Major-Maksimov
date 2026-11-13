@@ -28,9 +28,7 @@ async function fits(page, name) {
     `${name}: horizontal page overflow`,
   );
   const clipped = await page
-    .locator(
-      '.networks-page, .network-composition-sheet, [data-network-settings-overview], .network-settings-editor',
-    )
+    .locator('.networks-page, [data-network-settings-overview], .network-settings-editor')
     .evaluateAll((roots) =>
       roots.flatMap((root) =>
         [...root.querySelectorAll('button, input, select, h1, h2, h3')]
@@ -138,7 +136,6 @@ async function observe(page, linkRulesField) {
     const { PREVIEW_REQUEST_HANDLERS } = await import(findModule('preview-transport.ts'));
     const { PREVIEW_NOT_HANDLED } = await import(findModule('preview-transport-runtime.ts'));
     window.__networkRequests = [];
-    window.__networkLostComposition = false;
     PREVIEW_REQUEST_HANDLERS.unshift(async (context) => {
       const { url, method, init } = context;
       window.__networkRequests.push({
@@ -160,18 +157,6 @@ async function observe(page, linkRulesField) {
           ...response,
           fields: { ...response.fields, linkRulesPolicy: linkRulesField },
         };
-      }
-      if (
-        window.__networkLostComposition &&
-        method === 'PUT' &&
-        url.pathname.endsWith('/composition')
-      ) {
-        window.__networkLostComposition = false;
-        const { handleNetworksPreviewRequest } = await import(
-          findModule('preview-transport-networks.ts')
-        );
-        await handleNetworksPreviewRequest(context);
-        throw new Error('Preview response lost after committed composition');
       }
       return PREVIEW_NOT_HANDLED;
     });
@@ -1017,89 +1002,49 @@ for (const profile of profiles.filter(
       'Back restores list scroll position',
     );
 
-    await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
-    const sheet = page.locator('.network-composition-sheet');
-    await sheet.waitFor();
-    const changedCommunityTitle = await sheet
+    const changedCommunityTitle = await page
       .locator('.network-community-row__text strong')
       .first()
       .innerText();
-    const firstAssignment = sheet.getByRole('combobox').first();
-    const desiredAssignment =
-      (await firstAssignment.inputValue()) === 'watch' ? 'important' : 'watch';
-    await firstAssignment.selectOption(desiredAssignment);
+    await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
+    await page.locator('.chats-home.is-category-editing').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('view'), 'chat');
+    const homeSearch = page.locator('#chat-search');
+    assert.equal(await homeSearch.inputValue(), '', 'handoff clears the previous home search');
+    await homeSearch.fill(changedCommunityTitle);
+    const categoryEditor = page.locator('.chat-card__category-editor').first();
+    await categoryEditor.click();
+    const favoriteSheet = page.locator('.home-sheet--favorite');
+    await favoriteSheet.waitFor();
     await back(page);
-    await page.getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Продолжить редактирование', exact: true }).click();
-    await page
-      .getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true })
-      .waitFor({ state: 'hidden' });
-    assert.equal(await sheet.isVisible(), true, 'confirmation cancellation returns to the editor');
-    await back(page);
-    await page.getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true }).waitFor();
-    await back(page);
-    await page
-      .getByRole('dialog', { name: 'Сбросить изменения состава?', exact: true })
-      .waitFor({ state: 'hidden' });
-    assert.equal(
-      await firstAssignment.inputValue(),
-      desiredAssignment,
-      'cancelled discard preserves draft',
-    );
-    await fits(page, `${profile.name} composition`);
+    await favoriteSheet.waitFor({ state: 'hidden' });
+    assert.equal(await page.locator('.chats-home.is-category-editing').count(), 1);
+    await categoryEditor.click();
+    await favoriteSheet.locator('.favorite-picker__option.is-watch').click();
+    await favoriteSheet.waitFor({ state: 'hidden' });
+    await homeSearch.focus();
+    await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
+    const done = page.getByRole('button', { name: 'Готово', exact: true });
+    await done.scrollIntoViewIfNeeded();
+    const doneBox = await done.boundingBox();
+    assert.ok(doneBox && doneBox.y + doneBox.height <= page.viewportSize().height + 1);
+    await setPhoneKeyboard(page, { mode: 'resize', open: false });
+    await homeSearch.fill('');
     await page.screenshot({
-      path: join(output, `${profile.name}-composition.png`),
+      path: join(output, `${profile.name}-home-categories.png`),
       animations: 'disabled',
     });
-    await sheet.getByRole('searchbox').focus();
-    await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
-    await fits(page, `${profile.name} composition keyboard`);
-    const saveBox = await sheet
-      .getByRole('button', { name: 'Сохранить состав', exact: true })
-      .boundingBox();
-    assert.ok(
-      saveBox && saveBox.y + saveBox.height <= page.viewportSize().height + 1,
-      'composition save stays above keyboard',
-    );
-    await setPhoneKeyboard(page, { mode: 'resize', open: false });
-    await page.evaluate(() => {
-      window.__networkLostComposition = true;
-    });
-    await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).click();
-    await sheet.getByText('Состав изменился', { exact: true }).waitFor();
-    assert.equal(await sheet.isVisible(), true, 'lost write response preserves composition draft');
-    await sheet.getByRole('button', { name: 'Обновить состав', exact: true }).click();
-    await sheet.locator('.network-composition-review strong').first().waitFor();
+    if (profile.name === 'iphone-se-dark') await back(page);
+    else await done.click();
+    await page.locator('.chats-home:not(.is-category-editing)').waitFor();
+    assert.equal(new URL(page.url()).searchParams.has('editCategory'), false);
     assert.equal(
-      await sheet.locator('.network-composition-review strong').first().innerText(),
-      changedCommunityTitle,
-      'review retains the selected community identity after it has moved out of the loaded list',
+      await page.locator('.home-category-chip.is-important').getAttribute('aria-pressed'),
+      'true',
     );
-    await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
-    const reviewBody = await sheet.locator('.network-composition-sheet__body').boundingBox();
-    assert.ok(
-      reviewBody && reviewBody.height >= 40,
-      'recovery content stays scrollable above the keyboard',
-    );
-    await fits(page, `${profile.name} recovery keyboard`);
-    await sheet.getByRole('button', { name: 'Подтвердить изменения', exact: true }).click();
-    await setPhoneKeyboard(page, { mode: 'resize', open: false });
-    assert.equal(
-      await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).isDisabled(),
-      true,
-      'already committed desired assignment needs no replay',
-    );
-    assert.equal(
-      await page.evaluate(
-        () =>
-          window.__networkRequests.filter(
-            (row) => row.method === 'PUT' && row.path.endsWith('/composition'),
-          ).length,
-      ),
-      1,
-    );
-    await back(page);
-    await sheet.waitFor({ state: 'hidden' });
+    await page.goBack();
+    await page.locator('.network-community-list').waitFor();
+    assert.equal(await page.locator('.network-composition-sheet').count(), 0);
     await configure.click();
     const changedCompositionScope = await settingsHub(page, {
       readCount: (await readRequests(page)).length,
@@ -1738,7 +1683,7 @@ for (const profile of profiles.filter(
     await fits(page, `${profile.name} Publisher`);
     assert.deepEqual(errors, []);
     console.log(
-      `PASS ${profile.name}: whole-category settings from cards and statistics, category switching and composition, original settings parity, restored tab/position, pagination, mixed drafts, Native Back, keyboard, lost response and durable recovery`,
+      `PASS ${profile.name}: whole-category settings from cards and statistics, category switching and Home category editing, original settings parity, restored tab/position, pagination, mixed drafts, Native Back, keyboard, lost response and durable recovery`,
     );
   } catch (error) {
     console.error('FAILED', profile.name, page.url());

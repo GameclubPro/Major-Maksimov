@@ -48,9 +48,6 @@ const NetworkOperationHistory = lazy(async () => ({
 const NetworkStatisticsView = lazy(async () => ({
   default: (await import('../features/networks/network-statistics-view')).NetworkStatisticsView,
 }));
-const NetworkCompositionSheet = lazy(async () => ({
-  default: (await import('../features/networks/network-composition-sheet')).NetworkCompositionSheet,
-}));
 const compactNumber = new Intl.NumberFormat('ru-RU', {
   notation: 'compact',
   maximumFractionDigits: 1,
@@ -245,7 +242,6 @@ function NetworkDetail({
   const { snapshot } = useHomeEntityFavorites();
   const navigate = useNavigate();
   const location = useLocation();
-  const [compositionOpen, setCompositionOpen] = useState<'members' | 'add' | null>(null);
   const searchKey = `members:${state.entityType}:${state.favoriteType}`;
   const [memberQuery, setMemberQuery] = useState(() =>
     readNetworkViewPreference(snapshot.actor.scope, searchKey).slice(
@@ -351,11 +347,15 @@ function NetworkDetail({
       onRoute({ ...state, favoriteType: null, tab: 'overview' });
       return true;
     },
-    { enabled: !compositionOpen, priority: 100 },
+    { priority: 100 },
   );
   const route = (next: NetworkRouteState) => {
     savePosition();
     onRoute(next);
+  };
+  const editComposition = () => {
+    savePosition();
+    navigate(`/?view=${state.entityType}&editCategory=${card.favoriteType}`);
   };
   const openSettings = () => {
     savePosition();
@@ -407,11 +407,7 @@ function NetworkDetail({
             <NetworkCategoryIcon favoriteType={card.favoriteType} />
           </span>
           <h2>В сетке пока пусто</h2>
-          <button
-            type="button"
-            className="networks-primary"
-            onClick={() => setCompositionOpen('add')}
-          >
+          <button type="button" className="networks-primary" onClick={editComposition}>
             <AppIcon icon="Plus" />
             {state.entityType === 'chat' ? 'Добавить чаты' : 'Добавить каналы'}
           </button>
@@ -463,21 +459,9 @@ function NetworkDetail({
             </span>
           </div>
           <div className="network-community-actions">
-            <button
-              type="button"
-              className="networks-secondary"
-              onClick={() => setCompositionOpen('members')}
-            >
+            <button type="button" className="networks-secondary" onClick={editComposition}>
               <AppIcon icon="Group" />
               Изменить состав
-            </button>
-            <button
-              type="button"
-              className="networks-primary"
-              onClick={() => setCompositionOpen('add')}
-            >
-              <AppIcon icon="Plus" />
-              Добавить
             </button>
           </div>
           <SearchField
@@ -566,23 +550,6 @@ function NetworkDetail({
           </div>
         </>
       )}
-      {compositionOpen ? (
-        <Suspense
-          fallback={
-            <div className="networks-loading" role="status">
-              Открываем состав…
-            </div>
-          }
-        >
-          <NetworkCompositionSheet
-            api={api}
-            entityType={state.entityType}
-            favoriteType={card.favoriteType}
-            initialMode={compositionOpen}
-            onClose={() => setCompositionOpen(null)}
-          />
-        </Suspense>
-      ) : null}
     </>
   );
 }

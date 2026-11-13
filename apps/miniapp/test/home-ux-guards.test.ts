@@ -298,10 +298,6 @@ test('home list keeps grouped rows at wide breakpoints', () => {
 });
 
 test('category assignment is explicit, exclusive and stable while editing', () => {
-  assert.match(
-    chatsPageSource,
-    /const \[categoryEditMode, setCategoryEditMode\] = useState\(false\)/u,
-  );
   assert.match(chatsPageSource, /if \(categoryEditMode\) \{\s*return matchingEntities;/u);
   assert.match(chatsPageSource, /enabled: categoryEditMode && !homeOverlayOpen, priority: 600/u);
   assert.match(chatsPageSource, />\s*Готово\s*<\/button>/u);
