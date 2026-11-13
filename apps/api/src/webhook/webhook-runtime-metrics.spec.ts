@@ -1,12 +1,16 @@
 import {
   addWebhookMetric,
+  classifyWebhookPreparationError,
   sanitizeWebhookOutboxSnapshot,
   sanitizeWebhookPreparationSnapshot,
   WebhookOutboxRuntimeMetrics,
   WEBHOOK_OUTBOX_STAGES,
   WEBHOOK_RETENTION_PHASES,
+  WEBHOOK_PREPARATION_ERROR_REASONS,
 } from './webhook-runtime-metrics';
 import { WebhookPreparationAdmission } from './webhook-preparation-admission';
+import { WebhookPreparationDeferredError } from '../common/webhook-preparation-deferred.error';
+import { WebhookExecutionOwnerUnavailableError } from '../common/webhook-execution-owner-unavailable.error';
 
 const retentionConfig = {
   webhookCompletedRetentionEnabled: false,
@@ -33,6 +37,94 @@ function webhookOutboxSnapshot() {
 
 describe('fixed cumulative webhook telemetry', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    [new WebhookPreparationDeferredError('private-wait'), 'preparationDeferred'],
+    [new WebhookExecutionOwnerUnavailableError('private-owner'), 'ownerUnavailable'],
+    [{ code: 'P2002' }, 'databaseConflict'],
+    [{ code: 'P2034' }, 'databaseConflict'],
+    [{ code: 'P2024' }, 'databaseTimeout'],
+    [{ code: 'P2010', meta: { code: '40P01', message: 'private-sql' } }, 'databaseConflict'],
+    [{ code: 'P2010', meta: { code: '55P03' } }, 'databaseOther'],
+    [{ code: '57014' }, 'databaseOther'],
+    [{ code: 'P1001' }, 'databaseConnection'],
+    [{ code: 'P2028' }, 'databaseOther'],
+    [{ code: 'ETIMEDOUT' }, 'dependencyFailure'],
+    [{ code: 'ECONNRESET' }, 'dependencyFailure'],
+    [{ code: 'private-unrecognized-code', message: 'P2024' }, 'unclassified'],
+    [null, 'unclassified'],
+    [undefined, 'unclassified'],
+  ])('classifies only fixed preparation reasons (%p)', (error, expected) => {
+    expect(classifyWebhookPreparationError(error)).toBe(expected);
+  });
+
+  it('attributes recognized dependency codes inside typed deferrals with bounded cause reads', () => {
+    const failure = new WebhookPreparationDeferredError('private-wait', 1_000, {
+      cause: { code: 'P2010', meta: { code: '23505' } },
+    });
+    expect(classifyWebhookPreparationError(failure)).toBe('databaseConflict');
+    const cycle: { cause?: unknown } = {};
+    cycle.cause = cycle;
+    expect(classifyWebhookPreparationError(cycle)).toBe('unclassified');
+    const tooDeep = { cause: { cause: { cause: { cause: { code: 'P2024' } } } } };
+    expect(classifyWebhookPreparationError(tooDeep)).toBe('unclassified');
+    const unreadable = Object.defineProperty({}, 'code', {
+      get() {
+        throw new Error('private-getter');
+      },
+    });
+    expect(classifyWebhookPreparationError(unreadable)).toBe('unclassified');
+    expect(
+      classifyWebhookPreparationError(
+        new WebhookPreparationDeferredError('private-wait', 1_000, unreadable),
+      ),
+    ).toBe('preparationDeferred');
+  });
+
+  it('keeps missing, corrupt or inconsistent reason coverage unknown without losing base counters', async () => {
+    const admission = new WebhookPreparationAdmission(4, jest.fn());
+    await expect(
+      admission.run('private-bot', 'ordinary', async () => {
+        throw { code: 'P2024', message: 'private-timeout' };
+      }),
+    ).rejects.toMatchObject({ code: 'P2024' });
+    const source = admission.runtimeSnapshot();
+    const snapshot = sanitizeWebhookPreparationSnapshot({
+      ...source,
+      errorReasons: Object.assign([...source.errorReasons], { privateLabel: 123 }),
+    })!;
+    expect(snapshot).toMatchObject({
+      errors: { ordinary: 1 },
+      errorReasons: [0, 0, 0, 1, 0, 0, 0, 0],
+    });
+    expect(JSON.stringify(snapshot)).not.toContain('private');
+    expect(snapshot.errorReasons).toHaveLength(WEBHOOK_PREPARATION_ERROR_REASONS.length);
+    source.errorReasons[3] = 0;
+    for (const errorReasons of [
+      undefined,
+      null,
+      {},
+      source.errorReasons,
+      [-1, 0, 0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 1, 0, 0, 0, 0, 0],
+      Array(8),
+    ]) {
+      expect(sanitizeWebhookPreparationSnapshot({ ...source, errorReasons })).toMatchObject({
+        errors: { ordinary: 1 },
+        duration: { calls: 1, errors: 1 },
+        errorReasons: null,
+      });
+    }
+    expect(
+      sanitizeWebhookPreparationSnapshot({
+        ...source,
+        get errorReasons() {
+          throw new Error('private-provider');
+        },
+      }),
+    ).toMatchObject({ errors: { ordinary: 1 }, errorReasons: null });
+    expect(snapshot).toMatchObject({ errorReasons: [0, 0, 0, 1, 0, 0, 0, 0] });
+  });
 
   it('records failed and successful timing populations once with monotonic clocks', () => {
     const metrics = new WebhookOutboxRuntimeMetrics();

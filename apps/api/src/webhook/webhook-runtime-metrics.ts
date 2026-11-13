@@ -1,5 +1,77 @@
+import { WebhookExecutionOwnerUnavailableError } from '../common/webhook-execution-owner-unavailable.error';
+import { WebhookPreparationDeferredError } from '../common/webhook-preparation-deferred.error';
+
 export const WEBHOOK_WORK_CLASSES = ['ordinary', 'interactive', 'lifecycle'] as const;
 export type WebhookWorkClass = (typeof WEBHOOK_WORK_CLASSES)[number];
+export const WEBHOOK_PREPARATION_ERROR_REASONS = [
+  'ownerUnavailable',
+  'preparationDeferred',
+  'databaseConflict',
+  'databaseTimeout',
+  'databaseConnection',
+  'databaseOther',
+  'dependencyFailure',
+  'unclassified',
+] as const;
+type PreparationErrorReason = (typeof WEBHOOK_PREPARATION_ERROR_REASONS)[number];
+
+// FLAG: Diagnostic classification never authorizes retries. Inspect at most four cause
+// nodes and exact scalar codes; never retain messages, stacks, metadata or dynamic labels.
+export function classifyWebhookPreparationError(error: unknown): PreparationErrorReason {
+  let fallback: PreparationErrorReason = 'unclassified';
+  try {
+    let current = error;
+    for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth += 1) {
+      if (current instanceof WebhookExecutionOwnerUnavailableError) fallback = 'ownerUnavailable';
+      else if (current instanceof WebhookPreparationDeferredError && fallback === 'unclassified')
+        fallback = 'preparationDeferred';
+      const source = current as { code?: unknown; meta?: { code?: unknown }; cause?: unknown };
+      const outerCode = source.code;
+      const code = outerCode === 'P2010' ? source.meta?.code : outerCode;
+      switch (code) {
+        case 'P2002':
+        case '23505':
+        case 'P2034':
+        case '40001':
+        case '40P01':
+          return 'databaseConflict';
+        case 'P1002':
+        case 'P1008':
+        case 'P2024':
+          return 'databaseTimeout';
+        case 'P1001':
+        case 'P1017':
+        case '08000':
+        case '08001':
+        case '08003':
+        case '08006':
+        case '57P01':
+        case '57P02':
+        case '57P03':
+          return 'databaseConnection';
+        case 'P2028':
+        case '55P03':
+        case '57014':
+          return 'databaseOther';
+        case 'ETIMEDOUT':
+        case 'UND_ERR_CONNECT_TIMEOUT':
+        case 'UND_ERR_HEADERS_TIMEOUT':
+        case 'UND_ERR_BODY_TIMEOUT':
+        case 'ECONNREFUSED':
+        case 'ECONNRESET':
+        case 'EPIPE':
+        case 'ENOTFOUND':
+        case 'EAI_AGAIN':
+          return 'dependencyFailure';
+      }
+      current = source.cause;
+    }
+  } catch {
+    // FLAG: A throwing getter/proxy must not replace the original task rejection or leak a slot.
+  }
+  return fallback;
+}
+
 export const WEBHOOK_OUTBOX_STAGES = [
   'admission',
   'selection',
@@ -129,7 +201,36 @@ function sanitizePreparationSnapshot(value: unknown) {
     result[field] = counts;
   }
   const duration = sanitizeTiming(source.duration);
-  return duration ? { ...result, duration } : null;
+  return duration
+    ? { ...result, duration, errorReasons: sanitizePreparationErrorReasons(source) }
+    : null;
+}
+
+function sanitizePreparationErrorReasons(source: Record<string, unknown>) {
+  try {
+    const reasons = source.errorReasons;
+    const errors = checkedNumbers(source.errors, WEBHOOK_WORK_CLASSES);
+    if (
+      !Array.isArray(reasons) ||
+      reasons.length !== WEBHOOK_PREPARATION_ERROR_REASONS.length ||
+      !errors
+    )
+      return null;
+    const counts = WEBHOOK_PREPARATION_ERROR_REASONS.map((_, index) => reasons[index]);
+    if (
+      counts.some((value) => typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+    )
+      return null;
+    const total = counts.reduce((sum, value) => addWebhookMetric(sum, value), 0);
+    const errorTotal = WEBHOOK_WORK_CLASSES.reduce(
+      (sum, workClass) => addWebhookMetric(sum, errors[workClass]!),
+      0,
+    );
+    return total === errorTotal ? (counts as number[]) : null;
+  } catch {
+    // FLAG: Old/malformed optional attribution is unknown; preserve the base measurements.
+    return null;
+  }
 }
 
 export class WebhookPreparationRuntimeMetrics {
@@ -137,11 +238,16 @@ export class WebhookPreparationRuntimeMetrics {
   readonly deferred = zeroes(WEBHOOK_WORK_CLASSES);
   readonly completed = zeroes(WEBHOOK_WORK_CLASSES);
   readonly errors = zeroes(WEBHOOK_WORK_CLASSES);
+  readonly errorReasons = zeroes(WEBHOOK_PREPARATION_ERROR_REASONS);
   readonly duration = emptyTiming();
   peakInFlight = 0;
-  finish(workClass: WebhookWorkClass, started: number, failed: boolean): void {
+  finish(workClass: WebhookWorkClass, started: number, failed: boolean, error?: unknown): void {
     this.completed[workClass] = addWebhookMetric(this.completed[workClass]);
-    if (failed) this.errors[workClass] = addWebhookMetric(this.errors[workClass]);
+    if (failed) {
+      this.errors[workClass] = addWebhookMetric(this.errors[workClass]);
+      const reason = classifyWebhookPreparationError(error);
+      this.errorReasons[reason] = addWebhookMetric(this.errorReasons[reason]);
+    }
     observeTiming(this.duration, started, failed);
   }
 }

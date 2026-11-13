@@ -46,7 +46,30 @@ They add no per-event Redis writes or SQL queries.
 Preparation counts admitted, deferred, completed and failed attempts by the three
 fixed work classes; a completed attempt can have failed. Active work and peak
 concurrency are separate gauges. Duration covers the admitted task through its
-result, including errors; it excludes deferred work. Outbox batch and stage timings
+result, including errors; it excludes work refused before admission.
+
+The additive `errorReasons` vector classifies each admitted task rejection once
+across all work classes. Its eight fixed positions, defined by
+`WEBHOOK_PREPARATION_ERROR_REASONS`, are `ownerUnavailable`, `preparationDeferred`,
+`databaseConflict`, `databaseTimeout`, `databaseConnection`, `databaseOther`,
+`dependencyFailure`, and `unclassified`. The vector keeps the existing 24 KiB
+report bound even at maximum counter widths. The first two positions identify typed waits;
+these exceptions do not establish a business failure. Recognized dependency codes
+take precedence over the typed wait when found within four cause nodes. Fixed
+categories distinguish unique/transaction conflicts, database timeout and connection
+failures. `databaseOther` groups unavailable locks, cancellation and transaction errors:
+PostgreSQL cancellation does not prove a timeout, and `P2028` does not prove transaction
+expiry. `dependencyFailure` groups recognized network/timeout codes; they do not identify
+which dependency failed. Classification never changes retry policy or admission.
+Messages, stacks, raw codes, identities and metadata are not exported. Unreadable
+errors retain the typed fallback or `unclassified`, without changing the rejection.
+Missing, malformed or inconsistent reason counts remain `null` while base counters
+stay readable. The sum of reasons equals the sum of all three `errors` counters,
+using the same saturating counter limit. The vector does not attribute reasons to
+individual work classes. Compare deltas only inside one process epoch; the
+attribution cannot reconstruct reasons for exceptions observed by an older image.
+
+Outbox batch and stage timings
 use monotonic clocks, retain errors and unknown clocks, and have disjoint duration
 buckets. These new timing blocks use `totalMs`, `maxMs` and `buckets`; the existing
 optimization fields retain their names. Admission includes the effective-mode and retained-representative reads.
