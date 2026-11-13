@@ -1,5 +1,9 @@
 import { WebhookPreparationDeferredError } from '../common/webhook-preparation-deferred.error';
-import { addWebhookMetric, WebhookPreparationRuntimeMetrics } from './webhook-runtime-metrics';
+import {
+  addWebhookMetric,
+  WebhookPreparationRuntimeMetrics,
+  WEBHOOK_PREPARATION_ERROR_REASONS,
+} from './webhook-runtime-metrics';
 
 type WorkClass = 'ordinary' | 'interactive' | 'lifecycle';
 type ReservedWorkClass = Exclude<WorkClass, 'ordinary'>;
@@ -121,8 +125,8 @@ export class WebhookPreparationAdmission {
     this.byBot.set(botId, botCounts);
     this.byClass[workClass] += 1;
     const startedAt = performance.now();
-    const finish = (failed: boolean) => {
-      this.runtimeMetrics.finish(workClass, startedAt, failed);
+    const finish = (failed: boolean, error?: unknown) => {
+      this.runtimeMetrics.finish(workClass, startedAt, failed, error);
       this.active.delete(tracked);
       botCounts[workClass] -= 1;
       if (Object.values(botCounts).every((count) => count === 0)) this.byBot.delete(botId);
@@ -140,7 +144,7 @@ export class WebhookPreparationAdmission {
           return value;
         },
         (error: unknown) => {
-          finish(true);
+          finish(true, error);
           throw error;
         },
       );
@@ -180,6 +184,10 @@ export class WebhookPreparationAdmission {
       deferred: { ...this.runtimeMetrics.deferred },
       completed: { ...this.runtimeMetrics.completed },
       errors: { ...this.runtimeMetrics.errors },
+      // FLAG: The fixed vector preserves the report's 24 KiB worst-case byte bound.
+      errorReasons: WEBHOOK_PREPARATION_ERROR_REASONS.map(
+        (reason) => this.runtimeMetrics.errorReasons[reason],
+      ),
       peakInFlight: this.runtimeMetrics.peakInFlight,
       duration: {
         ...this.runtimeMetrics.duration,

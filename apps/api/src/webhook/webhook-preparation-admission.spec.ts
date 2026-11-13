@@ -534,14 +534,57 @@ describe('Webhook durable preparation admission', () => {
       deferred: { ordinary: 1 },
       completed: { ordinary: 1, lifecycle: 1 },
       errors: { lifecycle: 1 },
+      errorReasons: [0, 0, 0, 0, 0, 0, 0, 1],
       duration: { calls: 2, errors: 1, unknownClocks: 0 },
     });
     snapshot.admitted.ordinary = 999;
     snapshot.duration.buckets.under100Ms = 999;
+    snapshot.errorReasons[7] = 999;
     expect(admission.runtimeSnapshot().admitted.ordinary).toBe(1);
     expect(admission.runtimeSnapshot().duration.buckets.under100Ms).not.toBe(999);
+    expect(admission.runtimeSnapshot().errorReasons[7]).toBe(1);
     expect(JSON.stringify(admission.runtimeSnapshot())).not.toContain('private');
   });
+
+  it.each(['undefined', 'null', 'getter', 'proxy'])(
+    'preserves rejection identity and releases admission for unreadable errors (%s)',
+    async (kind) => {
+      const error =
+        kind === 'undefined'
+          ? undefined
+          : kind === 'null'
+            ? null
+            : kind === 'getter'
+              ? Object.defineProperty({}, 'code', {
+                  get() {
+                    throw new Error('private-property-reader');
+                  },
+                })
+              : new Proxy(
+                  {},
+                  {
+                    getPrototypeOf() {
+                      throw new Error('private-proxy');
+                    },
+                  },
+                );
+      const admission = new WebhookPreparationAdmission(2, jest.fn());
+      await expect(
+        admission.run('private-bot', 'ordinary', async () => {
+          throw error;
+        }),
+      ).rejects.toBe(error);
+      expect(admission.runtimeSnapshot()).toMatchObject({
+        inFlight: 0,
+        botScopes: 0,
+        errors: { ordinary: 1 },
+        errorReasons: [0, 0, 0, 0, 0, 0, 0, 1],
+      });
+      await expect(admission.run('private-bot', 'ordinary', async () => 'ready')).resolves.toBe(
+        'ready',
+      );
+    },
+  );
 
   it.each([NaN, Infinity, 0, -1])(
     'rejects invalid pool budget %s instead of losing the bound',

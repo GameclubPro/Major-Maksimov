@@ -845,6 +845,7 @@ describe('bounded storage-runtime metrics', () => {
           : field === 'registryOverflows'
             ? 0
             : Number.MAX_SAFE_INTEGER;
+      if (Array.isArray(value)) return value.map((entry) => widen(entry));
       if (value && typeof value === 'object')
         return Object.fromEntries(
           Object.entries(value).map(([key, entry]) => [key, widen(entry, key)]),
@@ -869,14 +870,19 @@ describe('bounded storage-runtime metrics', () => {
   });
   it('publishes sanitized webhook attribution through the existing report and tolerates missing writers', async () => {
     const fixture = webhookOutboxSnapshot();
+    const preparation = new WebhookPreparationAdmission(4, jest.fn());
+    const failure = Object.assign(new Error('private-database-error'), { code: 'P2024' });
+    await expect(
+      preparation.run('private-bot', 'lifecycle', async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
     metrics.registerWebhookOutboxSnapshot(() => ({
       ...fixture,
       payload: 'private-payload',
       stages: { ...fixture.stages, 'private-stage': {} },
     }));
-    metrics.registerWebhookPreparationSnapshot(() =>
-      new WebhookPreparationAdmission(4, jest.fn()).runtimeSnapshot(),
-    );
+    metrics.registerWebhookPreparationSnapshot(() => preparation.runtimeSnapshot());
     const before = metrics.getLocalSnapshot()!;
     await metrics.publish();
     expect(mockRedis.set).toHaveBeenCalledTimes(1);
@@ -884,6 +890,10 @@ describe('bounded storage-runtime metrics', () => {
     expect(JSON.parse(encoded)).toMatchObject({
       startedAt: before.startedAt,
       webhookOutbox: fixture,
+      webhookPreparation: {
+        errors: { lifecycle: 1 },
+        errorReasons: [0, 0, 0, 1, 0, 0, 0, 0],
+      },
     });
     expect(encoded).not.toContain('private');
     const older = { ...before, webhookOutbox: undefined, webhookPreparation: undefined };
