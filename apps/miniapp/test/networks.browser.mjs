@@ -1020,6 +1020,10 @@ for (const profile of profiles.filter(
     await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
     const sheet = page.locator('.network-composition-sheet');
     await sheet.waitFor();
+    const changedCommunityTitle = await sheet
+      .locator('.network-community-row__text strong')
+      .first()
+      .innerText();
     const firstAssignment = sheet.getByRole('combobox').first();
     const desiredAssignment =
       (await firstAssignment.inputValue()) === 'watch' ? 'important' : 'watch';
@@ -1059,7 +1063,21 @@ for (const profile of profiles.filter(
     await sheet.getByText('Состав изменился', { exact: true }).waitFor();
     assert.equal(await sheet.isVisible(), true, 'lost write response preserves composition draft');
     await sheet.getByRole('button', { name: 'Обновить состав', exact: true }).click();
+    await sheet.locator('.network-composition-review strong').first().waitFor();
+    assert.equal(
+      await sheet.locator('.network-composition-review strong').first().innerText(),
+      changedCommunityTitle,
+      'review retains the selected community identity after it has moved out of the loaded list',
+    );
+    await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
+    const reviewBody = await sheet.locator('.network-composition-sheet__body').boundingBox();
+    assert.ok(
+      reviewBody && reviewBody.height >= 40,
+      'recovery content stays scrollable above the keyboard',
+    );
+    await fits(page, `${profile.name} recovery keyboard`);
     await sheet.getByRole('button', { name: 'Подтвердить изменения', exact: true }).click();
+    await setPhoneKeyboard(page, { mode: 'resize', open: false });
     assert.equal(
       await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).isDisabled(),
       true,

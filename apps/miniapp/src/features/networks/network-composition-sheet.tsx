@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { ManagedEntityFavoriteType, ManagedEntityType } from '@maxim/contracts';
+import type {
+  ManagedEntityFavoriteType,
+  ManagedEntityNetworkEntry,
+  ManagedEntityType,
+} from '@maxim/contracts';
 import type { ApiTransport } from '../../lib/api/transport';
 import { useHomeEntityFavorites } from '../../lib/home-entity-favorites-context';
 import { useManagedEntityNetworkCompositionDraft } from '../../lib/use-managed-entity-network-composition-draft';
@@ -17,7 +21,7 @@ import {
   HOME_ENTITY_FAVORITE_TYPES,
   getHomeEntityFavoriteTypes,
 } from '../../lib/home-entity-favorites';
-import { useNetworkEntries } from './network-community-list';
+import { NETWORK_ENTITY_SEARCH_MAX_LENGTH, useNetworkEntries } from './network-community-list';
 
 export function NetworkCompositionSheet({
   api,
@@ -43,7 +47,9 @@ export function NetworkCompositionSheet({
   const [reviewReady, setReviewReady] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const panel = useRef<HTMLElement | null>(null);
+  const body = useRef<HTMLDivElement | null>(null);
   const closeButton = useRef<HTMLButtonElement | null>(null);
+  const stagedTitles = useRef(new Map<string, string>());
   const saving = draft.phase === 'saving';
   const overlayStyle = useVisualViewportOverlayStyle(true);
   const labels = snapshot.labels.resolved;
@@ -59,6 +65,14 @@ export function NetworkCompositionSheet({
     () => new Map(draft.changes.map((change) => [change.entityId, change])),
     [draft.changes],
   );
+  const stage = (
+    item: ManagedEntityNetworkEntry,
+    favoriteType: ManagedEntityFavoriteType | null,
+  ) => {
+    stagedTitles.current.set(item.id, item.title);
+    setBatchNotice(null);
+    draft.stage(item, favoriteType);
+  };
   const visibleEntries = entries.items.filter(
     (item) => mode === 'members' || item.favoriteType !== favoriteType,
   );
@@ -131,9 +145,7 @@ export function NetworkCompositionSheet({
         entries.refresh();
       }
     } catch {
-      setError(
-        'Не удалось подтвердить сохранение. Черновик сохранён — обновите состав и проверьте изменения.',
-      );
+      setError('Не удалось подтвердить сохранение. Обновите состав и проверьте изменения.');
       setReviewReady(false);
     }
   };
@@ -146,12 +158,22 @@ export function NetworkCompositionSheet({
       await actions.refreshAssignments(entityType);
       setReviewReady(true);
     } catch {
-      setError('Не удалось загрузить актуальный состав. Изменения сохранены в черновике.');
+      setError('Не удалось обновить состав. Ваши изменения остались в черновике.');
     } finally {
       setReviewing(false);
     }
   };
   const requiresReview = draft.phase === 'review-required' || draft.compositionChanged;
+  const readOnly =
+    saving ||
+    reviewing ||
+    requiresReview ||
+    entries.accessDenied ||
+    draft.phase === 'saved-refresh-pending';
+  useEffect(() => {
+    if (requiresReview || error || draft.phase === 'saved-refresh-pending')
+      body.current?.scrollTo({ top: 0 });
+  }, [requiresReview, error, draft.phase]);
   return createPortal(
     <>
       <div className="network-composition-overlay" style={overlayStyle}>
@@ -187,7 +209,7 @@ export function NetworkCompositionSheet({
               <AppIcon icon="Xmark" />
             </button>
           </header>
-          <div className="network-composition-sheet__body">
+          <div className="network-composition-sheet__body" ref={body}>
             <SegmentedControl
               value={mode}
               options={[
@@ -207,7 +229,40 @@ export function NetworkCompositionSheet({
               onChange={setQuery}
               placeholder="Найти сообщество"
               label="Поиск сообществ"
+              inputProps={{ maxLength: NETWORK_ENTITY_SEARCH_MAX_LENGTH }}
             />
+            {error ? (
+              <p className="networks-notice" role="alert">
+                {error}
+              </p>
+            ) : null}
+            {batchNotice ? <p role="status">{batchNotice}</p> : null}
+            {draft.count > 500 ? (
+              <p>
+                Изменения сохраняются пакетами по 500. Остальной выбор сохранится для следующего
+                пакета.
+              </p>
+            ) : null}
+            {draft.phase === 'saved-refresh-pending' ? (
+              <div className="networks-notice" role="status">
+                <p>Состав сохранён. Обновите список.</p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void actions
+                      .refreshAssignments(entityType)
+                      .then(() => actions.refreshCatalogue(entityType))
+                      .then(() => {
+                        if (!draft.count) onClose();
+                        else entries.refresh();
+                      })
+                      .catch(() => setError('Состав сохранён, но список пока не обновился.'))
+                  }
+                >
+                  Обновить
+                </button>
+              </div>
+            ) : null}
             {requiresReview ? (
               <div className="networks-notice" role="alert">
                 <strong>Состав изменился</strong>
@@ -222,6 +277,7 @@ export function NetworkCompositionSheet({
                         <li key={change.entityId}>
                           <strong>
                             {entries.items.find((item) => item.id === change.entityId)?.title ??
+                              stagedTitles.current.get(change.entityId) ??
                               'Сообщество'}
                           </strong>
                           <span>
@@ -256,7 +312,6 @@ export function NetworkCompositionSheet({
                     >
                       Подтвердить изменения
                     </button>
-                    <small>После проверки нажмите «Сохранить» отдельно.</small>
                   </>
                 ) : null}
               </div>
@@ -271,10 +326,10 @@ export function NetworkCompositionSheet({
                       type="checkbox"
                       aria-label={`${mode === 'members' ? 'Оставить' : 'Добавить'} ${item.title}`}
                       checked={value === favoriteType}
-                      disabled={saving || requiresReview}
+                      disabled={readOnly}
                       onChange={(event) => {
                         setError(null);
-                        draft.stage(
+                        stage(
                           item,
                           event.target.checked
                             ? favoriteType
@@ -293,27 +348,29 @@ export function NetworkCompositionSheet({
                   />
                   <span className="network-community-row__text">
                     <strong>{item.title}</strong>
-                    <small>
-                      {change
-                        ? change.favoriteType === favoriteType
-                          ? item.favoriteType
-                            ? `Перенести из «${labels[item.favoriteType]}»`
-                            : 'Добавить в сетку'
-                          : change.favoriteType
-                            ? `Перенести в «${labels[change.favoriteType]}»`
-                            : 'Убрать из сетки'
-                        : item.favoriteType
-                          ? labels[item.favoriteType]
-                          : 'Не в избранном'}
-                    </small>
+                    {change || mode === 'add' ? (
+                      <small>
+                        {change
+                          ? change.favoriteType === favoriteType
+                            ? item.favoriteType
+                              ? `Перенести из «${labels[item.favoriteType]}»`
+                              : 'Добавить в сетку'
+                            : change.favoriteType
+                              ? `Перенести в «${labels[change.favoriteType]}»`
+                              : 'Убрать из сетки'
+                          : item.favoriteType
+                            ? labels[item.favoriteType]
+                            : 'Не в избранном'}
+                      </small>
+                    ) : null}
                     {mode === 'members' ? (
                       <select
                         aria-label={`Категория: ${item.title}`}
                         value={value && value !== favoriteType ? value : ''}
-                        disabled={saving || requiresReview}
+                        disabled={readOnly}
                         onChange={(event) => {
                           setError(null);
-                          draft.stage(
+                          stage(
                             item,
                             (event.target.value || null) as ManagedEntityFavoriteType | null,
                           );
@@ -388,38 +445,8 @@ export function NetworkCompositionSheet({
                     .filter(([, count]) => count)
                     .map(([label, count]) => `${label} ${count}`)
                     .join(' · ')
-                : 'Выберите изменения'}
+                : null}
             </span>
-            {error ? <p role="alert">{error}</p> : null}
-            {batchNotice ? <p role="status">{batchNotice}</p> : null}
-            {draft.count > 500 ? (
-              <p>
-                Изменения сохраняются пакетами по 500. Остальной выбор сохранится для следующего
-                пакета.
-              </p>
-            ) : null}
-            {draft.phase === 'saved-refresh-pending' ? (
-              <div className="networks-notice" role="status">
-                <p>Состав сохранён. Осталось обновить отображение.</p>
-                <button
-                  type="button"
-                  onClick={() =>
-                    void actions
-                      .refreshAssignments(entityType)
-                      .then(() => actions.refreshCatalogue(entityType))
-                      .then(() => {
-                        if (!draft.count) onClose();
-                        else entries.refresh();
-                      })
-                      .catch(() =>
-                        setError('Сохранение подтверждено. Обновить отображение пока не удалось.'),
-                      )
-                  }
-                >
-                  Обновить
-                </button>
-              </div>
-            ) : null}
             <button
               type="button"
               className="networks-primary"
@@ -428,7 +455,8 @@ export function NetworkCompositionSheet({
                 saving ||
                 reviewing ||
                 requiresReview ||
-                draft.phase === 'saved-refresh-pending'
+                draft.phase === 'saved-refresh-pending' ||
+                entries.accessDenied
               }
               onClick={() => void save()}
             >

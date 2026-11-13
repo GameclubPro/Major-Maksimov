@@ -437,6 +437,179 @@ for (const profile of profiles) {
       animations: 'disabled',
     });
 
+    await open('networks?type=chat&category=service', '.network-empty-start');
+    assert.equal(
+      await page.locator('.network-detail-metrics').count(),
+      0,
+      'empty networks have no meaningless metrics',
+    );
+    assert.equal(
+      await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
+      true,
+    );
+    await page.getByRole('button', { name: 'Добавить чаты', exact: true }).click();
+    const emptySheet = page.locator('.network-composition-sheet');
+    await emptySheet.getByRole('radio', { name: 'Добавить', exact: true }).waitFor();
+    assert.equal(
+      await emptySheet
+        .getByRole('radio', { name: 'Добавить', exact: true })
+        .getAttribute('aria-checked'),
+      'true',
+    );
+    await emptySheet.getByRole('button', { name: 'Закрыть', exact: true }).click();
+    await emptySheet.waitFor({ state: 'hidden' });
+    await page.screenshot({
+      path: join(output, `${profile.name}-empty.png`),
+      animations: 'disabled',
+    });
+
+    const actionsMenu = page.locator('.network-workspace-menu');
+    const actionsTrigger = actionsMenu.locator('summary');
+    await actionsTrigger.click();
+    await actionsMenu.getByRole('button', { name: 'Переименовать', exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await actionsMenu
+      .getByRole('button', { name: 'Переименовать', exact: true })
+      .waitFor({ state: 'hidden' });
+    assert.equal(
+      await actionsTrigger.evaluate((node) => node === document.activeElement),
+      true,
+      'Escape restores menu focus',
+    );
+    await actionsTrigger.click();
+    await page.locator('.network-workspace-icon').click();
+    await actionsMenu
+      .getByRole('button', { name: 'Переименовать', exact: true })
+      .waitFor({ state: 'hidden' });
+    await actionsTrigger.click();
+    await actionsMenu.getByRole('button', { name: 'Переименовать', exact: true }).click();
+    const renameField = page.getByRole('textbox', { name: 'Название сетки', exact: true });
+    await renameField.waitFor();
+    assert.equal(
+      await renameField.evaluate((node) => node === document.activeElement),
+      true,
+      'rename focuses its input',
+    );
+    await renameField.fill('');
+    await renameField.pressSequentially('Длинное название новой сетки для чатов');
+    const enteredName = await renameField.inputValue();
+    assert.equal(
+      enteredName.length,
+      24,
+      'input uses the same length bound as favorite persistence',
+    );
+    await page.getByRole('button', { name: 'Сохранить название', exact: true }).click();
+    await renameField.waitFor({ state: 'hidden' });
+    assert.equal(
+      await page.locator('.network-workspace-heading h1').innerText(),
+      enteredName,
+      'saving never silently truncates the displayed name',
+    );
+
+    await open('networks?type=chat&category=important&tab=communities', '.network-community-row');
+    const memberSearch = page.getByRole('searchbox', { name: 'Поиск в составе', exact: true });
+    await memberSearch.fill('я'.repeat(101));
+    assert.equal(
+      (await memberSearch.inputValue()).length,
+      100,
+      'member search respects the API bound',
+    );
+    await page.getByText('Ничего не найдено', { exact: true }).waitFor();
+    assert.equal(
+      await page.locator('.network-community-list [role="alert"]').count(),
+      0,
+      'long search is not a failed request',
+    );
+    await page.getByRole('button', { name: 'Очистить: Поиск в составе', exact: true }).click();
+    await page.locator('.network-community-row').first().waitFor();
+    assert.equal(
+      await memberSearch.evaluate((node) => node === document.activeElement),
+      true,
+      'clearing search retains focus',
+    );
+    await page.evaluate(async () => {
+      const find = (name) =>
+        performance
+          .getEntriesByType('resource')
+          .findLast((entry) => new URL(entry.name).pathname.endsWith('/' + name))?.name;
+      const { PREVIEW_REQUEST_HANDLERS } = await import(find('preview-transport.ts'));
+      const { PREVIEW_NOT_HANDLED } = await import(find('preview-transport-runtime.ts'));
+      const { ApiRequestError } = await import('/app/src/lib/api-request-error.ts');
+      window.__networkUxPageStatus = 500;
+      PREVIEW_REQUEST_HANDLERS.unshift(async (context) => {
+        if (
+          context.method === 'GET' &&
+          context.url.pathname.endsWith('/entities') &&
+          context.url.searchParams.get('cursor')
+        )
+          throw new ApiRequestError(window.__networkUxPageStatus, '{}', 'Fixture page failure');
+        return PREVIEW_NOT_HANDLED;
+      });
+    });
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+    await page.locator('.network-community-list [role="alert"]').waitFor();
+    assert.equal(
+      await page.locator('.network-community-row').count(),
+      50,
+      'transient pagination failure preserves loaded communities',
+    );
+    await page.getByRole('button', { name: 'Обновить список', exact: true }).click();
+    await page.locator('.network-community-row').first().waitFor();
+    await page.evaluate(() => {
+      window.__networkUxPageStatus = 403;
+    });
+    await page.getByRole('button', { name: 'Показать ещё', exact: true }).click();
+    await page
+      .getByText('Доступ к сообществам изменился. Обновите список.', { exact: true })
+      .waitFor();
+    assert.equal(
+      await page.locator('.network-community-row').count(),
+      0,
+      'access denial clears obsolete rows',
+    );
+    await pageFits(page, `${profile.name} access error`);
+
+    if (profile.name === 'android-light') {
+      for (const [type, title, addLabel, countLabel] of [
+        ['chat', 'Районный чат 104', 'Добавить чаты', '1 чат'],
+        ['channel', 'Городской канал 104', 'Добавить каналы', '1 канал'],
+      ]) {
+        await open(`networks?type=${type}&category=test`, '.network-empty-start');
+        await page.getByRole('button', { name: addLabel, exact: true }).click();
+        const sheet = page.locator('.network-composition-sheet');
+        const search = sheet.getByRole('searchbox', { name: 'Поиск сообществ', exact: true });
+        assert.equal(await search.getAttribute('maxlength'), '100');
+        await search.fill(title);
+        await sheet.getByRole('checkbox', { name: `Добавить ${title}`, exact: true }).check();
+        await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).click();
+        await sheet.waitFor({ state: 'hidden' });
+        await page
+          .locator('.network-workspace-heading')
+          .getByText(countLabel, { exact: true })
+          .waitFor();
+        await page.locator('.network-detail-metrics').waitFor();
+        assert.equal(
+          await page.locator('.network-empty-start').count(),
+          0,
+          `${type}: adding the first community opens statistics`,
+        );
+        await page.getByRole('button', { name: 'Состав', exact: true }).click();
+        await page.locator('.network-community-list').getByText(title, { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
+        await sheet.getByRole('checkbox', { name: `Оставить ${title}`, exact: true }).uncheck();
+        await sheet.getByRole('button', { name: 'Сохранить состав', exact: true }).click();
+        await sheet.waitFor({ state: 'hidden' });
+        await page.getByText('В сетке пока пусто', { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'Статистика', exact: true }).click();
+        await page.locator('.network-empty-start').waitFor();
+        assert.equal(
+          await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
+          true,
+          `${type}: removing the last community disables settings`,
+        );
+      }
+    }
+
     const networkStyles = await page.locator('style[data-vite-dev-id]').evaluateAll((nodes) =>
       nodes
         .filter((node) =>
