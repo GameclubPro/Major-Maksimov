@@ -39,6 +39,7 @@ import {
 } from './suggestion-review-effects.service';
 import { hasSuggestionRequest, suggestionRevision } from './suggestion-review-content';
 import { readPendingSuggestionInput, retainSuggestionNativeInput } from './suggestion-native-input';
+import { buildPublishedSuggestionButton } from './suggestion-review-links';
 import {
   nativeContentSchema,
   nativeSuggestionMarkdown,
@@ -527,7 +528,16 @@ export class SuggestionNativeService {
       session.version,
     );
     if (detail.status !== 'pending') {
-      buttons = [[button(this.status(detail), 'hint')]];
+      const published =
+        detail.status === 'published' && detail.profile === 'moderation'
+          ? buildPublishedSuggestionButton(
+              detail.profile,
+              suggestionObject(
+                (await this.review.authorize(detail.id, job.profile, actor)).payload,
+              ),
+            )
+          : null;
+      buttons = [[published ?? button(this.status(detail), 'hint')]];
     } else if (session.mode === 'edit') {
       const row = await this.review.authorize(detail.id, job.profile, actor);
       const content = readSuggestionNativeContent(suggestionObject(row.payload));

@@ -373,8 +373,9 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     expect(edit.mock.calls.at(-1)?.[3]?.buttons).toEqual([
       [
         expect.objectContaining({
+          type: 'link',
           text: 'Опубликовано',
-          payload: expect.stringContaining('sr1|hint|'),
+          url: 'https://max.ru/confirmed-post',
         }),
       ],
     ]);
@@ -382,6 +383,37 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       attachments: [
         { type: 'image', payload: { token: 'original-photo' } },
         { type: 'inline_keyboard' },
+      ],
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('keeps the exact published post link during background card synchronization', async () => {
+    const f = await seed();
+    const url = 'https://max.ru/c/-78271171091799/42';
+    await db.auditLog.update({
+      where: { id: f.row.id },
+      data: {
+        payload: {
+          ...suggestionObject(f.row.payload),
+          reviewStatus: 'published',
+          publishedMessageId: 'published-message-42',
+          publishedUrl: url,
+        },
+      },
+    });
+    await db.$transaction((tx) => effects.recordSync(tx, f.row.id, 0, f.profile));
+    const effect = await db.suggestionReviewEffect.findFirstOrThrow({
+      where: { suggestionId: f.row.id, kind: 'sync' },
+    });
+    await effects.process(effect.id, f.profile);
+    expect(edit.mock.calls.at(-1)?.[3]?.buttons).toEqual([
+      [{ type: 'link', text: 'Опубликовано', url }],
+    ]);
+    expect(messages.get(f.card.remoteMessageId!)?.body).toMatchObject({
+      attachments: [
+        { type: 'image', payload: { token: 'original-photo' } },
+        { type: 'inline_keyboard', payload: { buttons: [[{ type: 'link', url }]] } },
       ],
     });
     expect(send).not.toHaveBeenCalled();
@@ -1114,7 +1146,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     await callback(f, 'edit');
     expect(dispatched).toBe(false);
   });
-  it('upgrades old pending card buttons in bounded pages without new messages or reviving terminal work', async () => {
+  it('upgrades pending and confirmed published cards in bounded pages without replaying publication', async () => {
     const f = await seed();
     messages.set(f.card.remoteMessageId!, {
       body: {
@@ -1143,6 +1175,31 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       where: { id: terminal.row.id },
       data: { payload: { type: 'suggest', reviewStatus: 'cancelled' } },
     });
+    const published = await seed();
+    const publishedPayload = {
+      ...suggestionObject(published.row.payload),
+      reviewStatus: 'published',
+      publishedMessageId: 'old-published-message',
+      publishedUrl: 'https://max.ru/c/-123/42',
+    };
+    await db.auditLog.update({
+      where: { id: published.row.id },
+      data: { payload: publishedPayload },
+    });
+    const previousSync = await db.suggestionReviewEffect.create({
+      data: {
+        suggestionId: published.row.id,
+        profile: 'moderation',
+        botId: 'major',
+        kind: 'native-sync',
+        revision: 0,
+        status: 'SENT',
+        payload: {},
+      },
+    });
+    await db.suggestionReviewCardUpgrade.create({
+      data: { profile: 'moderation', cursor: 'previous-completed-cursor', completed: true },
+    });
     await db.channelSuggestionAdminDelivery.createMany({
       data: Array.from({ length: 2000 }, (_, i) => ({
         id: `a-history-${String(i).padStart(6, '0')}`,
@@ -1153,8 +1210,32 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         status: 'FAILED' as const,
       })),
     });
+    await db.channelSuggestionAdminDelivery.createMany({
+      data: Array.from({ length: 22 }, (_, i) => ({
+        id: `y-page-gap-${i}`,
+        auditLogId: terminal.row.id,
+        adminUserId: `gap-${i}`,
+        botKey: 'major',
+        botId: 'major',
+        status: 'FAILED' as const,
+      })),
+    });
+    await db.channelSuggestionAdminDelivery.create({
+      data: {
+        id: 'z-published-next-page',
+        auditLogId: published.row.id,
+        adminUserId: 'second-admin',
+        botKey: 'major',
+        botId: 'major',
+        status: 'SENT',
+        privateChatId: 'second-private-chat',
+        remoteMessageId: 'second-published-card',
+        sentAt: new Date(),
+      },
+    });
+    messages.set('second-published-card', messages.get(published.card.remoteMessageId!)!);
     const pages = jest.spyOn(db.channelSuggestionAdminDelivery, 'findMany');
-    for (let i = 0; i < 82; i++) await effects.upgradeNativeCards('moderation');
+    for (let i = 0; i < 81; i++) await effects.upgradeNativeCards('moderation');
     expect(pages.mock.calls).toHaveLength(81);
     for (const [args] of pages.mock.calls)
       expect(args).toMatchObject({
@@ -1164,12 +1245,16 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       });
     pages.mockRestore();
     const rows = await db.suggestionReviewEffect.findMany({
-      where: { kind: 'native-sync', suggestionId: { in: [f.row.id, terminal.row.id] } },
+      where: {
+        kind: 'native-sync',
+        suggestionId: { in: [f.row.id, terminal.row.id, published.row.id] },
+      },
     });
-    expect(rows).toHaveLength(1);
-    await effects.process(rows[0]!.id, 'moderation');
+    expect(rows).toHaveLength(2);
+    const pendingSync = rows.find((row) => row.suggestionId === f.row.id)!;
+    await effects.process(pendingSync.id, 'moderation');
     expect(
-      await db.suggestionReviewEffect.findUnique({ where: { id: rows[0]!.id } }),
+      await db.suggestionReviewEffect.findUnique({ where: { id: pendingSync.id } }),
     ).toMatchObject({ status: 'SENT' });
     for (const button of edit.mock.calls.at(-1)?.[3]?.buttons?.flat() ?? []) {
       expect(button.type).toBe('callback');
@@ -1179,6 +1264,28 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
           revision: 0,
         });
     }
+    expect(rows.find((row) => row.id === previousSync.id)?.status).toBe('PENDING');
+    await effects.process(previousSync.id, 'moderation');
+    expect(edit.mock.calls.at(-1)?.[3]?.buttons).toEqual([
+      [{ type: 'link', text: 'Опубликовано', url: publishedPayload.publishedUrl }],
+    ]);
+    // A second delivery on the next page must not restart the already completed repair.
+    await effects.upgradeNativeCards('moderation');
+    await effects.upgradeNativeCards('moderation');
+    expect(
+      await db.suggestionReviewEffect.findUnique({ where: { id: previousSync.id } }),
+    ).toMatchObject({
+      status: 'SENT',
+    });
+    expect(
+      await db.suggestionReviewCardUpgrade.findUnique({ where: { profile: 'moderation' } }),
+    ).toMatchObject({
+      cursor: 'previous-completed-cursor',
+      completed: true,
+    });
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: published.row.id } })).payload,
+    ).toEqual(publishedPayload);
     expect(send).not.toHaveBeenCalled();
   });
 });

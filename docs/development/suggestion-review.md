@@ -21,6 +21,12 @@ content is revision zero, so they cannot approve later edits. Retries retain the
 actor and body when a safe preparation failure has already saved an edit. Exhausted transient
 failures produce a sanitized callback notice; logs keep fixed failure category and processing stage.
 
+After confirmed Major publication, `Опубликовано` is a link to the persisted MAX post URL,
+as explicitly requested on 2026-11-14. Native rendering and background card synchronization
+use the same button. A missing/invalid URL or message receipt must not manufacture a destination
+or trigger another SEND. Publik's `Передано в публикацию` remains a handoff status, not proof
+that its asynchronous publication has reached MAX.
+
 MAX has no documented composer-prefill/force-reply operation. A clipboard button is an
 optional shortcut only for bodies of at most 1024 characters; its exact whitespace must survive
 normalization. Longer text uses native message copying. Editor UI uses existing-message PUTs,
@@ -92,9 +98,11 @@ without another SEND. Card edits remain repeatable and version-aware; they do no
 active personal draft of the same content revision. Queue failure leaves durable recovery work.
 
 A bounded, persisted primary-key walk upgrades already-delivered pending cards to native buttons.
-Each page selects at most 25 delivery keys before profile/status/payload checks; terminal rows
-are skipped and native sync intents are idempotent. Existing historical suggestions are neither
-resent nor reopened. Runtime governor and profile-owned recovery remain in force.
+Each page selects at most 25 delivery keys before profile/status/payload checks. Major's versioned
+published-link pass also refreshes confirmed published cards with valid saved post links, retaining
+the earlier cursor. It may reopen only completed repeatable native card-sync effects; publication,
+rejection notifications and suggestion statuses are unchanged. Other terminal cards are skipped,
+and the completed pass does not run again. Runtime governor and profile-owned recovery remain in force.
 
 The additive migration creates only dialog, contact and upgrade-progress tables with indexes on
 new empty tables. Existing suggestion/effect statuses and publication fences retain their meaning.
