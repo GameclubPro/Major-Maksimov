@@ -1,9 +1,40 @@
 import { BadRequestException, HttpException } from '@nestjs/common';
 import { isAmbiguousMaxSendError } from '../max/max-send-ambiguity.util';
+import { isMaxApiCircuitOpenError } from '../max/max-client.service';
+import { MaxApiInternalRateLimitError } from '../max/max-api-internal-rate-limit.error';
 import { extractPrivateControlUserErrorDetails } from './private-control-bad-request.util';
 import type { PrivateSuggestionDraft } from './private-control.types';
 
+export function privateSuggestionReviewErrorDiagnostic(error: unknown) {
+  const status =
+    error instanceof HttpException
+      ? error.getStatus()
+      : (error as { response?: { status?: number } } | null)?.response?.status;
+  const reason =
+    error instanceof MaxApiInternalRateLimitError
+      ? 'local_capacity'
+      : isMaxApiCircuitOpenError(error)
+        ? 'circuit_open'
+        : isAmbiguousMaxSendError(error)
+          ? 'transport_unconfirmed'
+          : typeof status === 'number'
+            ? 'request_rejected'
+            : 'unexpected';
+  return { reason, httpStatus: typeof status === 'number' ? status : null };
+}
+
 export function describePrivateSuggestionReviewError(error: unknown): string {
+  if (error instanceof MaxApiInternalRateLimitError || isMaxApiCircuitOpenError(error)) {
+    return 'MAX временно ограничил запросы. Предложка сохранена; повторите действие немного позже.';
+  }
+  // FLAG: Translate only this known application refusal, never arbitrary technical MAX text.
+  if (
+    error instanceof HttpException &&
+    error.getStatus() === 503 &&
+    error.message === 'MAX API временно ограничил проверку прав администратора. Повторите попытку.'
+  ) {
+    return 'MAX временно ограничил проверку прав администратора. Повторите попытку немного позже.';
+  }
   const publicMessage = extractPrivateControlUserErrorDetails(
     error instanceof HttpException ? new BadRequestException(error.getResponse()) : error,
   );

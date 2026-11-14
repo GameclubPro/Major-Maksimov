@@ -224,6 +224,20 @@ export function createAdminChannelSuggestionPublicationRuntimeContext(
 export class AdminChannelSuggestionPublicationRuntime {
   constructor(private readonly context: AdminChannelSuggestionPublicationRuntimeContext) {}
 
+  // FLAG: Card refresh may reconcile retained receipts, but can never start a new SEND.
+  async reconcileReview(suggestionId: string, user: AuthUser): Promise<void> {
+    const row = await this.context.prisma.auditLog.findFirst({
+      where: { id: suggestionId, action: CHANNEL_DIALOG_ACTION_SUGGEST },
+      select: { id: true, chatId: true, actorUserId: true, payload: true },
+    });
+    if (!row) throw new BadRequestException('Предложка не найдена.');
+    await this.context.assertChatAdmin(row.chatId, user.userId, 'channel');
+    const payload = this.context.readObjectPayload(row.payload);
+    if (payload.type === 'suggest' && payload.reviewStatus === 'publishing') {
+      await this.recoverClaimedPublication({ row, payload });
+    }
+  }
+
   async review(
     suggestionId: string,
     user: AuthUser,

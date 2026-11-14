@@ -69,6 +69,13 @@ export class SuggestionReviewService {
     return this.present(row, profile);
   }
 
+  async reconcilePublication(id: string, profile: MiniappProfile, user: AuthUser): Promise<void> {
+    const row = await this.authorize(id, profile, user);
+    if (profile === 'moderation' && suggestionObject(row.payload).reviewStatus === 'publishing') {
+      await this.dialogs.reconcileSuggestion(id, user);
+    }
+  }
+
   async save(id: string, profile: MiniappProfile, user: AuthUser, body: unknown) {
     const input = suggestionReviewWriteSchema.safeParse(body);
     if (!input.success) throw new BadRequestException(input.error.format());

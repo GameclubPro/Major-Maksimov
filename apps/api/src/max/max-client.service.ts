@@ -661,6 +661,8 @@ type MaxEditableMessageOptions = Pick<
   expectedSourceMarkup?: readonly MaxTextMarkup[];
   expectedSourceAttachmentTypes?: readonly string[];
   requireAllAttachmentsPreserved?: boolean;
+  /** FLAG: Private cards only; the final mutation guard verifies exact card/bot ownership. */
+  replaceOwnedInlineKeyboard?: boolean;
 };
 
 type MaxImmediateSendMessageOptions = MaxSendMessageOptions & {
@@ -1922,6 +1924,14 @@ export class MaxClientService implements OnModuleDestroy {
     options?: MaxEditableMessageOptions,
     requestOptions: MaxApiRequestOptions | MaxApiTrafficClass = {},
   ) {
+    if (
+      options?.replaceOwnedInlineKeyboard &&
+      (!/^[1-9]\d{0,30}$/u.test(chatId) ||
+        !options.requireAllAttachmentsPreserved ||
+        !options.beforeEditMutation)
+    ) {
+      throw new BadRequestException('Owned keyboard replacement requires a guarded private card.');
+    }
     return this.runWithMessageKeyboardEditLock(
       messageId,
       async (assertOwnership, assertCurrentOwnership) => {
@@ -6787,7 +6797,9 @@ export class MaxClientService implements OnModuleDestroy {
         { body: { attachments: sourceAttachments } },
         { ...options, requireAllAttachmentsPreserved: false },
       );
-      assertEditableAttachmentsPreserved(sourceAttachments, result, options.buttons ?? []);
+      assertEditableAttachmentsPreserved(sourceAttachments, result, options.buttons ?? [], {
+        replaceSourceKeyboard: options.replaceOwnedInlineKeyboard === true,
+      });
       return result;
     }
     const editableAttachments = this.extractEditableAttachments(message, includeForwarded);

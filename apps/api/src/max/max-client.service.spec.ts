@@ -8699,6 +8699,63 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
+  it('replaces a guarded private keyboard and retains original media in the actual PUT', async () => {
+    const httpService = {
+      request: jest.fn().mockReturnValue(of({ status: 200, data: { success: true } })),
+    };
+    const service = createService(httpService);
+    const media = { type: 'image', payload: { token: 'photo-token' } };
+    jest.spyOn(service as any, 'getMessageById').mockResolvedValue({
+      body: {
+        text: 'Предложка',
+        attachments: [
+          media,
+          {
+            type: 'inline_keyboard',
+            payload: {
+              buttons: [
+                [{ type: 'callback', text: 'Опубликовать', payload: 'sr1|publish|id|0|0' }],
+              ],
+            },
+          },
+        ],
+      },
+    });
+    const beforeEditMutation = jest.fn().mockResolvedValue(undefined);
+    try {
+      await service.editMessageInlineKeyboard('101', 'card', 'Опубликовано', {
+        buttons: [],
+        requireAllAttachmentsPreserved: true,
+        replaceOwnedInlineKeyboard: true,
+        beforeEditMutation,
+      });
+      expect(beforeEditMutation).toHaveBeenCalledTimes(1);
+      expect(httpService.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'put',
+          data: { text: 'Опубликовано', attachments: [media] },
+        }),
+      );
+      httpService.request.mockClear();
+      for (const [chatId, guard] of [
+        ['-101', beforeEditMutation],
+        ['101', undefined],
+      ] as const) {
+        await expect(
+          service.editMessageInlineKeyboard(chatId, 'card', null, {
+            buttons: [],
+            requireAllAttachmentsPreserved: true,
+            replaceOwnedInlineKeyboard: true,
+            beforeEditMutation: guard,
+          }),
+        ).rejects.toThrow('guarded private card');
+      }
+      expect(httpService.request).not.toHaveBeenCalled();
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
   it.each([false, true])(
     'uses fresh prepared text instead of stale caller text (omit=%s)',
     async (omitText) => {

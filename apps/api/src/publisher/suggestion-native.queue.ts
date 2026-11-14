@@ -76,9 +76,16 @@ export class SuggestionNativeQueueService {
     const old =
       cb &&
       (profile === 'publisher'
-        ? /^psa:v1:cancel:([A-Za-z0-9_-]{1,160})$/u.exec(cb.payload)
-        : /^pc2\|suggestion_review_cancel\|([A-Za-z0-9_-]{1,160})$/u.exec(cb.payload));
-    if (old) callback = { action: 'reject', id: old[1]!, revision: -1, version: 0 };
+        ? /^psa:v1:(cancel|publish):([A-Za-z0-9_-]{1,160})$/u.exec(cb.payload)
+        : /^pc2\|suggestion_review_(cancel|publish)\|([A-Za-z0-9_-]{1,160})$/u.exec(cb.payload));
+    if (old)
+      callback = {
+        action: old[1] === 'publish' ? 'publish' : 'reject',
+        id: old[2]!,
+        // FLAG: Old publish cards display revision zero; never approve unseen later edits.
+        revision: old[1] === 'publish' ? 0 : -1,
+        version: 0,
+      };
     if (cb && !callback) return cb.payload.startsWith(SUGGESTION_NATIVE_PREFIX);
     if (!cb && !['message_created', 'message_edited'].includes(update.type)) return false;
     const actorId = cb ? cb.actorUserId : message.senderId;

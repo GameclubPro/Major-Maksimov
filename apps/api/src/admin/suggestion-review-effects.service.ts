@@ -21,6 +21,7 @@ import { buildChannelSuggestionAdminMessagePayload } from './admin-channel-sugge
 import { readChannelSuggestionTextMarkup } from './admin-channel-dialog-values';
 import { buildSuggestionReviewButtons } from './suggestion-review-links';
 import { suggestionRevision } from './suggestion-review-content';
+import { privateSuggestionReviewErrorDiagnostic } from '../moderation/private-control-channel-suggestion';
 
 export const suggestionObject = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -352,7 +353,16 @@ export class SuggestionReviewEffectsService {
             : 'Ожидает повторной подготовки.',
         },
       });
-      this.logger.warn({ effectId: id, status }, 'Suggestion review effect did not complete');
+      this.logger.warn(
+        {
+          effectId: id,
+          kind: row.kind,
+          status,
+          attempted,
+          ...privateSuggestionReviewErrorDiagnostic(error),
+        },
+        'Suggestion review effect did not complete',
+      );
     }
   }
 
@@ -440,6 +450,7 @@ export class SuggestionReviewEffectsService {
             buttons,
             textFormat: message.textFormat,
             requireAllAttachmentsPreserved: true,
+            replaceOwnedInlineKeyboard: true,
             beforeEditMutation: async () => {
               await this.assertDispatchAccess(row.chatId, effect.botId, profile, card.adminUserId);
               const active = await this.prisma.suggestionReviewDialog.findUnique({

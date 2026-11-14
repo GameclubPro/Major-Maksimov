@@ -1,4 +1,10 @@
-import { BadRequestException, ConflictException, HttpException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  HttpException,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -21,12 +27,16 @@ import {
 } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import type { SuggestionNativeJob } from '../publisher/suggestion-native.queue';
+import {
+  describePrivateSuggestionReviewError,
+  privateSuggestionReviewErrorDiagnostic,
+} from '../moderation/private-control-channel-suggestion';
 import { SuggestionReviewService } from './suggestion-review.service';
 import {
   SuggestionReviewEffectsService,
   suggestionObject,
 } from './suggestion-review-effects.service';
-import { suggestionRevision } from './suggestion-review-content';
+import { hasSuggestionRequest, suggestionRevision } from './suggestion-review-content';
 import {
   nativeContentSchema,
   nativeSuggestionMarkdown,
@@ -55,6 +65,7 @@ type Card = ChannelSuggestionAdminDelivery & {
 
 @Injectable()
 export class SuggestionNativeService {
+  private readonly logger = new Logger(SuggestionNativeService.name);
   constructor(
     private readonly prisma: PrismaService,
     private readonly review: SuggestionReviewService,
@@ -62,7 +73,7 @@ export class SuggestionNativeService {
     private readonly max: MaxClientService,
   ) {}
 
-  async process(job: SuggestionNativeJob): Promise<void> {
+  async process(job: SuggestionNativeJob, options: { finalAttempt?: boolean } = {}): Promise<void> {
     const requestedAt = Date.parse(job.requestedAt);
     if (
       !Number.isFinite(requestedAt) ||
@@ -98,6 +109,7 @@ export class SuggestionNativeService {
     };
     let token: string | null = null;
     let notice = '';
+    let stage = 'authorization';
     try {
       const row = await this.review.authorize(card.auditLogId, job.profile, actor);
       await this.effects.assertDispatchAccess(
@@ -135,6 +147,29 @@ export class SuggestionNativeService {
         where: { deliveryId: card.id },
       });
       let detail = await this.review.get(card.auditLogId, job.profile, actor);
+      stage = 'review';
+      if (detail.status === 'publishing') {
+        await this.review.reconcilePublication(card.auditLogId, job.profile, actor);
+        detail = await this.review.get(card.auditLogId, job.profile, actor);
+      }
+      // FLAG: A failed pre-dispatch publication may already have saved this exact edit.
+      // Only its original actor/action/body receipt permits crossing that revision change.
+      const retainedPublishInput = {
+        requestId: requestId(`${card.id}\0${session.revision}\0${session.version}\0publish`),
+        expectedRevision: session.revision,
+        ...(session.mode === 'preview'
+          ? { text: nativeSuggestionMarkdown(this.readDraft(session)) }
+          : {}),
+      };
+      const acceptedPublishRetry =
+        job.callback?.action === 'publish' &&
+        ['idle', 'preview'].includes(session.mode) &&
+        hasSuggestionRequest(
+          suggestionObject(row.payload),
+          'publish',
+          actor.userId,
+          retainedPublishInput,
+        );
       if (session.lastEventId !== job.eventId && detail.status === 'pending') {
         if (session.mode !== 'idle' && session.expiresAt < new Date()) {
           session = await this.change(session, token, job, {
@@ -157,7 +192,8 @@ export class SuggestionNativeService {
         } else if (
           (job.callback &&
             job.callback.revision >= 0 &&
-            job.callback.revision !== detail.revision) ||
+            job.callback.revision !== detail.revision &&
+            !acceptedPublishRetry) ||
           (!job.callback && session.revision !== detail.revision)
         ) {
           notice =
@@ -231,7 +267,7 @@ export class SuggestionNativeService {
             const draft = session.mode === 'preview' ? this.readDraft(session) : null;
             const input = {
               requestId: identity,
-              expectedRevision: detail.revision,
+              expectedRevision: acceptedPublishRetry ? session.revision : detail.revision,
               ...(draft ? { text: nativeSuggestionMarkdown(draft) } : {}),
             };
             await this.assertLock(session, token);
@@ -330,12 +366,24 @@ export class SuggestionNativeService {
         }
       }
       detail = await this.review.get(card.auditLogId, job.profile, actor);
+      stage = 'card_update';
       await this.render(job, bound, session, token, detail, actor);
       await this.answer(job, notice || this.status(detail));
     } catch (error) {
-      if (!(error instanceof HttpException) || error.getStatus() >= 500) throw error;
-      const message =
-        typeof error.message === 'string' ? error.message : 'Не удалось применить изменение.';
+      this.logger.warn(
+        {
+          suggestionId: card.auditLogId,
+          profile: job.profile,
+          stage,
+          ...privateSuggestionReviewErrorDiagnostic(error),
+        },
+        'Native suggestion review did not complete',
+      );
+      const message = describePrivateSuggestionReviewError(error);
+      if (!(error instanceof HttpException) || error.getStatus() >= 500) {
+        if (options.finalAttempt) await this.answer(job, message);
+        throw error;
+      }
       await this.answer(job, message);
       // FLAG: A text reply has no callback toast: display the error on the same card without saving it.
       if (!job.callbackId && token) {
@@ -538,6 +586,7 @@ export class SuggestionNativeService {
         buttons,
         textFormat: format,
         requireAllAttachmentsPreserved: true,
+        replaceOwnedInlineKeyboard: true,
         beforeEditMutation: async () => {
           await this.assertLock(session, token);
           await this.effects.assertDispatchAccess(

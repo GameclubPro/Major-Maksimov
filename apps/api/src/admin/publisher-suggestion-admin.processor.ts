@@ -72,7 +72,9 @@ export class PublisherSuggestionAdminProcessor extends WorkerHost {
     if (job.data.kind === 'suggestion-native') {
       if (!this.nativeReview || job.data.profile !== 'publisher')
         throw new Error('Native review unavailable');
-      await this.nativeReview.process(job.data);
+      await this.nativeReview.process(job.data, {
+        finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1),
+      });
       return;
     }
     if (job.data.kind === 'review-effect') {

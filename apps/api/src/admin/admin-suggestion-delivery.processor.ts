@@ -31,7 +31,9 @@ export class AdminSuggestionDeliveryProcessor extends WorkerHost {
 
     if ('kind' in job.data && job.data.kind === 'suggestion-native') {
       if (job.data.profile !== 'moderation') throw new Error('Wrong native review worker');
-      await this.nativeReview.process(job.data);
+      await this.nativeReview.process(job.data, {
+        finalAttempt: job.attemptsMade + 1 >= (job.opts.attempts ?? 1),
+      });
       return;
     }
     if ('kind' in job.data && job.data.kind === 'review-effect') {
