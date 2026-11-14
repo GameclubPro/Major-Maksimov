@@ -60,6 +60,8 @@ function setup(draft = initial()) {
       writes.push([api, id, request]);
       return saveServerPublicationDraft(api, id, request);
     },
+    remove: (id: string, request: Parameters<typeof deleteServerPublicationDraft>[2]) =>
+      deleteServerPublicationDraft(api, id, request),
     get: (id: string) => getServerPublicationDraft(api, id),
     find: (id: string) => findServerPublicationDraft(api, id),
     persist: async (_draft: PublicationDraft) => undefined,
@@ -443,4 +445,78 @@ test('cloud and local drafts preserve the authored late policy across reopening'
     })?.latePolicy,
     undefined,
   );
+});
+
+test('discard removes the saved draft, frees its slot and permits a fresh autosave', async () => {
+  const { api, make, writes } = setup();
+  const engine = make();
+  const saved = await engine.flush();
+  await engine.discard();
+  await assert.rejects(getServerPublicationDraft(api, saved.cloudDraft!.id), { status: 404 });
+  assert.equal(engine.getSnapshot().text, '');
+  assert.equal(engine.getSnapshot().cloudDraft, undefined);
+  assert.equal(engine.dirty, false);
+  await engine.flush();
+  assert.equal(writes.length, 1, 'empty discarded drafts must not be recreated');
+  engine.setSnapshot({ ...engine.getSnapshot(), text: 'Следующий пост' });
+  const next = await engine.flush();
+  assert.notEqual(next.cloudDraft?.id, saved.cloudDraft?.id);
+  assert.notEqual(writes[1][2].requestId, writes[0][2].requestId);
+});
+
+test('failed deletion preserves the draft and its revision for retry', async () => {
+  const fixture = setup();
+  const engine = fixture.make();
+  const saved = await engine.flush();
+  const remove = fixture.dependencies.remove;
+  fixture.dependencies.remove = async () => {
+    throw new Error('Нет связи');
+  };
+  await assert.rejects(engine.discard(), /Нет связи/);
+  assert.deepEqual(engine.getSnapshot(), saved);
+  fixture.dependencies.remove = remove;
+  await engine.discard();
+  assert.equal(engine.getSnapshot().cloudDraft, undefined);
+});
+
+test('discard never drops an uncertain write or deletes another device revision', async () => {
+  const fixture = setup();
+  const engine = fixture.make();
+  const save = fixture.dependencies.save;
+  fixture.dependencies.save = async (id, request) => {
+    await save(id, request);
+    throw new Error('lost acknowledgment');
+  };
+  await assert.rejects(engine.flush());
+  await assert.rejects(engine.discard(), /Повторите сохранение/);
+  assert.equal(engine.getSnapshot().text, initial().text);
+  fixture.dependencies.save = save;
+  const saved = await engine.flush();
+  await saveServerPublicationDraft(
+    fixture.api,
+    saved.cloudDraft!.id,
+    serverDraftRequest({ ...saved, text: 'Другая версия' }, 'other-device-before-delete', 1),
+  );
+  await assert.rejects(engine.discard(), { status: 409 });
+  assert.equal(
+    (await getServerPublicationDraft(fixture.api, saved.cloudDraft!.id)).publication.content.text,
+    'Другая версия',
+  );
+  assert.equal(engine.getSnapshot().text, initial().text);
+});
+
+test('discard after a definitive quota rejection resets the error without creating an empty row', async () => {
+  const fixture = setup();
+  const engine = fixture.make();
+  const save = fixture.dependencies.save;
+  fixture.dependencies.save = async () => {
+    throw Object.assign(new Error('Можно сохранить до 50 черновиков.'), { status: 400 });
+  };
+  await assert.rejects(engine.flush());
+  await engine.discard();
+  fixture.dependencies.save = save;
+  await engine.flush();
+  assert.equal(fixture.writes.length, 0);
+  engine.setSnapshot({ ...engine.getSnapshot(), text: 'Новый пост' });
+  assert.ok((await engine.flush()).cloudDraft);
 });

@@ -28,12 +28,14 @@ export function PublicationDraftStatus({
   onRetry,
   onReload,
   onCopy,
+  onDrafts,
 }: {
   state: DraftSaveState;
   busy: boolean;
   onRetry: () => void;
   onReload: () => void;
   onCopy: () => void;
+  onDrafts: () => void;
 }) {
   if (!publicationDraftNeedsAttention(state)) return null;
   const problem = publicationDraftProblem(state);
@@ -45,6 +47,10 @@ export function PublicationDraftStatus({
       </span>
       <small>{problem.detail}</small>
       <div>
+        <button type="button" disabled={busy} onClick={onDrafts}>
+          <IconoirSprite variant="iconoir" icon="Post" aria-hidden />
+          Черновики
+        </button>
         {state.status === 'conflict' || state.status === 'unavailable' ? (
           <>
             {state.status === 'conflict' ? (

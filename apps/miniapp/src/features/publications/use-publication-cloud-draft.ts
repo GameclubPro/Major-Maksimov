@@ -33,6 +33,12 @@ export function usePublicationCloudDraft(options: {
           id,
           request,
         ),
+      remove: async (id, request) =>
+        (await import('../../lib/api/publication-drafts-client')).deleteServerPublicationDraft(
+          options.api,
+          id,
+          request,
+        ),
       find: async (id) =>
         (await import('../../lib/api/publication-drafts-client')).findServerPublicationDraft(
           options.api,
@@ -81,6 +87,7 @@ export function usePublicationCloudDraft(options: {
   return {
     ...state,
     flush,
+    discard: () => controller?.discard(),
     reload: () => controller?.reload(),
     saveCopy: () => controller?.saveCopy(),
     markConflict: (error: unknown) => controller?.markConflict(error),
