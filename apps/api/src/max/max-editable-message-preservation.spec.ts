@@ -5,6 +5,43 @@ import {
 import { AdminDialogLinkHelper } from '../admin/admin-dialog-link-helper';
 
 describe('strict editable message preservation', () => {
+  it('replaces an explicitly owned keyboard while preserving every media attachment', () => {
+    const photo = { type: 'image', payload: { token: 'photo' } };
+    const video = { type: 'video', payload: { token: 'video' } };
+    const source = [
+      photo,
+      video,
+      {
+        type: 'inline_keyboard',
+        payload: {
+          buttons: [[{ type: 'callback', text: 'Опубликовать', payload: 'sr1|publish|id|0|0' }]],
+        },
+      },
+    ];
+    expect(() => assertEditableAttachmentsPreserved(source, [photo, video], [])).toThrow(
+      'A button would be lost',
+    );
+    expect(() =>
+      assertEditableAttachmentsPreserved(source, [photo, video], [], {
+        replaceSourceKeyboard: true,
+      }),
+    ).not.toThrow();
+    for (const result of [[photo], [video], [photo, { ...video, payload: { token: 'changed' } }]]) {
+      expect(() =>
+        assertEditableAttachmentsPreserved(source, result, [], {
+          replaceSourceKeyboard: true,
+        }),
+      ).toThrow('An attachment would be lost');
+    }
+    expect(() =>
+      assertEditableAttachmentsPreserved(
+        source,
+        [photo, video],
+        [[{ type: 'callback', text: 'Новая', payload: 'sr1|edit|id|0|1' }]],
+        { replaceSourceKeyboard: true },
+      ),
+    ).toThrow('A button would be lost');
+  });
   it('allows only a recognized same-channel suggestion alias, never lost ads or comments', () => {
     const helper = new AdminDialogLinkHelper({
       appBaseUrl: null,

@@ -71,6 +71,10 @@ export class ChannelDialogService {
     );
   }
 
+  reconcileSuggestion(id: string, user: AuthUser) {
+    return this.legacyAdminService.channelSuggestionPublicationRuntime.reconcileReview(id, user);
+  }
+
   resolveCommentThread(
     chatId: string,
     entityType: ManagedEntityType,

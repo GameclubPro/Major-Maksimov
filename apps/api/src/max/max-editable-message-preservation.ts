@@ -45,6 +45,7 @@ export function assertEditableAttachmentsPreserved(
   source: unknown[],
   result: Record<string, unknown>[],
   requestedButtons: readonly unknown[],
+  options: { replaceSourceKeyboard?: boolean } = {},
 ): void {
   const keyboards = result.filter((item) => item.type === 'inline_keyboard');
   const deliveredButtons = keyboards.flatMap((item) => {
@@ -62,6 +63,8 @@ export function assertEditableAttachmentsPreserved(
           'Source keyboard is incomplete; preserving the original post.',
         );
       }
+      // FLAG: Only an explicitly owned private-card keyboard may change; media stays exact.
+      if (options.replaceSourceKeyboard) continue;
       requiredButtons.push(...rows);
       for (const button of rows.flat()) {
         const normalized = normalizeMaxInlineKeyboardButtons([[button]])?.[0]?.[0];

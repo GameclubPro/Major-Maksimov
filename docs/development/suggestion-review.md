@@ -16,10 +16,20 @@ shared suggestion content unchanged. Editing the administrator's bound input mes
 its preview only while that editing session is active. Other messages/commands and replies to
 other cards do not become post content or overwrite other private authoring sessions.
 
+Historical publish callbacks enter the same bounded native queue as current cards. Their displayed
+content is revision zero, so they cannot approve later edits. Retries retain the exact operation,
+actor and body when a safe preparation failure has already saved an edit. Exhausted transient
+failures produce a sanitized callback notice; logs keep fixed failure category and processing stage.
+
 MAX has no documented composer-prefill/force-reply operation. A clipboard button is an
 optional shortcut only for bodies of at most 1024 characters; its exact whitespace must survive
 normalization. Longer text uses native message copying. Editor UI uses existing-message PUTs,
 not new SENDs. Preserve every media attachment when replacing its text or keyboard.
+
+Keyboard replacement uses the explicit guarded private-card option. General strict preservation
+continues to protect existing buttons; the private option still verifies every original media
+attachment and every requested new button. Native store tests execute the real attachment builder
+against existing card snapshots, including transitions that remove old buttons.
 
 Native input retains MAX entities and untrimmed UTF-16 text. Unchanged ranges keep original
 styles and URLs; edits inside a style inherit it when correspondence is unambiguous. Changed
@@ -49,6 +59,10 @@ Shared review service row locks, operation hashes, publication claims and effect
 authoritative. Operation IDs bind action, actor and request body. Rejected, publishing and
 transferred suggestions cannot be edited. Publication freezes the same revision it accepts.
 The mini app's strict text/revision/UUID contract remains unchanged.
+
+Reopening a Major card in `publishing` reconciles its exact publication ledger. A confirmed receipt
+finalizes the saved status without another SEND; unknown effects stay fenced and require review.
+Reconciliation may release only a provably unattempted stale claim and never starts a publication.
 
 Major dialog jobs execute on `admin-suggestion-delivery` in the action role. Publik uses
 `publisher-suggestion-admin` in `api-publisher`, retaining identity/dispatch gates. Fresh exact

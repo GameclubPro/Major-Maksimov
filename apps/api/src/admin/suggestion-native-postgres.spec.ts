@@ -10,7 +10,7 @@ import {
   type ChannelSuggestionAdminDelivery,
 } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
-import type { MaxClientService } from '../max/max-client.service';
+import { MaxClientService } from '../max/max-client.service';
 import type { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { ManagedEntitiesService } from './managed-entities.service';
@@ -29,8 +29,20 @@ import {
 import { SuggestionNativeService } from './suggestion-native.service';
 import { SuggestionReviewService } from './suggestion-review.service';
 import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
+import { suggestionObject } from './suggestion-review-effects.service';
+import {
+  AdminChannelSuggestionPublicationRuntime,
+  type AdminChannelSuggestionPublicationRuntimeContext,
+} from './admin-channel-suggestion-publication-runtime';
+import {
+  buildChannelSuggestionPublicationLedgerJobId,
+  withChannelSuggestionPublicationContextDigest,
+  CHANNEL_SUGGESTION_PUBLICATION_SOURCE_TAG,
+} from './admin-channel-suggestion-publication-protocol';
+import { suggestionContentPatch, suggestionRequestPatch } from './suggestion-review-content';
 import {
   parseSuggestionNativeCallback,
+  suggestionNativeButtons,
   type SuggestionNativeAction,
 } from './suggestion-native-protocol';
 
@@ -52,6 +64,13 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
   let answer: jest.MockedFunction<MaxClientService['answerCallback']>;
   let authorize: jest.MockedFunction<ManagedEntitiesService['assertChannelAdminAccess']>;
   const chats: string[] = [];
+  const messages = new Map<string, Record<string, unknown>>();
+  const attachmentBuilder = Object.create(MaxClientService.prototype) as {
+    buildEditableMessageAttachments(
+      message: Record<string, unknown>,
+      options: Parameters<MaxClientService['editMessageInlineKeyboard']>[3],
+    ): Record<string, unknown>[];
+  };
   type Fixture = {
     row: AuditLog;
     card: ChannelSuggestionAdminDelivery;
@@ -80,8 +99,12 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         ReturnType<MaxClientService['editMessageInlineKeyboard']>,
         Parameters<MaxClientService['editMessageInlineKeyboard']>
       >()
-      .mockImplementation(async (_chat, _id, _text, options) => {
+      .mockImplementation(async (_chat, id, text, options) => {
+        const source = messages.get(id);
+        if (!source) throw new Error('Test card snapshot missing');
+        const attachments = attachmentBuilder.buildEditableMessageAttachments(source, options);
         await options?.beforeEditMutation?.();
+        messages.set(id, { body: { text, attachments } });
         return true;
       });
     send = jest
@@ -111,6 +134,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       answerCallback: answer,
       getCurrentChatMemberAccess: jest.fn().mockResolvedValue({ isAdmin: true }),
       getChatMemberAccess: jest.fn().mockResolvedValue({ isAdmin: true }),
+      resolveMessageLink: jest.fn().mockResolvedValue('https://max.ru/confirmed-post'),
     } satisfies Pick<
       MaxClientService,
       | 'editMessageInlineKeyboard'
@@ -118,6 +142,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       | 'answerCallback'
       | 'getCurrentChatMemberAccess'
       | 'getChatMemberAccess'
+      | 'resolveMessageLink'
     >;
     const registry = {
       getPublisherBotDescriptor: () => ({ id: 'publisher' }),
@@ -137,12 +162,29 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         assertEntityReady: jest.fn().mockResolvedValue({ requiredBotId: 'publisher' }),
       } as unknown as PublisherReadinessService,
     );
+    const reconciliationContext = {
+      prisma: db as unknown as PrismaService,
+      maxClient: max as unknown as MaxClientService,
+      logger: { warn: jest.fn() },
+      assertChatAdmin: authorize,
+      readObjectPayload: suggestionObject,
+      readTrimmedString: (value: unknown) =>
+        typeof value === 'string' ? value.trim() || null : null,
+      readLowerString: (value: unknown) => (typeof value === 'string' ? value.toLowerCase() : null),
+      syncChannelSuggestionAdminReviewMessages: jest.fn().mockResolvedValue(undefined),
+    };
+    const publication = new AdminChannelSuggestionPublicationRuntime(
+      reconciliationContext as unknown as AdminChannelSuggestionPublicationRuntimeContext,
+    );
+    const dialogs = {
+      reconcileSuggestion: (id, user) => publication.reconcileReview(id, user),
+    } satisfies Pick<ChannelDialogService, 'reconcileSuggestion'>;
     review = new SuggestionReviewService(
       db as unknown as PrismaService,
       { assertChannelAdminAccess: authorize } as unknown as ManagedEntitiesService,
       { getEntity: jest.fn().mockResolvedValue({}) } as unknown as PublisherPolicyService,
       {} as PublisherSuggestionService,
-      {} as ChannelDialogService,
+      dialogs as ChannelDialogService,
       { getBotId: () => 'publisher' } as PublisherDialogLinkService,
       {
         preparePostText: jest.fn(async (_chat, content) => content),
@@ -163,7 +205,9 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     );
   });
   afterEach(async () => {
+    messages.clear();
     jest.restoreAllMocks();
+    await db.maxActionLedgerEntry.deleteMany({ where: { chatId: { in: chats } } });
     await db.suggestionReviewContact.deleteMany({ where: { channelId: { in: chats } } });
     await db.chat.deleteMany({ where: { id: { in: chats.splice(0) } } });
     await db.suggestionReviewCardUpgrade.deleteMany();
@@ -212,6 +256,15 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         sentAt: new Date(),
       },
     });
+    messages.set(card.remoteMessageId!, {
+      body: {
+        text: 'Карточка предложки',
+        attachments: [
+          { type: 'image', payload: { token: 'original-photo' } },
+          { type: 'inline_keyboard', payload: { buttons: suggestionNativeButtons(row.id) } },
+        ],
+      },
+    });
     return { row, card, profile, botId };
   }
   async function callback(
@@ -243,6 +296,230 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     await service.process(job);
     return job;
   }
+
+  async function seedPublication(f: Fixture, outcome: 'confirmed' | 'unknown' | 'unattempted') {
+    const ledgerJobId = buildChannelSuggestionPublicationLedgerJobId(f.row.id);
+    const context = withChannelSuggestionPublicationContextDigest({
+      protocol: 'max_action_ledger_v1',
+      preparedAt: new Date().toISOString(),
+      messageDigest: 'b'.repeat(64),
+      botId: f.botId,
+      threadId: null,
+      buttons: [],
+      includeCommentsButton: false,
+      includeSuggestButton: false,
+      suggestButtonText: null,
+      suggestionEntryMode: 'BOT',
+      authorAttribution: {
+        userId: '42',
+        displayName: 'Анна',
+        mentionDisplayName: 'Анна',
+        username: null,
+        profileUrl: 'https://max.ru/anna',
+      },
+    });
+    await db.auditLog.update({
+      where: { id: f.row.id },
+      data: {
+        payload: {
+          ...suggestionObject(f.row.payload),
+          reviewStatus: 'publishing',
+          reviewAction: 'publish',
+          reviewPublicationProtocol: context.protocol,
+          reviewPublicationLedgerJobId: ledgerJobId,
+          reviewClaimToken: 'retained-claim',
+          reviewClaimedByUserId: '101',
+          reviewClaimedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+          ...(outcome !== 'unattempted' ? { reviewPublicationContext: context } : {}),
+        },
+      },
+    });
+    if (outcome !== 'unattempted')
+      await db.maxActionLedgerEntry.create({
+        data: {
+          jobId: ledgerJobId,
+          chatId: f.row.chatId,
+          actionType: 'SEND_MESSAGE',
+          sourceTag: CHANNEL_SUGGESTION_PUBLICATION_SOURCE_TAG,
+          status: outcome === 'confirmed' ? 'SUCCEEDED' : 'IN_PROGRESS',
+          terminal: outcome === 'confirmed',
+          ambiguous: outcome === 'unknown',
+          dispatchToken: 'dispatch',
+          dispatchStartedAt: new Date(),
+          dispatchBotId: f.botId,
+          remoteMessageId: outcome === 'confirmed' ? 'confirmed-message' : null,
+          metadata: {
+            ledgerContext: {
+              suggestionId: f.row.id,
+              publicationProtocol: context.protocol,
+              claimToken: 'retained-claim',
+              actorUserId: '42',
+              messageDigest: context.messageDigest,
+              contextDigest: context.contextDigest,
+            },
+          },
+        },
+      });
+    return ledgerJobId;
+  }
+
+  it('reconciles a confirmed publication from the native card without another SEND', async () => {
+    const f = await seed();
+    await seedPublication(f, 'confirmed');
+    await callback(f, 'publish');
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ reviewStatus: 'published', publishedMessageId: 'confirmed-message' });
+    expect(edit.mock.calls.at(-1)?.[3]?.buttons).toEqual([
+      [
+        expect.objectContaining({
+          text: 'Опубликовано',
+          payload: expect.stringContaining('sr1|hint|'),
+        }),
+      ],
+    ]);
+    expect(messages.get(f.card.remoteMessageId!)?.body).toMatchObject({
+      attachments: [
+        { type: 'image', payload: { token: 'original-photo' } },
+        { type: 'inline_keyboard' },
+      ],
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('keeps unknown publication effects fenced on repeated native clicks', async () => {
+    const f = await seed();
+    const jobId = await seedPublication(f, 'unknown');
+    const before = await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId } });
+    await callback(f, 'publish');
+    await callback(f, 'publish');
+    expect(await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId } })).toEqual(before);
+    expect(answer.mock.calls.at(-1)?.[1]).toContain('Повторная отправка отключена');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('releases only stale unattempted publication state without sending from reconciliation', async () => {
+    const f = await seed();
+    await seedPublication(f, 'unattempted');
+    await review.reconcilePublication(f.row.id, f.profile, {
+      userId: '101',
+      username: null,
+      displayName: null,
+    });
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ reviewStatus: 'pending' });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('retains the exact edit request across a safe pre-dispatch failure and revision increment', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    await input(f, '  Цена 500 ₽\n\n');
+    const error = new Error('temporary preparation failure');
+    const publish = jest
+      .spyOn(review, 'publish')
+      .mockImplementationOnce(async (id, _profile, actor, body) => {
+        const input = body as { requestId: string; expectedRevision: number; text: string };
+        const row = await db.auditLog.findUniqueOrThrow({ where: { id } });
+        const payload = suggestionObject(row.payload);
+        await db.auditLog.update({
+          where: { id },
+          data: {
+            payload: {
+              ...payload,
+              ...suggestionContentPatch(payload, input, actor.userId),
+              ...suggestionRequestPatch(payload, 'publish', actor.userId, input, 1),
+              reviewStatus: 'pending',
+            },
+          },
+        });
+        throw error;
+      })
+      .mockImplementationOnce(async (id, profile, actor) => review.get(id, profile, actor));
+    const session = await db.suggestionReviewDialog.findUniqueOrThrow({
+      where: { deliveryId: f.card.id },
+    });
+    const eventId = randomUUID();
+    const patch = {
+      eventId,
+      callback: { action: 'publish' as const, id: f.row.id, revision: 0, version: session.version },
+    };
+    await expect(callback(f, 'publish', patch)).rejects.toBe(error);
+    await callback(f, 'publish', patch);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish.mock.calls[1]?.[3]).toEqual(publish.mock.calls[0]?.[3]);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each(['moderation', 'publisher'] as const)(
+    'queues old %s publish buttons with bounded retries',
+    async (profile) => {
+      const f = await seed(profile);
+      const update = {
+        botId: f.botId,
+        updateId: randomUUID(),
+        type: 'message_callback',
+        message: {
+          messageId: f.card.remoteMessageId!,
+          chatId: '101',
+          senderId: '101',
+          text: '',
+          createdAt: new Date().toISOString(),
+        },
+        raw: {
+          timestamp: Date.now(),
+          callback: {
+            callback_id: randomUUID(),
+            user: { user_id: '101' },
+            payload:
+              profile === 'publisher'
+                ? `psa:v1:publish:${f.row.id}`
+                : `pc2|suggestion_review_publish|${f.row.id}`,
+          },
+        },
+      } satisfies MaxUpdate;
+      expect(await ingress.observeWebhook(update)).toBe(true);
+      expect(await ingress.observeWebhook(update)).toBe(true);
+      const jobs = await (profile === 'publisher' ? publisher : major).getJobs([
+        'wait',
+        'prioritized',
+      ]);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.data.callback).toEqual({
+        action: 'publish',
+        id: f.row.id,
+        revision: 0,
+        version: 0,
+      });
+      expect(jobs[0]?.opts.attempts).toBe(5);
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports an exhausted transient failure without leaking raw transport details', async () => {
+    const f = await seed();
+    authorize.mockRejectedValue(new Error('internal password=secret'));
+    const job: SuggestionNativeJob = {
+      version: 1,
+      kind: 'suggestion-native',
+      profile: f.profile,
+      requiredBotId: f.botId,
+      actorId: '101',
+      privateChatId: '101',
+      messageId: f.card.remoteMessageId!,
+      callbackId: 'callback',
+      callback: { action: 'publish', id: f.row.id, revision: 0, version: 0 },
+      eventId: randomUUID(),
+      requestedAt: new Date().toISOString(),
+    };
+    await expect(service.process(job, { finalAttempt: false })).rejects.toThrow('internal');
+    expect(answer).not.toHaveBeenCalled();
+    await expect(service.process(job, { finalAttempt: true })).rejects.toThrow('internal');
+    expect(answer.mock.calls[0]?.[1]).toContain('Не удалось подтвердить');
+    expect(answer.mock.calls[0]?.[1]).not.toContain('secret');
+    expect(send).not.toHaveBeenCalled();
+  });
   async function input(f: Fixture, text: string, patch: Partial<SuggestionNativeJob> = {}) {
     const session = await db.suggestionReviewDialog.findUniqueOrThrow({
       where: { deliveryId: f.card.id },
@@ -630,6 +907,28 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
   });
   it('upgrades old pending card buttons in bounded pages without new messages or reviving terminal work', async () => {
     const f = await seed();
+    messages.set(f.card.remoteMessageId!, {
+      body: {
+        text: 'Старая карточка',
+        attachments: [
+          { type: 'image', payload: { token: 'original-photo' } },
+          {
+            type: 'inline_keyboard',
+            payload: {
+              buttons: [
+                [
+                  {
+                    type: 'callback',
+                    text: 'Опубликовать',
+                    payload: `pc2|suggestion_review_publish|${f.row.id}`,
+                  },
+                ],
+              ],
+            },
+          },
+        ],
+      },
+    });
     const terminal = await seed();
     await db.auditLog.update({
       where: { id: terminal.row.id },
@@ -660,6 +959,9 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     });
     expect(rows).toHaveLength(1);
     await effects.process(rows[0]!.id, 'moderation');
+    expect(
+      await db.suggestionReviewEffect.findUnique({ where: { id: rows[0]!.id } }),
+    ).toMatchObject({ status: 'SENT' });
     for (const button of edit.mock.calls.at(-1)?.[3]?.buttons?.flat() ?? []) {
       expect(button.type).toBe('callback');
       if (button.type === 'callback')
