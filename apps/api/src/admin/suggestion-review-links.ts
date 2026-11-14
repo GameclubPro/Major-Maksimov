@@ -3,6 +3,37 @@ import type { MiniappProfile } from '@maxim/contracts/publisher';
 import type { MaxMessageButton } from '../max/max-client.service';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 
+export function buildPublishedSuggestionButton(
+  profile: MiniappProfile,
+  payload: Record<string, unknown>,
+): MaxMessageButton | null {
+  // FLAG: Publik's published review status is a queued handoff, not a confirmed MAX post.
+  if (
+    profile !== 'moderation' ||
+    payload.reviewStatus !== 'published' ||
+    typeof payload.publishedMessageId !== 'string' ||
+    !payload.publishedMessageId.trim() ||
+    typeof payload.publishedUrl !== 'string'
+  )
+    return null;
+  try {
+    const url = new URL(payload.publishedUrl.trim());
+    if (
+      url.protocol !== 'https:' ||
+      !['max.ru', 'www.max.ru'].includes(url.hostname) ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.pathname === '/' ||
+      url.href.length > 2048
+    )
+      return null;
+    return { type: 'link', text: 'Опубликовано', url: url.href };
+  } catch {
+    return null;
+  }
+}
+
 export function suggestionReviewUrl(
   links: MaxBotLinkService,
   profile: MiniappProfile,

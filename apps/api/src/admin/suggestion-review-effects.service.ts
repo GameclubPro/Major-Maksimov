@@ -19,7 +19,10 @@ import {
 } from '../publisher/publisher-suggestion-admin.queue';
 import { buildChannelSuggestionAdminMessagePayload } from './admin-channel-suggestion-presentation';
 import { readChannelSuggestionTextMarkup } from './admin-channel-dialog-values';
-import { buildSuggestionReviewButtons } from './suggestion-review-links';
+import {
+  buildPublishedSuggestionButton,
+  buildSuggestionReviewButtons,
+} from './suggestion-review-links';
 import { suggestionRevision } from './suggestion-review-content';
 import { privateSuggestionReviewErrorDiagnostic } from '../moderation/private-control-channel-suggestion';
 
@@ -145,9 +148,10 @@ export class SuggestionReviewEffectsService {
   }
 
   async upgradeNativeCards(profile: MiniappProfile): Promise<void> {
+    const upgradeProfile = profile === 'moderation' ? 'moderation:published-link-v1' : profile;
     const state = await this.prisma.suggestionReviewCardUpgrade.upsert({
-      where: { profile },
-      create: { profile },
+      where: { profile: upgradeProfile },
+      create: { profile: upgradeProfile },
       update: {},
     });
     if (state.completed) return;
@@ -160,7 +164,7 @@ export class SuggestionReviewEffectsService {
     });
     await this.prisma.$transaction(async (tx) => {
       const changed = await tx.suggestionReviewCardUpgrade.updateMany({
-        where: { profile, cursor: state.cursor, completed: false },
+        where: { profile: upgradeProfile, cursor: state.cursor, completed: false },
         data: { cursor: cards.at(-1)?.id ?? state.cursor, completed: cards.length < 25 },
       });
       if (changed.count !== 1) return;
@@ -176,16 +180,17 @@ export class SuggestionReviewEffectsService {
           select: { action: true, payload: true },
         });
         const payload = suggestionObject(row?.payload);
+        const published = buildPublishedSuggestionButton(profile, payload);
         if (
           row?.action !==
             (profile === 'publisher'
               ? 'PUBLISHER_CHANNEL_DIALOG_SUGGESTION'
               : 'CHANNEL_DIALOG_SUGGESTION') ||
-          (payload.reviewStatus ?? 'pending') !== 'pending'
+          ((payload.reviewStatus ?? 'pending') !== 'pending' && !published)
         )
           continue;
         const revision = suggestionRevision(payload);
-        await tx.suggestionReviewEffect.upsert({
+        const effect = await tx.suggestionReviewEffect.upsert({
           where: {
             suggestionId_kind_revision_botId: {
               suggestionId: card.auditLogId,
@@ -200,10 +205,28 @@ export class SuggestionReviewEffectsService {
             botId: card.botId,
             kind: 'native-sync',
             revision,
-            payload: {},
+            payload: published ? { publishedLinkVersion: 1 } : {},
           },
           update: {},
         });
+        // FLAG: The versioned cursor refreshes confirmed cards once; only repeatable PUT work reopens.
+        if (published && suggestionObject(effect.payload).publishedLinkVersion !== 1)
+          await tx.suggestionReviewEffect.updateMany({
+            where: {
+              id: effect.id,
+              kind: 'native-sync',
+              status: { in: ['PENDING', 'SENT'] },
+              attemptedAt: null,
+            },
+            data: {
+              status: 'PENDING',
+              nextAttemptAt: new Date(),
+              payload: {
+                ...suggestionObject(effect.payload),
+                publishedLinkVersion: 1,
+              } as Prisma.InputJsonObject,
+            },
+          });
       }
     });
   }
@@ -387,6 +410,7 @@ export class SuggestionReviewEffectsService {
         ? storedStatus
         : 'pending';
     const profile = effect.profile as MiniappProfile;
+    const published = buildPublishedSuggestionButton(profile, payload);
     const buttons =
       status === 'pending'
         ? buildSuggestionReviewButtons(
@@ -396,7 +420,9 @@ export class SuggestionReviewEffectsService {
             undefined,
             suggestionRevision(payload),
           )
-        : [];
+        : published
+          ? [[published]]
+          : [];
     const message = buildChannelSuggestionAdminMessagePayload({
       status,
       publishedPresentation: profile === 'publisher' ? 'publication_created' : 'confirmed',
