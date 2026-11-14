@@ -1,16 +1,30 @@
+import { collectMaxRetryErrorChain } from './max-retry-after';
+
 export const MAX_SEND_AMBIGUOUS_ERROR_PREFIX = '[max.send_ambiguous]';
 export const MAX_SEND_FENCE_STALE_MS = 10 * 60_000;
 
 export function isAmbiguousMaxMutationError(error: unknown): boolean {
-  const status = (error as { response?: { status?: number } })?.response?.status;
-  if (status === 408 || status === 504) {
-    return true;
-  }
+  return isAmbiguousMaxError(error, false);
+}
 
-  if (typeof status === 'number') {
-    return false;
-  }
+export function isAmbiguousMaxSendError(error: unknown): boolean {
+  return isAmbiguousMaxError(error, true);
+}
 
+function isAmbiguousMaxError(error: unknown, send: boolean): boolean {
+  const chain = collectMaxRetryErrorChain(error);
+  // FLAG: Wrappers must preserve uncertain effects. Inspect the bounded cause chain;
+  // an actual HTTP response takes precedence over timeout-like descriptive text.
+  for (const entry of chain) {
+    const status = (entry as { response?: { status?: unknown } })?.response?.status;
+    if (typeof status === 'number') {
+      return status === 408 || status === 504 || (send && status >= 500 && status <= 599);
+    }
+  }
+  return chain.some(isAmbiguousTransportError);
+}
+
+function isAmbiguousTransportError(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
   if (typeof code === 'string' && code.trim().length > 0) {
     const normalizedCode = code.trim().toLowerCase();
@@ -37,13 +51,4 @@ export function isAmbiguousMaxMutationError(error: unknown): boolean {
     normalized.includes('socket hang up') ||
     normalized.includes('network')
   );
-}
-
-export function isAmbiguousMaxSendError(error: unknown): boolean {
-  const status = (error as { response?: { status?: number } })?.response?.status;
-  if (typeof status === 'number' && status >= 500 && status <= 599) {
-    return true;
-  }
-
-  return isAmbiguousMaxMutationError(error);
 }

@@ -7679,6 +7679,13 @@ describe('ModerationService', () => {
       mutationAttempted: true,
     },
     {
+      failureLabel: 'wraps a transport timeout after dispatch',
+      error: markMaxMemberMutationAttempted(
+        new Error('MAX operation failed', { cause: { code: 'ETIMEDOUT' } }),
+      ),
+      mutationAttempted: true,
+    },
+    {
       failureLabel: 'fails before dispatch with a timeout-shaped error',
       error: new Error('MAX route timeout'),
       mutationAttempted: false,
