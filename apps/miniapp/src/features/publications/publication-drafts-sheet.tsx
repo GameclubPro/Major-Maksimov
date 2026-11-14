@@ -22,11 +22,13 @@ export function PublicationDraftsSheet({
   onClose,
   onOpen,
   onDeleted,
+  protectedDraftId,
 }: {
   api: ApiTransport;
   busy: boolean;
   onClose: () => void;
-  onOpen: (id: string, copy: boolean) => void;
+  onOpen?: (id: string, copy: boolean) => void;
+  protectedDraftId?: string;
   onDeleted: (id: string) => void;
 }) {
   const panel = useRef<HTMLElement>(null);
@@ -53,6 +55,7 @@ export function PublicationDraftsSheet({
     },
   });
   const blocked = busy || remove.isPending;
+  const DraftTitle = onOpen ? 'button' : 'div';
   useDialogFocusTrap(!deleting, panel, close);
   useNativeBackHandler(
     () => {
@@ -123,12 +126,19 @@ export function PublicationDraftsSheet({
               <p>Нет сохранённых черновиков</p>
             ) : null}
             {mergePublicationPages(drafts.data?.pages).map((draft) => (
-              <article className="publication-drafts-sheet__row" key={draft.id}>
-                <button
-                  type="button"
+              <article
+                className={`publication-drafts-sheet__row${onOpen ? '' : ' is-manage'}`}
+                key={draft.id}
+              >
+                <DraftTitle
                   className="publication-drafts-sheet__open"
-                  disabled={blocked}
-                  onClick={() => onOpen(draft.id, false)}
+                  {...(onOpen
+                    ? {
+                        type: 'button' as const,
+                        disabled: blocked,
+                        onClick: () => onOpen(draft.id, false),
+                      }
+                    : {})}
                 >
                   <strong>
                     {draft.title || (
@@ -147,20 +157,22 @@ export function PublicationDraftsSheet({
                       minute: '2-digit',
                     }).format(new Date(draft.updatedAt))}
                   </small>
-                </button>
+                </DraftTitle>
+                {onOpen ? (
+                  <button
+                    type="button"
+                    disabled={blocked}
+                    title="Создать копию"
+                    aria-label="Создать копию черновика"
+                    onClick={() => onOpen?.(draft.id, true)}
+                  >
+                    <IconoirSprite variant="iconoir" icon="Copy" aria-hidden />
+                  </button>
+                ) : null}
                 <button
                   type="button"
-                  disabled={blocked}
-                  title="Создать копию"
-                  aria-label="Создать копию черновика"
-                  onClick={() => onOpen(draft.id, true)}
-                >
-                  <IconoirSprite variant="iconoir" icon="Copy" aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  disabled={blocked}
-                  title="Удалить"
+                  disabled={blocked || draft.id === protectedDraftId}
+                  title={draft.id === protectedDraftId ? 'Открыт в редакторе' : 'Удалить'}
                   aria-label="Удалить черновик"
                   onClick={() => {
                     remove.reset();
@@ -193,6 +205,7 @@ export function PublicationDraftsSheet({
             : 'Черновик исчезнет на всех устройствах.'
         }
         confirmLabel="Удалить"
+        confirmBusyLabel="Удаляем..."
         cancelLabel="Оставить"
         tone="danger"
         isBusy={remove.isPending}

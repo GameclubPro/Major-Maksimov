@@ -106,10 +106,31 @@ export function usePublicationEditorSession({
     sessionKey: isEditor && editorContext?.kind !== 'edit' ? editorContext : null,
     enabled:
       hydrated &&
+      !draftsOpen &&
+      !pendingDraftClear &&
       !mediaPreparing &&
       !videoPreparing &&
       !imagesNeedReselection &&
       !publicationDraftNeedsVideoReselection(draft),
+  });
+
+  const discardDraftMutation = useMutation({
+    mutationFn: async () => {
+      const id = draft.cloudDraft?.id;
+      await cloudDraft.discard();
+      return id;
+    },
+    onSuccess: (id) => {
+      setPendingDraftClear(false);
+      setImportOmissions([]);
+      setFieldError('');
+      setValidationStarted(false);
+      if (isIsolatedPublicationEditor(editorContext?.kind ?? null)) {
+        finishIsolatedPublication(id ?? '');
+      } else {
+        void clearDraft();
+      }
+    },
   });
 
   const openPublicationMutation = useMutation({
@@ -416,7 +437,7 @@ export function usePublicationEditorSession({
         }
         closeEditor(preserveDraft);
       })
-      .catch(async (error) => {
+      .catch(async () => {
         await flushDraft();
         if (persistenceEnabled) {
           closeEditor(true);
@@ -425,10 +446,7 @@ export function usePublicationEditorSession({
             title: 'Не удалось сохранить изменения',
           });
         } else {
-          pushToast({
-            tone: 'danger',
-            title: describeUserFacingError(error, 'Не удалось сохранить черновик'),
-          });
+          setPendingEditorClose(true);
         }
       })
       .finally(() => setEditorClosePending(false));
@@ -477,6 +495,12 @@ export function usePublicationEditorSession({
     setValidationStarted(false);
     setComposeRoute(false);
     restoreEditorReturnFocus();
+  }
+
+  function forgetDeletedDraft(publicationId: string) {
+    if (savedCreateDraftRef.current?.draft.cloudDraft?.id === publicationId)
+      savedCreateDraftRef.current = null;
+    if (draft.cloudDraft?.id === publicationId) void clearDraft();
   }
 
   // FLAG: A published isolated draft cannot restore the same cloud draft as a pending create.
@@ -528,6 +552,8 @@ export function usePublicationEditorSession({
     revisionConflictPublicationId,
     setRevisionConflictPublicationId,
     cloudDraft,
+    discardDraftMutation,
+    forgetDeletedDraft,
     openPublicationMutation,
     postImport,
     refreshEditedPublicationMutation,

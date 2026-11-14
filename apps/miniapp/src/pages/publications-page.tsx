@@ -54,7 +54,6 @@ import {
   canReviewPublicationScheduleDecision,
   hasPublicationScheduleError,
   getPublicationEditorTitle,
-  createEmptyPublicationDraft,
   getPublicationActionCapabilities,
   getPublicationActionableDelivery,
   getPublicationEditActionLabel,
@@ -219,7 +218,6 @@ export function PublicationsPage({
     hasSavedDraft,
     imagesNeedReselection,
     missingImageCount,
-    replaceDraft,
     clearDraft,
     discardMissingImages,
     resolveMissingImages,
@@ -231,7 +229,6 @@ export function PublicationsPage({
     previewTargetKey,
     setPreviewTargetKey,
     importOmissions,
-    setImportOmissions,
     fieldError,
     setFieldError,
     validationStarted,
@@ -495,7 +492,8 @@ export function PublicationsPage({
     publisherDraftHydration.isPending ||
     timingPreparing ||
     videoPreparing ||
-    editorClosePending;
+    editorClosePending ||
+    editorSession.discardDraftMutation.isPending;
   const isBusy = operationBusy || mediaPreparing;
   const anyBusy = isBusy || resolveAmbiguousMutation.isPending;
   const isRetryVersionEditor =
@@ -1521,29 +1519,10 @@ export function PublicationsPage({
   }
 
   function confirmDraftClear() {
-    if (isBusy) {
-      return;
-    }
-    setPendingDraftClear(false);
-    setFieldError('');
-    setValidationStarted(false);
-    if (draft.cloudDraft) {
-      replaceDraft({
-        ...createEmptyPublicationDraft(),
-        cloudDraft: draft.cloudDraft,
-        cloudRequestId: draft.cloudRequestId,
-      });
-      setImportOmissions([]);
-      return;
-    }
-    if (isIsolatedPublicationEditor(editorContext?.kind ?? null)) {
-      if (editorContext?.kind === 'import') {
-        setImportOmissions([]);
-      }
-      replaceDraft(createEmptyPublicationDraft());
-      return;
-    }
-    void clearDraft();
+    if (isBusy) return;
+    editorSession.discardDraftMutation.mutate(undefined, {
+      onSuccess: () => void invalidatePublicationQueries(),
+    });
   }
 
   function renderEditor() {
@@ -1579,9 +1558,12 @@ export function PublicationsPage({
           </span>
           <button
             type="button"
-            onClick={() => setPendingDraftClear(true)}
-            aria-label="Очистить черновик"
-            title="Очистить"
+            onClick={() => {
+              editorSession.discardDraftMutation.reset();
+              setPendingDraftClear(true);
+            }}
+            aria-label={draft.cloudDraft ? 'Удалить черновик' : 'Очистить черновик'}
+            title={draft.cloudDraft ? 'Удалить' : 'Очистить'}
             disabled={isBusy || editing || cloudDraft.status === 'saving'}
           >
             <IconoirSprite variant="iconoir" icon="Trash" aria-hidden />
@@ -1593,6 +1575,7 @@ export function PublicationsPage({
             <PublicationDraftStatus
               state={cloudDraft}
               busy={isBusy || cloudDraft.status === 'saving'}
+              onDrafts={() => setDraftsOpen(true)}
               onRetry={() => void cloudDraft.flush().catch(() => undefined)}
               onReload={() => setCloudReloadConfirm(true)}
               onCopy={() =>
@@ -1859,17 +1842,22 @@ export function PublicationsPage({
         <Suspense fallback={null}>
           <LazyPublicationDraftsSheet
             api={api}
-            busy={openPublicationMutation.isPending}
+            busy={isBusy || cloudDraft.status === 'saving'}
+            protectedDraftId={isEditor ? draft.cloudDraft?.id : undefined}
             onClose={() => setDraftsOpen(false)}
-            onOpen={(publicationId, copy) => {
-              rememberEditorReturnFocus();
-              openPublicationMutation.mutate({
-                publicationId,
-                mode: copy ? 'draft-copy' : 'draft',
-              });
-            }}
+            onOpen={
+              isEditor
+                ? undefined
+                : (publicationId, copy) => {
+                    rememberEditorReturnFocus();
+                    openPublicationMutation.mutate({
+                      publicationId,
+                      mode: copy ? 'draft-copy' : 'draft',
+                    });
+                  }
+            }
             onDeleted={(id) => {
-              if (draft.cloudDraft?.id === id) void clearDraft();
+              editorSession.forgetDeletedDraft(id);
               void invalidatePublicationQueries();
             }}
           />
@@ -1920,8 +1908,19 @@ export function PublicationsPage({
       <ActionConfirmSheet
         id="publication-draft-clear"
         open={pendingDraftClear}
-        title="Очистить черновик?"
-        confirmLabel="Очистить"
+        title={draft.cloudDraft ? 'Удалить черновик?' : 'Очистить черновик?'}
+        summary={
+          editorSession.discardDraftMutation.isError
+            ? describeUserFacingError(
+                editorSession.discardDraftMutation.error,
+                'Не удалось удалить черновик.',
+              )
+            : draft.cloudDraft
+              ? 'Черновик исчезнет на всех устройствах.'
+              : undefined
+        }
+        confirmLabel={draft.cloudDraft ? 'Удалить' : 'Очистить'}
+        confirmBusyLabel={draft.cloudDraft ? 'Удаляем...' : 'Очищаем...'}
         cancelLabel="Оставить"
         tone="danger"
         isBusy={isBusy}

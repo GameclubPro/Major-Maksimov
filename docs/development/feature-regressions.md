@@ -176,6 +176,14 @@ Verify this with the [spacing browser](../../apps/miniapp/test/max-rich-text-spa
 (Chromium and WebKit, light/dark) and the composer browser's saved draft/publish payload case.
 The browser flows use local fixtures/preview transport and never publish to MAX.
 
+Draft capacity recovery is covered by the [draft recovery browser](../../apps/miniapp/test/publication-draft-recovery.browser.mjs):
+at the 50-draft limit, the editor's save error opens paginated draft management without replacing
+the unsaved copy. Deleting a selected draft and retrying permits one explicitly confirmed publication.
+The editor trash removes an acknowledged server draft with its expected revision; clearing must not
+leave or recreate an empty server row. Failed deletion preserves the text, and an uncertain save
+must be resolved before deletion. Failed isolated-editor close offers explicit discard confirmation.
+The browser checks iPhone/Android sizes in both themes using local fixtures; it does not establish MAX delivery.
+
 | Boundary                                                               | Focused checks                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Publisher catalog, virtualized lists, last-row access, cross-route CSS | [Catalog browser](../../apps/miniapp/test/publisher-catalog-layout.browser.mjs)                                                                                                                                                                                                                 |

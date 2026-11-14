@@ -9,7 +9,12 @@ import {
   serverDraftRequest,
   withSavedPublicationMedia,
 } from './publication-cloud-draft-model';
-import { isPublicationDraftEmpty, type PublicationDraft } from './publication-model';
+import {
+  createEmptyPublicationDraft,
+  isPublicationDraftEmpty,
+  type PublicationDraft,
+} from './publication-model';
+import type { PublicationActionRequest } from '@maxim/contracts/publication';
 import { createPublicationRequestId } from './publication-request-identity';
 
 export type DraftSaveStatus =
@@ -31,6 +36,7 @@ type Dependencies = {
     id: string | null,
     request: SavePublicationDraftRequest,
   ) => Promise<PublicationDraftResponse>;
+  remove: (id: string, request: PublicationActionRequest) => Promise<void>;
   find: (requestId: string) => Promise<PublicationDraftResponse>;
   get: (id: string) => Promise<PublicationDraftResponse>;
   persist: (draft: PublicationDraft) => Promise<void>;
@@ -180,6 +186,26 @@ export class PublicationDraftAutosave {
       );
       throw error;
     }
+  }
+  async discard(): Promise<void> {
+    if (this.operation) await this.operation.catch(() => undefined);
+    // FLAG: Do not orphan an unacknowledged create or erase another device's revision.
+    if (this.pending || this.recoveryId) {
+      if (this.state.status === 'conflict') throw this.state.error;
+      throw new Error('Повторите сохранение, затем удалите черновик.');
+    }
+    const identity = this.current.cloudDraft;
+    if (identity) {
+      await this.dependencies.remove(identity.id, {
+        requestId: createPublicationRequestId(),
+        expectedRevision: identity.revision,
+      });
+    }
+    if (!this.active) return;
+    this.saved = null;
+    this.replace(createEmptyPublicationDraft());
+    await this.dependencies.persist(this.current);
+    this.report('idle');
   }
   async reload(): Promise<void> {
     if (this.operation) await this.operation.catch(() => undefined);

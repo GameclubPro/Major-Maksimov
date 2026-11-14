@@ -123,7 +123,11 @@
     gap: 2px;
     border-top: 1px solid var(--publication-ui-border);
   }
+  .publication-drafts-sheet__row.is-manage {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
   .publication-drafts-sheet .publication-drafts-sheet__open {
+    padding: 10px;
     display: grid;
     gap: 5px;
     min-width: 0;
