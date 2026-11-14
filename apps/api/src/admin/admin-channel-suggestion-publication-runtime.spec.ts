@@ -1,6 +1,7 @@
 import { channelSettingsSchema } from '@maxim/contracts';
 
 import { MAX_API_SOURCE_TAGS } from '../max/max-client.service';
+import type { MaxRoutedPublicationRequest } from '../max/max-routed-publication.service';
 import {
   AdminChannelSuggestionPublicationRuntime,
   type AdminChannelSuggestionPublicationRuntimeContext,
@@ -248,6 +249,35 @@ function createHarness(
 }
 
 describe('AdminChannelSuggestionPublicationRuntime', () => {
+  it('prepares the accepted edited body for Major dispatch instead of the original payload', async () => {
+    const { maxRoutedPublicationService, runtime } = createHarness();
+    const dispatch = maxRoutedPublicationService.publish.getMockImplementation()!;
+    let outgoingText: string | undefined;
+    let outgoingFormat: string | undefined;
+    maxRoutedPublicationService.publish.mockImplementation(
+      async (request: MaxRoutedPublicationRequest) => {
+        const prepare = request.prepareAttempt!;
+        return dispatch({
+          ...request,
+          prepareAttempt: async (attempt: Parameters<typeof prepare>[0]) => {
+            const prepared = await prepare(attempt);
+            outgoingText = prepared.text;
+            outgoingFormat = prepared.options?.textFormat;
+            return prepared;
+          },
+        });
+      },
+    );
+    await runtime.review('suggestion-1', reviewer, 'publish', {
+      expectedRevision: 0,
+      requestId: 'ab4f3c9d-1a5b-4c35-8c60-7f56bf8ec4e4',
+      text: '  **Цена** 500 ₽\n\n',
+    });
+    expect(outgoingText).toContain('&nbsp;&nbsp;<strong>Цена</strong> 500 ₽\n\n');
+    expect(outgoingFormat).toBe('html');
+    expect(outgoingText).not.toContain('Проверенная предложка');
+  });
+
   it('keeps Major suggestions on the Major route when the Publisher module is enabled', async () => {
     const { context, maxRoutedPublicationService, prisma, publisherDialogContextService, runtime } =
       createHarness();

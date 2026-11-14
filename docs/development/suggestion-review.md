@@ -55,6 +55,21 @@ not mutate shared content until save/publication. Pending sessions are independe
 Major inputs and Publik import/auto-reply leases because only exact replies or bound edits are
 consumed. Native callbacks, including old rejection callbacks, precede those routers.
 
+Input admission retains the latest bounded text/entities in the dialog's `draft.pendingInput`
+before Redis handoff. The same primary-key conditional update binds its source message,
+advances `inputAt` and the view version, and returns the card to `edit`/`contact` mode. Thus
+quick source edits are already bound and earlier publish buttons cannot approve stale text.
+These modes also refuse publication in older readers. A compatible reader is required to
+recover retained inputs after rollback; no schema migration or history replay is needed.
+
+The card worker consumes the newest retained input under its existing lock, even when an
+older queue entry or callback reaches it first. That callback only produces a fresh preview;
+publication requires another click on its new version. Lock contention retries input jobs,
+while a failed Redis handoff remains recoverable from the next card interaction. Superseded
+inputs cannot overwrite newer text. Invalid/expired inputs leave editing open without a
+publish button; cancellation, exact session epochs, current access and five-minute source
+deadlines still apply. A later input never cancels or replays an already accepted publication.
+
 Shared review service row locks, operation hashes, publication claims and effect journal remain
 authoritative. Operation IDs bind action, actor and request body. Rejected, publishing and
 transferred suggestions cannot be edited. Publication freezes the same revision it accepts.
