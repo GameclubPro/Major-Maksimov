@@ -264,6 +264,27 @@ postgres('Publisher comment notification outbox on PostgreSQL', () => {
     expect(sent).toHaveBeenCalledTimes(status === 'PENDING' ? 2 : 1);
   });
 
+  it.each([408, 500, 503, 504])(
+    'never resends a notification after wrapped HTTP %s uncertainty',
+    async (status) => {
+      await service.updateSettings(target(), 'recipient', 'all', 'thread');
+      const row = await comment('author');
+      sent.mockRejectedValueOnce(
+        new Error('MAX operation failed', { cause: { response: { status } } }),
+      );
+      await delivery.process(job(row.id));
+      expect(
+        await db.publisherCommentNotificationDelivery.findFirst({ where: { eventId: row.id } }),
+      ).toMatchObject({ status: 'UNKNOWN', attempts: 1 });
+      await db.publisherCommentNotificationDelivery.updateMany({
+        where: { eventId: row.id },
+        data: { availableAt: new Date(0) },
+      });
+      await delivery.process(job(row.id));
+      expect(sent).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('recovers a lost queue job from the outbox and fences a stalled send', async () => {
     await service.updateSettings(target(), 'recipient', 'all', 'thread');
     const row = await comment('author');
