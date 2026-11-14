@@ -543,6 +543,215 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     return job;
   }
 
+  function replyUpdate(f: Fixture, text: string, patch: Partial<MaxUpdate> = {}): MaxUpdate {
+    return {
+      botId: f.botId,
+      updateId: randomUUID(),
+      type: 'message_created',
+      message: {
+        messageId: 'edited-reply',
+        chatId: '101',
+        senderId: '101',
+        text,
+        createdAt: new Date().toISOString(),
+      },
+      raw: {
+        timestamp: Date.now(),
+        message: {
+          timestamp: Date.now(),
+          body: { mid: 'edited-reply', text },
+          link: { type: 'reply', message: { body: { mid: f.card.remoteMessageId } } },
+        },
+      },
+      ...patch,
+    };
+  }
+
+  it.each(['moderation', 'publisher'] as const)(
+    'retains a quick source edit before the first reply is processed in %s',
+    async (profile) => {
+      const f = await seed(profile);
+      await callback(f, 'edit');
+      const original = replyUpdate(f, 'Цена 350 ₽');
+      expect(await ingress.observeWebhook(original)).toBe(true);
+      const corrected = replyUpdate(f, 'Цена 500 ₽', {
+        type: 'message_edited',
+        raw: {
+          timestamp: Number((original.raw as { timestamp: number }).timestamp) + 1,
+          message: { body: { mid: 'edited-reply', text: 'Цена 500 ₽' } },
+        },
+      });
+      expect(await ingress.observeWebhook(corrected)).toBe(true);
+      const jobs = await (profile === 'publisher' ? publisher : major).getJobs(['prioritized']);
+      // Process the old queue entry first: it must not expose an obsolete publish button.
+      const first = jobs.find((job) => job.data.eventId === original.updateId)!;
+      await service.process(first.data);
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('500');
+      for (const job of jobs) await service.process(job.data);
+      await callback(f, 'save');
+      expect(
+        (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+      ).toMatchObject({ text: '**Цена** 500 ₽', reviewContentRevision: 1 });
+    },
+  );
+
+  it('keeps a newer input during a slow card update and prevents publication overtaking it', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const render = edit.getMockImplementation()!;
+    edit.mockImplementationOnce(async (...args) => {
+      enter();
+      await released;
+      return render(...args);
+    });
+    const oldInput = input(f, 'Цена 350 ₽');
+    await entered;
+    const newer = replyUpdate(f, 'Цена 500 ₽');
+    await ingress.observeWebhook(newer);
+    const job = (await major.getJobs(['prioritized'])).find(
+      (item) => item.data.eventId === newer.updateId,
+    )!;
+    let contention: unknown;
+    try {
+      await service.process(job.data);
+    } catch (error) {
+      contention = error;
+    }
+    release();
+    await oldInput;
+    const publish = jest
+      .spyOn(review, 'publish')
+      .mockImplementation(async (id, profile, actor) => review.get(id, profile, actor));
+    // A callback can run before BullMQ retries the contended input.
+    await callback(f, 'publish');
+    expect(publish).not.toHaveBeenCalled();
+    expect(contention).toBeInstanceOf(Error);
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('500');
+    await service.process(job.data);
+    await callback(f, 'publish');
+    expect(publish.mock.calls[0]?.[3]).toMatchObject({ text: '**Цена** 500 ₽' });
+  });
+
+  it('recovers retained input after Redis handoff failure without approving an unseen preview', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    await input(f, 'Цена 350 ₽');
+    const update = replyUpdate(f, 'Цена 900 ₽');
+    jest.spyOn(major, 'add').mockRejectedValueOnce(new Error('Redis unavailable'));
+    await expect(ingress.observeWebhook(update)).rejects.toThrow('Redis unavailable');
+    const publish = jest
+      .spyOn(review, 'publish')
+      .mockImplementation(async (id, profile, actor) => review.get(id, profile, actor));
+    await callback(f, 'publish');
+    expect(publish).not.toHaveBeenCalled();
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('900');
+    await callback(f, 'publish');
+    expect(publish.mock.calls[0]?.[3]).toMatchObject({ text: '**Цена** 900 ₽' });
+  });
+
+  it.each(['invalid', 'expired'] as const)(
+    'keeps publication disabled after a retained %s input',
+    async (kind) => {
+      const f = await seed();
+      await callback(f, 'edit');
+      await input(f, 'Цена 350 ₽');
+      const update = replyUpdate(f, kind === 'invalid' ? '/start' : 'Цена 900 ₽');
+      await ingress.observeWebhook(update);
+      if (kind === 'expired') {
+        const dialog = await db.suggestionReviewDialog.findUniqueOrThrow({
+          where: { deliveryId: f.card.id },
+        });
+        const draft = suggestionObject(dialog.draft);
+        await db.suggestionReviewDialog.update({
+          where: { deliveryId: f.card.id },
+          data: {
+            draft: {
+              pendingInput: {
+                ...suggestionObject(draft.pendingInput),
+                requestedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+              },
+            },
+          },
+        });
+      }
+      const publish = jest.spyOn(review, 'publish');
+      await callback(f, 'publish');
+      await callback(f, 'publish');
+      expect(publish).not.toHaveBeenCalled();
+      expect(
+        edit.mock.calls
+          .at(-1)?.[3]
+          ?.buttons?.flat()
+          .some((button) => 'payload' in button && String(button.payload).includes('|publish|')),
+      ).toBe(false);
+      expect(
+        await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+      ).toMatchObject({ mode: 'edit', draft: null });
+    },
+  );
+
+  it('accepts an edited explicit reply before the original webhook and ignores the late original', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    const original = replyUpdate(f, 'Цена 350 ₽');
+    const corrected = replyUpdate(f, 'Цена 500 ₽', { type: 'message_edited' });
+    corrected.raw = {
+      ...(corrected.raw as object),
+      timestamp: Number((original.raw as { timestamp: number }).timestamp) + 1,
+    };
+    expect(await ingress.observeWebhook(corrected)).toBe(true);
+    expect(await ingress.observeWebhook(original)).toBe(true);
+    const jobs = await major.getJobs(['prioritized']);
+    for (const job of jobs) await service.process(job.data);
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('500');
+    const before = await db.suggestionReviewDialog.findUniqueOrThrow({
+      where: { deliveryId: f.card.id },
+    });
+    await ingress.observeWebhook(corrected);
+    expect(
+      await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+    ).toEqual(before);
+  });
+
+  it('does not admit a newly edited old reply into a reopened editor', async () => {
+    const f = await seed();
+    const opening = await callback(f, 'edit');
+    const update = replyUpdate(f, 'Цена 900 ₽', { type: 'message_edited' });
+    const raw = update.raw as { message: { timestamp: number } };
+    raw.message.timestamp = Date.parse(opening.requestedAt) - 1000;
+    expect(await ingress.observeWebhook(update)).toBe(false);
+    expect(
+      await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+    ).toMatchObject({ mode: 'edit', draft: null, inputMessageId: null });
+    expect(await major.getJobs(['prioritized'])).toHaveLength(0);
+  });
+
+  it('cancels retained input only from the current card and rejects its delayed queue entry', async () => {
+    const f = await seed();
+    const opening = await callback(f, 'edit');
+    const update = replyUpdate(f, 'Цена 900 ₽');
+    await ingress.observeWebhook(update);
+    const job = (await major.getJobs(['prioritized']))[0]!;
+    await callback(f, 'back', { callback: { ...opening.callback!, action: 'back' } });
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('900');
+    await callback(f, 'back');
+    await service.process(job.data);
+    expect(
+      await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+    ).toMatchObject({ mode: 'idle', draft: null });
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ text: '  Цена 300 ₽\n\n' });
+  });
+
   it.each(['moderation', 'publisher'] as const)(
     'edits and saves through %s while preserving author, media and whitespace',
     async (profile) => {

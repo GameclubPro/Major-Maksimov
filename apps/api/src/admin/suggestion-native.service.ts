@@ -4,6 +4,7 @@ import {
   HttpException,
   Injectable,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -37,6 +38,7 @@ import {
   suggestionObject,
 } from './suggestion-review-effects.service';
 import { hasSuggestionRequest, suggestionRevision } from './suggestion-review-content';
+import { readPendingSuggestionInput, retainSuggestionNativeInput } from './suggestion-native-input';
 import {
   nativeContentSchema,
   nativeSuggestionMarkdown,
@@ -74,7 +76,8 @@ export class SuggestionNativeService {
   ) {}
 
   async process(job: SuggestionNativeJob, options: { finalAttempt?: boolean } = {}): Promise<void> {
-    const requestedAt = Date.parse(job.requestedAt);
+    const responseJob = job;
+    let requestedAt = Date.parse(job.requestedAt);
     if (
       !Number.isFinite(requestedAt) ||
       requestedAt > Date.now() + 60_000 ||
@@ -133,6 +136,7 @@ export class SuggestionNativeService {
           expiresAt: new Date(Date.now() + SESSION_MS),
         },
       });
+      await retainSuggestionNativeInput(this.prisma, job);
       token = randomUUID();
       const claim = await this.prisma.suggestionReviewDialog.updateMany({
         where: {
@@ -141,11 +145,26 @@ export class SuggestionNativeService {
         },
         data: { lockToken: token, lockedAt: new Date() },
       });
-      if (claim.count !== 1)
+      if (claim.count !== 1) {
+        if (!job.callback) throw new ServiceUnavailableException('Карточка обновляется.');
         throw new ConflictException('Карточка обновляется. Повторите нажатие.');
+      }
       let session = await this.prisma.suggestionReviewDialog.findUniqueOrThrow({
         where: { deliveryId: card.id },
       });
+      const pendingInput = readPendingSuggestionInput(session.draft);
+      // FLAG: A queued callback may overtake an input retry or a failed Redis handoff.
+      // Consume only the retained latest input; this callback cannot approve its unseen preview.
+      if (
+        pendingInput &&
+        !(job.callback?.action === 'back' && job.callback.version === session.version)
+      ) {
+        job = { ...job, ...pendingInput, callback: undefined, callbackId: undefined };
+        requestedAt = Date.parse(job.requestedAt);
+        notice = 'Текст обновлён. Проверьте предпросмотр перед публикацией.';
+        if (Date.now() - requestedAt > 5 * 60_000)
+          throw new BadRequestException('Правка устарела. Пришлите исправленный текст ещё раз.');
+      }
       let detail = await this.review.get(card.auditLogId, job.profile, actor);
       stage = 'review';
       if (detail.status === 'publishing') {
@@ -334,7 +353,8 @@ export class SuggestionNativeService {
           } else if (!job.callback) {
             if (job.inputError) throw new BadRequestException(job.inputError);
             if (!job.input) return;
-            if (session.inputAt && Date.parse(job.requestedAt) <= session.inputAt.getTime()) return;
+            if (!pendingInput && session.inputAt && requestedAt <= session.inputAt.getTime())
+              return;
             if (job.edited && session.inputMessageId !== job.messageId) return;
             if (['contact', 'contact_confirm'].includes(session.mode)) {
               const contactUrl = job.input.text.trim();
@@ -368,7 +388,7 @@ export class SuggestionNativeService {
       detail = await this.review.get(card.auditLogId, job.profile, actor);
       stage = 'card_update';
       await this.render(job, bound, session, token, detail, actor);
-      await this.answer(job, notice || this.status(detail));
+      await this.answer(responseJob, notice || this.status(detail));
     } catch (error) {
       this.logger.warn(
         {
@@ -381,16 +401,19 @@ export class SuggestionNativeService {
       );
       const message = describePrivateSuggestionReviewError(error);
       if (!(error instanceof HttpException) || error.getStatus() >= 500) {
-        if (options.finalAttempt) await this.answer(job, message);
+        if (options.finalAttempt) await this.answer(responseJob, message);
         throw error;
       }
-      await this.answer(job, message);
+      await this.answer(responseJob, message);
       // FLAG: A text reply has no callback toast: display the error on the same card without saving it.
       if (!job.callbackId && token) {
-        const session = await this.prisma.suggestionReviewDialog.findUnique({
+        let session = await this.prisma.suggestionReviewDialog.findUnique({
           where: { deliveryId: card.id },
         });
         if (session?.lockToken === token) {
+          if (readPendingSuggestionInput(session.draft)?.eventId === job.eventId) {
+            session = await this.change(session, token, job, { draft: Prisma.DbNull });
+          }
           const detail = await this.review.get(card.auditLogId, job.profile, actor);
           await this.render(job, bound, session, token, detail, actor, message);
         }

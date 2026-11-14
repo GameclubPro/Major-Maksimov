@@ -10,6 +10,7 @@ import { ADMIN_SUGGESTION_DELIVERY_QUEUE } from '../admin/admin-suggestion-deliv
 import { PUBLISHER_SUGGESTION_ADMIN_QUEUE } from './publisher-suggestion-admin.queue';
 import { readPublisherPrivateCallback } from './publisher-private-flow-update-reader';
 import { readWebhookEventTimestamp } from '../webhook/webhook-semantic-event-key';
+import { parseWebhookEventTimestampMs } from '../webhook/webhook-event-timestamp';
 import {
   extractIncomingMessageNode,
   extractIncomingMessageMarkup,
@@ -20,6 +21,7 @@ import {
   type SuggestionNativeCallback,
 } from '../admin/suggestion-native-protocol';
 import type { NativeSuggestionContent } from '../admin/suggestion-native-content';
+import { retainSuggestionNativeInput } from '../admin/suggestion-native-input';
 
 export type SuggestionNativeJob = {
   version: 1;
@@ -123,13 +125,21 @@ export class SuggestionNativeQueueService {
           botId,
           actorId,
           privateChatId: message.chatId,
-          ...(edited ? { inputMessageId: message.messageId } : { cardMessageId: reply }),
+          ...(reply ? { cardMessageId: reply } : { inputMessageId: message.messageId }),
         },
       });
       if (!dialog) return false;
+      // FLAG: An unbound edited reply can win webhook arrival order, but not cross editor epochs.
+      if (edited && dialog.inputMessageId !== message.messageId) {
+        // Normalized message.createdAt is the edit event time, not original message creation.
+        const createdAt = parseWebhookEventTimestampMs(
+          node?.timestamp ?? node?.created_at ?? node?.createdAt,
+        );
+        if (createdAt === null || createdAt < dialog.openedAt.getTime()) return false;
+      }
       job.deliveryId = dialog.deliveryId;
       job.openedAt = dialog.openedAt.toISOString();
-      job.edited = edited;
+      job.edited = edited && dialog.inputMessageId === message.messageId;
       const body = record(node?.body);
       const text = typeof body.text === 'string' ? body.text : message.text;
       const markup = extractIncomingMessageMarkup(node);
@@ -148,6 +158,7 @@ export class SuggestionNativeQueueService {
         job.input = undefined;
         job.inputError = 'Текст должен быть не длиннее 4000 символов.';
       }
+      await retainSuggestionNativeInput(this.prisma, job);
     }
     const digest = createHash('sha256')
       .update(`${botId}\0${cb?.callbackId ?? update.updateId}`)
