@@ -79,6 +79,40 @@ const local = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
     `dup:window:v1:${digestDuplicateContent(chatId)}:${MESSAGE_DUPLICATE_HISTORY_FENCE_STORAGE_VERSION}:`;
   const recordExpiry = async (key: string) => Number(await inspector.call('PEXPIRETIME', key));
 
+  it('checks all 128 retained fingerprints within the native history budget', async () => {
+    const text = Array.from({ length: 127 }, (_, index) => `https://site-${index}.ru/`).join(' ');
+    const policy = duplicateSettings({
+      duplicateDetectionPreset: 'CUSTOM',
+      duplicateIgnoreLinksEnabled: true,
+    });
+    const durations: number[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      const before = performance.now();
+      const observed = await history.observeWithOutcome({
+        chatId,
+        userId: '123',
+        messageId: `budget-${index}`,
+        eventTimestampMs: start + index,
+        controlRevision: 1,
+        comparison: 'TEXT',
+        settings: policy,
+        content: extractDuplicateMessageContent({ message: { body: { text } } }),
+      });
+      durations.push(performance.now() - before);
+      if (index > 0) expect(observed.candidates).toHaveLength(128);
+    }
+    const ordered = durations.slice(5).sort((a, b) => a - b);
+    console.info(
+      'duplicate_fingerprint_budget',
+      JSON.stringify({
+        fingerprints: 128,
+        samples: ordered.length,
+        p50Ms: ordered[Math.floor(ordered.length / 2)],
+        p95Ms: ordered[Math.floor(ordered.length * 0.95)],
+      }),
+    );
+  });
+
   it('rejects an expired Redis admission before mutation despite the longer reply wait', async () => {
     const now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockReturnValueOnce(now - 1_000);

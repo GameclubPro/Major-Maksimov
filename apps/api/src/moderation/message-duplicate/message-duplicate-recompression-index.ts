@@ -12,6 +12,7 @@ export type MessageDuplicateRecompressionCandidate = {
 
 export type DuplicateRecompressionIndexInput = {
   op: 'read' | 'remember';
+  includeCoverage?: boolean;
   atMs: number;
   candidate?: MessageDuplicateRecompressionCandidate;
 };
@@ -155,6 +156,7 @@ local function withinHamming(hash)
   distances[hash]=distance
   return true
 end
+local saturated=false
 local all={}
 local seen={}
 local encoded={}
@@ -178,6 +180,16 @@ for i=1,8 do
   rows={}
   for _,r in pairs(preferred) do rows[#rows+1]=r end
   table.sort(rows,earlier)
+  local saturationKey=KEYS[i]..':saturated-until'
+  local saturationRaw=redis.call('GET',saturationKey)
+  local saturationUntil=saturationRaw and tonumber(saturationRaw) or 0
+  if not saturationUntil or saturationUntil<0 then return redis.error_reply('Invalid recompression coverage marker') end
+  if #rows>=8 or saturationUntil>now then saturated=true end
+  if #rows>8 then
+    for n=9,#rows do saturationUntil=math.max(saturationUntil,rows[n].expiresAtMs) end
+    -- FLAG: Evicted live pointers remain a coverage gap after retained older pointers expire.
+    redis.call('SET',saturationKey,tostring(saturationUntil),'PXAT',math.min(saturationUntil,now+retention))
+  end
   local kept={}
   local hashes={}
   local deadline=0
@@ -214,6 +226,7 @@ table.sort(all,function(a,b)
 end)
 local result={}
 for i=1,math.min(8,#all) do result[i]=all[i] end
+if p.includeCoverage then return cjson.encode({candidates=result,saturated=saturated or #all>8}) end
 if #result==0 then return '[]' end
 return cjson.encode(result)
 `;
@@ -236,6 +249,37 @@ export class MessageDuplicateRecompressionIndex {
     if (!Array.isArray(rows) || rows.length > 8 || !rows.every(validCandidate))
       throw new Error('Invalid duplicate recompression index result');
     return rows;
+  }
+
+  async readWithCoverage(
+    scope: string,
+    hash: string,
+    atMs: number,
+  ): Promise<{
+    candidates: MessageDuplicateRecompressionCandidate[];
+    saturated: boolean;
+  }> {
+    if (!Number.isSafeInteger(atMs) || atMs <= 0)
+      throw new Error('Invalid duplicate recompression index time');
+    const raw = await this.redis.duplicateRecompressionIndex(
+      duplicateRecompressionIndexKeys(scope, hash),
+      { op: 'read', atMs, includeCoverage: true },
+    );
+    const result = JSON.parse(raw) as { candidates?: unknown; saturated?: unknown };
+    // Lua encodes an empty table as an object; require an actually empty object.
+    const rows = result.candidates;
+    const candidates =
+      rows && !Array.isArray(rows) && typeof rows === 'object' && Object.keys(rows).length === 0
+        ? []
+        : rows;
+    if (
+      !Array.isArray(candidates) ||
+      candidates.length > 8 ||
+      !candidates.every(validCandidate) ||
+      typeof result.saturated !== 'boolean'
+    )
+      throw new Error('Invalid duplicate recompression coverage result');
+    return { candidates, saturated: result.saturated };
   }
 
   async remember(scope: string, candidate: MessageDuplicateRecompressionCandidate): Promise<void> {

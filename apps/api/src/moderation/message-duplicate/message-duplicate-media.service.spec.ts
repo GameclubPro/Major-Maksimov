@@ -1,3 +1,4 @@
+import type { MessageDuplicateEnforcementService } from './message-duplicate-enforcement.service';
 import { MaxBotContextService } from '../../max/max-bot-context.service';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
@@ -32,6 +33,7 @@ import type { PhotoDuplicateAnalysisService } from '../photo-duplicate/photo-dup
 import type { RedisCounterService } from '../redis-counter.service';
 import { UnrecoverableError } from 'bullmq';
 import { WebhookPreparationDeferredError } from '../../common/webhook-preparation-deferred.error';
+import { PhotoDuplicateSourceNotReadyError } from '../photo-duplicate/photo-duplicate.queue';
 
 function setup(config: Record<string, unknown> = {}) {
   const settings = { ...duplicateSettings(), chat: { entityType: 'CHAT', admins: [] } };
@@ -57,7 +59,7 @@ function setup(config: Record<string, unknown> = {}) {
         ReturnType<RedisCounterService['duplicateRecompressionIndex']>,
         Parameters<RedisCounterService['duplicateRecompressionIndex']>
       >()
-      .mockResolvedValue('[]'),
+      .mockResolvedValue('{"candidates":[],"saturated":false}'),
   };
   const prisma = {
     webhookEvent: {
@@ -88,6 +90,10 @@ function setup(config: Record<string, unknown> = {}) {
     }),
   };
   const enforcement = {
+    selectMatch: jest.fn(
+      async ({ observation }: Parameters<MessageDuplicateEnforcementService['selectMatch']>[0]) =>
+        observation.match,
+    ),
     enqueue: jest.fn().mockResolvedValue({ kind: 'intent_accepted', intentId: 'intent' }),
   };
   const bots = {
@@ -193,6 +199,24 @@ function setup(config: Record<string, unknown> = {}) {
 }
 
 describe('bounded message duplicate media analysis', () => {
+  it('defers an immediate TEXT job until its source is processed, then resumes without media work', async () => {
+    const s = setup();
+    const job = s.job('text-source', 0);
+    job.comparison = 'TEXT';
+    const row = s.rows.get(job.webhookEventId) as { status: string };
+    row.status = 'PROCESSING';
+    await expect(s.service.process(job, s.lease)).rejects.toBeInstanceOf(
+      PhotoDuplicateSourceNotReadyError,
+    );
+    expect(s.history.observe).not.toHaveBeenCalled();
+    expect(s.enforcement.enqueue).not.toHaveBeenCalled();
+    row.status = 'PROCESSED';
+    expect(await s.service.process(job, s.lease)).toBe('COMPARED_NO_MATCH');
+    expect(s.history.observe).toHaveBeenCalledTimes(1);
+    expect(s.downloads).not.toHaveBeenCalled();
+    expect(s.photos.fingerprintAlbum).not.toHaveBeenCalled();
+  });
+
   it.each(['NO_REPLAY_HELD', 'FAILED', 'PROCESSED'] as const)(
     'settles a permanently held %s source and leaves independent media runnable',
     async (status) => {

@@ -121,7 +121,12 @@ export class MessageDuplicateEnqueueService {
         },
         {
           jobId: id,
-          delay: 5000,
+          // FLAG: Text resumes existing qualification and needs no image settling window.
+          // Media keeps five seconds from its first durable admission, not from every repair.
+          delay:
+            input.comparison === 'TEXT'
+              ? 0
+              : Math.max(0, admission.admittedAtMs + 5000 - Date.now()),
           attempts: 5,
           backoff: { type: 'exponential', delay: 5000 },
           removeOnComplete: { age: 86400, count: 25_000 },

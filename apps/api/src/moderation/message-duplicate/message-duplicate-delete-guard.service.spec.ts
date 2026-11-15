@@ -195,6 +195,60 @@ function setup() {
   };
 }
 
+describe('selection before action acquisition', () => {
+  it('never replaces an already qualified stage when its original is gone', async () => {
+    const s = setup();
+    const match = {
+      binding: s.binding,
+      hit: {
+        count: 1,
+        windowSec: 3600,
+        hash: s.binding.fingerprint,
+        fingerprintType: 'exact' as const,
+      },
+    };
+    s.originalLookup.mockResolvedValue(null as never);
+    await expect(
+      s.service.selectMatch({
+        chatId: s.params.chatId,
+        botId: 'bot',
+        observation: { outcome: 'MATCHED', match, candidates: [match], selectionLocked: true },
+      }),
+    ).resolves.toBe(match);
+    expect(s.originalLookup).not.toHaveBeenCalled();
+    expect(s.history.remove).not.toHaveBeenCalled();
+    expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+
+  it('carries unavailable original evidence into the existing handoff without selecting alternatives', async () => {
+    const s = setup();
+    const match = {
+      binding: s.binding,
+      hit: {
+        count: 1,
+        windowSec: 3600,
+        hash: s.binding.fingerprint,
+        fingerprintType: 'exact' as const,
+      },
+    };
+    const failure = Object.assign(new Error('Unavailable'), {
+      response: { status: 404, data: {} },
+    });
+    s.originalLookup.mockRejectedValueOnce(failure);
+    const selected = await s.service.selectMatch({
+      chatId: s.params.chatId,
+      botId: 'bot',
+      observation: { outcome: 'MATCHED', match, candidates: [match, match] },
+    });
+    expect(selected?.binding).toBe(match.binding);
+    expect(selected?.qualificationSourceUnavailable?.cause).toBe(failure);
+    expect(s.originalLookup).toHaveBeenCalledTimes(1);
+    expect(s.history.remove).not.toHaveBeenCalled();
+    expect(s.history.qualify).not.toHaveBeenCalled();
+    expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('scheduled duplicate final action guard', () => {
   it('rechecks the end boundary after external calls', async () => {
     const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-29T14:59Z'));

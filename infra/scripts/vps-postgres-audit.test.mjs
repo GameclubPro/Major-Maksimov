@@ -91,7 +91,6 @@ if [[ -n "\${MOCK_NATIVE_PSQL_BRIDGE:-}" ]]; then
   exec node -- "$MOCK_NATIVE_PSQL_BRIDGE" "$@"
 fi
 cat >"$MOCK_AUDIT_SQL"
-: >"$MOCK_AUDIT_STARTED"
 if [[ "\${MOCK_AUDIT_FAIL:-0}" == "1" ]]; then
   printf '%s\n' 'ERROR near fixture-event-0001' >&2
   exit 7
@@ -100,6 +99,7 @@ printf '%s' "$$" >"$MOCK_DOCKER_PID"
 sleep "\${MOCK_AUDIT_SLEEP_SEC:-0}" &
 sleep_pid="$!"
 printf '%s' "$sleep_pid" >"$MOCK_SLEEP_PID"
+: >"$MOCK_AUDIT_STARTED"
 wait "$sleep_pid"
 printf '%s\n' '{"mock":true}'
 `,
@@ -3572,10 +3572,13 @@ test('duplicate audit uses fixed windows and bounds every source before aggregat
   assert.match(sql, /'unrecognized_rule_count'/u);
 
   assert.match(sql, /intent_sample_plus AS MATERIALIZED/u);
-  const intentSamples = sql.slice(
-    sql.indexOf('intent_sample_plus AS MATERIALIZED'),
-    sql.indexOf('), ranked_intents AS MATERIALIZED'),
-  );
+  const intentSamples = [
+    ...sql.matchAll(
+      /intent_sample_plus AS MATERIALIZED \(([\s\S]*?)\), ranked_intents AS MATERIALIZED/gu,
+    ),
+  ]
+    .map((match) => match[1])
+    .join('\n');
   const boundedStatuses = [
     ...intentSamples.matchAll(
       /FROM moderation_delete_intents\s+WHERE status = '([A-Z_]+)'::"ModerationDeleteIntentStatus"\s+AND updated_at >= statement_timestamp\(\) - make_interval\(mins => 1440\)\s+ORDER BY updated_at DESC\s+LIMIT 65/gu,
@@ -3593,7 +3596,7 @@ test('duplicate audit uses fixed windows and bounds every source before aggregat
     'EXPIRED',
     'FAILED_TERMINAL',
   ]);
-  assert.equal([...intentSamples.matchAll(/UNION ALL/gu)].length, 9);
+  assert.equal([...intentSamples.matchAll(/UNION ALL/gu)].length, 0);
   assert.doesNotMatch(intentSamples, /CROSS JOIN LATERAL|status = intent_statuses\.status/u);
   assert.match(sql, /WHERE sample_rank <= 64/u);
   assert.match(
@@ -3656,7 +3659,7 @@ test('duplicate explain plans only the fixed intent query and forwards no operat
   const sql = readFileSync(data.sql, 'utf8');
   const reportSql = extractDuplicateReportSql(sql);
   assert.match(reportSql, /^EXPLAIN \(FORMAT JSON\)\s+WITH intent_statuses/u);
-  assert.equal([...reportSql.matchAll(/EXPLAIN/gu)].length, 1);
+  assert.equal([...reportSql.matchAll(/EXPLAIN/gu)].length, 10);
   assert.doesNotMatch(reportSql, /ANALYZE|duplicate_settings|recent_duplicate_moderation/u);
   assert.match(sql, /required_duplicate_indexes/u);
   assert.match(sql, /\) IN \(40, 48\)/u);
@@ -4291,7 +4294,7 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
     .flatMap((statement) => statement.rows ?? [])
     .map((row) => JSON.parse(row.json_build_object));
   await database.exec('SET SESSION AUTHORIZATION postgres;');
-  assert.equal(reports.length, 3);
+  assert.equal(reports.length, 12);
   assert.equal(reports[0]?.audit, 'duplicate_settings');
   assert.equal(reports[0]?.schema_version, 2);
   assert.equal(reports[0]?.runtime_authority, 'not_observed_by_sql');
@@ -4453,13 +4456,20 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
   const intentSql = reportSql.slice(
     reportSql.indexOf('WITH intent_statuses(status_order, status)'),
   );
-  const fullIntentPlan = await database.query(`EXPLAIN (FORMAT JSON, COSTS FALSE) ${intentSql}`);
+  const intentStatements = intentSql
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  assert.equal(intentStatements.length, 10);
   const sourceScans = [];
   const collectSourceScans = (node, parent = null) => {
     if (node['Relation Name'] === 'moderation_delete_intents') sourceScans.push({ node, parent });
     for (const child of node.Plans ?? []) collectSourceScans(child, node);
   };
-  collectSourceScans(fullIntentPlan.rows[0]['QUERY PLAN'][0].Plan);
+  for (const statement of intentStatements) {
+    const plan = await database.query(`EXPLAIN (FORMAT JSON, COSTS FALSE) ${statement}`);
+    collectSourceScans(plan.rows[0]['QUERY PLAN'][0].Plan);
+  }
   assert.equal(sourceScans.length, 10);
   for (const { node: scan, parent } of sourceScans) {
     assert.equal(parent?.['Node Type'], 'Limit');
@@ -4600,7 +4610,10 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
     .map((row) => JSON.parse(row.json_build_object));
   await database.exec('SET SESSION AUTHORIZATION postgres;');
   const boundaryEventWindow = boundaryReports[1]?.windows.find((row) => row.window_minutes === 60);
-  const boundaryIntentWindows = boundaryReports[2]?.rows.filter((row) => row.window_minutes === 60);
+  const boundaryIntentWindows = boundaryReports
+    .slice(2)
+    .flatMap((report) => report.rows)
+    .filter((row) => row.window_minutes === 60);
   assert.equal(boundaryEventWindow?.sample_saturated, true);
   assert.equal(boundaryEventWindow?.complete, false);
   assert.equal(boundaryIntentWindows?.length, 10);
@@ -4611,6 +4624,50 @@ test('duplicate SQL executes, grants converge, and each bounded source has an in
     assert.equal(boundaryIntentWindow.sample_saturated, true);
     assert.equal(boundaryIntentWindow.complete, false);
   }
+});
+
+test('duplicate history keeps exact scope, private failures and the shared audit budgets', (t) => {
+  const data = fixture();
+  t.after(() => rmSync(data.directory, { force: true, recursive: true }));
+  for (const options of [[], ['--explain']]) {
+    const result = runAudit(data, ['duplicate-history', '-123', ...options]);
+    assert.equal(result.status, 0, result.stderr);
+    const sql = readFileSync(data.sql, 'utf8');
+    assert.match(sql, /BEGIN READ ONLY/u);
+    assert.match(sql, /duplicate_history_privileges_ready/u);
+    assert.match(sql, /duplicate_history_indexes_ready/u);
+    assert.match(sql, /ORDER BY intent_created_at DESC,intent_id DESC LIMIT 129/u);
+    const args = readFileSync(data.dockerArgs, 'utf8');
+    assert.match(args, /statement_timeout=2500ms/u);
+    assert.match(args, /search_path=pg_catalog,public,pg_temp/u);
+    assert.match(args, /timezone=UTC/u);
+    assert.equal(
+      runConnect(data, ['postgres-audit', 'duplicate-history', '-123', ...options]).status,
+      0,
+    );
+  }
+  for (const args of [
+    [],
+    ['1'],
+    ['-01'],
+    ['-1,-2'],
+    ["-1';SELECT 1"],
+    ['/tmp/query.sql'],
+    ['-123', '--apply'],
+    ['-123', '--explain', 'extra'],
+    ['-123', '--explain', '--explain'],
+  ]) {
+    rmSync(data.dockerArgs, { force: true });
+    rmSync(data.sshArgs, { force: true });
+    assert.equal(runAudit(data, ['duplicate-history', ...args]).status, 2);
+    assert.equal(runConnect(data, ['postgres-audit', 'duplicate-history', ...args]).status, 2);
+    assert.equal(existsSync(data.dockerArgs), false);
+    assert.equal(existsSync(data.sshArgs), false);
+  }
+  const failed = runAudit(data, ['duplicate-history', '-123'], { MOCK_AUDIT_FAIL: '1' });
+  assert.equal(failed.status, 7);
+  assert.match(failed.stderr, /duplicate history audit failed closed/u);
+  assert.doesNotMatch(`${failed.stdout}${failed.stderr}`, /fixture-event|ERROR near/u);
 });
 
 test('audit modes reject arbitrary SQL and unsafe monitor windows before Docker', (t) => {

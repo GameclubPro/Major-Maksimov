@@ -798,7 +798,7 @@ maxim_topology_require_message_duplicate_delete_guard() {
   # FLAG: Pending v3 decisions outlive environment downgrades. Both rollback paths
   # must retain lifecycle revisions, durable first admission/revocation and the last permit fence.
   # Bounded phone labels, strong identifier/quantity guards and original-text phone-before-URL
-  # normalization remain mandatory with v14 text fences, v8 phone evidence and bounded v4 history with retained v3 negative fences.
+  # normalization remain mandatory with v15 text fences, v8 phone evidence and bounded v4 history with retained v3 negative fences.
   # Case-sensitive quantity units before/after values and finite phone authority must survive
   # exact/near matching and lifecycle identity.
   # FLAG: Retained single-image recompression grants require both exact hashes, independent
@@ -1157,7 +1157,14 @@ maxim_topology_require_message_duplicate_delete_guard() {
       const evidence = phoneExtraction.indexOf("const phone = phoneEvidence(");
       return ranges >= 0 && exclusion > ranges && evidence > exclusion;
     };
-    const valid = unifiedComparison && recompressionReader && start >= 0 && end > start &&
+    const candidateSelection =
+      service.includes("this.enforcement.selectMatch({") && media.includes("this.enforcement.selectMatch({") &&
+      history.includes("MESSAGE_DUPLICATE_FINGERPRINT_LIMIT = 128") &&
+      history.includes("selectionLocked: matches.some((match) => match.qualified !== undefined)") &&
+      guard.includes("observation.selectionLocked") &&
+      guard.includes("qualificationSourceUnavailable: error") &&
+      enforcement.includes("if (params.qualificationSourceUnavailable) throw params.qualificationSourceUnavailable;");
+    const valid = unifiedComparison && recompressionReader && candidateSelection && start >= 0 && end > start &&
       guard.includes("class MessageDuplicateDeleteGuardService") &&
       check.includes("await this.history.stillMatches(") &&
       check.includes("message_duplicate_content_changed") &&
@@ -1174,8 +1181,8 @@ maxim_topology_require_message_duplicate_delete_guard() {
       state.includes("lifecycleRevision:") &&
       state.includes("authorization:") &&
       state.includes("messageDuplicateEnforcementScope") &&
-      state.includes("text-fixed-window-safe-text-v14") &&
-      state.includes("text-fixed-window-v14") &&
+      state.includes("text-fixed-window-safe-text-v15") &&
+      state.includes("text-fixed-window-v15") &&
       state.includes("const safeTextMatchingEnabled = nearEnabled || phoneValueMatchingEnabled;") &&
       /const phoneValueMatchingEnabled\s*=\s*settings.duplicateDetectionPreset === .CUSTOM. && settings.duplicateIgnorePhonesEnabled/u.test(state) &&
       /version:\s*safeTextMatchingEnabled\s*\?/u.test(state) &&

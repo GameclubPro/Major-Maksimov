@@ -606,7 +606,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       track: true,
       executeFullAction: execute,
     });
-    return (await queue.getJobs(['delayed'])).find(
+    return (await queue.getJobs(['delayed', 'waiting'])).find(
       (job) => job.data.webhookEventId === item.receipt,
     );
   };
@@ -666,6 +666,85 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
     afterEach(async () => {
       jest.restoreAllMocks();
       await flow?.close();
+    });
+
+    it.each([false, true])(
+      'keeps independent image match when stale text evidence exists=%s',
+      async (staleText) => {
+        flow = await createFlow();
+        const textOriginal = flow.prepare({ text: 'Selling the same aquarium today' });
+        await flow.ingest(textOriginal);
+        const imageOriginal = flow.prepare({ photo: 'png', text: 'Different original caption' });
+        await flow.processor.process((await flow.ingest(imageOriginal))!);
+        flow.remote.delete(textOriginal.id);
+        const repeat = flow.prepare({
+          photo: 'webp',
+          text: staleText ? 'Selling the same aquarium today' : 'New unrelated caption',
+        });
+        const job = await flow.ingest(repeat);
+        if (job) await flow.processor.process(job);
+        expect(flow.deleted).toContain(repeat.id);
+      },
+    );
+
+    it.each([false, true])(
+      'keeps independent phone match when stale link evidence exists=%s',
+      async (staleLink) => {
+        flow = await createFlow({
+          duplicateDetectionPreset: 'CUSTOM',
+          duplicateIgnoreLinksEnabled: true,
+          duplicateIgnorePhonesEnabled: true,
+        });
+        const phoneOriginal = flow.prepare({
+          text: 'Телефон: +7 (999) 123-45-67. Продам велосипед.',
+        });
+        await flow.ingest(phoneOriginal);
+        const linkOriginal = flow.prepare({ text: 'Сдам квартиру https://example.com/rent' });
+        await flow.ingest(linkOriginal);
+        flow.remote.delete(linkOriginal.id);
+        const repeat = flow.prepare({
+          text:
+            'Услуги ремонта. Телефон: +7 (999) 123-45-67' +
+            (staleLink ? ' https://example.com/rent' : ''),
+        });
+        await flow.ingest(repeat);
+        expect(flow.deleted).toContain(repeat.id);
+      },
+    );
+
+    it.each([0, 16, 64])('checks the shared link after %s differing links', async (count) => {
+      flow = await createFlow({
+        duplicateDetectionPreset: 'CUSTOM',
+        duplicateIgnoreLinksEnabled: true,
+      });
+      const links = (side: string) =>
+        Array.from({ length: count }, (_, i) => `https://a-${side}-${i}.example.com/`).join(' ');
+      const original = flow.prepare({
+        text: `Первое объявление ${links('one')} https://z-shared.example.com/`,
+      });
+      await flow.ingest(original);
+      const repeat = flow.prepare({
+        text: `Другое объявление ${links('two')} https://z-shared.example.com/`,
+      });
+      await flow.ingest(repeat);
+      expect(flow.deleted).toContain(repeat.id);
+    });
+
+    it('preserves the independent image after an undelivered edit of the text original', async () => {
+      flow = await createFlow();
+      const original = flow.prepare({ text: 'Original offer before edit' });
+      await flow.ingest(original);
+      const photo = flow.prepare({ photo: 'png', text: 'Different photo offer' });
+      await flow.processor.process((await flow.ingest(photo))!);
+      flow.prepare({
+        id: original.id,
+        text: 'Edited offer with another meaning',
+        time: original.time + 1,
+        editedFrom: original.time,
+      });
+      const repeat = flow.prepare({ photo: 'webp', text: 'Original offer before edit' });
+      await flow.processor.process((await flow.ingest(repeat))!);
+      expect(flow.deleted).toEqual([repeat.id]);
     });
 
     const prepareStaleRecompressionOriginal = async (
@@ -1321,6 +1400,7 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       };
       const nativePair = jest.spyOn(flow.photos, 'verifyRecompression');
       return {
+        originals,
         exact,
         repeat,
         job,
@@ -1342,6 +1422,24 @@ async function createFlow(overrides: Partial<ChatSettings> = {}) {
       expect(binding.imageRecompression).toBeUndefined();
       expect(await flow.history.qualified(flow.chatId, binding)).toBe(1);
       expect(nativePair).not.toHaveBeenCalled();
+    });
+
+    it('skips four revoked originals before spending native proof on the fifth candidate', async () => {
+      const { originals, exact, input, lookup, nativePair } = await prepareExactCandidatePriority();
+      for (const entry of originals.slice(0, 4))
+        await flow.history.remove(flow.chatId, entry.item.id);
+      input.verified.hashes = ['f'.repeat(64)];
+      nativePair.mockResolvedValue(null);
+      const result = await lookup();
+      expect(result.unverified).toBe(true);
+      expect(result.anchor).toBeUndefined();
+      expect(nativePair).toHaveBeenCalledTimes(1);
+      expect(nativePair).toHaveBeenCalledWith(
+        expect.objectContaining({
+          expectedOriginalHash: exact.candidate.canonicalHash,
+        }),
+      );
+      expect(flow.deleted).toEqual([]);
     });
 
     it('does not require or consume the native pair budget for exact canonical history', async () => {

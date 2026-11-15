@@ -1,3 +1,4 @@
+import type { MessageDuplicateQualificationSourceUnavailableError } from './message-duplicate-guard.contract';
 import { Injectable, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { ChatSettings } from '../../prisma/prisma-client';
@@ -48,12 +49,20 @@ export type MessageDuplicateObservation = {
   imageOriginal?: MessageDuplicateOriginal;
 };
 
-export type MessageDuplicateHistoryObservation = {
-  outcome: 'SCHEDULE_CLOSED' | 'CONTENT_UNVERIFIED' | 'STALE' | 'COMPARED_NO_MATCH' | 'MATCHED';
-  match: { hit: DuplicateHit; binding: MessageDuplicateBinding } | null;
+export type MessageDuplicateMatch = {
+  hit: DuplicateHit;
+  binding: MessageDuplicateBinding;
+  qualificationSourceUnavailable?: MessageDuplicateQualificationSourceUnavailableError;
 };
 
-export const MESSAGE_DUPLICATE_FINGERPRINT_LIMIT = 16;
+export type MessageDuplicateHistoryObservation = {
+  outcome: 'SCHEDULE_CLOSED' | 'CONTENT_UNVERIFIED' | 'STALE' | 'COMPARED_NO_MATCH' | 'MATCHED';
+  match: MessageDuplicateMatch | null;
+  candidates?: MessageDuplicateMatch[];
+  selectionLocked?: boolean;
+};
+
+export const MESSAGE_DUPLICATE_FINGERPRINT_LIMIT = 128;
 
 export function selectMessageDuplicateFingerprints(
   fingerprints: readonly DuplicateFingerprint[],
@@ -96,7 +105,7 @@ export class MessageDuplicateHistoryService {
     imageOnly = false,
   ): string[] {
     if (imageOnly) return [digestDuplicateContent(['exact-image-v1', content.media.length])];
-    const parts = this.buildFingerprints(content, settings);
+    const { parts } = this.buildFingerprintSelection(content, settings);
     return parts.map((part) =>
       digestDuplicateContent({
         version: 1,
@@ -155,6 +164,7 @@ export class MessageDuplicateHistoryService {
     const windowSec = dailyWindow
       ? Math.ceil((dailyWindow.endMs - dailyWindow.startMs) / 1000)
       : flow.windowSec;
+    const selection = this.buildFingerprintSelection(input.content, input.settings);
     const parts: DuplicateFingerprint[] = identity
       ? mode === 'IMAGE'
         ? [
@@ -163,7 +173,7 @@ export class MessageDuplicateHistoryService {
               value: anchorIdentity!,
             },
           ]
-        : this.buildFingerprints(input.content, input.settings)
+        : selection.parts
       : [];
     const settingsDigest =
       mode === 'IMAGE'
@@ -222,48 +232,47 @@ export class MessageDuplicateHistoryService {
       return { outcome: identity ? 'STALE' : 'CONTENT_UNVERIFIED', match: null };
     }
     const matches = Array.isArray(mutation.matches) ? mutation.matches : [];
-    const selected = matches.sort((a, b) => (b.qualified ?? b.count) - (a.qualified ?? a.count))[0];
-    const pattern = selected && patterns.find((part) => part.hash === selected.fingerprint);
-    if (!selected || !pattern) {
-      this.metrics?.record('history.no_match_or_allowed');
-      return { outcome: 'COMPARED_NO_MATCH', match: null };
-    }
-    this.metrics?.record('history.matched');
-    const match = { ...pattern, count: selected.qualified ?? selected.count };
-    const binding: MessageDuplicateBinding = {
-      version: 3,
-      enforcementScope: mode === 'IMAGE' ? 'full' : 'delete_only',
-      lifecycleRevision: mutation.revision,
-      policyRevision: input.settings.duplicatePolicyRevision,
-      original: messageDuplicateOriginalSchema.parse({
-        ...selected.original,
-        mediaHashes: Array.isArray(selected.original.mediaHashes)
-          ? selected.original.mediaHashes
-          : [],
-      }),
-      senderId: input.userId,
-      messageId: input.messageId,
-      eventTimestampMs: mutation.observedAt ?? input.eventTimestampMs,
-      controlRevision: input.controlRevision,
-      compareMode: mode,
-      ...(input.imageScope ? { imageScope: input.imageScope } : {}),
-      settingsDigest,
-      sourceDigest,
-      contentDigest: identity,
-      fingerprint: match.hash,
-      mediaHashes,
-      mediaVersion: MESSAGE_DUPLICATE_MEDIA_VERSION,
-      ...(recompression ? { imageRecompression: recompression } : {}),
-      hasPhotos: mode !== 'TEXT' && input.content.media.some((media) => media.kind === 'photo'),
-      photoControlRevision: null,
-      windowSeconds: windowSec,
-      requiredCount: flow.allowedCount + 2,
-    };
-    if (!hasValidImageComparisonEvidence(binding))
-      return { outcome: 'CONTENT_UNVERIFIED', match: null };
-    return {
-      outcome: 'MATCHED',
-      match: {
+    matches.sort(
+      (a, b) =>
+        Number(b.qualified !== undefined) - Number(a.qualified !== undefined) ||
+        (b.qualified ?? b.count) - (a.qualified ?? a.count),
+    );
+    const candidates: MessageDuplicateMatch[] = [];
+    for (const selected of matches) {
+      const pattern = patterns.find((part) => part.hash === selected.fingerprint);
+      if (!pattern) continue;
+      const match = { ...pattern, count: selected.qualified ?? selected.count };
+      const binding: MessageDuplicateBinding = {
+        version: 3,
+        enforcementScope: mode === 'IMAGE' ? 'full' : 'delete_only',
+        lifecycleRevision: mutation.revision!,
+        policyRevision: input.settings.duplicatePolicyRevision,
+        original: messageDuplicateOriginalSchema.parse({
+          ...selected.original,
+          mediaHashes: Array.isArray(selected.original.mediaHashes)
+            ? selected.original.mediaHashes
+            : [],
+        }),
+        senderId: input.userId,
+        messageId: input.messageId,
+        eventTimestampMs: mutation.observedAt ?? input.eventTimestampMs,
+        controlRevision: input.controlRevision,
+        compareMode: mode,
+        ...(input.imageScope ? { imageScope: input.imageScope } : {}),
+        settingsDigest,
+        sourceDigest,
+        contentDigest: identity,
+        fingerprint: match.hash,
+        mediaHashes,
+        mediaVersion: MESSAGE_DUPLICATE_MEDIA_VERSION,
+        ...(recompression ? { imageRecompression: recompression } : {}),
+        hasPhotos: mode !== 'TEXT' && input.content.media.some((media) => media.kind === 'photo'),
+        photoControlRevision: null,
+        windowSeconds: windowSec,
+        requiredCount: flow.allowedCount + 2,
+      };
+      if (!hasValidImageComparisonEvidence(binding)) continue;
+      candidates.push({
         binding,
         hit: {
           count: match.count,
@@ -272,7 +281,24 @@ export class MessageDuplicateHistoryService {
           fingerprintType: match.part.type,
           metadata: { duplicateSource: 'message_v1', messageDuplicate: binding },
         },
-      },
+      });
+    }
+    if (candidates.length === 0) {
+      const incomplete = matches.length > 0 || (mode !== 'IMAGE' && selection.limited);
+      this.metrics?.record(incomplete ? 'history.unverified' : 'history.no_match_or_allowed');
+      return {
+        outcome: incomplete ? 'CONTENT_UNVERIFIED' : 'COMPARED_NO_MATCH',
+        match: null,
+      };
+    }
+    this.metrics?.record('history.matched');
+    return {
+      outcome: 'MATCHED',
+      match: candidates[0]!,
+      candidates,
+      // FLAG: An already qualified stage is immutable even if its original later disappears.
+      // Alternatives are only source selection before any qualification/effect.
+      selectionLocked: matches.some((match) => match.qualified !== undefined),
     };
   }
 
@@ -422,7 +448,7 @@ export class MessageDuplicateHistoryService {
     );
   }
 
-  private buildFingerprints(content: DuplicateMessageContent, settings: ChatSettings) {
+  private buildFingerprintSelection(content: DuplicateMessageContent, settings: ChatSettings) {
     const all = this.fingerprints.buildFingerprints(
       // FLAG: URL paths, query values and fragments are case-sensitive. Normalize prose inside
       // the detector, never before extracting navigation value fingerprints.
@@ -434,7 +460,7 @@ export class MessageDuplicateHistoryService {
       this.metrics?.record('history.fingerprint_budget');
     const parts = selectMessageDuplicateFingerprints(all);
     if (parts.length === 0) parts.push({ type: 'exact', value: '' });
-    return parts;
+    return { parts, limited: all.length > MESSAGE_DUPLICATE_FINGERPRINT_LIMIT };
   }
 }
 

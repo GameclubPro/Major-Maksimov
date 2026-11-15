@@ -54,6 +54,33 @@ const MAX_RETENTION_MS = 48 * 60 * 60 * 1000;
     await counters.onModuleDestroy();
   });
 
+  it('reports saturated coverage and retains the gap after old pointers expire', async () => {
+    const rows = Array.from({ length: 9 }, (_, i) =>
+      candidate(`capacity-${i}`, {
+        publishedAtMs: now - 2000 + i,
+        eventTimestampMs: now - 2000 + i,
+      }),
+    );
+    for (const row of rows) await index.remember(scope, row);
+    const result = await index.readWithCoverage(scope, hash, now);
+    expect(result.candidates).toHaveLength(8);
+    expect(result.saturated).toBe(true);
+    const bucketKeys = duplicateRecompressionIndexKeys(scope, hash);
+    for (const key of bucketKeys) keys.add(`${key}:saturated-until`);
+    await inspector.del(...bucketKeys);
+    expect(await index.readWithCoverage(scope, hash, now)).toEqual({
+      candidates: [],
+      saturated: true,
+    });
+  });
+
+  it('distinguishes an empty nonsaturated index', async () => {
+    expect(await index.readWithCoverage(scope, hash, now)).toEqual({
+      candidates: [],
+      saturated: false,
+    });
+  });
+
   it('retrieves one original through surviving bands after six changed bits', async () => {
     const original = candidate('original');
     await index.remember(scope, original);

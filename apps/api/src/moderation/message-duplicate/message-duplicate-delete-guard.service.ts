@@ -24,6 +24,8 @@ import {
   exactImageSourceDigest,
 } from './message-duplicate-content';
 import {
+  type MessageDuplicateHistoryObservation,
+  type MessageDuplicateMatch,
   duplicateSourceDigest,
   MessageDuplicateHistoryService,
 } from './message-duplicate-history.service';
@@ -167,6 +169,69 @@ export class MessageDuplicateDeleteGuardService {
       else this.metrics?.record('guard.unavailable');
       throw error;
     }
+  }
+
+  async selectMatch(params: {
+    chatId: string;
+    botId: string;
+    observation: MessageDuplicateHistoryObservation;
+    assertLease?: () => void;
+  }): Promise<MessageDuplicateMatch | null> {
+    const { observation } = params;
+    if (!observation.match || observation.selectionLocked) return observation.match;
+    const invalidOriginals = new Set<string>();
+    let reads = 0;
+    for (const candidate of observation.candidates ?? [observation.match]) {
+      const original = candidate.binding.original;
+      if (!original) return candidate;
+      if (invalidOriginals.has(original.messageId)) continue;
+      // FLAG: Source selection never acquires/releases an action claim, consumes immunity or
+      // qualifies a stage. Final guards repeat these reads after the durable claim is acquired.
+      if (reads >= 8) {
+        this.metrics?.record('selection.original_limit');
+        return null;
+      }
+      params.assertLease?.();
+      reads += 1;
+      try {
+        const raw = await this.lookupMessage(
+          'original',
+          params.chatId,
+          original.messageId,
+          {
+            botId: params.botId,
+            timeoutMs: this.timeoutMs,
+            bypassCache: true,
+            trafficClass: 'critical',
+            actionHealthLane: 'critical',
+            sourceTag: MAX_API_SOURCE_TAGS.MODERATION_DELETE,
+            ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
+          },
+          true,
+          undefined,
+          'qualification',
+        );
+        await this.assertOriginalContent(params.chatId, candidate.binding, raw);
+        params.assertLease?.();
+        return candidate;
+      } catch (error) {
+        if (
+          error instanceof MessageDuplicateGuardRejectedError &&
+          (error.code === 'message_duplicate_original_missing' ||
+            error.code === 'message_duplicate_original_changed')
+        ) {
+          invalidOriginals.add(original.messageId);
+          this.metrics?.record('selection.stale_original');
+          continue;
+        }
+        // FLAG: Unavailability is never absence. Keep this candidate for the existing
+        // typed qualification handoff; no alternative is authorized by a failed read.
+        if (error instanceof MessageDuplicateQualificationSourceUnavailableError)
+          return { ...candidate, qualificationSourceUnavailable: error };
+        throw error;
+      }
+    }
+    return null;
   }
 
   async qualify(params: MessageDuplicateGuardInput): Promise<number | null> {
@@ -562,39 +627,7 @@ export class MessageDuplicateDeleteGuardService {
       !receiptIntentId ? params.deletePhase : undefined,
       lookupPhase,
     );
-    if (!originalRaw) {
-      await this.history.remove(params.chatId, binding.original.messageId);
-      throw new MessageDuplicateGuardRejectedError('message_duplicate_original_missing');
-    }
-    const originalMessage = this.parser.parse({
-      type: 'message_created',
-      updateId: 'message-duplicate-original-guard',
-      message: originalRaw,
-    }).message;
-    const originalContent = extractDuplicateMessageContent(originalRaw, false);
-    if (
-      !originalMessage ||
-      originalMessage.chatId !== params.chatId ||
-      originalMessage.messageId !== binding.original.messageId ||
-      originalMessage.senderId !== binding.original.senderId ||
-      originalMessage.entityType === 'channel' ||
-      duplicateSourceDigest(originalContent, binding.compareMode) !==
-        binding.original.sourceDigest ||
-      buildMessageDuplicateIdentity(
-        originalContent,
-        binding.compareMode,
-        binding.original.mediaHashes,
-      ) !== binding.original.contentDigest
-    ) {
-      // FLAG: A missed edit is not proof of removal. Revoke the observed evidence using its
-      // actual current content; never manufacture a new publication or penalty from this read.
-      await this.history.invalidateLifecycle({
-        chatId: params.chatId,
-        messageId: binding.original.messageId,
-        content: originalContent,
-      });
-      throw new MessageDuplicateGuardRejectedError('message_duplicate_original_changed');
-    }
+    await this.assertOriginalContent(params.chatId, binding, originalRaw);
     if (!(await this.history.stillMatches(params.chatId, binding, Boolean(receiptIntentId)))) {
       throw new MessageDuplicateGuardRejectedError('message_duplicate_history_changed');
     }
@@ -624,6 +657,48 @@ export class MessageDuplicateDeleteGuardService {
     if (Date.now() >= Math.min(binding.authorization!.deadlineAtMs, binding.original.expiresAtMs))
       throw new MessageDuplicateGuardRejectedError('message_duplicate_action_expired');
     return 'allowed';
+  }
+
+  private async assertOriginalContent(
+    chatId: string,
+    binding: MessageDuplicateBinding,
+    originalRaw: Record<string, unknown> | null,
+  ): Promise<void> {
+    if (!binding.original)
+      throw new MessageDuplicateGuardRejectedError('message_duplicate_binding_invalid');
+    if (!originalRaw) {
+      await this.history.remove(chatId, binding.original.messageId);
+      throw new MessageDuplicateGuardRejectedError('message_duplicate_original_missing');
+    }
+    const originalMessage = this.parser.parse({
+      type: 'message_created',
+      updateId: 'message-duplicate-original-guard',
+      message: originalRaw,
+    }).message;
+    const originalContent = extractDuplicateMessageContent(originalRaw, false);
+    if (
+      !originalMessage ||
+      originalMessage.chatId !== chatId ||
+      originalMessage.messageId !== binding.original.messageId ||
+      originalMessage.senderId !== binding.original.senderId ||
+      originalMessage.entityType === 'channel' ||
+      duplicateSourceDigest(originalContent, binding.compareMode) !==
+        binding.original.sourceDigest ||
+      buildMessageDuplicateIdentity(
+        originalContent,
+        binding.compareMode,
+        binding.original.mediaHashes,
+      ) !== binding.original.contentDigest
+    ) {
+      // FLAG: A missed edit is not proof of removal. Revoke the observed evidence using its
+      // actual current content; never manufacture a new publication or penalty from this read.
+      await this.history.invalidateLifecycle({
+        chatId: chatId,
+        messageId: binding.original.messageId,
+        content: originalContent,
+      });
+      throw new MessageDuplicateGuardRejectedError('message_duplicate_original_changed');
+    }
   }
 
   private async lookupMessage(

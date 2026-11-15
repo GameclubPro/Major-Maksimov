@@ -279,8 +279,20 @@ const mutations = [
     'false',
   ],
   ['state', 'z.literal(3)', 'z.literal(4)'],
-  ['state', 'text-fixed-window-safe-text-v14', 'text-fixed-window-safe-text-v13'],
-  ['state', 'text-fixed-window-v14', 'text-fixed-window-v13'],
+  [
+    'history',
+    'MESSAGE_DUPLICATE_FINGERPRINT_LIMIT = 128',
+    'MESSAGE_DUPLICATE_FINGERPRINT_LIMIT = 16',
+  ],
+  [
+    'history',
+    'selectionLocked: matches.some((match) => match.qualified !== undefined)',
+    'selectionLocked: false',
+  ],
+  ['guard', 'observation.selectionLocked', 'false'],
+  ['guard', 'qualificationSourceUnavailable: error', 'qualificationSourceUnavailable: undefined'],
+  ['state', 'text-fixed-window-safe-text-v15', 'text-fixed-window-safe-text-v13'],
+  ['state', 'text-fixed-window-v15', 'text-fixed-window-v13'],
   ['state', 'version: safeTextMatchingEnabled ?', 'version: false ?'],
   ['state', 'nearEnabled || phoneValueMatchingEnabled', 'nearEnabled'],
   [

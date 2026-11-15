@@ -104,6 +104,7 @@
     "moderation:export-commercial-private-images": "tsx src/scripts/export-commercial-private-images.ts",
     "moderation:recover-duplicate-diagnostics": "sh -c 'if [ -f dist/apps/api/src/scripts/recover-duplicate-diagnostics.js ]; then exec node dist/apps/api/src/scripts/recover-duplicate-diagnostics.js \"$@\"; else exec tsx src/scripts/recover-duplicate-diagnostics.ts \"$@\"; fi' --",
     "moderation:export-antiduplicate-corpus": "sh -c 'if [ -f dist/apps/api/src/scripts/export-antiduplicate-corpus.js ]; then exec node dist/apps/api/src/scripts/export-antiduplicate-corpus.js \"$@\"; else exec tsx src/scripts/export-antiduplicate-corpus.ts \"$@\"; fi' --",
+    "moderation:prepare-antiduplicate-review": "tsx src/scripts/prepare-antiduplicate-review.ts",
     "moderation:replay-antiduplicate-corpus": "sh -c 'if [ -f dist/apps/api/src/scripts/replay-antiduplicate-corpus.js ]; then exec node dist/apps/api/src/scripts/replay-antiduplicate-corpus.js \"$@\"; else exec tsx src/scripts/replay-antiduplicate-corpus.ts \"$@\"; fi' --",
     "loadtest:multibot-catalog": "node ../../scripts/with-file-lock.mjs api-validation -- npm run loadtest:multibot-catalog:unlocked --",
     "loadtest:multibot-catalog:unlocked": "npm run prepare:codegen && tsx src/scripts/loadtest-multibot-catalog.ts",
