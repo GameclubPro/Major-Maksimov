@@ -12,7 +12,7 @@ import {
   wasMaxMessageSendAttempted,
 } from './max-mutation-outcome.util';
 
-type SendCapacityAttempt = { action: MaxActionJob; botId: string };
+type SendCapacityAttempt = { action: MaxActionJob; botId: string; deferCapacity: boolean };
 const currentSend = new AsyncLocalStorage<SendCapacityAttempt>();
 const limiterRefusals = new WeakMap<object, SendCapacityAttempt>();
 const sendRefusals = new WeakMap<object, { jobId: string; chatId: string; botId: string }>();
@@ -41,8 +41,30 @@ export function runWithMaxSendCapacityAttempt<T>(
   action: MaxActionJob,
   botId: string,
   run: () => Promise<T>,
+  deferCapacity = false,
 ): Promise<T> {
-  return currentSend.run({ action, botId }, run);
+  return currentSend.run({ action, botId, deferCapacity }, run);
+}
+
+export function boundMaxSendCapacityWait(
+  configuredMs: number,
+  reservation: { botId: string; chatId: string | null; operation?: string },
+): number {
+  const scope = currentSend.getStore();
+  // FLAG: Only the locked worker's exact, journaled notice POST can yield its
+  // slot. Keep a short wait for normal pacing after fresh GET preparation; nested
+  // reads, direct callers and unknown envelopes retain their original budgets.
+  if (
+    !scope?.deferCapacity ||
+    reservation.operation !== 'send' ||
+    scope.botId !== reservation.botId ||
+    scope.action.botId !== reservation.botId ||
+    scope.action.chatId !== reservation.chatId ||
+    !scope.action.idempotencyKey.trim() ||
+    readMaxSendCapacityDeadline(scope.action) === null
+  )
+    return configuredMs;
+  return Math.min(configuredMs, MIN_CAPACITY_DELAY_MS);
 }
 
 // FLAG: Called only where the shared limiter actually refuses admission. Error

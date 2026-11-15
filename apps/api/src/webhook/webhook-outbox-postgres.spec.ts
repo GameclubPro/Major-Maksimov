@@ -1696,6 +1696,46 @@ describePostgres('PostgreSQL webhook outbox queries', () => {
     expect(await prisma.webhookEvent.count({ where: { id: { in: ids } } })).toBe(500);
   });
 
+  it.each(['completed', 'failed'] as const)(
+    'advances the %s cursor past a partially locked pinned head and revisits it after wrap',
+    async (phase) => {
+      const service = Object.create(WebhookOutboxService.prototype) as {
+        deleteCompletedWebhookBatch(cutoff: Date): Promise<{ removed: number; scanned: number }>;
+        deleteTerminalFailedWebhookBatch(
+          cutoff: Date,
+        ): Promise<{ removed: number; scanned: number }>;
+      };
+      Object.defineProperty(service, 'prisma', { value: prisma });
+      Object.defineProperty(service, 'webhookRetentionCursors', { value: new Map() });
+      const prefix = `retention-locked-${randomUUID()}`;
+      const ids = Array.from({ length: 501 }, (_, i) => `${prefix}-${String(i).padStart(3, '0')}`);
+      createdEventIds.push(...ids);
+      await prisma.webhookEvent.createMany({
+        data: ids.map((id, index) => ({
+          id,
+          dedupKey: id,
+          createdAt: new Date(Date.UTC(2020, 0, 1) + index),
+          status: phase === 'completed' ? WebhookStatus.PROCESSED : WebhookStatus.FAILED,
+          semanticKey: index === 0 || index === 500 ? `${prefix}-semantic-${index}` : null,
+          normalizedPayload: {},
+          rawPayload: {},
+        })),
+      });
+      const read = () =>
+        phase === 'completed'
+          ? service.deleteCompletedWebhookBatch(new Date('2021-01-01T00:00:00Z'))
+          : service.deleteTerminalFailedWebhookBatch(new Date('2021-01-01T00:00:00Z'));
+      await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM webhook_events WHERE id = ${ids[0]} FOR UPDATE`;
+        expect(await read()).toEqual({ removed: 0, scanned: 500 });
+        expect(await read()).toEqual({ removed: 1, scanned: 1 });
+        expect(await tx.webhookEvent.findUnique({ where: { id: ids[0] } })).not.toBeNull();
+      });
+      expect(await read()).toEqual({ removed: 1, scanned: 500 });
+      expect(await prisma.webhookEvent.count({ where: { id: { in: ids } } })).toBe(499);
+    },
+  );
+
   it('retains unfinished and ambiguous proof bodies while settled command and execution tombstones survive cleanup', async () => {
     const cutoff = new Date('2021-01-01T00:00:00Z');
     const old = new Date('2020-01-01T00:00:00Z');

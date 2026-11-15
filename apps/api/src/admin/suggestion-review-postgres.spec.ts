@@ -17,6 +17,7 @@ import type { ChannelDialogService } from './channel-dialog.service';
 import type { ChannelPostSignatureService } from './channel-post-signature.service';
 import { SuggestionReviewService } from './suggestion-review.service';
 import { SuggestionReviewEffectsService } from './suggestion-review-effects.service';
+import { ManagedEntityActivationRequiredError } from '../max/managed-entity-activation.util';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL ?? '';
@@ -181,6 +182,66 @@ native('suggestion review with PostgreSQL and Redis', () => {
     contactUrl: 'https://max.ru/editor',
     ...extra,
   });
+
+  it.each(['activation', 'publication'] as const)(
+    'backs off a known %s preparation blocker and permits an explicit source wake before the retry',
+    async (blocker) => {
+      const row = await seed();
+      await db.channelSuggestionAdminDelivery.create({
+        data: {
+          auditLogId: row.id,
+          adminUserId: actor.userId,
+          botKey: 'major',
+          botId: 'major',
+          privateChatId: 'private-admin',
+          remoteMessageId: 'blocked-card',
+          status: 'SENT',
+          sentAt: new Date(),
+        },
+      });
+      await service.save(row.id, 'moderation', actor, request('Новое содержимое'));
+      const effect = await db.suggestionReviewEffect.findFirstOrThrow({
+        where: { suggestionId: row.id, kind: 'sync' },
+      });
+      const current = await db.auditLog.findUniqueOrThrow({ where: { id: row.id } });
+      if (blocker === 'activation')
+        jest
+          .spyOn(effects, 'assertDispatchAccess')
+          .mockRejectedValueOnce(new ManagedEntityActivationRequiredError());
+      else
+        await db.auditLog.update({
+          where: { id: row.id },
+          data: {
+            payload: { ...(current.payload as object), reviewStatus: 'publishing' },
+          },
+        });
+      const startedAt = Date.now();
+      await effects.process(effect.id, 'moderation');
+      const blocked = await db.suggestionReviewEffect.findUniqueOrThrow({
+        where: { id: effect.id },
+      });
+      expect(blocked).toMatchObject({ status: 'PENDING', attemptedAt: null, lockToken: null });
+      expect(blocked.nextAttemptAt.getTime() - startedAt).toBeGreaterThanOrEqual(
+        blocker === 'activation' ? 15 * 60_000 : 5 * 60_000,
+      );
+      expect(blocked.lastError).toContain(blocker === 'activation' ? 'подключение' : 'публикации');
+      expect(editedCards).toEqual([]);
+      expect(send).not.toHaveBeenCalled();
+      if (blocker === 'publication')
+        await db.auditLog.update({ where: { id: row.id }, data: { payload: current.payload! } });
+      await effects.enqueueForSuggestion(row.id);
+      await effects.process(effect.id, 'moderation');
+      expect(editedCards).toEqual(['blocked-card']);
+      expect(
+        await db.suggestionReviewEffect.findUniqueOrThrow({ where: { id: effect.id } }),
+      ).toMatchObject({
+        status: 'SENT',
+        attemptedAt: null,
+        lastError: null,
+      });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['moderation', 'publisher'] as const)(
     'allows exactly one concurrent editor for %s and preserves author and original',
@@ -404,6 +465,56 @@ native('suggestion review with PostgreSQL and Redis', () => {
       expect((await service.get(row.id, profile, actor)).notification).toBe('sent');
     },
   );
+  it.each([false, true])(
+    'preserves notification lifetime after activation backoff (expired=%s)',
+    async (expired) => {
+      const row = await seed();
+      await service.reject(row.id, 'moderation', actor, rejection());
+      const effect = await db.suggestionReviewEffect.findFirstOrThrow({
+        where: { suggestionId: row.id, kind: 'notify' },
+      });
+      const delivered = jest.fn();
+      send.mockImplementation(async (_id, _text, options) => {
+        await options?.beforeSend?.();
+        delivered();
+        return { messageId: 'recovered-receipt', url: null };
+      });
+      jest
+        .spyOn(effects, 'assertDispatchAccess')
+        .mockRejectedValueOnce(new ManagedEntityActivationRequiredError());
+      await effects.process(effect.id, 'moderation');
+      expect(delivered).not.toHaveBeenCalled();
+      expect(
+        await db.suggestionReviewEffect.findUniqueOrThrow({ where: { id: effect.id } }),
+      ).toMatchObject({
+        status: 'PENDING',
+        attemptedAt: null,
+        lastError: 'Требуется явное подключение бота администратором.',
+      });
+      const enqueue = jest.spyOn(major, 'add');
+      await effects.recover('moderation');
+      expect(enqueue).not.toHaveBeenCalled();
+      if (expired)
+        await db.suggestionReviewEffect.update({
+          where: { id: effect.id },
+          data: { createdAt: new Date(Date.now() - 25 * 60 * 60_000) },
+        });
+      await effects.enqueueForSuggestion(row.id);
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      await effects.process(effect.id, 'moderation');
+      expect(delivered).toHaveBeenCalledTimes(expired ? 0 : 1);
+      expect(
+        await db.suggestionReviewEffect.findUniqueOrThrow({ where: { id: effect.id } }),
+      ).toMatchObject({
+        status: expired ? 'FAILED' : 'SENT',
+        lastError: expired ? 'Срок подготовки истёк.' : null,
+        remoteMessageId: expired ? null : 'recovered-receipt',
+      });
+      await effects.process(effect.id, 'moderation');
+      expect(delivered).toHaveBeenCalledTimes(expired ? 0 : 1);
+    },
+  );
+
   it('retains the committed answer when Redis enqueue fails and recovers it later', async () => {
     const row = await seed();
     const enqueue = jest.spyOn(major, 'add').mockRejectedValueOnce(new Error('Redis unavailable'));

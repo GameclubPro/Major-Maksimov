@@ -10,6 +10,7 @@ import { markMaxMessageSendAttempted } from './max-mutation-outcome.util';
 import { MESSAGE_DUPLICATE_MEDIA_VERSION } from '../moderation/message-duplicate/message-duplicate-state';
 import type { MessageDuplicateNoticeProof } from '../moderation/message-duplicate/message-duplicate-notice-proof';
 import {
+  boundMaxSendCapacityWait,
   certifyMaxSendCapacityDeferral,
   consumeMaxSendCapacityDeferral,
   markMaxApiCapacityRefusal,
@@ -69,6 +70,45 @@ async function issued(job: MaxActionJob, retryAfterMs = 60_000) {
 describe('Bounded notice SEND capacity deferral', () => {
   beforeEach(() => jest.useFakeTimers().setSystemTime(new Date('2026-11-09T03:00:00Z')));
   afterEach(() => jest.useRealTimers());
+
+  it('bounds only the exact worker notice POST and preserves smaller, direct and nested read budgets', async () => {
+    const job = action();
+    const reservation = { botId: job.botId!, chatId: job.chatId, operation: 'send' };
+    expect(boundMaxSendCapacityWait(5_000, reservation)).toBe(5_000);
+    await runWithMaxSendCapacityAttempt(job, job.botId!, async () => {
+      expect(boundMaxSendCapacityWait(5_000, reservation)).toBe(5_000);
+    });
+    await runWithMaxSendCapacityAttempt(
+      job,
+      job.botId!,
+      async () => {
+        expect(boundMaxSendCapacityWait(5_000, reservation)).toBe(250);
+        expect(boundMaxSendCapacityWait(40, reservation)).toBe(40);
+        expect(boundMaxSendCapacityWait(0, reservation)).toBe(0);
+        for (const other of [
+          { ...reservation, operation: undefined },
+          { ...reservation, operation: 'delete' },
+          { ...reservation, botId: 'another-bot' },
+          { ...reservation, chatId: 'another-chat' },
+        ])
+          expect(boundMaxSendCapacityWait(5_000, other)).toBe(5_000);
+      },
+      true,
+    );
+    for (const unproved of [
+      { ...job, ledgerContext: undefined },
+      { ...job, sourceTag: 'managed_handshake' },
+      { ...job, botId: undefined },
+    ])
+      await runWithMaxSendCapacityAttempt(
+        unproved,
+        job.botId!,
+        async () => {
+          expect(boundMaxSendCapacityWait(5_000, reservation)).toBe(5_000);
+        },
+        true,
+      );
+  });
 
   it('retains a genuine Retry-After lower bound and the original proof deadline', async () => {
     const job = action();

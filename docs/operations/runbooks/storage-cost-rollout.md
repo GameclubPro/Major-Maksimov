@@ -96,6 +96,29 @@ source-history growth measure different populations. Their difference does not
 identify a pin reason or prove a leak. Compare bounded inventory samples across a
 comparable interval before estimating retention efficiency or capacity.
 
+The completed, held and terminal-failed webhook streams each advance their process-local
+`(created_at, id)` cursor from a raw page of at most 500 keys, before lock and proof filtering.
+`scanned` counts that raw page, including locked or pinned rows; `removed` counts actual deletes.
+A short page wraps the stream so skipped rows can be reconsidered. A restart begins at the head.
+Completed and held streams retain their shared one-page maintenance budget. Native regressions
+cover partial/full locked heads, progress behind them, wrap, retained authority and indexed plans.
+
+| Receipt state                                    | Eligibility in the existing cleanup                                                                                         | Evidence preserved                                                                                             |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `PROCESSED`, `DUPLICATE`                         | Older than the configured cutoff and passes all unpinned-proof predicates                                                   | Semantic identity, unfinished claims/mirrors, leases, command results, quarantine and source/cancellation pins |
+| `NO_REPLAY_HELD`                                 | Exact post-seal declined-receipt proof, no execution claim or retained original/source pin                                  | Original and pre-seal receipts, durable disposition/tombstone authority                                        |
+| `FAILED`                                         | Terminal with no scheduled retry, quarantine or ambiguous marker; ordinary proof predicates or exact declined-receipt proof | Attempted/uncertain effects, unfinished owners and recovery evidence                                           |
+| `RECEIVED`, `QUEUED`, `QUARANTINED`, `CANCELLED` | Not selected by these three cleanup streams                                                                                 | Pending execution, quarantine and cancellation evidence                                                        |
+
+This cursor correction does not enable either webhook-retention switch or choose shorter lifetimes.
+Before later activation, satisfy the [backup and restore gates](#gates-for-later-stages), inspect
+the effective flags/cutoffs and compatibility of every retained reader, then use the normal guarded
+release with existing batch/time budgets. Capture readiness, closed receipt/action cohorts, SQL
+activity, storage and phase counters before and after. Stop the newly enabled phase through the
+same configuration/release procedure if latency, SQL pressure or error rates regress; preserve
+all evidence. Disabling cleanup cannot restore removed rows. Revisit physical storage changes
+only after representative growth measurements and a separately reviewed maintenance plan.
+
 ### Bounded fleet baseline collection
 
 After deploying the telemetry reader, collect an owner-private baseline inside the
@@ -110,7 +133,9 @@ Redis writes or keyspace scans. The existing runtime reader uses the fixed servi
 keys and trusts the bounded writers; it rejects reports above 24 KiB after reading.
 MAX observations use read-only Lua with length/type admission, a catalog cardinality
 limit of 512 and 256 KiB materialization cap, at most 32 configured tokens and
-120,000 logical counters in batches of 200. Collection has an eight-second MAX read
+120,000 logical counters per 60-second slice. Only one batch of 200 counter descriptors is
+materialized at a time. The largest admitted five-minute scope reads 252,600 counters across
+five slices; it does not raise an individual Redis read's budget. Collection has an eight-second MAX read
 budget, one-second Redis command deadlines, a twelve-second disconnect deadline
 and a 512 KiB output limit. An unavailable or oversized catalog refuses collection;
 it never bootstraps, repairs or truncates the catalog to make coverage appear complete.
@@ -123,6 +148,13 @@ recorded request admissions and limiter outcomes, not every HTTP attempt or a co
 of confirmed effects. Unknown source labels fold into the fixed `other` label.
 `populationComplete: false` and `zeroOrMissingCounters` remain explicit; absent
 counters cannot establish idle traffic or instrumentation completeness.
+
+The source catalog is read again after collection; a changed catalog returns `catalog_changed`
+without partial totals. `collectionComplete: true`, `slicesRead` and `sourceCatalogFingerprint`
+describe a completed read of that stable selected catalog, separately from HTTP population
+coverage. Compare source totals only across matching source fingerprints. The existing
+`catalogFingerprint` continues to identify configured bot aliases. Catalog changes, deadline
+expiry and failed reads remain explicit unavailable observations.
 
 Tokens leave the process only as sorted aliases and a catalog fingerprint. Compare
 aliases only when fingerprints match. Global stack counters can include observations

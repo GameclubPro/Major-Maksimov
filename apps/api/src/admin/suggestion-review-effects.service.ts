@@ -25,6 +25,7 @@ import {
 } from './suggestion-review-links';
 import { suggestionRevision } from './suggestion-review-content';
 import { privateSuggestionReviewErrorDiagnostic } from '../moderation/private-control-channel-suggestion';
+import { ManagedEntityActivationRequiredError } from '../max/managed-entity-activation.util';
 
 export const suggestionObject = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -35,6 +36,44 @@ const STALE_MS = 120_000;
 const PREPARATION_DEADLINE_MS = 24 * 60 * 60_000;
 
 class SuggestionReviewRecipientAccessRemoved extends ForbiddenException {}
+
+const PREPARATION_MESSAGES = {
+  publication_pending: 'Ожидает завершения публикации.',
+  editor_busy: 'Карточку редактирует администратор.',
+  source_changed: 'Содержимое изменилось; ожидает обновления карточки.',
+  ownership_lost: 'Ожидает завершения другой обработки карточки.',
+  reply_binding_changed: 'Решение по предложке изменилось.',
+  preparation_expired: 'Срок подготовки истёк.',
+} as const;
+
+class SuggestionReviewPreparationError extends Error {
+  constructor(readonly reason: keyof typeof PREPARATION_MESSAGES) {
+    super(reason);
+  }
+}
+
+function preparationFailure(error: unknown) {
+  if (error instanceof ManagedEntityActivationRequiredError)
+    return {
+      reason: 'activation_required',
+      message: 'Требуется явное подключение бота администратором.',
+      retryMs: 15 * 60_000,
+    };
+  if (error instanceof SuggestionReviewPreparationError)
+    return {
+      reason: error.reason,
+      message: PREPARATION_MESSAGES[error.reason],
+      retryMs: error.reason === 'publication_pending' ? 5 * 60_000 : 60_000,
+    };
+  return {
+    ...privateSuggestionReviewErrorDiagnostic(error),
+    message:
+      error instanceof ForbiddenException
+        ? 'Нет необходимых прав для подготовки.'
+        : 'Ожидает повторной подготовки.',
+    retryMs: 60_000,
+  };
+}
 
 @Injectable()
 export class SuggestionReviewEffectsService {
@@ -302,7 +341,7 @@ export class SuggestionReviewEffectsService {
             ? 'PUBLISHER_CHANNEL_DIALOG_SUGGESTION'
             : 'CHANNEL_DIALOG_SUGGESTION')
       )
-        throw new Error('Suggestion rejection binding changed');
+        throw new SuggestionReviewPreparationError('reply_binding_changed');
       const contact = string(payload.contactUrl);
       const result = await this.max.sendMessageImmediateToUser(
         source.actorUserId,
@@ -323,12 +362,12 @@ export class SuggestionReviewEffectsService {
               string(payload.reviewerId),
             );
             if (Date.now() - row.createdAt.getTime() > PREPARATION_DEADLINE_MS)
-              throw new Error('Suggestion reply preparation expired');
+              throw new SuggestionReviewPreparationError('preparation_expired');
             const started = await this.prisma.suggestionReviewEffect.updateMany({
               where: { id, status: 'PROCESSING', lockToken: token, attemptedAt: null },
               data: { status: 'SENDING', attemptedAt: new Date(), lockedAt: new Date() },
             });
-            if (started.count !== 1) throw new Error('Suggestion reply dispatch ownership lost');
+            if (started.count !== 1) throw new SuggestionReviewPreparationError('ownership_lost');
             attempted = true;
           },
         },
@@ -342,6 +381,7 @@ export class SuggestionReviewEffectsService {
           remoteMessageId: result.messageId,
           lockedAt: null,
           lockToken: null,
+          lastError: null,
         },
       });
     } catch (error) {
@@ -353,14 +393,15 @@ export class SuggestionReviewEffectsService {
         httpStatus >= 400 &&
         httpStatus < 500 &&
         httpStatus !== 408;
+      const preparationExpired = Date.now() - row.createdAt.getTime() > PREPARATION_DEADLINE_MS;
+      const failure = preparationFailure(error);
       const status = remoteMessageId
         ? 'SENT'
         : attempted
           ? definiteRejection
             ? 'FAILED'
             : 'AMBIGUOUS'
-          : error instanceof ForbiddenException ||
-              Date.now() - row.createdAt.getTime() > PREPARATION_DEADLINE_MS
+          : error instanceof ForbiddenException || preparationExpired
             ? 'FAILED'
             : 'PENDING';
       await this.prisma.suggestionReviewEffect.updateMany({
@@ -368,12 +409,18 @@ export class SuggestionReviewEffectsService {
         data: {
           status,
           ...(remoteMessageId ? { remoteMessageId } : {}),
-          nextAttemptAt: new Date(Date.now() + 60_000),
+          // FLAG: Backoff changes preparation scheduling only. Explicit source wakes
+          // remain immediate; original notification lifetime and SEND fences still apply.
+          nextAttemptAt: new Date(Date.now() + failure.retryMs),
           lockedAt: null,
           lockToken: null,
-          lastError: attempted
-            ? 'Не удалось подтвердить доставку ответа.'
-            : 'Ожидает повторной подготовки.',
+          lastError: remoteMessageId
+            ? null
+            : attempted
+              ? 'Не удалось подтвердить доставку ответа.'
+              : preparationExpired
+                ? PREPARATION_MESSAGES.preparation_expired
+                : failure.message,
         },
       });
       this.logger.warn(
@@ -383,6 +430,10 @@ export class SuggestionReviewEffectsService {
           status,
           attempted,
           ...privateSuggestionReviewErrorDiagnostic(error),
+          ...(!attempted
+            ? { reason: preparationExpired ? 'preparation_expired' : failure.reason }
+            : {}),
+          retryInMs: status === 'PENDING' ? failure.retryMs : null,
         },
         'Suggestion review effect did not complete',
       );
@@ -392,7 +443,7 @@ export class SuggestionReviewEffectsService {
   private async finish(id: string, token: string, status: string) {
     await this.prisma.suggestionReviewEffect.updateMany({
       where: { id, lockToken: token, status: 'PROCESSING' },
-      data: { status, lockToken: null, lockedAt: null },
+      data: { status, lockToken: null, lockedAt: null, lastError: null },
     });
   }
 
@@ -404,7 +455,8 @@ export class SuggestionReviewEffectsService {
     if (!row) return;
     const payload = suggestionObject(row.payload);
     const storedStatus = string(payload.reviewStatus);
-    if (storedStatus === 'publishing') throw new Error('Awaiting committed publication state');
+    if (storedStatus === 'publishing')
+      throw new SuggestionReviewPreparationError('publication_pending');
     const status =
       storedStatus === 'published' || storedStatus === 'drafted' || storedStatus === 'cancelled'
         ? storedStatus
@@ -466,7 +518,7 @@ export class SuggestionReviewEffectsService {
         suggestionRevision(suggestionObject(current.payload)) !== suggestionRevision(payload) ||
         suggestionObject(current.payload).reviewStatus !== payload.reviewStatus
       )
-        throw new Error('Suggestion changed during card sync');
+        throw new SuggestionReviewPreparationError('source_changed');
       try {
         await this.max.editMessageInlineKeyboard(
           card.privateChatId,
@@ -491,12 +543,12 @@ export class SuggestionReviewEffectsService {
                     active.revision === suggestionRevision(payload) &&
                     active.expiresAt > new Date()))
               )
-                throw new Error('Native editor owns this card');
+                throw new SuggestionReviewPreparationError('editor_busy');
               const owned = await this.prisma.suggestionReviewEffect.updateMany({
                 where: { id: effect.id, status: 'PROCESSING', lockToken: token },
                 data: { lockedAt: new Date() },
               });
-              if (owned.count !== 1) throw new Error('Suggestion sync ownership lost');
+              if (owned.count !== 1) throw new SuggestionReviewPreparationError('ownership_lost');
               const current = await this.prisma.auditLog.findUnique({
                 where: { id: row.id },
                 select: { payload: true },
@@ -507,7 +559,7 @@ export class SuggestionReviewEffectsService {
                   suggestionRevision(payload) ||
                 suggestionObject(current.payload).reviewStatus !== payload.reviewStatus
               )
-                throw new Error('Suggestion changed before card edit');
+                throw new SuggestionReviewPreparationError('source_changed');
             },
           },
           {
@@ -529,7 +581,7 @@ export class SuggestionReviewEffectsService {
         suggestionRevision(suggestionObject(after.payload)) !== suggestionRevision(payload) ||
         suggestionObject(after.payload).reviewStatus !== payload.reviewStatus
       )
-        throw new Error('Suggestion changed during card sync');
+        throw new SuggestionReviewPreparationError('source_changed');
     }
   }
 

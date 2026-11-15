@@ -3866,6 +3866,8 @@ export class WebhookOutboxService
   private async deleteCompletedWebhookBatch(
     cutoff: Date,
   ): Promise<{ removed: number; scanned: number }> {
+    // FLAG: Cursor progress follows the bounded raw page, before SKIP LOCKED and
+    // proof filters. Locked or pinned bodies are revisited only after the stream wraps.
     const cursor = this.webhookRetentionCursors.get('completed');
     await expireUnclaimedGroupStarts(this.prisma, cutoff, cursor, RETENTION_CLEANUP_BATCH_SIZE);
     // FLAG: Match the exact existing terminal partial index predicate. Splitting status
@@ -3897,9 +3899,9 @@ export class WebhookOutboxService
         WHERE target."id" = ANY(ARRAY(SELECT "id" FROM expired)) RETURNING target."id"
       )
       SELECT (SELECT COUNT(*)::int FROM removed) AS "removed",
-        (SELECT COUNT(*)::int FROM candidates) AS "scanned",
-        (SELECT "id" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
-        (SELECT "created_at" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
+        (SELECT COUNT(*)::int FROM candidate_ids) AS "scanned",
+        (SELECT "id" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
+        (SELECT "created_at" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
     `);
     return this.advanceWebhookRetentionCursor('completed', result[0]);
   }
@@ -3912,7 +3914,7 @@ export class WebhookOutboxService
       Array<{ removed: number; scanned: number; lastId: string | null; lastCreatedAt: Date | null }>
     >(Prisma.sql`
       WITH candidate_ids AS MATERIALIZED (
-        SELECT "id" FROM "webhook_events"
+        SELECT "id", "created_at" FROM "webhook_events"
         WHERE "status" = 'NO_REPLAY_HELD'::"WebhookStatus" AND "created_at" < ${cutoff}
           ${cursor ? Prisma.sql`AND ("created_at", "id") > (${cursor.createdAt}, ${cursor.id})` : Prisma.empty}
         ORDER BY "created_at", "id" LIMIT ${RETENTION_CLEANUP_BATCH_SIZE}
@@ -3930,9 +3932,9 @@ export class WebhookOutboxService
         DELETE FROM "webhook_events" target WHERE target."id" = ANY(ARRAY(SELECT "id" FROM expired)) RETURNING target."id"
       )
       SELECT (SELECT COUNT(*)::int FROM removed) AS "removed",
-        (SELECT COUNT(*)::int FROM candidates) AS "scanned",
-        (SELECT "id" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
-        (SELECT "created_at" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
+        (SELECT COUNT(*)::int FROM candidate_ids) AS "scanned",
+        (SELECT "id" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
+        (SELECT "created_at" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
     `);
     return this.advanceWebhookRetentionCursor('held', result[0]);
   }
@@ -3956,7 +3958,7 @@ export class WebhookOutboxService
         }>
       >(Prisma.sql`
       WITH candidate_ids AS MATERIALIZED (
-        SELECT "id"
+        SELECT "id", "created_at"
         FROM "webhook_events"
         WHERE "status" = CAST(${WebhookStatus.FAILED} AS "WebhookStatus")
           AND "created_at" < ${cutoff}
@@ -3990,9 +3992,9 @@ export class WebhookOutboxService
         WHERE target."id" = ANY(ARRAY(SELECT "id" FROM expired)) RETURNING target."id"
       )
       SELECT (SELECT COUNT(*)::int FROM removed) AS "removed",
-        (SELECT COUNT(*)::int FROM candidates) AS "scanned",
-        (SELECT "id" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
-        (SELECT "created_at" FROM candidates ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
+        (SELECT COUNT(*)::int FROM candidate_ids) AS "scanned",
+        (SELECT "id" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastId",
+        (SELECT "created_at" FROM candidate_ids ORDER BY "created_at" DESC, "id" DESC LIMIT 1) AS "lastCreatedAt"
     `),
     ]);
     return this.advanceWebhookRetentionCursor('failed', result[0]);
