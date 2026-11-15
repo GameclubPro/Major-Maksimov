@@ -1,4 +1,5 @@
 import '../src/styles.css';
+import '../src/styles/publisher-workspace.css';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -41,6 +42,10 @@ const api: ApiTransport = {
 Object.assign(window, {
   suggestionLayoutTest: {
     sendRequests,
+    async setTitle(entityTitle: string) {
+      data = { ...data, entityTitle, introText: null };
+      await client.invalidateQueries();
+    },
     async setTruncated(hasMoreMessages: boolean) {
       data = { ...data, hasMoreMessages };
       await client.invalidateQueries();
@@ -48,6 +53,7 @@ Object.assign(window, {
   },
 });
 syncMaxNativeEnvironment();
+document.body.dataset.miniappProfile = 'publisher';
 createRoot(document.getElementById('root')!).render(
   <QueryClientProvider client={client}>
     <ToastProvider>
