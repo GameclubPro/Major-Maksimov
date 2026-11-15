@@ -850,7 +850,11 @@ native('native cold legacy installation and ordering', () => {
         try {
           expect(
             await reader.deleteTerminalFailedWebhookBatch(new Date(Date.now() + 60_000)),
-          ).toEqual({ removed: 0, scanned: 0 });
+          ).toEqual({ removed: 0, scanned: 500 });
+          expect(reader.webhookRetentionCursors.get('failed')).toEqual({
+            createdAt: expect.any(Date),
+            id: expect.any(String),
+          });
           lockedQuery = lockedCapture.mock.calls[0]![0] as Prisma.Sql;
         } finally {
           lockedCapture.mockRestore();
