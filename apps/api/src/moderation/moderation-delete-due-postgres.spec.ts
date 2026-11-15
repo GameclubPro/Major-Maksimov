@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { Client } from 'pg';
-import { Queue } from 'bullmq';
+import { Queue, Worker } from 'bullmq';
 import { Prisma } from '../prisma/prisma-client';
 import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
 import { buildDeleteWakeupQuery, processQueuedDeleteWakeup } from './moderation-delete-wakeup';
@@ -301,6 +301,101 @@ describePostgres('PostgreSQL delete due selection', () => {
     );
     expect(retained.rows[0].count).toBe(101);
   });
+
+  it('recovers a lost fresh enqueue and a vanished SQL head above the historical window', async () => {
+    const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim();
+    if (!redisUrl) throw new Error('This recovery case requires disposable PostgreSQL and Redis');
+    const url = new URL(redisUrl);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname))
+      throw new Error('Disposable local Redis required');
+    const connection = { host: url.hostname, port: Number(url.port || 6379) };
+    const prefix = `delete-full-recovery-${randomUUID()}`;
+    queue = new Queue(MODERATION_DELETE_INTENT_QUEUE, { connection, prefix });
+    await queue.pause();
+    for (let offset = 0; offset < 600_000; offset += 1000) {
+      await queue.addBulk(
+        Array.from({ length: 1000 }, (_, index) => {
+          const intentId = `retained-${offset + index}`;
+          return {
+            name: 'execute-moderation-delete-intent',
+            data: { intentId },
+            opts: { jobId: `mdi-${intentId}`, priority: 10, removeOnComplete: true },
+          };
+        }),
+      );
+    }
+    service = createService();
+    jest
+      .spyOn(service as unknown as { expireDueIntents(): Promise<number> }, 'expireDueIntents')
+      .mockResolvedValue(0);
+    // FLAG: These durable rows model a failed initial enqueue and retained history.
+    // SQL selection and handoff use both real stores; no external effect is executed.
+    await client.query(`INSERT INTO moderation_delete_intents
+      (id,status,next_attempt_at,created_at)
+      SELECT 'retained-'||n::text,'AMBIGUOUS',
+        TIMESTAMP '2026-01-01' + n*INTERVAL '1 millisecond',
+        TIMESTAMP '2026-01-01' + n*INTERVAL '1 millisecond'
+      FROM generate_series(0,99)n;
+      INSERT INTO moderation_delete_intents(id,status,next_attempt_at,created_at)
+      VALUES ('fresh-lost','PENDING',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
+      INSERT INTO moderation_delete_intents(id,status,next_attempt_at,created_at)
+      SELECT 'missing-tail-'||n::text,'AMBIGUOUS',
+        TIMESTAMP '2026-01-02' + n*INTERVAL '1 millisecond',
+        TIMESTAMP '2026-01-02' + n*INTERVAL '1 millisecond'
+      FROM generate_series(0,99)n;
+      INSERT INTO moderation_delete_intent_reasons(intent_id,rule_code,reason_key,metadata)
+      SELECT id,'BOT_MESSAGE_AUTO_DELETE','fixture','{}'::jsonb FROM moderation_delete_intents;`);
+    await service.sweepDueIntents();
+    expect(await queue.getJob('mdi-fresh-lost')).toBeDefined();
+    await (await queue.getJob('mdi-retained-0'))!.remove();
+    await service.sweepDueIntents();
+    expect(await queue.getJob('mdi-retained-0')).toBeDefined();
+    for (let tick = 0; tick < 8; tick++) await service.sweepDueIntents();
+    expect(service.getDueSweepRuntimeSnapshot().historicalAdmission.deferredCount).toBeGreaterThan(
+      0,
+    );
+    expect(await queue.getJob('mdi-missing-tail-0')).toBeUndefined();
+    expect((await queue.getJob('mdi-retained-1'))!.opts.priority).toBe(10);
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 600_001 });
+    expect(await queue.isPaused()).toBe(true);
+    await queue.add(
+      'execute-moderation-delete-intent',
+      { intentId: 'direct-fresh' },
+      {
+        jobId: 'mdi-direct-fresh',
+        priority: 1,
+        removeOnComplete: true,
+      },
+    );
+    await queue.resume();
+    const worker = new Worker<ModerationDeleteIntentJob>(
+      MODERATION_DELETE_INTENT_QUEUE,
+      undefined,
+      {
+        connection,
+        prefix,
+        autorun: false,
+      },
+    );
+    try {
+      const handled: string[] = [];
+      for (let index = 0; index < 4; index++) {
+        const token = randomUUID();
+        const job = await worker.getNextJob(token, { block: false });
+        expect(job).toBeDefined();
+        handled.push(job!.data.intentId);
+        await job!.moveToCompleted(null, token, false);
+      }
+      expect(handled).toEqual(['direct-fresh', 'fresh-lost', 'retained-0', 'retained-1']);
+    } finally {
+      await worker.close();
+    }
+    const retained = await client.query(
+      "SELECT status,lease_token,retry_until_at FROM moderation_delete_intents WHERE id='fresh-lost'",
+    );
+    expect(retained.rows[0]).toMatchObject({ status: 'PENDING', lease_token: null });
+    expect(retained.rows[0].retry_until_at.toISOString()).toBe('2099-01-01T00:00:00.000Z');
+  }, 120_000);
 
   it.each(['base', 'optional', 'guarded'])(
     'bounds intent and reason scans with scope %s',

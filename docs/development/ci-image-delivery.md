@@ -7,6 +7,11 @@ registry manifest digest are recorded and compared separately. Their interpretat
 the Docker image store; the containerd inspect ID may identify a manifest or index. Neither field
 substitutes for verification of the other at the publication and preload boundaries.
 
+CI pins Ubuntu 24.04 for its compatible Playwright, PostgreSQL 16 and Redis 7 toolchain.
+The restore lane explicitly selects the PostgreSQL 16 client. An OS major upgrade requires
+validation of browser installation, native fixtures and infrastructure checks before changing
+the runner labels; the moving `ubuntu-latest` alias is not the CI platform contract.
+
 ## Routine release
 
 1. Implement in the configured `workspace` task checkout. Select checks from the actual diff,
