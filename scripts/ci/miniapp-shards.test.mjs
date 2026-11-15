@@ -98,3 +98,10 @@ test('each browser partition owns dependencies and builds contracts before its f
       assert.equal(webkit, -1, 'Only complete Android/iOS matrices need WebKit');
   }
 });
+
+test('browser jobs pin the Ubuntu release supported by the installed Playwright', () => {
+  for (const job of [miniapp, jobs.admin]) {
+    assert.equal(job['runs-on'], 'ubuntu-24.04');
+    assert.ok(job.steps.some((step) => step.run === 'npx playwright install --with-deps chromium'));
+  }
+});

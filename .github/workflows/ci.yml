@@ -320,7 +320,8 @@ jobs:
     name: Mini App (${{ matrix.shard }})
     needs: impact
     if: needs.impact.outputs.miniapp == 'true'
-    runs-on: ubuntu-latest
+    # FLAG: Playwright 1.60 cannot install browsers on the moving Ubuntu 26.04 image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # FLAG: Keep every browser case while bounding each serial runner below the
     # job deadline; the aggregate Required check waits for all four shards.
@@ -436,7 +437,8 @@ jobs:
     name: Safety Desk
     needs: impact
     if: needs.impact.outputs.admin == 'true'
-    runs-on: ubuntu-latest
+    # FLAG: Playwright 1.60 cannot install browsers on the moving Ubuntu 26.04 image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
