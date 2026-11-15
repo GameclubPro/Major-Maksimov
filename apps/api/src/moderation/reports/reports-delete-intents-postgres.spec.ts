@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { Queue } from 'bullmq';
+import {
+  MODERATION_DELETE_INTENT_QUEUE,
+  type ModerationDeleteIntentJob,
+} from '../moderation-delete-intent.queue';
 import { ConfigService } from '@nestjs/config';
 import { createPrismaClient, type PrismaClient } from '../../prisma/prisma-client';
 import { ModerationDeleteIntentService } from '../moderation-delete-intent.service';
@@ -17,7 +22,11 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
   const authorId = 'author';
   const rows = new Map<string, Record<string, unknown>>();
   const bot = { isKnownBotUserId: () => false };
-  const queue = { add: jest.fn().mockResolvedValue(undefined) };
+  let queue: Queue<ModerationDeleteIntentJob>;
+  let add: jest.SpyInstance<
+    ReturnType<Queue<ModerationDeleteIntentJob>['add']>,
+    Parameters<Queue<ModerationDeleteIntentJob>['add']>
+  >;
   const remoteMutation = jest.fn();
   const guardStub = {
     assertIntentStillActionable: async () => 'not_applicable' as const,
@@ -188,6 +197,15 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
       !parsed.pathname.includes('race_test')
     )
       throw new Error('Report delete tests require a disposable local race_test database');
+    const redisUrl = new URL(process.env.MAXIM_TEST_REDIS_URL ?? '');
+    if (!['localhost', '127.0.0.1'].includes(redisUrl.hostname))
+      throw new Error('Report delete tests require disposable local Redis');
+    queue = new Queue(MODERATION_DELETE_INTENT_QUEUE, {
+      connection: { host: redisUrl.hostname, port: Number(redisUrl.port || 6379) },
+      prefix: `report-delete-${randomUUID()}`,
+    });
+    await queue.waitUntilReady();
+    add = jest.spyOn(queue, 'add');
     prisma = createPrismaClient(url, { max: 8 });
     await prisma.$connect();
     await prisma.chat.create({
@@ -199,13 +217,17 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
     });
   });
   beforeEach(() => {
-    queue.add.mockClear();
+    add.mockClear();
     max.deleteMessage.mockClear();
     remoteMutation.mockClear();
     max.getExactMessageRow.mockClear();
     max.getChatMemberAccess.mockClear();
   });
   afterAll(async () => {
+    if (queue) {
+      await queue.obliterate({ force: true });
+      await queue.close();
+    }
     if (!prisma) return;
     await prisma.chat.deleteMany({ where: { id: chatId } });
     await prisma.$disconnect();
@@ -216,10 +238,10 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
       const report = await target(mode);
       const writer = service(mode);
       const id = await prepare(writer, report);
-      expect(queue.add).not.toHaveBeenCalled();
+      expect(add).not.toHaveBeenCalled();
       const recovered = service(mode);
       await recovered.enqueueCurrentIntentWakeupStrict(id);
-      expect(queue.add).toHaveBeenCalledWith(
+      expect(add).toHaveBeenCalledWith(
         expect.any(String),
         { intentId: id },
         expect.objectContaining({ priority: 1 }),
@@ -246,7 +268,7 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
       lastErrorCode: 'moderation_delete_reasons_no_longer_authorized',
       status: 'FAILED_TERMINAL',
     });
-    expect(queue.add).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
     expect(rows.has(report.messageId)).toBe(true);
   });
   it('settles stored report intents after the report admission switch turns off', async () => {
@@ -479,14 +501,14 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
     const report = await target('history');
     const deletes = service('off');
     const id = await prepare(deletes, report, `historical-${randomUUID()}`);
-    expect(queue.add).toHaveBeenCalledWith(
+    expect(add).toHaveBeenCalledWith(
       expect.any(String),
       { intentId: id },
       expect.objectContaining({ priority: 10 }),
     );
-    queue.add.mockClear();
+    add.mockClear();
     await service('off').enqueueCurrentIntentWakeupStrict(id);
-    expect(queue.add).toHaveBeenCalledWith(
+    expect(add).toHaveBeenCalledWith(
       expect.any(String),
       { intentId: id },
       expect.objectContaining({ priority: 10 }),
@@ -507,9 +529,9 @@ describePostgres('PostgreSQL report to shared deletion boundary', () => {
       messageAuthorKind: 'user',
       routingPolicy: 'delete_capable',
     });
-    queue.add.mockClear();
+    add.mockClear();
     expect(await prepare(deletes, report, messageId)).toBe(urgent.intentId);
-    expect(queue.add).toHaveBeenCalledWith(
+    expect(add).toHaveBeenCalledWith(
       expect.any(String),
       { intentId: urgent.intentId },
       expect.objectContaining({ priority: 1 }),

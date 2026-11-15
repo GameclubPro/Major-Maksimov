@@ -11730,6 +11730,70 @@ describe('ModerationDeleteIntentService', () => {
     expect(queue.add.mock.calls[1]?.[2]?.jobId).toBe('mdi-intent-1');
   });
 
+  it('retains a delayed wakeup for a fresh scheduled deletion before the historical sweep', async () => {
+    const { service, queue } = createService();
+    const executeAt = new Date(Date.now() + 120_000);
+    await (service as unknown as ServiceInternals).enqueueWakeup({
+      ...baseIntent,
+      status: 'PENDING',
+      attemptCount: 0,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      executeAt,
+      nextAttemptAt: executeAt,
+      retryUntilAt: new Date(executeAt.getTime() + 60_000),
+    });
+    expect(queue.add).toHaveBeenCalledTimes(1);
+    const options = queue.add.mock.calls[0]![2]!;
+    expect(options.delay).toBeGreaterThan(119_000);
+    expect(options.delay).toBeLessThanOrEqual(120_000);
+    expect(options.jobId).toBe('mdi-intent-1');
+  });
+
+  it.each([
+    ['retry history', { attemptCount: 1 }],
+    ['retry status', { status: 'RETRYABLE' }],
+    ['in progress', { status: 'IN_PROGRESS' }],
+    ['observed', { status: 'OBSERVED' }],
+    ['retention owned', { retentionOwned: true }],
+    ['lease', { leaseToken: 'held' }],
+    ['partial dispatch', { deleteDispatchStartedBotId: 'bot-1' }],
+    ['partial receipt', { remoteDeleteSucceededAt: new Date() }],
+    ['beyond horizon', { nextAttemptAt: new Date(Date.now() + 3_700_000) }],
+    ['deadline exhausted', { retryUntilAt: new Date(Date.now() + 60_000) }],
+  ])('does not add an early wakeup for %s', async (_label, change) => {
+    const { service, queue } = createService();
+    const executeAt = new Date(Date.now() + 120_000);
+    await (service as unknown as ServiceInternals).enqueueWakeup({
+      ...baseIntent,
+      status: 'PENDING',
+      attemptCount: 0,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      executeAt,
+      nextAttemptAt: executeAt,
+      retryUntilAt: new Date(Date.now() + 4_000_000),
+      ...change,
+    });
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it.each(['off', 'shadow'])('does not schedule a fresh wakeup in %s rollout', async (mode) => {
+    const { service, queue } = createService({ MODERATION_DELETE_INTENT_MODE: mode });
+    const executeAt = new Date(Date.now() + 120_000);
+    await (service as unknown as ServiceInternals).enqueueWakeup({
+      ...baseIntent,
+      status: 'PENDING',
+      attemptCount: 0,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      executeAt,
+      nextAttemptAt: executeAt,
+      retryUntilAt: new Date(Date.now() + 240_000),
+    });
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
   it('strictly enqueues the current due persisted intent for operator repair', async () => {
     const pendingIntent = {
       ...baseIntent,
@@ -13080,7 +13144,7 @@ describe('ModerationDeleteIntentService', () => {
       { priority: 10 },
     );
     const changePriority = jest.spyOn(existingJob, 'changePriority').mockResolvedValue(undefined);
-    queue.add.mockResolvedValueOnce(existingJob);
+    queue.getJob.mockResolvedValueOnce(existingJob);
 
     const expectedUpdatedAt = new Date('2026-07-16T12:00:00.000Z');
     const result = await service.retryTerminalIntent(
