@@ -157,10 +157,13 @@ async function assertReachableControl(locator, label, { touchTarget = false } = 
 async function assertModulePresentation(page, name, entity, title, panelSelector, palette) {
   const label = `${name}/${entity}`;
   const panel = page.locator(panelSelector);
+  if (entity === 'channel') {
+    await panel.locator('.channel-post-actions__signature-settings > summary').click();
+  }
   await (
     entity === 'chat'
       ? panel.getByRole('checkbox', { name: 'Включить антидубль', exact: true })
-      : panel.getByRole('checkbox', { name: 'Действие под публикацией', exact: true })
+      : panel.getByRole('checkbox', { name: 'Добавлять подпись', exact: true })
   ).waitFor({ state: 'attached' });
   await settledBox(panel);
   assert.equal(await page.getByRole('dialog', { name: title, exact: true }).count(), 1);
@@ -204,7 +207,7 @@ async function assertModulePresentation(page, name, entity, title, panelSelector
     };
     try {
       const card = element.querySelector(
-        '.settings-native-toggle, .channel-post-signature__activation',
+        '.settings-native-toggle, .channel-post-actions__signature-settings',
       );
       const field = element.querySelector(
         '.field input, .field select, .field textarea, .network-settings-field input:not([type="checkbox"]):not([type="file"]), .network-settings-field select, .network-settings-field textarea',
@@ -513,7 +516,7 @@ try {
         const moduleSwitch =
           entity === 'chat'
             ? page.getByRole('checkbox', { name: 'Включить антидубль', exact: true })
-            : page.getByRole('checkbox', { name: 'Действие под публикацией', exact: true });
+            : page.getByRole('checkbox', { name: 'Добавлять подпись', exact: true });
         assert.equal(
           await moduleSwitch.isChecked(),
           enabled === 'true',

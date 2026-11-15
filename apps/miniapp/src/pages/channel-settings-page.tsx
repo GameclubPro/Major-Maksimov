@@ -1,3 +1,5 @@
+import { ApiRequestError } from '../lib/api-request-error';
+import { runNativeBackHandlers } from '../lib/native-back';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import { SettingsOverviewGroups } from '../components/ui/settings-overview-groups';
 import { getNetworkSettingsSectionPresentation } from './settings/settings-workspace-sections';
@@ -40,6 +42,7 @@ import '../styles/settings-native-polish.css';
 import '../styles/settings-experience.css';
 import '../styles/channel-post-signature-entry.css';
 import '../styles/channel-post-signature.css';
+import '../styles/channel-post-actions-save.css';
 import {
   Suspense,
   lazy,
@@ -89,6 +92,7 @@ import {
   getChannelManagedBroadcastCalendar,
   getChannelManagedBroadcast,
   getChannelSettingsScreen,
+  getChannelPostSignature,
   recheckChannelManagedEntityAccess,
   retryChannelManagedBroadcast,
   sendChannelBroadcast,
@@ -148,7 +152,7 @@ import { buildChannelBroadcastSystemButtons } from '../lib/broadcast-system-butt
 import { saveUntilLatestDraftIsPersisted } from '../lib/latest-draft-save';
 import { buildBroadcastAudiencePresentation } from '../lib/broadcast-audience-presentation';
 import { cn } from '../lib/cn';
-import { maxNotify, openLink, setMaxClosingConfirmation } from '../lib/max-bridge';
+import { maxNotify, setMaxClosingConfirmation } from '../lib/max-bridge';
 import { useManagedEntityLeaveGuard } from '../lib/managed-entity-navigation';
 import {
   buildManagedEntityStatisticsRoute,
@@ -728,6 +732,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
   const routeAvatarUrl = routeState.avatarUrl;
   const [draft, setDraft] = useState<ChannelSettings | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState<ChannelSettings | null>(null);
+  const [customButtonEditorOpen, setCustomButtonEditorOpen] = useState(false);
   const [postSignatureDraft, setPostSignatureDraft] = useState<ChannelPostSignatureSettings | null>(
     null,
   );
@@ -737,6 +742,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
   const [postSignatureSaveState, setPostSignatureSaveState] = useState<
     'idle' | 'saving' | 'saved' | 'error'
   >('idle');
+  const [postSignatureSaveError, setPostSignatureSaveError] = useState('');
   const [autosaveState, setAutosaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [isSavingChannelSettingsForBroadcast, setIsSavingChannelSettingsForBroadcast] =
     useState(false);
@@ -1446,12 +1452,19 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
       isDirty ||
       autosaveState === 'saving' ||
       isPostSignatureDirty ||
+      customButtonEditorOpen ||
       postSignatureSaveState === 'saving';
     setMaxClosingConfirmation(shouldBlockClose);
     return () => {
       setMaxClosingConfirmation(false);
     };
-  }, [autosaveState, isDirty, isPostSignatureDirty, postSignatureSaveState]);
+  }, [
+    autosaveState,
+    isDirty,
+    isPostSignatureDirty,
+    customButtonEditorOpen,
+    postSignatureSaveState,
+  ]);
 
   function updatePostSignatureDraft(
     next: ChannelPostSignatureSettings,
@@ -1492,6 +1505,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
         }
         const payload = validated.data;
         setPostSignatureSaveState('saving');
+        setPostSignatureSaveError('');
         try {
           const saved = await updateChannelPostSignature(
             api,
@@ -1535,12 +1549,33 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
           if (activePostSignatureChatIdRef.current !== operationChatId) {
             return;
           }
+          let description = normalizeApiError(error);
+          if (
+            error instanceof ApiRequestError &&
+            error.code === 'CHANNEL_SETTINGS_CONCURRENT_UPDATE'
+          ) {
+            try {
+              const fresh = await getChannelPostSignature(api, operationChatId);
+              if (activePostSignatureChatIdRef.current !== operationChatId) return;
+              const reconciled = reconcilePostSignatureSave(
+                savedPostSignatureRef.current ?? payload,
+                latestPostSignatureRef.current ?? payload,
+                fresh,
+              );
+              savedPostSignatureRef.current = fresh;
+              savedPostSignatureKeyRef.current = postSignatureSettingsKey(fresh);
+              latestPostSignatureRef.current = reconciled;
+              latestPostSignatureKeyRef.current = postSignatureSettingsKey(reconciled);
+              setSavedPostSignature(fresh);
+              setPostSignatureDraft(reconciled);
+              description =
+                'Настройки изменились. Ваши правки сохранены в черновике. Проверьте их и сохраните снова.';
+            } catch {
+              // Keep the draft and its original revision until the server can be read.
+            }
+          }
           setPostSignatureSaveState('error');
-          pushToast({
-            tone: 'danger',
-            title: 'Подпись не сохранена',
-            description: normalizeApiError(error),
-          });
+          setPostSignatureSaveError(description);
           maxNotify('error');
           return;
         }
@@ -1690,6 +1725,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
   };
 
   async function saveWorkspaceChanges(): Promise<boolean> {
+    if (customButtonEditorOpen) return false;
     try {
       if (isDirty) {
         const saved = await saveCurrentDraft({ force: true });
@@ -1724,7 +1760,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
   }
 
   useManagedEntityLeaveGuard({
-    dirty: isDirty || isPostSignatureDirty,
+    dirty: isDirty || isPostSignatureDirty || customButtonEditorOpen,
     saving: autosaveState === 'saving' || postSignatureSaveState === 'saving',
     save: saveWorkspaceChanges,
     discard: discardWorkspaceChanges,
@@ -2241,6 +2277,8 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
     presentation: 'signature' as const,
     text: CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
     url: '',
+    customButtonsEnabled: false,
+    customButtons: [],
   };
   const resolvedPostSignaturePreviewUrl = resolveChannelPostSignaturePreviewUrl(
     postSignature.url,
@@ -2253,22 +2291,12 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
     ? ''
     : (postSignatureValidation.error.issues.find((issue) => issue.path[0] === 'text')?.message ??
       '');
-  const effectivePostSignatureUrl = resolvedPostSignaturePreviewUrl.url;
 
   function closePostSignatureSection() {
-    if (isPostSignatureDirty && (postSignatureUrlError || postSignatureTextError)) {
-      document
-        .querySelector<HTMLInputElement>(
-          postSignatureTextError ? '#channel-post-signature-text' : '#channel-post-signature-url',
-        )
-        ?.focus({ preventScroll: true });
+    if (customButtonEditorOpen) {
+      runNativeBackHandlers();
       return;
     }
-
-    if (isPostSignatureDirty) {
-      savePostSignature(postSignature);
-    }
-
     closeSection('postSignature');
   }
 
@@ -2505,12 +2533,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
           : 'Выкл';
   const postSignatureTone =
     postSignatureSaveState === 'error' ? 'rose' : postSignature.enabled ? 'sky' : 'ink';
-  const postSignaturePanelSummary =
-    postSignatureSaveState === 'error'
-      ? 'Не сохранено'
-      : postSignature.enabled
-        ? `${postSignature.presentation === 'button' ? 'Кнопка' : 'Ссылка'} · ${postSignatureLabel}`
-        : 'Выключена';
+
   const postSuggestionsEntryLabel =
     draft.postSuggestionsEntryMode === 'MINIAPP' ? 'Приложение' : 'Бот';
   const postSuggestionsCardSummary = draft.postSuggestionsEnabled
@@ -3198,7 +3221,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
           <div className={cn('settings-section__head', 'settings-section__head--interactive')}>
             <SettingsSectionToggle
               title={SHARED_CHANNEL_SECTION_PRESENTATIONS.postSignature.title}
-              enabled={postSignature.enabled}
+              enabled={postSignature.enabled || postSignature.customButtonsEnabled}
               summary={postSignatureCardSummary}
               status={postSignatureCardStatus}
               icon={SHARED_CHANNEL_SECTION_PRESENTATIONS.postSignature.icon}
@@ -3216,7 +3239,6 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
             }
             open={expandedSections.postSignature}
             title={SHARED_CHANNEL_SECTION_PRESENTATIONS.postSignature.title}
-            summary={postSignaturePanelSummary}
             tone={SHARED_CHANNEL_SECTION_PRESENTATIONS.postSignature.tone}
             className={SHARED_CHANNEL_SECTION_PRESENTATIONS.postSignature.panelClassName}
             onClose={closePostSignatureSection}
@@ -3232,92 +3254,54 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
               {expandedSections.postSignature ? (
                 <div className="settings-section__collapse-inner channel-post-signature__panel-body">
                   <ChannelPostSignatureFields
+                    key={chatId}
                     fields={createChannelSettingsFieldAdapter({
                       settings: postSignature,
-                      onChange: (next, paths) => {
+                      baseline: savedPostSignature ?? postSignature,
+                      readOnly: postSignatureSaveState === 'saving',
+                      onChange: (next) => {
                         latestPostSignatureRef.current = next;
                         latestPostSignatureKeyRef.current = postSignatureSettingsKey(next);
                         setPostSignatureDraft(next);
                         if (postSignatureSaveInFlightRef.current?.chatId !== chatId)
                           setPostSignatureSaveState('idle');
-                        if (paths.some((path) => path === 'enabled' || path === 'presentation'))
-                          savePostSignature(next);
                       },
                       errors: {
-                        text: postSignatureTextError ?? undefined,
-                        url: postSignatureUrlError ?? undefined,
+                        text: postSignatureTextError || undefined,
+                        url: postSignatureUrlError || undefined,
                       },
                     })}
-                    onBlur={() =>
-                      savePostSignature(latestPostSignatureRef.current ?? postSignature)
-                    }
                     fallbackUrl={fallbackPostSignatureUrl}
-                  >
-                    <div
-                      className={cn(
-                        'channel-post-signature__preview',
-                        !postSignature.enabled && 'is-disabled',
-                      )}
+                    onEditorOpen={setCustomButtonEditorOpen}
+                    systemButtons={[
+                      ...(draft.commentsEnabled ? ['💬 Комментарии'] : []),
+                      ...(draft.postSuggestionsEnabled
+                        ? [draft.postSuggestionsButtonText.trim() || '📰 Предложить пост']
+                        : []),
+                    ]}
+                  />
+                  <div className="channel-post-actions__save">
+                    <span>Для новых публикаций</span>
+                    <button
+                      type="button"
+                      className="button button--accent"
+                      disabled={
+                        !isPostSignatureDirty ||
+                        customButtonEditorOpen ||
+                        postSignatureSaveState === 'saving' ||
+                        !postSignatureValidation.success
+                      }
+                      onClick={() => savePostSignature(postSignature)}
                     >
-                      <div className="channel-post-signature__preview-head">
-                        <span>Предпросмотр</span>
-                        <small>
-                          {postSignature.enabled
-                            ? postSignature.presentation === 'button'
-                              ? 'Кнопка'
-                              : 'Ссылка'
-                            : 'Выключено'}
-                        </small>
-                      </div>
-                      <div className="channel-post-signature__message-preview">
-                        <span className="channel-post-signature__message-lines" aria-hidden>
-                          <i />
-                          <i />
-                        </span>
-                        {postSignature.presentation === 'button' ? (
-                          <button
-                            type="button"
-                            className="channel-post-signature__message-button"
-                            disabled={!postSignature.enabled || !effectivePostSignatureUrl}
-                            onClick={() =>
-                              effectivePostSignatureUrl && openLink(effectivePostSignatureUrl)
-                            }
-                          >
-                            {postSignatureLabel}
-                          </button>
-                        ) : (
-                          <span className="channel-post-signature__message-signature">
-                            <IconoirSprite variant="iconoir" icon="Link" aria-hidden />
-                            {effectivePostSignatureUrl ? (
-                              <a
-                                href={effectivePostSignatureUrl}
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  openLink(effectivePostSignatureUrl);
-                                }}
-                              >
-                                {postSignatureLabel}
-                              </a>
-                            ) : (
-                              <strong>{postSignatureLabel}</strong>
-                            )}
-                          </span>
-                        )}
-                      </div>
-                      <small
-                        className={cn(
-                          'channel-post-signature__preview-url',
-                          postSignatureUrlError && 'is-error',
-                        )}
-                        title={effectivePostSignatureUrl || undefined}
-                      >
-                        {postSignatureUrlError ||
-                          effectivePostSignatureUrl ||
-                          'Ссылка канала недоступна'}
-                      </small>
-                    </div>
-                  </ChannelPostSignatureFields>
+                      {postSignatureSaveState === 'saving' ? 'Сохраняем...' : 'Сохранить'}
+                    </button>
+                  </div>
 
+                  {postSignatureSaveState === 'error' && postSignatureSaveError ? (
+                    <p className="channel-post-actions__save-error" role="alert">
+                      {postSignatureSaveError}
+                    </p>
+                  ) : null}
                   {postSignatureSaveState !== 'idle' || isPostSignatureDirty ? (
                     <div
                       className={cn(
@@ -3341,7 +3325,7 @@ export function ChannelSettingsPage({ api }: { api: ApiTransport }) {
                       {postSignatureSaveState === 'error' ? (
                         <button
                           type="button"
-                          aria-label="Повторить сохранение подписи"
+                          aria-label="Повторить сохранение действий"
                           title="Повторить"
                           onClick={() => savePostSignature(postSignature)}
                         >

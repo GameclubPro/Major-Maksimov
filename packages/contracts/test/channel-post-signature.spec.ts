@@ -4,12 +4,15 @@ import {
   CHANNEL_POST_SIGNATURE_TEXT_MAX_LENGTH,
   CHANNEL_POST_SIGNATURE_URL_MAX_LENGTH,
   channelPostSignatureSettingsSchema,
+  channelCustomPostButtonsSchema,
   updateChannelPostSignatureRequestSchema,
 } from '../src/channel-post-signature.js';
 
 describe('channel post signature contracts', () => {
   it('keeps a fail-safe disabled default with stable link text', () => {
     expect(channelPostSignatureSettingsSchema.parse({})).toEqual({
+      customButtonsEnabled: false,
+      customButtons: [],
       enabled: false,
       presentation: 'signature',
       text: CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
@@ -26,6 +29,8 @@ describe('channel post signature contracts', () => {
         url: 'https://example.test/ads',
       }),
     ).toEqual({
+      customButtonsEnabled: false,
+      customButtons: [],
       enabled: true,
       presentation: 'button',
       text: '📞 Заказать рекламу',
@@ -102,5 +107,49 @@ describe('channel post signature contracts', () => {
       expectedRevision: 3,
       enabled: true,
     });
+  });
+});
+
+describe('persistent channel buttons', () => {
+  const button = {
+    id: '11111111-1111-4111-8111-111111111111',
+    text: 'Каталог',
+    url: 'https://example.com/catalog#new',
+  };
+  it('preserves independent enablement, order, query and fragment', () => {
+    const result = channelPostSignatureSettingsSchema.parse({
+      customButtonsEnabled: true,
+      customButtons: [button],
+    });
+    expect(result.enabled).toBe(false);
+    expect(result.customButtons).toEqual([button]);
+    expect(
+      updateChannelPostSignatureRequestSchema.parse({ expectedRevision: 1, text: 'Read' }),
+    ).not.toHaveProperty('customButtons');
+  });
+  it('rejects duplicate identities, duplicate destinations, excessive count and unsafe URLs', () => {
+    expect(channelCustomPostButtonsSchema.safeParse([button, button]).success).toBe(false);
+    expect(channelCustomPostButtonsSchema.safeParse(Array(9).fill(button)).success).toBe(false);
+    for (const url of [
+      'javascript:alert(1)',
+      'https://name:password@example.com/',
+      'https://max.ru/bot?start=pmh-secret',
+    ])
+      expect(channelCustomPostButtonsSchema.safeParse([{ ...button, url }]).success).toBe(false);
+    expect(channelCustomPostButtonsSchema.safeParse([{ ...button, text: ' ' }]).success).toBe(
+      false,
+    );
+  });
+  it('allows distinct page sections and canonicalizes surrounding spaces', () => {
+    expect(
+      channelCustomPostButtonsSchema.parse([
+        button,
+        {
+          ...button,
+          id: '22222222-2222-4222-8222-222222222222',
+          url: ' https://example.com/catalog#sale ',
+        },
+      ])[1]?.url,
+    ).toBe('https://example.com/catalog#sale');
   });
 });

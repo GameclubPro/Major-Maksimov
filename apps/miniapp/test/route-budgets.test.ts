@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { sharedSettingsChunkSources } from '../shared-settings-chunks';
 import {
   collectManifestAssets,
   differenceAssets,
@@ -99,34 +100,38 @@ test('manifest asset collection deduplicates transitive chunks and supports base
   assert.deepEqual([...incremental.css], ['assets/events.css']);
 });
 
-test('network editing budgets count the lazy signature stylesheet and deduplicate shared CSS', () => {
-  const stylesheet = 'src/styles/channel-post-signature.css';
+test('network editing budgets count all channel action fields and their shared CSS', () => {
+  const entry = 'channel-post-action-fields';
   for (const id of ['network-settings', 'network-settings-full']) {
     const budget = routeBudgets.budgets.find((item: { id: string }) => item.id === id);
-    assert.ok(budget?.entries.includes(stylesheet), `${id} must measure the lazy editor CSS`);
+    assert.ok(budget?.entries.includes(entry), `${id} must measure the complete editor`);
   }
+  for (const source of [
+    '/apps/miniapp/src/pages/settings/channel-post-signature-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-custom-buttons-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-custom-buttons.css',
+    '/apps/miniapp/src/styles/channel-post-signature.css',
+  ])
+    assert.ok(sharedSettingsChunkSources[entry]?.includes(source));
   const recovery = routeBudgets.budgets.find(
     (item: { id: string }) => item.id === 'network-settings-recovery-cold',
   );
-  assert.ok(recovery && !recovery.entries.includes(stylesheet));
+  assert.ok(recovery && !recovery.entries.includes(entry));
 
   const manifest = {
-    'src/pages/settings/channel-post-signature-fields.tsx': {
-      file: 'assets/signature-fields.js',
-      css: ['assets/shared.css'],
-    },
-    [stylesheet]: {
-      file: 'assets/signature.css',
-      isDynamicEntry: true,
-      css: ['assets/shared.css'],
+    '_channel-post-action-fields-hash.js': {
+      name: entry,
+      file: 'assets/channel-post-action-fields-hash.js',
+      css: ['assets/shared.css', 'assets/channel-post-action-fields-hash.css'],
     },
   };
-  const assets = collectManifestAssets(manifest, [
-    'src/pages/settings/channel-post-signature-fields.tsx',
-    resolveManifestEntry(manifest, stylesheet),
+  const resolved = resolveManifestEntry(manifest, entry);
+  const assets = collectManifestAssets(manifest, [resolved, resolved]);
+  assert.deepEqual([...assets.js], ['assets/channel-post-action-fields-hash.js']);
+  assert.deepEqual([...assets.css].sort(), [
+    'assets/channel-post-action-fields-hash.css',
+    'assets/shared.css',
   ]);
-  assert.deepEqual([...assets.js], ['assets/signature-fields.js']);
-  assert.deepEqual([...assets.css].sort(), ['assets/shared.css', 'assets/signature.css']);
 });
 
 test('route coverage fails when a dynamic page manifest entry has no budget', () => {

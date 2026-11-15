@@ -625,6 +625,8 @@ export type MaxMessageButton =
   | MaxChatButton;
 
 export type MaxSendMessageOptions = {
+  /** Reject before dispatch instead of dropping existing or configured channel actions. */
+  rejectKeyboardTrimming?: boolean;
   /** Trusted message purpose; never accepted from HTTP input or applied to edits/DMs. */
   marketplacePublication?: MarketplacePublicationIntent;
   button?: MaxLinkButton;
@@ -641,7 +643,7 @@ export type MaxSendMessageOptions = {
 
 type MaxEditableMessageOptions = Pick<
   MaxSendMessageOptions,
-  'button' | 'buttons' | 'debugContext' | 'textFormat'
+  'button' | 'buttons' | 'debugContext' | 'textFormat' | 'rejectKeyboardTrimming'
 > & {
   /** Trusted channel decoration only. This is not an HTTP request field. */
   marketplaceChannelPost?: { entityId: string; sourceAt: string; only: boolean };
@@ -6833,6 +6835,7 @@ export class MaxClientService implements OnModuleDestroy {
             editableAttachments,
             options.appendNewInlineKeyboardRows === true,
             options.preserveExistingChannelDialogButtons === true,
+            options.rejectKeyboardTrimming === true,
           ),
         ];
       }
@@ -6948,6 +6951,7 @@ export class MaxClientService implements OnModuleDestroy {
     editableAttachments: readonly Record<string, unknown>[],
     appendNewRows: boolean,
     preserveExistingDialogButtons: boolean,
+    rejectKeyboardTrimming = false,
   ): Record<string, unknown> {
     const existingKeyboard = editableAttachments.find(
       (attachment) => this.readLowerString(attachment.type) === 'inline_keyboard',
@@ -7040,6 +7044,7 @@ export class MaxClientService implements OnModuleDestroy {
       appendNewRows
         ? [...preservedExistingRows, ...resolvedPrimaryRows]
         : [...resolvedPrimaryRows, ...preservedExistingRows],
+      { rejectOnTrim: rejectKeyboardTrimming },
     );
 
     return {
@@ -7444,6 +7449,7 @@ export class MaxClientService implements OnModuleDestroy {
     }
 
     return normalizeMaxInlineKeyboardButtons(sourceButtons, {
+      rejectOnTrim: options.rejectKeyboardTrimming,
       onTrimmed: (details) => {
         this.logger.warn(
           {

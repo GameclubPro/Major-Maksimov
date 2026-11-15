@@ -1199,6 +1199,8 @@ describe('PublisherPolicyService', () => {
           entityType: 'channel',
           channelPostSignature: {
             enabled: true,
+            customButtonsEnabled: false,
+            customButtons: [],
             presentation: 'button',
             text: '📞 Заказать рекламу',
             url: 'https://example.test/ads',

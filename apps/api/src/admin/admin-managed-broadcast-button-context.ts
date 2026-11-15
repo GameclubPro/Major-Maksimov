@@ -164,11 +164,15 @@ export async function resolveManagedBroadcastButtonContext(
     trafficClass: 'background',
     sourceTag: MAX_API_SOURCE_TAGS.MANAGED_BROADCAST,
   });
+  const channelButtonRows =
+    (await dependencies.channelPostSignatureService?.buildCustomPostButtons(chatId, {
+      entityType: 'channel',
+    })) ?? [];
   const rows = buildChannelPostActionRows({
     commentsButton,
     suggestButton,
     ctaButton,
-    customButtonRows,
+    customButtonRows: [...channelButtonRows, ...customButtonRows],
   });
 
   return {

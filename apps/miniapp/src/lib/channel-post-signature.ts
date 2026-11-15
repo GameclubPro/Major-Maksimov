@@ -15,6 +15,8 @@ export function normalizePostSignatureSettings(
     presentation: value.presentation,
     text: value.text.trim(),
     url: parsedUrl.error ? value.url.trim() : parsedUrl.url,
+    customButtonsEnabled: value.customButtonsEnabled ?? false,
+    customButtons: value.customButtons ?? [],
   };
 }
 
@@ -28,6 +30,12 @@ export function buildPostSignaturePatch(
 ): UpdateChannelPostSignatureRequest {
   return {
     expectedRevision: previous?.revision ?? next.revision ?? 0,
+    ...((next.customButtonsEnabled ?? false) !== (previous?.customButtonsEnabled ?? false)
+      ? { customButtonsEnabled: next.customButtonsEnabled }
+      : {}),
+    ...(JSON.stringify(next.customButtons ?? []) !== JSON.stringify(previous?.customButtons ?? [])
+      ? { customButtons: next.customButtons }
+      : {}),
     ...(next.enabled !== previous?.enabled ? { enabled: next.enabled } : {}),
     ...(next.presentation !== previous?.presentation ? { presentation: next.presentation } : {}),
     ...(next.text !== previous?.text ? { text: next.text } : {}),

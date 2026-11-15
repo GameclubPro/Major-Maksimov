@@ -413,6 +413,6 @@ test('chat and channel settings register save and discard leave guards', () => {
   );
   assert.match(
     channelSettingsSource,
-    /useManagedEntityLeaveGuard\(\{\s*dirty: isDirty \|\| isPostSignatureDirty,\s*saving: autosaveState === 'saving' \|\| postSignatureSaveState === 'saving',\s*save: saveWorkspaceChanges,\s*discard: discardWorkspaceChanges,\s*\}\);/u,
+    /useManagedEntityLeaveGuard\(\{\s*dirty: isDirty \|\| isPostSignatureDirty \|\| customButtonEditorOpen,\s*saving: autosaveState === 'saving' \|\| postSignatureSaveState === 'saving',\s*save: saveWorkspaceChanges,\s*discard: discardWorkspaceChanges,\s*\}\);/u,
   );
 });

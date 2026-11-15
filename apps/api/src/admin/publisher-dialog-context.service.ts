@@ -164,7 +164,11 @@ export class PublisherDialogContextService {
           trafficClass: 'background',
           sourceTag: MAX_API_SOURCE_TAGS.MANAGED_BROADCAST,
         })) ?? null;
-      const customButtonRows = buttons;
+      const channelButtonRows =
+        (await this.postSignature?.buildCustomPostButtons(params.chatId, {
+          entityType: 'channel',
+        })) ?? [];
+      const customButtonRows = [...channelButtonRows, ...buttons];
       buttons = buildChannelPostActionRows({
         commentsButton,
         suggestButton,

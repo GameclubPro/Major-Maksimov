@@ -38,32 +38,13 @@ test('channel post action stays compact on the overview and opens in a drilldown
   );
 });
 
-test('closing the post action drilldown blocks invalid fields and flushes a valid dirty draft', () => {
-  assert.match(
-    channelSettingsSource,
-    /function closePostSignatureSection\(\)[\s\S]*?isPostSignatureDirty && \(postSignatureUrlError \|\| postSignatureTextError\)[\s\S]*?savePostSignature\(postSignature\);[\s\S]*?closeSection\('postSignature'\);/u,
-  );
-});
-
-test('post action offers signature and button modes with a real button preview', () => {
-  assert.match(
-    channelSettingsSource,
-    /<ChannelPostSignatureFields[\s\S]*?settings: postSignature/u,
-  );
-  assert.match(postSignatureFieldsSource, /const presentation = fields\.read\('presentation'\)/u);
-  assert.match(
-    postSignatureFieldsSource,
-    /<SegmentedControl[\s\S]*?value=\{presentation\.kind === 'common' \? presentation\.value : ''\}[\s\S]*?value: 'signature'[\s\S]*?value: 'button'[\s\S]*?value === 'signature' \|\| value === 'button'[\s\S]*?fields\.setScalar\('presentation', value\)/u,
-  );
-  assert.match(channelSettingsSource, /className="channel-post-signature__message-button"/u);
-  assert.match(
-    postSignatureFieldsSource,
-    /isButton \? \(\s*<button type="button" className="channel-post-signature__message-button" disabled>\s*\{label\}/u,
-  );
-  assert.match(
-    postSignatureFieldsSource,
-    /disabled: fields\.readOnly \|\| presentation\.kind === 'loading'/u,
-  );
+test('post actions use explicit save and protect the unfinished button editor on close', () => {
+  assert.match(channelSettingsSource, /customButtonEditorOpen[\s\S]*?runNativeBackHandlers\(\)/u);
+  assert.match(channelSettingsSource, /onClick=\{\(\) => savePostSignature\(postSignature\)\}/u);
+  assert.match(postSignatureFieldsSource, /ChannelCustomButtonsFields/u);
+  assert.match(postSignatureFieldsSource, /channel-post-actions__preview-button/u);
+  assert.match(postSignatureFieldsSource, /fields\.read\('customButtons'\)/u);
+  assert.match(postSignatureFieldsSource, /value: 'signature'[\s\S]*?value: 'button'/u);
 });
 
 test('settings search includes post action terminology', () => {

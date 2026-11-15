@@ -6055,6 +6055,7 @@ describe('ModerationService', () => {
           chatId: true,
           quickButtonsEnabled: true,
           postSignatureEnabled: true,
+          customPostButtonsEnabled: true,
           commentsEnabled: true,
           postSuggestionsEnabled: true,
         },

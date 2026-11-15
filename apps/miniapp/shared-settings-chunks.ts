@@ -25,7 +25,21 @@ export const sharedSettingsChunkSources: Record<string, readonly string[]> = {
   'channel-signature-contracts': [
     '/packages/contracts/dist/button-url.js',
     '/packages/contracts/dist/channel-post-signature.js',
+    '/packages/contracts/dist/settings-message-field-schemas.js',
+    '/packages/contracts/dist/broadcast-common.js',
+    '/packages/contracts/dist/broadcast-buttons.js',
     '/node_modules/zod/v4/classic/coerce.js',
+  ],
+  'channel-post-action-fields': [
+    '/apps/miniapp/src/pages/settings/channel-quick-buttons-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-comments-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-post-suggestions-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-post-signature-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-custom-buttons-fields.tsx',
+    '/apps/miniapp/src/pages/settings/channel-settings-text-field.tsx',
+    '/apps/miniapp/src/pages/settings/channel-settings-toggle-card.tsx',
+    '/apps/miniapp/src/pages/settings/channel-custom-buttons.css',
+    '/apps/miniapp/src/styles/channel-post-signature.css',
   ],
   'settings-overview-contracts': [
     '/packages/contracts/dist/broadcast-schedule-fields.js',

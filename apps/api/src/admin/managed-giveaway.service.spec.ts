@@ -2099,6 +2099,7 @@ describe('ManagedGiveawayService', () => {
         ...payload,
         signatureApplied: false,
       })),
+      buildCustomPostButtons: jest.fn().mockResolvedValue([]),
       buildPostButton: jest.fn().mockResolvedValue({
         type: 'link',
         text: '📞 Заказать рекламу',
@@ -3015,6 +3016,7 @@ describe('ManagedGiveawayService', () => {
         ...payload,
         signatureApplied: false,
       })),
+      buildCustomPostButtons: jest.fn().mockResolvedValue([]),
       buildPostButton: jest.fn().mockResolvedValue({
         type: 'link',
         text: '📞 Заказать рекламу',

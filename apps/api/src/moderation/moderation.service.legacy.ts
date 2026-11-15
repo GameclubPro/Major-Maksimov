@@ -1,3 +1,6 @@
+import { buildChannelPostActionRows } from '../common/channel-post-actions';
+import { parseChannelAutoPostListedMessage } from './channel-auto-post-runtime';
+import { buildChannelCustomPostButtons } from '../common/channel-custom-post-buttons';
 import {
   channelSettingsForSource,
   marketplacePostIsEligible,
@@ -1032,6 +1035,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       markerStore: this.replacementAttachMarkerStore,
       isMessageHeld: async (chatId, messageId) =>
         (await this.legacyHolds?.isMessageHeld(chatId, messageId)) ?? false,
+      lookupExactSourceAt: async (chatId, messageId, options) => {
+        const row = await maxClient.getExactMessageRow(chatId, messageId, options);
+        const parsed = row ? parseChannelAutoPostListedMessage(row, chatId) : null;
+        return parsed?.messageId === messageId ? new Date(parsed.timestampMs).toISOString() : null;
+      },
       lookupExactButtonIdentities: (chatId, messageId, options) =>
         maxClient.getExactChannelDialogButtonIdentities(chatId, messageId, options),
       resolveUnifiedLookupBotId: ({ chatId }) => this.resolveAutoAttachBotId(chatId, 'poll'),
@@ -15310,9 +15318,10 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         ? params.marketplaceAt
         : ((await this.maxClient.getMarketplaceChannelPostActivation?.(chatId)) ?? null);
     const includeMarketplaceButton = marketplacePostIsEligible(sourceMessageAt, marketplaceAt);
-    const channelSettings = includeMarketplaceButton
-      ? channelSettingsForSource(managedChannel.channelSettings, sourceMessageAt)
-      : managedChannel.channelSettings;
+    const channelSettings =
+      includeMarketplaceButton || managedChannel.channelSettings.customPostButtonsEnabled
+        ? channelSettingsForSource(managedChannel.channelSettings, sourceMessageAt)
+        : managedChannel.channelSettings;
     const quickButtons = includeMarketplaceButton
       ? channelSettings.quickButtonsEnabled
         ? params.quickButtons
@@ -15344,14 +15353,25 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       buttonVisibility.includeCommentsButton && !existingButtonKinds.has('comments');
     const includeSuggestButton =
       buttonVisibility.includeSuggestButton && !existingButtonKinds.has('suggest');
+    const customPostButtonRows = buildChannelCustomPostButtons(
+      channelSettings,
+      sourceMessageAt ?? null,
+    );
+    const hasCustomPostButtons = customPostButtonRows.length > 0;
     const postSignatureEnabled = channelSettings.postSignatureEnabled === true;
-    if (!normalizedSenderId && !senderlessEngagementAllowed && !postSignatureEnabled) {
+    if (
+      !normalizedSenderId &&
+      !senderlessEngagementAllowed &&
+      !postSignatureEnabled &&
+      !hasCustomPostButtons
+    ) {
       return 'skipped';
     }
     if (
       !includeCommentsButton &&
       !includeSuggestButton &&
       !postSignatureEnabled &&
+      !hasCustomPostButtons &&
       !quickButtons &&
       !includeMarketplaceButton
     ) {
@@ -15442,7 +15462,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
               botId: autoAttachBotId,
             })) ?? null)
           : null;
-      const buttons = buildChannelAutoPostButtons(
+      let buttons = buildChannelAutoPostButtons(
         managedChannel.channelSettings,
         quickButtons ? { includeCommentsButton, includeSuggestButton } : buttonVisibility,
         (type, buttonText, suggestionEntryMode) =>
@@ -15456,7 +15476,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           ),
         ctaButton,
       );
-      buttons.push(...(quickButtons?.buttons ?? []));
+      buttons = buildChannelPostActionRows({
+        customButtonRows: [...buttons, ...customPostButtonRows, ...(quickButtons?.buttons ?? [])],
+      });
       const decoration = {
         chatId,
         text,
@@ -15510,14 +15532,34 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
                 !includeCommentsButton &&
                 !includeSuggestButton &&
                 !postSignatureEnabled &&
+                !hasCustomPostButtons &&
                 !quickButtons,
             }
           : undefined;
+      const assertCustomButtonsCurrent = async () => {
+        if (hasCustomPostButtons) {
+          const currentCustom = await this.prisma.channelSettings.findUnique({
+            where: { chatId },
+            select: {
+              customPostButtonsEnabled: true,
+              customPostButtons: true,
+              customPostButtonsSince: true,
+            },
+          });
+          if (
+            JSON.stringify(
+              buildChannelCustomPostButtons(currentCustom, sourceMessageAt ?? null),
+            ) !== JSON.stringify(customPostButtonRows)
+          )
+            throw new Error('Channel custom buttons changed before keyboard edit');
+        }
+      };
       const beforeEditMutation = withMaxFinalAuthorityCheckpoint(async (beforeFinalAuthority) => {
         await this.channelAutoPostMutationGuard.assertEditAuthorized(chatId, autoAttachBotId);
         // FLAG: Finish remote authorization before admission; settings and the owned
         // marker must still authorize the edit after any quota or route wait.
         await beforeFinalAuthority?.();
+        await assertCustomButtonsCurrent();
         if (quickButtons) await this.assertChannelQuickButtonsEnabled(chatId);
         if (linkType !== 'forward' && !quickButtons) {
           await this.replacementAttachMarkerStore.assertChannelEditClaimCurrent({
@@ -15536,12 +15578,14 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           preparedText.text,
           {
             buttons,
+            rejectKeyboardTrimming: hasCustomPostButtons,
             ...mutationTextOptions,
             appendNewInlineKeyboardRows: true,
             mergeExistingInlineKeyboard: true,
             ...(preparedText.textFormat ? { textFormat: preparedText.textFormat } : {}),
             ...(preserveExistingInlineKeyboard ? { preserveExistingInlineKeyboard: true } : {}),
             beforeSend: async () => {
+              await assertCustomButtonsCurrent();
               if (quickButtons) {
                 await this.assertChannelQuickButtonsEnabled(chatId);
               }
@@ -15646,6 +15690,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
               editForwardInPlace ? null : preparedText.text,
               {
                 buttons,
+                rejectKeyboardTrimming: hasCustomPostButtons,
                 ...mutationTextOptions,
                 mergeExistingInlineKeyboard: true,
                 preserveExistingChannelDialogButtons: true,
@@ -15697,6 +15742,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
                 // FLAG: A rejected merge never authorizes dropping Publisher discussions,
                 // custom links, or media. Re-read and preserve the source under the edit lock.
                 buttons,
+                rejectKeyboardTrimming: hasCustomPostButtons,
                 ...mutationTextOptions,
                 mergeExistingInlineKeyboard: true,
                 appendNewInlineKeyboardRows: true,
@@ -15900,7 +15946,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     const auditIncludesCommentsButton =
       includeCommentsButton || existingButtonKinds.has('comments');
     const auditIncludesSuggestButton = includeSuggestButton || existingButtonKinds.has('suggest');
-    const frozenButtonRows = buildChannelAutoPostButtons(
+    let frozenButtonRows = buildChannelAutoPostButtons(
       managedChannel.channelSettings,
       {
         includeCommentsButton: auditIncludesCommentsButton,
@@ -15917,6 +15963,13 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         ),
       ctaButton,
     );
+    frozenButtonRows = buildChannelPostActionRows({
+      customButtonRows: [
+        ...frozenButtonRows,
+        ...customPostButtonRows,
+        ...(quickButtons?.buttons ?? []),
+      ],
+    });
     try {
       await this.prisma.auditLog.create({
         data: {

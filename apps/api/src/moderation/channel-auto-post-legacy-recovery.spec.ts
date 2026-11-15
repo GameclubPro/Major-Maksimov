@@ -34,6 +34,7 @@ function createHarness(options: {
   candidates?: ReturnType<typeof candidate>[];
   contextRows?: ReturnType<typeof contextRow>[];
   lookup?: jest.Mock;
+  sourceAt?: jest.Mock;
 }) {
   let nowMs = Date.parse('2026-08-09T12:00:00.000Z');
   const listCandidates = jest.fn().mockResolvedValue({
@@ -71,6 +72,7 @@ function createHarness(options: {
     },
     isMessageHeld,
     lookupExactButtonIdentities: lookup,
+    lookupExactSourceAt: options.sourceAt,
     resolveUnifiedLookupBotId,
     attach,
     logger,
@@ -95,6 +97,35 @@ function createHarness(options: {
 }
 
 describe('ChannelAutoPostLegacyRecovery', () => {
+  it.each(['2026-11-16T00:00:00Z', '2026-11-14T00:00:00Z', null])(
+    'checks original time before recovering custom-only edits: %s',
+    async (sourceAt) => {
+      const row = {
+        ...contextRow('channel-1', { commentsEnabled: false }),
+        postSignatureEnabled: false,
+        customPostButtonsEnabled: true,
+        customPostButtonsSince: new Date('2026-11-15'),
+      };
+      const lookup = jest.fn().mockResolvedValue(sourceAt);
+      const harness = createHarness({
+        candidates: [candidate('channel-1', 'custom-post', 'retryable_edit_marker')],
+        contextRows: [row],
+        sourceAt: lookup,
+      });
+      await harness.runner.runIfDue();
+      expect(lookup).toHaveBeenCalledWith(
+        'channel-1',
+        'custom-post',
+        expect.objectContaining({ botId: 'scan-bot' }),
+      );
+      if (sourceAt === '2026-11-16T00:00:00Z')
+        expect(harness.attach).toHaveBeenCalledWith(
+          expect.objectContaining({ sourceMessageAt: sourceAt }),
+        );
+      else expect(harness.attach).not.toHaveBeenCalled();
+    },
+  );
+
   it('recovers a durable signature-only edit using the locked snapshot, even without a sender', async () => {
     const harness = createHarness({
       candidates: [candidate('channel-1', 'missed-signature', 'retryable_edit_marker')],
@@ -476,13 +507,11 @@ describe('ChannelAutoPostLegacyRecovery', () => {
     const harness = createHarness({
       candidates: [candidate('blocked'), candidate('healthy')],
       contextRows: [contextRow('blocked'), contextRow('healthy')],
-      lookup: jest
-        .fn()
-        .mockRejectedValue(
-          Object.assign(new Error(new MaxExactMessageLookupMissingIdError().message), {
-            name: 'MaxExactMessageLookupMissingIdError',
-          }),
-        ),
+      lookup: jest.fn().mockRejectedValue(
+        Object.assign(new Error(new MaxExactMessageLookupMissingIdError().message), {
+          name: 'MaxExactMessageLookupMissingIdError',
+        }),
+      ),
     });
     await expect(harness.runner.runIfDue()).resolves.toMatchObject({
       status: 'deferred',

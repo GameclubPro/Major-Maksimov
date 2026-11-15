@@ -79,6 +79,7 @@ export class ChannelAutoPostScanRuntime {
           chatId: true,
           quickButtonsEnabled: true,
           postSignatureEnabled: true,
+          customPostButtonsEnabled: true,
           commentsEnabled: true,
           postSuggestionsEnabled: true,
         },
@@ -92,6 +93,7 @@ export class ChannelAutoPostScanRuntime {
           (item) =>
             item.quickButtonsEnabled ||
             item.postSignatureEnabled ||
+            item.customPostButtonsEnabled ||
             item.commentsEnabled ||
             item.postSuggestionsEnabled,
         )
