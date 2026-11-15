@@ -4,6 +4,8 @@ export const SUGGESTION_NATIVE_PREFIX = 'sr1|';
 export const SUGGESTION_NATIVE_ACTIONS = [
   'publish',
   'edit',
+  'source',
+  'preview',
   'reject',
   'back',
   'save',

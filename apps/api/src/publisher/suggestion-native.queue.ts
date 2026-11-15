@@ -149,6 +149,13 @@ export class SuggestionNativeQueueService {
         job.inputError = 'Не удалось прочитать оформление. Пришлите исправленный текст ещё раз.';
       if (text.trimStart().startsWith('/'))
         job.inputError = 'Команда не заменяет текст предложки. Пришлите текст ответом на карточку.';
+      if (
+        body.attachments != null &&
+        (!Array.isArray(body.attachments) ||
+          body.attachments.some((attachment) => record(attachment).type !== 'share'))
+      )
+        job.inputError =
+          'Здесь меняется только текст. Пришлите исправленный текст без новых вложений; исходные фото и видео сохранятся.';
       if (markup.length > 400) {
         job.input = undefined;
         job.inputError =

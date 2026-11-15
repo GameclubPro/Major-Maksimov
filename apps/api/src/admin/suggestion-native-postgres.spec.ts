@@ -706,6 +706,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
           where: { deliveryId: f.card.id },
           data: {
             draft: {
+              ...draft,
               pendingInput: {
                 ...suggestionObject(draft.pendingInput),
                 requestedAt: new Date(Date.now() - 6 * 60_000).toISOString(),
@@ -726,7 +727,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       ).toBe(false);
       expect(
         await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
-      ).toMatchObject({ mode: 'edit', draft: null });
+      ).toMatchObject({ mode: 'edit', draft: { text: 'Цена 350 ₽' } });
     },
   );
 
@@ -798,7 +799,14 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         },
       });
       await callback(f, 'edit');
-      expect(edit.mock.calls.at(-1)?.[2]).toBe('  **Цена** 300 ₽\n\n');
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('Ответить');
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('  Цена 300 ₽\n\n');
+      expect(
+        edit.mock.calls
+          .at(-1)?.[3]
+          ?.buttons?.flat()
+          .some((b) => b.text === 'Как править'),
+      ).toBe(false);
       expect(send).not.toHaveBeenCalled();
       const sent = await input(f, '  Цена 350 ₽\n\n');
       expect(edit.mock.calls.at(-1)?.[2]).toContain(
@@ -824,6 +832,116 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       expect(edit.mock.calls.every((call) => call[3]?.requireAllAttachmentsPreserved)).toBe(true);
     },
   );
+  it.each([1025, 3900])(
+    'keeps a persistent instruction and the complete %i-character copy source',
+    async (length) => {
+      const f = await seed();
+      const text = 'я'.repeat(length);
+      await db.auditLog.update({
+        where: { id: f.row.id },
+        data: { payload: { ...suggestionObject(f.row.payload), text, textMarkup: [] } },
+      });
+      await callback(f, 'edit');
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('Ответить');
+      const source = edit.mock.calls
+        .at(-1)?.[3]
+        ?.buttons?.flat()
+        .find((b) => b.text === 'Текст для копирования');
+      expect(source).toMatchObject({ type: 'callback' });
+      if (source?.type !== 'callback') throw new Error('Copy source action missing');
+      const action = parseSuggestionNativeCallback(source.payload)!;
+      await callback(f, action.action);
+      expect(edit.mock.calls.at(-1)?.[2]).toBe(text);
+      expect(edit.mock.calls.at(-1)?.[3]?.textFormat).toBeUndefined();
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it('returns from preview to editing the current personal text and retains its new formatting', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    await input(f, '  Цена 350 ₽\n\nСайт', {
+      input: {
+        text: '  Цена 350 ₽\n\nСайт',
+        markup: [{ type: 'link', from: 14, length: 4, url: 'https://example.com', userLink: null }],
+      },
+    });
+    expect(
+      edit.mock.calls
+        .at(-1)?.[3]
+        ?.buttons?.flat()
+        .some((b) => b.text === 'Править'),
+    ).toBe(true);
+    await callback(f, 'edit');
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('350');
+    expect(edit.mock.calls.at(-1)?.[2]).not.toContain('300');
+    await input(f, '  Цена 450 ₽\n\nСайт');
+    await callback(f, 'save');
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ text: '  **Цена** 450 ₽\n\n[Сайт](https://example.com/)' });
+  });
+
+  it('returns to the same preview without losing its body or accepting a formatting warning', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    await input(f, 'Совсем новый текст');
+    await callback(f, 'edit');
+    await callback(f, 'preview');
+    expect(
+      await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+    ).toMatchObject({ mode: 'format', draft: { text: 'Совсем новый текст' } });
+    const publish = jest.spyOn(review, 'publish');
+    await callback(f, 'publish');
+    expect(publish).not.toHaveBeenCalled();
+    await callback(f, 'accept_format');
+    await callback(f, 'edit');
+    await callback(f, 'preview');
+    await callback(f, 'save');
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ text: 'Совсем новый текст' });
+  });
+
+  it('accepts text with a link preview while preserving the original media', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    const update = replyUpdate(f, '  Цена 450 ₽\n\nhttps://example.com');
+    const raw = update.raw as { message: { body: Record<string, unknown> } };
+    raw.message.body.attachments = [{ type: 'share', payload: { url: 'https://example.com' } }];
+    expect(await ingress.observeWebhook(update)).toBe(true);
+    const [job] = await major.getJobs(['prioritized']);
+    await service.process(job!.data);
+    expect(
+      await db.suggestionReviewDialog.findUnique({ where: { deliveryId: f.card.id } }),
+    ).toMatchObject({ mode: 'preview' });
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('https://example.com');
+    expect(
+      suggestionObject(suggestionObject(messages.get(f.card.remoteMessageId!)).body).attachments,
+    ).toEqual(expect.arrayContaining([{ type: 'image', payload: { token: 'original-photo' } }]));
+  });
+
+  it('does not silently discard new attachments sent as an edit reply', async () => {
+    const f = await seed();
+    await callback(f, 'edit');
+    const update = replyUpdate(f, '  Цена 450 ₽\n\n');
+    const raw = update.raw as { message: { body: Record<string, unknown> } };
+    raw.message.body.attachments = [{ type: 'image', payload: { token: 'replacement' } }];
+    expect(await ingress.observeWebhook(update)).toBe(true);
+    const [job] = await major.getJobs(['prioritized']);
+    await service.process(job!.data);
+    expect(edit.mock.calls.at(-1)?.[2]).toContain('только текст');
+    expect(
+      edit.mock.calls
+        .at(-1)?.[3]
+        ?.buttons?.flat()
+        .some((b) => b.text === 'Опубликовать'),
+    ).toBe(false);
+    expect(
+      (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+    ).toMatchObject({ text: '  Цена 300 ₽\n\n' });
+  });
+
   it.each(['paid', 'details', 'topic', 'rules'] as const)(
     'rejects with %s in two clicks and delivers the reply only once',
     async (reason) => {

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { SuggestionNativeJob } from '../publisher/suggestion-native.queue';
 import { nativeContentSchema } from './suggestion-native-content';
+import { readNativeDraft } from './suggestion-native-editor';
 
 const pendingInputSchema = z.object({
   eventId: z.string(),
@@ -61,7 +62,7 @@ export async function retainSuggestionNativeInput(
     },
     data: {
       mode: contact ? 'contact' : 'edit',
-      draft: { pendingInput },
+      draft: { ...readNativeDraft(dialog.draft), pendingInput },
       inputMessageId: job.messageId,
       inputAt: requestedAt,
       version: { increment: 1 },
