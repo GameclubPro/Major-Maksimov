@@ -8,11 +8,14 @@ they are not used by new card buttons. The full publication workspace remains Pu
 
 ## Native card interaction
 
-`Править` edits the existing bot card into its body-only source. The administrator replies
-to that exact card with corrected text, then sees the final publication preview including
+`Править` immediately shows a persistent editing instruction and the editable text on the
+existing card. The explicit correction on 2026-11-15 supersedes the hidden `Как править` hint.
+The administrator copies the body and uses MAX’s `Ответить` on that exact card to send the
+corrected text, then sees the final publication preview including
 original author attribution, channel signature and retained media. `Опубликовать` saves
 and publishes atomically; `Сохранить` leaves the edited suggestion pending. `Отмена` leaves
-shared suggestion content unchanged. Editing the administrator's bound input message updates
+shared suggestion content unchanged. Preview offers `Править`, retaining the current personal
+text and formatting; the editor can return to that preview without discarding it. Editing the administrator's bound input message updates
 its preview only while that editing session is active. Other messages/commands and replies to
 other cards do not become post content or overwrite other private authoring sessions.
 
@@ -29,7 +32,10 @@ that its asynchronous publication has reached MAX.
 
 MAX has no documented composer-prefill/force-reply operation. A clipboard button is an
 optional shortcut only for bodies of at most 1024 characters; its exact whitespace must survive
-normalization. Longer text uses native message copying. Editor UI uses existing-message PUTs,
+normalization. Longer text has a `Текст для копирования` view containing the complete plain body, without
+UI instructions, attribution or Markdown escapes. When the body plus instruction exceeds
+4000 characters, the initial editor shows the instruction and that source action without
+truncating the body. Editor UI uses existing-message PUTs,
 not new SENDs. Preserve every media attachment when replacing its text or keyboard.
 
 Keyboard replacement uses the explicit guarded private-card option. General strict preservation
@@ -42,6 +48,11 @@ styles and URLs; edits inside a style inherit it when correspondence is unambigu
 or ambiguous link labels and edits crossing style boundaries require an explicit formatting
 choice or a new formatted input. Never silently attach a URL to another equal label. The
 original remains retained, and author identity/profile URL are outside the editable body.
+Further plain-text edits use the latest personal draft as their formatting base and keep
+unresolved warnings until explicit acceptance. Input admission retains this base alongside
+the pending input, including quick edits and failed Redis handoff. New media in an edit reply
+produces a visible text-only editing error instead of being silently discarded; ordinary
+link previews remain compatible.
 
 The four version-1 rejection templates are `paid`, `details`, `topic`, `rules`:
 «Платное размещение», «Нужно дополнить», «Не по теме», «Не по правилам».

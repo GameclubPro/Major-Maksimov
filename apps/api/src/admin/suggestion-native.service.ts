@@ -40,8 +40,8 @@ import {
 import { hasSuggestionRequest, suggestionRevision } from './suggestion-review-content';
 import { readPendingSuggestionInput, retainSuggestionNativeInput } from './suggestion-native-input';
 import { buildPublishedSuggestionButton } from './suggestion-review-links';
+import { readNativeDraft, suggestionEditView } from './suggestion-native-editor';
 import {
-  nativeContentSchema,
   nativeSuggestionMarkdown,
   readSuggestionNativeContent,
   mergeSuggestionNativeContent,
@@ -55,7 +55,6 @@ import {
 
 const SESSION_MS = 2 * 60 * 60_000;
 const LOCK_MS = 2 * 60_000;
-const draftSchema = nativeContentSchema.extend({ warnings: z.array(z.string()).max(400) });
 const requestId = (value: string) => {
   const hash = createHash('sha256').update(value).digest('hex');
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
@@ -200,7 +199,8 @@ export class SuggestionNativeService {
             inputAt: null,
           });
           notice = 'Время редактирования истекло. Нажмите «Править», чтобы начать снова.';
-        } else if (job.callback?.action === 'hint') notice = this.hint(session.mode);
+        } else if (job.callback?.action === 'hint' && session.mode !== 'edit')
+          notice = this.hint(session.mode);
         else if (job.callback?.action === 'back' && job.callback.version === session.version) {
           session = await this.change(session, token, job, {
             mode: 'idle',
@@ -248,15 +248,28 @@ export class SuggestionNativeService {
             `${card.id}\0${session.revision}\0${session.version}\0${action ?? job.eventId}`,
           );
           if (action === 'edit') {
+            const draft = ['preview', 'format', 'edit'].includes(session.mode)
+              ? readNativeDraft(session.draft)
+              : null;
             session = await this.change(session, token, job, {
               mode: 'edit',
               openedAt: new Date(job.requestedAt),
               revision: detail.revision,
-              draft: Prisma.DbNull,
+              draft: draft ?? Prisma.DbNull,
               inputMessageId: null,
               inputAt: null,
             });
             notice = this.hint('edit');
+          } else if ((action === 'source' || action === 'hint') && session.mode === 'edit') {
+            session = await this.change(session, token, job, {
+              draft: { ...readNativeDraft(session.draft), editorSource: action === 'source' },
+            });
+          } else if (action === 'preview' && session.mode === 'edit') {
+            const draft = this.readDraft(session);
+            session = await this.change(session, token, job, {
+              mode: draft.warnings.length ? 'format' : 'preview',
+              draft,
+            });
           } else if (action === 'reject') {
             session = await this.change(session, token, job, {
               mode: 'reject',
@@ -368,9 +381,12 @@ export class SuggestionNativeService {
               });
             } else {
               const stored = await this.review.authorize(card.auditLogId, job.profile, actor);
-              // FLAG: Compare every replacement with saved content so resending plain text cannot erase a link warning.
-              const base = readSuggestionNativeContent(suggestionObject(stored.payload));
+              // FLAG: Continue the personal draft, retaining unresolved warnings until explicit acceptance.
+              const previous = readNativeDraft(session.draft);
+              const base =
+                previous ?? readSuggestionNativeContent(suggestionObject(stored.payload));
               const draft = mergeSuggestionNativeContent(base, job.input);
+              draft.warnings = [...new Set([...(previous?.warnings ?? []), ...draft.warnings])];
               await this.review.preview(card.auditLogId, job.profile, actor, {
                 requestId: identity,
                 expectedRevision: detail.revision,
@@ -413,7 +429,9 @@ export class SuggestionNativeService {
         });
         if (session?.lockToken === token) {
           if (readPendingSuggestionInput(session.draft)?.eventId === job.eventId) {
-            session = await this.change(session, token, job, { draft: Prisma.DbNull });
+            session = await this.change(session, token, job, {
+              draft: readNativeDraft(session.draft) ?? Prisma.DbNull,
+            });
           }
           const detail = await this.review.get(card.auditLogId, job.profile, actor);
           await this.render(job, bound, session, token, detail, actor, message);
@@ -448,9 +466,9 @@ export class SuggestionNativeService {
   }
 
   private readDraft(session: SuggestionReviewDialog): NativeSuggestionDraft {
-    const parsed = draftSchema.safeParse(session.draft);
-    if (!parsed.success) throw new BadRequestException('Пришлите исправленный текст ещё раз.');
-    return parsed.data;
+    const draft = readNativeDraft(session.draft);
+    if (!draft) throw new BadRequestException('Пришлите исправленный текст ещё раз.');
+    return draft;
   }
 
   private async change(
@@ -540,16 +558,20 @@ export class SuggestionNativeService {
       buttons = [[published ?? button(this.status(detail), 'hint')]];
     } else if (session.mode === 'edit') {
       const row = await this.review.authorize(detail.id, job.profile, actor);
-      const content = readSuggestionNativeContent(suggestionObject(row.payload));
-      text = nativeSuggestionMarkdown(content) || 'Пришлите подпись ответом на эту карточку.';
-      format = 'markdown';
-      buttons = [
-        [button('Как править', 'hint')],
-        ...(content.text.length && content.text.length <= 1024
-          ? [[{ type: 'clipboard' as const, text: 'Скопировать текст', payload: content.text }]]
-          : []),
-        [button('Отмена', 'back')],
-      ];
+      const draft = readNativeDraft(session.draft);
+      const view = suggestionEditView(
+        draft ?? readSuggestionNativeContent(suggestionObject(row.payload)),
+        button,
+        {
+          source: suggestionObject(session.draft).editorSource === true,
+          resume: Boolean(draft),
+          error,
+        },
+      );
+      text = view.text;
+      buttons = view.buttons;
+      format = undefined;
+      banner = '';
     } else if (session.mode === 'preview' || session.mode === 'format') {
       const draft = this.readDraft(session);
       const preview = await this.review.preview(detail.id, job.profile, actor, {
@@ -561,9 +583,13 @@ export class SuggestionNativeService {
       format = preview.textFormat;
       buttons =
         session.mode === 'format'
-          ? [[button('Принять новое оформление', 'accept_format')], [button('Отмена', 'back')]]
+          ? [
+              [button('Принять новое оформление', 'accept_format')],
+              [button('Править', 'edit'), button('Отмена', 'back')],
+            ]
           : [
               [button('Опубликовать', 'publish')],
+              [button('Править', 'edit')],
               [button('Сохранить', 'save'), button('Отмена', 'back')],
             ];
       if (draft.warnings.length)
