@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+import { buildChannelCustomPostButtons } from '../common/channel-custom-post-buttons';
 import {
   assertFixedModeratorCapabilitiesForSettings,
   lockModeratorSettingsChat,
@@ -61,6 +63,8 @@ export class ChannelPostSignatureService {
         postSignaturePresentation: true,
         postSignatureText: true,
         postSignatureUrl: true,
+        customPostButtonsEnabled: true,
+        customPostButtons: true,
         revision: true,
       },
     });
@@ -72,6 +76,8 @@ export class ChannelPostSignatureService {
           : 'signature',
       text: settings?.postSignatureText ?? CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
       url: settings?.postSignatureUrl ?? '',
+      customButtonsEnabled: settings?.customPostButtonsEnabled ?? false,
+      customButtons: settings?.customPostButtons ?? [],
       revision: settings?.revision ?? 0,
     });
   }
@@ -101,7 +107,14 @@ export class ChannelPostSignatureService {
       return result.data;
     };
     const preview = validateNext(current);
-    if (preview.enabled && (networkWrite || parsed.data.enabled === true || !current.enabled)) {
+    if (
+      (preview.enabled || preview.customButtonsEnabled) &&
+      (networkWrite ||
+        parsed.data.enabled === true ||
+        parsed.data.customButtonsEnabled === true ||
+        parsed.data.customButtons !== undefined ||
+        (!current.enabled && preview.enabled))
+    ) {
       await this.assertEditAccessAvailable(chatId);
     }
     const channelLinkVerified = preview.enabled && !preview.url;
@@ -122,14 +135,16 @@ export class ChannelPostSignatureService {
       await assertFixedModeratorCapabilitiesForSettings(
         tx,
         lockedChat,
-        next.enabled ? ['edit_message'] : [],
+        next.enabled || next.customButtonsEnabled ? ['edit_message'] : [],
       );
       if (networkWrite?.validateOnly) return next;
       if (
         next.enabled === lockedCurrent.enabled &&
         next.presentation === lockedCurrent.presentation &&
         next.text === lockedCurrent.text &&
-        next.url === lockedCurrent.url
+        next.url === lockedCurrent.url &&
+        next.customButtonsEnabled === lockedCurrent.customButtonsEnabled &&
+        isDeepStrictEqual(next.customButtons, lockedCurrent.customButtons)
       ) {
         await networkWrite?.onCommitted?.(tx, String(lockedCurrent.revision));
         return lockedCurrent;
@@ -142,6 +157,12 @@ export class ChannelPostSignatureService {
             : ChannelPostSignaturePresentation.SIGNATURE,
         postSignatureText: next.text,
         postSignatureUrl: next.url,
+        customPostButtonsEnabled: next.customButtonsEnabled,
+        customPostButtons: next.customButtons,
+        ...(next.customButtonsEnabled !== lockedCurrent.customButtonsEnabled ||
+        !isDeepStrictEqual(next.customButtons, lockedCurrent.customButtons)
+          ? { customPostButtonsSince: next.customButtonsEnabled ? new Date() : null }
+          : {}),
       };
       const exists = await tx.channelSettings.findUnique({
         where: { chatId },
@@ -311,6 +332,22 @@ export class ChannelPostSignatureService {
       text: settings.text,
       url,
     };
+  }
+
+  async buildCustomPostButtons(
+    chatId: string,
+    options: { entityType?: 'chat' | 'channel'; sourceAt?: string | null } = {},
+  ): Promise<MaxMessageButton[][]> {
+    if (options.entityType === 'chat') return [];
+    const settings = await this.prisma.channelSettings.findUnique({
+      where: { chatId },
+      select: {
+        customPostButtonsEnabled: true,
+        customPostButtons: true,
+        customPostButtonsSince: true,
+      },
+    });
+    return buildChannelCustomPostButtons(settings, options.sourceAt);
   }
 
   async assertChannelLinkAvailable(

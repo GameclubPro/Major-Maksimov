@@ -115,6 +115,8 @@ test('section paths preserve authored media while excluding derived aliases and 
     'presentation',
     'text',
     'url',
+    'customButtonsEnabled',
+    'customButtons',
   ]);
   assert.throws(() => settingsSectionPaths('channel', 'reports'));
   assert.throws(() => settingsSectionPaths('chat', 'comments'));

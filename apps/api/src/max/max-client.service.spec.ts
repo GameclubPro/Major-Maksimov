@@ -9745,6 +9745,46 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
+  it('refuses persistent channel buttons before PUT when the existing keyboard is full', async () => {
+    const buttons = Array.from({ length: 30 }, (_, index) => [
+      { type: 'link', text: `Existing ${index}`, url: `https://example.com/${index}` },
+    ]);
+    const httpService = {
+      request: jest
+        .fn()
+        .mockReturnValue(
+          of({
+            status: 200,
+            data: {
+              messages: [
+                {
+                  body: {
+                    mid: 'full-keyboard',
+                    text: 'Post',
+                    attachments: [{ type: 'inline_keyboard', payload: { buttons } }],
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+    };
+    const service = createService(httpService);
+    try {
+      await expect(
+        service.editMessageInlineKeyboard('chat-1', 'full-keyboard', null, {
+          buttons: [[{ type: 'link', text: 'Каталог', url: 'https://example.com/catalog' }]],
+          mergeExistingInlineKeyboard: true,
+          rejectKeyboardTrimming: true,
+        }),
+      ).rejects.toThrow('лимит');
+      expect(httpService.request).toHaveBeenCalledTimes(1);
+      expect(httpService.request).toHaveBeenCalledWith(expect.objectContaining({ method: 'get' }));
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
   it('updates a channel dialog label when the route changes but the thread stays the same', async () => {
     const threadId = '12345678-1234-4123-8123-123456789abc';
     const token = `cdt-${Buffer.from(

@@ -141,6 +141,8 @@ const LABELS: Record<string, string> = {
   presentation: 'Вид действия под публикацией',
   text: 'Текст действия под публикацией',
   url: 'Ссылка действия под публикацией',
+  customButtonsEnabled: 'Добавлять свои кнопки',
+  customButtons: 'Свои кнопки',
   requiredSubscriptionChannelIds: 'Каналы обязательной подписки',
   reportsAliases: 'Слова для жалоб',
   duplicateAllowedMessages: 'Допустимое количество повторов',

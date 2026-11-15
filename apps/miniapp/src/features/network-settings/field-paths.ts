@@ -276,7 +276,14 @@ export const CHANNEL_SECTION_FIELDS = {
     'commentsLimitTwoInRowEnabled',
     'commentsMessageText',
   ],
-  postSignature: ['enabled', 'presentation', 'text', 'url'],
+  postSignature: [
+    'enabled',
+    'presentation',
+    'text',
+    'url',
+    'customButtonsEnabled',
+    'customButtons',
+  ],
   postSuggestions: [
     'postSuggestionsEnabled',
     'postSuggestionsRequireSubscription',

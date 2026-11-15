@@ -445,6 +445,8 @@ describe('ChannelPostSignatureService', () => {
       presentation: 'button',
       text: 'Новый текст',
       url: 'https://max.ru/advertising',
+      customButtonsEnabled: false,
+      customButtons: [],
       revision: 1,
     });
 
@@ -456,6 +458,8 @@ describe('ChannelPostSignatureService', () => {
         postSignaturePresentation: 'BUTTON',
         postSignatureText: 'Новый текст',
         postSignatureUrl: 'https://max.ru/advertising',
+        customPostButtonsEnabled: false,
+        customPostButtons: [],
       },
     });
     expect(prisma.vkParsingSettings.updateMany).not.toHaveBeenCalled();

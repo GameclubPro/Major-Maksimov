@@ -2641,17 +2641,23 @@ export class ManagedGiveawayService {
     source: GiveawayActionSource,
   ): Promise<MaxMessageButton[][] | undefined> {
     const sendOptions = buildManagedGiveawayMaxApiOptions(source, 'send');
-    const [resolvedActionButton, ctaButton] = await Promise.all([
+    const [resolvedActionButton, ctaButton, channelButtonRows] = await Promise.all([
       actionButton,
       this.channelPostSignatureService?.buildPostButton?.(giveaway.sourceChatId, {
         entityType: this.fromPrismaEntityType(giveaway.entityType),
         trafficClass: sendOptions.trafficClass,
         sourceTag: sendOptions.sourceTag,
       }) ?? Promise.resolve(null),
+      this.channelPostSignatureService?.buildCustomPostButtons(giveaway.sourceChatId, {
+        entityType: this.fromPrismaEntityType(giveaway.entityType),
+      }) ?? Promise.resolve([]),
     ]);
     const rows = buildChannelPostActionRows({
       ctaButton,
-      customButtonRows: resolvedActionButton ? [[resolvedActionButton]] : [],
+      customButtonRows: [
+        ...(resolvedActionButton ? [[resolvedActionButton]] : []),
+        ...channelButtonRows,
+      ],
     });
     return rows.length > 0 ? rows : undefined;
   }

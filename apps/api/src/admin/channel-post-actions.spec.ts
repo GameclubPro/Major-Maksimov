@@ -71,7 +71,7 @@ describe('buildChannelPostActionRows', () => {
     ]);
   });
 
-  it('removes a custom link already represented by the channel CTA', () => {
+  it('preserves links to different fragments of the same page', () => {
     expect(
       buildChannelPostActionRows({
         ctaButton: link('Advertise', 'https://example.test/ads#contact'),
@@ -84,6 +84,7 @@ describe('buildChannelPostActionRows', () => {
       }),
     ).toEqual([
       [link('Advertise', 'https://example.test/ads#contact')],
+      [link('Duplicate', 'https://example.test/ads')],
       [link('Details', 'https://example.test/info')],
     ]);
   });

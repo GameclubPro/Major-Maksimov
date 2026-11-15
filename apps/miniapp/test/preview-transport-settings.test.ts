@@ -253,6 +253,8 @@ test('Major preview settings keep publishing data empty', async () => {
   assert.deepEqual(channelSettings.postSignature, {
     revision: 0,
     enabled: false,
+    customButtonsEnabled: false,
+    customButtons: [],
     presentation: 'signature',
     text: 'Подписаться на канал',
     url: '',
@@ -281,6 +283,8 @@ test('preview channel signature update is isolated from settings and Publik VK i
   assert.deepEqual(signature, {
     revision: (signatureBefore.revision ?? 0) + 1,
     enabled: true,
+    customButtonsEnabled: false,
+    customButtons: [],
     presentation: 'button',
     text: 'Заказать рекламу',
     url: 'https://max.ru/advertising-manager',

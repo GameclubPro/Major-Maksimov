@@ -596,6 +596,8 @@ test('preview keeps Publisher channel comments independent and exposes channel C
   assert.deepEqual(disabled.channelPostSignature, {
     revision: signatureBefore.revision,
     enabled: true,
+    customButtonsEnabled: false,
+    customButtons: [],
     presentation: 'button',
     text: '📞 Заказать рекламу',
     url: 'https://example.test/advertising',

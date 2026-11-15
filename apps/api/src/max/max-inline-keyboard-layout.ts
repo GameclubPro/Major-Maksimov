@@ -22,6 +22,7 @@ export type MaxInlineKeyboardTrimDetails = {
 };
 
 export type MaxInlineKeyboardLayoutOptions = {
+  rejectOnTrim?: boolean;
   onTrimmed?: (details: MaxInlineKeyboardTrimDetails) => void;
 };
 
@@ -114,6 +115,8 @@ export function normalizeMaxInlineKeyboardButtons(
   }
 
   if (truncated || requestedButtons > totalButtons || requestedRows > MAX_INLINE_KEYBOARD_ROWS) {
+    if (options.rejectOnTrim)
+      throw new Error('Кнопки не добавлены: превышен лимит клавиатуры MAX.');
     options.onTrimmed?.({
       requestedButtons,
       deliveredButtons: totalButtons,

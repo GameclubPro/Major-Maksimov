@@ -8737,7 +8737,16 @@ export class AdminService implements OnModuleDestroy {
       sourceTag: MAX_API_SOURCE_TAGS.CHANNEL_AUTO_POST,
     });
 
-    if (!includeCommentsButton && !includeSuggestButton && !ctaButton) {
+    const channelButtonRows =
+      (await this.channelPostSignatureService?.buildCustomPostButtons(chatId, {
+        entityType: 'channel',
+      })) ?? [];
+    if (
+      !includeCommentsButton &&
+      !includeSuggestButton &&
+      !ctaButton &&
+      !channelButtonRows.length
+    ) {
       return {
         buttons: [],
         threadId: null,
@@ -8771,7 +8780,12 @@ export class AdminService implements OnModuleDestroy {
             settings.postSuggestionsEntryMode,
           )
         : null;
-    const buttons = buildChannelPostActionRows({ commentsButton, suggestButton, ctaButton });
+    const buttons = buildChannelPostActionRows({
+      commentsButton,
+      suggestButton,
+      ctaButton,
+      customButtonRows: channelButtonRows,
+    });
 
     return {
       buttons,

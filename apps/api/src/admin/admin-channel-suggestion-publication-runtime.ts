@@ -153,6 +153,10 @@ export type AdminChannelSuggestionPublicationRuntimeContext = {
         sourceTag: string;
       },
     ): Promise<{ text: string; textFormat?: MaxSendMessageOptions['textFormat'] }>;
+    buildCustomPostButtons?(
+      chatId: string,
+      options: { entityType: 'channel' },
+    ): Promise<MaxMessageButton[][]>;
     buildPostButton?(
       chatId: string,
       options: {
@@ -1551,7 +1555,11 @@ export class AdminChannelSuggestionPublicationRuntime {
         trafficClass: 'interactive',
         sourceTag: MAX_API_SOURCE_TAGS.SUGGESTION_DELIVERY,
       })) ?? null;
-    const includeCtaButton = ctaButton !== null;
+    const channelButtonRows =
+      (await this.context.channelPostSignatureService?.buildCustomPostButtons?.(chatId, {
+        entityType: 'channel',
+      })) ?? [];
+    const includeCtaButton = ctaButton !== null || channelButtonRows.length > 0;
     if (!includeCommentsButton && !includeSuggestButton && !includeCtaButton) {
       return {
         buttons: [],
@@ -1587,7 +1595,12 @@ export class AdminChannelSuggestionPublicationRuntime {
             settings.postSuggestionsEntryMode,
           )
         : null;
-    const buttons = buildChannelPostActionRows({ commentsButton, suggestButton, ctaButton });
+    const buttons = buildChannelPostActionRows({
+      commentsButton,
+      suggestButton,
+      ctaButton,
+      customButtonRows: channelButtonRows,
+    });
     return {
       buttons,
       threadId,

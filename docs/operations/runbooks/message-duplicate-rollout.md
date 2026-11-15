@@ -238,8 +238,8 @@ evidence failures, so one unsupported baseline cannot block subsequent verifiabl
 See [Duplicate Miss Audit](../incidents/2026-09-19-duplicate-miss-audit.md) for regression coverage
 and the limits of attributing a reported miss.
 
-Fingerprint admission stays capped at 16, with representation for every enabled kind and stable
-value selection under truncation. Media comparison materializes all distinct candidate receipts
+Fingerprint admission stays capped at 128, with representation for every enabled kind and stable
+value selection under truncation. A no-match result beyond the budget remains unverified. Media comparison materializes all distinct candidate receipts
 before recording the current occurrence. One attempt admits at most 20 uncached media items under
 the existing 30-second verification deadline; additional work defers with revision-scoped proof
 reuse and the same ten-minute job lifetime. Terminal baseline rejection is cached separately and

@@ -160,6 +160,8 @@ export class PublisherPolicyService {
                   postSignaturePresentation: true,
                   postSignatureText: true,
                   postSignatureUrl: true,
+                  customPostButtonsEnabled: true,
+                  customPostButtons: true,
                 },
               },
               publicationPolicy: true,
@@ -501,6 +503,8 @@ export class PublisherPolicyService {
                 postSignaturePresentation: true,
                 postSignatureText: true,
                 postSignatureUrl: true,
+                customPostButtonsEnabled: true,
+                customPostButtons: true,
               },
             },
             publicationPolicy: true,
@@ -983,6 +987,8 @@ export class PublisherPolicyService {
         postSignaturePresentation: ChannelPostSignaturePresentation;
         postSignatureText: string;
         postSignatureUrl: string;
+        customPostButtonsEnabled: boolean;
+        customPostButtons: unknown;
       } | null;
       publicationPolicy: Parameters<PublisherReadinessService['resolvePolicy']>[0];
       publisherBinding: Parameters<
@@ -1013,6 +1019,8 @@ export class PublisherPolicyService {
               text:
                 source.channelSettings?.postSignatureText ?? CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
               url: source.channelSettings?.postSignatureUrl ?? '',
+              customButtonsEnabled: source.channelSettings?.customPostButtonsEnabled ?? false,
+              customButtons: source.channelSettings?.customPostButtons ?? [],
             }
           : null,
       moduleSettings: this.presentModuleSettings(effectiveEntityType, source.publisherSettings),

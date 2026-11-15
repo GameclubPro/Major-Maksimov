@@ -1,3 +1,4 @@
+import { channelCustomButtonsEligible } from '../common/channel-custom-post-buttons';
 import type { InternalChannelDialogButtonIdentity } from '../common/channel-dialog-button-identity.util';
 import type { PrismaService } from '../prisma/prisma.service';
 import { isMaxExactMessageLookupMissingIdError } from '../max/max-exact-message-lookup.error';
@@ -42,6 +43,7 @@ export type ChannelAutoPostLegacyRecoveryAttachInput = {
   existingDialogThreadId: string | null;
   managedChannel: ManagedChannelContext;
   source: 'poll';
+  sourceMessageAt?: string | null;
   senderId: null;
   senderAdminVerified: false;
   allowSenderlessEngagement: boolean;
@@ -91,6 +93,11 @@ export class ChannelAutoPostLegacyRecovery {
       markerStore: LegacyRecoveryMarkerStore;
       isMessageHeld: (chatId: string, messageId: string) => Promise<boolean>;
       lookupExactButtonIdentities: ExactChannelDialogButtonLookupPort;
+      lookupExactSourceAt?: (
+        chatId: string,
+        messageId: string,
+        options: ExactChannelDialogLookupOptions,
+      ) => Promise<string | null>;
       resolveUnifiedLookupBotId?: (params: {
         chatId: string;
         capability: 'background_scans';
@@ -174,15 +181,61 @@ export class ChannelAutoPostLegacyRecovery {
         if (
           candidate.evidence === 'retryable_edit_marker' ||
           (candidate.evidence === 'predispatch_marker' &&
-            context.channelSettings.postSignatureEnabled)
+            (context.channelSettings.postSignatureEnabled ||
+              context.channelSettings.customPostButtonsEnabled))
         ) {
           if (mutationAttempts >= LEGACY_RECOVERY_MUTATION_LIMIT) {
             cursorCanAdvance = false;
             deferReason ??= 'mutation_limit';
             continue;
           }
-          mutationAttempts += 1;
           try {
+            let sourceMessageAt: string | null = null;
+            if (context.channelSettings.customPostButtonsEnabled) {
+              if (remoteLookups >= LEGACY_RECOVERY_LOOKUP_LIMIT) {
+                cursorCanAdvance = false;
+                deferReason ??= 'lookup_limit';
+                continue;
+              }
+              const botId = await this.dependencies.resolveUnifiedLookupBotId?.({
+                chatId: candidate.chatId,
+                capability: 'background_scans',
+                fallbackToPrimary: true,
+              });
+              remoteLookups += 1;
+              // FLAG: Marker creation time never substitutes for the original post time.
+              sourceMessageAt =
+                (await this.dependencies.lookupExactSourceAt?.(
+                  candidate.chatId,
+                  candidate.messageId,
+                  {
+                    trafficClass: 'background',
+                    actionHealthLane: 'background',
+                    sourceTag: 'channel_auto_post',
+                    ...(botId ? { botId } : {}),
+                  },
+                )) ?? null;
+              if (
+                !channelCustomButtonsEligible(context.channelSettings, sourceMessageAt) &&
+                !context.channelSettings.commentsEnabled &&
+                !context.channelSettings.postSuggestionsEnabled &&
+                !context.channelSettings.postSignatureEnabled
+              ) {
+                const finished = await this.finishWithoutMutation(
+                  candidate,
+                  'SKIPPED',
+                  'Original post time does not authorize current custom buttons.',
+                  null,
+                );
+                if (finished === 'deferred') {
+                  cursorCanAdvance = false;
+                  deferReason ??= 'marker_in_progress';
+                }
+                terminalizedCandidates += finished === 'completed' ? 1 : 0;
+                continue;
+              }
+            }
+            mutationAttempts += 1;
             // FLAG: The durable edit intent authorizes a fresh locked GET/PUT, never a send.
             // Keep the current signature enabled even when no discussion buttons are configured.
             const outcome = await this.dependencies.attach({
@@ -195,6 +248,7 @@ export class ChannelAutoPostLegacyRecovery {
               existingDialogThreadId: null,
               managedChannel: context,
               source: 'poll',
+              sourceMessageAt,
               senderId: null,
               senderAdminVerified: false,
               allowSenderlessEngagement: true,

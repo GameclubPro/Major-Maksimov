@@ -1,0 +1,58 @@
+@layer pages {
+  .channel-post-signature__save-state {
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 7px;
+    padding: 0 2px;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 680;
+  }
+
+  .channel-post-signature__save-state.is-saving,
+  .channel-post-signature__save-state.is-dirty {
+    color: var(--accent);
+  }
+
+  .channel-post-signature__save-state.is-error {
+    color: var(--danger);
+  }
+
+  .channel-post-signature__save-state button {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    background: var(--surface-card);
+    color: inherit;
+  }
+
+  .channel-post-signature__save-state button svg {
+    width: 17px;
+    height: 17px;
+  }
+  .channel-post-actions__save {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .channel-post-actions__save > span {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+  }
+  .channel-post-actions__save-error {
+    color: var(--danger);
+    font-size: 0.85rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    margin: 8px 0 0;
+  }
+}

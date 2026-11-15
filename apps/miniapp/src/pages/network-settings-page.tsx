@@ -1,3 +1,4 @@
+import { runNativeBackHandlers } from '../lib/native-back';
 import { describeUserFacingError } from '../lib/user-facing-error';
 import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import type { NetworkSettingsOperationResponse } from '@maxim/contracts/network-settings';
@@ -110,6 +111,7 @@ const NetworkSettingsOperationPanel =
 export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
   const controller = useNetworkSettingsController(props);
   const navigation = useManagedEntityNavigation();
+  const [customButtonEditorOpen, setCustomButtonEditorOpen] = useState(false);
   const [freshEditorError, setFreshEditorError] = useState<string | null>(null);
   const scope = props.scope;
   const section = scope.initialSection;
@@ -145,7 +147,7 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
   const chatFields = createNetworkSettingsFieldAdapter<ChatSettingsFieldValues>(binding);
   const channelFields = createNetworkSettingsFieldAdapter<ChannelSettingsFieldValues>(binding);
   useManagedEntityLeaveGuard({
-    dirty: controller.dirty,
+    dirty: controller.dirty || customButtonEditorOpen,
     saving: controller.phase === 'apply',
     discardOnly: true,
     save: async () => false,
@@ -257,6 +259,7 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
             type="button"
             className="button button--accent"
             disabled={
+              customButtonEditorOpen ||
               controller.readOnly ||
               (!controller.changes.length && !controller.navigationAllowlist) ||
               Object.keys(controller.errors).length > 0
@@ -289,7 +292,15 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
       variant={presentation.variant}
       overlayClassName={presentation.overlayClassName}
       className={presentation.panelClassName + ' network-settings-editor'}
-      onClose={reviewVisible && !controller.readOnly ? controller.editPreview : props.onClose}
+      onClose={
+        customButtonEditorOpen
+          ? () => {
+              runNativeBackHandlers();
+            }
+          : reviewVisible && !controller.readOnly
+            ? controller.editPreview
+            : props.onClose
+      }
       confirmCloseWhen={false}
       footer={footer}
       keepFooterVisibleWhenKeyboardOpen
@@ -392,7 +403,10 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
             ) : (
               <div className="settings-section__collapse channel-post-signature is-open">
                 <div className="settings-section__collapse-inner channel-post-signature__panel-body">
-                  <ChannelPostSignatureFields fields={channelFields} />
+                  <ChannelPostSignatureFields
+                    fields={channelFields}
+                    onEditorOpen={setCustomButtonEditorOpen}
+                  />
                 </div>
               </div>
             )}
