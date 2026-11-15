@@ -204,8 +204,9 @@ export class RequiredSubscriptionExecutionGuardService {
         try {
           return await this.max.getExactMessageRow(proof.chatId, proof.messageId, options);
         } catch (error) {
-          // FLAG: This GET supplies notice evidence only. A 404 denies the notice;
-          // do not turn it into null, deletion proof, or authority for another effect.
+          // FLAG: This GET supplies notice evidence only. Unavailability is not absence;
+          // the common guard may consult only this original reason's verified receipt.
+          // Without it the owned handoff still finishes without a SEND or deletion.
           if (
             (extractHttpStatusCode(error) === 404 ||
               isMaxExactMessageLookupMissingIdError(error)) &&

@@ -11855,7 +11855,7 @@ describe('ModerationDeleteIntentService', () => {
         ).dueContinuation,
         'select',
       )
-      .mockResolvedValue({ ids: [{ id: 'tail' }], commit });
+      .mockResolvedValue({ ids: [{ id: 'tail' }], inspectedCount: 1, commit });
 
     await expect(service.sweepDueIntents()).resolves.toBe(4);
 
@@ -11897,7 +11897,7 @@ describe('ModerationDeleteIntentService', () => {
         ).dueContinuation,
         'select',
       )
-      .mockResolvedValue({ ids: [{ id: 'tail' }], commit });
+      .mockResolvedValue({ ids: [{ id: 'tail' }], inspectedCount: 1, commit });
     queue.getJob.mockImplementation(async (id) =>
       id === 'mdi-head'
         ? new Job(

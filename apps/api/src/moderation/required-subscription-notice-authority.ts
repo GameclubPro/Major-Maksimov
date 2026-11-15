@@ -143,7 +143,17 @@ export async function assertRequiredSubscriptionNoticeAuthority(
   if (!access || access.isAdmin === true || access.isOwner === true) return reject();
   if (access.userId !== proof.userId || access.isAdmin !== false || access.isOwner !== false)
     throw new Error('Required subscription notice author access unavailable');
-  const source = await dependencies.getSource();
+  let source: Record<string, unknown> | null;
+  let unavailable: RequiredSubscriptionNoticeSourceUnavailableError | undefined;
+  try {
+    source = await dependencies.getSource();
+  } catch (error) {
+    if (!(error instanceof RequiredSubscriptionNoticeSourceUnavailableError)) throw error;
+    // FLAG: Unavailable source evidence is never absence. Only this exact reason's
+    // independently committed DELETE receipt can supply the missing source authority.
+    unavailable = error;
+    source = null;
+  }
   if (source) {
     const message = new WebhookParser().parse({
       type: 'message_created',
@@ -169,6 +179,10 @@ export async function assertRequiredSubscriptionNoticeAuthority(
   } else {
     // FLAG: Queued notice handoff precedes DELETE. A missing source is authorized only by
     // this original reason's own receipt; another album member cannot lend source or time.
+    const rejectSource = (): never => {
+      if (unavailable) throw unavailable;
+      return reject();
+    };
     const intent = await prisma.moderationDeleteIntent.findUnique({
       where: { chatId_messageId: { chatId: proof.chatId, messageId: proof.messageId } },
       select: { id: true, status: true, subjectUserId: true, sourceMessageAt: true },
@@ -179,7 +193,7 @@ export async function assertRequiredSubscriptionNoticeAuthority(
       intent.subjectUserId !== proof.userId ||
       intent.sourceMessageAt?.getTime() !== proof.sourceAtMs
     )
-      return reject();
+      return rejectSource();
     const reason = await prisma.moderationDeleteIntentReason.findUnique({
       where: { intentId_reasonKey: { intentId: intent.id, reasonKey: proof.reasonKey } },
       select: { ruleCode: true, userId: true, metadata: true },
@@ -195,7 +209,7 @@ export async function assertRequiredSubscriptionNoticeAuthority(
       binding.requiredSubscriptionSourceAtMs !== proof.sourceAtMs ||
       binding.requiredSubscriptionDeadlineAtMs !== proof.deadlineAtMs
     )
-      return reject();
+      return rejectSource();
   }
   let missing = false;
   // FLAG: Bound target fanout, query every configured target freshly, and propagate unknown

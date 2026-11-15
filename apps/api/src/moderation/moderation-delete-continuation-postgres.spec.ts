@@ -257,6 +257,48 @@ describePostgres('PostgreSQL bounded DELETE continuation', () => {
     for (const probe of reasonProbes) expect(String(probe['Index Cond'])).toContain('intent_id');
   }
 
+  it('bounds recent recovery beyond retained history and advances past future, held and head rows', async () => {
+    await seedHistory(50_000, true);
+    const recent = new DeleteDueContinuation(['PENDING', 'RETRYABLE']);
+    for (let n = 1; n <= 12; n++)
+      await insert(`recent-${String(n).padStart(2, '0')}`, {
+        createdAt: new Date(now.getTime() - 60_000),
+      });
+    await client.query(
+      "UPDATE moderation_delete_intents SET next_attempt_at='2099-01-01' WHERE id BETWEEN 'recent-01' AND 'recent-08'",
+    );
+    await client.query('ANALYZE moderation_delete_intents');
+    await locker.query('BEGIN');
+    await locker.query("SELECT id FROM moderation_delete_intents WHERE id='recent-09' FOR UPDATE");
+    const selected: string[] = [];
+    const options = {
+      now,
+      limit: 2,
+      rolloutFilter: rollout(),
+      headIds: new Set(['recent-10']),
+      minimumCreatedAt: new Date(now.getTime() - 10 * 60_000),
+    };
+    for (let tick = 0; tick < 12; tick++) {
+      const page = await recent.select(prisma, options);
+      expect(rawRows.length).toBeLessThanOrEqual(2);
+      expect(rawRows.every((row) => row.id.startsWith('recent-'))).toBe(true);
+      selected.push(...page.ids.map((row) => row.id));
+      if (tick === 0 || tick === 11) await assertBoundedPlan(2, tick > 0);
+      page.commit();
+    }
+    expect(selected).toEqual(['recent-11', 'recent-12']);
+    const last = await client.query(
+      "SELECT status, lease_token, retry_until_at FROM moderation_delete_intents WHERE id='recent-12'",
+    );
+    expect(last.rows[0]).toMatchObject({ status: 'PENDING', lease_token: null });
+    expect(last.rows[0].retry_until_at.toISOString()).toBe('2099-01-01T00:00:00.000Z');
+    (await recent.select(prisma, options)).commit();
+    await client.query(
+      "UPDATE moderation_delete_intents SET next_attempt_at='2026-01-01' WHERE id='recent-01'",
+    );
+    expect((await recent.select(prisma, options)).ids).toEqual([{ id: 'recent-01' }]);
+  });
+
   it.each([1, 100])(
     'bounds raw, PK and reason work before skew/locks with budget %i',
     async (limit) => {

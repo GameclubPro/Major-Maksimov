@@ -92,7 +92,10 @@ type RawCandidate = {
   eligible: boolean;
 };
 
+export const DELETE_RECENT_RECOVERY_WINDOW_MS = 10 * 60_000;
+
 export class DeleteDueContinuation {
+  constructor(private readonly statuses: readonly ContinuationStatus[] = CONTINUATION_STATUSES) {}
   private readonly cursors = new Map<ContinuationStatus, Cursor>();
   private firstLane = 0;
 
@@ -103,19 +106,25 @@ export class DeleteDueContinuation {
       limit: number;
       rolloutFilter: Prisma.Sql;
       headIds: ReadonlySet<string>;
+      minimumCreatedAt?: Date;
     },
-  ): Promise<{ ids: Array<{ id: string }>; commit(): void }> {
-    const { now, limit, rolloutFilter, headIds } = options;
+  ): Promise<{ ids: Array<{ id: string }>; inspectedCount: number; commit(): void }> {
+    const { now, limit, rolloutFilter, headIds, minimumCreatedAt } = options;
     if (!Number.isSafeInteger(limit) || limit < 1)
       throw new Error('DELETE continuation requires a positive bounded budget');
-    const lanes = CONTINUATION_STATUSES.map((status, index) => {
-      const offset =
-        (index - this.firstLane + CONTINUATION_STATUSES.length) % CONTINUATION_STATUSES.length;
-      const quota =
-        Math.floor(limit / CONTINUATION_STATUSES.length) +
-        Number(offset < limit % CONTINUATION_STATUSES.length);
-      return { status, quota, cursor: this.cursors.get(status) ?? { cutoff: now } };
-    }).filter((lane) => lane.quota > 0);
+    const lanes = this.statuses
+      .map((status, index) => {
+        const offset = (index - this.firstLane + this.statuses.length) % this.statuses.length;
+        const quota =
+          Math.floor(limit / this.statuses.length) + Number(offset < limit % this.statuses.length);
+        const saved = this.cursors.get(status);
+        const cursor =
+          saved && (!minimumCreatedAt || saved.cutoff >= minimumCreatedAt)
+            ? saved
+            : { cutoff: now };
+        return { status, quota, cursor };
+      })
+      .filter((lane) => lane.quota > 0);
 
     // FLAG: Raw status/creation prefixes are bounded BEFORE eligibility, reason
     // probes and SKIP LOCKED. The existing (status, created_at, id) index supplies
@@ -126,6 +135,7 @@ export class DeleteDueContinuation {
        FROM "moderation_delete_intents" source
        WHERE source."status" = CAST(${status} AS "ModerationDeleteIntentStatus")
          AND source."created_at" <= ${cursor.cutoff}
+         ${minimumCreatedAt ? Prisma.sql`AND source."created_at" >= ${minimumCreatedAt}` : Prisma.empty}
          ${
            cursor.after
              ? Prisma.sql`
@@ -160,6 +170,7 @@ export class DeleteDueContinuation {
     let committed = false;
     return {
       ids,
+      inspectedCount: rows.length,
       commit: () => {
         if (committed) return;
         committed = true;
@@ -179,7 +190,7 @@ export class DeleteDueContinuation {
             this.cursors.delete(status);
           }
         }
-        this.firstLane = (this.firstLane + 1) % CONTINUATION_STATUSES.length;
+        this.firstLane = (this.firstLane + 1) % this.statuses.length;
       },
     };
   }
