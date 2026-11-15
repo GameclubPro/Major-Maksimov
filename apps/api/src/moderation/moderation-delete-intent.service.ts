@@ -119,6 +119,7 @@ import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moder
 import {
   MODERATION_DELETE_INTENT_QUEUE,
   handoffModerationDeleteSweepJobs,
+  enqueueModerationDeleteWakeup,
   type ModerationDeleteIntentJob,
 } from './moderation-delete-intent.queue';
 import {
@@ -7811,13 +7812,25 @@ export class ModerationDeleteIntentService {
     priority = DELETE_QUEUE_PRIORITY_BACKGROUND,
   ): Promise<void> {
     if (intent.retentionOwned || (await this.isAbandonedIntentWithoutReceipt(intent))) return;
-    if (this.classifyIntentWakeupEligibility(intent) !== 'eligible') {
-      return;
-    }
+    const eligibility = this.classifyIntentWakeupEligibility(intent);
+    const delay = Math.max(intent.executeAt.getTime(), intent.nextAttemptAt.getTime()) - Date.now();
+    // FLAG: Only pristine, near-term producer work gets an early Redis wakeup.
+    // Retried/uncertain history keeps SQL recovery; no deadline or effect authority is renewed.
+    const freshScheduled =
+      eligibility === 'not_due' &&
+      intent.status === 'PENDING' &&
+      intent.attemptCount === 0 &&
+      !intent.leaseToken &&
+      !intent.leaseExpiresAt &&
+      !this.hasRemoteSuccessMarker(intent) &&
+      !this.hasDeleteDispatchMarker(intent) &&
+      delay <= 60 * 60_000;
+    if (eligibility !== 'eligible' && !freshScheduled) return;
     try {
       await this.enqueueIntentJob(
         intent.id,
         intent.reportHistoryOnly ? DELETE_QUEUE_PRIORITY_BACKGROUND : priority,
+        Math.max(0, delay),
       );
     } catch (error: unknown) {
       this.logger.warn(
@@ -7862,32 +7875,9 @@ export class ModerationDeleteIntentService {
   private async enqueueIntentJob(
     intentId: string,
     priority = DELETE_QUEUE_PRIORITY_BACKGROUND,
+    delay = 0,
   ): Promise<void> {
-    const job = await this.queue.add(
-      'execute-moderation-delete-intent',
-      { intentId },
-      {
-        jobId: `mdi-${intentId}`,
-        priority,
-        attempts: 1,
-        removeOnComplete: true,
-        removeOnFail: true,
-      },
-    );
-    if (
-      job &&
-      priority === DELETE_QUEUE_PRIORITY_INTERACTIVE &&
-      job.opts.priority !== DELETE_QUEUE_PRIORITY_INTERACTIVE
-    ) {
-      try {
-        await job.changePriority({ priority: DELETE_QUEUE_PRIORITY_INTERACTIVE });
-      } catch (error: unknown) {
-        this.logger.warn(
-          { intentId, err: this.errorMessage(error) },
-          'Failed to promote an existing moderation delete intent job priority',
-        );
-      }
-    }
+    await enqueueModerationDeleteWakeup(this.queue, intentId, priority, delay);
   }
 
   private async loadRequiredIntent(intentId: string): Promise<IntentRow> {

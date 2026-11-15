@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
 import Redis from 'ioredis';
 import {
+  enqueueModerationDeleteWakeup,
   handoffModerationDeleteSweepJob,
   handoffModerationDeleteSweepJobs,
   MODERATION_DELETE_INTENT_QUEUE,
@@ -103,6 +104,118 @@ function deferred() {
     expect(await inspector.xlen(queue.toKey('events'))).toBe(eventCount);
     expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 1 });
   });
+
+  it('promotes the persisted priority even when duplicate add reports the requested priority', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'urgent', 10);
+    const duplicate = await queue.add(
+      'execute-moderation-delete-intent',
+      { intentId: 'urgent' },
+      {
+        jobId: 'mdi-urgent',
+        priority: 1,
+      },
+    );
+    expect(duplicate.opts.priority).toBe(1);
+    expect((await queue.getJob('mdi-urgent'))!.priority).toBe(10);
+    await enqueueModerationDeleteWakeup(queue, 'urgent', 1);
+    expect((await queue.getJob('mdi-urgent'))!.priority).toBe(1);
+    await enqueueModerationDeleteWakeup(queue, 'urgent', 10);
+    expect((await queue.getJob('mdi-urgent'))!.priority).toBe(1);
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 1 });
+  });
+
+  it('retains the earlier delayed wakeup and advances it only after SQL reports due work', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'scheduled', 1, 60_000);
+    const original = (await queue.getJob('mdi-scheduled'))!;
+    await enqueueModerationDeleteWakeup(queue, 'scheduled', 10, 120_000);
+    const preserved = (await queue.getJob('mdi-scheduled'))!;
+    expect(preserved.timestamp).toBe(original.timestamp);
+    expect(preserved.delay).toBe(60_000);
+    expect(preserved.priority).toBe(1);
+    expect(await preserved.getState()).toBe('delayed');
+    await expect(handoffModerationDeleteSweepJobs(queue, ['scheduled'], 10)).resolves.toEqual([
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true, observationErrors: 0 } },
+    ]);
+    expect(await preserved.getState()).toBe('prioritized');
+    expect((await queue.getJob('mdi-scheduled'))!.priority).toBe(1);
+  });
+
+  it('wakes a newly urgent reason immediately without creating a second job', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'urgent-reason', 10, 60_000);
+    await enqueueModerationDeleteWakeup(queue, 'urgent-reason', 1);
+    const persisted = (await queue.getJob('mdi-urgent-reason'))!;
+    expect(persisted.priority).toBe(1);
+    expect(await persisted.getState()).toBe('prioritized');
+    expect(await queue.getJobCounts('delayed', 'prioritized')).toMatchObject({
+      delayed: 0,
+      prioritized: 1,
+    });
+  });
+
+  it('preserves an active job when delayed promotion races the SQL handoff', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'promotion-race', 1, 60_000);
+    const started = deferred();
+    const release = deferred();
+    let starts = 0;
+    await interceptNextBatchRead(async (results) => {
+      await (await queue.getJob('mdi-promotion-race'))!.promote();
+      worker = new Worker<ModerationDeleteIntentJob>(
+        MODERATION_DELETE_INTENT_QUEUE,
+        async () => {
+          starts++;
+          started.resolve();
+          await release.promise;
+        },
+        { connection, prefix },
+      );
+      await started.promise;
+      return results;
+    });
+    try {
+      const results = await handoffModerationDeleteSweepJobs(queue, ['promotion-race'], 10);
+      expect(results[0]).toMatchObject({ status: 'fulfilled', value: { reused: true } });
+      expect(await (await queue.getJob('mdi-promotion-race'))!.getState()).toBe('active');
+      expect(starts).toBe(1);
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it('serves a fresh scheduled wakeup before 420000 retained jobs and then progresses background work', async () => {
+    for (let offset = 0; offset < 420_000; offset += 1000) {
+      await queue.addBulk(
+        Array.from({ length: 1000 }, (_, index) => {
+          const intentId = `retained-${offset + index}`;
+          return {
+            name: 'execute-moderation-delete-intent',
+            data: { intentId },
+            opts: { jobId: `mdi-${intentId}`, priority: 10, removeOnComplete: true },
+          };
+        }),
+      );
+    }
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 420_000 });
+    await enqueueModerationDeleteWakeup(queue, 'fresh', 1, 200);
+    const scheduled = (await queue.getJob('mdi-fresh'))!;
+    expect(await scheduled.getState()).toBe('delayed');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const completed = deferred();
+    const handled: string[] = [];
+    let completions = 0;
+    worker = new Worker<ModerationDeleteIntentJob>(
+      MODERATION_DELETE_INTENT_QUEUE,
+      async (job) => {
+        handled.push(job.data.intentId);
+        if (handled.length === 2) await worker!.pause(true);
+      },
+      { connection, prefix, concurrency: 1 },
+    );
+    worker.on('completed', () => {
+      if (++completions === 2) completed.resolve();
+    });
+    await completed.promise;
+    expect(handled).toEqual(['fresh', 'retained-0']);
+  }, 120_000);
 
   it('keeps a different persisted token uncertain when concurrent missing-job observations race', async () => {
     const bothObservedMissing = deferred();

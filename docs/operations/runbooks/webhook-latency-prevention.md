@@ -275,6 +275,14 @@ retention-owned and currently leased wakeups need no reason inventory or MAX cal
 recovery owns subsequent eligibility. Expired unattempted wakeups still load current reasons and
 check rollout/source holds before the original conditional expiry writer. Its no-op is not an
 expiry receipt. Executable work follows the ordinary lease and authorization path. Optional
+Fresh unattempted PENDING producer intents within one hour retain a delayed deterministic Redis
+wakeup, preserving the maximum of their original execute/retry times. Leased, retained, observed,
+expired and mutation-marked history remains excluded. Duplicate insertion must inspect the persisted
+job priority; BullMQ's returned caller options do not describe an existing job. Never postpone an
+existing wakeup or downgrade it. The bounded due sweep may promote an existing delayed job when SQL
+has an earlier due reason; concurrent promotion/completion never permits active-job removal or effect
+replay. Earlier future reasons still rely on this due repair. Native Redis tests cover persisted
+priority, promotion races and fresh-then-background progress behind 420,000 retained jobs.
 `deleteDueSweep.wakeups` counters distinguish skipped, attempted and expiry-checked wakeups,
 errors and processing time; neither an attempted wakeup nor a completed queue job proves deletion.
 Old/malformed telemetry remains unknown. Validate the exact lookup against representative retained

@@ -1,4 +1,4 @@
-import { Job, type JobJsonRaw, type Queue } from 'bullmq';
+import { ErrorCode, Job, type JobJsonRaw, type Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 
 export const MODERATION_DELETE_INTENT_QUEUE = 'moderation-delete-intents';
@@ -9,7 +9,7 @@ export type ModerationDeleteIntentJob = {
 };
 
 type SweepQueue = Pick<Queue<ModerationDeleteIntentJob>, 'getJob' | 'add'>;
-type SweepJobObservation = 'existing' | 'missing' | 'error';
+type SweepJobObservation = Job<ModerationDeleteIntentJob> | 'missing' | 'error';
 const SWEEP_OBSERVATION_BATCH_SIZE = 100;
 
 export type ModerationDeleteSweepHandoff = {
@@ -26,7 +26,7 @@ export async function handoffModerationDeleteSweepJob(
   const jobId = `mdi-${intentId}`;
   let observation: SweepJobObservation;
   try {
-    observation = (await queue.getJob(jobId)) ? 'existing' : 'missing';
+    observation = (await queue.getJob(jobId)) ?? 'missing';
   } catch {
     observation = 'error';
   }
@@ -97,8 +97,7 @@ async function observeModerationDeleteSweepJobs(
     try {
       // FLAG: Match BullMQ getJob's public decoder instead of trusting key presence.
       // Pipeline observations live only for this sweep; the next SQL pass repairs a vanished job.
-      Job.fromJSON<ModerationDeleteIntentJob>(queue, encoded, jobId);
-      return 'existing';
+      return Job.fromJSON<ModerationDeleteIntentJob>(queue, encoded, jobId);
     } catch {
       return 'error';
     }
@@ -113,9 +112,11 @@ async function handoffObservedModerationDeleteSweepJob(
 ): Promise<ModerationDeleteSweepHandoff> {
   const jobId = `mdi-${intentId}`;
   const observationErrors = observation === 'error' ? 1 : 0;
-  if (observation === 'existing') {
-    // FLAG: Deterministic add would reuse this same job without changing it.
-    // If it disappears now, the next DB sweep repairs the wakeup; SQL still owns execution.
+  if (typeof observation !== 'string') {
+    // FLAG: A due SQL reason can precede a previously scheduled Redis wakeup.
+    // Only advance its wakeup; the worker still reloads SQL and all effect guards.
+    await promoteDueWakeup(observation);
+    // If it disappears now, the next DB sweep repairs it; SQL still owns execution.
     return { insertion: 'existing', reused: true, observationErrors };
   }
   // FLAG: An observational failure must not suppress the original deterministic handoff.
@@ -140,5 +141,41 @@ async function handoffObservedModerationDeleteSweepJob(
     // FLAG: Redis already acknowledged add. A failed observation is uncertainty,
     // not a failed handoff and never permission to retry an external effect.
     return { insertion: 'unknown', reused: false, observationErrors: observationErrors + 1 };
+  }
+}
+
+/** Queue hints only: the worker must re-read the original SQL schedule and authority. */
+export async function enqueueModerationDeleteWakeup(
+  queue: SweepQueue,
+  intentId: string,
+  priority: number,
+  delay = 0,
+): Promise<void> {
+  const jobId = `mdi-${intentId}`;
+  await queue.add(
+    'execute-moderation-delete-intent',
+    { intentId },
+    { jobId, priority, delay, attempts: 1, removeOnComplete: true, removeOnFail: true },
+  );
+  // FLAG: Duplicate add returns requested options, not persisted priority/delay.
+  // Never postpone an existing wakeup or downgrade its priority. A future earlier
+  // SQL reason is recovered by the bounded due sweep once that reason is due.
+  const persisted = await queue.getJob(jobId);
+  if (!persisted) return;
+  if (priority === 1 && persisted.priority > priority) {
+    await persisted.changePriority({ priority });
+  }
+  if (delay === 0) await promoteDueWakeup(persisted);
+}
+
+async function promoteDueWakeup(job: Job<ModerationDeleteIntentJob>): Promise<void> {
+  if (!(job.delay > 0)) return;
+  try {
+    await job.promote();
+  } catch (error: unknown) {
+    // FLAG: A concurrent promotion/completion may consume the delayed membership.
+    // Never remove/recreate an active job; a missing job is repaired next SQL sweep.
+    if (error instanceof Error && 'code' in error && error.code === ErrorCode.JobNotInState) return;
+    throw error;
   }
 }
