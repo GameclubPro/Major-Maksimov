@@ -624,3 +624,13 @@ test('shared statistics native coverage runs against required stores in the bloc
     assert.ok(new RegExp(selector, 'u').test(path), `Missing native marketplace suite: ${path}`);
   assert.ok(jobs.required.needs.includes('postgres-races'));
 });
+
+test('release hooks and Lastik recovery retain their compatible CI toolchains', () => {
+  const jobs = parse(workflow).jobs;
+  assert.equal(jobs.static['runs-on'], 'ubuntu-24.04');
+  assert.equal(jobs.eraser['runs-on'], 'ubuntu-24.04');
+  assert.equal(jobs.eraser.services.postgres.image, 'postgres:16-alpine');
+  assert.ok(
+    jobs.eraser.steps.some((step) => step.run === 'npm run test:stores --workspace @maxim/eraser'),
+  );
+});
