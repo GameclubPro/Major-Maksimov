@@ -1,6 +1,10 @@
 import { DELETE_SWEEP_HISTORICAL_WINDOW } from './moderation-delete-sweep-admission';
 import { settleBotAutoDeleteReceipt } from './moderation-delete-auto-receipt';
-import { buildDeleteDueHeadQuery, DeleteDueContinuation } from './moderation-delete-due-selection';
+import {
+  buildDeleteDueHeadQuery,
+  DeleteDueContinuation,
+  DELETE_RECENT_RECOVERY_WINDOW_MS,
+} from './moderation-delete-due-selection';
 import {
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE,
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE,
@@ -793,6 +797,7 @@ export class ModerationDeleteIntentService {
   private readonly leaseMs: number;
   private readonly sweepBatchSize: number;
   private readonly dueContinuation = new DeleteDueContinuation();
+  private readonly recentDueRecovery = new DeleteDueContinuation(['PENDING', 'RETRYABLE']);
   private readonly recoveryBatchSize: number;
   private readonly deleteTimeoutMs: number;
   private readonly retentionDays: number;
@@ -810,6 +815,7 @@ export class ModerationDeleteIntentService {
     handoffErrorCount: 0,
     handoffInsertionUnknownCount: 0,
     historicalAdmission: { deferredCount: 0 },
+    autoDeleteReceipts: { freshSettled: 0, savedSettled: 0, refused: 0, errors: 0 },
     handoffOutcomes: {
       insertedCount: 0,
       existingCount: 0,
@@ -2683,9 +2689,19 @@ export class ModerationDeleteIntentService {
           await settleBotAutoDeleteReceipt(this.prisma, intent, leaseToken, (tx) =>
             this.materializeModerationEventsForIntent(tx, intent.id),
           )
-        )
+        ) {
+          this.dueSweepMetrics.autoDeleteReceipts.savedSettled = addDueSweepCount(
+            this.dueSweepMetrics.autoDeleteReceipts.savedSettled,
+          );
           return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+        }
+        this.dueSweepMetrics.autoDeleteReceipts.refused = addDueSweepCount(
+          this.dueSweepMetrics.autoDeleteReceipts.refused,
+        );
       } catch (error: unknown) {
+        this.dueSweepMetrics.autoDeleteReceipts.errors = addDueSweepCount(
+          this.dueSweepMetrics.autoDeleteReceipts.errors,
+        );
         return this.finishPersistenceFailure(
           intent,
           leaseToken,
@@ -3626,21 +3642,50 @@ export class ModerationDeleteIntentService {
       // Redis reuse frees add attempts for continuation; rejected/unknown handoffs
       // consume their original budget. At most 2B observations and B adds per tick.
       if (dueIntents.length === this.sweepBatchSize && headHandoff.reused > 0) {
-        const continuation = await this.measureDueSweepStage(
-          'select',
-          () =>
-            this.dueContinuation.select(this.prisma, {
-              now: new Date(),
-              limit: headHandoff.reused,
-              rolloutFilter: this.buildSweepRolloutFilter(),
-              headIds: new Set(dueIntents.map((intent) => intent.id)),
-            }),
-          (page) => page.ids.length,
-        );
-        selectedCount += continuation.ids.length;
-        metrics.selectedCount = addDueSweepCount(metrics.selectedCount, continuation.ids.length);
-        if (continuation.ids.length) await handoff(continuation.ids, true);
-        continuation.commit();
+        const now = new Date();
+        const recentBudget = Math.floor((headHandoff.reused + ((metrics.calls + 1) % 2)) / 2);
+        const headIds = new Set(dueIntents.map((intent) => intent.id));
+        let remaining = headHandoff.reused;
+        // FLAG: Share only proven-reuse credits. A bounded recent creation window
+        // repairs fresh SQL-only work behind an older same-status head; history keeps
+        // half the credits (alternating at B=1), its cursor, and its admission cap.
+        for (const page of [
+          {
+            selector: this.recentDueRecovery,
+            limit: recentBudget,
+            historical: false,
+            minimumCreatedAt: new Date(now.getTime() - DELETE_RECENT_RECOVERY_WINDOW_MS),
+          },
+          {
+            selector: this.dueContinuation,
+            limit: headHandoff.reused - recentBudget,
+            historical: true,
+            minimumCreatedAt: undefined,
+          },
+        ]) {
+          const limit = page.historical ? remaining : page.limit;
+          if (!limit) continue;
+          const continuation = await this.measureDueSweepStage(
+            'select',
+            () =>
+              page.selector.select(this.prisma, {
+                now,
+                limit,
+                rolloutFilter: this.buildSweepRolloutFilter(),
+                headIds,
+                minimumCreatedAt: page.minimumCreatedAt,
+              }),
+            (result) => result.ids.length,
+          );
+          // FLAG: Only unused raw-prefix capacity may return to history. Ineligible,
+          // held and head rows consume their observations even without Redis work.
+          remaining -= continuation.inspectedCount;
+          selectedCount += continuation.ids.length;
+          metrics.selectedCount = addDueSweepCount(metrics.selectedCount, continuation.ids.length);
+          if (continuation.ids.length) await handoff(continuation.ids, page.historical);
+          for (const intent of continuation.ids) headIds.add(intent.id);
+          continuation.commit();
+        }
       }
       metrics.completed = addDueSweepCount(metrics.completed);
       // FLAG: Preserve the historical selected-row return contract. Observed existing
@@ -3657,6 +3702,7 @@ export class ModerationDeleteIntentService {
       ...this.dueSweepMetrics,
       wakeups: { ...this.dueSweepMetrics.wakeups },
       historicalAdmission: { ...this.dueSweepMetrics.historicalAdmission },
+      autoDeleteReceipts: { ...this.dueSweepMetrics.autoDeleteReceipts },
       handoffOutcomes: { ...this.dueSweepMetrics.handoffOutcomes },
       stages: Object.fromEntries(
         STORAGE_DELETE_DUE_SWEEP_STAGES.map((stage) => {
@@ -7184,8 +7230,15 @@ export class ModerationDeleteIntentService {
         await settleBotAutoDeleteReceipt(this.prisma, current, leaseToken, (tx) =>
           this.materializeModerationEventsForIntent(tx, intent.id),
         )
-      )
+      ) {
+        this.dueSweepMetrics.autoDeleteReceipts.freshSettled = addDueSweepCount(
+          this.dueSweepMetrics.autoDeleteReceipts.freshSettled,
+        );
         return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+      }
+      this.dueSweepMetrics.autoDeleteReceipts.refused = addDueSweepCount(
+        this.dueSweepMetrics.autoDeleteReceipts.refused,
+      );
       return this.finishPersistenceFailure(
         current,
         leaseToken,
@@ -7193,6 +7246,9 @@ export class ModerationDeleteIntentService {
         new Error('Receipt identity or reasons changed'),
       );
     } catch (error: unknown) {
+      this.dueSweepMetrics.autoDeleteReceipts.errors = addDueSweepCount(
+        this.dueSweepMetrics.autoDeleteReceipts.errors,
+      );
       return this.persistRemoteSuccessFallback(intent, leaseToken, botId, error);
     }
   }

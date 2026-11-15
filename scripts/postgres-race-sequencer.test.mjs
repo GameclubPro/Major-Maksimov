@@ -62,9 +62,9 @@ test('the public eight-way native selection separates the three heavy suites', a
   );
 });
 
-test('all 168 native suites execute exactly once with only the two approved ownership changes', async () => {
-  assert.equal(nativePaths.length, 168);
-  assert.equal(new Set(nativePaths).size, 168);
+test('all 169 native suites execute exactly once with only the two approved ownership changes', async () => {
+  assert.equal(nativePaths.length, 169);
+  assert.equal(new Set(nativePaths).size, 169);
   assert.ok(nativePaths.includes('src/admin/suggestion-review-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/moderation/moderation-delete-continuation-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/moderation/moderation-delete-auto-receipt-postgres.spec.ts'));
@@ -121,6 +121,7 @@ test('all 168 native suites execute exactly once with only the two approved owne
   assert.ok(nativePaths.includes('src/admin/vk-auto-delete-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/max/max-immediate-send-ledger-postgres.spec.ts'));
   assert.ok(nativePaths.includes('src/max/max-action-send-capacity-postgres.spec.ts'));
+  assert.ok(nativePaths.includes('src/max/max-required-subscription-notice-postgres.spec.ts'));
   const tests = makeTests();
   const baseline = await partitions(DefaultSequencer, tests);
   const selected = await partitions(SelectedSequencer, tests);
