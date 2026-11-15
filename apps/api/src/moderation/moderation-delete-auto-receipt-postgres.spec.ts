@@ -171,6 +171,12 @@ integration('Documented bot auto-delete receipts with the real MAX client', () =
     });
     expect(current.remoteDeleteSucceededBotId).toBe(f.botId);
     expect(current.absenceVerifiedAt).toBeNull();
+    expect(f.service.getDueSweepRuntimeSnapshot().autoDeleteReceipts).toEqual({
+      freshSettled: 1,
+      savedSettled: 0,
+      refused: 0,
+      errors: 0,
+    });
   });
 
   it('settles an exact acknowledged DELETE without the impossible absence read or a second DELETE', async () => {
@@ -191,6 +197,12 @@ integration('Documented bot auto-delete receipts with the real MAX client', () =
     expect(actual.remoteDeleteSucceededAt).toEqual(f.intent.remoteDeleteSucceededAt);
     expect(actual.retryUntilAt).toEqual(f.intent.retryUntilAt);
     expect(actual.leaseToken).toBeNull();
+    expect(f.service.getDueSweepRuntimeSnapshot().autoDeleteReceipts).toEqual({
+      freshSettled: 0,
+      savedSettled: 1,
+      refused: 0,
+      errors: 0,
+    });
   });
   it.each([
     'missing-time',

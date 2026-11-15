@@ -263,6 +263,12 @@ function sanitizeDeleteDueSweepSnapshot(value: unknown) {
   return {
     ...counters,
     historicalAdmission: checkedNumbers(source.historicalAdmission, ['deferredCount']),
+    autoDeleteReceipts: checkedNumbers(source.autoDeleteReceipts, [
+      'freshSettled',
+      'savedSettled',
+      'refused',
+      'errors',
+    ]),
     handoffOutcomes: checkedNumbers(source.handoffOutcomes, DELETE_HANDOFF_OUTCOME_FIELDS),
     ...(source.wakeups === undefined
       ? {}

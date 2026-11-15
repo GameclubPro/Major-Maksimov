@@ -264,9 +264,13 @@ CI. Paths in the table are relative to `apps/api/src` except the explicit `infra
 rows affected by a change; do not rerun unrelated suites for a documentation-only edit.
 
 DELETE recovery retains the entire existing due head of size `B` on every sweep. When that
-head is full, confirmed Redis job reuse funds one additional continuation page: at most `B`
-raw keys across five status lanes, sought through `(status, created_at, id)` before current
-eligibility and exact-key lock checks. The fixed creation horizon forces each lane to wrap;
+head is full, confirmed Redis job reuse funds at most `B` additional raw keys. Half of that
+budget repairs PENDING/RETRYABLE rows created in the last ten minutes, so an old same-status
+head cannot hide a lost fresh enqueue. The other half traverses all five historical status
+lanes. A one-key budget alternates between the two; unused recent raw capacity returns to
+history. Both use `(status, created_at, id)` before current eligibility and exact-key lock checks.
+The recent creation window is a scheduling preference, never a renewed effect deadline;
+older obligations remain in the original head and historical traversal. The fixed creation horizon forces each lane to wrap;
 small budgets rotate between lanes. No SQL state, deadline, lease or effect authority changes.
 Per sweep, pre-observations are at most `2B`, insertion-proof reads at most `B`, and attempted
 adds at most `B`, including failed or uncertain adds. Selected-row metrics/return values may
@@ -312,7 +316,8 @@ Historical continuation admission targets 1,000 unfinished wakeups, counting wai
 prioritized and delayed work plus shared in-flight reservations. One bounded Redis script reserves
 up to 100 missing jobs per batch using constant-time queue counts. The original bounded,
 status-interleaved SQL head bypasses this target to repair lost enqueues and vanished jobs, at
-priority 2: after direct interactive priority 1 and before historical priority 10. Existing jobs
+priority 2: after direct interactive priority 1 and before historical priority 10. Bounded recent
+recovery uses the same recovery priority and bypass, within the shared add budget. Existing jobs
 keep their priority and still get due promotion. Fresh producer enqueue also bypasses the target.
 Head repair and continuation together retain at most B add attempts and 2B observations per tick;
 confirmed reuse alone funds continuation. `deferred` neither confirms
@@ -324,7 +329,19 @@ on total queue size and does not remove any retained work. Optional
 `deleteDueSweep.historicalAdmission.deferredCount` reports this backpressure; absent old telemetry
 is unknown. Native tests cover concurrent reconcilers, outage, permit expiry, paused/delayed repair
 and both direct fresh progress and SQL recovery with 600,000 retained jobs. Observe useful SQL completion independently of
-queue retirement and handoff counts.
+queue retirement and handoff counts. Optional `deleteDueSweep.autoDeleteReceipts` reports
+`freshSettled` and `savedSettled` only after committed exact-receipt settlement, separately from
+`refused` and processing `errors`; missing old telemetry remains unknown.
+
+Queued required-subscription notices can use their original reason's committed, verified DELETE
+receipt when their exact source GET returns 404 or a typed missing-ID result. This is independent
+receipt evidence, not a claim of message absence. Exact source/user/time/policy/reason binding,
+current author membership, target subscriptions, immunity, settings and the original deadline
+remain required. Unconfirmed/foreign receipts, source 503, member 404 and unknown SEND effects
+retain their existing failure and fencing behavior. The original handoff still finishes without
+sending when unavailable source evidence has no matching receipt. Native coverage uses the real
+MAX client, PostgreSQL ledger and Redis limiter in
+`max/max-required-subscription-notice-postgres.spec.ts`.
 
 | Change                                      | Required evidence                                                                                                                                                                                        | Existing regression                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

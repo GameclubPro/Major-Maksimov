@@ -369,6 +369,37 @@ function transportFixture() {
 }
 
 describe('required-subscription queued SEND boundary', () => {
+  it('sends after an exact source HTTP 404 only with its own verified DELETE receipt', async () => {
+    const s = transportFixture();
+    s.sourceLookup.mockRestore();
+    s.http.request.mockImplementation((request) =>
+      request.method === 'get'
+        ? throwError(() => ({ response: { status: 404, data: { code: 'message.not.found' } } }))
+        : of({
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config: { headers: new AxiosHeaders() },
+            data: { message: { body: { mid: 'notice-sent' } } },
+          }),
+    );
+    try {
+      await expect(s.client.executeActionJob(s.action)).resolves.toMatchObject({
+        messageId: 'notice-sent',
+      });
+      expect(s.prisma.moderationDeleteIntentReason.findUnique).toHaveBeenCalledTimes(1);
+      expect(
+        s.http.request.mock.calls.filter(([request]) => request.method === 'post'),
+      ).toHaveLength(1);
+      expect(s.http.request.mock.calls.some(([request]) => request.method === 'delete')).toBe(
+        false,
+      );
+      expect(s.ledger.completeSendDispatch).toHaveBeenCalledTimes(1);
+    } finally {
+      await s.client.onModuleDestroy();
+    }
+  });
+
   it.each([403, 404, 429, 503, 'timeout'] as const)(
     'refuses a source lookup %s before SEND while counting only transport pressure',
     async (failure) => {
@@ -378,6 +409,7 @@ describe('required-subscription queued SEND boundary', () => {
           ? Object.assign(new Error('source lookup timed out'), { code: 'ETIMEDOUT' })
           : { response: { status: failure, data: { code: 'not.found' } } };
       s.sourceLookup.mockRestore();
+      if (failure === 404) s.intent.status = 'AMBIGUOUS';
       s.http.request.mockReturnValue(throwError(() => error));
       jest.spyOn(s.client as any, 'registerCriticalFailure').mockResolvedValue(undefined);
       try {
@@ -386,7 +418,9 @@ describe('required-subscription queued SEND boundary', () => {
         expect(s.http.request.mock.calls.every(([request]) => request.method === 'get')).toBe(true);
         expect(s.ledger.releaseSendDispatch).toHaveBeenCalledTimes(1);
         expect(s.ledger.completeSendDispatch).not.toHaveBeenCalled();
-        expect(s.prisma.moderationDeleteIntent.findUnique).not.toHaveBeenCalled();
+        expect(s.prisma.moderationDeleteIntent.findUnique).toHaveBeenCalledTimes(
+          failure === 404 ? 1 : 0,
+        );
         expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
         expect(s.health.recordSuccessForLane).not.toHaveBeenCalled();
         if (failure === 403 || failure === 404) {

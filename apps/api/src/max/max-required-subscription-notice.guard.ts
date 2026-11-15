@@ -1,12 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { UnrecoverableError } from 'bullmq';
+import { extractHttpStatusCode } from '../common/http-error.util';
+import { isMaxExactMessageLookupMissingIdError } from './max-exact-message-lookup.error';
+import { wasMaxMemberMutationAttempted } from './max-member-error.util';
+import {
+  isMaxMutationOutcomeAmbiguous,
+  wasMaxMessageSendAttempted,
+} from './max-mutation-outcome.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { ParticipantModerationImmunityService } from '../moderation/participant-moderation-immunity.service';
 import {
   assertRequiredSubscriptionNoticeAuthority,
   readRequiredSubscriptionNoticeAuthority,
   RequiredSubscriptionNoticeRejectedError,
+  RequiredSubscriptionNoticeSourceUnavailableError,
 } from '../moderation/required-subscription-notice-authority';
 import type { ModerationRuleMemberAccess } from '../moderation/moderation-rule-sanction-authority';
 import { MaxBotRegistryService } from './max-bot-registry.service';
@@ -93,13 +101,31 @@ export class MaxRequiredSubscriptionNoticeGuardService {
             botId: selectedBotId,
             timeoutMs,
           }),
-        getSource: () =>
-          readers.getSource({
-            chatId: proof.chatId,
-            messageId: proof.messageId,
-            botId: selectedBotId,
-            timeoutMs,
-          }),
+        getSource: async () => {
+          try {
+            return await readers.getSource({
+              chatId: proof.chatId,
+              messageId: proof.messageId,
+              botId: selectedBotId,
+              timeoutMs,
+            });
+          } catch (error) {
+            // FLAG: Only this exact source GET can nominate receipt fallback. Member
+            // reads, access denial, transport failures and unknown mutations cannot.
+            if (
+              (extractHttpStatusCode(error) === 404 ||
+                isMaxExactMessageLookupMissingIdError(error)) &&
+              !wasMaxMessageSendAttempted(error) &&
+              !wasMaxMemberMutationAttempted(error) &&
+              !isMaxMutationOutcomeAmbiguous(error)
+            )
+              throw new RequiredSubscriptionNoticeSourceUnavailableError(
+                'Required subscription notice source unavailable',
+                { cause: error },
+              );
+            throw error;
+          }
+        },
         getMembership: (targetId) =>
           readers.getMembership({ targetId, userId: proof.userId, timeoutMs }),
         consumeImmunity: (input) => this.immunity.consumeForMessage(input),
@@ -108,6 +134,10 @@ export class MaxRequiredSubscriptionNoticeGuardService {
     } catch (error) {
       if (error instanceof RequiredSubscriptionNoticeRejectedError)
         throw new MaxRequiredSubscriptionNoticeRejectedError();
+      // FLAG: Without an exact receipt preserve the original queued failure/retry
+      // contract. The initial handoff keeps its own typed no-dispatch recovery.
+      if (error instanceof RequiredSubscriptionNoticeSourceUnavailableError && error.cause)
+        throw error.cause;
       throw error;
     }
   }
