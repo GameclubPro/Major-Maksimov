@@ -162,7 +162,7 @@ Manual release advances a per-author Redis cutoff in constant time, fencing prio
 bindings and delayed media without deleting another author's shared IMAGE original. Existing
 manual-release grace remains in effect.
 
-Each atomic history operation examines at most 16 fingerprints; records and counters expire after
+Each atomic history operation examines at most 128 fingerprints; records and counters expire after
 the bounded history retention. Lifecycle tombstones and reset cutoffs cover the maximum supported
 window. This logic does not change burst, quota or other rolling counters. The new settings digest
 and required original proof reject old queued evidence; no bulk Redis purge is needed.
@@ -238,8 +238,8 @@ evidence failures, so one unsupported baseline cannot block subsequent verifiabl
 See [Duplicate Miss Audit](../incidents/2026-09-19-duplicate-miss-audit.md) for regression coverage
 and the limits of attributing a reported miss.
 
-Fingerprint admission stays capped at 16, with representation for every enabled kind and stable
-value selection under truncation. Media comparison materializes all distinct candidate receipts
+Fingerprint admission stays capped at 128, with representation for every enabled kind and stable
+value selection under truncation. A no-match result beyond the budget remains unverified. Media comparison materializes all distinct candidate receipts
 before recording the current occurrence. One attempt admits at most 20 uncached media items under
 the existing 30-second verification deadline; additional work defers with revision-scoped proof
 reuse and the same ten-minute job lifetime. Terminal baseline rejection is cached separately and
@@ -499,6 +499,50 @@ directly below its LIMIT. The local regression includes all competing intent ind
 status populations; a production timeout can still reflect host I/O and does not authorize a
 larger timeout, an unbounded scan or a new index without evidence.
 
+### Independent evidence and bounded coverage
+
+Text history returns a bounded list of candidate bindings. Before acquiring an action claim,
+source selection can discard only a confirmed missing or changed original and try another
+candidate. It reads at most eight distinct originals; reaching the limit leaves the comparison
+unverified. A temporary source failure retains the selected candidate and enters the existing
+qualification handoff. A qualified stage remains immutable, including after original removal.
+All final policy, source, immunity, deadline, SQL claim and Redis qualification checks remain.
+When no usable text original remains, an independently eligible image can still be queued.
+
+Text settings fences are v15. The fingerprint budget is 128, balanced across enabled types;
+a no-match result beyond that budget is `CONTENT_UNVERIFIED`, with
+`history.fingerprint_budget`, rather than a verified miss. This improves bounded coverage;
+messages exceeding the budget can still contain undiscovered repeats. Selection counters
+`selection.stale_original` and `selection.original_limit` contain no source identifiers.
+Both rollback paths require the v15 selection readers, not just a version marker.
+
+Image search retains eight results and at most four native pair candidates. It checks retained
+original lifecycle before spending pair attempts, so an already removed original cannot consume
+one of those attempts. Full index buckets and evicted live pointers mark incomplete coverage;
+`media.recompression_index_saturated` and `media.recompression_candidate_limit` distinguish the
+limits. Coverage markers expire with the last evicted candidate and grant no action authority.
+No similarity threshold or native resource limit is relaxed.
+
+Deferred TEXT jobs start without an unconditional five-second queue delay. Media retains a
+five-second settling period from its first durable admission; reconstructing an old job does
+not restart that period. Every worker still requires its source receipt to be PROCESSED,
+current ordering ownership and the original deadline. Local queue timing does not establish
+end-to-end MAX latency or production acceptance.
+
+The `duplicate` audit emits separate bounded statements/reports for each intent status.
+`--status` selects one page; `--explain` produces one plain plan per selected status. The
+2.5-second statement and eight-second collector limits remain unchanged. These general intent
+samples can still miss duplicate outcomes in a busy status; zero is not proof of no duplicates.
+
+For exact-chat outcomes use `postgres-audit duplicate-history <chat-id> [--explain]` after
+synchronizing the reviewed catalog and previewing/applying `postgres-audit-provision`. Its three
+optional projection grants expose only join/time keys. The dedicated chat/time/id index selects
+at most 129 duplicate rows, then at most 128 intent primary-key reads classify confirmed DELETE,
+confirmed absence, pending, expired and unconfirmed outcomes plus fixed reason groups. Output
+contains no chat/message identifiers, text or raw errors. `PROJECTED_ONLY`, saturation, missing
+intents and actual sample span stay explicit; this is not complete historical or fleet coverage.
+The mini app summarizes one latest result per message across its loaded history pages.
+
 ## Runtime Control
 
 Run the built operator inside the exact released `api-admin` container through the normal VPS
@@ -585,7 +629,7 @@ environment ceiling.
 
 Both API rollback paths require v3 binding, lifecycle and durable/permit authorization source
 capabilities, duplicate-only phone evidence v8, mode-aware TEXT lifecycle eligibility,
-and near punctuation/symbol positions with the `text-fixed-window-safe-text-v14` / `text-fixed-window-v14` settings fences
+and near punctuation/symbol positions with the `text-fixed-window-safe-text-v15` / `text-fixed-window-v15` settings fences
 and common `text-v14` matching namespace. Shared semantic normalization must preserve case-sensitive
 finite quantity units in scalar/dimension/compound expressions and prefix fields (`MB: 100`,
 `MΩ = 10`) for fingerprints, source digest and lifecycle identity. Phone evidence uses the same

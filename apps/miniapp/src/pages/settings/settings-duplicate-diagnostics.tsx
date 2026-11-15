@@ -1,3 +1,4 @@
+import { summarizeDuplicateMessages } from './duplicate-diagnostics-summary';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -227,6 +228,7 @@ export default function SettingsDuplicateDiagnostics({
     };
   }, [epoch]);
   const attempts = [...(data?.history.attempts ?? []), ...older];
+  const messageSummary = summarizeDuplicateMessages(attempts);
   const capability = failed ? 'UNKNOWN' : data?.capability.state;
   const capabilityLabel = busy
     ? 'Проверяем права'
@@ -322,7 +324,7 @@ export default function SettingsDuplicateDiagnostics({
               <p className="field__hint">Результат сравнения не подтверждает удаление сообщения.</p>
             </>
           )}
-          <h4 className="duplicate-stage__title">Последние попытки удаления</h4>
+          <h4 className="duplicate-stage__title">Результаты по сообщениям</h4>
           <div className="duplicate-diagnostics__history-meta">
             <span>За 24 часа</span>
             <time dateTime={data.generatedAt}>{formatTime(data.generatedAt)}</time>
@@ -336,6 +338,15 @@ export default function SettingsDuplicateDiagnostics({
                 <p className="field__hint">
                   Показаны зарегистрированные решения антидубля. Более ранняя история может быть
                   неполной.
+                </p>
+              )}
+              {messageSummary.total > 0 && (
+                <p className="field__hint">
+                  В выборке: {messageSummary.total}.{' '}
+                  {messageSummary.outcomes
+                    .map(([outcome, count]) => `${DUPLICATE_ATTEMPT_LABELS[outcome]}: ${count}`)
+                    .join('; ')}
+                  .
                 </p>
               )}
               {attempts.length === 0 ? (

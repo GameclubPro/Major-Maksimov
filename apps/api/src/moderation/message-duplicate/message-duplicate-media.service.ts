@@ -330,7 +330,15 @@ export class MessageDuplicateMediaService {
       const content = extractDuplicateMessageContent(source.update.raw);
       const textOnly = job.comparison === 'TEXT' || (!imageOnly && content.media.length === 0);
       const enforce = async (observation: MessageDuplicateHistoryObservation) => {
-        const result = observation.match;
+        const result =
+          job.actionEligible === true && (observation.candidates?.length ?? 0) > 1
+            ? await this.enforcement.selectMatch({
+                chatId: job.chatId,
+                botId: source.botId,
+                observation,
+                assertLease: lease.assertOwned,
+              })
+            : observation.match;
         if (observation.outcome === 'MATCHED') comparedOutcome = 'MATCHED_ACTION_FAILED';
         if (result) {
           if (job.actionEligible !== true || !(await lease.resolveActionEligibility())) {
@@ -1169,9 +1177,13 @@ export class MessageDuplicateMediaService {
     original?: MessageDuplicateOriginal;
   }> {
     const imageScope = digestDuplicateContent([input.scope, input.verified.content.actions]);
-    const candidates = (
-      await this.recompressionIndex.read(imageScope, input.hash, input.job.eventTimestampMs)
-    ).filter((candidate) => {
+    const index = await this.recompressionIndex.readWithCoverage(
+      imageScope,
+      input.hash,
+      input.job.eventTimestampMs,
+    );
+    if (index.saturated) this.metrics?.record('media.recompression_index_saturated');
+    const candidates = index.candidates.filter((candidate) => {
       let distance = BigInt(`0x${candidate.recompressionHash}`) ^ BigInt(`0x${input.hash}`);
       let differentBits = 0;
       while (distance) {
@@ -1186,8 +1198,9 @@ export class MessageDuplicateMediaService {
       ...candidates.filter((candidate) => candidate.canonicalHash === input.verified.hashes[0]),
       ...candidates.filter((candidate) => candidate.canonicalHash !== input.verified.hashes[0]),
     ];
-    let unverified = candidates.length > 4;
-    for (const candidate of orderedCandidates.slice(0, 4)) {
+    let unverified = index.saturated;
+    let pairAttempts = 0;
+    for (const candidate of orderedCandidates) {
       input.lease.assertOwned();
       if (candidate.messageId === input.job.messageId) continue;
       if (Date.now() >= input.deadlineAtMs)
@@ -1215,8 +1228,48 @@ export class MessageDuplicateMediaService {
         unverified = true;
         continue;
       }
+      // FLAG: Establish the original's own exact history before attaching a verified
+      // copy. Its revision/window remains authoritative; a removed source cannot revive.
+      const originalInput = {
+        content,
+        chatId: input.job.chatId,
+        userId: message.senderId,
+        messageId: message.messageId,
+        eventTimestampMs: baseline.eventTimestampMs,
+        publishedAtMs: candidate.publishedAtMs,
+        controlRevision: input.job.controlRevision,
+        settings: input.settings,
+        mediaHashes: [candidate.canonicalHash],
+        imageScope: input.settings.duplicatePhotoScope,
+      };
+      const original = await this.history.observeWithOutcome(originalInput);
+      if (
+        original.outcome === 'STALE' ||
+        original.outcome === 'CONTENT_UNVERIFIED' ||
+        original.outcome === 'SCHEDULE_CLOSED'
+      ) {
+        unverified = true;
+        continue;
+      }
+      const accepted = await this.history.findImageOriginal({
+        ...originalInput,
+        eventTimestampMs: input.job.eventTimestampMs,
+      });
+      if (
+        accepted?.mediaHashes.length !== 1 ||
+        accepted.mediaHashes[0] !== candidate.canonicalHash
+      ) {
+        unverified = true;
+        continue;
+      }
       let proof: PhotoRecompressionProof | undefined;
       if (candidate.canonicalHash !== input.verified.hashes[0]) {
+        if (pairAttempts >= 4) {
+          unverified = true;
+          this.metrics?.record('media.recompression_candidate_limit');
+          continue;
+        }
+        pairAttempts += 1;
         if (input.budget.remaining < 2)
           throw new MessageDuplicateMediaDeferredError('proof_budget');
         if (
@@ -1320,40 +1373,6 @@ export class MessageDuplicateMediaService {
         }
         if (!result) continue;
         proof = result;
-      }
-      // FLAG: Establish the original's own exact history before attaching a verified
-      // copy. Its revision/window remains authoritative; a removed source cannot revive.
-      const originalInput = {
-        content,
-        chatId: input.job.chatId,
-        userId: message.senderId,
-        messageId: message.messageId,
-        eventTimestampMs: baseline.eventTimestampMs,
-        publishedAtMs: candidate.publishedAtMs,
-        controlRevision: input.job.controlRevision,
-        settings: input.settings,
-        mediaHashes: [candidate.canonicalHash],
-        imageScope: input.settings.duplicatePhotoScope,
-      };
-      const original = await this.history.observeWithOutcome(originalInput);
-      if (
-        original.outcome === 'STALE' ||
-        original.outcome === 'CONTENT_UNVERIFIED' ||
-        original.outcome === 'SCHEDULE_CLOSED'
-      ) {
-        unverified = true;
-        continue;
-      }
-      const accepted = await this.history.findImageOriginal({
-        ...originalInput,
-        eventTimestampMs: input.job.eventTimestampMs,
-      });
-      if (
-        accepted?.mediaHashes.length !== 1 ||
-        accepted.mediaHashes[0] !== candidate.canonicalHash
-      ) {
-        unverified = true;
-        continue;
       }
       return { unverified, anchor: candidate, ...(proof ? { proof, original: accepted } : {}) };
     }

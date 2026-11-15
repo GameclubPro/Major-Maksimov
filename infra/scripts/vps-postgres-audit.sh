@@ -42,6 +42,7 @@ Usage:
   ./infra/scripts/vps-postgres-audit.sh chat-message-window <chat-id> <UTC-minute> [--slice <0..11>] [--explain]
   ./infra/scripts/vps-postgres-audit.sh chat-moderation <chat-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh duplicate [--status <STATUS>] [--explain]
+  ./infra/scripts/vps-postgres-audit.sh duplicate-history <chat-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh poll-publication <poll-id> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-quarantine <UTC-minute> [--explain]
   ./infra/scripts/vps-postgres-audit.sh webhook-quarantine-proof <UTC-minute> [--explain] [--private-blocker-ids]
@@ -109,6 +110,7 @@ DUPLICATE_EXPLAIN=''
 DUPLICATE_STATUS=''
 MESSAGE_WINDOW_ARGS=()
 CHAT_MODERATION_ARGS=()
+DUPLICATE_HISTORY_ARGS=()
 WEBHOOK_COHORT_ARGS=()
 RECOVERY_KEY_COHORT_ARGS=()
 SOURCE_ENVELOPE_OWNER=''
@@ -118,6 +120,10 @@ NETWORK_STATISTICS_ARGS=()
 STATISTICS_EXCHANGE_ARGS=()
 CENTRAL_STATISTICS_ARGS=()
 case "$AUDIT_MODE" in
+  duplicate-history)
+    DUPLICATE_HISTORY_ARGS=("${@:2}")
+    node "$ROOT_DIR/infra/scripts/duplicate-history-audit.mjs" --validate-scope "${DUPLICATE_HISTORY_ARGS[@]}" >/dev/null || exit 2
+    ;;
   chat-moderation)
     CHAT_MODERATION_ARGS=("${@:2}")
     node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" --validate-scope "${CHAT_MODERATION_ARGS[@]}" >/dev/null || exit 2
@@ -249,10 +255,10 @@ esac
 
 # FLAG: This report attests public relations. Pin resolution before the shared
 # privilege admission as well as the report, including pg_temp last explicitly.
-if [[ "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
+if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'publisher-slots' || "$AUDIT_MODE" == 'webhook-cohort' || "$AUDIT_MODE" == 'webhook-quarantine-proof' || "$AUDIT_MODE" == 'webhook-source-envelope' || "$AUDIT_MODE" == 'webhook-held-receipt' || "$AUDIT_MODE" == 'webhook-recovery-key-cohort' || "$AUDIT_MODE" == 'network-statistics' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then
   POSTGRES_AUDIT_OPTIONS+=' -c search_path=pg_catalog,public,pg_temp'
 fi
-if [[ "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
+if [[ "$AUDIT_MODE" == 'duplicate-history' || "$AUDIT_MODE" == 'chat-moderation' || "$AUDIT_MODE" == 'action-latency' || "$AUDIT_MODE" == 'statistics-exchange' || "$AUDIT_MODE" == 'central-statistics' || "$AUDIT_MODE" == 'karavan-candidates' ]]; then POSTGRES_AUDIT_OPTIONS+=' -c timezone=UTC'; fi
 
 emit_prelude() {
   cat <<'SQL'
@@ -558,7 +564,7 @@ SELECT CASE
               'channel_view_archive_states', 'marketplace_bindings', 'chat_membership_activity_rollups', 'chat_membership_activity_feed_items',
               'stats_entities', 'stats_authorities', 'stats_measurements', 'stats_ingest_requests', 'stats_changes',
               'statistics_exchange_grants', 'statistics_exchange_entities', 'statistics_exchange_imports', 'statistics_exchange_generations',
-              'karavan_marketplace_candidate_settings', 'karavan_marketplace_candidate_events',
+              'karavan_marketplace_candidate_settings', 'karavan_marketplace_candidate_events', 'duplicate_diagnostics_history',
                 'chat_settings',
                 'moderation_delete_intents',
                 'moderation_delete_intent_reasons'
@@ -2376,9 +2382,25 @@ SELECT json_build_object(
 )::text;
 
 SQL
-  elif [[ -n "$DUPLICATE_EXPLAIN" ]]; then
-    printf '%s\n' 'EXPLAIN (FORMAT JSON)'
   fi
+  local selected_status="$DUPLICATE_STATUS"
+  local audit_status
+  for audit_status in OBSERVED PENDING IN_PROGRESS RETRYABLE WAITING_CAPABILITY AMBIGUOUS SUCCEEDED ALREADY_ABSENT EXPIRED FAILED_TERMINAL; do
+    if [[ -n "$selected_status" && "$audit_status" != "$selected_status" ]]; then continue; fi
+    DUPLICATE_STATUS="$audit_status"
+    emit_duplicate_intent_audit
+  done
+  DUPLICATE_STATUS="$selected_status"
+  cat <<'SQL'
+\else
+\echo MAXIM_POSTGRES_DUPLICATE_AUDIT_UNAVAILABLE
+SELECT 1 / 0;
+\endif
+SQL
+}
+
+emit_duplicate_intent_audit() {
+  if [[ -n "$DUPLICATE_EXPLAIN" ]]; then printf '%s\n' 'EXPLAIN (FORMAT JSON)'; fi
   cat <<SQL
 WITH intent_statuses(status_order, status) AS (
   VALUES
@@ -2503,10 +2525,6 @@ SELECT json_build_object(
   )
 )::text
 FROM intent_rows;
-\else
-\echo MAXIM_POSTGRES_DUPLICATE_AUDIT_UNAVAILABLE
-SELECT 1 / 0;
-\endif
 SQL
 }
 
@@ -2516,6 +2534,9 @@ emit_legacy_default_webhook_audit() {
 
 emit_sql() {
   emit_prelude
+  local duplicate_history_privilege_args=(--privileges)
+  if [[ "$AUDIT_MODE" == 'duplicate-history' ]]; then duplicate_history_privilege_args+=(--require-all); fi
+  node "$ROOT_DIR/infra/scripts/duplicate-history-audit.mjs" "${duplicate_history_privilege_args[@]}"
   local chat_moderation_privilege_args=(--privileges)
   if [[ "$AUDIT_MODE" == 'chat-moderation' ]]; then chat_moderation_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${chat_moderation_privilege_args[@]}"
@@ -2559,6 +2580,9 @@ emit_sql() {
   if [[ "$AUDIT_MODE" == 'webhook-quarantine' ]]; then quarantine_privilege_args+=(--require-all); fi
   node "$ROOT_DIR/infra/scripts/webhook-quarantine-audit.mjs" "${quarantine_privilege_args[@]}"
   case "$AUDIT_MODE" in
+    duplicate-history)
+      node "$ROOT_DIR/infra/scripts/duplicate-history-audit.mjs" "${DUPLICATE_HISTORY_ARGS[@]}"
+      ;;
     chat-moderation)
       node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" "${CHAT_MODERATION_ARGS[@]}"
       ;;
@@ -2744,7 +2768,7 @@ prepare_audit_sql() {
     echo "Generated PostgreSQL audit input is invalid." >&2
     return 1
   fi
-  if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
+  if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "duplicate-history" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
     AUDIT_STDERR_FILE="$(mktemp "$temp_root/maxim-postgres-audit-stderr.XXXXXXXX")" || {
       echo "Could not create the private PostgreSQL audit diagnostics file." >&2
       return 1
@@ -2855,7 +2879,7 @@ trap 'exit 143' TERM
 
 prepare_audit_sql
 AUDIT_BACKEND_MAY_EXIST=1
-if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
+if [[ "$AUDIT_MODE" == "legacy-default-webhook-jobs" || "$AUDIT_MODE" == "webhook-quarantine-proof" || "$AUDIT_MODE" == "webhook-source-envelope" || "$AUDIT_MODE" == "webhook-held-receipt" || "$AUDIT_MODE" == "webhook-recovery-key-cohort" || ( "$AUDIT_MODE" == "webhook-owner-proof" || "$AUDIT_MODE" == "webhook-source-proof" || "$AUDIT_MODE" == "webhook-retry-proof" || "$AUDIT_MODE" == "webhook-queued-proof" ) || ( "$AUDIT_MODE" == "action-latency" || "$AUDIT_MODE" == "delete-retry-heads" || "$AUDIT_MODE" == "chat-message-window" || "$AUDIT_MODE" == "duplicate-history" || "$AUDIT_MODE" == "chat-moderation" || "$AUDIT_MODE" == "moderation-outcomes" || "$AUDIT_MODE" == "webhook-cohort" || "$AUDIT_MODE" == "webhook-workload" ) || ( "$AUDIT_MODE" == "legacy-order-candidates" || "$AUDIT_MODE" == "legacy-order-window" || "$AUDIT_MODE" == "legacy-semantic-mirrors" ) ]]; then
   timeout --signal=TERM --kill-after=2s \
     "$AUDIT_WALL_TIMEOUT_SEC" "${psql_command[@]}" <"$AUDIT_SQL_FILE" \
     2>"$AUDIT_STDERR_FILE" &
@@ -2894,6 +2918,8 @@ elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "chat-moderation" ]]; then
   echo "Bounded chat moderation audit failed closed; private SQL details withheld." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "chat-message-window" ]]; then
   echo "Bounded chat message window audit failed closed." >&2
+elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "duplicate-history" ]]; then
+  echo "Bounded duplicate history audit failed closed; private SQL details withheld." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "moderation-outcomes" ]]; then
   echo "Bounded moderation outcomes audit failed closed." >&2
 elif [[ "$status" -ne 0 && "$AUDIT_MODE" == "webhook-workload" ]]; then

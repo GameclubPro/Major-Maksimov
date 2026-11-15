@@ -2210,7 +2210,10 @@ case "$command" in
   postgres-audit)
     # FLAG: Extend dispatch after the installed protected prefix. Its immutable
     # source floor must remain intact for existing release and recovery operations.
-    if [[ "${1:-}" == 'chat-moderation' ]]; then
+    if [[ "${1:-}" == 'duplicate-history' ]]; then
+      node "$ROOT_DIR/infra/scripts/duplicate-history-audit.mjs" --validate-scope "${@:2}" >/dev/null || exit 2
+      remote_exec "$(shell_quote_args ./infra/scripts/vps-postgres-audit.sh "$@")"
+    elif [[ "${1:-}" == 'chat-moderation' ]]; then
       node "$ROOT_DIR/infra/scripts/chat-moderation-audit.mjs" --validate-scope "${@:2}" >/dev/null || exit 2
       remote_exec "$(shell_quote_args ./infra/scripts/vps-postgres-audit.sh "$@")"
     elif [[ "${1:-}" == 'action-latency' ]]; then

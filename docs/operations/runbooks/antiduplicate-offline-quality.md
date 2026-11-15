@@ -67,6 +67,26 @@ Each private JSONL label uses the schema in `antiduplicate-corpus.ts`, binds the
 scores; agent labels are exploratory. Do not tune on the final two days. Resolve disagreements
 independently and preserve the reviewed label file with the corpus.
 
+To prepare a reproducible independent review packet without detector predictions or historical
+sanction answers, run:
+
+```bash
+npm run moderation:prepare-antiduplicate-review --workspace @maxim/api -- \
+  --input "$MAXIM_CORPUS_DIR/corpus.jsonl" \
+  --output "$MAXIM_CORPUS_DIR/blind-review.json" \
+  --corpus-sha256 "${MAXIM_FROZEN_CORPUS_SHA256:?frozen corpus SHA required}" \
+  --per-partition 100
+```
+
+The tool verifies private paths, the frozen digest before/after reading, event order, interval,
+chat scope and EOF counts. It selects up to 200 events per temporal partition by a deterministic
+hash of input identity, excluding warm-up and removal events as review targets. Reviewers must
+use the complete frozen sequence for context, including edits/removals and each policy window.
+The packet preserves source/cohort completeness and snapshot-policy limitations. Blank answers
+are deliberately invalid labels; no reviewer identity or HUMAN certification is generated.
+Extract independently completed label objects into a separate private JSONL file for replay.
+A packet or synthetic regression pass does not establish precision/recall without human labels.
+
 Replay again with `--labels <private-reviewed-labels.jsonl>` and new output paths. Reports
 separate development/holdout results, matching/action predictions, infrastructure unknowns and
 confirmed historical receipts, with sample sizes and Wilson 95% intervals. Missing binary hashes

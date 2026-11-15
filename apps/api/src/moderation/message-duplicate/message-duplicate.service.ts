@@ -177,7 +177,16 @@ export class MessageDuplicateService {
           settings: params.settings,
         }),
       );
-      const result = observation.match;
+      const result =
+        params.actionEligible &&
+        messageDuplicateActionsEnabled(policy.mode) &&
+        (hasPhotos || (observation.candidates?.length ?? 0) > 1)
+          ? await this.enforcement.selectMatch({
+              chatId: message.chatId,
+              botId: params.botId,
+              observation,
+            })
+          : observation.match;
       if (supported && observation.outcome === 'MATCHED') comparedOutcome = 'MATCHED_ACTION_FAILED';
       if (supported && observation.outcome === 'COMPARED_NO_MATCH')
         comparedOutcome = 'COMPARED_NO_MATCH';

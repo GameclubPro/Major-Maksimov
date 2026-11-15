@@ -24,6 +24,7 @@ local Docker-socket access under the production pg_hba rules, with:
   - 21 additional delete-intent/verified-reason metadata columns for bounded owner proof;
     identities, lease tokens and reason metadata are check-only and never report output
   - two delete failure columns, classified in SQL; raw error text is never reported
+  - three optional duplicate-history projection columns; exact chat scope, no message content
   - nineteen exact poll/original-bot metadata columns; no question, images, voters or permissions
   - eight quarantine-journal metadata columns; no identities or raw errors in report output
   - ten rules-publication metadata columns; no rules text, media, links, or settings
@@ -285,6 +286,28 @@ GRANT SELECT (
   last_error_code,
   last_error
 ) ON TABLE public.moderation_delete_intents TO maxim_audit;
+-- FLAG: Optional duplicate-only history grants expose three scalar columns, never message content.
+DO $duplicate_history_grants$
+BEGIN
+  IF 3 = (SELECT count(*) FROM pg_attribute WHERE attrelid=to_regclass('public.duplicate_diagnostics_history')
+      AND attnum>0 AND NOT attisdropped AND attname IN ('intent_id','chat_id','intent_created_at')) THEN
+    GRANT SELECT (intent_id,chat_id,intent_created_at) ON public.duplicate_diagnostics_history TO maxim_audit;
+  END IF;
+  IF NOT (WITH columns AS (
+    SELECT attribute.attname, has_column_privilege('maxim_audit', attribute.attrelid, attribute.attnum, 'SELECT') AS readable
+    FROM pg_attribute attribute WHERE attribute.attrelid=to_regclass('public.duplicate_diagnostics_history')
+      AND attribute.attnum>0 AND NOT attribute.attisdropped
+  ) SELECT (SELECT count(*) FROM columns WHERE readable AND attname IN ('intent_id','chat_id','intent_created_at')) IN (0,3)
+    AND NOT EXISTS (SELECT 1 FROM columns WHERE readable AND attname NOT IN ('intent_id','chat_id','intent_created_at'))
+    AND NOT EXISTS (SELECT 1 FROM pg_class relation WHERE relation.oid=to_regclass('public.duplicate_diagnostics_history')
+      AND (has_table_privilege('maxim_audit',relation.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR EXISTS (SELECT 1 FROM pg_attribute attribute WHERE attribute.attrelid=relation.oid AND attribute.attnum>0 AND NOT attribute.attisdropped
+        AND has_column_privilege('maxim_audit',relation.oid,attribute.attnum,'INSERT,UPDATE,REFERENCES'))))) THEN
+    RAISE EXCEPTION 'maxim_audit duplicate-history privileges are not exact';
+  END IF;
+END
+$duplicate_history_grants$;
+
 GRANT SELECT (
   chat_id, published_message_id, published_bot_id, publish_operation_id,
   publish_send_started_at, pending_cleanup_message_id, pending_cleanup_bot_id,
@@ -1208,7 +1231,7 @@ BEGIN
               'channel_view_archive_states', 'marketplace_bindings', 'chat_membership_activity_rollups', 'chat_membership_activity_feed_items',
               'stats_entities', 'stats_authorities', 'stats_measurements', 'stats_ingest_requests', 'stats_changes',
         'statistics_exchange_grants', 'statistics_exchange_entities', 'statistics_exchange_imports', 'statistics_exchange_generations',
-        'karavan_marketplace_candidate_settings', 'karavan_marketplace_candidate_events',
+        'karavan_marketplace_candidate_settings', 'karavan_marketplace_candidate_events', 'duplicate_diagnostics_history',
               'chat_settings',
               'moderation_delete_intents',
               'moderation_delete_intent_reasons'

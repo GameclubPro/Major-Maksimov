@@ -73,6 +73,10 @@ export class MessageDuplicateEnforcementService {
     @Optional() private readonly metrics?: MessageDuplicateMetricsService,
   ) {}
 
+  selectMatch(params: Parameters<MessageDuplicateDeleteGuardService['selectMatch']>[0]) {
+    return this.guard.selectMatch(params);
+  }
+
   async enqueue(params: {
     chatId: string;
     sourceCreatedAt: string;
@@ -86,6 +90,7 @@ export class MessageDuplicateEnforcementService {
     update?: MaxUpdate;
     executeFullAction?: ExecuteDuplicateModerationAction;
     deferQualification?: () => Promise<void>;
+    qualificationSourceUnavailable?: MessageDuplicateQualificationSourceUnavailableError;
   }): Promise<DuplicateEnforcementResult> {
     this.metrics?.record('enforcement.match_found');
     const policy = await this.policy.resolve(params.chatId, true);
@@ -139,6 +144,7 @@ export class MessageDuplicateEnforcementService {
     }
     let repeatCount: number | null;
     try {
+      if (params.qualificationSourceUnavailable) throw params.qualificationSourceUnavailable;
       repeatCount = await measureDuplicatePhase(this.metrics, 'qualification', () =>
         this.guard.qualify({
           chatId: params.chatId,

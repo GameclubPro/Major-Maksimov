@@ -95,7 +95,7 @@ describe('message duplicate queue', () => {
     expect(queue.add).toHaveBeenCalledWith(
       'message-duplicate-analysis',
       expect.objectContaining({ actionEligible: false }),
-      expect.objectContaining({ attempts: 5, delay: 5000 }),
+      expect.objectContaining({ attempts: 5, delay: expect.any(Number) }),
     );
     const first = queue.add.mock.calls[0]![1].idempotencyKey;
     await service.enqueue({
@@ -108,6 +108,55 @@ describe('message duplicate queue', () => {
     await expect(service.enqueue(jobData())).rejects.toThrow('ambiguous enqueue');
     expect(ordering.announce).toHaveBeenLastCalledWith(expect.anything(), true, 'retry');
   });
+  it.each(['TEXT', 'IMAGE'] as const)(
+    'preserves the original settling deadline for a repaired %s job',
+    async (comparison) => {
+      const queue = { add: jest.fn(), getJob: jest.fn().mockResolvedValue(null) };
+      const ordering = { announce: jest.fn().mockResolvedValue(registered(true)) };
+      const admissionStore = {
+        register: jest
+          .fn()
+          .mockResolvedValue({ registration: 'retry', admittedAtMs: Date.now() - 10_000 }),
+      };
+      const service = new MessageDuplicateEnqueueService(
+        queue as never,
+        ordering as never,
+        admissionStore as never,
+      );
+      const input = { ...jobData(), comparison };
+      await service.enqueue(input);
+      expect(queue.add).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ deadlineAtMs: expect.any(Number) }),
+        expect.objectContaining({
+          delay: 0,
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 5000 },
+        }),
+      );
+    },
+  );
+
+  it('starts deferred text qualification immediately while preserving fresh image settling', async () => {
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const queue = { add: jest.fn(), getJob: jest.fn().mockResolvedValue(null) };
+      const ordering = { announce: jest.fn().mockResolvedValue(registered(true)) };
+      const service = new MessageDuplicateEnqueueService(
+        queue as never,
+        ordering as never,
+        admission() as never,
+      );
+      await service.enqueue({ ...jobData(), comparison: 'TEXT' });
+      expect(queue.add.mock.calls[0]?.[2].delay).toBe(0);
+      await service.enqueue({ ...jobData(), comparison: 'IMAGE' });
+      expect(queue.add.mock.calls[1]?.[2].delay).toBe(5000);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('retries unavailable registration without submitting a permanently ineligible job', async () => {
     const queue = { add: jest.fn(), getJob: jest.fn().mockResolvedValue(null) };
     const ordering = {

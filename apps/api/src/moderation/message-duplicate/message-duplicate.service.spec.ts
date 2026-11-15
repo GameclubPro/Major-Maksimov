@@ -1,3 +1,4 @@
+import type { MessageDuplicateEnforcementService } from './message-duplicate-enforcement.service';
 import { MessageDuplicateService } from './message-duplicate.service';
 import { duplicateSettings, duplicateUpdate } from './message-duplicate-test-fixtures';
 
@@ -26,6 +27,10 @@ describe('message duplicate main-path admission', () => {
       }),
     };
     const enforcement = {
+      selectMatch: jest.fn(
+        async ({ observation }: Parameters<MessageDuplicateEnforcementService['selectMatch']>[0]) =>
+          observation.match,
+      ),
       enqueue: jest.fn().mockResolvedValue({ kind: 'intent_accepted', intentId: 'intent' }),
     };
     const queue = { enqueue: jest.fn() };

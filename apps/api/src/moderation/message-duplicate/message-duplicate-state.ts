@@ -193,7 +193,7 @@ export function messageDuplicateSettingsDigest(settings: ChatSettings): string {
   return digestDuplicateContent({
     // FLAG: Old text grants/jobs, including exact-only, must fail the fresh guard after
     // electrical quantity-unit and numeric/phone protection. IMAGE has independent settings/raster semantics.
-    version: safeTextMatchingEnabled ? 'text-fixed-window-safe-text-v14' : 'text-fixed-window-v14',
+    version: safeTextMatchingEnabled ? 'text-fixed-window-safe-text-v15' : 'text-fixed-window-v15',
     comparisonPolicy: 'text-or-image-v1',
     historyStorageVersion: MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION,
     historyRevision: settings.duplicateHistoryRevision ?? 0,

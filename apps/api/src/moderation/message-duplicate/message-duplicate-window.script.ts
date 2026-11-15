@@ -10,7 +10,7 @@ export const MESSAGE_DUPLICATE_HISTORY_RETENTION_MS =
 
 // FLAG: Duplicate windows are anchored to an accepted original. Rejected attempts never
 // become evidence or extend its lifetime. This script is intentionally separate from burst
-// and quota rolling counters. Work is bounded by 16 fingerprints and constant-size records.
+// and quota rolling counters. Work is bounded by 128 fingerprints and constant-size records.
 export const MESSAGE_DUPLICATE_WINDOW_SCRIPT = `
 local p = cjson.decode(ARGV[1])
 local prefix = KEYS[1] .. '${MESSAGE_DUPLICATE_HISTORY_STORAGE_VERSION}:'
