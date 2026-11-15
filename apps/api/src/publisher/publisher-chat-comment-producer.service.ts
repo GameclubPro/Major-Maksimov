@@ -1,3 +1,4 @@
+import { channelCustomButtonsEligible } from '../common/channel-custom-post-buttons';
 import type { MaxUpdate } from '@maxim/contracts';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -262,7 +263,13 @@ export class PublisherChatCommentProducerService {
       select: {
         publicationPolicy: { select: { publikEnabled: true, revision: true, updatedAt: true } },
         channelSettings: {
-          select: { postSignatureEnabled: true, postSignaturePresentation: true, updatedAt: true },
+          select: {
+            postSignatureEnabled: true,
+            postSignaturePresentation: true,
+            updatedAt: true,
+            customPostButtonsEnabled: true,
+            customPostButtonsSince: true,
+          },
         },
         publisherSettings: {
           select: {
@@ -280,11 +287,16 @@ export class PublisherChatCommentProducerService {
       entity.channelSettings.postSignaturePresentation ===
         ChannelPostSignaturePresentation.BUTTON &&
       createdAt >= entity.channelSettings.updatedAt;
+    const hasCustomButtons = channelCustomButtonsEligible(
+      entity?.channelSettings,
+      createdAt.toISOString(),
+    );
     if (
       entity?.publicationPolicy?.publikEnabled === false ||
       (!settings?.channelCommentsEnabled &&
         !settings?.channelSuggestionsEnabled &&
-        !hasPostButton) ||
+        !hasPostButton &&
+        !hasCustomButtons) ||
       (settings && createdAt < settings.updatedAt) ||
       (entity?.publicationPolicy && createdAt < entity.publicationPolicy.updatedAt)
     )

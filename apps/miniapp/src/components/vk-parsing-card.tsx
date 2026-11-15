@@ -90,6 +90,8 @@ export function VkParsingCard({
     presentation: 'signature' as const,
     text: settings.channelLinkText || CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
     url: '',
+    customButtonsEnabled: false,
+    customButtons: [],
   };
   const editorIsReview =
     editingPost?.sourcePublishMode === 'REVIEW' || editingPost?.sourcePublishMode === 'BOT_REVIEW';

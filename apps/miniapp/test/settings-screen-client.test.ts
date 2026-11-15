@@ -343,12 +343,16 @@ test('channel post signature client preserves a custom URL across GET and PATCH'
     expectedRevision: 4,
   });
 
-  assert.deepEqual(current, signature);
+  assert.deepEqual(current, {
+    ...signature,
+    customButtonsEnabled: false,
+    customButtons: [],
+  });
   assert.deepEqual(updated, current);
   assert.equal(calls[0]?.path, '/channels/channel-1/post-signature');
   assert.equal(calls[1]?.path, '/channels/channel-1/post-signature');
   assert.equal(calls[1]?.init?.method, 'PATCH');
-  assert.equal(calls[1]?.init?.body, JSON.stringify({ expectedRevision: 4, ...current }));
+  assert.equal(calls[1]?.init?.body, JSON.stringify({ expectedRevision: 4, ...signature }));
 });
 
 test('channel settings screen client only adds prefetch query when requested', async () => {

@@ -2846,6 +2846,71 @@ describe('ModerationService channel auto post buttons', () => {
     });
   });
 
+  it.each([true, false])(
+    'adds persistent buttons only to eligible posts and freezes them for counters: %s',
+    async (eligible) => {
+      const prisma = {
+        ...createChannelMutationGuardPrismaMock(),
+        auditLog: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+      };
+      const maxClient = {
+        ...createChannelMutationGuardMaxClientMock(),
+        editMessageInlineKeyboard: jest.fn().mockResolvedValue(undefined),
+      };
+      const service = new ModerationService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        maxClient as never,
+        undefined,
+        undefined,
+        createConfigMock() as never,
+        undefined,
+        undefined,
+        createAdminServiceMock() as never,
+      );
+      configureDefaultChannelAutoPostEditRoute(service);
+      const custom = {
+        id: '11111111-1111-4111-8111-111111111111',
+        text: 'Каталог',
+        url: 'https://example.com/catalog#new',
+      };
+      await (service as any).tryAutoAttachChannelMessageButtons({
+        chatId: 'channel-1',
+        messageId: 'custom-post',
+        text: 'Пост',
+        textFormat: null,
+        linkType: null,
+        managedChannel: {
+          channelSettings: {
+            commentsEnabled: true,
+            postSuggestionsEnabled: false,
+            postSuggestionsButtonText: '',
+            postSignatureEnabled: false,
+            updatedAt: new Date('2026-11-01'),
+            customPostButtonsEnabled: true,
+            customPostButtons: [custom],
+            customPostButtonsSince: new Date('2026-11-15'),
+          },
+          adminUserIds: ['admin-1'],
+        },
+        source: 'webhook',
+        senderId: '777000',
+        requiredAuthorUserId: '777000',
+        sourceMessageAt: eligible ? '2026-11-16T00:00:00Z' : '2026-11-14T00:00:00Z',
+      });
+      const buttons = maxClient.editMessageInlineKeyboard.mock.calls[0]?.[3].buttons;
+      expect(buttons).toHaveLength(eligible ? 2 : 1);
+      if (eligible)
+        expect(buttons[1]).toEqual([{ type: 'link', text: custom.text, url: custom.url }]);
+      expect(prisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({ buttonRows: buttons }),
+        }),
+      });
+    },
+  );
+
   it('adds the channel CTA after comments and freezes the managed keyboard for counters', async () => {
     const prisma = {
       ...createChannelMutationGuardPrismaMock(),
@@ -3548,6 +3613,7 @@ describe('ModerationService channel auto post buttons', () => {
         chatId: true,
         quickButtonsEnabled: true,
         postSignatureEnabled: true,
+        customPostButtonsEnabled: true,
         commentsEnabled: true,
         postSuggestionsEnabled: true,
       },

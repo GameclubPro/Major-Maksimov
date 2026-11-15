@@ -272,3 +272,19 @@ attachment descriptors, retry and Back. `MINIAPP_TEST_BASE_URL` selects the loca
 the real sheet. [Participant navigation](../../apps/miniapp/test/participant-navigation.browser.mjs)
 requires an existing local server and checks journal → message → participant → message transitions.
 These local cases never send messages to MAX and do not establish live deletion acceptance.
+
+## Channel Post Actions
+
+Persistent channel links are independent of the signature and apply to future posts.
+Disabling retains the list; counter refresh uses frozen rows. Recovery requires original
+post time and existing edit authority. Configuration writes retain revision and rights checks.
+
+- [Contracts](../../packages/contracts/test/channel-post-signature.spec.ts) cover bounded lists,
+  safe URLs, duplicates and legacy partial writes.
+- [PostgreSQL](../../apps/api/src/admin/channel-custom-buttons-postgres.spec.ts) covers persistence,
+  competing administrators, cutoff and disabling without deletion.
+- [Major](../../apps/api/src/moderation/moderation.channel-post-buttons.spec.ts) and
+  [Publisher](../../apps/api/src/publisher/publisher-channel-comment-delivery.service.spec.ts)
+  cover composition and frozen keyboards; the legacy recovery suite checks original time.
+- [Browser](../../apps/miniapp/test/channel-post-signature.browser.mjs) owns its local server
+  and checks explicit save, errors, ordering, undo and draft protection on desktop and phones.

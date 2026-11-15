@@ -417,6 +417,8 @@ export function createInitialState(search: string, clock: PreviewClock): Preview
     engagementMessageText: 'Есть идея или обратная связь? Выберите действие ниже.',
   });
   const channelPostSignature: ChannelPostSignatureSettings = {
+    customButtonsEnabled: false,
+    customButtons: [],
     revision: 0,
     enabled: channelPostSignatureState === 'button',
     presentation: channelPostSignatureState === 'button' ? 'button' : 'signature',

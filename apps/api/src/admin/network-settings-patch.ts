@@ -67,7 +67,14 @@ const CHANNEL_SECTIONS = {
     'commentsLimitTwoInRowEnabled',
     'commentsMessageText',
   ],
-  postSignature: ['enabled', 'presentation', 'text', 'url'],
+  postSignature: [
+    'enabled',
+    'presentation',
+    'text',
+    'url',
+    'customButtonsEnabled',
+    'customButtons',
+  ],
   postSuggestions: [
     'postSuggestionsEnabled',
     'postSuggestionsRequireSubscription',

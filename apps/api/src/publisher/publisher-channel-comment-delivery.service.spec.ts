@@ -1,3 +1,4 @@
+import type { ChannelPostSignatureService } from '../admin/channel-post-signature.service';
 import { PublisherSetupRequiredException } from './publisher-errors';
 import { PublisherCommentSetupBlockedError } from './publisher-comment-readiness';
 import type { MaxUpdate } from '@maxim/contracts';
@@ -90,7 +91,20 @@ function fixture(dialogLinks = links) {
     assertDispatchAllowed: jest.fn(),
     recordSendFailure: jest.fn().mockResolvedValue(undefined),
   };
-  const postSignature = { buildPostButton: jest.fn().mockResolvedValue(null) };
+  const postSignature = {
+    buildPostButton: jest
+      .fn<
+        ReturnType<ChannelPostSignatureService['buildPostButton']>,
+        Parameters<ChannelPostSignatureService['buildPostButton']>
+      >()
+      .mockResolvedValue(null),
+    buildCustomPostButtons: jest
+      .fn<
+        ReturnType<ChannelPostSignatureService['buildCustomPostButtons']>,
+        Parameters<ChannelPostSignatureService['buildCustomPostButtons']>
+      >()
+      .mockResolvedValue([]),
+  } satisfies Pick<ChannelPostSignatureService, 'buildPostButton' | 'buildCustomPostButtons'>;
   const service = new PublisherChannelCommentDeliveryService(
     prisma as never,
     maxClient as never,
@@ -176,14 +190,14 @@ describe('Publisher channel keyboard webhook and delivery', () => {
       expect(currentLinks.resolveChannelDialogThreadId(chatId, 'comments', token)).toBe(
         h.job.threadId,
       );
-      const shop = { type: 'link', text: 'Магазин', url: 'https://example.test/shop' };
+      const shop = { type: 'link' as const, text: 'Магазин', url: 'https://example.test/shop' };
       h.message.body.attachments = [
         { type: 'image', payload: { token: 'retained-photo' } },
         { type: 'inline_keyboard', payload: { buttons: [[shop], [comments], [suggest]] } },
       ];
       if (addAction)
         h.postSignature.buildPostButton.mockResolvedValue({
-          type: 'link',
+          type: 'link' as const,
           text: 'Отзывы',
           url: 'https://example.test/reviews',
         });
@@ -256,7 +270,9 @@ describe('Publisher channel keyboard webhook and delivery', () => {
     h.message.body.attachments = [
       {
         type: 'inline_keyboard',
-        payload: { buttons: [[{ type: 'link', text: 'Keep', url: 'https://example.com' }]] },
+        payload: {
+          buttons: [[{ type: 'link' as const, text: 'Keep', url: 'https://example.com' }]],
+        },
       },
     ];
     await h.service.process(h.job);
@@ -428,7 +444,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
       'major-bot',
       'MINIAPP',
     );
-    const reviews = { type: 'link', text: 'Отзывы', url: 'https://example.test/reviews' };
+    const reviews = { type: 'link' as const, text: 'Отзывы', url: 'https://example.test/reviews' };
     h.postSignature.buildPostButton.mockResolvedValue(reviews);
     h.message.body.attachments = [
       { type: 'inline_keyboard', payload: { buttons: [[comments], [contact]] } },
@@ -454,7 +470,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
 
   it('includes the configured CTA in the Publisher comment-count reference', async () => {
     const h = fixture();
-    const cta = { type: 'link', text: 'Отзывы', url: 'https://example.test/reviews' };
+    const cta = { type: 'link' as const, text: 'Отзывы', url: 'https://example.test/reviews' };
     h.postSignature.buildPostButton.mockResolvedValue(cta);
     await h.service.process(h.job);
     const rows = h.mutate.mock.calls[0]![0];
@@ -498,7 +514,11 @@ describe('Publisher channel keyboard webhook and delivery', () => {
         'Contact',
         'MINIAPP',
       );
-      const reviews = { type: 'link', text: 'Reviews', url: 'https://example.test/reviews' };
+      const reviews = {
+        type: 'link' as const,
+        text: 'Reviews',
+        url: 'https://example.test/reviews',
+      };
       h.postSignature.buildPostButton.mockResolvedValue(reviews);
       h.message.body.attachments = [
         {
@@ -557,7 +577,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
       'major-bot',
       'MINIAPP',
     );
-    const reviews = { type: 'link', text: 'Отзывы', url: 'https://example.test/reviews' };
+    const reviews = { type: 'link' as const, text: 'Отзывы', url: 'https://example.test/reviews' };
     h.message.body.attachments = [
       { type: 'inline_keyboard', payload: { buttons: [[comments], [contact]] } },
     ];
@@ -611,7 +631,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
     h.prisma.chat.findUnique.mockResolvedValue({ ...h.entity, publisherSettings: null });
     h.entity.channelSettings.postSignatureEnabled = true;
     h.job = { ...h.job, publisherSettingsRevision: 0 };
-    const reviews = { type: 'link', text: 'Отзывы', url: 'https://example.test/reviews' };
+    const reviews = { type: 'link' as const, text: 'Отзывы', url: 'https://example.test/reviews' };
     h.postSignature.buildPostButton.mockResolvedValue(reviews);
     await h.producer.observeWebhook(h.update);
     expect(h.queue.enqueueChannelAttach).toHaveBeenCalledWith(
@@ -668,7 +688,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
           buttons: [
             [comments],
             [otherComments],
-            [{ type: 'link', text: 'Comments', url: 'https://example.test/comments' }],
+            [{ type: 'link' as const, text: 'Comments', url: 'https://example.test/comments' }],
           ],
         },
       },
@@ -689,7 +709,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
     'fences the prepared signature across transport admission (changed: %s)',
     async (changed) => {
       const h = fixture();
-      const cta = { type: 'link', text: 'Reviews', url: 'https://example.com/reviews' };
+      const cta = { type: 'link' as const, text: 'Reviews', url: 'https://example.com/reviews' };
       h.postSignature.buildPostButton.mockResolvedValue(cta);
       const checkpoint = jest.fn(async () => {
         expect(h.maxClient.getChatSnapshot).toHaveBeenCalledTimes(1);
@@ -724,7 +744,7 @@ describe('Publisher channel keyboard webhook and delivery', () => {
     const h = fixture();
     h.postSignature.buildPostButton
       .mockResolvedValueOnce({
-        type: 'link',
+        type: 'link' as const,
         text: 'Отзывы',
         url: 'https://example.test/reviews',
       })
@@ -866,5 +886,38 @@ describe('Publisher channel keyboard webhook and delivery', () => {
     expect(queue.add.mock.calls[0]![1]).toEqual(
       expect.objectContaining({ requiredBotId: 'publik-bot', dialogBotId: 'publik-bot' }),
     );
+  });
+});
+
+describe('persistent Publisher channel buttons', () => {
+  it('decorates custom-only posts without enabling comments or suggestions', async () => {
+    const state = fixture();
+    const rows = [
+      [{ type: 'link' as const, text: 'Каталог', url: 'https://example.com/catalog#new' }],
+    ];
+    state.postSignature.buildCustomPostButtons.mockResolvedValue(rows);
+    Object.assign(state.entity.channelSettings, {
+      customPostButtonsEnabled: true,
+      customPostButtonsSince: new Date(Date.now() - 60_000),
+    });
+    state.entity.publisherSettings.channelCommentsEnabled = false;
+    state.entity.publisherSettings.channelSuggestionsEnabled = false;
+    await state.service.process(state.job);
+    expect(state.mutate).toHaveBeenCalledWith(rows);
+  });
+  it('keeps the published custom links when refreshing the comment count after a settings change', async () => {
+    const state = fixture();
+    const custom = [
+      { type: 'link' as const, text: 'Каталог', url: 'https://example.com/original' },
+    ];
+    state.postSignature.buildCustomPostButtons.mockResolvedValue([custom]);
+    await state.service.process(state.job);
+    const frozen = state.prisma.auditLog.upsert.mock.calls[0]![0].create.payload;
+    state.postSignature.buildCustomPostButtons.mockResolvedValue([
+      [{ ...custom[0]!, url: 'https://example.com/new' }],
+    ]);
+    const refreshed = prepareStoredChannelCommentsKeyboard(frozen, 8)!;
+    expect(refreshed.buttons.at(-1)).toEqual(custom);
+    expect(refreshed.buttons[0]![0]!.text).toContain('8');
   });
 });

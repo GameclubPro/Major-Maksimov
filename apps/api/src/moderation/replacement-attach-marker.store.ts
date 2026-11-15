@@ -336,6 +336,7 @@ export class ReplacementAttachMarkerStore {
               { commentsEnabled: true },
               { postSuggestionsEnabled: true },
               { postSignatureEnabled: true },
+              { customPostButtonsEnabled: true },
             ],
           },
         },

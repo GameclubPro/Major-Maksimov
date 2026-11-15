@@ -1,3 +1,4 @@
+import { channelCustomButtonsEligible } from '../common/channel-custom-post-buttons';
 import { checkPublisherCommentReadiness } from './publisher-comment-readiness';
 import { Injectable } from '@nestjs/common';
 import { UnrecoverableError } from 'bullmq';
@@ -71,6 +72,7 @@ export class PublisherChannelCommentDeliveryService {
     } as const;
     let reference: Prisma.InputJsonObject | null = null;
     let ctaButton: MaxMessageButton | null = null;
+    let channelButtonRows: MaxMessageButton[][] = [];
     const postButtonOptions = {
       entityType: 'channel',
       botId: job.requiredBotId,
@@ -84,6 +86,7 @@ export class PublisherChannelCommentDeliveryService {
         null,
         {
           mergeExistingInlineKeyboard: true,
+          rejectKeyboardTrimming: true,
           requireAllAttachmentsPreserved: true,
           prepareInlineKeyboard: async (message) => {
             const recipient = message?.recipient as Record<string, unknown> | undefined;
@@ -154,6 +157,10 @@ export class PublisherChannelCommentDeliveryService {
                 )
               : null;
             ctaButton = await this.postSignature.buildPostButton(job.chatId, postButtonOptions);
+            channelButtonRows = await this.postSignature.buildCustomPostButtons(job.chatId, {
+              entityType: 'channel',
+              sourceAt: job.createdAt,
+            });
             // FLAG: Counter refresh matches the installed opaque link, not a regenerated
             // signature. Preserve the same Publisher button that the locked edit keeps;
             // a retained Major button must never become a Publisher count reference.
@@ -161,6 +168,7 @@ export class PublisherChannelCommentDeliveryService {
               commentsButton: comments ? (findExistingDialog('comments') ?? comments) : null,
               suggestButton: suggest ? (findExistingDialog('suggest') ?? suggest) : null,
               ctaButton,
+              customButtonRows: channelButtonRows,
             });
             reference = {
               messageId: job.messageId,
@@ -192,12 +200,28 @@ export class PublisherChannelCommentDeliveryService {
             const missingCta =
               ctaButton &&
               !existingButtons.some((button) => button.type === 'link' && button.url === ctaUrl);
-            if (!missingComments && !missingSuggest && !missingCta && !hasDuplicateDialogs)
+            const missingCustom = channelButtonRows.filter((row) =>
+              row.some(
+                (button) =>
+                  button.type === 'link' &&
+                  !existingButtons.some(
+                    (existing) => existing.type === 'link' && existing.url === button.url,
+                  ),
+              ),
+            );
+            if (
+              !missingComments &&
+              !missingSuggest &&
+              !missingCta &&
+              !missingCustom.length &&
+              !hasDuplicateDialogs
+            )
               return null;
             return buildChannelPostActionRows({
               commentsButton: findExistingDialog('comments') ?? comments,
               suggestButton: findExistingDialog('suggest') ?? suggest,
               ctaButton: missingCta ? ctaButton : null,
+              customButtonRows: missingCustom,
             });
           },
           beforeEditMutation: withMaxFinalAuthorityCheckpoint(async (beforeFinalAuthority) => {
@@ -223,6 +247,17 @@ export class PublisherChannelCommentDeliveryService {
               : null;
             await beforeFinalAuthority?.();
             const currentSettings = await this.readCurrentSettings(job);
+            if (
+              channelButtonRows.length &&
+              !isDeepStrictEqual(
+                channelButtonRows,
+                await this.postSignature.buildCustomPostButtons(job.chatId, {
+                  entityType: 'channel',
+                  sourceAt: job.createdAt,
+                }),
+              )
+            )
+              throw new UnrecoverableError('Channel custom buttons changed before keyboard edit');
             if (!currentSettings) {
               throw new UnrecoverableError(
                 'Publisher channel settings changed before keyboard edit',
@@ -276,7 +311,13 @@ export class PublisherChannelCommentDeliveryService {
         entityType: true,
         publicationPolicy: { select: { publikEnabled: true, revision: true } },
         channelSettings: {
-          select: { postSignatureEnabled: true, postSignaturePresentation: true, updatedAt: true },
+          select: {
+            postSignatureEnabled: true,
+            postSignaturePresentation: true,
+            updatedAt: true,
+            customPostButtonsEnabled: true,
+            customPostButtonsSince: true,
+          },
         },
         publisherSettings: {
           select: { channelCommentsEnabled: true, channelSuggestionsEnabled: true, revision: true },
@@ -289,8 +330,12 @@ export class PublisherChannelCommentDeliveryService {
       entity.channelSettings.postSignaturePresentation ===
         ChannelPostSignaturePresentation.BUTTON &&
       Date.parse(job.createdAt) >= entity.channelSettings.updatedAt.getTime();
+    const hasCustomButtons = channelCustomButtonsEligible(entity?.channelSettings, job.createdAt);
     return entity?.entityType === ChatEntityType.CHANNEL &&
-      (settings?.channelCommentsEnabled || settings?.channelSuggestionsEnabled || hasPostButton) &&
+      (settings?.channelCommentsEnabled ||
+        settings?.channelSuggestionsEnabled ||
+        hasPostButton ||
+        hasCustomButtons) &&
       (settings?.revision ?? 0) === job.publisherSettingsRevision &&
       entity.publicationPolicy?.publikEnabled !== false &&
       (entity.publicationPolicy?.revision ?? 0) === job.publicationPolicyRevision

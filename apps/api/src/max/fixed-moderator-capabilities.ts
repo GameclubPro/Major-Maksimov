@@ -23,6 +23,7 @@ export async function readFixedModeratorSettingsPurposes(
         commentsEnabled: true,
         postSuggestionsEnabled: true,
         postSignatureEnabled: true,
+        customPostButtonsEnabled: true,
         quickButtonsEnabled: true,
       },
     });

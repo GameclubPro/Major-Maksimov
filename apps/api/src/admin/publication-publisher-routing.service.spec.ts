@@ -229,7 +229,10 @@ describe('PublisherDialogContextService', () => {
       text: 'Задать вопрос или приобрести',
       url: 'https://example.test/contact',
     };
-    const postSignature = { buildPostButton: jest.fn().mockResolvedValue(cta) };
+    const postSignature = {
+      buildCustomPostButtons: jest.fn().mockResolvedValue([]),
+      buildPostButton: jest.fn().mockResolvedValue(cta),
+    };
     const service = new PublisherDialogContextService(
       {
         publisherEntitySettings: {

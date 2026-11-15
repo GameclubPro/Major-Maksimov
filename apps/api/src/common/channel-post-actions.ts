@@ -58,7 +58,6 @@ function readLinkIdentity(button: MaxMessageButton): string | null {
 
   try {
     const url = new URL(rawUrl.trim());
-    url.hash = '';
     return url.toString();
   } catch {
     return rawUrl.trim();

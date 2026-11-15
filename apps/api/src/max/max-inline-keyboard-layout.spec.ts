@@ -15,3 +15,15 @@ describe('clipboard payload for native suggestion editing', () => {
     ).toBeNull();
   });
 });
+
+describe('channel keyboard capacity', () => {
+  it('refuses overflow before replacing a keyboard when all actions must be retained', () => {
+    const rows = Array.from({ length: 31 }, (_, i) => [
+      { type: 'link', text: `Button ${i}`, url: `https://example.com/${i}` },
+    ]);
+    expect(() => normalizeMaxInlineKeyboardButtons(rows, { rejectOnTrim: true })).toThrow('лимит');
+    expect(
+      normalizeMaxInlineKeyboardButtons(rows.slice(0, 30), { rejectOnTrim: true }),
+    ).toHaveLength(30);
+  });
+});

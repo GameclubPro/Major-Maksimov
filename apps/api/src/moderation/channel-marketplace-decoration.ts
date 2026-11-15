@@ -1,3 +1,4 @@
+import type { CustomPostButtonSettings } from '../common/channel-custom-post-buttons';
 import type { ChannelSettings } from '../prisma/prisma-client';
 
 type Decorations = Pick<
@@ -7,7 +8,8 @@ type Decorations = Pick<
   | 'commentsEnabled'
   | 'postSuggestionsEnabled'
   | 'updatedAt'
->;
+> &
+  CustomPostButtonSettings;
 
 export function hasChannelDecorations(settings: Decorations): boolean {
   return (
@@ -25,8 +27,13 @@ export function channelDecorationStart(
 ): number | null {
   const legacy = hasChannelDecorations(settings) ? settings.updatedAt.getTime() : null;
   const marketplace = marketplaceAt?.getTime() ?? null;
-  if (legacy === null) return marketplace;
-  return marketplace === null ? legacy : Math.min(legacy, marketplace);
+  const custom = settings.customPostButtonsEnabled
+    ? (settings.customPostButtonsSince?.getTime() ?? null)
+    : null;
+  const baselines = [legacy, marketplace, custom].filter(
+    (value): value is number => value !== null,
+  );
+  return baselines.length ? Math.min(...baselines) : null;
 }
 
 export function marketplacePostIsEligible(

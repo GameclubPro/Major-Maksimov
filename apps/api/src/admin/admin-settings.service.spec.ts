@@ -203,6 +203,7 @@ function createService(
     currentSettings?: Record<string, unknown> | null;
     channelPostSignatureService?: {
       buildPostButton: jest.Mock;
+      buildCustomPostButtons: jest.Mock;
       getSettings: jest.Mock;
       preparePostText: jest.Mock;
       updateSettings: jest.Mock;
@@ -441,6 +442,7 @@ function createService(
   };
   const channelPostSignatureService = options.channelPostSignatureService ?? {
     buildPostButton: jest.fn().mockResolvedValue(null),
+    buildCustomPostButtons: jest.fn().mockResolvedValue([]),
     getSettings: jest.fn().mockResolvedValue({
       enabled: false,
       presentation: 'signature',
@@ -1828,6 +1830,8 @@ describe('AdminSettingsService chat rules', () => {
     expect(result.settings.commentsEnabled).toBe(true);
     expect(result.postSignature).toEqual({
       enabled: false,
+      customButtonsEnabled: false,
+      customButtons: [],
       presentation: 'signature',
       text: 'Подписаться на канал',
       url: '',
