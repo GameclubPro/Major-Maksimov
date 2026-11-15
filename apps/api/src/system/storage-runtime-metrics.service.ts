@@ -68,6 +68,19 @@ const DELETE_HANDOFF_OUTCOME_FIELDS = [
   'reusedCount',
   'observationErrorCount',
 ] as const;
+const DELETE_WAKEUP_FIELDS = [
+  'calls',
+  'missing',
+  'settled',
+  'retentionOwned',
+  'scheduled',
+  'leased',
+  'expiryChecked',
+  'attempted',
+  'errors',
+  'totalDurationMs',
+  'maxDurationMs',
+] as const;
 const PROCESS_MEMORY_FIELDS = [
   'rssBytes',
   'heapUsedBytes',
@@ -250,6 +263,9 @@ function sanitizeDeleteDueSweepSnapshot(value: unknown) {
   return {
     ...counters,
     handoffOutcomes: checkedNumbers(source.handoffOutcomes, DELETE_HANDOFF_OUTCOME_FIELDS),
+    ...(source.wakeups === undefined
+      ? {}
+      : { wakeups: checkedNumbers(source.wakeups, DELETE_WAKEUP_FIELDS) }),
     stages: sanitized,
   };
 }

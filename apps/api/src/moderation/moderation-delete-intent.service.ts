@@ -48,6 +48,11 @@ import type { Queue } from 'bullmq';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
+  createDeleteWakeupCounters,
+  expiredAutoDeleteVerificationDelay,
+  processQueuedDeleteWakeup,
+} from './moderation-delete-wakeup';
+import {
   SuggestionSubscriptionService,
   SUGGESTION_SUBSCRIPTION_DELETE_RULE,
 } from '../suggestions/suggestion-subscription.service';
@@ -285,7 +290,6 @@ const DEFAULT_PURGE_MAX_BATCHES = 40;
 const DEFAULT_DELETE_TIMEOUT_MS = 5_000;
 const DEFAULT_RETENTION_DAYS = 90;
 const BOT_MESSAGE_AUTO_DELETE_MAX_EXTERNAL_ATTEMPTS = 5;
-const BOT_MESSAGE_AUTO_DELETE_EXPIRED_VERIFICATION_RETRY_MS = 60 * 60_000;
 const BOT_MESSAGE_AUTO_DELETE_RETRY_LIMIT_ERROR_CODE =
   'bot_message_auto_delete_retry_limit_reached';
 const BOT_MESSAGE_AUTO_DELETE_SUCCESS_VERIFICATION_PENDING_ERROR_CODE =
@@ -792,6 +796,7 @@ export class ModerationDeleteIntentService {
   private readonly purgeMaxBatches: number;
   private readonly expectedImageOcrNativeBehavior: CommercialOcrNativeBehaviorIdentity;
   private readonly dueSweepMetrics = {
+    wakeups: createDeleteWakeupCounters(),
     calls: 0,
     completed: 0,
     errors: 0,
@@ -2236,6 +2241,38 @@ export class ModerationDeleteIntentService {
     };
   }
 
+  async processQueuedIntent(intentId: string): Promise<void> {
+    const counters = this.dueSweepMetrics.wakeups;
+    counters.calls = addDueSweepCount(counters.calls);
+    const startedAt = performance.now();
+    try {
+      const outcome = await processQueuedDeleteWakeup(
+        this.prisma,
+        intentId,
+        () => this.attemptIntent(intentId),
+        async () => {
+          // FLAG: Cheap eligibility is advisory. Retain the full current rollout/reason
+          // and source-hold checks before the original conditional expiry writer.
+          const current = await this.loadIntent(intentId);
+          if (
+            current &&
+            this.isExecutionEnabledForIntent(current) &&
+            !(await this.isAbandonedIntentWithoutReceipt(current))
+          )
+            await this.expireIntentIfDue(intentId);
+        },
+      );
+      counters[outcome] = addDueSweepCount(counters[outcome]);
+    } catch (error) {
+      counters.errors = addDueSweepCount(counters.errors);
+      throw error;
+    } finally {
+      const elapsed = Math.max(0, Math.round(performance.now() - startedAt));
+      counters.totalDurationMs = addDueSweepCount(counters.totalDurationMs, elapsed);
+      counters.maxDurationMs = Math.max(counters.maxDurationMs, elapsed);
+    }
+  }
+
   async attemptIntent(
     intentId: string,
     options?: ModerationDeleteIntentAttemptOptions,
@@ -3570,6 +3607,7 @@ export class ModerationDeleteIntentService {
   getDueSweepRuntimeSnapshot() {
     return {
       ...this.dueSweepMetrics,
+      wakeups: { ...this.dueSweepMetrics.wakeups },
       handoffOutcomes: { ...this.dueSweepMetrics.handoffOutcomes },
       stages: Object.fromEntries(
         STORAGE_DELETE_DUE_SWEEP_STAGES.map((stage) => {
@@ -6667,7 +6705,7 @@ export class ModerationDeleteIntentService {
     ): Promise<number> => {
       const now = Date.now();
       // FLAG: Acknowledged cleanup still needs exact absence proof. An expired auto-delete-only
-      // obligation retains its markers and polls no sooner than hourly, preserving longer hints.
+      // obligation retains its markers and backs off from hourly to daily as it ages.
       const expiredAutoDeleteVerification =
         allowSlowVerification && this.isExpiredAutoDeleteVerification(currentIntent, now);
       const requestedNextAt = new Date(
@@ -6676,7 +6714,7 @@ export class ModerationDeleteIntentService {
             1_000,
             details.retryDelayMs ?? 1_000,
             expiredAutoDeleteVerification
-              ? BOT_MESSAGE_AUTO_DELETE_EXPIRED_VERIFICATION_RETRY_MS
+              ? expiredAutoDeleteVerificationDelay(currentIntent.retryUntilAt, now)
               : 0,
           ),
       );
@@ -8161,11 +8199,12 @@ export class ModerationDeleteIntentService {
         return 'denied';
       accessProbeStartedAt = new Date();
       membershipLookupPending = true;
+      const readClass = this.deleteRecoveryReadClass(intent);
       const access = await this.maxClient.getCurrentChatMemberAccess(intent.chatId, {
         botId,
         bypassCache: true,
-        trafficClass: intent.retentionOwned ? 'background' : 'critical',
-        actionHealthLane: intent.retentionOwned ? 'background' : 'critical',
+        trafficClass: readClass,
+        actionHealthLane: readClass,
         sourceTag: intent.retentionOwned
           ? MAX_API_SOURCE_TAGS.MESSAGE_RETENTION
           : MAX_API_SOURCE_TAGS.MODERATION_DELETE,
@@ -8256,17 +8295,26 @@ export class ModerationDeleteIntentService {
         'Retention reconciliation paused',
         'runtime_disabled',
       );
+    const readClass = this.deleteRecoveryReadClass(intent);
     return this.maxClient.getExactMessagePresence(intent.chatId, intent.messageId, {
       botId,
       bypassCache: true,
-      trafficClass: intent.retentionOwned ? 'background' : 'critical',
-      actionHealthLane: intent.retentionOwned ? 'background' : 'critical',
+      trafficClass: readClass,
+      actionHealthLane: readClass,
       sourceTag: intent.retentionOwned
         ? MAX_API_SOURCE_TAGS.MESSAGE_RETENTION
         : MAX_API_SOURCE_TAGS.MODERATION_DELETE,
       timeoutMs: this.deleteTimeoutMs,
       ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
     });
+  }
+
+  private deleteRecoveryReadClass(intent: IntentRow): 'background' | 'critical' {
+    // FLAG: Historical positive-receipt verification never borrows the fresh critical
+    // lane. This changes read admission only; every existing effect guard still runs.
+    return intent.retentionOwned || this.isExpiredAutoDeleteVerification(intent, Date.now())
+      ? 'background'
+      : 'critical';
   }
 
   private async recordCandidateFailure(

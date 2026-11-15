@@ -270,6 +270,23 @@ remains durable due work and is revisited after wrap; it cannot freeze independe
 Head job loss still receives the next-sweep repair. Tail progress is conditional on available
 confirmed reuse and has a separate cycle bound, not a one-second fleet-wide guarantee.
 
+The DELETE worker first reads one intent by primary key. Missing, settled, future-scheduled,
+retention-owned and currently leased wakeups need no reason inventory or MAX call; durable SQL
+recovery owns subsequent eligibility. Expired unattempted wakeups still load current reasons and
+check rollout/source holds before the original conditional expiry writer. Its no-op is not an
+expiry receipt. Executable work follows the ordinary lease and authorization path. Optional
+`deleteDueSweep.wakeups` counters distinguish skipped, attempted and expiry-checked wakeups,
+errors and processing time; neither an attempted wakeup nor a completed queue job proves deletion.
+Old/malformed telemetry remains unknown. Validate the exact lookup against representative retained
+history and preserve marker races and off/shadow/canary behavior in the native deletion suites.
+
+Expired, pure bot-message auto-delete obligations with a complete positive DELETE receipt retain
+their exact-absence requirement and original deadline. Their verification floor grows from one
+hour, doubling every six hours past that deadline, to a maximum of 24 hours; longer existing retry
+hints survive. Only these historical reads use background admission. Independent current reasons,
+incomplete receipts and unknown dispatches keep their existing classification and guards. The
+locked reason recheck prevents an independently added reason from inheriting the slower schedule.
+
 | Change                                      | Required evidence                                                                                                                                                                                        | Existing regression                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | DELETE due recovery continuation            | Missing tail job behind a paused existing head; next-sweep head repair; raw/PK bounds under ties, rejects and locks; finite wrap, tiny budgets and failed handoff isolation                              | `moderation/moderation-delete-due-postgres.spec.ts`, `moderation/moderation-delete-continuation-postgres.spec.ts`, `moderation/moderation-delete-due-selection.spec.ts`, `moderation/moderation-delete-intent.service.spec.ts`, `moderation/moderation-delete-intent-handoff.redis-integration.spec.ts`                                                              |

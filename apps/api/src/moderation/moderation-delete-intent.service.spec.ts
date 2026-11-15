@@ -6404,6 +6404,9 @@ describe('ModerationDeleteIntentService', () => {
 
   it.each([
     ['expired complete acknowledgement', {}, 3_600_000],
+    ['six-hour expired acknowledgement', { expiredForMs: 6 * 3_600_000 }, 2 * 3_600_000],
+    ['twelve-hour expired acknowledgement', { expiredForMs: 12 * 3_600_000 }, 4 * 3_600_000],
+    ['old expired acknowledgement', { expiredForMs: 30 * 3_600_000 }, 24 * 3_600_000],
     ['active horizon', { activeHorizon: true }, 300_000],
     ['horizon expires after lock decision', { horizonCrossesWhilePersisting: true }, 300_000],
     ['acknowledgement timestamp only', { remoteDeleteSucceededBotId: null }, 300_000],
@@ -6429,6 +6432,7 @@ describe('ModerationDeleteIntentService', () => {
         invalidAcknowledgement?: boolean;
         futureAcknowledgement?: boolean;
         invalidHorizon?: boolean;
+        expiredForMs?: number;
         remoteDeleteSucceededAt?: null;
         remoteDeleteSucceededBotId?: string | null;
         botMessageAutoDeleteOnly?: false;
@@ -6443,6 +6447,7 @@ describe('ModerationDeleteIntentService', () => {
         invalidAcknowledgement,
         futureAcknowledgement,
         invalidHorizon,
+        expiredForMs,
         ...intentOverrides
       } = options;
       const intent = {
@@ -6460,7 +6465,12 @@ describe('ModerationDeleteIntentService', () => {
         retryUntilAt: new Date(
           invalidHorizon
             ? Number.NaN
-            : now.getTime() + (horizonCrossesWhilePersisting ? 0 : activeHorizon ? 60_000 : -1_000),
+            : now.getTime() +
+                (horizonCrossesWhilePersisting
+                  ? 0
+                  : activeHorizon
+                    ? 60_000
+                    : -(expiredForMs ?? 1_000)),
         ),
         ...intentOverrides,
       };
@@ -6527,7 +6537,15 @@ describe('ModerationDeleteIntentService', () => {
       expect(sql).not.toContain('"delete_dispatch_started_at" =');
       expect(sql).not.toContain('"delete_dispatch_started_bot_id" =');
       expect(transaction).toHaveBeenCalledTimes(
-        ['expired complete acknowledgement', 'longer remote retry hint'].includes(_label) ? 1 : 0,
+        [
+          'expired complete acknowledgement',
+          'longer remote retry hint',
+          'six-hour expired acknowledgement',
+          'twelve-hour expired acknowledgement',
+          'old expired acknowledgement',
+        ].includes(_label)
+          ? 1
+          : 0,
       );
     },
   );
@@ -6591,6 +6609,11 @@ describe('ModerationDeleteIntentService', () => {
 
     expect(getExactMessagePresence).toHaveBeenCalledTimes(1);
     expect(deleteMessage).not.toHaveBeenCalled();
+    expect(getExactMessagePresence).toHaveBeenCalledWith(
+      'chat-1',
+      'message-1',
+      expect.objectContaining({ trafficClass: 'background' }),
+    );
     const retryQuery = executeRaw.mock.calls
       .map(
         (call: unknown[]) => call[0] as { strings: readonly string[]; values: readonly unknown[] },
