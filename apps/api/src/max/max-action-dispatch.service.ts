@@ -421,6 +421,12 @@ export class MaxActionDispatchService {
             },
           };
         }
+        if (
+          attemptJob.actionType === 'SEND_MESSAGE' &&
+          options.deferSendCapacity === true &&
+          this.actionLedgerService
+        )
+          executionOptions = { ...executionOptions, deferSendCapacity: true };
         const executionResult = executionOptions
           ? await this.maxClient.executeActionJob(attemptJob, executionOptions)
           : await this.maxClient.executeActionJob(attemptJob);

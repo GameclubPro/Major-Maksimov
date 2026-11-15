@@ -1021,18 +1021,19 @@ native('legacy disposition production ingestion activation regressions', () => {
       orderBy: { id: 'asc' },
     });
     expect(retainedModernReceipts.length).toBeLessThan(496);
-    await prisma.$transaction(async (tx) => {
+    const tail = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM webhook_events WHERE status = 'NO_REPLAY_HELD' ORDER BY created_at, id LIMIT 500 FOR UPDATE`;
       expect(await internals.deleteLegacyHeldWebhookBatch(expiry)).toEqual({
-        scanned: 0,
+        scanned: 500,
         removed: 0,
       });
+      const result = await internals.deleteLegacyHeldWebhookBatch(expiry);
+      expect(result.scanned).toBe(4 + retainedModernReceipts.length);
+      return result;
     });
-    const first = await internals.deleteLegacyHeldWebhookBatch(expiry);
-    const second = await internals.deleteLegacyHeldWebhookBatch(expiry);
-    expect(first.scanned).toBe(500);
-    expect(second.scanned).toBe(4 + retainedModernReceipts.length);
-    expect(first.removed + second.removed).toBe(502);
+    const revisited = await internals.deleteLegacyHeldWebhookBatch(expiry);
+    expect(revisited.scanned).toBe(500);
+    expect(revisited.removed + tail.removed).toBe(502);
     expect(
       await prisma.webhookEvent.findMany({
         where: { id: { in: retainedModernReceipts.map((receipt) => receipt.id) } },

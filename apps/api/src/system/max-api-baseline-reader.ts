@@ -15,7 +15,8 @@ const CLASSES = ['critical', 'interactive', 'background'] as const;
 const SOURCES = new Set<string>(Object.values(MAX_API_SOURCE_TAGS));
 const MAX_DIMENSIONS = 512;
 const MAX_BOTS = 32;
-const MAX_COUNTERS = 120_000;
+const MAX_COUNTERS_PER_SLICE = 120_000;
+const SLICE_SECONDS = 60;
 const COUNTER_BATCH = 200;
 const DEADLINE_MS = 8_000;
 
@@ -170,49 +171,59 @@ export async function readMaxApiBaseline(
       else excludedDimensions++;
     }
     const expectedCounters = (10 * (botIds.length + 1) + dimensions.length) * windowSec;
-    if (expectedCounters > MAX_COUNTERS) return unavailable('counter_limit', observedAt);
+    if ((expectedCounters / windowSec) * SLICE_SECONDS > MAX_COUNTERS_PER_SLICE)
+      return unavailable('counter_limit', observedAt);
     const stack = bucket();
     const bots = new Map(botIds.map((id) => [id, bucket()]));
-    const counters: Counter[] = [];
     const fromSec = untilMs / 1_000 - windowSec;
-    for (let sec = fromSec; sec < untilMs / 1_000; sec++) {
-      for (const [id, target] of [['stack', stack] as const, ...bots]) {
-        const prefix = id === 'stack' ? 'maxapi:rps:stack' : `maxapi:rps:global:${id}`;
-        counters.push({
-          key: `${prefix}:${sec}`,
-          add: (n) => (target.admitted = addCounter(target.admitted, n)),
-        });
-        for (const trafficClass of CLASSES) {
-          counters.push({
-            key: `${prefix}:${trafficClass}:${sec}`,
-            add: (n) =>
-              (target.classes[trafficClass] = addCounter(target.classes[trafficClass], n)),
-          });
-          for (const [origin, counts] of [
-            ['internal_limiter', target.internalLimiterRejects],
-            ['external_429', target.external429],
-          ] as const)
-            counters.push({
-              key: `maxapi:rate-limit:v1:${origin}:${id}:${trafficClass}:${sec}`,
-              add: (n) => (counts[trafficClass] = addCounter(counts[trafficClass], n)),
-            });
+    const targets = [['stack', stack] as const, ...bots];
+    // FLAG: Generate one bounded Redis batch at a time; retained fleet dimensions
+    // must not allocate a closure for every second of the complete window.
+    function* countersForSlice(start: number, end: number): Generator<Counter> {
+      for (let sec = start; sec < end; sec++) {
+        for (const [id, target] of targets) {
+          const prefix = id === 'stack' ? 'maxapi:rps:stack' : `maxapi:rps:global:${id}`;
+          yield {
+            key: `${prefix}:${sec}`,
+            add: (n) => (target.admitted = addCounter(target.admitted, n)),
+          };
+          for (const trafficClass of CLASSES) {
+            yield {
+              key: `${prefix}:${trafficClass}:${sec}`,
+              add: (n) =>
+                (target.classes[trafficClass] = addCounter(target.classes[trafficClass], n)),
+            };
+            for (const [origin, counts] of [
+              ['internal_limiter', target.internalLimiterRejects],
+              ['external_429', target.external429],
+            ] as const)
+              yield {
+                key: `maxapi:rate-limit:v1:${origin}:${id}:${trafficClass}:${sec}`,
+                add: (n) => (counts[trafficClass] = addCounter(counts[trafficClass], n)),
+              };
+          }
         }
-      }
-      for (const dimension of dimensions) {
-        const target = bots.get(dimension.botId)!;
-        const source = SOURCES.has(dimension.sourceTag) ? dimension.sourceTag : 'other';
-        const counts = (target.sources[source] ??= { critical: 0, interactive: 0, background: 0 });
-        counters.push({
-          key: buildMaxApiSourceMetricKey({ ...dimension, sec }),
-          add: (n) =>
-            (counts[dimension.trafficClass] = addCounter(counts[dimension.trafficClass], n)),
-        });
+        for (const dimension of dimensions) {
+          const target = bots.get(dimension.botId)!;
+          const source = SOURCES.has(dimension.sourceTag) ? dimension.sourceTag : 'other';
+          const counts = (target.sources[source] ??= {
+            critical: 0,
+            interactive: 0,
+            background: 0,
+          });
+          yield {
+            key: buildMaxApiSourceMetricKey({ ...dimension, sec }),
+            add: (n) =>
+              (counts[dimension.trafficClass] = addCounter(counts[dimension.trafficClass], n)),
+          };
+        }
       }
     }
     let countersPresent = 0;
-    for (let start = 0; start < counters.length; start += COUNTER_BATCH) {
-      if (performance.now() >= deadline) return unavailable('deadline', observedAt);
-      const batch = counters.slice(start, start + COUNTER_BATCH);
+    let countersRead = 0;
+    let slicesRead = 0;
+    const readBatch = async (batch: Counter[]): Promise<string | null> => {
+      if (performance.now() >= deadline) return 'deadline';
       const addresses = batch.map(({ key }) => maxApiMinuteCounterAddress(key));
       const values = await redis.call(
         'EVAL_RO',
@@ -221,8 +232,7 @@ export async function readMaxApiBaseline(
         ...batch.flatMap(({ key }, index) => [key, addresses[index]!.key]),
         ...addresses.map(({ field }) => field),
       );
-      if (!Array.isArray(values) || values.length !== batch.length * 2)
-        return unavailable('counter_invalid', observedAt);
+      if (!Array.isArray(values) || values.length !== batch.length * 2) return 'counter_invalid';
       for (let index = 0; index < batch.length; index++) {
         const count = values[index * 2];
         const present = values[index * 2 + 1];
@@ -231,11 +241,48 @@ export async function readMaxApiBaseline(
           Number(count) < 0 ||
           ![0, 1, 2].includes(Number(present))
         )
-          return unavailable('counter_invalid', observedAt);
+          return 'counter_invalid';
         batch[index]!.add(Number(count));
         if (Number(present) > 0) countersPresent++;
       }
+      countersRead += batch.length;
+      return null;
+    };
+    for (let start = fromSec; start < untilMs / 1_000; start += SLICE_SECONDS) {
+      let batch: Counter[] = [];
+      for (const counter of countersForSlice(
+        start,
+        Math.min(start + SLICE_SECONDS, untilMs / 1_000),
+      )) {
+        batch.push(counter);
+        if (batch.length < COUNTER_BATCH) continue;
+        const failure = await readBatch(batch);
+        if (failure) return unavailable(failure, observedAt);
+        batch = [];
+      }
+      if (batch.length) {
+        const failure = await readBatch(batch);
+        if (failure) return unavailable(failure, observedAt);
+      }
+      slicesRead++;
     }
+    if (performance.now() >= deadline) return unavailable('deadline', observedAt);
+    // FLAG: A changed source catalog is incomplete evidence even if every original
+    // counter was read. Recheck the bounded catalog without scans or repair writes.
+    const finalCatalog = await redis.call(
+      'EVAL_RO',
+      READ_CATALOG,
+      2,
+      MAX_API_SOURCE_DIMENSION_BOOTSTRAP_COMPLETE_KEY,
+      MAX_API_SOURCE_DIMENSION_CATALOG_KEY,
+    );
+    const catalogIdentity = JSON.stringify(catalog.slice(1).sort());
+    if (
+      !Array.isArray(finalCatalog) ||
+      finalCatalog[0] !== 'ok' ||
+      JSON.stringify(finalCatalog.slice(1).sort()) !== catalogIdentity
+    )
+      return unavailable('catalog_changed', observedAt);
     if (performance.now() >= deadline) return unavailable('deadline', observedAt);
     // FLAG: Aliases only identify this exact configured catalog. They are not MAX
     // identities or proof that every HTTP call/effect was observed by diagnostics.
@@ -251,9 +298,12 @@ export async function readMaxApiBaseline(
       catalogFingerprint: createHash('sha256').update(JSON.stringify(botIds)).digest('hex'),
       catalogDimensions: catalog.length - 1,
       excludedDimensions,
-      countersRead: counters.length,
+      collectionComplete: true,
+      sourceCatalogFingerprint: createHash('sha256').update(catalogIdentity).digest('hex'),
+      slicesRead,
+      countersRead,
       countersPresent,
-      zeroOrMissingCounters: counters.length - countersPresent,
+      zeroOrMissingCounters: countersRead - countersPresent,
       stack,
       bots: botIds.map((id, index) => ({ alias: `token_${index + 1}`, ...bots.get(id)! })),
     };

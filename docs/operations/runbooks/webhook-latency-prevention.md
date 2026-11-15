@@ -85,6 +85,11 @@ before editing it; copying these notes does not install a fix or prove the deplo
    source, policy, holds and rights on every entry. Missing/malformed notice proofs, borrowed
    GET failures, protected moderation budgets and attempted/ambiguous effects cannot nominate
    this deferral; no whole-handler replay or renewed authority is permitted.
+   For these exact journaled notices, the locked worker caps its local POST admission wait at
+   250 ms before the existing durable deferral. Short waits still permit ordinary token pacing
+   after fresh preparation. The ephemeral option is bound to the exact bot/chat/notice proof;
+   direct SEND callers, nested GETs, DELETEs and smaller existing wait budgets are unchanged.
+   No quota or cooldown is raised, and no failed or unknown HTTP effect gains retry authority.
    The inline text-rule follow-up with this attempt's own DELETE reason confirmed enters
    `violation-follow-up.authority` before fresh sanction authorization. A failure there occurs
    after deletion; it is neither a failed DELETE nor permission to replay the handler. Pending

@@ -1,5 +1,7 @@
 import { DelayedError, Queue, QueueEvents, type Job, UnrecoverableError, Worker } from 'bullmq';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { ConfigService } from '@nestjs/config';
+import type { HttpService } from '@nestjs/axios';
 import { randomUUID } from 'node:crypto';
 import { from } from 'rxjs';
 import { PrismaClient, createPrismaAdapter } from '../prisma/prisma-client';
@@ -9,6 +11,10 @@ import { MaxActionInteractiveProcessor } from './max-action.processor';
 import { MaxApiInternalRateLimitError } from './max-api-internal-rate-limit.error';
 import { MaxClientService, type MaxActionJob } from './max-client.service';
 import { markMaxApiCapacityRefusal } from './max-send-capacity-deferral';
+import { MaxBotRegistryService } from './max-bot-registry.service';
+import { MaxBotContextService } from './max-bot-context.service';
+import type { ActionHealthService } from '../system/action-health.service';
+import type Redis from 'ioredis';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim() ?? '';
@@ -71,16 +77,21 @@ integration('Notice SEND capacity on locked Redis jobs and PostgreSQL ledger', (
     else process.env.APP_ROLE = previousRole;
   });
 
-  async function enqueue(deadlineOffsetMs = 60_000, attempts = 2): Promise<Job<MaxActionJob>> {
+  async function enqueue(
+    deadlineOffsetMs = 60_000,
+    attempts = 2,
+    selectedBotId = botId,
+  ): Promise<Job<MaxActionJob>> {
     const now = Date.now();
     const id = `capacity-notice-${randomUUID()}`;
     ids.push(id);
     const data: MaxActionJob = {
       actionType: 'SEND_MESSAGE',
-      botId,
+      botId: selectedBotId,
       chatId: `capacity-chat-${randomUUID()}`,
       text: 'Synthetic notice with no external network',
       sourceTag: 'moderation_notice',
+      trafficClass: 'background',
       idempotencyKey: id,
       attempt: 1,
       createdAt: new Date(now).toISOString(),
@@ -184,6 +195,129 @@ integration('Notice SEND capacity on locked Redis jobs and PostgreSQL ledger', (
       },
     };
   }
+
+  it('caps a blocked token wait on a locked notice and promptly serves another token with real Redis admission', async () => {
+    const otherBotId = `capacity-peer-${randomUUID()}`;
+    const original = await enqueue();
+    const independent = await enqueue(60_000, 2, otherBotId);
+    const request = jest.fn(async () => ({ message_id: `remote-${randomUUID()}` }));
+    const clients = [botId, otherBotId].map((id) => {
+      const config = new ConfigService({
+        MAX_API_BASE_URL: 'https://platform-api2.max.ru',
+        REDIS_URL: redisUrl,
+        MAX_BOT_ID: id,
+        MAX_BOT_TOKEN: `synthetic-${id}`,
+        MAX_WEBHOOK_SECRET_PATH: 'synthetic',
+        MAX_WEBHOOK_HEADER_SECRET: 'synthetic',
+        MAX_API_GLOBAL_RPS: 25,
+        MAX_API_GLOBAL_BURST: 0,
+        MAX_API_RATE_LIMIT_WAIT_MS_BACKGROUND: 3_000,
+        APP_SERVICE_NAME: 'test-notice-capacity',
+      });
+      const client = new MaxClientService(
+        {
+          request: (options: { method: string; url: string }) => {
+            if (
+              options.method !== 'post' ||
+              options.url !== 'https://platform-api2.max.ru/messages'
+            )
+              throw new Error('Only synthetic notice HTTP is admitted');
+            return from(request().then((data) => ({ status: 200, data })));
+          },
+        } as unknown as HttpService,
+        config,
+        {
+          recordSuccessForLane: jest.fn(),
+          recordFailureForLane: jest.fn(),
+        } as unknown as ActionHealthService,
+        new MaxBotRegistryService(config),
+        new MaxBotContextService(),
+        undefined,
+        undefined,
+        ledger,
+      );
+      Object.defineProperty(client, 'moderationRuleNoticeGuard', {
+        value: {
+          assertAllowed: async (
+            _job: MaxActionJob,
+            _bot: string,
+            _readers: unknown,
+            checkpoint?: () => Promise<void>,
+          ) => checkpoint?.(),
+        },
+      });
+      return client;
+    });
+    const blocked = clients[0]! as unknown as {
+      limiterRedis: Redis;
+      sleep(ms: number): Promise<void>;
+    };
+    const sleep = jest.spyOn(blocked, 'sleep');
+    const max = {
+      executeActionJob: (job, options) =>
+        clients[job.botId === botId ? 0 : 1]!.executeActionJob(job, options),
+    } satisfies Pick<MaxClientService, 'executeActionJob'>;
+    const processor = new MaxActionInteractiveProcessor(
+      new MaxActionDispatchService(max as never, undefined, ledger),
+    );
+    const cooldown = `maxapi:gcra:v1:bot:${botId}:all:cooldown`;
+    try {
+      await blocked.limiterRedis.set(cooldown, '1', 'PX', 5_000);
+      const expiresAt = await blocked.limiterRedis.pexpiretime(cooldown);
+      const first = (await worker.getNextJob('native-blocked-lock'))!;
+      expect(first.id).toBe(original.id);
+      await expect(processor.process(first, 'native-blocked-lock')).rejects.toBeInstanceOf(
+        DelayedError,
+      );
+      expect(sleep.mock.calls.reduce((sum, [ms]) => sum + ms, 0)).toBeLessThanOrEqual(250);
+      expect(await first.getState()).toBe('delayed');
+      expect(first.attemptsMade).toBe(0);
+      expect(request).not.toHaveBeenCalled();
+      expect(await blocked.limiterRedis.pexpiretime(cooldown)).toBe(expiresAt);
+      expect(await blocked.limiterRedis.zcard(`maxapi:gcra:v1:bot:${botId}:all:window:v1`)).toBe(0);
+      const next = (await worker.getNextJob('native-peer-lock'))!;
+      expect(next.id).toBe(independent.id);
+      await processor.process(next, 'native-peer-lock');
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(await blocked.limiterRedis.pttl(cooldown)).toBeGreaterThan(0);
+      expect(
+        await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: original.id! } }),
+      ).toMatchObject({
+        status: 'FAILED_RETRYABLE',
+        terminal: false,
+        ambiguous: false,
+        dispatchToken: null,
+        dispatchStartedAt: null,
+        remoteMessageId: null,
+      });
+      expect(
+        await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: independent.id! } }),
+      ).toMatchObject({
+        status: 'SUCCEEDED',
+        terminal: true,
+        ambiguous: false,
+      });
+      const paced = await enqueue();
+      const pacedJob = (await worker.getNextJob('native-paced-lock'))!;
+      expect(pacedJob.id).toBe(paced.id);
+      await blocked.limiterRedis.set(cooldown, '1', 'PX', 150);
+      sleep.mockClear();
+      await processor.process(pacedJob, 'native-paced-lock');
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(sleep.mock.calls.reduce((sum, [ms]) => sum + ms, 0)).toBeGreaterThan(0);
+      expect(sleep.mock.calls.reduce((sum, [ms]) => sum + ms, 0)).toBeLessThanOrEqual(250);
+      expect(
+        await db.maxActionLedgerEntry.findUniqueOrThrow({ where: { jobId: paced.id! } }),
+      ).toMatchObject({
+        status: 'SUCCEEDED',
+        terminal: true,
+        ambiguous: false,
+      });
+    } finally {
+      sleep.mockRestore();
+      await Promise.all(clients.map((client) => client.onModuleDestroy()));
+    }
+  }, 15_000);
 
   it('preserves the locked job identity and attempts, permits independent work, then sends once', async () => {
     const original = await enqueue();

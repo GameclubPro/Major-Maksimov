@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { readMaxApiBaseline } from './max-api-baseline-reader';
 import { maxApiMinuteCounterAddress } from '../max/max-api-counter-storage';
 import {
@@ -171,7 +172,7 @@ native('bounded read-only fleet MAX baseline on native Redis', () => {
     }
   });
 
-  it('refuses catalog and total-work limits before reading counters', async () => {
+  it('refuses an oversized catalog and reads the largest admitted catalog in bounded slices', async () => {
     await catalog();
     const members = Array.from({ length: 512 }, (_, index) =>
       serializeMaxApiSourceMetricDimension({
@@ -188,7 +189,102 @@ native('bounded read-only fleet MAX baseline on native Redis', () => {
     await redis.srem(CATALOG, members[0]!);
     expect(
       await readMaxApiBaseline(redis, { botIds: [botId], untilMs, windowSec: 300 }),
-    ).toMatchObject({ available: false, code: 'counter_limit' });
+    ).toMatchObject({ available: true, countersRead: (20 + 512) * 300 });
+  });
+
+  it.each([
+    [7, 321],
+    [32, 512],
+  ])(
+    'reads five closed minutes for %i bots and %i dimensions',
+    async (botCount, dimensionCount) => {
+      await catalog();
+      const botIds = Array.from({ length: botCount }, (_, index) =>
+        index ? `${botId}_${index}` : botId,
+      );
+      await redis.sadd(
+        CATALOG,
+        ...Array.from({ length: dimensionCount - 1 }, (_, index) =>
+          serializeMaxApiSourceMetricDimension({
+            botId: botIds[index % botCount]!,
+            trafficClass: 'critical',
+            sourceTag: `source_${index}`,
+          }),
+        ),
+      );
+      const fromSec = untilMs / 1_000 - 300;
+      for (const id of botIds) {
+        for (let slice = 0; slice < 5; slice++) {
+          const key = `maxapi:rps:global:${id}:${fromSec + slice * 60}`;
+          await string(key, '2');
+          await minute(key, '3');
+        }
+        await minute(`maxapi:rps:global:${id}:${fromSec - 1}`, '100');
+        await minute(`maxapi:rps:global:${id}:${untilMs / 1_000}`, '100');
+      }
+      const report = await readMaxApiBaseline(redis, { botIds, untilMs, windowSec: 300 });
+      expect(report).toMatchObject({
+        available: true,
+        collectionComplete: true,
+        slicesRead: 5,
+        populationComplete: false,
+        catalogDimensions: dimensionCount,
+        countersRead: (10 * (botCount + 1) + dimensionCount) * 300,
+        countersPresent: botCount * 5,
+      });
+      if (!report.available) throw new Error('Fleet baseline unavailable');
+      expect(report.bots).toHaveLength(botCount);
+      expect(report.bots.every((bot) => bot.admitted === 25)).toBe(true);
+    },
+  );
+
+  it('refuses a catalog changed during collection instead of publishing partial totals', async () => {
+    await catalog();
+    const original = redis.call.bind(redis);
+    let catalogReads = 0;
+    const call = jest.spyOn(redis, 'call').mockImplementation(async (...args) => {
+      if (args.includes(COMPLETE) && ++catalogReads === 2) {
+        await catalog('new_dimension_during_collection');
+      }
+      return original(...args);
+    });
+    try {
+      expect(await readMaxApiBaseline(redis, { botIds: [botId], untilMs })).toMatchObject({
+        available: false,
+        code: 'catalog_changed',
+      });
+      expect(catalogReads).toBe(2);
+    } finally {
+      call.mockRestore();
+    }
+  });
+
+  it('stops after the common deadline without issuing another batch or returning partial data', async () => {
+    await catalog();
+    const clock = jest.spyOn(performance, 'now').mockReturnValue(0);
+    const original = redis.call.bind(redis);
+    let batches = 0;
+    const call = jest.spyOn(redis, 'call').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (!args.includes(COMPLETE)) {
+        batches++;
+        expect(Number(args[2])).toBeLessThanOrEqual(400);
+        clock.mockReturnValue(8_001);
+      }
+      return result;
+    });
+    try {
+      expect(
+        await readMaxApiBaseline(redis, { botIds: [botId], untilMs, windowSec: 300 }),
+      ).toMatchObject({
+        available: false,
+        code: 'deadline',
+      });
+      expect(batches).toBe(1);
+    } finally {
+      call.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   it('refuses oversized catalog values before materializing their contents', async () => {

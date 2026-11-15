@@ -53,6 +53,7 @@ import {
   certifyMaxSendCapacityDeferral,
   markMaxApiCapacityRefusal,
   runWithMaxSendCapacityAttempt,
+  boundMaxSendCapacityWait,
 } from './max-send-capacity-deferral';
 import { readMaxChatAvatar } from './max-chat-avatar';
 import { readMaxRetryAfterMs } from './max-retry-after';
@@ -778,6 +779,7 @@ export type MaxActionDispatchOptions = {
 };
 
 type MaxActionExecutionOptions = {
+  deferSendCapacity?: boolean;
   beforeDeleteMutation?: MaxActionDispatchOptions['beforeImmediateDeleteMutation'];
   beforeMemberMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>;
   beforeSendMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>;
@@ -3501,6 +3503,7 @@ export class MaxClientService implements OnModuleDestroy {
             attachments,
             mutationOptions,
             beforeSend,
+            executionOptions.deferSendCapacity === true,
           );
           const sentMessageId = this.extractMessageIdFromSendResponse(sendResponse);
           if (!sentMessageId) {
@@ -8086,6 +8089,7 @@ export class MaxClientService implements OnModuleDestroy {
     attachments: Record<string, unknown>[],
     mutationOptions: MaxApiRequestOptions,
     beforeMutation?: (revalidateRoute?: () => Promise<void>) => Promise<void>,
+    deferSendCapacity = false,
   ): Promise<MaxQueuedSendResponse> {
     const ruleNotice = hasMaxModerationRuleNoticeProof(action);
     const subscriptionNotice = isMaxRequiredSubscriptionNoticeAction(action);
@@ -8190,23 +8194,27 @@ export class MaxClientService implements OnModuleDestroy {
     }
     const sendBotId = this.readTrimmedString(mutationOptions.botId) ?? this.getCurrentBot().id;
     const sendRequest = () =>
-      runWithMaxSendCapacityAttempt(action, sendBotId, () =>
-        runWithMaxSendHttpObservation(action.idempotencyKey, () =>
-          this.request<Record<string, unknown>>('post', '/messages', {
-            params: {
-              chat_id: action.chatId,
-            },
-            data: {
-              text: hasText ? action.text : null,
-              ...(hasText && action.options?.textFormat
-                ? { format: action.options.textFormat }
-                : {}),
-              ...(messageLink ? { link: messageLink } : {}),
-              ...(attachments.length > 0 ? { attachments } : {}),
-            },
-            ...(mutationOptions.timeoutMs ? { timeout: mutationOptions.timeoutMs } : {}),
-          }),
-        ),
+      runWithMaxSendCapacityAttempt(
+        action,
+        sendBotId,
+        () =>
+          runWithMaxSendHttpObservation(action.idempotencyKey, () =>
+            this.request<Record<string, unknown>>('post', '/messages', {
+              params: {
+                chat_id: action.chatId,
+              },
+              data: {
+                text: hasText ? action.text : null,
+                ...(hasText && action.options?.textFormat
+                  ? { format: action.options.textFormat }
+                  : {}),
+                ...(messageLink ? { link: messageLink } : {}),
+                ...(attachments.length > 0 ? { attachments } : {}),
+              },
+              ...(mutationOptions.timeoutMs ? { timeout: mutationOptions.timeoutMs } : {}),
+            }),
+          ),
+        deferSendCapacity && Boolean(this.actionLedgerService),
       );
 
     if (!this.actionLedgerService) {
@@ -8683,9 +8691,12 @@ export class MaxClientService implements OnModuleDestroy {
       messageMutation?.operation === 'send' &&
       this.normalizeMetricSourceTag(sourceTag) === MAX_API_SOURCE_TAGS.MANAGED_BROADCAST &&
       this.botRegistry.getPublisherBotDescriptor?.().id === botId;
-    const configuredMaxWaitMs = durablePublisherSend
-      ? 0
-      : this.resolveTrafficClassRateLimitWaitMs(trafficClass, sourceTag, messageMutation);
+    const configuredMaxWaitMs = boundMaxSendCapacityWait(
+      durablePublisherSend
+        ? 0
+        : this.resolveTrafficClassRateLimitWaitMs(trafficClass, sourceTag, messageMutation),
+      { botId, chatId, operation: messageMutation?.operation },
+    );
     const maxWaitMs =
       typeof maxWaitMsOverride === 'number' && Number.isFinite(maxWaitMsOverride)
         ? Math.max(0, Math.min(configuredMaxWaitMs, Math.trunc(maxWaitMsOverride)))

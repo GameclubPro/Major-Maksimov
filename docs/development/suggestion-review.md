@@ -97,6 +97,15 @@ Timeout/crash/unknown outcomes stay ambiguous. Confirmed receipts survive persis
 without another SEND. Card edits remain repeatable and version-aware; they do not erase an
 active personal draft of the same content revision. Queue failure leaves durable recovery work.
 
+Preparation diagnostics distinguish `activation_required`, `publication_pending`, `editor_busy`,
+`source_changed`, `ownership_lost`, `reply_binding_changed` and `preparation_expired`.
+Missing explicit activation retries after 15 minutes; an unfinished publication retries after
+five minutes. Other preparation waits retain the one-minute retry. An explicit current-source
+wakeup may run earlier, with fresh access, revision and ownership checks. Recovery honors the
+saved retry time. These waits never extend the original 24-hour notification authority or reopen
+an attempted SEND. Confirmed reply delivery and completed card synchronization clear stale
+preparation errors; unknown transport failures keep their existing diagnostics and effect fences.
+
 A bounded, persisted primary-key walk upgrades already-delivered pending cards to native buttons.
 Each page selects at most 25 delivery keys before profile/status/payload checks. Major's versioned
 published-link pass also refreshes confirmed published cards with valid saved post links, retaining
