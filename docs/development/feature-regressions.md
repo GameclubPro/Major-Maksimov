@@ -262,3 +262,13 @@ For Birzhik advertising/profile cases, use the separate
 
 The former commerce-editor browser scripts are superseded by the Karavan administration
 suite. Actual MAX acceptance remains separate from Chromium/WebKit emulation.
+
+## Deleted-message journal
+
+[Message details](../../apps/miniapp/test/moderation-message.browser.mjs) starts its own local
+server and checks 320/393/430 px, light/dark, long text, fragments, missing/expired content,
+attachment descriptors, retry and Back. `MINIAPP_TEST_BASE_URL` selects the local URL;
+`MINIAPP_TEST_REUSE_SERVER=1` explicitly reuses an existing server. The matching fixture renders
+the real sheet. [Participant navigation](../../apps/miniapp/test/participant-navigation.browser.mjs)
+requires an existing local server and checks journal → message → participant → message transitions.
+These local cases never send messages to MAX and do not establish live deletion acceptance.

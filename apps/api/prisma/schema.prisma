@@ -2526,10 +2526,24 @@ model ModerationDeleteIntentReason {
 
   intent ModerationDeleteIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
   origin ModerationDeleteReasonOrigin?
+  messageSnapshot ModerationMessageSnapshot?
 
   @@unique([intentId, reasonKey], map: "moderation_delete_intent_reasons_intent_reason_key")
   @@index([intentId, moderationEventId], map: "moderation_delete_intent_reasons_event_idx")
   @@map("moderation_delete_intent_reasons")
+}
+
+// FLAG: Private observed content, never execution evidence. Purging leaves an expiry tombstone.
+model ModerationMessageSnapshot {
+  reasonId String @id @map("reason_id")
+  content Json?
+  sourceAt DateTime @map("source_at")
+  expiresAt DateTime @map("expires_at")
+  purgedAt DateTime? @map("purged_at")
+  reason ModerationDeleteIntentReason @relation(fields: [reasonId], references: [id], onDelete: Cascade)
+
+  @@index([purgedAt, expiresAt, reasonId], map: "moderation_message_snapshots_purge_idx")
+  @@map("moderation_message_snapshots")
 }
 
 // FLAG: Observation only; origin never grants execution or replay authority.

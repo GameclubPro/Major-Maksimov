@@ -213,3 +213,32 @@ test('keeps retired topic-filter violations readable in historical events', () =
     'Сообщение должно начинаться с кодового слова "максим".',
   );
 });
+
+test('explains current AI deletions using saved categories without generic fallback', () => {
+  assert.match(
+    resolveModerationFeedReason({
+      ruleCode: 'COMMERCIAL_LLM_DELETE',
+      metadata: { commercialAdsDecision: { categories: ['SERVICES'] } },
+    }),
+    /услуги/u,
+  );
+  assert.match(
+    resolveModerationFeedReason({
+      ruleCode: 'COMMERCIAL_LLM_DELETE',
+      metadata: { commercialAdsDecision: { categories: ['PERSONAL_SALE'] } },
+    }),
+    /личные продажи/u,
+  );
+  assert.equal(
+    resolveModerationFeedReason({ ruleCode: 'COMMERCIAL_LLM_DELETE', metadata: {} }),
+    'Реклама запрещена правилами чата.',
+  );
+  assert.equal(
+    resolveModerationFeedReason({ ruleCode: 'COMMERCIAL_OCR_DELETE', metadata: {} }),
+    'Реклама на изображении.',
+  );
+  assert.equal(
+    resolveModerationFeedReason({ ruleCode: 'FUTURE_RULE_DELETE', metadata: {} }),
+    'Причина не сохранена.',
+  );
+});

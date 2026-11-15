@@ -71,6 +71,7 @@ type ChatParticipantSheetProps = {
   onProfileActivate: () => void;
   onSpammerDiagnostics: () => void;
   onSanctionsActivate?: () => void;
+  onMessageActivate?: () => void;
   onMute: (durationHours: number) => void;
   onBan: (banOnRejoin: boolean) => void;
 };
@@ -322,6 +323,7 @@ export function ChatParticipantSheet({
   onProfileActivate,
   onSpammerDiagnostics,
   onSanctionsActivate,
+  onMessageActivate,
   onMute,
   onBan,
 }: ChatParticipantSheetProps) {
@@ -641,6 +643,15 @@ export function ChatParticipantSheet({
                   ) : null}
                 </div>
                 {origin.reason ? <p>{origin.reason}</p> : null}
+                {onMessageActivate ? (
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={onMessageActivate}
+                  >
+                    Открыть сообщение
+                  </button>
+                ) : null}
               </div>
             ) : null}
             {loadError ? (

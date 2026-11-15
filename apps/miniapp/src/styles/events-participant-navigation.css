@@ -59,4 +59,16 @@
     :is(.event-feed-item__person, button.membership-feed__name-link):active {
     background: var(--major-subtle);
   }
+  body[data-miniapp-profile='moderation'] .events-screen .event-feed-item__message-preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    margin-block-end: 8px;
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--major-ink);
+    white-space: pre-wrap;
+  }
 }

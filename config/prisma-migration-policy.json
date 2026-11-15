@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261114010000_add_suggestion_review_dialogs",
-  "baselineNamesSha256": "8d851adaf6893aae92be3f387d42426e71f49594658e23e4c1b7c97d886fd1f9",
-  "baselineContentsSha256": "51a5b5834ff5dd3d66c0b1a1d34ab0b25d3b39e337e6e328e322ba2fb5c9d8f3",
+  "baselineThrough": "20261115152000_add_moderation_message_snapshots",
+  "baselineNamesSha256": "1f5a9292481fd4cec05b9edba0510977ab6670ad65c44bb74b0b443ab51220fe",
+  "baselineContentsSha256": "e0b15ab116d2953624e463dd8a8edb9f42c9ecaab6de145d85d0e1f3e7fdb5b8",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -332,6 +332,9 @@
     },
     "20261114010000_add_suggestion_review_dialogs": {
       "reason": "All indexes belong only to new empty private review state tables. No retained suggestions, deliveries or publication history is indexed, scanned or rewritten by the migration."
+    },
+    "20261115152000_add_moderation_message_snapshots": {
+      "reason": "Index is created on the new, empty moderation_message_snapshots table before any writer is deployed."
     }
   }
 }

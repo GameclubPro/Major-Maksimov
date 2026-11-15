@@ -1,3 +1,4 @@
+import { handleModerationMessagePreviewRequest } from './preview-transport-moderation-message';
 import type { ApiTransport } from './transport';
 import { markPreviewApiPrincipal } from './preview-principal';
 import { handleAutopostsPreviewRequest } from './preview-transport-autoposts';
@@ -53,6 +54,7 @@ export const PREVIEW_REQUEST_HANDLERS: readonly PreviewRequestHandler[] = [
   handleGiveawaysPreviewRequest,
   handleDialogPreviewRequest,
   handleVkPreviewRequest,
+  handleModerationMessagePreviewRequest,
   handleEventsPreviewRequest,
   handleSettingsPreviewRequest,
 ];

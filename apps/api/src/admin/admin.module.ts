@@ -1,3 +1,5 @@
+import { ModerationMessageController } from './moderation-message.controller';
+import { ModerationMessageService } from './moderation-message.service';
 import { SuggestionNativeService } from './suggestion-native.service';
 import { SuggestionReviewService } from './suggestion-review.service';
 import { SuggestionReviewController } from './suggestion-review.controller';
@@ -247,6 +249,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     PublisherModule,
   ],
   controllers: [
+    ModerationMessageController,
     SuggestionReviewController,
     AdminMessageRetentionController,
     AdminReportsController,
@@ -342,6 +345,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     AdminStopWordsService,
     AdminLinksService,
     AdminCommercialAdsService,
+    ModerationMessageService,
     CommercialAdsPreviewService,
     ChannelDialogService,
     CommentModerationService,

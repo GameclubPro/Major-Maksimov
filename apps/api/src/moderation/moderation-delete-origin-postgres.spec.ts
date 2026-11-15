@@ -1,3 +1,5 @@
+import { purgeModerationMessageSnapshots } from './moderation-message-snapshot';
+import type { PrismaService } from '../prisma/prisma.service';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
@@ -27,6 +29,7 @@ type OriginRow = {
 (databaseUrl ? describe : describe.skip)('native first-insert DELETE origins', () => {
   let prisma: PrismaClient, service: ModerationDeleteIntentService;
   const chats: string[] = [];
+  const receipts: string[] = [];
   beforeAll(async () => {
     const url = new URL(databaseUrl);
     if (
@@ -51,6 +54,7 @@ type OriginRow = {
   afterAll(async () => {
     if (!prisma) return;
     await prisma.chat.deleteMany({ where: { id: { in: chats } } });
+    await prisma.webhookEvent.deleteMany({ where: { id: { in: receipts } } });
     await prisma.$disconnect();
   });
   async function fixture() {
@@ -100,6 +104,144 @@ type OriginRow = {
       JOIN moderation_delete_intents intent ON intent.id = reason.intent_id WHERE intent.chat_id = ${chatId}`;
     return { chatId, input, scope, ensure, origins, sourceEventAt };
   }
+
+  it('captures exact text atomically, keeps its original revision and purges only content', async () => {
+    const s = await fixture();
+    const receipt = `snapshot-${randomUUID()}`;
+    receipts.push(receipt);
+    const scope = s.scope(receipt);
+    scope.update.message.text = 'Original paragraph.\nSecond paragraph.';
+    await prisma.webhookEvent.create({
+      data: {
+        id: receipt,
+        dedupKey: receipt,
+        botId: 'receiving',
+        rawPayload: {},
+        normalizedPayload: scope.update,
+      },
+    });
+    const input = { ...s.input, subjectUserId: 'user' };
+    const result = await withCanonicalWebhookOrigin(scope, () =>
+      service.ensureIntent(input, { enqueue: false }),
+    );
+    const reason = await prisma.moderationDeleteIntentReason.findFirstOrThrow({
+      where: { intentId: result.intentId! },
+    });
+    const before = await prisma.moderationMessageSnapshot.findUniqueOrThrow({
+      where: { reasonId: reason.id },
+    });
+    expect(before.content).toEqual({
+      text: scope.update.message.text,
+      truncated: false,
+      attachments: [],
+    });
+    expect(before.expiresAt.getTime() - before.sourceAt.getTime()).toBe(14 * 86400_000);
+    scope.update.message.text = 'Later edited text';
+    await prisma.webhookEvent.update({
+      where: { id: receipt },
+      data: { normalizedPayload: scope.update },
+    });
+    await withCanonicalWebhookOrigin(scope, () => service.ensureIntent(input, { enqueue: false }));
+    expect(
+      await prisma.moderationMessageSnapshot.findUnique({ where: { reasonId: reason.id } }),
+    ).toEqual(before);
+    await prisma.webhookEvent.delete({ where: { id: receipt } });
+    expect(
+      (await prisma.moderationMessageSnapshot.findUniqueOrThrow({ where: { reasonId: reason.id } }))
+        .content,
+    ).toEqual(before.content);
+    await prisma.moderationMessageSnapshot.update({
+      where: { reasonId: reason.id },
+      data: { expiresAt: new Date(Date.now() - 1000) },
+    });
+    expect(
+      await purgeModerationMessageSnapshots(prisma as unknown as PrismaService),
+    ).toBeGreaterThanOrEqual(1);
+    const after = await prisma.moderationMessageSnapshot.findUniqueOrThrow({
+      where: { reasonId: reason.id },
+    });
+    expect(after.content).toBeNull();
+    expect(after.purgedAt).not.toBeNull();
+    expect(
+      (await prisma.moderationDeleteIntent.findUniqueOrThrow({ where: { id: result.intentId! } }))
+        .status,
+    ).toBe('PENDING');
+  });
+
+  it('does not copy content from a receipt with another message or author', async () => {
+    const s = await fixture();
+    const receipt = `mismatch-${randomUUID()}`;
+    receipts.push(receipt);
+    const scope = s.scope(receipt);
+    await prisma.webhookEvent.create({
+      data: {
+        id: receipt,
+        dedupKey: receipt,
+        botId: 'receiving',
+        rawPayload: {},
+        normalizedPayload: {
+          ...scope.update,
+          message: { ...scope.update.message, messageId: 'other', text: 'private' },
+        },
+      },
+    });
+    const result = await withCanonicalWebhookOrigin(scope, () =>
+      service.ensureIntent({ ...s.input, subjectUserId: 'user' }, { enqueue: false }),
+    );
+    const reason = await prisma.moderationDeleteIntentReason.findFirstOrThrow({
+      where: { intentId: result.intentId! },
+    });
+    expect(
+      await prisma.moderationMessageSnapshot.findUnique({ where: { reasonId: reason.id } }),
+    ).toBeNull();
+  });
+
+  it('bounds Unicode text and records only attachment kinds', async () => {
+    const s = await fixture();
+    const receipt = `media-${randomUUID()}`;
+    receipts.push(receipt);
+    const scope = s.scope(receipt);
+    const text = '🙂'.repeat(16001);
+    const update = {
+      ...scope.update,
+      message: { ...scope.update.message, text },
+      raw: {
+        ...scope.update.raw,
+        message: {
+          body: {
+            attachments: Array.from({ length: 35 }, (_, index) => ({
+              type: index === 0 ? 'image' : 'file',
+              payload: { token: 'private-token', url: 'https://private.invalid' },
+            })),
+          },
+        },
+      },
+    };
+    await prisma.webhookEvent.create({
+      data: {
+        id: receipt,
+        dedupKey: receipt,
+        botId: 'receiving',
+        rawPayload: {},
+        normalizedPayload: update,
+      },
+    });
+    const result = await withCanonicalWebhookOrigin(scope, () =>
+      service.ensureIntent({ ...s.input, subjectUserId: 'user' }, { enqueue: false }),
+    );
+    const reason = await prisma.moderationDeleteIntentReason.findFirstOrThrow({
+      where: { intentId: result.intentId! },
+    });
+    const saved = await prisma.moderationMessageSnapshot.findUniqueOrThrow({
+      where: { reasonId: reason.id },
+    });
+    expect(saved.content).toEqual({
+      text: '🙂'.repeat(16000),
+      truncated: true,
+      attachments: ['image', ...Array(31).fill('file')],
+    });
+    expect(JSON.stringify(saved.content)).not.toMatch(/private-token|private.invalid/);
+  });
 
   it('keeps the first concurrent receipt and records a separate later reason', async () => {
     const s = await fixture();
@@ -157,6 +299,18 @@ type OriginRow = {
 
   it('rolls back intent, reason and origin together', async () => {
     const s = await fixture();
+    const receipt = `rollback-${randomUUID()}`;
+    receipts.push(receipt);
+    const scope = s.scope(receipt);
+    await prisma.webhookEvent.create({
+      data: {
+        id: receipt,
+        dedupKey: receipt,
+        botId: 'receiving',
+        rawPayload: {},
+        normalizedPayload: scope.update,
+      },
+    });
     const internal = service as unknown as {
       persistIntent(
         input: EnsureModerationDeleteIntentInput,
@@ -166,9 +320,14 @@ type OriginRow = {
     };
     await expect(
       prisma.$transaction(async (tx) => {
-        await withCanonicalWebhookOrigin(s.scope('rollback'), () =>
-          internal.persistIntent(s.input, false, tx),
+        await withCanonicalWebhookOrigin(scope, () =>
+          internal.persistIntent({ ...s.input, subjectUserId: 'user' }, false, tx),
         );
+        expect(
+          await tx.moderationMessageSnapshot.count({
+            where: { reason: { intent: { chatId: s.chatId } } },
+          }),
+        ).toBe(1);
         throw new Error('abort transaction');
       }),
     ).rejects.toThrow('abort transaction');

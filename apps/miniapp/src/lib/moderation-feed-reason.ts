@@ -1,3 +1,4 @@
+import { COMMERCIAL_CATEGORY_LABELS } from './commercial-ads-category-labels';
 import type { LogsDashboardViolation } from '@maxim/contracts';
 import { formatTimezoneLabel } from './timezone-label';
 
@@ -48,6 +49,33 @@ export function resolveModerationFeedReason(violation: ModerationReasonSource): 
     if (imageTextReason) {
       return imageTextReason;
     }
+  }
+
+  if (
+    violation.ruleCode.trim().toUpperCase() === 'COMMERCIAL_OCR_DELETE' &&
+    metadata?.source === 'image_text_ocr' &&
+    imageTextRuleCode &&
+    imageTextRuleCode !== 'COMMERCIAL_AD'
+  )
+    return 'Правило для текста на изображении.';
+
+  const sourceRule = violation.ruleCode.trim().toUpperCase();
+  if (sourceRule === 'COMMERCIAL_LLM_DELETE' || sourceRule === 'COMMERCIAL_OCR_DELETE') {
+    const aiDecision = readRecord(metadata?.commercialAdsDecision);
+    const saved = readStringArray(
+      metadata?.commercialAdsCategories ??
+        aiDecision?.categories ??
+        metadata?.commercialCategories ??
+        metadata?.categories,
+    );
+    const categories = Object.keys(COMMERCIAL_CATEGORY_LABELS).filter((key) =>
+      saved.includes(key),
+    ) as Array<keyof typeof COMMERCIAL_CATEGORY_LABELS>;
+    if (categories.length)
+      return `Запрещённая реклама: ${categories.map((category) => COMMERCIAL_CATEGORY_LABELS[category].toLowerCase()).join(', ')}.`;
+    return sourceRule === 'COMMERCIAL_OCR_DELETE'
+      ? 'Реклама на изображении.'
+      : 'Реклама запрещена правилами чата.';
   }
 
   const ruleCode = normalizeModerationRuleCode(violation.ruleCode);
@@ -328,7 +356,7 @@ function resolveFallbackReason(ruleCode: string): string {
     MANUAL_UNBAN: 'Модератор разблокировал участника.',
   };
 
-  return labels[ruleCode] ?? 'Сработало правило модерации.';
+  return labels[ruleCode] ?? 'Причина не сохранена.';
 }
 
 function normalizeModerationRuleCode(ruleCode: string): string {
