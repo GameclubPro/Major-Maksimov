@@ -313,6 +313,7 @@ export const BOT_MESSAGE_AUTO_DELETE_ACCESS_AMBIGUOUS_HANDOFF_AUDIT_ACTION =
   'OPERATOR_ACK_AUTO_DELETE_ACCESS_AMBIGUOUS_HANDOFF';
 const NIGHT_MODE_CLOSE_NOTICE_CLEANUP_STALE_ERROR_CODE = 'night_mode_close_notice_cleanup_stale';
 const DELETE_QUEUE_PRIORITY_INTERACTIVE = 1;
+const DELETE_QUEUE_PRIORITY_RECOVERY = 2;
 const DELETE_QUEUE_PRIORITY_BACKGROUND = 10;
 const CHANNEL_AUTO_POST_FORWARD_REPLACEMENT_CLEANUP_RULE_CODE =
   'CHANNEL_AUTO_POST_FORWARD_REPLACEMENT_CLEANUP';
@@ -3552,7 +3553,7 @@ export class ModerationDeleteIntentService {
         (intents) => intents.length,
       );
       metrics.selectedCount = addDueSweepCount(metrics.selectedCount, dueIntents.length);
-      const handoff = (dueIntents: Array<{ id: string }>) =>
+      const handoff = (dueIntents: Array<{ id: string }>, historical: boolean) =>
         this.measureDueSweepStage(
           'handoff',
           async () => {
@@ -3565,8 +3566,8 @@ export class ModerationDeleteIntentService {
             const handoffs = await handoffModerationDeleteSweepJobs(
               this.queue,
               dueIntents.map((intent) => intent.id),
-              DELETE_QUEUE_PRIORITY_BACKGROUND,
-              DELETE_SWEEP_HISTORICAL_WINDOW,
+              historical ? DELETE_QUEUE_PRIORITY_BACKGROUND : DELETE_QUEUE_PRIORITY_RECOVERY,
+              historical ? DELETE_SWEEP_HISTORICAL_WINDOW : undefined,
             );
             handoffs.forEach((result, index) => {
               if (result.status === 'fulfilled') {
@@ -3615,7 +3616,11 @@ export class ModerationDeleteIntentService {
           },
           (result) => result.acknowledged,
         );
-      const headHandoff = await handoff(dueIntents);
+      // FLAG: The bounded, status-interleaved SQL head owns outage/vanished-job
+      // recovery even above the historical window. Repaired jobs run after direct
+      // interactive work and before retained background wakeups. Existing jobs keep
+      // their priorities; only continuation expansion uses historical admission.
+      const headHandoff = await handoff(dueIntents, false);
       let selectedCount = dueIntents.length;
       // FLAG: Preserve the entire old head and its next-sweep repair. Only proven
       // Redis reuse frees add attempts for continuation; rejected/unknown handoffs
@@ -3634,7 +3639,7 @@ export class ModerationDeleteIntentService {
         );
         selectedCount += continuation.ids.length;
         metrics.selectedCount = addDueSweepCount(metrics.selectedCount, continuation.ids.length);
-        if (continuation.ids.length) await handoff(continuation.ids);
+        if (continuation.ids.length) await handoff(continuation.ids, true);
         continuation.commit();
       }
       metrics.completed = addDueSweepCount(metrics.completed);

@@ -308,18 +308,22 @@ A refused pure receipt stays ambiguous without external calls. Its expired verif
 remains one hour, doubling every six hours to 24 hours, preserving longer hints. Independent
 reasons and unknown dispatches retain their original guards and attempt limits.
 
-Historical sweep admission targets 1,000 unfinished wakeups, counting waiting, paused, active,
+Historical continuation admission targets 1,000 unfinished wakeups, counting waiting, paused, active,
 prioritized and delayed work plus shared in-flight reservations. One bounded Redis script reserves
-up to 100 missing jobs per batch using constant-time queue counts. Existing jobs still get due
-promotion and fresh producer enqueue bypasses this historical target. `deferred` neither confirms
+up to 100 missing jobs per batch using constant-time queue counts. The original bounded,
+status-interleaved SQL head bypasses this target to repair lost enqueues and vanished jobs, at
+priority 2: after direct interactive priority 1 and before historical priority 10. Existing jobs
+keep their priority and still get due promotion. Fresh producer enqueue also bypasses the target.
+Head repair and continuation together retain at most B add attempts and 2B observations per tick;
+confirmed reuse alone funds continuation. `deferred` neither confirms
 a handoff nor funds continuation; SQL keeps the obligation for later repair. Admission failure
 refuses missing historical adds while preserving existing-job repair. Uncertain add/release keeps
-its reservation for at most 60 seconds; exceptionally late Redis commands and fresh traffic may
+its reservation for at most 60 seconds; exceptionally late Redis commands, head repairs and fresh traffic may
 overshoot the target, after which counts stop further historical admission. It is not a hard cap
 on total queue size and does not remove any retained work. Optional
 `deleteDueSweep.historicalAdmission.deferredCount` reports this backpressure; absent old telemetry
 is unknown. Native tests cover concurrent reconcilers, outage, permit expiry, paused/delayed repair
-and fresh progress with 600,000 retained jobs. Observe useful SQL completion independently of
+and both direct fresh progress and SQL recovery with 600,000 retained jobs. Observe useful SQL completion independently of
 queue retirement and handoff counts.
 
 | Change                                      | Required evidence                                                                                                                                                                                        | Existing regression                                                                                                                                                                                                                                                                                                                                                  |

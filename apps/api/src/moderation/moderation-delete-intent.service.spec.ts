@@ -12221,7 +12221,7 @@ describe('ModerationDeleteIntentService', () => {
     expect(queue.add).toHaveBeenCalledWith(
       'execute-moderation-delete-intent',
       { intentId: 'baseline-intent-1', handoffToken: expect.any(String) },
-      expect.objectContaining({ priority: 10 }),
+      expect.objectContaining({ priority: 2 }),
     );
   });
 
