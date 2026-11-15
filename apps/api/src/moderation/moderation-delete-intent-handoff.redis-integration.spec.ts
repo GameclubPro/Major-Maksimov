@@ -181,8 +181,8 @@ function deferred() {
     }
   });
 
-  it('serves a fresh scheduled wakeup before 420000 retained jobs and then progresses background work', async () => {
-    for (let offset = 0; offset < 420_000; offset += 1000) {
+  it('serves a fresh scheduled wakeup before 600000 retained jobs and then progresses background work', async () => {
+    for (let offset = 0; offset < 600_000; offset += 1000) {
       await queue.addBulk(
         Array.from({ length: 1000 }, (_, index) => {
           const intentId = `retained-${offset + index}`;
@@ -194,7 +194,21 @@ function deferred() {
         }),
       );
     }
-    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 420_000 });
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 600_000 });
+    const historicalAdds = jest.spyOn(queue, 'add');
+    const admission = await handoffModerationDeleteSweepJobs(
+      queue,
+      ['retained-0', ...Array.from({ length: 99 }, (_, i) => `missing-history-${i}`)],
+      10,
+      1000,
+    );
+    expect(admission[0]).toMatchObject({ status: 'fulfilled', value: { reused: true } });
+    expect(
+      admission
+        .slice(1)
+        .every((result) => result.status === 'fulfilled' && result.value.insertion === 'deferred'),
+    ).toBe(true);
+    expect(historicalAdds).not.toHaveBeenCalled();
     await enqueueModerationDeleteWakeup(queue, 'fresh', 1, 200);
     const scheduled = (await queue.getJob('mdi-fresh'))!;
     expect(await scheduled.getState()).toBe('delayed');
@@ -216,6 +230,88 @@ function deferred() {
     await completed.promise;
     expect(handled).toEqual(['fresh', 'retained-0']);
   }, 120_000);
+
+  it('shares a bounded window between concurrent schedulers while fresh work bypasses it', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 4 }, (_, scheduler) =>
+        handoffModerationDeleteSweepJobs(
+          queue,
+          Array.from({ length: 20 }, (_, i) => `scheduler-${scheduler}-${i}`),
+          10,
+          25,
+        ),
+      ),
+    );
+    const outcomes = results.flat().map((result) => {
+      if (result.status === 'rejected') throw result.reason;
+      return result.value;
+    });
+    expect(outcomes.filter((result) => result.insertion === 'inserted')).toHaveLength(25);
+    expect(outcomes.filter((result) => result.insertion === 'deferred')).toHaveLength(55);
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 25 });
+    await enqueueModerationDeleteWakeup(queue, 'fresh-over-window', 1);
+    expect(await queue.getJobCounts('prioritized')).toMatchObject({ prioritized: 26 });
+    const jobs = await queue.getJobs(['prioritized'], 0, 1);
+    await jobs[0]!.remove();
+    await jobs[1]!.remove();
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['recovered-capacity'], 10, 25),
+    ).resolves.toMatchObject([{ status: 'fulfilled', value: { insertion: 'inserted' } }]);
+  });
+
+  it('counts delayed and paused work but repairs existing jobs even at capacity', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'delayed', 10, 60_000);
+    await queue.pause();
+    await queue.add('inert', { intentId: 'paused' }, { jobId: 'mdi-paused' });
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['missing', 'delayed', 'paused'], 10, 2),
+    ).resolves.toMatchObject([
+      { status: 'fulfilled', value: { insertion: 'deferred', reused: false } },
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true } },
+      { status: 'fulfilled', value: { insertion: 'existing', reused: true } },
+    ]);
+    expect(await (await queue.getJob('mdi-delayed'))!.getState()).toBe('prioritized');
+  });
+
+  it('retains admission after an unknown add and resumes after bounded permit expiry', async () => {
+    const add = jest
+      .spyOn(queue, 'add')
+      .mockRejectedValueOnce(new Error('synthetic unknown enqueue'));
+    expect((await handoffModerationDeleteSweepJobs(queue, ['uncertain'], 10, 1))[0]!.status).toBe(
+      'rejected',
+    );
+    const client = await queue.client;
+    const key = queue.toKey('historical-admission-v1');
+    expect(await client.zcard(key)).toBe(1);
+    inspector = new Redis(redisUrl, { maxRetriesPerRequest: 0 });
+    expect(await inspector.pttl(key)).toBeGreaterThan(0);
+    await expect(handoffModerationDeleteSweepJobs(queue, ['later'], 10, 1)).resolves.toMatchObject([
+      { status: 'fulfilled', value: { insertion: 'deferred' } },
+    ]);
+    expect(add).toHaveBeenCalledTimes(1);
+    // FLAG: Advance only this disposable permit's expiry, without sleeping a minute.
+    const [permit] = await client.zrange(key, 0, 0);
+    await inspector.zadd(key, 0, permit!);
+    await expect(
+      handoffModerationDeleteSweepJobs(queue, ['uncertain'], 10, 1),
+    ).resolves.toMatchObject([{ status: 'fulfilled', value: { insertion: 'inserted' } }]);
+    expect(await client.zcard(key)).toBe(0);
+  });
+
+  it('fails closed for new history on admission failure and keeps existing repair', async () => {
+    await enqueueModerationDeleteWakeup(queue, 'known', 10);
+    const client = await queue.client;
+    const original = client.runCommand;
+    client.runCommand = jest.fn().mockRejectedValue(new Error('synthetic Redis outage'));
+    clientRestorations.push(() => {
+      client.runCommand = original;
+    });
+    const add = jest.spyOn(queue, 'add');
+    const results = await handoffModerationDeleteSweepJobs(queue, ['missing', 'known'], 10, 1000);
+    expect(results[0]!.status).toBe('rejected');
+    expect(results[1]).toMatchObject({ status: 'fulfilled', value: { insertion: 'existing' } });
+    expect(add).not.toHaveBeenCalled();
+  });
 
   it('keeps a different persisted token uncertain when concurrent missing-job observations race', async () => {
     const bothObservedMissing = deferred();

@@ -22,9 +22,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # FLAG: Pin the supported browser/PG16/Redis7 toolchain; ubuntu-latest can switch OS majors.
   impact:
     name: Change impact
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
@@ -57,7 +58,6 @@ jobs:
   static:
     name: Static (${{ matrix.part }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     needs: impact
-    # FLAG: Retain the ShellCheck version compatible with installed byte-protected release hooks.
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     strategy:
@@ -110,7 +110,7 @@ jobs:
     name: Contracts
     needs: impact
     if: needs.impact.outputs.contracts == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -125,7 +125,7 @@ jobs:
     name: API (${{ matrix.part }})
     needs: impact
     if: needs.impact.outputs.api == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # FLAG: Required waits for compile/storage/Redis and every Jest partition.
     # Each job owns its checkout and Redis; file workers remain serial within a shard.
     timeout-minutes: 15
@@ -176,7 +176,7 @@ jobs:
     name: PostgreSQL Races (${{ matrix.shard }})
     needs: impact
     if: needs.impact.outputs.postgres_races == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # FLAG: Each shard owns its PostgreSQL/Redis services; race suites stay serial inside it.
     timeout-minutes: 10
     strategy:
@@ -304,7 +304,7 @@ jobs:
     name: Commercial Benchmark
     needs: impact
     if: needs.impact.outputs.commercial_benchmark == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     env:
       COMMERCIAL_BENCHMARK_PROFILE: github-hosted
@@ -321,7 +321,6 @@ jobs:
     name: Mini App (${{ matrix.shard }})
     needs: impact
     if: needs.impact.outputs.miniapp == 'true'
-    # FLAG: Playwright 1.60 cannot install browsers on the moving Ubuntu 26.04 image.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # FLAG: Keep every browser case while bounding each serial runner below the
@@ -438,7 +437,6 @@ jobs:
     name: Safety Desk
     needs: impact
     if: needs.impact.outputs.admin == 'true'
-    # FLAG: Playwright 1.60 cannot install browsers on the moving Ubuntu 26.04 image.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -464,7 +462,6 @@ jobs:
     name: Lastik
     needs: impact
     if: needs.impact.outputs.eraser == 'true'
-    # FLAG: The restore rehearsal requires the PostgreSQL 16 client supplied by this runner.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -495,6 +492,11 @@ jobs:
           cache: npm
       - run: npm ci --no-audit
       - run: npm run check:eraser
+      - name: Select PostgreSQL 16 restore client
+        run: |
+          test -x /usr/lib/postgresql/16/bin/pg_dump
+          /usr/lib/postgresql/16/bin/pg_dump --version
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
       - name: Validate independent PostgreSQL and Redis lifecycle
         env:
           TZ: UTC
@@ -506,7 +508,7 @@ jobs:
     name: Docker (${{ matrix.component }})
     needs: impact
     if: needs.impact.outputs.docker == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -688,7 +690,7 @@ jobs:
     name: Registry (${{ matrix.component }})
     needs: [impact, docker]
     if: needs.impact.outputs.registry == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -809,7 +811,7 @@ jobs:
   required:
     name: Required
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read

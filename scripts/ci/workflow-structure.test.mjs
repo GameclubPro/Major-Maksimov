@@ -9,6 +9,22 @@ import { parse } from 'yaml';
 const root = resolve(import.meta.dirname, '../..');
 const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8');
 
+test('CI pins the supported OS and exact PostgreSQL restore client before native stores', () => {
+  const jobs = parse(workflow).jobs;
+  for (const [name, job] of Object.entries(jobs))
+    assert.equal(job['runs-on'], 'ubuntu-24.04', `${name} must not inherit a moving OS toolchain`);
+  const steps = jobs.eraser.steps;
+  const select = steps.findIndex((step) => step.name === 'Select PostgreSQL 16 restore client');
+  const restore = steps.findIndex(
+    (step) => step.name === 'Validate independent PostgreSQL and Redis lifecycle',
+  );
+  assert.ok(select >= 0 && select < restore);
+  assert.equal(steps[select].if, undefined);
+  assert.equal(steps[select]['continue-on-error'], undefined);
+  assert.match(steps[select].run, /test -x \/usr\/lib\/postgresql\/16\/bin\/pg_dump/u);
+  assert.match(steps[select].run, /echo '\/usr\/lib\/postgresql\/16\/bin' >> "\$GITHUB_PATH"/u);
+});
+
 test('image build and publication normalize the same default Docker store before any image work', () => {
   const jobs = parse(workflow).jobs;
   for (const [id, firstWork] of [
@@ -112,7 +128,7 @@ test('registry prepares pinned Syft with bounded installer retries before image 
 
 test('registry attestations receive standard Docker auth and always restore it before source cleanup', () => {
   const jobs = parse(workflow).jobs;
-  assert.equal(jobs.registry['runs-on'], 'ubuntu-latest');
+  assert.equal(jobs.registry['runs-on'], 'ubuntu-24.04');
   const steps = jobs.registry.steps;
   const prepare = steps.findIndex(
     (step) => step.run === 'node scripts/ci/registry-attestation-auth.mjs prepare',

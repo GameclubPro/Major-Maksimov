@@ -1,3 +1,4 @@
+import { reserveDeleteSweepAdmission } from './moderation-delete-sweep-admission';
 import { ErrorCode, Job, type JobJsonRaw, type Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 
@@ -13,7 +14,7 @@ type SweepJobObservation = Job<ModerationDeleteIntentJob> | 'missing' | 'error';
 const SWEEP_OBSERVATION_BATCH_SIZE = 100;
 
 export type ModerationDeleteSweepHandoff = {
-  insertion: 'inserted' | 'existing' | 'unknown';
+  insertion: 'inserted' | 'existing' | 'unknown' | 'deferred';
   reused: boolean;
   observationErrors: number;
 };
@@ -37,18 +38,54 @@ export async function handoffModerationDeleteSweepJobs(
   queue: Queue<ModerationDeleteIntentJob>,
   intentIds: readonly string[],
   priority: number,
+  historicalWindow?: number,
 ): Promise<Array<PromiseSettledResult<ModerationDeleteSweepHandoff>>> {
   const outcomes: Array<PromiseSettledResult<ModerationDeleteSweepHandoff>> = [];
   for (let offset = 0; offset < intentIds.length; offset += SWEEP_OBSERVATION_BATCH_SIZE) {
     const batch = intentIds.slice(offset, offset + SWEEP_OBSERVATION_BATCH_SIZE);
     const observations = await observeModerationDeleteSweepJobs(queue, batch);
+    const missingCount = observations.filter((value) => typeof value === 'string').length;
+    let reservation: Awaited<ReturnType<typeof reserveDeleteSweepAdmission>> | undefined;
+    let reservationError: unknown;
+    if (historicalWindow !== undefined && missingCount) {
+      try {
+        reservation = await reserveDeleteSweepAdmission(queue, missingCount, historicalWindow);
+      } catch (error: unknown) {
+        reservationError = error;
+      }
+    }
+    let missingIndex = 0;
+    const acknowledgedReservations: number[] = [];
     outcomes.push(
       ...(await Promise.allSettled(
-        batch.map((intentId, index) =>
-          handoffObservedModerationDeleteSweepJob(queue, intentId, priority, observations[index]!),
-        ),
+        batch.map(async (intentId, index) => {
+          const observation = observations[index]!;
+          if (typeof observation !== 'string')
+            return handoffObservedModerationDeleteSweepJob(queue, intentId, priority, observation);
+          if (reservationError) throw reservationError;
+          const slot = missingIndex++;
+          if (reservation && slot >= reservation.count)
+            return {
+              insertion: 'deferred' as const,
+              reused: false,
+              observationErrors: observation === 'error' ? 1 : 0,
+            };
+          const result = await handoffObservedModerationDeleteSweepJob(
+            queue,
+            intentId,
+            priority,
+            observation,
+          );
+          if (reservation) acknowledgedReservations.push(slot);
+          return result;
+        }),
       )),
     );
+    // FLAG: A failed add can have reached Redis. Retain its permit until expiry;
+    // a failed release also only reduces admission temporarily. SQL remains due.
+    // Delayed Redis commands beyond the TTL can overshoot the historical target;
+    // queue counts stop subsequent admission, without removing any existing job.
+    if (reservation) await reservation.release(acknowledgedReservations).catch(() => undefined);
   }
   return outcomes;
 }
