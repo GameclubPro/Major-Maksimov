@@ -288,19 +288,39 @@ job priority; BullMQ's returned caller options do not describe an existing job. 
 existing wakeup or downgrade it. The bounded due sweep may promote an existing delayed job when SQL
 has an earlier due reason; concurrent promotion/completion never permits active-job removal or effect
 replay. Earlier future reasons still rely on this due repair. Native Redis tests cover persisted
-priority, promotion races and fresh-then-background progress behind 420,000 retained jobs.
+priority, promotion races and fresh-then-background progress behind 600,000 retained jobs.
 
 Optional `deleteDueSweep.wakeups` counters distinguish skipped, attempted and expiry-checked wakeups,
 errors and processing time; neither an attempted wakeup nor a completed queue job proves deletion.
 Old/malformed telemetry remains unknown. Validate the exact lookup against representative retained
 history and preserve marker races and off/shadow/canary behavior in the native deletion suites.
 
-Expired, pure bot-message auto-delete obligations with a complete positive DELETE receipt retain
-their exact-absence requirement and original deadline. Their verification floor grows from one
-hour, doubling every six hours past that deadline, to a maximum of 24 hours; longer existing retry
-hints survive. Only these historical reads use background admission. Independent current reasons,
-incomplete receipts and unknown dispatches keep their existing classification and guards. The
-locked reason recheck prevents an independently added reason from inheriting the slower schedule.
+Pure bot-message auto-delete accepts an exact stored documented DELETE success without a
+presence read or another DELETE. `moderation-delete-auto-receipt.ts` locks the exact live lease,
+then rechecks bot/chat/message identity, no dispatch marker, non-retention ownership and at most
+64 reasons in a fresh READ COMMITTED statement. Every reason must be `BOT_MESSAGE_AUTO_DELETE`
+and predate the receipt. It only materializes the auto-delete event: no absence proof, rule
+followup, replacement cleanup or new authority is fabricated. The original retry deadline remains.
+The paired receipt columns predate this fix and were written only after the client's strict
+`success: true` validation; additive `botAutoDeleteConfirmation` metadata records this evidence.
+Existing readers understand `SUCCEEDED`; rollback does not reopen it or need a schema migration.
+A refused pure receipt stays ambiguous without external calls. Its expired verification floor
+remains one hour, doubling every six hours to 24 hours, preserving longer hints. Independent
+reasons and unknown dispatches retain their original guards and attempt limits.
+
+Historical sweep admission targets 1,000 unfinished wakeups, counting waiting, paused, active,
+prioritized and delayed work plus shared in-flight reservations. One bounded Redis script reserves
+up to 100 missing jobs per batch using constant-time queue counts. Existing jobs still get due
+promotion and fresh producer enqueue bypasses this historical target. `deferred` neither confirms
+a handoff nor funds continuation; SQL keeps the obligation for later repair. Admission failure
+refuses missing historical adds while preserving existing-job repair. Uncertain add/release keeps
+its reservation for at most 60 seconds; exceptionally late Redis commands and fresh traffic may
+overshoot the target, after which counts stop further historical admission. It is not a hard cap
+on total queue size and does not remove any retained work. Optional
+`deleteDueSweep.historicalAdmission.deferredCount` reports this backpressure; absent old telemetry
+is unknown. Native tests cover concurrent reconcilers, outage, permit expiry, paused/delayed repair
+and fresh progress with 600,000 retained jobs. Observe useful SQL completion independently of
+queue retirement and handoff counts.
 
 | Change                                      | Required evidence                                                                                                                                                                                        | Existing regression                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

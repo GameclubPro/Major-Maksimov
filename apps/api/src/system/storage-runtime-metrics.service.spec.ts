@@ -134,6 +134,7 @@ function deleteDueSweepSnapshot() {
     handoffAcknowledgedCount: 1,
     handoffErrorCount: 1,
     handoffInsertionUnknownCount: 1,
+    historicalAdmission: { deferredCount: 3 },
     handoffOutcomes: {
       insertedCount: 0,
       existingCount: 0,
@@ -752,10 +753,17 @@ describe('bounded storage-runtime metrics', () => {
       }),
     ).toMatchObject({ deleteDueSweep: { wakeups: null, calls: fixture.calls } });
     const legacyFixture: Partial<typeof fixture> = { ...fixture };
+    delete legacyFixture.historicalAdmission;
     delete legacyFixture.handoffOutcomes;
     expect(
       sanitizeStorageRuntimeSnapshot({ ...valid, deleteDueSweep: legacyFixture }),
-    ).toMatchObject({ deleteDueSweep: { handoffOutcomes: null, handoffInsertionUnknownCount: 1 } });
+    ).toMatchObject({
+      deleteDueSweep: {
+        historicalAdmission: null,
+        handoffOutcomes: null,
+        handoffInsertionUnknownCount: 1,
+      },
+    });
     expect(
       sanitizeStorageRuntimeSnapshot({
         ...valid,

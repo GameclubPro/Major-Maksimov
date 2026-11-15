@@ -1,3 +1,5 @@
+import { DELETE_SWEEP_HISTORICAL_WINDOW } from './moderation-delete-sweep-admission';
+import { settleBotAutoDeleteReceipt } from './moderation-delete-auto-receipt';
 import { buildDeleteDueHeadQuery, DeleteDueContinuation } from './moderation-delete-due-selection';
 import {
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE,
@@ -293,8 +295,7 @@ const DEFAULT_RETENTION_DAYS = 90;
 const BOT_MESSAGE_AUTO_DELETE_MAX_EXTERNAL_ATTEMPTS = 5;
 const BOT_MESSAGE_AUTO_DELETE_RETRY_LIMIT_ERROR_CODE =
   'bot_message_auto_delete_retry_limit_reached';
-const BOT_MESSAGE_AUTO_DELETE_SUCCESS_VERIFICATION_PENDING_ERROR_CODE =
-  'bot_message_auto_delete_success_verification_pending';
+
 const BOT_MESSAGE_AUTO_DELETE_SUCCESS_STILL_PRESENT_ERROR_CODE =
   'bot_message_auto_delete_success_still_present';
 export const BOT_MESSAGE_AUTO_DELETE_REPAIR_INTENT_AUDIT_ACTION =
@@ -807,6 +808,7 @@ export class ModerationDeleteIntentService {
     handoffAcknowledgedCount: 0,
     handoffErrorCount: 0,
     handoffInsertionUnknownCount: 0,
+    historicalAdmission: { deferredCount: 0 },
     handoffOutcomes: {
       insertedCount: 0,
       existingCount: 0,
@@ -2668,6 +2670,35 @@ export class ModerationDeleteIntentService {
       await this.releasePausedLease(intent.id, leaseToken);
       return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
     }
+    if (
+      this.isBotMessageAutoDeleteOnlyReason(intent) &&
+      intent.remoteDeleteSucceededAt &&
+      intent.remoteDeleteSucceededBotId
+    ) {
+      // FLAG: A saved success never becomes permission for another DELETE. A refused
+      // exact receipt remains durable for reconciliation without any external calls.
+      try {
+        if (
+          await settleBotAutoDeleteReceipt(this.prisma, intent, leaseToken, (tx) =>
+            this.materializeModerationEventsForIntent(tx, intent.id),
+          )
+        )
+          return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+      } catch (error: unknown) {
+        return this.finishPersistenceFailure(
+          intent,
+          leaseToken,
+          'auto_delete_receipt_finalize_failed',
+          error,
+        );
+      }
+      return this.finishPersistenceFailure(
+        intent,
+        leaseToken,
+        'auto_delete_receipt_requires_reconciliation',
+        new Error('Receipt identity or reasons changed'),
+      );
+    }
     // FLAG: A queued historical job may already be above the sweep cap. Terminalize it before
     // starting a heartbeat or making any MAX access, presence, or delete call.
     if (
@@ -3535,10 +3566,21 @@ export class ModerationDeleteIntentService {
               this.queue,
               dueIntents.map((intent) => intent.id),
               DELETE_QUEUE_PRIORITY_BACKGROUND,
+              DELETE_SWEEP_HISTORICAL_WINDOW,
             );
             handoffs.forEach((result, index) => {
               if (result.status === 'fulfilled') {
                 const handoff = result.value;
+                if (handoff.insertion === 'deferred') {
+                  metrics.historicalAdmission.deferredCount = addDueSweepCount(
+                    metrics.historicalAdmission.deferredCount,
+                  );
+                  metrics.handoffOutcomes.observationErrorCount = addDueSweepCount(
+                    metrics.handoffOutcomes.observationErrorCount,
+                    handoff.observationErrors,
+                  );
+                  return;
+                }
                 acknowledged++;
                 metrics.handoffAcknowledgedCount = addDueSweepCount(
                   metrics.handoffAcknowledgedCount,
@@ -3609,6 +3651,7 @@ export class ModerationDeleteIntentService {
     return {
       ...this.dueSweepMetrics,
       wakeups: { ...this.dueSweepMetrics.wakeups },
+      historicalAdmission: { ...this.dueSweepMetrics.historicalAdmission },
       handoffOutcomes: { ...this.dueSweepMetrics.handoffOutcomes },
       stages: Object.fromEntries(
         STORAGE_DELETE_DUE_SWEEP_STAGES.map((stage) => {
@@ -6705,8 +6748,8 @@ export class ModerationDeleteIntentService {
       allowSlowVerification = false,
     ): Promise<number> => {
       const now = Date.now();
-      // FLAG: Acknowledged cleanup still needs exact absence proof. An expired auto-delete-only
-      // obligation retains its markers and backs off from hourly to daily as it ages.
+      // FLAG: Receipts refused by exact local settlement retain all evidence. Expired
+      // reconciliation backs off; an ambiguous GET never establishes absence.
       const expiredAutoDeleteVerification =
         allowSlowVerification && this.isExpiredAutoDeleteVerification(currentIntent, now);
       const requestedNextAt = new Date(
@@ -7084,7 +7127,7 @@ export class ModerationDeleteIntentService {
     verifiedReasonKeys: string[] = [],
   ): Promise<ModerationDeleteAttemptResult> {
     if (this.isBotMessageAutoDeleteOnlyReason(intent)) {
-      return this.recordRemoteSuccessPendingVerification(intent, leaseToken, botId);
+      return this.recordBotAutoDeleteSuccess(intent, leaseToken, botId);
     }
 
     let marked: boolean;
@@ -7123,50 +7166,30 @@ export class ModerationDeleteIntentService {
     );
   }
 
-  private async recordRemoteSuccessPendingVerification(
+  private async recordBotAutoDeleteSuccess(
     intent: IntentRow,
     leaseToken: string,
     botId: string,
   ): Promise<ModerationDeleteAttemptResult> {
-    const nextAttemptAt = new Date(Date.now() + this.retryDelayMs(intent.attemptCount));
-    const changed = await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "moderation_delete_intents"
-      SET
-        "status" = CAST('AMBIGUOUS' AS "ModerationDeleteIntentStatus"),
-        "next_attempt_at" = ${nextAttemptAt},
-        "last_bot_id" = ${botId},
-        "delete_dispatch_started_at" = NULL,
-        "delete_dispatch_started_bot_id" = NULL,
-        "remote_delete_succeeded_at" = COALESCE(
-          "remote_delete_succeeded_at",
-          CURRENT_TIMESTAMP
-        ),
-        "remote_delete_succeeded_bot_id" = COALESCE(
-          "remote_delete_succeeded_bot_id",
-          ${botId}
-        ),
-        "last_status_code" = NULL,
-        "last_error_code" = ${BOT_MESSAGE_AUTO_DELETE_SUCCESS_VERIFICATION_PENDING_ERROR_CODE},
-        "last_error" = 'MAX acknowledged DELETE; exact absence verification is pending',
-        "completed_at" = NULL,
-        "absence_verified_at" = NULL,
-        "absence_verified_bot_id" = NULL,
-        "absence_verification_code" = NULL,
-        "lease_token" = NULL,
-        "lease_expires_at" = NULL,
-        "leased_from_status" = NULL,
-        "updated_at" = CURRENT_TIMESTAMP
-      WHERE "id" = ${intent.id}
-        AND "status" = CAST('IN_PROGRESS' AS "ModerationDeleteIntentStatus")
-        AND "lease_token" = ${leaseToken}
-    `);
-    if (changed === 0) {
-      return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+    try {
+      if (!(await this.recordRemoteDeleteSucceeded(intent.id, leaseToken, botId)))
+        return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+      const current = await this.loadRequiredIntent(intent.id);
+      if (
+        await settleBotAutoDeleteReceipt(this.prisma, current, leaseToken, (tx) =>
+          this.materializeModerationEventsForIntent(tx, intent.id),
+        )
+      )
+        return this.toAttemptResult(await this.loadRequiredIntent(intent.id));
+      return this.finishPersistenceFailure(
+        current,
+        leaseToken,
+        'auto_delete_receipt_requires_reconciliation',
+        new Error('Receipt identity or reasons changed'),
+      );
+    } catch (error: unknown) {
+      return this.persistRemoteSuccessFallback(intent, leaseToken, botId, error);
     }
-
-    const current = await this.loadRequiredIntent(intent.id);
-    await this.enqueueWakeup(current);
-    return this.toAttemptResult(current);
   }
 
   private async finalizeRecordedRemoteSuccess(

@@ -27,7 +27,7 @@ import {
 } from '../prisma/connection-admission-metrics';
 
 export const STORAGE_RUNTIME_METRICS_PREFIX = 'runtime:storage-cost:v1:';
-export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 24_576;
+export const STORAGE_RUNTIME_MAX_REPORT_BYTES = 25_600;
 export const STORAGE_RUNTIME_COUNTERS = [
   'deleteLeaseChecks',
   'deleteLeaseRenewals',
@@ -262,6 +262,7 @@ function sanitizeDeleteDueSweepSnapshot(value: unknown) {
   // observations into zero inserts; acknowledgements alone do not prove new jobs.
   return {
     ...counters,
+    historicalAdmission: checkedNumbers(source.historicalAdmission, ['deferredCount']),
     handoffOutcomes: checkedNumbers(source.handoffOutcomes, DELETE_HANDOFF_OUTCOME_FIELDS),
     ...(source.wakeups === undefined
       ? {}
