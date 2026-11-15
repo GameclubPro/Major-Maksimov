@@ -49,10 +49,21 @@ async function checkControls(page, selector) {
     if (!box.hit || box.left < -1 || box.right > box.viewport + 1) {
       await page.screenshot({ path: `${output}/failure.png` });
       console.error(
-        await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.outerHTML, {
-          x: box.x + box.width / 2,
-          y: box.y + box.height / 2,
-        }),
+        await page.evaluate(
+          ({ x, y }) => {
+            const hit = document.elementFromPoint(x, y);
+            return {
+              html: hit?.outerHTML,
+              rect: hit?.getBoundingClientRect().toJSON(),
+              parent: hit?.parentElement?.outerHTML,
+              parentRect: hit?.parentElement?.getBoundingClientRect().toJSON(),
+            };
+          },
+          {
+            x: box.x + box.width / 2,
+            y: box.y + box.height / 2,
+          },
+        ),
       );
     }
     assert.ok(box.left >= -1 && box.right <= box.viewport + 1, `offscreen ${JSON.stringify(box)}`);
@@ -277,6 +288,55 @@ try {
           await applyNativeVisualMode(page, { safeTop: 0, safeBottom: 0 });
           await body.evaluate((node) => (node.scrollTop = 0));
           await page.screenshot({ path: `${output}/${engine.name()}-${theme}.png` });
+          await page.getByRole('button', { name: 'Убрать first.png', exact: true }).click();
+          await editor.fill('Первая строка');
+          for (const width of [280, 320]) {
+            for (const font of [16, 32]) {
+              await editor.blur();
+              await page.setViewportSize({ width, height: 360 });
+              await page.evaluate(
+                (size) => (document.documentElement.style.fontSize = `${size}px`),
+                font,
+              );
+              await applyNativeVisualMode(page, { safeTop: 0, safeBottom: 0 });
+              await editor.focus();
+              await page.waitForTimeout(400);
+              await checkControls(
+                page,
+                '.channel-suggest-tabs button, .channel-suggest-composer__bar button, .channel-suggest-composer__bar label',
+              );
+              for (let button = 1; button <= 7; button++) {
+                const selector = `.channel-suggest-composer__modifier-row button:nth-child(${button})`;
+                await page.locator(selector).scrollIntoViewIfNeeded();
+                await checkControls(page, selector);
+              }
+              await editor.focus();
+              await page.waitForTimeout(400);
+              const compact = await editor.evaluate((node) => {
+                const rect = node.getBoundingClientRect();
+                const body = node.closest('.channel-suggest-body').getBoundingClientRect();
+                const style = getComputedStyle(node);
+                const y =
+                  rect.top + parseFloat(style.paddingTop) + parseFloat(style.lineHeight) / 2;
+                return {
+                  body: body.toJSON(),
+                  editor: rect.toJSON(),
+                  firstLine: node.contains(document.elementFromPoint(rect.left + 16, y)),
+                };
+              });
+              assert.ok(compact.body.height >= 60 && compact.firstLine, JSON.stringify(compact));
+              results.push({
+                engine: engine.name(),
+                theme,
+                viewport: { width, height: 360 },
+                font,
+                compact,
+              });
+              await page.screenshot({
+                path: `${output}/${engine.name()}-${theme}-compact-${width}-${font}.png`,
+              });
+            }
+          }
           assert.deepEqual(errors, []);
           assert.deepEqual(await page.evaluate(() => window.suggestionLayoutTest.sendRequests), []);
           console.log(

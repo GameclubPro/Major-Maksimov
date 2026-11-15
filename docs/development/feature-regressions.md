@@ -152,6 +152,9 @@ The [suggestion composer browser](../../apps/miniapp/test/channel-suggestion-com
 checks long recipient names against actual control bounds and hit targets, 280–412px portrait and
 568/667px landscape, 100%/200% editor text, independent formatting/media scroll, native formatting taps,
 photo zoom/navigation/native Back/focus return, attachment ordering and draft preservation. Its
+compact 280/320×360px cases verify the first editable line, horizontally reachable 44px formatting
+controls and attachment/send hit targets at both text sizes, including WebKit native file-input
+clipping. The full matrix contains 72 engine/theme/viewport/text-size configurations. Its
 server is owned by default; reuse requires `SUGGEST_COMPOSER_BASE_URL` and
 `SUGGEST_COMPOSER_REUSE_SERVER=1`. `SUGGEST_COMPOSER_ENGINE`, `SUGGEST_COMPOSER_THEME` and
 `SUGGEST_COMPOSER_OUTPUT` select the engine, theme and artifacts. Root font resizing is verified

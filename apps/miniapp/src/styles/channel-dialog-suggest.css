@@ -805,6 +805,30 @@
     }
   }
 
+  @media (max-height: 400px) {
+    .channel-dialog-screen--suggest
+      .channel-suggest-composer__rich-editor
+      .max-rich-text-editor__surface {
+      min-height: 56px;
+      max-height: clamp(56px, calc(100dvh - 250px), 140px);
+      padding: 8px;
+      line-height: 1.4;
+      overflow-y: auto;
+    }
+  }
+
+  @media (max-width: 360px) and (max-height: 400px) {
+    /* FLAG: Short keyboard viewports need one scrollable tool row to retain editable space. */
+    .channel-suggest-composer__modifier-row {
+      display: flex;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .channel-suggest-composer__modifier-row button {
+      flex: 1 0 44px;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .channel-dialog-screen--suggest *,
     .channel-dialog-screen--suggest *::before,

@@ -16,6 +16,8 @@
   }
 
   .channel-suggest-composer__tools > .channel-suggest-composer__tool {
+    /* FLAG: Clip native file-control hit regions to their own action, including WebKit text scaling. */
+    overflow: hidden;
     flex: 1 1 0;
     flex-wrap: wrap;
     min-width: 44px;
@@ -60,6 +62,27 @@
     .channel-suggest-composer__submit {
       gap: 6px;
       padding-inline: 10px;
+    }
+  }
+  @media (max-width: 559px) and (max-height: 400px) {
+    .channel-suggest-composer__tools {
+      flex-wrap: nowrap;
+    }
+    .channel-suggest-composer__tools > .channel-suggest-composer__tool > span {
+      display: none;
+    }
+    .channel-suggest-composer__submit {
+      width: 52px;
+      min-width: 52px;
+      padding: 0;
+      gap: 0;
+    }
+    .channel-suggest-composer__submit > span:not(.channel-dialog-submit__loader) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
     }
   }
 }
