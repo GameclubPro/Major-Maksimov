@@ -38,8 +38,15 @@ try {
       );
       await page.locator('.event-feed-item__person').first().waitFor();
       await applyNativeVisualMode(page, { safeTop: 20, safeBottom: 12 });
-      const row = page.locator('.event-feed-item').first();
+      const row = page
+        .locator('.event-feed-item')
+        .filter({ has: page.getByRole('button', { name: /^Открыть сообщение:/ }) })
+        .first();
       await row.locator('.event-feed-item__expand').click();
+      const message = page.getByRole('dialog', { name: 'Сообщение', exact: true });
+      await message.waitFor();
+      await message.locator('.moderation-message__paper p').waitFor();
+      await message.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
       const name = await row.locator('.event-feed-item__person strong').innerText();
       await row.locator('.event-feed-item__person').click();
       const card = page.locator('.participant-card');
@@ -88,10 +95,15 @@ try {
       await card.waitFor();
       await card.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
       await card.waitFor({ state: 'detached' });
-      assert.equal(
-        await row.locator('.event-feed-item__expand').getAttribute('aria-expanded'),
-        'true',
-      );
+      await row.locator('.event-feed-item__expand').click();
+      await message.waitFor();
+      await message.locator('.moderation-message__author').click();
+      await card.waitFor();
+      await card.getByRole('button', { name: 'Открыть сообщение', exact: true }).click();
+      await message.waitFor();
+      await page.keyboard.press('Escape');
+      await card.waitFor();
+      await card.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
       assert.match(page.url(), /moderationView=history/u);
 
       await page

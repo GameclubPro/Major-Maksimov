@@ -1,3 +1,4 @@
+import { captureModerationMessageSql } from './moderation-message-snapshot';
 import { DELETE_SWEEP_HISTORICAL_WINDOW } from './moderation-delete-sweep-admission';
 import { settleBotAutoDeleteReceipt } from './moderation-delete-auto-receipt';
 import { buildDeleteDueHeadQuery, DeleteDueContinuation } from './moderation-delete-due-selection';
@@ -6023,6 +6024,14 @@ export class ModerationDeleteIntentService {
             ${sourceOrigin?.sourceEventAt ?? null}, CURRENT_TIMESTAMP, ${sourceOrigin?.sourceEvidenceVersion ?? null}
           FROM changed_reason
           WHERE changed_reason."id" = ${reasonId} AND ${sourceOrigin !== null}
+        ), recorded_message AS (
+          ${captureModerationMessageSql({
+            reasonId,
+            chatId: normalized.chatId,
+            messageId: normalized.messageId,
+            userId: normalized.event.userId,
+            origin: sourceOrigin,
+          })}
         ), retired_retention_reason AS (
           DELETE FROM "moderation_delete_intent_reasons"
           WHERE "intent_id" = ${intent.id} AND "rule_code" = ${MESSAGE_RETENTION_RULE}

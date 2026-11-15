@@ -1,3 +1,4 @@
+import type { LogsDashboardViolation } from '@maxim/contracts';
 import type {
   ChatParticipantDetails,
   ChatParticipantItem,
@@ -31,7 +32,7 @@ export type ParticipantCardTarget = Pick<ChatParticipantItem, 'userId' | 'userDi
   username?: string | null;
   profileUrl?: string | null;
   profileHandoffUrl?: string | null;
-  origin?: { title: string; date?: string; reason?: string | null };
+  origin?: { title: string; date?: string; reason?: string | null; event?: LogsDashboardViolation };
 };
 
 export const participantDetailsKey = (

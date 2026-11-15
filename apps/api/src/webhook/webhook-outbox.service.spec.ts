@@ -4579,7 +4579,7 @@ describe('WebhookOutboxService', () => {
     await (service as unknown as RetentionInternals).cleanupRetention();
 
     const queries = prisma.$executeRaw.mock.calls.map(([query]) => extractSql(query));
-    expect(queries).toHaveLength(5);
+    expect(queries).toHaveLength(6);
     expect(queries.join(' ')).not.toContain('DELETE FROM "webhook_events"');
     expect(queries.join(' ')).not.toContain(`'PROCESSED'::"WebhookStatus"`);
     expect(queries.join(' ')).not.toContain(`'DUPLICATE'::"WebhookStatus"`);
@@ -4607,7 +4607,7 @@ describe('WebhookOutboxService', () => {
         values: (query as SqlQuery).values ?? [],
       }),
     );
-    expect(queries).toHaveLength(11);
+    expect(queries).toHaveLength(12);
     const plannerSettings = queries.filter((query) => query.sql.startsWith('SET LOCAL'));
     expect(plannerSettings.map((query) => query.sql)).toEqual([
       'SET LOCAL enable_incremental_sort = off',
@@ -4638,6 +4638,7 @@ describe('WebhookOutboxService', () => {
     expect(deleteQueries[1]?.sql).toContain('"next_enqueue_at" IS NULL');
     expect(queries.map((query) => query.sql)).toEqual(
       expect.arrayContaining([
+        expect.stringContaining('UPDATE moderation_message_snapshots snapshot'),
         expect.stringContaining('DELETE FROM "moderation_events" target'),
         expect.stringContaining('DELETE FROM "violations" target'),
         expect.stringContaining('DELETE FROM "moderation_violation_message_claims" target'),
@@ -4692,7 +4693,7 @@ describe('WebhookOutboxService', () => {
     resolveFirstBatch(0);
     await cleanup;
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(3);
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(6);
   });
 
   it('retains successful cleanup batches when a later batch fails, without changing the error', async () => {
@@ -4850,7 +4851,7 @@ describe('WebhookOutboxService', () => {
       retryQueries.filter((sql) => sql.includes(`'NO_REPLAY_HELD'::"WebhookStatus"`)),
     ).toHaveLength(1);
     expect(retryQueries.some((sql) => sql.includes(`'PROCESSED'::"WebhookStatus"`))).toBe(false);
-    expect(prisma.$executeRaw).toHaveBeenCalledTimes(5);
+    expect(prisma.$executeRaw).toHaveBeenCalledTimes(6);
     expect(internals.cleaning).toBe(false);
     expect(internals.retentionMaintenanceDue).toBe(false);
 

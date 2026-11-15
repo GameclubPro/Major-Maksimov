@@ -41,6 +41,7 @@ import {
   useState,
 } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
+import type { ModerationMessageSheet as ModerationMessageSheetComponent } from '../components/moderation-message-sheet';
 import type { ChatParticipantCard as ChatParticipantCardComponent } from '../components/dashboard/chat-participant-card';
 import type { ChatSanctionsWorkspace as ChatSanctionsWorkspaceComponent } from '../components/dashboard/chat-sanctions-workspace';
 import type { ChatParticipantsRoster as ChatParticipantsRosterComponent } from '../components/dashboard/chat-participants-roster';
@@ -122,6 +123,9 @@ import { useHintPopoverAutoPosition } from '../lib/hint-popover';
 import { describeManualModerationFeedback } from '../lib/manual-moderation-feedback';
 import { participantDetailsKey, type ParticipantCardTarget } from '../lib/participant-card';
 
+const ModerationMessageSheet = recoverableLazyNamedComponent<
+  ComponentProps<typeof ModerationMessageSheetComponent>
+>(() => import('../components/moderation-message-sheet'), 'ModerationMessageSheet');
 const ChatParticipantsRoster = recoverableLazyNamedComponent<
   ComponentProps<typeof ChatParticipantsRosterComponent>
 >(() => import('../components/dashboard/chat-participants-roster'), 'ChatParticipantsRoster');
@@ -2177,6 +2181,10 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
     setEventsFilter(readModerationRouteFilter(location.search));
   }, [location.search]);
   const [expandedViolationId, setExpandedViolationId] = useState<string | null>(null);
+  const [messageEvent, setMessageEvent] = useState<{
+    chatId: string;
+    event: LogsDashboardViolation;
+  } | null>(null);
   const [spammerReviewOpen, setSpammerReviewOpen] = useState(false);
   const [participantTarget, setParticipantTarget] = useState<ParticipantCardTarget | null>(null);
   const [participantSavedVersion, setParticipantSavedVersion] = useState(0);
@@ -2973,6 +2981,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
 
   useEffect(() => {
     setParticipantTarget(null);
+    setMessageEvent(null);
     setPendingScopeAction(null);
     setPendingScopeChoice(null);
     setSpammerDiagnosticsTarget(null);
@@ -3806,6 +3815,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                         title: actionLabelMap[displayAction],
                         date: violation.createdAt,
                         reason: violationReason || resolveViolationBlurb(violation),
+                        event: violation,
                       },
                     });
                   const toggleExpanded = () =>
@@ -3862,10 +3872,27 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                           <button
                             type="button"
                             className="event-feed-item__expand"
-                            onClick={toggleExpanded}
-                            aria-expanded={isExpanded}
-                            aria-controls={`event-details-${violation.id}`}
-                            aria-label={`${isExpanded ? 'Скрыть' : 'Показать'} детали нарушения: ${displayName}`}
+                            onClick={
+                              displayAction === 'DELETE_MESSAGE'
+                                ? () => setMessageEvent({ chatId, event: violation })
+                                : toggleExpanded
+                            }
+                            aria-expanded={
+                              displayAction === 'DELETE_MESSAGE' ? undefined : isExpanded
+                            }
+                            aria-haspopup={
+                              displayAction === 'DELETE_MESSAGE' ? 'dialog' : undefined
+                            }
+                            aria-controls={
+                              displayAction === 'DELETE_MESSAGE'
+                                ? undefined
+                                : `event-details-${violation.id}`
+                            }
+                            aria-label={
+                              displayAction === 'DELETE_MESSAGE'
+                                ? `Открыть сообщение: ${displayName}`
+                                : `${isExpanded ? 'Скрыть' : 'Показать'} детали нарушения: ${displayName}`
+                            }
                           >
                             <span className="event-feed-item__body">
                               <span className="event-feed-item__headline">
@@ -3893,6 +3920,11 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                                 </span>
                               </span>
 
+                              {violation.maskedExcerpt ? (
+                                <span className="event-feed-item__message-preview">
+                                  {violation.maskedExcerpt}
+                                </span>
+                              ) : null}
                               <span className="event-feed-item__summary">
                                 {violationReason || resolveViolationBlurb(violation)}
                               </span>
@@ -4090,6 +4122,51 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
         }}
       />
 
+      {messageEvent?.chatId === chatId ? (
+        <Suspense
+          fallback={
+            <SettingsDrilldownPanel
+              id="moderation-message-loading"
+              open
+              title="Сообщение"
+              onClose={() => setMessageEvent(null)}
+            >
+              <Spinner label="Загружаем сообщение" />
+            </SettingsDrilldownPanel>
+          }
+        >
+          <ModerationMessageSheet
+            key={`${chatId}:${messageEvent.event.id}`}
+            api={api}
+            chatId={chatId}
+            event={messageEvent.event}
+            onClose={() => setMessageEvent(null)}
+            onParticipant={
+              messageEvent.event.userId
+                ? () => {
+                    const event = messageEvent.event;
+                    setMessageEvent(null);
+                    setParticipantTarget({
+                      chatId,
+                      userId: event.userId,
+                      userDisplayName: resolveOffenderName(event),
+                      avatarUrl: event.avatarUrl,
+                      profileUrl: event.profileUrl,
+                      profileHandoffUrl: event.profileHandoffUrl,
+                      origin: {
+                        title: actionLabelMap[resolveDisplayAction(event)],
+                        date: event.createdAt,
+                        reason: resolveModerationFeedReason(event),
+                        event,
+                      },
+                    });
+                  }
+                : undefined
+            }
+          />
+        </Suspense>
+      ) : null}
+
       {selectedParticipant ? (
         <Suspense
           fallback={
@@ -4107,6 +4184,12 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
             key={`${chatId}:${selectedParticipant.userId}`}
             api={api}
             target={selectedParticipant}
+            onMessageActivate={
+              selectedParticipant.origin?.event &&
+              resolveDisplayAction(selectedParticipant.origin.event) === 'DELETE_MESSAGE'
+                ? () => setMessageEvent({ chatId, event: selectedParticipant.origin!.event! })
+                : undefined
+            }
             range={range}
             chatTitle={chatTitle}
             savedVersion={participantSavedVersion}
@@ -4130,7 +4213,7 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
                 }),
               );
             }}
-            open={Boolean(selectedParticipant)}
+            open={Boolean(selectedParticipant) && !messageEvent}
             rangeLabel={formatStatisticsRangeLabel(range)}
             onImmunityChanged={() => {
               if (section === 'participants') void participantsFeed.retry();

@@ -259,6 +259,23 @@ Native administrator suggestion editing and rejection use the [private-card revi
 
 ## Moderation And Read Models
 
+- Deleted-message details are private: `GET /v1/chats/:chatId/moderation-feed/:eventId/message`
+  checks chat administrator access before event lookup and uses `private, no-store`. The feed
+  keeps its existing short excerpt; full content is fetched only when opening the message.
+- `moderation_message_snapshots` captures the first reason's exact webhook source in the same
+  transaction, before DELETE. Receipt PK, receiving bot, chat, message and author must match.
+  Copies preserve newlines and at most 16,000 Unicode code points; only the first 32 attachment
+  kinds are retained. Never copy URLs, tokens, OCR results or binary media. Sources without an
+  exact retained receipt keep their existing excerpt fallback; no broad historical recovery.
+- Snapshot content expires 14 days after source event time. Reads refuse expired content even
+  before the hourly indexed 250-row purge; the tombstone distinguishes expiry from missing
+  capture. Physical cleanup can lag. This TTL applies to the new full snapshot, not existing
+  feed excerpts or moderation event retention. Duplicate receipts cannot overwrite or renew it.
+  This observation adds no effect authority, retries, queue work or MAX requests. The migration
+  creates an empty table and index without backfill; older runtimes can ignore it.
+- Native atomicity, Unicode bounds and source binding live in
+  `moderation-delete-origin-postgres.spec.ts`; private reads in `moderation-message.service.spec.ts`.
+
 - Message-count quota applies to new eligible messages per chat and author, shared across bots.
   By the user's decision of 9 November 2026, only publications admitted by this quota spend it;
   quota-rejected attempts never extend the wait. Admission does not guarantee survival of other

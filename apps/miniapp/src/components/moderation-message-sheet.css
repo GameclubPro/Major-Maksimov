@@ -1,0 +1,139 @@
+@layer workspace {
+  body[data-miniapp-profile='moderation'] .moderation-message {
+    --moderation-message-paper-shadow: 0 14px 32px
+      color-mix(in srgb, var(--major-ink) 7%, transparent);
+    width: min(100%, 580px);
+    border-radius: 28px 28px 0 0;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message .settings-drilldown__body {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 20px 20px calc(24px + var(--app-safe-bottom, 0px));
+    min-width: 0;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__identity {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__author {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0;
+    min-height: 48px;
+    max-width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--major-ink);
+    text-align: left;
+    font: inherit;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__author strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 17px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__avatar {
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background: var(--major-accent-soft);
+    color: var(--major-accent);
+    font-weight: 800;
+    flex: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 16px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__identity time {
+    color: var(--major-muted);
+    font-size: 12px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__paper {
+    display: grid;
+    gap: 16px;
+    padding: 24px;
+    min-width: 0;
+    border: 1px solid var(--major-border);
+    border-radius: 24px;
+    background: var(--major-surface);
+    box-shadow: var(--moderation-message-paper-shadow);
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__text {
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.65;
+    color: var(--major-ink);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__reason {
+    display: grid;
+    gap: 8px;
+    padding: 20px;
+    border-radius: 20px;
+    border-inline-start: 3px solid var(--major-accent);
+    background: var(--major-accent-soft);
+    color: var(--major-ink);
+    overflow-wrap: anywhere;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__reason p {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.55;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__label {
+    color: var(--major-muted);
+    font-size: 12px;
+    font-weight: 650;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__attachments {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    color: var(--major-muted);
+    font-size: 13px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__attachments span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--major-subtle);
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__attachments small {
+    flex-basis: 100%;
+    font-size: 12px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__empty {
+    margin: 0;
+    color: var(--major-muted);
+    font-size: 14px;
+  }
+  body[data-miniapp-profile='moderation'] .moderation-message__error {
+    display: grid;
+    gap: 12px;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 359px) {
+    body[data-miniapp-profile='moderation'] .moderation-message .settings-drilldown__body {
+      padding: 16px;
+    }
+    body[data-miniapp-profile='moderation'] .moderation-message__paper {
+      padding: 18px;
+    }
+  }
+}

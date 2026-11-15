@@ -1,3 +1,4 @@
+import { purgeModerationMessageSnapshots } from '../moderation/moderation-message-snapshot';
 import { WebhookDependencyQuarantineService } from './webhook-dependency-quarantine.service';
 import { writeWebhookEnqueueState } from './webhook-receipt-write';
 import { purgeExpiredVoiceSources } from '../moderation/voice-webhook-source';
@@ -3710,6 +3711,11 @@ export class WebhookOutboxService
               moderationRowsRemaining = Math.max(0, moderationRowsRemaining - removed);
               return removed;
             },
+          },
+          {
+            name: 'moderationMessageContent',
+            maxBatches: 1,
+            deleteBatch: () => purgeModerationMessageSnapshots(this.prisma),
           },
           {
             name: 'sanctionHistory',
