@@ -270,6 +270,7 @@ export function ChannelSuggestDialogPage({
   const [draft, setDraft] = useState('');
   const [view, setView] = useState<'compose' | 'preview' | 'history'>('compose');
   const [isImportingText, setIsImportingText] = useState(false);
+  const [destinationExpanded, setDestinationExpanded] = useState(false);
   const [activeTools, setActiveTools] = useState<ReadonlySet<MaxMarkdownTool>>(() => new Set());
   const [editorReady, setEditorReady] = useState(false);
   const [draftAttachments, setDraftAttachments] = useState<SuggestDraftAttachment[]>([]);
@@ -1412,6 +1413,7 @@ export function ChannelSuggestDialogPage({
             tabIndex={isComposerBusy ? -1 : 0}
           />
           <IconoirSprite variant="iconoir" icon="Attachment" aria-hidden focusable="false" />
+          <span aria-hidden>Фото</span>
         </label>
       ) : (
         <>
@@ -1430,6 +1432,7 @@ export function ChannelSuggestDialogPage({
             }}
           >
             <IconoirSprite variant="iconoir" icon="Attachment" aria-hidden focusable="false" />
+            <span aria-hidden>Фото</span>
           </button>
           <input
             ref={imageInputRef}
@@ -1477,6 +1480,7 @@ export function ChannelSuggestDialogPage({
         title="Добавить текст из файла"
       >
         <IconoirSprite variant="iconoir" icon="Page" aria-hidden />
+        <span aria-hidden>Текст</span>
         <input
           className="channel-dialog-compose__attach-input"
           type="file"
@@ -1546,18 +1550,35 @@ export function ChannelSuggestDialogPage({
       <div className="channel-dialog-shell channel-dialog-shell--suggest">
         <header className="channel-suggest-heading">
           <div className="channel-suggest-heading__copy">
-            <h1>Предложить объявление</h1>
+            <h1>
+              Предложить <span>объявление</span>
+            </h1>
             {dialogQuery.data?.entityTitle ? (
-              <p
-                className="channel-suggest-heading__destination"
-                title={dialogQuery.data.entityTitle}
-                aria-label={`Канал-получатель: ${dialogQuery.data.entityTitle}`}
-              >
-                {dialogQuery.data.entityTitle}
-              </p>
+              <div className="channel-suggest-heading__destination-wrap">
+                <button
+                  type="button"
+                  className="channel-suggest-heading__destination"
+                  aria-label={`Канал-получатель: ${dialogQuery.data.entityTitle}`}
+                  aria-expanded={destinationExpanded}
+                  aria-controls="suggest-destination-name"
+                  onBlur={() => setDestinationExpanded(false)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      setDestinationExpanded(false);
+                    }
+                  }}
+                  onClick={() => {
+                    blurSuggestComposerFocus();
+                    setDestinationExpanded((expanded) => !expanded);
+                  }}
+                >
+                  <span id="suggest-destination-name">{dialogQuery.data.entityTitle}</span>
+                  <IconoirSprite variant="iconoir" icon="NavArrowDown" aria-hidden />
+                </button>
+              </div>
             ) : null}
           </div>
-          <span>{profile === 'publisher' ? 'Публик' : 'Майор'}</span>
         </header>
         <div className="channel-suggest-tabs" role="tablist" aria-label="Предложения">
           {(
@@ -1608,6 +1629,26 @@ export function ChannelSuggestDialogPage({
               {tab.label}
             </button>
           ))}
+        </div>
+        <div
+          className="channel-suggest-editor-tools"
+          hidden={view !== 'compose' || !canRenderDialog}
+        >
+          <div className="channel-suggest-composer__head">
+            <span className="channel-suggest-composer__status">
+              {isImportingText ? 'Загрузка текста' : 'Черновик'}
+            </span>
+            <span
+              className={cn(
+                'channel-suggest-composer__counter',
+                draftLength > SUGGEST_DRAFT_MAX_LENGTH && 'is-limit',
+              )}
+              aria-live="polite"
+            >
+              {draftLength}/{SUGGEST_DRAFT_MAX_LENGTH}
+            </span>
+          </div>
+          {formatToolbar}
         </div>
         <section ref={scrollViewportRef} className="channel-dialog-body channel-suggest-body">
           {dialogQuery.isLoading ? (
@@ -1670,22 +1711,6 @@ export function ChannelSuggestDialogPage({
                 aria-labelledby="suggest-tab-compose"
                 hidden={view !== 'compose'}
               >
-                <div className="channel-suggest-composer__head">
-                  <span className="channel-suggest-composer__status">
-                    {isImportingText ? 'Загрузка текста' : 'Черновик'}
-                  </span>
-                  <span
-                    className={cn(
-                      'channel-suggest-composer__counter',
-                      draftLength > SUGGEST_DRAFT_MAX_LENGTH && 'is-limit',
-                    )}
-                    aria-live="polite"
-                  >
-                    {draftLength}/{SUGGEST_DRAFT_MAX_LENGTH}
-                  </span>
-                </div>
-                {formatToolbar}
-
                 {draftImagesNeedReselection ? (
                   <div className="channel-suggest-composer__restore-warning" role="alert">
                     <span>

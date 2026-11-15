@@ -122,14 +122,19 @@ describePostgres('PostgreSQL delete due selection', () => {
     await client.query('TRUNCATE moderation_delete_intent_reasons, moderation_delete_intents');
   });
 
+  // FLAG: Removing 600,000 disposable jobs can exceed Jest's 5s default on CI runners.
   afterEach(async () => {
     jest.restoreAllMocks();
-    if (queue) {
-      await queue.obliterate({ force: true });
-      await queue.close();
-      queue = undefined;
+    const ownedQueue = queue;
+    queue = undefined;
+    if (ownedQueue) {
+      try {
+        await ownedQueue.obliterate({ force: true });
+      } finally {
+        await ownedQueue.close();
+      }
     }
-  });
+  }, 30_000);
 
   const select = () =>
     (

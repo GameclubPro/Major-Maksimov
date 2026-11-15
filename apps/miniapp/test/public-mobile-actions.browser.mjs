@@ -405,9 +405,40 @@ export async function runPublicMobileChecks({
       await page.setViewportSize({ width, height: profile.height });
       await settleVisualFrame(page);
       for (const button of await page
-        .locator('.channel-suggest-composer__image-grid button:enabled')
+        .locator(
+          '.channel-suggest-composer__image-remove:enabled, .channel-suggest-composer__image-order button:enabled',
+        )
         .all())
         await target44(button);
+      // Photos can exceed the scroll viewport; their visible portion must retain a 44px tap area.
+      const photo = page.locator('.channel-suggest-composer__image-open').first();
+      await photo.evaluate((node) => node.scrollIntoView({ block: 'center' }));
+      await settleVisualFrame(page);
+      const photoTarget = await photo.evaluate((node) => {
+        const image = node.getBoundingClientRect();
+        const viewport = node.closest('.channel-suggest-body').getBoundingClientRect();
+        const left = Math.max(image.left, viewport.left);
+        const right = Math.min(image.right, viewport.right);
+        const top = Math.max(image.top, viewport.top);
+        const bottom = Math.min(image.bottom, viewport.bottom);
+        const x = (left + right) / 2;
+        const y = (top + bottom) / 2;
+        return {
+          width: right - left,
+          height: bottom - top,
+          hit: [
+            [x, y],
+            [x - 21, y],
+            [x + 21, y],
+            [x, y - 21],
+            [x, y + 21],
+          ].every(([x, y]) => node.contains(document.elementFromPoint(x, y))),
+        };
+      });
+      assert.ok(
+        photoTarget.width >= 44 && photoTarget.height >= 44 && photoTarget.hit,
+        JSON.stringify(photoTarget),
+      );
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
         true,

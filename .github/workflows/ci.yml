@@ -426,6 +426,9 @@ jobs:
       - name: Rich text formatting, typing state and imported drafts
         if: matrix.shard == '4/4'
         run: node apps/miniapp/test/max-rich-text-formatting.browser.mjs
+      - name: Suggestion composer long names, enlarged text and photos on Android and iOS
+        if: matrix.shard == '3/4'
+        run: node apps/miniapp/test/channel-suggestion-composer.browser.mjs
       - name: Speech styles and custom message preservation
         if: matrix.shard == '3/4'
         run: node apps/miniapp/test/bot-speech-style.browser.mjs
