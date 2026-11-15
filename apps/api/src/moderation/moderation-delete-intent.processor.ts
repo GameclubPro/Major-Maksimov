@@ -21,6 +21,6 @@ export class ModerationDeleteIntentProcessor extends WorkerHost {
       return;
     }
 
-    await this.deleteIntents.attemptIntent(job.data.intentId);
+    await this.deleteIntents.processQueuedIntent(job.data.intentId);
   }
 }

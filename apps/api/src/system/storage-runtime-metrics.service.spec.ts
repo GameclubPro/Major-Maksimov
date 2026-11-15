@@ -726,6 +726,31 @@ describe('bounded storage-runtime metrics', () => {
   it('keeps invalid or failing due-sweep measurements from discarding the existing report', () => {
     const valid = metrics.getLocalSnapshot()!;
     const fixture = deleteDueSweepSnapshot();
+    const wakeups = {
+      calls: 10,
+      missing: 1,
+      settled: 2,
+      retentionOwned: 1,
+      scheduled: 1,
+      leased: 1,
+      expiryChecked: 1,
+      attempted: 3,
+      errors: 0,
+      totalDurationMs: 100,
+      maxDurationMs: 40,
+    };
+    expect(
+      sanitizeStorageRuntimeSnapshot({
+        ...valid,
+        deleteDueSweep: { ...fixture, wakeups: { ...wakeups, privateId: 'secret' } },
+      }),
+    ).toMatchObject({ deleteDueSweep: { wakeups } });
+    expect(
+      sanitizeStorageRuntimeSnapshot({
+        ...valid,
+        deleteDueSweep: { ...fixture, wakeups: { ...wakeups, calls: -1 } },
+      }),
+    ).toMatchObject({ deleteDueSweep: { wakeups: null, calls: fixture.calls } });
     const legacyFixture: Partial<typeof fixture> = { ...fixture };
     delete legacyFixture.handoffOutcomes;
     expect(

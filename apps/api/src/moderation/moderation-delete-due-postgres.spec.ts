@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { Queue } from 'bullmq';
 import { Prisma } from '../prisma/prisma-client';
 import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
+import { buildDeleteWakeupQuery, processQueuedDeleteWakeup } from './moderation-delete-wakeup';
 import {
   MODERATION_DELETE_INTENT_QUEUE,
   type ModerationDeleteIntentJob,
@@ -51,6 +52,8 @@ describePostgres('PostgreSQL delete due selection', () => {
       remote_delete_succeeded_at timestamp, remote_delete_succeeded_bot_id text,
       delete_dispatch_started_at timestamp, delete_dispatch_started_bot_id text,
       lease_expires_at timestamp DEFAULT '2026-01-01', suggestion_subscription_id text,
+      lease_token text, leased_from_status "ModerationDeleteIntentStatus",
+      completed_at timestamp, updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
       attempt_count integer NOT NULL DEFAULT 0, commercial_ocr_guard_required boolean NOT NULL DEFAULT false
     )`);
     // Use the production index, including its execute_at rather than created_at suffix.
@@ -69,6 +72,8 @@ describePostgres('PostgreSQL delete due selection', () => {
       'CREATE INDEX reason_idx ON moderation_delete_intent_reasons(intent_id, reason_key)',
     );
     const prisma = {
+      $executeRaw: async (value: Prisma.Sql) =>
+        (await client.query(value.text, value.values)).rowCount ?? 0,
       $queryRaw: async (value: Prisma.Sql) => {
         query = value;
         const result = await client.query(
@@ -145,6 +150,103 @@ describePostgres('PostgreSQL delete due selection', () => {
     await client.query('ANALYZE moderation_delete_intents');
     await client.query('ANALYZE moderation_delete_intent_reasons');
   }
+
+  it('drains stale queue wakeups without reason reads or MAX attempts and retains unresolved effects', async () => {
+    await client.query(`INSERT INTO moderation_delete_intents
+      (id,status,next_attempt_at,created_at,retry_until_at,retention_owned,lease_expires_at,
+       remote_delete_succeeded_at,delete_dispatch_started_bot_id)
+      VALUES
+      ('settled','SUCCEEDED','2026-01-01','2026-01-01','2026-01-02',false,null,null,null),
+      ('observed','OBSERVED','2026-01-01','2026-01-01','2026-01-02',false,null,null,null),
+      ('future','RETRYABLE','2099-01-01','2026-01-01','2099-01-02',false,null,null,null),
+      ('leased','IN_PROGRESS','2026-01-01','2026-01-01','2099-01-02',false,'2099-01-01',null,null),
+      ('owned','PENDING','2026-01-01','2026-01-01','2099-01-02',true,null,null,null),
+      ('receipt','AMBIGUOUS','2026-01-01','2026-01-01','2026-01-02',false,null,'2026-01-01',null),
+      ('dispatch','AMBIGUOUS','2026-01-01','2026-01-01','2026-01-02',false,null,null,'bot-1'),
+      ('fresh','PENDING','2026-01-01','2026-01-01','2099-01-02',false,null,null,null)`);
+    const attempt = jest.spyOn(service, 'attemptIntent').mockImplementation(async (intentId) => ({
+      intentId,
+      kind: 'pending',
+      confirmed: false,
+      status: 'PENDING',
+    }));
+    for (const id of [
+      'missing',
+      'settled',
+      'observed',
+      'future',
+      'leased',
+      'owned',
+      'receipt',
+      'dispatch',
+      'fresh',
+    ]) {
+      await service.processQueuedIntent(id);
+      expect(query.text).not.toContain('moderation_delete_intent_reasons');
+    }
+    expect(attempt.mock.calls.map(([id]) => id)).toEqual(['receipt', 'dispatch', 'fresh']);
+    const markers = await client.query(
+      "SELECT id,status FROM moderation_delete_intents WHERE id IN ('receipt','dispatch') ORDER BY id",
+    );
+    expect(markers.rows).toEqual([
+      { id: 'dispatch', status: 'AMBIGUOUS' },
+      { id: 'receipt', status: 'AMBIGUOUS' },
+    ]);
+    expect(service.getDueSweepRuntimeSnapshot().wakeups).toMatchObject({
+      calls: 9,
+      missing: 1,
+      settled: 2,
+      scheduled: 1,
+      leased: 1,
+      retentionOwned: 1,
+      expiryChecked: 0,
+      attempted: 3,
+      errors: 0,
+    });
+  });
+
+  it('rechecks newly persisted dispatch evidence before fast expiry', async () => {
+    await client.query(`INSERT INTO moderation_delete_intents
+      (id,status,next_attempt_at,created_at,retry_until_at)
+      VALUES ('raced','PENDING','2026-01-01','2026-01-01','2026-01-02')`);
+    const attempt = jest.fn();
+    const prisma = {
+      $queryRaw: async <T>(value: Prisma.Sql) =>
+        (await client.query(value.text, value.values)).rows as T,
+    };
+    await processQueuedDeleteWakeup(prisma, 'raced', attempt, async () => {
+      await locker.query(
+        "UPDATE moderation_delete_intents SET delete_dispatch_started_bot_id='bot-1' WHERE id='raced'",
+      );
+      await (
+        service as unknown as { expireIntentIfDue(id: string): Promise<void> }
+      ).expireIntentIfDue('raced');
+    });
+    expect(attempt).not.toHaveBeenCalled();
+    const current = await client.query(
+      "SELECT status,delete_dispatch_started_bot_id FROM moderation_delete_intents WHERE id='raced'",
+    );
+    expect(current.rows).toEqual([{ status: 'PENDING', delete_dispatch_started_bot_id: 'bot-1' }]);
+  });
+
+  it('keeps queued-wakeup work to one primary-key row with 420000 retained intents', async () => {
+    await client.query(`INSERT INTO moderation_delete_intents
+      (id,status,next_attempt_at,created_at)
+      SELECT n::text,'SUCCEEDED','2026-01-01','2026-01-01' FROM generate_series(1,420000)n`);
+    await client.query('ANALYZE moderation_delete_intents');
+    const value = buildDeleteWakeupQuery('420000');
+    const result = await client.query(
+      `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${value.text}`,
+      value.values,
+    );
+    const root = result.rows[0]['QUERY PLAN'][0].Plan as Plan;
+    expect(root['Node Type']).toBe('Index Scan');
+    expect(root['Actual Rows']).toBe(1);
+    expect(Number(root['Shared Hit Blocks']) + Number(root['Shared Read Blocks'])).toBeLessThan(12);
+    const attempt = jest.spyOn(service, 'attemptIntent');
+    await service.processQueuedIntent('420000');
+    expect(attempt).not.toHaveBeenCalled();
+  }, 30_000);
 
   it('repairs a missing tail wakeup behind existing jobs while the real queue is paused', async () => {
     const redisUrl = process.env.MAXIM_TEST_REDIS_URL?.trim();

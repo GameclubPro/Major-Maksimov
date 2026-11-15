@@ -147,6 +147,56 @@ type Authorization = {
     return { service, intent, message, max, chatId, bots, config };
   }
 
+  it.each([
+    ['on', '', false, 'EXPIRED'],
+    ['shadow', '', false, 'PENDING'],
+    ['off', '', false, 'PENDING'],
+    ['canary', 'other-chat', false, 'PENDING'],
+    ['canary', '*', false, 'EXPIRED'],
+    ['on', '', true, 'PENDING'],
+  ] as const)(
+    'queued expiry preserves rollout %s/%s and retention ownership %s',
+    async (mode, canary, retentionOwned, expectedStatus) => {
+      const s = await fixture();
+      await prisma.moderationDeleteIntentReason.deleteMany({ where: { intentId: s.intent.id } });
+      await prisma.moderationDeleteIntent.update({
+        where: { id: s.intent.id },
+        data: {
+          executeAt: new Date(Date.now() - 120_000),
+          nextAttemptAt: new Date(Date.now() - 120_000),
+          retryUntilAt: new Date(Date.now() - 60_000),
+          retentionOwned,
+        },
+      });
+      const service = new ModerationDeleteIntentService(
+        prisma as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        new ConfigService({
+          MODERATION_DELETE_INTENT_MODE: mode,
+          MODERATION_DELETE_INTENT_CANARY_CHAT_IDS: canary,
+        }),
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+      );
+      const attempt = jest.spyOn(service, 'attemptIntent');
+      await service.processQueuedIntent(s.intent.id);
+      expect(attempt).not.toHaveBeenCalled();
+      expect(
+        await prisma.moderationDeleteIntent.findUniqueOrThrow({ where: { id: s.intent.id } }),
+      ).toMatchObject({
+        status: expectedStatus,
+        attemptCount: 0,
+        retentionOwned,
+        remoteDeleteSucceededAt: null,
+        deleteDispatchStartedAt: null,
+      });
+    },
+  );
+
   it.each(['valid length', 'disabled policy', 'protected author', 'participant immunity'] as const)(
     'rechecks SQL independent authority after final duplicate refusal: %s',
     async (change) => {
