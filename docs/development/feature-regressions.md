@@ -148,6 +148,17 @@ The browser runner owns a server by default; reuse requires `PUBLIC_DIALOG_BASE_
 `PUBLIC_DIALOG_REUSE_SERVER=1`. `PUBLIC_DIALOG_ENGINE`, `PUBLIC_DIALOG_THEME` and
 `PUBLIC_DIALOG_OUTPUT` narrow the run and select artifacts.
 
+The [suggestion composer browser](../../apps/miniapp/test/channel-suggestion-composer.browser.mjs)
+checks long recipient names against actual control bounds and hit targets, 280–412px portrait and
+568/667px landscape, 100%/200% editor text, independent formatting/media scroll, native formatting taps,
+photo zoom/navigation/native Back/focus return, attachment ordering and draft preservation. Its
+server is owned by default; reuse requires `SUGGEST_COMPOSER_BASE_URL` and
+`SUGGEST_COMPOSER_REUSE_SERVER=1`. `SUGGEST_COMPOSER_ENGINE`, `SUGGEST_COMPOSER_THEME` and
+`SUGGEST_COMPOSER_OUTPUT` select the engine, theme and artifacts. Root font resizing is verified
+against computed editor text size; physical Android font/display scaling remains a device check.
+The full engine/theme matrix also runs in Mini App CI shard 3/4.
+A document-width assertion alone cannot detect overflow hidden inside the suggestion shell.
+
 The [comment image viewer browser](../../apps/miniapp/test/comment-image-viewer.browser.mjs)
 checks that tapping an image keeps it open, zoom/pan/swipe/pinch work, and closing restores
 focus at 320/393/412px and 667px landscape in both themes and engines. Chromium uses trusted

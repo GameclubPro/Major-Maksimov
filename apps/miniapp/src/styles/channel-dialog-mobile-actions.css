@@ -1,26 +1,65 @@
 @layer workspace {
-  .channel-suggest-composer__tool.channel-suggest-composer__video-tool {
-    flex-basis: auto;
-    width: auto;
-    gap: 5px;
-    padding-inline: 7px;
-    font-size: 0.75rem;
-    white-space: nowrap;
-  }
   .channel-suggest-composer__bar:not([hidden]) {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
   }
+
   .channel-suggest-composer__bar > span {
     display: none;
   }
+
   .channel-suggest-composer__tools {
-    flex: 1 1 auto;
+    display: flex;
     flex-wrap: wrap;
     min-width: 0;
+    gap: 6px;
   }
+
+  .channel-suggest-composer__tools > .channel-suggest-composer__tool {
+    flex: 1 1 0;
+    flex-wrap: wrap;
+    min-width: 44px;
+    min-height: 44px;
+    gap: 6px;
+    padding: 6px;
+    border-color: var(--suggest-line);
+    background: var(--suggest-surface);
+    font-size: 0.75rem;
+    font-weight: 650;
+    line-height: 1.2;
+  }
+
+  .channel-suggest-composer__tool > span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .channel-suggest-composer__submit {
-    flex: 0 0 auto;
-    margin-inline-start: auto;
+    width: 100%;
+    min-width: 0;
+  }
+
+  @media (min-width: 560px), (max-height: 400px) {
+    .channel-suggest-composer__bar:not([hidden]) {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .channel-suggest-composer__submit {
+      min-height: 44px;
+    }
+    .channel-suggest-composer__tools > .channel-suggest-composer__tool {
+      padding-inline: 6px;
+    }
+  }
+  @media (min-width: 560px) and (max-height: 400px) {
+    .channel-suggest-composer__tools > .channel-suggest-composer__tool {
+      flex-basis: auto;
+    }
+    .channel-suggest-composer__tools > .channel-suggest-composer__tool > svg {
+      display: none;
+    }
+    .channel-suggest-composer__submit {
+      gap: 6px;
+      padding-inline: 10px;
+    }
   }
 }

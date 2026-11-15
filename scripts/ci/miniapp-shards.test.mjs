@@ -33,6 +33,7 @@ const browserFiles = [
   'publication-composer-usability',
   'max-rich-text-formatting',
   'bot-speech-style',
+  'channel-suggestion-composer',
 ].map((name) => `apps/miniapp/test/${name}.browser.mjs`);
 const expectedCommands = [
   'npm run check:miniapp',
@@ -89,7 +90,11 @@ test('each browser partition owns dependencies and builds contracts before its f
     assert.ok(index(build) >= 0 && index(build) < firstBrowser, `${shard}: missing ${build}`);
     const shop = index('node apps/miniapp/test/karavan-shop-formats.browser.mjs');
     const webkit = index('npx playwright install --with-deps webkit');
-    if (shop >= 0) assert.ok(webkit >= 0 && webkit < shop);
-    else assert.equal(webkit, -1, 'Only the complete Android/iOS shop matrix needs WebKit');
+    const composer = index('node apps/miniapp/test/channel-suggestion-composer.browser.mjs');
+    for (const browserCase of [shop, composer].filter((index) => index >= 0)) {
+      assert.ok(webkit >= 0 && webkit < browserCase);
+    }
+    if (shop < 0 && composer < 0)
+      assert.equal(webkit, -1, 'Only complete Android/iOS matrices need WebKit');
   }
 });
