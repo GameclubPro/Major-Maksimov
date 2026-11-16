@@ -135,9 +135,12 @@ export function Shell({
 
   const isGiveawayRoute = location.pathname.includes('/giveaways/');
   const isLegalRoute = location.pathname.startsWith('/legal/');
+  const isSuggestionReviewRoute =
+    /^\/suggestions\/[A-Za-z0-9_-]{1,160}\/(edit|reject|publish)\/?$/u.test(location.pathname);
   const isDialogRoute =
-    location.pathname.includes('/dialog/') &&
-    (location.pathname.includes('/channel/') || location.pathname.includes('/chat/'));
+    isSuggestionReviewRoute ||
+    (location.pathname.includes('/dialog/') &&
+      (location.pathname.includes('/channel/') || location.pathname.includes('/chat/')));
   const isCommentsDialogRoute = isDialogRoute && location.pathname.includes('/dialog/comments');
   const isSuggestDialogRoute = isDialogRoute && location.pathname.includes('/dialog/suggest');
   const shouldCloseDialogOnBack = isDialogRoute;

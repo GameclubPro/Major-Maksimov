@@ -1,7 +1,7 @@
 import { useEffect, type RefObject } from 'react';
 import { useKeyboardOpen } from './use-keyboard-open';
 
-export function useVisibleEditorCaret(editorRef: RefObject<HTMLElement | null>) {
+export function useVisibleEditorCaret(editorRef: RefObject<HTMLElement | null>, bottomInset = 0) {
   const keyboardOpen = useKeyboardOpen();
   useEffect(() => {
     if (!keyboardOpen) return;
@@ -51,7 +51,10 @@ export function useVisibleEditorCaret(editorRef: RefObject<HTMLElement | null>) 
           return { top, bottom: top + lineHeight };
         };
         const top = (viewport?.offsetTop ?? 0) + 12;
-        const bottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? innerHeight) - 12;
+        const bottom = Math.max(
+          top + 24,
+          (viewport?.offsetTop ?? 0) + (viewport?.height ?? innerHeight) - bottomInset - 12,
+        );
         const delta = (start: number, end: number) => {
           const rect = caretBounds();
           return rect.top < start ? rect.top - start : rect.bottom > end ? rect.bottom - end : 0;
@@ -96,5 +99,5 @@ export function useVisibleEditorCaret(editorRef: RefObject<HTMLElement | null>) 
       document.removeEventListener('selectionchange', reveal);
       editor?.removeEventListener('focus', reveal);
     };
-  }, [editorRef, keyboardOpen]);
+  }, [editorRef, keyboardOpen, bottomInset]);
 }

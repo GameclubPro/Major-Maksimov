@@ -48,7 +48,7 @@ describe('suggestion review bot cards', () => {
     'buildEntryMiniappStartUrlSync' | 'buildPublisherMiniappStartUrlSync'
   >;
   it.each(['moderation', 'publisher'] as const)(
-    'moderates %s entirely inside its bot',
+    'opens the %s editor while preserving native publish/reject authority',
     (profile) => {
       const buttons = buildSuggestionReviewButtons(
         links as MaxBotLinkService,
@@ -69,11 +69,25 @@ describe('suggestion review bot cards', () => {
           ),
       ).toEqual([
         { action: 'publish', id: 'suggestion-42', revision: 7, version: 0 },
-        { action: 'edit', id: 'suggestion-42', revision: 7, version: 0 },
+        null,
         { action: 'reject', id: 'suggestion-42', revision: 7, version: 0 },
       ]);
+      const edit = buttons[1]![0]!;
+      expect(edit.type).toBe('link');
+      if (edit.type !== 'link') throw new Error('Missing mini app link');
+      const url = new URL(edit.url);
+      expect(url.pathname).toBe(profile === 'publisher' ? '/publik' : '/major');
+      expect(
+        JSON.parse(Buffer.from(url.searchParams.get('startapp')!.slice(3), 'base64url').toString())
+          .r,
+      ).toBe('/suggestions/suggestion-42/edit');
     },
   );
+  it('retains the native fallback when no mini app link is configured', () => {
+    expect(
+      buildSuggestionReviewButtons(undefined, 'moderation', 'id', undefined, 3, 8)[1]![0],
+    ).toMatchObject({ type: 'callback', payload: 'sr1|edit|id|3|8' });
+  });
   it('keeps existing explicit miniapp entry links compatible', () => {
     const url = new URL(
       suggestionReviewUrl(links as MaxBotLinkService, 'publisher', 'suggestion-42', 'publish')!,

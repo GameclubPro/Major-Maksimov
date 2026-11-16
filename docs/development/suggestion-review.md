@@ -1,14 +1,21 @@
 # Suggestion review in Major and Publik
 
-The primary administrator flow is the private bot card: `Опубликовать`, `Править`,
-`Отклонить`. The user's explicit correction on 2026-11-14 supersedes mandatory mini app
-navigation for these actions. Native callbacks must work identically in Major and Publik.
-Existing explicit `/suggestions/:id/edit|publish|reject` mini app URLs remain compatible;
-they are not used by new card buttons. The full publication workspace remains Publik-only.
+The private bot card offers `Опубликовать`, `Править`, `Отклонить`. The user's explicit
+correction on 2026-11-16 makes `Править` a bot-scoped mini app link to the exact suggestion.
+This supersedes native-only editing as the default. Publication and rejection stay native.
+The compact mini app editor opens with stored formatting and protected media, supports image
+zoom, save and explicit publication, and retains author attribution and revision checks.
+Media loads independently of the editor; failed previews have retry without discarding text.
+Stored MAX photo URLs use the authenticated asset endpoint, restricted HTTPS CDN hosts,
+validated redirects, an eight-second deadline and the existing 8 MiB image budget. Tokens
+and remote URLs stay server-side; preview never rewrites the stored publication asset.
+Existing `/suggestions/:id/edit|publish|reject` URLs and in-progress native sessions remain
+compatible. The full publication workspace remains Publik-only.
 
-## Native card interaction
+## Native card compatibility
 
-`Править` immediately shows a persistent editing instruction and the editable text on the
+Existing native editing sessions and historical callbacks retain their guarded input flow.
+For these sessions, `Править` immediately shows a persistent editing instruction and the editable text on the
 existing card. The explicit correction on 2026-11-15 supersedes the hidden `Как править` hint.
 The administrator copies the body and uses MAX’s `Ответить` on that exact card to send the
 corrected text, then sees the final publication preview including
@@ -118,7 +125,9 @@ an attempted SEND. Confirmed reply delivery and completed card synchronization c
 preparation errors; unknown transport failures keep their existing diagnostics and effect fences.
 
 A bounded, persisted primary-key walk upgrades already-delivered pending cards to native buttons.
-Each page selects at most 25 delivery keys before profile/status/payload checks. Major's versioned
+Each page selects at most 25 delivery keys before profile/status/payload checks. The
+`miniapp-edit-v1` pass in each profile refreshes pending cards once, reopening only unattempted
+repeatable native-sync effects; active personal editing sessions keep their content. Major's versioned
 published-link pass also refreshes confirmed published cards with valid saved post links, retaining
 the earlier cursor. It may reopen only completed repeatable native card-sync effects; publication,
 rejection notifications and suggestion statuses are unchanged. Other terminal cards are skipped,

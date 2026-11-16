@@ -41,10 +41,16 @@ try {
         const errors = [];
         page.on('pageerror', (error) => errors.push(error.message));
         const fixture = new URL('test/browser/suggestion-review.html', base);
-        fixture.search = new URLSearchParams({ profile, theme }).toString();
+        fixture.search = new URLSearchParams({ profile, theme, media: '1' }).toString();
         await page.goto(fixture.href);
         const editor = page.getByRole('textbox', { name: 'Текст предложки', exact: true });
         await editor.waitFor();
+        assert.equal(await page.locator('.shell-topbar, .bottom-nav').count(), 0);
+        await page.getByRole('button', { name: 'Открыть фото: Фото 1' }).waitFor();
+        await page.getByRole('button', { name: 'Открыть фото: Фото 1' }).click();
+        await page.getByRole('dialog', { name: 'Просмотр фото' }).waitFor();
+        await page.getByRole('button', { name: 'Закрыть просмотр' }).click();
+        assert.equal(await page.getByRole('dialog').count(), 0);
         assert.equal(await page.getByRole('button', { name: 'Анна Смирнова ↗' }).count(), 1);
         await editor.evaluate((el) => {
           const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -67,16 +73,61 @@ try {
           path: `${output}/${name}-${profile}-${theme}-edit.png`,
           fullPage: true,
         });
-        await editor.focus();
+        await page.getByRole('button', { name: 'Предпросмотр', exact: true }).click();
+        await page.getByRole('button', { name: 'Текст', exact: true }).click();
+        const publish = page.getByRole('button', {
+          name: profile === 'moderation' ? 'Опубликовать' : 'В публикацию',
+          exact: true,
+        });
+        await publish.waitFor();
+        await page.waitForFunction(
+          () => !document.querySelector('.suggestion-review__dock .button--primary').disabled,
+        );
+        await editor.evaluate((el) => {
+          el.focus();
+          const text = [...el.querySelectorAll('a')].at(-1)?.firstChild ?? el.firstChild;
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          range.collapse(false);
+          getSelection().removeAllRanges();
+          getSelection().addRange(range);
+        });
         await page.setViewportSize({ width, height: 430 });
-        await page
-          .getByRole('button', { name: 'В публикацию', exact: true })
-          .scrollIntoViewIfNeeded();
+        await page.waitForFunction(() => {
+          const selection = getSelection();
+          if (!selection?.rangeCount) return false;
+          const range = selection.getRangeAt(0).cloneRange();
+          if (range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset)
+            range.setStart(range.startContainer, range.startOffset - 1);
+          const caret = range.getBoundingClientRect();
+          const dock = document.querySelector('.suggestion-review__dock').getBoundingClientRect();
+          return caret.height > 0 && caret.top >= 0 && caret.bottom < dock.top;
+        });
         assert.equal(
           await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
           false,
         );
+        const dock = await page.locator('.suggestion-review__dock').boundingBox();
+        assert.ok(
+          dock && dock.y >= 0 && dock.y + dock.height <= 431,
+          'Actions remain above the keyboard',
+        );
+        await page.screenshot({
+          path: `${output}/${name}-${profile}-${theme}-keyboard.png`,
+          fullPage: false,
+        });
         await page.setViewportSize({ width, height });
+        fixture.searchParams.set('mediaError', '1');
+        fixture.searchParams.set('long', '1');
+        await page.goto(fixture.href);
+        await page.getByRole('button', { name: 'Повторить', exact: true }).click();
+        await page.getByRole('button', { name: 'Открыть фото: Фото 1' }).waitFor();
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+          false,
+        );
+        fixture.searchParams.delete('mediaError');
+        fixture.searchParams.delete('long');
         fixture.searchParams.set('mode', 'reject');
         await page.goto(fixture.href);
         await page.getByRole('button', { name: 'Платное размещение', exact: true }).click();

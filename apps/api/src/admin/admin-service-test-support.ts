@@ -145,6 +145,8 @@ export function expectChatRulesDeleteOptions(overrides: Record<string, unknown> 
 }
 
 export function createAdminMaxBotLinkMock(overrides: Record<string, unknown> = {}) {
+  const miniappLink = (bot: string) =>
+    jest.fn((start: string) => `https://max.ru/${bot}?startapp=${encodeURIComponent(start)}`);
   return {
     getContextOrDefaultBotId: jest.fn(() => '777000_bot'),
     getBotTokenSync: jest.fn().mockReturnValue('test-max-bot-token'),
@@ -154,9 +156,8 @@ export function createAdminMaxBotLinkMock(overrides: Record<string, unknown> = {
     resolveBotIdForSend: jest.fn().mockResolvedValue('777000_bot'),
     resolveBotRoute: jest.fn(),
     resolveContactIdSync: jest.fn().mockReturnValue(null),
-    buildEntryMiniappStartUrlSync: jest.fn(
-      (startParam: string) => `https://max.ru/entry-bot?startapp=${encodeURIComponent(startParam)}`,
-    ),
+    buildEntryMiniappStartUrlSync: miniappLink('entry-bot'),
+    buildPublisherMiniappStartUrlSync: miniappLink('publik'),
     buildMiniappStartUrlSync: jest.fn(
       (startParam: string, botId?: string | null) =>
         `https://max.ru/${encodeURIComponent(botId?.trim() || '777000_bot')}?startapp=${encodeURIComponent(startParam)}`,

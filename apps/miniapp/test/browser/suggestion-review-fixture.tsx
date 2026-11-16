@@ -1,8 +1,10 @@
 import '../../src/styles.css';
+import photo from '../../src/assets/wallpapers/comments-atlas-light.webp';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SuggestionReviewPage } from '../../src/pages/suggestion-review-page';
+import { Shell } from '../../src/components/shell';
 import type { ApiTransport } from '../../src/lib/api/transport';
 import type { SuggestionReviewDetail } from '@maxim/contracts/publisher';
 const params = new URLSearchParams(location.search);
@@ -14,7 +16,9 @@ let current: SuggestionReviewDetail = {
   id: 'suggestion-1',
   profile,
   channelId: 'channel-1',
-  channelTitle: 'Городские объявления',
+  channelTitle: params.has('long')
+    ? 'Городские объявления — новости, события и предложения жителей нашего района'
+    : 'Городские объявления',
   revision: params.has('stale') ? 1 : 0,
   text,
   originalText: text,
@@ -22,16 +26,31 @@ let current: SuggestionReviewDetail = {
   author: { userId: '42', name: 'Анна Смирнова', url: 'https://max.ru/anna' },
   previewText: `От подписчика [Анна Смирнова](https://max.ru/anna)\n\n${text}`,
   previewFormat: 'markdown',
-  media: [],
+  media: params.has('media')
+    ? [0, 1, 2].map((n) => ({
+        id: `photo-${n}`,
+        type: 'image' as const,
+        name: `Фото ${n + 1}`,
+        available: true,
+      }))
+    : [],
   notification: 'none',
   rejectionText: null,
   contactUrl: '',
 };
 let failOnce = params.has('error');
+let failMedia = params.has('mediaError');
 const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
 Object.assign(window, { reviewCalls: calls });
 const api = {
   request: async (path: string, options?: { body?: string; method?: string }) => {
+    if (path.includes('/assets/')) {
+      if (failMedia) {
+        failMedia = false;
+        throw new Error('Media unavailable');
+      }
+      return (await fetch(photo)).blob();
+    }
     if (failOnce) {
       failOnce = false;
       throw new Error('Temporary network error');
@@ -71,10 +90,12 @@ createRoot(document.getElementById('root')!).render(
   <QueryClientProvider client={new QueryClient()}>
     <MemoryRouter initialEntries={[`/suggestions/suggestion-1/${params.get('mode') ?? 'edit'}`]}>
       <Routes>
-        <Route
-          path="/suggestions/:suggestionId/:mode"
-          element={<SuggestionReviewPage api={api} profile={profile} userId="101" />}
-        />
+        <Route element={<Shell profile={profile} />}>
+          <Route
+            path="/suggestions/:suggestionId/:mode"
+            element={<SuggestionReviewPage api={api} profile={profile} userId="101" />}
+          />
+        </Route>
       </Routes>
     </MemoryRouter>
   </QueryClientProvider>,

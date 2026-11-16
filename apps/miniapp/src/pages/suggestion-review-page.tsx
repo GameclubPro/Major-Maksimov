@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -22,7 +22,20 @@ import { closeMaxMiniApp, openMaxProfileLink } from '../lib/max-bridge';
 import { useNativeBackHandler } from '../lib/native-back';
 import { hydrateMirroredItem, removeMirroredItem, saveMirroredItem } from '../lib/native-storage';
 import { describeUserFacingError } from '../lib/user-facing-error';
+import { AppIcon } from '../components/ui/app-icon';
+import { SuggestionReviewMedia } from './suggestion-review-media';
+import { useVisualViewportOverlayStyle } from '../lib/use-visual-viewport-overlay-style';
 import '../styles/suggestion-review.css';
+
+const toolIcons = {
+  heading: 'Type',
+  bold: 'Bold',
+  italic: 'Italic',
+  underline: 'Underline',
+  strike: 'Strikethrough',
+  code: 'Code',
+  link: 'Link',
+} as const;
 
 type Preview = { text: string; textFormat?: 'markdown' | 'html' | 'plain' };
 const statuses = {
@@ -39,53 +52,6 @@ const notificationLabels = {
   failed: 'Не удалось отправить ответ',
   ambiguous: 'Отправка ответа не подтверждена',
 };
-
-function AssetPreview({
-  api,
-  suggestionId,
-  asset,
-}: {
-  api: ApiTransport;
-  suggestionId: string;
-  asset: SuggestionReviewDetail['media'][number];
-}) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!asset.available) return;
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    void api
-      .request(
-        `/suggestion-reviews/${encodeURIComponent(suggestionId)}/assets/${encodeURIComponent(asset.id)}`,
-        { responseType: 'blob' },
-      )
-      .then((blob) => {
-        if (cancelled || !(blob instanceof Blob)) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
-      })
-      .catch(() => setUrl(null));
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [api, asset.available, asset.id, suggestionId]);
-  return (
-    <figure className="suggestion-review__asset">
-      {url ? (
-        asset.type === 'image' ? (
-          <img src={url} alt={asset.name} />
-        ) : (
-          <video src={url} controls preload="metadata" />
-        )
-      ) : (
-        <span>
-          {asset.type === 'video' ? 'Видео' : 'Фото'} · {asset.name}
-        </span>
-      )}
-    </figure>
-  );
-}
 
 function PreviewContent({ preview }: { preview: Preview }) {
   // FLAG: HTML is the authenticated server's escaped MAX presentation, never editable DOM input.
@@ -145,6 +111,12 @@ function SuggestionReviewContent({
   const [editorReady, setEditorReady] = useState(true);
   const [conflictDraft, setConflictDraft] = useState<string | null>(null);
   const editorRef = useRef<MaxRichTextEditorHandle>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  const [dockHeight, setDockHeight] = useState(0);
+  const viewport = useVisualViewportOverlayStyle(true);
+  const dockStyle = {
+    '--review-dock-bottom': `${viewport ? Math.max(0, window.innerHeight - Number(viewport.top) - Number(viewport.height)) : 0}px`,
+  } as CSSProperties;
   const [activeTools, setActiveTools] = useState<ReadonlySet<MaxMarkdownTool>>(new Set());
   const operationRef = useRef<{ body: string; id: string } | null>(null);
   const busyRef = useRef(false);
@@ -227,7 +199,22 @@ function SuggestionReviewContent({
   }, [navigate]);
   useNativeBackHandler(close);
   useEffect(() => {
-    if (!detail || !showPreview || detail.status !== 'pending') return;
+    const dock = dockRef.current;
+    if (!dock) {
+      setDockHeight(0);
+      return;
+    }
+    const measure = () => setDockHeight(dock.getBoundingClientRect().height);
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    measure();
+    return () => observer.disconnect();
+  }, [ready, detail?.status, mode]);
+  useEffect(() => {
+    if (!detail || !showPreview || detail.status !== 'pending') {
+      setPreviewBusy(false);
+      return;
+    }
     let cancelled = false;
     setPreviewBusy(true);
     setPreview(null);
@@ -332,7 +319,8 @@ function SuggestionReviewContent({
   if (query.isPending || !ready)
     return (
       <main className="suggestion-review" aria-busy="true">
-        <p>Загружаю предложку…</p>
+        <span className="suggestion-review__sr-only">Загрузка предложки</span>
+        <div className="suggestion-review__skeleton" aria-hidden="true" />
         {query.isError ? (
           <p role="alert">{describeUserFacingError(query.error, 'Предложка недоступна.')}</p>
         ) : null}
@@ -350,16 +338,22 @@ function SuggestionReviewContent({
     ? buildSuggestionRejectionText(reason, detail.channelTitle, comment)
     : '';
   return (
-    <main className="suggestion-review">
+    <main className="suggestion-review" style={dockStyle}>
       <header className="suggestion-review__header">
         <div>
-          <span className="suggestion-review__eyebrow">{detail.channelTitle}</span>
-          <h1>{rejection ? 'Отклонить предложку' : 'Предложка'}</h1>
+          <span className="suggestion-review__eyebrow">
+            {rejection ? 'Отклонить пост' : 'Редактор поста'}
+          </span>
+          <h1>{detail.channelTitle}</h1>
         </div>
-        <span className="suggestion-review__status">{statuses[detail.status]}</span>
+        {!pending ? (
+          <span className="suggestion-review__status">{statuses[detail.status]}</span>
+        ) : null}
       </header>
       <div className="suggestion-review__author">
-        <span>Автор</span>
+        <span className="suggestion-review__avatar" aria-hidden="true">
+          {detail.author.name.slice(0, 1)}
+        </span>
         {detail.author.url ? (
           <button type="button" onClick={() => openMaxProfileLink(detail.author.url!)}>
             {detail.author.name} ↗
@@ -485,9 +479,18 @@ function SuggestionReviewContent({
       ) : (
         <>
           {detail.media.length ? (
-            <div className="suggestion-review__media">
+            <div
+              className="suggestion-review__media"
+              data-count={detail.media.length}
+              aria-label="Вложения поста"
+            >
               {detail.media.map((asset) => (
-                <AssetPreview key={asset.id} api={api} suggestionId={detail.id} asset={asset} />
+                <SuggestionReviewMedia
+                  key={asset.id}
+                  api={api}
+                  suggestionId={detail.id}
+                  asset={asset}
+                />
               ))}
             </div>
           ) : null}
@@ -498,16 +501,16 @@ function SuggestionReviewContent({
                 aria-pressed={!showPreview}
                 onClick={() => setShowPreview(false)}
               >
-                Редактировать
+                <AppIcon icon="EditPencil" /> Текст
               </button>
               <button type="button" aria-pressed={showPreview} onClick={() => setShowPreview(true)}>
-                Предпросмотр
+                <AppIcon icon="Eye" /> Предпросмотр
               </button>
             </div>
           ) : null}
           {!showPreview && pending ? (
             <section className="suggestion-review__editor">
-              <div className="suggestion-review__tools" aria-label="Форматирование">
+              <div className="suggestion-review__tools" role="toolbar" aria-label="Форматирование">
                 {MAX_MARKDOWN_TOOL_DEFINITIONS.map((tool) => (
                   <button
                     key={tool.id}
@@ -519,7 +522,7 @@ function SuggestionReviewContent({
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => editorRef.current?.applyTool(tool.id)}
                   >
-                    {tool.label}
+                    <AppIcon icon={toolIcons[tool.id]} variant="iconoir" aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -532,6 +535,7 @@ function SuggestionReviewContent({
                 ariaLabel="Текст предложки"
                 placeholder="Текст публикации"
                 preserveWhitespace
+                viewportBottomInset={dockHeight}
                 disabled={busy}
                 onNormalizationReadyChange={setEditorReady}
               />
@@ -552,14 +556,15 @@ function SuggestionReviewContent({
             </div>
           ) : null}
           {pending ? (
-            <div className="suggestion-review__actions">
+            <div ref={dockRef} className="suggestion-review__actions suggestion-review__dock">
               <button
                 className="button button--primary"
                 type="button"
-                disabled={busy || !editorReady || previewBusy}
+                disabled={busy || !editorReady || previewBusy || (showPreview && !preview)}
                 onClick={() => void submit('publish')}
               >
-                {text === detail.text ? 'В публикацию' : 'Сохранить и в публикацию'}
+                <AppIcon icon="SendDiagonal" />
+                {busy ? 'Сохраняем…' : profile === 'moderation' ? 'Опубликовать' : 'В публикацию'}
               </button>
               <button
                 className="button button--secondary"
@@ -567,10 +572,7 @@ function SuggestionReviewContent({
                 disabled={busy || !editorReady || text === detail.text}
                 onClick={() => void submit('save')}
               >
-                Сохранить
-              </button>
-              <button type="button" disabled={busy} onClick={close}>
-                Назад
+                <AppIcon icon="Check" /> Сохранить
               </button>
             </div>
           ) : (
