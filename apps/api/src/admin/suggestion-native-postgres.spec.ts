@@ -591,6 +591,55 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     return job;
   }
 
+  it.each(['moderation', 'publisher'] as const)(
+    'opens, edits, saves and reopens a stored relative MAX mention in %s',
+    async (profile) => {
+      const f = await seed(profile);
+      const original = {
+        text: '  😀 Анна: цена 300 ₽\n\n',
+        textFormat: 'plain',
+        textMarkup: [{ type: 'user_mention', from: 5, length: 4, user_link: 'user/67123224' }],
+      };
+      await db.auditLog.update({
+        where: { id: f.row.id },
+        data: { payload: { ...suggestionObject(f.row.payload), ...original } },
+      });
+      await callback(f, 'edit');
+      expect(edit.mock.calls.at(-1)?.[2]).toContain(original.text);
+      await input(f, original.text.replace('300', '350'));
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('[Анна](max://user/67123224): цена 350 ₽');
+      await callback(f, 'save');
+      const saved = suggestionObject(
+        (await db.auditLog.findUniqueOrThrow({ where: { id: f.row.id } })).payload,
+      );
+      expect(saved).toMatchObject({
+        reviewContentRevision: 1,
+        reviewOriginalContent: original,
+        actorUserId: '42',
+        text: '  😀 [Анна](max://user/67123224): цена 350 ₽\n\n',
+      });
+      const actor = { userId: '101', username: null, displayName: null };
+      const detail = await review.get(f.row.id, profile, actor);
+      expect(detail.originalText).toBe('  😀 [Анна](max://user/67123224): цена 300 ₽\n\n');
+      // The current mini app uses the same save contract after a historical native session.
+      await review.save(f.row.id, profile, actor, {
+        requestId: randomUUID(),
+        expectedRevision: 1,
+        text: detail.text.replace('350', '400'),
+      });
+      await callback(f, 'edit');
+      expect(edit.mock.calls.at(-1)?.[2]).toContain('  😀 Анна: цена 400 ₽\n\n');
+      expect(messages.get(f.card.remoteMessageId!)?.body).toMatchObject({
+        attachments: [
+          { type: 'image', payload: { token: 'original-photo' } },
+          { type: 'inline_keyboard' },
+        ],
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect(answer.mock.calls.some((call) => call[1]?.includes('Не удалось'))).toBe(false);
+    },
+  );
+
   function replyUpdate(f: Fixture, text: string, patch: Partial<MaxUpdate> = {}): MaxUpdate {
     return {
       botId: f.botId,

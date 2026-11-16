@@ -61,6 +61,15 @@ the pending input, including quick edits and failed Redis handoff. New media in 
 produces a visible text-only editing error instead of being silently discarded; ordinary
 link previews remain compatible.
 
+Stored MAX mentions use the same destination resolution as publication: `user/<id>`,
+`/user/<id>`, profile names and absolute profile links open without rewriting the original.
+Exact `max://user/<id>` destinations may contain opaque identifiers, as in the mini app.
+Editor links retain the credential-free HTTPS/exact MAX-user policy; foreign schemes,
+control characters, query-bearing MAX links and malformed ranges still fail closed.
+Validate original integer offsets before tolerant legacy readers, including UTF-16 surrogate
+boundaries. An automatic-link-only fallback escapes literal Markdown punctuation, so opening
+and saving an ordinary post cannot introduce formatting that the author never supplied.
+
 The four version-1 rejection templates are `paid`, `details`, `topic`, `rules`:
 «Платное размещение», «Нужно дополнить», «Не по теме», «Не по правилам».
 `Отклонить` exposes these buttons on the same card. Selecting a template commits the decision

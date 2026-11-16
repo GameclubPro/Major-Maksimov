@@ -11,8 +11,7 @@ import {
   renderMaxTextMarkupAsMarkdown,
   type MaxTextMarkup,
 } from '../common/max-text-markup.util';
-import { readChannelSuggestionTextMarkup } from './admin-channel-dialog-values';
-import { suggestionEditorText } from './suggestion-review-content';
+import { readSuggestionReviewMarkup } from './suggestion-review-markup';
 
 const markupSchema = z.object({
   type: z.enum(MAX_TEXT_MARKUP_TYPES),
@@ -31,9 +30,8 @@ export type NativeSuggestionDraft = NativeSuggestionContent & { warnings: string
 export function readSuggestionNativeContent(
   payload: Record<string, unknown>,
 ): NativeSuggestionContent {
-  suggestionEditorText(payload); // Validate stored ranges and destinations before editing.
   const text = typeof payload.text === 'string' ? payload.text : '';
-  const markup = readChannelSuggestionTextMarkup(payload.textMarkup);
+  const markup = readSuggestionReviewMarkup(text, payload.textMarkup);
   if (markup.length || payload.textFormat !== 'markdown') return { text, markup };
   return readMarkdownNativeContent(text);
 }
@@ -118,7 +116,7 @@ function validateContent(content: NativeSuggestionContent) {
     if (mark.from + mark.length > content.text.length)
       throw new BadRequestException('Не удалось прочитать оформление сообщения.');
   }
-  suggestionEditorText({ text: content.text, textMarkup: content.markup });
+  readSuggestionReviewMarkup(content.text, content.markup);
 }
 
 type Change = { from: number; to: number; nextFrom: number; nextTo: number };

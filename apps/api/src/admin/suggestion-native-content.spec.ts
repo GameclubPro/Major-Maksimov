@@ -17,6 +17,22 @@ const mark = (
 ) => ({ type, from, length, url, userLink: null });
 
 describe('native suggestion content', () => {
+  it('keeps a relative MAX mention through native input, text correction and Markdown conversion', () => {
+    const text = '😀 Анна: 300 ₽\n\n';
+    const markup = [{ ...mark('user_mention', 3, 4), userLink: 'user/67123224' }];
+    const source = readSuggestionNativeContent({ text, textMarkup: markup });
+    expect(source.markup[0]?.userLink).toBe('max://user/67123224');
+    const draft = mergeSuggestionNativeContent(source, {
+      text: text.replace('300', '350'),
+      markup: [],
+    });
+    expect(draft.warnings).toEqual([]);
+    expect(nativeSuggestionMarkdown(draft)).toBe('😀 [Анна](max://user/67123224): 350 ₽\n\n');
+    expect(nativeSuggestionMarkdown({ text, markup })).toBe(
+      '😀 [Анна](max://user/67123224): 300 ₽\n\n',
+    );
+  });
+
   it('round-trips actual whitespace, paragraphs, emoji and hidden links', () => {
     const markdown = '  **😀 Заголовок**\n\n\t[Профиль](https://max.ru/person)  \n';
     const content = readMarkdownNativeContent(markdown);
