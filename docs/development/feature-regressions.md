@@ -278,9 +278,17 @@ These local cases never send messages to MAX and do not establish live deletion 
 Persistent channel links are independent of the signature and apply to future posts.
 Disabling retains the list; counter refresh uses frozen rows. Recovery requires original
 post time and existing edit authority. Configuration writes retain revision and rights checks.
+Custom-button writes validate domain labels and the top-level suffix as well as HTTP syntax;
+URL parsing alone accepts hosts such as `example.com1` that MAX rejects. Saved legacy values
+remain readable and editable. Delivery omits a malformed saved hostname while retaining valid
+custom links, comments and suggestions; it never rewrites the saved URL. The editor identifies
+the affected button. A definite MAX `proto.payload` invalid-button-URL response retains a bounded
+`invalid_button_url` reason and does not repeat the same invalid keyboard with reordered rows.
 
 - [Contracts](../../packages/contracts/test/channel-post-signature.spec.ts) cover bounded lists,
   safe URLs, duplicates and legacy partial writes.
+- [Composition](../../apps/api/src/common/channel-custom-post-buttons.spec.ts) checks legacy URL
+  isolation without losing valid actions or changing saved settings.
 - [PostgreSQL](../../apps/api/src/admin/channel-custom-buttons-postgres.spec.ts) covers persistence,
   competing administrators, cutoff and disabling without deletion.
 - [Major](../../apps/api/src/moderation/moderation.channel-post-buttons.spec.ts) and

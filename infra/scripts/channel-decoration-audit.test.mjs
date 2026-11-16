@@ -13,7 +13,8 @@ CREATE INDEX chats_entity_type_updated_id_idx ON chats (entity_type, updated_at 
 CREATE TABLE channel_settings (chat_id text UNIQUE, post_signature_enabled boolean,
   post_signature_presentation text, post_signature_text text, post_signature_url text,
   quick_buttons_enabled boolean, comments_enabled boolean, post_suggestions_enabled boolean,
-  updated_at timestamp);
+  custom_post_buttons_enabled boolean, custom_post_buttons_since timestamptz,
+  custom_post_buttons jsonb, updated_at timestamp);
 CREATE TABLE chat_bot_memberships (chat_id text, bot_id text, status text, bot_access_state text,
   bot_access_checked_at timestamp, bot_access_source text, lifecycle_event_at timestamp);
 CREATE INDEX chat_bot_memberships_chat_status_lifecycle_idx ON chat_bot_memberships (chat_id, status, lifecycle_event_at DESC);
@@ -67,8 +68,10 @@ test('exact channel inspection uses bounded indexes and omits raw errors and oth
   await db.exec(`INSERT INTO chats (id,title,entity_type,updated_at) VALUES ('-1','Target','CHANNEL',now());
     INSERT INTO chats (id,title,entity_type,updated_at)
       SELECT 'other-' || n, 'private', 'CHAT', now() FROM generate_series(1,5000) n;
-    INSERT INTO channel_settings (chat_id,post_signature_enabled,post_signature_url)
-      VALUES ('-1', true, 'https://private-link');
+    INSERT INTO channel_settings (chat_id,post_signature_enabled,post_signature_url,
+      custom_post_buttons_enabled,custom_post_buttons_since,custom_post_buttons)
+      VALUES ('-1', true, 'https://private-link', true, now(),
+        '[{"text":"private button","url":"https://private-link"},{"text":"second private button"}]');
     INSERT INTO channel_auto_post_attach_markers (chat_id,message_id,status,last_error,updated_at)
       SELECT '-1', 'message-' || n, 'SKIPPED', 'private raw error', now() - n * interval '1 second'
       FROM generate_series(1,52) n;
@@ -80,9 +83,15 @@ test('exact channel inspection uses bounded indexes and omits raw errors and oth
   assert.equal(result.markers.rows.length, 50);
   assert.equal(result.markers.truncated, true);
   assert.equal(result.settings.rows[0].custom_signature_url, true);
+  assert.equal(result.settings.rows[0].custom_post_buttons_enabled, true);
+  assert.equal(result.settings.rows[0].custom_post_button_count, 2);
+  assert.ok(result.settings.rows[0].custom_post_buttons_since);
   assert.equal(result.remoteEffectsProven, false);
   assert.equal(result.audits.rows[0].changed_enabled, true);
-  assert.doesNotMatch(JSON.stringify(result), /private raw|private-link|unrelated-message/u);
+  assert.doesNotMatch(
+    JSON.stringify(result),
+    /private raw|private-link|private button|unrelated-message/u,
+  );
   assert.equal((await db.query('SHOW transaction_read_only')).rows[0].transaction_read_only, 'off');
 });
 

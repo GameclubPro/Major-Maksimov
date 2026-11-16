@@ -39,6 +39,32 @@ test('empty signature text stays invalid instead of silently restoring default c
   assert.equal(validatePostSignatureSettings(draft).success, false);
 });
 
+test('an invalid saved custom domain stays visible but must be corrected before enabling', () => {
+  const draft = {
+    enabled: false,
+    presentation: 'signature' as const,
+    text: 'Read',
+    url: '',
+    customButtonsEnabled: true,
+    customButtons: [
+      {
+        id: '11111111-1111-4111-8111-111111111111',
+        text: 'Second',
+        url: 'https://example.com1/two',
+      },
+    ],
+  };
+  assert.equal(
+    normalizePostSignatureSettings(draft).customButtons[0]?.url,
+    draft.customButtons[0]?.url,
+  );
+  assert.equal(validatePostSignatureSettings(draft).success, false);
+  assert.equal(
+    validatePostSignatureSettings({ ...draft, customButtonsEnabled: false }).success,
+    true,
+  );
+});
+
 test('mode changes validate the complete label before saving without truncating it', () => {
   const draft = {
     enabled: true,

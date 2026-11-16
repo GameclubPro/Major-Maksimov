@@ -483,6 +483,7 @@ import { ChannelAutoPostLegacyRecovery } from './channel-auto-post-legacy-recove
 import { ChannelPostDemandRuntime } from './channel-post-demand-runtime';
 import {
   buildMaxMessageFallbackUrl,
+  channelPostButtonUrlFailure,
   recordChannelAutoPostTerminalSkip,
 } from './channel-auto-post-reply-fallback';
 import {
@@ -15716,6 +15717,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           const mergedEditFailure = classifyMaxTerminalChatActionError(mergedEditError);
           const canRetryWithPreservedKeyboard =
             !quickButtons &&
+            !channelPostButtonUrlFailure(mergedEditError) &&
             buttons.length > 0 &&
             mergedEditStatus !== null &&
             mergedEditStatus < 500 &&
@@ -15867,7 +15869,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             chatId,
             messageId,
             status,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: channelPostButtonUrlFailure(error) ?? this.extractErrorSummary(error),
           },
           replaceForward
             ? 'Failed to replace forwarded channel post with bot copy; skipping retry'
@@ -15897,7 +15899,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           linkType,
           deliveryMode: failedDeliveryMode,
           ...(terminalEditAttemptExhausted ? { terminalEditAttemptExhausted: true } : {}),
-          lastError: this.extractErrorSummary(error),
+          lastError: channelPostButtonUrlFailure(error) ?? this.extractErrorSummary(error),
           lastStatusCode: status,
         });
         return 'skipped';

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { createPrismaAdapter, PrismaClient } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { MaxClientService } from '../max/max-client.service';
@@ -114,5 +114,50 @@ integration('persistent channel buttons with PostgreSQL', () => {
     expect(await service.buildCustomPostButtons(chatId)).toEqual([]);
     const row = await db.channelSettings.findUniqueOrThrow({ where: { chatId } });
     expect(row.customPostButtonsSince).toBeNull();
+  });
+  it('keeps legacy invalid settings repairable without sending the invalid button or losing valid ones', async () => {
+    const invalid = {
+      ...button,
+      id: randomUUID(),
+      text: 'Second',
+      url: 'https://example.com1/two',
+    };
+    await db.channelSettings.update({
+      where: { chatId },
+      data: {
+        customPostButtonsEnabled: true,
+        customPostButtons: [button, invalid],
+        customPostButtonsSince: new Date('2026-01-01'),
+      },
+    });
+    const current = await service.getSettings(chatId);
+    expect(current.customButtons).toEqual([button, invalid]);
+    expect(await service.buildCustomPostButtons(chatId)).toEqual([
+      [{ type: 'link', text: button.text, url: button.url }],
+    ]);
+    await expect(
+      service.updateSettings(chatId, 'admin', {
+        expectedRevision: current.revision,
+        customButtons: [button, invalid],
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    await expect(
+      service.updateSettings(chatId, 'admin', {
+        expectedRevision: current.revision,
+        customButtonsEnabled: true,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    const disabled = await service.updateSettings(chatId, 'admin', {
+      expectedRevision: current.revision,
+      customButtonsEnabled: false,
+    });
+    expect(disabled.customButtons).toEqual([button, invalid]);
+    const repaired = await service.updateSettings(chatId, 'admin', {
+      expectedRevision: disabled.revision,
+      customButtonsEnabled: true,
+      customButtons: [button, { ...invalid, url: 'https://example.com/two' }],
+    });
+    expect(repaired.customButtons).toHaveLength(2);
+    expect(await service.buildCustomPostButtons(chatId)).toHaveLength(2);
   });
 });

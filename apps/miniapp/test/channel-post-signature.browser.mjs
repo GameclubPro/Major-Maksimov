@@ -145,6 +145,14 @@ try {
       await editor.getByLabel('Ссылка', { exact: true }).fill('javascript:alert(1)');
       await editor.getByRole('button', { name: 'Готово', exact: true }).click();
       await editor.getByRole('alert').waitFor();
+      await editor.getByLabel('Ссылка', { exact: true }).fill('https://example.com1/catalog');
+      await editor.getByRole('button', { name: 'Готово', exact: true }).click();
+      await editor
+        .getByRole('alert')
+        .getByText('Проверьте адрес сайта в ссылке, например https://example.com.')
+        .waitFor();
+      assert.equal(await panel.locator('.channel-custom-buttons__item').count(), 0);
+      await editor.screenshot({ path: path.join(screenshots, `${name}-invalid-host.png`) });
       await editor.getByLabel('Ссылка', { exact: true }).fill('https://example.com/catalog#new');
       assert.equal(await save.isDisabled(), true);
       await editor.getByRole('button', { name: 'Готово', exact: true }).click();

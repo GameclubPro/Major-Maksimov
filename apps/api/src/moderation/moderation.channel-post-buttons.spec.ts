@@ -2889,7 +2889,14 @@ describe('ModerationService channel auto post buttons', () => {
             postSignatureEnabled: false,
             updatedAt: new Date('2026-11-01'),
             customPostButtonsEnabled: true,
-            customPostButtons: [custom],
+            customPostButtons: [
+              custom,
+              {
+                ...custom,
+                id: '22222222-2222-4222-8222-222222222222',
+                url: 'https://example.com1/invalid',
+              },
+            ],
             customPostButtonsSince: new Date('2026-11-15'),
           },
           adminUserIds: ['admin-1'],
@@ -2910,6 +2917,69 @@ describe('ModerationService channel auto post buttons', () => {
       });
     },
   );
+
+  it('does not repeat a definite invalid-URL rejection and records its safe reason', async () => {
+    const prisma = {
+      ...createChannelMutationGuardPrismaMock(),
+      auditLog: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+    };
+    const maxClient = {
+      ...createChannelMutationGuardMaxClientMock(),
+      editMessageInlineKeyboard: jest
+        .fn<
+          ReturnType<MaxClientService['editMessageInlineKeyboard']>,
+          Parameters<MaxClientService['editMessageInlineKeyboard']>
+        >()
+        .mockRejectedValue({
+          message: 'Request failed with status code 400',
+          response: {
+            status: 400,
+            data: {
+              code: 'proto.payload',
+              message: 'Must have only http/https links format in buttons',
+            },
+          },
+        }),
+    };
+    const service = new ModerationService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      maxClient as never,
+      undefined,
+      undefined,
+      createConfigMock() as never,
+    );
+    configureDefaultChannelAutoPostEditRoute(service);
+    await expect(
+      (service as any).tryAutoAttachChannelMessageButtons({
+        chatId: 'channel-1',
+        messageId: 'invalid-url-post',
+        text: 'Post',
+        textFormat: null,
+        linkType: null,
+        managedChannel: {
+          channelSettings: {
+            commentsEnabled: true,
+            postSuggestionsEnabled: false,
+            postSuggestionsButtonText: '',
+            postSignatureEnabled: false,
+          },
+          adminUserIds: ['admin-1'],
+        },
+        source: 'webhook',
+        senderId: '777000',
+        requiredAuthorUserId: '777000',
+      }),
+    ).resolves.toBe('skipped');
+    expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledTimes(1);
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'AUTO_ATTACH_CHANNEL_ENGAGEMENT_SKIPPED',
+        payload: expect.objectContaining({ error: 'invalid_button_url', status: 400 }),
+      }),
+    });
+  });
 
   it('adds the channel CTA after comments and freezes the managed keyboard for counters', async () => {
     const prisma = {

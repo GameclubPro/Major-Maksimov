@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import {
-  channelCustomPostButtonSchema,
+  channelCustomPostButtonInputSchema,
   MAX_CHANNEL_CUSTOM_BUTTONS,
   type ChannelCustomPostButton,
 } from '@maxim/contracts/channel-post-signature';
@@ -81,7 +81,7 @@ export function ChannelCustomButtonsFields({
   };
   const apply = () => {
     if (!editing || readOnly) return;
-    const result = channelCustomPostButtonSchema.safeParse(editing);
+    const result = channelCustomPostButtonInputSchema.safeParse(editing);
     if (!result.success) {
       const issue = result.error.issues[0]!;
       setError({ field: issue.path[0] === 'text' ? 'text' : 'url', message: issue.message });
@@ -197,11 +197,11 @@ export function ChannelCustomButtonsFields({
             <span>{editing.text.trim() || 'Название кнопки'}</span>
             <AppIcon icon="ArrowUpRight" />
           </div>
-          {channelCustomPostButtonSchema.safeParse(editing).success && (
+          {channelCustomPostButtonInputSchema.safeParse(editing).success && (
             <button
               type="button"
               className="channel-custom-buttons__link"
-              onClick={() => openLink(channelCustomPostButtonSchema.parse(editing).url)}
+              onClick={() => openLink(channelCustomPostButtonInputSchema.parse(editing).url)}
             >
               Открыть ссылку
               <AppIcon icon="ArrowUpRight" />
@@ -323,6 +323,11 @@ export function ChannelCustomButtonsFields({
                     <span>
                       <strong>{button.text}</strong>
                       <small>{new URL(button.url).hostname}</small>
+                      {!channelCustomPostButtonInputSchema.safeParse(button).success && (
+                        <span className="channel-custom-buttons__error">
+                          Проверьте ссылку — кнопка не добавляется.
+                        </span>
+                      )}
                     </span>
                     <AppIcon icon="NavArrowRight" />
                   </button>

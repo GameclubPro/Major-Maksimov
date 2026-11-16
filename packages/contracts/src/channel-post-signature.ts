@@ -24,6 +24,31 @@ export const channelCustomPostButtonSchema = z.object({
     .transform((value) => normalizeHttpButtonUrl(value)!),
 });
 export type ChannelCustomPostButton = z.infer<typeof channelCustomPostButtonSchema>;
+
+function hasValidButtonHostname(value: string): boolean {
+  const normalized = normalizeHttpButtonUrl(value);
+  if (!normalized) return false;
+  const hostname = new URL(normalized).hostname;
+  // FLAG: URL accepts domains such as example.com1, but MAX rejects the whole keyboard.
+  // Validate syntax locally; DNS availability must never become a settings dependency.
+  if (hostname.startsWith('[') && hostname.endsWith(']')) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/u.test(hostname)) return true;
+  const labels = hostname.split('.');
+  return (
+    hostname.length <= 253 &&
+    labels.length >= 2 &&
+    labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu.test(label)) &&
+    /^(?:[a-z]{2,63}|xn--[a-z0-9-]+)$/iu.test(labels.at(-1) ?? '')
+  );
+}
+
+export const channelCustomPostButtonInputSchema = channelCustomPostButtonSchema.refine(
+  (button) => hasValidButtonHostname(button.url),
+  { path: ['url'], message: 'Проверьте адрес сайта в ссылке, например https://example.com.' },
+);
+
+// FLAG: Retain the readable saved format so an old invalid URL can be opened and repaired.
+// New writes and outgoing buttons use the stricter input schema below.
 export const channelCustomPostButtonsSchema = z
   .array(channelCustomPostButtonSchema)
   .max(MAX_CHANNEL_CUSTOM_BUTTONS, 'Можно добавить до 8 кнопок.')
@@ -43,6 +68,17 @@ export const channelCustomPostButtonsSchema = z
       urls.add(button.url);
     });
   });
+
+export const channelCustomPostButtonsInputSchema = channelCustomPostButtonsSchema.superRefine(
+  (buttons, ctx) => {
+    buttons.forEach((button, index) => {
+      const parsed = channelCustomPostButtonInputSchema.safeParse(button);
+      if (!parsed.success)
+        for (const issue of parsed.error.issues)
+          ctx.addIssue({ ...issue, path: [index, ...issue.path] });
+    });
+  },
+);
 
 export const channelPostSignaturePresentationSchema = z.enum(['signature', 'button']);
 export type ChannelPostSignaturePresentation = z.infer<
@@ -113,7 +149,7 @@ export const updateChannelPostSignatureRequestSchema = z
       .optional(),
     url: channelPostSignatureUrlSchema.optional(),
     customButtonsEnabled: z.boolean().optional(),
-    customButtons: channelCustomPostButtonsSchema.optional(),
+    customButtons: channelCustomPostButtonsInputSchema.optional(),
   })
   .refine((value) => Object.keys(value).some((key) => key !== 'expectedRevision'), {
     message: 'Передайте хотя бы одну настройку.',
