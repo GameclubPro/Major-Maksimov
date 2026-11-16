@@ -1,6 +1,7 @@
 import {
   channelCustomPostButtonsSchema,
   channelCustomPostButtonInputSchema,
+  layoutChannelCustomButtonRows,
 } from '@maxim/contracts/channel-post-signature';
 import type { MaxMessageButton } from '../max/max-client.service';
 
@@ -35,7 +36,8 @@ export function buildChannelCustomPostButtons(
   if (!parsed.success) return [];
   // FLAG: Preserve valid saved buttons and built-in actions when one legacy URL is invalid.
   // The saved list stays intact for administrator correction; never guess a replacement URL.
-  return parsed.data
+  const buttons: MaxMessageButton[] = parsed.data
     .filter((button) => channelCustomPostButtonInputSchema.safeParse(button).success)
-    .map(({ text, url }) => [{ type: 'link', text, url }]);
+    .map(({ text, url }) => ({ type: 'link', text, url }));
+  return layoutChannelCustomButtonRows(buttons);
 }

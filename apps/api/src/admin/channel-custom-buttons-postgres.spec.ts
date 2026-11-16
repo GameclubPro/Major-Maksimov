@@ -158,6 +158,11 @@ integration('persistent channel buttons with PostgreSQL', () => {
       customButtons: [button, { ...invalid, url: 'https://example.com/two' }],
     });
     expect(repaired.customButtons).toHaveLength(2);
-    expect(await service.buildCustomPostButtons(chatId)).toHaveLength(2);
+    expect(await service.buildCustomPostButtons(chatId)).toEqual([
+      [
+        { type: 'link', text: button.text, url: button.url },
+        { type: 'link', text: invalid.text, url: 'https://example.com/two' },
+      ],
+    ]);
   });
 });

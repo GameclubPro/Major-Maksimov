@@ -65,7 +65,13 @@ describe('optional marketplace publication button', () => {
       outcome: 'KEYBOARD_FULL',
     });
     const splitRows: MaxSendMessageOptions = { buttons: [options.buttons!.flat()] };
-    expect(appendMarketplacePublicationButton(splitRows, url).outcome).toBe('KEYBOARD_FULL');
+    expect(appendMarketplacePublicationButton(splitRows, url).outcome).toBe('ADDED');
+    const longLabels: MaxSendMessageOptions = {
+      buttons: [
+        options.buttons!.flat().map((button) => ({ ...button, text: 'Открыть свою витрину 🏪' })),
+      ],
+    };
+    expect(appendMarketplacePublicationButton(longLabels, url).outcome).toBe('KEYBOARD_FULL');
   });
 
   it.each([

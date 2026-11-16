@@ -1,4 +1,5 @@
 import type { MaxMessageButton } from '../max/max-client.service';
+import { isCompactChannelButtonText } from '@maxim/contracts/channel-post-signature';
 import {
   channelDialogButtonPresentationKey,
   readInternalChannelDialogButtonIdentity,
@@ -20,8 +21,27 @@ export function buildChannelPostActionRows(plan: ChannelPostActionPlan): MaxMess
   appendFullWidthButton(rows, seenLinks, plan.ctaButton);
 
   for (const row of plan.customButtonRows ?? []) {
+    let compactRow: MaxMessageButton[] | null = null;
     for (const button of row) {
+      const previousLength = rows.length;
       appendFullWidthButton(rows, seenLinks, button);
+      if (rows.length === previousLength) continue;
+      const appended = rows[rows.length - 1];
+      if (
+        button.type === 'link' &&
+        !readInternalChannelDialogButtonIdentity(button) &&
+        isCompactChannelButtonText(button.text)
+      ) {
+        if (compactRow?.length === 1) {
+          compactRow.push(...appended);
+          rows.pop();
+          compactRow = null;
+        } else {
+          compactRow = appended;
+        }
+      } else {
+        compactRow = null;
+      }
     }
   }
 

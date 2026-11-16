@@ -7,6 +7,39 @@ export const CHANNEL_POST_SIGNATURE_TEXT_MAX_LENGTH = 120;
 export const CHANNEL_POST_SIGNATURE_URL_MAX_LENGTH = 256;
 export const CHANNEL_POST_BUTTON_TEXT_MAX_LENGTH = 32;
 export const MAX_CHANNEL_CUSTOM_BUTTONS = 8;
+
+export function isCompactChannelButtonText(text: string): boolean {
+  const label = text.trim();
+  if (!label || /[\r\n]/u.test(label)) return false;
+  // MAX recommends up to 10 characters for two buttons per row; emoji need extra room.
+  return (
+    Array.from(label).reduce(
+      (width, char) =>
+        width + (/\p{Emoji_Presentation}|\p{Extended_Pictographic}/u.test(char) ? 2 : 1),
+      0,
+    ) <= 10
+  );
+}
+
+export function layoutChannelCustomButtonRows<T extends { text: string }>(
+  buttons: readonly T[],
+): T[][] {
+  const rows: T[][] = [];
+  for (const button of buttons) {
+    const previous = rows.at(-1);
+    if (
+      previous?.length === 1 &&
+      isCompactChannelButtonText(previous[0].text) &&
+      isCompactChannelButtonText(button.text)
+    ) {
+      previous.push(button);
+    } else {
+      rows.push([button]);
+    }
+  }
+  return rows;
+}
+
 export const channelCustomPostButtonSchema = z.object({
   id: z.string().uuid(),
   text: z.string().trim().min(1, 'Введите название кнопки.').max(32),

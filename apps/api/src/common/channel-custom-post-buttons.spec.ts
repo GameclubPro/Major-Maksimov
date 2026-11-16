@@ -1,7 +1,36 @@
 import { buildChannelCustomPostButtons } from './channel-custom-post-buttons';
 import { buildChannelPostActionRows } from './channel-post-actions';
+import { normalizeMaxInlineKeyboardButtons } from '../max/max-inline-keyboard-layout';
 
 describe('saved channel button delivery', () => {
+  it('delivers two short saved links in one row after composition and transport normalization', () => {
+    const customButtonRows = buildChannelCustomPostButtons({
+      customPostButtonsEnabled: true,
+      customPostButtons: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          text: 'Тест',
+          url: 'https://example.com/one',
+        },
+        {
+          id: '22222222-2222-4222-8222-222222222222',
+          text: 'Тест2',
+          url: 'https://example.com/two',
+        },
+      ],
+    });
+    const rows = buildChannelPostActionRows({
+      commentsButton: { type: 'link', text: '💬 Комментарии · 0', url: 'https://max.ru/comments' },
+      suggestButton: { type: 'link', text: 'Предложить пост', url: 'https://max.ru/suggest' },
+      customButtonRows,
+    });
+    expect(
+      normalizeMaxInlineKeyboardButtons(rows, { rejectOnTrim: true })?.map((row) =>
+        row.map((button) => button.text),
+      ),
+    ).toEqual([['💬 Комментарии · 0'], ['Предложить пост'], ['Тест', 'Тест2']]);
+  });
+
   it('keeps comments, suggestions and valid custom links when a legacy hostname is invalid', () => {
     const buttons = [
       { id: '11111111-1111-4111-8111-111111111111', text: 'First', url: 'https://example.com/one' },
