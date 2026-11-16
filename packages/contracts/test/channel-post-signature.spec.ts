@@ -5,6 +5,7 @@ import {
   CHANNEL_POST_SIGNATURE_URL_MAX_LENGTH,
   channelPostSignatureSettingsSchema,
   channelCustomPostButtonsSchema,
+  channelCustomPostButtonInputSchema,
   updateChannelPostSignatureRequestSchema,
 } from '../src/channel-post-signature.js';
 
@@ -151,5 +152,34 @@ describe('persistent channel buttons', () => {
         },
       ])[1]?.url,
     ).toBe('https://example.com/catalog#sale');
+  });
+  it.each([
+    'https://example.com1/catalog',
+    'https://example.123abc/',
+    'https://-example.com/',
+    'https://example-.com/',
+    'https://example..com/',
+    'https://localhost/',
+  ])('rejects a MAX-incompatible hostname on write but retains the saved value: %s', (url) => {
+    const savedButton = { ...button, url };
+    expect(
+      channelPostSignatureSettingsSchema.parse({ customButtons: [savedButton] }).customButtons,
+    ).toEqual([savedButton]);
+    expect(channelCustomPostButtonInputSchema.safeParse(savedButton).success).toBe(false);
+    const result = updateChannelPostSignatureRequestSchema.safeParse({
+      expectedRevision: 1,
+      customButtons: [savedButton],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues[0]?.path).toEqual(['customButtons', 0, 'url']);
+  });
+  it.each([
+    'https://example.com/path1?x=2#3',
+    'https://shop2.example.com/',
+    'https://пример.рф/каталог',
+    'http://192.0.2.1:8080/path',
+    'https://[2001:db8::1]/path',
+  ])('retains valid domain, IDN and IP syntax: %s', (url) => {
+    expect(channelCustomPostButtonInputSchema.safeParse({ ...button, url }).success).toBe(true);
   });
 });

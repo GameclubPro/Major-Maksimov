@@ -1,4 +1,7 @@
-import { channelCustomPostButtonsSchema } from '@maxim/contracts/channel-post-signature';
+import {
+  channelCustomPostButtonsSchema,
+  channelCustomPostButtonInputSchema,
+} from '@maxim/contracts/channel-post-signature';
 import type { MaxMessageButton } from '../max/max-client.service';
 
 export type CustomPostButtonSettings = {
@@ -30,5 +33,9 @@ export function buildChannelCustomPostButtons(
   if (!channelCustomButtonsEligible(settings, sourceAt)) return [];
   const parsed = channelCustomPostButtonsSchema.safeParse(settings?.customPostButtons);
   if (!parsed.success) return [];
-  return parsed.data.map(({ text, url }) => [{ type: 'link', text, url }]);
+  // FLAG: Preserve valid saved buttons and built-in actions when one legacy URL is invalid.
+  // The saved list stays intact for administrator correction; never guess a replacement URL.
+  return parsed.data
+    .filter((button) => channelCustomPostButtonInputSchema.safeParse(button).success)
+    .map(({ text, url }) => [{ type: 'link', text, url }]);
 }

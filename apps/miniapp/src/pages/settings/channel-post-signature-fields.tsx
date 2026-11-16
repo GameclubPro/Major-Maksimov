@@ -4,6 +4,7 @@ import { AppIcon } from '../../components/ui/app-icon';
 import { SegmentedControl } from '../../components/ui/segmented-control';
 import {
   channelPostSignatureUrlSchema,
+  channelCustomPostButtonInputSchema,
   CHANNEL_POST_BUTTON_TEXT_MAX_LENGTH,
   CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
   CHANNEL_POST_SIGNATURE_TEXT_MAX_LENGTH,
@@ -54,6 +55,7 @@ export function ChannelPostSignatureFields({
     ...(isEnabled && isButton ? [label] : []),
     ...(customEnabled.kind === 'common' && customEnabled.value && custom.kind === 'common'
       ? custom.value
+          .filter((button) => channelCustomPostButtonInputSchema.safeParse(button).success)
           .filter(
             (button) =>
               !(isEnabled && isButton && signatureUrl.success && signatureUrl.data === button.url),

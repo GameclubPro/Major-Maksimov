@@ -3,6 +3,20 @@ import type { Logger } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 import { CHANNEL_DIALOG_AUTO_ATTACH_SKIP_ACTION } from './moderation.service.support';
 
+export function channelPostButtonUrlFailure(error: unknown): 'invalid_button_url' | null {
+  const response = (
+    error as {
+      response?: { status?: unknown; data?: { code?: unknown; message?: unknown } };
+    } | null
+  )?.response;
+  // FLAG: Classify only the exact definitive MAX response. Never infer retry safety from text alone.
+  return response?.status === 400 &&
+    response.data?.code === 'proto.payload' &&
+    response.data.message === 'Must have only http/https links format in buttons'
+    ? 'invalid_button_url'
+    : null;
+}
+
 export type ChannelAutoPostTerminalSkipInput = {
   chatId: string;
   messageId: string;
@@ -52,7 +66,7 @@ export async function recordChannelAutoPostTerminalSkip(
             : {}),
           ...(input.botId ? { botId: input.botId } : {}),
           status: input.status,
-          error: readErrorMessage(input.error),
+          error: channelPostButtonUrlFailure(input.error) ?? readErrorMessage(input.error),
         },
       },
     });

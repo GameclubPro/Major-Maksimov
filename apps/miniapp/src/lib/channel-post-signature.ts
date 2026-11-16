@@ -1,6 +1,7 @@
 import {
   channelPostSignatureSettingsSchema,
   channelPostSignatureUrlSchema,
+  channelCustomPostButtonsInputSchema,
   type ChannelPostSignatureSettings,
   type UpdateChannelPostSignatureRequest,
 } from '@maxim/contracts/channel-post-signature';
@@ -20,8 +21,16 @@ export function normalizePostSignatureSettings(
   };
 }
 
+const editableSettingsSchema = channelPostSignatureSettingsSchema.superRefine((settings, ctx) => {
+  if (!settings.customButtonsEnabled) return;
+  const buttons = channelCustomPostButtonsInputSchema.safeParse(settings.customButtons);
+  if (!buttons.success)
+    for (const issue of buttons.error.issues)
+      ctx.addIssue({ ...issue, path: ['customButtons', ...issue.path] });
+});
+
 export function validatePostSignatureSettings(value: ChannelPostSignatureSettings) {
-  return channelPostSignatureSettingsSchema.safeParse(normalizePostSignatureSettings(value));
+  return editableSettingsSchema.safeParse(normalizePostSignatureSettings(value));
 }
 
 export function buildPostSignaturePatch(

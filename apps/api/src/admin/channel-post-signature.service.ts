@@ -8,6 +8,7 @@ import {
   CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
   CHANNEL_POST_SIGNATURE_URL_MAX_LENGTH,
   channelPostSignatureSettingsSchema,
+  channelCustomPostButtonsInputSchema,
   updateChannelPostSignatureRequestSchema,
   type ChannelPostSignatureSettings,
 } from '@maxim/contracts';
@@ -103,6 +104,10 @@ export class ChannelPostSignatureService {
       });
       if (!result.success) {
         throw new BadRequestException(result.error.format());
+      }
+      if (changes.customButtonsEnabled === true) {
+        const buttons = channelCustomPostButtonsInputSchema.safeParse(result.data.customButtons);
+        if (!buttons.success) throw new BadRequestException(buttons.error.format());
       }
       return result.data;
     };

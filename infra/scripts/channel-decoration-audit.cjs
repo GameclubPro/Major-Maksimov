@@ -34,7 +34,11 @@ const INSPECT_SQL = {
     routing_state, updated_at FROM chats WHERE id = $1`,
   settings: `SELECT post_signature_enabled, post_signature_presentation,
     post_signature_text, post_signature_url <> '' AS custom_signature_url,
-    quick_buttons_enabled, comments_enabled, post_suggestions_enabled, updated_at
+    quick_buttons_enabled, comments_enabled, post_suggestions_enabled,
+    custom_post_buttons_enabled, custom_post_buttons_since,
+    CASE WHEN jsonb_typeof(custom_post_buttons) = 'array'
+      THEN jsonb_array_length(custom_post_buttons) ELSE NULL END AS custom_post_button_count,
+    updated_at
     FROM channel_settings WHERE chat_id = $1`,
   memberships: `SELECT bot_id, status, bot_access_state, bot_access_checked_at,
     bot_access_source, lifecycle_event_at FROM chat_bot_memberships
@@ -43,6 +47,7 @@ const INSPECT_SQL = {
     replacement_message_id, replacement_send_started_at, original_deleted,
     last_status_code, last_error IS NOT NULL AS error_present,
     CASE
+      WHEN last_error = 'invalid_button_url' THEN 'invalid_button_url'
       WHEN last_error LIKE '%without the requested id%' THEN 'message_lookup_identity_missing'
       WHEN last_error LIKE '%MAX_API_INTERNAL_RATE_LIMIT%' OR last_error LIKE '%rate limit%'
         OR last_error LIKE '%quota%' THEN 'quota_or_capacity'
