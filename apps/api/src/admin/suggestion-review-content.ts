@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import type { SuggestionReviewWrite } from '@maxim/contracts/publisher';
 import { buildPublisherSuggestionPublicationText } from './publisher-suggestion-content';
-import { readChannelSuggestionTextMarkup } from './admin-channel-dialog-values';
+import { readSuggestionReviewMarkup } from './suggestion-review-markup';
 import { renderMaxTextMarkupAsMarkdown } from '../common/max-text-markup.util';
 
 export function suggestionRevision(payload: Record<string, unknown>): number {
@@ -14,25 +14,11 @@ export function suggestionRevision(payload: Record<string, unknown>): number {
 
 export function suggestionEditorText(payload: Record<string, unknown>): string {
   const text = typeof payload.text === 'string' ? payload.text : '';
-  const markup = readChannelSuggestionTextMarkup(payload.textMarkup);
-  const raw = payload.textMarkup;
-  if (
-    (raw != null && !Array.isArray(raw)) ||
-    (Array.isArray(raw) && raw.length !== markup.length) ||
-    markup.some(
-      (item) =>
-        !Number.isSafeInteger(item.from) ||
-        !Number.isSafeInteger(item.length) ||
-        item.from < 0 ||
-        item.from + item.length > text.length ||
-        (item.type === 'link' && !safeEditorUrl(item.url)) ||
-        (item.type === 'user_mention' && !safeEditorUrl(item.userLink)),
-    )
-  )
-    throw new BadRequestException(
-      'Не удалось безопасно прочитать оформление. Исходный пост сохранён без изменений.',
+  const markup = readSuggestionReviewMarkup(text, payload.textMarkup);
+  if (markup.length)
+    return (
+      renderMaxTextMarkupAsMarkdown(text, markup) ?? text.replace(/([\\`*_[\]()~+#^>])/gu, '\\$1')
     );
-  if (markup.length) return renderMaxTextMarkupAsMarkdown(text, markup) ?? text;
   return payload.textFormat === 'markdown' ? text : text.replace(/([\\`*_[\]()~+#^>])/gu, '\\$1');
 }
 
@@ -128,15 +114,4 @@ function readRequests(
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, { hash: string; revision: number }>)
     : {};
-}
-
-function safeEditorUrl(value: string | null): boolean {
-  if (!value) return false;
-  if (/^max:\/\/user\/[1-9]\d*$/u.test(value)) return true;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && !url.username && !url.password;
-  } catch {
-    return false;
-  }
 }

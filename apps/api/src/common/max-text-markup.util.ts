@@ -359,7 +359,7 @@ function resolveMarkupMarkdownDelimiters(
     case 'link':
       return markup.url ? resolveMarkdownLinkDelimiters(markup.url) : null;
     case 'user_mention': {
-      const mentionTarget = resolveMentionHref(markup.userLink);
+      const mentionTarget = resolveMaxUserMentionHref(markup.userLink);
       return mentionTarget ? resolveMarkdownLinkDelimiters(mentionTarget) : null;
     }
     default:
@@ -472,7 +472,7 @@ function resolveMarkupHtmlTags(
         : null;
     }
     case 'user_mention': {
-      const mentionTarget = resolveMentionHref(markup.userLink);
+      const mentionTarget = resolveMaxUserMentionHref(markup.userLink);
       return mentionTarget
         ? {
             open: `<a href="${escapeHtmlAttribute(mentionTarget)}">`,
@@ -486,7 +486,7 @@ function resolveMarkupHtmlTags(
   }
 }
 
-function resolveMentionHref(value: string | null): string | null {
+export function resolveMaxUserMentionHref(value: string | null): string | null {
   if (!value) {
     return null;
   }
