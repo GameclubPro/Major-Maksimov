@@ -27,6 +27,7 @@ import {
   type ChannelSuggestionAdminDelivery,
 } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
+import { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { SuggestionNativeJob } from '../publisher/suggestion-native.queue';
 import {
   describePrivateSuggestionReviewError,
@@ -39,7 +40,10 @@ import {
 } from './suggestion-review-effects.service';
 import { hasSuggestionRequest, suggestionRevision } from './suggestion-review-content';
 import { readPendingSuggestionInput, retainSuggestionNativeInput } from './suggestion-native-input';
-import { buildPublishedSuggestionButton } from './suggestion-review-links';
+import {
+  buildPublishedSuggestionButton,
+  buildSuggestionReviewButtons,
+} from './suggestion-review-links';
 import { readNativeDraft, suggestionEditView } from './suggestion-native-editor';
 import {
   nativeSuggestionMarkdown,
@@ -47,11 +51,7 @@ import {
   mergeSuggestionNativeContent,
   type NativeSuggestionDraft,
 } from './suggestion-native-content';
-import {
-  suggestionNativeButton,
-  suggestionNativeButtons,
-  type SuggestionNativeAction,
-} from './suggestion-native-protocol';
+import { suggestionNativeButton, type SuggestionNativeAction } from './suggestion-native-protocol';
 
 const SESSION_MS = 2 * 60 * 60_000;
 const LOCK_MS = 2 * 60_000;
@@ -73,6 +73,7 @@ export class SuggestionNativeService {
     private readonly review: SuggestionReviewService,
     private readonly effects: SuggestionReviewEffectsService,
     private readonly max: MaxClientService,
+    private readonly links: MaxBotLinkService,
   ) {}
 
   async process(job: SuggestionNativeJob, options: { finalAttempt?: boolean } = {}): Promise<void> {
@@ -540,8 +541,11 @@ export class SuggestionNativeService {
     let banner = error;
     let format: 'markdown' | 'html' | undefined =
       detail.previewFormat === 'plain' ? undefined : detail.previewFormat;
-    let buttons: MaxMessageButton[][] = suggestionNativeButtons(
+    let buttons: MaxMessageButton[][] = buildSuggestionReviewButtons(
+      this.links,
+      job.profile,
       detail.id,
+      undefined,
       detail.revision,
       session.version,
     );

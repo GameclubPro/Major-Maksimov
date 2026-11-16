@@ -187,7 +187,7 @@ export class SuggestionReviewEffectsService {
   }
 
   async upgradeNativeCards(profile: MiniappProfile): Promise<void> {
-    const upgradeProfile = profile === 'moderation' ? 'moderation:published-link-v1' : profile;
+    const upgradeProfile = `${profile}:miniapp-edit-v1`;
     const state = await this.prisma.suggestionReviewCardUpgrade.upsert({
       where: { profile: upgradeProfile },
       create: { profile: upgradeProfile },
@@ -244,12 +244,13 @@ export class SuggestionReviewEffectsService {
             botId: card.botId,
             kind: 'native-sync',
             revision,
-            payload: published ? { publishedLinkVersion: 1 } : {},
+            payload: published ? { publishedLinkVersion: 1 } : { miniappEditVersion: 1 },
           },
           update: {},
         });
-        // FLAG: The versioned cursor refreshes confirmed cards once; only repeatable PUT work reopens.
-        if (published && suggestionObject(effect.payload).publishedLinkVersion !== 1)
+        // FLAG: A new keyboard version reopens only repeatable PUT work, never publication or SEND.
+        const versionKey = published ? 'publishedLinkVersion' : 'miniappEditVersion';
+        if (suggestionObject(effect.payload)[versionKey] !== 1)
           await tx.suggestionReviewEffect.updateMany({
             where: {
               id: effect.id,
@@ -262,7 +263,7 @@ export class SuggestionReviewEffectsService {
               nextAttemptAt: new Date(),
               payload: {
                 ...suggestionObject(effect.payload),
-                publishedLinkVersion: 1,
+                [versionKey]: 1,
               } as Prisma.InputJsonObject,
             },
           });

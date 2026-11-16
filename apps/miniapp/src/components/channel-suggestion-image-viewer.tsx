@@ -13,7 +13,7 @@ export default function ChannelSuggestionImageViewer({
   returnFocusRef,
   onClose,
 }: {
-  photos: PreparedSuggestionAttachment[];
+  photos: Array<Pick<PreparedSuggestionAttachment, 'previewUrl' | 'fileName'>>;
   initialIndex: number;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;

@@ -48,11 +48,15 @@ export function suggestionReviewUrl(
 }
 
 export function buildSuggestionReviewButtons(
-  _links: MaxBotLinkService | undefined,
-  _profile: MiniappProfile,
+  links: MaxBotLinkService | undefined,
+  profile: MiniappProfile,
   id: string,
   _publish?: MaxMessageButton,
   revision = 0,
+  version = 0,
 ): MaxMessageButton[][] {
-  return suggestionNativeButtons(id, revision);
+  const buttons = suggestionNativeButtons(id, revision, version);
+  const url = links ? suggestionReviewUrl(links, profile, id) : null;
+  if (url) buttons[1]![0] = { type: 'link', text: 'Править', url };
+  return buttons;
 }

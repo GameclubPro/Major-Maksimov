@@ -154,7 +154,15 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       max as unknown as MaxClientService,
       {
         assertChatBotAccessProbeAllowed: jest.fn().mockResolvedValue({}),
-      } as unknown as MaxBotLinkService,
+        buildEntryMiniappStartUrlSync: (start: string) => `https://max.ru/major?startapp=${start}`,
+        buildPublisherMiniappStartUrlSync: (start: string) =>
+          `https://max.ru/publik?startapp=${start}`,
+      } satisfies Pick<
+        MaxBotLinkService,
+        | 'assertChatBotAccessProbeAllowed'
+        | 'buildEntryMiniappStartUrlSync'
+        | 'buildPublisherMiniappStartUrlSync'
+      > as unknown as MaxBotLinkService,
       major as unknown as Queue<AdminSuggestionDeliveryJob>,
       publisher as unknown as Queue<PublisherSuggestionAdminJob>,
       registry,
@@ -196,6 +204,14 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       review,
       effects,
       max as unknown as MaxClientService,
+      {
+        buildEntryMiniappStartUrlSync: (start: string) => `https://max.ru/major?startapp=${start}`,
+        buildPublisherMiniappStartUrlSync: (start: string) =>
+          `https://max.ru/publik?startapp=${start}`,
+      } satisfies Pick<
+        MaxBotLinkService,
+        'buildEntryMiniappStartUrlSync' | 'buildPublisherMiniappStartUrlSync'
+      > as MaxBotLinkService,
     );
     ingress = new SuggestionNativeQueueService(
       db as unknown as PrismaService,
@@ -1288,6 +1304,17 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         ],
       },
     });
+    await db.suggestionReviewEffect.create({
+      data: {
+        suggestionId: f.row.id,
+        profile: 'moderation',
+        botId: 'major',
+        kind: 'native-sync',
+        revision: 0,
+        status: 'SENT',
+        payload: {},
+      },
+    });
     const terminal = await seed();
     await db.auditLog.update({
       where: { id: terminal.row.id },
@@ -1375,7 +1402,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
       await db.suggestionReviewEffect.findUnique({ where: { id: pendingSync.id } }),
     ).toMatchObject({ status: 'SENT' });
     for (const button of edit.mock.calls.at(-1)?.[3]?.buttons?.flat() ?? []) {
-      expect(button.type).toBe('callback');
+      expect(button.type).toBe(button.text === 'Править' ? 'link' : 'callback');
       if (button.type === 'callback')
         expect(parseSuggestionNativeCallback(button.payload)).toMatchObject({
           id: f.row.id,

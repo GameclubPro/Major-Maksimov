@@ -299,6 +299,40 @@ native('suggestion review with PostgreSQL and Redis', () => {
     }
   });
 
+  it.each(['moderation', 'publisher'] as const)(
+    'previews stored MAX photos for %s without changing the original asset',
+    async (profile) => {
+      const row = await seed(profile);
+      const image = await db.channelSuggestionImageAsset.create({
+        data: {
+          auditLogId: row.id,
+          position: 0,
+          fileName: 'original.jpg',
+          durablePayload: { token: 'original-token', url: 'https://img.max.ru/original.jpg' },
+        },
+      });
+      const fetcher = jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('photo', { headers: { 'content-type': 'image/jpeg' } }));
+      expect((await service.get(row.id, profile, actor)).media).toEqual([
+        { id: image.id, type: 'image', name: 'original.jpg', available: true },
+      ]);
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(await service.asset(row.id, image.id, profile, actor)).toEqual({
+        bytes: Buffer.from('photo'),
+        mimeType: 'image/jpeg',
+      });
+      expect(await db.channelSuggestionImageAsset.findUnique({ where: { id: image.id } })).toEqual(
+        image,
+      );
+      const other = await seed(profile);
+      await expect(service.asset(other.id, image.id, profile, actor)).rejects.toThrow(
+        'Предпросмотр вложения недоступен',
+      );
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('reopens completed sync for a late administrator card and preserves media on save', async () => {
     const row = await seed();
     const image = await db.channelSuggestionImageAsset.create({

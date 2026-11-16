@@ -22,6 +22,7 @@ import { ChannelDialogService } from './channel-dialog.service';
 import { PublisherDialogLinkService } from '../publisher/publisher-dialog-link.service';
 import { ChannelPostSignatureService } from './channel-post-signature.service';
 import { buildPublisherSuggestionPublicationText } from './publisher-suggestion-content';
+import { loadSuggestionPreview, suggestionPreviewUrl } from './suggestion-review-media';
 import { buildUserProfileUrl, normalizeMaxProfileUrl } from './admin-profile-links';
 import { normalizeMaxUserDisplayName } from '../common/max-user-display-name.util';
 import {
@@ -224,6 +225,10 @@ export class SuggestionReviewService {
     const row = await this.prisma.channelSuggestionImageAsset.findFirst({
       where: { auditLogId: id, id: assetId },
     });
+    if (row && !row.bytes) {
+      const url = suggestionPreviewUrl(row.durablePayload);
+      if (url) return loadSuggestionPreview(url);
+    }
     if (
       !row?.bytes ||
       !row.mimeType ||
@@ -287,7 +292,7 @@ export class SuggestionReviewService {
     const assets = await this.prisma.channelSuggestionImageAsset.findMany({
       where: { auditLogId: row.id },
       orderBy: { position: 'asc' },
-      select: { id: true, mimeType: true, fileName: true, sizeBytes: true },
+      select: { id: true, mimeType: true, fileName: true, sizeBytes: true, durablePayload: true },
     });
     const preview = await this.signatures.preparePostText(row.chatId, {
       text: buildPublisherSuggestionPublicationText(row.actorUserId, payload),
@@ -315,7 +320,7 @@ export class SuggestionReviewService {
             id: asset.id,
             type: asset.mimeType?.startsWith('video/') ? 'video' : 'image',
             name: asset.fileName ?? 'Вложение',
-            available: Boolean(asset.sizeBytes),
+            available: Boolean(asset.sizeBytes || suggestionPreviewUrl(asset.durablePayload)),
           }))
         : payload.hasVideo || payload.hasImage
           ? [
