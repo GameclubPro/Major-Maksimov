@@ -7,6 +7,24 @@ function link(text: string, url: string): MaxMessageButton {
 }
 
 describe('buildChannelPostActionRows', () => {
+  it('retains custom row boundaries after deduplicating the separate channel CTA', () => {
+    const cta = link('Сайт', 'https://example.com/site');
+    const catalog = link('Каталог', 'https://example.com/catalog');
+    const contact = link('Контакты', 'https://example.com/contact');
+    const reviews = link('Отзывы', 'https://example.com/reviews');
+    const customButtonRows = [
+      [cta, catalog],
+      [contact, reviews],
+    ];
+    const snapshot = structuredClone(customButtonRows);
+    expect(buildChannelPostActionRows({ ctaButton: cta, customButtonRows })).toEqual([
+      [cta],
+      [catalog],
+      [contact, reviews],
+    ]);
+    expect(customButtonRows).toEqual(snapshot);
+  });
+
   it('keeps one suggestion when an old button is also present in CTA or custom rows', () => {
     const helper = new AdminDialogLinkHelper({
       appBaseUrl: null,
@@ -84,8 +102,7 @@ describe('buildChannelPostActionRows', () => {
       }),
     ).toEqual([
       [link('Advertise', 'https://example.test/ads#contact')],
-      [link('Duplicate', 'https://example.test/ads')],
-      [link('Details', 'https://example.test/info')],
+      [link('Duplicate', 'https://example.test/ads'), link('Details', 'https://example.test/info')],
     ]);
   });
 

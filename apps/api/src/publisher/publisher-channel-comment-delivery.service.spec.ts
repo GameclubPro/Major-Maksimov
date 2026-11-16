@@ -893,7 +893,10 @@ describe('persistent Publisher channel buttons', () => {
   it('decorates custom-only posts without enabling comments or suggestions', async () => {
     const state = fixture();
     const rows = [
-      [{ type: 'link' as const, text: 'Каталог', url: 'https://example.com/catalog#new' }],
+      [
+        { type: 'link' as const, text: 'Каталог', url: 'https://example.com/catalog#new' },
+        { type: 'link' as const, text: 'Контакты', url: 'https://example.com/contacts' },
+      ],
     ];
     state.postSignature.buildCustomPostButtons.mockResolvedValue(rows);
     Object.assign(state.entity.channelSettings, {
@@ -909,6 +912,7 @@ describe('persistent Publisher channel buttons', () => {
     const state = fixture();
     const custom = [
       { type: 'link' as const, text: 'Каталог', url: 'https://example.com/original' },
+      { type: 'link' as const, text: 'Контакты', url: 'https://example.com/contacts' },
     ];
     state.postSignature.buildCustomPostButtons.mockResolvedValue([custom]);
     await state.service.process(state.job);

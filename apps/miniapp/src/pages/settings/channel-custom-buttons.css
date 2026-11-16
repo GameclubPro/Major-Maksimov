@@ -1,20 +1,20 @@
 @layer pages {
   .channel-post-actions {
-    --post-actions-border: color-mix(in srgb, var(--accent) 22%, var(--border-subtle));
-    --post-actions-shadow: color-mix(in srgb, var(--accent) 8%, transparent);
-    --post-actions-lift-shadow: color-mix(in srgb, var(--accent) 15%, transparent);
-    --post-actions-add-border: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
+    --post-border: color-mix(in srgb, var(--accent) 22%, var(--border-subtle));
+    --post-shadow: color-mix(in srgb, var(--accent) 8%, transparent);
+    --post-lift-shadow: color-mix(in srgb, var(--accent) 15%, transparent);
+    --post-add-border: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
     display: grid;
     gap: 20px;
     min-width: 0;
   }
   .channel-post-actions__preview {
-    border: 1px solid var(--post-actions-border);
+    border: 1px solid var(--post-border);
     background: var(--surface-card);
     border-radius: 20px;
     min-width: 0;
     overflow: hidden;
-    box-shadow: 0 8px 28px var(--post-actions-shadow);
+    box-shadow: 0 8px 28px var(--post-shadow);
   }
   .channel-post-actions summary {
     display: flex;
@@ -63,6 +63,7 @@
     overflow-wrap: anywhere;
   }
   .channel-post-actions__preview-button {
+    flex: 1;
     padding: 12px;
     min-height: 44px;
     display: grid;
@@ -150,7 +151,7 @@
   }
   .channel-custom-buttons__row.is-dragging {
     transform: scale(1.015);
-    box-shadow: 0 8px 24px var(--post-actions-lift-shadow);
+    box-shadow: 0 8px 24px var(--post-lift-shadow);
     border-color: var(--accent);
   }
   .channel-custom-buttons__grip {
@@ -217,7 +218,7 @@
     width: 100%;
     min-height: 48px;
     padding: 12px;
-    border: 1px dashed var(--post-actions-add-border);
+    border: 1px dashed var(--post-add-border);
     border-radius: 15px;
     margin-top: 10px;
     background: var(--accent-soft);
@@ -314,7 +315,8 @@
     color: var(--accent);
     font-size: 0.8rem;
   }
-  .channel-custom-buttons__order {
+  .channel-custom-buttons__order,
+  .channel-post-actions__preview-row {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;

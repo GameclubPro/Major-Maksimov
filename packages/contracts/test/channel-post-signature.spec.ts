@@ -7,7 +7,41 @@ import {
   channelCustomPostButtonsSchema,
   channelCustomPostButtonInputSchema,
   updateChannelPostSignatureRequestSchema,
+  layoutChannelCustomButtonRows,
 } from '../src/channel-post-signature.js';
+
+describe('compact channel button layout', () => {
+  it.each([
+    [['Тест', 'Тест2'], [['Тест', 'Тест2']]],
+    [
+      ['Каталог', 'Контакты', 'Отзывы'],
+      [['Каталог', 'Контакты'], ['Отзывы']],
+    ],
+    [
+      ['Купить', 'Открыть свою витрину 🏪', 'Отзывы', 'Помощь'],
+      [['Купить'], ['Открыть свою витрину 🏪'], ['Отзывы', 'Помощь']],
+    ],
+    [
+      ['1234567890', '1234567890', '12345678901'],
+      [['1234567890', '1234567890'], ['12345678901']],
+    ],
+    [
+      ['😀😀😀😀😀', 'Тест', '😀😀😀😀😀😀', 'Ещё'],
+      [['😀😀😀😀😀', 'Тест'], ['😀😀😀😀😀😀'], ['Ещё']],
+    ],
+    [
+      ['Первая\nВторая', 'Тест'],
+      [['Первая\nВторая'], ['Тест']],
+    ],
+  ])('lays out %j without changing order or labels', (labels, expected) => {
+    const buttons = labels.map((text, index) =>
+      Object.freeze({ text, url: `https://example.com/${index}` }),
+    );
+    const rows = layoutChannelCustomButtonRows(Object.freeze(buttons));
+    expect(rows.map((row) => row.map((button) => button.text))).toEqual(expected);
+    expect(rows.flat()).toEqual(buttons);
+  });
+});
 
 describe('channel post signature contracts', () => {
   it('keeps a fail-safe disabled default with stable link text', () => {

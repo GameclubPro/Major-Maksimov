@@ -1,4 +1,5 @@
 import { normalizeHttpButtonUrl } from '@maxim/contracts';
+import { isCompactChannelButtonText } from '@maxim/contracts/channel-post-signature';
 
 const MAX_INLINE_KEYBOARD_BUTTONS = 210;
 const MAX_INLINE_KEYBOARD_ROWS = 30;
@@ -83,9 +84,12 @@ export function normalizeMaxInlineKeyboardButtons(
         const buttonTextWeight = measureInlineKeyboardButtonTextWeight(normalizedButton);
         const nextRowLimit =
           rowBuffer.length === 0 ? buttonRowLimit : Math.min(rowLimit, buttonRowLimit);
+        const changesLinkType =
+          (rowBuffer.at(-1)?.type === 'link') !== (normalizedButton.type === 'link');
         if (
           rowBuffer.length > 0 &&
-          (rowBuffer.length >= nextRowLimit ||
+          (changesLinkType ||
+            rowBuffer.length >= nextRowLimit ||
             rowTextWeight + buttonTextWeight > MAX_INLINE_KEYBOARD_ROW_TEXT_WEIGHT) &&
           !flushRow()
         ) {
@@ -266,6 +270,8 @@ function normalizeHttpInlineKeyboardUrl(value: unknown): string | null {
 
 function resolveInlineKeyboardButtonRowLimit(button: Record<string, unknown>): number {
   const type = typeof button.type === 'string' ? button.type.trim().toLowerCase() : '';
+  if (type === 'link' && typeof button.text === 'string' && isCompactChannelButtonText(button.text))
+    return 2;
   return MAX_INLINE_KEYBOARD_FULL_WIDTH_BUTTON_TYPES.has(type)
     ? MAX_INLINE_KEYBOARD_ACTION_BUTTONS_PER_ROW
     : MAX_INLINE_KEYBOARD_BUTTONS_PER_ROW;

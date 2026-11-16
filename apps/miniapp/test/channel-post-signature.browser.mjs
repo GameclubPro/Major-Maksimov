@@ -193,6 +193,41 @@ try {
         await panel.locator('.channel-custom-buttons__item strong').first().textContent(),
         'Контакты',
       );
+      const preview = panel.locator('.channel-post-actions__preview');
+      if (
+        !(await preview.getAttribute('open')) &&
+        !(await preview.evaluate((element) => element.open))
+      )
+        await preview.locator('summary').click();
+      const compactRow = preview
+        .locator('.channel-post-actions__preview-row')
+        .filter({ hasText: 'Каталог' });
+      assert.deepEqual(
+        await compactRow.locator('.channel-post-actions__preview-button').allTextContents(),
+        ['Контакты', 'Каталог'],
+      );
+      const boxes = await compactRow
+        .locator('.channel-post-actions__preview-button')
+        .evaluateAll((elements) =>
+          elements.map((element) => {
+            const { x, y, width, height } = element.getBoundingClientRect();
+            return {
+              x,
+              y,
+              width,
+              height,
+              scrollWidth: element.scrollWidth,
+              clientWidth: element.clientWidth,
+            };
+          }),
+        );
+      assert.equal(boxes[0].y, boxes[1].y);
+      assert.ok(boxes[1].x > boxes[0].x);
+      for (const box of boxes) {
+        assert.ok(box.height >= 44);
+        assert.ok(box.scrollWidth <= box.clientWidth);
+      }
+      await preview.screenshot({ path: path.join(screenshots, `${name}-compact-preview.png`) });
       await panel.getByRole('button', { name: 'Изменить кнопку «Контакты»' }).click();
       await editor.getByRole('button', { name: 'Удалить', exact: true }).click();
       await panel.getByRole('button', { name: 'Вернуть', exact: true }).click();

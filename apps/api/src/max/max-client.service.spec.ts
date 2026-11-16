@@ -6587,7 +6587,7 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
-  it('moves link and open_app action buttons to their own MAX rows', async () => {
+  it('pairs short link buttons and keeps open_app in its own MAX row', async () => {
     const service = createService();
 
     const normalized = (service as any).normalizeInlineKeyboardButtons({
@@ -6605,7 +6605,7 @@ describe('MaxClientService inline keyboard guardrails', () => {
       ],
     }) as Array<Array<Record<string, unknown>>> | null;
 
-    expect(normalized?.map((row) => row.length)).toEqual([1, 1, 1, 1]);
+    expect(normalized?.map((row) => row.length)).toEqual([2, 1, 1]);
 
     await service.onModuleDestroy();
   });

@@ -5,6 +5,7 @@ import { SegmentedControl } from '../../components/ui/segmented-control';
 import {
   channelPostSignatureUrlSchema,
   channelCustomPostButtonInputSchema,
+  layoutChannelCustomButtonRows,
   CHANNEL_POST_BUTTON_TEXT_MAX_LENGTH,
   CHANNEL_POST_SIGNATURE_DEFAULT_TEXT,
   CHANNEL_POST_SIGNATURE_TEXT_MAX_LENGTH,
@@ -50,18 +51,30 @@ export function ChannelPostSignatureFields({
     text.kind === 'common'
       ? text.value.trim() || CHANNEL_POST_SIGNATURE_DEFAULT_TEXT
       : 'Разные значения';
-  const previewButtons = [
-    ...systemButtons,
-    ...(isEnabled && isButton ? [label] : []),
-    ...(customEnabled.kind === 'common' && customEnabled.value && custom.kind === 'common'
-      ? custom.value
-          .filter((button) => channelCustomPostButtonInputSchema.safeParse(button).success)
-          .filter(
-            (button) =>
-              !(isEnabled && isButton && signatureUrl.success && signatureUrl.data === button.url),
+  const customPreviewRows =
+    customEnabled.kind === 'common' && customEnabled.value && custom.kind === 'common'
+      ? layoutChannelCustomButtonRows(
+          custom.value.filter(
+            (button) => channelCustomPostButtonInputSchema.safeParse(button).success,
+          ),
+        )
+          .map((row) =>
+            row.filter(
+              (button) =>
+                !(
+                  isEnabled &&
+                  isButton &&
+                  signatureUrl.success &&
+                  signatureUrl.data === button.url
+                ),
+            ),
           )
-          .map((button) => button.text)
-      : []),
+          .filter((row) => row.length > 0)
+      : [];
+  const previewRows = [
+    ...systemButtons.map((text) => [{ text }]),
+    ...(isEnabled && isButton ? [[{ text: label }]] : []),
+    ...customPreviewRows,
   ];
   return (
     <div className="channel-post-actions">
@@ -86,9 +99,13 @@ export function ChannelPostSignatureFields({
                 <span className="channel-post-actions__signature">{label}</span>
               )}
             </div>
-            {previewButtons.map((button, index) => (
-              <div key={`${index}-${button}`} className="channel-post-actions__preview-button">
-                {button}
+            {previewRows.map((row, index) => (
+              <div key={index} className="channel-post-actions__preview-row">
+                {row.map((button, buttonIndex) => (
+                  <div key={buttonIndex} className="channel-post-actions__preview-button">
+                    {button.text}
+                  </div>
+                ))}
               </div>
             ))}
             {(custom.kind === 'mixed' || customEnabled.kind === 'mixed') && (

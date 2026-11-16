@@ -33,6 +33,21 @@ their purpose or destination.
 
 ## Implemented Resolution
 
+### Compact Custom Buttons
+
+Adjacent saved custom links with short captions share a row, two at a time, in their saved
+order. Captions up to ten display units qualify (emoji count as two); longer or multiline
+captions occupy their own row. Comments, suggestions and the configured channel CTA keep
+their separate rows. This follows MAX's recommended caption length for two-button rows
+without adding a layout setting or changing saved links.
+
+Runtime and the settings preview share the same layout helper. Composition retains compact
+custom rows after URL deduplication; transport preserves explicit row boundaries and splits
+long captions instead of forcing every link into a full-width row. Existing posts are not
+bulk rewritten. The regression covers saved settings through composition and final MAX
+normalization in `apps/api/src/common/channel-custom-post-buttons.spec.ts`; the browser
+case checks adjacent preview buttons on desktop, iPhone and Android sizes.
+
 ### One Visible Dialog Entry
 
 - Presentation identity is `(channel, action)` for both comments and suggestions.
