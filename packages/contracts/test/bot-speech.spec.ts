@@ -106,6 +106,16 @@ describe('speech style text ownership', () => {
 });
 
 describe('inherited speech scenario coverage', () => {
+  it.each(BOT_SPEECH_STYLE_VALUES)(
+    'asks for subscription without deletion workflow status for %s',
+    (style) => {
+      const template = getBotSpeechEditableTemplate(style, 'requiredSubscriptionBotMessageText');
+      expect(extractPlaceholders(template)).toEqual(['channels', 'user']);
+      expect(template).toMatch(/подпишитесь/iu);
+      expect(template).not.toMatch(/удал|ожида|ждёт/iu);
+    },
+  );
+
   it.each(BOT_SPEECH_STYLE_VALUES)('makes subscription mute duration available for %s', (style) => {
     const template = getBotSpeechSystemTemplate(style, 'requiredSubscriptionMute');
     expect(extractPlaceholders(template)).toEqual(['channels', 'mute_duration', 'user']);

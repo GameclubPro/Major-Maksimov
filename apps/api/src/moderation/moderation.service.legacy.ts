@@ -1,4 +1,5 @@
 import { buildChannelPostActionRows } from '../common/channel-post-actions';
+import { readRequiredSubscriptionTargetLink } from '../common/required-subscription-target-link';
 import { parseChannelAutoPostListedMessage } from './channel-auto-post-runtime';
 import { buildChannelCustomPostButtons } from '../common/channel-custom-post-buttons';
 import {
@@ -12024,7 +12025,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           channelId,
           cached?.title ?? '',
         );
-        const cachedLink = this.normalizeBotButtonUrl(cached?.link ?? '');
+        const cachedLink = await readRequiredSubscriptionTargetLink(
+          this.prisma,
+          channelId,
+          cached?.link,
+        );
         const persistedChatLooksLikeChat = persistedChat?.entityType === ChatEntityType.CHAT;
         const cachedLooksLikeChat = cachedEntityType === 'chat';
         const cachedLooksLikeChannel = cachedEntityType === 'channel';
@@ -12074,7 +12079,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           const title =
             this.readRequiredSubscriptionChannelTitle(channelId, snapshot.title ?? '') ||
             fallbackTitle;
-          const link = this.normalizeBotButtonUrl(snapshot.link ?? '');
+          const link = this.normalizeBotButtonUrl(snapshot.link ?? '') ?? cachedLink;
           await this.chatContextCache?.setManagedEntityHeader({
             id: channelId,
             title,

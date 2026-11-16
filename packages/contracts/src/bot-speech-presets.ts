@@ -19,8 +19,7 @@ export const BOT_SPEECH_PRESETS: Record<BotSpeechStyle, BotSpeechPreset> = {
         'Здравствуйте, {user}. Я {bot_character_name}. Перед общением ознакомьтесь с правилами чата.',
       linkBotMessageText: '{user}, сообщение {message_status}. Причина: {reason}.',
       linkWarnMessageText: '{user}, предупреждение: {reason}.',
-      requiredSubscriptionBotMessageText:
-        '{user}, сообщение {message_status}. Чтобы писать в чат, подпишитесь на {channels}.',
+      requiredSubscriptionBotMessageText: '{user}, чтобы писать в чат, подпишитесь на {channels}.',
       requiredSubscriptionWarnMessageText:
         '{user}, предупреждение: {reason}. Подпишитесь на {channels}.',
       invitationAccessBotMessageText:
@@ -78,8 +77,7 @@ export const BOT_SPEECH_PRESETS: Record<BotSpeechStyle, BotSpeechPreset> = {
       linkBotMessageText:
         '{user}, сообщение {message_status}. Причина: {reason}. Пожалуйста, отправьте текст без этой ссылки.',
       linkWarnMessageText: '{user}, предупреждение: {reason}.',
-      requiredSubscriptionBotMessageText:
-        '{user}, сообщение {message_status}. Чтобы писать в чат, подпишитесь на {channels}.',
+      requiredSubscriptionBotMessageText: '{user}, чтобы писать в чат, подпишитесь на {channels}.',
       requiredSubscriptionWarnMessageText:
         '{user}, предупреждение: {reason}. Пожалуйста, подпишитесь на {channels}, чтобы продолжить общение.',
       invitationAccessBotMessageText:
@@ -141,8 +139,7 @@ export const BOT_SPEECH_PRESETS: Record<BotSpeechStyle, BotSpeechPreset> = {
         '{user}, сообщение {message_status}. Причина: {reason}. Отправьте текст без этой ссылки.',
       linkWarnMessageText:
         '{user}, предупреждение: {reason}. Следующее сообщение — без этой ссылки.',
-      requiredSubscriptionBotMessageText:
-        '{user}, сообщение {message_status}. Чтобы писать в чате, подпишитесь на {channels}.',
+      requiredSubscriptionBotMessageText: '{user}, чтобы писать в чате, подпишитесь на {channels}.',
       requiredSubscriptionWarnMessageText:
         '{user}, предупреждение: {reason}. Подпишитесь на {channels} перед следующим сообщением.',
       invitationAccessBotMessageText:
@@ -207,7 +204,7 @@ export const BOT_SPEECH_PRESETS: Record<BotSpeechStyle, BotSpeechPreset> = {
       linkWarnMessageText:
         '{user}, предупреждение: {reason}. Пожалуйста, больше не отправляйте эту ссылку.',
       requiredSubscriptionBotMessageText:
-        '{user}, сообщение {message_status}. Чтобы писать в чате, подпишитесь на {channels}. Здесь «я только посмотреть» работает только на чтение.',
+        '{user}, чтобы писать в чате, подпишитесь на {channels}. Здесь «я только посмотреть» работает только на чтение.',
       requiredSubscriptionWarnMessageText:
         '{user}, предупреждение: {reason}. Подпишитесь на {channels} перед следующим сообщением.',
       invitationAccessBotMessageText:
