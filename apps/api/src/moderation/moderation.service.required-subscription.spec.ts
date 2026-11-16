@@ -94,6 +94,9 @@ describe('ModerationService', () => {
     ) {
       const persistedModerationEvents = new Map<string, { metadata: unknown }>();
       const prisma = {
+        managedBotChatCatalog: {
+          findMany: jest.fn().mockResolvedValue([]),
+        },
         chat: {
           upsert: jest.fn().mockResolvedValue({
             id: 'chat-1',
@@ -2266,7 +2269,7 @@ describe('ModerationService', () => {
       );
       expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
       const [, noticeText, noticeOptions] = maxClient.sendMessage.mock.calls[0] ?? [];
-      expect(noticeText).toContain('ожидает удаления');
+      expect(noticeText).not.toMatch(/ожидает удаления|ждёт снятия с линии/u);
       expect(noticeText).not.toMatch(/удалено/u);
       expect(noticeText).toContain('Новости MAX');
       expect(noticeText).toContain('Афиша района');
@@ -3350,6 +3353,44 @@ describe('ModerationService', () => {
               },
             ],
           ],
+        }),
+      );
+    });
+
+    it('restores the subscription button from the saved catalog after the header cache expires', async () => {
+      const prisma = createPrismaForRequiredSubscription({
+        requiredSubscriptionEnabled: true,
+        requiredSubscriptionChannelIds: ['channel-1'],
+      });
+      prisma.managedBotChatCatalog.findMany.mockResolvedValue([
+        { chatId: 'channel-1', link: 'https://max.ru/subscription' },
+      ]);
+      const maxClient = {
+        hasChatMember: jest.fn().mockResolvedValue(false),
+        getChatSnapshot: jest.fn().mockResolvedValue({
+          title: 'Подписочная',
+          link: null,
+          participantsCount: 100,
+          entityType: 'channel',
+        }),
+        deleteMessage: jest.fn(),
+        sendMessage: jest.fn(),
+        kickMember: jest.fn(),
+        banMember: jest.fn(),
+        notifyModerators: jest.fn(),
+        resolveMessageLink: jest.fn().mockResolvedValue(null),
+      };
+      const service = createRequiredSubscriptionService(
+        prisma as never,
+        { detect: jest.fn() } as never,
+        { resolveAction: jest.fn() } as never,
+        maxClient as never,
+      );
+      await service.handleUpdate(createUpdate());
+      expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
+      expect(maxClient.sendMessage.mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({
+          buttons: [[{ text: 'Подписочная', url: 'https://max.ru/subscription' }]],
         }),
       );
     });

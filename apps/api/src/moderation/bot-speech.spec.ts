@@ -20,7 +20,7 @@ const EXPECTED_EDITABLE_PLACEHOLDERS = {
   greetingBotMessageText: ['bot_character_name', 'user'],
   linkBotMessageText: ['message_status', 'reason', 'user'],
   linkWarnMessageText: ['reason', 'user'],
-  requiredSubscriptionBotMessageText: ['channels', 'message_status', 'user'],
+  requiredSubscriptionBotMessageText: ['channels', 'user'],
   requiredSubscriptionWarnMessageText: ['channels', 'reason', 'user'],
   invitationAccessBotMessageText: [
     'invited_count',
@@ -389,7 +389,6 @@ describe('bot speech styles', () => {
       const notices = (deleted: boolean): string[] => [
         service.buildLinkExplanation(user, deleted, '', style),
         service.buildLinkExplanation(user, deleted, '', style, true),
-        service.buildRequiredSubscriptionExplanation(user, deleted, ['Новости MAX'], '', style),
         service.buildInvitationAccessExplanation(user, deleted, 3, 2, '', style),
         service.buildTextFilterExplanation(user, 'COMMERCIAL_AD', deleted, '', style),
         service.buildTextFilterExplanation(user, 'PROFANITY', deleted, '', style),
@@ -418,9 +417,17 @@ describe('bot speech styles', () => {
         expect(message).toContain('не удалено.');
         expect(message).not.toContain('не удалено:');
       }
-      expect(
-        service.buildRequiredSubscriptionExplanation(user, null, ['Новости MAX'], '', style),
-      ).toContain('сообщение ожидает удаления.');
+      for (const status of [true, false, null]) {
+        const subscription = service.buildRequiredSubscriptionExplanation(
+          user,
+          status,
+          ['Новости MAX'],
+          '',
+          style,
+        );
+        expect(subscription).toContain('подпишитесь на Новости MAX');
+        expect(subscription).not.toMatch(/удал|ожида|ждёт/iu);
+      }
       for (const fingerprint of ['exact', 'image', 'image_set']) {
         const removed = service.buildDuplicateHitExplanation(user, true, '', style, fingerprint);
         const kept = service.buildDuplicateHitExplanation(user, false, '', style, fingerprint);

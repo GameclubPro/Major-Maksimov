@@ -8,6 +8,11 @@ import {
 import { raceWithTimeout } from '../common/promise-timeout.util';
 import { resolveExplicitMembershipAccessDenial } from '../max/max-membership-access-error';
 import { readSavedRequiredSubscriptionHeaders } from './admin-required-subscription-metadata';
+import {
+  normalizeRequiredSubscriptionTargetLink,
+  readRequiredSubscriptionTargetLink,
+  rememberRequiredSubscriptionTargetLink,
+} from '../common/required-subscription-target-link';
 import { ManagedEntityActivationRequiredError } from '../max/managed-entity-activation.util';
 import type { ChatSettings, ManagedEntityHeader, ManagedEntityType } from '@maxim/contracts';
 import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
@@ -112,6 +117,7 @@ export class AdminRequiredSubscriptionRuntime {
   }
 
   async resolveRequiredSubscriptionChannelReference(value: string): Promise<ManagedEntityHeader> {
+    const observedAt = new Date();
     const normalizedValue = value.trim();
     if (!normalizedValue) {
       throw new BadRequestException(
@@ -130,6 +136,8 @@ export class AdminRequiredSubscriptionRuntime {
       return this.resolveRequiredSubscriptionChannelById(channel.chatId, {
         preferredBotId: channel.botId ?? null,
         observedBotIds: channel.botIds ?? [],
+        verifiedLink: channel.link,
+        observedAt,
       });
     }
 
@@ -332,8 +340,11 @@ export class AdminRequiredSubscriptionRuntime {
     options: {
       preferredBotId?: string | null;
       observedBotIds?: readonly string[] | null;
+      verifiedLink?: string | null;
+      observedAt?: Date;
     } = {},
   ): Promise<ManagedEntityHeader> {
+    const observedAt = options.observedAt ?? new Date();
     const normalizedChatId = chatId.trim();
     if (!normalizedChatId) {
       throw new BadRequestException('Укажите корректный ID чата или канала.');
@@ -378,7 +389,17 @@ export class AdminRequiredSubscriptionRuntime {
       );
     }
 
-    const link = snapshot.link?.trim() || null;
+    const observedLink =
+      normalizeRequiredSubscriptionTargetLink(snapshot.link) ??
+      normalizeRequiredSubscriptionTargetLink(options.verifiedLink);
+    const cachedHeader = observedLink
+      ? null
+      : await this.chatContextCache.getManagedEntityHeader?.(normalizedChatId, snapshot.entityType);
+    const link = await readRequiredSubscriptionTargetLink(
+      this.prisma,
+      normalizedChatId,
+      observedLink ?? cachedHeader?.link,
+    );
     const entityType = snapshot.entityType;
     const prismaEntityType = mapManagedEntityTypeToChatEntityType(entityType);
 
@@ -417,6 +438,15 @@ export class AdminRequiredSubscriptionRuntime {
         title: header.title,
         entityType: prismaEntityType,
       });
+      if (observedLink && verifiedBotId) {
+        await rememberRequiredSubscriptionTargetLink(this.prisma, {
+          chatId: normalizedChatId,
+          botId: verifiedBotId,
+          entityType: prismaEntityType,
+          link: observedLink,
+          observedAt,
+        });
+      }
     } catch (error: unknown) {
       this.logger.warn(
         {

@@ -93,6 +93,59 @@ describe('AdminService required subscription settings', () => {
     chatTitle: null,
   };
 
+  it('keeps the verified public subscription link when the ID snapshot omits it', async () => {
+    const prisma = createPrismaMock();
+    const cache = createChatContextCacheMock();
+    const createLink = jest.fn().mockResolvedValue({});
+    Object.assign(prisma.managedBotChatCatalog, {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      create: createLink,
+    });
+    const maxClient = {
+      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
+      getCurrentChatMemberAccess: jest.fn().mockResolvedValue({
+        userId: '777000_bot',
+        isAdmin: true,
+        isOwner: false,
+        permissions: [],
+      }),
+      getChannelSnapshotByLink: jest.fn().mockResolvedValue({
+        chatId: 'channel-ext-1',
+        title: 'Подписочная',
+        entityType: 'channel',
+        link: 'https://max.ru/subscription',
+        participantsCount: 100,
+      }),
+      getChatSnapshot: jest.fn().mockResolvedValue({
+        chatId: 'channel-ext-1',
+        title: 'Подписочная',
+        entityType: 'channel',
+        link: null,
+        participantsCount: 100,
+      }),
+    };
+    const service = createRequiredSubscriptionService(prisma, maxClient, cache);
+    const result = await service.resolveRequiredSubscriptionChannel('chat-1', actor, {
+      value: 'https://max.ru/subscription',
+    });
+    expect(result.channel.link).toBe('https://max.ru/subscription');
+    expect(cache.setManagedEntityHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'channel-ext-1',
+        link: 'https://max.ru/subscription',
+      }),
+    );
+    expect(createLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          chatId: 'channel-ext-1',
+          link: 'https://max.ru/subscription',
+          status: 'PRESENTATION',
+        }),
+      }),
+    );
+  });
+
   it('normalizes and persists required subscription entity ids on update', async () => {
     const prisma = createPrismaMock();
     const maxClient = {
