@@ -1,3 +1,7 @@
+import {
+  PUBLIC_HANDLE_CHANNEL,
+  createHandleLookupMock,
+} from './navigation/max-handle-navigation.fixture';
 import type { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { ConfigService } from '@nestjs/config';
 
@@ -12,6 +16,30 @@ import { fingerprintLinkRulesPolicy } from './link-rules-policy.runtime';
 import { finalizeDeleteAuthority } from './moderation-delete-authority-preparation';
 
 describe('LinkHistoryDeleteGuardService', () => {
+  it.each(['live', 'history'] as const)(
+    're-resolves a channel handle before %s deletion and preserves an edited person mention',
+    async (reasonKind) => {
+      const row = {
+        ...buildPlainTextMessage(),
+        body: { mid: 'message-1', text: '@azov_overhear' },
+      };
+      const h = buildHarness({ reasonKind, candidateRow: row, textClickabilityEnabled: true });
+      h.handleLookup.mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+      await expect(h.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+      h.handleLookup.mockRejectedValue(new Error('not a confirmed channel now'));
+      await expect(h.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+        code: `${reasonKind}_violation_no_longer_present`,
+      });
+      h.maxClient.getExactMessageRow.mockResolvedValue(buildProfileMentionMessage());
+      h.handleLookup.mockClear();
+      await expect(h.service.assertIntentStillActionable(baseInput)).rejects.toMatchObject({
+        code:
+          reasonKind === 'live' ? 'live_violation_no_longer_present' : 'history_content_changed',
+      });
+      expect(h.handleLookup).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['live', 'history'] as const)(
     'uses saved admin immunity for %s without an author GET or absent-author roster request',
     async (reasonKind) => {
@@ -510,7 +538,9 @@ function buildHarness(
       }),
     },
   };
+  const handleLookup = createHandleLookupMock();
   const maxClient = {
+    resolvePublicChannelHandle: handleLookup,
     getChatAdminAccesses: jest
       .fn<Promise<Array<{ userId: string }>>, []>()
       .mockResolvedValue([{ userId: 'different-admin' }]),
@@ -539,7 +569,7 @@ function buildHarness(
     }),
     options.authorAccess as AutomaticDeleteAuthorAccessService | undefined,
   );
-  return { service, prisma, maxClient, maxBotLinkService };
+  return { service, prisma, maxClient, handleLookup, maxBotLinkService };
 }
 
 function buildMessage(

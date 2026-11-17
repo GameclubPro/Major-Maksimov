@@ -1,3 +1,4 @@
+import { PUBLIC_HANDLE_CHANNEL } from './navigation/max-handle-navigation.fixture';
 import {
   SanctionAction,
   buildModerationReleaseCallbackPayload,
@@ -114,6 +115,38 @@ function installGuardedDeleteExecutorFixture(service: ModerationService) {
 
 describe('ModerationService', () => {
   describe('live typed navigation moderation', () => {
+    it.each(['message_created', 'message_edited'] as const)(
+      'enforces confirmed channel handles and preserves people on %s',
+      async (type) => {
+        const harness = createLiveNavigationHarness({ linkPolicy: 'BLOCKLIST_ONLY' });
+        harness.handleLookup.mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+        await harness.service.handleUpdate(
+          createLiveNavigationEnvelopeUpdate(type, {
+            body: { text: '😀 @azov_overhear подпишись' },
+          }),
+        );
+        expect(harness.prisma.violation.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ ruleCode: 'LINK_BLOCKED' }),
+          }),
+        );
+        expect(harness.maxClient.deleteMessage).toHaveBeenCalled();
+        const person = createLiveNavigationHarness({ linkPolicy: 'BLOCKLIST_ONLY' });
+        person.handleLookup.mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+        await person.service.handleUpdate(
+          createLiveNavigationEnvelopeUpdate(type, {
+            body: {
+              text: '@azov_overhear',
+              markup: [{ type: 'user_mention', from: 0, length: 14, user_id: 67123224 }],
+            },
+          }),
+        );
+        expect(person.handleLookup).not.toHaveBeenCalled();
+        expect(person.maxClient.deleteMessage).not.toHaveBeenCalled();
+        expect(person.prisma.violation.create).not.toHaveBeenCalled();
+      },
+    );
+
     it('captures the selective policy fingerprint and suppresses a cached decision after policy replacement', async () => {
       const linkRulesPolicy = {
         version: 1,

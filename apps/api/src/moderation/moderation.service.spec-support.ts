@@ -1,3 +1,4 @@
+import { createHandleLookupMock } from './navigation/max-handle-navigation.fixture';
 import { REQUIRED_SUBSCRIPTION_MAX_CHANNELS, type MaxUpdate } from '@maxim/contracts';
 import { USER_AGREEMENT_SHORT_NOTICE } from '../common/user-agreement-notice';
 import { createGroupCommandAuthorityMock } from '../common/group-command-authority.spec-support';
@@ -1159,7 +1160,9 @@ function createLiveNavigationHarness(
   };
   const ruleEngine = new RuleEngineService(createRedisCounterMock() as never);
   const detectSpy = jest.spyOn(ruleEngine, 'detect');
+  const handleLookup = createHandleLookupMock();
   const maxClient = {
+    resolvePublicChannelHandle: handleLookup,
     deleteMessage: jest.fn(),
     sendMessage: jest.fn(),
     kickMember: jest.fn(),
@@ -1198,7 +1201,7 @@ function createLiveNavigationHarness(
     options.maxBotLinkService as never,
   );
 
-  return { service, prisma, ruleEngine, detectSpy, maxClient };
+  return { service, prisma, ruleEngine, detectSpy, maxClient, handleLookup };
 }
 
 function createNumericSenderNameUpdate(): MaxUpdate {

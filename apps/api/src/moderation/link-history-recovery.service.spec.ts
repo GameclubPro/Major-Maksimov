@@ -1,3 +1,7 @@
+import {
+  PUBLIC_HANDLE_CHANNEL,
+  createHandleLookupMock,
+} from './navigation/max-handle-navigation.fixture';
 import { ConfigService } from '@nestjs/config';
 
 import {
@@ -11,6 +15,24 @@ import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.
 const ORIGINAL_SERVICE_NAME = process.env.APP_SERVICE_NAME;
 
 describe('LinkHistoryRecoveryService', () => {
+  it('confirms the exact channel handle before creating a history intent', async () => {
+    const now = Date.now();
+    const row = buildPlainTextLinkedMessage(now - 60_000, '@azov_overhear');
+    const h = buildHarness({
+      now,
+      listRows: [row],
+      exactRow: row,
+      deleteEnabled: true,
+      plainTextClickabilityEnabled: true,
+    });
+    h.handleLookup.mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+    await h.service.runOnce();
+    expect(h.handleLookup).toHaveBeenCalledTimes(2);
+    expect(h.deleteIntents.ensureIntent).toHaveBeenCalledWith(
+      expect.objectContaining({ ruleCode: 'LINK_HISTORY_RECOVERY', messageId: 'message-1' }),
+    );
+  });
+
   it('uses adopted selective rules and ignores frozen legacy exceptions', async () => {
     const now = Date.now();
     const row = buildLinkedMessage(now - 60_000);
@@ -561,7 +583,9 @@ function buildHarness(options: {
   const getExactMessageRow = options.exactLookupError
     ? jest.fn().mockRejectedValue(options.exactLookupError)
     : jest.fn().mockResolvedValue(options.exactRow ?? null);
+  const handleLookup = createHandleLookupMock();
   const maxClient = {
+    resolvePublicChannelHandle: handleLookup,
     listMessages: jest.fn().mockResolvedValue(options.listRows ?? []),
     getExactMessageRow,
     getChatMemberAccess: jest.fn().mockResolvedValue(
@@ -603,7 +627,7 @@ function buildHarness(options: {
     governor as never,
     config,
   );
-  return { service, prisma, maxClient, maxBotLinkService, deleteIntents, governor };
+  return { service, prisma, maxClient, handleLookup, maxBotLinkService, deleteIntents, governor };
 }
 
 function buildLinkedMessage(

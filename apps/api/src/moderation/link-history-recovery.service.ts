@@ -21,10 +21,10 @@ import {
   type LinkHistoryListedMessageMetadata,
 } from './link-history-recovery.util';
 import {
-  extractEnabledNavigationTargets,
   resolveEnabledNavigationTargetOptions,
   type EnabledNavigationTargetOptions,
 } from './navigation/enabled-navigation-targets';
+import { resolveEnabledNavigationTargets } from './navigation/max-handle-navigation';
 import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.adapter';
 import { ModerationDeleteIntentService } from './moderation-delete-intent.service';
 import { activeLinkPolicySql, linkPolicySemanticEffectiveAtSql } from './link-rules-history.sql';
@@ -383,7 +383,9 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
       listed: rows.length,
     };
     for (const item of pageRows) {
-      const listedTargets = this.extractEnabledTargets(adaptMaxMessageNavigationView(item.row));
+      const listedTargets = await this.extractEnabledTargets(
+        adaptMaxMessageNavigationView(item.row),
+      );
       if (!hasActionableNavigationTargets(listedTargets)) {
         continue;
       }
@@ -425,7 +427,7 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
 
       const exactView = adaptMaxMessageNavigationView(exactRow);
       const actionableTargets = filterActionableNavigationTargets(
-        this.extractEnabledTargets(exactView),
+        await this.extractEnabledTargets(exactView),
       );
       if (
         !isLinkHistoryPolicyViolation(
@@ -800,11 +802,13 @@ export class LinkHistoryRecoveryService implements OnModuleInit, OnModuleDestroy
   }
 
   private extractEnabledTargets(
-    view: Parameters<typeof extractEnabledNavigationTargets>[0],
-  ): ReturnType<typeof extractEnabledNavigationTargets> {
-    return extractEnabledNavigationTargets(view, {
-      ...this.config.navigationTargetOptions,
-    });
+    view: Parameters<typeof resolveEnabledNavigationTargets>[0],
+  ): ReturnType<typeof resolveEnabledNavigationTargets> {
+    return resolveEnabledNavigationTargets(
+      view,
+      this.config.navigationTargetOptions,
+      this.maxClient,
+    );
   }
 
   private assertMatchingPolicy(

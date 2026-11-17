@@ -411,10 +411,10 @@ import {
   hasFreshLinkRulesPolicyAuthority,
 } from './link-rules-policy.runtime';
 import {
-  extractEnabledWebhookNavigationTargets,
   resolveEnabledNavigationTargetOptions,
   type EnabledNavigationTargetOptions,
 } from './navigation/enabled-navigation-targets';
+import { resolveEnabledWebhookNavigationTargets } from './navigation/max-handle-navigation';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import { MessageLimitsBlockedDomainDetector } from './rule-engine-blocked-domains.detector';
 import { SanctionService } from './sanction.service';
@@ -2402,9 +2402,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       if (settings.commercialAdsFilterEnabled) {
         this.markWebhookHotPathStage(hotPathProfile, 'rule-engine.commercial-campaign');
       }
-      const navigationTargets = extractEnabledWebhookNavigationTargets(
+      const navigationTargets = await resolveEnabledWebhookNavigationTargets(
         update.raw,
         this.navigationTargetOptions,
+        this.maxClient,
+        settings,
       );
       this.markWebhookHotPathStage(hotPathProfile, 'rule-engine.detect');
       const detection = await this.ruleEngine.detect({
