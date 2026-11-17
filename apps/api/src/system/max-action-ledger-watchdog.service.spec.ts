@@ -340,6 +340,9 @@ describe('MaxActionLedgerWatchdogService', () => {
           expect.objectContaining({
             lastError: null,
             lastDeferredCount: 1,
+            lastDeferredByReason: expect.objectContaining({
+              memberGuardRejected: { count: 1, oldestAgeSec: expect.any(Number) },
+            }),
             lastReconciledCount: 0,
             lastQuarantinedCount: 0,
             lastTerminalFailedCount: 0,
@@ -769,6 +772,9 @@ describe('MaxActionLedgerWatchdogService', () => {
     expect(await service.getSnapshot()).toEqual(
       expect.objectContaining({
         lastDeferredCount: 1,
+        lastDeferredByReason: expect.objectContaining({
+          ownedByPublication: { count: 1, oldestAgeSec: expect.any(Number) },
+        }),
         lastTerminalFailedCount: 0,
         lastQuarantinedCount: 0,
       }),
@@ -850,7 +856,39 @@ describe('MaxActionLedgerWatchdogService', () => {
     expect(snapshot.staleCount).toBe(0);
     expect(snapshot.lastScannedCount).toBe(1);
     expect(snapshot.lastDeferredCount).toBe(1);
+    expect(snapshot.lastDeferredByReason?.waitingInQueue).toEqual({
+      count: 1,
+      oldestAgeSec: expect.any(Number),
+    });
     expect(snapshot.lastReconciledCount).toBe(0);
+  });
+
+  it('reports fresh execution separately from work still waiting in the queue', async () => {
+    const row = createCandidate({ actionType: 'DELETE_MESSAGE' });
+    const { service, prisma } = createHarness({
+      rows: [row],
+      job: {
+        getState: jest.fn().mockResolvedValue('active'),
+        processedOn: Date.now() - 1_000,
+      },
+    });
+
+    await service.runNow();
+
+    expect(prisma.maxActionLedgerEntry.updateMany).not.toHaveBeenCalled();
+    const snapshot = await service.getSnapshot();
+    expect(snapshot.lastDeferredCount).toBe(1);
+    expect(snapshot.lastDeferredByReason?.waitingInQueue.count).toBe(0);
+    expect(snapshot.lastDeferredByReason?.recentlyStarted.count).toBe(1);
+  });
+
+  it('does not infer a reason breakdown for a status written by an older worker', async () => {
+    const { service, redis } = createHarness();
+    redis.getString.mockResolvedValue(JSON.stringify({ lastDeferredCount: 4 }));
+
+    const snapshot = await service.getSnapshot();
+    expect(snapshot.lastDeferredCount).toBe(4);
+    expect(snapshot.lastDeferredByReason).toBeNull();
   });
 
   it('finds retained jobs in a split action lane when legacy is empty', async () => {

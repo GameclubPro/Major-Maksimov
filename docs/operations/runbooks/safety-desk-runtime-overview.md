@@ -59,6 +59,13 @@ a daily percentile.
   action latency. Time without a state update is a separate neutral measurement:
   scheduled work, retries and uncertain outcomes require their own evidence.
   A stale source is displayed as stale, not as a current recovery or failure confirmation.
+- The closed system queue metrics include the action watchdog's last successful scan.
+  `lastDeferredByReason` counts waiting or delayed jobs, recently started jobs,
+  publication-owned sends and retained pre-dispatch member guard refusals separately.
+  Each bucket's age is since the ledger row's last state update. A missing
+  breakdown means the writer has not provided this evidence. `lastScanTruncated`
+  means the scan reached its cap, without proving any rows remain after the cursor.
+  This rotating sample is neither the total fleet backlog nor authorization to replay.
 
 There is no completion percentage for a continuous queue. Count, distribution,
 backlog change and observed processing pace describe it. Results per minute are

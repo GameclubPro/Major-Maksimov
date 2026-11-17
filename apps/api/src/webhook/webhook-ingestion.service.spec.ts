@@ -174,6 +174,22 @@ describe('WebhookIngestionService', () => {
     expect(webhookSubscriptionStatusService.markIncomingWebhook).toHaveBeenCalledWith('bot-1');
   });
 
+  it('acknowledges a persisted webhook when Redis cannot record its delivery time', async () => {
+    const { service, webhookService, webhookSubscriptionStatusService } = createService();
+    webhookSubscriptionStatusService.markIncomingWebhook.mockRejectedValueOnce(
+      new Error('Redis unavailable'),
+    );
+    await expect(
+      service.ingest({ botId: 'bot-1', secretPath: 'secret-path' }, {}, {
+        headers: { 'x-max-bot-api-secret': 'secret-header' },
+        ip: '127.0.0.1',
+      } as never),
+    ).resolves.toMatchObject({ ok: true });
+    await flushImmediate();
+    expect(webhookService.storeReceipt).toHaveBeenCalledTimes(1);
+    expect(webhookSubscriptionStatusService.markIncomingWebhook).toHaveBeenCalledWith('bot-1');
+  });
+
   it('acknowledges a legacy-compatible duplicate without scheduling business preparation', async () => {
     const { service, webhookService } = createService();
     webhookService.storeReceipt.mockResolvedValueOnce({
@@ -219,8 +235,13 @@ describe('WebhookIngestionService', () => {
   });
 
   it('returns a retryable service error when the durable receipt cannot be stored', async () => {
-    const { service, webhookService, webhookRateLimitService, webhookIngressMetricsService } =
-      createService();
+    const {
+      service,
+      webhookService,
+      webhookRateLimitService,
+      webhookIngressMetricsService,
+      webhookSubscriptionStatusService,
+    } = createService();
     webhookService.storeReceipt.mockRejectedValueOnce(new Error('postgres unavailable'));
 
     await expect(
@@ -238,6 +259,7 @@ describe('WebhookIngestionService', () => {
       outcome: 'failed',
       latencyMs: expect.any(Number),
     });
+    expect(webhookSubscriptionStatusService.markIncomingWebhook).not.toHaveBeenCalled();
   });
 
   it('does not wait for Redis metric persistence before resolving the webhook ACK path', async () => {

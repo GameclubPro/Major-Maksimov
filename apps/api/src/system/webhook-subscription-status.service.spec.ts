@@ -79,6 +79,19 @@ describe('WebhookSubscriptionStatusService', () => {
     await service.onModuleDestroy();
   });
 
+  it('distinguishes absent state from a failed read or invalid persisted configuration', async () => {
+    const service = new WebhookSubscriptionStatusService({
+      getOrThrow: jest.fn().mockReturnValue('redis://localhost:6379/0'),
+    } as never);
+    const redis = redisInstances[0]!;
+    await expect(service.getSyncState()).resolves.toBeNull();
+    redis.hgetall.mockRejectedValueOnce(new Error('Redis unavailable'));
+    await expect(service.getSyncState()).rejects.toThrow('Redis unavailable');
+    redis.strings.set('system:webhook-subscription:sync-state:v1', '{');
+    await expect(service.getSyncState()).rejects.toBeInstanceOf(SyntaxError);
+    await service.onModuleDestroy();
+  });
+
   it('atomically keeps the newest per-bot and global ingress timestamp', async () => {
     const service = new WebhookSubscriptionStatusService({
       getOrThrow: jest.fn().mockReturnValue('redis://localhost:6379/0'),
@@ -104,7 +117,7 @@ describe('WebhookSubscriptionStatusService', () => {
     await service.onModuleDestroy();
   });
 
-  it('merges atomic ingress timestamps over an older reconciler snapshot', async () => {
+  it('retains subscription configuration but trusts only atomic ingress over old or newer snapshot times', async () => {
     const service = new WebhookSubscriptionStatusService({
       getOrThrow: jest.fn().mockReturnValue('redis://localhost:6379/0'),
     } as never);
@@ -117,15 +130,21 @@ describe('WebhookSubscriptionStatusService', () => {
             configuredUrl: 'https://example.test/webhook',
             headerSecretFingerprint: 'fingerprint',
             updatedAt: '2026-07-10T10:00:00.000Z',
-            lastIncomingWebhookAt: '2026-07-10T10:00:00.000Z',
+            lastIncomingWebhookAt: '2026-07-11T10:00:00.000Z',
             lastAutoRecreateAt: null,
           },
         },
-        lastGlobalIncomingWebhookAt: '2026-07-10T10:00:00.000Z',
+        lastGlobalIncomingWebhookAt: '2026-07-11T10:00:00.000Z',
         lastGlobalAutoRecreateAt: null,
       }),
     );
 
+    await expect(service.getSyncState()).resolves.toMatchObject({
+      bots: {
+        'bot-1': { configuredUrl: 'https://example.test/webhook', lastIncomingWebhookAt: null },
+      },
+      lastGlobalIncomingWebhookAt: null,
+    });
     await service.markIncomingWebhook('bot-1', '2026-07-10T12:00:00.789Z');
 
     await expect(service.getSyncState()).resolves.toEqual(

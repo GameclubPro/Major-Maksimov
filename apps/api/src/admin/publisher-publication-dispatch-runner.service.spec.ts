@@ -742,9 +742,16 @@ describe('PublisherPublicationDispatchRunnerService', () => {
     expect(settled).toBe(true);
   });
 
-  it('propagates a strict wake-owned deadline failure for BullMQ retry', async () => {
+  it('returns a shared deadline failure to the wake job while its background tick completes', async () => {
     process.env.APP_ROLE = 'publisher';
     const failure = new Error('deadline database unavailable');
+    let rejectDeadline!: (error: Error) => void;
+    const deadline = jest.fn(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectDeadline = reject;
+        }),
+    );
     const verificationBudget = { remaining: 50 };
     const runner = new PublisherPublicationDispatchRunnerService(
       {
@@ -752,7 +759,7 @@ describe('PublisherPublicationDispatchRunnerService', () => {
         processTargetedImmediatePublicationBroadcasts: jest
           .fn()
           .mockResolvedValue(verificationBudget),
-        processTargetedDeadlinePublicationBroadcasts: jest.fn().mockRejectedValue(failure),
+        processTargetedDeadlinePublicationBroadcasts: deadline,
         processDueDeadlinePublicationBroadcasts: jest.fn().mockRejectedValue(failure),
       } as never,
       { assertAttested: jest.fn().mockResolvedValue(undefined) } as never,
@@ -765,7 +772,16 @@ describe('PublisherPublicationDispatchRunnerService', () => {
       createPrisma() as never,
     );
 
-    await expect(runner.wakeAfterPublicationMaterialization('publication-1')).rejects.toBe(failure);
+    const wake = runner.wakeAfterPublicationMaterialization('publication-1');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(deadline).toHaveBeenCalledTimes(1);
+    const tick = runner['run']('scheduled');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rejectDeadline(failure);
+    expect(await Promise.allSettled([wake, tick])).toEqual([
+      { status: 'rejected', reason: failure },
+      { status: 'fulfilled', value: undefined },
+    ]);
   });
 
   it('propagates a wake-owned deadline refresh failure for BullMQ retry', async () => {

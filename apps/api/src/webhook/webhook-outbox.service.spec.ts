@@ -5127,6 +5127,69 @@ describe('WebhookOutboxService', () => {
     }
   });
 
+  it('accounts for successful and failed carried units once after their poll returns', async () => {
+    jest.useFakeTimers();
+    const { service, webhookRows, webhookRoutingService, queues } = createService({
+      configOverrides: { ENQUEUE_CONCURRENCY: 3 },
+      findManyResult: ['early', 'late-success', 'late-error'].map((id) => ({
+        id,
+        enqueueAttempts: 0,
+        normalizedPayload: { type: 'message_callback' },
+      })),
+    });
+    let succeed!: () => void;
+    let fail!: () => void;
+    const success = new Promise<void>((resolve) => {
+      succeed = resolve;
+    });
+    const failure = new Promise<void>((resolve) => {
+      fail = resolve;
+    });
+    webhookRoutingService.resolveQueueName.mockImplementation(async (id) => {
+      if (id === 'late-success') await success;
+      if (id === 'late-error') {
+        await failure;
+        throw new Error('fixture routing failure');
+      }
+      return 'moderation-critical';
+    });
+    const internal = service as unknown as {
+      tick(): Promise<void>;
+      activeEnqueueUnits: Map<string, Promise<void>>;
+    };
+    try {
+      const tick = internal.tick();
+      await jest.advanceTimersByTimeAsync(1_001);
+      await tick;
+      expect(service.getRuntimeSnapshot()).toMatchObject({
+        inFlightWorkUnits: 2,
+        progress: { workUnits: 3, prepared: 3, outstanding: 1, workUnitErrors: 0 },
+      });
+      const owned = [...internal.activeEnqueueUnits.values()];
+      fail();
+      await internal.activeEnqueueUnits.get('event:late-error');
+      expect(service.getRuntimeSnapshot()).toMatchObject({
+        inFlightWorkUnits: 1,
+        progress: { prepared: 3, outstanding: 1, workUnitErrors: 1 },
+      });
+      succeed();
+      await Promise.all(owned);
+      expect(service.getRuntimeSnapshot()).toMatchObject({
+        inFlightWorkUnits: 0,
+        progress: { workUnits: 3, prepared: 3, outstanding: 2, workUnitErrors: 1 },
+      });
+      expect(queues.criticalQueue.add).toHaveBeenCalledTimes(2);
+      expect(webhookRows.find((row) => row.id === 'late-error')?.status).toBe(
+        WebhookStatus.RECEIVED,
+      );
+    } finally {
+      fail();
+      succeed();
+      await service.onModuleDestroy();
+      jest.useRealTimers();
+    }
+  });
+
   it('retains one global concurrency budget across timed-out polls until owned units finish', async () => {
     jest.useFakeTimers();
     const { service, webhookService, webhookRoutingService } = createService({

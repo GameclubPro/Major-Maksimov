@@ -214,6 +214,32 @@ describe('MaxChatAdminRosterSyncService', () => {
     };
   }
 
+  it('reclaims terminal chat backoffs in batches while preserving renewed and unrelated active backoffs', () => {
+    jest.useFakeTimers();
+    const { service } = createService();
+    try {
+      for (let i = 0; i < 1_000; i++) service['markTerminalBotBackoff'](`chat-${i}`, 'bot-1');
+      jest.advanceTimersByTime(60_000);
+      jest.setSystemTime(Date.now() - 3_600_000);
+      service['markTerminalBotBackoff']('chat-0', 'bot-1');
+      service['markTerminalBotBackoff']('chat-1', 'bot-2');
+      jest.advanceTimersByTime(240_000);
+      const markers = service['terminalBotBackoffUntilMs'];
+      expect(markers.size).toBeGreaterThan(2);
+      expect(markers.size).toBeLessThan(1_001);
+      jest.advanceTimersByTime(100);
+      expect(markers.size).toBe(2);
+      expect(service['isTerminalBotBackoffActive']('chat-0', 'bot-1')).toBe(true);
+      expect(service['isTerminalBotBackoffActive']('chat-1', 'bot-2')).toBe(true);
+      jest.advanceTimersByTime(60_000);
+      expect(markers.size).toBe(0);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      service.onModuleDestroy();
+      jest.useRealTimers();
+    }
+  });
+
   it('classifies bootstrap completion without counting observation deduplication as synchronization', async () => {
     const metrics = { optimization: new OptimizationRuntimeMetrics() };
     const h = createService(metrics);

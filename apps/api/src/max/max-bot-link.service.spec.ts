@@ -1829,7 +1829,7 @@ describe('MaxBotLinkService', () => {
         role: ChatBotMembershipRole.STANDBY,
         status: ChatBotMembershipStatus.ACTIVE,
         botAccessSource: MAJOR_EXPLICIT_ACTIVATION_PENDING_SOURCE,
-        lastWebhookAt: expect.any(Date),
+        lastWebhookAt: null,
       }),
     );
   });
@@ -1882,6 +1882,39 @@ describe('MaxBotLinkService', () => {
         status: ChatBotMembershipStatus.ACTIVE,
       }),
     );
+  });
+
+  it('preserves an observed title and separates access probes from real webhooks on the same chat', async () => {
+    const fixture = createServiceFixture();
+    const chatId = 'chat-no-metadata';
+    const botId = fixture.bots[0]!.id;
+    const previous = new Date(Date.now() - 60_000);
+    fixture.chats.set(chatId, { id: chatId, title: 'Named chat', primaryBotId: botId, botId });
+    fixture.memberships.push(createActiveMembership(chatId, botId, 0, { lastWebhookAt: previous }));
+
+    await fixture.service.bindChatToBot({ chatId, botId });
+    await fixture.service.bindChatToBot({
+      chatId,
+      botId,
+      title: `Chat ${chatId}`,
+      lifecycleEventType: 'live_probe',
+      lifecycleSource: 'live_probe',
+      lifecycleEventAt: new Date(),
+    });
+    expect(fixture.chats.get(chatId)?.title).toBe('Named chat');
+    expect(fixture.memberships[0]?.lastWebhookAt).toEqual(previous);
+
+    jest.setSystemTime(Date.now() + 1_000);
+    const receivedAt = new Date();
+    await fixture.service.markChatBotRemoved({
+      chatId,
+      botId,
+      title: `Channel ${chatId}`,
+      lifecycleSource: 'webhook',
+      lifecycleEventAt: receivedAt,
+    });
+    expect(fixture.chats.get(chatId)?.title).toBe('Named chat');
+    expect(fixture.memberships[0]?.lastWebhookAt).toEqual(receivedAt);
   });
 
   it.each([1, 2, 3, 6])(

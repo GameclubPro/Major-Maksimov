@@ -11,7 +11,6 @@ import { getAppRole, roleRunsIngress } from '../runtime/app-role';
 import {
   WebhookSubscriptionStatusService,
   type WebhookSubscriptionBotSyncState,
-  type WebhookSubscriptionSyncState,
 } from '../system/webhook-subscription-status.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from './max-client.service';
 import { MaxBotRegistryService, type MaxBotDefinition } from './max-bot-registry.service';
@@ -94,12 +93,9 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
       const syncState = await this.webhookSubscriptionStatusService.getSyncState();
       const operationalBots = this.getOperationalBots();
       const botIds = operationalBots.map((bot) => bot.id);
-      const [latestRecordedIncomingByBot, membershipDiagnosticsByBot] = await Promise.all([
-        this.resolveLatestRecordedIncomingWebhookAtByBot(syncState, botIds),
-        this.resolveMembershipDiagnosticsByBot(botIds),
-      ]);
+      const membershipDiagnosticsByBot = await this.resolveMembershipDiagnosticsByBot(botIds);
       const latestRecordedIncomingWebhookAt = this.resolveLatestIso(
-        Object.values(latestRecordedIncomingByBot),
+        botIds.map((botId) => syncState?.bots?.[botId]?.lastIncomingWebhookAt ?? null),
       );
       const botResults: Array<{
         snapshot: BotWebhookSubscriptionSnapshot;
@@ -130,7 +126,8 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
       for (const bot of operationalBots) {
         const previousBotSyncState = syncState?.bots?.[bot.id] ?? null;
         const botState = {
-          latestRecordedIncomingWebhookAt: latestRecordedIncomingByBot[bot.id] ?? null,
+          // FLAG: Historical membership timestamps may reflect access repair, not incoming traffic.
+          latestRecordedIncomingWebhookAt: previousBotSyncState?.lastIncomingWebhookAt ?? null,
           membershipDiagnostics: membershipDiagnosticsByBot[bot.id] ?? {
             activeMemberships: 0,
             lastMembershipWebhookAt: null,
@@ -658,44 +655,6 @@ export class MaxWebhookSubscriptionReconcilerService implements OnModuleInit, On
     }
 
     return Date.now() - lastIngressAtMs >= this.staleIngressMs;
-  }
-
-  private async resolveLatestRecordedIncomingWebhookAtByBot(
-    syncState: WebhookSubscriptionSyncState | null,
-    botIds: readonly string[],
-  ): Promise<Record<string, string | null>> {
-    const normalizedBotIds = [...new Set(botIds.map((botId) => botId.trim()).filter(Boolean))];
-    if (normalizedBotIds.length === 0) {
-      return {};
-    }
-
-    const latestMembershipRows = await this.prisma.chatBotMembership.groupBy({
-      by: ['botId'],
-      _max: {
-        lastWebhookAt: true,
-      },
-      where: {
-        botId: {
-          in: normalizedBotIds,
-        },
-        lastWebhookAt: {
-          not: null,
-        },
-      },
-    });
-    const latestMembershipByBot = new Map(
-      latestMembershipRows.map((row) => [row.botId, row._max.lastWebhookAt?.toISOString() ?? null]),
-    );
-
-    return Object.fromEntries(
-      normalizedBotIds.map((botId) => [
-        botId,
-        this.resolveLatestIso([
-          syncState?.bots?.[botId]?.lastIncomingWebhookAt ?? null,
-          latestMembershipByBot.get(botId) ?? null,
-        ]),
-      ]),
-    );
   }
 
   private async resolveMembershipDiagnosticsByBot(

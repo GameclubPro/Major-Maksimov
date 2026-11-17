@@ -81,9 +81,14 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
         .mockResolvedValue(undefined),
       writeSyncState: jest.fn().mockResolvedValue(undefined),
     };
+    const client = {
+      getConfiguredWebhookSubscriptionTarget: jest.fn(),
+      ensureWebhookSubscription: jest.fn(),
+    };
+    const registry = { getAllBots: jest.fn().mockReturnValue([{ id: 'bot-1' }, { id: 'bot-2' }]) };
     const service = new MaxWebhookSubscriptionReconcilerService(
-      {} as never,
-      { getAllBots: jest.fn().mockReturnValue([]) } as never,
+      client as never,
+      registry as never,
       statusService as never,
       createPrismaMock() as never,
       { get: jest.fn((_key: string, fallback: unknown) => fallback) } as never,
@@ -92,7 +97,10 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     try {
       await expect(service.onModuleInit()).resolves.toBeUndefined();
       expect(statusService.writeSyncState).not.toHaveBeenCalled();
+      expect(registry.getAllBots).not.toHaveBeenCalled();
+      expect(client.ensureWebhookSubscription).not.toHaveBeenCalled();
 
+      registry.getAllBots.mockReturnValue([]);
       await jest.advanceTimersByTimeAsync(60_000);
 
       expect(statusService.getSyncState).toHaveBeenCalledTimes(2);
@@ -359,10 +367,12 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
     const bots = [
       {
         id: 'first_bot',
+        state: 'active',
         webhookHeaderSecrets: ['secret-header-current'],
       },
       {
         id: 'second_bot',
+        state: 'active',
         webhookHeaderSecrets: ['secret-header-current'],
       },
     ];
@@ -452,6 +462,18 @@ describe('MaxWebhookSubscriptionReconcilerService', () => {
 
     expect(startedBots).toEqual(['first_bot', 'first_bot', 'second_bot', 'second_bot']);
     expect(maxClient.listWebhookSubscriptions).toHaveBeenCalledTimes(4);
+    expect(statusService.writeSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bots: expect.objectContaining({
+          second_bot: expect.objectContaining({
+            operationalDiagnostics: expect.objectContaining({
+              lastIncomingWebhookAt: null,
+              lastMembershipWebhookAt: '2026-07-03T12:00:00.000Z',
+            }),
+          }),
+        }),
+      }),
+    );
     expect(statusService.writeSyncState).toHaveBeenCalledWith(
       expect.objectContaining({
         bots: expect.objectContaining({
