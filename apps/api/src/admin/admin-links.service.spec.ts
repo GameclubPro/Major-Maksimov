@@ -1,3 +1,8 @@
+import type { MaxClientService } from '../max/max-client.service';
+import {
+  PUBLIC_HANDLE_CHANNEL,
+  createHandleLookupMock,
+} from '../moderation/navigation/max-handle-navigation.fixture';
 import { ConfigService } from '@nestjs/config';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import type { ManagedEntitiesService } from './managed-entities.service';
@@ -12,8 +17,12 @@ function harness(config: Record<string, unknown> = {}) {
     >()
     .mockResolvedValue(undefined);
   const admin = { assertChatAdminAccess } as Pick<ManagedEntitiesService, 'assertChatAdminAccess'>;
+  const handleLookup = createHandleLookupMock();
   return {
-    service: new AdminLinksService(admin as ManagedEntitiesService, new ConfigService(config)),
+    handleLookup,
+    service: new AdminLinksService(admin as ManagedEntitiesService, new ConfigService(config), {
+      resolvePublicChannelHandle: handleLookup,
+    } as unknown as MaxClientService),
     assertChatAdminAccess,
     user: { userId: 'admin-1' } as AuthUser,
   };
@@ -34,6 +43,26 @@ const exactPolicy = () =>
   });
 
 describe('AdminLinksService preview', () => {
+  it('uses confirmed channel identity in preview and retains exact exceptions', async () => {
+    const h = harness();
+    h.handleLookup.mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+    const policy = linkRulesPolicySchema.parse({ version: 1, mode: 'ALLOW_SELECTED', rules: [] });
+    const body = { policy, text: '@azov_overhear' };
+    await expect(h.service.preview('chat-1', h.user, body)).resolves.toMatchObject({
+      allowed: false,
+      targetsCount: 1,
+    });
+    const allowed = linkRulesPolicySchema.parse({
+      ...policy,
+      rules: [
+        { id: 'channel', effect: 'ALLOW', kind: 'WEB_EXACT', target: PUBLIC_HANDLE_CHANNEL.url },
+      ],
+    });
+    await expect(
+      h.service.preview('chat-1', h.user, { ...body, policy: allowed }),
+    ).resolves.toMatchObject({ allowed: true, targetsCount: 1 });
+  });
+
   it('requires exact chat admin access before validating the submitted text', async () => {
     const h = harness();
     h.assertChatAdminAccess.mockRejectedValue(new Error('denied'));

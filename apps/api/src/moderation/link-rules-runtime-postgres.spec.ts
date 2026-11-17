@@ -1,3 +1,7 @@
+import {
+  PUBLIC_HANDLE_CHANNEL,
+  createHandleLookupMock,
+} from './navigation/max-handle-navigation.fixture';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { linkRulesPolicySchema } from '@maxim/contracts/settings';
@@ -60,104 +64,150 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
   });
   const settings = () => db.chatSettings.findUniqueOrThrow({ where: { chatId } });
 
-  it('runs real seed and lease SQL and binds the exact source to the new policy', async () => {
-    const current = await settings();
-    const row = {
-      id: 'message-1',
-      timestamp: current.linkPolicyEffectiveAt!.getTime(),
-      recipient: { chat_id: chatId },
-      sender: { user_id: 'user-1', is_bot: false },
-      body: {
-        mid: 'message-1',
-        text: 'site',
-        markup: [{ type: 'link', from: 0, length: 4, url: 'https://blocked.example/path' }],
-      },
-    };
-    const max = {
-      listMessages: jest.fn().mockResolvedValue([row]),
-      getExactMessageRow: jest.fn().mockResolvedValue(row),
-      getChatMemberAccess: jest
-        .fn()
-        .mockResolvedValue({ userId: 'user-1', isAdmin: false, isOwner: false, permissions: [] }),
-    };
-    const bots = {
-      resolveBotRoute: jest.fn().mockResolvedValue({ botId: 'link-native-bot' }),
-      isKnownBotUserId: jest.fn().mockReturnValue(false),
-    };
-    const intents = {
-      ensureIntent: jest.fn().mockResolvedValue({
-        intentId: 'native-link-intent',
-        rollout: 'execute',
-        status: 'PENDING',
-      }),
-    };
-    const service = new LinkHistoryRecoveryService(
-      db as never,
-      max as never,
-      bots as never,
-      intents as never,
-      { decide: async () => ({ action: 'run', retryAfterMs: 0, reason: 'ok' }) } as never,
-      new ConfigService({
-        MODERATION_LINK_HISTORY_SCAN_ENABLED: true,
-        MODERATION_LINK_HISTORY_DELETE_ENABLED: true,
-      }),
-    );
-    await expect(service.runOnce()).resolves.toBe(true);
-    expect(intents.ensureIntent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        chatId,
-        sourceMessageAt: current.linkPolicyEffectiveAt,
-        event: expect.objectContaining({
-          metadata: expect.objectContaining({
-            linkRulesPolicySha256: fingerprintLinkRulesPolicy(current.linkRulesPolicy),
-            policyRevision: current.linkPolicyRevision,
+  it.each(['link', 'plain_handle', 'named_handle'] as const)(
+    'runs real policy/lease SQL and final rechecks for %s',
+    async (carrier) => {
+      if (carrier !== 'link')
+        await db.chatSettings.update({
+          where: { chatId },
+          data: {
+            linkRulesPolicy: {
+              ...policy(),
+              rules: [
+                {
+                  id: 'channel',
+                  effect: 'DENY',
+                  kind: 'WEB_EXACT',
+                  target: PUBLIC_HANDLE_CHANNEL.url,
+                },
+              ],
+            },
+          },
+        });
+      const current = await settings();
+      const row = {
+        id: 'message-1',
+        timestamp: current.linkPolicyEffectiveAt!.getTime(),
+        recipient: { chat_id: chatId },
+        sender: { user_id: 'user-1', is_bot: false },
+        body: {
+          mid: 'message-1',
+          text: carrier === 'link' ? 'site' : '@azov_overhear',
+          markup:
+            carrier === 'link'
+              ? [{ type: 'link', from: 0, length: 4, url: 'https://blocked.example/path' }]
+              : carrier === 'named_handle'
+                ? [{ type: 'user_mention', from: 0, length: 14, user_link: '@azov_overhear' }]
+                : [],
+        },
+      };
+      const handleLookup = createHandleLookupMock().mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
+      const max = {
+        resolvePublicChannelHandle: handleLookup,
+        listMessages: jest.fn().mockResolvedValue([row]),
+        getExactMessageRow: jest.fn().mockResolvedValue(row),
+        getChatMemberAccess: jest
+          .fn()
+          .mockResolvedValue({ userId: 'user-1', isAdmin: false, isOwner: false, permissions: [] }),
+      };
+      const bots = {
+        resolveBotRoute: jest.fn().mockResolvedValue({ botId: 'link-native-bot' }),
+        isKnownBotUserId: jest.fn().mockReturnValue(false),
+      };
+      const intents = {
+        ensureIntent: jest.fn().mockResolvedValue({
+          intentId: 'native-link-intent',
+          rollout: 'execute',
+          status: 'PENDING',
+        }),
+      };
+      const service = new LinkHistoryRecoveryService(
+        db as never,
+        max as never,
+        bots as never,
+        intents as never,
+        { decide: async () => ({ action: 'run', retryAfterMs: 0, reason: 'ok' }) } as never,
+        new ConfigService({
+          MODERATION_LINK_HISTORY_SCAN_ENABLED: true,
+          MODERATION_LINK_HISTORY_DELETE_ENABLED: true,
+        }),
+      );
+      await expect(service.runOnce()).resolves.toBe(true);
+      expect(intents.ensureIntent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId,
+          sourceMessageAt: current.linkPolicyEffectiveAt,
+          event: expect.objectContaining({
+            metadata: expect.objectContaining({
+              linkRulesPolicySha256: fingerprintLinkRulesPolicy(current.linkRulesPolicy),
+              policyRevision: current.linkPolicyRevision,
+            }),
           }),
         }),
-      }),
-    );
-    const reason = {
-      ruleCode: 'LINK_BLOCKED_DELETE',
-      reasonKey: 'new-link',
-      score: 1,
-      metadata: {
-        linkPolicyRevision: current.linkPolicyRevision,
-        linkPolicyEffectiveAt: current.linkPolicyEffectiveAt!.toISOString(),
-        linkRulesPolicySha256: fingerprintLinkRulesPolicy(current.linkRulesPolicy),
-      },
-    };
-    const guardDb = {
-      chatSettings: db.chatSettings,
-      domainAllowlist: db.domainAllowlist,
-      $transaction: db.$transaction.bind(db),
-      moderationDeleteIntentReason: { findMany: async () => [reason] },
-    };
-    const guard = new LinkHistoryDeleteGuardService(
-      guardDb as never,
-      max as never,
-      bots as never,
-      new ConfigService(),
-    );
-    const input = {
-      intentId: 'native-link-intent',
-      chatId,
-      messageId: 'message-1',
-      subjectUserId: 'user-1',
-      botId: 'link-native-bot',
-    };
-    const preparation = await guard.prepareForDispatch(input);
-    await db.chatSettings.update({
-      where: { chatId },
-      data: { linkRulesPolicy: { ...policy(), rules: [] } },
-    });
-    const changed = await settings();
-    expect(changed.linkPolicyRevision).toBeGreaterThan(current.linkPolicyRevision);
-    expect(changed.linkPolicyEffectiveAt!.getTime()).toBeGreaterThanOrEqual(
-      current.linkPolicyEffectiveAt!.getTime(),
-    );
-    await expect(finalizeDeleteAuthority(preparation)).rejects.toMatchObject({
-      code: 'live_policy_revision_changed',
-    });
-  });
+      );
+      const reason = {
+        ruleCode: 'LINK_BLOCKED_DELETE',
+        reasonKey: 'new-link',
+        score: 1,
+        metadata: {
+          linkPolicyRevision: current.linkPolicyRevision,
+          linkPolicyEffectiveAt: current.linkPolicyEffectiveAt!.toISOString(),
+          linkRulesPolicySha256: fingerprintLinkRulesPolicy(current.linkRulesPolicy),
+        },
+      };
+      const guardDb = {
+        chatSettings: db.chatSettings,
+        domainAllowlist: db.domainAllowlist,
+        $transaction: db.$transaction.bind(db),
+        moderationDeleteIntentReason: { findMany: async () => [reason] },
+      };
+      const guard = new LinkHistoryDeleteGuardService(
+        guardDb as never,
+        max as never,
+        bots as never,
+        new ConfigService(),
+      );
+      const input = {
+        intentId: 'native-link-intent',
+        chatId,
+        messageId: 'message-1',
+        subjectUserId: 'user-1',
+        botId: 'link-native-bot',
+      };
+      const preparation = await guard.prepareForDispatch(input);
+      if (carrier !== 'link') {
+        handleLookup.mockRejectedValue(new Error('identity unconfirmed'));
+        await expect(guard.assertIntentStillActionable(input)).rejects.toMatchObject({
+          code: 'live_violation_no_longer_present',
+        });
+        max.getExactMessageRow.mockResolvedValue({
+          ...row,
+          body: {
+            mid: 'message-1',
+            text: '@azov_overhear',
+            markup: [{ type: 'user_mention', from: 0, length: 14, user_id: 67123224 }],
+          },
+        });
+        handleLookup.mockClear();
+        await expect(guard.assertIntentStillActionable(input)).rejects.toMatchObject({
+          code: 'live_violation_no_longer_present',
+        });
+        expect(handleLookup).not.toHaveBeenCalled();
+      }
+      await db.chatSettings.update({
+        where: { chatId },
+        data: { linkRulesPolicy: { ...policy(), rules: [] } },
+      });
+      const changed = await settings();
+      expect(changed.linkPolicyRevision).toBeGreaterThan(current.linkPolicyRevision);
+      expect(changed.linkPolicyEffectiveAt!.getTime()).toBeGreaterThanOrEqual(
+        current.linkPolicyEffectiveAt!.getTime(),
+      );
+      await expect(finalizeDeleteAuthority(preparation)).rejects.toMatchObject({
+        code: 'live_policy_revision_changed',
+      });
+    },
+  );
 
   it('uses bounded JSON allowance expiry instead of frozen legacy rows and tolerates malformed JSON expiry', async () => {
     const current = await settings();

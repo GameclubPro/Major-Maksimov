@@ -23,10 +23,10 @@ import {
   parseLinkHistoryListedMessage,
 } from './link-history-recovery.util';
 import {
-  extractEnabledNavigationTargets,
   resolveEnabledNavigationTargetOptions,
   type EnabledNavigationTargetOptions,
 } from './navigation/enabled-navigation-targets';
+import { resolveEnabledNavigationTargets } from './navigation/max-handle-navigation';
 import { adaptMaxMessageNavigationView } from './navigation/max-navigation-view.adapter';
 import { MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES } from './moderation.service.support';
 import { fingerprintLinkRulesPolicy, isRuntimeLinkPolicyActive } from './link-rules-policy.runtime';
@@ -329,7 +329,7 @@ export class LinkHistoryDeleteGuardService {
     }
 
     const targets = filterActionableNavigationTargets(
-      extractEnabledNavigationTargets(view, this.extractionOptions),
+      await resolveEnabledNavigationTargets(view, this.extractionOptions, this.maxClient),
     );
     if (
       !isLinkHistoryPolicyViolation(

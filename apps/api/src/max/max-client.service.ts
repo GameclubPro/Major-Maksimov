@@ -1,3 +1,4 @@
+import { resolvePublicMaxHandle } from './max-public-handle';
 import {
   MaxApiInternalRateLimitError,
   type MaxApiRateLimitScope,
@@ -3720,6 +3721,10 @@ export class MaxClientService implements OnModuleDestroy {
     }
 
     return snapshot;
+  }
+
+  resolvePublicChannelHandle(url: string, timeoutMs: number) {
+    return resolvePublicMaxHandle(url, timeoutMs);
   }
 
   async getChannelSnapshotByLink(
