@@ -50,7 +50,9 @@ const LITERAL_LATIN_TERM =
 const MEASUREMENT_LITERAL =
   /^(?:(?:на|по|до|за)\s*)?[+-]?\d{1,6}(?:[.,]\d{1,3})?(?:\s*[-–—]\s*\d{1,6}(?:[.,]\d{1,3})?)?\s*[-–—]?\s*(л(?:итр(?:а|ов)?)?|l(?:it(?:er|re)s?)?|л\.?\s*с\.?|лет(?:н(?:ий|яя|ее|ие|его|ему|ей|их|ими|им|ем|юю))?)$/iu;
 const VOLUME_CONTEXT =
-  /(?:об[ъь]?ем|емкост|ёмкост|бак|канистр|вод[аыу]|топлив|бензин|дизел|масл|аквариум|рюкзак|кастрюл|ведр|бутыл|бочк|литр|volume|tank|water|fuel|capacity|backpack)/iu;
+  /(?:об[ъь]?ем|емкост|ёмкост|бак|канистр|вод[аыу]|топлив|бензин|дизел|масл|аквариум|рюкзак|кастрюл|ведр|бутыл|бочк|горш(?:ок|к)|кашпо|литр|volume|tank|water|fuel|capacity|backpack)/iu;
+const ADJACENT_QUANTITY_LISTING =
+  /(?:^|[^\p{L}\p{N}])(?:отдам|отдадим|отдаю|отда[её]м|продам|продадим|продаю|прода[её]м|прода[её]тся|продаются|обменяю|меняю)[ \t]*(?:\([ \t]*)?$/iu;
 const AGE_CONTEXT =
   /(?:возраст|дет(?:и|ей|ям|ск)|реб[её]н|ребят|малыш|дошколь|школьни|групп|заняти|студи|круж|секци)/iu;
 
@@ -99,10 +101,14 @@ export function getMeasurementLiteralContext(
     /^[ \t]*\.?[ \t]*,?[ \t]*(?:гр\.|групп[аы]|дет(?:и|ей)|возраст)(?![\p{L}\p{N}])/iu.test(
       afterWindow,
     );
+  // FLAG: A listing verb immediately before a complete quantity supplies literal context
+  // even when the item is shown only in a photo. Keep clause barriers and target checks.
+  const adjacentQuantityListing = ADJACENT_QUANTITY_LISTING.test(before);
   if (
     !unambiguousUnit &&
     !standalone &&
     !VOLUME_CONTEXT.test(localContext) &&
+    !adjacentQuantityListing &&
     !(unit.toLowerCase() === 'л' && (AGE_CONTEXT.test(localContext) || adjacentAgeLabel))
   ) {
     return null;
