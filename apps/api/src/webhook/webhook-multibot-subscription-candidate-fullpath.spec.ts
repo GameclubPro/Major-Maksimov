@@ -281,6 +281,36 @@ describeStores(
       return s.prisma.requiredSubscriptionCandidate.findUniqueOrThrow({ where: { id: row.id } });
     }
 
+    it('keeps a refused target route unknown after restart without a default-bot probe or sanction', async () => {
+      const f = await fixture();
+      const source = await nominate(f);
+      await f.s.prisma.chat.update({
+        where: { id: f.targetId },
+        data: { primaryBotId: null, botId: null, routingState: 'NO_ELIGIBLE_BOT' },
+      });
+      expect(await f.s.links.resolveBotIdForRead({ chatId: f.targetId })).toBeNull();
+      const { worker } = await f.restart();
+      f.targetReads.mockClear();
+      expect(await worker.sweep()).toBe(1);
+      const pending = await read(f.s, source.row);
+      expect(pending).toMatchObject({ status: 'WAITING_CHECK', frozenPlan: null, claimId: null });
+      expect(pending.deadlineAt).toEqual(source.row.deadlineAt);
+      expect(f.targetReads).not.toHaveBeenCalled();
+      await expectNoEffect(f.s, f.chatId);
+
+      const following = await f.s.ingest({
+        chatId: f.chatId,
+        messageId: `following-refused-route-${randomUUID()}`,
+        text: 'Independent receipt after an unavailable target route',
+        senderless: true,
+      });
+      await f.s.drain();
+      expect(
+        (await f.s.prisma.webhookEvent.findUniqueOrThrow({ where: { id: following } })).status,
+      ).toBe('PROCESSED');
+      await expectNoEffect(f.s, f.chatId);
+    });
+
     it.each(initialReadBoundaries)(
       'registers without effects on the initial %s GET refusal and discovers one frozen decision after restart across mirrors',
       async (boundary) => {

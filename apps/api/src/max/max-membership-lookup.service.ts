@@ -608,14 +608,21 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
 
     const now = Date.now();
     const requestedBotId = typeof options.botId === 'string' ? options.botId.trim() : '';
+    const requireReadRoute = policyName === 'moderation_required_subscription';
     let lookupBotId: string | null = this.normalizeBotScopedCacheBotId(requestedBotId);
     if (
       !lookupBotId &&
-      this.botScopedCacheEnabled &&
+      (this.botScopedCacheEnabled || requireReadRoute) &&
       normalizedUserIds.length > 0 &&
       this.maxBotLinkService
     ) {
-      lookupBotId = await this.resolveLookupBotId(normalizedChatId);
+      lookupBotId = await this.resolveLookupBotId(normalizedChatId, requireReadRoute);
+      // FLAG: A refused target route cannot borrow a default token or retained
+      // negative membership to authorize a subscription notice or sanction.
+      if (requireReadRoute && !lookupBotId)
+        return new Map(
+          normalizedUserIds.map((userId) => [userId, { membership: null, fresh: false }]),
+        );
     }
     const basePolicy = MEMBERSHIP_LOOKUP_POLICIES[policyName];
     const policy = this.resolveEffectivePolicy(normalizedChatId, policyName, basePolicy, now);
@@ -757,7 +764,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     }
 
     if (usersToLookup.length > 0 && !lookupBotId && this.maxBotLinkService) {
-      lookupBotId = await this.resolveLookupBotId(normalizedChatId);
+      lookupBotId = await this.resolveLookupBotId(normalizedChatId, requireReadRoute);
     }
 
     if (usersToLookup.length === 1) {
@@ -816,7 +823,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
       // FLAG: Retry only a different currently selected read route, once. Explicit token requests
       // never switch identities; no unknown membership result can authorize a sanction.
       try {
-        const peerBotId = await this.resolveLookupBotId(normalizedChatId);
+        const peerBotId = await this.resolveLookupBotId(normalizedChatId, requireReadRoute);
         if (peerBotId && peerBotId !== lookupBotId) {
           const peerResults = await this.getMembershipResolutions(
             normalizedChatId,
@@ -1367,7 +1374,10 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     }
   }
 
-  private async resolveLookupBotId(chatId: string): Promise<string | null> {
+  private async resolveLookupBotId(
+    chatId: string,
+    requireReadRoute = false,
+  ): Promise<string | null> {
     if (!this.maxBotLinkService) {
       return null;
     }
@@ -1380,14 +1390,14 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
         purpose: 'read',
         chatId,
       });
-      if (route.botId) {
+      if (route.botId || requireReadRoute) {
         return route.botId;
       }
     }
 
     if (typeof this.maxBotLinkService.resolveBotIdForRead === 'function') {
       const botId = await this.maxBotLinkService.resolveBotIdForRead({ chatId });
-      if (botId) {
+      if (botId || requireReadRoute) {
         return botId;
       }
     }

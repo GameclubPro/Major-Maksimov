@@ -1,5 +1,12 @@
 import { centralEnabled } from '../../statistics/stats-common';
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import {
+  HttpException,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -36,7 +43,7 @@ export class StatisticsExchangeRuntimeService implements OnModuleInit, OnModuleD
       // FLAG: Central rights refresh consumes expiring demand, never a fleet sweep.
       if (!this.accessActive)
         this.accessActive = this.refreshAccessBatch()
-          .catch(() => this.logger.warn('EXCHANGE_ACCESS_UNAVAILABLE'))
+          .catch((error: unknown) => this.reportAccessFailure(error))
           .finally(() => {
             this.accessActive = null;
           });
@@ -110,8 +117,8 @@ export class StatisticsExchangeRuntimeService implements OnModuleInit, OnModuleD
       for (let count = 0; count < 4 && !this.stopping && Date.now() < deadline; count++) {
         try {
           if (!(await this.grants.refreshRequestedAccess())) return;
-        } catch {
-          this.logger.warn('EXCHANGE_ACCESS_UNAVAILABLE');
+        } catch (error) {
+          this.reportAccessFailure(error);
           return;
         }
       }
@@ -132,6 +139,26 @@ export class StatisticsExchangeRuntimeService implements OnModuleInit, OnModuleD
       if (!row) return;
       await this.access.refresh(row, true);
     }
+  }
+  private reportAccessFailure(error: unknown): void {
+    const response = error instanceof HttpException ? error.getResponse() : null;
+    const pending =
+      error instanceof HttpException &&
+      error.getStatus() === 503 &&
+      response !== null &&
+      typeof response === 'object' &&
+      'code' in response &&
+      response.code === 'MARKETPLACE_ACCESS_PENDING';
+    const failureCode = pending
+      ? 'ACCESS_PENDING'
+      : error instanceof Prisma.PrismaClientKnownRequestError
+        ? error.code === 'P2034' || ['40001', '40P01'].includes(String(error.meta?.code))
+          ? 'STORE_CONFLICT'
+          : 'STORE_ERROR'
+        : classifyExchangeFailure(error).code;
+    // FLAG: Fixed classifications only: peer bodies, SQL, identities and raw errors
+    // never enter this diagnostic. Admission, demand expiry and retry stay unchanged.
+    this.logger.warn({ failureCode }, 'EXCHANGE_ACCESS_UNAVAILABLE');
   }
   async refreshRemoteAccessBatch(): Promise<void> {
     if (!this.enabled() || centralEnabled(this.config)) return;

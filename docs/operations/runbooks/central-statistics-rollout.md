@@ -163,6 +163,13 @@ is best effort; a later statistics read can retry. Redis command waits are cappe
 with no offline or local application wait queue. Stale grant revisions cannot restore removed
 access. Publisher handoff retains its exact identity and background admission.
 
+`EXCHANGE_ACCESS_UNAVAILABLE` includes a fixed `failureCode`: `ACCESS_PENDING` for
+explicit deferred admission/handoff, `ACCESS_DENIED` for rejected rights,
+`STORE_CONFLICT`/`STORE_ERROR` for classified database failures, or the existing
+exchange failure category. `UNKNOWN` remains unresolved. No raw exception, peer
+body, query or identity is logged. These diagnostics preserve the original demand
+deadline, backoff and authorization; a warning alone proves neither denial nor recovery.
+
 Archive pulls, reverse-import access and legacy history remain retired in central mode.
 Snapshot metadata cleanup remains active. Neither cache reads nor renewal advance
 measurement/import-success timestamps. Legacy mode retains its existing five-minute policy.

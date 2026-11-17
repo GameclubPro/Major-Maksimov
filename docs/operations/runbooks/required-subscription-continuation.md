@@ -15,6 +15,14 @@ lookups, expired proofs, 404s, timeouts and attempted or ambiguous mutations do 
 The initial leader awaits registration and rechecks its lease before completing without effects;
 store or lease failure must not become a successful handoff.
 
+Required-subscription membership reads honor the target's current read route before cache use.
+A refused route remains unknown: it cannot fall through to the default bot or reuse a retained
+negative membership, even when bot-scoped caching is disabled. This matches the queued notice's
+final target check and avoids creating work that it must reject. A missing route carries no
+local-quota provenance and cannot nominate a new candidate; an existing candidate retains its
+original deadline and unavailable-read retry. Independent receipts continue without sanctions.
+Coverage includes `required-subscription-routing.spec.ts` and the native restart case below.
+
 The source envelope retains the original event time and absolute five-minute deadline, policy
 fingerprint, bot observation, message/author and media scope. It contains a bounded masked excerpt,
 never the raw message. Registration conflicts preserve the first source and all existing effects.

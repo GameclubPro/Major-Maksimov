@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { MaxMembershipLookupService } from '../max/max-membership-lookup.service';
+import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import { fingerprintModerationSettings } from './moderation-settings-fingerprint';
 import { RequiredSubscriptionExecutionGuardService } from './required-subscription-execution-guard.service';
 import type { RequiredSubscriptionNoticeAuthority } from './required-subscription-notice-authority';
@@ -8,6 +9,7 @@ jest.mock('ioredis', () => ({
   __esModule: true,
   default: jest.fn(() => {
     const redis = {
+      mget: jest.fn(async (...keys: string[]) => keys.map(() => null)),
       eval: jest.fn(async (_script: string, count: number) => Array<number>(count).fill(1)),
       quit: jest.fn(async () => 'OK'),
       duplicate: jest.fn(),
@@ -17,7 +19,7 @@ jest.mock('ioredis', () => ({
   }),
 }));
 
-function fixture() {
+function fixture(botScopedCacheEnabled = true) {
   const settings = {
     requiredSubscriptionEnabled: true,
     requiredSubscriptionChannelIds: ['target-1', 'target-2'],
@@ -35,9 +37,21 @@ function fixture() {
   ]);
   const bots = {
     isKnownBotUserId: jest.fn(() => false),
-    resolveBotRoute: jest.fn(async ({ chatId }: { chatId: string }) => ({
-      botId: targetBots.get(chatId),
+    resolveBotRoute: jest.fn<
+      ReturnType<MaxBotLinkService['resolveBotRoute']>,
+      Parameters<MaxBotLinkService['resolveBotRoute']>
+    >(async ({ chatId }) => ({
+      purpose: 'read',
+      chatId: chatId ?? null,
+      primaryBotId: null,
+      botId: targetBots.get(chatId ?? '') ?? null,
+      candidateBotIds: targetBots.has(chatId ?? '') ? [targetBots.get(chatId!)!] : [],
+      reason: 'default',
     })),
+    resolveBotId: jest.fn<
+      ReturnType<MaxBotLinkService['resolveBotId']>,
+      Parameters<MaxBotLinkService['resolveBotId']>
+    >(async () => 'default-bot'),
   };
   const max = {
     getChatMemberAccess: jest.fn(async () => ({
@@ -64,6 +78,7 @@ function fixture() {
   const config = new ConfigService({
     REDIS_URL: 'redis://127.0.0.1:1',
     MAX_MEMBERSHIP_LOOKUP_BATCH_WINDOW_MS: 0,
+    MAX_MEMBERSHIP_LOOKUP_BOT_SCOPED_CACHE_ENABLED: botScopedCacheEnabled,
   });
   const membership = new MaxMembershipLookupService(max as never, config, bots as never);
   const prisma = { chatSettings: { findUnique: jest.fn(async () => settings) } };
@@ -109,10 +124,52 @@ function fixture() {
             },
           ],
         });
-  return { authorize, membership, settings, max, bots, proof, immunity };
+  return { authorize, membership, settings, max, bots, proof, immunity, targetBots };
 }
 
 describe('required subscription target routing at final authority', () => {
+  it.each([true, false])(
+    'keeps a refused read route unknown before cache/MAX (bot-scoped cache: %s)',
+    async (botScopedCacheEnabled) => {
+      const s = fixture(botScopedCacheEnabled);
+      try {
+        await expect(
+          s.membership.getMembershipResolution(
+            'target-1',
+            'user-1',
+            'moderation_required_subscription',
+          ),
+        ).resolves.toEqual({ membership: false, fresh: true });
+        s.targetBots.delete('target-1');
+        s.max.getChatMembersAccess.mockClear();
+        s.max.getChatMembersAccess.mockResolvedValue(new Map());
+
+        for (const forceRefresh of [false, true]) {
+          await expect(
+            s.membership.getMembershipResolution(
+              'target-1',
+              'user-1',
+              'moderation_required_subscription',
+              { forceRefresh },
+            ),
+          ).resolves.toEqual({ membership: null, fresh: false });
+        }
+        expect(s.bots.resolveBotId).not.toHaveBeenCalled();
+        expect(s.max.getChatMembersAccess).not.toHaveBeenCalled();
+
+        const finalRoute = jest.fn(async () => undefined);
+        for (const kind of ['delete', 'notice'] as const)
+          await expect(s.authorize(kind, finalRoute)).rejects.toThrow(
+            'fresh membership unavailable',
+          );
+        expect(finalRoute).not.toHaveBeenCalled();
+        expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+      } finally {
+        await s.membership.onModuleDestroy();
+      }
+    },
+  );
+
   it.each(['delete', 'notice'] as const)(
     'checks each target with its own route while keeping %s source authority on the selected peer',
     async (kind) => {
