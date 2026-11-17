@@ -140,6 +140,8 @@ describe('ProfanityDeleteGuardService', () => {
 
   it.each([
     'Спасибо, всё исправил',
+    'Отдам (3-6 л) за сладость, Новотроицк.',
+    'Горшки 3-6л, отдам за сладость) Новотроицк.',
     'blyaha na remne',
     'В зоопарке живет п.е.т.у.х.',
     'В детском центре а у т и с т пишет рассказ.',
@@ -157,14 +159,17 @@ describe('ProfanityDeleteGuardService', () => {
     expect(harness.immunity.consumeForMessage).not.toHaveBeenCalled();
   });
 
-  it.each(['отъебись', 'спиздил', 'Питомник продаёт щенков. Ты сука!'])(
-    'keeps corrected detection actionable at dispatch: %s',
-    async (text) => {
-      const harness = buildHarness();
-      harness.maxClient.getExactMessageRow.mockResolvedValue(buildMessage(text));
-      await expect(harness.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
-    },
-  );
+  it.each([
+    'отъебись',
+    'спиздил',
+    'Питомник продаёт щенков. Ты сука!',
+    'Отдам (3-6 л) за сладость, блять',
+    'Горшки 3-6л, а ты 36л',
+  ])('keeps corrected detection actionable at dispatch: %s', async (text) => {
+    const harness = buildHarness();
+    harness.maxClient.getExactMessageRow.mockResolvedValue(buildMessage(text));
+    await expect(harness.service.assertIntentStillActionable(baseInput)).resolves.toBe('allowed');
+  });
 
   it('accepts edited text that still violates current policy', async () => {
     const harness = buildHarness();
