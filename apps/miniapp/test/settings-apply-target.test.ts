@@ -7,9 +7,11 @@ import {
 } from '@maxim/contracts/settings';
 import {
   createDefaultApplySettingsTarget,
+  formatApplyTargetSaveLabel,
   formatApplyTargetCountLabel,
   isApplySettingsTargetPreviewCurrent,
 } from '../src/pages/settings/settings-apply-target';
+import { resolveSettingsSaveFavoriteType } from '../src/pages/settings/settings-save-folder';
 
 const applyTargetSheetSource = readFileSync(
   new URL('../src/pages/settings/settings-apply-target-sheet.tsx', import.meta.url),
@@ -111,16 +113,12 @@ test('selected chat previews cannot confirm another chat selection', () => {
   );
 });
 
-test('target picker names the affected chats and freezes selection during application', () => {
+test('direct confirmation names recipients without another scope selector', () => {
   assert.match(applyTargetSheetSource, /sampleChats\.slice\(0, 4\)/u);
   assert.match(applyTargetSheetSource, /aria-label="Выбранные чаты"/u);
-  assert.match(applyTargetSheetSource, /<li key=\{chat\.id\}>\{chat\.title\}<\/li>/u);
-  assert.match(applyTargetSheetSource, /aria-pressed=\{[\s\S]*?disabled=\{isApplying\}/u);
-  assert.match(
-    applyTargetSheetSource,
-    /disabled=\{isApplying \|\| favoriteLabelsStatus !== 'ready'\}/u,
-  );
-  assert.match(applyTargetSheetSource, /Сохраним этот чат и заменим настройки раздела/u);
+  assert.match(applyTargetSheetSource, /<span>\{chat\.title\}<\/span>/u);
+  assert.doesNotMatch(applyTargetSheetSource, /onTargetChange|aria-pressed|Область применения/u);
+  assert.match(applyTargetSheetSource, /Настройки «\{sectionLabel\}» будут заменены/u);
   assert.match(
     applyTargetSheetSource,
     /onClick=\{\(\) => \{\s*if \(canConfirm\) \{\s*onConfirm\(\)/u,
@@ -169,8 +167,49 @@ test('settings target picker shares authenticated labels and invalidates stale m
     applyTargetSheetSource,
     /saveHomeEntityFavoriteLabels|readHomeEntityFavoriteLabels|getHomeEntityFavoritesFallbackScope/u,
   );
-  assert.match(
-    applyTargetSheetSource,
-    /disabled=\{isApplying \|\| favoriteLabelsStatus !== 'ready'\}[\s\S]*?Названия категорий временно недоступны/u,
+  assert.match(applyTargetSheetSource, /favoriteReady &&\s*!favoriteChanged &&\s*supportedTarget/u);
+  assert.match(applyTargetSheetSource, /preview\?\.sourceChatId === sheet\.sourceChatId/u);
+});
+
+test('folder save uses a matching origin or one confirmed membership, never an arbitrary category', () => {
+  const favorites = {
+    chat: { important: ['a'], watch: ['b'], broadcast: [], test: [], partner: [], service: [] },
+    channel: { important: ['c'], watch: [], broadcast: [], test: [], partner: [], service: [] },
+  };
+  const route = (entityId: string, filter: string, entityType = 'chat') => ({
+    managedEntityWorkspace: {
+      version: 1,
+      entityId,
+      entityType,
+      origin: null,
+      homeSnapshot: { filter },
+      statsPreference: {},
+    },
+  });
+  assert.equal(resolveSettingsSaveFavoriteType('a', null, favorites), 'important');
+  assert.equal(resolveSettingsSaveFavoriteType('c', null, favorites), null);
+  assert.equal(
+    resolveSettingsSaveFavoriteType('a', route('a', 'important'), favorites),
+    'important',
   );
+  assert.equal(resolveSettingsSaveFavoriteType('a', route('a', 'watch'), favorites), null);
+  assert.equal(resolveSettingsSaveFavoriteType('a', route('b', 'watch'), favorites), 'important');
+  assert.equal(
+    resolveSettingsSaveFavoriteType('a', route('a', 'watch', 'channel'), favorites),
+    'important',
+  );
+  const ambiguous = { ...favorites, chat: { ...favorites.chat, watch: ['a'] } };
+  assert.equal(resolveSettingsSaveFavoriteType('a', null, ambiguous), null);
+  assert.equal(resolveSettingsSaveFavoriteType('a', route('a', 'watch'), ambiguous), 'watch');
+});
+
+test('save labels use the correct prepositional form', () => {
+  for (const [count, expected] of [
+    [1, 'Сохранить в 1 чате'],
+    [2, 'Сохранить в 2 чатах'],
+    [11, 'Сохранить в 11 чатах'],
+    [21, 'Сохранить в 21 чате'],
+    [111, 'Сохранить в 111 чатах'],
+  ] as const)
+    assert.equal(formatApplyTargetSaveLabel(count), expected);
 });

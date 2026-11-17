@@ -10,6 +10,7 @@ import { Spinner } from '../components/ui/spinner';
 import { createChatSettingsFieldAdapter } from '../features/network-settings/settings-field-bindings';
 import { settingsSectionPaths } from '../features/network-settings/field-paths';
 import { useHomeEntityFavorites } from '../lib/home-entity-favorites-context';
+import { isApplySettingsTargetPreviewCurrent } from './settings/settings-apply-target';
 import { SettingsOverviewSearchPlaceholder } from '../components/ui/settings-overview-search-placeholder';
 import { SettingsOverviewLoading } from '../components/ui/settings-overview-skeleton';
 import { useSettingsRules } from './settings/use-settings-rules';
@@ -32,6 +33,7 @@ import {
   normalizeStoredNavigationAllowlistEntry,
   stepDeleteBotMessagesDelayMinutes,
   type ChatSettings,
+  type ApplySettingsTarget,
   type ChatSettingsScreenResponse,
   type DomainAllowlistEntry,
   type NavigationAllowlistKind,
@@ -57,6 +59,7 @@ import '../styles/settings-home-compact.css';
 import '../styles/settings-home-route-polish.css';
 import '../styles/broadcast-studio-base.css';
 import './settings/settings-rules-publication.css';
+import './settings/settings-section-save-footer.css';
 import '../styles/settings-link-allowlist.css';
 import { useSettingsScreenQuery } from './settings/use-settings-screen-query';
 import { formatTimezoneLabel } from '../lib/timezone-label';
@@ -299,7 +302,6 @@ import {
   SettingsSectionKey,
   INITIAL_EXPANDED_SECTIONS,
   SECTION_LABELS,
-  createDefaultApplySettingsTarget,
   resolveDuplicateSharedWindowSec,
   resolveDuplicateAllowedCount,
   resolveDuplicateAllowedCountMax,
@@ -367,7 +369,7 @@ const LazyBotPermissionRequiredDialog = lazy(() =>
 );
 const LazySettingsSectionSaveFooter = lazy(() =>
   import('./settings/settings-section-save-footer').then((module) => ({
-    default: module.SettingsSectionSaveFooter,
+    default: module.SettingsChatSectionSaveFooter,
   })),
 );
 let settingsApplyTargetSheetPromise: Promise<{
@@ -4407,7 +4409,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     }
   }
 
-  function openApplyTargetSheet(section: ApplySectionKey) {
+  function openApplyTargetSheet(section: ApplySectionKey, target: ApplySettingsTarget) {
     if (!chatId || !draft) {
       return;
     }
@@ -4452,7 +4454,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       stopWordsStorageStatus,
       stopWordsReplacement,
       isCurrentScope: isCurrentSettingsScope,
-      target: createDefaultApplySettingsTarget(),
+      target,
     });
   }
 
@@ -4461,6 +4463,21 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       return;
     }
     if (applyTargetSheet.isCurrentScope?.() === false) return;
+    const favoriteType = applyTargetSheet.target.favoriteTypes[0];
+    if (
+      applyTargetSheet.target.mode === 'favoriteTypes' &&
+      (applyTargetSheet.target.favoriteTypes.length !== 1 ||
+        !favoriteType ||
+        !favoritesSnapshot.assignments.chat[favoriteType].includes(applyTargetSheet.sourceChatId))
+    ) {
+      setApplyTargetSheet(null);
+      pushToast({
+        tone: 'info',
+        title: 'Папка чата изменилась',
+        description: 'Откройте сохранение заново.',
+      });
+      return;
+    }
     if (
       applyTargetSheet.section === 'stopWords' &&
       (stopWordsStorageLocked ||
@@ -4482,6 +4499,8 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     if (
       applyTargetPreviewEpoch !== favoritesCompositionEpochRef.current ||
       !applyTargetPreview ||
+      applyTargetPreview.sourceChatId !== applyTargetSheet.sourceChatId ||
+      !isApplySettingsTargetPreviewCurrent(applyTargetSheet.target, applyTargetPreview) ||
       applyTargetPreviewLoading
     ) {
       setApplyTargetPreview(null);
@@ -4564,15 +4583,16 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       saveLabel?: string;
     },
   ) {
-    if (!isSectionDirty(section) && settingsConflict?.section !== section) {
-      return null;
-    }
-
     return (
       <Suspense fallback={null}>
         <LazySettingsSectionSaveFooter
           section={section}
           options={options}
+          hasChanges={isSectionDirty(section)}
+          chatId={chatId}
+          routeState={location.state}
+          canSaveAll={canApplyToAllChats}
+          onSaveTarget={(target) => openApplyTargetSheet(section, target)}
           disabled={section === 'stopWords' && stopWordsStorageLocked}
           isSavingSettings={isSavingSettings || (section === 'stopWords' && isReloadingStopWords)}
           savingSection={savingSection}
@@ -4608,36 +4628,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           onSaveSection={(targetSection) => void handleSaveSection(targetSection)}
         />
       </Suspense>
-    );
-  }
-
-  function renderApplyTargetHeaderAction(section: ApplySectionKey) {
-    if (!canApplyToAllChats) {
-      return null;
-    }
-
-    const isApplying = isApplyingSectionToAll && applyingSection === section;
-    return (
-      <button
-        type="button"
-        className="settings-drilldown__header-action"
-        aria-label="Применить к другим чатам"
-        onClick={() => openApplyTargetSheet(section)}
-        disabled={
-          isSavingSettings ||
-          isApplyingSectionToAll ||
-          (section === 'stopWords' && (isReloadingStopWords || stopWordsStorageLocked))
-        }
-      >
-        {isApplying ? (
-          'Применяем...'
-        ) : (
-          <>
-            <span className="settings-drilldown__header-action-label--full">Другие чаты</span>
-            <span className="settings-drilldown__header-action-label--compact">Ещё чаты</span>
-          </>
-        )}
-      </button>
     );
   }
 
@@ -5318,7 +5308,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       {applyTargetSheet ? (
         <Suspense fallback={null}>
           <LazySettingsApplyTargetSheet
-            api={api}
             sheet={applyTargetSheet}
             preview={
               applyTargetPreviewEpoch === favoritesCompositionEpoch ? applyTargetPreview : null
@@ -5331,12 +5320,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
             overlayStyle={applyTargetOverlayStyle}
             isApplying={isApplyingSectionToAll}
             onClose={() => setApplyTargetSheet(null)}
-            onTargetChange={(target) => {
-              setApplyTargetPreview(null);
-              setApplyTargetPreviewEpoch(null);
-              setApplyTargetPreviewLoading(true);
-              setApplyTargetSheet((current) => (current ? { ...current, target } : current));
-            }}
+            onRetry={() => setApplyTargetSheet((current) => (current ? { ...current } : current))}
             onConfirm={() => void handleConfirmApplyTarget()}
           />
         </Suspense>
@@ -5476,7 +5460,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                     tone={SHARED_CHAT_SECTION_PRESENTATIONS.links.tone}
                     className={SHARED_CHAT_SECTION_PRESENTATIONS.links.panelClassName}
                     onClose={() => toggleSection('links')}
-                    headerAction={renderApplyTargetHeaderAction('links')}
                     confirmCloseWhen={isSectionDirty('links')}
                     onDiscardChanges={() => {
                       discardSectionChanges('links');
@@ -5789,7 +5772,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                     tone={SHARED_CHAT_SECTION_PRESENTATIONS.greeting.tone}
                     className={SHARED_CHAT_SECTION_PRESENTATIONS.greeting.panelClassName}
                     onClose={() => toggleSection('greeting')}
-                    headerAction={renderApplyTargetHeaderAction('greeting')}
                     confirmCloseWhen={isSectionDirty('greeting')}
                     onDiscardChanges={() => discardSectionChanges('greeting')}
                     footer={renderSectionSaveFooter('greeting')}
@@ -5839,7 +5821,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                     tone={SHARED_CHAT_SECTION_PRESENTATIONS.profanityFilter.tone}
                     className={SHARED_CHAT_SECTION_PRESENTATIONS.profanityFilter.panelClassName}
                     onClose={() => toggleSection('profanityFilter')}
-                    headerAction={renderApplyTargetHeaderAction('profanityFilter')}
                     confirmCloseWhen={isSectionDirty('profanityFilter')}
                     onDiscardChanges={() => discardSectionChanges('profanityFilter')}
                     footer={renderSectionSaveFooter('profanityFilter')}
@@ -5874,7 +5855,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   openHintKey={openHintKey}
                   openWarnEditorKey={openWarnEditorKey}
                   renderAdminContactToggle={renderAdminContactToggle}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderInlineHint={renderInlineHint}
                   renderMuteStageToggle={renderMuteStageToggle}
                   renderSectionSaveFooter={renderSectionSaveFooter}
@@ -5912,7 +5892,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   toggleSection={toggleSection}
                   isSectionDirty={isSectionDirty}
                   discardSectionChanges={discardSectionChanges}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderSectionSaveFooter={renderSectionSaveFooter}
                 />
               </SettingsOverviewEntry>
@@ -5953,7 +5932,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   openHintKey={openHintKey}
                   openMuteDurationKey={openMuteDurationKey}
                   renderAdminContactToggle={renderAdminContactToggle}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderMuteDurationEditor={renderMuteDurationEditor}
                   renderSectionSaveFooter={renderSectionSaveFooter}
                   setFieldValue={setFieldValue}
@@ -5997,7 +5975,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   openBotEditorKey={openBotEditorKey}
                   openHintKey={openHintKey}
                   renderAdminContactToggle={renderAdminContactToggle}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderInlineHint={renderInlineHint}
                   renderMuteStageToggle={renderMuteStageToggle}
                   renderSectionSaveFooter={renderSectionSaveFooter}
@@ -6025,7 +6002,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   toggleSection={toggleSection}
                   isSectionDirty={isSectionDirty}
                   discardSectionChanges={discardSectionChanges}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderSectionSaveFooter={renderSectionSaveFooter}
                   setFieldValue={setFieldValue}
                   clearFieldError={clearFieldError}
@@ -6078,7 +6054,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   nightTimezoneError={nightTimezoneError}
                   openBotEditorKey={openBotEditorKey}
                   openHintKey={openHintKey}
-                  renderApplyTargetHeaderAction={renderApplyTargetHeaderAction}
                   renderInlineHint={renderInlineHint}
                   renderSectionSaveFooter={renderSectionSaveFooter}
                   setDraft={setDraft}
@@ -6576,12 +6551,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                       SHARED_CHAT_SECTION_PRESENTATIONS.requiredSubscription.panelClassName
                     }
                     onClose={() => toggleSection('requiredSubscription')}
-                    headerAction={
-                      <>
-                        <RequiredSubscriptionHelp />
-                        {renderApplyTargetHeaderAction('requiredSubscription')}
-                      </>
-                    }
+                    headerAction={<RequiredSubscriptionHelp />}
                     confirmCloseWhen={isSectionDirty('requiredSubscription')}
                     onDiscardChanges={() => discardSectionChanges('requiredSubscription')}
                     footer={renderSectionSaveFooter('requiredSubscription')}
@@ -6602,7 +6572,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                     draft={draft}
                     expanded={expandedSections.commands}
                     fieldErrors={fieldErrors}
-                    headerAction={renderApplyTargetHeaderAction('commands')}
                     footer={renderSectionSaveFooter('commands')}
                     hasChanges={isSectionDirty('commands')}
                     onDiscardChanges={() => discardSectionChanges('commands')}
@@ -6623,7 +6592,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   expanded={expandedSections.storefront}
                   summary={storefrontHeaderSummary}
                   status={storefrontCardStatus}
-                  headerAction={renderApplyTargetHeaderAction('storefront')}
                   footer={renderSectionSaveFooter('storefront')}
                   hasChanges={isSectionDirty('storefront')}
                   onDiscardChanges={() => discardSectionChanges('storefront')}
@@ -6658,7 +6626,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                   status={extraCardStatus}
                   openHintKey={openHintKey}
                   fieldErrors={fieldErrors}
-                  headerAction={renderApplyTargetHeaderAction('extra')}
                   footer={renderSectionSaveFooter('extra')}
                   hasChanges={isSectionDirty('extra')}
                   onDiscardChanges={() => discardSectionChanges('extra')}

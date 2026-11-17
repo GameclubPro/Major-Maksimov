@@ -326,14 +326,12 @@ try {
       await master.uncheck();
       assert.equal(await scope.count(), 0);
       await master.check();
-      await panel.getByRole('button', { name: 'Применить к другим чатам', exact: true }).click();
-      const currentTarget = page.getByRole('button', { name: 'Этот чат', exact: true });
-      assert.equal(await currentTarget.getAttribute('aria-pressed'), 'true');
+      await panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true }).click();
+      const currentTarget = page.getByRole('dialog', { name: 'Все чаты', exact: true });
+      await currentTarget.waitFor();
       assert.equal(
-        await page
-          .getByRole('button', { name: 'Все чаты', exact: true })
-          .getAttribute('aria-pressed'),
-        'false',
+        await currentTarget.getByRole('group', { name: 'Область применения' }).count(),
+        0,
       );
       await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
       await currentTarget.waitFor({ state: 'hidden' });
@@ -375,7 +373,7 @@ try {
       await page.setViewportSize(fullViewport);
       await applyNativeVisualMode(page, safeAreas);
       await interval.blur();
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).waitFor();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).waitFor();
       assert.equal(await interval.inputValue(), '13');
 
       // Bridge Back asks before abandoning edits; Back on that prompt keeps the draft.
@@ -425,7 +423,7 @@ try {
       await panel
         .getByText('Ежедневно, с переходом на следующий день.', { exact: false })
         .waitFor();
-      const save = panel.getByRole('button', { name: 'Сохранить', exact: true });
+      const save = panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true });
       const submit = async () => {
         const received = page.waitForResponse((response) =>
           response.url().endsWith('/settings/section'),
@@ -472,7 +470,7 @@ try {
         .waitFor({ state: 'hidden' });
       assert.equal(writes.length, 3);
       assert.ok(previews.length > 0);
-      assert.ok(previews.every((preview) => preview.target.mode === 'current'));
+      assert.ok(previews.every((preview) => preview.target.mode === 'all'));
       assert.ok(
         writes.every(
           (write) =>
@@ -508,7 +506,7 @@ try {
         .boundingBox();
       assert.ok(dismissBox && dismissBox.width >= 44 && dismissBox.height >= 44);
       await assertReachable(
-        panel.getByRole('button', { name: 'Применить к другим чатам', exact: true }),
+        panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true }),
       );
       await page.screenshot({ path: path.join(screenshots, `${name}-saved-toast.png`) });
 
@@ -525,22 +523,13 @@ try {
       await page.getByRole('button', { name: 'Антидубль', exact: true }).click();
       assert.equal(await allParticipants.getAttribute('aria-checked'), 'true');
       await sameAuthor.click();
-      await panel.getByRole('button', { name: 'Применить к другим чатам', exact: true }).click();
-      const targetSheet = page
-        .getByRole('dialog', { name: 'Антидубль', exact: true })
-        .and(page.locator('.settings-apply-target__panel'));
-      assert.equal(
-        await targetSheet
-          .getByRole('button', { name: 'Этот чат', exact: true })
-          .getAttribute('aria-pressed'),
-        'true',
-      );
       const allPreview = page.waitForResponse(
         (response) =>
           response.url().endsWith('/settings/apply-section-preview') &&
           response.request().postDataJSON().target.mode === 'all',
       );
-      await targetSheet.getByRole('button', { name: 'Все чаты', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true }).click();
+      const targetSheet = page.getByRole('dialog', { name: 'Все чаты', exact: true });
       await allPreview;
       assert.equal(
         writes.filter((write) => write.pathname.endsWith('/apply-section-to-all')).length,
@@ -551,7 +540,7 @@ try {
       const bulkApplied = page.waitForResponse((response) =>
         response.url().endsWith('/settings/apply-section-to-all'),
       );
-      await targetSheet.getByRole('button', { name: 'Применить', exact: true }).click();
+      await targetSheet.getByRole('button', { name: /^Сохранить в \d+ чат/u }).click();
       await bulkApplied;
       await targetSheet.waitFor({ state: 'hidden' });
       await panel.waitFor({ state: 'hidden' });
@@ -630,7 +619,7 @@ try {
       await allParticipants.click();
       holdSectionSave = true;
       const heldRequest = page.waitForRequest('**/api/chats/chat-a/settings/section');
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await heldRequest;
       const secondLoaded = page.waitForResponse('**/api/chats/chat-b/settings-screen');
       await page.getByRole('link', { name: 'Чат B', exact: true }).click();
@@ -660,7 +649,7 @@ try {
       );
       assert.equal(await closeToast.count(), 0);
       const secondSaved = page.waitForResponse('**/api/chats/chat-b/settings/section');
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       const secondBody = (await secondSaved).request().postDataJSON();
       assert.equal(secondBody.expectedRevision, '2026-10-04T06:00:00.000Z');
       assert.equal(secondBody.changes.duplicateWarnWindowSec, 25200);

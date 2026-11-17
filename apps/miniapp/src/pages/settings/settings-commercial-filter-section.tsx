@@ -46,7 +46,6 @@ export function SettingsCommercialFilterSection(props: SettingsCommercialFilterS
     discardSectionChanges,
     expanded,
     isSectionDirty,
-    renderApplyTargetHeaderAction,
     renderSectionSaveFooter,
     toggleSection,
   } = props;
@@ -80,7 +79,6 @@ export function SettingsCommercialFilterSection(props: SettingsCommercialFilterS
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => toggleSection('commercialFilter')}
-        headerAction={renderApplyTargetHeaderAction('commercialFilter')}
         confirmCloseWhen={isSectionDirty('commercialFilter')}
         onDiscardChanges={() => discardSectionChanges('commercialFilter')}
         footer={renderSectionSaveFooter('commercialFilter')}

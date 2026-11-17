@@ -52,7 +52,7 @@ try {
       assert.ok(errorId);
       assert.match(await page.locator(`[id="${errorId}"]`).innerText(), /от 50 до 1500/u);
     }
-    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
     assert.equal(await panel.isVisible(), true, 'invalid numeric draft blocks Save');
     assert.equal(await length.inputValue(), '');
     const dismissToasts = async () => {
@@ -67,7 +67,7 @@ try {
     }
     await length.fill('49');
     await lengthEnabled.uncheck();
-    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
     await panel.waitFor({ state: 'hidden' });
     await dismissToasts();
     await page.getByRole('button', { name: 'Ограничения', exact: true }).click();
@@ -161,7 +161,7 @@ try {
         .count(),
       0,
     );
-    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
     await page.waitForFunction(
       () => !document.querySelector('.settings-drilldown__footer-actions [aria-busy="true"]'),
     );

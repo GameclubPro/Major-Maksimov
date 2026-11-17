@@ -66,7 +66,6 @@ export function SettingsLimitsSection(props: SettingsLimitsSectionProps) {
     isSectionDirty,
     limitsCardStatus,
     limitsRulesEnabledCount,
-    renderApplyTargetHeaderAction,
     renderSectionSaveFooter,
     toggleSection,
   } = props;
@@ -100,7 +99,6 @@ export function SettingsLimitsSection(props: SettingsLimitsSectionProps) {
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => toggleSection('limits')}
-        headerAction={renderApplyTargetHeaderAction('limits')}
         confirmCloseWhen={isSectionDirty('limits')}
         onDiscardChanges={() => discardSectionChanges('limits')}
         footer={renderSectionSaveFooter('limits')}

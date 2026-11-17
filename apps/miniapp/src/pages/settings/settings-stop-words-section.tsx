@@ -43,7 +43,6 @@ export function SettingsStopWordsSection(props: SettingsStopWordsSectionProps) {
     discardSectionChanges,
     expanded,
     isSectionDirty,
-    renderApplyTargetHeaderAction,
     renderSectionSaveFooter,
     toggleSection,
   } = props;
@@ -87,7 +86,6 @@ export function SettingsStopWordsSection(props: SettingsStopWordsSectionProps) {
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => toggleSection('stopWords')}
-        headerAction={renderApplyTargetHeaderAction('stopWords')}
         confirmCloseWhen={isSectionDirty('stopWords')}
         onDiscardChanges={() => discardSectionChanges('stopWords')}
         footer={renderSectionSaveFooter('stopWords')}

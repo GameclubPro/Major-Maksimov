@@ -503,7 +503,7 @@ try {
         fullPage: false,
       });
       assert.equal(await words(true).isDisabled(), true);
-      const copy = panel.getByRole('button', { name: 'Применить к другим чатам', exact: true });
+      const copy = panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true });
       if (await copy.count()) assert.equal(await copy.isDisabled(), true);
       const create = panel.getByRole('button', { name: 'Создать новый список', exact: true });
       await create.click();
@@ -754,7 +754,7 @@ try {
         .click();
       await page
         .locator('.settings-drilldown__panel--links')
-        .getByRole('button', { name: 'Сохранить', exact: true })
+        .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
         .click();
       await links.waitFor({ state: 'hidden' });
       assert.equal(state.writes.length, 2);

@@ -165,7 +165,7 @@ try {
       assert.equal(await aliases.getAttribute('aria-invalid'), null);
       assert.equal(await panel.getByRole('alert').count(), 0);
       assert.equal(
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).isEnabled(),
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).isEnabled(),
         true,
       );
       assert.deepEqual(await page.evaluate(() => window.__REPORTS_KEYBOARD_WRITES__), []);
@@ -207,7 +207,7 @@ try {
       await assertStableMobilePanel();
       await panel.getByRole('tab', { name: 'Настройки', exact: true }).click();
     }
-    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
     await page.waitForFunction(
       () => !document.querySelector('.settings-drilldown__footer-actions [aria-busy="true"]'),
     );
@@ -348,7 +348,7 @@ try {
     await pausedSwitch.check();
     assert.equal(await pausedSwitch.isChecked(), true);
     await pausedSwitch.uncheck();
-    await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+    await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
     await page.getByRole('button', { name: 'Система жалоб', exact: true }).click();
     await pausedSwitch.waitFor();
     assert.equal(await pausedSwitch.isDisabled(), true);
