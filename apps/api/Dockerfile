@@ -63,6 +63,10 @@ COPY --from=build /app/scripts/agent/multibot-online-prepare.mjs ./scripts/agent
 COPY --from=build /app/scripts/agent/outcome-cohort-online-targets.mjs ./scripts/agent/outcome-cohort-online-targets.mjs
 COPY --from=build /app/scripts/agent/outcome-cohort-historical-compatibility.mjs ./scripts/agent/outcome-cohort-historical-compatibility.mjs
 COPY --from=build /app/scripts/agent/outcome-cohort-online-prepare.mjs ./scripts/agent/outcome-cohort-online-prepare.mjs
+COPY --from=build /app/scripts/agent/routing-index-online-target.mjs ./scripts/agent/routing-index-online-target.mjs
+COPY --from=build /app/scripts/agent/routing-index-online-prepare.mjs ./scripts/agent/routing-index-online-prepare.mjs
+COPY --from=build /app/scripts/agent/routing-index-catalog.mjs ./scripts/agent/routing-index-catalog.mjs
+COPY --from=build /app/scripts/agent/online-migration-receipts.mjs ./scripts/agent/online-migration-receipts.mjs
 COPY infra/scripts/outcome-cohort-online-state.mjs ./infra/scripts/outcome-cohort-online-state.mjs
 COPY --from=build /app/packages/contracts/dist ./packages/contracts/dist
 COPY --from=prod-deps /app/packages/contracts/node_modules ./packages/contracts/node_modules

@@ -513,44 +513,71 @@ export class WebhookRoutingService {
     chatId: string,
     webhookEventId: string,
   ): Promise<OutstandingMessageQueueWork> {
+    const chatExpression = Prisma.sql`
+      COALESCE(
+        NULLIF(BTRIM(e.normalized_payload->'message'->>'chatId'), ''),
+        NULLIF(BTRIM(e.normalized_payload->>'chatId'), '')
+      )
+    `;
+    const pendingBasePredicate = Prisma.sql`
+      e.id <> ${webhookEventId}
+      AND (
+        e.status = ANY(ARRAY['RECEIVED', 'QUEUED']::"WebhookStatus"[])
+        OR (
+          e.status = 'FAILED'::"WebhookStatus"
+          AND (
+            e.next_enqueue_at IS NOT NULL
+            OR LEFT(COALESCE(e.error_message, ''), ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_LENGTH_SQL}) = ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_SQL}
+          )
+        )
+      )
+      AND LOWER(
+        COALESCE(
+          NULLIF(BTRIM(e.normalized_payload->>'type'), ''),
+          NULLIF(BTRIM(e.normalized_payload->>'update_type'), '')
+        )
+      ) = ANY(ARRAY['message_created', 'message_edited'])
+    `;
+    const pendingPredicate = Prisma.sql`${pendingBasePredicate} AND ${chatExpression} = ${chatId}`;
     const rows = await this.prisma.$queryRaw<
       Array<{ has_pending?: boolean; queue_name?: string | null }>
     >(
       Prisma.sql`
-        WITH outstanding AS MATERIALIZED (
-          SELECT queue_name, created_at, id
-          FROM webhook_events
-          WHERE id <> ${webhookEventId}
-            AND (
-              status = ANY(ARRAY['RECEIVED', 'QUEUED']::"WebhookStatus"[])
-              OR (
-                status = 'FAILED'::"WebhookStatus"
-                AND (
-                  next_enqueue_at IS NOT NULL
-                  OR LEFT(COALESCE(error_message, ''), ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_LENGTH_SQL}) = ${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_MARKER_SQL}
-                )
-              )
-            )
-            AND LOWER(
-              COALESCE(
-                NULLIF(BTRIM(normalized_payload->>'type'), ''),
-                NULLIF(BTRIM(normalized_payload->>'update_type'), '')
-              )
-            ) = ANY(ARRAY['message_created', 'message_edited'])
-            AND COALESCE(
-              NULLIF(BTRIM(normalized_payload->'message'->>'chatId'), ''),
-              NULLIF(BTRIM(normalized_payload->>'chatId'), '')
-            ) = ${chatId}
-        )
+        -- FLAG: A missing head differs from a pending head with a NULL or legacy queue.
+        -- Only the latter needs the per-shard search, in the same snapshot.
         SELECT
-          EXISTS (SELECT 1 FROM outstanding LIMIT 1) AS has_pending,
-          (
-            SELECT queue_name
-            FROM outstanding
-            WHERE queue_name IN (${Prisma.join(DEFAULT_WEBHOOK_QUEUE_NAMES)})
-            ORDER BY created_at ASC, id ASC
+          head.id IS NOT NULL AS has_pending,
+          CASE
+            WHEN head.id IS NULL THEN NULL
+            WHEN head.queue_name IN (${Prisma.join(DEFAULT_WEBHOOK_QUEUE_NAMES)}) THEN head.queue_name
+            ELSE (
+            SELECT candidate.queue_name
+            FROM (VALUES ${Prisma.join(
+              DEFAULT_WEBHOOK_QUEUE_NAMES.map((queueName) => Prisma.sql`(${queueName}::text)`),
+            )}) AS queues(queue_name)
+            CROSS JOIN LATERAL (
+              SELECT ${chatExpression} AS chat_id, e.queue_name, e.created_at, e.id
+              FROM webhook_events e
+              WHERE ${pendingBasePredicate}
+                AND (${chatExpression}, e.queue_name) >= (${chatId}::text, queues.queue_name)
+              -- FLAG: Seek the first successor; test its chat and queue after LIMIT
+              -- so an absent shard cannot scan the entire chat through another index.
+              ORDER BY ${chatExpression} ASC, e.queue_name ASC, e.created_at ASC, e.id ASC
+              LIMIT 1
+            ) AS candidate
+            WHERE candidate.chat_id = ${chatId} AND candidate.queue_name = queues.queue_name
+            ORDER BY candidate.created_at ASC, candidate.id ASC
             LIMIT 1
-          ) AS queue_name
+            )
+          END AS queue_name
+        FROM (VALUES (1)) AS anchor(n)
+        LEFT JOIN (
+          SELECT e.id, e.queue_name
+          FROM webhook_events e
+          WHERE ${pendingPredicate}
+          ORDER BY ${chatExpression} ASC, e.created_at ASC, e.id ASC
+          LIMIT 1
+        ) AS head ON true
       `,
     );
     const queueName = rows[0]?.queue_name;

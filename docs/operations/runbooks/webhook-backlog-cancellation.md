@@ -137,6 +137,8 @@ The client walks at most 500,000 receipts through 200-row indexed pages, preserv
 bounds before cutoff and eligibility filtering. It cancels pre-cutoff RECEIVED/QUEUED receipts
 and retrying or pending-timeout FAILED message ordering heads. The latter use the existing
 ordered-head partial index, including NULL chat keys, so terminal FAILED history is not scanned.
+Both page orders retain the chat expression before `(created_at, id)`; for NULL chat it is
+constant, but omitting it can make PostgreSQL sort an unbounded queue-prefixed index scan.
 Historical nonmessage FAILED receipts are outside this selection. Existing legacy/source dispositions remain untouched.
 Permanent exact semantic/message tombstones also stop late copies; they do not grant immunity
 to an author or an entire chat. Claims remain immutable, including ambiguous action evidence.
