@@ -198,6 +198,13 @@ leave or recreate an empty server row. Failed deletion preserves the text, and a
 must be resolved before deletion. Failed isolated-editor close offers explicit discard confirmation.
 The browser checks iPhone/Android sizes in both themes using local fixtures; it does not establish MAX delivery.
 
+The [calendar validation browser](../../apps/miniapp/test/publication-calendar-validation.browser.mjs)
+covers the empty schedule correction on short screens, stale feedback after switching between
+dates and recurrence, and custom time entry. Failed validation must focus the reachable calendar
+control. Rejected times remain editable with a field error; adding an already selected time must
+preserve it. Explicit removal, the two-minute lead window and final confirmation remain required.
+The checks use local preview state on a narrow desktop window, iPhone and Android in both themes.
+
 | Boundary                                                               | Focused checks                                                                                                                                                                                                                                                                                  |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Publisher catalog, virtualized lists, last-row access, cross-route CSS | [Catalog browser](../../apps/miniapp/test/publisher-catalog-layout.browser.mjs)                                                                                                                                                                                                                 |

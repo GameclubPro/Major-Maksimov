@@ -1085,14 +1085,41 @@ export function BroadcastSchedulePlanner({
     maxImpact(shouldAdd ? 'light' : 'soft');
   }
 
-  function addCustomTime(value: string) {
+  function getCustomTimeError(value: string): string | undefined {
     const parsedMinutes = parseBroadcastPlannerTimeLabel(value);
-    if (parsedMinutes === null) {
+    if (parsedMinutes === null) return undefined;
+    const minutes = normalizeBroadcastPlannerTimeMinutes(parsedMinutes, minuteStep);
+    const newDayKeys = targetDayKeys.filter((dayKey) => !isSlotSelectedForDay(dayKey, minutes));
+    if (
+      newDayKeys.some(
+        (dayKey) =>
+          Date.parse(buildBroadcastScheduleSlotIso(dayKey, minutes)) < Date.now() + minimumLeadMs,
+      )
+    )
+      return 'Выберите более позднее время.';
+    if (newDayKeys.some((dayKey) => isSlotBusy(dayKey, minutes)))
+      return 'Это время занято. Выберите другое.';
+    return undefined;
+  }
+
+  function addCustomTime(value: string) {
+    if (disabled) return;
+    setCustomTimeValue(value);
+    const parsedMinutes = parseBroadcastPlannerTimeLabel(value);
+    if (parsedMinutes === null || getCustomTimeError(value)) {
       return;
     }
 
+    const minutes = normalizeBroadcastPlannerTimeMinutes(parsedMinutes, minuteStep);
+    activateScheduledMode();
+    setHasBlockingIssue(false);
+    // FLAG: Entering a time adds it idempotently; only chips and explicit removal toggle it off.
+    replaceSlotsForDays(targetDayKeys, (dayKey, currentSlots) => [
+      ...currentSlots,
+      buildBroadcastScheduleSlotIso(dayKey, minutes),
+    ]);
     setCustomTimeValue('');
-    toggleSlot(normalizeBroadcastPlannerTimeMinutes(parsedMinutes, minuteStep));
+    maxImpact('light');
   }
 
   const monthCells = getMonthCells(visibleMonthKey);
@@ -1211,6 +1238,8 @@ export function BroadcastSchedulePlanner({
                   onClick={openScheduleSummary}
                   disabled={disabled}
                   title={`Когда: ${compactScheduleSummary}`}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? `${calendarGridId}-error` : undefined}
                 >
                   <span className="broadcast-planner__compact-copy">
                     <small>Когда</small>
@@ -1760,7 +1789,11 @@ export function BroadcastSchedulePlanner({
           ) : null}
         </div>
 
-        {error ? <small className="broadcast-planner__error">{error}</small> : null}
+        {error ? (
+          <small id={`${calendarGridId}-error`} className="broadcast-planner__error">
+            {error}
+          </small>
+        ) : null}
       </section>
 
       {typeof document !== 'undefined' &&
@@ -2112,10 +2145,8 @@ export function BroadcastSchedulePlanner({
                           minuteStep={minuteStep}
                           precise={preciseTime}
                           disabled={disabled}
-                          onChange={(nextValue) => {
-                            setCustomTimeValue(nextValue);
-                            addCustomTime(nextValue);
-                          }}
+                          error={getCustomTimeError(customTimeValue)}
+                          onChange={addCustomTime}
                         />
                       </div>
 

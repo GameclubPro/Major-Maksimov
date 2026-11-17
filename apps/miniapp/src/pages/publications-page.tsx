@@ -1413,9 +1413,10 @@ export function PublicationsPage({
                   type="button"
                   aria-pressed={draft.scheduleKind === option.value}
                   className={cn(draft.scheduleKind === option.value && 'is-active')}
-                  onClick={() =>
-                    setDraft((current) => ({ ...current, scheduleKind: option.value }))
-                  }
+                  onClick={() => {
+                    setDraft((current) => ({ ...current, scheduleKind: option.value }));
+                    setFieldError('');
+                  }}
                   disabled={isBusy}
                 >
                   {option.label}
@@ -1437,6 +1438,7 @@ export function PublicationsPage({
                   preciseTime
                   minimumLeadMs={PUBLICATION_MIN_SCHEDULE_DELAY_MS}
                   value={draft.scheduledSlots}
+                  error={validationStarted ? timingIssue?.message : undefined}
                   occupiedSlots={
                     calendarAvailabilityQuery.data?.slots.map((slot) => slot.scheduledAt) ?? []
                   }
