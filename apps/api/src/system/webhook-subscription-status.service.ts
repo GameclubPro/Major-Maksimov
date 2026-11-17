@@ -143,11 +143,8 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
                       row.headerSecretFingerprint.trim().length > 0
                         ? row.headerSecretFingerprint
                         : null,
-                    lastIncomingWebhookAt:
-                      typeof row.lastIncomingWebhookAt === 'string' &&
-                      row.lastIncomingWebhookAt.trim().length > 0
-                        ? row.lastIncomingWebhookAt
-                        : null,
+                    // FLAG: Older snapshots copied membership repair times; only ingress proves receipt.
+                    lastIncomingWebhookAt: null,
                     lastAutoRecreateAt:
                       typeof row.lastAutoRecreateAt === 'string' &&
                       row.lastAutoRecreateAt.trim().length > 0
@@ -167,11 +164,7 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
         return this.mergeAtomicIngressState(
           {
             bots: parsedBots,
-            lastGlobalIncomingWebhookAt:
-              typeof parsed.lastGlobalIncomingWebhookAt === 'string' &&
-              parsed.lastGlobalIncomingWebhookAt.trim().length > 0
-                ? parsed.lastGlobalIncomingWebhookAt
-                : null,
+            lastGlobalIncomingWebhookAt: null,
             lastGlobalAutoRecreateAt:
               typeof parsed.lastGlobalAutoRecreateAt === 'string' &&
               parsed.lastGlobalAutoRecreateAt.trim().length > 0
@@ -195,9 +188,10 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
         {
           err: error instanceof Error ? error.message : String(error),
         },
-        'Failed to parse cached webhook subscription sync state',
+        'Failed to read cached webhook subscription sync state',
       );
-      return null;
+      // FLAG: An unreadable secret fingerprint must not trigger a fleet-wide subscription update.
+      throw error;
     }
   }
 
@@ -241,7 +235,7 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
         configuredUrl: existing?.configuredUrl ?? null,
         headerSecretFingerprint: existing?.headerSecretFingerprint ?? null,
         updatedAt: existing?.updatedAt ?? occurredAt,
-        lastIncomingWebhookAt: this.latestIso(existing?.lastIncomingWebhookAt ?? null, occurredAt),
+        lastIncomingWebhookAt: occurredAt,
         lastAutoRecreateAt: existing?.lastAutoRecreateAt ?? null,
       };
     }
@@ -250,10 +244,7 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
     return {
       ...state,
       bots,
-      lastGlobalIncomingWebhookAt: this.latestIso(
-        state.lastGlobalIncomingWebhookAt,
-        globalIncomingAt,
-      ),
+      lastGlobalIncomingWebhookAt: globalIncomingAt,
     };
   }
 
@@ -262,16 +253,6 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
     return Number.isFinite(timestampMs) && timestampMs > 0
       ? new Date(timestampMs).toISOString()
       : null;
-  }
-
-  private latestIso(left: string | null, right: string | null): string | null {
-    if (!left) {
-      return right;
-    }
-    if (!right) {
-      return left;
-    }
-    return left.localeCompare(right) >= 0 ? left : right;
   }
 
   createPendingSnapshot(

@@ -7600,6 +7600,8 @@ export class MaxClientService implements OnModuleDestroy {
           facts: { failureOrigin: 'unlinked', isCritical },
           association: failureAssociation,
         });
+        const requestedRetryAfterMs = status === 429 ? readMaxRetryAfterMs(error, Date.now()) : 0;
+        const cooldownMs = requestedRetryAfterMs || 30_000;
         if (status === 429) {
           // FLAG: Publish the shared admission stop before unrelated circuit bookkeeping.
           // A slow circuit write must not leave other roles admitting this token's requests.
@@ -7608,7 +7610,7 @@ export class MaxClientService implements OnModuleDestroy {
               MAX_API_EXTERNAL_COOLDOWN_SCRIPT,
               1,
               `maxapi:gcra:v1:bot:${bot.id}:all:cooldown`,
-              String(Math.max(1, readMaxRetryAfterMs(error, Date.now()) || 30_000)),
+              String(cooldownMs),
             );
           } catch {
             // FLAG: Preserve the actual HTTP 429 for durable retry even if Redis is unavailable.
@@ -7632,6 +7634,8 @@ export class MaxClientService implements OnModuleDestroy {
             trafficClass,
             sourceTag,
             statusCode: status,
+            retryAfterMs: cooldownMs,
+            retryAfterSource: requestedRetryAfterMs ? 'max' : 'default',
             reason: this.extractErrorMessage(error) || 'MAX API 429 rate limit',
           });
         }
@@ -9012,6 +9016,7 @@ export class MaxClientService implements OnModuleDestroy {
     reason: string;
     statusCode?: number | null;
     retryAfterMs?: number | null;
+    retryAfterSource?: 'max' | 'default';
     limitScope?: MaxApiRateLimitScope;
   }): Promise<void> {
     const nowSec = Math.floor(Date.now() / 1_000);
@@ -9055,6 +9060,7 @@ export class MaxClientService implements OnModuleDestroy {
           origin: params.origin,
           statusCode: params.statusCode ?? null,
           retryAfterMs: params.retryAfterMs ?? null,
+          ...(params.retryAfterSource ? { retryAfterSource: params.retryAfterSource } : {}),
           limitScope: params.limitScope ?? null,
         },
         params.origin === 'external_429'

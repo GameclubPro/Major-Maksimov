@@ -166,7 +166,9 @@ export class PublisherPublicationDispatchRunnerService implements OnModuleInit, 
 
     const deadlineRun = this.deadlineInFlight;
     if (deadlineRun) {
-      await deadlineRun;
+      // FLAG: The address-specific wake owns its logged failure and BullMQ retry.
+      // A background tick observing the same pass only waits for it to settle.
+      await Promise.allSettled([deadlineRun]);
     }
   }
 

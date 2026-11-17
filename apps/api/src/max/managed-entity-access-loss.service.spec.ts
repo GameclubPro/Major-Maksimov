@@ -1103,7 +1103,7 @@ describe('ManagedEntityAccessLossService', () => {
     expect(maxBotLinkService.markChatBotRemoved).toHaveBeenCalledWith({
       chatId: 'chat-1',
       botId: 'bot-1',
-      title: 'Managed chat',
+      title: undefined,
       entityType: ChatEntityType.CHAT,
       accessLostReason: 'chat_not_found',
       accessLostSource: 'unit-test',

@@ -2281,6 +2281,7 @@ export class WebhookOutboxService
         Math.max(1, deadlineMs - Date.now()),
       );
     });
+    let reported: EnqueueProgress | undefined;
     const runUnit = async (workUnit: WebhookEnqueueWorkUnit, retainedResponsibility: boolean) => {
       try {
         await this.enqueueCandidateSequence(
@@ -2302,6 +2303,17 @@ export class WebhookOutboxService
           });
         }
         progress.workUnitErrors += 1;
+      } finally {
+        // FLAG: After this poll returns its snapshot, carried owners can still finish.
+        // Report only new increments since the snapshot or the last owner's completion.
+        if (reported) {
+          const delta = createEnqueueProgress();
+          for (const key of Object.keys(delta) as Array<keyof EnqueueProgress>) {
+            delta[key] = progress[key] - reported[key];
+            reported[key] = progress[key];
+          }
+          this.runtimeMetrics.addProgress(delta);
+        }
       }
     };
 
@@ -2413,6 +2425,7 @@ export class WebhookOutboxService
     // encounter both limits and later dispatch within this same poll.
     progress.preparationSharedCapacityBlocked = sharedCapacityBlocked.size;
     progress.preparationScopeBlocked = scopeBlocked.size;
+    if (active.size > 0) reported = { ...progress };
     return { ...progress };
   }
 

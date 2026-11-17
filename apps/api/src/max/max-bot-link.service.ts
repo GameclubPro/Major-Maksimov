@@ -1550,7 +1550,6 @@ export class MaxBotLinkService implements OnModuleDestroy {
       role: ChatBotMembershipRole.STANDBY,
       status: ChatBotMembershipStatus.ACTIVE,
       ...snapshot,
-      lastWebhookAt: checkedAt,
       lifecycleEventAt: checkedAt,
       lifecycleEventType: 'live_probe',
       lifecycleSource: 'live_probe',
@@ -1833,7 +1832,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
       botId: params.botId,
     });
     const botId = explicitBotId ?? defaultRoute.botId ?? this.getDefaultBotId();
-    const title = params.title?.trim() || `Chat ${chatId}`;
+    const title = observedManagedEntityTitle(chatId, params.title);
     const entityType = params.entityType ?? undefined;
     const catalogKind = resolveChatCatalogKind({
       chatId,
@@ -1841,11 +1840,12 @@ export class MaxBotLinkService implements OnModuleDestroy {
       managedHint: true,
     });
     const now = new Date();
+    const lastWebhookAt = explicitBotId && params.lifecycleSource === 'webhook' ? now : null;
 
     const created = await this.prisma.chat.createMany({
       data: {
         id: chatId,
-        title,
+        title: title ?? `Chat ${chatId}`,
         botId,
         primaryBotId: botId,
         routingState: ChatRoutingState.NO_ELIGIBLE_BOT,
@@ -1860,7 +1860,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
         role: ChatBotMembershipRole.PRIMARY,
         status: ChatBotMembershipStatus.ACTIVE,
         lastSeenAt: now,
-        lastWebhookAt: explicitBotId ? now : null,
+        lastWebhookAt,
         lifecycleEventAt: params.lifecycleEventAt,
         lifecycleEventType: params.lifecycleEventType,
         lifecycleSource: params.lifecycleSource,
@@ -1879,13 +1879,6 @@ export class MaxBotLinkService implements OnModuleDestroy {
           lifecycleSource: params.lifecycleSource ?? '',
         });
       }
-      if (params.lifecycleEventAt) {
-        return this.reconcileChatPrimaryByAccess({
-          chatId,
-          title,
-          entityType,
-        });
-      }
       return this.reconcileChatPrimaryByAccess({ chatId, title, entityType });
     }
 
@@ -1902,7 +1895,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
     await this.prisma.chat.update({
       where: { id: chatId },
       data: {
-        title,
+        ...(title ? { title } : {}),
         botId: nextPrimaryBotId,
         primaryBotId: nextPrimaryBotId,
         ...(entityType ? { entityType } : {}),
@@ -1915,7 +1908,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
         nextPrimaryBotId === botId ? ChatBotMembershipRole.PRIMARY : ChatBotMembershipRole.STANDBY,
       status: ChatBotMembershipStatus.ACTIVE,
       lastSeenAt: now,
-      lastWebhookAt: explicitBotId ? now : null,
+      lastWebhookAt,
       lifecycleEventAt: params.lifecycleEventAt,
       lifecycleEventType: params.lifecycleEventType,
       lifecycleSource: params.lifecycleSource,
@@ -2411,7 +2404,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
       return null;
     }
 
-    const title = params.title?.trim() || `Chat ${chatId}`;
+    const title = observedManagedEntityTitle(chatId, params.title);
     const entityType = params.entityType ?? undefined;
     const now = new Date();
     const lifecycleEventAt = params.lifecycleEventAt ?? now;
@@ -2442,13 +2435,13 @@ export class MaxBotLinkService implements OnModuleDestroy {
       where: { id: chatId },
       create: {
         id: chatId,
-        title,
+        title: title ?? `Chat ${chatId}`,
         routingState: ChatRoutingState.NO_ELIGIBLE_BOT,
         ...(entityType ? { entityType } : {}),
         catalogKind,
       },
       update: {
-        title,
+        ...(title ? { title } : {}),
         ...(entityType ? { entityType } : {}),
       },
     });
@@ -2478,7 +2471,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
       status: ChatBotMembershipStatus.REMOVED,
       ...(accessLossSnapshot ? { permissionsSnapshot: accessLossSnapshot } : {}),
       lastSeenAt: lifecycleEventAt,
-      lastWebhookAt: lifecycleEventAt,
+      ...(params.lifecycleSource === 'webhook' ? { lastWebhookAt: lifecycleEventAt } : {}),
       lifecycleEventAt,
       lifecycleEventType,
       lifecycleSource,
@@ -4545,7 +4538,7 @@ export class MaxBotLinkService implements OnModuleDestroy {
               botAccessExpiresAt: lifecycleEventAt,
             }),
         lastSeenAt: params.lastSeenAt ?? lifecycleEventAt,
-        lastWebhookAt: params.lastWebhookAt ?? lifecycleEventAt,
+        ...(params.lastWebhookAt ? { lastWebhookAt: params.lastWebhookAt } : {}),
         lifecycleEventAt,
         lifecycleEventType,
         lifecycleSource,

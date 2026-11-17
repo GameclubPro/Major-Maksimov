@@ -101,6 +101,16 @@ type LedgerCandidate = Prisma.MaxActionLedgerEntryGetPayload<{
 
 type WatchdogScanCursor = Pick<LedgerCandidate, 'id' | 'updatedAt'>;
 
+type DeferredBucket = { count: number; oldestAgeSec: number };
+type DeferredBreakdown = Record<
+  'waitingInQueue' | 'recentlyStarted' | 'ownedByPublication' | 'memberGuardRejected',
+  DeferredBucket
+>;
+
+type WatchdogDiagnosticSnapshot = MaxActionLedgerWatchdogSnapshot & {
+  lastDeferredByReason: DeferredBreakdown | null;
+};
+
 type WatchdogPersistentState = {
   lastRunAt: string | null;
   lastSuccessAt: string | null;
@@ -119,6 +129,7 @@ type WatchdogPersistentState = {
   lastRequeuedCount: number;
   lastRetryOrphanTerminalizedCount: number;
   lastDeferredCount: number;
+  lastDeferredByReason: DeferredBreakdown | null;
   lastConflictCount: number;
   lastShadowClassifiedCount: number;
   lastWouldQuarantineCount: number;
@@ -130,10 +141,10 @@ type WatchdogPersistentState = {
 
 type WatchdogRunSummary = Omit<
   WatchdogPersistentState,
-  'lastRunAt' | 'lastSuccessAt' | 'lastError' | 'lastRunReason'
->;
+  'lastRunAt' | 'lastSuccessAt' | 'lastError' | 'lastRunReason' | 'lastDeferredByReason'
+> & { lastDeferredByReason: DeferredBreakdown };
 
-const EMPTY_RUN_SUMMARY: WatchdogRunSummary = {
+const EMPTY_RUN_SUMMARY: Omit<WatchdogRunSummary, 'lastDeferredByReason'> = {
   staleCount: 0,
   staleEnqueuedCount: 0,
   staleInProgressCount: 0,
@@ -170,6 +181,7 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
     lastError: null,
     lastRunReason: null,
     ...EMPTY_RUN_SUMMARY,
+    lastDeferredByReason: null,
   };
   private timer: NodeJS.Timeout | null = null;
   private startupTimer: NodeJS.Timeout | null = null;
@@ -308,7 +320,7 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
     }
   }
 
-  async getSnapshot(): Promise<MaxActionLedgerWatchdogSnapshot> {
+  async getSnapshot(): Promise<WatchdogDiagnosticSnapshot> {
     const persisted = await this.readPersistedStateBestEffort();
     const state = persisted ?? this.state;
     return {
@@ -326,7 +338,15 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
 
   private async reconcileStaleEntries(lockToken: string): Promise<WatchdogRunSummary> {
     const cutoff = new Date(Date.now() - WATCHDOG_STALE_AFTER_MS);
-    const summary: WatchdogRunSummary = { ...EMPTY_RUN_SUMMARY };
+    const summary: WatchdogRunSummary = {
+      ...EMPTY_RUN_SUMMARY,
+      lastDeferredByReason: {
+        waitingInQueue: { count: 0, oldestAgeSec: 0 },
+        recentlyStarted: { count: 0, oldestAgeSec: 0 },
+        ownedByPublication: { count: 0, oldestAgeSec: 0 },
+        memberGuardRejected: { count: 0, oldestAgeSec: 0 },
+      },
+    };
     let after = await this.readScanCursor();
     let reachedEnd = false;
 
@@ -408,6 +428,17 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
     );
   }
 
+  private observeDeferredCandidate(
+    summary: WatchdogRunSummary,
+    row: LedgerCandidate,
+    reason: keyof DeferredBreakdown,
+  ): void {
+    summary.lastDeferredCount += 1;
+    const bucket = summary.lastDeferredByReason[reason];
+    bucket.count += 1;
+    bucket.oldestAgeSec = Math.max(bucket.oldestAgeSec, (Date.now() - row.updatedAt.getTime()) / 1_000);
+  }
+
   private async reconcileCandidate(
     row: LedgerCandidate,
     cutoff: Date,
@@ -421,14 +452,14 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
     }
 
     if (observations.some(({ state }) => LIVE_QUEUE_STATES.has(state))) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'waitingInQueue');
       return;
     }
 
     if (
       observations.some(({ job, state }) => state === 'active' && this.jobStartedAfter(job, cutoff))
     ) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'recentlyStarted');
       return;
     }
 
@@ -444,7 +475,7 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
     }
 
     if (this.shouldDeferFinalMemberGuardFailure(row, observations)) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'memberGuardRejected');
       return;
     }
 
@@ -537,19 +568,19 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
         sourceTag: row.sourceTag,
       })
     ) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'ownedByPublication');
       return;
     }
 
     if (observations.some(({ state }) => LIVE_QUEUE_STATES.has(state))) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'waitingInQueue');
       return;
     }
 
     if (
       observations.some(({ job, state }) => state === 'active' && this.jobStartedAfter(job, cutoff))
     ) {
-      summary.lastDeferredCount += 1;
+      this.observeDeferredCandidate(summary, row, 'recentlyStarted');
       return;
     }
 
@@ -1059,6 +1090,7 @@ export class MaxActionLedgerWatchdogService implements OnModuleInit, OnModuleDes
       return {
         ...this.state,
         ...parsed,
+        lastDeferredByReason: parsed.lastDeferredByReason ?? null,
       };
     } catch {
       return null;

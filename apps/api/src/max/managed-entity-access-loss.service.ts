@@ -198,12 +198,10 @@ export class ManagedEntityAccessLossService {
     const chat = await this.prisma.chat.findUnique({
       where: { id: chatId },
       select: {
-        title: true,
         entityType: true,
       },
     });
     const botId = await this.resolveBotId(chatId, explicitBotId);
-    const title = params.title?.trim() || chat?.title || `Chat ${chatId}`;
     const entityType = params.entityType ?? chat?.entityType ?? null;
     const lifecycleEventAt = this.normalizeDate(params.lifecycleEventAt);
     const lifecycleEventType = this.readTrimmedString(params.lifecycleEventType) ?? 'bot_removed';
@@ -212,7 +210,7 @@ export class ManagedEntityAccessLossService {
       ? await this.maxBotLinkService.markChatBotRemoved({
           chatId,
           botId,
-          title,
+          title: params.title,
           entityType,
           accessLostReason: params.reason,
           accessLostSource: params.source,

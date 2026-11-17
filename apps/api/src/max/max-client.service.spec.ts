@@ -9750,24 +9750,22 @@ describe('MaxClientService inline keyboard guardrails', () => {
       { type: 'link', text: `Existing ${index}`, url: `https://example.com/${index}` },
     ]);
     const httpService = {
-      request: jest
-        .fn()
-        .mockReturnValue(
-          of({
-            status: 200,
-            data: {
-              messages: [
-                {
-                  body: {
-                    mid: 'full-keyboard',
-                    text: 'Post',
-                    attachments: [{ type: 'inline_keyboard', payload: { buttons } }],
-                  },
+      request: jest.fn().mockReturnValue(
+        of({
+          status: 200,
+          data: {
+            messages: [
+              {
+                body: {
+                  mid: 'full-keyboard',
+                  text: 'Post',
+                  attachments: [{ type: 'inline_keyboard', payload: { buttons } }],
                 },
-              ],
-            },
-          }),
-        ),
+              },
+            ],
+          },
+        }),
+      ),
     };
     const service = createService(httpService);
     try {
@@ -17107,10 +17105,45 @@ describe('MaxClientService inline keyboard guardrails', () => {
       expect.objectContaining({ category: 'max_api_external_429', statusCode: 429 }),
     );
     expect(externalWarn).toHaveBeenCalledWith(
-      expect.objectContaining({ origin: 'external_429', statusCode: 429 }),
+      expect.objectContaining({
+        origin: 'external_429',
+        statusCode: 429,
+        retryAfterMs: 30_000,
+        retryAfterSource: 'default',
+      }),
       'MAX API returned external HTTP 429',
     );
     await externalService.onModuleDestroy();
+  });
+
+  it('reports the same external Retry-After delay that was submitted to the shared limiter', async () => {
+    const externalError = Object.assign(new Error('rate limited'), {
+      response: { status: 429, headers: { 'retry-after': '7' } },
+    });
+    const service = createService({
+      request: jest.fn().mockReturnValue(throwError(() => externalError)),
+    });
+    const state = service as any;
+    const warn = jest.spyOn(state.logger, 'warn');
+    try {
+      await expect(service.getChatSnapshot('chat-external')).rejects.toBe(externalError);
+      expect(state.limiterRedis.eval).toHaveBeenCalledWith(
+        expect.any(String),
+        1,
+        'maxapi:gcra:v1:bot:777000_bot:all:cooldown',
+        '7000',
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          origin: 'external_429',
+          retryAfterMs: 7_000,
+          retryAfterSource: 'max',
+        }),
+        'MAX API returned external HTTP 429',
+      );
+    } finally {
+      await service.onModuleDestroy();
+    }
   });
 
   it('lets user-facing traffic classes borrow spare global headroom while capping background work', async () => {

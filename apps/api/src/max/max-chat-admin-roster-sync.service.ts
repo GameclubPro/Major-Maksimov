@@ -10,7 +10,7 @@ import {
   invalidateAdminRosterCompleteness,
 } from './chat-admin-roster-state';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'crypto';
 import type { ChatSummary, ManagedEntityType } from '@maxim/contracts';
 import { managedRefreshBackoffMs } from './managed-refresh-backoff';
@@ -58,6 +58,7 @@ const CHAT_ADMIN_ROSTER_SYNC_MEMBERSHIP_PREWARM_MAX_PENDING = 64;
 const CHAT_ADMIN_ROSTER_SYNC_SOURCE_BACKOFF_MS = 10_000;
 const CHAT_ADMIN_ROSTER_SYNC_SOURCE_BACKOFF_JITTER_MS = 5_000;
 const CHAT_ADMIN_ROSTER_SYNC_TERMINAL_BOT_BACKOFF_MS = 5 * 60 * 1_000;
+const TERMINAL_BACKOFF_SWEEP_BATCH = 256;
 const MANAGED_ENTITIES_PUBLISHED_SNAPSHOT_TTL_SEC = 7 * 24 * 60 * 60;
 const MANAGED_ENTITIES_PUBLISHED_SNAPSHOT_PATCH_CONCURRENCY = 8;
 const MANAGED_ENTITY_ACCESS_EDGE_GRANTED_TTL_MS = 3 * 24 * 60 * 60 * 1_000;
@@ -113,10 +114,11 @@ export class MaxChatAdminRosterSyncSourceBackoffError extends Error {
 }
 
 @Injectable()
-export class MaxChatAdminRosterSyncService {
+export class MaxChatAdminRosterSyncService implements OnModuleDestroy {
   private readonly logger = new Logger(MaxChatAdminRosterSyncService.name);
   private readonly managedRefreshSourceBackoffUntilMs = new Map<string, number>();
   private readonly terminalBotBackoffUntilMs = new Map<string, number>();
+  private terminalBackoffTimer?: NodeJS.Timeout;
   private readonly nextActiveRosterObservationAt = new Map<string, number>();
   private activeRosterObservations = 0;
 
@@ -133,6 +135,12 @@ export class MaxChatAdminRosterSyncService {
     private readonly nightModeTransitionScheduler?: NightModeTransitionSchedulerService,
     @Optional() private readonly metrics?: StorageRuntimeMetricsService,
   ) {}
+
+  onModuleDestroy(): void {
+    clearTimeout(this.terminalBackoffTimer);
+    this.terminalBackoffTimer = undefined;
+    this.terminalBotBackoffUntilMs.clear();
+  }
 
   async observeActivity(
     chatId: string,
@@ -2322,10 +2330,10 @@ export class MaxChatAdminRosterSyncService {
     return this.hashModulo(job.chatId, CHAT_ADMIN_ROSTER_SYNC_SOURCE_BACKOFF_JITTER_MS + 1);
   }
 
-  private isTerminalBotBackoffActive(chatId: string, botId: string, now = Date.now()): boolean {
+  private isTerminalBotBackoffActive(chatId: string, botId: string): boolean {
     const key = this.buildTerminalBotBackoffKey(chatId, botId);
     const backoffUntilMs = this.terminalBotBackoffUntilMs.get(key) ?? 0;
-    if (backoffUntilMs <= now) {
+    if (backoffUntilMs <= performance.now()) {
       if (backoffUntilMs > 0) {
         this.terminalBotBackoffUntilMs.delete(key);
       }
@@ -2335,11 +2343,35 @@ export class MaxChatAdminRosterSyncService {
     return true;
   }
 
-  private markTerminalBotBackoff(chatId: string, botId: string, now = Date.now()): void {
+  private markTerminalBotBackoff(chatId: string, botId: string): void {
+    const key = this.buildTerminalBotBackoffKey(chatId, botId);
+    // FLAG: Monotonic deadlines preserve expiry order across wall clock corrections.
+    this.terminalBotBackoffUntilMs.delete(key);
     this.terminalBotBackoffUntilMs.set(
-      this.buildTerminalBotBackoffKey(chatId, botId),
-      now + CHAT_ADMIN_ROSTER_SYNC_TERMINAL_BOT_BACKOFF_MS,
+      key,
+      performance.now() + CHAT_ADMIN_ROSTER_SYNC_TERMINAL_BOT_BACKOFF_MS,
     );
+    if (!this.terminalBackoffTimer) this.scheduleTerminalBackoffSweep();
+  }
+
+  private scheduleTerminalBackoffSweep(): void {
+    const nextExpiry = this.terminalBotBackoffUntilMs.values().next().value;
+    if (nextExpiry === undefined) return;
+    this.terminalBackoffTimer = setTimeout(
+      () => {
+        this.terminalBackoffTimer = undefined;
+        const now = performance.now();
+        let removed = 0;
+        for (const [key, expiry] of this.terminalBotBackoffUntilMs) {
+          if (expiry > now || removed >= TERMINAL_BACKOFF_SWEEP_BATCH) break;
+          this.terminalBotBackoffUntilMs.delete(key);
+          removed++;
+        }
+        this.scheduleTerminalBackoffSweep();
+      },
+      Math.max(1, nextExpiry - performance.now()),
+    );
+    this.terminalBackoffTimer.unref();
   }
 
   private buildTerminalBotBackoffKey(chatId: string, botId: string): string {
