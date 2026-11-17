@@ -202,6 +202,11 @@ try {
       await editor().getByRole('alert').waitFor();
       assert.equal(await editor().getByRole('textbox').inputValue(), 'mailto:admin@example.com');
       await editor().getByRole('button', { name: 'Отмена', exact: true }).click();
+      await page
+        .getByRole('dialog', { name: 'Отменить изменения правила?', exact: true })
+        .getByRole('button', { name: 'Отменить изменения', exact: true })
+        .click();
+      await editor().waitFor({ state: 'detached' });
       await add('blocked.example');
       await panel.locator('summary').filter({ hasText: 'Исключения' }).click();
       await add('https://blocked.example/help', true);
@@ -249,7 +254,7 @@ try {
       await page.setViewportSize(viewport);
       failNext = true;
       const save = () =>
-        panel.getByRole('button', { name: /^(?:Сохранить|Повторить)$/u, exact: true });
+        panel.getByRole('button', { name: /^(?:Сохранить в этом чате|Повторить)$/u, exact: true });
       await save().click();
       await waitFor(() => writes.length === 1, 'Failed save was not observed');
       await save().waitFor({ state: 'visible' });

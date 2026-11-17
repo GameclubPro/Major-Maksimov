@@ -6,7 +6,10 @@ async function reopen(page) {
   await page.locator(PANEL).waitFor({ state: 'visible' });
 }
 async function save(page) {
-  await page.locator(PANEL).getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await page
+    .locator(PANEL)
+    .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+    .click();
   await page.locator(PANEL).waitFor({ state: 'hidden' });
 }
 
@@ -30,7 +33,7 @@ export async function assertStopWordsEditorFlow(page) {
     true,
     'Message preview must wait until the input buffer is added to the draft list',
   );
-  await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
   assert.equal(await input.inputValue(), phrase);
   assert.equal(await wordsList.getByText(phrase, { exact: true }).count(), 0);
   await panel.getByRole('button', { name: 'Добавить записи', exact: true }).click();
@@ -45,7 +48,7 @@ export async function assertStopWordsEditorFlow(page) {
     await panel.getByRole('button', { name: 'Добавить записи', exact: true }).isDisabled(),
     true,
   );
-  await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
   assert.equal(await input.inputValue(), 'новыймаркер, и/в');
   assert.equal(
     await panel
@@ -116,11 +119,11 @@ export async function assertStopWordsSaveFailure(page, failure) {
   const input = panel.getByRole('textbox', { name: 'Добавить слова и фразы', exact: true });
   const wordsList = panel.getByLabel('Список слов и фраз', { exact: true });
   await input.fill('контрольная фраза');
-  await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
   assert.equal(await input.inputValue(), 'контрольная фраза');
   assert.equal(await wordsList.getByText('контрольная фраза', { exact: true }).count(), 0);
   await panel.getByRole('button', { name: 'Добавить записи', exact: true }).click();
-  await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
   await page.getByText('Не удалось сохранить блок «Стоп-слова»', { exact: true }).waitFor();
   assert.equal(await input.inputValue(), '');
   await wordsList.getByText('контрольная фраза', { exact: true }).waitFor();
