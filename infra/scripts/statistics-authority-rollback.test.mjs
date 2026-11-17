@@ -261,9 +261,20 @@ git() {
   esac
 }
 require_market_statistics_lock_dispatch() { :; }
+require_major_market_release_dispatch() {
+  [[ "$#" == 1 && ( "$1" == origin/main || "$1" == refs/heads/main ) ]] || return 92
+  printf 'major-market-source-checked:%s\\n' "$1"
+}
+require_pair_release_admission_dispatch() {
+  [[ "$#" == 1 && ( "$1" == origin/main || "$1" == refs/heads/main ) ]] || return 93
+  printf 'pair-admission-source-checked:%s\\n' "$1"
+}
 maxim_topology_require_eraser_bridge() { :; }
 maxim_topology_require_eraser_rate_limit_reader() { :; }
-${marker}() { [[ "$1" != "$REFUSED_REF" ]]; }
+${marker}() {
+  printf 'lifecycle-source-checked:%s\\n' "$1"
+  [[ "$1" != "$REFUSED_REF" ]]
+}
 ${sync}
 sync_branch
 `,
@@ -271,6 +282,15 @@ sync_branch
       { encoding: 'utf8', env: { PATH: process.env.PATH, REFUSED_REF: refused } },
     );
     assert.equal(result.status, 2, result.stderr);
-    assert.doesNotMatch(result.stderr, /UNSAFE/u);
+    const checkedRefs = refused === 'origin/main' ? ['origin/main'] : ['origin/main', refused];
+    assert.deepEqual(
+      result.stdout.trimEnd().split('\n'),
+      checkedRefs.flatMap((ref) => [
+        `major-market-source-checked:${ref}`,
+        `pair-admission-source-checked:${ref}`,
+        `lifecycle-source-checked:${ref}`,
+      ]),
+    );
+    assert.doesNotMatch(result.stderr, /UNSAFE|command not found/u);
   }
 });

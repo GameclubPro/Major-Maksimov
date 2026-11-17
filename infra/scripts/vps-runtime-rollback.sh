@@ -615,22 +615,26 @@ echo "Services: ${SERVICES[*]}"
 ensure_rollback_migrations_compatible
 maxim_check_deploy_disk_capacity 1 0
 require_market_statistics_lock_dispatch "$TARGET_FULL_SHA" || exit 1
+require_major_market_release_dispatch "$TARGET_FULL_SHA" || exit 1
 require_pair_release_admission_dispatch "$TARGET_FULL_SHA" || exit 1
 git switch --detach "$TARGET_FULL_SHA"
 maxim_topology_refuse_dirty_api_build_inputs
 
 export MAXIM_API_IMAGE="$ROLLBACK_API_IMAGE"
+major_market_release_verify before-build
 maxim_topology_build_shared_api_image "$ROLLBACK_API_IMAGE" "$TARGET_FULL_SHA"
 ROLLBACK_API_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$ROLLBACK_API_IMAGE")"
 maxim_topology_require_ocr_native_sandbox_image_capability \
   "$ROLLBACK_API_IMAGE_ID" "$TARGET_HAS_OCR_NATIVE_SANDBOX"
 maxim_topology_require_photo_native_image_capability "${ROLLBACK_API_IMAGE_ID}"
+major_market_release_verify after-image-validation
 begin_runtime_rollback_transition
 ROLLBACK_RUNTIME_STARTED=1
 verify_inherited_static_components
 MAXIM_MIGRATION_API_IMAGE="$ROLLBACK_API_IMAGE" \
   docker compose "${MIGRATION_COMPOSE_FILES[@]}" run --rm --no-deps --pull never api-ingress \
   ./node_modules/.bin/prisma migrate deploy --config apps/api/prisma.config.ts
+major_market_release_verify before-quiesce
 maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES
 if [[ "$TARGET_HAS_PUBLISHER" -eq 0 ]]; then
   remove_incompatible_publisher_container
