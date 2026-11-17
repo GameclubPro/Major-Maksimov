@@ -97,7 +97,6 @@ export function SettingsDuplicatesSection(props: SettingsDuplicatesSectionProps)
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => toggleSection('duplicates')}
-        headerAction={props.renderApplyTargetHeaderAction('duplicates')}
         confirmCloseWhen={props.isSectionDirty('duplicates')}
         onDiscardChanges={() => props.discardSectionChanges('duplicates')}
         footer={props.renderSectionSaveFooter('duplicates')}

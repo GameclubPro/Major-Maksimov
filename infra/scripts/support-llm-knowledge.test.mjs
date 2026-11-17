@@ -569,7 +569,10 @@ test('four link modes preserve their actual effects, target scope and save actio
   assert.match(links, /«Запрещать по списку» — запрещены адреса из списка с учётом исключений/u);
   assert.match(links, /«Удалять все» — запрещены любые ссылки, исключения не действуют/u);
   assert.match(links, /Сообщение с запрещённой ссылкой удаляется целиком/u);
+  // The installed support bundle calls the current-chat action “Сохранить”.
+  const saveFooter = source('apps/miniapp/src/pages/settings/settings-section-save-footer.tsx');
   assert.match(links, /После изменения нажмите «Сохранить»/u);
+  assert.match(saveFooter, /options\?\.saveLabel \?\? 'Сохранить в этом чате'/u);
   assert.match(links, /Пустой список.*«Разрешать по списку» запрещает все ссылки/u);
   assert.match(links, /«Запрещать по списку» запретов по пустому списку нет/u);
   assert.match(links, /конкретного адреса.*«Добавить».*«Только эта ссылка»/u);
@@ -591,8 +594,4 @@ test('four link modes preserve their actual effects, target scope and save actio
   const detector = source('apps/api/src/moderation/rule-engine-link-detector.ts');
   assert.match(detector, /evaluateRuntimeLinkRulesPolicy\(rules\.policy, targets\)/u);
   assert.match(detector, /policy === LinkPolicy\.ALERT_ONLY\) \{\s*return null;/u);
-  assert.match(
-    source('apps/miniapp/src/pages/settings/settings-section-save-footer.tsx'),
-    /options\?\.saveLabel \?\? 'Сохранить'/u,
-  );
 });

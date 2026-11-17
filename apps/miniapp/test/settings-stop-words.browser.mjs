@@ -103,7 +103,8 @@ try {
       const panel = page.locator(PANEL);
       const words = (includeHidden = false) =>
         panel.getByRole('textbox', { name: 'Добавить слова и фразы', exact: true, includeHidden });
-      const save = () => panel.getByRole('button', { name: /^(?:Сохранить|Сохраняем\.\.\.)$/u });
+      const save = () =>
+        panel.getByRole('button', { name: /^(?:Сохранить в этом чате|Сохраняем\.\.\.)$/u });
       const stopState = (chatId, requestState = state) => ({
         policy:
           requestState.storage[chatId] === 'invalid'
@@ -402,7 +403,7 @@ try {
         };
       });
       if (savePresentation.color === savePresentation.background) console.error(savePresentation);
-      assert.equal(savePresentation.text, 'Сохранить');
+      assert.equal(savePresentation.text, 'Сохранить в этом чате');
       assert.notEqual(savePresentation.color, savePresentation.background);
       await save().click();
       await panel.waitFor({ state: 'hidden' });
@@ -503,7 +504,7 @@ try {
         fullPage: false,
       });
       assert.equal(await words(true).isDisabled(), true);
-      const copy = panel.getByRole('button', { name: 'Применить к другим чатам', exact: true });
+      const copy = panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true });
       if (await copy.count()) assert.equal(await copy.isDisabled(), true);
       const create = panel.getByRole('button', { name: 'Создать новый список', exact: true });
       await create.click();
@@ -549,7 +550,7 @@ try {
         ),
       );
       await waitForFailedSave();
-      assert.equal(await save().textContent(), 'Сохранить');
+      assert.equal(await save().textContent(), 'Сохранить в этом чате');
       assert.equal(await save().isDisabled(), true);
       await panel.getByRole('button', { name: 'Создать новый список', exact: true }).click();
       await page
@@ -754,7 +755,7 @@ try {
         .click();
       await page
         .locator('.settings-drilldown__panel--links')
-        .getByRole('button', { name: 'Сохранить', exact: true })
+        .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
         .click();
       await links.waitFor({ state: 'hidden' });
       assert.equal(state.writes.length, 2);

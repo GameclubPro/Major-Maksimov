@@ -2,40 +2,23 @@ import type {
   ApplySectionTargetPreviewResponse,
   ApplySettingsTarget,
 } from '@maxim/contracts/settings';
-import type { ManagedEntityFavoriteType } from '@maxim/contracts/managed-entities';
 import { useEffect, useRef, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { HOME_ENTITY_FAVORITE_ICONS, XmarkGlyph } from '../../components/ui/compact-icons';
-import type { ApiTransport } from '../../lib/api/transport';
-import { HOME_ENTITY_FAVORITE_TYPES } from '../../lib/home-entity-favorites';
+import { XmarkGlyph } from '../../components/ui/compact-icons';
+import { AppIcon } from '../../components/ui/app-icon';
 import { useHomeEntityFavorites } from '../../lib/home-entity-favorites-context';
-import { cn } from '../../lib/cn';
 import { isTopmostModalDialog, useDialogFocusTrap } from '../../lib/dialog-focus';
 import { useNativeBackHandler } from '../../lib/native-back';
 import type { ApplySectionKey } from '../settings-page-state';
 import {
   formatApplyTargetCountLabel,
+  formatApplyTargetSaveLabel,
   isApplySettingsTargetPreviewCurrent,
 } from './settings-apply-target';
 import './settings-apply-target-sheet.css';
 
-type ApplyTargetSheetState = {
-  section: ApplySectionKey;
-  target: ApplySettingsTarget;
-};
-
-const HOME_ENTITY_FAVORITE_TITLES: Record<ManagedEntityFavoriteType, string> = {
-  important: 'Важные чаты',
-  watch: 'Чаты, за которыми нужно следить',
-  broadcast: 'Чаты для публикаций',
-  test: 'Чаты для проверки настроек',
-  partner: 'Чаты партнёров и клиентов',
-  service: 'Рабочие чаты',
-};
-
 type SettingsApplyTargetSheetProps = {
-  api: ApiTransport;
-  sheet: ApplyTargetSheetState | null;
+  sheet: { sourceChatId: string; section: ApplySectionKey; target: ApplySettingsTarget } | null;
   preview: ApplySectionTargetPreviewResponse | null;
   previewLoading: boolean;
   previewError: string | null;
@@ -43,7 +26,7 @@ type SettingsApplyTargetSheetProps = {
   overlayStyle: CSSProperties | undefined;
   isApplying: boolean;
   onClose: () => void;
-  onTargetChange: (target: ApplySettingsTarget) => void;
+  onRetry: () => void;
   onConfirm: () => void;
 };
 
@@ -56,16 +39,13 @@ export function SettingsApplyTargetSheet({
   overlayStyle,
   isApplying,
   onClose,
-  onTargetChange,
+  onRetry,
   onConfirm,
 }: SettingsApplyTargetSheetProps) {
   const panelRef = useRef<HTMLElement | null>(null);
   const isOpen = Boolean(sheet);
   useDialogFocusTrap(isOpen, panelRef, panelRef);
   const { snapshot: favoritesSnapshot, actions: favoritesActions } = useHomeEntityFavorites();
-  const favoriteLabels = favoritesSnapshot.labels.resolved;
-  const favoriteLabelsStatus =
-    favoritesSnapshot.labels.status === 'idle' ? 'loading' : favoritesSnapshot.labels.status;
   const compositionEpoch = favoritesSnapshot.byType.chat.compositionEpoch;
   const previewEpochRef = useRef({ preview, epoch: compositionEpoch });
   if (previewEpochRef.current.preview !== preview)
@@ -76,88 +56,84 @@ export function SettingsApplyTargetSheet({
       if (isApplying) {
         return true;
       }
-
       onClose();
       return true;
     },
-    { enabled: Boolean(sheet), priority: 690 },
+    { enabled: isOpen, priority: 690 },
   );
 
   useEffect(() => {
-    if (isOpen && favoritesSnapshot.labels.status === 'idle')
-      void favoritesActions.refreshLabels().catch(() => undefined);
-  }, [isOpen, favoritesActions, favoritesSnapshot.labels.status]);
-
-  useEffect(() => {
-    if (!isOpen) {
-      return undefined;
-    }
-
+    if (!isOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') {
-        return;
-      }
-
+      if (event.key !== 'Escape') return;
       const panel = panelRef.current;
       if (!panel || !isTopmostModalDialog(panel)) {
         return;
       }
-
       event.preventDefault();
       event.stopImmediatePropagation();
       if (!isApplying) {
         onClose();
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isApplying, isOpen, onClose]);
 
-  if (!sheet) {
-    return null;
-  }
-
+  if (!sheet) return null;
   const { target } = sheet;
-  const favoriteTargetSelected = target.mode === 'allFavorites' || target.mode === 'favoriteTypes';
+  const favoriteType =
+    target.mode === 'favoriteTypes' && target.favoriteTypes.length === 1
+      ? target.favoriteTypes[0]
+      : null;
+  const favoriteReady =
+    !favoriteType ||
+    (favoritesSnapshot.labels.status === 'ready' &&
+      favoritesSnapshot.labels.serverConfirmed &&
+      favoritesSnapshot.byType.chat.assignmentsComplete &&
+      favoritesSnapshot.byType.chat.status === 'ready');
+  const favoriteChanged = Boolean(
+    favoriteType &&
+    favoriteReady &&
+    !favoritesSnapshot.assignments.chat[favoriteType].includes(sheet.sourceChatId),
+  );
+  const supportedTarget =
+    target.mode === 'all' || target.mode === 'current' || Boolean(favoriteType);
   const previewMatchesTarget =
+    preview?.sourceChatId === sheet.sourceChatId &&
     previewEpochRef.current.epoch === compositionEpoch &&
     isApplySettingsTargetPreviewCurrent(target, preview);
+  const reportsTargetLimitExceeded =
+    sheet.section === 'reports' && (preview?.appliedChatIds.length ?? 0) > 500;
   const canConfirm =
     previewMatchesTarget &&
     !previewLoading &&
     !previewError &&
     !isApplying &&
-    (!favoriteTargetSelected || favoriteLabelsStatus === 'ready') &&
+    favoriteReady &&
+    !favoriteChanged &&
+    supportedTarget &&
     (preview?.updatedChats ?? 0) > 0 &&
-    (sheet.section !== 'reports' || (preview?.appliedChatIds.length ?? 0) <= 500);
+    !reportsTargetLimitExceeded;
   const visibleChats = previewMatchesTarget ? (preview?.sampleChats.slice(0, 4) ?? []) : [];
   const remainingChats = Math.max(0, (preview?.updatedChats ?? 0) - visibleChats.length);
-  const reportsTargetLimitExceeded =
-    sheet.section === 'reports' && (preview?.appliedChatIds.length ?? 0) > 500;
-
-  function updateFavoriteType(favoriteType: ManagedEntityFavoriteType) {
-    if (isApplying) {
-      return;
-    }
-    const currentTypes =
-      target.mode === 'allFavorites' ? [...HOME_ENTITY_FAVORITE_TYPES] : target.favoriteTypes;
-    const nextTypes = currentTypes.includes(favoriteType)
-      ? currentTypes.filter((item) => item !== favoriteType)
-      : [...currentTypes, favoriteType];
-
-    if (nextTypes.length === 0) {
-      return;
-    }
-
-    onTargetChange({
-      mode:
-        nextTypes.length === HOME_ENTITY_FAVORITE_TYPES.length ? 'allFavorites' : 'favoriteTypes',
-      favoriteTypes: nextTypes,
-      chatIds: [],
-    });
-  }
-
+  const title =
+    favoriteType && favoritesSnapshot.labels.status === 'ready'
+      ? `Папка «${favoritesSnapshot.labels.resolved[favoriteType]}»`
+      : target.mode === 'current'
+        ? 'Этот чат'
+        : favoriteType
+          ? 'Папка'
+          : 'Все чаты';
+  const error = favoriteChanged
+    ? 'Папка чата изменилась. Откройте сохранение заново.'
+    : !supportedTarget
+      ? 'Откройте сохранение заново.'
+      : !favoriteReady
+        ? 'Не удалось подтвердить папку чата.'
+        : reportsTargetLimitExceeded
+          ? 'За раз можно сохранить настройки не более чем в 500 чатах.'
+          : previewError;
   const titleId = `settings-apply-target-${sheet.section}-title`;
   const descriptionId = `settings-apply-target-${sheet.section}-description`;
   const content = (
@@ -165,7 +141,7 @@ export function SettingsApplyTargetSheet({
       <button
         type="button"
         className="settings-apply-target__backdrop"
-        aria-label="Закрыть выбор чатов"
+        aria-label="Закрыть подтверждение"
         onClick={onClose}
         disabled={isApplying}
         tabIndex={-1}
@@ -179,108 +155,33 @@ export function SettingsApplyTargetSheet({
         aria-describedby={descriptionId}
         tabIndex={-1}
       >
+        <div className="settings-apply-target__handle" aria-hidden />
         <div className="settings-apply-target__header">
-          <div>
-            <strong id={titleId}>{sectionLabel}</strong>
-            <span id={descriptionId}>
-              {target.mode === 'current'
-                ? 'Сохраним настройки этого раздела только в текущем чате.'
-                : 'Сохраним этот чат и заменим настройки раздела в выбранных чатах.'}
-            </span>
-          </div>
+          <strong id={titleId}>{title}</strong>
           <button
             type="button"
             className="settings-apply-target__close"
-            aria-label="Закрыть выбор чатов"
+            aria-label="Закрыть подтверждение"
             onClick={onClose}
             disabled={isApplying}
           >
             <XmarkGlyph aria-hidden />
           </button>
         </div>
-
-        <div className="settings-apply-target__modes" role="group" aria-label="Область применения">
-          {[
-            { mode: 'current' as const, title: 'Этот чат' },
-            { mode: 'all' as const, title: 'Все чаты' },
-            { mode: 'allFavorites' as const, title: 'Категории' },
-          ].map((item) => (
-            <button
-              key={item.mode}
-              type="button"
-              className={cn(
-                'settings-apply-target__mode',
-                (target.mode === item.mode ||
-                  (item.mode === 'allFavorites' && target.mode === 'favoriteTypes')) &&
-                  'is-active',
-              )}
-              aria-pressed={
-                target.mode === item.mode ||
-                (item.mode === 'allFavorites' && target.mode === 'favoriteTypes')
-              }
-              disabled={isApplying}
-              onClick={() =>
-                onTargetChange({
-                  mode: item.mode,
-                  favoriteTypes: [],
-                  chatIds: [],
-                })
-              }
-            >
-              <strong>{item.title}</strong>
-            </button>
-          ))}
-        </div>
-
-        {favoriteTargetSelected ? (
-          <div
-            className="settings-apply-target__favorites"
-            role="group"
-            aria-label="Категории избранного"
-            aria-busy={favoriteLabelsStatus === 'loading' || undefined}
-          >
-            {HOME_ENTITY_FAVORITE_TYPES.map((favoriteType) => {
-              const FavoriteIcon = HOME_ENTITY_FAVORITE_ICONS[favoriteType];
-              const active =
-                target.mode === 'allFavorites' || target.favoriteTypes.includes(favoriteType);
-
-              return (
-                <button
-                  key={favoriteType}
-                  type="button"
-                  className={cn(
-                    'settings-apply-target__favorite',
-                    `is-${favoriteType}`,
-                    active && 'is-active',
-                  )}
-                  aria-pressed={active}
-                  title={HOME_ENTITY_FAVORITE_TITLES[favoriteType]}
-                  disabled={isApplying || favoriteLabelsStatus !== 'ready'}
-                  onClick={() => updateFavoriteType(favoriteType)}
-                >
-                  <FavoriteIcon aria-hidden />
-                  <span>{favoriteLabels[favoriteType]}</span>
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-
+        <p id={descriptionId} className="settings-apply-target__consequence">
+          Настройки «{sectionLabel}» будут заменены.
+        </p>
         <div
           className="settings-apply-target__preview"
           aria-live="polite"
-          aria-busy={previewLoading || (!previewError && !previewMatchesTarget) || undefined}
+          aria-busy={(!error && (previewLoading || !previewMatchesTarget)) || undefined}
         >
-          {favoriteTargetSelected && favoriteLabelsStatus === 'loading' ? (
-            <span>Загружаем категории…</span>
-          ) : favoriteTargetSelected && favoriteLabelsStatus === 'error' ? (
-            <span className="is-danger">Названия категорий временно недоступны.</span>
-          ) : reportsTargetLimitExceeded ? (
-            <span className="is-danger">Выберите не более 500 чатов за одно применение.</span>
-          ) : previewLoading || (!previewError && !previewMatchesTarget) ? (
-            <span>Проверяем выбранные чаты…</span>
-          ) : previewError ? (
-            <span className="is-danger">{previewError}</span>
+          {error ? (
+            <span role="alert" className="is-danger">
+              {error}
+            </span>
+          ) : previewLoading || !previewMatchesTarget ? (
+            <span>Проверяем чаты…</span>
           ) : (
             <>
               <strong>
@@ -288,50 +189,65 @@ export function SettingsApplyTargetSheet({
                   ? formatApplyTargetCountLabel(preview.updatedChats)
                   : 'Нет подходящих чатов'}
               </strong>
-              {visibleChats.length > 0 ? (
+              {visibleChats.length ? (
                 <ul className="settings-apply-target__chat-list" aria-label="Выбранные чаты">
                   {visibleChats.map((chat) => (
-                    <li key={chat.id}>{chat.title}</li>
+                    <li key={chat.id}>
+                      <AppIcon icon="ChatLines" />
+                      <span>{chat.title}</span>
+                      {chat.id === sheet.sourceChatId ? <small>Этот чат</small> : null}
+                    </li>
                   ))}
-                  {remainingChats > 0 ? <li>И ещё {remainingChats}</li> : null}
+                  {remainingChats > 0 ? (
+                    <li className="settings-apply-target__remaining">И ещё {remainingChats}</li>
+                  ) : null}
                 </ul>
               ) : null}
             </>
           )}
         </div>
-
+        {error && !favoriteChanged && !reportsTargetLimitExceeded && supportedTarget ? (
+          <button
+            type="button"
+            className="button button--ghost settings-apply-target__retry"
+            disabled={isApplying}
+            onClick={() => {
+              if (favoriteType && !favoriteReady) {
+                void Promise.allSettled([
+                  favoritesActions.refreshLabels(),
+                  favoritesActions.refreshAssignments('chat'),
+                ]).then(onRetry);
+              } else onRetry();
+            }}
+          >
+            Повторить проверку
+          </button>
+        ) : null}
         <div className="settings-apply-target__actions">
           <button
             type="button"
-            className="button button--ghost"
-            onClick={onClose}
-            disabled={isApplying}
-          >
-            Отмена
-          </button>
-          <button
-            type="button"
             className="button button--accent"
+            disabled={!canConfirm}
+            aria-busy={isApplying || undefined}
             onClick={() => {
               if (canConfirm) {
                 onConfirm();
               }
             }}
-            disabled={!canConfirm}
           >
             <span className="settings-apply-target__confirm-label">
-              {isApplying ? 'Сохраняем…' : target.mode === 'current' ? 'Сохранить' : 'Применить'}
+              {isApplying
+                ? 'Сохраняем…'
+                : previewMatchesTarget && preview?.updatedChats
+                  ? formatApplyTargetSaveLabel(preview.updatedChats)
+                  : 'Сохранить'}
             </span>
           </button>
         </div>
       </section>
     </div>
   );
-
-  if (typeof document === 'undefined') {
-    return content;
-  }
-
+  if (typeof document === 'undefined') return content;
   return createPortal(
     content,
     document.querySelector('.design-preview__device-screen') ?? document.body,

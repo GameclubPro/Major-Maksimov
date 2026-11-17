@@ -25,7 +25,6 @@ export type SettingsSectionShellProps = {
   toggleSection: (section: SettingsSectionKey) => void;
   isSectionDirty: (section: ApplySectionKey) => boolean;
   discardSectionChanges: (section: ApplySectionKey) => void;
-  renderApplyTargetHeaderAction: (section: ApplySectionKey) => ReactNode;
   renderSectionSaveFooter: (
     section: ApplySectionKey,
     options?: { note?: string | null; saveLabel?: string },

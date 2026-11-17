@@ -122,7 +122,7 @@ try {
         });
       }
       await linksPanel.getByRole('radio', { name: 'Разрешать все', exact: true }).click();
-      await linksPanel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await linksPanel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       if (width === 320) {
         await page.getByText('Не удалось сохранить блок «Ссылки»', { exact: true }).waitFor();
         assert.equal(
@@ -135,7 +135,9 @@ try {
           path: join(output, `${width}-${theme}-save-error.png`),
           animations: 'disabled',
         });
-        await linksPanel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await linksPanel
+          .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+          .click();
       }
       await linksPanel.waitFor({ state: 'hidden' });
       if (width === 320) assert.equal(await page.evaluate(() => window.__signalSettingsWrites), 2);

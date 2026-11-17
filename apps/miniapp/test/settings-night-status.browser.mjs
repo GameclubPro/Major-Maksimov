@@ -438,7 +438,7 @@ try {
         /21:59/,
         'Actual night time picker draft survives status refresh',
       );
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).waitFor();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).waitFor();
       assert.equal(
         await panel.evaluate((element) => element.scrollWidth > element.clientWidth + 1),
         false,
@@ -449,7 +449,7 @@ try {
         animations: 'disabled',
       });
       const saved = screen.waitForResponse('**/api/chats/*/settings/section');
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await saved;
       assert.equal(patches.length, 1);
       assert.equal(patches[0].section, 'night');

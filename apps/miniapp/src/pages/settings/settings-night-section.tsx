@@ -101,7 +101,6 @@ export function SettingsNightSection(props: SettingsNightSectionProps) {
     nightTimezoneError,
     openBotEditorKey,
     openHintKey,
-    renderApplyTargetHeaderAction,
     renderInlineHint,
     renderSectionSaveFooter,
     setDraft,
@@ -142,7 +141,6 @@ export function SettingsNightSection(props: SettingsNightSectionProps) {
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => toggleSection('night')}
-        headerAction={renderApplyTargetHeaderAction('night')}
         confirmCloseWhen={isSectionDirty('night')}
         onDiscardChanges={() => discardSectionChanges('night')}
         footer={renderSectionSaveFooter('night')}

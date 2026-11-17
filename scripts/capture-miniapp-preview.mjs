@@ -2342,7 +2342,7 @@ const scenarioBehaviors = [
         (await hoursError.innerText()) !== 'Укажите период от 1 до 48 часов.'
       )
         throw new Error('Invalid duplicate window lost its value or validation state');
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       if (!(await panel.isVisible()) || !(await hoursError.isVisible()))
         throw new Error('Invalid duplicate window was accepted');
       await panel.getByRole('radio', { name: '2 дня', exact: true }).click();
@@ -2394,7 +2394,7 @@ const scenarioBehaviors = [
       await panel
         .getByRole('combobox', { name: 'Часовой пояс', exact: true })
         .selectOption('Asia/Yekaterinburg');
-      const save = panel.getByRole('button', { name: 'Сохранить', exact: true });
+      const save = panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true });
       await save.click();
       await save.waitFor({ state: 'hidden' });
       if (await panel.isVisible())
@@ -2455,7 +2455,7 @@ const scenarioBehaviors = [
         await earlier.click();
       if ((await panel.locator('.duplicate-count-stepper__value').innerText()).trim() !== '2-го')
         throw new Error('Strict duplicate threshold must display the second message');
-      const save = panel.getByRole('button', { name: 'Сохранить', exact: true });
+      const save = panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true });
       await save.click();
       await save.waitFor({ state: 'hidden' });
       if (await panel.isVisible())
@@ -2477,7 +2477,7 @@ const scenarioBehaviors = [
       const panel = page.locator('.settings-drilldown__panel--duplicates');
       await panel.getByText('Права удаления подтверждены', { exact: true }).waitFor();
       await panel.getByLabel('Включить антидубль', { exact: true }).uncheck();
-      const save = panel.getByRole('button', { name: 'Сохранить', exact: true });
+      const save = panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true });
       await save.click();
       await save.waitFor({ state: 'hidden' });
       await openSettingsSection(page, 'Антидубль', '.settings-drilldown__panel--duplicates');
@@ -2510,7 +2510,7 @@ const scenarioBehaviors = [
       const scope = panel.getByRole('radiogroup', { name: 'Чьи картинки сравнивать' });
       await scope.waitFor({ state: 'visible' });
       await scope.getByRole('radio', { name: 'Всех участников', exact: true }).click();
-      const save = panel.getByRole('button', { name: 'Сохранить', exact: true });
+      const save = panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true });
       await save.click();
       await save.waitFor({ state: 'hidden' });
       if (await panel.isVisible())

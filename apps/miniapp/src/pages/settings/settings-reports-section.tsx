@@ -88,7 +88,6 @@ export function SettingsReportsSection(props: SettingsReportsSectionProps) {
         tone={SECTION_PRESENTATION.tone}
         className={SECTION_PRESENTATION.panelClassName}
         onClose={() => props.toggleSection('reports')}
-        headerAction={props.renderApplyTargetHeaderAction('reports')}
         confirmCloseWhen={props.isSectionDirty('reports')}
         onDiscardChanges={() => props.discardSectionChanges('reports')}
         footer={tab === 'settings' ? props.renderSectionSaveFooter('reports') : null}

@@ -3,6 +3,11 @@ import type {
   ApplySettingsTarget,
 } from '@maxim/contracts/settings';
 
+export function formatApplyTargetSaveLabel(count: number): string {
+  const singular = Math.abs(count) % 10 === 1 && Math.abs(count) % 100 !== 11;
+  return `Сохранить в ${count} ${singular ? 'чате' : 'чатах'}`;
+}
+
 export function createDefaultApplySettingsTarget(): ApplySettingsTarget {
   return {
     mode: 'current',

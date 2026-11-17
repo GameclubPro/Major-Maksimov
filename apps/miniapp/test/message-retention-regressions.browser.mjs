@@ -362,7 +362,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           }),
         );
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         const blocker = page.getByRole('alertdialog', { name: 'Боту не хватает прав' });
         await blocker.waitFor();
         assert.equal(await panel.getByText('Настройки уже изменились', { exact: true }).count(), 0);
@@ -381,7 +381,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
       if (scenario === 'pending-close') {
         await page.evaluate(() => window.__RETENTION_TEST__.holdWrite());
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.getByRole('button', { name: 'Сохраняем', exact: true }).waitFor();
         assert.equal(
           await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).isDisabled(),
@@ -410,7 +410,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           window.__RETENTION_TEST__.failReads(failRead);
         }, scenario === 'unconfirmed-read');
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         if (scenario === 'unconfirmed-read') {
           await panel.getByText('Сохранение пока не подтверждено', { exact: true }).waitFor();
           assert.equal(
@@ -433,7 +433,9 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           1,
         );
         assert.equal(
-          await panel.getByRole('button', { name: 'Сохранить', exact: true }).isDisabled(),
+          await panel
+            .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+            .isDisabled(),
           true,
         );
         assert.equal(
@@ -447,7 +449,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           window.__RETENTION_TEST__.loseNextReplyBeforeCommit();
         });
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.getByText('Сохранение пока не подтверждено', { exact: true }).waitFor();
         assert.deepEqual(
           await page.evaluate(() => ({
@@ -512,7 +514,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           window.__RETENTION_TEST__.loseNextReplyBeforeCommit();
         });
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.getByText('Сохранение пока не подтверждено', { exact: true }).waitFor();
         await page.evaluate(() => {
           // A different administrator wins while the original request is still in flight.
@@ -586,7 +588,7 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
           }),
         );
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.getByText('Не удалось сохранить изменения', { exact: true }).waitFor();
         await panel.getByRole('button', { name: 'Обновить состояние', exact: true }).click();
         assert.equal(
@@ -630,7 +632,9 @@ export async function runRetentionRegressions(browser, base, output, scenarios) 
         );
         assert.equal(await panel.getByText('Настройки уже изменились', { exact: true }).count(), 0);
         assert.equal(
-          await panel.getByRole('button', { name: 'Сохранить', exact: true }).isDisabled(),
+          await panel
+            .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+            .isDisabled(),
           true,
         );
       }

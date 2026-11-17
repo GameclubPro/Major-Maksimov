@@ -46,6 +46,7 @@ function renderFooter(overrides: Partial<Parameters<typeof SettingsSectionSaveFo
   return renderToStaticMarkup(
     createElement(SettingsSectionSaveFooter, {
       section: 'links',
+      hasChanges: true,
       isSavingSettings: false,
       savingSection: null,
       isApplyingSectionToAll: false,
@@ -74,7 +75,7 @@ test('the active save action announces that it is busy', () => {
 test('a review-blocked stop-word action stays disabled without claiming a pending save', () => {
   const html = renderFooter({ section: 'stopWords', savingSection: 'stopWords', disabled: true });
   assert.match(html, /disabled=""/u);
-  assert.match(html, />Сохранить<\/button>/u);
+  assert.match(html, /Сохранить в этом чате/u);
   assert.doesNotMatch(html, /aria-busy|Сохраняем/u);
 });
 
@@ -155,4 +156,29 @@ test('lazy settings help does not import the full settings helper module at runt
   }
   assert.doesNotMatch(duplicatePhotoSource, /settings-page-helpers/u);
   assert.doesNotMatch(hintSource, /@maxim\/contracts|settings-page-helpers/u);
+});
+
+test('unchanged settings retain explicit bulk actions while current save is disabled', () => {
+  const html = renderFooter({
+    hasChanges: false,
+    onSaveAll: () => undefined,
+    folder: { type: 'important', label: 'Рабочие', onSave: () => undefined },
+  });
+  assert.match(html, /settings-save-actions__current[^>]*disabled/u);
+  assert.equal((html.match(/<button/g) ?? []).length, 3);
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 1);
+  assert.match(html, /Сохранить в папке «Рабочие»/u);
+  assert.doesNotMatch(html, /Ещё чаты|Другие чаты|<select|aria-haspopup="menu"/u);
+});
+
+test('a version conflict blocks bulk copying while preserving the comparison action', () => {
+  const html = renderFooter({
+    hasChanges: true,
+    onSaveAll: () => undefined,
+    folder: { type: 'important', label: 'Рабочие', onSave: () => undefined },
+    conflict: { viewingSaved: false, onToggle: () => undefined },
+  });
+  assert.match(html, /Сравнить с сохранённым/u);
+  assert.match(html, /Сохранить мой вариант/u);
+  assert.equal((html.match(/disabled=""/g) ?? []).length, 2);
 });

@@ -27,6 +27,8 @@ await page.route('**/settings-apply-target-test', (route) =>
 const fresh = async () => {
   await page.goto(new URL('settings-apply-target-test', base).href);
   await page.getByRole('dialog').waitFor();
+  await page.locator('.settings-save-actions__folder').waitFor({ state: 'attached' });
+  await resolvePreview();
 };
 const actions = () => page.evaluate(() => window.settingsApplyTargetTest.actions);
 const resolvePreview = async () => {
@@ -38,7 +40,7 @@ const confirmButton = () => page.locator('.settings-apply-target__actions .butto
 try {
   await fresh();
   assert.equal(await confirmButton().isEnabled(), true);
-  await page.getByRole('button', { name: 'Все чаты', exact: true }).click();
+  await page.evaluate(() => window.settingsApplyTargetTest.render({ previewLoading: true }));
   assert.equal(await confirmButton().isDisabled(), true);
   assert.match(await page.locator('.settings-apply-target__preview').innerText(), /Проверяем/u);
   await resolvePreview();
@@ -59,29 +61,50 @@ try {
   assert.equal(await page.getByRole('dialog').isVisible(), true);
   assert.deepEqual(
     (await actions()).map((action) => action.kind),
-    ['target', 'confirm'],
+    ['confirm'],
   );
   console.log(
     'PASS: stale target counts cannot confirm; busy apply consumes Escape and native Back',
   );
 
   await fresh();
-  await page.getByRole('button', { name: 'Категории', exact: true }).click();
-  const favoriteButtons = page
-    .getByRole('group', { name: 'Категории избранного' })
-    .getByRole('button');
-  await favoriteButtons.first().waitFor();
-  await favoriteButtons.first().click();
-  await resolvePreview();
-  assert.equal(await confirmButton().isEnabled(), true);
-  await favoriteButtons.nth(1).click();
+  await page.keyboard.press('Escape');
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  await page.evaluate(() => window.settingsApplyTargetTest.render({ hasChanges: false }));
+  await page.locator('.settings-save-actions__current:disabled').waitFor();
+  assert.equal(
+    await page.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).isDisabled(),
+    true,
+  );
+  const folder = page.getByRole('button', { name: 'Сохранить в папке «Важные»', exact: true });
+  await folder.waitFor();
+  await folder.click();
+  await page.getByRole('dialog', { name: 'Папка «Важные»' }).waitFor();
   assert.equal(await confirmButton().isDisabled(), true);
   await resolvePreview();
-  await confirmButton().click();
-  for (const button of await favoriteButtons.all()) assert.equal(await button.isDisabled(), true);
-  console.log(
-    'PASS: changing categories invalidates the preview and saving freezes every category',
+  assert.equal(await confirmButton().isEnabled(), true);
+  assert.equal(await page.getByRole('group', { name: 'Область применения' }).count(), 0);
+  assert.equal(await page.getByRole('group', { name: 'Категории избранного' }).count(), 0);
+  await page.evaluate(() => window.settingsApplyTargetTest.moveSource());
+  assert.equal(await confirmButton().isDisabled(), true);
+  await page.getByRole('alert').filter({ hasText: 'Папка чата изменилась' }).waitFor();
+  assert.equal(
+    (await actions()).some((action) => action.kind === 'confirm'),
+    false,
   );
+  console.log(
+    'PASS: unchanged settings can be copied directly; changed folder membership cannot confirm',
+  );
+
+  await fresh();
+  await page.evaluate(() =>
+    window.settingsApplyTargetTest.render({ previewError: 'Не удалось проверить чаты' }),
+  );
+  await page.getByRole('button', { name: 'Повторить проверку' }).click();
+  assert.equal(await confirmButton().isDisabled(), true);
+  await resolvePreview();
+  assert.equal(await confirmButton().isEnabled(), true);
+  console.log('PASS: failed preview can be retried without saving');
 
   await fresh();
   await page.keyboard.press('Escape');
@@ -102,7 +125,6 @@ try {
     await page.setViewportSize({ width, height });
     await fresh();
     await page.evaluate((theme) => (document.documentElement.dataset.maxTheme = theme), theme);
-    await page.getByRole('button', { name: 'Категории', exact: true }).click();
     await resolvePreview();
     await page.screenshot({ path: join(screenshotDir, `${name}.png`), fullPage: true });
     assert.deepEqual(
@@ -178,6 +200,11 @@ try {
       await page.evaluate((theme) => {
         document.documentElement.dataset.maxTheme = theme;
       }, theme);
+      await partial.evaluate(async (element) => {
+        await Promise.allSettled(
+          element.getAnimations({ subtree: true }).map((animation) => animation.finished),
+        );
+      });
       assert.equal(
         await partial.evaluate((element) => {
           const bounds = element.getBoundingClientRect();

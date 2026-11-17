@@ -72,17 +72,17 @@ try {
       const toggle = panel.getByRole('switch', { name: 'Удаление по сроку' });
       await toggle.check();
       await panel.getByRole('radio', { name: '24 часа' }).check();
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await panel.getByText('Сохранено', { exact: true }).waitFor();
       await panel.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
       await entry.click();
       assert.equal(await toggle.isChecked(), true);
       assert.equal(await panel.getByRole('radio', { name: '24 часа' }).isChecked(), true);
       await panel.getByRole('radio', { name: '48 часов' }).check();
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await panel.getByText('Сохранено', { exact: true }).waitFor();
       await panel.getByRole('radio', { name: '1 неделя' }).check();
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await panel.getByText('Сохранено', { exact: true }).waitFor();
       assert.equal(await panel.getByRole('radio', { name: '1 неделя' }).isChecked(), true);
       assert.ok(
@@ -185,7 +185,7 @@ try {
       await panel.getByRole('radio', { name: '24 часа', exact: true }).check();
       await panel.getByRole('button', { name: 'Обновить состояние', exact: true }).click();
       assert.equal(await toggle.isChecked(), true);
-      await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       if (scenario === 'conflict') {
         await panel.getByText('Настройки уже изменились', { exact: true }).waitFor();
         await page.waitForTimeout(250);

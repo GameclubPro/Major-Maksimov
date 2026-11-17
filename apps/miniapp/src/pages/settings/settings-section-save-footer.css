@@ -1,0 +1,96 @@
+@layer workspace {
+  body[data-miniapp-profile='moderation'] {
+    --settings-save-fill: linear-gradient(115deg, #3159e7, #6554d6);
+    --settings-save-ink: #fff;
+    --settings-save-shadow: 0 5px 16px rgb(49 89 231 / 18%), inset 0 1px rgb(255 255 255 / 16%);
+    --settings-save-secondary-shadow: 0 2px 6px rgb(20 35 65 / 3%);
+    --settings-save-footer-shadow: 0 -8px 24px rgb(20 35 65 / 5%);
+  }
+  body[data-miniapp-profile='moderation'] .settings-drilldown__footer:has(.settings-save-actions) {
+    padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    background: var(--major-surface);
+    border-top: 1px solid var(--major-border);
+    box-shadow: var(--settings-save-footer-shadow);
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .button {
+    min-width: 0;
+    min-height: 54px;
+    margin: 0;
+    border-radius: 16px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+    transition:
+      transform 160ms ease,
+      background-color 160ms ease;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .settings-save-actions__current {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    padding: 13px 16px;
+    border-color: transparent;
+    background: var(--settings-save-fill);
+    color: var(--settings-save-ink);
+    box-shadow: var(--settings-save-shadow);
+    font-size: 0.9rem;
+    font-weight: 750;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions__targets {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions__targets:has(> :only-child) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .settings-save-actions__target {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 9px;
+    padding: 10px 12px;
+    border: 1px solid var(--major-border);
+    background: var(--major-surface);
+    color: var(--major-ink);
+    text-align: left;
+    font-size: 0.82rem;
+    box-shadow: var(--settings-save-secondary-shadow);
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions__folder {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions__folder small {
+    color: var(--major-muted);
+    font-size: 0.7rem;
+    font-weight: 500;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions__folder strong {
+    font-weight: 700;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .button svg {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .button:disabled {
+    opacity: 0.5;
+    box-shadow: none;
+  }
+  body[data-miniapp-profile='moderation'] .settings-save-actions .button:enabled:active {
+    transform: scale(0.985);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body[data-miniapp-profile='moderation'] .settings-save-actions .button {
+      transition: none;
+    }
+  }
+}

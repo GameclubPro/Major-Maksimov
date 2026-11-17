@@ -294,7 +294,9 @@ try {
                 'Escape closes only the child time picker',
               );
               assert.equal(await pending.inputValue(), 'https://example.com/pending-rule');
-              await page.getByRole('button', { name: 'Сохранить', exact: true }).click();
+              await page
+                .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+                .click();
               assert.equal(await pending.count(), 1, 'Outer Save must retain the pending rule');
               assert.equal(await pending.inputValue(), 'https://example.com/pending-rule');
               assert.equal(await pending.getAttribute('aria-invalid'), 'false');
@@ -307,7 +309,9 @@ try {
                 .getByRole('region', { name: 'Добавление правила' })
                 .getByRole('button', { name: 'Добавить', exact: true })
                 .click();
-              await page.getByRole('button', { name: 'Сохранить', exact: true }).click();
+              await page
+                .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+                .click();
               await group.waitFor({ state: 'hidden' });
               await page.getByRole('button', { name: 'Ссылки', exact: true }).click();
               await page

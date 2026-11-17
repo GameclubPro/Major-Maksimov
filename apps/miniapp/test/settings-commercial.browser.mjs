@@ -54,8 +54,10 @@ try {
         await panel.locator('.commercial-studio').waitFor();
         await settleVisualFrame(page);
         assert.equal(
-          await panel.getByRole('button', { name: 'Сохранить', exact: true }).count(),
-          0,
+          await panel
+            .getByRole('button', { name: 'Сохранить в этом чате', exact: true })
+            .isDisabled(),
+          true,
           'Opening must not change saved thresholds',
         );
         assert.equal(await panel.locator('details').count(), 0);
@@ -95,7 +97,7 @@ try {
         );
         const toggle = panel.getByRole('checkbox', { name: 'Удалять рекламу', exact: true });
         await toggle.uncheck();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.waitFor({ state: 'hidden' });
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         assert.equal(await toggle.isChecked(), false);
@@ -105,14 +107,14 @@ try {
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         assert.equal(await toggle.isChecked(), false);
         await toggle.check();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.waitFor({ state: 'hidden' });
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         assert.equal(await toggle.isChecked(), true);
         const services = panel.getByRole('switch', { name: 'Разрешить: Услуги', exact: true });
         assert.equal(await services.getAttribute('aria-checked'), 'false');
         await services.click();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.waitFor({ state: 'hidden' });
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         assert.equal(await services.getAttribute('aria-checked'), 'true');
@@ -139,7 +141,7 @@ try {
         assert.match(await exceptions.innerText(), /Магазины и бизнес/u);
         assert.match(await exceptions.innerText(), /До /u);
         await exceptions.getByRole('button', { name: 'Готово', exact: true }).click();
-        await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
         await panel.waitFor({ state: 'hidden' });
         await clickSettingsOverviewEntry(page, 'Коммерческая реклама');
         await panel.getByRole('button', { name: 'Исключения', exact: true }).click();
