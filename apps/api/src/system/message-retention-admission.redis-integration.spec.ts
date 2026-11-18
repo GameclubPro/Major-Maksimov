@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import Redis from 'ioredis';
+import { getQueueToken } from '@nestjs/bullmq';
 import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
+import type { Queue } from 'bullmq';
+import Redis from 'ioredis';
 import {
   activityReleaseReceiptKey,
   buildRetentionPriorityQueueDescriptors,
   retentionPriorityQueueKeys,
   HIGHER_PRIORITY_ACTIVITY_KEY,
   HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+  RETENTION_PRIORITY_PERMIT_KEY,
+  RETENTION_PRIORITY_STATUS_KEY,
   retentionPriorityTrafficKey,
 } from '../max/retention-priority-admission';
 import { WebhookIngressMetricsService } from './webhook-ingress-metrics.service';
@@ -15,10 +20,12 @@ import {
   type RetentionObservation,
 } from './message-retention-admission.policy';
 import {
+  RETENTION_ADMISSION_COLLECTOR_KEY,
   RETENTION_COMMIT_SAMPLE_SCRIPT,
   RETENTION_RELEASE_COLLECTOR_SCRIPT,
   RETENTION_SAMPLE_SCRIPT,
 } from './message-retention-admission.redis';
+import { MessageRetentionAdmissionService } from './message-retention-admission.service';
 
 const redisUrl = process.env.MAXIM_TEST_REDIS_URL ?? '';
 const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisUrl);
@@ -79,7 +86,7 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
     await expect(sample()).rejects.toThrow('Invalid priority queue list');
   });
 
-  it('has one collector, commits a short permit, and rejects a former owner without renewing anything', async () => {
+  it('has one collector and protects the short permit from a former owner publishing a denial', async () => {
     const collector = own(`${prefix}:collector`);
     const status = own(`${prefix}:status`);
     const permit = own(`${prefix}:permit`);
@@ -118,10 +125,11 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
         'former-owner',
         String(started),
         'invalid',
-        '1',
+        '0',
       ),
     ).toBe(0);
     expect(await first.get(status)).toBe('{"observed":true}');
+    expect(await first.hget(permit, 'sampleStartedAtMs')).toBe(String(started));
     await first.pexpireat(permit, started - 1);
     expect(await first.exists(permit)).toBe(0);
     expect(await first.eval(RETENTION_RELEASE_COLLECTOR_SCRIPT, 2, collector, permit, owner)).toBe(
@@ -147,15 +155,98 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
         unavailable,
         ...keys,
         '300',
-      ) as Promise<number[]>;
+      ) as Promise<(number | string)[]>;
     await first.zadd(activity, now + 30_000, 'unfinished-receipt');
     expect((await sample())[2]).toBe(1);
     await first.zadd(activity, now - 1, 'unfinished-receipt');
-    await expect(sample()).rejects.toThrow('Stale higher priority activity');
+    await expect(sample()).resolves.toEqual([expect.any(Number), 'stale_activity']);
     await first.del(activity);
     await first.set(unavailable, 'lost-writer');
-    await expect(sample()).rejects.toThrow('Higher priority observation unavailable');
+    await expect(sample()).resolves.toEqual([expect.any(Number), 'activity_unavailable']);
   });
+
+  it.each(['stale_activity', 'activity_unavailable'] as const)(
+    'publishes a fresh denial for %s, revokes the permit and restarts the observation window',
+    async (detail) => {
+      const collector = own(RETENTION_ADMISSION_COLLECTOR_KEY);
+      const statusKey = own(RETENTION_PRIORITY_STATUS_KEY);
+      const permit = own(RETENTION_PRIORITY_PERMIT_KEY);
+      const activity = own(HIGHER_PRIORITY_ACTIVITY_KEY);
+      const unavailable = own(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY);
+      await first.del(collector, statusKey, permit, activity, unavailable);
+      const moduleRef = await Test.createTestingModule({
+        providers: [
+          MessageRetentionAdmissionService,
+          { provide: ConfigService, useValue: new ConfigService({ REDIS_URL: redisUrl }) },
+          ...buildRetentionPriorityQueueDescriptors().map(({ name, wait }) => ({
+            provide: getQueueToken(name),
+            useValue: {
+              toKey: (kind) => wait.slice(0, -'wait'.length) + kind,
+            } satisfies Pick<Queue, 'toKey'>,
+          })),
+        ],
+      }).compile();
+      try {
+        const service = moduleRef.get(MessageRetentionAdmissionService);
+        // Connect the service without starting its periodic timer.
+        await expect(service.status()).resolves.toBeNull();
+        const before = await serverNow();
+        own(retentionPriorityTrafficKey(before));
+        own(retentionPriorityTrafficKey(before + 60_000));
+        await service.tick();
+        await expect(service.status()).resolves.toMatchObject({
+          window: { samples: 1 },
+        });
+        const owner = await second.get(collector);
+        expect(owner).toBeTruthy();
+        const blockedAt = await serverNow();
+        if (detail === 'stale_activity') {
+          await first.zadd(activity, blockedAt - 1, 'unfinished-receipt');
+        } else {
+          await first.set(unavailable, 'lost-writer');
+        }
+        // The seeded permit must still exist when the collector withdraws it.
+        await first.hset(permit, {
+          version: '1',
+          sampleStartedAtMs: String(blockedAt),
+          validUntilMs: String(blockedAt + 10_000),
+        });
+        await first.pexpire(permit, 10_000);
+        await service.tick();
+        const status = await service.status();
+        expect(status).toMatchObject({
+          allowed: false,
+          reason: 'metrics_unavailable',
+          detail,
+          quietSinceMs: null,
+          healthySinceMs: null,
+          window: {
+            complete: false,
+            samples: 0,
+            coverage: 0,
+            arrivalsPerMinute: null,
+            httpPerMinute: null,
+          },
+          resources: { available: false },
+        });
+        expect(status!.observedAtMs).toBeGreaterThanOrEqual(blockedAt);
+        expect(await second.get(collector)).toBe(owner);
+        expect(await second.exists(permit)).toBe(0);
+        expect(await second.exists(detail === 'stale_activity' ? activity : unavailable)).toBe(1);
+
+        await first.del(activity, unavailable);
+        await service.tick();
+        await expect(service.status()).resolves.toMatchObject({
+          allowed: false,
+          reason: 'current_window_incomplete',
+          window: { samples: 1, coverage: 0, complete: false },
+        });
+        expect(await second.exists(permit)).toBe(0);
+      } finally {
+        await moduleRef.close();
+      }
+    },
+  );
 
   it('publishes after a complete current quiet minute without any history key', async () => {
     const collector = own(`${prefix}:collector`);

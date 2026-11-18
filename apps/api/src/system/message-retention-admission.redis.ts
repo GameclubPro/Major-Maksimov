@@ -10,14 +10,14 @@ local nowMs = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local ready = 0
 local active = 0
 local due = 0
-if redis.call('EXISTS', KEYS[3]) ~= 0 then return redis.error_reply('Higher priority observation unavailable') end
+if redis.call('EXISTS', KEYS[3]) ~= 0 then return {nowMs, 'activity_unavailable'} end
 local activityKind = redis.call('TYPE', KEYS[2]).ok
 if activityKind ~= 'none' and activityKind ~= 'zset' then return redis.error_reply('Invalid higher priority activity') end
 if activityKind == 'zset' then
   active = redis.call('ZCARD', KEYS[2])
   if active > 0 then
     local oldest = redis.call('ZRANGE', KEYS[2], 0, 0, 'WITHSCORES')
-    if tonumber(oldest[2]) <= nowMs then return redis.error_reply('Stale higher priority activity') end
+    if tonumber(oldest[2]) <= nowMs then return {nowMs, 'stale_activity'} end
   end
 end
 for index = 4, #KEYS, 5 do
