@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { ConfigService } from '@nestjs/config';
 import {
+  activityReleaseReceiptKey,
   buildRetentionPriorityQueueDescriptors,
   retentionPriorityQueueKeys,
   HIGHER_PRIORITY_ACTIVITY_KEY,
@@ -192,9 +193,10 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
   });
 
   it('holds an ingress observation through actual completion and records its arrival in the same Redis receipt script', async () => {
-    own(HIGHER_PRIORITY_ACTIVITY_KEY);
-    own(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY);
-    await first.del(HIGHER_PRIORITY_ACTIVITY_KEY, HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY);
+    const active = own(HIGHER_PRIORITY_ACTIVITY_KEY);
+    const unavailable = own(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY);
+    const sqlReceipts = own(activityReleaseReceiptKey('receipt:sql'));
+    await first.del(active, unavailable, sqlReceipts);
     const service = new WebhookIngressMetricsService(new ConfigService({ REDIS_URL: redisUrl }));
     const serviceRedis = (service as unknown as { redis: Redis }).redis;
     if (serviceRedis.status !== 'ready')
@@ -210,10 +212,15 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
         finish = resolve;
       });
     });
+    let sqlId: string | undefined;
     try {
       await didStart;
-      expect(await first.zcard(HIGHER_PRIORITY_ACTIVITY_KEY)).toBe(1);
-      expect(await first.exists(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY)).toBe(0);
+      const ids = await first.zrange(active, 0, -1);
+      expect(ids).toHaveLength(1);
+      sqlId = ids[0];
+      expect(sqlId).toMatch(/^receipt:/u);
+      expect(await second.zscore(sqlReceipts, sqlId!)).toBeNull();
+      expect(await first.exists(unavailable)).toBe(0);
       const now = await serverNow();
       const trafficKey = own(retentionPriorityTrafficKey(now));
       const nextTrafficKey = own(retentionPriorityTrafficKey(now + 60_000));
@@ -232,7 +239,9 @@ const localRedis = /^redis:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(redisU
       finish();
       await work;
       await service.onModuleDestroy();
-      expect(await first.zcard(HIGHER_PRIORITY_ACTIVITY_KEY)).toBe(0);
     }
+    expect(await second.zcard(active)).toBe(0);
+    expect(Number(await second.zscore(sqlReceipts, sqlId!))).toBeGreaterThan(await serverNow());
+    expect(await second.exists(unavailable)).toBe(0);
   });
 });

@@ -1,6 +1,9 @@
 import type { MarketplaceStateService } from '../integrations/marketplace/marketplace-state.service';
 import {
   HIGHER_PRIORITY_ACTIVITY_KEY,
+  HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+  HIGHER_PRIORITY_ACTIVITY_RENEW_MS,
+  HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
   HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
   RETENTION_PRIORITY_PERMIT_KEY,
   RETENTION_PRIORITY_RESERVATION_MARKER,
@@ -223,6 +226,7 @@ jest.mock('ioredis', () => {
         set: jest
           .fn()
           .mockImplementation(async (key: string, value: string, ...args: unknown[]) => {
+            if (args.includes('NX') && readEntry(key)) return null;
             let expiresAtMs: number | null = null;
             if (args[0] === 'EX' && typeof args[1] === 'number' && Number.isFinite(args[1])) {
               expiresAtMs = Date.now() + args[1] * 1_000;
@@ -236,14 +240,6 @@ jest.mock('ioredis', () => {
             });
             return 'OK';
           }),
-        zrem: jest.fn().mockImplementation(async (key: string, id: string) => {
-          const entry = readEntry(key);
-          const leases = JSON.parse(entry?.value ?? '{}') as Record<string, number>;
-          if (!(id in leases)) return 0;
-          delete leases[id];
-          store.set(key, { value: JSON.stringify(leases), expiresAtMs: null });
-          return 1;
-        }),
         del: jest.fn().mockImplementation(async (...keys: string[]) => {
           let deleted = 0;
           for (const key of keys) {
@@ -359,14 +355,33 @@ jest.mock('ioredis', () => {
                 return [1, 0, 0];
               }
 
-              if (script.includes('MAX_HIGHER_PRIORITY_ACTIVITY_RENEW_V1')) {
+              if (script === HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT) {
+                const leases = JSON.parse(readEntry(keys[0])?.value ?? '{}') as Record<
+                  string,
+                  number
+                >;
+                const id = String(argValues[0]);
+                if (!(id in leases)) {
+                  if (!readEntry(keys[1])) {
+                    store.set(keys[1], { value: 'activity_release_unknown', expiresAtMs: null });
+                  }
+                  return 0;
+                }
+                delete leases[id];
+                store.set(keys[0], { value: JSON.stringify(leases), expiresAtMs: null });
+                return 1;
+              }
+
+              if (script === HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT) {
                 const leases = JSON.parse(readEntry(keys[0])?.value ?? '{}') as Record<
                   string,
                   number
                 >;
                 const id = String(argValues[0]);
                 if ((leases[id] ?? 0) <= Date.now()) {
-                  store.set(keys[1], { value: 'activity_coverage_lost', expiresAtMs: null });
+                  if (!readEntry(keys[1])) {
+                    store.set(keys[1], { value: 'activity_coverage_lost', expiresAtMs: null });
+                  }
                   return 0;
                 }
                 leases[id] = Date.now() + Number(argValues[1]);
@@ -16373,18 +16388,23 @@ describe('MaxClientService inline keyboard guardrails', () => {
     const service = createService(httpService, {
       MAX_API_GLOBAL_RPS: '30',
       MAX_API_GLOBAL_RPS_INTERACTIVE: '1',
-      MAX_API_RATE_LIMIT_WAIT_MS_INTERACTIVE: '10',
+      MAX_API_RATE_LIMIT_WAIT_MS_INTERACTIVE: '500',
       MAX_API_RATE_LIMIT_RETRY_FLOOR_MS: '1',
     });
-    const limiterRedis = (service as unknown as { limiterRedis: { eval: jest.Mock } }).limiterRedis;
-    limiterRedis.eval
-      .mockResolvedValueOnce([1, 0, 0])
-      .mockResolvedValueOnce([0, 2, 1])
-      .mockResolvedValueOnce([1, 0, 0]);
+    const limiterRedis = (service as unknown as { limiterRedis: Pick<Redis, 'eval'> }).limiterRedis;
+    const evaluate = jest.mocked(limiterRedis.eval);
+    const originalEval = evaluate.getMockImplementation()!;
+    let reservations = 0;
+    evaluate.mockImplementation((script, keys, ...args) => {
+      if (script.includes('MAX_API_GCRA_RESERVE_V1') && ++reservations === 1) {
+        return Promise.resolve([0, 2, 1]);
+      }
+      return originalEval(script, keys, ...args);
+    });
 
     await expect(service.listBotChats()).resolves.toEqual([]);
 
-    expect(limiterRedis.eval).toHaveBeenCalledTimes(3);
+    expect(reservations).toBe(2);
     expect(httpService.request).toHaveBeenCalledTimes(1);
 
     await service.onModuleDestroy();
@@ -18009,20 +18029,29 @@ describe('MaxClientService inline keyboard guardrails', () => {
         .mockReturnValue(of({ status: 200, data: { title: 'Chat', participants_count: 10 } })),
     };
     const service = createService(http);
-    const redis = (service as unknown as { limiterRedis: { zrem: jest.Mock; quit: jest.Mock } })
+    const redis = (service as unknown as { limiterRedis: Pick<Redis, 'eval' | 'quit'> })
       .limiterRedis;
+    const evaluate = jest.mocked(redis.eval);
+    const originalEval = evaluate.getMockImplementation()!;
     let acknowledge!: (removed: number) => void;
-    redis.zrem.mockReturnValueOnce(
-      new Promise<number>((resolve) => {
-        acknowledge = resolve;
-      }),
+    const response = new Promise<number>((resolve) => {
+      acknowledge = resolve;
+    });
+    evaluate.mockImplementation((script, keys, ...args) =>
+      script === HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT
+        ? response
+        : originalEval(script, keys, ...args),
     );
     let shutdown: Promise<void> | undefined;
     try {
       await expect(service.getChatSnapshot('chat-1')).resolves.toEqual(
         expect.objectContaining({ chatId: 'chat-1' }),
       );
-      expect(redis.zrem).toHaveBeenCalledTimes(1);
+      expect(
+        evaluate.mock.calls.filter(
+          ([script]) => script === HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+        ),
+      ).toHaveLength(1);
       expect(redis.quit).not.toHaveBeenCalled();
 
       let stopped = false;
@@ -18040,6 +18069,62 @@ describe('MaxClientService inline keyboard guardrails', () => {
     } finally {
       acknowledge(1);
       await (shutdown ?? service.onModuleDestroy());
+    }
+  });
+
+  it('returns HTTP while one renewal is pending and releases only after it settles', async () => {
+    jest.useFakeTimers();
+    type ChatResponse = { status: number; data: { title: string; participants_count: number } };
+    let complete!: (value: ChatResponse) => void;
+    const httpResponse = new Promise<ChatResponse>((resolve) => {
+      complete = resolve;
+    });
+    const http = { request: jest.fn().mockReturnValue(from(httpResponse)) };
+    const service = createService(http);
+    const redis = (service as unknown as { limiterRedis: Pick<Redis, 'eval'> }).limiterRedis;
+    const evaluate = jest.mocked(redis.eval);
+    const originalEval = evaluate.getMockImplementation()!;
+    let acknowledge!: (value: number) => void;
+    const renewal = new Promise<number>((resolve) => {
+      acknowledge = resolve;
+    });
+    evaluate.mockImplementation((script, keys, ...args) =>
+      script === HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT
+        ? renewal
+        : originalEval(script, keys, ...args),
+    );
+    let shutdown: Promise<void> | undefined;
+    try {
+      const read = service.getChatSnapshot('chat-1');
+      await jest.advanceTimersByTimeAsync(2 * HIGHER_PRIORITY_ACTIVITY_RENEW_MS);
+      const renewals = evaluate.mock.calls.filter(
+        ([script]) => script === HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
+      );
+      expect(renewals).toHaveLength(1);
+      expect(http.request).toHaveBeenCalledTimes(1);
+      complete({ status: 200, data: { title: 'Chat', participants_count: 10 } });
+      await expect(read).resolves.toEqual(expect.objectContaining({ chatId: 'chat-1' }));
+      expect(evaluate).not.toHaveBeenCalledWith(
+        HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      acknowledge(1);
+      shutdown = service.onModuleDestroy();
+      await shutdown;
+      const releases = evaluate.mock.calls.filter(
+        ([script]) => script === HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+      );
+      expect(releases).toEqual([
+        [HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT, ...renewals[0]!.slice(1, -1)],
+      ]);
+    } finally {
+      acknowledge(1);
+      await (shutdown ?? service.onModuleDestroy());
+      jest.useRealTimers();
     }
   });
 

@@ -136,6 +136,12 @@ the admission reason. Require a fresh observation (at most two seconds old); a
 missing/stale value is an evidence gap. `current_window_incomplete` during the first minute is an
 expected closed gate. No SCAN, SQL or MAX request is needed for this observation.
 
+Completed SQL and MAX HTTP activity leave short Redis receipts for the exact
+operation ID. Each kind retains up to 8,192 receipts for at most 60 seconds.
+A retry after a lost Redis reply can use that evidence without repeating SQL,
+MAX requests or quota reservations. If both the active marker and its valid
+receipt are missing, admission stays closed and the first stop reason is kept.
+
 An expired in-flight activity observation closes admission conservatively. A forced
 process termination can leave such an observation; this version does not infer
 completion from lease expiry or automatically erase it. Inspect the fixed activity

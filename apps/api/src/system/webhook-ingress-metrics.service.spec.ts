@@ -1,6 +1,13 @@
 import Redis from 'ioredis';
 import { WebhookIngressMetricsService } from './webhook-ingress-metrics.service';
 import {
+  activityReleaseReceiptKey,
+  HIGHER_PRIORITY_ACTIVITY_ACQUIRE_SCRIPT,
+  HIGHER_PRIORITY_ACTIVITY_KEY,
+  HIGHER_PRIORITY_ACTIVITY_LEASE_MS,
+  HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+  HIGHER_PRIORITY_ACTIVITY_RENEW_MS,
+  HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
   retentionPriorityTrafficKey,
   RETENTION_PRIORITY_TRAFFIC_KEY_PREFIX,
   RETENTION_PRIORITY_TRAFFIC_TTL_SEC,
@@ -19,9 +26,12 @@ const redisState: RedisMockState = {
   failWrites: false,
 };
 
+type EvalArgs = [script: string, keyCount: number, key: string, ...args: string[]];
+type StopArgs = [key: string, reason: string, mode: 'NX'];
+
 const redisInstances: Array<{
-  eval: jest.Mock;
-  set: jest.Mock;
+  eval: jest.Mock<ReturnType<Redis['eval']>, EvalArgs>;
+  set: jest.Mock<Promise<'OK' | null>, StopArgs>;
   pipeline: jest.Mock;
   quit: jest.Mock;
 }> = [];
@@ -83,7 +93,7 @@ jest.mock('ioredis', () => ({
         redisState.hashes.set(key, hash);
         return 1;
       }),
-      set: jest.fn().mockResolvedValue('OK'),
+      set: jest.fn<Promise<'OK' | null>, StopArgs>().mockResolvedValue('OK'),
       pipeline: jest.fn(() => {
         const keys: string[] = [];
         return {
@@ -176,6 +186,7 @@ describe('WebhookIngressMetricsService', () => {
     expect(redisInstances[0]!.set).toHaveBeenCalledWith(
       HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
       'receipt_observation_unknown',
+      'NX',
     );
     await service.onModuleDestroy();
   });
@@ -208,6 +219,88 @@ describe('WebhookIngressMetricsService', () => {
     expect(active).toBe(false);
   });
 
+  it('waits for the last renewal before settling the same receipt after SQL completes', async () => {
+    jest.useFakeTimers();
+    try {
+      const service = createService();
+      const redis = redisInstances[0]!;
+      let finishSql!: () => void;
+      let finishRenew!: (result: number) => void;
+      redis.eval.mockImplementation(async (script) => {
+        if (script === HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT)
+          return new Promise<number>((resolve) => {
+            finishRenew = resolve;
+          });
+        return 1;
+      });
+      const work = service.observeReceiptWork(
+        () =>
+          new Promise<void>((resolve) => {
+            finishSql = resolve;
+          }),
+      );
+      await jest.advanceTimersByTimeAsync(HIGHER_PRIORITY_ACTIVITY_RENEW_MS);
+      const id = redis.eval.mock.calls[0]![4]!;
+      expect(id).toMatch(/^receipt:/);
+      expect(redis.eval).toHaveBeenCalledWith(
+        HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
+        3,
+        HIGHER_PRIORITY_ACTIVITY_KEY,
+        HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+        activityReleaseReceiptKey(id),
+        id,
+        String(HIGHER_PRIORITY_ACTIVITY_LEASE_MS),
+      );
+      finishSql();
+      await work;
+      expect(
+        redis.eval.mock.calls.some(
+          ([script]) => script === HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+        ),
+      ).toBe(false);
+      finishRenew(1);
+      await service.onModuleDestroy();
+      expect(redis.eval).toHaveBeenCalledWith(
+        HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+        3,
+        HIGHER_PRIORITY_ACTIVITY_KEY,
+        HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+        activityReleaseReceiptKey(id),
+        id,
+      );
+      expect(redis.set).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retries a lost release reply for the same operation without repeating SQL', async () => {
+    const service = createService();
+    const redis = redisInstances[0]!;
+    redis.eval
+      .mockResolvedValueOnce(1)
+      .mockRejectedValueOnce(new Error('Reply lost'))
+      .mockResolvedValueOnce(1);
+    const operation = jest.fn(async () => 'SQL committed');
+    await expect(service.observeReceiptWork(operation)).resolves.toBe('SQL committed');
+    await service.onModuleDestroy();
+    const [acquire, release, retry] = redis.eval.mock.calls;
+    expect(acquire?.[0]).toBe(HIGHER_PRIORITY_ACTIVITY_ACQUIRE_SCRIPT);
+    const id = acquire![4]!;
+    expect(release).toEqual([
+      HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+      3,
+      HIGHER_PRIORITY_ACTIVITY_KEY,
+      HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+      activityReleaseReceiptKey(id),
+      id,
+    ]);
+    expect(retry).toEqual(release);
+    expect(redis.eval).toHaveBeenCalledTimes(3);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
   it('preserves a committed SQL result while failed asynchronous release blocks cleanup', async () => {
     const service = createService();
     redisInstances[0]!.eval.mockImplementation(async (script: string) => {
@@ -220,7 +313,8 @@ describe('WebhookIngressMetricsService', () => {
     await service.onModuleDestroy();
     expect(redisInstances[0]!.set).toHaveBeenCalledWith(
       HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
-      'receipt_observation_unknown',
+      'activity_release_failed',
+      'NX',
     );
   });
 
@@ -511,6 +605,11 @@ describe('WebhookIngressMetricsService', () => {
         latencyMs: 120,
       }),
     ).resolves.toBeUndefined();
+    expect(redisInstances[0]!.set).toHaveBeenCalledWith(
+      HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+      'receipt_counter_unknown',
+      'NX',
+    );
     service.recordRouteOutcome({ botId: null, outcome: 'authentication_rejected' });
     await expect(service.getSnapshot({ windowSec: 900 })).resolves.toMatchObject({
       available: true,
