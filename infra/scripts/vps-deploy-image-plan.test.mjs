@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +31,14 @@ const planFunctions = [
   shellFunction('impact_plan_selects_component', 'derive_auto_services'),
   shellFunction('derive_auto_services', 'print_deploy_plan'),
   shellFunction('print_image_preparation_plan', 'has_requested_api_service'),
+  shellFunction('api_deploy_settings_requested', 'is_enabled'),
+  shellFunction('verify_eraser_only_release', 'record_successful_release'),
 ].join('\n');
+
+const runtimeSelectionStart = deploy.indexOf('\nif api_deploy_settings_requested &&');
+const runtimeSelectionEnd = deploy.indexOf('\nvalidate_requested_services', runtimeSelectionStart);
+assert.ok(runtimeSelectionStart >= 0 && runtimeSelectionEnd > runtimeSelectionStart);
+const runtimeSelection = deploy.slice(runtimeSelectionStart, runtimeSelectionEnd);
 
 function fixture(t, changes = []) {
   const directory = mkdtempSync(join(tmpdir(), 'maxim-real-image-plan-'));
@@ -57,17 +64,24 @@ function fixture(t, changes = []) {
   writeFileSync(join(directory, 'README.md'), 'Image plan fixture.\n');
   git('add', '.');
   git('commit', '-qm', 'component baseline');
+  writeFileSync(join(directory, '.env'), 'POSTGRES_PASSWORD=fixture\n');
   const revisions = [git('rev-parse', 'HEAD')];
   for (const [index, path] of changes.entries()) {
     mkdirSync(dirname(join(directory, path)), { recursive: true });
     writeFileSync(join(directory, path), `Changed input ${index}.\n`);
-    git('add', '.');
+    git('add', path);
     git('commit', '-qm', `change ${index}`);
     revisions.push(git('rev-parse', 'HEAD'));
   }
   return {
     revisions,
-    run({ args = ['main', '--auto', '--image-plan'], sources = {}, driftService = '' } = {}) {
+    run({
+      args = ['main', '--auto', '--image-plan'],
+      sources = {},
+      driftService = '',
+      probe = 'plan',
+      refusal = '',
+    } = {}) {
       return spawnSync(
         'bash',
         [
@@ -79,8 +93,11 @@ function fixture(t, changes = []) {
           `
 DEPLOY_MODE=manual
 IMAGE_PLAN_ONLY=0
+BRANCH="$1"
+EXPECTED_DEPLOY_SHA="$(git rev-parse HEAD)"
+POST_RELEASE_RECLAIM=0
+MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE=0
 ${selection}
-[[ "$IMAGE_PLAN_ONLY" == 1 ]] || exit 93
 API_SERVICES=(api-ingress api-admin)
 RELEASE_COMPONENTS=(api-shared miniapp-major-static admin-static eraser)
 RETENTION_DEPLOY_MODE=''
@@ -89,6 +106,13 @@ unset COMMERCIAL_AI_POOL_WORKERS_DEPLOY_ENABLED COMMERCIAL_AI_POOL_DEPLOY_ENABLE
 unset STATISTICS_EXCHANGE_DEPLOY_ENABLED STATISTICS_CENTRAL_DEPLOY_EPOCH
 source "$CLASSIFIER_PATH"
 ${planFunctions}
+if [[ "$FIXTURE_REFUSAL" == api-settings ]]; then COMMERCIAL_AI_POOL_DEPLOY_REQUESTED=true; fi
+if [[ "$FIXTURE_REFUSAL" == reclaim ]]; then POST_RELEASE_RECLAIM=1; fi
+if [[ "$FIXTURE_REFUSAL" == recovery ]]; then MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE=1; fi
+if [[ "$FIXTURE_REFUSAL" == missing-env ]]; then rm .env; fi
+release_manifest() {
+  [[ "$*" == 'validate-current --eraser-rollback-baseline 1' && "$FIXTURE_REFUSAL" != journal ]]
+}
 release_field() {
   local source
   case "$1" in
@@ -101,12 +125,26 @@ release_field() {
   case "$2" in
     sourceSha) printf '%s\\n' "$source" ;;
     imageId) printf '%s\\n' "$FIXTURE_IMAGE_ID" ;;
+    imageRef) printf 'maxim-%s:%s\\n' "$1" "$source" ;;
     *) return 94 ;;
   esac
 }
 docker() {
   case "$1" in
-    compose) printf 'fixture-%s\\n' "\${!#}" ;;
+    compose)
+      if [[ "$2" == -p && "$3" == infra-scale ]]; then
+        case "$FIXTURE_REFUSAL" in
+          scale-running) printf 'api-ingress\\n' ;;
+          scale-unknown) return 1 ;;
+        esac
+        return
+      fi
+      printf 'fixture-%s\\n' "\${!#}"
+      ;;
+    image)
+      [[ "$FIXTURE_REFUSAL" != rollback-image ]] || return 1
+      printf '%s\\n' "$FIXTURE_IMAGE_ID"
+      ;;
     inspect)
       if [[ -n "$FIXTURE_DRIFT_SERVICE" && "\${!#}" == "fixture-$FIXTURE_DRIFT_SERVICE" ]]; then
         printf 'sha256:drift\\n'
@@ -117,8 +155,33 @@ docker() {
     *) return 95 ;;
   esac
 }
-maxim_topology_verify_ocr_native_sandbox_for_image() { return 0; }
+maxim_topology_verify_ocr_native_sandbox_for_image() { [[ "$FIXTURE_REFUSAL" != ocr && "$FIXTURE_REFUSAL" != photo ]]; }
+maxim_topology_require_eraser_bridge() { [[ "$FIXTURE_REFUSAL" != bridge ]]; }
+maxim_durable_executor_requested() { [[ "$FIXTURE_REFUSAL" == durable ]]; }
+maxim_eraser_configured() { return 0; }
+maxim_eraser_require_stores() { [[ "$FIXTURE_REFUSAL" != stores ]]; }
+node() {
+  if [[ "$1" == infra/scripts/assert-eraser-source.mjs ]]; then
+    case "$3:$4" in
+      --connection-requests:api-shared|--connection-requests:eraser|--rate-limit-reader:eraser|--connection-proof-reader:eraser)
+        [[ "$FIXTURE_REFUSAL" != source-floor ]]
+        return
+        ;;
+      *) return 96 ;;
+    esac
+  fi
+  command node "$@"
+}
 COMPOSE_FILES=()
+ALTERNATE_COMPOSE_FILES=(-p infra-scale -f infra/docker-compose.scale.yml)
+if [[ "$FIXTURE_PROBE" == runtime ]]; then
+  verify_eraser_only_release
+  ${runtimeSelection}
+  printf 'BUILD_API_IMAGE=%s\\n' "$BUILD_API_IMAGE"
+  printf 'RUNTIME_SERVICE=%s\\n' "\${SERVICES[@]}"
+  exit
+fi
+[[ "$IMAGE_PLAN_ONLY" == 1 ]] || exit 93
 print_image_preparation_plan
 if [[ "$DEPLOY_MODE" == auto ]]; then
   derive_auto_services
@@ -143,6 +206,8 @@ fi
             FIXTURE_ADMIN_SHA: sources['admin-static'] ?? revisions[0],
             FIXTURE_ERASER_SHA: sources.eraser ?? revisions[0],
             FIXTURE_DRIFT_SERVICE: driftService,
+            FIXTURE_PROBE: probe,
+            FIXTURE_REFUSAL: refusal,
           },
         },
       );
@@ -198,6 +263,139 @@ test('manual service requests retain cumulative API impact and the exact source 
     'api-shared',
     'admin-static',
   ]);
+});
+
+test('Lastik-only image plan and runtime exclude accumulated API and static changes', (t) => {
+  const data = fixture(t, [
+    'apps/api/src/night-mode.ts',
+    'apps/admin/src/overview.tsx',
+    'apps/eraser/src/worker.ts',
+  ]);
+  const planned = data.run({ args: ['main', '--eraser-only', '--image-plan'] });
+  assert.equal(planned.status, 0, planned.stderr);
+  assert.deepEqual(parseImagePreparationPlan(planned.stdout, data.revisions.at(-1)), ['eraser']);
+  const runtime = data.run({ args: ['main', '--eraser-only'], probe: 'runtime' });
+  assert.equal(runtime.status, 0, runtime.stderr);
+  assert.equal(runtime.stdout, 'BUILD_API_IMAGE=0\nRUNTIME_SERVICE=eraser\n');
+  const ordinary = data.run({ sources: { eraser: data.revisions.at(-1) } });
+  assert.equal(ordinary.status, 0, ordinary.stderr);
+  assert.deepEqual(parseImagePreparationPlan(ordinary.stdout, data.revisions.at(-1)), [
+    'api-shared',
+    'admin-static',
+  ]);
+});
+
+test('Lastik-only planning and runtime refuse unsafe starting states', (t) => {
+  const data = fixture(t);
+  for (const options of [
+    { refusal: 'journal' },
+    { refusal: 'scale-running' },
+    { refusal: 'scale-unknown' },
+    { refusal: 'api-settings' },
+    { refusal: 'reclaim' },
+    { refusal: 'recovery' },
+    { refusal: 'durable' },
+    { refusal: 'bridge' },
+    { refusal: 'source-floor' },
+    { refusal: 'ocr' },
+    { refusal: 'photo' },
+    { refusal: 'rollback-image' },
+    { refusal: 'stores' },
+    { driftService: 'api-admin' },
+    { driftService: 'admin-static' },
+    { driftService: 'eraser' },
+    { sources: { eraser: 'unknown' } },
+    { refusal: 'missing-env' },
+  ]) {
+    for (const probe of ['plan', 'runtime']) {
+      const args = ['main', '--eraser-only', ...(probe === 'plan' ? ['--image-plan'] : [])];
+      const result = data.run({ args, probe, ...options });
+      assert.ok([1, 2].includes(result.status), JSON.stringify({ ...options, probe, ...result }));
+      assert.equal(result.stdout, '');
+    }
+  }
+});
+
+test('Lastik-only refuses a target with shared connection changes', (t) => {
+  const data = fixture(t, ['apps/api/src/message-retention/new-bridge.ts']);
+  const result = data.run({ args: ['main', '--eraser-only', '--image-plan'] });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /unchanged shared connection/u);
+});
+
+test('failed Lastik manifest publication retains its journal and committed pointer', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'maxim-eraser-commit-exit-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const current = join(directory, 'current.json');
+  const journal = 'current.invalid-deploy-eraser-fixture.json';
+  writeFileSync(current, 'committed successor');
+  writeFileSync(join(directory, journal), 'previous release');
+  const result = spawnSync(
+    'bash',
+    [
+      '-euc',
+      `
+RELEASE_STATE_DIR="$1"
+RECOVERY_BASE_MANIFEST="$1/$2"
+DEPLOY_RUNTIME_STARTED=1
+DEPLOY_MANIFEST_RECORDED=0
+DEPLOY_MODE=eraser-only
+${shellFunction('invalidate_stale_release_inventory', 'cleanup')}
+invalidate_stale_release_inventory
+`,
+      'lastik-commit-exit',
+      directory,
+      journal,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readdirSync(directory).sort(), [journal, 'current.json']);
+  assert.equal(readFileSync(current, 'utf8'), 'committed successor');
+});
+
+test('native attestation rejects unknown OCR capability and unexpected legacy runtime', () => {
+  const topology = fileURLToPath(new URL('./lib/deploy-topology.sh', import.meta.url));
+  const result = spawnSync(
+    'bash',
+    [
+      '-ec',
+      `source "$1"
+COMPOSE_FILES=(-p infra -f infra/docker-compose.yml)
+maxim_topology_verify_photo_native_sandbox_for_image() { return 0; }
+docker() {
+  case "$1" in
+    image)
+      case "$LABEL" in
+        unavailable) return 1 ;;
+        absent) return 0 ;;
+        *) printf '%s' "$LABEL" ;;
+      esac
+      ;;
+    compose)
+      if [[ "$PRESENT" == 1 ]]; then printf '%s' running-sandbox; fi
+      ;;
+    *) return 99 ;;
+  esac
+}
+for LABEL in unavailable malformed; do
+  if maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"; then exit 10; fi
+  if maxim_topology_require_ocr_native_sandbox_image_capability "$2" 0; then exit 11; fi
+done
+LABEL=absent
+PRESENT=1
+if maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"; then exit 12; fi
+PRESENT=0
+maxim_topology_verify_ocr_native_sandbox_for_image COMPOSE_FILES "$2"
+maxim_topology_require_ocr_native_sandbox_image_capability "$2" 0
+`,
+      'ocr-attestation',
+      topology,
+      imageId,
+    ],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('runtime image drift selects its component even when source is current', (t) => {

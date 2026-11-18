@@ -201,13 +201,28 @@ test('quoted URLs, comment-like strings and shell arguments preserve real active
 
 test('floor is installed only for a selected Lastik image before migration and startup', () => {
   const deploy = read('infra/scripts/vps-pull-build-up.sh');
-  const install = deploy.indexOf('maxim_eraser_install_rate_limit_reader_floor "$TARGET_SHA"');
-  assert.ok(install > deploy.indexOf('TARGET_SHA="$(git rev-parse HEAD)"'));
-  assert.ok(install < deploy.indexOf('\n  begin_release_runtime_transition\n'));
-  assert.ok(install < deploy.indexOf('node apps/eraser/dist/migrate.js'));
+  const targetSha = deploy.indexOf('TARGET_SHA="$(git rev-parse HEAD)"');
+  const migration = deploy.indexOf('node apps/eraser/dist/migrate.js');
+  const ordinary = deploy.slice(targetSha, deploy.indexOf('\nRELEASE_ID=', targetSha));
+  const ordinaryTransition = deploy.indexOf('\n  begin_release_runtime_transition\n', targetSha);
+  assert.ok(targetSha >= 0 && ordinaryTransition > targetSha + ordinary.length);
+  assert.match(ordinary, /^TARGET_SHA=.*\nif \[\[ "\$DEPLOY_MODE" != eraser-only \]\]; then\n/u);
   assert.match(
-    deploy,
-    /if contains_service eraser "\$\{SERVICES\[@\]\}"; then\n {2}maxim_eraser_install_rate_limit_reader_floor "\$TARGET_SHA"\nfi/u,
+    ordinary,
+    /if contains_service eraser "\$\{SERVICES\[@\]\}"; then\n {4}maxim_eraser_install_rate_limit_reader_floor "\$TARGET_SHA"\n/u,
+  );
+  const imageAdmission = deploy.indexOf(
+    '\n  require_preloaded_target_image "$candidate_image_ref"',
+  );
+  const isolated = deploy.slice(imageAdmission, migration);
+  assert.ok(imageAdmission > ordinaryTransition && migration > imageAdmission);
+  assert.match(
+    isolated,
+    /\nif \[\[ "\$DEPLOY_MODE" != eraser-only \]\]; then\n {2}ensure_compose_env\nelse\n {2}maxim_eraser_install_connection_request_floor "\$TARGET_SHA"\n {2}maxim_eraser_install_rate_limit_reader_floor "\$TARGET_SHA"\n {2}maxim_eraser_install_connection_proof_reader_floor "\$TARGET_SHA"\nfi\nif .*; then\n {2}begin_release_runtime_transition\n/u,
+  );
+  assert.equal(
+    deploy.match(/\bmaxim_eraser_install_rate_limit_reader_floor "\$TARGET_SHA"/gu)?.length,
+    2,
   );
   const runtime = read('infra/scripts/vps-runtime-rollback.sh');
   const guard = runtime.indexOf(

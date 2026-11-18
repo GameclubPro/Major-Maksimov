@@ -73,6 +73,28 @@ both own stores. The ordinary release manifest records the image ID/source SHA. 
 bootstrap, legacy three-component manifests remain valid. Once installed, inherited
 Lastik image identity is checked on later partial deployments.
 
+If a pending API change blocks an otherwise independent Lastik fix, run
+`./infra/scripts/vps-connect.sh deploy main --eraser-only` from a clean release checkout
+at exact green main. This mode requires the existing configuration and healthy stores,
+the matching immutable release record, the previous Lastik image available locally
+for rollback, and compatible reader sources. It runs only Lastik migrations and
+replaces only Lastik. Confirm the new source against `/health` and compare the inherited component identities in
+the release manifest. If interrupted, preserve the journal and inspect the exact
+running image, store health and migration outcome before choosing recovery.
+For a validated rollback, use the release ID recorded in the single Lastik
+transition journal, set `LASTIK_PREVIOUS_RELEASE_ID` to that exact ID and select
+only `eraser`:
+
+```sh
+MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE=1 \
+  ./infra/scripts/vps-connect.sh rollback-release "${LASTIK_PREVIOUS_RELEASE_ID:?read the Lastik transition journal}" eraser
+```
+
+This path verifies the inherited components and the immutable previous release.
+If a new `current.json` was already written, it also verifies its immutable copy
+before withdrawing the pointer. An unresolved Lastik transition blocks normal
+release operations. Preserve both records; never remove either to force a retry.
+
 Nginx and subscription tooling may advance without rebuilding Lastik. Both operations
 check the installed Lastik source against its component in the complete active release
 manifest under the protected deploy lock.

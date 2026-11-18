@@ -16,7 +16,7 @@ const executorRoot = `/var/www/Chat_bot/.release-executors/${operation}/source`;
 const admissionPath = '/usr/local/lib/maxim-release/infra/scripts/release-service-admission.mjs';
 const startupStart = deploy.indexOf('\nrequire_node_24\n');
 const startupEnd = deploy.indexOf(
-  '\nensure_compose_env\nprepare_retention_deploy_mode',
+  '\nif [[ "$DEPLOY_MODE" != eraser-only ]]; then\n  ensure_compose_env\n',
   startupStart,
 );
 assert.ok(startupStart > 0 && startupEnd > startupStart);

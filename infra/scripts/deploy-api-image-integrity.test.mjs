@@ -98,7 +98,7 @@ function runStaticImageBuild({ service, labels, imageExists = false, registryPro
   const requireStart = deploy.indexOf('require_preloaded_target_image() {\n');
   const requireEnd = deploy.indexOf('\nvalidate_deploy_branch() {', requireStart);
   const buildStart = deploy.indexOf('for service in "${SERVICES_TO_BUILD[@]}"; do\n');
-  const buildEnd = deploy.indexOf('\nensure_compose_env\n', buildStart);
+  const buildEnd = deploy.indexOf('\ndone\n', buildStart);
   assert.ok(verificationStart >= 0 && verificationEnd > verificationStart);
   assert.ok(buildStart >= 0 && buildEnd > buildStart);
 
@@ -137,7 +137,7 @@ node() {
   [[ "$1" == infra/scripts/registry-preload-host.mjs && "$2" == verify ]]
   [[ "$4" == "$EXPECTED_REVISION" && "$6" == sha256:* && "$REGISTRY_PROOF" == 1 ]]
 }
-${deploy.slice(buildStart, buildEnd)}
+${deploy.slice(buildStart, buildEnd + '\ndone'.length)}
 printf 'static-image-accepted\\n'
 `,
     ],

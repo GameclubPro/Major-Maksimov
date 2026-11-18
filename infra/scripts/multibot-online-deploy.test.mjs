@@ -236,7 +236,7 @@ test('online prep follows verified image admission and precedes queue fence, ing
     '\n  maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES',
   );
   const imageCapacity = deploy.indexOf('\nprepare_deploy_disk_capacity\n');
-  const alternateShutdown = deploy.indexOf('\nstop_conflicting_stacks\n');
+  const alternateShutdown = deploy.search(/^[ \t]*stop_conflicting_stacks$/mu);
   const apiImageAdmission = deploy.indexOf('\n  require_preloaded_target_image "$MAXIM_API_IMAGE"');
   const staticImageAdmission = deploy.indexOf(
     '\n  require_preloaded_target_image "$candidate_image_ref"',
