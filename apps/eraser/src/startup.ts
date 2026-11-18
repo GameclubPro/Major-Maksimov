@@ -30,7 +30,7 @@ export async function startAfterSubscription(
       // FLAG: Keep webhook ingress open during a known no-effect rejection. Other
       // prerequisite failures still stop startup; identity checks are never bypassed.
       if (!(error instanceof MaxError) || error.status !== 429 || error.attempted) throw error;
-      const until = Date.now() + Math.max(1000, error.retryAfterMs);
+      const until = error.retryAtMs;
       try {
         while (Date.now() < until)
           await delay(Math.min(60_000, until - Date.now()), undefined, { signal });

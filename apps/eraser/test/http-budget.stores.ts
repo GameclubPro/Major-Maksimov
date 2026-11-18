@@ -63,7 +63,7 @@ test('safety rights and pages share one request per second across clients withou
 test('a legacy Redis-only long cooldown defers admission instead of occupying a worker', async () => {
   await fixture(async (redis, prefix) => {
     const limiter = new HttpLimiter(redis, 20, prefix);
-    await limiter.cooldown(60_000);
+    await limiter.cooldownUntil(Date.now() + 60_000);
     await assert.rejects(
       limiter.acquire(undefined, AbortSignal.timeout(200)),
       (error) => error instanceof HttpAdmissionDeferred && error.retryAfterMs > 59_000,

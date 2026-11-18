@@ -6,7 +6,7 @@ import pg from 'pg';
 import { Redis } from 'ioredis';
 import type { Config } from '../src/config.js';
 import { migrate } from '../src/migrate.js';
-import { DurableRateLimit } from '../src/rate-limit.js';
+import { DurableRateLimit, type RateLimitStore } from '../src/rate-limit.js';
 import { ADMIT_HTTP_LUA, HttpAdmissionDeferred, HttpLimiter } from '../src/limiter.js';
 import { MaxClient, MaxError } from '../src/max.js';
 import { CleanupRuntime } from '../src/runtime.js';
@@ -37,6 +37,13 @@ const settings: Config = {
   commitSha: 'test',
   webhookUrl: null,
 };
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
 before(async () => {
   await admin.query(`CREATE SCHEMA ${schema}`);
   await migrate(pool);
@@ -113,6 +120,13 @@ test('received DELETE 429 survives Redis disconnect and a new client cannot disp
     assert.equal(row.outcome_code, 'rate_limited');
     assert.equal(row.attempt_count, 1);
     assert.ok(row.next_attempt_at.getTime() > Date.now());
+    const { not_before: deadline } = (
+      await pool.query('SELECT not_before FROM eraser_rate_limits WHERE bot_id=$1', [
+        settings.botId,
+      ])
+    ).rows[0];
+    assert.equal(row.next_attempt_at.getTime(), deadline.getTime());
+    assert.equal((await store.policy('-1'))?.next_run_at.getTime(), deadline.getTime());
     assert.ok((await durable.remainingMs()) > 1000);
     assert.equal(await restartedRedis.get(`${prefix}:cooldown`), null);
     let dispatches = 0;
@@ -141,6 +155,98 @@ test('received DELETE 429 survives Redis disconnect and a new client cannot disp
     const keys = await restartedRedis.keys(`${prefix}:*`);
     if (keys.length) await restartedRedis.del(...keys);
     await restartedRedis.quit();
+  }
+});
+
+test('429 headers fence a second chat before the response body or PostgreSQL write returns', async () => {
+  const redis = new Redis(redisUrl!, { maxRetriesPerRequest: 1 });
+  const prefix = `eraser:limit:${randomUUID()}`;
+  const durable = new DurableRateLimit(pool, '333');
+  const body = deferred();
+  const write = deferred();
+  const redisWritten = deferred();
+  const deadline = Math.floor(Date.now() / 1000) * 1000 + 30_000;
+  const slowDurable: RateLimitStore = {
+    remainingMs: (reference) => durable.remainingMs(reference),
+    extend: async (until) => {
+      await write.promise;
+      await durable.extend(until);
+    },
+  };
+  try {
+    await redis.ping();
+    const first = new MaxClient(
+      { ...settings, botId: '333' },
+      new HttpLimiter(
+        {
+          eval: async (script, keys, ...args) => {
+            assert.ok(
+              args.every(
+                (arg): arg is string | number | Buffer =>
+                  typeof arg === 'string' || typeof arg === 'number' || Buffer.isBuffer(arg),
+              ),
+            );
+            const result = await redis.eval(script, keys, ...args);
+            if (script !== ADMIT_HTTP_LUA) redisWritten.resolve();
+            return result;
+          },
+        },
+        20,
+        prefix,
+        slowDurable,
+      ),
+      async () =>
+        new Response(
+          new ReadableStream({
+            async start(controller) {
+              await body.promise;
+              controller.enqueue(new TextEncoder().encode('{"code":"rate.limit"}'));
+              controller.close();
+            },
+          }),
+          { status: 429, headers: { 'Retry-After': new Date(deadline).toUTCString() } },
+        ),
+    );
+    const rejected = assert.rejects(
+      first.pin('-1'),
+      (error) => error instanceof MaxError && error.status === 429 && error.retryAtMs === deadline,
+    );
+    await redisWritten.promise;
+    assert.equal(Number(await redis.get(`${prefix}:cooldown`)), deadline);
+    assert.equal(await durable.remainingMs(), 0);
+    const second = new MaxClient(
+      settings,
+      new HttpLimiter(redis, 20, prefix, durable),
+      async () => {
+        assert.fail('A different chat of the same bot reached MAX during cooldown');
+      },
+    );
+    await assert.rejects(
+      second.pin('-2'),
+      (error) =>
+        error instanceof MaxError &&
+        error.code === 'rate_limit_cooldown' &&
+        error.retryAtMs === deadline,
+    );
+    const independent = new MaxClient(
+      settings,
+      new HttpLimiter(redis, 20, `${prefix}:other`, new DurableRateLimit(pool, '334')),
+      async () => Response.json({ message: null }),
+    );
+    assert.equal(await independent.pin('-2'), null);
+    write.resolve();
+    body.resolve();
+    await rejected;
+    const found = await pool.query('SELECT not_before FROM eraser_rate_limits WHERE bot_id=$1', [
+      '333',
+    ]);
+    assert.equal(found.rows[0].not_before.getTime(), deadline);
+  } finally {
+    write.resolve();
+    body.resolve();
+    const keys = await redis.keys(`${prefix}:*`);
+    if (keys.length) await redis.del(...keys);
+    await redis.quit();
   }
 });
 
@@ -180,13 +286,6 @@ test('a cooldown committed during a delayed Redis admission reply wins the final
   const redis = new Redis(redisUrl!, { maxRetriesPerRequest: 1 });
   const prefix = `eraser:limit:${randomUUID()}`;
   const durable = new DurableRateLimit(pool, '222');
-  const deferred = () => {
-    let resolve!: () => void;
-    const promise = new Promise<void>((done) => {
-      resolve = done;
-    });
-    return { promise, resolve };
-  };
   const committed = deferred();
   const reply = deferred();
   try {
@@ -217,6 +316,43 @@ test('a cooldown committed during a delayed Redis admission reply wins the final
     await committed.promise;
     await durable.extend(30_000);
     assert.equal(await redis.get(`${prefix}:cooldown`), null);
+    reply.resolve();
+    await rejected;
+  } finally {
+    reply.resolve();
+    const keys = await redis.keys(`${prefix}:*`);
+    if (keys.length) await redis.del(...keys);
+    await redis.quit();
+  }
+});
+
+test('an observed cooldown defeats a stale final PostgreSQL reply in the same limiter', async () => {
+  const redis = new Redis(redisUrl!, { maxRetriesPerRequest: 1 });
+  const prefix = `eraser:limit:${randomUUID()}`;
+  const durable = new DurableRateLimit(pool, '555');
+  const read = deferred();
+  const reply = deferred();
+  let calls = 0;
+  try {
+    await redis.ping();
+    const limiter = new HttpLimiter(redis, 20, prefix, {
+      extend: (until) => durable.extend(until),
+      remainingMs: async (reference) => {
+        const remaining = await durable.remainingMs(reference);
+        if (++calls === 2) {
+          read.resolve();
+          await reply.promise;
+        }
+        return remaining;
+      },
+    });
+    const deadline = Date.now() + 30_000;
+    const rejected = assert.rejects(
+      limiter.acquire(),
+      (error) => error instanceof HttpAdmissionDeferred && error.retryAtMs === deadline,
+    );
+    await read.promise;
+    await limiter.cooldownUntil(deadline);
     reply.resolve();
     await rejected;
   } finally {
