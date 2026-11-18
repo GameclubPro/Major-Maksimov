@@ -1,4 +1,5 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { DEFAULT_WEBHOOK_WORKER_GROUP_NAMES } from '../runtime/runtime-topology';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type {
   BotOwnershipFoundationSnapshot,
@@ -25,6 +26,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   DEFAULT_WEBHOOK_P95_TARGET_MS,
   buildSystemCanaryState,
+  getSystemLeaseFleet,
   buildSystemQueueGroupHealth,
   buildSystemRollbackReadiness,
   buildSystemRuntimeProfile,
@@ -32,6 +34,7 @@ import {
 import { ActionLatencyService } from './action-latency.service';
 import { BackgroundRuntimeGovernorService } from './background-runtime-governor.service';
 import { QueueMetricsService } from './queue-metrics.service';
+import { WebhookDynamicLeaseStatusService } from './webhook-dynamic-lease-status.service';
 import { RuntimeDiagnosticsService } from './runtime-diagnostics.service';
 import { SystemModeService } from './system-mode.service';
 import { WebhookSloService, type WebhookSloSnapshot } from './webhook-slo.service';
@@ -224,6 +227,12 @@ export class SystemDashboardService {
     private readonly prisma?: PrismaService,
     @Optional()
     private readonly actionLatencyService?: ActionLatencyService,
+    @Optional()
+    @Inject(WebhookDynamicLeaseStatusService)
+    private readonly dynamicLeaseStatusService?: Pick<
+      WebhookDynamicLeaseStatusService,
+      'getHeartbeatObservation'
+    >,
   ) {
     this.queueLagCriticalThresholdSec = configService.get<number>('QUEUE_LAG_DEGRADE_SEC', 10);
     this.webhookSloTargetMs = configService.get<number>(
@@ -241,11 +250,12 @@ export class SystemDashboardService {
     const ownershipPromise = this.ownershipFoundationService
       ? this.ownershipFoundationService.getSnapshot()
       : Promise.resolve(this.buildFallbackOwnershipSnapshot());
-    const [queues, mode, webhookSubscription, ownership] = await Promise.all([
+    const [queues, mode, webhookSubscription, ownership, leaseHeartbeats] = await Promise.all([
       this.queueMetricsService.getSnapshot(),
       this.systemModeService.getEffectiveSnapshot(),
       webhookSubscriptionPromise,
       ownershipPromise,
+      this.dynamicLeaseStatusService?.getHeartbeatObservation(),
     ]);
     await this.runtimeDiagnosticsService?.recordQueueLagSnapshot({
       queues,
@@ -373,30 +383,41 @@ export class SystemDashboardService {
       alerts.push(webhookSubscriptionAlert);
     }
 
+    const runtimeProfile = buildSystemRuntimeProfile(
+      webhookSlo?.targetProcessingMs ?? this.webhookSloTargetMs,
+    );
+    const fleet = getSystemLeaseFleet(queues, runtimeProfile, leaseHeartbeats);
+    // The cached group totals may still be attributed to owners from the rejected summary.
+    const rejectedLeaseSummary = Boolean(queues.webhookDynamicLeases && !fleet.snapshot);
     const defaultWorkerSkewAlert = this.buildDefaultWorkerSkewAlert(
-      (
-        queues as {
-          webhookDefaultWorkerGroups?: Awaited<
-            ReturnType<QueueMetricsService['getSnapshot']>
-          >['webhookDefaultWorkerGroups'];
-        }
-      ).webhookDefaultWorkerGroups,
+      rejectedLeaseSummary ? undefined : queues.webhookDefaultWorkerGroups,
     );
     if (defaultWorkerSkewAlert) {
       alerts.push(defaultWorkerSkewAlert);
     }
-
-    const dynamicLeaseAlert = this.buildDynamicLeaseAlert(
-      (
-        queues as {
-          webhookDynamicLeases?: Awaited<
-            ReturnType<QueueMetricsService['getSnapshot']>
-          >['webhookDynamicLeases'];
-        }
-      ).webhookDynamicLeases,
-    );
-    if (dynamicLeaseAlert) {
-      alerts.push(dynamicLeaseAlert);
+    const dynamicLeaseAlert = fleet.monitor ? this.buildDynamicLeaseAlert(fleet.snapshot) : null;
+    if (dynamicLeaseAlert) alerts.push(dynamicLeaseAlert);
+    const workerWarning =
+      fleet.monitor &&
+      (!fleet.consensus || fleet.mixed || fleet.summaryConflict || !fleet.summaryMode);
+    if (workerWarning) {
+      const count = fleet.liveWorkerGroups.length;
+      const expected = DEFAULT_WEBHOOK_WORKER_GROUP_NAMES.length;
+      alerts.push({
+        code: 'dynamic-lease-worker-pool',
+        level: 'warning',
+        title: 'Требуется проверка групп обработки сообщений',
+        detail: fleet.mixed
+          ? 'Группы обработки сообщают разные режимы перераспределения очередей.'
+          : fleet.summaryConflict
+            ? 'Режим в сводке очередей расходится со свежими отметками групп обработки.'
+            : fleet.unreadable > 0
+              ? `Подтверждено групп: ${count} из ${expected}. Для остальных нет достоверных данных.`
+              : count < expected
+                ? `Свежие отметки получены от ${count} из ${expected} групп.`
+                : 'Все группы ответили, но свежая сводка очередей недоступна.',
+        recommendedAction: 'Проверьте группы обработки перед расширением пробного режима.',
+      });
     }
 
     const joinBurstAlert = this.buildJoinBurstAlert(
@@ -510,6 +531,7 @@ export class SystemDashboardService {
       hotPathSlowWarning,
       webhookSloStatus: webhookSlo?.status ?? null,
       criticalLimiterWarning: criticalLimiterAlert !== null,
+      workerWarning,
       vkParsingWarning: vkParsingAlert !== null,
       actionQueueLaneCritical: actionQueueLaneAlert?.level === 'critical',
       actionQueueLaneWarning: actionQueueLaneAlert?.level === 'warning',
@@ -522,17 +544,18 @@ export class SystemDashboardService {
       nightModeReconcileWarning: nightModeReconcileAlert !== null,
     });
     const queueGroupHealth = buildSystemQueueGroupHealth(queues);
-    const runtimeProfile = buildSystemRuntimeProfile(
-      webhookSlo?.targetProcessingMs ?? this.webhookSloTargetMs,
+    const canaryState = buildSystemCanaryState(
+      {
+        queues,
+        dashboardStatus: status,
+        queueLagSec,
+        queueLagCriticalThresholdSec: this.queueLagCriticalThresholdSec,
+        activeFailedWebhooks: failedCount,
+        webhookSlo: webhookSlo ?? null,
+      },
+      runtimeProfile,
+      fleet,
     );
-    const canaryState = buildSystemCanaryState({
-      queues,
-      dashboardStatus: status,
-      queueLagSec,
-      queueLagCriticalThresholdSec: this.queueLagCriticalThresholdSec,
-      activeFailedWebhooks: failedCount,
-      webhookSlo: webhookSlo ?? null,
-    });
     const rollbackReadiness = buildSystemRollbackReadiness({
       queues,
       dashboardStatus: status,
@@ -559,7 +582,13 @@ export class SystemDashboardService {
         stabilizing,
       },
       alerts,
-      queues,
+      queues: {
+        ...queues,
+        ...(rejectedLeaseSummary ? { webhookDefaultWorkerGroups: {} } : {}),
+        webhookDynamicLeases: fleet.snapshot
+          ? { ...fleet.snapshot, liveWorkerGroups: fleet.liveWorkerGroups }
+          : null,
+      },
       mode: {
         ...mode,
         condition: mode.condition ?? 'unknown',
@@ -603,6 +632,7 @@ export class SystemDashboardService {
     hotPathSlowWarning?: boolean;
     webhookSloStatus?: WebhookSloSnapshot['status'] | null;
     criticalLimiterWarning?: boolean;
+    workerWarning?: boolean;
     vkParsingWarning?: boolean;
     actionQueueLaneCritical?: boolean;
     actionQueueLaneWarning?: boolean;
@@ -639,6 +669,7 @@ export class SystemDashboardService {
       input.hotPathSlowWarning === true ||
       input.webhookSloStatus === 'warning' ||
       input.criticalLimiterWarning === true ||
+      input.workerWarning === true ||
       input.vkParsingWarning === true ||
       input.actionQueueLaneWarning === true ||
       input.actionLedgerWatchdogWarning === true ||
@@ -2329,11 +2360,6 @@ export class SystemDashboardService {
       (entry) => entry.eligibleForDynamicLeases && entry.actualOwner !== entry.desiredOwner,
     ).length;
     const pendingHandoffs = queueEntries.filter((entry) => entry.handoffPending).length;
-    const totalExpectedWorkerGroups = 4;
-    const degradedWorkerPool =
-      leaseSnapshot.liveWorkerGroups.length > 0 &&
-      leaseSnapshot.liveWorkerGroups.length < totalExpectedWorkerGroups;
-
     if (leaseSnapshot.mode === 'shadow' && recommendedMoves > 0) {
       return {
         code: 'dynamic-lease-shadow',
@@ -2353,17 +2379,6 @@ export class SystemDashboardService {
         detail: `Сейчас в handoff pending находится ${pendingHandoffs} shard’ов.`,
         recommendedAction:
           'Следите, чтобы handoff быстро сходился и не приводил к росту queue lag или duplicate processing.',
-      };
-    }
-
-    if (degradedWorkerPool) {
-      return {
-        code: 'dynamic-lease-worker-pool',
-        level: 'warning',
-        title: 'Часть realtime worker group не видна в lease heartbeat',
-        detail: `Lease runtime видит только ${leaseSnapshot.liveWorkerGroups.length} worker group(s).`,
-        recommendedAction:
-          'Проверьте health default moderation containers перед расширением canary или полным включением leases.',
       };
     }
 

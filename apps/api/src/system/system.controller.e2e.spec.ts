@@ -1,4 +1,9 @@
 import { createHmac } from 'node:crypto';
+import {
+  systemDashboardResponseSchema,
+  type SystemCanaryState,
+  type SystemDashboardResponse,
+} from '@maxim/contracts';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -30,6 +35,159 @@ function createSignedInitData(botToken: string, userId: string, authDateSec: num
     .join('&');
 }
 
+function queueCounters() {
+  return {
+    waiting: 0,
+    prioritized: 0,
+    active: 0,
+    delayed: 0,
+    failed: 0,
+    completed: 1,
+  };
+}
+
+function webhookMetrics() {
+  return {
+    count: 0,
+    oldestEventId: null,
+    oldestCreatedAt: null,
+    oldestLagSec: 0,
+  };
+}
+
+function actionHealth() {
+  return {
+    windowSec: 60,
+    total: 0,
+    success: 0,
+    failure: 0,
+    critical: 0,
+    errorRate: 0,
+    criticalRate: 0,
+  };
+}
+
+function ownershipCoverage() {
+  return {
+    total: 0,
+    withPrimary: 0,
+    withoutPrimary: 0,
+    coverageRatio: 1,
+  };
+}
+
+function createDashboardSnapshot(canaryState: SystemCanaryState): SystemDashboardResponse {
+  const generatedAt = '2026-11-18T10:00:00.000Z';
+  return systemDashboardResponseSchema.parse({
+    summary: {
+      status: 'healthy',
+      title: 'OK',
+      detail: 'Runtime is healthy',
+      generatedAt,
+      stabilizing: false,
+    },
+    alerts: [],
+    queues: {
+      moderation: queueCounters(),
+      webhookCritical: queueCounters(),
+      webhookDefault: queueCounters(),
+      webhookBackground: queueCounters(),
+      webhookLegacy: queueCounters(),
+      actions: queueCounters(),
+      webhookEvents: {
+        received: webhookMetrics(),
+        queued: webhookMetrics(),
+        failed: webhookMetrics(),
+      },
+      actionHealth: actionHealth(),
+      bots: {},
+      oldestQueuedEventId: null,
+      oldestQueuedCreatedAt: null,
+      oldestQueuedLagSec: 0,
+      oldestReceivedEventId: null,
+      oldestReceivedCreatedAt: null,
+      oldestReceivedLagSec: 0,
+      effectiveLagSec: 0,
+      generatedAt,
+    },
+    mode: {
+      mode: 'normal',
+      source: 'auto',
+      condition: 'healthy',
+      reason: 'ok',
+      updatedAt: generatedAt,
+      manualMode: null,
+      queueLagSec: 0,
+      action: actionHealth(),
+    },
+    webhookSubscription: {
+      status: 'healthy',
+      configured: true,
+      url: 'https://example.test/api/v1/max/webhook',
+      checkedAt: generatedAt,
+      reconciledAt: generatedAt,
+      requiredUpdateTypes: [],
+      actualUpdateTypes: [],
+      missingUpdateTypes: [],
+      extraUpdateTypes: [],
+      otherSubscriptionsCount: 0,
+      lastError: null,
+      note: null,
+      botCount: 0,
+      bots: {},
+    },
+    ownership: {
+      generatedAt,
+      bots: {
+        configured: 0,
+        adminVisible: 0,
+        active: 0,
+        dormant: 0,
+        draining: 0,
+        disabled: 0,
+      },
+      entities: {
+        total: ownershipCoverage(),
+        chats: ownershipCoverage(),
+        channels: ownershipCoverage(),
+      },
+      routingStates: {
+        ready: 0,
+        noEligibleBot: 0,
+      },
+      anomalies: {
+        noPrimary: 0,
+        recoverableLegacyOnly: 0,
+        recoverableFromMemberships: 0,
+        noEligibleBot: 0,
+        unbound: 0,
+        primaryBotUnknown: 0,
+        legacyBotUnknown: 0,
+        activeMembershipBotUnknown: 0,
+        primaryWithoutActiveMembership: 0,
+        primaryWithoutAdminAccess: 0,
+        sharedChats: 0,
+      },
+      repair: {
+        enabled: true,
+        activeOnThisRole: false,
+        intervalMs: 300_000,
+        rebalanceMode: 'off',
+        rebalanceCanaryPercent: 0,
+        rebalanceMaxMovesPerRun: 25,
+        recommendedMoves: 0,
+        lastAppliedMoves: 0,
+        lastRunAt: null,
+        lastSuccessAt: null,
+        lastError: null,
+        lastAppliedChanges: 0,
+        totalAppliedChanges: 0,
+      },
+    },
+    canaryState,
+  });
+}
+
 describe('SystemController auth e2e', () => {
   let app: NestFastifyApplication;
   let appCreated = false;
@@ -39,6 +197,10 @@ describe('SystemController auth e2e', () => {
   const getRouteAudit = jest.fn();
   const getMembershipAudit = jest.fn();
   const getQueueSnapshot = jest.fn();
+  const getDashboardSnapshot = jest.fn<
+    ReturnType<SystemDashboardService['getSnapshot']>,
+    Parameters<SystemDashboardService['getSnapshot']>
+  >();
   const getOperationalQueueSnapshot = jest.fn();
 
   beforeEach(async () => {
@@ -72,6 +234,7 @@ describe('SystemController auth e2e', () => {
       summary: { criticalCount: 0 },
     });
     getQueueSnapshot.mockReset();
+    getDashboardSnapshot.mockReset();
     getOperationalQueueSnapshot.mockReset().mockResolvedValue({
       effectiveLagSec: 2,
       webhookDefaultShards: {
@@ -141,7 +304,7 @@ describe('SystemController auth e2e', () => {
         },
         {
           provide: SystemDashboardService,
-          useValue: { getSnapshot: jest.fn() },
+          useValue: { getSnapshot: getDashboardSnapshot },
         },
         {
           provide: MaxApiMetricsService,
@@ -206,6 +369,42 @@ describe('SystemController auth e2e', () => {
     });
     expect(getOperationalQueueSnapshot).toHaveBeenCalledWith({ maxAgeMs: 1_000 });
     expect(getQueueSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('returns live worker groups and the canary decision only to a system admin', async () => {
+    const url = '/v1/system/dashboard';
+    const nowSec = Math.floor(Date.now() / 1_000);
+    const canaryState: SystemCanaryState = {
+      enabled: true,
+      mode: 'canary',
+      status: 'canary',
+      recommendation: 'hold',
+      workerGroup: null,
+      canaryShardIds: ['moderation-default-0'],
+      liveWorkerGroups: ['api-moderation', 'api-moderation-realtime-b'],
+      handoffPendingQueues: [],
+      unhealthyQueues: [],
+      reason: 'Worker coverage is incomplete.',
+    };
+    const unauthenticated = await app.inject({ method: 'GET', url });
+    expect(unauthenticated.statusCode).toBe(401);
+    const forbidden = await app.inject({
+      method: 'GET',
+      url,
+      headers: { authorization: `InitData ${createSignedInitData(botToken, '101', nowSec)}` },
+    });
+    expect(forbidden.statusCode).toBe(403);
+    expect(getDashboardSnapshot).not.toHaveBeenCalled();
+
+    getDashboardSnapshot.mockResolvedValue(createDashboardSnapshot(canaryState));
+    const allowed = await app.inject({
+      method: 'GET',
+      url,
+      headers: { authorization: `InitData ${createSignedInitData(botToken, '100', nowSec)}` },
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(systemDashboardResponseSchema.parse(allowed.json()).canaryState).toEqual(canaryState);
+    expect(getDashboardSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it('returns source-level MAX metrics for an authenticated system admin', async () => {

@@ -209,6 +209,8 @@ describe('runtime role dependency graphs', () => {
             if (service.appRole !== 'message-retention') {
               const { SystemModule } = await import('../system/system.module');
               const { SystemDashboardService } = await import('../system/system-dashboard.service');
+              const { WebhookDynamicLeaseStatusService } =
+                await import('../system/webhook-dynamic-lease-status.service');
               const { AdminModule } = await import('../admin/admin.module');
               const { HealthModule } = await import('../health/health.module');
               const { OcrReadinessHeartbeatService } =
@@ -219,7 +221,12 @@ describe('runtime role dependency graphs', () => {
               expect(context.select(SystemModule).get(QueueMetricsService)).toBe(
                 context.select(SystemRuntimeModule).get(QueueMetricsService),
               );
-              expect(context.get(SystemDashboardService)).toBeInstanceOf(SystemDashboardService);
+              const dashboard = context.get(SystemDashboardService) as unknown as {
+                dynamicLeaseStatusService: InstanceType<typeof WebhookDynamicLeaseStatusService>;
+              };
+              expect(dashboard.dynamicLeaseStatusService).toBe(
+                context.select(SystemRuntimeModule).get(WebhookDynamicLeaseStatusService),
+              );
               const state = context.get(OcrReadinessStateService);
               expect(context.select(AdminModule).get(OcrReadinessStateService)).toBe(state);
               expect(context.select(HealthModule).get(OcrReadinessStateService)).toBe(state);

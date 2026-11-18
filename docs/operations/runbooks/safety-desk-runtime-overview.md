@@ -32,6 +32,24 @@ Failed source observations become gaps, and missing minutes remain gaps. Latency
 points describe overlapping fifteen-minute samples; they cannot be averaged into
 a daily percentile.
 
+## Default webhook worker rollout
+
+The closed system dashboard at `GET /api/v1/system/dashboard` reports
+`canaryState.mode` and `canaryState.liveWorkerGroups` from fresh reports of the
+four default webhook worker groups. `runtimeProfile.dynamicLeasesMode` describes
+the process serving the request. On a distributed deployment, the topology
+provides the fallback expectation when live reports are insufficient. The
+dashboard warns when reports are missing or disagree with one another or with the
+shard summary. If the dashboard rejects a shard summary, it omits the worker
+group totals derived from it. Per-shard counters are still available. The
+separate `metrics/queues` endpoint retains the scheduler's summary for existing
+consumers.
+
+Treat `hold` as a reason to keep the current rollout stage. A fresh report from
+all four groups describes their mode at one time. Expansion requires full window
+coverage from every expected ingress writer, alongside queue and processing
+health. Critical signals during an active rollout can still recommend rollback.
+
 ## Reading the numbers
 
 - Queue bars describe the distribution of current jobs. Waiting includes paused
