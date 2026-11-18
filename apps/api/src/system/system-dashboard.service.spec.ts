@@ -2584,14 +2584,21 @@ describe('SystemDashboardService', () => {
           recommendation,
           liveWorkerGroups: [...DEFAULT_WEBHOOK_WORKER_GROUP_NAMES].slice(0, workers.length),
         });
+        const groupHealth = result.queueGroupHealth?.groups ?? [];
+        expect(groupHealth.map(({ name }) => name)).toContain('webhook-critical');
+        const defaultWorkerGroup = groupHealth.find(
+          ({ name }) => name === 'api-moderation-realtime-b',
+        );
         if (mode === 'off') {
           expect(result.queues.webhookDynamicLeases).toBeNull();
           expect(result.queues.webhookDefaultWorkerGroups).toEqual({});
+          expect(defaultWorkerGroup).toBeUndefined();
           expect(result.alerts.some((entry) => entry.code === 'default-worker-skew')).toBe(false);
         } else {
           expect(result.queues.webhookDynamicLeases).toMatchObject({
             liveWorkerGroups: result.canaryState?.liveWorkerGroups,
           });
+          expect(defaultWorkerGroup).toMatchObject({ waiting: 50 });
           expect(result.alerts.some((entry) => entry.code === 'default-worker-skew')).toBe(true);
         }
         expect(result.alerts.some((entry) => entry.code === 'dynamic-lease-worker-pool')).toBe(

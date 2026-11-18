@@ -1,5 +1,6 @@
 import type {
   SystemCanaryState,
+  SystemDashboardResponse,
   SystemDashboardWebhookSlo,
   SystemDynamicLeasesMode,
   SystemQueueGroup,
@@ -20,7 +21,7 @@ import {
   type LeaseHeartbeatObservation,
   observeLeaseFleet,
 } from './default-webhook-fleet-observation';
-import type { QueueCounters, QueueMetricsSnapshot } from '../system/queue-metrics.service';
+import type { QueueMetricsSnapshot } from '../system/queue-metrics.service';
 import { MAX_ACTION_ALL_QUEUE_NAMES } from '../max/max-action.queue';
 import { LEGACY_WEBHOOK_QUEUE } from '../webhook/webhook-queues';
 import { COMMERCIAL_OCR_QUEUE } from '../moderation/commercial-ocr/commercial-ocr.queue';
@@ -31,8 +32,9 @@ const QUEUE_GROUP_WAITING_CRITICAL = 50;
 
 export type RuntimeRoleProfile = RuntimeRoleCapabilities;
 
+type DashboardQueueCounters = NonNullable<SystemDashboardResponse['queues']['webhookCritical']>;
+
 type RuntimeReliabilityInput = {
-  queues: QueueMetricsSnapshot;
   dashboardStatus: 'healthy' | 'warning' | 'critical';
   queueLagSec: number;
   queueLagCriticalThresholdSec: number;
@@ -72,7 +74,20 @@ export function buildSystemRuntimeProfile(
   };
 }
 
-export function buildSystemQueueGroupHealth(queues: QueueMetricsSnapshot): SystemQueueGroupHealth {
+export function buildSystemQueueGroupHealth(
+  queues: Pick<
+    SystemDashboardResponse['queues'],
+    | 'webhookCritical'
+    | 'webhookJoinShards'
+    | 'webhookJoin'
+    | 'webhookDefaultWorkerGroups'
+    | 'webhookBackground'
+    | 'webhookLegacy'
+    | 'actions'
+    | 'globalSpammerDenorm'
+    | 'auxiliaryQueues'
+  >,
+): SystemQueueGroupHealth {
   const groups: SystemQueueGroup[] = [
     buildQueueGroup('webhook-critical', ['moderation-critical'], queues.webhookCritical),
     buildQueueGroup(
@@ -223,7 +238,7 @@ export function buildSystemRollbackReadiness(
 function buildQueueGroup(
   name: string,
   queues: readonly string[],
-  counters: QueueCounters | undefined,
+  counters: DashboardQueueCounters | undefined,
   options: { ignoreDelayedForStatus?: boolean } = {},
 ): SystemQueueGroup {
   const safeCounters = counters ?? {
@@ -254,7 +269,7 @@ function buildQueueGroup(
 }
 
 function resolveQueueGroupStatus(
-  counters: QueueCounters,
+  counters: DashboardQueueCounters,
   options: { ignoreDelayedForStatus?: boolean } = {},
 ): SystemQueueGroupStatus {
   const pending = counters.waiting + (counters.prioritized ?? 0);

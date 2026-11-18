@@ -388,9 +388,15 @@ export class SystemDashboardService {
     );
     const fleet = getSystemLeaseFleet(queues, runtimeProfile, leaseHeartbeats);
     // The cached group totals may still be attributed to owners from the rejected summary.
-    const rejectedLeaseSummary = Boolean(queues.webhookDynamicLeases && !fleet.snapshot);
+    const dashboardQueues: SystemDashboardResponse['queues'] = {
+      ...queues,
+      ...(queues.webhookDynamicLeases && !fleet.snapshot ? { webhookDefaultWorkerGroups: {} } : {}),
+      webhookDynamicLeases: fleet.snapshot
+        ? { ...fleet.snapshot, liveWorkerGroups: fleet.liveWorkerGroups }
+        : null,
+    };
     const defaultWorkerSkewAlert = this.buildDefaultWorkerSkewAlert(
-      rejectedLeaseSummary ? undefined : queues.webhookDefaultWorkerGroups,
+      dashboardQueues.webhookDefaultWorkerGroups,
     );
     if (defaultWorkerSkewAlert) {
       alerts.push(defaultWorkerSkewAlert);
@@ -543,27 +549,16 @@ export class SystemDashboardService {
       deleteCapabilityWarning: deleteCapabilityAlert !== null,
       nightModeReconcileWarning: nightModeReconcileAlert !== null,
     });
-    const queueGroupHealth = buildSystemQueueGroupHealth(queues);
-    const canaryState = buildSystemCanaryState(
-      {
-        queues,
-        dashboardStatus: status,
-        queueLagSec,
-        queueLagCriticalThresholdSec: this.queueLagCriticalThresholdSec,
-        activeFailedWebhooks: failedCount,
-        webhookSlo: webhookSlo ?? null,
-      },
-      runtimeProfile,
-      fleet,
-    );
-    const rollbackReadiness = buildSystemRollbackReadiness({
-      queues,
+    const queueGroupHealth = buildSystemQueueGroupHealth(dashboardQueues);
+    const reliabilityInput = {
       dashboardStatus: status,
       queueLagSec,
       queueLagCriticalThresholdSec: this.queueLagCriticalThresholdSec,
       activeFailedWebhooks: failedCount,
       webhookSlo: webhookSlo ?? null,
-    });
+    };
+    const canaryState = buildSystemCanaryState(reliabilityInput, runtimeProfile, fleet);
+    const rollbackReadiness = buildSystemRollbackReadiness(reliabilityInput);
 
     return {
       summary: {
@@ -582,13 +577,7 @@ export class SystemDashboardService {
         stabilizing,
       },
       alerts,
-      queues: {
-        ...queues,
-        ...(rejectedLeaseSummary ? { webhookDefaultWorkerGroups: {} } : {}),
-        webhookDynamicLeases: fleet.snapshot
-          ? { ...fleet.snapshot, liveWorkerGroups: fleet.liveWorkerGroups }
-          : null,
-      },
+      queues: dashboardQueues,
       mode: {
         ...mode,
         condition: mode.condition ?? 'unknown',
@@ -2299,9 +2288,7 @@ export class SystemDashboardService {
   }
 
   private buildDefaultWorkerSkewAlert(
-    workerGroups?: Awaited<
-      ReturnType<QueueMetricsService['getSnapshot']>
-    >['webhookDefaultWorkerGroups'],
+    workerGroups?: SystemDashboardResponse['queues']['webhookDefaultWorkerGroups'],
   ): SystemDashboardAlert | null {
     if (!workerGroups) {
       return null;
