@@ -4,8 +4,19 @@
   }
 
   .app-shell--immersive.app-shell--suggest-dialog {
+    /* FLAG: The visual viewport can pan as well as shrink when the keyboard opens. */
+    --immersive-height: min(
+      var(--suggest-layout-height, 100vh),
+      calc(var(--app-viewport-height) + var(--app-visual-viewport-top, 0px))
+    );
     --suggest-dialog-top-bleed: 0px;
     --immersive-top-bleed: 0px;
+  }
+
+  @supports (height: 100dvh) {
+    .app-shell--suggest-dialog {
+      --suggest-layout-height: 100dvh;
+    }
   }
 
   .channel-dialog-screen--suggest {
@@ -22,7 +33,6 @@
       calc(var(--safe-bottom) + 4px),
       calc(var(--suggest-keyboard-reserve) + 6px)
     );
-    --suggest-bar-space: calc(var(--suggest-bar-height) + var(--suggest-bar-bottom) + 12px);
     position: relative;
     display: grid;
     /* FLAG: Long recipient names must shrink inside the viewport, never size its grid track. */
@@ -32,7 +42,7 @@
     min-height: 0;
     min-width: 0;
     overflow: hidden;
-    padding: 0 16px;
+    padding: var(--app-visual-viewport-top, 0px) 16px 0;
     background: var(--suggest-surface);
     color: var(--suggest-ink);
     letter-spacing: 0;
@@ -281,6 +291,9 @@
   }
 
   .channel-dialog-screen--suggest .channel-suggest-body {
+    --suggest-bar-space: calc(
+      var(--suggest-bar-height) + var(--suggest-bar-bottom) + var(--suggest-bar-gap, 12px)
+    );
     display: block;
     grid-row: 4;
     min-width: 0;
@@ -757,76 +770,80 @@
     }
   }
 
-  @media (max-height: 600px) {
-    .channel-suggest-heading {
-      padding: 0;
-    }
-    .channel-suggest-heading h1 {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-    }
+  :where([data-suggest-size='short'], [data-suggest-size='compact']) .channel-suggest-heading {
+    padding: 0;
+  }
+  :where([data-suggest-size='short'], [data-suggest-size='compact']) .channel-suggest-heading h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  :where([data-suggest-size='short'], [data-suggest-size='compact'])
     .channel-suggest-heading__destination-wrap {
-      margin: 0;
-    }
-    .channel-suggest-tabs {
-      margin-bottom: 6px;
-    }
+    margin: 0;
+  }
+  :where([data-suggest-size='short'], [data-suggest-size='compact']) .channel-suggest-tabs {
+    margin-bottom: 6px;
   }
 
-  @media (max-height: 400px) {
-    .channel-suggest-tabs {
-      margin-bottom: 4px;
-      padding: 2px;
-    }
-    .channel-suggest-tabs button {
-      font-size: 0.75rem;
-    }
-    .channel-suggest-editor-tools {
-      padding-bottom: 4px;
-    }
-    .channel-suggest-heading {
-      padding-inline-end: 6.5rem;
-    }
-    .channel-suggest-composer__head {
-      position: absolute;
-      top: 0;
-      right: 0;
-      height: 44px;
-      padding: 0;
-    }
-    .channel-suggest-composer__status {
-      display: none;
-    }
+  :where([data-suggest-size='compact']) .channel-suggest-body {
+    --suggest-bar-gap: 6px;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-composer__bar {
+    min-height: 49px;
+    padding-top: 4px;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-tabs {
+    margin-bottom: 4px;
+    padding: 2px;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-tabs button {
+    font-size: 0.75rem;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-editor-tools {
+    padding-bottom: 4px;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-heading {
+    padding-inline-end: 6.5rem;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-composer__head {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 44px;
+    padding: 0;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-composer__status {
+    display: none;
+  }
+  :where([data-suggest-size='compact']) .channel-suggest-composer__modifier-row {
+    padding: 2px;
+  }
+
+  .channel-dialog-screen--suggest
+    :where([data-suggest-size='compact'])
+    .channel-suggest-composer__rich-editor
+    .max-rich-text-editor__surface {
+    min-height: 56px;
+    max-height: clamp(56px, calc(var(--suggest-visible-height) - 250px), 140px);
+    padding: 8px;
+    line-height: 1.4;
+    overflow-y: auto;
+  }
+
+  /* FLAG: Short keyboard viewports need one scrollable tool row to retain editable space. */
+  :where([data-suggest-size='compact'][data-suggest-narrow])
     .channel-suggest-composer__modifier-row {
-      padding: 2px;
-    }
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: thin;
   }
-
-  @media (max-height: 400px) {
-    .channel-dialog-screen--suggest
-      .channel-suggest-composer__rich-editor
-      .max-rich-text-editor__surface {
-      min-height: 56px;
-      max-height: clamp(56px, calc(100dvh - 250px), 140px);
-      padding: 8px;
-      line-height: 1.4;
-      overflow-y: auto;
-    }
-  }
-
-  @media (max-width: 360px) and (max-height: 400px) {
-    /* FLAG: Short keyboard viewports need one scrollable tool row to retain editable space. */
-    .channel-suggest-composer__modifier-row {
-      display: flex;
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
-    .channel-suggest-composer__modifier-row button {
-      flex: 1 0 44px;
-    }
+  :where([data-suggest-size='compact'][data-suggest-narrow])
+    .channel-suggest-composer__modifier-row
+    button {
+    flex: 1 0 44px;
   }
 
   @media (prefers-reduced-motion: reduce) {

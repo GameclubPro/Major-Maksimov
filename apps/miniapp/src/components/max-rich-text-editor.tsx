@@ -15,7 +15,7 @@ import { renderPlainTextAsEditorHtml, renderSupportedMarkdownAsHtml } from '../l
 import { clipboardHtmlToSupportedMarkdown } from '../lib/max-rich-text-clipboard';
 import { parseEditorLinkHref, serializeEditorLinkMarkdown } from '../lib/max-rich-text-link';
 import { serializeEditorInlineMarkdown } from '../lib/max-rich-text-serialization';
-import { useVisibleEditorCaret } from '../lib/use-visible-editor-caret';
+import { getEditorCaretBounds, useVisibleEditorCaret } from '../lib/use-visible-editor-caret';
 import { useNormalizedMarkdownSource } from '../lib/use-normalized-markdown-source';
 import {
   isElementInTopmostNativeBackModal,
@@ -28,6 +28,7 @@ import './max-rich-text-editor-content.css';
 export type MaxRichTextEditorHandle = {
   focus: () => void;
   applyTool: (tool: MaxMarkdownTool) => void;
+  getCaretBounds: () => ReturnType<typeof getEditorCaretBounds>;
 };
 
 export type MaxRichTextEditorProps = {
@@ -48,6 +49,7 @@ export type MaxRichTextEditorProps = {
   onNormalizationReadyChange?: (ready: boolean) => void;
   onActiveToolsChange?: (tools: ReadonlySet<MaxMarkdownTool>) => void;
   viewportBottomInset?: number;
+  manageCaretVisibility?: boolean;
 };
 
 const LINK_PLACEHOLDER_URL = 'https://max.ru/';
@@ -88,11 +90,12 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       onNormalizationReadyChange,
       onActiveToolsChange,
       viewportBottomInset = 0,
+      manageCaretVisibility = true,
     },
     ref,
   ) {
     const editorRef = useRef<HTMLDivElement | null>(null);
-    useVisibleEditorCaret(editorRef, viewportBottomInset);
+    useVisibleEditorCaret(editorRef, viewportBottomInset, manageCaretVisibility);
     const savedRangeRef = useRef<Range | null>(null);
     const editingLinkRef = useRef<HTMLAnchorElement | null>(null);
     const lastEmittedMarkdownRef = useRef(value);
@@ -399,6 +402,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       () => ({
         focus: focusEditor,
         applyTool: applyInlineTool,
+        getCaretBounds: () => (editorRef.current ? getEditorCaretBounds(editorRef.current) : null),
       }),
       [applyInlineTool, focusEditor],
     );

@@ -154,8 +154,11 @@ checks long recipient names against actual control bounds and hit targets, 280â€
 photo zoom/navigation/native Back/focus return, attachment ordering and draft preservation. Its
 compact 280/320Ã—360px cases verify the first editable line, horizontally reachable 44px formatting
 controls and attachment/send hit targets at both text sizes, including WebKit native file-input
-clipping. The full matrix contains 72 engine/theme/viewport/text-size configurations. Its
-server is owned by default; reuse requires `SUGGEST_COMPOSER_BASE_URL` and
+clipping. The full matrix contains 72 engine/theme/viewport/text-size configurations. The
+keyboard overlay cases keep the layout viewport unchanged and shrink and pan the visible area
+while typing at both ends of a long draft. They check the actual caret and action bar at
+100% and 200% text.
+The runner owns its server by default. Reuse requires `SUGGEST_COMPOSER_BASE_URL` and
 `SUGGEST_COMPOSER_REUSE_SERVER=1`. `SUGGEST_COMPOSER_ENGINE`, `SUGGEST_COMPOSER_THEME` and
 `SUGGEST_COMPOSER_OUTPUT` select the engine, theme and artifacts. Root font resizing is verified
 against computed editor text size; physical Android font/display scaling remains a device check.
