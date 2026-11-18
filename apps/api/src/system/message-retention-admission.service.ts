@@ -48,7 +48,17 @@ export type RetentionResources = {
   memoryRatio: number | null;
   ioWaitRatio: number | null;
 };
+type RetentionAdmissionDetail = 'activity_unavailable' | 'stale_activity';
+const MISSING_RESOURCES: RetentionResources = {
+  available: false,
+  cpuRatio: null,
+  loadRatio: null,
+  memoryRatio: null,
+  ioWaitRatio: null,
+};
+
 export type RetentionAdmissionStatus = RetentionAdmissionDecision & {
+  detail?: RetentionAdmissionDetail;
   version: typeof RETENTION_PRIORITY_VERSION;
   observedAtMs: number;
   sampleStartedAtMs: number;
@@ -135,6 +145,10 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
         value.observedAtMs - value.sampleStartedAtMs > RETENTION_SAMPLE_MAX_GAP_MS ||
         typeof value.allowed !== 'boolean' ||
         typeof value.reason !== 'string' ||
+        (value.detail !== undefined &&
+          (value.allowed ||
+            value.reason !== 'metrics_unavailable' ||
+            (value.detail !== 'activity_unavailable' && value.detail !== 'stale_activity'))) ||
         !Number.isSafeInteger(value.retryAfterMs) ||
         value.retryAfterMs <= 0 ||
         value.retryAfterMs > 60_000 ||
@@ -230,19 +244,44 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
   private async collect(): Promise<void> {
     if (!(await this.becomeCollector())) return;
     this.assertQueueCoverage();
-    const [raw, resources] = await Promise.all([
-      this.redis.eval(
-        RETENTION_SAMPLE_SCRIPT,
-        3 + this.descriptors.length * 5,
-        RETENTION_PRIORITY_TRAFFIC_KEY_PREFIX,
-        HIGHER_PRIORITY_ACTIVITY_KEY,
-        HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
-        ...retentionPriorityQueueKeys(this.descriptors),
-        String(RETENTION_PRIORITY_TRAFFIC_TTL_SEC),
-      ),
-      this.readResources(),
-    ]);
-    if (!Array.isArray(raw) || raw.length !== 8) throw new Error('Invalid retention sample');
+    const raw = await this.redis.eval(
+      RETENTION_SAMPLE_SCRIPT,
+      3 + this.descriptors.length * 5,
+      RETENTION_PRIORITY_TRAFFIC_KEY_PREFIX,
+      HIGHER_PRIORITY_ACTIVITY_KEY,
+      HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+      ...retentionPriorityQueueKeys(this.descriptors),
+      String(RETENTION_PRIORITY_TRAFFIC_TTL_SEC),
+    );
+    if (!Array.isArray(raw)) throw new Error('Invalid retention sample');
+    if (raw.length === 2 && (raw[1] === 'activity_unavailable' || raw[1] === 'stale_activity')) {
+      // FLAG: An activity hold breaks continuous coverage. The next valid sample
+      // starts a new window even when the collector has kept its lease.
+      this.samples = [];
+      this.previousCounters = null;
+      this.previousCpu = null;
+      const atMs = counter(raw[0]);
+      await this.publishStatus(
+        {
+          version: RETENTION_PRIORITY_VERSION,
+          observedAtMs: atMs,
+          sampleStartedAtMs: atMs,
+          allowed: false,
+          reason: 'metrics_unavailable',
+          detail: raw[1],
+          retryAfterMs: 1_000,
+          window: evaluateRetentionWindow([], atMs).window,
+          quietSinceMs: null,
+          healthySinceMs: null,
+          queues: { ready: 0, active: 0, dueDelayed: 0 },
+          resources: MISSING_RESOURCES,
+        },
+        false,
+      );
+      return;
+    }
+    if (raw.length !== 8) throw new Error('Invalid retention sample');
+    const resources = await this.readResources();
     const [atMs, ready, active, dueDelayed, arrivals, http] = raw.slice(0, 6).map(counter);
     const minute = Math.floor(atMs! / 60_000) * 60;
     let complete = true;
@@ -300,6 +339,13 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
       queues: { ready: ready!, active: active!, dueDelayed: dueDelayed! },
       resources,
     };
+    await this.publishStatus(status, evaluated.ready);
+  }
+
+  private async publishStatus(
+    status: RetentionAdmissionStatus,
+    renewPermit: boolean,
+  ): Promise<void> {
     const result = await this.redis.eval(
       RETENTION_COMMIT_SAMPLE_SCRIPT,
       3,
@@ -307,27 +353,20 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
       RETENTION_PRIORITY_STATUS_KEY,
       RETENTION_PRIORITY_PERMIT_KEY,
       this.collectorToken!,
-      String(atMs),
+      String(status.sampleStartedAtMs),
       JSON.stringify(status),
-      evaluated.ready ? '1' : '0',
+      renewPermit ? '1' : '0',
     );
     if (result !== 1) throw new Error('Retention collector lost ownership');
   }
 
   private async readResources(): Promise<RetentionResources> {
-    const missing: RetentionResources = {
-      available: false,
-      cpuRatio: null,
-      loadRatio: null,
-      memoryRatio: null,
-      ioWaitRatio: null,
-    };
     try {
       const [stat, memory] = await Promise.all([
         readFile('/proc/stat', 'utf8'),
         readFile('/proc/meminfo', 'utf8'),
       ]);
-      if (stat.length > 262_144 || memory.length > 32_768) return missing;
+      if (stat.length > 262_144 || memory.length > 32_768) return MISSING_RESOURCES;
       const cpu = stat.split('\n')[0]?.trim().split(/\s+/).slice(1, 9).map(Number);
       const totalMemory = Number(/^MemTotal:\s+(\d+)/m.exec(memory)?.[1]);
       const availableMemory = Number(/^MemAvailable:\s+(\d+)/m.exec(memory)?.[1]);
@@ -340,7 +379,7 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
         !(availableMemory >= 0 && availableMemory <= totalMemory) ||
         !Number.isFinite(loadRatio)
       )
-        return missing;
+        return MISSING_RESOURCES;
       const current = {
         total: cpu.reduce((sum, value) => sum + value, 0),
         idle: cpu[3]! + cpu[4]!,
@@ -354,7 +393,7 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
         current.idle < previous.idle ||
         current.ioWait < previous.ioWait
       )
-        return missing;
+        return MISSING_RESOURCES;
       const delta = current.total - previous.total;
       return {
         available: true,
@@ -364,7 +403,7 @@ export class MessageRetentionAdmissionService implements OnModuleInit, OnModuleD
         memoryRatio: 1 - availableMemory / totalMemory,
       };
     } catch {
-      return missing;
+      return MISSING_RESOURCES;
     }
   }
 }

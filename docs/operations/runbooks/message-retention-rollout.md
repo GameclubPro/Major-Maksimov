@@ -134,7 +134,13 @@ For a bounded admission observation, use `vps-connect.sh exec` to run Node insid
 current-window coverage and traffic rates, queue counts, resource ratios and
 the admission reason. Require a fresh observation (at most two seconds old); a
 missing/stale value is an evidence gap. `current_window_incomplete` during the first minute is an
-expected closed gate. No SCAN, SQL or MAX request is needed for this observation.
+expected closed gate. A running collector publishes `metrics_unavailable` with
+`detail=activity_unavailable` when the activity feed has a loss marker, or
+`detail=stale_activity` when the oldest marker has expired. Queue counts are placeholders
+and resource ratios are unavailable because neither was sampled during that cycle. The
+collector revokes the permit in the same commit. A new complete minute of observations
+is required after the hold is resolved. No SCAN, SQL or MAX request is needed for this
+observation.
 
 Completed SQL and MAX HTTP activity leave short Redis receipts for the exact
 operation ID. Each kind retains up to 8,192 receipts for at most 60 seconds.
