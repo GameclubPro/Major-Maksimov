@@ -70,6 +70,21 @@ test('--full rejects an explicitly requested service in either order', () => {
   }
 });
 
+test('--eraser-only selects Lastik and excludes other runtime targets', () => {
+  for (const args of [
+    ['main', '--eraser-only'],
+    ['main', '--eraser-only', '--image-plan'],
+  ]) {
+    const result = runArgumentSelection(args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), ['mode=eraser-only', 'service=eraser']);
+  }
+  for (const extra of ['--auto', '--plan', '--full', '--eraser-only', 'eraser', 'api-ingress']) {
+    assert.equal(runArgumentSelection(['main', '--eraser-only', extra]).status, 2);
+    assert.equal(runArgumentSelection(['main', extra, '--eraser-only']).status, 2);
+  }
+});
+
 test('legacy preview/apply refuses before service selection or runtime mutation', () => {
   for (const operation of [
     '--legacy-order-preview=owner-a,owner-b',

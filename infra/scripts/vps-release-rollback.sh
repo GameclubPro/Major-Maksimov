@@ -155,12 +155,16 @@ ROLLBACK_RUNTIME_STARTED=0
 ROLLBACK_MANIFEST_RECORDED=0
 RECOVERY_BASE_MANIFEST=""
 RECOVERY_REQUIRES_API_FENCE=0
+RECOVERY_ERASER_ONLY=0
 
 invalidate_stale_release_inventory() {
   local current_manifest="$RELEASE_STATE_DIR/current.json"
   local invalid_manifest
 
   [[ "$ROLLBACK_RUNTIME_STARTED" -eq 1 && "$ROLLBACK_MANIFEST_RECORDED" -eq 0 ]] || return 0
+  # FLAG: A Lastik-only retry retains its original journal. A committed pointer
+  # can coexist with it after a failed publication; the next retry proves both.
+  [[ "$RECOVERY_ERASER_ONLY" -eq 0 ]] || return 0
   [[ -f "$current_manifest" ]] || return 0
   invalid_manifest="$RELEASE_STATE_DIR/current.invalid-release-rollback-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
   if mv "$current_manifest" "$invalid_manifest"; then
@@ -185,13 +189,9 @@ select_release_recovery_base() {
     node infra/scripts/release-manifest.mjs validate-current >/dev/null 2>&1; then
     return 0
   fi
-  if [[ -e "$RELEASE_STATE_DIR/current.json" ]]; then
-    echo "Current release manifest exists but is invalid; refusing immutable rollback." >&2
-    return 1
-  fi
   if RECOVERY_BASE_MANIFEST="$(
     MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
-      node infra/scripts/release-manifest.mjs recovery-base
+      node infra/scripts/release-manifest.mjs recovery-base --include-eraser 1
   )"; then
     if [[ "$MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE" != "1" ]]; then
       echo "An interrupted release manifest requires explicit recovery adoption." >&2
@@ -200,6 +200,17 @@ select_release_recovery_base() {
       return 1
     fi
     case "$(basename "$RECOVERY_BASE_MANIFEST")" in
+      current.invalid-deploy-eraser-*)
+        if [[ "${#REQUESTED_COMPONENTS[@]}" -ne 1 || "${REQUESTED_COMPONENTS[0]:-}" != eraser ]]; then
+          echo 'Interrupted Lastik-only recovery requires an explicit eraser-only rollback.' >&2
+          return 1
+        fi
+        MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
+          node infra/scripts/release-manifest.mjs eraser-recovery --release-id "$SOURCE_RELEASE_ID" \
+            --current-manifest-file "$RECOVERY_BASE_MANIFEST" || return
+        RECOVERY_ERASER_ONLY=1
+        RECOVERY_REQUIRES_API_FENCE=0
+        ;;
       current.invalid-release-rollback-static-*)
         RECOVERY_REQUIRES_API_FENCE=0
         ;;
@@ -207,6 +218,10 @@ select_release_recovery_base() {
         RECOVERY_REQUIRES_API_FENCE=1
         ;;
     esac
+    if [[ "${RECOVERY_ERASER_ONLY:-0}" -ne 1 && ( -e "$RELEASE_STATE_DIR/current.json" || -L "$RELEASE_STATE_DIR/current.json" ) ]]; then
+      echo "Current release manifest exists but is invalid; refusing immutable rollback." >&2
+      return 1
+    fi
     echo "Adopting the single validated interrupted release manifest."
     return 0
   else
@@ -255,7 +270,10 @@ archive_recovery_base_manifest() {
 
 select_release_recovery_base
 
-running_scale_services="$(docker compose "${SCALE_COMPOSE_FILES[@]}" ps --status running --services 2>/dev/null || true)"
+if ! running_scale_services="$(docker compose "${SCALE_COMPOSE_FILES[@]}" ps --status running --services)"; then
+  echo "Refusing immutable rollback: cannot verify that infra-scale is stopped." >&2
+  exit 1
+fi
 if [[ -n "$running_scale_services" ]]; then
   echo "Refusing immutable rollback while infra-scale is running: $running_scale_services" >&2
   exit 1
@@ -708,6 +726,14 @@ verify_inherited_release_components() {
   done
 }
 
+if [[ "$RECOVERY_ERASER_ONLY" -eq 1 ]]; then
+  # FLAG: Prove inherited runtime and the immutable target before withdrawing
+  # a committed current pointer; the original Lastik journal survives a crash.
+  verify_inherited_release_components
+  MAXIM_RELEASE_STATE_DIR="$RELEASE_STATE_DIR" \
+    node infra/scripts/release-manifest.mjs eraser-recovery --release-id "$SOURCE_RELEASE_ID" \
+      --current-manifest-file "$RECOVERY_BASE_MANIFEST" --withdraw-current 1
+fi
 begin_release_runtime_transition
 ROLLBACK_RUNTIME_STARTED=1
 verify_inherited_release_components

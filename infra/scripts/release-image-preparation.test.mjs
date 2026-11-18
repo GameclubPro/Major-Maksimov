@@ -81,10 +81,9 @@ test('normal delivery prepares every image before invoking the final runtime exe
     deploy,
     /if \[\[ "\$IMAGE_PLAN_ONLY" -eq 1 \]\]; then\n {2}load_current_component_images\n {2}print_image_preparation_plan\n {2}exit 0/u,
   );
-  assert.ok(
-    deploy.indexOf('print_image_preparation_plan\n  exit 0') <
-      deploy.lastIndexOf('\ninitialize_release_inventory\n'),
-  );
+  const imagePlanExit = deploy.indexOf('print_image_preparation_plan\n  exit 0');
+  const inventoryInitialization = deploy.search(/^\s+initialize_release_inventory$/mu);
+  assert.ok(imagePlanExit >= 0 && inventoryInitialization > imagePlanExit);
   assert.doesNotMatch(
     deploy,
     /docker compose.* build|docker buildx build|maxim_topology_build_shared_api_image/u,

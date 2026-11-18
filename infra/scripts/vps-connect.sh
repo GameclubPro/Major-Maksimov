@@ -1898,6 +1898,8 @@ rollback_release() {
   # Static-only rollback keeps its existing image-only offline path.
   if [[ $# -eq 1 ]]; then
     capability_marker=maxim_topology_require_statistics_and_night_mode_recovery
+  elif [[ $# -eq 2 && "$2" == eraser && "${MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE:-0}" == 1 ]]; then
+    capability_marker=RECOVERY_ERASER_ONLY
   else
     for rollback_component in "${@:2}"; do
       if [[ "$rollback_component" == api-shared ]]; then

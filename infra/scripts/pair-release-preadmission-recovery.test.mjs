@@ -1672,7 +1672,14 @@ function shadowObservation() {
 async function shadowSourceDescriptors(mode = 0o664) {
   const sources = {};
   for (const [path, [size, hash]] of Object.entries(SHADOW_SOURCES)) {
-    const bytes = await readFile(new URL(`../../${path}`, import.meta.url));
+    // The pinned manifest predates component releases; shallow CI has no historical Git objects.
+    const sourceUrl = new URL(
+      path === 'infra/scripts/release-manifest.mjs'
+        ? './test-fixtures/4345d121-release-manifest.mjs.txt'
+        : `../../${path}`,
+      import.meta.url,
+    );
+    const bytes = await readFile(sourceUrl);
     assert.equal(bytes.length, size, path);
     assert.equal(digest(bytes), hash, path);
     sources[path] = { bytes, uid, gid: process.getgid(), mode, links: 1 };

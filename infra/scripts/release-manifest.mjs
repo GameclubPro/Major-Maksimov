@@ -5,6 +5,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export const ACTIVE_RELEASE_COMPONENTS = Object.freeze([
   'api-shared',
@@ -26,7 +28,7 @@ const activeComponentSet = new Set([...ACTIVE_RELEASE_COMPONENTS, ...OPTIONAL_RE
 const releaseIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
 const fullShaPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64}|unknown)$/u;
 const recoveryBaseNamePattern =
-  /^current\.invalid-(?:deploy|release-rollback(?:-(?:api|static))?|runtime-rollback)-\d{8}T\d{6}Z-\d+\.json$/u;
+  /^current\.invalid-(?:deploy(?:-eraser)?|release-rollback(?:-(?:api|static))?|runtime-rollback)-\d{8}T\d{6}Z-\d+\.json$/u;
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -92,6 +94,7 @@ export function beginReleaseTransition({ stateDir, kind, now = new Date(), pid =
   if (
     ![
       'deploy',
+      'deploy-eraser',
       'release-rollback',
       'release-rollback-api',
       'release-rollback-static',
@@ -216,6 +219,82 @@ export function findRecoveryBaseManifest(stateDir, { allowUnknown = false } = {}
     readRecoveryBaseManifest(candidates[0]);
   }
   return candidates[0];
+}
+
+function readRetainedEraserManifest(stateDir, path) {
+  if (!lstatSync(path).isFile())
+    throw new Error('Lastik recovery requires regular manifest files.');
+  const manifest = readRecoveryBaseManifest(path);
+  const immutable = resolve(stateDir, 'releases', `${manifest.releaseId}.json`);
+  if (
+    !lstatSync(immutable).isFile() ||
+    !readFileSync(immutable).equals(readFileSync(path)) ||
+    !manifest.components.eraser ||
+    !Number.isFinite(Date.parse(manifest.createdAt))
+  ) {
+    throw new Error('Lastik recovery requires an exact retained immutable release copy.');
+  }
+  return manifest;
+}
+
+function listUnarchivedJournalPaths(stateDir) {
+  return listRetentionProtectionManifestPaths(stateDir).filter((path) =>
+    basename(path).startsWith('current.invalid-'),
+  );
+}
+
+function proveEraserRollbackBase(stateDir, options) {
+  const journal = findRecoveryBaseManifest(stateDir);
+  if (
+    !journal ||
+    journal !== resolve(options.currentManifestFile) ||
+    !basename(journal).startsWith('current.invalid-deploy-eraser-') ||
+    listUnarchivedJournalPaths(stateDir).some((path) => path !== journal)
+  ) {
+    throw new Error('Lastik recovery requires the single typed Lastik transition.');
+  }
+  const currentPath = resolve(stateDir, 'current.json');
+  if (
+    options.withdrawCurrent === '1' &&
+    process.env.MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE !== '1'
+  ) {
+    throw new Error('Withdrawing a Lastik release pointer requires explicit recovery adoption.');
+  }
+  const baseline = readRetainedEraserManifest(stateDir, journal);
+  const baselineTime = Date.parse(baseline.createdAt);
+  if (options.releaseId !== baseline.releaseId) {
+    throw new Error('Lastik recovery must target the exact journal baseline release id.');
+  }
+  if (!lstatSync(currentPath, { throwIfNoEntry: false })) return;
+  const current = readRetainedEraserManifest(stateDir, currentPath);
+  const currentTime = Date.parse(current.createdAt);
+  const eraser = current.components.eraser;
+  const previousEraser = baseline.components.eraser;
+  const rollback = current.emergencyReason === `immutable rollback to ${baseline.releaseId}`;
+  const expectedEraser = rollback
+    ? current.targetSha === baseline.targetSha &&
+      ['sourceSha', 'imageRef', 'imageId'].every((field) => eraser[field] === previousEraser[field])
+    : eraser.sourceSha === current.targetSha &&
+      eraser.imageRef === `maxim-eraser:${current.targetSha}`;
+  if (
+    current.releaseId === baseline.releaseId ||
+    !expectedEraser ||
+    eraser.recordedAt !== current.createdAt ||
+    !isDeepStrictEqual(current.smokes, ['eraser-exact-source-ready']) ||
+    currentTime < baselineTime ||
+    !isDeepStrictEqual(current.migrations, baseline.migrations) ||
+    ACTIVE_RELEASE_COMPONENTS.some(
+      (id) => !isDeepStrictEqual(current.components[id], baseline.components[id]),
+    )
+  ) {
+    throw new Error('Coexisting current release is not a Lastik-only successor of the journal.');
+  }
+  // FLAG: Keep both immutable receipts and the original journal through every retry.
+  // The caller holds the deploy lock and has verified inherited runtime identities.
+  if (options.withdrawCurrent === '1') {
+    rmSync(currentPath);
+    syncDirectory(stateDir);
+  }
 }
 
 export function buildReleaseManifest({
@@ -662,18 +741,34 @@ function runCli(argv) {
       process.exitCode = 3;
       return;
     }
+    if (
+      basename(recoveryBase).startsWith('current.invalid-deploy-eraser-') &&
+      options.includeEraser !== '1'
+    ) {
+      throw new Error('An interrupted Lastik-only release requires scoped immutable rollback.');
+    }
     process.stdout.write(`${recoveryBase}\n`);
     return;
   }
 
+  if (command === 'eraser-recovery') {
+    proveEraserRollbackBase(stateDir, options);
+    return;
+  }
+
   if (command === 'validate-current') {
-    const current = readCurrentManifest(stateDir);
+    const proveEraserBaseline = options.eraserRollbackBaseline === '1';
+    const current = proveEraserBaseline
+      ? readRetainedEraserManifest(stateDir, resolve(stateDir, 'current.json'))
+      : readCurrentManifest(stateDir);
     if (!current) {
       process.exitCode = 3;
       return;
     }
     validateCompleteReleaseManifest(current, { allowUnknown: options.allowUnknown === '1' });
-    const unresolvedRecoveryBases = listRecoveryBaseManifestPaths(stateDir);
+    const unresolvedRecoveryBases = proveEraserBaseline
+      ? listUnarchivedJournalPaths(stateDir)
+      : listRecoveryBaseManifestPaths(stateDir);
     if (unresolvedRecoveryBases.length > 0) {
       throw new Error(
         `Current release coexists with ${unresolvedRecoveryBases.length} unresolved transition journal(s).`,
@@ -703,7 +798,7 @@ function runCli(argv) {
   }
 
   throw new Error(
-    'Usage: release-manifest.mjs commit|inventory|show|field|recovery-base|validate-current|begin-transition|archive-transition [options]',
+    'Usage: release-manifest.mjs commit|inventory|show|field|recovery-base|eraser-recovery|validate-current|begin-transition|archive-transition [options]',
   );
 }
 

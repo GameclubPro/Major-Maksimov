@@ -70,9 +70,9 @@ if [[ $# -ge 2 ]]; then
         echo "Legacy cold recovery activation is disabled (cold_activation_disabled)." >&2
         exit 2
         ;;
-      --plan|--auto|--full)
+      --plan|--auto|--full|--eraser-only)
         if [[ "$DEPLOY_MODE" != "manual" ]]; then
-          echo "Only one of --plan, --auto, or --full may be used." >&2
+          echo "Only one deploy mode may be used." >&2
           exit 2
         fi
         DEPLOY_MODE="${argument#--}"
@@ -95,6 +95,10 @@ fi
 if [[ "$DEPLOY_MODE" != "manual" && "${#SERVICES[@]}" -gt 0 ]]; then
   echo "Explicit services cannot be combined with --$DEPLOY_MODE." >&2
   exit 2
+fi
+
+if [[ "$DEPLOY_MODE" == "eraser-only" ]]; then
+  SERVICES=(eraser)
 fi
 
 if [[ "$DEPLOY_MODE" == "full" ]] || [[ "$DEPLOY_MODE" == "manual" && "${#SERVICES[@]}" -eq 0 ]]; then
@@ -392,6 +396,11 @@ invalidate_stale_release_inventory() {
   local invalid_manifest
 
   [[ "$DEPLOY_RUNTIME_STARTED" -eq 1 && "$DEPLOY_MANIFEST_RECORDED" -eq 0 ]] || return 0
+  # FLAG: Preserve both records if commit wrote current.json before failing.
+  # Lastik rollback verifies it against the immutable copy and the original journal.
+  if [[ "$DEPLOY_MODE" == eraser-only && "${RECOVERY_BASE_MANIFEST##*/}" == current.invalid-deploy-eraser-* && -f "$RECOVERY_BASE_MANIFEST" ]]; then
+    return 0
+  fi
   [[ -f "$current_manifest" ]] || return 0
   invalid_manifest="$RELEASE_STATE_DIR/current.invalid-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
   if mv "$current_manifest" "$invalid_manifest"; then
@@ -465,10 +474,14 @@ initialize_release_inventory() {
 
 begin_release_runtime_transition() {
   maxim_require_ordinary_effect_authority "$ROOT_DIR" || return
+  local transition_kind=deploy
   if [[ -n "$RECOVERY_BASE_MANIFEST" ]]; then
     return 0
   fi
-  if ! RECOVERY_BASE_MANIFEST="$(release_manifest begin-transition --kind deploy)"; then
+  if [[ "$DEPLOY_MODE" == eraser-only ]]; then
+    transition_kind=deploy-eraser
+  fi
+  if ! RECOVERY_BASE_MANIFEST="$(release_manifest begin-transition --kind "$transition_kind")"; then
     RECOVERY_BASE_MANIFEST=""
     echo "Could not journal the current release before runtime mutation." >&2
     return 1
@@ -636,9 +649,13 @@ print_deploy_plan() {
 print_image_preparation_plan() {
   local component service
   local selected=()
-  for component in "${RELEASE_COMPONENTS[@]}"; do
-    if impact_plan_selects_component "$component"; then selected+=("$component"); fi
-  done
+  if [[ "${DEPLOY_MODE:-manual}" == eraser-only ]]; then
+    verify_eraser_only_release || return
+  else
+    for component in "${RELEASE_COMPONENTS[@]}"; do
+      if impact_plan_selects_component "$component"; then selected+=("$component"); fi
+    done
+  fi
   for service in "${SERVICES[@]}"; do
     case "$service" in
       api-*) component=api-shared ;;
@@ -661,6 +678,12 @@ has_requested_api_service() {
     fi
   done
   return 1
+}
+
+api_deploy_settings_requested() {
+  [[ -n "${COMMERCIAL_OCR_DEPLOY_MODE:-}" || -n "${COMMERCIAL_AI_DEPLOY_ENABLED:-}" ||
+    -n "${COMMERCIAL_AI_POOL_DEPLOY_REQUESTED:-}" || -n "${RETENTION_DEPLOY_MODE:-}" ||
+    -n "${STATISTICS_EXCHANGE_DEPLOY_ENABLED:-}" || -n "${STATISTICS_CENTRAL_DEPLOY_EPOCH:-}" ]]
 }
 
 is_enabled() {
@@ -1212,6 +1235,66 @@ verify_inherited_release_components() {
   done
 }
 
+# FLAG: Do not expand an explicit Lastik-only release to API on drift. Reject it
+# before installing floors or creating a transition; ordinary reconciliation stays mandatory.
+verify_eraser_only_release() {
+  local component source_sha api_source_sha eraser_source_sha rollback_ref rollback_id running_scale
+  if [[ "$BRANCH" != main || ! "$EXPECTED_DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]] ||
+    maxim_durable_executor_requested ||
+    api_deploy_settings_requested ||
+    [[ "${MAXIM_WEBHOOK_ROLLOUT_ADOPT_EXISTING_PAUSE:-0}" != 0 || "$POST_RELEASE_RECLAIM" != 0 ]]; then
+    echo "Lastik-only deployment requires exact main and no API settings, recovery, or reclaim." >&2
+    return 2
+  fi
+  if [[ ! -s .env || -L .env ]] || ! maxim_eraser_configured; then
+    echo "Lastik-only deployment requires the existing production configuration and Lastik." >&2
+    return 1
+  fi
+  if ! running_scale="$(docker compose "${ALTERNATE_COMPOSE_FILES[@]}" ps --status running --services)" ||
+    [[ -n "$running_scale" ]]; then
+    echo "Lastik-only deployment requires the alternate stack to be stopped for rollback." >&2
+    return 1
+  fi
+  if ! release_manifest validate-current --eraser-rollback-baseline 1 >/dev/null; then
+    echo "Lastik-only deployment requires an immutable rollback baseline with no unresolved transition." >&2
+    return 1
+  fi
+  for component in api-shared miniapp-major-static admin-static eraser; do
+    source_sha="$(release_field "$component" sourceSha)" || return
+    if [[ ! "$source_sha" =~ ^[a-f0-9]{40}$ ]] ||
+      ! git merge-base --is-ancestor "$source_sha" "$EXPECTED_DEPLOY_SHA" ||
+      ! component_manifest_matches_runtime "$component"; then
+      echo "Lastik-only deployment cannot verify installed component: $component" >&2
+      return 1
+    fi
+  done
+  api_source_sha="$(release_field api-shared sourceSha)" || return
+  maxim_topology_require_eraser_bridge "$api_source_sha" || return
+  node infra/scripts/assert-eraser-source.mjs "$api_source_sha" --connection-requests api-shared || return
+  # FLAG: Installed API and target must agree on the shared connection boundary.
+  # A change here needs an ordinary coordinated release.
+  if ! git diff --quiet "$api_source_sha" "$EXPECTED_DEPLOY_SHA" -- \
+    apps/api/src/message-retention apps/api/prisma/schema.prisma packages/contracts \
+    infra/docker-compose.yml infra/docker-compose.eraser-no-build.yml; then
+    echo "Lastik-only deployment requires unchanged shared connection and Compose inputs." >&2
+    return 1
+  fi
+  eraser_source_sha="$(release_field eraser sourceSha)" || return
+  rollback_ref="$(release_field eraser imageRef)" || return
+  rollback_id="$(release_field eraser imageId)" || return
+  if [[ "$rollback_ref" != "maxim-eraser:${eraser_source_sha}" ]] ||
+    [[ "$(docker image inspect --format '{{.Id}}' "$rollback_ref")" != "$rollback_id" ]]; then
+    echo "Lastik-only deployment requires the exact recorded Lastik image for rollback." >&2
+    return 1
+  fi
+  for source_sha in "$eraser_source_sha" "$EXPECTED_DEPLOY_SHA"; do
+    node infra/scripts/assert-eraser-source.mjs "$source_sha" --connection-requests eraser || return
+    node infra/scripts/assert-eraser-source.mjs "$source_sha" --rate-limit-reader eraser || return
+    node infra/scripts/assert-eraser-source.mjs "$source_sha" --connection-proof-reader eraser || return
+  done
+  maxim_eraser_require_stores COMPOSE_FILES
+}
+
 record_successful_release() {
   maxim_require_ordinary_effect_authority "$ROOT_DIR" || return
   local migrations_file=""
@@ -1583,14 +1666,19 @@ maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 if maxim_durable_executor_requested; then
   maxim_durable_executor_admit || exit $?
 fi
-ensure_compose_env
-prepare_retention_deploy_mode
-prepare_commercial_ai_deploy_flag
-prepare_commercial_ai_pool_deploy_flags
-prepare_statistics_exchange_deploy_flag
-prepare_statistics_central_deploy_epoch
-initialize_release_inventory
+if [[ "$DEPLOY_MODE" != eraser-only ]]; then
+  ensure_compose_env
+  prepare_retention_deploy_mode
+  prepare_commercial_ai_deploy_flag
+  prepare_commercial_ai_pool_deploy_flags
+  prepare_statistics_exchange_deploy_flag
+  prepare_statistics_central_deploy_epoch
+  initialize_release_inventory
+fi
 load_current_component_images
+if [[ "$DEPLOY_MODE" == eraser-only ]]; then
+  verify_eraser_only_release
+fi
 if [[ "$DEPLOY_MODE" == "auto" ]]; then
   derive_auto_services
   validate_requested_services
@@ -1609,7 +1697,7 @@ if [[ -n "$RECOVERY_BASE_MANIFEST" ]]; then
 fi
 warn_postgres_password_fallback
 
-if [[ -n "${COMMERCIAL_OCR_DEPLOY_MODE:-}" || -n "${COMMERCIAL_AI_DEPLOY_ENABLED:-}" || -n "${COMMERCIAL_AI_POOL_DEPLOY_REQUESTED:-}" || -n "$RETENTION_DEPLOY_MODE" || -n "$STATISTICS_EXCHANGE_DEPLOY_ENABLED" || -n "$STATISTICS_CENTRAL_DEPLOY_EPOCH" ]] && ! has_requested_api_service; then
+if api_deploy_settings_requested && ! has_requested_api_service; then
   SERVICES+=("api-ingress")
 fi
 BUILD_API_IMAGE=0
@@ -1620,7 +1708,7 @@ for service in "${API_SERVICES[@]}"; do
   fi
 done
 
-if [[ "$BUILD_API_IMAGE" -eq 0 ]] && impact_plan_selects_component api-shared; then
+if [[ "$DEPLOY_MODE" != eraser-only && "$BUILD_API_IMAGE" -eq 0 ]] && impact_plan_selects_component api-shared; then
   BUILD_API_IMAGE=1
   SERVICES+=("api-ingress")
   echo "Unreleased API impact detected from the api-shared component manifest."
@@ -1631,11 +1719,11 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
     "Shared API image build or API-related diff detected."
 fi
 
-if ! contains_service "miniapp-major-static" "${SERVICES[@]}" && impact_plan_selects_component miniapp-major-static; then
+if [[ "$DEPLOY_MODE" != eraser-only ]] && ! contains_service "miniapp-major-static" "${SERVICES[@]}" && impact_plan_selects_component miniapp-major-static; then
   SERVICES+=("miniapp-major-static")
   echo "Unreleased Major mini app impact detected from the component manifest."
 fi
-if ! contains_service "admin-static" "${SERVICES[@]}" && impact_plan_selects_component admin-static; then
+if [[ "$DEPLOY_MODE" != eraser-only ]] && ! contains_service "admin-static" "${SERVICES[@]}" && impact_plan_selects_component admin-static; then
   SERVICES+=("admin-static")
   echo "Unreleased Safety Desk impact detected from the component manifest."
 fi
@@ -1653,14 +1741,14 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
 fi
 
 TARGET_SHA="$(git rev-parse HEAD)"
-if [[ "$BUILD_API_IMAGE" -eq 1 ]] || contains_service eraser "${SERVICES[@]}"; then
-  maxim_eraser_install_connection_request_floor "$TARGET_SHA"
-fi
-if contains_service eraser "${SERVICES[@]}"; then
-  maxim_eraser_install_rate_limit_reader_floor "$TARGET_SHA"
-fi
-if contains_service eraser "${SERVICES[@]}"; then
-  maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"
+if [[ "$DEPLOY_MODE" != eraser-only ]]; then
+  if [[ "$BUILD_API_IMAGE" -eq 1 ]] || contains_service eraser "${SERVICES[@]}"; then
+    maxim_eraser_install_connection_request_floor "$TARGET_SHA"
+  fi
+  if contains_service eraser "${SERVICES[@]}"; then
+    maxim_eraser_install_rate_limit_reader_floor "$TARGET_SHA"
+    maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"
+  fi
 fi
 RELEASE_ID="release-$(date -u +%Y%m%dT%H%M%SZ)-${TARGET_SHA:0:12}"
 TARGET_HAS_MEDIA_ANALYSIS=0
@@ -1707,7 +1795,9 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
 fi
 
 prepare_deploy_disk_capacity
-stop_conflicting_stacks
+if [[ "$DEPLOY_MODE" != eraser-only ]]; then
+  stop_conflicting_stacks
+fi
 warn_legacy_miniapp_static_target
 
 if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
@@ -1748,7 +1838,13 @@ for service in "${SERVICES_TO_BUILD[@]}"; do
   echo "Reusing existing immutable static image: $candidate_image_ref"
 done
 
-ensure_compose_env
+if [[ "$DEPLOY_MODE" != eraser-only ]]; then
+  ensure_compose_env
+else
+  maxim_eraser_install_connection_request_floor "$TARGET_SHA"
+  maxim_eraser_install_rate_limit_reader_floor "$TARGET_SHA"
+  maxim_eraser_install_connection_proof_reader_floor "$TARGET_SHA"
+fi
 if [[ "${#DEPLOYED_COMPONENTS[@]}" -gt 0 ]]; then
   begin_release_runtime_transition
   DEPLOY_RUNTIME_STARTED=1

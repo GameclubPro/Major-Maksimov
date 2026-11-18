@@ -2431,8 +2431,9 @@ maxim_topology_verify_ocr_native_sandbox_for_image() {
   if maxim_topology_image_has_ocr_native_sandbox "$image"; then
     maxim_topology_verify_ocr_native_sandbox_runtime "$compose_args_var" "$image" with-media
     return
+  else
+    capability_status=$?
   fi
-  capability_status=$?
   if [[ "$capability_status" -ne 1 ]]; then
     return "$capability_status"
   fi
@@ -2454,8 +2455,9 @@ maxim_topology_require_ocr_native_sandbox_image_capability() {
     fi
     echo "Pre-sandbox target image unexpectedly declares OCR sandbox capability." >&2
     return 1
+  else
+    capability_status=$?
   fi
-  capability_status=$?
   if [[ "$capability_status" -ne 1 ]]; then
     return "$capability_status"
   fi
