@@ -48,7 +48,11 @@ collations, options, no INCLUDE keys, and valid/ready/live flags. Genuine succes
 Prisma prerequisites are required. Duplicate active, unfinished, foreign and checksum-drifted
 receipts, competing builders and repair artifacts block the stage. Known historical rolled-back
 prerequisite attempts do not replace their required successful receipts; unknown rolled-back
-names/checksums and any rolled-back routing target block normal preparation. A successful
+names/checksums and any rolled-back routing target block normal preparation. For the four
+verified failed predecessor versions (spammer review, broadcast locking, suggestion delivery and
+publication revision), one unfinished zero-step rollback receipt is accepted only alongside the
+later successful one-step attempt of the same migration with the exact pinned current source
+checksum. Neither version's receipt is modified. A successful
 routing receipt must contain the one step recorded by a genuine Prisma deploy; any receipt for
 the superseded proposal `20261103120000_index_webhook_chat_queue_head` blocks preparation even if
 it was rolled back. The four existing
