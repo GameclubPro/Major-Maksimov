@@ -74,8 +74,10 @@ inputs. Other shared tooling, build inputs, CI policy and unknown paths retain f
 
 Ubuntu system dependency preparation uses the official archive and security endpoints over HTTPS.
 The bounded rewrite covers the hosted runners' regional EC2 mirrors and preserves suites, signing
-keys, other package sources and mirror-file indirection;
-Redis and browser lanes retain strict update failures and their existing installation deadlines.
+keys and mirror-file indirection. The two browser jobs configure APT to use only the runner's
+signed Ubuntu sources for Playwright's dependency install. Unrelated runner repositories cannot
+block that install. Redis and browser lanes both keep strict update failures and their existing
+installation deadlines.
 
 Preparation failures report a fixed phase and exit status before returning the original failure.
 Admission refusals retain the bounded known reason or `unknown`; captured remote output remains

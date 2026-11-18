@@ -494,6 +494,10 @@ try {
       await page.getByRole('button', { name: 'Антидубль', exact: true }).click();
       const savedToast = page.locator('.toast--success').last();
       await savedToast.waitFor({ state: 'visible' });
+      // The panel slides into the viewport after the toast becomes visible.
+      await panel.evaluate((node) =>
+        Promise.all(node.getAnimations().map((animation) => animation.finished.catch(() => {}))),
+      );
       const toastBox = await savedToast.boundingBox();
       const headerBox = await panel.locator('.settings-drilldown__header').boundingBox();
       assert.ok(toastBox && headerBox);
