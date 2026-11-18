@@ -17,7 +17,6 @@ import { useSettingsRules } from './settings/use-settings-rules';
 import { useSettingsDraft } from './settings/use-settings-draft';
 import { useSettingsRequiredSubscription } from './settings/use-settings-required-subscription';
 import { getStopWords } from '../lib/api/stop-words-client';
-import { prepareStopWordsInput } from '../lib/stop-words-editor';
 import {
   RequiredSubscriptionExternalSource,
   RequiredSubscriptionHelp,
@@ -32,6 +31,7 @@ import {
   normalizeNavigationAllowlistTarget,
   normalizeStoredNavigationAllowlistEntry,
   stepDeleteBotMessagesDelayMinutes,
+  stopWordsPolicySchema,
   type ChatSettings,
   type ApplySettingsTarget,
   type ChatSettingsScreenResponse,
@@ -447,8 +447,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const [domainInput, setDomainInput] = useState('');
   const [domainInputKind, setDomainInputKind] = useState<NavigationAllowlistKind>('WEB_DOMAIN');
   const [domainInputError, setDomainInputError] = useState('');
-  const [messageLimitsBlockedWordsInput, setMessageLimitsBlockedWordsInput] = useState('');
-  const [messageLimitsBlockedDomainsInput, setMessageLimitsBlockedDomainsInput] = useState('');
   const [scheduleDomain, setScheduleDomain] = useState<string | null>(null);
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
@@ -810,14 +808,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     stopWordsStorageStatus: settingsScreenQuery.data?.stopWordsStorageStatus,
     refetchSettings: settingsScreenQuery.refetch,
     onHydrated: () => setDuplicateWindowInputValue(null),
-    onStopWordsSaved: () => {
-      setMessageLimitsBlockedWordsInput((value) =>
-        value === messageLimitsBlockedWordsInput ? '' : value,
-      );
-      setMessageLimitsBlockedDomainsInput((value) =>
-        value === messageLimitsBlockedDomainsInput ? '' : value,
-      );
-    },
+    onStopWordsSaved() {},
     onSaved: (section) => {
       pushToast({
         replaceKey: `settings-save:${chatId}:${section}`,
@@ -1455,10 +1446,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
           variables.sourceSettings,
         );
       if (activeChatIdRef.current !== variables.sourceChatId) return;
-      if (result.section === 'stopWords') {
-        setMessageLimitsBlockedWordsInput('');
-        setMessageLimitsBlockedDomainsInput('');
-      }
       pushToast({
         tone: 'success',
         title: `Настройки «${SECTION_LABELS[result.section]}» применены`,
@@ -1477,10 +1464,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       if (sourceSaved && variables.section === 'stopWords' && savedSource) {
         savedSource = await refreshSavedStopWordsSource(api, savedSource);
         if (variables.isCurrentScope?.() === false) return;
-        if (activeChatIdRef.current === variables.sourceChatId) {
-          setMessageLimitsBlockedWordsInput('');
-          setMessageLimitsBlockedDomainsInput('');
-        }
       }
       const { parseSettingsApplyPartial } = await import('../lib/chat-settings-conflict');
       if (variables.isCurrentScope?.() === false) return;
@@ -2120,13 +2103,13 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     );
   }
   function validateDraft(value: ChatSettings, section?: ApplySectionKey): ChatSettings | null {
-    if (isReloadingStopWords) return null;
     const paths = section ? new Set(settingsSectionPaths('chat', section)) : null;
     if (Object.keys(sharedFieldErrors).some((path) => !paths || paths.has(path))) {
       if (section === 'stopWords') revealSharedStopWordsErrors();
       else revealSharedSettingsErrors();
       return null;
     }
+    if (section !== 'links' && isReloadingStopWords) return null;
     if (
       stopWordsStorageLocked &&
       JSON.stringify(value.stopWordsPolicy) !== JSON.stringify(settingsQuery.data?.stopWordsPolicy)
@@ -2151,7 +2134,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
 
       if (Object.keys(nextErrors).length === 0) {
         setFieldErrors({});
-        setStopWordsModuleError(null);
+        if (section !== 'links') setStopWordsModuleError(null);
         return normalizedParsed;
       }
 
@@ -3322,12 +3305,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const showMessageLimitsBotButtonErrors = Boolean(
     draft?.messageLimitsBotMessageEnabled && draft?.messageLimitsBotButtonEnabled,
   );
-  const messageLimitsBlockedWordsError = fieldErrors.messageLimitsBlockedWords;
-  const messageLimitsBlockedDomainsError = fieldErrors.messageLimitsBlockedDomains;
-  const stopWordsError =
-    fieldErrors.stopWordsPolicy ||
-    messageLimitsBlockedWordsError ||
-    messageLimitsBlockedDomainsError;
   const messageLimitsBotButtonErrors =
     showMessageLimitsBotButtonErrors && fieldErrors.messageLimitsBotButtons
       ? validateBroadcastLinkButtons(draft?.messageLimitsBotButtons ?? [])
@@ -4256,17 +4233,11 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     return settingsSectionPaths('chat', section).some((path) => Boolean(sharedFieldErrors[path]));
   }
   function isSectionDirty(section: ApplySectionKey) {
-    if (section === 'links' && isSectionDirty('stopWords')) return true;
     if (section === 'stopWords' && stopWordsReplacementAuthorized) return true;
     if (hasSharedSectionErrors(section)) return true;
     if (!draft || !settingsQuery.data) {
       return false;
     }
-    if (
-      section === 'stopWords' &&
-      (messageLimitsBlockedWordsInput.trim() || messageLimitsBlockedDomainsInput.trim())
-    )
-      return true;
 
     const draftSettings = normalizeSectionDraftSettings(draft, section);
     const savedSettings = normalizeSectionDraftSettings(settingsQuery.data, section);
@@ -4276,16 +4247,47 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     );
   }
 
-  function resetSharedSectionEditor(section: ApplySectionKey) {
-    const paths = new Set(settingsSectionPaths('chat', section));
+  const legacySitesVisible = Boolean(
+    draft?.stopWordsPolicy?.domains?.length ||
+    settingsQuery.data?.stopWordsPolicy?.domains?.length ||
+    stopWordsStorageStatus === 'invalid' ||
+    sharedFieldErrors['stopWordsPolicy.domains'],
+  );
+
+  function hasLegacySiteChanges() {
+    if (!legacySitesVisible) return false;
+    if (stopWordsReplacementAuthorized) return true;
+    if (
+      settingsSectionPaths('chat', 'stopWords').some(
+        (path) => path !== 'stopWordsPolicy.rules' && Boolean(sharedFieldErrors[path]),
+      )
+    )
+      return true;
+
+    const current = draft?.stopWordsPolicy;
+    const saved = settingsQuery.data?.stopWordsPolicy;
+    if (!current || current === saved) return false;
+    const baseline = saved ?? stopWordsPolicySchema.parse({});
+    return JSON.stringify({ ...current, rules: baseline.rules }) !== JSON.stringify(baseline);
+  }
+
+  function closeSavedSection(section: ApplySectionKey) {
+    if (section === 'links' && hasLegacySiteChanges()) return;
+    closeSection(section);
+  }
+
+  function resetSharedSectionEditor(section: ApplySectionKey, preservePath?: string) {
+    const paths = new Set(
+      settingsSectionPaths('chat', section).filter((path) => path !== preservePath),
+    );
     setSharedFieldErrors((current) =>
       Object.fromEntries(Object.entries(current).filter(([path]) => !paths.has(path))),
     );
     setSharedSectionEpochs((current) => ({ ...current, [section]: (current[section] ?? 0) + 1 }));
   }
 
-  function discardSectionChanges(section: ApplySectionKey) {
-    resetSharedSectionEditor(section);
+  function discardSectionChanges(section: ApplySectionKey, sitesOnly = false) {
+    resetSharedSectionEditor(section, sitesOnly ? 'stopWordsPolicy.rules' : undefined);
     if (!settingsQuery.data) {
       return;
     }
@@ -4295,19 +4297,33 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       discardStopWordsEditorState();
       setStopWordsModuleError(null);
       setStopWordsFocusRequest(undefined);
-      setMessageLimitsBlockedWordsInput('');
-      setMessageLimitsBlockedDomainsInput('');
-      clearFieldError('messageLimitsBlockedWords');
-      clearFieldError('messageLimitsBlockedDomains');
     }
 
     if (section === 'duplicates') {
       setDuplicateWindowInputValue(null);
     }
 
-    setDraft((current) =>
-      current ? mergeSectionSettings(current, savedSettings, section) : current,
-    );
+    setDraft((current) => {
+      if (!current) return current;
+      const restored = mergeSectionSettings(current, savedSettings, section);
+      if (!sitesOnly || !current.stopWordsPolicy) return restored;
+
+      const rules = current.stopWordsPolicy.rules;
+      if (
+        !sharedFieldErrors['stopWordsPolicy.rules'] &&
+        JSON.stringify(rules) === JSON.stringify(restored.stopWordsPolicy?.rules ?? [])
+      ) {
+        return restored;
+      }
+      return {
+        ...restored,
+        stopWordsPolicy: {
+          ...(restored.stopWordsPolicy ?? stopWordsPolicySchema.parse({})),
+          rules,
+        },
+        stopWordsRevision: current.stopWordsRevision,
+      };
+    });
   }
 
   function buildSectionPayload(section: ApplySectionKey) {
@@ -4328,30 +4344,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       section === 'requiredSubscription'
         ? normalizeRequiredSubscriptionDraftSettings(settingsQuery.data)
         : settingsQuery.data;
-    let draftSettings =
+    const draftSettings =
       section === 'requiredSubscription'
         ? normalizeRequiredSubscriptionDraftSettings(draft)
         : draft;
-    if (section === 'stopWords' && draft.stopWordsPolicy) {
-      const prepared = prepareStopWordsInput(
-        draft.stopWordsPolicy,
-        messageLimitsBlockedWordsInput,
-        messageLimitsBlockedDomainsInput,
-      );
-      if (prepared.errors.length) {
-        setFieldErrors((current) => ({
-          ...current,
-          messageLimitsBlockedWords: prepared.errors.join(' '),
-        }));
-        revealStopWordsFeedback({
-          field: 'stopWordsPolicy.rules',
-          path: ['stopWordsPolicy', 'rules'],
-        });
-        return null;
-      }
-      draftSettings = { ...draft, stopWordsPolicy: prepared.policy };
-    }
-
     return validateDraft(mergeSectionSettings(baseSettings, draftSettings, section), section);
   }
 
@@ -4359,23 +4355,14 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     if (!chatId) {
       return;
     }
-    if (section === 'links' && isSectionDirty('stopWords')) {
-      pushToast({
-        replaceKey: 'settings-links-sites-save',
-        tone: 'danger',
-        title: 'Сохраните прежние правила сайтов',
-        description: 'Кнопка сохранения находится в блоке «Сайты из стоп-слов».',
-      });
-      return;
-    }
     if (settingsConflict?.section === section && settingsConflict.viewingSaved) {
       setSettingsConflict(null);
-      closeSection(section);
+      closeSavedSection(section);
       return;
     }
 
     if (!isSectionDirty(section)) {
-      closeSection(section);
+      closeSavedSection(section);
       return;
     }
 
@@ -4403,7 +4390,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
 
     try {
       await mutateSettingsAsync({ section, payload });
-      if (isCurrentSettingsScope()) closeSection(section);
+      if (isCurrentSettingsScope()) closeSavedSection(section);
     } catch {
       // Errors are handled by the mutation.
     }
@@ -4411,15 +4398,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
 
   function openApplyTargetSheet(section: ApplySectionKey, target: ApplySettingsTarget) {
     if (!chatId || !draft) {
-      return;
-    }
-    if (section === 'links' && isSectionDirty('stopWords')) {
-      pushToast({
-        replaceKey: 'settings-links-sites-save',
-        tone: 'danger',
-        title: 'Сохраните прежние правила сайтов',
-        description: 'Кнопка сохранения находится в блоке «Сайты из стоп-слов».',
-      });
       return;
     }
 
@@ -4526,7 +4504,8 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
             .map((chat) => [chat.id, chat.title]),
         ),
       });
-      if (applyTargetSheet.isCurrentScope?.() !== false) closeSection(applyTargetSheet.section);
+      if (applyTargetSheet.isCurrentScope?.() !== false)
+        closeSavedSection(applyTargetSheet.section);
     } catch {
       // Errors are handled by the mutation.
     }
@@ -5068,10 +5047,6 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         stopWordsReloadRequestRef.current !== request
       )
         return;
-      setMessageLimitsBlockedWordsInput('');
-      setMessageLimitsBlockedDomainsInput('');
-      clearFieldError('messageLimitsBlockedWords');
-      clearFieldError('messageLimitsBlockedDomains');
       setStopWordsModuleError(null);
       setStopWordsFocusRequest(undefined);
       resetSharedSectionEditor('stopWords');
@@ -5105,6 +5080,25 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         />
       </Suspense>
     );
+    const stopWordsBusy = isSavingSettings || isApplyingSectionToAll || isReloadingStopWords;
+    const stopWordsEditor = {
+      storageStatus: stopWordsStorageStatus,
+      replacementAuthorized: stopWordsReplacementAuthorized,
+      onAuthorizeReplacement: () => {
+        authorizeStopWordsReplacement();
+        setStopWordsModuleError(null);
+      },
+      focusRequest: stopWordsFocusRequest,
+      moduleError: stopWordsModuleError ?? stopWordsSaveError,
+    };
+    const stopWordsTools =
+      section === 'stopWords' || (legacySitesVisible && section === 'links')
+        ? {
+            toolbar: stopWordsTool('toolbar'),
+            notice: stopWordsTool('notice'),
+            imageScan: stopWordsTool('imageScan'),
+          }
+        : undefined;
     const advertisingModules: Partial<Record<ApplySectionKey, MarketplaceButtonModule>> = {
       greeting: 'GREETING',
       links: 'LINKS',
@@ -5126,19 +5120,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
         fields={singleFields}
         context={{
           mode: 'single',
-          stopWordsEditor:
-            section === 'stopWords'
-              ? {
-                  storageStatus: stopWordsStorageStatus,
-                  replacementAuthorized: stopWordsReplacementAuthorized,
-                  onAuthorizeReplacement: () => {
-                    authorizeStopWordsReplacement();
-                    setStopWordsModuleError(null);
-                  },
-                  focusRequest: stopWordsFocusRequest,
-                  moduleError: stopWordsModuleError ?? stopWordsSaveError,
-                }
-              : undefined,
+          stopWordsEditor: section === 'stopWords' ? stopWordsEditor : undefined,
           sectionTools:
             advertisingModule && chatId && expandedSections[section]
               ? {
@@ -5172,12 +5154,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
               : undefined,
           stopWordsTools:
             section === 'stopWords'
-              ? {
-                  toolbar: stopWordsTool('toolbar'),
-                  notice: stopWordsTool('notice'),
-                  preview: stopWordsTool('preview'),
-                  imageScan: stopWordsTool('imageScan'),
-                }
+              ? { ...stopWordsTools, preview: stopWordsTool('preview') }
               : undefined,
           duplicatePresentation: {
             messageMode: settingsScreenQuery.data?.duplicateMessageModerationMode ?? 'OFF',
@@ -5214,40 +5191,27 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                         return previewLinks(api, chatId, policy, text);
                       }
                     : undefined,
-                  legacySites:
-                    draft?.stopWordsPolicy?.domains.length ||
-                    settingsQuery.data?.stopWordsPolicy?.domains.length ||
-                    stopWordsStorageStatus === 'invalid' ? (
-                      <Suspense fallback={<Spinner label="Загружаем сайты" />}>
-                        <LazySettingsLinkLegacySites
-                          fields={createSingleFields('stopWords') ?? singleFields}
-                          context={{
-                            mode: 'single',
-                            api,
-                            stopWordsEditor: {
-                              storageStatus: stopWordsStorageStatus,
-                              replacementAuthorized: stopWordsReplacementAuthorized,
-                              onAuthorizeReplacement: authorizeStopWordsReplacement,
-                              focusRequest: stopWordsFocusRequest,
-                              moduleError: stopWordsModuleError ?? stopWordsSaveError,
-                            },
-                            stopWordsTools: {
-                              toolbar: stopWordsTool('toolbar'),
-                              notice: stopWordsTool('notice'),
-                              imageScan: stopWordsTool('imageScan'),
-                            },
-                          }}
-                          dirty={isSectionDirty('stopWords')}
-                          saving={isSavingSettings}
-                          onDiscard={() => discardSectionChanges('stopWords')}
-                          onSave={async () => {
-                            const payload = buildSectionPayload('stopWords');
-                            if (payload)
-                              await mutateSettingsAsync({ section: 'stopWords', payload });
-                          }}
-                        />
-                      </Suspense>
-                    ) : null,
+                  legacySites: legacySitesVisible ? (
+                    <Suspense fallback={<Spinner label="Загружаем сайты" />}>
+                      <LazySettingsLinkLegacySites
+                        key={sharedSectionEpochs.stopWords ?? 0}
+                        fields={createSingleFields('stopWords') ?? singleFields}
+                        context={{
+                          mode: 'single',
+                          api,
+                          stopWordsEditor,
+                          stopWordsTools,
+                        }}
+                        dirty={hasLegacySiteChanges()}
+                        saving={stopWordsBusy}
+                        onDiscard={() => discardSectionChanges('stopWords', true)}
+                        onSave={async () => {
+                          const payload = buildSectionPayload('stopWords');
+                          if (payload) await mutateSettingsAsync({ section: 'stopWords', payload });
+                        }}
+                      />
+                    </Suspense>
+                  ) : null,
                 }
               : undefined,
           requiredSubscriptionSources: singleSubscriptionSources,
@@ -5460,10 +5424,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                     tone={SHARED_CHAT_SECTION_PRESENTATIONS.links.tone}
                     className={SHARED_CHAT_SECTION_PRESENTATIONS.links.panelClassName}
                     onClose={() => toggleSection('links')}
-                    confirmCloseWhen={isSectionDirty('links')}
+                    confirmCloseWhen={isSectionDirty('links') || hasLegacySiteChanges()}
                     onDiscardChanges={() => {
                       discardSectionChanges('links');
-                      discardSectionChanges('stopWords');
+                      if (hasLegacySiteChanges()) discardSectionChanges('stopWords', true);
                     }}
                     footer={renderSectionSaveFooter('links', {
                       note: isLinksKeyboardOpen ? null : undefined,
@@ -5994,26 +5958,12 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                 <SettingsStopWordsSection
                   storageInvalid={stopWordsStorageStatus === 'invalid'}
                   sharedContent={renderSharedChatSection('stopWords')}
-                  api={api}
-                  chatId={chatId ?? ''}
                   draft={draft}
-                  busy={isSavingSettings || isApplyingSectionToAll || isReloadingStopWords}
                   expanded={expandedSections.stopWords}
                   toggleSection={toggleSection}
                   isSectionDirty={isSectionDirty}
                   discardSectionChanges={discardSectionChanges}
                   renderSectionSaveFooter={renderSectionSaveFooter}
-                  setFieldValue={setFieldValue}
-                  clearFieldError={clearFieldError}
-                  botSpeechPreviewContext={botSpeechPreviewContext}
-                  messageLimitsBlockedWordsInput={messageLimitsBlockedWordsInput}
-                  messageLimitsBlockedDomainsInput={messageLimitsBlockedDomainsInput}
-                  setMessageLimitsBlockedWordsInput={setMessageLimitsBlockedWordsInput}
-                  setMessageLimitsBlockedDomainsInput={setMessageLimitsBlockedDomainsInput}
-                  messageLimitsBlockedWordsError={messageLimitsBlockedWordsError}
-                  messageLimitsBlockedDomainsError={messageLimitsBlockedDomainsError}
-                  stopWordsError={stopWordsError}
-                  reloadPolicy={reloadStopWordsPolicy}
                 />
               </SettingsOverviewEntry>
 

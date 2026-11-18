@@ -68,6 +68,7 @@ try {
       let failNextSite = false;
       const writes = [];
       const siteWrites = [];
+      const copies = [];
       await context.route('**/api/chats/chat-a/**', async (route) => {
         const request = route.request();
         const tail = new URL(request.url()).pathname.split('/').slice(4).join('/');
@@ -136,6 +137,21 @@ try {
               settingsRevision: saved.settingsRevision,
               storageStatus: 'valid',
               imageScanStatus: 'shadow',
+            },
+          });
+        }
+        if (tail === 'settings/apply-section-preview' || tail === 'settings/apply-section-to-all') {
+          const body = request.postDataJSON();
+          assert.equal(body.target.mode, 'all');
+          if (tail === 'settings/apply-section-to-all') copies.push(body);
+          return route.fulfill({
+            json: {
+              section: body.section,
+              sourceChatId: 'chat-a',
+              targetMode: 'all',
+              updatedChats: 2,
+              appliedChatIds: ['chat-a', 'chat-b'],
+              sampleChats: [],
             },
           });
         }
@@ -284,23 +300,53 @@ try {
           .getAttribute('aria-checked'),
         'true',
       );
-      await panel.locator('summary').filter({ hasText: 'Сайты из стоп-слов' }).click();
-      await panel
-        .getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true })
-        .fill('another-legacy.example');
       const legacy = panel
         .locator('details')
-        .filter({ has: page.getByText('Сайты из стоп-слов', { exact: true }) })
+        .filter({ has: page.getByText('Прежние правила сайтов', { exact: true }) })
         .first();
+      await legacy.locator(':scope > summary').click();
+      const siteInput = legacy.getByRole('textbox', {
+        name: 'Добавить запрещённые сайты',
+        exact: true,
+      });
+      await siteInput.fill('another-legacy.example');
+      await modes.getByRole('radio', { name: 'Удалять все', exact: true }).click();
+      await save().click();
+      await waitFor(() => writes.length === 3, 'Pending site input blocked the link mode save');
+      await page.getByText('Блок «Ссылки» сохранён', { exact: true }).waitFor();
+      assert.equal(writes[2].changes.linkRulesPolicy.mode, 'DENY_ALL');
+      assert.equal(writes[2].changes.stopWordsPolicy, undefined);
+      assert.equal(await save().isDisabled(), true, 'Site input alone cannot dirty the link mode');
+      assert.equal(await siteInput.inputValue(), 'another-legacy.example');
+      assert.equal(siteWrites.length, 0);
+      await dismissToasts();
+
+      await modes.getByRole('radio', { name: 'Запрещать по списку', exact: true }).click();
+      await panel.getByRole('button', { name: 'Сохранить во всех чатах', exact: true }).click();
+      await page
+        .getByRole('dialog', { name: 'Все чаты', exact: true })
+        .getByRole('button', { name: 'Сохранить в 2 чатах', exact: true })
+        .click();
+      await page.getByText('Настройки «Ссылки» применены', { exact: true }).waitFor();
+      assert.equal(writes.length, 4, 'Copy confirms the source link policy once');
+      assert.equal(writes[3].changes.linkRulesPolicy.mode, 'DENY_SELECTED');
+      assert.equal(writes[3].changes.stopWordsPolicy, undefined);
+      assert.deepEqual(copies, [
+        {
+          section: 'links',
+          target: { mode: 'all', favoriteTypes: [], chatIds: [] },
+          expectedSourceSettingsRevision: saved.settingsRevision,
+        },
+      ]);
+      assert.equal(await siteInput.inputValue(), 'another-legacy.example');
+      assert.equal(siteWrites.length, 0);
+      assert.deepEqual(saved.stopWordsPolicy, seed.settings.stopWordsPolicy);
+      await dismissToasts();
       await legacy.getByRole('button', { name: 'Добавить записи', exact: true }).click();
       failNextSite = true;
       await panel.getByRole('button', { name: 'Сохранить сайты', exact: true }).click();
       await waitFor(() => siteWrites.length === 1, 'Independent site CAS was not observed');
       await panel.getByText('Проверьте сайт', { exact: true }).first().waitFor();
-      const siteInput = panel.getByRole('textbox', {
-        name: 'Добавить запрещённые сайты',
-        exact: true,
-      });
       await page.waitForFunction(
         () => document.activeElement?.getAttribute('aria-label') === 'Добавить запрещённые сайты',
       );
@@ -318,18 +364,63 @@ try {
         'fixed-legacy.example',
       ]);
       assert.equal(siteWrites[1].policy.rules[0].value, 'казино');
-      assert.equal(writes.length, 2);
+      assert.equal(writes.length, 4);
       await page.getByText('Блок «Ссылки» сохранён', { exact: true }).waitFor();
       await page.locator('.toast--success').screenshot({
         path: path.join(screenshots, `${name}-save.png`),
         animations: 'disabled',
       });
       await dismissToasts();
+      if (!(await siteInput.isVisible())) await legacy.locator(':scope > summary').click();
+      await siteInput.fill('cancelled.example');
+      await legacy.getByRole('button', { name: 'Отменить', exact: true }).click();
+      if (!(await siteInput.isVisible())) await legacy.locator(':scope > summary').click();
+      assert.equal(
+        await siteInput.inputValue(),
+        '',
+        'Cancelling the legacy draft clears the input',
+      );
+      assert.equal(siteWrites.length, 2);
+      assert.equal(writes.length, 4);
       await modes.scrollIntoViewIfNeeded();
       await page.screenshot({
         path: path.join(screenshots, `${name}.png`),
         animations: 'disabled',
       });
+
+      await siteInput.fill('pending-after-refresh.example');
+      const lastSavedSite = legacy.getByText('fixed-legacy.example', { exact: true });
+      await lastSavedSite.waitFor();
+      saved = {
+        ...saved,
+        stopWordsPolicy: { ...saved.stopWordsPolicy, domains: [] },
+        stopWordsRevision: saved.stopWordsRevision + 1,
+        settingsRevision: new Date(Date.parse(saved.settingsRevision) + 1).toISOString(),
+      };
+      const refreshedRevision = saved.settingsRevision;
+      const refreshed = page.waitForResponse('**/api/chats/chat-a/settings-screen');
+      await page.evaluate(() =>
+        document.dispatchEvent(new Event('visibilitychange', { bubbles: true })),
+      );
+      await refreshed;
+      await lastSavedSite.waitFor({ state: 'detached' });
+      await siteInput.waitFor();
+      assert.equal(await siteInput.inputValue(), 'pending-after-refresh.example');
+      assert.equal(await save().isDisabled(), true);
+
+      await modes.getByRole('radio', { name: 'Удалять все', exact: true }).click();
+      await save().click();
+      await page.getByText('Блок «Ссылки» сохранён', { exact: true }).waitFor();
+      assert.equal(writes.length, 5);
+      assert.equal(writes[4].expectedRevision, refreshedRevision);
+      assert.equal(writes[4].changes.stopWordsPolicy, undefined);
+      assert.deepEqual(saved.stopWordsPolicy.domains, []);
+      assert.equal(siteWrites.length, 2);
+      await siteInput.waitFor();
+      assert.equal(await siteInput.inputValue(), 'pending-after-refresh.example');
+      await legacy.getByRole('button', { name: 'Отменить', exact: true }).click();
+      await legacy.waitFor({ state: 'detached' });
+
       assert.deepEqual(errors, []);
       console.log(
         `PASS ${name}: draft rules, exact URL, exception, expiry, preview, retry, atomic save, independent legacy sites`,

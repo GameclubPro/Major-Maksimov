@@ -23,7 +23,7 @@ export function SettingsLinkLegacySites({
         <span className="links-panel__detail-icon">
           <AppIcon icon="Book" />
         </span>
-        <span>Сайты из стоп-слов</span>
+        <span>Прежние правила сайтов</span>
         <AppIcon icon="NavArrowRight" className="links-panel__chevron" />
       </summary>
       <div className="links-panel__detail-body">
