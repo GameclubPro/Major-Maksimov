@@ -89,6 +89,34 @@ export async function smokeRuntimeOverview(page, profile, controls) {
   if (await panel.locator('.runtime-measure.runtime-tone--danger, .runtime-text--danger').count())
     throw new Error('Historical measurements retained a current critical indication.');
 
+  controls.setMode('fresh');
+  let releaseRetry;
+  const retryGate = new Promise((resolve) => {
+    releaseRetry = resolve;
+  });
+  await page.route(
+    '**/api/v1/safety-desk/runtime/overview',
+    async (route) => {
+      await retryGate;
+      await route.fallback();
+    },
+    { times: 1 },
+  );
+  try {
+    await page.getByRole('button', { name: 'Обновить', exact: true }).click();
+    await panel.and(page.locator('[aria-busy="true"]')).waitFor();
+    await panel.getByRole('alert').filter({ hasText: 'Показан предыдущий снимок' }).waitFor();
+    await panel.getByText('Данные устарели', { exact: false }).first().waitFor();
+    await panel.getByText('Задержка измерена для 2 из 7 результатов', { exact: true }).waitFor();
+    if (await panel.getByText('Свежее наблюдение', { exact: false }).count()) {
+      throw new Error('Retry made the previous snapshot appear fresh before replacement.');
+    }
+  } finally {
+    releaseRetry();
+  }
+  await panel.getByRole('alert').waitFor({ state: 'hidden' });
+  await panel.getByRole('article', { name: 'Майор 2', exact: true }).waitFor();
+
   controls.setMode('denied');
   await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   await panel.getByRole('alert').filter({ hasText: 'Нет доступа к наблюдениям.' }).waitFor();

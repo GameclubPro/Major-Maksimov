@@ -116,7 +116,10 @@ test('denied access removes previous evidence and prevents timer and manual read
     await h.flush();
     h.poll.refresh();
     await h.flush();
-    h.requests[1]!.reject(new AdminApiError('raw upstream text', status));
+    h.poll.refresh();
+    await h.flush();
+    assert.equal(h.requests[1]!.signal.aborted, true);
+    h.requests[2]!.reject(new AdminApiError('raw upstream text', status));
     await h.flush();
     assert.deepEqual(h.states.at(-1), {
       snapshot: null,
@@ -124,12 +127,15 @@ test('denied access removes previous evidence and prevents timer and manual read
       denied: true,
       error: 'Нет доступа к наблюдениям.',
     });
+    h.requests[1]!.resolve('late private evidence');
+    await h.flush();
+    assert.equal(h.states.at(-1)?.snapshot, null);
     h.poll.refresh();
     h.show(false);
     h.show(true);
     h.advance(180_000);
     await h.flush();
-    assert.equal(h.requests.length, 2);
+    assert.equal(h.requests.length, 3);
     assert.equal(h.timers.size, 0);
     h.poll.stop();
   }
@@ -153,6 +159,22 @@ test('failures retain an explicitly stale snapshot, back off, and never render u
   h.advance(1);
   await h.flush();
   assert.equal(h.requests.length, 3);
+  assert.equal(h.states.at(-1)?.loading, true);
+  assert.equal(h.states.at(-1)?.snapshot, 'last successful');
+  assert.match(h.states.at(-1)!.error, /предыдущий снимок/);
+
+  h.poll.refresh();
+  await h.flush();
+  assert.equal(h.requests[2]!.signal.aborted, true);
+  assert.match(h.states.at(-1)!.error, /предыдущий снимок/);
+  h.requests[3]!.resolve('replacement');
+  await h.flush();
+  assert.deepEqual(h.states.at(-1), {
+    snapshot: 'replacement',
+    loading: false,
+    error: '',
+    denied: false,
+  });
   h.poll.stop();
 });
 

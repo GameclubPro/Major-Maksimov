@@ -12,8 +12,9 @@ Only the admin role collects this overview. Fixed queue counters, worker reports
 subscription observations and the Publisher heartbeat refresh every ten seconds.
 SQL observations refresh every thirty seconds. Concurrent collections coalesce;
 browser reads use the shared result rather than starting additional SQL work.
-The visible screen polls every fifteen seconds. Hidden views stop polling; access
-changes abort earlier requests, and a denied session clears its displayed evidence.
+The visible screen polls every fifteen seconds. Hidden views stop polling. If a refresh
+fails, the previous snapshot and its stale warning stay visible through retries until a
+successful replacement. An access denial clears the snapshot and stops reads for that session.
 
 Each source retains its own observation time and availability. A new HTTP response
 does not refresh an older source observation. Redis failure, invalid clocks,
@@ -22,8 +23,10 @@ Worker reports establish process observation, not successful bot actions.
 Worker coverage follows the explicit role: `APP_ROLE=all` expects only `api-all`,
 while `APP_ROLE=admin` expects fourteen distributed API roles; present heartbeats
 never determine the expected set. A quiet bot has no invented activity deadline.
-Publisher uses its own runtime heartbeat;
-the overview does not infer Lastik or Birzhik health from Major's measurements.
+The Publisher heartbeat becomes stale at 45 seconds. Moderator subscriptions become
+stale at 150 seconds. A configured Publisher pause requires a fresh heartbeat and
+fresh, complete zero counts for both incoming events and unfinished actions. It does not
+add a bot to the attention count. Lastik and Birzhik require their own observations.
 
 The separate `safety-desk:overview:v1:*` Redis namespace contains no message text,
 chat/message identifiers, tokens or raw errors. History keeps the latest aggregate
@@ -67,16 +70,22 @@ health. Critical signals during an active rollout can still recommend rollback.
   receipts belong only to the explicitly configured default bot. The receipt
   summary covers this configured bot catalog; it does not count receipts for
   removed or unknown bot identities. Completeness describes this selected scope.
-- Unfinished actions use seven indexed status/terminal heads, each capped at 64
-  rows plus a sentinel, then exact primary-key bot projections. Their age measures
-  time since the sampled action's last state update, not time since enqueue or
-  effective readiness. Per-bot values are lower bounds from this fleet sample;
-  saturation makes coverage incomplete even for a bot with zero captured rows.
+- Unfinished actions use seven indexed fleet heads, each capped at 64 rows plus
+  a sentinel, then exact primary-key bot projections. Only saturated statuses
+  need an additional indexed probe per configured bot and a separate legacy
+  probe for the default bot. Each such probe starts at the sentinel timestamp,
+  includes ties, and caps candidates before checking for unfinished work.
+  Per-bot completeness is independent of fleet completeness. An incomplete
+  zero with no timestamp means the probe could not confirm any waiting work.
+  Age measures time since the last state update. The fleet head gives the oldest
+  unfinished state. An incomplete bot card gives the oldest confirmed witness.
 - A good completed-action percentile does not cancel an old unfinished head.
   Ten- and thirty-second attention thresholds apply to receipt age and completed
-  action latency. Time without a state update is a separate neutral measurement:
-  scheduled work, retries and uncertain outcomes require their own evidence.
-  A stale source is displayed as stale, not as a current recovery or failure confirmation.
+  action latency. A fresh unfinished sample whose oldest known state update is more
+  than thirty seconds old asks for review, including when it is a lower bound.
+  The fleet summary can ask for review even when the matching work is outside the bot
+  catalog. Scheduled work, retries and uncertain outcomes require their own evidence.
+  A stale source retains its recorded values with a stale label.
 - The closed system queue metrics include the action watchdog's last successful scan.
   `lastDeferredByReason` counts waiting or delayed jobs, recently started jobs,
   publication-owned sends and retained pre-dispatch member guard refusals separately.
@@ -94,10 +103,10 @@ authorizes replay, cancellation or removal of uncertain work.
 
 ## Validation and release
 
-The unfinished-work reader requires the exact existing receipt and action head
-indexes before reading retained history. Its transaction is read-only, with a
-two-second statement timeout, 250 ms lock timeout, disabled parallel query and
-five-second transaction deadline. The native regression
+The unfinished-work reader requires the exact existing receipt and action
+indexes before reading retained history. Its read-only transaction uses a
+two-second statement timeout, 250 ms lock timeout and five-second deadline.
+It disables parallel and bitmap scans to preserve ordered index seeks. The native regression
 `apps/api/src/admin/safety-desk-overview-pending-postgres.spec.ts` covers retained
 terminal history, tied heads, skew, legacy bot scope, saturation and index drift.
 UI regressions include stale/denied states and access-scope polling boundaries.

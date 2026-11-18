@@ -412,6 +412,45 @@ describe('Safety Desk shared bounded overview', () => {
     f.redis.disconnect();
   });
 
+  it('publishes no partial pending catalog and keeps original timestamps when a later catalog drifts', async () => {
+    const f = fixture();
+    const originalReader = f.pending.getSnapshot.getMockImplementation()!;
+    f.pending.getSnapshot.mockImplementationOnce(async (...args) => {
+      const sample = await originalReader(...args);
+      return { ...sample, bots: sample.bots.slice(1) };
+    });
+    await f.service.collect();
+    const first = f.store.write.mock.calls[0]![0];
+    expect(first.receipts.availability).toBe('UNAVAILABLE');
+    expect(first.unfinishedActions.availability).toBe('UNAVAILABLE');
+    expect(first.bots.every((bot) => bot.pendingReceipts.availability === 'UNAVAILABLE')).toBe(
+      true,
+    );
+    expect(first.actions.availability).toBe('FRESH');
+
+    jest.setSystemTime(new Date(now.getTime() + 30000));
+    await f.service.collect();
+    const valid = f.store.write.mock.calls[1]![0];
+    expect(valid.receipts.availability).toBe('FRESH');
+    expect(valid.unfinishedActions.availability).toBe('FRESH');
+
+    jest.setSystemTime(new Date(now.getTime() + 60000));
+    f.pending.getSnapshot.mockImplementationOnce(async (...args) => {
+      const sample = await originalReader(...args);
+      const [duplicate, ...rest] = sample.bots;
+      return { ...sample, bots: [duplicate!, duplicate!, ...rest.slice(1)] };
+    });
+    await f.service.collect();
+    const stale = f.store.write.mock.calls[2]![0];
+    expect(stale.receipts).toEqual({ ...valid.receipts, availability: 'STALE' });
+    expect(stale.unfinishedActions).toEqual({ ...valid.unfinishedActions, availability: 'STALE' });
+    expect(stale.bots.map((bot) => bot.pendingReceipts)).toEqual(
+      valid.bots.map((bot) => ({ ...bot.pendingReceipts, availability: 'STALE' })),
+    );
+    expect(stale.actions.availability).toBe('FRESH');
+    f.redis.disconnect();
+  });
+
   it('marks persisted evidence stale after restart and rejects future source clocks', async () => {
     const f = fixture();
     await f.service.collect();

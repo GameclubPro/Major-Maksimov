@@ -35,6 +35,7 @@ describe('SafetyDeskOverviewPendingService', () => {
       "SET LOCAL statement_timeout = '2000ms'",
       "SET LOCAL lock_timeout = '250ms'",
       'SET LOCAL max_parallel_workers_per_gather = 0',
+      'SET LOCAL enable_bitmapscan = off',
     ]);
     query.mockRejectedValueOnce(new Error('postgres://private-password@private-host'));
     await expect(service.getSnapshot(['major'])).rejects.toThrow(
@@ -67,5 +68,33 @@ describe('SafetyDeskOverviewPendingService', () => {
       query.mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([{ snapshot }]);
       await expect(service.getSnapshot(['major'])).rejects.toThrow(ServiceUnavailableException);
     }
+  });
+
+  it.each([
+    { botIds: ['major'] },
+    { botIds: ['major', 'major'] },
+    { botIds: ['major', 'foreign'] },
+  ])('rejects incomplete or misattributed SQL catalog $botIds', async ({ botIds }) => {
+    const { service, query } = harness();
+    const unfinishedActions = { countLowerBound: 0, truncated: false, oldestStateAt: null };
+    const receipts = { countLowerBound: 0, truncated: false, oldestAt: null };
+    query.mockResolvedValueOnce([{ ready: true }]).mockResolvedValueOnce([
+      {
+        snapshot: {
+          observedAt: new Date().toISOString(),
+          invalidClocks: false,
+          unfinishedActions,
+          bots: botIds.map((botId) => ({
+            botId,
+            received: receipts,
+            queued: receipts,
+            unfinishedActions,
+          })),
+        },
+      },
+    ]);
+    await expect(service.getSnapshot(['major', 'second'])).rejects.toThrow(
+      ServiceUnavailableException,
+    );
   });
 });

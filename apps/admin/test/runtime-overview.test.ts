@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { safetyDeskOverviewResponseSchema } from '../../../packages/contracts/src/safety-desk-overview.ts';
 import { SafetyDeskApiClient } from '../src/safety-desk-api-client';
 import { createAdminApiTransport } from '../src/admin-request';
 import { RuntimeOverviewSnapshot, historyChartPath } from '../src/runtime-overview-desk';
@@ -37,24 +38,139 @@ test('a good completed p95 cannot hide an old incoming receipt or incomplete cov
   assert.doesNotMatch(html, /role="progressbar"|NaN|Infinity/);
 });
 
-test('old action state with scheduled or retried work does not establish delivery latency', () => {
+test('old unfinished work requires review without being reported as delivery latency', () => {
   const snapshot = overviewFixture(now);
   const bot = snapshot.bots[0]!;
   snapshot.bots = [bot];
-  bot.unfinishedActions.value = {
-    countLowerBound: 1,
-    sampleComplete: true,
-    oldestAgeMs: 86_400_000,
-    ageBasis: 'state_updated_sample',
-  };
   snapshot.receipts.value = { ...bot.pendingReceipts.value! };
-  snapshot.unfinishedActions.value = { ...bot.unfinishedActions.value };
+  const setUnfinished = (oldestAgeMs: number, sampleComplete = true) => {
+    bot.unfinishedActions.value = {
+      countLowerBound: 1,
+      sampleComplete,
+      oldestAgeMs,
+      ageBasis: 'state_updated_sample',
+    };
+    snapshot.unfinishedActions.value = { ...bot.unfinishedActions.value };
+  };
+  setUnfinished(30_000);
   assert.equal(overviewBotStatus(bot, now).tone, 'success');
   assert.equal(overviewStatus(snapshot, now, false).tone, 'success');
-  const html = render(snapshot);
-  assert.match(html, /runtime-tone--neutral"><h3>Незавершённые действия/);
-  assert.match(html, /Может включать запланированные действия и повторные попытки/);
-  assert.doesNotMatch(html, /runtime-tone--danger|Долгое ожидание|Есть задержка/);
+
+  for (const [age, complete] of [
+    [30_001, true],
+    [602_000, false],
+  ] as const) {
+    setUnfinished(age, complete);
+    const html = render(safetyDeskOverviewResponseSchema.parse(snapshot));
+    assert.match(html, /Проверьте незавершённые действия/);
+    assert.match(html, /Требуют внимания: <strong>1 из 1/);
+    assert.match(html, /runtime-tone--neutral"><h3>Незавершённые действия/);
+    assert.match(html, /Может включать запланированные действия и повторные попытки/);
+    assert.doesNotMatch(html, /runtime-tone--danger|Долгое ожидание|Есть задержка/);
+  }
+  bot.unfinishedActions.value = {
+    ...bot.unfinishedActions.value!,
+    countLowerBound: 0,
+    oldestAgeMs: null,
+    sampleComplete: true,
+  };
+  assert.match(render(snapshot), /Требуют внимания: <strong>0 из 1/);
+  assert.equal(overviewStatus(snapshot, now, false).label, 'Проверьте незавершённые действия');
+});
+
+test('a fresh measured delay stays visible when unfinished coverage is incomplete', () => {
+  const snapshot = overviewFixture(now);
+  const bot = snapshot.bots[1]!;
+  snapshot.bots = [bot];
+  snapshot.queues = { availability: 'UNAVAILABLE', observedAt: null, value: null };
+  bot.subscription = { availability: 'UNAVAILABLE', observedAt: null, value: null };
+  bot.unfinishedActions.value!.sampleComplete = false;
+  assert.equal(overviewBotStatus(bot, now).tone, 'danger');
+  assert.equal(overviewStatus(snapshot, now, false).tone, 'danger');
+
+  bot.pendingReceipts.availability = 'STALE';
+  snapshot.receipts.availability = 'STALE';
+  bot.actionLatency.value = { sampleCount: 13, p50Ms: 5_000, p95Ms: 35_000, p99Ms: 40_000 };
+  assert.equal(overviewBotStatus(bot, now).tone, 'danger');
+  assert.equal(overviewStatus(snapshot, now, false).tone, 'danger');
+});
+
+test('each card preserves its own pending sample even when the fleet and a busy bot saturate', () => {
+  const snapshot = overviewFixture(now);
+  const [quiet, busy, empty] = snapshot.bots;
+  empty!.publisher!.value = { dispatchEnabled: true, blocker: null };
+  quiet!.unfinishedActions.value = {
+    ...quiet!.unfinishedActions.value!,
+    countLowerBound: 1,
+    oldestAgeMs: 1_000,
+  };
+  busy!.unfinishedActions.value = {
+    ...busy!.unfinishedActions.value!,
+    countLowerBound: 64,
+    sampleComplete: false,
+  };
+  snapshot.unfinishedActions.value = { ...busy!.unfinishedActions.value };
+  const html = render(safetyDeskOverviewResponseSchema.parse(snapshot));
+  assert.match(html, /Требуют внимания: <strong>1 из 3/);
+  assert.match(html, /aria-label="Майор">.*?<dt>Незавершённые действия<\/dt><dd>1<\/dd>/);
+  assert.match(html, /aria-label="Майор 2">.*?<dt>Незавершённые действия<\/dt><dd>≥ 64<\/dd>/);
+  assert.match(html, /aria-label="Публик">.*?<dt>Незавершённые действия<\/dt><dd>0<\/dd>/);
+});
+
+test('each bot card ages its own runtime signal at the server boundary', () => {
+  const snapshot = overviewFixture(now);
+  const [moderator, , publisher] = snapshot.bots;
+  snapshot.bots = [moderator!, publisher!];
+  snapshot.receipts.value = { ...moderator!.pendingReceipts.value! };
+  snapshot.unfinishedActions.value = { ...moderator!.unfinishedActions.value! };
+  publisher!.subscription = { availability: 'UNAVAILABLE', observedAt: null, value: null };
+  publisher!.publisher!.value = { dispatchEnabled: true, blocker: null };
+  publisher!.publisher!.observedAt = new Date(now - 44_999).toISOString();
+  moderator!.subscription.observedAt = new Date(now - 149_999).toISOString();
+  const fresh = render(safetyDeskOverviewResponseSchema.parse(snapshot));
+  assert.match(fresh, /Требуют внимания: <strong>0 из 2/);
+  assert.match(fresh, /Сигнал Публика · Свежее наблюдение/);
+  assert.match(fresh, /Подписка модератора · Свежее наблюдение/);
+  assert.equal((fresh.match(/Последнее входящее событие/g) ?? []).length, 1);
+
+  publisher!.publisher!.observedAt = new Date(now - 45_000).toISOString();
+  moderator!.subscription.observedAt = new Date(now - 150_000).toISOString();
+  const stale = render(snapshot);
+  assert.match(stale, /Требуют внимания: <strong>2 из 2/);
+  assert.match(stale, /Сигнал Публика · Данные устарели/);
+  assert.match(stale, /Подписка модератора · Данные устарели/);
+  publisher!.publisher = null;
+  assert.match(render(snapshot), /Сигнал Публика · Нет наблюдений/);
+});
+
+test('a planned Publisher pause requires a current signal and two confirmed empty samples', () => {
+  const snapshot = overviewFixture(now);
+  const publisher = snapshot.bots[2]!;
+  snapshot.bots = [publisher];
+  snapshot.receipts.value = { ...publisher.pendingReceipts.value! };
+  snapshot.unfinishedActions.value = { ...publisher.unfinishedActions.value! };
+  for (const blocker of ['global_paused', 'runtime_disabled']) {
+    publisher.publisher!.value = { dispatchEnabled: false, blocker };
+    const html = render(safetyDeskOverviewResponseSchema.parse(snapshot));
+    assert.match(html, /Плановая пауза отправки/);
+    assert.match(html, /Требуют внимания: <strong>0 из 1/);
+  }
+  publisher.unfinishedActions.value!.sampleComplete = false;
+  assert.match(render(snapshot), /Проверьте паузу отправки/);
+  assert.match(render(snapshot), /Требуют внимания: <strong>1 из 1/);
+
+  publisher.unfinishedActions.value!.sampleComplete = true;
+  publisher.pendingReceipts.value = {
+    ...publisher.pendingReceipts.value!,
+    countLowerBound: 1,
+    oldestAgeMs: 1_000,
+  };
+  assert.match(render(snapshot), /Проверьте паузу отправки/);
+  publisher.pendingReceipts.value = { ...snapshot.receipts.value };
+  publisher.publisher!.value = { dispatchEnabled: false, blocker: 'identity_unattested' };
+  assert.match(render(snapshot), /Проверьте паузу отправки/);
+  publisher.publisher!.value.dispatchEnabled = true;
+  assert.match(render(snapshot), /Проверьте отправку/);
 });
 
 test('missing action timings retain outcomes without claiming complete latency coverage', () => {
@@ -126,6 +242,7 @@ test('stale critical values and failed refresh remain historical evidence rather
   const snapshot = overviewFixture(now);
   const critical = snapshot.bots[1]!;
   critical.pendingReceipts.availability = 'STALE';
+  critical.unfinishedActions.availability = 'STALE';
   assert.equal(overviewBotStatus(critical, now).label, 'Данные неполные');
   assert.equal(overviewStatus(snapshot, now + 120_000, false).tone, 'neutral');
   const html = renderToStaticMarkup(

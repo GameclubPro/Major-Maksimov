@@ -38,6 +38,17 @@ export type SafetyDeskOverviewPendingSnapshot = Omit<
   'invalidClocks'
 >;
 
+export function indexPendingBots(
+  bots: SafetyDeskOverviewPendingSnapshot['bots'],
+  botIds: readonly string[],
+) {
+  const byId = new Map(bots.map((bot) => [bot.botId, bot]));
+  if (bots.length !== botIds.length || botIds.some((botId) => !byId.has(botId))) {
+    throw new Error('Incomplete pending bot catalog');
+  }
+  return byId;
+}
+
 @Injectable()
 export class SafetyDeskOverviewPendingService {
   constructor(private readonly prisma: PrismaService) {}
@@ -58,6 +69,7 @@ export class SafetyDeskOverviewPendingService {
           await tx.$executeRaw`SET LOCAL statement_timeout = '2000ms'`;
           await tx.$executeRaw`SET LOCAL lock_timeout = '250ms'`;
           await tx.$executeRaw`SET LOCAL max_parallel_workers_per_gather = 0`;
+          await tx.$executeRaw`SET LOCAL enable_bitmapscan = off`;
           const indexes = await tx.$queryRaw<Array<{ ready: boolean }>>(
             buildSafetyDeskOverviewPendingIndexQuery(),
           );
@@ -67,6 +79,7 @@ export class SafetyDeskOverviewPendingService {
           );
           const { invalidClocks, ...snapshot } = pendingSchema.parse(rows[0]?.snapshot);
           if (invalidClocks) throw new Error('Invalid pending clocks');
+          indexPendingBots(snapshot.bots, ids);
           return snapshot;
         },
         { maxWait: 2_000, timeout: 5_000 },

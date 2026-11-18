@@ -3,7 +3,8 @@ import { Prisma } from '../prisma/prisma-client';
 export function buildSafetyDeskOverviewPendingIndexQuery(): Prisma.Sql {
   return Prisma.sql`WITH required(name, relation, columns) AS (VALUES
     ('webhook_events_bot_id_status_created_at_idx', 'webhook_events', ARRAY['bot_id','status','created_at']),
-    ('max_action_ledger_status_terminal_updated_idx', 'max_action_ledger', ARRAY['status','terminal','updated_at'])
+    ('max_action_ledger_status_terminal_updated_idx', 'max_action_ledger', ARRAY['status','terminal','updated_at']),
+    ('max_action_ledger_bot_status_updated_idx', 'max_action_ledger', ARRAY['bot_id','status','updated_at'])
   ) SELECT bool_and(EXISTS (
     SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid
     JOIN pg_am am ON am.oid=c.relam
@@ -19,20 +20,21 @@ export function buildSafetyDeskOverviewPendingQuery(
   botIds: readonly string[],
   defaultBotId: string | null,
 ): Prisma.Sql {
-  // FLAG: The index constrains status AND terminal before the global action cap.
-  // Filtering bot/terminal after an unbounded retained-history scan is forbidden.
-  // Receipt probes are per bot; action groups describe a capped fleet sample.
+  // FLAG: The fleet index constrains status AND terminal before the cap.
+  // For a saturated status, seek per bot at the inclusive 65th timestamp, which
+  // also covers ties. Cap physical candidates before checking terminal state.
+  // Deduplicate overlapping witnesses. A full candidate page cannot prove exhaustion.
   return Prisma.sql`WITH bounds AS MATERIALIZED (
     SELECT statement_timestamp() AT TIME ZONE 'UTC' AS observed_at
   ), bots AS MATERIALIZED (
     SELECT unnest(${[...botIds]}::text[]) AS bot_id
-  ), receipt_scopes AS MATERIALIZED (
+  ), bot_scopes AS MATERIALIZED (
     SELECT bot_id, bot_id AS source_bot_id FROM bots
     UNION ALL SELECT bot_id, NULL::text FROM bots WHERE bot_id=${defaultBotId}::text
   ), receipt_statuses(status) AS (VALUES ('RECEIVED'::"WebhookStatus"), ('QUEUED'::"WebhookStatus")),
   receipt_heads AS MATERIALIZED (
     SELECT scope.bot_id, status.status, head.created_at, head.ordinal
-    FROM receipt_scopes scope CROSS JOIN receipt_statuses status
+    FROM bot_scopes scope CROSS JOIN receipt_statuses status
     CROSS JOIN LATERAL (
       SELECT created_at, row_number() OVER () AS ordinal FROM (
         SELECT created_at FROM webhook_events
@@ -54,25 +56,63 @@ export function buildSafetyDeskOverviewPendingQuery(
   ), action_heads AS MATERIALIZED (
     SELECT state.status, head.id, head.updated_at, head.ordinal
     FROM action_statuses state CROSS JOIN LATERAL (
-      SELECT id, updated_at, row_number() OVER () AS ordinal FROM (
+      SELECT id, updated_at, row_number() OVER (ORDER BY updated_at) AS ordinal FROM (
         SELECT id, updated_at FROM max_action_ledger
         WHERE status=state.status AND terminal=false ORDER BY updated_at LIMIT 65
       ) covered
     ) head
-  ), action_details AS MATERIALIZED (
-    SELECT COALESCE(detail.bot_id, ${defaultBotId}::text) AS bot_id, head.updated_at
+  ), fleet_action_witnesses AS MATERIALIZED (
+    SELECT COALESCE(detail.bot_id, ${defaultBotId}::text) AS bot_id,
+      head.status, head.id, head.updated_at
     FROM action_heads head CROSS JOIN LATERAL (
       SELECT bot_id FROM max_action_ledger WHERE id=head.id OFFSET 0
-    ) detail WHERE head.ordinal<=64
+    ) detail
+  ), action_frontiers AS (
+    SELECT status, updated_at AS cutoff FROM action_heads WHERE ordinal=65
+  ), action_candidates AS MATERIALIZED (
+    SELECT scope.bot_id, scope.source_bot_id, frontier.status,
+      candidate.id, candidate.terminal, candidate.updated_at
+    FROM action_frontiers frontier CROSS JOIN bot_scopes scope
+    CROSS JOIN LATERAL (
+      (SELECT id, terminal, updated_at FROM max_action_ledger
+       WHERE scope.source_bot_id IS NOT NULL AND bot_id=scope.source_bot_id
+         AND status=frontier.status AND updated_at>=frontier.cutoff
+       ORDER BY bot_id, status, updated_at LIMIT 65)
+      UNION ALL
+      (SELECT id, terminal, updated_at FROM max_action_ledger
+       WHERE scope.source_bot_id IS NULL AND bot_id IS NULL
+         AND status=frontier.status AND updated_at>=frontier.cutoff
+       ORDER BY bot_id, status, updated_at LIMIT 65)
+    ) candidate
+  ), limited_action_scopes AS (
+    SELECT bot_id, status FROM action_candidates
+    GROUP BY bot_id, source_bot_id, status HAVING count(*)=65
+  ), action_witnesses AS (
+    SELECT bot_id, status, id, updated_at FROM fleet_action_witnesses WHERE bot_id IS NOT NULL
+    UNION
+    SELECT bot_id, status, id, updated_at FROM action_candidates WHERE terminal=false
+  ), bot_action_statuses AS (
+    SELECT bots.bot_id, state.status, least(64,count(w.id)) AS counted, min(w.updated_at) AS oldest,
+      count(w.id)>64 OR EXISTS (
+        SELECT 1 FROM limited_action_scopes limited
+        WHERE limited.bot_id=bots.bot_id AND limited.status=state.status
+      ) AS truncated
+    FROM bots CROSS JOIN action_statuses state
+    LEFT JOIN action_witnesses w ON w.bot_id=bots.bot_id AND w.status=state.status
+    GROUP BY bots.bot_id, state.status
+  ), bot_actions AS (
+    SELECT bot_id, sum(counted) AS counted, bool_or(truncated) AS truncated, min(oldest) AS oldest
+    FROM bot_action_statuses GROUP BY bot_id
   )
   SELECT jsonb_build_object(
     'observedAt', to_char(bounds.observed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'invalidClocks', EXISTS(SELECT 1 FROM receipt_heads WHERE created_at>bounds.observed_at)
-      OR EXISTS(SELECT 1 FROM action_heads WHERE updated_at>bounds.observed_at),
+      OR EXISTS(SELECT 1 FROM action_heads WHERE updated_at>bounds.observed_at)
+      OR EXISTS(SELECT 1 FROM action_candidates WHERE terminal=false AND updated_at>bounds.observed_at),
     'unfinishedActions', jsonb_build_object(
-      'countLowerBound', (SELECT count(*) FROM action_details),
-      'truncated', EXISTS(SELECT 1 FROM action_heads WHERE ordinal=65),
-      'oldestStateAt', (SELECT to_char(min(updated_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM action_details)
+      'countLowerBound', (SELECT count(*) FROM action_heads WHERE ordinal<=64),
+      'truncated', EXISTS(SELECT 1 FROM action_frontiers),
+      'oldestStateAt', (SELECT to_char(min(updated_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM action_heads)
     ),
     'bots', (SELECT COALESCE(jsonb_agg(jsonb_build_object(
       'botId', bots.bot_id,
@@ -87,10 +127,10 @@ export function buildSafetyDeskOverviewPendingQuery(
         'oldestAt', (SELECT to_char(min(created_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM receipt_heads h WHERE h.bot_id=bots.bot_id AND h.status='QUEUED')
       ),
       'unfinishedActions', jsonb_build_object(
-        'countLowerBound', (SELECT count(*) FROM action_details d WHERE d.bot_id=bots.bot_id),
-        'truncated', EXISTS(SELECT 1 FROM action_heads WHERE ordinal=65),
-        'oldestStateAt', (SELECT to_char(min(updated_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM action_details d WHERE d.bot_id=bots.bot_id)
+        'countLowerBound', bot_actions.counted,
+        'truncated', bot_actions.truncated,
+        'oldestStateAt', to_char(bot_actions.oldest, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
       )
-    ) ORDER BY bots.bot_id), '[]'::jsonb) FROM bots)
+    ) ORDER BY bots.bot_id), '[]'::jsonb) FROM bots JOIN bot_actions USING (bot_id))
   ) AS snapshot FROM bounds`;
 }
