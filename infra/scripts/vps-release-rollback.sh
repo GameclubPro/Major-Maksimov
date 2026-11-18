@@ -527,7 +527,21 @@ if [[ "$SELECT_API" -eq 1 ]]; then
       fi
     done <"$APPLIED_MIGRATIONS_FILE"
 
-    if [[ "${#missing_migrations[@]}" -gt 0 ]]; then
+    # FLAG: Only this additive index may be absent from a retained API image.
+    # Prove its exact live definition and receipt under the current controller and lock.
+    if [[ "${#missing_migrations[@]}" -eq 1 && \
+      "${missing_migrations[0]}" == 20261118120000_index_webhook_chat_queue_head ]]; then
+      require_deploy_lock || return 1
+      if grep -Fxq '20261103120000_index_webhook_chat_queue_head' "$SOURCE_MIGRATIONS_FILE"; then
+        echo "Refusing the superseded routing migration in the rollback target." >&2
+        return 1
+      fi
+      if ! node "$ROOT_DIR/infra/scripts/routing-index-online-state.mjs" assert "${COMPOSE_FILES[@]}"; then
+        echo "Could not verify the applied routing index; refusing immutable API rollback." >&2
+        return 1
+      fi
+      echo "Verified the retained routing index for immutable API rollback."
+    elif [[ "${#missing_migrations[@]}" -gt 0 ]]; then
       echo "$commit_label $commit_sha is missing applied Prisma migrations:" >&2
       printf '  %s\n' "${missing_migrations[@]}" >&2
       echo "Refusing before any container recreate." >&2

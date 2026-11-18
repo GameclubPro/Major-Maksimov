@@ -17,6 +17,7 @@ import { deployLockEnvironment, deployLockFixture } from './test-fixtures/deploy
 const source = readFileSync(new URL('./vps-pull-build-up.sh', import.meta.url), 'utf8');
 const entrypoint = 'infra/scripts/vps-pull-build-up.sh';
 const outcomeHelper = 'infra/scripts/lib/outcome-cohort-online-prepare.sh';
+const routingHelper = 'infra/scripts/lib/routing-index-online-prepare.sh';
 const photoHelper = 'infra/scripts/lib/photo-native-lifecycle.sh';
 const eraserHelper = 'infra/scripts/lib/eraser-deploy.sh';
 const topologyHelper = 'infra/scripts/lib/deploy-topology.sh';
@@ -66,6 +67,7 @@ DEPLOY_MODE=auto
 LOADED_CONTROLLER=${revision}
 source "$ROOT_DIR/infra/scripts/lib/deploy-lock.sh"
 source "$ROOT_DIR/${outcomeHelper}"
+source "$ROOT_DIR/${routingHelper}"
 source "$ROOT_DIR/${topologyHelper}"
 source "$ROOT_DIR/${eraserHelper}"
 # This fixture proves controller re-exec, while the lifecycle floor has separate
@@ -83,6 +85,7 @@ if [[ -n "$FIXTURE_DIFF_BASELINE" ]]; then PRE_PULL_HEAD="$FIXTURE_DIFF_BASELINE
 reexec_if_current_script_changed
 require_deploy_lock
 if [[ "$LOADED_CONTROLLER" == new ]]; then maxim_outcome_cohort_prepare; fi
+if [[ "$LOADED_CONTROLLER" == new ]]; then maxim_routing_index_prepare; fi
 if [[ "$FIXTURE_NATIVE_PROBE" == 1 ]]; then maxim_photo_native_probe; fi
 if [[ "$FIXTURE_ERASER_PROBE" == 1 ]]; then maxim_eraser_install_rate_limit_reader_floor; fi
 printf 'PAUSE\\nMIGRATION\\n' >> "$FIXTURE_LOG"
@@ -102,6 +105,13 @@ function photoNativeHelper(revision) {
 `;
 }
 
+function routingIndexHelper(revision) {
+  return `maxim_routing_index_prepare() {
+  printf 'ROUTING\\t${revision}\\n' >> "$FIXTURE_LOG"
+}
+`;
+}
+
 function eraserDeployHelper(revision) {
   return `maxim_eraser_install_rate_limit_reader_floor() {
   printf 'ERASER\\t${revision}\\n' >> "$FIXTURE_LOG"
@@ -114,6 +124,7 @@ function fixture(
   {
     lateCapture = false,
     helperOnly = false,
+    routingHelperOnly = false,
     photoHelperOnly = false,
     eraserHelperOnly = false,
     localMain = 'B',
@@ -165,10 +176,14 @@ function fixture(
   git('init', '-b', 'fixture');
   writeFileSync(
     resolve(repo, entrypoint),
-    controller(helperOnly || photoHelperOnly || eraserHelperOnly ? 'new' : 'old', lateCapture),
+    controller(
+      helperOnly || routingHelperOnly || photoHelperOnly || eraserHelperOnly ? 'new' : 'old',
+      lateCapture,
+    ),
   );
   chmodSync(resolve(repo, entrypoint), 0o755);
   writeFileSync(resolve(repo, outcomeHelper), helper('old'));
+  writeFileSync(resolve(repo, routingHelper), routingIndexHelper('old'));
   writeFileSync(
     resolve(repo, topologyHelper),
     `${topologySources}\n${topologySource.slice(topologySource.indexOf('maxim_topology_require_eraser_bridge() {'))}`
@@ -178,9 +193,10 @@ function fixture(
   writeFileSync(resolve(repo, photoHelper), photoNativeHelper('old'));
   writeFileSync(resolve(repo, eraserHelper), eraserDeployHelper('old'));
   const A = commit('A: original installed controller');
-  if (!helperOnly && !photoHelperOnly && !eraserHelperOnly)
+  if (!helperOnly && !routingHelperOnly && !photoHelperOnly && !eraserHelperOnly)
     writeFileSync(resolve(repo, entrypoint), controller('new'));
-  if (photoHelperOnly) writeFileSync(resolve(repo, photoHelper), photoNativeHelper('new'));
+  if (routingHelperOnly) writeFileSync(resolve(repo, routingHelper), routingIndexHelper('new'));
+  else if (photoHelperOnly) writeFileSync(resolve(repo, photoHelper), photoNativeHelper('new'));
   else if (eraserHelperOnly) writeFileSync(resolve(repo, eraserHelper), eraserDeployHelper('new'));
   else writeFileSync(resolve(repo, outcomeHelper), helper('new'));
   const B = commit('B: updated controller or preparation helper');
@@ -289,6 +305,20 @@ test('outcome helper-only checkout change reexecutes an otherwise identical entr
     h.git('rev-parse', `${h.refs.C}:${entrypoint}`),
   );
   completed(h, h.run(), ['new', 'new']);
+});
+
+test('routing helper-only checkout change reloads preparation under the same deploy lock', (t) => {
+  const h = fixture(t, { routingHelperOnly: true });
+  assert.deepEqual(h.git('diff', '--name-only', h.refs.A, h.refs.B).split('\n'), [routingHelper]);
+  completed(h, h.run(), ['new', 'new'], ['old']);
+  assert.deepEqual(
+    h.events().filter(([event]) => event === 'ROUTING'),
+    [['ROUTING', 'new']],
+  );
+  assert.ok(
+    h.events().findIndex(([event]) => event === 'ROUTING') <
+      h.events().findIndex(([event]) => event === 'PAUSE'),
+  );
 });
 
 test('nested photo lifecycle helper-only change reloads native functions before the pause', (t) => {

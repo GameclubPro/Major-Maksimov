@@ -2,6 +2,7 @@
 const path = require('node:path');
 
 // FLAG: Continue the frozen operation through the existing ordered-head index.
+// Include the constant NULL chat key in ordering so the full index remains usable.
 // Historical terminal failures are outside its predicate. Never change the cutoff,
 // installed image, original snapshots, claim evidence or cancellation semantics.
 function pendingPageSql(Prisma, nullChat, cursor) {
@@ -22,25 +23,36 @@ function pendingPageSql(Prisma, nullChat, cursor) {
             : Prisma.sql`AND (${chat},created_at,id) > (${cursor.chatKey},${cursor.at},${cursor.id})`
           : Prisma.empty
       }
-    ORDER BY ${nullChat ? Prisma.empty : Prisma.sql`${chat},`} created_at,id LIMIT 200
+    ORDER BY ${chat},created_at,id LIMIT 200
   ) SELECT page.*, e.normalized_payload AS update, e.semantic_key AS "semanticKey",
       e.legacy_disposition_id AS "legacyDispositionId", e.source_disposition_id AS "sourceDispositionId"
     FROM page CROSS JOIN LATERAL (SELECT * FROM webhook_events WHERE id=page.id OFFSET 0) e
     ORDER BY page."chatKey",page.at,page.id`;
 }
 
-function assertPendingPlan(raw) {
+function assertPendingPlan(raw, continuation = false) {
   const scans = [];
-  const visit = (node) => {
+  let orderedCursor = false,
+    pageSort = false;
+  const visit = (node, inPage = false) => {
+    inPage ||= node['Subplan Name'] === 'CTE page';
     if (node['Relation Name']) scans.push(node);
-    for (const child of node.Plans ?? []) visit(child);
+    if (inPage && ['Sort', 'Incremental Sort'].includes(node['Node Type'])) pageSort = true;
+    if (
+      inPage &&
+      node['Index Name'] === 'webhook_events_ordered_chat_head_idx' &&
+      /\bcreated_at,\s*id\)\s*>/.test(String(node['Index Cond']))
+    )
+      orderedCursor = true;
+    for (const child of node.Plans ?? []) visit(child, inPage);
   };
   visit(raw[0]['QUERY PLAN'][0].Plan);
   if (
     scans.length !== 2 ||
     scans.some((n) => !['Index Scan', 'Index Only Scan'].includes(n['Node Type'])) ||
     !scans.some((n) => n['Index Name'] === 'webhook_events_ordered_chat_head_idx') ||
-    !scans.some((n) => n['Index Name'] === 'webhook_events_pkey')
+    !scans.some((n) => n['Index Name'] === 'webhook_events_pkey') ||
+    (continuation && (pageSort || !orderedCursor))
   )
     throw Error('Pending continuation index plan refused');
 }
@@ -73,10 +85,20 @@ async function capturePending(
       ),
     );
     let cursor = null;
+    let checkCursorPlan = true;
     for (;;) {
       if (Date.now() >= deadline || scanned >= 100000)
         throw Error('Pending continuation budget exhausted');
-      const page = await readBacklogPage(db, pendingPageSql(Prisma, nullChat, cursor));
+      const query = pendingPageSql(Prisma, nullChat, cursor);
+      if (cursor && checkCursorPlan) {
+        assertPendingPlan(
+          await readBacklogPage(db, Prisma.sql`EXPLAIN (FORMAT JSON) ${query}`),
+          true,
+        );
+        checkCursorPlan = false;
+        if (Date.now() >= deadline) throw Error('Pending continuation budget exhausted');
+      }
+      const page = await readBacklogPage(db, query);
       if (!page.length) break;
       scanned += page.length;
       await db.$transaction(
