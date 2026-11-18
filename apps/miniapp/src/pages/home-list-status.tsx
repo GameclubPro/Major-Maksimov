@@ -2,6 +2,8 @@ import type { ManagedEntitiesRefreshState } from '@maxim/contracts';
 import { StatusState } from '../components/ui/status-state';
 
 type HomeListStatusProps =
+  | { kind: 'transient'; retryAfterSec: number | null }
+  | { kind: 'error'; description: string; onRetry: () => void }
   | {
       kind: 'discovery';
       tab: 'chat' | 'channel';
@@ -44,6 +46,35 @@ function buildPendingSyncDescription(options: {
 }
 
 export default function HomeListStatus(props: HomeListStatusProps) {
+  if (props.kind === 'transient')
+    return (
+      <div className="chats-route-state chats-transient-state">
+        <StatusState
+          tone="warning"
+          title="Пока не удалось обновить список"
+          description={
+            props.retryAfterSec
+              ? `Повторим автоматически через ${props.retryAfterSec} с.`
+              : 'Повторим автоматически.'
+          }
+        />
+      </div>
+    );
+  if (props.kind === 'error')
+    return (
+      <div className="chats-route-state">
+        <StatusState
+          tone="danger"
+          title="Не удалось загрузить список"
+          description={props.description}
+          action={
+            <button type="button" className="button button--danger" onClick={props.onRetry}>
+              Повторить
+            </button>
+          }
+        />
+      </div>
+    );
   const tabLabel = props.tab === 'chat' ? 'Чаты' : 'Каналы';
   if (props.kind === 'discovery') {
     return (

@@ -6,6 +6,10 @@ const chatsPageSource = readFileSync(
   new URL('../src/pages/chats-page.tsx', import.meta.url),
   'utf8',
 );
+const categoryEditorSource = readFileSync(
+  new URL('../src/pages/home-category-editor.tsx', import.meta.url),
+  'utf8',
+);
 const favoriteLabelSyncSource = readFileSync(
   new URL('../src/lib/home-entity-favorite-label-sync.ts', import.meta.url),
   'utf8',
@@ -60,7 +64,7 @@ test('entity cards expose settings, favorite, statistics and category edit targe
     chatsPageSource,
     /chat-card__action--statistics[\s\S]*?data-action="statistics"[\s\S]*?Статистика[\s\S]*?<\/Link>/u,
   );
-  assert.match(chatsPageSource, /chat-card__category-editor/u);
+  assert.match(categoryEditorSource, /chat-card__category-editor/u);
   assert.doesNotMatch(chatsPageSource, /chat-card__category-marker/u);
   assert.match(chatsPageSource, /aria-label=\{`Открыть настройки: \$\{title\}/u);
   assert.match(chatsPageSource, /to=\{settingsRoute\}/u);
@@ -104,7 +108,7 @@ test('moderation and Publik navigation keep profile-aware publishing labels', ()
   assert.match(shellSource, />Чаты</u);
   assert.match(shellSource, />Каналы</u);
   assert.match(shellSource, /profile === 'moderation' && networksEnabled/u);
-  assert.match(shellSource, /to="\/networks"/u);
+  assert.match(shellSource, /to=\{`\/networks\?type=\$\{networksEntityType\}`\}/u);
   assert.match(shellSource, />Сетки</u);
   assert.match(shellSource, /href=\{PUBLIK_BOT_URL\}/u);
   assert.match(shellSource, /onClick=\{openPublikBot\}/u);
@@ -136,7 +140,10 @@ test('home sheets are named, focus-trapped and leave the shell controls inert', 
 
 test('home controls keep explicit actions, category filters and readable rows', () => {
   assert.match(chatsPageSource, /const searchPlaceholder = 'Поиск';/u);
-  assert.match(chatsPageSource, /<h1>\{tabLabel\}<\/h1>/u);
+  assert.match(
+    chatsPageSource,
+    /<h1>\{compositionCategory \? favoriteLabels\[compositionCategory\] : tabLabel\}<\/h1>/u,
+  );
   assert.doesNotMatch(chatsPageSource, /chats-command__avatar|home-active-filter/u);
   assert.match(chatsPageSource, /hasSearchQuery && 'has-query'/u);
   assert.match(
@@ -277,11 +284,8 @@ test('home list keeps grouped rows at wide breakpoints', () => {
   assert.match(chatsPageSource, /const CHAT_LIST_VIRTUAL_ROW_PITCH = CHAT_LIST_ROW_HEIGHT \+ 8;/u);
   assert.doesNotMatch(chatsPageSource, /chat-card__moderator|HomeModeratorBadge|moderatorTarget/u);
   assert.doesNotMatch(chatsPageSource, /import ['"]\.\/home-moderator\.css['"]/u);
-  assert.match(
-    chatsPageSource,
-    /top: index \* CHAT_LIST_VIRTUAL_ROW_PITCH,[\s\S]*?height: CHAT_LIST_ROW_HEIGHT/u,
-  );
-  assert.match(chatsPageSource, /height: filteredEntities\.length \* CHAT_LIST_VIRTUAL_ROW_PITCH/u);
+  assert.match(chatsPageSource, /top: index \* rowPitch,[\s\S]*?height: rowHeight/u);
+  assert.match(chatsPageSource, /height: filteredEntities\.length \* rowPitch/u);
   // Virtual rows receive the shared height inline; CSS must not override that geometry.
   assert.doesNotMatch(
     chatsPageSignalCss,
@@ -346,7 +350,11 @@ test('home exposes sync, result and virtual-list state to assistive technology',
     /role="list"[\s\S]*?aria-label=\{`\$\{tabLabel\}: \$\{filteredEntities\.length\}`\}[\s\S]*?aria-busy=/u,
   );
   assert.doesNotMatch(chatsPageSource, /<GlassCard role="alert" aria-live="assertive">/u);
-  assert.match(chatsPageSource, /<StatusState[\s\S]*?tone="danger"/u);
+  assert.match(chatsPageSource, /<LazyHomeListStatus\s+kind="error"/u);
+  assert.match(
+    readFileSync(new URL('../src/pages/home-list-status.tsx', import.meta.url), 'utf8'),
+    /<StatusState[\s\S]*?tone="danger"/u,
+  );
 });
 
 test('home reports favorite persistence failures through the shared toast', () => {

@@ -20,6 +20,7 @@ export type SharedChatSettingsContext = {
   hasPublishedRules?: boolean;
   api: ApiTransport;
   sectionTools?: Partial<Record<ApplySectionKey, ReactNode>>;
+  initialStopWordsList?: 'domains';
   stopWordsTools?: Partial<Record<'toolbar' | 'notice' | 'preview' | 'imageScan', ReactNode>>;
   stopWordsEditor?: {
     storageStatus?: StopWordsStorageStatus;

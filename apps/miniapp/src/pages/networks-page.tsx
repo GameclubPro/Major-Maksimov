@@ -106,7 +106,8 @@ function SummaryCard({
   card,
   range,
   stale,
-  onOpen,
+  onComposition,
+  onStatistics,
   onSettings,
   onRefresh,
 }: {
@@ -116,7 +117,8 @@ function SummaryCard({
   card: ManagedEntityNetworkCard;
   range: NetworkRouteState['range'];
   stale: boolean;
-  onOpen: () => void;
+  onComposition: () => void;
+  onStatistics: () => void;
   onSettings: () => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -146,6 +148,25 @@ function SummaryCard({
       void onRefresh().catch(() => undefined);
     },
   });
+  const data = stale ? null : stats.data;
+  const issue =
+    stats.phase === 'error' || stats.phase === 'stale'
+      ? (stats.error?.message ?? 'Не удалось загрузить статистику')
+      : null;
+  const coverage = data?.audience.coverage;
+  const growthCoverage = data?.netGrowth.coverage;
+  const status = stale
+    ? 'Состав изменился'
+    : issue ||
+      (stats.phase === 'settled' && coverage && growthCoverage
+        ? coverage.includedEntities < card.entityCount
+          ? `Аудитория по ${coverage.includedEntities} из ${card.entityCount}`
+          : coverage.status !== 'ready' || growthCoverage.status !== 'ready'
+            ? 'Данные неполные'
+            : null
+        : stats.phase === 'checking' && coverage
+          ? `Проверено ${data?.items.length ?? 0} из ${card.entityCount}`
+          : null);
   return (
     <article
       ref={cardRef}
@@ -155,7 +176,7 @@ function SummaryCard({
       <div className="network-summary-card__body">
         <div className="network-summary-card__head">
           <h2>
-            <button type="button" className="network-card-title-button" onClick={onOpen}>
+            <button type="button" className="network-card-title-button" onClick={onComposition}>
               <span className="network-category-icon">
                 <NetworkCategoryIcon favoriteType={card.favoriteType} />
               </span>
@@ -167,35 +188,23 @@ function SummaryCard({
             </button>
           </h2>
         </div>
-        <div className="network-summary-card__metrics">
+        <div
+          className="network-summary-card__metrics"
+          aria-busy={!stale && (stats.phase === 'loading' || stats.phase === 'checking')}
+        >
           <Metric
             label={type === 'chat' ? 'Участники' : 'Подписчики'}
-            value={stale ? null : stats.data?.audience.value}
+            value={data?.audience.value}
           />
           <Metric
             label={`Прирост · ${range === '7d' ? 7 : 30} дн.`}
-            value={stale ? null : stats.data?.netGrowth.value}
+            value={data?.netGrowth.value}
             growth
           />
         </div>
-        {stats.phase !== 'settled' ||
-        stats.data?.audience.coverage.status !== 'ready' ||
-        stats.data?.netGrowth.coverage.status !== 'ready' ? (
+        {status ? (
           <p className="network-summary-card__status" role="status">
-            {stale
-              ? 'Состав сетки нужно обновить'
-              : stats.phase === 'checking'
-                ? 'Проверяем доступ…'
-                : stats.phase === 'loading' || stats.phase === 'idle'
-                  ? 'Загружаем данные…'
-                  : stats.phase === 'error' || stats.phase === 'stale'
-                    ? (stats.error?.message ?? 'Не удалось загрузить статистику')
-                    : stats.data?.audience.coverage.status !== 'ready' ||
-                        stats.data?.netGrowth.coverage.status !== 'ready'
-                      ? stats.data?.audience.coverage.includedEntities !== card.entityCount
-                        ? `Аудитория по ${stats.data?.audience.coverage.includedEntities ?? 0} из ${card.entityCount}`
-                        : 'История прироста может быть неполной'
-                      : null}
+            {status}
           </p>
         ) : null}
       </div>
@@ -207,13 +216,13 @@ function SummaryCard({
         <button
           type="button"
           className="networks-secondary network-summary-card__open"
-          onClick={onOpen}
+          onClick={onStatistics}
         >
           <AppIcon icon="StatsUpSquare" />
           Статистика
         </button>
       </div>
-      {(stats.phase === 'error' || stats.phase === 'stale') && stats.error?.retryable !== false ? (
+      {!stale && issue && stats.error?.retryable !== false ? (
         <button type="button" className="networks-text-button" onClick={stats.refresh}>
           Обновить сводку
         </button>
@@ -268,7 +277,7 @@ function NetworkDetail({
     favoriteType: card.favoriteType,
     compositionEpoch,
     search: memberSearch,
-    enabled: state.tab === 'communities',
+    enabled: state.tab === 'communities' && card.entityCount > 0,
     initialPageCount: initialPosition.current.loadedPageCount,
   });
   const latest = useRef({ state, pageCount: entries.pageCount });
@@ -355,7 +364,17 @@ function NetworkDetail({
   };
   const editComposition = () => {
     savePosition();
-    navigate(`/?view=${state.entityType}&editCategory=${card.favoriteType}`);
+    const returnTo = buildNetworkRoute({ ...state, tab: 'communities' });
+    const originIndex: unknown = window.history.state?.idx;
+    navigate(`/?view=${state.entityType}&editCategory=${card.favoriteType}`, {
+      state: {
+        networkCompositionReturnTo: returnTo,
+        networkCompositionOriginIndex:
+          location.pathname + location.search === returnTo && typeof originIndex === 'number'
+            ? originIndex
+            : undefined,
+      },
+    });
   };
   const openSettings = () => {
     savePosition();
@@ -364,8 +383,9 @@ function NetworkDetail({
   return (
     <>
       <NetworkWorkspaceTabs
-        value={state.tab}
+        value={card.entityCount === 0 ? 'communities' : state.tab}
         settingsDisabled={stale || card.entityCount === 0}
+        statisticsDisabled={card.entityCount === 0}
         onChange={(tab) => (tab === 'settings' ? openSettings() : route({ ...state, tab }))}
       />
       {state.tab === 'overview' && card.entityCount > 0 ? (
@@ -401,7 +421,7 @@ function NetworkDetail({
           </button>
         </div>
       ) : null}
-      {state.tab === 'overview' && card.entityCount === 0 ? (
+      {card.entityCount === 0 ? (
         <div className="networks-empty network-empty-start">
           <span className="network-empty-start__icon" aria-hidden>
             <NetworkCategoryIcon favoriteType={card.favoriteType} />
@@ -452,26 +472,25 @@ function NetworkDetail({
         </Suspense>
       ) : (
         <>
-          <div className="network-community-heading">
-            <h2>Состав сетки</h2>
-            <span className="networks-caption">
-              {formatEntityCount(card.entityCount, state.entityType)}
-            </span>
-          </div>
-          <div className="network-community-actions">
-            <button type="button" className="networks-secondary" onClick={editComposition}>
-              <AppIcon icon="Group" />
-              Изменить состав
+          <div className="network-community-toolbar">
+            <SearchField
+              className="network-search-field"
+              label="Поиск в составе"
+              placeholder={state.entityType === 'chat' ? 'Найти чат' : 'Найти канал'}
+              value={memberQuery}
+              onChange={setMemberQuery}
+              inputProps={{ maxLength: NETWORK_ENTITY_SEARCH_MAX_LENGTH }}
+            />
+            <button
+              type="button"
+              className="networks-secondary"
+              aria-label="Изменить состав"
+              onClick={editComposition}
+            >
+              <AppIcon icon="EditPencil" />
+              Изменить
             </button>
           </div>
-          <SearchField
-            className="network-search-field"
-            label="Поиск в составе"
-            placeholder="Найти сообщество"
-            value={memberQuery}
-            onChange={setMemberQuery}
-            inputProps={{ maxLength: NETWORK_ENTITY_SEARCH_MAX_LENGTH }}
-          />
           <div className="network-community-list" aria-busy={entries.loading}>
             {entries.items.map((item) => (
               <button
@@ -603,7 +622,7 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
             scopeKey: snapshot.actor.scope,
             entityType,
             favoriteType: card.favoriteType,
-            range: state.range,
+            range: '7d',
             compositionVersion: card.compositionVersion,
           }),
           exact: true,
@@ -656,21 +675,15 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
           favoriteType={selectedCard.favoriteType}
           count={selectedCard.entityCount}
           onBack={() => onRoute({ ...state, favoriteType: null, tab: 'overview' })}
-          onPick={(entityType, favoriteType) => onRoute({ ...state, entityType, favoriteType })}
+          onPick={(entityType, favoriteType) =>
+            onRoute({ ...state, entityType, favoriteType, tab: 'communities' })
+          }
         />
       ) : (
         <header className="networks-heading">
           <span className="catalogue-heading-mark" aria-hidden />
           <div className="networks-heading__brand">
             <h1>Сетки</h1>
-            {catalogue.cards.length > 0 ? (
-              <span
-                className="networks-heading__count"
-                aria-label={`Сеток с сообществами: ${populated.length}`}
-              >
-                {populated.length}
-              </span>
-            ) : null}
           </div>
           <button
             type="button"
@@ -689,36 +702,17 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
       )}
       {!selectedCard ? (
         <div className="networks-controls">
-          <div className="networks-control">
-            <span className="networks-caption" aria-hidden>
-              Сообщества
-            </span>
-            <SegmentedControl
-              value={state.entityType}
-              options={[
-                { value: 'chat', label: 'Чаты' },
-                { value: 'channel', label: 'Каналы' },
-              ]}
-              onChange={(entityType) =>
-                onRoute({ ...state, entityType, favoriteType: null, tab: 'overview' })
-              }
-              ariaLabel="Тип сообществ"
-            />
-          </div>
-          <div className="networks-control">
-            <span className="networks-caption" aria-hidden>
-              Период статистики
-            </span>
-            <SegmentedControl
-              value={state.range}
-              options={[
-                { value: '7d', label: '7 дней' },
-                { value: '30d', label: '30 дней' },
-              ]}
-              onChange={(range) => onRoute({ ...state, range })}
-              ariaLabel="Период статистики"
-            />
-          </div>
+          <SegmentedControl
+            value={state.entityType}
+            options={[
+              { value: 'chat', label: 'Чаты' },
+              { value: 'channel', label: 'Каналы' },
+            ]}
+            onChange={(entityType) =>
+              onRoute({ ...state, entityType, favoriteType: null, tab: 'overview' })
+            }
+            ariaLabel="Тип сообществ"
+          />
         </div>
       ) : null}
       {settingsError ? (
@@ -756,24 +750,29 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
           <Suspense fallback={null}>
             <NetworkOperationHistory key={userId} api={api} userId={userId} />
           </Suspense>
-          <div className="networks-catalogue">
-            {populated.map((card) => (
-              <SummaryCard
-                key={`${state.entityType}:${card.favoriteType}`}
-                api={api}
-                scopeKey={snapshot.actor.scope}
-                type={state.entityType}
-                card={card}
-                range={state.range}
-                stale={catalogue.stale}
-                onRefresh={catalogue.refresh}
-                onSettings={() => void openSettings(card, state)}
-                onOpen={() =>
-                  onRoute({ ...state, favoriteType: card.favoriteType, tab: 'overview' })
-                }
-              />
-            ))}
-          </div>
+          {populated.length ? (
+            <div className="networks-catalogue">
+              {populated.map((card) => (
+                <SummaryCard
+                  key={`${state.entityType}:${card.favoriteType}`}
+                  api={api}
+                  scopeKey={snapshot.actor.scope}
+                  type={state.entityType}
+                  card={card}
+                  range="7d"
+                  stale={catalogue.stale}
+                  onRefresh={catalogue.refresh}
+                  onSettings={() => void openSettings(card, { ...state, tab: 'communities' })}
+                  onComposition={() =>
+                    onRoute({ ...state, favoriteType: card.favoriteType, tab: 'communities' })
+                  }
+                  onStatistics={() =>
+                    onRoute({ ...state, favoriteType: card.favoriteType, tab: 'overview' })
+                  }
+                />
+              ))}
+            </div>
+          ) : null}
           {emptyCards.length ? (
             <details className="networks-empty-categories" open={!populated.length}>
               <summary>{populated.length ? 'Другие сетки' : 'Выберите сетку'}</summary>
@@ -792,13 +791,6 @@ export function NetworksPage({ api, userId }: { api: ApiTransport; userId: strin
                   </button>
                 ))}
               </div>
-              <button
-                type="button"
-                className="networks-text-button"
-                onClick={() => navigate(`/?view=${state.entityType}`)}
-              >
-                <AppIcon icon="Star" />К избранному на главной
-              </button>
             </details>
           ) : null}
         </>

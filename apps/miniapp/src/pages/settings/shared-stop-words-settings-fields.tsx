@@ -724,7 +724,9 @@ function StopWordsAdminUrl({ fields }: { fields: ChatSettingsFieldAdapter }) {
 }
 
 export function SharedStopWordsSettingsFields({ fields, context, presentation = 'words' }: Props) {
-  const [networkMode, setNetworkMode] = useState<'words' | 'domains'>('words');
+  const [networkMode, setNetworkMode] = useState<'words' | 'domains'>(
+    context.initialStopWordsList ?? 'words',
+  );
   const mode =
     presentation === 'sites' ? 'domains' : context.mode === 'network' ? networkMode : 'words';
   const [speech, setSpeech] = useState<'explanation' | 'warning' | null>(null);

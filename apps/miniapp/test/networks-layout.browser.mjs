@@ -351,7 +351,7 @@ for (const profile of profiles) {
       );
       await refreshScopesStayIndependent(page);
     }
-    for (const name of ['Тип сообществ', 'Период статистики']) {
+    for (const name of ['Тип сообществ']) {
       const group = page.getByRole('radiogroup', { name, exact: true });
       assert.equal(await group.count(), 1, `${name}: one named selector`);
       assert.equal(await group.getByRole('radio').count(), 2, `${name}: two options`);
@@ -364,7 +364,7 @@ for (const profile of profiles) {
     await settleVisualFrame(page);
     await textFits(category, '.network-card-title-button', `${profile.name} long category`);
     await controlsFit(page, `${profile.name} catalogue`);
-    const focusTarget = page.getByRole('radio', { name: '30 дней', exact: true });
+    const focusTarget = page.getByRole('radio', { name: 'Каналы', exact: true });
     await page.keyboard.press('Tab');
     await focusTarget.focus();
     assert.equal(
@@ -384,7 +384,10 @@ for (const profile of profiles) {
       animations: 'disabled',
     });
 
+    assert.equal(await page.getByRole('radiogroup', { name: 'Период статистики' }).count(), 0);
     await page.locator('.network-card-title-button').first().click();
+    await page.locator('.network-community-row').first().waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('tab'), 'communities');
     if (profile.width === 320) {
       await page.locator('.network-workspace-menu > summary').click();
       await page.getByRole('button', { name: 'Переименовать', exact: true }).click();
@@ -437,12 +440,14 @@ for (const profile of profiles) {
       animations: 'disabled',
     });
 
-    await open('networks?type=chat&category=service', '.network-empty-start');
-    assert.equal(
-      await page.locator('.network-detail-metrics').count(),
-      0,
-      'empty networks have no meaningless metrics',
-    );
+    await open('networks?type=chat', '.network-summary-card');
+    await page.locator('.networks-empty-categories summary').click();
+    await page
+      .locator('.networks-empty-categories button[data-network-category="service"]')
+      .click();
+    await page.locator('.network-empty-start').waitFor();
+    assert.equal(await page.locator('.network-detail-metrics').count(), 0);
+    assert.equal(await page.getByRole('searchbox', { name: 'Поиск в составе' }).count(), 0);
     assert.equal(
       await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),
       true,
@@ -452,12 +457,6 @@ for (const profile of profiles) {
     assert.equal(new URL(page.url()).searchParams.get('view'), 'chat');
     assert.equal(new URL(page.url()).searchParams.get('editCategory'), 'service');
     await page.getByRole('button', { name: 'Готово', exact: true }).click();
-    await page.locator('.chats-home:not(.is-category-editing)').waitFor();
-    assert.equal(
-      await page.locator('.home-category-chip.is-service').getAttribute('aria-pressed'),
-      'true',
-    );
-    await page.goBack();
     await page.locator('.network-empty-start').waitFor();
     await page.screenshot({
       path: join(output, `${profile.name}-empty.png`),
@@ -575,43 +574,47 @@ for (const profile of profiles) {
         ['chat', 'Районный чат 104', 'Добавить чаты', '1 чат'],
         ['channel', 'Городской канал 104', 'Добавить каналы', '1 канал'],
       ]) {
-        await open(`networks?type=${type}&category=test`, '.network-empty-start');
+        await open(`?view=${type}`, '.chat-card');
+        await page.locator('.bottom-nav').getByRole('link', { name: 'Сетки', exact: true }).click();
+        await page.locator('.network-summary-card').first().waitFor();
+        assert.equal(new URL(page.url()).searchParams.get('type'), type);
+        await page.locator('.networks-empty-categories summary').click();
+        await page
+          .locator('.networks-empty-categories button[data-network-category="test"]')
+          .click();
         await page.getByRole('button', { name: addLabel, exact: true }).click();
         await page.locator('.chats-home.is-category-editing').waitFor();
         assert.equal(new URL(page.url()).searchParams.get('view'), type);
+        await page.getByRole('heading', { name: 'Тестовые' }).waitFor();
         await page.locator('#chat-search').fill(title);
-        await page.locator('.chat-card__category-editor').first().click();
-        const sheet = page.locator('.home-sheet--favorite');
-        await sheet.locator('.favorite-picker__option.is-test').click();
-        await sheet.waitFor({ state: 'hidden' });
-        await page.getByRole('button', { name: 'Готово', exact: true }).click();
-        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
-        assert.equal(
-          await page.locator('.home-category-chip.is-test').getAttribute('aria-pressed'),
-          'true',
+        const editor = page.locator('.chat-card__category-editor').first();
+        assert.equal(await editor.getAttribute('aria-pressed'), 'false');
+        await editor.click();
+        await page.waitForFunction(
+          () =>
+            document.querySelector('.chat-card__category-editor')?.getAttribute('aria-pressed') ===
+            'true',
         );
-        await page.goBack();
+        assert.equal(await page.locator('.home-sheet--favorite').count(), 0);
+        await page.getByRole('button', { name: 'Готово', exact: true }).click();
         await page
           .locator('.network-workspace-heading')
           .getByText(countLabel, { exact: true })
           .waitFor();
-        await page.locator('.network-detail-metrics').waitFor();
-        assert.equal(await page.locator('.network-empty-start').count(), 0);
-        await page.getByRole('button', { name: 'Состав', exact: true }).click();
         await page.locator('.network-community-list').getByText(title, { exact: true }).waitFor();
-        assert.equal(await page.getByRole('button', { name: 'Добавить', exact: true }).count(), 0);
+        assert.equal(await page.locator('.network-empty-start').count(), 0);
         await page.getByRole('button', { name: 'Изменить состав', exact: true }).click();
         await page.locator('.chats-home.is-category-editing').waitFor();
         assert.equal(await page.locator('#chat-search').inputValue(), '');
         await page.locator('#chat-search').fill(title);
-        await page.locator('.chat-card__category-editor').first().click();
-        await sheet.getByRole('button', { name: 'Убрать из избранного', exact: true }).click();
+        await editor.click();
+        const sheet = page.locator('.home-sheet--membership');
+        await sheet.getByRole('button', { name: 'Отмена', exact: true }).click();
+        assert.equal(await editor.getAttribute('aria-pressed'), 'true');
+        await editor.click();
+        await sheet.getByRole('button', { name: 'Убрать', exact: true }).click();
         await sheet.waitFor({ state: 'hidden' });
         await page.keyboard.press('Escape');
-        await page.locator('.chats-home:not(.is-category-editing)').waitFor();
-        await page.goBack();
-        await page.getByText('В сетке пока пусто', { exact: true }).waitFor();
-        await page.getByRole('button', { name: 'Статистика', exact: true }).click();
         await page.locator('.network-empty-start').waitFor();
         assert.equal(
           await page.getByRole('button', { name: 'Настройки', exact: true }).isDisabled(),

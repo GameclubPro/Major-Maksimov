@@ -306,3 +306,79 @@ test('old assignment read cannot overwrite an acknowledged mutation', async () =
   assert.deepEqual(session.getSnapshot().assignments.chat.watch, ['a', 'b']);
   assert.equal(session.getSnapshot().byType.chat.typeCompositionVersion, 'v2');
 });
+
+test('editing a network checks each row and refreshes its catalogue on return', async () => {
+  const f = fixture();
+  const reads: string[] = [];
+  const request = f.api.request;
+  f.api.request = (path, options) => {
+    if (options?.method !== 'PUT') reads.push(path);
+    return request(path, options);
+  };
+  const session = new HomeEntityFavoritesSession(f.api, 'editor');
+  const row = {
+    entityType: 'chat' as const,
+    entityId: 'a',
+    expectedFavoriteType: 'important' as Category,
+    favoriteType: 'test' as Category,
+  };
+  await assert.rejects(session.setFavorite(row, 'on-return'), /Обновите состав/u);
+  assert.equal(f.writes.length, 0);
+  await session.refreshAssignments('chat');
+  reads.length = 0;
+  const first = await session.setFavorite(row, 'on-return');
+  const second = await session.setFavorite(
+    { ...row, entityId: 'b', expectedFavoriteType: 'watch' },
+    'on-return',
+  );
+  assert.equal(first.refresh, 'on-return');
+  assert.equal(second.refresh, 'on-return');
+  assert.deepEqual(reads, []);
+  assert.equal(f.writes.length, 2);
+  assert.deepEqual(new Set(session.getSnapshot().assignments.chat.test), new Set(['a', 'b']));
+  assert.equal(session.getSnapshot().byType.chat.hasAcknowledgedRowEdits, true);
+  assert.equal(session.getSnapshot().byType.chat.assignmentsComplete, false);
+  assert.equal(session.getSnapshot().byType.chat.catalogueStale, true);
+  f.members.set('c', 'test');
+  f.advance();
+  await session.refreshCatalogue('chat');
+  assert.equal(
+    session.getSnapshot().byType.chat.catalogue?.items.find((card) => card.favoriteType === 'test')
+      ?.entityCount,
+    3,
+  );
+  assert.equal(session.getSnapshot().byType.chat.hasAcknowledgedRowEdits, false);
+  await session.refreshAssignments('chat');
+  assert.deepEqual(session.getSnapshot().assignments.chat.test, ['a', 'b', 'c']);
+});
+
+test('an uncertain row write stops quick edits until membership is read again', async () => {
+  const f = fixture();
+  const session = new HomeEntityFavoritesSession(f.api, 'editor');
+  await session.refreshAssignments('chat');
+  await session.setFavorite(
+    { entityType: 'chat', entityId: 'a', favoriteType: 'test', expectedFavoriteType: 'important' },
+    'on-return',
+  );
+  f.rejectReads(true);
+  const request = f.api.request;
+  f.api.request = async (path, options) => {
+    const result = await request(path, options);
+    if (options?.method === 'PUT') throw new Error('response lost');
+    return result;
+  };
+  const move = {
+    entityType: 'chat' as const,
+    entityId: 'b',
+    favoriteType: 'test' as const,
+    expectedFavoriteType: 'watch' as const,
+  };
+  await assert.rejects(session.setFavorite(move, 'on-return'), /response lost/u);
+  await assert.rejects(session.setFavorite(move, 'on-return'), /Обновите состав/u);
+  assert.equal(f.writes.length, 2);
+  assert.equal(f.members.get('b'), 'test');
+  assert.equal(session.getSnapshot().byType.chat.hasAcknowledgedRowEdits, false);
+  f.rejectReads(false);
+  await session.refreshAssignments('chat');
+  assert.deepEqual(session.getSnapshot().assignments.chat.test, ['a', 'b']);
+});

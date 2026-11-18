@@ -58,6 +58,7 @@ export interface NetworkSettingsPageProps {
   resumeOperationId?: string;
   retryOfOperationId?: string;
   onOperationChange?: (operation: NetworkSettingsOperationResponse | null) => void;
+  initialSites?: boolean;
   onOpenLegacySites: () => void;
   onClose: () => void;
 }
@@ -261,6 +262,7 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
             disabled={
               customButtonEditorOpen ||
               controller.readOnly ||
+              !controller.read?.recipientCount ||
               (!controller.changes.length && !controller.navigationAllowlist) ||
               Object.keys(controller.errors).length > 0
             }
@@ -333,6 +335,11 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
             {controller.progress.total ? ' из ' + controller.progress.total : ''}
           </p>
         ) : null}
+        {controller.previewChanged && controller.read && stage === 'editor' ? (
+          <p className="network-settings-editor__status" role="status">
+            Состав или настройки изменились. Проверьте черновик.
+          </p>
+        ) : null}
         {controller.error ? (
           <div className="network-settings-page__error" role="alert">
             <p>
@@ -368,7 +375,6 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
                 scopeId={props.scopeId}
                 read={controller.read}
                 fields={chatFields}
-                navigationAllowlist={controller.navigationAllowlist}
                 onNavigationAllowlist={controller.setNavigationAllowlist}
                 onOpenLegacySites={props.onOpenLegacySites}
               >
@@ -383,7 +389,11 @@ export function NetworkSettingsPage(props: NetworkSettingsPageProps) {
                     <SharedChatSettingsSection
                       section={scope.initialSection}
                       fields={chatFields}
-                      context={context}
+                      context={
+                        props.initialSites
+                          ? { ...context, initialStopWordsList: 'domains' }
+                          : context
+                      }
                     />
                   )
                 }

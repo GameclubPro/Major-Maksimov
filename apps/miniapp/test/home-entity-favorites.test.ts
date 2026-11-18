@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ApiRequestError } from '../src/lib/api-request-error';
 import { markPreviewApiPrincipal } from '../src/lib/api/preview-principal';
+import {
+  FavoriteLabelConflictError,
+  FavoriteLabelDuplicateError,
+} from '../src/lib/home-entity-favorites-types';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
 import {
   mergeHomeEntityFavoriteLabelEdits,
@@ -271,6 +275,50 @@ test('retries one structured revision conflict and merges onto the refreshed ser
     labels: { important: 'Новее другого окна', watch: 'Новый контроль', test: 'QA' },
     revision: 6,
   });
+});
+
+test('preserves another editor’s name until it is explicitly replaced', async () => {
+  const server = { initialized: true as const, labels: { important: 'Новости' }, revision: 4 };
+  const draft = { important: 'Медиа' };
+  let replaced = false;
+  const replace = async (labels: typeof server.labels, expectedRevision: number | null) => {
+    replaced = true;
+    assert.equal(expectedRevision, server.revision);
+    return { ...server, labels, revision: 5 };
+  };
+  const load = async () => server;
+  const attempt = () =>
+    saveHomeEntityFavoriteLabelEditsWithConflictRetry({}, draft, load, async (labels, revision) => {
+      assert.ok(labels.important);
+      return replace({ important: labels.important }, revision);
+    });
+  await assert.rejects(
+    attempt,
+    (error) => error instanceof FavoriteLabelConflictError && error.currentLabel === 'Новости',
+  );
+  assert.equal(replaced, false);
+  const result = await saveHomeEntityFavoriteLabelEditsWithConflictRetry(
+    server.labels,
+    draft,
+    load,
+    async (labels, revision) => {
+      assert.ok(labels.important);
+      return replace({ important: labels.important }, revision);
+    },
+  );
+  assert.deepEqual(result.labels, draft);
+});
+
+test('rejects a new duplicate of a standard name without blocking unrelated legacy edits', () => {
+  assert.throws(
+    () => mergeHomeEntityFavoriteLabelEdits({}, { test: 'ВАЖНЫЕ' }, {}),
+    FavoriteLabelDuplicateError,
+  );
+  const legacy = { test: 'Важные' };
+  assert.deepEqual(
+    mergeHomeEntityFavoriteLabelEdits(legacy, { ...legacy, watch: 'Медиа' }, legacy),
+    { ...legacy, watch: 'Медиа' },
+  );
 });
 
 test('preserves the complete local draft when the server profile is still uninitialized', async () => {

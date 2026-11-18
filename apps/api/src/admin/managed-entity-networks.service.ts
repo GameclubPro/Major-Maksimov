@@ -23,7 +23,7 @@ import type { AuthUser } from '../common/decorators/current-user.decorator';
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { Prisma, type Prisma as PrismaTypes } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
-import { resolvePresentableManagedEntityTitle } from './admin-legacy-utils';
+import { readNetworkCommunityRows } from './network-community-presentation';
 import { MANAGED_ENTITY_FAVORITE_TYPE_ORDER } from './admin.service.support';
 import {
   canonicalManagedEntityFavoriteType,
@@ -201,6 +201,21 @@ export class ManagedEntityNetworksService {
     );
   }
 
+  readCommunityPresentations(
+    db: Pick<Prisma.TransactionClient, '$queryRaw'>,
+    entityType: ManagedEntityType,
+    authorizedIds: string[],
+  ) {
+    return readNetworkCommunityRows(
+      db,
+      entityType,
+      this.registry.getAllBots().map((bot) => bot.id),
+      {
+        authorizedIds,
+      },
+    );
+  }
+
   async entries(
     user: AuthUser,
     entityTypeRaw: string,
@@ -220,6 +235,15 @@ export class ManagedEntityNetworksService {
           query.favoritesOnly,
           query.search,
         ]);
+        const memberIds =
+          query.favoriteType || query.favoritesOnly
+            ? [...snapshot.assignments]
+                .filter(([, type]) => !query.favoriteType || type === query.favoriteType)
+                .map(([id]) => id)
+            : null;
+        const version = query.favoriteType
+          ? this.selectionVersion(user.userId, entityType, query.favoriteType, memberIds!)
+          : snapshot.compositionVersion;
         let after: string | undefined;
         if (query.cursor) {
           try {
@@ -237,7 +261,7 @@ export class ManagedEntityNetworksService {
               !('version' in cursor)
             )
               throw new Error('Invalid cursor');
-            if (cursor.version !== snapshot.compositionVersion)
+            if (cursor.version !== version)
               throw new ConflictException({
                 code: 'MANAGED_ENTITY_NETWORK_CURSOR_STALE',
                 message: 'Состав сеток изменился. Обновите список.',
@@ -248,77 +272,27 @@ export class ManagedEntityNetworksService {
             throw new BadRequestException('Недействительный курсор списка.');
           }
         }
-        const memberIds =
-          query.favoriteType || query.favoritesOnly
-            ? [...snapshot.assignments]
-                .filter(([, type]) => !query.favoriteType || type === query.favoriteType)
-                .map(([id]) => id)
-            : null;
-        const rows = await tx.chat.findMany({
-          where: {
-            AND: [
-              this.visibleWhere(user.userId, entityType),
-              ...(memberIds ? [{ id: { in: memberIds } }] : []),
-              ...(after ? [{ id: { gt: after } }] : []),
-              ...(query.search
-                ? [
-                    {
-                      OR: [
-                        { title: { contains: query.search, mode: 'insensitive' as const } },
-                        { id: { contains: query.search } },
-                      ],
-                    },
-                  ]
-                : []),
-            ],
-          },
-          select: { id: true, title: true },
-          orderBy: { id: 'asc' },
-          take: query.limit + 1,
-        });
+        const rows = await readNetworkCommunityRows(
+          tx,
+          entityType,
+          this.registry.getAllBots().map((bot) => bot.id),
+          { userId: user.userId, memberIds, search: query.search, after, limit: query.limit + 1 },
+        );
         const page = rows.slice(0, query.limit);
-        const catalog =
-          page.length === 0
-            ? []
-            : await tx.managedBotChatCatalog.findMany({
-                where: {
-                  chatId: { in: page.map((row) => row.id) },
-                  entityType: entityType === 'chat' ? 'CHAT' : 'CHANNEL',
-                  botId: { in: this.registry.getAllBots().map((bot) => bot.id) },
-                  status: { in: ['ACTIVE', 'PRESENTATION'] },
-                },
-                select: { chatId: true, title: true, avatarUrl: true, avatarState: true },
-                orderBy: [
-                  { metadataObservedAt: { sort: 'desc', nulls: 'last' } },
-                  { botId: 'asc' },
-                ],
-              });
-        const presentationByChat = new Map<string, (typeof catalog)[number]>();
-        for (const item of catalog) {
-          if (!presentationByChat.has(item.chatId)) presentationByChat.set(item.chatId, item);
-        }
         return managedEntityNetworkEntriesResponseSchema.parse({
           entityType,
-          compositionVersion: snapshot.compositionVersion,
-          items: page.map((row) => {
-            const presentation = presentationByChat.get(row.id);
-            return {
-              id: row.id,
-              entityType,
-              title:
-                resolvePresentableManagedEntityTitle(row.id, row.title, presentation?.title) ??
-                (entityType === 'chat' ? 'Чат без названия' : 'Канал без названия'),
-              avatarUrl:
-                presentation?.avatarState === 'absent' ? null : (presentation?.avatarUrl ?? null),
-              favoriteType: snapshot.assignments.get(row.id) ?? null,
-            };
-          }),
+          compositionVersion: version,
+          items: page.map((row) => ({
+            ...row,
+            entityType,
+            favoriteType: snapshot.assignments.get(row.id) ?? null,
+          })),
           nextCursor:
             rows.length > query.limit && page.length > 0
               ? Buffer.from(
                   JSON.stringify({
                     binding,
-                    version: snapshot.compositionVersion,
+                    version: version,
                     after: page[page.length - 1]!.id,
                   }),
                 ).toString('base64url')

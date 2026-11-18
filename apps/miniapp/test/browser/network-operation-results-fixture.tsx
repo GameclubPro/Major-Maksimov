@@ -31,6 +31,8 @@ export function mountNetworkOperationResultsFixture() {
   const titles = new Map(
     operation.outcomes.map((row) => [row.entityId, `Сообщество ${row.entityId}`]),
   );
+  titles.delete('chat-0');
+  titles.delete('chat-1');
   function Fixture() {
     const [search, setSearch] = useState('Длинный поисковый запрос');
     const [status, setStatus] = useState<NetworkSettingsOperationResponse['status']>('PARTIAL');

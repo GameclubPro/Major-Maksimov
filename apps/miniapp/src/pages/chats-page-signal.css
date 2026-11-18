@@ -606,6 +606,81 @@
     padding-bottom: 12px;
   }
 
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chats-command__brand
+    h1 {
+    min-width: 0;
+    font-size: clamp(23px, 6vw, 34px);
+    overflow-wrap: anywhere;
+    letter-spacing: -0.045em;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chat-card.glass-card {
+    grid-template-columns: minmax(0, 1fr);
+    height: 64px;
+    padding: 4px 0;
+    align-items: center;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chat-card__category-editor {
+    grid-template-columns: 40px minmax(0, 1fr) 32px;
+    align-self: center;
+    min-height: 54px;
+    gap: 10px;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chat-card__avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chat-card__category-value {
+    margin-top: 2px;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    .is-composition-editing
+    .chat-card__category-editor
+    h3 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open .chat-card__membership-mark {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--steel-line);
+    border-radius: 10px;
+    background: var(--steel-raised);
+    color: var(--steel-muted);
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open
+    [aria-pressed='true']
+    > .chat-card__membership-mark {
+    border-color: transparent;
+    background: var(--steel-blue-soft);
+    color: var(--steel-blue);
+  }
+
+  body[data-miniapp-profile='moderation'].chats-home-page-open .chat-card__membership-mark svg {
+    width: 18px;
+    height: 18px;
+  }
+
   body[data-miniapp-profile='moderation'].chats-home-page-open .chats-command__done {
     min-height: 48px;
     border: 1px solid var(--steel-line);

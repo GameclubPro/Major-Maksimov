@@ -4,6 +4,10 @@ import type { ManagedEntityFavoriteType, ManagedEntityType } from '@maxim/contra
 import { CompactStickyHeader } from '../../components/ui/compact-sticky-header';
 import { useHomeEntityFavorites } from '../../lib/home-entity-favorites-context';
 import {
+  FavoriteLabelConflictError,
+  FavoriteLabelDuplicateError,
+} from '../../lib/home-entity-favorites-types';
+import {
   HOME_ENTITY_FAVORITE_LABEL_MAX_LENGTH,
   HOME_ENTITY_FAVORITE_TYPES,
 } from '../../lib/home-entity-favorites';
@@ -19,26 +23,32 @@ export function NetworkWorkspaceTabs({
   value,
   onChange,
   settingsDisabled = false,
+  statisticsDisabled = false,
 }: {
   value: NetworkWorkspaceTab;
   onChange: (tab: NetworkWorkspaceTab) => void;
   settingsDisabled?: boolean;
+  statisticsDisabled?: boolean;
 }) {
   return (
     <nav className="network-workspace-tabs" aria-label="Раздел сетки">
       {(
         [
+          ['communities', 'Состав'],
           ['overview', 'Статистика'],
           ['settings', 'Настройки'],
-          ['communities', 'Состав'],
         ] as const
       ).map(([tab, label]) => (
         <button
           type="button"
           key={tab}
           aria-current={value === tab ? 'page' : undefined}
-          disabled={tab === 'settings' && settingsDisabled}
-          onClick={() => onChange(tab)}
+          disabled={
+            (tab === 'settings' && settingsDisabled) || (tab === 'overview' && statisticsDisabled)
+          }
+          onClick={() => {
+            if (value !== tab) onChange(tab);
+          }}
         >
           {label}
         </button>
@@ -80,6 +90,7 @@ function NetworkWorkspaceIdentity({
     favoriteType: ManagedEntityFavoriteType;
     value: string;
     base: typeof snapshot.labels.overrides;
+    conflict?: FavoriteLabelConflictError;
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -130,13 +141,23 @@ function NetworkWorkspaceIdentity({
     setBusy(true);
     setError(null);
     try {
+      const base = rename.conflict?.latestLabels ?? rename.base;
       await actions.saveLabels({
-        baseLabels: rename.base,
-        draftLabels: { ...rename.base, [rename.favoriteType]: rename.value.trim() },
+        baseLabels: base,
+        draftLabels: { ...base, [rename.favoriteType]: rename.value.trim() },
       });
       setRename(null);
-    } catch {
-      setError('Название не сохранено. Проверьте актуальное имя и повторите.');
+    } catch (error) {
+      if (error instanceof FavoriteLabelConflictError) {
+        setRename({ ...rename, conflict: error });
+        setError(error.message);
+      } else {
+        setError(
+          error instanceof FavoriteLabelDuplicateError
+            ? error.message
+            : 'Название не сохранено. Попробуйте ещё раз.',
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -272,14 +293,17 @@ function NetworkWorkspaceIdentity({
               maxLength={HOME_ENTITY_FAVORITE_LABEL_MAX_LENGTH}
               disabled={busy}
               value={rename.value}
-              onChange={(event) => setRename({ ...rename, value: event.target.value })}
+              onChange={(event) => {
+                setError(null);
+                setRename({ ...rename, value: event.target.value, conflict: undefined });
+              }}
             />
           </label>
           <p>Название изменится и у чатов, и у каналов.</p>
           {error ? <p role="alert">{error}</p> : null}
           <div>
             <button type="submit" disabled={busy || !rename.value.trim()}>
-              {busy ? 'Сохраняем…' : 'Сохранить название'}
+              {busy ? 'Сохраняем…' : rename.conflict ? 'Заменить название' : 'Сохранить название'}
             </button>
             <button
               type="button"

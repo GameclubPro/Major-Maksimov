@@ -394,10 +394,7 @@ export class NetworkStatisticsService {
             WHERE r.chat_id=c.id AND r.bucket_start<=${g.to} ORDER BY bucket_start DESC LIMIT 1) last_rollup ON true
           WHERE c.id IN (${selected})
         `;
-          const names = await tx.chat.findMany({
-            where: { id: { in: ids } },
-            select: { id: true, title: true },
-          });
+          const names = await this.networks.readCommunityPresentations(tx, g.entityType, ids);
           return [
             audienceRead.rows,
             growth,

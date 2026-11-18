@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT } from '@maxim/contracts/network-settings-read';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   NetworkSettingsChange,
   NetworkSettingsField,
@@ -23,7 +24,11 @@ import {
 } from '../../lib/network-settings-operation-storage';
 import type { NetworkSettingsEditorScope } from '../../lib/network-settings-workspace-state';
 import { parseSettingsField, settingsSectionPaths } from './field-registry';
-import { assertOperationIdentity, canonicalNetworkValue } from './network-settings-operation-state';
+import {
+  NetworkSettingsPreviewConflict,
+  assertOperationIdentity,
+  canonicalNetworkValue,
+} from './network-settings-operation-state';
 import type { NetworkSettingsOperationPort } from './network-settings-operation-runtime';
 export { canonicalNetworkValue } from './network-settings-operation-state';
 
@@ -71,7 +76,7 @@ export async function readCompleteNetworkSettings(
       page.entityType !== input.entityType ||
       page.section !== input.section ||
       targetKey(page.target) !== targetKey(input.target) ||
-      page.recipients.length > 4 ||
+      page.recipients.length > NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT ||
       !page.compositionVersion
     )
       throw new Error('Получен другой состав настроек.');
@@ -277,8 +282,9 @@ export function useNetworkSettingsController(input: {
 }) {
   const [read, setRead] = useState<NetworkSettingsReadResponse | null>(null);
   const [progress, setProgress] = useState({ loaded: 0, total: 0 });
+  const carriedDraft = useMemo(() => pendingDrafts.get(input.scopeId), [input.scopeId]);
   const [changes, setChangesState] = useState<NetworkSettingsChange[]>(
-    () => pendingDrafts.get(input.scopeId)?.changes ?? [],
+    () => carriedDraft?.changes ?? [],
   );
   const [navigationAllowlist, setNavigationAllowlistState] = useState<
     NetworkNavigationAllowlistIntent | undefined
@@ -291,6 +297,12 @@ export function useNetworkSettingsController(input: {
   const [phase, setPhase] = useState<'loading' | 'idle' | 'preview' | 'apply'>('loading');
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const [previewChanged, setPreviewChanged] = useState(false);
+  const conflictDraft = useRef<{
+    identity: string;
+    changes: NetworkSettingsChange[];
+    navigationAllowlist?: NetworkNavigationAllowlistIntent;
+  } | null>(null);
   const generation = useRef(0);
   const applying = useRef(false);
   const frozen = useRef<string | null>(null);
@@ -373,7 +385,8 @@ export function useNetworkSettingsController(input: {
     setOperation(null);
     frozen.current = null;
     setErrors({});
-    const carried = pendingDrafts.get(input.scopeId);
+    const carried =
+      conflictDraft.current?.identity === identity ? conflictDraft.current : carriedDraft;
     pendingDrafts.delete(input.scopeId);
     setChangesState(carried?.changes ?? []);
     setNavigationAllowlistState(carried?.navigationAllowlist);
@@ -435,11 +448,12 @@ export function useNetworkSettingsController(input: {
       generation.current++;
     };
     // FLAG: The immutable actor/scope/section identity owns all asynchronous responses.
-  }, [identity, reload, input.api, input.resumeOperationId]);
+  }, [identity, reload, input.api, input.resumeOperationId, carriedDraft]);
   useEffect(() => {
     input.onOperationChange?.(operation);
   }, [operation, input.onOperationChange]);
-  const operationId = operation?.operationId ?? receipt?.operationId;
+  const operationId =
+    phase === 'preview' ? undefined : (operation?.operationId ?? receipt?.operationId);
   useEffect(() => {
     if (!operationId || (operation && isNetworkSettingsOperationSettled(operation))) return;
     let stopped = false;
@@ -533,7 +547,7 @@ export function useNetworkSettingsController(input: {
   const prepare = useCallback(async () => {
     const state = current.current;
     if (
-      !state.read ||
+      !state.read?.recipientCount ||
       (!state.changes.length && !state.navigationAllowlist) ||
       Object.keys(state.errors).length ||
       state.statusIssue ||
@@ -544,6 +558,8 @@ export function useNetworkSettingsController(input: {
     const revision = generation.current;
     const key = liveKey.current;
     const operationId = crypto.randomUUID();
+    conflictDraft.current = null;
+    setPreviewChanged(false);
     setPhase('preview');
     setError(null);
     setOperation(null);
@@ -566,6 +582,22 @@ export function useNetworkSettingsController(input: {
     } catch (cause) {
       if (!port.isCurrent() && cause instanceof DOMException && cause.name === 'AbortError') return;
       if (generation.current === revision) {
+        if (cause instanceof NetworkSettingsPreviewConflict) {
+          conflictDraft.current = {
+            identity,
+            changes: state.changes,
+            navigationAllowlist: state.navigationAllowlist,
+          };
+          setReceipt(null);
+          setOperation(null);
+          setPreview(null);
+          setRead(null);
+          frozen.current = null;
+          setStatusIssue(false);
+          setPreviewChanged(true);
+          setReload((value) => value + 1);
+          return;
+        }
         setStatusIssue(Boolean(current.current.preview));
         setError(
           cause instanceof Error ? cause.message : 'Ответ не получен. Проверяем исходную операцию.',
@@ -574,7 +606,7 @@ export function useNetworkSettingsController(input: {
     } finally {
       if (generation.current === revision) setPhase('idle');
     }
-  }, [makeReceipt, operationPort]);
+  }, [identity, makeReceipt, operationPort]);
   const impactsComplete =
     !navigationAllowlist ||
     Boolean(
@@ -678,6 +710,7 @@ export function useNetworkSettingsController(input: {
     phase,
     error,
     canApply,
+    previewChanged,
     prepare,
     apply,
     setChanges,

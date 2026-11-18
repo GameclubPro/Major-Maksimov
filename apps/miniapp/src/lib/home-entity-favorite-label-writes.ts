@@ -4,6 +4,10 @@ import { getManagedEntityFavoriteLabels } from './api/managed-entity-favorites-c
 import { updateManagedEntityFavoriteLabels } from './api/managed-entity-favorites-write-client';
 import type { ApiTransport } from './api/transport';
 import {
+  FavoriteLabelConflictError,
+  FavoriteLabelDuplicateError,
+} from './home-entity-favorites-types';
+import {
   HOME_ENTITY_FAVORITE_LABELS,
   HOME_ENTITY_FAVORITE_TYPES,
   resolveHomeEntityFavoriteLabels,
@@ -19,10 +23,17 @@ export function mergeHomeEntityFavoriteLabelEdits(
   const base = resolveHomeEntityFavoriteLabels(sanitizeHomeEntityFavoriteLabels(baseLabels));
   const draft = resolveHomeEntityFavoriteLabels(sanitizeHomeEntityFavoriteLabels(draftLabels));
   const next = sanitizeHomeEntityFavoriteLabels(latestServerLabels);
+  const latest = resolveHomeEntityFavoriteLabels(next);
 
   for (const favoriteType of HOME_ENTITY_FAVORITE_TYPES) {
     if (draft[favoriteType] === base[favoriteType]) {
       continue;
+    }
+    if (
+      latest[favoriteType] !== base[favoriteType] &&
+      latest[favoriteType] !== draft[favoriteType]
+    ) {
+      throw new FavoriteLabelConflictError(next, latest[favoriteType]);
     }
     if (draft[favoriteType] === HOME_ENTITY_FAVORITE_LABELS[favoriteType]) {
       delete next[favoriteType];
@@ -31,7 +42,26 @@ export function mergeHomeEntityFavoriteLabelEdits(
     }
   }
 
+  assertUniqueChangedLabels(latest, resolveHomeEntityFavoriteLabels(next));
   return sanitizeHomeEntityFavoriteLabels(next);
+}
+
+function assertUniqueChangedLabels(
+  previous: ReturnType<typeof resolveHomeEntityFavoriteLabels>,
+  next: ReturnType<typeof resolveHomeEntityFavoriteLabels>,
+) {
+  const key = (label: string) =>
+    label.normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase('ru');
+  for (const type of HOME_ENTITY_FAVORITE_TYPES) {
+    if (previous[type] === next[type]) continue;
+    if (
+      HOME_ENTITY_FAVORITE_TYPES.some(
+        (other) => other !== type && key(next[other]) === key(next[type]),
+      )
+    ) {
+      throw new FavoriteLabelDuplicateError(next[type]);
+    }
+  }
 }
 
 export function isHomeEntityFavoriteLabelsRevisionConflict(error: unknown): boolean {
@@ -57,6 +87,12 @@ export async function saveHomeEntityFavoriteLabelEditsWithConflictRetry(
     const labels = latest.initialized
       ? mergeHomeEntityFavoriteLabelEdits(baseLabels, draftLabels, latest.labels)
       : sanitizeHomeEntityFavoriteLabels(draftLabels);
+    if (!latest.initialized) {
+      assertUniqueChangedLabels(
+        resolveHomeEntityFavoriteLabels(baseLabels),
+        resolveHomeEntityFavoriteLabels(labels),
+      );
+    }
     try {
       return await replace(labels, latest.revision);
     } catch (error: unknown) {

@@ -322,6 +322,7 @@ export function hasUnsettledNetworkSettingsRetry(
 export async function removeNetworkSettingsOperationReceipt(
   userId: string,
   operationId: string,
+  options?: { unconfirmedOnly: true },
 ): Promise<void> {
   const previous = queues.get(userId) ?? Promise.resolve();
   const work = previous
@@ -329,6 +330,7 @@ export async function removeNetworkSettingsOperationReceipt(
     .then(async () => {
       const list = listNetworkSettingsOperationReceipts(userId);
       const receipt = list.find((r) => r.operationId === operationId);
+      if (options?.unconfirmedOnly && receipt?.launchState !== 'unconfirmed') return;
       // FLAG: An unfinished retry still needs its parent witness before dispatch.
       if (hasUnsettledNetworkSettingsRetry(operationId, list))
         throw new Error('Сначала проверьте результат повторной операции.');

@@ -1,3 +1,5 @@
+import { ManagedEntityNetworksService } from './managed-entity-networks.service';
+import type { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { chatRulesSchema, chatSettingsSchema, stopWordsPolicySchema } from '@maxim/contracts';
@@ -158,7 +160,9 @@ integration('supplemental network settings with PostgreSQL', () => {
     );
     service = new NetworkSettingsService(
       prisma,
-      {} as never,
+      new ManagedEntityNetworksService(prisma, {
+        getAllBots: () => [],
+      } as unknown as MaxBotRegistryService),
       access as unknown as ManagedEntitiesService,
       settings as unknown as AdminSettingsService,
       stopWords,

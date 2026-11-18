@@ -269,6 +269,40 @@ integration('network settings durable writes with PostgreSQL', () => {
     expect(await db.networkSettingsOperation.findUnique({ where: { id: newId } })).toBeNull();
   });
 
+  it('previews recipients under the same catalogue title as the composition list', async () => {
+    await db.managedBotChatCatalog.create({
+      data: {
+        botId: bot,
+        chatId: ids[0],
+        title: 'Новостное бюро',
+        entityType: 'CHANNEL',
+        status: 'PRESENTATION',
+      },
+    });
+    try {
+      const request = {
+        entityType: 'channel',
+        section: 'comments',
+        target: { mode: 'selected', entityIds: [ids[0]] },
+      };
+      const read = await service.read(user, request);
+      const operationId = randomUUID();
+      ownedOperations.push(operationId);
+      const preview = await service.preview(user, {
+        ...request,
+        operationId,
+        recipients: read.recipients,
+        compositionVersion: read.compositionVersion,
+        changes: [{ path: 'commentsMessageText', op: 'set', value: 'Изменено' }],
+      });
+      expect(preview.recipients[0]?.title).toBe('Новостное бюро');
+    } finally {
+      await db.managedBotChatCatalog.delete({
+        where: { botId_chatId: { botId: bot, chatId: ids[0] } },
+      });
+    }
+  });
+
   it('pages a full category and rejects stale composition before confirmation', async () => {
     await db.managedEntityFavorite.createMany({
       data: ids.map((chatId) => ({
@@ -283,6 +317,23 @@ integration('network settings durable writes with PostgreSQL', () => {
     expect(first.recipientCount).toBe(6);
     expect(first.recipients).toHaveLength(4);
     expect(first.complete).toBe(false);
+    const input = { entityType: 'channel', target, section: 'comments' };
+    const fast = await service.read(user, input, { adaptive: true });
+    expect(fast.recipients.map((row) => row.entityId)).toEqual(ids);
+    access.mockImplementationOnce(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+    const slow = await service.read(user, input, { adaptive: true });
+    expect(slow.recipients).toHaveLength(4);
+    expect(slow.complete).toBe(false);
+    access.mockClear();
+    await expect(
+      service.read(user, input, {
+        adaptive: true,
+        disconnected: () => access.mock.calls.length >= 1,
+      }),
+    ).rejects.toMatchObject({ status: 408 });
+    expect(access).toHaveBeenCalledTimes(1);
     const last = await service.read(user, {
       entityType: 'channel',
       target,

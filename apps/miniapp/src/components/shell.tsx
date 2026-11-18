@@ -132,6 +132,11 @@ export function Shell({
   const managedEntityBackRoute = isPublisherAutoRepliesRoute
     ? `/publisher/chat/${encodeURIComponent(entityId)}`
     : homeRoute;
+  const networksEntityType = isNetworksRoute
+    ? normalizeEntityType(new URLSearchParams(location.search).get('type'), resolvedEntityType)
+    : isNetworkSettingsRoute
+      ? routeEntityType
+      : resolvedEntityType;
 
   const isGiveawayRoute = location.pathname.includes('/giveaways/');
   const isLegalRoute = location.pathname.startsWith('/legal/');
@@ -302,7 +307,7 @@ export function Shell({
 
           {profile === 'moderation' && networksEnabled ? (
             <Link
-              to="/networks"
+              to={`/networks?type=${networksEntityType}`}
               className={cn(
                 'bottom-nav__item',
                 (isNetworksRoute || isNetworkSettingsHub) && 'is-active',

@@ -70,7 +70,6 @@ import {
   saveLastEntityType,
 } from '../lib/last-chat';
 import { useNativeBackHandler } from '../lib/native-back';
-import { channelStatsQueryKey, logsDashboardQueryKey } from '../lib/query-key-builders';
 import { useManagedEntitiesSync } from '../lib/use-managed-entities-sync';
 import {
   MANAGED_ENTITIES_VISIBILITY_REFRESH_MIN_HIDDEN_MS,
@@ -112,13 +111,12 @@ type WindowWithIdleCallback = {
 const CHAT_CARD_STAGGER_STEP_MS = 45;
 const CHAT_CARD_STAGGER_LIMIT = 10;
 const CHAT_CARD_STAGGER_THRESHOLD = 24;
-const DEFAULT_DASHBOARD_RANGE = '24h';
-const DEFAULT_CHANNEL_STATS_RANGE = '7d';
 const HOME_MANAGED_ENTITIES_VISIBILITY_REFRESH_MIN_INTERVAL_MS = 2_000;
 const CHAT_LIST_VIRTUALIZATION_THRESHOLD = 80;
 const CHAT_LIST_VIRTUAL_OVERSCAN = 6;
 const CHAT_LIST_ROW_HEIGHT = 132;
 const CHAT_LIST_VIRTUAL_ROW_PITCH = CHAT_LIST_ROW_HEIGHT + 8;
+const COMPOSITION_ROW_HEIGHT = 64;
 const CHAT_LIST_VIRTUAL_WINDOW_SIZE = 20;
 const FAVORITE_FILTER_ALL = 'all';
 
@@ -152,6 +150,7 @@ function preloadHomeEntitySheets() {
   return homeEntitySheetsPromise;
 }
 const LazyHomeEntitySheets = lazy(preloadHomeEntitySheets);
+const LazyHomeCategoryEditorRow = lazy(() => import('./home-category-editor'));
 const LazyEntityPresentationLoader = lazy(() => import('../lib/entity-presentation-loader'));
 const LazyHomeListStatus = lazy(() =>
   import('./home-list-status').catch(() => ({
@@ -223,6 +222,33 @@ function buildEntityRouteState(entityType: ManagedTab, entity: ManagedHomeEntity
   return {
     chatTitle: entity.title,
     avatarUrl: entity.avatarUrl ?? null,
+  };
+}
+
+function readCompositionReturn(
+  state: unknown,
+  type: ManagedTab,
+  category?: ManagedEntityFavoriteType,
+) {
+  if (!category || !state || typeof state !== 'object' || !('networkCompositionReturnTo' in state))
+    return null;
+  const path = state.networkCompositionReturnTo;
+  if (typeof path !== 'string' || !path.startsWith('/networks?')) return null;
+  const params = new URLSearchParams(path.slice('/networks?'.length));
+  if (
+    params.get('type') !== type ||
+    params.get('category') !== category ||
+    params.get('tab') !== 'communities'
+  )
+    return null;
+  const range = params.get('range') === '30d' ? '30d' : '7d';
+  return {
+    path: `/networks?${new URLSearchParams({ type, range, category, tab: 'communities' })}`,
+    originIndex:
+      'networkCompositionOriginIndex' in state &&
+      typeof state.networkCompositionOriginIndex === 'number'
+        ? state.networkCompositionOriginIndex
+        : null,
   };
 }
 
@@ -305,12 +331,19 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   const [favoritePicker, setFavoritePicker] = useState<{
     entityType: ManagedTab;
     entity: ManagedHomeEntity;
+    fromCategory?: ManagedEntityFavoriteType;
   } | null>(null);
   const [favoriteFilterPickerOpen, setFavoriteFilterPickerOpen] = useState(false);
   const [favoriteLabelsEditorOpen, setFavoriteLabelsEditorOpen] = useState(false);
   const [connectSheetOpen, setConnectSheetOpen] = useState(false);
   const [categoryEditMode, setCategoryEditMode] = useState(Boolean(requestedCategory));
   const [savingFavoriteEntityKey, setSavingFavoriteEntityKey] = useState<string | null>(null);
+  const compositionCategory = categoryEditMode ? requestedCategory : undefined;
+  const assignmentState = favoritesSnapshot.byType[activeTab];
+  const compositionReady =
+    assignmentState.assignmentsComplete || assignmentState.hasAcknowledgedRowEdits;
+  const rowHeight = compositionCategory ? COMPOSITION_ROW_HEIGHT : CHAT_LIST_ROW_HEIGHT;
+  const rowPitch = compositionCategory ? COMPOSITION_ROW_HEIGHT : CHAT_LIST_VIRTUAL_ROW_PITCH;
   const homeOverlayOpen =
     connectSheetOpen ||
     Boolean(favoritePicker) ||
@@ -612,10 +645,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     });
   }, [filteredEntities.length, virtualizationCanInitialize, virtualizationContextKey]);
   const virtualStartIndex = shouldVirtualizeEntities
-    ? Math.max(
-        0,
-        Math.floor(virtualListScrollTop / CHAT_LIST_VIRTUAL_ROW_PITCH) - CHAT_LIST_VIRTUAL_OVERSCAN,
-      )
+    ? Math.max(0, Math.floor(virtualListScrollTop / rowPitch) - CHAT_LIST_VIRTUAL_OVERSCAN)
     : 0;
   const virtualEndIndex = shouldVirtualizeEntities
     ? Math.min(filteredEntities.length, virtualStartIndex + CHAT_LIST_VIRTUAL_WINDOW_SIZE)
@@ -777,7 +807,10 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     if (requestedCategory) {
       setQuery('');
       setFavoriteFilter(requestedCategory);
-      const frame = window.requestAnimationFrame(() => categoryEditDoneRef.current?.focus());
+      const frame = window.requestAnimationFrame(() => {
+        window.scrollTo({ top: 0, behavior: 'instant' });
+        categoryEditDoneRef.current?.focus({ preventScroll: true });
+      });
       return () => window.cancelAnimationFrame(frame);
     }
   }, [activeTab, requestedCategory, location.key]);
@@ -819,10 +852,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     let secondAnimationFrame = 0;
 
     if (resolution.kind === 'entity' && shouldVirtualizeEntities) {
-      const targetScrollTop = Math.max(
-        0,
-        resolution.index * CHAT_LIST_VIRTUAL_ROW_PITCH - resolution.offset,
-      );
+      const targetScrollTop = Math.max(0, resolution.index * rowPitch - resolution.offset);
       setVirtualListScrollTop(targetScrollTop);
       if (virtualListViewportRef.current) {
         virtualListViewportRef.current.scrollTop = targetScrollTop;
@@ -871,6 +901,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     isLoading,
     isSyncSettled,
     queryError,
+    rowPitch,
     shouldVirtualizeEntities,
   ]);
 
@@ -970,7 +1001,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [categoryEditMode, homeOverlayOpen]);
+  }, [categoryEditMode, homeOverlayOpen, savingFavoriteEntityKey, location.key, location.state]);
 
   useEffect(() => {
     if (showEmptyState) {
@@ -981,33 +1012,6 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   function prefetchChatSettings(chatId: string) {
     void chatId;
     void preloadSettingsPage().catch(() => undefined);
-  }
-
-  function prefetchChatEvents(chatId: string, preference: ManagedEntityStatsPreference) {
-    void preloadEventsPage().catch(() => undefined);
-    if (preference.section === 'participants') {
-      return;
-    }
-
-    const range = preference.range ?? DEFAULT_DASHBOARD_RANGE;
-    const includeModerationPreview = preference.section === 'moderation';
-    const includeActivityPreview = !includeModerationPreview;
-    void queryClient
-      .prefetchQuery({
-        queryKey: logsDashboardQueryKey(
-          chatId,
-          range,
-          includeActivityPreview,
-          includeModerationPreview,
-        ),
-        queryFn: async ({ signal }) => {
-          const client = await import('../lib/api/events-client');
-          return includeModerationPreview
-            ? client.getChatModerationDashboard(api, chatId, range, { signal })
-            : client.getChatActivityDashboard(api, chatId, range, { signal });
-        },
-      })
-      .catch(() => undefined);
   }
 
   function prefetchChannelSettings(chatId: string) {
@@ -1157,12 +1161,18 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     entityId: string,
     preference: ManagedEntityStatsPreference,
   ) {
-    if (entityType === 'channel') {
-      prefetchChannelStats(entityId, preference);
-      return;
-    }
-
-    prefetchChatEvents(entityId, preference);
+    const isChannel = entityType === 'channel';
+    void (isChannel ? preloadChannelStatsPage() : preloadEventsPage()).catch(() => undefined);
+    void import('./home-statistics-prefetch')
+      .then(({ prefetchChannelStats, prefetchChatEvents }) => {
+        (isChannel ? prefetchChannelStats : prefetchChatEvents)(
+          api,
+          queryClient,
+          entityId,
+          preference,
+        );
+      })
+      .catch(() => undefined);
   }
 
   function buildFavoriteEntityKey(entityType: ManagedTab, entityId: string) {
@@ -1196,6 +1206,14 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
   }
 
   function exitCategoryEditMode() {
+    if (compositionCategory && savingFavoriteEntityKey !== null) return;
+    const origin = readCompositionReturn(location.state, activeTab, compositionCategory);
+    if (origin) {
+      if (origin.originIndex !== null && readCurrentHistoryIndex() === origin.originIndex + 1)
+        navigate(-1);
+      else navigate(origin.path, { replace: true });
+      return;
+    }
     setFavoritePicker(null);
     setCategoryEditMode(false);
     if (requestedCategory) {
@@ -1238,21 +1256,29 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     entityType: ManagedTab,
     entityId: string,
     favoriteType: ManagedEntityFavoriteType | null,
+    expectedFavoriteType: ManagedEntityFavoriteType | null = getHomeEntityFavoriteTypes(
+      homeEntityFavorites,
+      entityType,
+      entityId,
+    )[0] ?? null,
   ) {
     if (savingFavoriteEntityKey !== null) {
       return;
     }
 
-    const expectedFavoriteType =
-      getHomeEntityFavoriteTypes(homeEntityFavorites, entityType, entityId)[0] ?? null;
     setSavingFavoriteEntityKey(buildFavoriteEntityKey(entityType, entityId));
     try {
-      const result = await favoritesActions.setFavorite({
-        entityType,
-        entityId,
-        expectedFavoriteType,
-        favoriteType,
-      });
+      const result = await favoritesActions.setFavorite(
+        {
+          entityType,
+          entityId,
+          expectedFavoriteType,
+          favoriteType,
+        },
+        readCompositionReturn(location.state, activeTab, compositionCategory)
+          ? 'on-return'
+          : 'immediate',
+      );
       setFavoritePicker((current) =>
         current?.entityType === entityType && current.entity.id === entityId ? null : current,
       );
@@ -1263,6 +1289,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
           tone: 'info',
         });
     } catch (error) {
+      if (compositionCategory) setFavoritePicker(null);
       pushToast({
         title:
           error instanceof ApiRequestError && error.status === 409
@@ -1276,29 +1303,6 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
         current === buildFavoriteEntityKey(entityType, entityId) ? null : current,
       );
     }
-  }
-
-  function prefetchChannelStats(chatId: string, preference: ManagedEntityStatsPreference) {
-    void preloadChannelStatsPage().catch(() => undefined);
-    const range = preference.range ?? DEFAULT_CHANNEL_STATS_RANGE;
-    void queryClient
-      .prefetchQuery({
-        queryKey: channelStatsQueryKey(chatId, range, 'overview'),
-        queryFn: async ({ signal }) => {
-          const { getChannelStats } = await import('../lib/api/channel-stats-client');
-          return getChannelStats(
-            api,
-            chatId,
-            range,
-            { signal },
-            {
-              includeActivityPreview: false,
-              mode: 'overview',
-            },
-          );
-        },
-      })
-      .catch(() => undefined);
   }
 
   useEffect(() => {
@@ -1366,8 +1370,8 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
     let style: CSSProperties | undefined;
     if (shouldVirtualizeEntities) {
       style = {
-        top: index * CHAT_LIST_VIRTUAL_ROW_PITCH,
-        height: CHAT_LIST_ROW_HEIGHT,
+        top: index * rowPitch,
+        height: rowHeight,
       };
       if (staggerIndex !== null) {
         style.animationDelay = `${staggerIndex * CHAT_CARD_STAGGER_STEP_MS}ms`;
@@ -1410,43 +1414,30 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
         data-entity-id={entity.id}
       >
         {categoryEditMode ? (
-          <button
-            type="button"
-            className="chat-card__primary-link chat-card__category-editor"
-            aria-label={`Выбрать категорию: ${title}. Сейчас: ${categoryLabel}`}
-            aria-haspopup="dialog"
-            aria-controls="home-sheet-favorite"
-            aria-expanded={pickerOpen}
-            disabled={savingFavoriteEntityKey !== null}
-            onPointerEnter={() => void preloadHomeEntitySheets()}
-            onPointerDown={() => void preloadHomeEntitySheets()}
-            onClick={(event) => {
-              if (savingFavoriteEntityKey !== null) {
-                return;
-              }
-              homeOverlayTriggerRef.current = event.currentTarget;
-              setFavoritePicker({ entityType: activeTab, entity });
-            }}
-          >
-            <EntityAvatar
-              entityId={entity.id}
-              retryKey={`${entityPresentations[entity.id]?.observedAt ?? ''}:${refreshRequestByTab[activeTab].nonce}`}
-              title={title}
+          <Suspense fallback={null}>
+            <LazyHomeCategoryEditorRow
+              entity={entity}
               entityType={activeTab}
-              avatarUrl={entity.avatarUrl ?? null}
-              className="chat-card__avatar"
+              title={title}
+              retryKey={`${entityPresentations[entity.id]?.observedAt ?? ''}:${refreshRequestByTab[activeTab].nonce}`}
+              categoryLabel={categoryLabel}
+              primaryFavoriteType={primaryFavoriteType}
+              compositionCategory={compositionCategory}
+              disabled={
+                savingFavoriteEntityKey !== null ||
+                Boolean(compositionCategory && !compositionReady)
+              }
+              pickerOpen={pickerOpen}
+              onPrepare={preloadHomeEntitySheets}
+              onPick={(trigger, fromCategory) => {
+                homeOverlayTriggerRef.current = trigger;
+                setFavoritePicker({ entityType: activeTab, entity, fromCategory });
+              }}
+              onAdd={(category) =>
+                void handleSetHomeEntityFavoriteType(activeTab, entity.id, category, null)
+              }
             />
-            <span className="chat-card__title-wrap">
-              <h3>{title}</h3>
-              <span className={cn('chat-card__category-value', primaryFavoriteType && 'is-active')}>
-                <CategoryIcon aria-hidden focusable="false" />
-                <span>{categoryLabel}</span>
-              </span>
-            </span>
-            <span className="chat-card__chevron" aria-hidden>
-              <BackChevronIcon />
-            </span>
-          </button>
+          </Suspense>
         ) : (
           <Link
             to={settingsRoute}
@@ -1606,6 +1597,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
         'page-stack page-enter chats-home',
         `chats-home--${activeTab}`,
         categoryEditMode && 'is-category-editing',
+        compositionCategory && 'is-composition-editing',
       )}
       data-design-variant={
         searchParams.get('preview') === '1' && searchParams.get('design') === 'editorial'
@@ -1637,6 +1629,14 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
             favoriteLabelOverrides={homeEntityFavoriteLabels}
             favoriteStorageScope={favoriteStorageScope}
             favoriteCounts={favoriteCounts}
+            membership={
+              compositionCategory && favoritePicker?.fromCategory
+                ? {
+                    from: favoritePicker.fromCategory,
+                    target: compositionCategory,
+                  }
+                : null
+            }
             selectedFavoriteType={selectedSheetFavoriteType}
             favoriteSaving={sheetFavoriteSaving}
             favoriteLabelsStatus={favoriteLabelsStatus}
@@ -1653,6 +1653,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
                   favoritePicker.entityType,
                   favoritePicker.entity.id,
                   favoriteType,
+                  favoritePicker.fromCategory,
                 );
               }
             }}
@@ -1675,8 +1676,17 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
         <div className="chats-command__identity">
           <span className="chats-command__mark catalogue-heading-mark" aria-hidden />
           <div className="chats-command__brand">
-            <h1>{tabLabel}</h1>
-            {!isLoading && activeEntities ? (
+            <h1>{compositionCategory ? favoriteLabels[compositionCategory] : tabLabel}</h1>
+            {compositionCategory ? (
+              compositionReady ? (
+                <span
+                  className="chats-command__count"
+                  aria-label={`В сетке: ${homeEntityFavorites[activeTab][compositionCategory].length}`}
+                >
+                  {homeEntityFavorites[activeTab][compositionCategory].length}
+                </span>
+              ) : null
+            ) : !isLoading && activeEntities ? (
               <span className="chats-command__count">{activeEntities.length}</span>
             ) : null}
           </div>
@@ -1783,6 +1793,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
               ref={categoryEditDoneRef}
               type="button"
               className="chats-command__done"
+              disabled={Boolean(compositionCategory && savingFavoriteEntityKey)}
               onClick={exitCategoryEditMode}
             >
               Готово
@@ -1811,9 +1822,26 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
             </div>
           )}
         </div>
+        {compositionCategory && !compositionReady && !savingFavoriteEntityKey ? (
+          <div className="chats-command__saving" role="status">
+            {assignmentState.status === 'loading' ? (
+              'Загружаем состав…'
+            ) : (
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={() =>
+                  void favoritesActions.refreshAssignments(activeTab).catch(() => undefined)
+                }
+              >
+                Обновить состав
+              </button>
+            )}
+          </div>
+        ) : null}
         {savingFavoriteEntityKey !== null && !favoritePicker ? (
           <p className="chats-command__saving" role="status">
-            Сохраняем категорию… Подождите перед следующим изменением.
+            Сохраняем…
           </p>
         ) : null}
         {!categoryEditMode ? (
@@ -1848,17 +1876,9 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
       </GlassCard>
 
       {showTransientEmptyState ? (
-        <div className="chats-route-state chats-transient-state">
-          <StatusState
-            tone="warning"
-            title="Пока не удалось обновить список"
-            description={
-              manualRefreshRetryAfterSec
-                ? `Повторим автоматически через ${manualRefreshRetryAfterSec} с.`
-                : 'Повторим автоматически.'
-            }
-          />
-        </div>
+        <Suspense fallback={null}>
+          <LazyHomeListStatus kind="transient" retryAfterSec={manualRefreshRetryAfterSec} />
+        </Suspense>
       ) : null}
 
       {isLoading ? (
@@ -1886,26 +1906,17 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
       ) : null}
 
       {queryError ? (
-        <div className="chats-route-state">
-          <StatusState
-            tone="danger"
-            title="Не удалось загрузить список"
+        <Suspense fallback={null}>
+          <LazyHomeListStatus
+            kind="error"
             description={
               queryErrorPresentation?.error === queryError
                 ? queryErrorPresentation.description
                 : 'Попробуйте ещё раз.'
             }
-            action={
-              <button
-                type="button"
-                className="button button--danger"
-                onClick={() => handleRefresh(activeTab, 'manual')}
-              >
-                Повторить
-              </button>
-            }
+            onRetry={() => handleRefresh(activeTab, 'manual')}
           />
-        </div>
+        </Suspense>
       ) : null}
 
       {isSyncPending && Array.isArray(activeEntities) && activeEntities.length === 0 ? (
@@ -1978,7 +1989,7 @@ export function ChatsPage({ api }: { api: ApiTransport; botUrl: string | null })
           {shouldVirtualizeEntities ? (
             <div
               className="chat-grid__virtual-spacer"
-              style={{ height: filteredEntities.length * CHAT_LIST_VIRTUAL_ROW_PITCH }}
+              style={{ height: filteredEntities.length * rowPitch }}
             >
               {renderedEntities.map((entity, index) =>
                 renderEntityCard(entity, virtualStartIndex + index),
