@@ -462,6 +462,49 @@ test(
 );
 
 test(
+  'native message action cohorts distinguish slow cleanup from fast notice sends',
+  native,
+  async (t) => {
+    const f = await fixture(t);
+    const anchor = Date.now() - 60_000;
+    const common = {
+      source: 'moderation_notice',
+      completed: time(anchor, 0),
+      scheduledForAt: time(anchor, -9000),
+      scheduleClockState: 'VALID',
+      enqueued: time(anchor, -120_000),
+    };
+    await insert(f.client, [
+      { ...common, action: 'DELETE_MESSAGE', lane: 'background', attempt: time(anchor, -1000) },
+      { ...common, action: 'SEND_MESSAGE', lane: 'interactive', attempt: time(anchor, -8900) },
+      { ...common, action: 'DELETE_MESSAGE', lane: 'critical', attempt: time(anchor, -8800) },
+      { ...common, action: 'BAN_MEMBER', lane: 'critical', attempt: time(anchor, -8900) },
+      {
+        ...common,
+        action: 'DELETE_MESSAGE',
+        source: 'private-source',
+        lane: 'private-class',
+        attempt: time(anchor, -1000),
+      },
+    ]);
+    const value = await report(f);
+    const dimension = 'message_action_source_class';
+    assert.equal(group(value, 'source', 'moderation_notice').row_count, 4);
+    for (const [key, delay] of [
+      ['DELETE_MESSAGE/moderation_notice/background', 8000],
+      ['SEND_MESSAGE/moderation_notice/interactive', 100],
+      ['DELETE_MESSAGE/moderation_notice/critical', 200],
+      ['DELETE_MESSAGE/OTHER/OTHER', 8000],
+    ]) {
+      const row = group(value, dimension, key);
+      assert.equal(row.row_count, 1);
+      assert.equal(row.ready_to_last_attempt.p95_ms, delay);
+    }
+    assert.equal(value.groups.filter((row) => row.dimension === dimension).length, 4);
+  },
+);
+
+test(
   'native maximum finite dimension diversity fits the actual 8 MiB temporary-file budget',
   native,
   async (t) => {
@@ -479,9 +522,28 @@ test(
     const value = await report(f);
     assert.equal(value.sample_count, 5000);
     assert.equal(value.sample_complete, true);
+    const cohortKeys = ['DELETE_MESSAGE', 'SEND_MESSAGE'].flatMap((action) =>
+      ACTION_LATENCY_SOURCES.flatMap((source) =>
+        lanes.map((lane) => [action, source, lane].join('/')),
+      ),
+    );
     assert.equal(
       value.groups.length,
-      1 + actions.length + outcomes.length + ACTION_LATENCY_SOURCES.length + lanes.length,
+      1 +
+        actions.length +
+        outcomes.length +
+        ACTION_LATENCY_SOURCES.length +
+        lanes.length +
+        cohortKeys.length,
+    );
+    const messageCohorts = value.groups.filter(
+      (row) => row.dimension === 'message_action_source_class',
+    );
+    assert.deepEqual(messageCohorts.map((row) => row.key).sort(), cohortKeys.sort());
+    assert.equal(
+      messageCohorts.reduce((sum, row) => sum + row.row_count, 0),
+      group(value, 'action', 'DELETE_MESSAGE').row_count +
+        group(value, 'action', 'SEND_MESSAGE').row_count,
     );
     for (const [dimension, keys] of [
       ['action', actions],
