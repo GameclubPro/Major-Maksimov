@@ -111,7 +111,13 @@ finalization or failure handling. These measurements cannot locate a webhook sta
 prove a SQL bottleneck or establish a successful remote effect.
 
 Groups are fixed overall, action, terminal outcome, reviewed source label and traffic
-class. Unknown labels become `OTHER`, missing text dimensions become `MISSING`; raw
+class.
+Message sends and deletes also have a combined `message_action_source_class`
+group with an `ACTION/source/class` key. This uses the same selected rows and
+already classified labels, including `OTHER` and `MISSING`. For example,
+`DELETE_MESSAGE/moderation_notice/background` isolates notice cleanup from
+`SEND_MESSAGE/moderation_notice/interactive`. Use the selected group's sample
+counts and clocks to compare cohorts. These groups overlap the existing totals. Unknown labels become `OTHER`, missing text dimensions become `MISSING`; raw
 labels and identifiers never leave SQL. No per-bot grouping, content, schedule values,
 error text, failure codes or tokens are emitted. An unrecognized enum outcome is
 `OTHER`. `FAILED_RETRYABLE` with `terminal=true` is a terminal ledger outcome and can

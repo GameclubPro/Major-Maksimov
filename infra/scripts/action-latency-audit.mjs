@@ -247,6 +247,10 @@ heads AS MATERIALIZED (
   FROM observations CROSS JOIN LATERAL (VALUES
     ('action',action),('outcome',outcome),('source',source),('traffic_class',traffic_class)
   ) d(dimension,key) GROUP BY d.dimension,d.key
+  UNION ALL
+  SELECT 'message_action_source_class',action||'/'||source||'/'||traffic_class,count(*),${aggregate}
+  FROM observations WHERE action IN ('DELETE_MESSAGE','SEND_MESSAGE')
+  GROUP BY action,source,traffic_class
 )
 SELECT json_build_object('schema_version',1,'audit','action_latency',
   'basis','terminal_outcomes','window_basis','completed_at','action_start_basis','max_enqueued_at_scheduled_for',
