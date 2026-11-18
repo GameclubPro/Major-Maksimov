@@ -933,7 +933,7 @@ for (const profile of profiles.filter(
 
     const memberSearch = page.getByRole('searchbox', { name: 'Поиск в составе', exact: true });
     const membersUrl = page.url();
-    const membershipCount = page.locator('.network-community-heading > .networks-caption');
+    const membershipCount = page.locator('.network-workspace-heading .compact-page-header__subtitle');
     const membersCount = await membershipCount.innerText();
     await memberSearch.fill('нет-такого-сообщества-82931');
     await page
@@ -1014,13 +1014,13 @@ for (const profile of profiles.filter(
     await homeSearch.fill(changedCommunityTitle);
     const categoryEditor = page.locator('.chat-card__category-editor').first();
     await categoryEditor.click();
-    const favoriteSheet = page.locator('.home-sheet--favorite');
+    const favoriteSheet = page.locator('.home-sheet--membership');
     await favoriteSheet.waitFor();
     await back(page);
     await favoriteSheet.waitFor({ state: 'hidden' });
     assert.equal(await page.locator('.chats-home.is-category-editing').count(), 1);
     await categoryEditor.click();
-    await favoriteSheet.locator('.favorite-picker__option.is-watch').click();
+    await favoriteSheet.getByRole('button', { name: 'Убрать', exact: true }).click();
     await favoriteSheet.waitFor({ state: 'hidden' });
     await homeSearch.focus();
     await setPhoneKeyboard(page, { mode: 'resize', height: 230 });
@@ -1036,14 +1036,14 @@ for (const profile of profiles.filter(
     });
     if (profile.name === 'iphone-se-dark') await back(page);
     else await done.click();
-    await page.locator('.chats-home:not(.is-category-editing)').waitFor();
-    assert.equal(new URL(page.url()).searchParams.has('editCategory'), false);
-    assert.equal(
-      await page.locator('.home-category-chip.is-important').getAttribute('aria-pressed'),
-      'true',
-    );
-    await page.goBack();
     await page.locator('.network-community-list').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('category'), 'important');
+    assert.equal(new URL(page.url()).searchParams.get('tab'), 'communities');
+    assert.equal(
+      await page.getByRole('searchbox', { name: 'Поиск в составе' }).inputValue(),
+      '',
+      'the composition list retains its previous query',
+    );
     assert.equal(await page.locator('.network-composition-sheet').count(), 0);
     await configure.click();
     const changedCompositionScope = await settingsHub(page, {

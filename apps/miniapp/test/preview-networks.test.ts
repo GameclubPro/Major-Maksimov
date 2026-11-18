@@ -17,6 +17,12 @@ test('preview network catalogue is separate by type and includes server membersh
   assert.notEqual(chats.compositionVersion, channels.compositionVersion);
   const important = chats.items.find((item) => item.favoriteType === 'important')!;
   assert.ok(important.entityCount > 50);
+  const category = await getManagedEntityNetworkEntries(api, 'chat', {
+    favoriteType: 'important',
+    limit: 1,
+  });
+  assert.equal(category.compositionVersion, important.compositionVersion);
+
   assert.notEqual(important.compositionVersion, chats.compositionVersion);
   const first = await getManagedEntityNetworkEntries(api, 'chat', {
     favoriteType: 'important',

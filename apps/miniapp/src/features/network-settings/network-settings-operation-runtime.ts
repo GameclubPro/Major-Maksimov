@@ -14,10 +14,12 @@ import {
 } from '../../lib/api/network-settings-client';
 import {
   mergeNetworkSettingsReceipt,
+  removeNetworkSettingsOperationReceipt,
   type NetworkSettingsOperationReceipt,
 } from '../../lib/network-settings-operation-storage';
 import type { NetworkSettingsEditorScope } from '../../lib/network-settings-workspace-state';
 import {
+  NetworkSettingsPreviewConflict,
   assertOperationIdentity,
   assertNetworkSettingsOperationCurrent,
   canonicalNetworkValue,
@@ -122,7 +124,21 @@ export async function prepareNetworkSettingsOperation(input: {
       ...(state.navigationAllowlist ? { navigationAllowlist: state.navigationAllowlist } : {}),
     },
     () => assertNetworkSettingsOperationCurrent(isCurrent),
-  );
+  ).catch(async (error: unknown) => {
+    const { ApiRequestError } = await import('../../lib/api-request-error');
+    // FLAG: This rejection belongs only to preview. A dispatched apply always keeps its receipt.
+    if (
+      error instanceof ApiRequestError &&
+      error.status === 409 &&
+      error.code === 'NETWORK_SETTINGS_CHANGED'
+    ) {
+      await removeNetworkSettingsOperationReceipt(initial.userId, operationId, {
+        unconfirmedOnly: true,
+      });
+      throw new NetworkSettingsPreviewConflict(error.message);
+    }
+    throw error;
+  });
   if (!isCurrent()) return;
   if (
     result.operationId !== operationId ||

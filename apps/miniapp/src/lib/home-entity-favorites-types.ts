@@ -18,11 +18,15 @@ export type ManagedEntityNetworkKey = {
   favoriteType: ManagedEntityFavoriteType;
 };
 export type HomeEntityFavoritesLoadStatus = 'idle' | 'loading' | 'ready' | 'error';
-export type HomeEntityFavoriteWriteResult<T> = { response: T; refresh: 'complete' | 'pending' };
+export type HomeEntityFavoriteWriteResult<T> = {
+  response: T;
+  refresh: 'complete' | 'pending' | 'on-return';
+};
 export type HomeEntityFavoritesTypeSnapshot = {
   compositionEpoch: number;
   typeCompositionVersion: string | null;
   assignmentsComplete: boolean;
+  hasAcknowledgedRowEdits: boolean;
   catalogue: ManagedEntityNetworksResponse | null;
   catalogueStale: boolean;
   status: HomeEntityFavoritesLoadStatus;
@@ -52,6 +56,7 @@ export type HomeEntityFavoritesActions = {
   }): void;
   setFavorite(
     change: ManagedEntityNetworkCompositionChange & { entityType: ManagedEntityType },
+    refresh?: 'immediate' | 'on-return',
   ): Promise<HomeEntityFavoriteWriteResult<ManagedEntityFavoritesResponse>>;
   commitComposition(input: {
     entityType: ManagedEntityType;
@@ -62,3 +67,17 @@ export type HomeEntityFavoritesActions = {
     draftLabels: HomeEntityFavoriteLabelOverrides;
   }): Promise<ManagedEntityFavoriteLabelsResponse>;
 };
+export class FavoriteLabelConflictError extends Error {
+  constructor(
+    readonly latestLabels: HomeEntityFavoriteLabelOverrides,
+    readonly currentLabel: string,
+  ) {
+    super(`Название уже изменилось на «${currentLabel}».`);
+  }
+}
+
+export class FavoriteLabelDuplicateError extends Error {
+  constructor(readonly label: string) {
+    super(`Название «${label}» уже занято.`);
+  }
+}

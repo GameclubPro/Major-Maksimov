@@ -1,10 +1,24 @@
+import { z } from 'zod';
+import type { FastifyRequest } from 'fastify';
 import { NetworkSettingsMetadataService } from './network-settings-metadata.service';
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { InitDataGuard } from '../auth/init-data.guard';
 import { MiniappProfiles } from '../auth/miniapp-profile';
 import { CurrentUser, type AuthUser } from '../common/decorators/current-user.decorator';
 import { NetworkSettingsService } from './network-settings.service';
 import { MajorNetworksGuard } from './major-networks.guard';
+
+const pagingSchema = z.literal('adaptive').optional();
 
 @Controller('v1/networks/settings')
 @UseGuards(InitDataGuard)
@@ -31,8 +45,18 @@ export class NetworkSettingsController {
   }
   @Post('read')
   @UseGuards(MajorNetworksGuard)
-  read(@CurrentUser() user: AuthUser, @Body() body: unknown) {
-    return this.settings.read(user, body);
+  read(
+    @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
+    @Query('paging') paging: unknown,
+    @Req() request: FastifyRequest,
+  ) {
+    const parsed = pagingSchema.safeParse(paging);
+    if (!parsed.success) throw new BadRequestException('Некорректный режим чтения.');
+    return this.settings.read(user, body, {
+      adaptive: parsed.data === 'adaptive',
+      disconnected: () => request.raw.socket.destroyed,
+    });
   }
   @Post('navigation-allowlist/read')
   @UseGuards(MajorNetworksGuard)

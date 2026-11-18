@@ -37,6 +37,10 @@ import {
   sanitizeHomeEntityFavoriteLabels,
   type HomeEntityFavoriteLabelOverrides,
 } from '../lib/home-entity-favorites';
+import {
+  FavoriteLabelConflictError,
+  FavoriteLabelDuplicateError,
+} from '../lib/home-entity-favorites-types';
 import { useHomeEntityFavorites } from '../lib/home-entity-favorites-context';
 import { openMaxBotLinkAndClose } from '../lib/max-bridge';
 import { useNativeBackHandler } from '../lib/native-back';
@@ -63,6 +67,7 @@ type HomeEntitySheetsProps = {
   favoriteCounts: Record<ManagedEntityFavoriteType, number>;
   selectedFavoriteType: ManagedEntityFavoriteType | null;
   favoriteSaving: boolean;
+  membership: { from: ManagedEntityFavoriteType; target: ManagedEntityFavoriteType } | null;
   favoriteLabelsStatus: 'loading' | 'ready' | 'api' | 'chunk';
   onClose: () => void;
   onFilterChange: (filter: FavoriteFilter) => void;
@@ -364,7 +369,11 @@ function HomeFavoriteLabelsEditor({
       if (!controller.signal.aborted && saveControllerRef.current === controller) {
         pushToast({
           title: 'Не удалось сохранить названия',
-          description: describeApiError(error, 'Проверьте соединение и попробуйте ещё раз.'),
+          description:
+            error instanceof FavoriteLabelDuplicateError ||
+            error instanceof FavoriteLabelConflictError
+              ? error.message
+              : describeApiError(error, 'Проверьте соединение и попробуйте ещё раз.'),
           tone: 'danger',
         });
       }
@@ -464,6 +473,48 @@ export default function HomeEntitySheets(props: HomeEntitySheetsProps) {
         onClose={props.onClose}
         onSaved={props.onFavoriteLabelsSaved}
       />
+    );
+  }
+
+  if (props.favoriteTarget && props.membership) {
+    const { from, target } = props.membership;
+    const remove = from === target;
+    return (
+      <HomeSheet
+        sheetKey="membership"
+        title={
+          remove
+            ? `Убрать из «${props.favoriteLabels[target]}»?`
+            : `Перенести в «${props.favoriteLabels[target]}»?`
+        }
+        subtitle={
+          remove
+            ? props.favoriteTarget.entity.title
+            : `${props.favoriteTarget.entity.title} · сейчас в «${props.favoriteLabels[from]}»`
+        }
+        overlayStyle={overlayStyle}
+        onClose={props.onClose}
+      >
+        <div className="favorite-label-editor__actions">
+          <button
+            type="button"
+            className="button button--ghost"
+            disabled={props.favoriteSaving}
+            onClick={props.onClose}
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            className="button button--accent"
+            disabled={props.favoriteSaving}
+            aria-busy={props.favoriteSaving}
+            onClick={() => props.onFavoriteChange(remove ? null : target)}
+          >
+            {props.favoriteSaving ? 'Сохраняем…' : remove ? 'Убрать' : 'Перенести'}
+          </button>
+        </div>
+      </HomeSheet>
     );
   }
 

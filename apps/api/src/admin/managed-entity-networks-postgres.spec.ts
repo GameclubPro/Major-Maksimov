@@ -155,6 +155,17 @@ integration('managed network composition with PostgreSQL', () => {
             title,
           })),
         );
+        for (const literal of ['%', '_']) {
+          expect((await service.entries(user, entityType, { search: literal })).items).toEqual([]);
+        }
+        expect(
+          (await service.entries(user, entityType, { search: 'сОхРаНёНноЕ' })).items.map(
+            (row) => row.id,
+          ),
+        ).toEqual([chatIds[1]]);
+        expect(
+          (await service.entries(user, entityType, { search: 'Старое название' })).items,
+        ).toEqual([]);
         expect(second.nextCursor).toBeNull();
         expect(
           await db.chat.findMany({
@@ -244,6 +255,32 @@ integration('managed network composition with PostgreSQL', () => {
           changes: [{ entityId: id, expectedFavoriteType: null, favoriteType: 'important' }],
         }),
       ).rejects.toBeInstanceOf(ForbiddenException);
+    }
+  });
+
+  it('keeps a category cursor after an unrelated change and invalidates it when a member loses access', async () => {
+    await service.updateComposition(user, 'chat', {
+      changes: ids
+        .slice(0, 2)
+        .map((entityId) => ({ entityId, favoriteType: 'important', expectedFavoriteType: null })),
+    });
+    const scope = { favoriteType: 'important', limit: 1 };
+    const page = await service.entries(user, 'chat', scope);
+    expect(page.nextCursor).toBeTruthy();
+    await service.updateComposition(user, 'chat', {
+      changes: [{ entityId: ids[2], expectedFavoriteType: null, favoriteType: 'watch' }],
+    });
+    const next = await service.entries(user, 'chat', { ...scope, cursor: page.nextCursor });
+    expect(next.compositionVersion).toBe(page.compositionVersion);
+    expect(next.items.map((row) => row.id)).toEqual([ids[1]]);
+    const edge = { chatId_userId_botId: { chatId: ids[1], userId: actor, botId: bot } };
+    await db.managedEntityAccessEdge.update({ where: edge, data: { state: 'USER_DENIED' } });
+    try {
+      await expect(
+        service.entries(user, 'chat', { ...scope, cursor: page.nextCursor }),
+      ).rejects.toBeInstanceOf(ConflictException);
+    } finally {
+      await db.managedEntityAccessEdge.update({ where: edge, data: { state: 'GRANTED' } });
     }
   });
 

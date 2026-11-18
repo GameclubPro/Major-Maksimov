@@ -1,5 +1,4 @@
 import { lazy, Suspense, useEffect, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import type { ApiTransport } from '../lib/api/transport';
 import { GlassCard } from '../components/ui/glass-card';
 import { SettingsOverviewSearchPlaceholder } from '../components/ui/settings-overview-search-placeholder';
@@ -30,6 +29,7 @@ import '../styles/settings-tile-grid.css';
 import '../styles/settings-overview-steel.css';
 import '../components/ui/managed-entity-settings-header.css';
 
+const AdvertisingCapability = lazy(() => import('./settings/settings-advertising-capability'));
 const LazySettingsOverviewSearch = lazy(() =>
   import('../components/ui/settings-overview-search').then((module) => ({
     default: module.SettingsOverviewSearch,
@@ -56,28 +56,13 @@ export function NetworkSettingsOverview({
     target.mode === 'category'
       ? catalogue.cards.find((item) => item.favoriteType === target.favoriteType)
       : undefined;
+  const origin = readNetworkRoute(new URL(stored.returnTo, 'https://miniapp.invalid').search);
   const route = {
-    ...readNetworkRoute(new URL(stored.returnTo, 'https://miniapp.invalid').search),
+    ...origin,
     entityType,
-    favoriteType: target.mode === 'category' ? target.favoriteType : null,
+    favoriteType: target.mode === 'category' ? target.favoriteType : origin.favoriteType,
   };
 
-  const advertising = useQuery({
-    queryKey: ['advertising-placement-capability', stored.userId],
-    enabled: entityType === 'chat',
-    staleTime: 30_000,
-    retry: false,
-    queryFn: async () => {
-      const value = await api.request('/advertising-placement/capability');
-      return {
-        available:
-          typeof value === 'object' &&
-          value !== null &&
-          'available' in value &&
-          value.available === true,
-      };
-    },
-  });
   useEffect(() => {
     const className =
       entityType === 'chat' ? 'settings-home-page-open' : 'channel-settings-page-open';
@@ -106,7 +91,8 @@ export function NetworkSettingsOverview({
     </Suspense>
   );
   const entries = sections.map((entry) => {
-    if (isChat && entry.section === 'advertising' && !advertising.data?.available) return null;
+    const isAdvertising = isChat && entry.section === 'advertising';
+    if (isAdvertising && section) return null;
     const head = (
       <div className="settings-section__head settings-section__head--interactive">
         <SettingsSectionToggle
@@ -131,20 +117,31 @@ export function NetworkSettingsOverview({
           </section>
         </SettingsOverviewEntry>
       );
+    const card = (
+      <GlassCard
+        className={
+          isChat
+            ? `settings-section settings-home-entry${entry.entryVariant === 'plain' ? '' : ' settings-home-entry--' + (entry.entryVariant ?? 'list')}${entry.entryClassName ? ' ' + entry.entryClassName : ''} stagger-in`
+            : 'channel-settings-card' +
+              (entry.section === 'postSignature' ? ' channel-post-signature-entry' : '')
+        }
+        style={{ order: entry.order }}
+        elevated={!isChat}
+      >
+        {head}
+      </GlassCard>
+    );
     return (
       <SettingsOverviewEntry key={entry.section} order={entry.order}>
-        <GlassCard
-          className={
-            isChat
-              ? `settings-section settings-home-entry${entry.entryVariant === 'plain' ? '' : ' settings-home-entry--' + (entry.entryVariant ?? 'list')}${entry.entryClassName ? ' ' + entry.entryClassName : ''} stagger-in`
-              : 'channel-settings-card' +
-                (entry.section === 'postSignature' ? ' channel-post-signature-entry' : '')
-          }
-          style={{ order: entry.order }}
-          elevated={!isChat}
-        >
-          {head}
-        </GlassCard>
+        {isAdvertising ? (
+          <Suspense fallback={null}>
+            <AdvertisingCapability api={api} userId={stored.userId}>
+              {card}
+            </AdvertisingCapability>
+          </Suspense>
+        ) : (
+          card
+        )}
       </SettingsOverviewEntry>
     );
   });

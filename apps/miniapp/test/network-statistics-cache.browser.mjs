@@ -128,7 +128,11 @@ try {
           readyMs: Math.round(readyMs),
           statsRequests,
           cachedRequests,
-          settingsPages: calls.slice(readAt).filter((path) => path.endsWith('/read')).length,
+          settingsPages: calls
+            .slice(readAt)
+            .filter((path) =>
+              new URL(path, window.location.origin).pathname.endsWith('/networks/settings/read'),
+            ).length,
           settingsMs: Math.round(performance.now() - readStart),
         });
         if (size === 501) {
@@ -200,8 +204,8 @@ try {
     );
     assert.equal(
       row.settingsPages,
-      Math.ceil(row.size / 4),
-      'full server-resolved settings coverage',
+      Math.ceil(row.size / 16),
+      'full settings coverage through adaptive pages',
     );
   }
   console.log(

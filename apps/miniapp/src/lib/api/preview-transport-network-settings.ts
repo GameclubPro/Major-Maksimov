@@ -1,5 +1,6 @@
 import {
   networkSettingsReadRequestSchema,
+  NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT,
   networkSettingsPreviewRequestSchema,
   networkSettingsApplyRequestSchema,
   networkSettingsRequiredSubscriptionResolveRequestSchema,
@@ -134,8 +135,8 @@ function hash(value: unknown) {
   for (let i = 0; i < text.length; i++) n = Math.imul(n ^ text.charCodeAt(i), 16777619) >>> 0;
   return n.toString(16).padStart(8, '0').repeat(8);
 }
-function fail(status: number, message: string): never {
-  throw new ApiRequestError(status, '{}', message);
+function fail(status: number, message: string, code?: string): never {
+  throw new ApiRequestError(status, JSON.stringify({ code }), message);
 }
 function selection(state: PreviewState, request: NetworkSettingsReadRequest) {
   const rows = getPreviewNetworkEntities(state, request.entityType)
@@ -304,7 +305,8 @@ export async function handleNetworkSettingsPreviewRequest(context: PreviewReques
         fail(409, 'Состав изменился.');
       offset = cursor.offset;
     }
-    const rows = selected.rows.slice(offset, offset + 4);
+    const pageSize = context.url.searchParams.get('paging') === 'adaptive' ? NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT : 4;
+    const rows = selected.rows.slice(offset, offset + pageSize);
     const paths = settingsSectionPaths(request.entityType, request.section);
     const fields = Object.fromEntries(
       paths.map((path) => {
@@ -368,20 +370,21 @@ export async function handleNetworkSettingsPreviewRequest(context: PreviewReques
       canonical(selected.rows.map((row) => row.id).sort()) !==
         canonical(request.recipients.map((row) => row.entityId).sort())
     )
-      fail(409, 'Состав изменился.');
+      fail(409, 'Состав изменился.', 'NETWORK_SETTINGS_CHANGED');
     for (const recipient of request.recipients) {
       if (recipient.revision !== (store.revisions.get(recipient.entityId) ?? 1))
-        fail(409, 'Настройки изменились.');
+        fail(409, 'Настройки изменились.', 'NETWORK_SETTINGS_CHANGED');
       if (
         request.navigationAllowlist &&
         recipient.navigationAllowlistWitness?.revision !==
           witness(state, recipient.entityId).revision
       )
-        fail(409, 'Список изменился.');
+        fail(409, 'Список изменился.', 'NETWORK_SETTINGS_CHANGED');
     }
     const key = hash(request);
     let operation = store.operations.get(request.operationId);
-    if (operation && operation.hash !== key) fail(409, 'Другие изменения операции.');
+    if (operation && operation.hash !== key)
+      fail(409, 'Другие изменения операции.', 'NETWORK_SETTINGS_CHANGED');
     if (!operation) {
       operation = {
         request,

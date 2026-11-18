@@ -17,6 +17,7 @@ function sourceBetween(source: string, start: string, end: string): string {
 
 const appSource = readSource('../src/app.tsx');
 const shellSource = readSource('../src/components/shell.tsx');
+const prefetchSource = readSource('../src/pages/home-statistics-prefetch.ts');
 const homeSource = readSource('../src/pages/chats-page.tsx');
 const navigationSource = readSource('../src/lib/managed-entity-navigation.tsx');
 const navigationContextSource = readSource('../src/lib/managed-entity-navigation-context.ts');
@@ -344,10 +345,10 @@ test('canonical statistics routes sync query preferences into route state before
 test('Home prefetch uses the same persisted statistics preference as navigation', () => {
   assert.match(homeSource, /const statsPreference = readEntityStatsPreference\(entity\.id\)/u);
   assert.match(homeSource, /prefetchEntityActivity\(activeTab, entity\.id, statsPreference\)/u);
-  assert.match(homeSource, /const range = preference\.range \?\? DEFAULT_DASHBOARD_RANGE/u);
-  assert.match(homeSource, /preference\.section === 'participants'/u);
-  assert.match(homeSource, /client\.getChatModerationDashboard\(api, chatId, range/u);
-  assert.match(homeSource, /channelStatsQueryKey\(chatId, range, 'overview'\)/u);
+  assert.match(prefetchSource, /const range = preference\.range \?\? DEFAULT_DASHBOARD_RANGE/u);
+  assert.match(prefetchSource, /preference\.section === 'participants'/u);
+  assert.match(prefetchSource, /client\.getChatModerationDashboard\(api, chatId, range/u);
+  assert.match(prefetchSource, /channelStatsQueryKey\(chatId, range, 'overview'\)/u);
 });
 
 test('all managed detail screens provide authoritative identity to the shared header', () => {

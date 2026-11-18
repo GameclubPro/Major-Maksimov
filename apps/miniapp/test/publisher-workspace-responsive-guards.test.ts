@@ -60,7 +60,7 @@ test('Publik launches into its own entity catalog with Posts as a peer module', 
   assert.match(shellSource, /profile === 'moderation' && networksEnabled && 'bottom-nav--four'/u);
   assert.match(
     shellSource,
-    /\{profile === 'moderation' && networksEnabled \? \(\s*<Link\s+to="\/networks"/u,
+    /\{profile === 'moderation' && networksEnabled \? \(\s*<Link\s+to=\{\x60\/networks\?type=\$\{networksEntityType\}\x60\}/u,
   );
   assert.match(
     shellSource,

@@ -10,6 +10,7 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  RequestTimeoutException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,6 +27,7 @@ export function retentionOperationId(operationId: string, entityId: string): str
 }
 import {
   NETWORK_SETTINGS_OPERATION_READER_VERSION,
+  NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT,
   networkSettingsApplyRequestSchema,
   networkNavigationAllowlistReadRequestSchema,
   networkNavigationAllowlistReadResponseSchema,
@@ -73,6 +75,7 @@ import { assertStopWordsStorageEditable } from './stop-words-storage-boundary';
 const PREVIEW_TTL_MS = 10 * 60_000;
 const LEASE_MS = 5 * 60_000;
 const READ_PAGE_SIZE = 4;
+const ADAPTIVE_READ_BUDGET_MS = 200;
 const WORK_CHUNK_SIZE = 2;
 const ACTIVE_STATUSES = ['PREVIEWING', 'AUTHORIZING', 'RUNNING'];
 export { NETWORK_SETTINGS_OPERATION_READER_VERSION } from '@maxim/contracts/network-settings';
@@ -266,7 +269,12 @@ export class NetworkSettingsService {
     };
   }
 
-  async read(user: AuthUser, body: unknown) {
+  async read(
+    user: AuthUser,
+    body: unknown,
+    options: { adaptive?: boolean; disconnected?: () => boolean } = {},
+  ) {
+    const startedAt = performance.now();
     const request = parse(networkSettingsReadRequestSchema, body);
     const paths = networkSettingsPaths(request.entityType, request.section);
     const selection = await this.selection(user, request);
@@ -301,8 +309,31 @@ export class NetworkSettingsService {
     const snapshots = [];
     // FLAG: Every page binds to the complete server category; loading pages never truncates the
     // target category. Clients must finish all pages before treating values as network-wide.
-    for (const entityId of selection.entityIds.slice(offset, offset + READ_PAGE_SIZE))
+    const pageSize = options.adaptive ? NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT : READ_PAGE_SIZE;
+    for (const entityId of selection.entityIds.slice(offset, offset + pageSize)) {
+      if (options.disconnected?.()) throw new RequestTimeoutException();
+      // FLAG: Each strict recipient check finishes before starting the next. Only a fast
+      // read may exceed the legacy page, and a disconnected client receives no further probes.
+      if (
+        snapshots.length >= READ_PAGE_SIZE &&
+        performance.now() - startedAt >= ADAPTIVE_READ_BUDGET_MS
+      )
+        break;
       snapshots.push(await this.snapshot(user, request, entityId));
+    }
+    if (snapshots.length > READ_PAGE_SIZE && request.target.mode === 'category') {
+      const current = await this.selection(user, request);
+      if (current.compositionVersion !== selection.compositionVersion) throw changed();
+    }
+    const names = new Map(
+      (
+        await this.networks.readCommunityPresentations(
+          this.prisma,
+          request.entityType,
+          snapshots.map((snapshot) => snapshot.recipient.entityId),
+        )
+      ).map((row) => [row.id, row.title]),
+    );
     const nextOffset = offset + snapshots.length;
     const complete = nextOffset >= selection.entityIds.length;
     return networkSettingsReadResponseSchema.parse({
@@ -320,7 +351,12 @@ export class NetworkSettingsService {
         : Buffer.from(
             JSON.stringify({ binding, version: selection.compositionVersion, offset: nextOffset }),
           ).toString('base64url'),
-      recipients: snapshots.map((snapshot) => snapshot.recipient),
+      recipients: snapshots.map(({ recipient }) => ({
+        ...recipient,
+        title:
+          names.get(recipient.entityId) ??
+          (request.entityType === 'chat' ? 'Чат без названия' : 'Канал без названия'),
+      })),
       fields: snapshots.length
         ? commonNetworkSettingsFields(
             paths,

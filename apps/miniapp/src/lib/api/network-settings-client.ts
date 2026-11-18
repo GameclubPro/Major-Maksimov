@@ -29,7 +29,7 @@ export async function readNetworkSettingsPage(
   signal?: AbortSignal,
 ) {
   return networkSettingsReadResponseSchema.parse(
-    await post(api, 'read', networkSettingsReadRequestSchema.parse(input), signal),
+    await post(api, 'read?paging=adaptive', networkSettingsReadRequestSchema.parse(input), signal),
   );
 }
 export async function previewNetworkSettings(

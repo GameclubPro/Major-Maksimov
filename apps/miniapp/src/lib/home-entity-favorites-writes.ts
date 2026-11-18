@@ -22,6 +22,7 @@ function acknowledge(
   context: HomeEntityFavoritesWriteContext,
   type: ManagedEntityType,
   changes: readonly ManagedEntityNetworkCompositionChange[],
+  hasAcknowledgedRowEdits = false,
 ) {
   context.acceptWrite(type);
   let assignments = context.getSnapshot().assignments;
@@ -43,6 +44,7 @@ function acknowledge(
         ...current.byType[type],
         compositionEpoch: current.byType[type].compositionEpoch + 1,
         assignmentsComplete: false,
+        hasAcknowledgedRowEdits,
         catalogueStale: true,
         error: null,
       },
@@ -53,6 +55,7 @@ function acknowledge(
 export async function setHomeEntityFavorite(
   context: HomeEntityFavoritesWriteContext,
   change: Parameters<HomeEntityFavoritesActions['setFavorite']>[0],
+  refresh: 'immediate' | 'on-return',
 ) {
   const type = change.entityType;
   const response = await updateManagedEntityFavorites(
@@ -64,10 +67,16 @@ export async function setHomeEntityFavorite(
     { signal: context.signal },
   );
   context.assertActive();
-  if (response.entityType !== type || response.entityId !== change.entityId)
+  if (
+    response.entityType !== type ||
+    response.entityId !== change.entityId ||
+    response.favoriteTypes.length > 1 ||
+    (response.favoriteTypes[0] ?? null) !== change.favoriteType
+  )
     throw new Error('Неверный ответ сохранения.');
-  acknowledge(context, type, [{ ...change, favoriteType: response.favoriteTypes[0] ?? null }]);
-  return { response, refresh: await context.refresh(type) };
+  // Only the acknowledged row is current until the network catalogue is read again.
+  acknowledge(context, type, [change], refresh === 'on-return');
+  return { response, refresh: refresh === 'on-return' ? refresh : await context.refresh(type) };
 }
 
 export async function commitHomeEntityNetworkComposition(

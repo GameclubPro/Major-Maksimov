@@ -45,6 +45,13 @@ for (const [engine, viewport, colorScheme] of [
     assert.equal(await details.getAttribute('open'), null);
     assert.equal(await rows.count(), 50);
     assert.ok((await failures.innerText()).includes('Не применено · 120'));
+    assert.deepEqual(
+      await rows
+        .locator('strong')
+        .allTextContents()
+        .then((names) => names.slice(0, 2)),
+      ['Чат №1', 'Чат №2'],
+    );
     await failures.getByRole('button', { name: 'Показать ещё ошибки · 50' }).click();
     assert.equal(await rows.count(), 100);
     await failures.getByRole('button', { name: 'Показать ещё ошибки · 20' }).click();

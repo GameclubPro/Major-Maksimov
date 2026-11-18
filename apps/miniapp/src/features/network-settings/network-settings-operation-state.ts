@@ -1,5 +1,7 @@
 import type { NetworkSettingsOperationResponse } from '@maxim/contracts/network-settings';
 
+export class NetworkSettingsPreviewConflict extends Error {}
+
 export function canonicalNetworkValue(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonicalNetworkValue).join(',') + ']';
   if (value && typeof value === 'object')

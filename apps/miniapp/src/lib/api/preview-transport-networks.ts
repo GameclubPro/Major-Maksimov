@@ -70,7 +70,7 @@ export async function handleNetworksPreviewRequest(context: PreviewRequestContex
     const query = managedEntityNetworkEntriesQuerySchema.parse(
       Object.fromEntries(url.searchParams),
     );
-    const version = getPreviewNetworkVersion(state, type);
+    const version = getPreviewNetworkVersion(state, type, query.favoriteType);
     let offset = 0;
     if (query.cursor) {
       try {
@@ -103,7 +103,10 @@ export async function handleNetworksPreviewRequest(context: PreviewRequestContex
           (!query.favoriteType || row.favoriteTypes?.[0] === query.favoriteType) &&
           (!query.favoritesOnly || Boolean(row.favoriteTypes?.length)) &&
           (!query.search ||
-            row.title.toLocaleLowerCase('ru-RU').includes(query.search.toLocaleLowerCase('ru-RU'))),
+            row.title
+              .toLocaleLowerCase('ru-RU')
+              .includes(query.search.toLocaleLowerCase('ru-RU')) ||
+            row.id.includes(query.search)),
       )
       .sort((a, b) => a.id.localeCompare(b.id));
     const next = offset + query.limit;

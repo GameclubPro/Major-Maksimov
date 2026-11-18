@@ -30,6 +30,7 @@ const initialType = (): HomeEntityFavoritesTypeSnapshot => ({
   compositionEpoch: 0,
   typeCompositionVersion: null,
   assignmentsComplete: false,
+  hasAcknowledgedRowEdits: false,
   catalogue: null,
   catalogueStale: true,
   status: 'idle',
@@ -207,6 +208,7 @@ export class HomeEntityFavoritesSession {
       this.patchType(type, {
         ...this.acceptVersion(type, catalogue.compositionVersion),
         catalogue,
+        hasAcknowledgedRowEdits: false,
         assignmentsComplete: this.assignmentVersion[type] === catalogue.compositionVersion,
         catalogueStale: false,
         status: 'ready',
@@ -265,6 +267,7 @@ export class HomeEntityFavoritesSession {
             ...current.byType[type],
             ...version,
             assignmentsComplete: true,
+            hasAcknowledgedRowEdits: false,
             catalogueStale:
               current.byType[type].catalogue?.compositionVersion !== loaded.compositionVersion,
             status: 'ready',
@@ -369,6 +372,7 @@ export class HomeEntityFavoritesSession {
         this.assertActive();
         this.writeGeneration[type] += 1;
         this.abortTypeReads(type);
+        this.assignmentVersion[type] = null;
         this.awaitingWriteVersion[type] = true;
         this.protectedTypes.add(type);
       },
@@ -390,18 +394,34 @@ export class HomeEntityFavoritesSession {
     if (this.lifetime.signal.aborted) return;
     this.writeGeneration[type] += 1;
     this.abortTypeReads(type);
-    this.patchType(type, { catalogueStale: true, assignmentsComplete: false });
+    this.assignmentVersion[type] = null;
+    this.patchType(type, {
+      catalogueStale: true,
+      assignmentsComplete: false,
+      hasAcknowledgedRowEdits: false,
+    });
     // Read reconciliation only. A transport error never authorizes mutation replay.
     void this.refreshAfterWrite(type);
   }
-  setFavorite: HomeEntityFavoritesActions['setFavorite'] = async (change) => {
+  setFavorite: HomeEntityFavoritesActions['setFavorite'] = async (
+    change,
+    refresh = 'immediate',
+  ) => {
     const type = change.entityType;
+    const current = this.snapshot.byType[type];
+    if (
+      refresh === 'on-return' &&
+      !current.assignmentsComplete &&
+      !current.hasAcknowledgedRowEdits
+    ) {
+      throw new Error('Обновите состав перед изменением.');
+    }
     const pendingChange = { ...change };
     this.beginWrite(type);
     try {
       const { setHomeEntityFavorite } = await import('./home-entity-favorites-writes');
       this.assertActive();
-      return await setHomeEntityFavorite(this.writeContext(), pendingChange);
+      return await setHomeEntityFavorite(this.writeContext(), pendingChange, refresh);
     } catch (error) {
       this.failedWrite(type);
       throw error;

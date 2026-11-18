@@ -5,6 +5,9 @@ import { managedEntityFavoriteTypeSchema } from './managed-entity-favorite-type.
 import { managedEntityTypeSchema } from './managed-entity-type.js';
 export { applySettingsSectionSchema, type ApplySettingsSection } from './settings-sections.js';
 
+// Older readers request pages of four. Only clients advertising adaptive paging accept larger pages.
+export const NETWORK_SETTINGS_ADAPTIVE_PAGE_LIMIT = 16;
+
 export const networkSettingsTargetSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('category'), favoriteType: managedEntityFavoriteTypeSchema }).strict(),
   z

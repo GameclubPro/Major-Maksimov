@@ -69,7 +69,7 @@ test('folds the complete category beyond home pages and the explicit selection c
   const result = await readCompleteNetworkSettings(api, request);
   assert.ok(result.recipientCount > 500);
   assert.equal(result.recipients.length, result.recipientCount);
-  assert.equal(pages, Math.ceil(result.recipientCount / 4));
+  assert.equal(pages, Math.ceil(result.recipientCount / 16));
   assert.equal(result.fields.linkPolicy.kind, 'mixed');
   assert.equal(result.complete, true);
   assert.equal(result.nextCursor, null);

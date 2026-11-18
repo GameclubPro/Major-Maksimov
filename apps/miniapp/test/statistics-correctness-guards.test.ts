@@ -12,8 +12,8 @@ const channelStatsPageSource = [
 ]
   .map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
   .join('\n');
-const chatsPageSource = readFileSync(
-  new URL('../src/pages/chats-page.tsx', import.meta.url),
+const homePrefetchSource = readFileSync(
+  new URL('../src/pages/home-statistics-prefetch.ts', import.meta.url),
   'utf8',
 );
 const participantsRosterSource = readFileSync(
@@ -87,11 +87,11 @@ test('channel statistics keep overview and full request caches isolated', () => 
   );
   assert.match(channelStatsPageSource, /includeActivityPreview: false,\s*mode: 'full'/u);
   assert.match(
-    chatsPageSource,
+    homePrefetchSource,
     /const range = preference\.range \?\? DEFAULT_CHANNEL_STATS_RANGE/u,
   );
-  assert.match(chatsPageSource, /channelStatsQueryKey\(chatId, range, 'overview'\)/u);
-  assert.match(chatsPageSource, /includeActivityPreview: false,\s*mode: 'overview'/u);
+  assert.match(homePrefetchSource, /channelStatsQueryKey\(chatId, range, 'overview'\)/u);
+  assert.match(homePrefetchSource, /includeActivityPreview: false,\s*mode: 'overview'/u);
 });
 
 test('statistics navigation and chart controls retain explicit semantics', () => {

@@ -1,3 +1,4 @@
+import type { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { randomUUID } from 'node:crypto';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -9,7 +10,7 @@ import type {
 import { Prisma, PrismaClient, createPrismaAdapter } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { ManagedEntitiesService } from './managed-entities.service';
-import type { ManagedEntityNetworksService } from './managed-entity-networks.service';
+import { ManagedEntityNetworksService } from './managed-entity-networks.service';
 import { NetworkStatisticsObservationService } from './network-statistics-observation.service';
 import { NetworkAuthorizationService } from './network-authorization.service';
 import { NetworkStatisticsService, networkViewIntervalsSql } from './network-statistics.service';
@@ -25,6 +26,21 @@ const databaseUrl =
   process.env.MAXIM_TEST_POSTGRES_URL?.trim() ||
   '';
 const native = databaseUrl ? describe : describe.skip;
+function fixtureNetworks(
+  db: PrismaClient,
+  resolveSelection: ManagedEntityNetworksService['resolveSelection'],
+) {
+  return Object.assign(
+    new ManagedEntityNetworksService(
+      db as PrismaService,
+      {
+        getAllBots: () => [{ id: 'native-major' }],
+      } as unknown as MaxBotRegistryService,
+    ),
+    { resolveSelection },
+  );
+}
+
 native('network statistics native PostgreSQL observation and read boundaries', () => {
   let db: PrismaClient;
   let observations: NetworkStatisticsObservationService;
@@ -54,7 +70,7 @@ native('network statistics native PostgreSQL observation and read boundaries', (
     statistics = new NetworkStatisticsService(
       db as PrismaService,
       { assertManagedEntityReadAccess: authorize } as unknown as ManagedEntitiesService,
-      { resolveSelection } as unknown as ManagedEntityNetworksService,
+      fixtureNetworks(db, resolveSelection),
       new NetworkAuthorizationService(db as PrismaService),
     );
   });
@@ -97,6 +113,30 @@ native('network statistics native PostgreSQL observation and read boundaries', (
   });
   afterAll(async () => {
     await db?.$disconnect();
+  });
+
+  it('returns the catalogue display name for a channel with a placeholder title', async () => {
+    await db.chat.update({ where: { id: chatId }, data: { title: 'Channel ' + chatId } });
+    await db.managedBotChatCatalog.create({
+      data: {
+        botId: 'native-major',
+        chatId,
+        title: 'Новости',
+        entityType: 'CHANNEL',
+        status: 'PRESENTATION',
+      },
+    });
+    try {
+      const result = await statistics.read(actor, 'channel', {
+        favoriteType: 'important',
+        range: '7d',
+      });
+      expect(result.items[0]?.title).toBe('Новости');
+    } finally {
+      await db.managedBotChatCatalog.delete({
+        where: { botId_chatId: { botId: 'native-major', chatId } },
+      });
+    }
   });
 
   it('baselines old posts, records unchanged coverage and serializes duplicate/reordered sources', async () => {
@@ -803,13 +843,11 @@ native('network canonical current audience with independent PostgreSQL source au
     statistics = new NetworkStatisticsService(
       db as PrismaService,
       { assertManagedEntityReadAccess: authorize } as ManagedEntitiesService,
-      {
-        resolveSelection: async () => ({
-          entityIds: [entity.maxId, entity.maxId],
-          compositionVersion: entity.maxId,
-          label: 'Важные',
-        }),
-      } as unknown as ManagedEntityNetworksService,
+      fixtureNetworks(db, async () => ({
+        entityIds: [entity.maxId, entity.maxId],
+        compositionVersion: entity.maxId,
+        label: 'Важные',
+      })),
       new NetworkAuthorizationService(db as PrismaService),
       config,
       reader,

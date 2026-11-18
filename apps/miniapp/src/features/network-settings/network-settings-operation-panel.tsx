@@ -58,11 +58,18 @@ export function NetworkSettingsOperationPanel({
   ).length;
   const failures = operation.outcomes.filter((row) => row.status === 'FAILED');
   const otherOutcomes = operation.outcomes.filter((row) => row.status !== 'FAILED');
+  const recipientNumbers = new Map(
+    operation.outcomes.map((row, index) => [row.entityId, index + 1]),
+  );
   const outcomes = (rows: typeof operation.outcomes, limit: number) => (
     <ul className="network-settings-outcomes">
       {rows.slice(0, limit).map((row) => (
         <li key={row.entityId} data-outcome={row.status}>
-          <strong>{recipientTitles.get(row.entityId) || 'Сообщество'}</strong>
+          <strong>
+            {recipientTitles.get(row.entityId) ||
+              (operation.entityType === 'chat' ? 'Чат №' : 'Канал №') +
+                recipientNumbers.get(row.entityId)}
+          </strong>
           <span>{outcomeLabel(row)}</span>
           {row.failureMessage ? (
             <small>

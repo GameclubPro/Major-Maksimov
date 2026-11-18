@@ -115,6 +115,7 @@ export function NetworkSettingsRoute({ api, userId }: { api: ApiTransport; userI
       : stored.title;
   const openSection = (
     nextSection: import('@maxim/contracts/network-settings-read').NetworkSettingsSection,
+    initialSites = false,
   ) => {
     const last = listNetworkSettingsOperationReceipts(userId).find(
       (receipt) => receipt.scopeId === scopeId && receipt.section === nextSection,
@@ -130,7 +131,7 @@ export function NetworkSettingsRoute({ api, userId }: { api: ApiTransport; userI
           })
         : null;
     requestNavigation(
-      `/networks/${type}/settings/${nextSection}?${new URLSearchParams({ scope: fresh?.scopeId ?? scopeId })}`,
+      `/networks/${type}/settings/${nextSection}?${new URLSearchParams({ scope: fresh?.scopeId ?? scopeId, ...(initialSites ? { list: 'sites' } : {}) })}`,
     );
   };
   const scope = parsed?.success
@@ -154,7 +155,8 @@ export function NetworkSettingsRoute({ api, userId }: { api: ApiTransport; userI
           retryOfOperationId={stored.retryOfOperationId}
           returnTo={stored.returnTo}
           resumeOperationId={recovered.kind === 'resume' ? recovered.operationId : undefined}
-          onOpenLegacySites={() => openSection('stopWords')}
+          initialSites={scope.initialSection === 'stopWords' && query.get('list') === 'sites'}
+          onOpenLegacySites={() => openSection('stopWords', true)}
           onClose={() => requestNavigation(hubPath, { replace: true })}
         />
       ) : null}
