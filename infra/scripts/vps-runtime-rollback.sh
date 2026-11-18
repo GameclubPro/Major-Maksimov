@@ -570,6 +570,8 @@ if [[ -e /etc/maxim-release/installed || -L /etc/maxim-release/installed ]]; the
     "$release_policy_node" /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs pause-rollback >/dev/null || exit $?
 fi
 trap cleanup EXIT
+# shellcheck source=infra/scripts/lib/routing-index-online-prepare.sh
+source "$ROOT_DIR/infra/scripts/lib/routing-index-online-prepare.sh"
 # FLAG: Preserve the installed release-service prefix through its durable pause. New reader
 # floors run after that boundary and before any rollback environment, store or runtime work.
 maxim_topology_require_night_open_notice_cleanup_reader "$TARGET_FULL_SHA"
@@ -616,6 +618,9 @@ ensure_rollback_migrations_compatible
 maxim_check_deploy_disk_capacity 1 0
 require_market_statistics_lock_dispatch "$TARGET_FULL_SHA" || exit 1
 require_pair_release_admission_dispatch "$TARGET_FULL_SHA" || exit 1
+# FLAG: Use the current controller to attest the target before checking out its
+# source. The deploy lock remains held through the image build and rollback.
+maxim_routing_index_require_release "$TARGET_FULL_SHA" COMPOSE_FILES "" ROUTING_INDEX_RELEASE_STATE
 git switch --detach "$TARGET_FULL_SHA"
 maxim_topology_refuse_dirty_api_build_inputs
 
@@ -628,9 +633,13 @@ maxim_topology_require_photo_native_image_capability "${ROLLBACK_API_IMAGE_ID}"
 begin_runtime_rollback_transition
 ROLLBACK_RUNTIME_STARTED=1
 verify_inherited_static_components
-MAXIM_MIGRATION_API_IMAGE="$ROLLBACK_API_IMAGE" \
-  docker compose "${MIGRATION_COMPOSE_FILES[@]}" run --rm --no-deps --pull never api-ingress \
-  ./node_modules/.bin/prisma migrate deploy --config apps/api/prisma.config.ts
+if [[ "$ROUTING_INDEX_RELEASE_STATE" == compatible_pending ]]; then
+  echo "Rollback target can use the existing chat index; the only pending migration is deferred."
+else
+  MAXIM_MIGRATION_API_IMAGE="$ROLLBACK_API_IMAGE" \
+    docker compose "${MIGRATION_COMPOSE_FILES[@]}" run --rm --no-deps --pull never api-ingress \
+    ./node_modules/.bin/prisma migrate deploy --config apps/api/prisma.config.ts
+fi
 maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES
 if [[ "$TARGET_HAS_PUBLISHER" -eq 0 ]]; then
   remove_incompatible_publisher_container

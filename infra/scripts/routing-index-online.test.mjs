@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import {
@@ -8,7 +19,13 @@ import {
   readRoutingIndexSource,
   verifyRoutingIndexDatabaseUrl,
 } from '../../scripts/agent/routing-index-online-target.mjs';
-import { verifyRoutingIndexState } from './routing-index-online-state.mjs';
+import {
+  readReleaseRoutingSource,
+  readReleaseRoutingState,
+  verifyReleaseRoutingState,
+  verifyRoutingIndexState,
+} from './routing-index-online-state.mjs';
+import { OUTCOME_COHORT_TARGETS } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
   assessRoutingIndexPrepareCapacity,
   checkRoutingIndexPrepareCapacity,
@@ -44,6 +61,141 @@ const snapshot = () => ({
   index: { present: false, exact: false },
 });
 const filesystem = (device, availableBytes) => ({ device, mount: '/', availableBytes });
+
+test('release admission defers only the sole optional migration with exact ordered index proof', () => {
+  const pending = { ...snapshot(), orderedIndex: { present: true, exact: true } };
+  const release = { source, supportsOrdered: true };
+  assert.equal(verifyReleaseRoutingState(pending, release), 'compatible_pending');
+  assert.equal(verifyRoutingIndexState(pending, source).state, 'prepare_routing');
+  assert.equal(
+    verifyReleaseRoutingState(pending, { ...release, supportsOrdered: false }),
+    'prepare_routing',
+  );
+  for (const orderedIndex of [
+    undefined,
+    { present: false, exact: false },
+    { present: true, exact: false },
+  ])
+    assert.equal(
+      verifyReleaseRoutingState({ ...pending, orderedIndex }, release),
+      'prepare_routing',
+    );
+  assert.equal(
+    verifyReleaseRoutingState(pending, {
+      ...release,
+      source: [
+        ...source,
+        {
+          name: '20990101120000_later_migration',
+          checksum: 'a'.repeat(64),
+        },
+      ],
+    }),
+    'prepare_routing',
+  );
+  for (const change of [
+    { builders: [{ pid: 99 }] },
+    { artifacts: ['webhook_events_chat_queue_head_idx_ccold'] },
+    { index: { present: true, exact: false } },
+    { receipts: pending.receipts.slice(1) },
+    {
+      receipts: [
+        ...pending.receipts,
+        {
+          ...pending.receipts[0],
+          id: 'pending',
+          name: ROUTING_INDEX_TARGET.migration,
+          finished: false,
+        },
+      ],
+    },
+  ])
+    assert.throws(
+      () => verifyReleaseRoutingState({ ...pending, ...change }, release),
+      /ROUTING_INDEX_/u,
+    );
+});
+
+test('release proof uses the selected commit for migration bytes, identity and compatibility marker', async (t) => {
+  const root = mkdtempSync(resolve(tmpdir(), 'routing-release-source-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (...args) =>
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        '-c',
+        'commit.gpgSign=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        ...args,
+      ],
+      { cwd: root, encoding: 'utf8' },
+    ).trim();
+  const commit = () => {
+    git('add', '--all');
+    git('commit', '-qm', 'fixture');
+    return git('rev-parse', 'HEAD');
+  };
+  git('init', '-q');
+  const migrations = 'apps/api/prisma/migrations';
+  const copyMigration = (name) => {
+    mkdirSync(resolve(root, migrations, name), { recursive: true });
+    copyFileSync(
+      resolve(import.meta.dirname, '../..', migrations, name, 'migration.sql'),
+      resolve(root, migrations, name, 'migration.sql'),
+    );
+  };
+  for (const { migration } of OUTCOME_COHORT_TARGETS) copyMigration(migration);
+  const service = resolve(root, 'apps/api/src/webhook/webhook-routing.service.ts');
+  mkdirSync(resolve(service, '..'), { recursive: true });
+  writeFileSync(service, '// Previously released routing.\n');
+  const old = commit();
+  copyMigration(ROUTING_INDEX_TARGET.migration);
+  const required = commit();
+  const marker =
+    '// FLAG: Routing uses the existing ordered chat head index without the optional queue index.\n';
+  writeFileSync(service, marker);
+  const optional = commit();
+  const compose = ['-f', 'infra/docker-compose.yml'];
+  const rootOnly = {
+    root,
+    run: async () => assert.fail('pre-routing release must not query PostgreSQL'),
+  };
+  assert.equal(await readReleaseRoutingState(old, compose, rootOnly), 'not_in_target');
+  assert.throws(() => readReleaseRoutingSource(root, 'HEAD'), /TARGET_INVALID/u);
+  assert.throws(
+    () => readReleaseRoutingSource(root, git('rev-parse', 'HEAD^{tree}')),
+    /TARGET_INVALID/u,
+  );
+  const target = readReleaseRoutingSource(root, optional);
+  assert.equal(target.supportsOrdered, true);
+  assert.equal(readReleaseRoutingSource(root, required).supportsOrdered, false);
+  const state = snapshot();
+  state.orderedIndex = { present: true, exact: true };
+  state.receipts = state.receipts.filter((r) => target.source.some((m) => m.name === r.name));
+  const read = (sha) =>
+    readReleaseRoutingState(sha, compose, {
+      root,
+      run: async () => ({ stdout: JSON.stringify(state) }),
+    });
+  writeFileSync(service, '// Worktree contents have no authority.\n');
+  assert.equal(await read(optional), 'compatible_pending');
+  assert.equal(await read(required), 'prepare_routing');
+  writeFileSync(
+    resolve(root, migrations, ROUTING_INDEX_TARGET.migration, 'migration.sql'),
+    'SELECT 1;\n',
+  );
+  assert.throws(() => readReleaseRoutingSource(root, commit()), /TARGET_SOURCE_INVALID/u);
+  rmSync(resolve(root, migrations, ROUTING_INDEX_TARGET.migration), { recursive: true });
+  assert.throws(() => readReleaseRoutingSource(root, commit()), /TARGET_SOURCE_INVALID/u);
+  mkdirSync(resolve(root, migrations, supersededMigration), { recursive: true });
+  writeFileSync(resolve(root, migrations, supersededMigration, 'migration.sql'), 'SELECT 1;\n');
+  assert.throws(() => readReleaseRoutingSource(root, commit()), /TARGET_SOURCE_INVALID/u);
+});
 
 test('routing receipt and catalog gates reject drift and incomplete prefixes', () => {
   assert.deepEqual(verifyRoutingIndexState(snapshot(), source), {

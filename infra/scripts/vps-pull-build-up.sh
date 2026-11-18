@@ -1791,7 +1791,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   require_stateful_services_ready
   maxim_webhook_preflight_multibot_prepare_capacity COMPOSE_FILES
   maxim_outcome_cohort_preflight COMPOSE_FILES
-  maxim_routing_index_preflight COMPOSE_FILES
+  maxim_routing_index_preflight "$TARGET_SHA" COMPOSE_FILES
 fi
 
 prepare_deploy_disk_capacity
@@ -1807,9 +1807,9 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   maxim_topology_require_ocr_native_sandbox_image_capability \
     "$MAXIM_API_IMAGE" "$TARGET_HAS_OCR_NATIVE_SANDBOX"
   maxim_topology_require_photo_native_image_capability "${MAXIM_API_IMAGE}"
-  # FLAG: Build the routing index while old roles and the current manifest remain live.
-  # A failed or interrupted preparation cannot enter the runtime transition.
-  maxim_routing_index_prepare
+  # FLAG: Prove compatibility or complete the routing index while old roles and
+  # the current manifest remain live. A failed check cannot enter the transition.
+  maxim_routing_index_prepare "$TARGET_SHA" ROUTING_INDEX_RELEASE_STATE
   begin_release_runtime_transition
   DEPLOY_RUNTIME_STARTED=1
   verify_inherited_release_components
@@ -1855,18 +1855,25 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   expected_api_image_id="$(docker image inspect --format '{{.Id}}' "$MAXIM_API_IMAGE")"
   maxim_webhook_prepare_multibot_before_quiescence COMPOSE_FILES
   maxim_outcome_cohort_prepare
+  maxim_routing_index_require_release "$TARGET_SHA" COMPOSE_FILES "$ROUTING_INDEX_RELEASE_STATE"
   maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES
   maxim_webhook_quiesce_legacy_ingress_for_multibot_cutover COMPOSE_FILES
   # FLAG: The first command-authority migration is an effects cutoff only after every
   # legacy webhook producer and detached moderation handler has stopped.
-  if ! run_migrations; then
-    echo "First migration attempt failed. Retrying once in 5 seconds..."
-    sleep 5
-    run_migrations
+  if [[ "$ROUTING_INDEX_RELEASE_STATE" == compatible_pending ]]; then
+    # FLAG: The optional index is the only pending migration. Prisma deploy
+    # has no allowlist and would otherwise build the deferred index.
+    echo "Routing can use the existing chat index; the only pending migration is deferred."
+  else
+    if ! run_migrations; then
+      echo "First migration attempt failed. Retrying once in 5 seconds..."
+      sleep 5
+      run_migrations
+    fi
   fi
   maxim_webhook_assert_multibot_migration_indexes COMPOSE_FILES
   maxim_outcome_cohort_assert COMPOSE_FILES
-  maxim_routing_index_assert COMPOSE_FILES
+  maxim_routing_index_require_release "$TARGET_SHA" COMPOSE_FILES "$ROUTING_INDEX_RELEASE_STATE"
   if [[ "$TARGET_HAS_MEDIA_ANALYSIS" -eq 1 ]]; then
     maxim_webhook_assert_api_rollout_quiescence COMPOSE_FILES
     maxim_topology_stop_media_analysis_before_api_transition COMPOSE_FILES

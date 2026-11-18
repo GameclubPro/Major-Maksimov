@@ -7,21 +7,17 @@ excluded. Status, retry, timeout-quarantine and message-type predicates remain u
 
 The query uses one PostgreSQL statement and snapshot. It first finds the oldest pending row
 for the chat. No row means no pending work; a head with a current default queue supplies the
-shard immediately. A head with an unrecognized or NULL queue triggers one LATERAL lookup per
-default queue, followed by sorting at most those queue heads. The new
-partial nonunique B-tree is `webhook_events_chat_queue_head_idx` on the existing chat COALESCE
-expression, `queue_name`, `created_at`, `id`. Its predicate matches the existing ordered-chat
-head index, which remains installed. Dead tuples, MVCC visibility and physical I/O are not
-strictly bounded by LIMIT. Local custom and named generic plans must establish actual probe
-work on retained history and skewed hot chats.
+shard immediately. When the oldest row has an unrecognized or NULL queue, the second lookup
+uses the same ordered-chat head index to read the rest of that chat in order and stops at the
+first current default queue. If none exists, it returns no shard without changing the pending
+result. This is one scan of the remaining chat, rather than one scan per default queue. There is
+no fixed row cap: a long prefix with unrecognized queues may require reading that entire prefix.
+Dead tuples, MVCC visibility and physical I/O are not bounded by LIMIT. Validate custom and
+named generic plans with and without the optional index, using retained history and skewed chats.
 
-Each LATERAL lookup seeks the first row at or after the target `(chat, queue_name)` pair and
-orders by that pair followed by `(created_at, id)`. It checks the exact chat and queue after
-`LIMIT 1`. Equality filters inside the lookup can let PostgreSQL choose the old chat index
-and filter the entire pending chat once per queue. The local regression
-rebuilds a deliberately sparse index inside a rolled-back disposable-store transaction; this
-is a planner fixture, not production maintenance. Validate custom and generic plans after
-preceding native suites as well as on fresh stores, since index size and statistics affect plans.
+The optional partial nonunique B-tree is `webhook_events_chat_queue_head_idx` on the existing
+chat COALESCE expression, `queue_name`, `created_at`, `id`. Its predicate matches the existing
+ordered-chat head index, which remains required for deferral.
 
 ## Fixed migration and release order
 
@@ -35,12 +31,22 @@ receipt from the current controller under the deploy lock before any runtime cha
 existing execution and effect reader checks remain required. The ref-based API rollback
 continues to refuse a source missing an applied migration.
 
-The normal exact-green-SHA deploy holds the shared protected lock and performs read-only
-preflight before building. After immutable API-image verification, it supervises this build
-while the old roles and current release manifest remain live, before the first runtime
-transition journal or queue pause. A refused or interrupted build cannot advance that journal.
-Only after exact catalog and receipt verification does the ordinary fenced rollout continue.
-The post-migration assertion repeats before role replacement.
+The exact-green-SHA deploy uses `routing-index-online-state.mjs release-state <full SHA>` with
+the reviewed Compose selectors under the shared protected lock. It may defer the index only if
+the target source declares compatibility, the existing ordered-chat index matches exactly, and
+the sole pending migration is the pinned optional index. The new index, its receipt and any
+build or repair artifacts must all be absent. In this state the deploy skips the index
+supervisor and the ordinary Prisma runner, which would otherwise apply the pending index.
+The state must still match before queue pause and again before replacing API roles. Other
+migrations may not be skipped. Both API rollback paths refuse a target that requires a missing
+index; a verified compatible target also skips the ref-based rollback's Prisma runner. Recovery
+finalization verifies the API component source against the live state before recording it.
+
+When the index cannot be deferred and still needs preparation, the exact-green-SHA deploy runs
+the capacity checks and supervises the build after verifying the immutable API image, while the
+old roles and current manifest remain live. A refused or interrupted build cannot advance the
+runtime transition journal. The fenced rollout starts only after exact catalog and receipt
+verification. For an already applied index, ordinary Prisma processing remains in place.
 
 The reader uses one bounded repeatable-read catalog/receipt snapshot. It attests PostgreSQL 16,
 public persistent nonpartitioned B-tree layout, all four expressions/keys, predicate, opclasses,

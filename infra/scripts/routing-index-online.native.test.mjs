@@ -10,7 +10,11 @@ import {
   readRoutingIndexSource,
   ROUTING_INDEX_TARGET,
 } from '../../scripts/agent/routing-index-online-target.mjs';
-import { routingIndexStateSql, verifyRoutingIndexState } from './routing-index-online-state.mjs';
+import {
+  routingIndexStateSql,
+  verifyReleaseRoutingState,
+  verifyRoutingIndexState,
+} from './routing-index-online-state.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const nativeUrl = process.env.MAXIM_TEST_POSTGRES_URL?.trim();
@@ -71,7 +75,32 @@ test(
       rmSync(prefix.tempRoot, { recursive: true, force: true });
       prefix = undefined;
       const snapshot = async () => outcome(await db.query(routingIndexStateSql));
-      assert.equal(verifyRoutingIndexState(await snapshot(), source).state, 'prepare_routing');
+      const pending = await snapshot();
+      const selected = { source, supportsOrdered: true };
+      assert.equal(verifyRoutingIndexState(pending, source).state, 'prepare_routing');
+      assert.equal(verifyReleaseRoutingState(pending, selected), 'compatible_pending');
+      const { definition } = (
+        await db.query(
+          "SELECT pg_get_indexdef('public.webhook_events_ordered_chat_head_idx'::regclass) AS definition",
+        )
+      ).rows[0];
+      await db.query(
+        'ALTER INDEX public.webhook_events_ordered_chat_head_idx RENAME TO fixture_preserved_ordered_idx',
+      );
+      assert.equal(verifyReleaseRoutingState(await snapshot(), selected), 'prepare_routing');
+      for (const drifted of [
+        definition.replace('created_at, id)', 'id, created_at)'),
+        definition.replace('message_edited', 'different_event'),
+        definition.replace(/chatId/gu, 'otherChat'),
+      ]) {
+        assert.notEqual(drifted, definition);
+        await db.query(drifted);
+        assert.equal(verifyReleaseRoutingState(await snapshot(), selected), 'prepare_routing');
+        await db.query('DROP INDEX public.webhook_events_ordered_chat_head_idx');
+      }
+      await db.query(
+        'ALTER INDEX public.fixture_preserved_ordered_idx RENAME TO webhook_events_ordered_chat_head_idx',
+      );
       const seedReceipt = async ({ name, checksum, finished = true, rolledBack = false }) => {
         const id = randomUUID();
         await db.query(

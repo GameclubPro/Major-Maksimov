@@ -393,9 +393,10 @@ negative cases, effects evidence and following-event/no-replay checks.
 
 Bounded shard lookup additionally requires `webhook-routing-postgres.spec.ts`: old/new results,
 unknown/NULL queues, ID/timestamp ties and actual custom/generic plans over retained history.
-The [routing index release](webhook-routing-index.md) prepares its fixed concurrent index while
-old roles run, before the runtime journal; a healthy small fixture cannot justify an unobserved
-production build or a weaker receipt/catalog gate.
+The [routing index release](webhook-routing-index.md) may defer the optional index only for an
+exact compatible source and fully verified schema with that migration alone pending. Otherwise
+it prepares the fixed concurrent index while old roles run, before the runtime journal. A
+healthy small fixture cannot justify an unobserved production build or a weaker catalog gate.
 
 ## Fast incident response and acceptance
 

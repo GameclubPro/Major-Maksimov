@@ -228,7 +228,7 @@ test('normal API deploy verifies lifecycle compatibility before accepting the im
   const runtimeTransition = source.indexOf('\n  begin_release_runtime_transition', imageAdmission);
   assert.ok(imageAdmission > position && runtimeTransition > imageAdmission);
   assert.doesNotMatch(source, /maxim_topology_build_shared_api_image|docker compose[^\n]* build/u);
-  assert.ok(position < source.indexOf('\n  if ! run_migrations; then'));
+  assert.ok(position < source.search(/^[ \t]+if ! run_migrations; then$/mu));
   const before = source.lastIndexOf('if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then', position);
   const end = source.indexOf('\nfi\n', position);
   assert.ok(before >= 0 && end > position);

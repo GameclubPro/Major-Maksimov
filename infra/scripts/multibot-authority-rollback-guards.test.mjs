@@ -189,8 +189,8 @@ test('first authority cutover stops legacy ingress before the migration effects 
   const ingress = deploy.indexOf(
     '\n  maxim_webhook_quiesce_legacy_ingress_for_multibot_cutover COMPOSE_FILES',
   );
-  const migration = deploy.indexOf('\n  if ! run_migrations');
-  const migrationEnd = deploy.indexOf('\n  fi', migration);
+  const migration = deploy.search(/^[ \t]+if ! run_migrations; then$/mu);
+  const migrationEnd = deploy.indexOf('\n  fi\n', migration);
   const postcheck = deploy.indexOf(
     '\n  maxim_webhook_assert_multibot_migration_indexes COMPOSE_FILES',
   );

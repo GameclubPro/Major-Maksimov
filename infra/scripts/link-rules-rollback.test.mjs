@@ -30,15 +30,19 @@ test('runtime link reader follows the installed pause boundary and precedes roll
     '\nmaxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?\n',
     '\nensure_compose_env\n',
     '\nensure_stateful_services_ready\n',
+    '\nmaxim_routing_index_require_release "$TARGET_FULL_SHA" COMPOSE_FILES "" ROUTING_INDEX_RELEASE_STATE\n',
     '\ngit switch --detach "$TARGET_FULL_SHA"\n',
     '\nmaxim_topology_build_shared_api_image "$ROLLBACK_API_IMAGE" "$TARGET_FULL_SHA"\n',
     '\nbegin_runtime_rollback_transition\n',
-    '\nMAXIM_MIGRATION_API_IMAGE="$ROLLBACK_API_IMAGE" \\\n',
     '\nmaxim_webhook_quiesce_for_api_rollout COMPOSE_FILES\n',
     '\nrecreate_runtime_api_wave non-webhook "${non_webhook_services[@]}"\n',
   ]) {
     assert.ok(source.indexOf(work) > reader, `Reader must precede the actual call: ${work}`);
   }
+  const migration = source.search(
+    /^[ \t]*MAXIM_MIGRATION_API_IMAGE="\$ROLLBACK_API_IMAGE" \\\n[ \t]+docker compose /mu,
+  );
+  assert.ok(migration > reader, 'Reader must precede the actual Prisma deploy call');
 });
 
 test('a legacy target or disconnected final policy recheck is refused', () => {

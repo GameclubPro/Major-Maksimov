@@ -147,6 +147,8 @@ if [[ -e /etc/maxim-release/installed || -L /etc/maxim-release/installed ]]; the
   /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/maxim-release LANG=C.UTF-8 \
     "$release_policy_node" /usr/local/lib/maxim-release/infra/scripts/release-service-policy.mjs pause-rollback >/dev/null || exit $?
 fi
+# shellcheck source=infra/scripts/lib/routing-index-online-prepare.sh
+source "$ROOT_DIR/infra/scripts/lib/routing-index-online-prepare.sh"
 maxim_require_ordinary_effect_authority "$ROOT_DIR" || exit $?
 PLAN_FILE="$(mktemp)"
 SOURCE_MIGRATIONS_FILE="$(mktemp)"
@@ -573,6 +575,7 @@ if [[ "$SELECT_API" -eq 1 ]]; then
   }
 
   ensure_commit_has_applied_migrations "$API_SOURCE_SHA" "API component source"
+  maxim_routing_index_require_release "$API_SOURCE_SHA" COMPOSE_FILES
 fi
 
 wait_for_service_running() {

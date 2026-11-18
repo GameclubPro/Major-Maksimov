@@ -309,12 +309,14 @@ test('split finalization writes the captured runtime identity and rechecks compa
   const runtime = 'b'.repeat(40);
   const body = `
 EXPECTED_RUNTIME_SHA='${runtime}'
+COMPONENT_SOURCE_SHA[api-shared]="$EXPECTED_RUNTIME_SHA"
 RECOVERY_BASE_MANIFEST=/private/transition.json
 MIGRATIONS_FILE=/private/migrations.txt
 FINALIZER_COMPONENTS=(api-shared miniapp-major-static admin-static)
 maxim_require_ordinary_effect_authority() { :; }
 verify_synchronized_checkout() { :; }
 verify_controller_runtime_compatibility() { :; }
+maxim_routing_index_require_release() { printf 'routing=%s\\n' "$*" >&2; }
 for component in "\${FINALIZER_COMPONENTS[@]}"; do
   COMPONENT_IMAGE_REF["$component"]="$(expected_component_ref "$component")"
   COMPONENT_IMAGE_ID["$component"]='sha256:${'c'.repeat(64)}'
@@ -323,6 +325,7 @@ release_manifest() { printf 'manifest=%s\\n' "$*" >&2; }
 `;
   const result = runSourced(`${body}\ncommit_recovered_release`);
   assert.equal(result.status, 0, result.stderr);
+  assert.ok(result.stderr.startsWith(`routing=${runtime} COMPOSE_FILES\n`));
   assert.match(result.stderr, new RegExp(`--target-sha ${runtime}`, 'u'));
   for (const [component, image] of [
     ['api-shared', 'maxim-api'],
@@ -335,11 +338,12 @@ release_manifest() { printf 'manifest=%s\\n' "$*" >&2; }
     'maxim_require_ordinary_effect_authority',
     'verify_synchronized_checkout',
     'verify_controller_runtime_compatibility',
+    'maxim_routing_index_require_release',
   ]) {
     const invalid = runSourced(
       `${body}\n${failed}() { return 41; }\nif commit_recovered_release; then exit 99; else exit "$?"; fi`,
     );
-    assert.notEqual(invalid.status, 0);
+    assert.equal(invalid.status, 41, failed);
     assert.doesNotMatch(invalid.stderr, /manifest=/u);
   }
 });
@@ -361,6 +365,7 @@ FINALIZER_COMPONENTS=(api-shared miniapp-major-static admin-static)
 maxim_require_ordinary_effect_authority() { :; }
 verify_synchronized_checkout() { :; }
 verify_controller_runtime_compatibility() { :; }
+maxim_routing_index_require_release() { printf 'routing=%s\\n' "$*" >&2; }
 ${identities
   .map(
     ([
@@ -377,6 +382,7 @@ release_manifest() { printf 'manifest=%s\\n' "$*" >&2; }
 `;
   const valid = runSourced(`${body}\nif commit_recovered_release; then :; else exit "$?"; fi`);
   assert.equal(valid.status, 0, valid.stderr);
+  assert.ok(valid.stderr.startsWith(`routing=${runtime} COMPOSE_FILES\n`));
   assert.match(valid.stderr, new RegExp(`--target-sha ${runtime}`, 'u'));
   for (const [component, source, image, id] of identities) {
     assert.ok(

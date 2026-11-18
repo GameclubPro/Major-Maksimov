@@ -507,11 +507,12 @@ describe('WebhookRoutingService', () => {
     expect(sqlText).toContain('status = \'FAILED\'::"WebhookStatus"');
     expect(sqlText).toContain('next_enqueue_at IS NOT NULL');
     expect(sqlText).toContain(`LEFT(COALESCE(e.error_message, ''), 37) = '${quarantineMarker}'`);
-    expect(sqlText).toContain('CROSS JOIN LATERAL');
+    expect(sqlText).toContain('(e.created_at, e.id) > (head.created_at, head.id)');
     expect(sqlText).not.toContain('MATERIALIZED');
     expect(query?.values).not.toContain(37);
     expect(query?.values).not.toContain(quarantineMarker);
-    expect(query?.values).toEqual(expect.arrayContaining([webhookEventId, chatId]));
+    expect(query?.values?.filter((value) => value === webhookEventId)).toHaveLength(2);
+    expect(query?.values?.filter((value) => value === chatId)).toHaveLength(2);
     expect(query?.values).toEqual(expect.arrayContaining([...DEFAULT_WEBHOOK_QUEUE_NAMES]));
     expect(sqlText).not.toMatch(/COUNT\s*\(\s*\*\s*\)/iu);
   });
