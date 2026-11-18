@@ -722,7 +722,7 @@ try {
       const links = page.locator('.links-panel');
       const sites = links
         .locator('details')
-        .filter({ has: page.getByText('Сайты из стоп-слов', { exact: true }) });
+        .filter({ has: page.getByText('Прежние правила сайтов', { exact: true }) });
       await sites.locator(':scope > summary').click();
       await sites
         .getByRole('textbox', { name: 'Добавить запрещённые сайты', exact: true })

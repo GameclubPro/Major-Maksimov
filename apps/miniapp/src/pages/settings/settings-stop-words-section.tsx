@@ -14,7 +14,12 @@ import type {
   SettingsSectionShellProps,
 } from './settings-section-shared';
 
-export type SettingsStopWordsSectionProps = SettingsSectionShellProps &
+type SettingsStopWordsSectionProps = SettingsSectionShellProps &
+  Pick<SettingsSectionMutationProps, 'draft'> & {
+    storageInvalid?: boolean;
+  };
+
+export type SettingsStopWordsEditorProps = SettingsStopWordsSectionProps &
   Pick<SettingsSectionEditorProps, 'botSpeechPreviewContext'> &
   Pick<SettingsSectionMutationProps, 'draft' | 'setFieldValue' | 'clearFieldError'> & {
     api: ApiTransport;
@@ -26,15 +31,11 @@ export type SettingsStopWordsSectionProps = SettingsSectionShellProps &
     messageLimitsBlockedWordsError?: string;
     messageLimitsBlockedDomainsError?: string;
     stopWordsError?: string;
-    storageInvalid?: boolean;
     setMessageLimitsBlockedWordsInput: Dispatch<SetStateAction<string>>;
     setMessageLimitsBlockedDomainsInput: Dispatch<SetStateAction<string>>;
+    mode: 'words' | 'domains';
+    onModeChange: (mode: 'words' | 'domains') => void;
   };
-
-export type SettingsStopWordsEditorProps = SettingsStopWordsSectionProps & {
-  mode: 'words' | 'domains';
-  onModeChange: (mode: 'words' | 'domains') => void;
-};
 
 const SECTION_PRESENTATION = getNetworkSettingsSectionPresentation('chat', 'stopWords');
 
