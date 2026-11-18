@@ -50,9 +50,20 @@ const LITERAL_LATIN_TERM =
 const MEASUREMENT_LITERAL =
   /^(?:(?:на|по|до|за)\s*)?[+-]?\d{1,6}(?:[.,]\d{1,3})?(?:\s*[-–—]\s*\d{1,6}(?:[.,]\d{1,3})?)?\s*[-–—]?\s*(л(?:итр(?:а|ов)?)?|l(?:it(?:er|re)s?)?|л\.?\s*с\.?|лет(?:н(?:ий|яя|ее|ие|его|ему|ей|их|ими|им|ем|юю))?)$/iu;
 const VOLUME_CONTEXT =
-  /(?:об[ъь]?ем|емкост|ёмкост|бак|канистр|вод[аыу]|топлив|бензин|дизел|масл|аквариум|рюкзак|кастрюл|ведр|бутыл|бочк|горш(?:ок|к)|кашпо|литр|volume|tank|water|fuel|capacity|backpack)/iu;
-const ADJACENT_QUANTITY_LISTING =
-  /(?:^|[^\p{L}\p{N}])(?:отдам|отдадим|отдаю|отда[её]м|продам|продадим|продаю|прода[её]м|прода[её]тся|продаются|обменяю|меняю)[ \t]*(?:\([ \t]*)?$/iu;
+  /(?:об[ъь]?ем|емкост|ёмкост|бак|канистр|вод[аыу]|топлив|бензин|дизел|масл|аквариум|рюкзак|кастрюл|ведр|бутыл|бочк|горш(?:ок|к)|кашпо|фляг|краск|молок|литр|volume|tank|water|fuel|capacity|backpack)/iu;
+const QUANTITY_VERB_BEFORE =
+  /(?:^|[^\p{L}\p{N}])(?:отдам|отдадим|отдаю|отда[её]м|продам|продадим|продаю|прода[её]м|прода[её]тся|продаются|обменяю|меняю|куплю|возьму|заберу|принесу|привезу)[ \t]*(?:\([ \t]*)?$/iu;
+const QUANTITY_PREDICATE_AFTER =
+  /^[ \t]*\)?[ \t]*(?:хватит|достаточно|мало|много|есть)(?![\p{L}\p{N}])/iu;
+const QUANTITY_RECIPIENT_BEFORE = /(?:^|[^\p{L}\p{N}])(?:тебе|вам)[ \t]*$/iu;
+const QUANTITY_POSSESSION_BEFORE = /(?:^|[^\p{L}\p{N}])у[ \t]+(?:вас|тебя)[ \t]*$/iu;
+const QUANTITY_AVAILABILITY_QUESTION_AFTER = /^[ \t]*есть[ \t]*\?/iu;
+const FIRST_PERSON_CLAUSE_AFTER =
+  /^[ \t]*\)?[ \t]*(?:[,;.!?:\r\n–—-][ \t\r\n]*)?я(?:[ \t]*,[ \t]*|[ \t]+)(?:[авикосу][ \t]+)*(?![дт]ь|(?:да[ \t]+)?(?:ты|вы)(?![\p{L}\p{N}]))[а-яё]{2,}(?![\p{L}\p{N}])/iu;
+const SPLIT_MAT_AFTER_SIX_LITRES =
+  /^[\s.,_*–—-]+я[\s.,_*–—-]+[дт][\s._*–—-]*ь(?:ся|сь)?(?![\p{L}\p{N}])/iu;
+const SPLIT_MAT_BEFORE_SIX_LITRES = /(?:^|[^\p{L}\p{N}])[её][\s._*–—-]+$/iu;
+const SPLIT_MAT_END_AFTER_SIX_LITRES = /^[\s._*–—-]+ан(?![\p{L}\p{N}])/iu;
 const AGE_CONTEXT =
   /(?:возраст|дет(?:и|ей|ям|ск)|реб[её]н|ребят|малыш|дошколь|школьни|групп|заняти|студи|круж|секци)/iu;
 
@@ -90,6 +101,16 @@ export function getMeasurementLiteralContext(
   const end = candidate.rawEnd ?? start + (candidate.rawValue ?? candidate.value).length;
   const beforeWindow = source.slice(Math.max(0, start - 120), start);
   const afterWindow = source.slice(end, end + 120);
+  // FLAG: A one-digit volume look-alike cannot mask a complete split word. These
+  // adjacent fragments revoke only the literal exception; the normal detector still scores it.
+  if (
+    /^6\s*[лl]$/iu.test(literal) &&
+    (SPLIT_MAT_AFTER_SIX_LITRES.test(afterWindow) ||
+      (SPLIT_MAT_BEFORE_SIX_LITRES.test(beforeWindow) &&
+        SPLIT_MAT_END_AFTER_SIX_LITRES.test(afterWindow)))
+  ) {
+    return null;
+  }
   const before = beforeWindow.split(/[,.;!?\r\n\0]/u).at(-1) ?? '';
   const after = afterWindow.split(/[,.;!?\r\n\0]/u)[0] ?? '';
   const standalone = !/[\p{L}\p{N}]/u.test(source.slice(0, start) + source.slice(end));
@@ -101,19 +122,33 @@ export function getMeasurementLiteralContext(
     /^[ \t]*\.?[ \t]*,?[ \t]*(?:гр\.|групп[аы]|дет(?:и|ей)|возраст)(?![\p{L}\p{N}])/iu.test(
       afterWindow,
     );
-  // FLAG: A listing verb immediately before a complete quantity supplies literal context
-  // even when the item is shown only in a photo. Keep clause barriers and target checks.
-  const adjacentQuantityListing = ADJACENT_QUANTITY_LISTING.test(before);
+  // FLAG: Quantity verbs and predicates supply literal context even without an item name.
+  // A following first-person clause also keeps its «я» separate from the unit «л».
+  // Use bounded adjacency and keep the explicit target check for the matched quantity.
+  const firstPersonClause = FIRST_PERSON_CLAUSE_AFTER.test(afterWindow);
+  const adjacentQuantityContext =
+    QUANTITY_VERB_BEFORE.test(before) ||
+    QUANTITY_PREDICATE_AFTER.test(afterWindow) ||
+    firstPersonClause;
   if (
     !unambiguousUnit &&
     !standalone &&
     !VOLUME_CONTEXT.test(localContext) &&
-    !adjacentQuantityListing &&
+    !adjacentQuantityContext &&
     !(unit.toLowerCase() === 'л' && (AGE_CONTEXT.test(localContext) || adjacentAgeLabel))
   ) {
     return null;
   }
-  return { text: `${before} ${canonicalToken} ${after}`, unambiguousUnit };
+  // A pronoun can describe possession or the recipient of a quantity. Remove only
+  // that construction from the target check and keep all other address evidence.
+  let targetBefore = before;
+  if (QUANTITY_AVAILABILITY_QUESTION_AFTER.test(afterWindow)) {
+    targetBefore = targetBefore.replace(QUANTITY_POSSESSION_BEFORE, ' ');
+  }
+  if (firstPersonClause) {
+    targetBefore = targetBefore.replace(QUANTITY_RECIPIENT_BEFORE, ' ');
+  }
+  return { text: `${targetBefore} ${canonicalToken} ${after}`, unambiguousUnit };
 }
 
 export function tokenizeProfanityContext(
