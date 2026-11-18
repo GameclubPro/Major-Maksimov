@@ -133,7 +133,10 @@ with persistence disabled and its owned process verified through a private Unix 
 `REDIS_URL`, `CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL`, `MAXIM_TEST_POSTGRES_URL` and
 `MAXIM_TEST_REDIS_URL` are replaced only for child processes. URLs are not printed or written into
 repository env files. `--migrate` uses the public Prisma deployment script against that empty local
-database. It never imports production data or starts application workers.
+database, then runs the same baseline-aware schema drift check as CI before starting the requested
+command. A mismatch or failed comparison prevents that command from starting and still removes
+the owned stores. The committed known-drift baseline is not changed by this check. It never
+imports production data or starts application workers.
 
 The local catalog runner also supports `--topology=split --enqueue=production`. Use
 `with-test-stores.mjs --profile=split-load --migrate -- ...` for this profile: its ten
