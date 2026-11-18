@@ -39,7 +39,7 @@ test('a received DELETE 429 remains a known rejection when cooldown persistence 
     settings,
     {
       acquire: async () => {},
-      cooldown: async () => {
+      cooldownUntil: async () => {
         throw new Error('store unavailable');
       },
     },
@@ -58,6 +58,37 @@ test('a received DELETE 429 remains a known rejection when cooldown persistence 
       error.retryAfterMs === 3000,
   );
   assert.equal(issued, true);
+});
+
+test('Retry-After accepts HTTP dates in GMT and falls back for non-HTTP dates', async () => {
+  const expected = Date.UTC(2094, 10, 6, 8, 49, 37);
+  const [weekday, day, month, year, time] = new Date(expected).toUTCString().split(' ');
+  const asctime = `${weekday!.slice(0, -1)} ${month}  ${Number(day)} ${time} ${year}`;
+  for (const [header, valid] of [
+    [new Date(expected).toUTCString(), true],
+    [asctime, true],
+    ['1/2/49', false],
+  ] as const) {
+    let deadline: number | undefined;
+    const max = new MaxClient(
+      settings,
+      {
+        acquire: async () => {},
+        cooldownUntil: async (until) => {
+          deadline = until;
+        },
+      },
+      async () => Response.json({}, { status: 429, headers: { 'Retry-After': header } }),
+    );
+    await assert.rejects(
+      max.remove('-1', 'message', async () => {}),
+      (error) =>
+        error instanceof MaxError &&
+        error.status === 429 &&
+        error.retryAtMs === deadline &&
+        (valid ? deadline === expected : error.retryAfterMs === 1000),
+    );
+  }
 });
 
 test('defaults are disabled and fail closed for malformed identity/retired API and excessive RPS', () => {
@@ -187,7 +218,7 @@ test('transport budgets reads and every delete and never leaks a token into URL'
       acquire: async (chat) => {
         admissions.push(chat);
       },
-      cooldown: async () => {},
+      cooldownUntil: async () => {},
     },
     http,
   );
@@ -213,7 +244,7 @@ test('pin accepts documented empty envelopes and verified same-chat message IDs'
   for (const { response, expected } of cases) {
     const max = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json(response),
     );
     assert.equal(await max.pin('-1'), expected);
@@ -235,7 +266,7 @@ test('pin rejects nonempty unknown envelopes and malformed or foreign message ID
   ]) {
     const max = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json(response),
     );
     await assert.rejects(
@@ -247,7 +278,7 @@ test('pin rejects nonempty unknown envelopes and malformed or foreign message ID
   for (const response of [null, []]) {
     const max = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json(response),
     );
     await assert.rejects(
@@ -265,7 +296,7 @@ test('pin retains HTTP errors and shared Retry-After cooldown instead of certify
       settings,
       {
         acquire: async () => {},
-        cooldown: async (ms) => {
+        cooldownUntil: async (ms) => {
           cooldowns.push(ms);
         },
       },
@@ -280,14 +311,15 @@ test('pin retains HTTP errors and shared Retry-After cooldown instead of certify
         (status !== 429 || error.retryAfterMs === 3000),
     );
   }
-  assert.deepEqual(cooldowns, [3000]);
+  assert.equal(cooldowns.length, 1);
+  assert.ok(Math.abs(cooldowns[0]! - Date.now() - 3000) < 500);
 });
 
 test('message presence treats every 404 as inaccessible or missing, never certified absence', async () => {
   let response = Response.json({});
   const max = new MaxClient(
     settings,
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async () => response.clone(),
   );
   for (const body of [
@@ -314,7 +346,7 @@ test('presence preserves non-404 failures and the MAX rate-limit cooldown', asyn
     settings,
     {
       acquire: async () => {},
-      cooldown: async (ms) => {
+      cooldownUntil: async (ms) => {
         cooldowns.push(ms);
       },
     },
@@ -332,10 +364,11 @@ test('presence preserves non-404 failures and the MAX rate-limit cooldown', asyn
       max.presence('-1', 'message'),
       (e) => e instanceof MaxError && e.status === status && !e.attempted,
     );
-  assert.deepEqual(cooldowns, [3000]);
+  assert.equal(cooldowns.length, 1);
+  assert.ok(Math.abs(cooldowns[0]! - Date.now() - 3000) < 500);
   const unavailable = new MaxClient(
     settings,
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async () => {
       throw new Error('transport');
     },
@@ -350,7 +383,7 @@ test('only a positive acknowledgement certifies a delete request', async () => {
   let response = Response.json({ success: false });
   const max = new MaxClient(
     settings,
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async () => response,
   );
   await assert.rejects(
@@ -372,7 +405,7 @@ test('429 honors Retry-After and leaves the delete safe for a later guarded atte
     settings,
     {
       acquire: async () => {},
-      cooldown: async (ms) => {
+      cooldownUntil: async (ms) => {
         cooldowns.push(ms);
       },
     },
@@ -383,13 +416,14 @@ test('429 honors Retry-After and leaves the delete safe for a later guarded atte
     max.remove('-1', 'message', async () => {}),
     (e) => e instanceof MaxError && e.retryAfterMs === 3000 && !e.attempted,
   );
-  assert.deepEqual(cooldowns, [3000]);
+  assert.equal(cooldowns.length, 1);
+  assert.ok(Math.abs(cooldowns[0]! - Date.now() - 3000) < 500);
 });
 
 test('malformed/foreign history pages stop instead of manufacturing coverage', async () => {
   const max = new MaxClient(
     settings,
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async () =>
       Response.json({
         messages: [
@@ -409,7 +443,7 @@ test('webhook registration verifies exact bot, rejects conflicting subscriptions
   let registered = false;
   const max = new MaxClient(
     { ...settings, webhookUrl: url },
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async (input, init) => {
       const path = new URL(String(input)).pathname;
       calls.push(`${init?.method} ${path}`);
@@ -430,7 +464,7 @@ test('webhook registration verifies exact bot, rejects conflicting subscriptions
   ]);
   const conflict = new MaxClient(
     { ...settings, webhookUrl: url },
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async (input) =>
       new URL(String(input)).pathname === '/me'
         ? Response.json({ user_id: 123, is_bot: true })
@@ -482,7 +516,7 @@ test('webhook registration distinguishes verified, unknown and incompatible upda
       let registered = false;
       const max = new MaxClient(
         { ...settings, webhookUrl: url },
-        { acquire: async () => {}, cooldown: async () => {} },
+        { acquire: async () => {}, cooldownUntil: async () => {} },
         async (input, init) => {
           const path = new URL(String(input)).pathname;
           calls.push(`${init?.method} ${path}`);
@@ -547,7 +581,7 @@ test('membership absence or malformed data does not manufacture a permanent acce
   let row: unknown = { user_id: 123 };
   const max = new MaxClient(
     settings,
-    { acquire: async () => {}, cooldown: async () => {} },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
     async () => Response.json(row),
   );
   await assert.rejects(

@@ -3,8 +3,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { RateLimitStore } from './rate-limit.js';
 
 export class HttpAdmissionDeferred extends Error {
-  constructor(readonly retryAfterMs: number) {
+  constructor(readonly retryAtMs: number) {
     super('MAX cooldown remains active');
+  }
+  get retryAfterMs(): number {
+    return Math.max(0, this.retryAtMs - Date.now());
   }
 }
 
@@ -12,7 +15,7 @@ export class HttpAdmissionDeferred extends Error {
 export const ADMIT_HTTP_LUA = `
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
 local cooldown=tonumber(redis.call('GET',KEYS[1]) or '0')
-if cooldown-now>1000 then return -(cooldown-now) end
+if cooldown-now>1000 then return -cooldown end
 local gap=tonumber(ARGV[1]); local next=tonumber(redis.call('GET',KEYS[2]) or '0')
 local chat=KEYS[3] ~= '' and tonumber(redis.call('GET',KEYS[3]) or '0') or 0
 local safetyKey=KEYS[4] or ''
@@ -25,11 +28,13 @@ if safetyKey ~= '' then redis.call('SET',safetyKey,now+1000,'PX',60000) end
 return 0`;
 export const COOLDOWN_LUA = `
 local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000)
-local deadline=now+tonumber(ARGV[1]); local old=tonumber(redis.call('GET',KEYS[1]) or '0')
-if deadline>old then redis.call('SET',KEYS[1],deadline,'PX',tonumber(ARGV[1])+60000) end
+local deadline=math.min(tonumber(ARGV[1]),now+86400000)
+local old=tonumber(redis.call('GET',KEYS[1]) or '0')
+if deadline>now and deadline>old then redis.call('SET',KEYS[1],deadline,'PX',deadline-now+60000) end
 return math.max(deadline,old)`;
 export class HttpLimiter {
   private reducedUntil = 0;
+  private observedUntil = 0;
   private pendingDurableUntil = 0;
   constructor(
     private readonly redis: Pick<Redis, 'eval'>,
@@ -42,16 +47,18 @@ export class HttpLimiter {
     // FLAG: Failed persistence closes admission until the observed deadline is durable.
     if (this.pendingDurableUntil) {
       const deadline = this.pendingDurableUntil;
-      await this.durable.extend(Math.max(1000, deadline - Date.now()));
+      await this.durable.extend(new Date(deadline));
       if (this.pendingDurableUntil <= deadline) this.pendingDurableUntil = 0;
     }
-    const remaining = await this.durable.remainingMs();
-    if (remaining > 0) throw new HttpAdmissionDeferred(remaining);
+    const referenceMs = Date.now();
+    const remainingMs = await this.durable.remainingMs(referenceMs);
+    if (remainingMs > 0) throw new HttpAdmissionDeferred(referenceMs + remainingMs);
   }
   async acquire(chatId?: string, signal?: AbortSignal, purpose?: 'safety'): Promise<void> {
     for (;;) {
       signal?.throwIfAborted();
       await this.checkDurable();
+      if (this.observedUntil > Date.now()) throw new HttpAdmissionDeferred(this.observedUntil);
       const effectiveRps =
         Date.now() < this.reducedUntil ? Math.max(1, Math.floor(this.rps / 2)) : this.rps;
       const wait = Number(
@@ -71,21 +78,27 @@ export class HttpLimiter {
       if (wait === 0) {
         // FLAG: Another response may persist a cooldown while Redis admission is in flight.
         await this.checkDurable();
+        if (this.observedUntil > Date.now()) throw new HttpAdmissionDeferred(this.observedUntil);
+        signal?.throwIfAborted();
         return;
       }
       await delay(Math.min(wait, 1000), undefined, { signal });
     }
   }
-  async cooldown(ms: number): Promise<void> {
+  async cooldownUntil(deadline: number, observedAt = Date.now()): Promise<void> {
     this.reducedUntil = Date.now() + 60_000;
-    const duration = Math.max(1000, Math.ceil(ms));
-    const deadline = Date.now() + duration;
-    this.pendingDurableUntil = Math.max(this.pendingDurableUntil, deadline);
+    this.observedUntil = Math.max(this.observedUntil, deadline);
+    if (this.durable) this.pendingDurableUntil = Math.max(this.pendingDurableUntil, deadline);
     const results = await Promise.allSettled([
-      this.durable?.extend(duration).then(() => {
+      this.durable?.extend(new Date(deadline)).then(() => {
         if (this.pendingDurableUntil <= deadline) this.pendingDurableUntil = 0;
       }),
-      this.redis.eval(COOLDOWN_LUA, 1, `${this.prefix}:cooldown`, Math.min(duration, 86_400_000)),
+      this.redis.eval(
+        COOLDOWN_LUA,
+        1,
+        `${this.prefix}:cooldown`,
+        Math.min(deadline, observedAt + 86_400_000),
+      ),
     ]);
     const failure = results.find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') throw failure.reason;

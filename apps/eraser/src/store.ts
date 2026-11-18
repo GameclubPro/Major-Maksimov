@@ -74,6 +74,8 @@ export type PolicyRow = Policy & {
   last_operation_id: string | null;
   live_signature: string | null;
   history_signature: string | null;
+  history_gap_from: string | null;
+  history_gap_to: string | null;
   deferred_from: string | null;
   deferred_to: string | null;
   historical_deferred_from: string | null;
@@ -141,6 +143,24 @@ export function protectionGap(
   )
     return 'history';
   return null;
+}
+
+function remainingRange(
+  from: string | null,
+  to: string | null,
+  coveredFrom: number,
+  coveredTo: number,
+): [number | null, number | null] {
+  if (from === null || to === null)
+    return [from === null ? null : Number(from), to === null ? null : Number(to)];
+  const low = Number(from);
+  const high = Number(to);
+  if (coveredFrom <= coveredTo && coveredFrom <= high && coveredTo >= low) {
+    if (coveredFrom <= low) return coveredTo >= high ? [null, null] : [coveredTo + 1, high];
+    if (coveredTo >= high) return [low, coveredFrom - 1];
+  }
+  // FLAG: A single stored range cannot represent two remaining edges. Keep both.
+  return [low, high];
 }
 export class Store {
   private readonly maintenance: Housekeeping;
@@ -230,14 +250,20 @@ export class Store {
     });
   }
   private async applyProtection(client: pg.PoolClient, chatId: string, input: Protection) {
-    await client.query('SELECT chat_id FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [chatId]);
+    const policy = (
+      await client.query<PolicyRow>('SELECT * FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [
+        chatId,
+      ])
+    ).rows[0]!;
     const old = (
       await client.query<{
         source_revision: string;
+        ready: boolean;
+        complete_through: Date | null;
         bot_history_complete_from: Date | null;
         history_anchor: Date | null;
       }>(
-        'SELECT source_revision,bot_history_complete_from,history_anchor FROM eraser_protection_state WHERE chat_id=$1',
+        'SELECT source_revision,ready,complete_through,bot_history_complete_from,history_anchor FROM eraser_protection_state WHERE chat_id=$1',
         [chatId],
       )
     ).rows[0];
@@ -305,22 +331,43 @@ export class Store {
         evidence ? JSON.stringify(evidence) : null,
       ],
     );
-    // FLAG: Revisit deferred ranges only after a complete local protection snapshot exists.
-    if (input.complete !== false && input.completeThrough !== null) {
+    // FLAG: Reopen newly covered work. A page, not this certificate update,
+    // proves which part of the parked range was revisited.
+    if (input.complete === false || input.completeThrough === null) return;
+    const through = Date.parse(input.completeThrough);
+    const oldThrough = (old?.ready ? old.complete_through?.getTime() : undefined) ?? -Infinity;
+    const oldFloor =
+      (old?.ready ? old.bot_history_complete_from?.getTime() : undefined) ?? Infinity;
+    const gainedUpper = (
+      from: string | null,
+      to: string | null,
+      nextFloor: number,
+      prevFloor: number,
+    ) => {
+      if (from === null || to === null) return -Infinity;
+      const low = Math.max(Number(from), nextFloor);
+      const high = Math.min(Number(to), through);
+      if (low > high || (low >= prevFloor && high <= oldThrough)) return -Infinity;
+      return high;
+    };
+    const upper = Math.max(
+      gainedUpper(policy.deferred_from, policy.deferred_to, -Infinity, -Infinity),
+      gainedUpper(
+        policy.historical_deferred_from,
+        policy.historical_deferred_to,
+        floor ?? Infinity,
+        oldFloor,
+      ),
+    );
+    if (Number.isFinite(upper))
       await client.query(
-        `UPDATE eraser_policies SET scan_generation=scan_generation+1,history_cursor=GREATEST(COALESCE(history_cursor,0),deferred_to),history_complete=false,history_gap=false,history_signature=NULL,deferred_from=NULL,deferred_to=NULL,normal_next_at=CURRENT_TIMESTAMP,next_run_at=LEAST(CURRENT_TIMESTAMP,safety_next_at) WHERE chat_id=$1 AND deferred_to IS NOT NULL AND deferred_to <= $2`,
-        [chatId, Date.parse(input.completeThrough)],
-      );
-    }
-    // FLAG: An advancing current watermark cannot certify older module-bot publications.
-    if (
-      input.complete !== false &&
-      floor !== null &&
-      (!old?.bot_history_complete_from || floor < old.bot_history_complete_from.getTime())
-    )
-      await client.query(
-        `UPDATE eraser_policies SET scan_generation=scan_generation+1,history_cursor=GREATEST(COALESCE(history_cursor,0),historical_deferred_to),history_complete=false,history_signature=NULL,historical_deferred_from=NULL,historical_deferred_to=NULL,normal_next_at=CURRENT_TIMESTAMP,next_run_at=LEAST(CURRENT_TIMESTAMP,safety_next_at) WHERE chat_id=$1 AND historical_deferred_to IS NOT NULL AND historical_deferred_to >= $2`,
-        [chatId, floor],
+        `UPDATE eraser_policies SET scan_generation=scan_generation+1,
+         history_gap_from=LEAST(history_gap_from,CASE WHEN history_gap THEN history_cursor END),
+         history_gap_to=GREATEST(history_gap_to,CASE WHEN history_gap THEN history_cursor END),
+         history_cursor=CASE WHEN history_gap OR history_complete THEN $2::bigint ELSE GREATEST(history_cursor,$2) END,
+         history_complete=false,history_gap=false,history_signature=NULL,
+         normal_next_at=CURRENT_TIMESTAMP,next_run_at=LEAST(CURRENT_TIMESTAMP,safety_next_at) WHERE chat_id=$1`,
+        [chatId, upper],
       );
   }
   private async diagnosticPage(
@@ -420,8 +467,14 @@ export class Store {
             ? 'cancelled'
             : 'pending'
         : connection?.status;
-    const gap = policy.history_gap || policy.live_gap_at !== null || policy.safety_gap_at !== null;
-    const protectedHistory = policy.historical_deferred_from !== null;
+    const gap =
+      policy.history_gap ||
+      policy.history_gap_from !== null ||
+      policy.live_gap_at !== null ||
+      policy.safety_gap_at !== null;
+    const protectedCurrent = policy.deferred_from !== null || policy.deferred_to !== null;
+    const protectedHistory =
+      policy.historical_deferred_from !== null || policy.historical_deferred_to !== null;
     const executionStopped =
       !this.executionEnabled ||
       !policy.enabled ||
@@ -434,13 +487,13 @@ export class Store {
           ? 'no_access'
           : counts.review
             ? 'error'
-            : counts.unknown || policy.last_error || policy.deferred_from || protectedHistory || gap
+            : counts.unknown || policy.last_error || protectedCurrent || protectedHistory || gap
               ? 'delayed'
               : 'running';
     const historyStatus = !policy.enabled
       ? 'off'
       : gap ||
-          policy.deferred_from ||
+          protectedCurrent ||
           protectedHistory ||
           policy.last_error ||
           ['missing', 'no_access'].includes(policy.connection_status)
@@ -560,8 +613,9 @@ export class Store {
           diagnostics: {
             lastError: policy.last_error,
             historyBoundaryBlocked: snapshot.coverage.gap,
-            awaitingCurrentProtection: policy.deferred_from !== null,
-            awaitingHistoricalProtection: policy.historical_deferred_from !== null,
+            awaitingCurrentProtection: policy.deferred_from !== null || policy.deferred_to !== null,
+            awaitingHistoricalProtection:
+              policy.historical_deferred_from !== null || policy.historical_deferred_to !== null,
           },
           updatedAt: policy.updated_at.toISOString(),
         };
@@ -742,6 +796,8 @@ export class Store {
         live_floor=CASE WHEN $6 THEN LEAST($7,live_gap_at,safety_gap_at) ELSE live_floor END,live_upper=CASE WHEN $6 THEN NULL ELSE live_upper END,live_cursor=CASE WHEN $6 THEN NULL ELSE live_cursor END,
         history_cursor=CASE WHEN $6 THEN GREATEST(COALESCE(history_cursor,0),$8) ELSE history_cursor END,
         history_complete=CASE WHEN $6 THEN false ELSE history_complete END,history_gap=CASE WHEN $6 THEN false ELSE history_gap END,
+        history_gap_from=LEAST(history_gap_from,CASE WHEN history_gap THEN history_cursor END),
+        history_gap_to=GREATEST(history_gap_to,CASE WHEN history_gap THEN history_cursor END),
         history_signature=CASE WHEN $6 THEN NULL ELSE history_signature END,live_signature=CASE WHEN $6 THEN NULL ELSE live_signature END,
         live_due=CASE WHEN $6 THEN false ELSE live_due END,live_gap=CASE WHEN $6 THEN false ELSE live_gap END,
         due_floor=CASE WHEN $6 THEN NULL ELSE due_floor END,due_generation=due_generation+CASE WHEN $6 THEN 1 ELSE 0 END,
@@ -897,13 +953,21 @@ export class Store {
     status: 'pending' | 'cancelled',
     code: string | null,
     waitMs: number,
+    retryAtMs?: number,
   ): Promise<void> {
     await this.pool.query(
       `UPDATE eraser_connection_requests SET status=CASE WHEN expires_at<=clock_timestamp() THEN 'expired' ELSE $3 END,
-       next_attempt_at=LEAST(expires_at,clock_timestamp()+($5 * INTERVAL '1 millisecond')),
+       next_attempt_at=LEAST(expires_at,GREATEST(clock_timestamp()+($5 * INTERVAL '1 millisecond'),$6::timestamptz)),
        lease_token=NULL,lease_until=NULL,last_error=$4,updated_at=clock_timestamp()
        WHERE chat_id=$1 AND lease_token=$2 AND status='pending'`,
-      [chatId, leaseToken, status, code, Math.max(1000, waitMs)],
+      [
+        chatId,
+        leaseToken,
+        status,
+        code,
+        Math.max(1000, waitMs),
+        retryAtMs === undefined ? null : new Date(retryAtMs),
+      ],
     );
   }
   async activateConnection(
@@ -946,6 +1010,8 @@ export class Store {
          live_upper=NULL,live_cursor=NULL,history_cursor=GREATEST(COALESCE(history_cursor,0),
            (EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint-hours*3600000::bigint),
          history_complete=false,history_gap=false,live_gap=false,history_signature=NULL,live_signature=NULL,
+         history_gap_from=LEAST(history_gap_from,CASE WHEN history_gap THEN history_cursor END),
+         history_gap_to=GREATEST(history_gap_to,CASE WHEN history_gap THEN history_cursor END),
          live_due=false,due_floor=NULL,due_generation=due_generation+1,
          safety_floor=LEAST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint-hours*3600000::bigint+1,live_gap_at,safety_gap_at),
          safety_upper=NULL,safety_cursor=NULL,safety_signature=NULL,safety_had_messages=false,safety_gap=false,
@@ -1142,6 +1208,7 @@ export class Store {
     policy: PolicyRow,
     error: string | null = null,
     waitMs = 1000,
+    retryAtMs?: number,
   ): Promise<void> {
     const now = Date.now();
     const due = effectiveDueSql(policy.hours);
@@ -1176,7 +1243,7 @@ export class Store {
     if (!capacity) safetyAt = Math.max(safetyAt, now + SAFETY_DELAYS[0]!);
     if (capacity && policy.safety_cursor !== null && !policy.safety_gap) safetyAt = now + 1000;
     if (error) {
-      const retryAt = now + Math.max(1000, waitMs);
+      const retryAt = retryAtMs ?? now + Math.max(1000, waitMs);
       normalAt = Math.max(normalAt, retryAt);
       safetyAt = Math.max(safetyAt, retryAt);
     }
@@ -1219,6 +1286,7 @@ export class Store {
     token: string,
     error: string | null = null,
     waitMs = 1000,
+    retryAtMs?: number,
   ): Promise<void> {
     await this.transaction(async (client) => {
       const policy = (
@@ -1230,7 +1298,7 @@ export class Store {
       if (!policy) return;
       // FLAG: Recompute from current durable inputs under the same lock used by ingress.
       // A stale visit cannot replace a newer event's due wake with its idle polling delay.
-      await this.reschedule(client, policy, error, waitMs);
+      await this.reschedule(client, policy, error, waitMs, retryAtMs);
       await client.query(
         'UPDATE eraser_policies SET lease_token=NULL,lease_until=NULL,last_error=$3 WHERE chat_id=$1 AND lease_token=$2',
         [chatId, token, error],
@@ -1361,6 +1429,7 @@ export class Store {
     lane: Lane,
     messages: Message[],
     purpose: ScanPurpose = 'due',
+    scannedUpper?: number,
   ): Promise<void> {
     await this.transaction(async (client) => {
       const current = (
@@ -1375,6 +1444,8 @@ export class Store {
         !current ||
         current.revision !== policy.revision ||
         current.scan_generation !== policy.scan_generation ||
+        (lane === 'history' &&
+          (current.history_cursor !== policy.history_cursor || current.history_gap)) ||
         (lane === 'live' && purpose === 'due' && current.due_generation !== policy.due_generation)
       )
         return;
@@ -1394,7 +1465,12 @@ export class Store {
         : lane === 'live'
           ? current.live_signature
           : current.history_signature;
-      const repeated = messages.length === 100 && signature === previous;
+      const oldest = messages.at(-1)?.sourceMs;
+      const historyUpper =
+        scannedUpper ?? Number(current.history_cursor ?? Date.now() - current.hours * HOUR);
+      const repeated =
+        messages.length === 100 &&
+        (signature === previous || (lane === 'history' && oldest === historyUpper));
       let deferredFrom: number | null = null,
         deferredTo: number | null = null,
         historicalFrom: number | null = null,
@@ -1449,15 +1525,82 @@ export class Store {
         SELECT $1,m.message_id,m.author_id,m.is_bot,m.source_ms,$3 FROM jsonb_to_recordset($2::jsonb) AS m(message_id text,author_id text,is_bot boolean,source_ms bigint) ON CONFLICT DO NOTHING`,
         [policy.chat_id, JSON.stringify(admitted), lane],
       );
-      await client.query(
-        'UPDATE eraser_policies SET scanned_count=scanned_count+$2,deferred_from=CASE WHEN $3::bigint IS NULL THEN deferred_from ELSE LEAST(COALESCE(deferred_from,$3),$3) END,deferred_to=CASE WHEN $4::bigint IS NULL THEN deferred_to ELSE GREATEST(COALESCE(deferred_to,$4),$4) END,historical_deferred_from=CASE WHEN $5::bigint IS NULL THEN historical_deferred_from ELSE LEAST(COALESCE(historical_deferred_from,$5),$5) END,historical_deferred_to=CASE WHEN $6::bigint IS NULL THEN historical_deferred_to ELSE GREATEST(COALESCE(historical_deferred_to,$6),$6) END WHERE chat_id=$1',
-        [policy.chat_id, messages.length, deferredFrom, deferredTo, historicalFrom, historicalTo],
+      let [currentFrom, currentTo] = remainingRange(
+        current.deferred_from,
+        current.deferred_to,
+        Infinity,
+        -Infinity,
       );
-      const oldest = messages.at(-1)?.sourceMs;
+      let [historyFrom, historyTo] = remainingRange(
+        current.historical_deferred_from,
+        current.historical_deferred_to,
+        Infinity,
+        -Infinity,
+      );
+      if (lane === 'history' && !repeated && protection?.ready && protection.complete_through) {
+        // FLAG: A full page never certifies its oldest millisecond. Only a completed
+        // short page can include that boundary, even if the page contains candidates there.
+        const lower = messages.length < 100 ? -Infinity : oldest! + 1;
+        const upper = Math.min(
+          historyUpper,
+          protection.complete_through.getTime(),
+          Date.now() - current.hours * HOUR,
+        );
+        [currentFrom, currentTo] = remainingRange(
+          current.deferred_from,
+          current.deferred_to,
+          lower,
+          upper,
+        );
+        [historyFrom, historyTo] = remainingRange(
+          current.historical_deferred_from,
+          current.historical_deferred_to,
+          Math.max(lower, protection.bot_history_complete_from?.getTime() ?? Infinity),
+          upper,
+        );
+      }
+      await client.query(
+        `UPDATE eraser_policies SET scanned_count=scanned_count+$2,
+         deferred_from=LEAST($3::bigint,$7::bigint),deferred_to=GREATEST($4::bigint,$8::bigint),
+         historical_deferred_from=LEAST($5::bigint,$9::bigint),historical_deferred_to=GREATEST($6::bigint,$10::bigint)
+         WHERE chat_id=$1`,
+        [
+          policy.chat_id,
+          messages.length,
+          deferredFrom,
+          deferredTo,
+          historicalFrom,
+          historicalTo,
+          currentFrom,
+          currentTo,
+          historyFrom,
+          historyTo,
+        ],
+      );
       if (lane === 'history') {
+        // FLAG: A bounded revisit may finish below an older stalled millisecond.
+        // Retire only the boundaries covered by a page that actually progressed.
+        const [gapFrom, gapTo] = remainingRange(
+          current.history_gap_from,
+          current.history_gap_to,
+          repeated ? Infinity : messages.length < 100 ? -Infinity : oldest! + 1,
+          historyUpper,
+        );
         await client.query(
-          'UPDATE eraser_policies SET history_cursor=COALESCE($2,history_cursor),history_complete=$3,history_gap=$4,history_signature=$5 WHERE chat_id=$1',
-          [policy.chat_id, oldest ?? null, messages.length < 100, repeated, signature],
+          `UPDATE eraser_policies SET history_cursor=COALESCE($2,history_cursor),history_complete=$3,
+           history_gap=$4,history_signature=$5,
+           history_gap_from=LEAST($6::bigint,CASE WHEN $4 THEN $8::bigint END),
+           history_gap_to=GREATEST($7::bigint,CASE WHEN $4 THEN $8::bigint END) WHERE chat_id=$1`,
+          [
+            policy.chat_id,
+            repeated ? historyUpper : (oldest ?? null),
+            messages.length < 100,
+            repeated,
+            signature,
+            gapFrom,
+            gapTo,
+            historyUpper,
+          ],
         );
       } else if (safety && messages.length < 100 && current.safety_upper !== null) {
         const empty = !current.safety_had_messages && messages.length === 0;
@@ -1613,11 +1756,10 @@ export class Store {
     state: 'deleted' | 'protected' | 'review' | 'uncertain' | 'pending',
     code: string,
     waitMs = 1000,
+    options?: { leaseToken?: string; retryAtMs?: number },
   ): Promise<void> {
     await this.transaction(async (client) => {
-      await client.query('SELECT chat_id FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [
-        candidate.chat_id,
-      ]);
+      await this.lockPolicy(client, candidate.chat_id);
       const row = (
         await client.query<Candidate>(
           'SELECT * FROM eraser_candidates WHERE chat_id=$1 AND message_id=$2 FOR UPDATE',
@@ -1640,15 +1782,31 @@ export class Store {
         if (state === 'pending' && (candidate.state !== 'dispatching' || code !== 'rate_limited'))
           return;
       } else if (
+        !options?.leaseToken ||
         row.state !== 'pending' ||
         candidate.state !== 'pending' ||
-        !['pending', 'protected', 'review'].includes(state)
+        !['pending', 'protected', 'review'].includes(state) ||
+        row.next_attempt_at.getTime() > Date.now()
       )
         return;
-      await client.query(
-        "UPDATE eraser_candidates SET state=$3,outcome_code=$4,updated_at=CURRENT_TIMESTAMP,next_attempt_at=CURRENT_TIMESTAMP+($5 * INTERVAL '1 millisecond') WHERE chat_id=$1 AND message_id=$2",
-        [candidate.chat_id, candidate.message_id, state, code, waitMs],
+      const written = await client.query(
+        `UPDATE eraser_candidates SET state=$3,outcome_code=$4,updated_at=clock_timestamp(),
+           next_attempt_at=COALESCE($8::timestamptz,clock_timestamp()+($5 * INTERVAL '1 millisecond'))
+         WHERE chat_id=$1 AND message_id=$2 AND ($6 OR EXISTS(
+           SELECT 1 FROM eraser_policies WHERE chat_id=$1 AND enabled AND lease_token=$7 AND lease_until>clock_timestamp()
+         ))`,
+        [
+          candidate.chat_id,
+          candidate.message_id,
+          state,
+          code,
+          waitMs,
+          issued,
+          options?.leaseToken ?? null,
+          options?.retryAtMs === undefined ? null : new Date(options.retryAtMs),
+        ],
       );
+      if (!written.rowCount) return;
       if (state === 'pending') {
         // FLAG: A proven rejection may arrive after its visit ended. Restore only this known
         // retry's due wake; an unresolved DELETE never enters the ordinary schedule.
@@ -1713,23 +1871,35 @@ export class Store {
       await this.reschedule(client, policy);
     });
   }
-  async defer(candidate: Candidate, code: string, waitMs: number): Promise<void> {
+  async defer(
+    candidate: Candidate,
+    code: string,
+    waitMs: number,
+    leaseToken?: string,
+  ): Promise<void> {
     // FLAG: Age is derived from the current policy; it must never overwrite a retry or pin deadline.
     if (code === 'not_due') return;
-    await this.settle(candidate, 'pending', code, waitMs);
+    await this.settle(candidate, 'pending', code, waitMs, { leaseToken });
   }
-  async deferProtection(candidate: Candidate): Promise<void> {
+  private async lockPolicy(client: pg.PoolClient, chatId: string): Promise<void> {
+    await client.query('SELECT chat_id FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [chatId]);
+  }
+  async deferProtection(candidate: Candidate, leaseToken: string): Promise<void> {
     await this.transaction(async (client) => {
-      await client.query('SELECT chat_id FROM eraser_policies WHERE chat_id=$1 FOR UPDATE', [
-        candidate.chat_id,
-      ]);
+      if (candidate.state !== 'pending') return;
+      await this.lockPolicy(client, candidate.chat_id);
       const row = (
         await client.query<Candidate>(
           "SELECT * FROM eraser_candidates WHERE chat_id=$1 AND message_id=$2 AND state='pending' FOR UPDATE",
           [candidate.chat_id, candidate.message_id],
         )
       ).rows[0];
-      if (!row) return;
+      if (
+        !row ||
+        row.dispatch_id !== candidate.dispatch_id ||
+        row.next_attempt_at.getTime() > Date.now()
+      )
+        return;
       const protection = (
         await client.query<ProtectionState & { module_bot: boolean }>(
           'SELECT ready,complete_through,bot_history_complete_from,EXISTS(SELECT 1 FROM eraser_protected_bots WHERE chat_id=$1 AND bot_id=$2) AS module_bot FROM eraser_protection_state WHERE chat_id=$1',
@@ -1742,12 +1912,25 @@ export class Store {
         protection,
       );
       if (!gap) return;
+      if (row.dispatch_id !== null || row.attempt_count !== 0) {
+        await client.query(
+          `UPDATE eraser_candidates
+           SET next_attempt_at=GREATEST(next_attempt_at,clock_timestamp()+INTERVAL '1 minute')
+           WHERE chat_id=$1 AND message_id=$2 AND EXISTS(
+             SELECT 1 FROM eraser_policies WHERE chat_id=$1 AND enabled AND lease_token=$3 AND lease_until>clock_timestamp()
+           )`,
+          [candidate.chat_id, candidate.message_id, leaseToken],
+        );
+        return;
+      }
       const prefix = gap === 'history' ? 'historical_deferred' : 'deferred';
       // FLAG: Park only unissued candidates in a durable range; uncertain effects remain journals.
-      await client.query(
-        `UPDATE eraser_policies SET ${prefix}_from=LEAST(COALESCE(${prefix}_from,$2),$2),${prefix}_to=GREATEST(COALESCE(${prefix}_to,$2),$2) WHERE chat_id=$1`,
-        [candidate.chat_id, row.source_ms],
+      const parked = await client.query(
+        `UPDATE eraser_policies SET ${prefix}_from=LEAST(COALESCE(${prefix}_from,$2),$2),${prefix}_to=GREATEST(COALESCE(${prefix}_to,$2),$2)
+         WHERE chat_id=$1 AND enabled AND lease_token=$3 AND lease_until>clock_timestamp()`,
+        [candidate.chat_id, row.source_ms, leaseToken],
       );
+      if (!parked.rowCount) return;
       await client.query('DELETE FROM eraser_candidates WHERE chat_id=$1 AND message_id=$2', [
         candidate.chat_id,
         candidate.message_id,

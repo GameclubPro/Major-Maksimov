@@ -61,16 +61,14 @@ export class HttpTelemetry {
   transportError(purpose: HttpPurpose): void {
     this.requests.get(purpose)!.transportErrors++;
   }
-  admission(kind: 'cooldown' | 'unavailable' | 'guard', retryAfterMs?: number): void {
+  admission(kind: 'cooldown' | 'unavailable' | 'guard', retryAtMs?: number): void {
     if (kind === 'cooldown') {
       this.cooldownDeferrals++;
-      this.cooldown(retryAfterMs ?? 1000);
+      this.cooldownUntil(retryAtMs ?? this.now() + 1000);
     } else if (kind === 'unavailable') this.admissionUnavailable++;
     else this.guardRejected++;
   }
-  cooldown(retryAfterMs: number): void {
-    // Match the limiter's minimum without treating the observation as the shared durable gate.
-    const until = this.now() + Math.max(1000, retryAfterMs);
+  cooldownUntil(until: number): void {
     if (Number.isFinite(until) && until <= 8_640_000_000_000_000)
       this.observedCooldownUntil = Math.max(this.observedCooldownUntil, until);
   }

@@ -36,6 +36,27 @@ test('hour-long connection is an explicit enabled-only policy option', () => {
   assert.throws(() => updateInput({ ...input, enabled: false, connectWhenReady: true }));
 });
 
+test('shutdown after subscription lookup prevents a registration POST', async () => {
+  const controller = new AbortController();
+  const calls: string[] = [];
+  const client = new MaxClient(
+    { ...settings, webhookUrl: 'https://test.invalid/webhook' },
+    { acquire: async () => {}, cooldownUntil: async () => {} },
+    async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      calls.push(`${init?.method} ${path}`);
+      if (path === '/me') return Response.json({ user_id: settings.botId, is_bot: true });
+      assert.equal(path, '/subscriptions');
+      controller.abort();
+      return Response.json({ subscriptions: [] });
+    },
+    undefined,
+    controller.signal,
+  );
+  await assert.rejects(client.subscribe(), { name: 'AbortError' });
+  assert.deepEqual(calls, ['GET /me', 'GET /subscriptions']);
+});
+
 test('connection actor proof targets the exact requesting human and shares the HTTP budget', async () => {
   const calls: URL[] = [];
   let admissions = 0;
@@ -45,7 +66,7 @@ test('connection actor proof targets the exact requesting human and shares the H
       acquire: async () => {
         admissions++;
       },
-      cooldown: async () => {},
+      cooldownUntil: async () => {},
     },
     async (input, init) => {
       const url = new URL(String(input));
@@ -71,7 +92,7 @@ test('connection actor proof accepts positive human administrator or owner evide
   ]) {
     const client = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json({ members: [member] }),
     );
     await client.actorRights('-1', '5');
@@ -91,7 +112,7 @@ test('missing or malformed actor evidence never manufactures a cancellation or a
   ]) {
     const client = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json(response),
     );
     await assert.rejects(
@@ -108,7 +129,7 @@ test('explicit human nonadministrator cannot authorize background activation', a
   ]) {
     const client = new MaxClient(
       settings,
-      { acquire: async () => {}, cooldown: async () => {} },
+      { acquire: async () => {}, cooldownUntil: async () => {} },
       async () => Response.json({ members: [member] }),
     );
     await assert.rejects(
@@ -125,7 +146,7 @@ test('actor lookup preserves denial, unknown access and MAX retry-after semantic
     settings,
     {
       acquire: async () => {},
-      cooldown: async (ms) => {
+      cooldownUntil: async (ms) => {
         cooldowns.push(ms);
       },
     },
@@ -147,7 +168,8 @@ test('actor lookup preserves denial, unknown access and MAX retry-after semantic
         !error.attempted &&
         (status !== 429 || error.retryAfterMs === 7000),
     );
-  assert.deepEqual(cooldowns, [7000]);
+  assert.equal(cooldowns.length, 1);
+  assert.ok(Math.abs(cooldowns[0]! - Date.now() - 7000) < 500);
 });
 
 test('expired connection guard runs after rate admission and prevents every rights HTTP request', async () => {
@@ -161,7 +183,7 @@ test('expired connection guard runs after rate admission and prevents every righ
         acquire: async () => {
           admitted = true;
         },
-        cooldown: async () => {},
+        cooldownUntil: async () => {},
       },
       async () => {
         requests++;

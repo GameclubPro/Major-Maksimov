@@ -3,7 +3,7 @@ import { Queue, Worker, type Job } from 'bullmq';
 import type { Config } from './config.js';
 import { MaxError, type MaxTransport } from './max.js';
 import { Store, CHAT_BUFFER, HOUSEKEEPING_INTERVAL_MS } from './store.js';
-import { ServiceError, type Lane } from './types.js';
+import { ServiceError, type Candidate, type Lane } from './types.js';
 import { ProgressLog } from './progress-log.js';
 import type { HousekeepingHealth } from './housekeeping.js';
 
@@ -13,6 +13,23 @@ export const ERASER_CONNECTION_REQUEST_VERSION = 1;
 export const MAX_CONNECTION_WAKEUPS = 16;
 const WORKER_PROGRESS_LIMIT_MS = 120_000;
 const DIAGNOSTIC_LOG_INTERVAL_MS = 30_000;
+class DeleteSettlementError extends Error {
+  constructor(readonly retryAt: number | null) {
+    super('Failed to persist a known DELETE result');
+  }
+}
+
+async function persistDeleteResult(write: () => Promise<void>, retryAt: number | null) {
+  try {
+    await write();
+  } catch {
+    try {
+      await write();
+    } catch {
+      throw new DeleteSettlementError(retryAt);
+    }
+  }
+}
 export type Wakeup = { chatId: string; leaseToken: string; purpose?: 'due' | 'safety' };
 type WorkerErrorCode = 'worker_error' | 'job_failed' | 'job_stalled' | 'worker_closed';
 type WorkerObservation = {
@@ -287,10 +304,6 @@ export class CleanupRuntime {
         failure instanceof MaxError &&
         failure.status === 403 &&
         failure.code === 'actor_rights_missing';
-      const wait =
-        failure instanceof MaxError && failure.status === 429
-          ? Math.max(30_000, failure.retryAfterMs)
-          : 30_000;
       await this.store.finishConnection(
         chatId,
         leaseToken,
@@ -298,7 +311,8 @@ export class CleanupRuntime {
         failure instanceof MaxError || failure instanceof ServiceError
           ? failure.code
           : 'connection_check_failed',
-        wait,
+        30_000,
+        failure instanceof MaxError && failure.status === 429 ? failure.retryAtMs : undefined,
       );
     }
   }
@@ -364,8 +378,9 @@ export class CleanupRuntime {
   }
   async visit(wakeup: Wakeup): Promise<void> {
     const { chatId, leaseToken, purpose = 'due' } = wakeup;
-    let error: string | null = null,
-      wait = 1000;
+    let error: string | null = null;
+    let wait = 1000;
+    let retryAtMs: number | undefined;
     try {
       let policy = await this.store.active(chatId, leaseToken);
       if (!policy || this.stopping || !this.config.enabled) return;
@@ -396,7 +411,7 @@ export class CleanupRuntime {
             window.lower,
             purpose === 'safety' ? 'safety' : undefined,
           );
-          await this.store.savePage(policy, lane, page, purpose);
+          await this.store.savePage(policy, lane, page, purpose, window.upper);
           candidates = await this.store.nextCandidates(chatId, policy.hours);
           if (candidates.length) break;
         }
@@ -421,10 +436,11 @@ export class CleanupRuntime {
           pin = await this.max.pin(chatId);
         }
         if (pin === candidate.message_id) {
-          await this.store.defer(candidate, 'pinned', 60_000);
+          await this.store.defer(candidate, 'pinned', 60_000, leaseToken);
           continue;
         }
-        let issued = candidate;
+        let issued: Candidate | null = null;
+        let rejected: MaxError | null = null;
         try {
           await this.max.remove(chatId, candidate.message_id, async () => {
             if (this.stopping)
@@ -437,37 +453,57 @@ export class CleanupRuntime {
             );
             issued = { ...candidate, state: 'dispatching', dispatch_id: dispatch };
           });
-          await this.store.settle(issued, 'deleted', 'deleted');
         } catch (failure) {
-          if (failure instanceof ServiceError) {
+          if (issued) {
+            if (failure instanceof MaxError && failure.status === 429 && !failure.attempted) {
+              rejected = failure;
+            } else {
+              // FLAG: Timeout, malformed acknowledgement and generic errors retain mutation uncertainty.
+              await this.store.settle(issued, 'uncertain', 'reconciliation', 10_000);
+              throw failure;
+            }
+          } else if (failure instanceof ServiceError) {
             if (failure.code === 'ERASER_PROTECTED')
-              await this.store.settle(candidate, 'protected', 'protected');
+              await this.store.settle(candidate, 'protected', 'protected', 1000, { leaseToken });
             else if (failure.code === 'ERASER_PROTECTION_PENDING')
-              await this.store.deferProtection(candidate);
-            else await this.store.defer(candidate, 'policy_changed', 1000);
-          } else if (failure instanceof MaxError && failure.status === 429 && !failure.attempted) {
-            await this.store.settle(issued, 'pending', 'rate_limited', failure.retryAfterMs);
-            throw failure;
-          } else if (issued !== candidate) {
-            // FLAG: Timeout, malformed acknowledgement and generic errors retain mutation uncertainty.
-            await this.store.settle(issued, 'uncertain', 'reconciliation', 10_000);
-            throw failure;
+              await this.store.deferProtection(candidate, leaseToken);
+            else await this.store.defer(candidate, 'policy_changed', 1000, leaseToken);
+            continue;
           } else throw failure;
         }
+        // FLAG: No HTTP replay and no acknowledgement without a returned dispatch UUID.
+        // A lost settlement COMMIT response can only repeat the exact idempotent store write.
+        const dispatch = issued;
+        if (!dispatch) throw new Error('Missing DELETE dispatch receipt');
+        if (rejected) {
+          await persistDeleteResult(
+            () =>
+              this.store.settle(dispatch, 'pending', 'rate_limited', 1000, {
+                retryAtMs: rejected.retryAtMs,
+              }),
+            rejected.retryAtMs,
+          );
+          throw rejected;
+        }
+        await persistDeleteResult(() => this.store.settle(dispatch, 'deleted', 'deleted'), null);
       }
     } catch (failure) {
       if (failure instanceof MaxError) {
         error = failure.code;
-        wait =
-          failure.status === 429 ? failure.retryAfterMs : failure.status === 403 ? 300_000 : 5000;
+        wait = failure.status === 403 ? 300_000 : 5000;
+        if (failure.status === 429) retryAtMs = failure.retryAtMs;
         if (failure.code === 'eraser_rights_missing')
           await this.store.connection(chatId, 'no_access');
+      } else if (failure instanceof DeleteSettlementError) {
+        error = 'delete_settlement_failed';
+        wait = 5000;
+        retryAtMs = failure.retryAt ?? undefined;
       } else {
         error = 'worker_error';
         wait = 5000;
       }
     } finally {
-      await this.store.finishVisit(chatId, leaseToken, error, wait);
+      await this.store.finishVisit(chatId, leaseToken, error, wait, retryAtMs);
     }
   }
   health(): {

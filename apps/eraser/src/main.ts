@@ -20,6 +20,7 @@ const pool = new pg.Pool({
 const redis = new Redis(settings.redisUrl, { maxRetriesPerRequest: 1 });
 redis.on('error', () => {});
 const store = new Store(pool, settings.enabled);
+const startupAbort = new AbortController();
 const max = new MaxClient(
   settings,
   new HttpLimiter(
@@ -28,11 +29,13 @@ const max = new MaxClient(
     'eraser:http',
     new DurableRateLimit(pool, settings.botId),
   ),
+  undefined,
+  undefined,
+  startupAbort.signal,
 );
 const runtime = new CleanupRuntime(store, max, settings);
 const server = createHttpServer(store, max, runtime, settings, () => redis.ping());
 let closing: Promise<void> | undefined;
-const startupAbort = new AbortController();
 let startup: Promise<boolean> | undefined;
 function close(): Promise<void> {
   if (closing) return closing;
