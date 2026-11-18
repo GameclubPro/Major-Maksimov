@@ -926,6 +926,26 @@ export class RedisCounterService implements OnModuleDestroy {
     await this.redis.set(key, value, 'EX', Math.trunc(ttlSeconds));
   }
 
+  async replaceStringIfUnchangedWithTtl(
+    key: string,
+    expected: string,
+    value: string,
+    ttlSeconds: number,
+  ): Promise<boolean> {
+    return (
+      Number(
+        await this.redis.eval(
+          'if redis.call("get", KEYS[1]) ~= ARGV[1] then return 0 end; redis.call("set", KEYS[1], ARGV[2], "EX", ARGV[3]); return 1',
+          1,
+          key,
+          expected,
+          value,
+          ttlSeconds,
+        ),
+      ) === 1
+    );
+  }
+
   async deleteKey(key: string): Promise<number> {
     const normalizedKey = key.trim();
     if (!normalizedKey) {

@@ -3,7 +3,7 @@ import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import { getNetworkSettingsSectionPresentation } from './settings-workspace-sections';
 
 import { useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
-import { lazy, Suspense, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useRef, useState, type ReactNode } from 'react';
 import type { ChatSettings } from '@maxim/contracts/settings';
 import type {
   KaravanStorefrontAllowlistEntry,
@@ -110,36 +110,23 @@ export function SettingsStorefrontSection({
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     enabled: Boolean(chatId) && allowlistVisible,
-    staleTime: 30_000,
-    refetchOnWindowFocus: true,
+    staleTime: 0,
+    refetchOnWindowFocus: 'always',
   });
+  const openingBot = useRef(false);
   const handoffMutation = useMutation({
-    mutationFn: () => handoffKaravanStorefrontAllowlist(api, chatId ?? ''),
-    onSuccess: ({ botUrl }) => {
-      if (!openMaxBotLinkAndClose(botUrl)) {
-        pushToast({
-          tone: 'danger',
-          title: 'Не удалось открыть бота',
-          description: 'Повторите попытку из MAX.',
-        });
-        maxNotify('error');
-        return;
+    mutationFn: async () => {
+      const { botUrl } = await handoffKaravanStorefrontAllowlist(api, chatId ?? '');
+      try {
+        if (openMaxBotLinkAndClose(botUrl)) return;
+      } catch {
+        // MAX can refuse the transition after the server has prepared the conversation.
       }
-
-      pushToast({
-        tone: 'info',
-        title: 'Открываем бота',
-        description: 'Перешлите ему сообщение пользователя и выберите срок доступа.',
-      });
-      maxNotify('success');
+      throw new Error('Не удалось открыть личный чат бота. Попробуйте ещё раз.');
     },
-    onError: (error) => {
-      pushToast({
-        tone: 'danger',
-        title: 'Не удалось запустить добавление',
-        description: describeUserFacingError(error, 'Повторите попытку.'),
-      });
-      maxNotify('error');
+    onError: () => maxNotify('error'),
+    onSettled: () => {
+      openingBot.current = false;
     },
   });
   const revokeMutation = useMutation({
@@ -215,21 +202,41 @@ export function SettingsStorefrontSection({
             >
               <div className="settings-storefront__allowlist-head">
                 <div>
-                  <h3 id="settings-storefront-allowlist-title">Разрешённые пользователи</h3>
-                  <p>Доступ действует только в этом чате.</p>
+                  <h3 id="settings-storefront-allowlist-title">Доступ к ответу на $ в этом чате</h3>
+                  <p>
+                    {hasChanges
+                      ? 'Сохраните настройки перед переходом к боту.'
+                      : 'В личном чате с ботом перешлите сообщение участника и выберите срок доступа.'}
+                  </p>
                 </div>
                 <button
                   type="button"
                   className="settings-storefront__add-button"
-                  onClick={() => handoffMutation.mutate()}
-                  disabled={!chatId || handoffMutation.isPending}
+                  onClick={() => {
+                    if (openingBot.current || !chatId || hasChanges) return;
+                    openingBot.current = true;
+                    handoffMutation.mutate();
+                  }}
+                  disabled={!chatId || hasChanges || handoffMutation.isPending}
                 >
                   <IconoirSprite variant="iconoir" icon="PlusCircle" aria-hidden />
                   <span>
-                    {handoffMutation.isPending ? 'Открываем...' : 'Добавить пользователя'}
+                    {handoffMutation.isPending
+                      ? 'Открываем бота…'
+                      : handoffMutation.isError
+                        ? 'Повторить переход к боту'
+                        : 'Выдать доступ через бота'}
                   </span>
                 </button>
               </div>
+              {handoffMutation.isError && !hasChanges ? (
+                <p role="alert" className="settings-storefront__state">
+                  {describeUserFacingError(
+                    handoffMutation.error,
+                    'Не удалось открыть личный чат бота. Попробуйте ещё раз.',
+                  )}
+                </p>
+              ) : null}
 
               {allowlistQuery.isLoading ? (
                 <div className="settings-storefront__state" role="status">
@@ -246,7 +253,7 @@ export function SettingsStorefrontSection({
                   </button>
                 </div>
               ) : entries.length === 0 ? (
-                <p className="settings-storefront__empty">Список пока пуст.</p>
+                <p className="settings-storefront__empty">Персональных разрешений пока нет.</p>
               ) : (
                 <div className="settings-storefront__list" aria-live="polite">
                   {entries.map((entry) => (
@@ -297,7 +304,7 @@ export function SettingsStorefrontSection({
             open
             id="storefront-revoke"
             className="storefront-revoke-confirm"
-            title="Отозвать доступ к добавлению ссылки?"
+            title="Отозвать доступ к ответу на $?"
             previewTitle={allowlistEntryLabel(entryToRevoke)}
             confirmLabel="Отозвать доступ"
             confirmBusyLabel="Отзываем…"

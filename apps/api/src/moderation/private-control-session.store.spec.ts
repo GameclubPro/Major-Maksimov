@@ -1,6 +1,6 @@
 import { createDefaultPrivateControlSession } from './private-control-session-normalizer';
 import { PrivateControlSessionStore } from './private-control-session.store';
-import type { PrivateSession } from './private-control.types';
+import type { PendingKaravanAllowlistFlow, PrivateSession } from './private-control.types';
 
 function createStore(redisCounter?: {
   getString: jest.Mock;
@@ -8,6 +8,7 @@ function createStore(redisCounter?: {
   deleteKey: jest.Mock;
   acquireLock: jest.Mock;
   releaseLock: jest.Mock;
+  replaceStringIfUnchangedWithTtl?: jest.Mock;
 }) {
   return new PrivateControlSessionStore({
     redisCounter: redisCounter as never,
@@ -18,6 +19,54 @@ function createStore(redisCounter?: {
 }
 
 describe('PrivateControlSessionStore', () => {
+  it.each([false, true])(
+    'recovers a corrupt handoff session without overwriting a concurrent repair (%s)',
+    async (concurrentRepair) => {
+      let raw = '{';
+      let calls = 0;
+      const redis = {
+        getString: jest.fn(async () => raw),
+        replaceStringIfUnchangedWithTtl: jest.fn(
+          async (_key: string, expected: string, next: string) => {
+            if (concurrentRepair && calls++ === 0) {
+              raw = JSON.stringify({
+                ...createDefaultPrivateControlSession(),
+                selectedChatId: 'repaired-chat',
+              });
+            }
+            if (raw !== expected) return false;
+            raw = next;
+            return true;
+          },
+        ),
+        setStringWithTtl: jest.fn(),
+        deleteKey: jest.fn(),
+        acquireLock: jest.fn(),
+        releaseLock: jest.fn(),
+      };
+      const store = createStore(redis);
+      const candidate: PendingKaravanAllowlistFlow = {
+        chatId: 'chat',
+        chatTitle: 'Chat',
+        actorUserId: 'admin',
+        botId: 'bot',
+        nonce: 'offer',
+        stage: 'await_forward',
+        targetUserId: null,
+        targetDisplayName: null,
+        sourceMessageId: null,
+        expiresAt: Date.now() + 30_000,
+      };
+      await expect(store.claimKaravanAllowlist('admin', 'bot', candidate)).resolves.toEqual(
+        candidate,
+      );
+      expect(JSON.parse(raw)).toMatchObject({
+        pendingKaravanAllowlist: candidate,
+        selectedChatId: concurrentRepair ? 'repaired-chat' : null,
+      });
+    },
+  );
+
   it('isolates mutable sessions for the same user across bots', async () => {
     const store = createStore();
     const first = createDefaultPrivateControlSession();
