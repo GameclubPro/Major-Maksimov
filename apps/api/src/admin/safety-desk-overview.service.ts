@@ -22,7 +22,10 @@ import {
   OverviewInvalidEvidenceError,
 } from './safety-desk-overview-store';
 import { SafetyDeskOverviewActionsService } from './safety-desk-overview-actions.service';
-import { SafetyDeskOverviewPendingService } from './safety-desk-overview-pending.service';
+import {
+  indexPendingBots,
+  SafetyDeskOverviewPendingService,
+} from './safety-desk-overview-pending.service';
 
 export const OVERVIEW_CHEAP_INTERVAL_MS = 10000;
 export const OVERVIEW_EXPENSIVE_INTERVAL_MS = 30000;
@@ -385,14 +388,9 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
       try {
         const sample = await this.pendingReader.getSnapshot(ids, defaultBotId);
         const sampleAt = Date.parse(sample.observedAt);
-        snapshot.bots = snapshot.bots.map((bot) => {
-          const row = sample.bots.find((item) => item.botId === bot.botId);
-          if (!row)
-            return {
-              ...bot,
-              pendingReceipts: failed(bot.pendingReceipts),
-              unfinishedActions: failed(bot.unfinishedActions),
-            };
+        const pendingById = indexPendingBots(sample.bots, ids);
+        const bots = snapshot.bots.map((bot) => {
+          const row = pendingById.get(bot.botId)!;
           const receiptAges = [
             ageMs(row.received.oldestAt, sampleAt),
             ageMs(row.queued.oldestAt, sampleAt),
@@ -419,11 +417,11 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
             ),
           };
         });
-        const receipts = snapshot.bots.map((bot) => bot.pendingReceipts.value!);
+        const receipts = bots.map((bot) => bot.pendingReceipts.value!);
         const receiptAges = receipts.flatMap((row) =>
           row.oldestAgeMs === null ? [] : [row.oldestAgeMs],
         );
-        snapshot.receipts = observed(
+        const pendingReceipts = observed(
           pending(
             receipts.reduce((sum, row) => sum + row.countLowerBound, 0),
             receipts.every((row) => row.sampleComplete),
@@ -432,7 +430,7 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
           ),
           sample.observedAt,
         );
-        snapshot.unfinishedActions = observed(
+        const unfinishedActions = observed(
           pending(
             sample.unfinishedActions.countLowerBound,
             !sample.unfinishedActions.truncated,
@@ -441,6 +439,7 @@ export class SafetyDeskOverviewService implements OnModuleInit, OnModuleDestroy 
           ),
           sample.observedAt,
         );
+        Object.assign(snapshot, { bots, receipts: pendingReceipts, unfinishedActions });
       } catch {
         snapshot.receipts = failed(snapshot.receipts);
         snapshot.unfinishedActions = failed(snapshot.unfinishedActions);

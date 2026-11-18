@@ -9,9 +9,10 @@ import { observationTime } from './observation-view';
 import { useRuntimeOverview, type OverviewAccessScope } from './use-runtime-overview';
 import {
   overviewAvailability,
-  overviewBotStatus,
+  overviewBotSignal,
   overviewDelayTone,
   overviewDuration,
+  overviewFreshness,
   overviewNumber,
   overviewOutcomeCount,
   overviewStatus,
@@ -32,18 +33,20 @@ const availabilityLabels = {
 function SourceStamp({
   source,
   now,
+  maxAgeMs,
+  label,
 }: {
-  source: {
-    availability: SafetyDeskOverviewResponse['collector']['availability'];
-    observedAt: string | null;
-  };
+  source: Pick<OverviewObservation<unknown>, 'availability' | 'observedAt'> | null;
   now: number;
+  maxAgeMs?: number;
+  label?: string;
 }) {
-  const availability = overviewAvailability(source, now);
+  const availability = source ? overviewAvailability(source, now, maxAgeMs) : 'UNAVAILABLE';
   return (
     <span className={`runtime-source runtime-source--${availability.toLowerCase()}`}>
+      {label && `${label} · `}
       {availabilityLabels[availability]}
-      {source.observedAt ? ` · ${observationTime(source.observedAt)}` : ''}
+      {source?.observedAt ? ` · ${observationTime(source.observedAt)}` : ''}
     </span>
   );
 }
@@ -210,7 +213,7 @@ function Queues({ snapshot, now }: { snapshot: SafetyDeskOverviewResponse; now: 
     <section className="runtime-section" aria-label="Распределение очередей">
       <div className="runtime-section__heading">
         <h3>Очереди сейчас</h3>
-        <SourceStamp source={snapshot.queues} now={now} />
+        <SourceStamp source={snapshot.queues} now={now} maxAgeMs={overviewFreshness.cheap} />
       </div>
       {queueData ? (
         <div className="runtime-queue-grid">
@@ -266,15 +269,15 @@ function Queues({ snapshot, now }: { snapshot: SafetyDeskOverviewResponse; now: 
 function BotCard({
   bot,
   now,
-  actionSampleComplete,
+  status,
   onEvidence,
 }: {
   bot: SafetyDeskOverviewResponse['bots'][number];
   now: number;
-  actionSampleComplete: boolean;
+  status: ReturnType<typeof overviewStatus>['cards'][number]['status'];
   onEvidence: (family: EvidenceFamily) => void;
 }) {
-  const status = overviewBotStatus(bot, now, actionSampleComplete);
+  const signal = overviewBotSignal(bot);
   const pending = bot.pendingReceipts.value;
   const unfinished = bot.unfinishedActions.value;
   const publisherReasons: Record<string, string> = {
@@ -294,14 +297,16 @@ function BotCard({
         <span className={`runtime-status runtime-status--${status.tone}`}>{status.label}</span>
       </div>
       <dl className="runtime-bot__facts">
-        <div>
-          <dt>Последнее событие</dt>
-          <dd>
-            {bot.subscription.value
-              ? observationTime(bot.subscription.value.lastIncomingAt)
-              : 'Нет наблюдений'}
-          </dd>
-        </div>
+        {bot.kind === 'moderator' && (
+          <div>
+            <dt>Последнее входящее событие</dt>
+            <dd>
+              {bot.subscription.value
+                ? observationTime(bot.subscription.value.lastIncomingAt)
+                : 'Нет наблюдений'}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Последний результат действия</dt>
           <dd>
@@ -363,10 +368,15 @@ function BotCard({
         )}
         <Outcomes values={bot.outcomes.value} />
         <div className="runtime-sources">
-          <SourceStamp source={bot.subscription} now={now} />
-          <SourceStamp source={bot.pendingReceipts} now={now} />
-          <SourceStamp source={bot.actionLatency} now={now} />
-          {bot.publisher && <SourceStamp source={bot.publisher} now={now} />}
+          <SourceStamp
+            source={signal.source}
+            now={now}
+            maxAgeMs={signal.maxAgeMs}
+            label={signal.label}
+          />
+          <SourceStamp source={bot.pendingReceipts} now={now} label="Входящие события" />
+          <SourceStamp source={bot.unfinishedActions} now={now} label="Незавершённые действия" />
+          <SourceStamp source={bot.actionLatency} now={now} label="Измеренная задержка" />
         </div>
         <button
           type="button"
@@ -437,7 +447,7 @@ function History({ snapshot, now }: { snapshot: SafetyDeskOverviewResponse; now:
       <div className="runtime-section__heading">
         <div>
           <h3>По минутам</h3>
-          <SourceStamp source={snapshot.history} now={now} />
+          <SourceStamp source={snapshot.history} now={now} maxAgeMs={overviewFreshness.history} />
         </div>
         <div className="runtime-range" aria-label="Период графиков">
           {([1, 24] as const).map((value) => (
@@ -538,13 +548,7 @@ export function RuntimeOverviewSnapshot({
 }) {
   const snapshot = failedRefresh ? staleOverview(receivedSnapshot) : receivedSnapshot;
   const status = overviewStatus(snapshot, now, failedRefresh);
-  const attentionCount = snapshot.bots.filter((bot) => {
-    const status = overviewBotStatus(bot, now, snapshot.actions.value?.sampleComplete === true);
-    return (
-      ['warning', 'danger'].includes(status.tone) ||
-      ['Данные неполные', 'Неполная выборка', 'Неполные данные задержки'].includes(status.label)
-    );
-  }).length;
+  const attentionCount = status.cards.filter((card) => card.status.attention).length;
   const actionData = snapshot.actions.value;
   const queueData = snapshot.queues.value;
   const totalJobs = queueData
@@ -569,7 +573,7 @@ export function RuntimeOverviewSnapshot({
         <div className="runtime-summary__time">
           <span>Последний успешный сбор</span>
           <strong>{observationTime(snapshot.collector.lastSuccessfulAt)}</strong>
-          <SourceStamp source={snapshot.collector} now={now} />
+          <SourceStamp source={snapshot.collector} now={now} maxAgeMs={overviewFreshness.cheap} />
         </div>
       </div>
       <div className="runtime-measure-grid">
@@ -577,7 +581,7 @@ export function RuntimeOverviewSnapshot({
           <h3>Заданий в очередях</h3>
           <strong className="runtime-measure__value">{overviewNumber(totalJobs)}</strong>
           <span className="runtime-note">Ожидают, исполняются или отложены</span>
-          <SourceStamp source={snapshot.queues} now={now} />
+          <SourceStamp source={snapshot.queues} now={now} maxAgeMs={overviewFreshness.cheap} />
         </article>
         <Pending label="События настроенных ботов" observation={snapshot.receipts} now={now} />
         <Pending
@@ -592,12 +596,12 @@ export function RuntimeOverviewSnapshot({
           <span className="runtime-note">Наблюдения обрабатываемой работы</span>
         </div>
         <div className="runtime-bot-grid">
-          {snapshot.bots.map((bot) => (
+          {status.cards.map(({ bot, status: cardStatus }) => (
             <BotCard
               key={bot.botId}
               bot={bot}
               now={now}
-              actionSampleComplete={snapshot.actions.value?.sampleComplete === true}
+              status={cardStatus}
               onEvidence={onEvidence}
             />
           ))}
@@ -672,7 +676,7 @@ export function RuntimeOverviewSnapshot({
             ? `Свежие отчёты: ${snapshot.workers.value.freshCount} из ${snapshot.workers.value.expectedCount}`
             : 'Общие отчёты процессов недоступны'}
         </p>
-        <SourceStamp source={snapshot.workers} now={now} />
+        <SourceStamp source={snapshot.workers} now={now} maxAgeMs={overviewFreshness.cheap} />
         <ul className="runtime-worker-list">
           {snapshot.workers.value?.rows.map((row) => (
             <li key={row.service}>

@@ -38,6 +38,7 @@ export function startOverviewPolling<T>(
   let cancelDeadline: (() => void) | null = null;
   let snapshot: T | null = null;
   let failures = 0;
+  let error = '';
 
   const clearRequest = () => {
     generation += 1;
@@ -62,14 +63,10 @@ export function startOverviewPolling<T>(
   };
   const fail = () => {
     failures = Math.min(failures + 1, 2);
-    onChange({
-      snapshot,
-      loading: false,
-      denied: false,
-      error: snapshot
-        ? 'Не удалось обновить наблюдения. Показан предыдущий снимок.'
-        : 'Наблюдения временно недоступны. Повторю проверку.',
-    });
+    error = snapshot
+      ? 'Не удалось обновить наблюдения. Показан предыдущий снимок.'
+      : 'Наблюдения временно недоступны. Повторю проверку.';
+    onChange({ snapshot, loading: false, denied: false, error });
     schedule();
   };
   function refresh() {
@@ -79,7 +76,7 @@ export function startOverviewPolling<T>(
     const requestGeneration = generation;
     const requestController = new AbortController();
     controller = requestController;
-    onChange({ snapshot, loading: true, error: '', denied: false });
+    onChange({ snapshot, loading: true, error, denied: false });
     cancelDeadline = environment.schedule(() => {
       clearRequest();
       fail();
@@ -94,6 +91,7 @@ export function startOverviewPolling<T>(
           controller = null;
           snapshot = value;
           failures = 0;
+          error = '';
           onChange({ snapshot, loading: false, error: '', denied: false });
           schedule();
         },
