@@ -1,6 +1,6 @@
-import type { Logger } from '@nestjs/common';
+import { ServiceUnavailableException, type Logger } from '@nestjs/common';
 import { SESSION_KEY_PREFIX, SESSION_TTL_SEC } from './private-control.constants';
-import type { PrivateSession } from './private-control.types';
+import type { PendingKaravanAllowlistFlow, PrivateSession } from './private-control.types';
 import type { RedisCounterService } from './redis-counter.service';
 
 const LEGACY_SESSION_MIGRATION_LOCK_TTL_MS = 5_000;
@@ -43,19 +43,8 @@ export class PrivateControlSessionStore {
   ): Promise<PrivateSession | null> {
     if (this.options.redisCounter) {
       const raw = await this.options.redisCounter.getString(sessionKey);
-      if (raw) {
-        try {
-          return this.options.normalizeSession(JSON.parse(raw));
-        } catch (error: unknown) {
-          this.options.logger.warn(
-            {
-              userId,
-              err: error instanceof Error ? error.message : String(error),
-            },
-            'Failed to parse private control session from redis',
-          );
-        }
-      }
+      const session = this.parseStoredSession(raw, userId);
+      if (session) return session;
     }
 
     const memory = this.memorySession.get(sessionKey);
@@ -64,6 +53,16 @@ export class PrivateControlSessionStore {
     }
 
     return null;
+  }
+
+  private parseStoredSession(raw: string | null, userId: string): PrivateSession | null {
+    if (!raw) return null;
+    try {
+      return this.options.normalizeSession(JSON.parse(raw));
+    } catch {
+      this.options.logger.warn({ userId }, 'Failed to parse private control session from redis');
+      return null;
+    }
   }
 
   async loadSessionForDiagnostics(
@@ -89,6 +88,42 @@ export class PrivateControlSessionStore {
     const sessionKey = this.sessionKey(userId, botId);
 
     await this.persistStoredSession(sessionKey, normalized);
+  }
+
+  async claimKaravanAllowlist(
+    userId: string,
+    botId: string | null,
+    candidate: PendingKaravanAllowlistFlow,
+  ): Promise<PendingKaravanAllowlistFlow> {
+    const key = this.sessionKey(userId, botId);
+    const redis = this.options.redisCounter;
+    if (!redis) {
+      const row = this.memorySession.get(key);
+      const session =
+        row && row.expiresAt > Date.now()
+          ? this.options.normalizeSession(row.session)
+          : this.options.createDefaultSession();
+      const existing = session.pendingKaravanAllowlist;
+      if (existing && existing.expiresAt > Date.now()) return existing;
+      session.pendingKaravanAllowlist = candidate;
+      this.memorySession.set(key, { session, expiresAt: Date.now() + SESSION_TTL_SEC * 1_000 });
+      return candidate;
+    }
+    // FLAG: Concurrent handoffs must share the winning nonce without replacing other private input.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const raw = await redis.getString(key);
+      const session = this.parseStoredSession(raw, userId) ?? this.options.createDefaultSession();
+      const existing = session.pendingKaravanAllowlist;
+      if (existing && existing.expiresAt > Date.now()) return existing;
+      session.pendingKaravanAllowlist = candidate;
+      const value = JSON.stringify(session);
+      const saved =
+        raw === null
+          ? await redis.setStringIfAbsentWithTtl(key, value, SESSION_TTL_SEC)
+          : await redis.replaceStringIfUnchangedWithTtl(key, raw, value, SESSION_TTL_SEC);
+      if (saved) return candidate;
+    }
+    throw new ServiceUnavailableException('Настройки изменились. Повторите добавление.');
   }
 
   private async persistStoredSession(sessionKey: string, session: PrivateSession): Promise<void> {

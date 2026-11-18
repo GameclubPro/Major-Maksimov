@@ -333,6 +333,7 @@ function checkConnectionRevision(revision: number | undefined) {
 const state = window as Window & {
   __shopRequests: Array<{ path: string; body: any }>;
   __shopOpened: string[];
+  __allowlistGrantConfirmed?: boolean;
   __shopPublished: typeof appearance;
   __shopMarket: typeof market;
   WebApp: unknown;
@@ -395,6 +396,14 @@ const api = {
       return karavanMarketplaceOperationSchema.parse(structuredClone(operation));
     }
     if (path.includes('/karavan-storefront/allowlist')) {
+      if (path.endsWith('/handoff') && init.method === 'POST') {
+        if (state.__shopRequests.filter((request) => request.path === path).length === 1)
+          throw new Error('Нет соединения. Повторите.');
+        return { botUrl: 'https://max.ru/synthetic_major_bot?start=allow_fixture' };
+      }
+      if (scenario === 'simple_community_allowlist') {
+        return { items: state.__allowlistGrantConfirmed ? allowedUsers.slice(0, 1) : [], hasMore: false, nextCursor: null };
+      }
       if (init.method === 'DELETE') {
         const index = allowedUsers.findIndex((user) => path.endsWith('/' + user.id));
         if (index >= 0) allowedUsers.splice(index, 1);

@@ -36,9 +36,24 @@ export function resolvePrivateControlSetFieldInputText(
 export function shouldPreferActiveContentInputForForward(
   session: Pick<
     PrivateSession,
-    'pendingInput' | 'screen' | 'selectedChatId' | 'selectedEntityType' | 'section'
+    | 'pendingInput'
+    | 'pendingKaravanAllowlist'
+    | 'screen'
+    | 'selectedChatId'
+    | 'selectedEntityType'
+    | 'section'
   >,
+  actorUserId: string,
+  botId: string | null,
 ): boolean {
+  const flow = session.pendingKaravanAllowlist;
+  if (
+    flow &&
+    flow.actorUserId === actorUserId &&
+    (!flow.botId || flow.botId === botId) &&
+    flow.expiresAt > Date.now()
+  )
+    return true;
   const pendingInput = session.pendingInput;
   if (!pendingInput) {
     return false;

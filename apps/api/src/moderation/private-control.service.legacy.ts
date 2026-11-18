@@ -679,40 +679,43 @@ export class PrivateControlService {
     }
 
     const session = await this.loadSession(user.userId);
+    const botId = user.launchBotId?.trim() || session.lastPrivateBotId?.trim() || null;
     const existing = session.pendingKaravanAllowlist;
+    const linkFor = (flow: PendingKaravanAllowlistFlow) => {
+      if (flow.actorUserId !== user.userId || flow.chatId !== chatId || flow.botId !== botId) {
+        throw new BadRequestException(
+          'В личном чате с ботом осталось другое добавление. Завершите его или напишите боту «Отмена», затем повторите здесь.',
+        );
+      }
+      const startPayload = this.buildKaravanAllowlistStartPayload(flow, flow.botId);
+      const botUrl = this.buildBotStartUrl(startPayload, flow.botId);
+      if (!botUrl) throw new BadRequestException('Ссылка на личный чат бота не настроена.');
+      return karavanStorefrontHandoffResponseSchema.parse({ botUrl });
+    };
     if (existing && existing.expiresAt > Date.now()) {
-      throw new BadRequestException(
-        'Сначала завершите текущее добавление пользователя или нажмите «Отмена».',
-      );
+      return linkFor(existing);
     }
 
     const chatTitle = await this.resolveKaravanAllowlistChatTitle(chatId, user);
-
-    const botId = user.launchBotId?.trim() || session.lastPrivateBotId?.trim() || null;
-    const nonce = this.createKaravanAllowlistNonce();
-    const startPayload = this.buildKaravanAllowlistStartPayload(
-      { chatId, actorUserId: user.userId, nonce },
-      botId,
-    );
-    const botUrl = this.buildBotStartUrl(startPayload, botId);
-    if (!botUrl) {
-      throw new BadRequestException('Ссылка на личный чат бота не настроена.');
-    }
-
-    session.pendingKaravanAllowlist = {
+    const candidate: PendingKaravanAllowlistFlow = {
       chatId,
       chatTitle,
       actorUserId: user.userId,
       botId,
-      nonce,
+      nonce: this.createKaravanAllowlistNonce(),
       stage: 'await_forward',
       targetUserId: null,
       targetDisplayName: null,
       sourceMessageId: null,
       expiresAt: Date.now() + KARAVAN_ALLOWLIST_FLOW_TTL_MS,
     };
-    await this.saveSession(user.userId, session);
-    return karavanStorefrontHandoffResponseSchema.parse({ botUrl });
+    const link = linkFor(candidate);
+    const winner = await this.sessionStore.claimKaravanAllowlist(
+      user.userId,
+      this.sessionBotContext.currentBotId(),
+      candidate,
+    );
+    return winner === candidate ? link : linkFor(winner);
   }
 
   private async handleKaravanAllowlistStarted(
@@ -751,16 +754,10 @@ export class PrivateControlService {
 
     await this.ensureKaravanAllowlistChatTitle(flow, context.actor);
 
-    flow.stage = 'await_forward';
-    await this.respond(
-      context,
-      session,
-      this.renderKaravanAllowlistForwardPrompt(flow.chatId, undefined, flow.nonce, flow.chatTitle),
-      {
-        callbackId: null,
-        notification: null,
-      },
-    );
+    await this.respond(context, session, this.renderKaravanAllowlistStep(flow), {
+      callbackId: null,
+      notification: null,
+    });
   }
 
   private async processKaravanAllowlistText(
@@ -863,14 +860,14 @@ export class PrivateControlService {
       });
       return;
     }
+    if (callback.args[0] !== flow.nonce) {
+      await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
+        callbackId: context.callbackId,
+        notification: 'Кнопка устарела',
+      });
+      return;
+    }
     if (callback.action === KARAVAN_ALLOWLIST_CANCEL_CALLBACK_ACTION) {
-      if (callback.args[0] !== flow.nonce) {
-        await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
-          callbackId: context.callbackId,
-          notification: 'Кнопка устарела',
-        });
-        return;
-      }
       session.pendingKaravanAllowlist = null;
       await this.respond(context, session, this.renderKaravanAllowlistCancelledView(), {
         callbackId: context.callbackId,
@@ -878,7 +875,7 @@ export class PrivateControlService {
       });
       return;
     }
-    if (flow.expiresAt <= Date.now() || flow.stage !== 'await_duration') {
+    if (flow.expiresAt <= Date.now()) {
       session.pendingKaravanAllowlist = null;
       await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
         callbackId: context.callbackId,
@@ -886,10 +883,9 @@ export class PrivateControlService {
       });
       return;
     }
-    const nonce = callback.args[0]?.trim() ?? '';
     const parsedDuration = karavanStorefrontDurationSchema.safeParse(callback.args[1]);
-    if (!nonce || nonce !== flow.nonce || !parsedDuration.success || !flow.targetUserId) {
-      await this.respond(context, session, this.renderKaravanAllowlistDurationPrompt(flow), {
+    if (flow.stage !== 'await_duration' || !parsedDuration.success || !flow.targetUserId) {
+      await this.respond(context, session, this.renderKaravanAllowlistStep(flow), {
         callbackId: context.callbackId,
         notification: 'Кнопка устарела',
       });
@@ -948,7 +944,7 @@ export class PrivateControlService {
     const readableChatTitle = formatKaravanAllowlistChatTitle(chatId, chatTitle);
     return {
       text: [
-        privateMarkdownTitle('Разрешение для витрины'),
+        privateMarkdownTitle('Доступ к объявлениям с $'),
         '',
         notice
           ? escapePrivateMarkdown(notice)
@@ -981,7 +977,7 @@ export class PrivateControlService {
         `Пользователь: ${escapePrivateMarkdown(label)}`,
         `Чат: ${escapePrivateMarkdown(chatTitle)}`,
         '',
-        'Выберите срок публикации витрин:',
+        'На какой срок разрешить объявления с $ в этом чате?',
       ].join('\n'),
       options: {
         buttons: [
@@ -1035,6 +1031,8 @@ export class PrivateControlService {
         `Пользователь: ${escapePrivateMarkdown(flow.targetDisplayName?.trim() || 'Пользователь')}`,
         `Чат: ${escapePrivateMarkdown(formatKaravanAllowlistChatTitle(flow.chatId, flow.chatTitle))}`,
         `Срок: ${expiresAt ? formatPrivateControlDateTimeLabel(expiresAt.toISOString()) : 'бессрочно'}`,
+        '',
+        'Теперь участник может отправить в этот чат объявление, поставив $ в начале сообщения.',
       ].join('\n'),
       options: { buttons: this.buildFooterButtons() },
     };
@@ -1083,6 +1081,17 @@ export class PrivateControlService {
     }
 
     flow.chatTitle = await this.resolveKaravanAllowlistChatTitle(flow.chatId, user);
+  }
+
+  private renderKaravanAllowlistStep(flow: PendingKaravanAllowlistFlow): PrivateView {
+    return flow.stage === 'await_duration'
+      ? this.renderKaravanAllowlistDurationPrompt(flow)
+      : this.renderKaravanAllowlistForwardPrompt(
+          flow.chatId,
+          undefined,
+          flow.nonce,
+          flow.chatTitle,
+        );
   }
 
   async handoffBroadcastFromMiniapp(
@@ -2188,15 +2197,7 @@ export class PrivateControlService {
 
     if (session.pendingKaravanAllowlist) {
       await this.ensureKaravanAllowlistChatTitle(session.pendingKaravanAllowlist, context.actor);
-      const view =
-        session.pendingKaravanAllowlist.stage === 'await_duration'
-          ? this.renderKaravanAllowlistDurationPrompt(session.pendingKaravanAllowlist)
-          : this.renderKaravanAllowlistForwardPrompt(
-              session.pendingKaravanAllowlist.chatId,
-              undefined,
-              session.pendingKaravanAllowlist.nonce,
-              session.pendingKaravanAllowlist.chatTitle,
-            );
+      const view = this.renderKaravanAllowlistStep(session.pendingKaravanAllowlist);
       await this.respond(context, session, view, {
         callbackId: context.callbackId,
         notification: 'Сначала завершите добавление пользователя',

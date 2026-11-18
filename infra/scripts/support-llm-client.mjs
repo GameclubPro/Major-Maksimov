@@ -10,7 +10,7 @@ export const knowledge = JSON.parse(
 const mandatoryIds = new Set(['support-room', 'operator']);
 
 function supportPromptFact(
-  { id, answer, sources, developerAnswer, troubleshootingAnswer },
+  { id, answer, sources, developerAnswer, troubleshootingAnswer, placementAnswer },
   { developer = false, troubleshooting = false } = {},
 ) {
   const pages = knowledge.officialSources.filter((page) => sources.includes(page.url));
@@ -19,6 +19,7 @@ function supportPromptFact(
     id,
     answer: [
       answer,
+      placementAnswer,
       developer && developerAnswer,
       (developer || troubleshooting) && troubleshootingAnswer,
     ]
@@ -775,6 +776,15 @@ async function answerSupportText(
   // allowlisted fact set. Additional tasks must retain inference and their own facts.
   const procedure = [
     {
+      active: request.storefrontPlacementOnly || request.storefrontDetail,
+      id: 'karavan-chat-marketplace',
+      field:
+        request.storefrontDetail === 'conditionalSellerId'
+          ? 'sellerIdAnswer'
+          : request.storefrontDetail || 'placementAnswer',
+      allowed: ['karavan-chat-marketplace', 'karavan-storefront'],
+    },
+    {
       active: request.nightManualOnly,
       id: 'night-manual',
       field: 'manualAnswer',
@@ -832,9 +842,11 @@ async function answerSupportText(
         : fact[procedure.field];
     const prefix =
       actionBoundary +
-      (request.role === 'admin' || request.aiObservationHandoffOnly
-        ? ''
-        : 'Если у вас есть права администратора сообщества:\n\n');
+      (request.storefrontDetail === 'conditionalSellerId'
+        ? 'Если вы добавляете продавца в магазин чата:\n\n'
+        : request.role === 'admin' || request.aiObservationHandoffOnly || request.storefrontDetail
+          ? ''
+          : 'Если у вас есть права администратора сообщества:\n\n');
     return {
       ...validateSupportAnswer(
         { action: 'reply', text: prefix + procedureText, sourceIds: [fact.id] },

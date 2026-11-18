@@ -12,6 +12,143 @@ import {
 import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 
 const selected = knowledge.entries.filter((entry) => ['bots', 'operator'].includes(entry.id));
+// These controls or shortcuts are unavailable in the deployed Karavan seller flow.
+const unsupportedPlacement =
+  /Скопировать мой ID MAX|Разместить выбранную витрину|«Принять заявку»|Порядок размещения|попросите продавца.*прислать.*ID|\$/iu;
+const applicationSteps =
+  /«Продавцы».*«Скопировать ссылку».*правила.*«Отправить заявку».*«Заявки».*названи.*«Принять».*подтверд/isu;
+const selectedSellerSteps =
+  /в Майоре.*«Чаты».*«Статистика».*«Участники».*по имени.*карточке.*«Скопировать ID MAX».*в Караване.*«ID продавца в MAX».*«Найти продавца».*витрину по названию.*разрешите размещение/isu;
+
+test('placement of an existing seller storefront returns reviewed actions without a role question', async () => {
+  for (const text of [
+    'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить',
+    'Продавец уже открыл витрину. Как мне, администратору, добавить его магазин к нашему магазину чата?',
+    'У участника уже есть витрина. Подскажите, как добавить его магазин в магазин нашего чата?',
+    'Витрина уже есть. Как разместить эту витрину в магазине чата?',
+  ]) {
+    const answer = await answerSupport({ text, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace']);
+    assert.match(answer.text, selectedSellerSteps);
+    assert.match(answer.text, /если выбор оставили продавцу, отправьте ему ссылку/iu);
+    assert.match(answer.text, applicationSteps);
+    assert.match(answer.text, /«По заявкам».*«Свободно»/su);
+    assert.doesNotMatch(answer.text, unsupportedPlacement);
+  }
+  const publication = 'Продавец уже открыл витрину. Как добавить его для ответа бота на $?';
+  assert.equal(selectKnowledge(publication)[0].id, 'karavan-storefront-publishing');
+  for (const text of [
+    publication,
+    'Продавец создал витрину. Как его добавить в чёрный список?',
+    'Продавец уже открыл витрину. Как добавить его магазин и как изменить часовой пояс?',
+    'Витрина уже есть. Как разместить эту витрину и опубликовать объявление?',
+  ])
+    assert.equal(classifySupportRequest(text).storefrontPlacementOnly, false, text);
+});
+
+test('seller ID questions tell the administrator how to copy it without changing admission', async () => {
+  const history = [
+    { role: 'user', text: 'У участника уже есть витрина. Как добавить его магазин?' },
+    { role: 'assistant', text: 'Попросите продавца прислать свой ID MAX.' },
+  ];
+  for (const [text, turns] of [
+    ['Где продавцу взять ID MAX в Караване?', []],
+    ['Как скопировать свой айди в Караване для продавцов?', []],
+    ['Где взять ID?', history],
+    ['А где ID?', history],
+  ]) {
+    const answer = await answerSupport({ text, history: turns, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace'], text);
+    assert.match(answer.text, selectedSellerSteps, text);
+    assert.doesNotMatch(answer.text, unsupportedPlacement, text);
+  }
+  for (const [text, turns] of [
+    ['Где взять ID?', []],
+    ['MAX не показывает ID', []],
+    ['Где взять ID чата?', history],
+    ['Где взять ID MAX нашего чата?', history],
+    ['Как найти участника по его ID MAX?', history],
+    ['Найдите участника по его ID MAX', []],
+    ['Где найти идентификатор магазина?', history],
+    ['Как принять заявку на вступление в чат?', history],
+    ['Где взять ID продавца и как удалить товары из витрины?', []],
+    ['Мне нужен ID участника для ответа бота на $. Где его взять?', history],
+    ['Где ID?', [...history, { role: 'user', text: 'Как настроить Ластик?' }]],
+  ])
+    assert.equal(classifySupportRequest(text, turns).storefrontDetail, null, text);
+});
+
+test('actual seller complaint and ID follow-up work with the delivered reply or the quoted prompt', async () => {
+  const first = 'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить';
+  const followup =
+    'найдите участника по его ID MAX где он найдет бл id если макс не показывает такого ????';
+  const signal = AbortSignal.abort();
+  const opening = await answerSupport({ text: first, signal });
+  const contextualOpening = await answerSupport({
+    text: first,
+    history: [{ role: 'user', text: 'Я администратор магазина нашего чата.' }],
+    signal,
+  });
+  for (const reply of [opening, contextualOpening]) {
+    assert.equal(reply.responseRoute, 'reviewed-faq');
+    assert.deepEqual(reply.sourceIds, ['karavan-chat-marketplace']);
+    assert.match(reply.text, applicationSteps);
+    assert.match(reply.text, selectedSellerSteps);
+    assert.doesNotMatch(reply.text, /Включить магазин|Новый магазин|Продолжить/iu);
+    assert.doesNotMatch(reply.text, unsupportedPlacement);
+  }
+  const userTurn = [{ role: 'user', text: first }];
+  const bothTurns = [...userTurn, { role: 'assistant', text: opening.text }];
+  for (const [text, history] of [
+    [followup, userTurn],
+    [followup, bothTurns],
+    [followup, []],
+    ['MAX не показывает ID', bothTurns],
+    ['Айди не отображается', bothTurns],
+    ['Где продавцу брать ID, если MAX не показывает его?', []],
+  ]) {
+    assert.equal(classifySupportRequest(text, history).requiredReply, true, text);
+    const answer = await answerSupport({ text, history, signal });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace'], text);
+    assert.match(answer.text, selectedSellerSteps, text);
+    assert.doesNotMatch(answer.text, /По заявкам|Свободно/u, text);
+    assert.deepEqual(
+      answer.text.match(/^\d+\. [^\n]+/gmu)?.map((line) => line[0]),
+      ['1', '2'],
+    );
+    assert.equal(
+      answer.text.startsWith('Если вы добавляете продавца в магазин чата'),
+      text === followup && !history.length,
+    );
+    assert.doesNotMatch(answer.text, unsupportedPlacement, text);
+  }
+  for (const text of [
+    followup + ' И где ID MAX канала?',
+    followup + ' А где ответ бота на $?',
+    followup + ' И как изменить часовой пояс?',
+  ])
+    assert.equal(classifySupportRequest(text, bothTurns).storefrontDetail, null, text);
+});
+
+test('application mode identifies both actions without asking for seller ID', async () => {
+  const history = [
+    { role: 'user', text: 'У участника есть витрина. Как его добавить в магазин чата?' },
+  ];
+  for (const [text, turns] of [
+    ['Как в Караване принять заявку продавца?', []],
+    ['А у меня по заявкам. Тоже нужен ID?', history],
+  ]) {
+    const answer = await answerSupport({ text, history: turns, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.match(answer.text, /^ID не нужен\./u);
+    assert.match(answer.text, applicationSteps);
+    assert.doesNotMatch(answer.text, unsupportedPlacement);
+    assert.doesNotMatch(answer.text, /Найти продавца|Порядок размещения/iu);
+  }
+});
 
 test('visible AI identity cannot be contradicted by a human claim before the footer', () => {
   for (const text of [

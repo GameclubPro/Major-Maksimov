@@ -25,6 +25,7 @@ function ConnectionWorkspace({ module, busy, readOnly, open, chats, publications
   const [error, setError] = useState<string | null>(null);
   const market = module.marketplace!;
   const manageUrl = karavanShopManagementUrl(module.buyerUrl, market.publicSlug);
+  const canManageSellers = market.format === 'community' && market.status !== 'archived' && module.permissions.includes('manage_marketplace');
   useLayoutEffect(() => {
     if (workspace && !['home', 'chats', 'publications'].includes(workspace.page)) workspace.navigate('home');
   }, [workspace?.page, workspace?.navigate]);
@@ -45,7 +46,13 @@ function ConnectionWorkspace({ module, busy, readOnly, open, chats, publications
       <SettingsSectionToggle title="Подключение" icon="tools" tone="sky" open={false} controls="karavan-shop-chats" onClick={() => workspace?.navigate('chats')} />
     </StorefrontScreen>
     <StorefrontScreen page="chats"><div id="karavan-shop-chats">{chats}</div></StorefrontScreen>
-    {publications ? <StorefrontScreen page="publications"><div id="karavan-shop-publications">{publications}</div></StorefrontScreen> : null}
+    {publications ? <StorefrontScreen page="publications">
+      <div id="karavan-shop-publications">{publications}</div>
+      {canManageSellers && manageUrl ? <div className="karavan-module__actions">
+        <button type="button" disabled={busy || readOnly || commands.blocked || workspace?.settingsDirty} onClick={openManagement}>Продавцы и витрины в Караване</button>
+        {error ? <p role="alert">{error}</p> : null}
+      </div> : null}
+    </StorefrontScreen> : null}
   </>;
 }
 

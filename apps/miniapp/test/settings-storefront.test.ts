@@ -96,7 +96,7 @@ test('storefront settings expose the admin-only toggle and keep the allowlist co
   assert.match(sectionSource, /karavanStorefrontAdminsOnly/u);
   assert.match(sectionSource, /draft\.karavanStorefrontEnabled\s*\?/u);
   assert.match(sectionSource, /settings-storefront__allowlist/u);
-  assert.match(sectionSource, /Добавить пользователя/u);
+  assert.match(sectionSource, /Выдать доступ через бота/u);
   assert.match(sectionSource, /openMaxBotLinkAndClose/u);
   assert.match(sectionSource, /revokeKaravanStorefrontAllowlistEntry/u);
 });

@@ -1088,6 +1088,18 @@ function createHarness(
   const redisStrings = new Map<string, string>();
   const redisCounter = {
     getString: jest.fn(async (key: string) => redisStrings.get(key) ?? null),
+    setStringIfAbsentWithTtl: jest.fn(async (key: string, value: string) => {
+      if (redisStrings.has(key)) return false;
+      redisStrings.set(key, value);
+      return true;
+    }),
+    replaceStringIfUnchangedWithTtl: jest.fn(
+      async (key: string, expected: string, value: string) => {
+        if (redisStrings.get(key) !== expected) return false;
+        redisStrings.set(key, value);
+        return true;
+      },
+    ),
     setStringWithTtl: jest.fn(async (key: string, value: string) => {
       redisStrings.set(key, value);
     }),
@@ -4466,6 +4478,105 @@ describe('PrivateControlService', () => {
     expect(grantedText).toContain('Доступ разрешён');
     expect(grantedText).toContain('Чат: Тестовый чат 1');
     expect(grantedText).not.toContain('-70000000000001');
+  });
+
+  it('resumes a Karavan handoff before opening MAX and at the saved duration choice', async () => {
+    const { service, maxClient, chats, karavanStorefrontAllowlistService } = createHarness();
+    const actor = {
+      userId: 'user-1',
+      launchBotId: '777000_bot',
+      displayName: 'Администратор',
+      username: null,
+    };
+    const open = () => service.handoffKaravanStorefrontAllowlistFromMiniapp(chats[0].id, actor);
+    const [first, second] = await Promise.all([open(), open()]);
+    expect(second).toEqual(first);
+    await expect(open()).resolves.toEqual(first);
+    const start = () =>
+      service.handleBotStarted(
+        createBotStartedPrivateUpdate(extractStartPayload(first.botUrl), {
+          botId: actor.launchBotId,
+        }),
+      );
+    await start();
+    await service.handleUpdate({
+      ...createPrivateForwardedModerationUpdate(''),
+      botId: actor.launchBotId,
+    });
+    const durationText = getLastSentText(maxClient);
+    expect(durationText).toContain('Срок разрешения');
+    await expect(open()).resolves.toEqual(first);
+    await start();
+    expect(getLastSentText(maxClient)).toBe(durationText);
+    expect(karavanStorefrontAllowlistService.upsert).not.toHaveBeenCalled();
+  });
+
+  it('protects another chat and ignores old duration buttons after cancellation', async () => {
+    const { service, maxClient, chats, karavanStorefrontAllowlistService } = createHarness();
+    const actor = {
+      userId: 'user-1',
+      launchBotId: '777000_bot',
+      displayName: 'Администратор',
+      username: null,
+    };
+    const open = (id: string) => service.handoffKaravanStorefrontAllowlistFromMiniapp(id, actor);
+    const otherChatId = '-70000000000002';
+    const old = await open(chats[0].id);
+    await expect(open(otherChatId)).rejects.toThrow('личном чате');
+    await expect(open(chats[0].id)).resolves.toEqual(old);
+    await service.handleBotStarted(
+      createBotStartedPrivateUpdate(extractStartPayload(old.botUrl), { botId: actor.launchBotId }),
+    );
+    await service.handleUpdate({
+      ...createPrivateForwardedModerationUpdate(''),
+      botId: actor.launchBotId,
+    });
+    const oldButton = getLastButtons(maxClient)
+      .flat()
+      .find((button) => String((button as { payload?: string }).payload).endsWith('|1d')) as {
+      payload: string;
+    };
+    await service.handleUpdate({ ...createPrivateTextUpdate('Отмена'), botId: actor.launchBotId });
+    const current = await open(otherChatId);
+    expect(current.botUrl).not.toBe(old.botUrl);
+    await service.handleUpdate(
+      createPrivateCallbackUpdate(oldButton.payload, { botId: actor.launchBotId }),
+    );
+    await expect(open(otherChatId)).resolves.toEqual(current);
+    expect(karavanStorefrontAllowlistService.upsert).not.toHaveBeenCalled();
+  });
+
+  it('uses an official uncaptioned forward to identify a user during Karavan handoff', async () => {
+    const managedEntityHandshakeService = { handleWebhookUpdate: jest.fn() };
+    const { service, maxClient, chats } = createHarness({ managedEntityHandshakeService });
+    await service.handoffKaravanStorefrontAllowlistFromMiniapp(chats[0].id, {
+      userId: '195714583',
+      launchBotId: '777000_bot',
+      displayName: 'Администратор',
+      username: null,
+    });
+    const update = new WebhookParser().parse(
+      {
+        update_type: 'message_created',
+        timestamp: new Date().toISOString(),
+        message: {
+          sender: { user_id: 195714583 },
+          recipient: { chat_id: 152517912, chat_type: 'dialog' },
+          body: null,
+          link: {
+            type: 'forward',
+            chat_id: -70000000000001,
+            sender: { user_id: 778899, name: 'Анна' },
+            message: { mid: 'mid-seller', text: 'Моя витрина' },
+          },
+        },
+      },
+      { botId: '777000_bot' },
+    );
+    await service.handleUpdate(update);
+    expect(managedEntityHandshakeService.handleWebhookUpdate).not.toHaveBeenCalled();
+    expect(getLastSentText(maxClient)).toContain('Срок разрешения');
+    expect(getLastSentText(maxClient)).toContain('Анна');
   });
 
   it('shows a concise retry prompt for a typed user id instead of technical validation text', async () => {

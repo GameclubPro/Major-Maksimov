@@ -44,6 +44,51 @@ try {
             assert.ok(await panel.evaluate(element => [...element.querySelectorAll('button,summary,input:not([type=radio]):not([type=checkbox])')].filter(node => node.getBoundingClientRect().width > 0).every(node => node.getBoundingClientRect().height >= 43)), `${label}: touch controls`);
             await page.screenshot({ path: `${output}/${name}-${theme}-${label}.png` });
           };
+          if (group === 'allowlist' || group === 'connection') {
+            await begin('simple_community_allowlist');
+            await home.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
+            const panel = page.getByRole('dialog', { name: 'Объявления в чате', exact: true });
+            const sellers = panel.getByRole('button', { name: 'Продавцы и витрины в Караване' });
+            await sellers.click();
+            assert.deepEqual(await page.evaluate(() => window.__shopOpened), ['https://max.ru/synthetic_buyer_bot?startapp=ma_synthetic-shop']);
+            await panel.getByRole('radio', { name: 'Администраторы и выбранные пользователи' }).check();
+            const list = panel.getByRole('region', { name: 'Доступ к ответу на $ в этом чате' });
+            const grant = list.getByRole('button', { name: 'Выдать доступ через бота' });
+            assert.ok(await grant.isDisabled());
+            assert.ok(await sellers.isDisabled());
+            await panel.getByRole('button', { name: 'Сохранить', exact: true }).click();
+            await list.getByText('Персональных разрешений пока нет.').waitFor();
+            await grant.evaluate((button) => { button.click(); button.click(); });
+            await list.getByText('Нет соединения. Повторите.').waitFor();
+            const handoffs = () => page.evaluate(() => window.__shopRequests.filter(({path}) => path.endsWith('/handoff')).length);
+            assert.equal(await handoffs(), 1);
+            await page.evaluate(() => {
+              const original = window.WebApp.openMaxLink;
+              window.WebApp.openMaxLink = () => {
+                window.WebApp.openMaxLink = original;
+                throw new Error('Native launch failed');
+              };
+            });
+            const retry = list.getByRole('button', { name: 'Открыть бота ещё раз' });
+            await retry.click();
+            await list.getByRole('alert').getByText('Не удалось открыть чат с ботом.', { exact: true }).waitFor();
+            assert.equal(await list.getByRole('alert').count(), 1);
+            assert.equal(await page.locator('.toast-stack').count(), 0);
+            await retry.scrollIntoViewIfNeeded();
+            await shot('allowlist-retry', list);
+            await retry.click();
+            await page.waitForFunction(() => window.__shopOpened.some(url => url.includes('synthetic_major_bot')));
+            await list.getByRole('alert').waitFor({ state: 'detached' });
+            await page.evaluate(() => {
+              window.__allowlistGrantConfirmed = true;
+              document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));
+            });
+            await list.getByText('Участник 1', { exact: true }).waitFor();
+            await grant.click();
+            await page.waitForFunction(() => window.__shopOpened.filter(url => url.includes('synthetic_major_bot')).length === 2);
+            await page.evaluate(() => window.__loseShopManage());
+            await sellers.waitFor({ state: 'detached' });
+          }
           if (group === 'queue') {
             await begin('simple_community_open');
             const original = await page.evaluate(async () => {
@@ -79,7 +124,7 @@ try {
               assert.equal((await page.evaluate(() => window.__shopRequests.filter(row => row.body?.command))).length, 0, 'opening Karavan performs no commerce command');
               await shot(scenario);
             }
-          } else {
+          } else if (group === 'connection') {
             await begin('simple_community_network');
             await home.getByRole('button', { name: 'Открыть магазин', exact: true }).click();
             await home.getByRole('button', { name: 'Управлять магазином', exact: true }).click();

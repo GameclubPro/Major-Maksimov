@@ -313,6 +313,72 @@ const platformUpdates = (text) =>
   );
 const storefrontPattern =
   /караван|интернет.?витрин|магазин.{0,12}чат|витрин|ответ.{0,15}\$|\$.{0,25}(?:кнопк|продав|участник)|кнопк.{0,15}магазин/iu;
+const storefrontPlacementAction =
+  /(?:добавить|разместить|подключить|включить)\s+(?:(?:его|ее|эту|этот|готовую|существующую)\s+)?(?:витрину|магазин)|(?:его|ее|витрину|магазин)\s+(?:добавить|разместить|подключить)(?=\s*[?!.;,]|$)|(?:добавить|разместить|подключить)\s+(?:его|ее)(?=\s*[?!.;,]|$)/iu;
+const existingStorefront =
+  /(?:создал[аи]?|открыл[аи]?|готовую|существующую|уже есть)\s+(?:(?:свою|личную)\s+)?витрин|витрин\p{L}*\s+(?:уже\s+)?(?:есть|готова|создана|открыта)/iu;
+function placingExistingStorefront(text) {
+  const action = storefrontPlacementAction.exec(text);
+  return (
+    existingStorefront.test(text) &&
+    action !== null &&
+    !negatedAt(text, action.index) &&
+    !/\$|доллар|объявлен|ответ\p{L}* бот|отозва|отказ|ошибк|не (?:добав|размест|подключ|созда|открыл|появ|получа|работа|видно)/iu.test(
+      text,
+    )
+  );
+}
+function withoutStorefrontPlacement(text) {
+  return placingExistingStorefront(text) ? text.replace(storefrontPlacementAction, '') : text;
+}
+const sellerId = /(?<![\p{L}\d])(?:id|айди|идентификатор)(?![\p{L}\d])/iu;
+const sellerApplication =
+  /по заявкам|(?:подал\p{L}*|подать|отправ\p{L}*|приня\p{L}*|одобри\p{L}*|рассмотр\p{L}*)\s+заявк/iu;
+function storefrontQuestion(ctx) {
+  const { current } = ctx;
+  const previousUser = ctx.recent.findLast((turn) => turn.role === 'user')?.text ?? '';
+  const sellerContext = /караван|витрин|магазин.{0,12}чат|продавц|продавец/iu;
+  const knownStorefront = sellerContext.test(current) || sellerContext.test(previousUser);
+  const idQuestion =
+    /где|как|откуда|не (?:знаю|вижу|нахожу|виден|видно|отображается|показывает)|не могу найти/iu;
+  // A quoted seller lookup instruction can arrive without its preceding support turn.
+  const quotedLookup = /найдите участника по (?:его )?(?:id|айди) (?:max|макс)(?![\p{L}])/iu.exec(
+    current,
+  );
+  if (
+    (!knownStorefront &&
+      !(
+        quotedLookup && idQuestion.test(current.slice(quotedLookup.index + quotedLookup[0].length))
+      )) ||
+    /\$|доллар|объявлен|черн\p{L}* спис|публик|ошибк|не работа|не получ|приглашен|вступлен|возврат|заказ|(?:id|айди|идентификатор)\s+(?:(?:max|макс|наше(?:го|й)|мо(?:его|ей)|это(?:го|й))\s+)*(?:чат|групп|магазин|витрин|канал|бот|товар|заявк|админ|покупател)|(?:найти|разыскать)\s+(?:(?:другого|этого)\s+)?(?:участника|человека)\s+по/iu.test(
+      current,
+    )
+  )
+    return null;
+  if (
+    knownStorefront &&
+    sellerApplication.test(current) &&
+    reviewedTaskCovered(
+      current,
+      sellerApplication,
+      /(?:нужен|нужно|тоже).{0,18}(?:id|айди)|что (?:делать )?дальше/iu,
+      /^(?:принять|отправить|подать|одобрить|добавить|разместить|делать|искать)$/u,
+    )
+  )
+    return 'applicationAnswer';
+  if (
+    sellerId.test(current) &&
+    idQuestion.test(current) &&
+    reviewedTaskCovered(
+      current.replace(/[?!]{2,}/gu, '?'),
+      sellerId,
+      /(?!)$/u,
+      /^(?:взять|найти|посмотреть|увидеть|узнать|скопировать|получить|брать|искать)$/u,
+    )
+  )
+    return knownStorefront ? 'sellerIdAnswer' : 'conditionalSellerId';
+  return null;
+}
 const developerPattern =
   /\bapi\b|\bnotify\b|разработ|webhook|longpoll|uploads|platform-api|\b(?:get|post|put|delete|patch)\s+\/|\/(?:chats|messages|uploads)(?:\/|\?|\b)/iu;
 const commercialPattern =
@@ -725,10 +791,11 @@ function mixedRequests(ctx, state) {
     )
   )
     return true;
-  if (placement.test(ctx.current)) currentTopics.add('publication');
+  const otherTasks = withoutStorefrontPlacement(ctx.current);
+  if (placement.test(otherTasks)) currentTopics.add('publication');
   if (state.publisherRequest && /[«"„]нужно проверить[»"“]/iu.test(ctx.current))
     currentTopics.add('delivery');
-  if (/подкл[юу]ч|подклюить/iu.test(ctx.current)) currentTopics.add('connection');
+  if (/подкл[юу]ч|подклюить/iu.test(otherTasks)) currentTopics.add('connection');
   const secondTask =
     /(?<![\p{L}])(?:и|а)\s+(?:еще|также|заодно|как|где|почему|сколько|какие|можно|настрой|включ|выключ|подключ|добав|провер|расскаж|объясни|переключ|смен|замен|помен|запрет|разреш)|кроме того|а также|;|[.!?]\s*(?:а\s+|и\s+)?(?:как|где|почему|что|сколько|какие|можно|нужно|настрой|включ|выключ|подключ|добав|провер|переключ|смен|замен|помен|запрет|разреш)/iu.test(
       ctx.current.replace(/^(?:а|и)\s+/iu, ''),
@@ -1113,6 +1180,16 @@ function reviewedAtomicIntents(ctx, state, primaryIds) {
   }
   return {
     lastikConflictIntent,
+    storefrontPlacementOnly:
+      placingExistingStorefront(ctx.current) &&
+      !state.mixedTopics &&
+      only(['karavan-storefront', 'karavan-chat-marketplace']) &&
+      reviewedTaskCovered(
+        ctx.current,
+        storefrontPlacementAction,
+        existingStorefront,
+        /^(?:добавить|разместить|подключить|включить|делать|сообразить|понять|есть)$/u,
+      ),
     nightManualOnly,
     nightManualIntent,
     publisherDeliveryOnly,
@@ -2077,7 +2154,8 @@ function semanticFacts(text, state) {
     if (setupRecovery) add('karavan-setup-recovery', 145);
     if (
       (!setupRecovery || test(/(?:как|хочу|нужно).{0,15}создать/iu)) &&
-      test(/подключ|созда|черновик|правил|общ.{0,12}магазин|один.{0,12}магазин/iu)
+      (placingExistingStorefront(text) ||
+        test(/подключ|созда|черновик|правил|общ.{0,12}магазин|один.{0,12}магазин/iu))
     )
       add('karavan-chat-marketplace', 135);
     if (test(/\$|публикац|ссылк|выбор|выбра|выбрат|витрин.{0,15}нескольк/iu))
@@ -2094,7 +2172,7 @@ function semanticFacts(text, state) {
   )
     add('announcement-removal', 45);
   if (
-    (advert.test(text) || placement.test(text)) &&
+    (advert.test(text) || placement.test(withoutStorefrontPlacement(text))) &&
     (!facts.length || !publ) &&
     (!state.eraserRequest || mixedTopics)
   ) {
@@ -2152,6 +2230,7 @@ export function createSupportRouter(knowledge) {
   };
   function classify(text, history = [], interaction = {}) {
     const ctx = conversationFor(text, history);
+    const storefrontDetail = storefrontQuestion(ctx);
     let botMembership = botMembershipIntent(ctx.current);
     const recentBot = ctx.recent.filter((item) => item.role === 'user').at(-1);
     if (
@@ -2236,6 +2315,7 @@ export function createSupportRouter(knowledge) {
       );
     const switchingModerator = moderatorSwitchRequest(ctx.current);
     const request =
+      Boolean(storefrontDetail) ||
       supportQuestion.test(ctx.current) ||
       supportIncident.test(ctx.current) ||
       (domain.test(ctx.current) &&
@@ -2300,7 +2380,8 @@ export function createSupportRouter(knowledge) {
       (addressed || !peerAdvice(ctx.current, text)) &&
       (!roleOnly || freshClarification) &&
       ((request &&
-        (domain.test(ctx.current) ||
+        (storefrontDetail ||
+          domain.test(ctx.current) ||
           /модератор/iu.test(ctx.current) ||
           advert.test(ctx.current) ||
           topics(ctx.current).length ||
@@ -2401,7 +2482,8 @@ export function createSupportRouter(knowledge) {
           )),
       );
     state.mixedTopics = mixedTopics;
-    const primaryIds = factsFor(state);
+    const storefrontDetailOnly = !mixedTopics && storefrontDetail;
+    const primaryIds = storefrontDetailOnly ? ['karavan-chat-marketplace'] : factsFor(state);
     const productHelp = primaryIds.some(
       (id) =>
         ![
@@ -2428,6 +2510,7 @@ export function createSupportRouter(knowledge) {
       advertisementRequest: Boolean(advertisementRequest),
       commercialAi,
       mixedTopics,
+      storefrontDetail: storefrontDetailOnly || null,
       publisherRequest,
       publisherConnectionReady: state.publisherConnectionReady,
       eraserRequest,

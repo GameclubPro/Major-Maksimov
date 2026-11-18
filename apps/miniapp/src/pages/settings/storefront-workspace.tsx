@@ -29,6 +29,7 @@ type ActiveStorefrontPage = keyof typeof pages;
 export type StorefrontPage = ActiveStorefrontPage | 'appearance';
 type Navigation = {
   page: StorefrontPage;
+  settingsDirty: boolean;
   visited: ReadonlySet<StorefrontPage>;
   navigate: (page: StorefrontPage) => void;
   reportDirty: (page: string, dirty: boolean) => void;
@@ -180,8 +181,17 @@ export function StorefrontWorkspace({
     positions.current.clear();
   }, [open]);
   const context = useMemo(
-    () => ({ page, visited, navigate, reportDirty, footerTarget, setBack, setInlinePublications }),
-    [page, visited, navigate, reportDirty, footerTarget, setBack],
+    () => ({
+      page,
+      settingsDirty: dirty,
+      visited,
+      navigate,
+      reportDirty,
+      footerTarget,
+      setBack,
+      setInlinePublications,
+    }),
+    [page, dirty, visited, navigate, reportDirty, footerTarget, setBack],
   );
   const parent =
     page === 'publications'

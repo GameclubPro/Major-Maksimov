@@ -494,6 +494,14 @@ try {
       await page.getByRole('button', { name: 'Антидубль', exact: true }).click();
       const savedToast = page.locator('.toast--success').last();
       await savedToast.waitFor({ state: 'visible' });
+      await panel.evaluate((element) =>
+        Promise.all(
+          element
+            .getAnimations()
+            .filter((animation) => animation.animationName === 'settings-drilldown-panel-enter')
+            .map((animation) => animation.finished),
+        ),
+      );
       const toastBox = await savedToast.boundingBox();
       const headerBox = await panel.locator('.settings-drilldown__header').boundingBox();
       assert.ok(toastBox && headerBox);

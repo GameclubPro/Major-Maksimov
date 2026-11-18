@@ -83,7 +83,13 @@ export class PrivateControlService extends LegacyPrivateControlService {
             timeoutMs: FORWARDED_RECOVERY_SESSION_LOOKUP_TIMEOUT_MS,
             onTimeout: () => null,
           });
-          preferContentInput = session ? shouldPreferActiveContentInputForForward(session) : false;
+          preferContentInput = session
+            ? shouldPreferActiveContentInputForForward(
+                session,
+                userId,
+                update.botId?.trim() || null,
+              )
+            : false;
         } catch {
           // Managed-entity recovery must not depend on optional private-session storage.
           preferContentInput = false;

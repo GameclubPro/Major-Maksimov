@@ -9,6 +9,7 @@ import { useEffect, useEffectEvent, useId, useRef, useState, type KeyboardEvent 
 import { useNativeBackHandler } from '../../lib/native-back';
 import { isTopmostModalDialog } from '../../lib/dialog-focus';
 import { PersonAvatar } from '../ui/person-avatar';
+import { ParticipantMaxId } from './participant-max-id';
 import { SettingsDrilldownPanel } from '../ui/settings-drilldown-panel';
 import { ActionConfirmSheet } from '../ui/action-confirm-sheet';
 import { participantCapabilities, type ParticipantCardTarget } from '../../lib/participant-card';
@@ -620,6 +621,7 @@ export function ChatParticipantSheet({
                 </div>
               </div>
 
+              <ParticipantMaxId key={item.userId} userId={item.userId} />
               {detailsReady ? (
                 <p className="participant-card__violations">
                   Нарушений {rangeLabel}: <strong>{formatViolationCount(violationCount)}</strong>

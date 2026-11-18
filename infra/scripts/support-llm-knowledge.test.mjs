@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { knowledge, validateSupportAnswer } from './support-llm-client.mjs';
+import { createSupportRouter } from './support-llm-routing.mjs';
 
 const entries = new Map(knowledge.entries.map((entry) => [entry.id, entry]));
 const fact = (id) => {
@@ -52,12 +53,54 @@ test('unified duplicate and commercial preview facts preserve independent eviden
   assert.match(preview, /«Недостаточно данных» и «Не удалось проверить» не подтверждают/u);
 });
 
-test('storefront caller access includes the verified user handoff and its chat scope', () => {
-  const ui = source('apps/miniapp/src/pages/settings/settings-storefront-section.tsx');
-  for (const label of ['Разрешённые пользователи', 'Добавить пользователя', 'Отозвать доступ'])
-    assert.ok(ui.includes(label), label);
-  assert.match(fact('karavan-storefront'), /«Добавить пользователя».*перешлите.*сообщение.*срок/iu);
-  assert.match(fact('karavan-storefront'), /только в этом чате/iu);
+test('adding a participant with an existing storefront retrieves placement and per-chat caller access', () => {
+  const question =
+    'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить';
+  const answers = createSupportRouter(knowledge).selectKnowledge(question);
+  const callerAccess = fact('karavan-storefront');
+  const marketplace = entries.get('karavan-chat-marketplace');
+  const placement = marketplace.placementAnswer;
+  for (const id of ['karavan-storefront', marketplace.id])
+    assert.ok(
+      answers.some((entry) => entry.id === id),
+      question,
+    );
+  assert.match(marketplace.answer, /«Включить магазин».*«Участники».*«Продолжить»/su);
+
+  const settings = 'apps/miniapp/src/pages/settings/';
+  for (const [file, label] of [
+    ['karavan-shop/manager.tsx', 'Кнопки в чате'],
+    ['storefront-workspace.tsx', 'Объявления в чате'],
+    ['settings-storefront-section.tsx', 'Выдать доступ через бота'],
+    ['settings-storefront-section.tsx', 'Отозвать доступ'],
+    ['karavan-shop/manager.tsx', 'Управлять магазином'],
+  ]) {
+    assert.ok(source(settings + file).includes(label), label);
+    assert.ok(callerAccess.includes(`«${label}»`), label);
+  }
+  assert.match(callerAccess, /перешлите сообщение самого участника и выберите срок/iu);
+  assert.match(callerAccess, /только в этом чате/iu);
+  assert.match(callerAccess, /витрина от этого не появится в магазине/iu);
+  assert.match(callerAccess, /«Магазин чата» → «Управлять магазином».*«Продавцы»/u);
+  assert.match(placement, /«Магазин чата».*«Управлять магазином».*«Продавцы»/iu);
+  assert.match(placement, /«ID продавца в MAX».*«Найти продавца».*выберите витрину/iu);
+  assert.match(
+    placement,
+    /«По заявкам».*«Скопировать ссылку».*«Отправить заявку».*«Заявки».*«Принять» и подтвердите/u,
+  );
+  const roster = 'apps/miniapp/src/components/dashboard/chat-participants-roster.tsx';
+  const sheet = 'apps/miniapp/src/components/dashboard/chat-participant-sheet.tsx';
+  const copyControl = 'apps/miniapp/src/components/dashboard/participant-max-id.tsx';
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(roster));
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(sheet));
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(copyControl));
+  assert.ok(source(roster).includes('Имя или ID'));
+  assert.ok(source(sheet).includes('<ParticipantMaxId'));
+  assert.ok(source(copyControl).includes('aria-label="Скопировать ID MAX"'));
+  assert.match(
+    entries.get('karavan-chat-marketplace').sellerIdAnswer,
+    /в Майоре.*«Участники».*по имени.*карточке.*«Скопировать ID MAX»/isu,
+  );
 });
 
 test('customer knowledge uses the public project name without renaming the MAX platform', () => {
@@ -78,6 +121,9 @@ test('reviewed answers and link examples pass the public response boundary', () 
       'conflictSavedAnswer',
       'conflictMineAnswer',
       'incidentAnswer',
+      'placementAnswer',
+      'sellerIdAnswer',
+      'applicationAnswer',
     ]) {
       if (entry[field] === undefined) continue;
       assert.doesNotThrow(
