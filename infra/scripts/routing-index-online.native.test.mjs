@@ -112,6 +112,21 @@ test(
       assert.equal(verifyRoutingIndexState(await snapshot(), source).state, 'prepare_routing');
       await db.query('DELETE FROM public._prisma_migrations WHERE id=$1', [historicalRetry]);
 
+      const recoveredId = randomUUID();
+      const recoveredName = '20260621120000_optimize_spammer_review';
+      const recoveredChecksum = '456919e50cecb0b00a54d65ccb346598f9781498c446179e483ea99cf2e93c95';
+      const recovered = await db.query(
+        `INSERT INTO public._prisma_migrations
+          (id,checksum,migration_name,started_at,finished_at,rolled_back_at,applied_steps_count)
+          SELECT $1,$2,migration_name,started_at - interval '2 minutes',NULL,
+            started_at - interval '1 minute',0
+          FROM public._prisma_migrations
+          WHERE migration_name=$3 AND finished_at IS NOT NULL AND rolled_back_at IS NULL`,
+        [recoveredId, recoveredChecksum, recoveredName],
+      );
+      assert.equal(recovered.rowCount, 1);
+      assert.equal(verifyRoutingIndexState(await snapshot(), source).state, 'prepare_routing');
+
       writer = new pg.Client({ connectionString: own.href });
       builder = new pg.Client({
         connectionString: own.href,
@@ -149,6 +164,10 @@ test(
       assert.equal(applied.status, 0, 'Real routing migration must complete');
       const completed = await snapshot();
       assert.equal(verifyRoutingIndexState(completed, source).state, 'already_applied');
+      const historical = completed.receipts.find((row) => row.id === recoveredId);
+      assert.equal(historical?.checksum, recoveredChecksum);
+      assert.equal(historical.rolled_back, true);
+      assert.equal(historical.steps, 0);
       const receipt = completed.receipts.find((row) => row.name === ROUTING_INDEX_TARGET.migration);
       assert.equal(receipt?.steps, 1, 'Prisma deploy records one applied step on PostgreSQL 16');
       await db.query('UPDATE public._prisma_migrations SET applied_steps_count=0 WHERE id=$1', [

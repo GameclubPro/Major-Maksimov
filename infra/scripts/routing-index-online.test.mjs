@@ -146,6 +146,84 @@ test('routing receipt and catalog gates reject drift and incomplete prefixes', (
   assert.throws(() => verifyRoutingIndexState(applied, source), /INDEX_BLOCKED/u);
 });
 
+test('routing accepts only exact recovered predecessor attempts with a later successful receipt', () => {
+  const failedAttempts = [
+    [
+      '20260621120000_optimize_spammer_review',
+      '456919e50cecb0b00a54d65ccb346598f9781498c446179e483ea99cf2e93c95',
+    ],
+    [
+      '20260628133000_managed_broadcast_lock_tokens_and_validated_invariants',
+      '4534eb15d6901acbbc8b48431c43f2a156bb5db99cf518daa4165687c4a9fa28',
+    ],
+    [
+      '20260706193000_channel_suggestion_admin_delivery_ledger',
+      'e2130f6974440b0dfe2d755ffab65aaa19544655b69208df377d9a9012e62de0',
+    ],
+    [
+      '20260718100000_add_publication_delivery_content_revision',
+      'c0c095a4943c31d34262c589df61d59466d5119a09d7dca8934362ddc53f26ca',
+    ],
+  ];
+  const state = snapshot();
+  for (const [name, checksum] of failedAttempts) {
+    const applied = state.receipts.find((row) => row.name === name);
+    assert.ok(applied);
+    applied.started_at = '2026-08-01T00:01:00Z';
+    state.receipts.push({
+      id: `failed-${applied.id}`,
+      name,
+      checksum,
+      started_at: '2026-08-01T00:00:00Z',
+      finished: false,
+      rolled_back: true,
+      steps: 0,
+    });
+  }
+  assert.deepEqual(verifyRoutingIndexState(state, source), {
+    state: 'prepare_routing',
+    pending: ['routing'],
+  });
+  for (const mutate of [
+    (s, failed) => {
+      failed.checksum = '0'.repeat(64);
+    },
+    (s, failed) => {
+      failed.finished = true;
+    },
+    (s, failed) => {
+      failed.rolled_back = false;
+    },
+    (s, failed) => {
+      failed.steps = 1;
+    },
+    (s, failed) => {
+      failed.started_at = '2026-08-01T00:01:00Z';
+    },
+    (s, failed) => {
+      failed.started_at = null;
+    },
+    (s, failed) => {
+      s.receipts.push({ ...failed, id: 'second-failed-receipt' });
+    },
+    (s, failed, applied) => {
+      applied.steps = 0;
+    },
+    (s, failed, applied) => {
+      applied.checksum = failed.checksum;
+    },
+    (s, failed, applied) => {
+      s.receipts.splice(s.receipts.indexOf(applied), 1);
+    },
+  ]) {
+    const invalid = structuredClone(state);
+    const failed = invalid.receipts.at(-1);
+    const applied = invalid.receipts.find((row) => row.name === failed.name && !row.rolled_back);
+    mutate(invalid, failed, applied);
+    assert.throws(() => verifyRoutingIndexState(invalid, source), /RECEIPT_BLOCKED/u);
+  }
+});
+
 test('connection options are rejected before a preflight probe, container creation or runner inspect', async () => {
   const sha = 'a'.repeat(40);
   const tag = 'maxim-online-61bfd8a3-9d75-4ec2-9b1c-89f325387e53';
