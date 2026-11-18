@@ -69,9 +69,9 @@ try {
                 throw new Error('Native launch failed');
               };
             });
-            const retry = list.getByRole('button', { name: 'Повторить переход к боту' });
+            const retry = list.getByRole('button', { name: 'Открыть бота ещё раз' });
             await retry.click();
-            await list.getByText('Не удалось открыть личный чат бота. Попробуйте ещё раз.').waitFor();
+            await list.getByRole('alert').getByText('Не удалось открыть чат с ботом.', { exact: true }).waitFor();
             assert.equal(await list.getByRole('alert').count(), 1);
             assert.equal(await page.locator('.toast-stack').count(), 0);
             await retry.scrollIntoViewIfNeeded();

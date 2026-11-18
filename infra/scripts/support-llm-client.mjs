@@ -775,9 +775,12 @@ async function answerSupportText(
   // allowlisted fact set. Additional tasks must retain inference and their own facts.
   const procedure = [
     {
-      active: request.storefrontPlacementOnly,
+      active: request.storefrontPlacementOnly || request.storefrontDetail,
       id: 'karavan-chat-marketplace',
-      field: 'answer',
+      field:
+        request.storefrontDetail === 'conditionalSellerId'
+          ? 'sellerIdAnswer'
+          : request.storefrontDetail || 'answer',
       allowed: ['karavan-chat-marketplace', 'karavan-storefront'],
     },
     {
@@ -838,9 +841,11 @@ async function answerSupportText(
         : fact[procedure.field];
     const prefix =
       actionBoundary +
-      (request.role === 'admin' || request.aiObservationHandoffOnly
-        ? ''
-        : 'Если у вас есть права администратора сообщества:\n\n');
+      (request.storefrontDetail === 'conditionalSellerId'
+        ? 'Если вы добавляете продавца в магазин чата, попросите его прислать свой ID. Вот как продавцу его скопировать:\n\n'
+        : request.role === 'admin' || request.aiObservationHandoffOnly || request.storefrontDetail
+          ? ''
+          : 'Если у вас есть права администратора сообщества:\n\n');
     return {
       ...validateSupportAnswer(
         { action: 'reply', text: prefix + procedureText, sourceIds: [fact.id] },

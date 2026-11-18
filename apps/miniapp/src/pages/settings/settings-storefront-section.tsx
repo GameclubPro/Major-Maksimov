@@ -122,7 +122,7 @@ export function SettingsStorefrontSection({
       } catch {
         // MAX can refuse the transition after the server has prepared the conversation.
       }
-      throw new Error('Не удалось открыть личный чат бота. Попробуйте ещё раз.');
+      throw new Error('Не удалось открыть чат с ботом.');
     },
     onError: () => maxNotify('error'),
     onSettled: () => {
@@ -224,7 +224,7 @@ export function SettingsStorefrontSection({
                     {handoffMutation.isPending
                       ? 'Открываем бота…'
                       : handoffMutation.isError
-                        ? 'Повторить переход к боту'
+                        ? 'Открыть бота ещё раз'
                         : 'Выдать доступ через бота'}
                   </span>
                 </button>
@@ -233,15 +233,15 @@ export function SettingsStorefrontSection({
                 <p role="alert" className="settings-storefront__state">
                   {describeUserFacingError(
                     handoffMutation.error,
-                    'Не удалось открыть личный чат бота. Попробуйте ещё раз.',
+                    'Не удалось открыть чат с ботом.',
                   )}
                 </p>
               ) : null}
 
               {allowlistQuery.isLoading ? (
                 <div className="settings-storefront__state" role="status">
-                  <Spinner size="sm" label="Загружаем список" />
-                  <span>Загружаем список...</span>
+                  <Spinner size="sm" label={null} />
+                  <span>Загружаем список…</span>
                 </div>
               ) : allowlistQuery.isError && !allowlistQuery.data ? (
                 <div className="settings-storefront__state settings-storefront__state--error">
@@ -287,7 +287,7 @@ export function SettingsStorefrontSection({
                 </button>
               ) : null}
               {allowlistQuery.isFetchNextPageError ? (
-                <p role="alert">Не удалось загрузить следующую страницу. Повторите загрузку.</p>
+                <p role="alert">Не удалось загрузить следующую страницу.</p>
               ) : null}
             </section>
           ) : null}

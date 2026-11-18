@@ -79,9 +79,13 @@ test('adding a participant with an existing storefront retrieves placement and p
   assert.match(callerAccess, /перешлите сообщение самого участника и выберите срок/iu);
   assert.match(callerAccess, /только в этом чате/iu);
   assert.match(callerAccess, /витрина от этого не появится в магазине/iu);
-  assert.match(placement, /уже создал витрину.*«Управлять магазином»/iu);
+  assert.match(placement, /«Магазин чата».*«Управлять магазином».*«Продавцы»/iu);
+  assert.match(
+    placement,
+    /на название витрины со стрелкой.*«Мои витрины».*«Скопировать мой ID MAX»/u,
+  );
   assert.match(placement, /ID MAX.*«Найти продавца».*«Разместить выбранную витрину»/u);
-  assert.match(placement, /«По заявкам».*участник подаёт заявку.*администратор рассматривает/iu);
+  assert.match(placement, /«По заявкам».*«Отправить заявку».*«Заявки».*«Принять заявку»/u);
 });
 
 test('customer knowledge uses the public project name without renaming the MAX platform', () => {
@@ -102,6 +106,8 @@ test('reviewed answers and link examples pass the public response boundary', () 
       'conflictSavedAnswer',
       'conflictMineAnswer',
       'incidentAnswer',
+      'sellerIdAnswer',
+      'applicationAnswer',
     ]) {
       if (entry[field] === undefined) continue;
       assert.doesNotThrow(

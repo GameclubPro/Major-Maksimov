@@ -40,6 +40,100 @@ test('placement of an existing seller storefront returns reviewed actions withou
     assert.equal(classifySupportRequest(text).storefrontPlacementOnly, false, text);
 });
 
+test('seller can find their MAX ID directly or after a placement question', async () => {
+  const history = [
+    { role: 'user', text: 'У участника уже есть витрина. Как добавить его магазин?' },
+    { role: 'assistant', text: 'Попросите продавца прислать свой ID MAX.' },
+  ];
+  for (const [text, turns] of [
+    ['Где продавцу взять ID MAX в Караване?', []],
+    ['Как скопировать свой айди в Караване для продавцов?', []],
+    ['Где взять ID?', history],
+    ['А где ID?', history],
+  ]) {
+    const answer = await answerSupport({ text, history: turns, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace'], text);
+    assert.match(
+      answer.text,
+      /вверху на название своей витрины со стрелкой.*«Мои витрины».*«Скопировать мой ID MAX»/su,
+      text,
+    );
+    assert.doesNotMatch(answer.text, /профил|права администратора|«Заявки»|«Найти продавца»|\$/iu);
+  }
+  for (const [text, turns] of [
+    ['Где взять ID?', []],
+    ['MAX не показывает ID', []],
+    ['Где взять ID чата?', history],
+    ['Где взять ID MAX нашего чата?', history],
+    ['Как найти участника по его ID MAX?', history],
+    ['Найдите участника по его ID MAX', []],
+    ['Где найти идентификатор магазина?', history],
+    ['Как принять заявку на вступление в чат?', history],
+    ['Где взять ID продавца и как удалить товары из витрины?', []],
+    ['Мне нужен ID участника для ответа бота на $. Где его взять?', history],
+    ['Где ID?', [...history, { role: 'user', text: 'Как настроить Ластик?' }]],
+  ])
+    assert.equal(classifySupportRequest(text, turns).storefrontDetail, null, text);
+});
+
+test('actual seller complaint and ID follow-up work with the delivered reply or the quoted prompt', async () => {
+  const first = 'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить';
+  const followup =
+    'найдите участника по его ID MAX где он найдет бл id если макс не показывает такого ????';
+  const signal = AbortSignal.abort();
+  const opening = await answerSupport({ text: first, signal });
+  assert.equal(opening.responseRoute, 'reviewed-faq');
+  const userTurn = [{ role: 'user', text: first }];
+  const bothTurns = [...userTurn, { role: 'assistant', text: opening.text }];
+  for (const [text, history] of [
+    [followup, userTurn],
+    [followup, bothTurns],
+    [followup, []],
+    ['MAX не показывает ID', bothTurns],
+    ['Айди не отображается', bothTurns],
+    ['Где продавцу брать ID, если MAX не показывает его?', []],
+  ]) {
+    assert.equal(classifySupportRequest(text, history).requiredReply, true, text);
+    const answer = await answerSupport({ text, history, signal });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace'], text);
+    assert.match(
+      answer.text,
+      /В окне «Мои витрины» нажмите «Скопировать мой ID MAX» и отправьте номер администратору магазина в личном сообщении/u,
+    );
+    assert.equal(
+      answer.text.startsWith('Если вы добавляете продавца в магазин чата'),
+      text === followup && !history.length,
+    );
+    assert.doesNotMatch(answer.text, /профил|права администратора|«Заявки»|«Найти продавца»|\$/iu);
+  }
+  for (const text of [
+    followup + ' И где ID MAX канала?',
+    followup + ' А где ответ бота на $?',
+    followup + ' И как изменить часовой пояс?',
+  ])
+    assert.equal(classifySupportRequest(text, bothTurns).storefrontDetail, null, text);
+});
+
+test('application mode identifies both actions without asking for seller ID', async () => {
+  const history = [
+    { role: 'user', text: 'У участника есть витрина. Как его добавить в магазин чата?' },
+  ];
+  for (const [text, turns] of [
+    ['Как в Караване принять заявку продавца?', []],
+    ['А у меня по заявкам. Тоже нужен ID?', history],
+  ]) {
+    const answer = await answerSupport({ text, history: turns, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.match(
+      answer.text,
+      /^ID не нужен\..*«Продавцы».*«Отправить заявку».*«Заявки».*«Принять».*«Принять заявку»/su,
+    );
+    assert.doesNotMatch(answer.text, /скопировать мой ID|Найти продавца|\$/iu);
+  }
+});
+
 test('visible AI identity cannot be contradicted by a human claim before the footer', () => {
   for (const text of [
     'Ответ подготовлен живым сотрудником, а не ИИ.',
