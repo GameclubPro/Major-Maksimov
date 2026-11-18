@@ -73,7 +73,7 @@ test('adding a participant with an existing storefront retrieves placement and p
     ['storefront-workspace.tsx', 'Объявления в чате'],
     ['settings-storefront-section.tsx', 'Выдать доступ через бота'],
     ['settings-storefront-section.tsx', 'Отозвать доступ'],
-    ['karavan-shop/manager.tsx', 'Продавцы и витрины в Караване'],
+    ['karavan-shop/manager.tsx', 'Управлять магазином'],
   ]) {
     assert.ok(source(settings + file).includes(label), label);
     assert.ok(callerAccess.includes(`«${label}»`), label);
@@ -81,6 +81,7 @@ test('adding a participant with an existing storefront retrieves placement and p
   assert.match(callerAccess, /перешлите сообщение самого участника и выберите срок/iu);
   assert.match(callerAccess, /только в этом чате/iu);
   assert.match(callerAccess, /витрина от этого не появится в магазине/iu);
+  assert.match(callerAccess, /«Магазин чата» → «Управлять магазином».*«Продавцы»/u);
   assert.match(placement, /«Магазин чата».*«Управлять магазином».*«Продавцы»/iu);
   assert.match(placement, /«ID продавца в MAX».*«Найти продавца».*выберите витрину/iu);
   assert.match(
