@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { DEFAULT_WEBHOOK_LEASE_SUMMARY_KEY } from '../runtime/default-webhook-dynamic-leases';
 import { WebhookDynamicLeaseStatusService } from './webhook-dynamic-lease-status.service';
@@ -14,9 +15,9 @@ jest.mock('ioredis', () => ({
 }));
 
 function fixture() {
-  const service = new WebhookDynamicLeaseStatusService({
-    getOrThrow: () => 'redis://localhost:6379/0',
-  } as never);
+  const service = new WebhookDynamicLeaseStatusService(
+    new ConfigService({ REDIS_URL: 'redis://localhost:6379/0' }),
+  );
   const constructor = Redis as unknown as jest.Mock;
   const redis = constructor.mock.results.at(-1)!.value as {
     get: jest.Mock<ReturnType<Redis['get']>, Parameters<Redis['get']>>;

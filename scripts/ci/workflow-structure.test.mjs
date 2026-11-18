@@ -212,7 +212,7 @@ function assertBoundedHttpsAptPolicy(run) {
   assert.equal(execFileSync('sed', ['-E', expression], { input, encoding: 'utf8' }), expected);
 }
 
-test('browser setup avoids slow HTTP mirror retries in both browser lanes', () => {
+test('browser setup limits strict APT updates to signed Ubuntu sources', () => {
   const jobs = parse(workflow).jobs;
   for (const id of ['miniapp', 'admin']) {
     const steps = jobs[id].steps;
@@ -222,6 +222,9 @@ test('browser setup avoids slow HTTP mirror retries in both browser lanes', () =
     assert.equal(setup.if, undefined);
     assert.equal(setup['continue-on-error'], undefined);
     assertBoundedHttpsAptPolicy(setup.run);
+    assert.match(setup.run, /test -s \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/u);
+    assert.ok(setup.run.includes('Dir::Etc::sourcelist "/etc/apt/sources.list.d/ubuntu.sources";'));
+    assert.ok(setup.run.includes('Dir::Etc::sourceparts "-";'));
     assert.equal(steps[index + 1].run, 'npx playwright install --with-deps chromium');
     assert.equal(steps[index + 1]['timeout-minutes'], 3);
   }

@@ -16,6 +16,11 @@ import {
   buildChannelSuggestionPublicationLedgerJobId,
   withChannelSuggestionPublicationContextDigest,
 } from '../admin/admin-channel-suggestion-publication-protocol';
+import {
+  DEFAULT_WEBHOOK_WORKER_GROUP_NAMES,
+  type WebhookDynamicLeasesMode,
+} from '../runtime/runtime-topology';
+import { readLeaseHeartbeats } from '../runtime/default-webhook-fleet-observation';
 import { SystemDashboardService } from './system-dashboard.service';
 
 const execFileAsync = promisify(execFile);
@@ -2420,97 +2425,202 @@ describe('SystemDashboardService', () => {
     });
   });
 
-  it('adds an informational alert when dynamic leases are in shadow mode with pending recommendations', async () => {
-    const service = new SystemDashboardService(
-      {
-        getSnapshot: jest.fn().mockResolvedValue({
-          moderation: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          webhookCritical: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          webhookDefault: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          webhookDefaultWorkerGroups: createDefaultWorkerGroups(),
-          webhookDynamicLeases: {
-            mode: 'shadow',
-            generatedAt: '2026-03-31T00:00:00.000Z',
-            liveWorkerGroups: [
-              'api-moderation',
-              'api-moderation-realtime-b',
-              'api-moderation-realtime-c',
-              'api-moderation-realtime-d',
-            ],
-            queues: {
-              'moderation-default-0': {
-                homeOwner: 'api-moderation',
-                actualOwner: 'api-moderation',
-                desiredOwner: 'api-moderation-realtime-b',
-                eligibleForDynamicLeases: true,
-                handoffPending: true,
-                activeJobs: 0,
-                pressure: 8,
-                reason: 'rebalance-least-loaded',
-                claimFencingToken: null,
-                claimLeaseUntil: null,
-                lastHandoffAt: null,
+  it.each([
+    {
+      mode: 'shadow',
+      workers: ['shadow'],
+      pressure: 8,
+      summaryMode: 'shadow',
+      recommendation: 'hold',
+      alert: 'dynamic-lease-shadow',
+      warning: true,
+    },
+    {
+      mode: 'canary',
+      workers: ['off'],
+      pressure: 0,
+      summaryMode: 'off',
+      recommendation: 'hold',
+      alert: null,
+      warning: true,
+    },
+    {
+      mode: 'canary',
+      workers: ['off'],
+      pressure: 50,
+      summaryMode: 'canary',
+      recommendation: 'rollback',
+      alert: 'dynamic-lease-handoff',
+      warning: true,
+    },
+    {
+      mode: 'canary',
+      workers: [],
+      pressure: 50,
+      summaryMode: 'canary',
+      recommendation: 'rollback',
+      alert: 'dynamic-lease-handoff',
+      warning: true,
+    },
+    {
+      mode: 'off',
+      workers: ['off', 'off', 'off', 'off'],
+      pressure: 50,
+      summaryMode: 'canary',
+      recommendation: 'hold',
+      alert: null,
+      warning: true,
+    },
+    {
+      mode: 'canary',
+      workers: ['canary', 'canary', 'canary', 'canary'],
+      pressure: 0,
+      summaryMode: 'canary',
+      recommendation: 'hold',
+      alert: 'dynamic-lease-handoff',
+      warning: false,
+    },
+  ] as const)(
+    'reports $mode/$recommendation with $workers and $summaryMode',
+    async ({ mode, workers, pressure, summaryMode, recommendation, alert, warning }) => {
+      const environment = jest.replaceProperty(process, 'env', {
+        ...process.env,
+        APP_SERVICE_NAME: 'api-admin',
+        APP_ROLE: 'admin',
+        WEBHOOK_DYNAMIC_LEASES_MODE: 'off',
+      });
+      const now = Date.now();
+      const observation = readLeaseHeartbeats(
+        DEFAULT_WEBHOOK_WORKER_GROUP_NAMES.flatMap((group, index) => {
+          const workerMode: WebhookDynamicLeasesMode | undefined = workers[index];
+          const value = workerMode
+            ? JSON.stringify({ workerGroupName: group, mode: workerMode, updatedAtMs: now })
+            : null;
+          return [
+            [null, value],
+            [null, workerMode ? 24_000 : -2],
+          ] as const;
+        }),
+        now,
+        24_000,
+      );
+      try {
+        const service = new SystemDashboardService(
+          {
+            getSnapshot: jest.fn().mockResolvedValue(
+              createHealthyQueueSnapshot({
+                webhookDefaultWorkerGroups: createDefaultWorkerGroups({
+                  'api-moderation-realtime-b': {
+                    queues: ['moderation-default-0'],
+                    counters: { waiting: 50, active: 0, delayed: 0, failed: 0, completed: 0 },
+                  },
+                }),
+                webhookDynamicLeases: {
+                  mode: summaryMode,
+                  generatedAt: new Date(now).toISOString(),
+                  liveWorkerGroups: [
+                    'api-moderation',
+                    'api-moderation-realtime-b',
+                    'api-moderation-realtime-c',
+                    'api-moderation-realtime-d',
+                  ],
+                  queues: {
+                    'moderation-default-0': {
+                      homeOwner: 'api-moderation',
+                      actualOwner: 'api-moderation',
+                      desiredOwner: 'api-moderation-realtime-b',
+                      eligibleForDynamicLeases: true,
+                      handoffPending: true,
+                      activeJobs: 0,
+                      pressure,
+                      reason: 'rebalance-least-loaded',
+                      claimFencingToken: null,
+                      claimLeaseUntil: null,
+                      lastHandoffAt: null,
+                    },
+                  },
+                },
+              }),
+            ),
+          } as never,
+          {
+            getEffectiveSnapshot: jest.fn().mockResolvedValue({
+              mode: 'normal',
+              source: 'auto',
+              reason: 'system healthy',
+              updatedAt: '2026-03-31T00:00:00.000Z',
+              manualMode: null,
+              queueLagSec: 0,
+              action: {
+                windowSec: 60,
+                total: 12,
+                success: 12,
+                failure: 0,
+                critical: 0,
+                errorRate: 0,
+                criticalRate: 0,
               },
-            },
-          },
-          webhookBackground: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          webhookLegacy: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          actions: { waiting: 0, active: 0, delayed: 0, failed: 0, completed: 0 },
-          webhookEvents: {
-            received: { count: 0, oldestEventId: null, oldestCreatedAt: null, oldestLagSec: 0 },
-            queued: { count: 0, oldestEventId: null, oldestCreatedAt: null, oldestLagSec: 0 },
-            failed: { count: 0, oldestEventId: null, oldestCreatedAt: null, oldestLagSec: 0 },
-          },
-          actionHealth: {
-            windowSec: 60,
-            total: 12,
-            success: 12,
-            failure: 0,
-            critical: 0,
-            errorRate: 0,
-            criticalRate: 0,
-          },
-          oldestQueuedEventId: null,
-          oldestQueuedCreatedAt: null,
-          oldestQueuedLagSec: 0,
-          oldestReceivedEventId: null,
-          oldestReceivedCreatedAt: null,
-          oldestReceivedLagSec: 0,
-          effectiveLagSec: 0,
-          generatedAt: '2026-03-31T00:00:00.000Z',
-        }),
-      } as never,
-      {
-        getEffectiveSnapshot: jest.fn().mockResolvedValue({
-          mode: 'normal',
-          source: 'auto',
-          reason: 'system healthy',
-          updatedAt: '2026-03-31T00:00:00.000Z',
-          manualMode: null,
-          queueLagSec: 0,
-          action: {
-            windowSec: 60,
-            total: 12,
-            success: 12,
-            failure: 0,
-            critical: 0,
-            errorRate: 0,
-            criticalRate: 0,
-          },
-        }),
-      } as never,
-      createConfigMock({ QUEUE_LAG_DEGRADE_SEC: 10 }),
-      {
-        getSnapshot: jest.fn().mockResolvedValue(createWebhookSubscriptionSnapshot()),
-      } as never,
-    );
-
-    await expect(service.getSnapshot()).resolves.toMatchObject({
-      alerts: expect.arrayContaining([
-        expect.objectContaining({ code: 'dynamic-lease-shadow', level: 'info' }),
-      ]),
-    });
-  });
+            }),
+          } as never,
+          createConfigMock({ QUEUE_LAG_DEGRADE_SEC: 10 }),
+          {
+            getSnapshot: jest.fn().mockResolvedValue(createWebhookSubscriptionSnapshot()),
+          } as never,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          { getHeartbeatObservation: async () => ({ ...observation, summaryTtlMs: 20_000 }) },
+        );
+        const result = await service.getSnapshot();
+        expect(result.runtimeProfile).toMatchObject({
+          serviceName: 'api-admin',
+          dynamicLeasesMode: 'off',
+        });
+        expect(result.canaryState).toMatchObject({
+          mode,
+          recommendation,
+          liveWorkerGroups: [...DEFAULT_WEBHOOK_WORKER_GROUP_NAMES].slice(0, workers.length),
+        });
+        const groupHealth = result.queueGroupHealth?.groups ?? [];
+        expect(groupHealth.map(({ name }) => name)).toContain('webhook-critical');
+        const defaultWorkerGroup = groupHealth.find(
+          ({ name }) => name === 'api-moderation-realtime-b',
+        );
+        if (mode === 'off') {
+          expect(result.queues.webhookDynamicLeases).toBeNull();
+          expect(result.queues.webhookDefaultWorkerGroups).toEqual({});
+          expect(defaultWorkerGroup).toBeUndefined();
+          expect(result.alerts.some((entry) => entry.code === 'default-worker-skew')).toBe(false);
+        } else {
+          expect(result.queues.webhookDynamicLeases).toMatchObject({
+            liveWorkerGroups: result.canaryState?.liveWorkerGroups,
+          });
+          expect(defaultWorkerGroup).toMatchObject({ waiting: 50 });
+          expect(result.alerts.some((entry) => entry.code === 'default-worker-skew')).toBe(true);
+        }
+        expect(result.alerts.some((entry) => entry.code === 'dynamic-lease-worker-pool')).toBe(
+          warning,
+        );
+        if (alert)
+          expect(result.alerts).toEqual(
+            expect.arrayContaining([expect.objectContaining({ code: alert, level: 'info' })]),
+          );
+        else
+          expect(
+            result.alerts.some(
+              (entry) =>
+                entry.code === 'dynamic-lease-handoff' || entry.code === 'dynamic-lease-shadow',
+            ),
+          ).toBe(false);
+        expect(JSON.stringify(result)).not.toMatch(/summaryTtlMs|expiresAtMs|unreadable/);
+      } finally {
+        environment.restore();
+      }
+    },
+  );
 
   it('surfaces ownership foundation gaps as rollout guidance without marking runtime unhealthy', async () => {
     const service = new SystemDashboardService(

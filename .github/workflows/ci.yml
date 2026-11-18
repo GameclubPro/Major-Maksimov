@@ -349,7 +349,14 @@ jobs:
               sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
             fi
           done
-          printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
+          # Playwright updates APT before installing Ubuntu libraries. Keep unrelated runner repositories out of that update.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Dir::Etc::sourcelist "/etc/apt/sources.list.d/ubuntu.sources";' \
+            'Dir::Etc::sourceparts "-";' \
+            'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' \
+            'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' \
+            | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
       - run: npx playwright install --with-deps chromium
         timeout-minutes: 3
       - name: Install WebKit for chat shop mobile formats
@@ -459,7 +466,14 @@ jobs:
               sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
             fi
           done
-          printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
+          # Playwright updates APT before installing Ubuntu libraries. Keep unrelated runner repositories out of that update.
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Dir::Etc::sourcelist "/etc/apt/sources.list.d/ubuntu.sources";' \
+            'Dir::Etc::sourceparts "-";' \
+            'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' \
+            'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' \
+            | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
       - run: npx playwright install --with-deps chromium
         timeout-minutes: 3
       - run: npm run check:admin

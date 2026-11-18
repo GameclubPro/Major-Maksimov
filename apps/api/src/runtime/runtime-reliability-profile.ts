@@ -1,6 +1,6 @@
 import type {
-  SystemCanaryRecommendation,
   SystemCanaryState,
+  SystemDashboardResponse,
   SystemDashboardWebhookSlo,
   SystemDynamicLeasesMode,
   SystemQueueGroup,
@@ -15,7 +15,13 @@ import {
   getWebhookDynamicLeasesWorkerGroup,
 } from './moderation-runtime';
 import { resolveRuntimeServiceProfile, type RuntimeRoleCapabilities } from './runtime-topology';
-import type { QueueCounters, QueueMetricsSnapshot } from '../system/queue-metrics.service';
+import {
+  currentLeaseSummaryMode,
+  expectedLeaseMode,
+  type LeaseHeartbeatObservation,
+  observeLeaseFleet,
+} from './default-webhook-fleet-observation';
+import type { QueueMetricsSnapshot } from '../system/queue-metrics.service';
 import { MAX_ACTION_ALL_QUEUE_NAMES } from '../max/max-action.queue';
 import { LEGACY_WEBHOOK_QUEUE } from '../webhook/webhook-queues';
 import { COMMERCIAL_OCR_QUEUE } from '../moderation/commercial-ocr/commercial-ocr.queue';
@@ -26,8 +32,9 @@ const QUEUE_GROUP_WAITING_CRITICAL = 50;
 
 export type RuntimeRoleProfile = RuntimeRoleCapabilities;
 
+type DashboardQueueCounters = NonNullable<SystemDashboardResponse['queues']['webhookCritical']>;
+
 type RuntimeReliabilityInput = {
-  queues: QueueMetricsSnapshot;
   dashboardStatus: 'healthy' | 'warning' | 'critical';
   queueLagSec: number;
   queueLagCriticalThresholdSec: number;
@@ -67,7 +74,20 @@ export function buildSystemRuntimeProfile(
   };
 }
 
-export function buildSystemQueueGroupHealth(queues: QueueMetricsSnapshot): SystemQueueGroupHealth {
+export function buildSystemQueueGroupHealth(
+  queues: Pick<
+    SystemDashboardResponse['queues'],
+    | 'webhookCritical'
+    | 'webhookJoinShards'
+    | 'webhookJoin'
+    | 'webhookDefaultWorkerGroups'
+    | 'webhookBackground'
+    | 'webhookLegacy'
+    | 'actions'
+    | 'globalSpammerDenorm'
+    | 'auxiliaryQueues'
+  >,
+): SystemQueueGroupHealth {
   const groups: SystemQueueGroup[] = [
     buildQueueGroup('webhook-critical', ['moderation-critical'], queues.webhookCritical),
     buildQueueGroup(
@@ -94,10 +114,40 @@ export function buildSystemQueueGroupHealth(queues: QueueMetricsSnapshot): Syste
   };
 }
 
-export function buildSystemCanaryState(input: RuntimeReliabilityInput): SystemCanaryState {
-  const profile = buildSystemRuntimeProfile(input.webhookSlo?.targetProcessingMs);
-  const mode = profile.dynamicLeasesMode;
-  const dynamicLeaseQueues = Object.entries(input.queues.webhookDynamicLeases?.queues ?? {});
+export function getSystemLeaseFleet(
+  queues: QueueMetricsSnapshot,
+  profile: SystemRuntimeProfile,
+  evidence?: LeaseHeartbeatObservation & { summaryTtlMs: number },
+) {
+  const expected = expectedLeaseMode(profile.serviceName, profile.dynamicLeasesMode);
+  const now = Date.now();
+  const snapshot = queues.webhookDynamicLeases;
+  const summaryMode = currentLeaseSummaryMode(snapshot, evidence?.summaryTtlMs ?? 0, now);
+  const fleet = observeLeaseFleet(evidence, expected, summaryMode, now);
+  // FLAG: A single writer can leave its previous mode in Redis after all workers switch off.
+  const contradictedByDisabledFleet =
+    fleet.consensus && fleet.mode === 'off' && fleet.summaryConflict;
+  return {
+    ...fleet,
+    summaryMode,
+    snapshot: summaryMode && !contradictedByDisabledFleet ? snapshot : null,
+  };
+}
+
+export function buildSystemCanaryState(
+  input: RuntimeReliabilityInput,
+  profile: SystemRuntimeProfile,
+  fleet: ReturnType<typeof getSystemLeaseFleet>,
+): SystemCanaryState {
+  const mode = fleet.mode;
+  const dynamicLeaseQueues = mode === 'off' ? [] : Object.entries(fleet.snapshot?.queues ?? {});
+  const canaryShardIds =
+    mode === 'canary' && fleet.summaryMode === 'canary'
+      ? dynamicLeaseQueues
+          .filter(([, queue]) => queue.eligibleForDynamicLeases)
+          .map(([name]) => name)
+          .sort()
+      : [];
   const handoffPendingQueues = dynamicLeaseQueues
     .filter(([, queue]) => queue.handoffPending)
     .map(([queueName]) => queueName)
@@ -114,13 +164,17 @@ export function buildSystemCanaryState(input: RuntimeReliabilityInput): SystemCa
       enabled: false,
       mode,
       status: 'disabled',
-      recommendation: 'observe',
+      recommendation: fleet.summaryConflict ? 'hold' : 'observe',
       workerGroup: profile.dynamicLeasesWorkerGroup,
-      canaryShardIds: profile.canaryShardIds,
-      liveWorkerGroups: input.queues.webhookDynamicLeases?.liveWorkerGroups ?? [],
+      canaryShardIds,
+      liveWorkerGroups: fleet.liveWorkerGroups,
       handoffPendingQueues,
       unhealthyQueues,
-      reason: 'Dynamic leases are disabled for this runtime.',
+      reason: fleet.summaryConflict
+        ? 'All workers report off. Wait for the independently read shard summary to match.'
+        : fleet.consensus
+          ? 'All workers report that dynamic leases are disabled.'
+          : 'Dynamic leases are disabled in this runtime profile.',
     };
   }
 
@@ -130,19 +184,18 @@ export function buildSystemCanaryState(input: RuntimeReliabilityInput): SystemCa
     webhookSlo: input.webhookSlo ?? null,
     unhealthyQueues,
   });
-  const recommendation = resolveCanaryRecommendation(status, mode, handoffPendingQueues);
+  const decision = describeCanaryDecision(status, mode, handoffPendingQueues, fleet);
 
   return {
     enabled: true,
     mode,
     status,
-    recommendation,
+    ...decision,
     workerGroup: profile.dynamicLeasesWorkerGroup,
-    canaryShardIds: profile.canaryShardIds,
-    liveWorkerGroups: input.queues.webhookDynamicLeases?.liveWorkerGroups ?? [],
+    canaryShardIds,
+    liveWorkerGroups: fleet.liveWorkerGroups,
     handoffPendingQueues,
     unhealthyQueues,
-    reason: buildCanaryReason(status, recommendation, mode),
   };
 }
 
@@ -185,7 +238,7 @@ export function buildSystemRollbackReadiness(
 function buildQueueGroup(
   name: string,
   queues: readonly string[],
-  counters: QueueCounters | undefined,
+  counters: DashboardQueueCounters | undefined,
   options: { ignoreDelayedForStatus?: boolean } = {},
 ): SystemQueueGroup {
   const safeCounters = counters ?? {
@@ -216,7 +269,7 @@ function buildQueueGroup(
 }
 
 function resolveQueueGroupStatus(
-  counters: QueueCounters,
+  counters: DashboardQueueCounters,
   options: { ignoreDelayedForStatus?: boolean } = {},
 ): SystemQueueGroupStatus {
   const pending = counters.waiting + (counters.prioritized ?? 0);
@@ -272,48 +325,54 @@ function resolveCanaryStatus(input: {
   return 'canary';
 }
 
-function resolveCanaryRecommendation(
+function describeCanaryDecision(
   status: SystemCanaryState['status'],
   mode: SystemDynamicLeasesMode,
   handoffPendingQueues: readonly string[],
-): SystemCanaryRecommendation {
+  fleet: ReturnType<typeof getSystemLeaseFleet>,
+): Pick<SystemCanaryState, 'recommendation' | 'reason'> {
   if (status === 'degraded') {
-    return 'rollback';
+    return {
+      recommendation: 'rollback',
+      reason: 'A critical runtime signal was observed during the rollout.',
+    };
   }
-
-  if (handoffPendingQueues.length > 0) {
-    return 'hold';
+  if (fleet.mixed || fleet.summaryConflict) {
+    return {
+      recommendation: 'hold',
+      reason: 'Worker rollout modes disagree. Wait for the reported modes to converge.',
+    };
   }
-
-  if (status === 'canary' && mode === 'canary') {
-    return 'expand';
+  if (!fleet.consensus) {
+    return {
+      recommendation: 'hold',
+      reason:
+        fleet.source === 'expected'
+          ? 'The displayed mode is the topology expectation. Worker coverage is incomplete.'
+          : 'The displayed mode is from a partial observation. Worker coverage is incomplete.',
+    };
   }
-
-  return 'observe';
-}
-
-function buildCanaryReason(
-  status: SystemCanaryState['status'],
-  recommendation: SystemCanaryRecommendation,
-  mode: SystemDynamicLeasesMode,
-): string {
-  if (recommendation === 'rollback') {
-    return 'Canary/runtime health is degraded; rollback is safer than expanding worker coverage.';
+  if (!fleet.summaryMode) {
+    return {
+      recommendation: 'hold',
+      reason: 'The worker mode is confirmed. A current shard summary is unavailable.',
+    };
   }
-
-  if (recommendation === 'hold') {
-    return 'Dynamic lease handoff is still settling; keep the current canary window.';
+  if (handoffPendingQueues.length) {
+    return { recommendation: 'hold', reason: 'A shard handoff is in progress.' };
   }
-
-  if (recommendation === 'expand') {
-    return 'Current canary window is healthy and can be expanded to the next worker group.';
+  if (mode === 'canary') {
+    // FLAG: A single set of worker heartbeats cannot prove a complete observation window across all ingress writers.
+    return {
+      recommendation: 'hold',
+      reason:
+        'Keep the current canary until every expected ingress writer is observed for a full window.',
+    };
   }
-
-  if (status === 'shadow') {
-    return 'Dynamic leases are observing worker ownership without moving queues.';
-  }
-
-  return `Dynamic leases mode is ${mode}; keep observing SLO and queue group health.`;
+  return {
+    recommendation: 'observe',
+    reason: 'Continue observing the current worker mode and webhook latency.',
+  };
 }
 
 function readCsvEnv(key: string, fallback: readonly string[] = []): string[] {
