@@ -182,6 +182,9 @@ function assertBoundedHttpsAptPolicy(run) {
   const input = [
     'http://azure.archive.ubuntu.com/ubuntu/',
     'https://azure.archive.ubuntu.com/ubuntu/',
+    'http://us-east-2.ec2.archive.ubuntu.com/ubuntu/',
+    'https://eu-west-1.ec2.archive.ubuntu.com/ubuntu/',
+    'http://us-east-2.ec2.archive.ubuntu.com.example/ubuntu/',
     'deb http://archive.ubuntu.com/ubuntu noble main',
     'URIs: http://security.ubuntu.com/ubuntu/',
     'URIs: https://security.ubuntu.com/ubuntu/',
@@ -194,6 +197,9 @@ function assertBoundedHttpsAptPolicy(run) {
   const expected = [
     'https://archive.ubuntu.com/ubuntu/',
     'https://archive.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    'https://archive.ubuntu.com/ubuntu/',
+    'http://us-east-2.ec2.archive.ubuntu.com.example/ubuntu/',
     'deb https://archive.ubuntu.com/ubuntu noble main',
     'URIs: https://security.ubuntu.com/ubuntu/',
     'URIs: https://security.ubuntu.com/ubuntu/',
