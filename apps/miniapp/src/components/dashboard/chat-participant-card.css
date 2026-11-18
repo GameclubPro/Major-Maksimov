@@ -1,4 +1,53 @@
 @layer workspace {
+  body[data-miniapp-profile='moderation'] .participant-card__max-id {
+    display: grid;
+    grid-template-columns: minmax(0, auto) 44px;
+    justify-content: start;
+    align-items: center;
+    column-gap: 6px;
+    color: var(--major-muted);
+    font-size: 13px;
+  }
+  body[data-miniapp-profile='moderation'] .participant-card__max-id label {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    align-content: center;
+    min-height: 44px;
+    min-width: 0;
+    gap: 0 6px;
+    white-space: nowrap;
+  }
+  body[data-miniapp-profile='moderation'] .participant-card__max-id input {
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--major-ink);
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+  }
+  body[data-miniapp-profile='moderation'] .participant-card__max-id button {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--major-ink);
+  }
+  body[data-miniapp-profile='moderation'] .participant-card__max-id svg {
+    width: 20px;
+    height: 20px;
+  }
+  body[data-miniapp-profile='moderation'] .participant-card__max-id [role='status'] {
+    grid-column: 1 / -1;
+    white-space: normal;
+  }
   body[data-miniapp-profile='moderation'] .participant-card.participant-sheet {
     width: min(100%, 560px);
   }

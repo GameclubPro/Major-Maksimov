@@ -10,7 +10,7 @@ export const knowledge = JSON.parse(
 const mandatoryIds = new Set(['support-room', 'operator']);
 
 function supportPromptFact(
-  { id, answer, sources, developerAnswer, troubleshootingAnswer },
+  { id, answer, sources, developerAnswer, troubleshootingAnswer, placementAnswer },
   { developer = false, troubleshooting = false } = {},
 ) {
   const pages = knowledge.officialSources.filter((page) => sources.includes(page.url));
@@ -19,6 +19,7 @@ function supportPromptFact(
     id,
     answer: [
       answer,
+      placementAnswer,
       developer && developerAnswer,
       (developer || troubleshooting) && troubleshootingAnswer,
     ]
@@ -780,7 +781,7 @@ async function answerSupportText(
       field:
         request.storefrontDetail === 'conditionalSellerId'
           ? 'sellerIdAnswer'
-          : request.storefrontDetail || 'answer',
+          : request.storefrontDetail || 'placementAnswer',
       allowed: ['karavan-chat-marketplace', 'karavan-storefront'],
     },
     {
@@ -842,7 +843,7 @@ async function answerSupportText(
     const prefix =
       actionBoundary +
       (request.storefrontDetail === 'conditionalSellerId'
-        ? 'Если вы добавляете продавца в магазин чата, попросите его прислать свой ID. Вот как продавцу его скопировать:\n\n'
+        ? 'Если вы добавляете продавца в магазин чата:\n\n'
         : request.role === 'admin' || request.aiObservationHandoffOnly || request.storefrontDetail
           ? ''
           : 'Если у вас есть права администратора сообщества:\n\n');

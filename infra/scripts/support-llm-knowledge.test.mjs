@@ -58,12 +58,14 @@ test('adding a participant with an existing storefront retrieves placement and p
     'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить';
   const answers = createSupportRouter(knowledge).selectKnowledge(question);
   const callerAccess = fact('karavan-storefront');
-  const placement = fact('karavan-chat-marketplace');
-  for (const answer of [callerAccess, placement])
+  const marketplace = entries.get('karavan-chat-marketplace');
+  const placement = marketplace.placementAnswer;
+  for (const id of ['karavan-storefront', marketplace.id])
     assert.ok(
-      answers.some((entry) => entry.answer === answer),
+      answers.some((entry) => entry.id === id),
       question,
     );
+  assert.match(marketplace.answer, /«Включить магазин».*«Участники».*«Продолжить»/su);
 
   const settings = 'apps/miniapp/src/pages/settings/';
   for (const [file, label] of [
@@ -80,12 +82,24 @@ test('adding a participant with an existing storefront retrieves placement and p
   assert.match(callerAccess, /только в этом чате/iu);
   assert.match(callerAccess, /витрина от этого не появится в магазине/iu);
   assert.match(placement, /«Магазин чата».*«Управлять магазином».*«Продавцы»/iu);
+  assert.match(placement, /«ID продавца в MAX».*«Найти продавца».*выберите витрину/iu);
   assert.match(
     placement,
-    /на название витрины со стрелкой.*«Мои витрины».*«Скопировать мой ID MAX»/u,
+    /«По заявкам».*«Скопировать ссылку».*«Отправить заявку».*«Заявки».*«Принять» и подтвердите/u,
   );
-  assert.match(placement, /ID MAX.*«Найти продавца».*«Разместить выбранную витрину»/u);
-  assert.match(placement, /«По заявкам».*«Отправить заявку».*«Заявки».*«Принять заявку»/u);
+  const roster = 'apps/miniapp/src/components/dashboard/chat-participants-roster.tsx';
+  const sheet = 'apps/miniapp/src/components/dashboard/chat-participant-sheet.tsx';
+  const copyControl = 'apps/miniapp/src/components/dashboard/participant-max-id.tsx';
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(roster));
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(sheet));
+  assert.ok(entries.get('karavan-chat-marketplace').sources.includes(copyControl));
+  assert.ok(source(roster).includes('Имя или ID'));
+  assert.ok(source(sheet).includes('<ParticipantMaxId'));
+  assert.ok(source(copyControl).includes('aria-label="Скопировать ID MAX"'));
+  assert.match(
+    entries.get('karavan-chat-marketplace').sellerIdAnswer,
+    /в Майоре.*«Участники».*по имени.*карточке.*«Скопировать ID MAX»/isu,
+  );
 });
 
 test('customer knowledge uses the public project name without renaming the MAX platform', () => {
@@ -106,6 +120,7 @@ test('reviewed answers and link examples pass the public response boundary', () 
       'conflictSavedAnswer',
       'conflictMineAnswer',
       'incidentAnswer',
+      'placementAnswer',
       'sellerIdAnswer',
       'applicationAnswer',
     ]) {
