@@ -298,13 +298,17 @@ describe('real PostgreSQL ownership, journals and restart', () => {
   test('protection rewind cannot be overwritten by a historical page already in flight', async () => {
     await enable();
     const at = source();
+    await store.protect(
+      '-1',
+      protection({ sourceRevision: 2, completeThrough: new Date(at).toISOString() }),
+    );
     await pool.query(
       "UPDATE eraser_policies SET history_cursor=$1,deferred_from=$2,deferred_to=$2 WHERE chat_id='-1'",
       [at, at + 1000],
     );
     const wake = await reserve();
     const policy = (await store.active('-1', wake.leaseToken))!;
-    await store.protect('-1', protection({ sourceRevision: 2 }));
+    await store.protect('-1', protection({ sourceRevision: 3 }));
     await store.savePage(policy, 'history', []);
     const fresh = (await store.policy('-1'))!;
     assert.equal(fresh.history_complete, false);
@@ -625,6 +629,123 @@ describe('real PostgreSQL ownership, journals and restart', () => {
     assert.equal((await store.snapshot('-1')).deletedCount, 1);
     assert.equal(deletes, 1);
   });
+  for (const outcome of ['deleted', 'rate_limited'] as const) {
+    for (const committed of [false, true]) {
+      test(`records a known ${outcome} once when settlement fails ${committed ? 'after' : 'before'} commit`, async (t) => {
+        await enable();
+        await candidate();
+        const actual = new Store(pool, true);
+        const settle = actual.settle.bind(actual);
+        const writes: Array<[Candidate['dispatch_id'], string]> = [];
+        t.mock.method(actual, 'settle', async (...args: Parameters<Store['settle']>) => {
+          writes.push([args[0].dispatch_id, args[2]]);
+          if (writes.length > 1 || committed) await settle(...args);
+          if (writes.length === 1) throw new Error('settlement response lost');
+        });
+        let deletes = 0;
+        const runtime = new CleanupRuntime(
+          actual,
+          transport({
+            remove: async (_chat, _mid, before) => {
+              await before();
+              deletes++;
+              if (outcome === 'rate_limited')
+                throw new MaxError(429, 'too.many.requests', false, 30_000);
+            },
+          }),
+          { enabled: true, redisUrl },
+        );
+        await runtime.visit(await reserve());
+        const receipt = (await pool.query<Candidate>('SELECT * FROM eraser_candidates')).rows[0]!;
+        assert.ok(receipt.dispatch_id);
+        assert.equal(deletes, 1);
+        assert.equal(receipt.attempt_count, 1);
+        assert.deepEqual(writes, [
+          [receipt.dispatch_id, outcome],
+          [receipt.dispatch_id, outcome],
+        ]);
+        assert.equal(receipt.state, outcome === 'deleted' ? 'deleted' : 'pending');
+        assert.equal(receipt.outcome_code, outcome);
+        if (outcome === 'rate_limited') {
+          assert.ok(receipt.next_attempt_at.getTime() > Date.now() + 28_000);
+          assert.equal((await store.snapshot('-1')).deletedCount, 0);
+        } else {
+          await store.ingest(
+            { update_type: 'message_removed', chat_id: -1, message_id: 'message' },
+            'already-acknowledged-removal',
+          );
+          assert.equal((await store.snapshot('-1')).deletedCount, 1);
+        }
+      });
+    }
+  }
+  test('a lost dispatch commit response cannot authorize an external DELETE', async (t) => {
+    await enable();
+    await candidate();
+    const actual = new Store(pool, true);
+    const mark = actual.assertAndMarkDispatch.bind(actual);
+    t.mock.method(
+      actual,
+      'assertAndMarkDispatch',
+      async (...args: Parameters<Store['assertAndMarkDispatch']>) => {
+        await mark(...args);
+        throw new Error('dispatch commit response lost');
+      },
+    );
+    let deletes = 0;
+    const runtime = new CleanupRuntime(
+      actual,
+      transport({
+        remove: async (_chat, _mid, before) => {
+          await before();
+          deletes++;
+        },
+      }),
+      { enabled: true, redisUrl },
+    );
+    await runtime.visit(await reserve());
+    const receipt = (await pool.query<Candidate>('SELECT * FROM eraser_candidates')).rows[0]!;
+    assert.equal(deletes, 0);
+    assert.equal(receipt.state, 'dispatching');
+    assert.equal(receipt.attempt_count, 1);
+    assert.ok(receipt.dispatch_id);
+    assert.equal((await store.snapshot('-1')).deletedCount, 0);
+  });
+  test('two failed settlement writes keep the issued DELETE fenced until a removal receipt', async (t) => {
+    await enable();
+    await candidate();
+    const actual = new Store(pool, true);
+    const settle = t.mock.method(actual, 'settle', async () => {
+      throw new Error('settlement store unavailable');
+    });
+    let deletes = 0;
+    const runtime = new CleanupRuntime(
+      actual,
+      transport({
+        remove: async (_chat, _mid, before) => {
+          await before();
+          deletes++;
+        },
+      }),
+      { enabled: true, redisUrl },
+    );
+    await runtime.visit(await reserve());
+    const read = async () =>
+      (await pool.query<Candidate>('SELECT * FROM eraser_candidates')).rows[0]!;
+    const issued = await read();
+    assert.equal(settle.mock.callCount(), 2);
+    assert.equal(issued.state, 'dispatching');
+    assert.ok(issued.dispatch_id);
+    assert.equal((await actual.policy('-1'))!.last_error, 'delete_settlement_failed');
+    await runtime.visit(await reserve());
+    assert.equal(deletes, 1);
+    assert.deepEqual(await read(), issued);
+    const removal = { update_type: 'message_removed', chat_id: -1, message_id: 'message' };
+    await store.ingest(removal, 'late-removal');
+    await store.ingest(removal, 'duplicate-removal');
+    assert.equal((await read()).state, 'deleted');
+    assert.equal((await store.snapshot('-1')).deletedCount, 1);
+  });
   for (const [status, state] of [
     [0, 'uncertain'],
     [403, 'dispatching'],
@@ -797,6 +918,129 @@ describe('real PostgreSQL ownership, journals and restart', () => {
 });
 
 describe('bounded history and same-chat progress', () => {
+  test('partial protection and a stalled full page preserve both ends of the history debt', async () => {
+    await enable();
+    const base = source();
+    const stamp = (offset: number) => new Date(base + offset).toISOString();
+    await store.protect(
+      '-1',
+      protection({
+        sourceRevision: 2,
+        protectedBotIds: ['900'],
+        botHistoryCompleteFrom: stamp(400),
+        completeThrough: stamp(500),
+      }),
+    );
+    await pool.query(
+      "UPDATE eraser_policies SET historical_deferred_from=$1,historical_deferred_to=$2,history_cursor=$2,history_gap=true WHERE chat_id='-1'",
+      [base + 100, base + 300],
+    );
+    await store.protect(
+      '-1',
+      protection({
+        sourceRevision: 3,
+        protectedBotIds: ['900'],
+        botHistoryCompleteFrom: stamp(220),
+        completeThrough: stamp(280),
+      }),
+    );
+    const restarted = new Store(pool, true);
+    const wake = await reserve();
+    const policy = (await restarted.active('-1', wake.leaseToken))!;
+    assert.equal(policy.historical_deferred_from, String(base + 100));
+    assert.equal(policy.historical_deferred_to, String(base + 300));
+    const firstWindow = await restarted.openScan(policy, 'history');
+    assert.equal(firstWindow?.upper, base + 280);
+    const page = (prefix: string, upper: number): Message[] =>
+      Array.from({ length: 100 }, (_, i) => ({
+        id: prefix + i,
+        chatId: '-1',
+        authorId: '900',
+        isBot: true,
+        sourceMs: upper >= base + 300 ? base + 300 : base + 220,
+      }));
+    await restarted.savePage(policy, 'history', page('first', firstWindow!.upper));
+    const atBoundary = (await restarted.active('-1', wake.leaseToken))!;
+    assert.equal(atBoundary.history_gap, false);
+    assert.equal(atBoundary.history_cursor, String(base + 220));
+    await store.protect(
+      '-1',
+      protection({
+        sourceRevision: 3,
+        protectedBotIds: ['900'],
+        botHistoryCompleteFrom: stamp(220),
+        completeThrough: stamp(280),
+      }),
+    );
+    assert.equal((await store.policy('-1'))!.scan_generation, atBoundary.scan_generation);
+    await restarted.savePage(atBoundary, 'history', page('second', base + 220));
+    const stalled = (await restarted.active('-1', wake.leaseToken))!;
+    assert.equal(stalled.history_gap, true);
+    assert.equal(stalled.history_cursor, atBoundary.history_cursor);
+    assert.equal(stalled.history_gap_from, String(base + 220));
+    assert.equal(stalled.history_gap_to, String(base + 300));
+    await restarted.savePage(atBoundary, 'history', page('second', base + 220));
+    const afterDuplicate = (await restarted.active('-1', wake.leaseToken))!;
+    assert.equal(afterDuplicate.scan_generation, stalled.scan_generation);
+    assert.equal(afterDuplicate.scanned_count, stalled.scanned_count);
+    assert.equal(stalled.historical_deferred_from, String(base + 100));
+    assert.equal(stalled.historical_deferred_to, String(base + 300));
+    assert.equal(await restarted.openScan(stalled, 'history'), null);
+    assert.equal(
+      (
+        await pool.query(
+          "SELECT count(*)::int AS count FROM eraser_candidates WHERE message_id LIKE 'second%'",
+        )
+      ).rows[0].count,
+      100,
+    );
+    await pool.query("DELETE FROM eraser_candidates WHERE message_id LIKE 'first%'");
+    await restarted.finishVisit('-1', wake.leaseToken);
+    await store.protect(
+      '-1',
+      protection({
+        sourceRevision: 4,
+        protectedBotIds: ['900'],
+        botHistoryCompleteFrom: stamp(100),
+        completeThrough: stamp(250),
+      }),
+    );
+    const partial = await reserve();
+    const belowGap = (await restarted.active('-1', partial.leaseToken))!;
+    const partialWindow = await restarted.openScan(belowGap, 'history');
+    assert.equal(partialWindow?.upper, base + 250);
+    await restarted.savePage(belowGap, 'history', [], 'due', partialWindow!.upper);
+    const afterPartial = (await restarted.policy('-1'))!;
+    assert.equal(afterPartial.history_gap_from, String(base + 251));
+    assert.equal(afterPartial.history_gap_to, String(base + 300));
+    assert.equal(
+      (await restarted.runtimeDiagnostics('900', { chatIds: ['-1'] })).items[0]!.diagnostics
+        .historyBoundaryBlocked,
+      true,
+    );
+    await restarted.finishVisit('-1', partial.leaseToken);
+    await store.protect(
+      '-1',
+      protection({
+        sourceRevision: 5,
+        protectedBotIds: ['900'],
+        botHistoryCompleteFrom: stamp(100),
+        completeThrough: stamp(300),
+      }),
+    );
+    const fresh = await reserve();
+    const covered = (await store.active('-1', fresh.leaseToken))!;
+    assert.equal(covered.historical_deferred_from, String(base + 251));
+    await store.savePage(covered, 'history', []);
+    const finished = (await store.policy('-1'))!;
+    assert.equal(finished.historical_deferred_from, null);
+    assert.equal(finished.historical_deferred_to, null);
+    assert.equal(
+      (await restarted.runtimeDiagnostics('900', { chatIds: ['-1'] })).items[0]!.diagnostics
+        .historyBoundaryBlocked,
+      false,
+    );
+  });
   test('all authors are eligible, exact exceptions excluded, sync gaps defer bots without blocking humans', async () => {
     await enable();
     await store.protect(
@@ -865,6 +1109,10 @@ describe('bounded history and same-chat progress', () => {
     });
     assert.equal((await store.policy('-1'))!.historical_deferred_from, String(at));
     await store.protect('-1', expanded);
+    const retry = await reserve();
+    const reopened = (await store.active('-1', retry.leaseToken))!;
+    assert.equal(reopened.historical_deferred_from, String(at));
+    await store.savePage(reopened, 'history', []);
     assert.equal((await store.policy('-1'))!.historical_deferred_from, null);
     assert.deepEqual(
       (await pool.query("SELECT evidence FROM eraser_protection_state WHERE chat_id='-1'")).rows[0]
@@ -946,7 +1194,7 @@ describe('bounded history and same-chat progress', () => {
       }),
     );
     const reopened = (await store.policy('-1'))!;
-    assert.equal(reopened.historical_deferred_from, null);
+    assert.equal(reopened.historical_deferred_from, String(at - 1));
     assert.equal(reopened.history_complete, false);
     assert.ok(Number(reopened.history_cursor) >= at);
     await runtime.close();
@@ -970,7 +1218,7 @@ describe('bounded history and same-chat progress', () => {
       store.assertAndMarkDispatch(disputed, wake.leaseToken, Date.now(), Date.now()),
       { code: 'ERASER_PROTECTION_PENDING' },
     );
-    await store.deferProtection(disputed);
+    await store.deferProtection(disputed, wake.leaseToken);
     assert.equal(
       (await pool.query("SELECT 1 FROM eraser_candidates WHERE message_id='module-late'")).rowCount,
       0,
@@ -981,13 +1229,65 @@ describe('bounded history and same-chat progress', () => {
       { code: 'ERASER_PROTECTED' },
     );
     await store.assertAndMarkDispatch(ordinary, wake.leaseToken, Date.now(), Date.now());
-    await store.deferProtection(ordinary);
+    await store.deferProtection(ordinary, wake.leaseToken);
     assert.equal(
       (await pool.query("SELECT state FROM eraser_candidates WHERE message_id='ordinary-bot'"))
         .rows[0].state,
       'dispatching',
       'issued effects retain their reconciliation journal',
     );
+  });
+  test('protection deferrals preserve a later rejected attempt even across visits', async () => {
+    await enable();
+    const visit = await reserve();
+    const initial = await candidate('retry', '-1', true, '900');
+    const issue = async (row: Candidate): Promise<Candidate> => ({
+      ...row,
+      state: 'dispatching',
+      dispatch_id: await store.assertAndMarkDispatch(row, visit.leaseToken, Date.now(), Date.now()),
+    });
+    const current = async () =>
+      (await pool.query<Candidate>("SELECT * FROM eraser_candidates WHERE message_id='retry'"))
+        .rows[0]!;
+    const first = await issue(initial);
+    await store.settle(first, 'pending', 'rate_limited', 30_000);
+    const firstPending = (
+      await pool.query<Candidate>(
+        "UPDATE eraser_candidates SET next_attempt_at=clock_timestamp() WHERE message_id='retry' RETURNING *",
+      )
+    ).rows[0]!;
+    const second = await issue(firstPending);
+    await store.settle(second, 'pending', 'rate_limited', 30_000);
+    const secondPending = await current();
+    await store.protect('-1', protection({ sourceRevision: 2, protectedBotIds: ['900'] }));
+    await store.finishVisit('-1', visit.leaseToken);
+    const nextVisit = await reserve();
+    const restarted = new Store(pool, true);
+    await restarted.deferProtection(initial, nextVisit.leaseToken);
+    await restarted.deferProtection(firstPending, nextVisit.leaseToken);
+    await restarted.deferProtection(secondPending, nextVisit.leaseToken);
+    await restarted.settle(first, 'deleted', 'deleted');
+    assert.deepEqual(await current(), secondPending, 'future retry survives any local deferral');
+    const due = (
+      await pool.query<Candidate>(
+        "UPDATE eraser_candidates SET next_attempt_at=clock_timestamp() WHERE message_id='retry' RETURNING *",
+      )
+    ).rows[0]!;
+    await restarted.deferProtection(due, visit.leaseToken);
+    assert.deepEqual(
+      await current(),
+      due,
+      'an expired visit cannot reschedule even the exact retry',
+    );
+    await restarted.deferProtection(due, nextVisit.leaseToken);
+    const preserved = await current();
+    assert.equal(preserved.dispatch_id, second.dispatch_id);
+    assert.equal(preserved.attempt_count, 2);
+    assert.equal(preserved.outcome_code, 'rate_limited');
+    assert.equal(preserved.state, 'pending');
+    assert.ok(preserved.next_attempt_at.getTime() > Date.now() + 59_000);
+    assert.equal((await store.policy('-1'))?.historical_deferred_from, null);
+    assert.equal((await store.snapshot('-1')).deletedCount, 0);
   });
   test('pinned, uncertain and protected rows do not prevent an independent ordinary delete', async () => {
     await enable();
@@ -1808,7 +2108,7 @@ test('real Redis distributed admission enforces total spacing, per-chat1s and sh
   await one.acquire('-1');
   await two.acquire('-1');
   assert.ok(Date.now() - start >= 950);
-  await one.cooldown(1000);
+  await one.cooldownUntil(Date.now() + 1000);
   const cool = Date.now();
   await two.acquire();
   assert.ok(Date.now() - cool >= 950);

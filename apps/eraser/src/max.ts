@@ -11,12 +11,28 @@ const ERASER_WEBHOOK_UPDATE_TYPES = [
   'bot_removed',
 ] as const;
 
+const HTTP_DATE =
+  /^(?:[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Z][a-z]+, \d{2}-[A-Z][a-z]{2}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Z][a-z]{2} [A-Z][a-z]{2} (?: \d|\d{2}) \d{2}:\d{2}:\d{2} \d{4})$/;
+
+function retryDeadline(header: string | null, receivedAt: number): number {
+  const target =
+    header && /^\d+(\.\d+)?$/.test(header)
+      ? receivedAt + Math.ceil(Number(header) * 1000)
+      : header && HTTP_DATE.test(header)
+        ? Date.parse(header.endsWith(' GMT') ? header : `${header} GMT`)
+        : NaN;
+  return Number.isSafeInteger(target) && target <= 8_640_000_000_000_000
+    ? Math.max(receivedAt + 1000, target)
+    : receivedAt + 1000;
+}
+
 export class MaxError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     readonly attempted: boolean,
     readonly retryAfterMs = 1000,
+    readonly retryAtMs = Date.now() + retryAfterMs,
   ) {
     super(`MAX ${status || 'transport'} ${code}`);
   }
@@ -33,9 +49,10 @@ export type MaxTransport = {
 export class MaxClient implements MaxTransport {
   constructor(
     private readonly config: Config,
-    private readonly limiter: Pick<HttpLimiter, 'acquire' | 'cooldown'>,
+    private readonly limiter: Pick<HttpLimiter, 'acquire' | 'cooldownUntil'>,
     private readonly http: typeof fetch = fetch,
     private readonly telemetry = new HttpTelemetry(),
+    private readonly admissionSignal?: AbortSignal,
   ) {}
   metrics(): TransportMetrics {
     return this.telemetry.snapshot();
@@ -52,27 +69,34 @@ export class MaxClient implements MaxTransport {
     },
   ): Promise<Record<string, unknown>> {
     try {
-      await this.limiter.acquire(options.chatDelete, undefined, options.purpose);
+      await this.limiter.acquire(options.chatDelete, this.admissionSignal, options.purpose);
+      this.admissionSignal?.throwIfAborted();
     } catch (error) {
       if (error instanceof HttpAdmissionDeferred) {
-        this.telemetry.admission('cooldown', error.retryAfterMs);
-        throw new MaxError(429, 'rate_limit_cooldown', false, error.retryAfterMs);
+        this.telemetry.admission('cooldown', error.retryAtMs);
+        throw new MaxError(429, 'rate_limit_cooldown', false, error.retryAfterMs, error.retryAtMs);
       }
       this.telemetry.admission('unavailable');
       throw error;
     }
     try {
       await options.before?.();
+      if (method !== 'DELETE') this.admissionSignal?.throwIfAborted();
     } catch (error) {
       this.telemetry.admission('guard');
       throw error;
     }
     const target = new URL(path, this.config.apiBaseUrl);
+    const timeout = AbortSignal.timeout(5000);
     const request: RequestInit = {
       method,
       headers: { Authorization: this.config.botToken, 'Content-Type': 'application/json' },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-      signal: AbortSignal.timeout(5000),
+      // FLAG: Give a journaled DELETE its normal chance to report the result on shutdown.
+      signal:
+        method !== 'DELETE' && this.admissionSignal
+          ? AbortSignal.any([timeout, this.admissionSignal])
+          : timeout,
       redirect: 'error',
     };
     let response: Response;
@@ -85,7 +109,20 @@ export class MaxClient implements MaxTransport {
       this.telemetry.transportError(options.metric);
       throw new MaxError(0, 'transport_unknown', method === 'DELETE');
     }
+    const receivedAt = Date.now();
     this.telemetry.response(options.metric, response.status);
+    const retryAtMs = retryDeadline(
+      response.ok ? null : response.headers.get('retry-after'),
+      receivedAt,
+    );
+    let cooldown: Promise<void> | undefined;
+    if (response.status === 429) {
+      this.telemetry.cooldownUntil(retryAtMs);
+      // FLAG: Close shared admission at the headers; a slow body cannot delay the pause.
+      cooldown = this.limiter.cooldownUntil(retryAtMs, receivedAt).catch(() => {
+        // The shared store failure cannot replace a known no-effect rejection.
+      });
+    }
     let body: Record<string, unknown> | null = null;
     try {
       body = record(await response.json());
@@ -97,27 +134,13 @@ export class MaxClient implements MaxTransport {
         typeof body?.code === 'string' && /^[a-zA-Z_.-]{1,100}$/.test(body.code)
           ? body.code
           : 'unclassified';
-      const retry = response.headers.get('retry-after');
-      const retryAfterMs =
-        retry && /^\d+(\.\d+)?$/.test(retry)
-          ? Math.ceil(Number(retry) * 1000)
-          : retry
-            ? Math.max(1000, Date.parse(retry) - Date.now())
-            : 1000;
-      if (response.status === 429) {
-        this.telemetry.cooldown(Number.isFinite(retryAfterMs) ? retryAfterMs : 1000);
-        try {
-          await this.limiter.cooldown(Number.isFinite(retryAfterMs) ? retryAfterMs : 1000);
-        } catch {
-          // FLAG: A failed cooldown store cannot replace the known no-effect HTTP rejection.
-          // The limiter keeps admission closed until its observed deadline is persisted.
-        }
-      }
+      await cooldown;
       throw new MaxError(
         response.status,
         code,
         method === 'DELETE' && response.status !== 429,
-        Number.isFinite(retryAfterMs) ? retryAfterMs : 1000,
+        retryAtMs - receivedAt,
+        retryAtMs,
       );
     }
     if (!body) throw new MaxError(0, 'malformed_response', method === 'DELETE');

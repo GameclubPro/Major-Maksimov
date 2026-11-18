@@ -318,9 +318,16 @@ attempt only after its deadline. Any failed DELETE ends that visit after recordi
 outcome, preventing a cascade of uncertain effects. Final dispatch checks the database
 clock after lock waits, and removal ingestion uses the same policy-before-candidate
 lock order as dispatch and settlement.
+If persistence of a known acknowledgement or 429 fails, retry only the idempotent
+write for the same dispatch ID. If both writes fail, `delete_settlement_failed` is
+recorded when the visit can close. Keep the issued journal and wait for an authenticated
+removal receipt; the failed write does not authorize another DELETE.
 
 A received 429 stays a known rejection even when Redis cooldown persistence fails.
-Its token-wide deadline is also stored in PostgreSQL and survives client restart; failed
+Compute the absolute deadline when headers arrive and begin both writes before parsing
+the body. The full deadline in PostgreSQL survives restart; Redis retains up to one day
+from the same observation. Visits, candidates and connection checks reuse the deadline;
+connection checks also retain their own 30-second minimum and request expiry. Failed
 durable admission stops new requests. The 200-candidate cap applies to new pending
 intake, separately from issued, uncertain and review journals. A late exact rejected
 attempt keeps its retry even if it temporarily fills an extra pending slot; further
@@ -335,7 +342,8 @@ submitting that request; truncating its PostgreSQL microseconds fails the identi
 
 Startup keeps authenticated webhook ingress available while a known 429 defers
 subscription verification. Workers remain stopped and health remains not ready until
-identity and subscription checks succeed. Shutdown cancels the wait; other prerequisite
+identity and subscription checks succeed. Shutdown cancels the wait and stops new
+subscription requests; an already issued DELETE can record its outcome. Other prerequisite
 failures remain fatal. A deployment still requires the normal readiness deadline.
 
 `/health` also requires both workers to be ready and running and reports bounded worker
@@ -347,6 +355,13 @@ Migration `0004-scan-generation.sql` adds a cursor generation with a constant ze
 default; it does not change activation or existing effect journals. A late webhook or
 protection rewind invalidates an older page, including an empty response. New messages
 outside the due window do not invalidate it. Preserve these rules when changing scans.
+New protection can reopen the covered portion of parked work. The confirmed page,
+not the protection update, retires scanned portions of that debt. A full page cannot
+certify its oldest millisecond; a full page with a stalled cursor parks the scan even if
+the message IDs differ. Migration `0010-history-boundary.sql` adds nullable range bounds
+for stalled milliseconds. They survive targeted rescans below an old boundary and are
+retired only by a scan that covers them. Existing readers may leave these additive
+fields untouched; only the new reader uses them for historical coverage diagnostics.
 The authenticated `/internal/v1/runtime` page includes `diagnostics.lastError`,
 `historyBoundaryBlocked`, `awaitingCurrentProtection` and `awaitingHistoricalProtection`.
 The closed Safety Desk forwards these optional flags and allowlisted error reasons;

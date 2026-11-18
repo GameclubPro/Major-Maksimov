@@ -19,9 +19,9 @@ const settings: Config = {
   commitSha: 'test',
   webhookUrl: null,
 };
-const admitted: Pick<HttpLimiter, 'acquire' | 'cooldown'> = {
+const admitted: Pick<HttpLimiter, 'acquire' | 'cooldownUntil'> = {
   acquire: async () => {},
-  cooldown: async () => {},
+  cooldownUntil: async () => {},
 };
 const guarded = async () => {};
 
@@ -32,7 +32,7 @@ test('local cooldown, unavailable admission and final guard refusal make no HTTP
     {
       ...admitted,
       acquire: async () => {
-        if (refusal === 'cooldown') throw new HttpAdmissionDeferred(60_000);
+        if (refusal === 'cooldown') throw new HttpAdmissionDeferred(Date.now() + 60_000);
         if (refusal === 'unavailable') throw new Error('private Redis connection string');
       },
     },
@@ -65,7 +65,7 @@ test('actual MAX 429 remains distinct from a local deferral even if cooldown per
     settings,
     {
       ...admitted,
-      cooldown: async () => {
+      cooldownUntil: async () => {
         throw new Error('private store error');
       },
     },
