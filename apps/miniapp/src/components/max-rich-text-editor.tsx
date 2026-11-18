@@ -15,7 +15,7 @@ import { renderPlainTextAsEditorHtml, renderSupportedMarkdownAsHtml } from '../l
 import { clipboardHtmlToSupportedMarkdown } from '../lib/max-rich-text-clipboard';
 import { parseEditorLinkHref, serializeEditorLinkMarkdown } from '../lib/max-rich-text-link';
 import { serializeEditorInlineMarkdown } from '../lib/max-rich-text-serialization';
-import { useVisibleEditorCaret } from '../lib/use-visible-editor-caret';
+import { getEditorCaretBounds, useVisibleEditorCaret } from '../lib/use-visible-editor-caret';
 import { useNormalizedMarkdownSource } from '../lib/use-normalized-markdown-source';
 import {
   isElementInTopmostNativeBackModal,
@@ -28,6 +28,7 @@ import './max-rich-text-editor-content.css';
 export type MaxRichTextEditorHandle = {
   focus: () => void;
   applyTool: (tool: MaxMarkdownTool) => void;
+  getCaretBounds: () => ReturnType<typeof getEditorCaretBounds>;
 };
 
 export type MaxRichTextEditorProps = {
@@ -401,6 +402,7 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       () => ({
         focus: focusEditor,
         applyTool: applyInlineTool,
+        getCaretBounds: () => (editorRef.current ? getEditorCaretBounds(editorRef.current) : null),
       }),
       [applyInlineTool, focusEditor],
     );

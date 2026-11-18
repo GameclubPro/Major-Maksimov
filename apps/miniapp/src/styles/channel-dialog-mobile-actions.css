@@ -41,48 +41,57 @@
     min-width: 0;
   }
 
-  @container suggestion (min-width: 528px) or (max-height: 400px) {
+  :where([data-suggest-wide], [data-suggest-size='compact'])
     .channel-suggest-composer__bar:not([hidden]) {
-      grid-template-columns: minmax(0, 1fr) auto;
-    }
-    .channel-suggest-composer__submit {
-      min-height: 44px;
-    }
-    .channel-suggest-composer__tools > .channel-suggest-composer__tool {
-      padding-inline: 6px;
-    }
+    grid-template-columns: minmax(0, 1fr) auto;
   }
-  @container suggestion (min-width: 528px) and (max-height: 400px) {
-    .channel-suggest-composer__tools > .channel-suggest-composer__tool {
-      flex-basis: auto;
-    }
-    .channel-suggest-composer__tools > .channel-suggest-composer__tool > svg {
-      display: none;
-    }
-    .channel-suggest-composer__submit {
-      gap: 6px;
-      padding-inline: 10px;
-    }
+  :where([data-suggest-wide], [data-suggest-size='compact']) .channel-suggest-composer__submit {
+    min-height: 44px;
   }
-  @container suggestion (width < 528px) and (max-height: 400px) {
-    .channel-suggest-composer__tools {
-      flex-wrap: nowrap;
-    }
-    .channel-suggest-composer__tools > .channel-suggest-composer__tool > span {
-      display: none;
-    }
-    .channel-suggest-composer__submit {
-      width: 52px;
-      min-width: 52px;
-      padding: 0;
-      gap: 0;
-    }
-    .channel-suggest-composer__submit > span:not(.channel-dialog-submit__loader) {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-    }
+  :where([data-suggest-wide], [data-suggest-size='compact'])
+    .channel-suggest-composer__tools
+    > .channel-suggest-composer__tool {
+    padding-inline: 6px;
+  }
+
+  :where([data-suggest-wide][data-suggest-size='compact'])
+    .channel-suggest-composer__tools
+    > .channel-suggest-composer__tool {
+    flex-basis: auto;
+  }
+  :where([data-suggest-wide][data-suggest-size='compact'])
+    .channel-suggest-composer__tools
+    > .channel-suggest-composer__tool
+    > svg {
+    display: none;
+  }
+  :where([data-suggest-wide][data-suggest-size='compact']) .channel-suggest-composer__submit {
+    gap: 6px;
+    padding-inline: 10px;
+  }
+
+  :where([data-suggest-size='compact']:not([data-suggest-wide])) .channel-suggest-composer__tools {
+    flex-wrap: nowrap;
+  }
+  :where([data-suggest-size='compact']:not([data-suggest-wide]))
+    .channel-suggest-composer__tools
+    > .channel-suggest-composer__tool
+    > span {
+    display: none;
+  }
+  :where([data-suggest-size='compact']:not([data-suggest-wide])) .channel-suggest-composer__submit {
+    width: 52px;
+    min-width: 52px;
+    padding: 0;
+    gap: 0;
+  }
+  :where([data-suggest-size='compact']:not([data-suggest-wide]))
+    .channel-suggest-composer__submit
+    > span:not(.channel-dialog-submit__loader) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 }

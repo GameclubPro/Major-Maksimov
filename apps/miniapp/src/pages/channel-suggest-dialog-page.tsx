@@ -51,7 +51,6 @@ import { openFileInputPicker, resolveFileInputActivationMode } from '../lib/file
 import { maxSelectionChanged, setMaxClosingConfirmation } from '../lib/max-bridge';
 import { queryKeys } from '../lib/query-keys';
 import { describeUserFacingError } from '../lib/user-facing-error';
-import { getEditorCaretBounds } from '../lib/use-visible-editor-caret';
 import '../styles/channel-dialog-suggest.css';
 import '../styles/channel-dialog-mobile-actions.css';
 
@@ -282,6 +281,7 @@ export function ChannelSuggestDialogPage({
   const [terminalDialogErrorState, setTerminalDialogErrorState] =
     useState<TerminalDialogErrorState | null>(null);
   const screenRef = useRef<HTMLDivElement | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
   const scrollViewportRef = useRef<HTMLElement | null>(null);
   const suggestComposerRef = useRef<HTMLElement | null>(null);
   const suggestBarRef = useRef<HTMLDivElement | null>(null);
@@ -426,26 +426,34 @@ export function ChannelSuggestDialogPage({
 
   useLayoutEffect(() => {
     const screen = screenRef.current;
+    const shell = shellRef.current;
     const bar = suggestBarRef.current;
-    if (!screen || !bar) {
+    if (!screen || !shell) {
       return undefined;
     }
 
-    const updateBarHeight = () => {
-      screen.style.setProperty(
-        '--suggest-bar-height',
-        `${Math.ceil(bar.getBoundingClientRect().height)}px`,
-      );
+    const updateLayout = () => {
+      const { height, width } = shell.getBoundingClientRect();
+      // Older mobile WebViews can measure the visible shell without CSS size queries.
+      shell.dataset.suggestSize = height <= 400 ? 'compact' : height <= 600 ? 'short' : 'regular';
+      shell.toggleAttribute('data-suggest-narrow', width <= 340);
+      shell.toggleAttribute('data-suggest-wide', width >= 528);
+      shell.style.setProperty('--suggest-visible-height', `${height}px`);
+      if (bar) {
+        screen.style.setProperty(
+          '--suggest-bar-height',
+          `${Math.ceil(bar.getBoundingClientRect().height)}px`,
+        );
+      }
     };
 
-    updateBarHeight();
-    const observer = new ResizeObserver(updateBarHeight);
-    observer.observe(bar);
-    window.addEventListener('resize', updateBarHeight, { passive: true });
+    updateLayout();
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(shell);
+    if (bar) observer.observe(bar);
 
     return () => {
       observer.disconnect();
-      window.removeEventListener('resize', updateBarHeight);
       screen.style.removeProperty('--suggest-bar-height');
     };
   }, [dialogQuery.isSuccess]);
@@ -588,7 +596,9 @@ export function ChannelSuggestDialogPage({
       const visibleBottom = Math.min(viewportRect.bottom, keyboardLayout.visibleBottomPx);
       const barTop = suggestBarRef.current?.getBoundingClientRect().top;
       const protectedBottom = Math.min(visibleBottom, barTop ?? visibleBottom);
-      const caretBounds = editor.isContentEditable ? getEditorCaretBounds(editor) : null;
+      const caretBounds = editor.isContentEditable
+        ? richTextEditorRef.current?.getCaretBounds()
+        : null;
       if (editor.isContentEditable && !caretBounds) return;
       // FLAG: Reveal the active line in the editor and then in the form. Scrolling to
       // the bottom of the editor on input hides upper lines when the keyboard is open.
@@ -1553,7 +1563,7 @@ export function ChannelSuggestDialogPage({
     >
       <div className="channel-dialog-screen__backdrop" aria-hidden />
 
-      <div className="channel-dialog-shell channel-dialog-shell--suggest">
+      <div ref={shellRef} className="channel-dialog-shell channel-dialog-shell--suggest">
         <header className="channel-suggest-heading">
           <div className="channel-suggest-heading__copy">
             <h1>
