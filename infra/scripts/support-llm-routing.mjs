@@ -313,6 +313,24 @@ const platformUpdates = (text) =>
   );
 const storefrontPattern =
   /караван|интернет.?витрин|магазин.{0,12}чат|витрин|ответ.{0,15}\$|\$.{0,25}(?:кнопк|продав|участник)|кнопк.{0,15}магазин/iu;
+const storefrontPlacementAction =
+  /(?:добавить|разместить|подключить|включить)\s+(?:(?:его|ее|эту|этот|готовую|существующую)\s+)?(?:витрину|магазин)|(?:его|ее|витрину|магазин)\s+(?:добавить|разместить|подключить)(?=\s*[?!.;,]|$)|(?:добавить|разместить|подключить)\s+(?:его|ее)(?=\s*[?!.;,]|$)/iu;
+const existingStorefront =
+  /(?:создал[аи]?|открыл[аи]?|готовую|существующую|уже есть)\s+(?:(?:свою|личную)\s+)?витрин|витрин\p{L}*\s+(?:уже\s+)?(?:есть|готова|создана|открыта)/iu;
+function placingExistingStorefront(text) {
+  const action = storefrontPlacementAction.exec(text);
+  return (
+    existingStorefront.test(text) &&
+    action !== null &&
+    !negatedAt(text, action.index) &&
+    !/\$|доллар|объявлен|ответ\p{L}* бот|отозва|отказ|ошибк|не (?:добав|размест|подключ|созда|открыл|появ|получа|работа|видно)/iu.test(
+      text,
+    )
+  );
+}
+function withoutStorefrontPlacement(text) {
+  return placingExistingStorefront(text) ? text.replace(storefrontPlacementAction, '') : text;
+}
 const developerPattern =
   /\bapi\b|\bnotify\b|разработ|webhook|longpoll|uploads|platform-api|\b(?:get|post|put|delete|patch)\s+\/|\/(?:chats|messages|uploads)(?:\/|\?|\b)/iu;
 const commercialPattern =
@@ -725,10 +743,11 @@ function mixedRequests(ctx, state) {
     )
   )
     return true;
-  if (placement.test(ctx.current)) currentTopics.add('publication');
+  const otherTasks = withoutStorefrontPlacement(ctx.current);
+  if (placement.test(otherTasks)) currentTopics.add('publication');
   if (state.publisherRequest && /[«"„]нужно проверить[»"“]/iu.test(ctx.current))
     currentTopics.add('delivery');
-  if (/подкл[юу]ч|подклюить/iu.test(ctx.current)) currentTopics.add('connection');
+  if (/подкл[юу]ч|подклюить/iu.test(otherTasks)) currentTopics.add('connection');
   const secondTask =
     /(?<![\p{L}])(?:и|а)\s+(?:еще|также|заодно|как|где|почему|сколько|какие|можно|настрой|включ|выключ|подключ|добав|провер|расскаж|объясни|переключ|смен|замен|помен|запрет|разреш)|кроме того|а также|;|[.!?]\s*(?:а\s+|и\s+)?(?:как|где|почему|что|сколько|какие|можно|нужно|настрой|включ|выключ|подключ|добав|провер|переключ|смен|замен|помен|запрет|разреш)/iu.test(
       ctx.current.replace(/^(?:а|и)\s+/iu, ''),
@@ -1113,6 +1132,16 @@ function reviewedAtomicIntents(ctx, state, primaryIds) {
   }
   return {
     lastikConflictIntent,
+    storefrontPlacementOnly:
+      placingExistingStorefront(ctx.current) &&
+      !state.mixedTopics &&
+      only(['karavan-storefront', 'karavan-chat-marketplace']) &&
+      reviewedTaskCovered(
+        ctx.current,
+        storefrontPlacementAction,
+        existingStorefront,
+        /^(?:добавить|разместить|подключить|включить|делать|сообразить|понять|есть)$/u,
+      ),
     nightManualOnly,
     nightManualIntent,
     publisherDeliveryOnly,
@@ -2077,7 +2106,8 @@ function semanticFacts(text, state) {
     if (setupRecovery) add('karavan-setup-recovery', 145);
     if (
       (!setupRecovery || test(/(?:как|хочу|нужно).{0,15}создать/iu)) &&
-      test(/подключ|созда|черновик|правил|общ.{0,12}магазин|один.{0,12}магазин/iu)
+      (placingExistingStorefront(text) ||
+        test(/подключ|созда|черновик|правил|общ.{0,12}магазин|один.{0,12}магазин/iu))
     )
       add('karavan-chat-marketplace', 135);
     if (test(/\$|публикац|ссылк|выбор|выбра|выбрат|витрин.{0,15}нескольк/iu))
@@ -2094,7 +2124,7 @@ function semanticFacts(text, state) {
   )
     add('announcement-removal', 45);
   if (
-    (advert.test(text) || placement.test(text)) &&
+    (advert.test(text) || placement.test(withoutStorefrontPlacement(text))) &&
     (!facts.length || !publ) &&
     (!state.eraserRequest || mixedTopics)
   ) {

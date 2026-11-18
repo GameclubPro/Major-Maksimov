@@ -775,6 +775,12 @@ async function answerSupportText(
   // allowlisted fact set. Additional tasks must retain inference and their own facts.
   const procedure = [
     {
+      active: request.storefrontPlacementOnly,
+      id: 'karavan-chat-marketplace',
+      field: 'answer',
+      allowed: ['karavan-chat-marketplace', 'karavan-storefront'],
+    },
+    {
       active: request.nightManualOnly,
       id: 'night-manual',
       field: 'manualAnswer',

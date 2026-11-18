@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { knowledge, validateSupportAnswer } from './support-llm-client.mjs';
+import { createSupportRouter } from './support-llm-routing.mjs';
 
 const entries = new Map(knowledge.entries.map((entry) => [entry.id, entry]));
 const fact = (id) => {
@@ -52,12 +53,35 @@ test('unified duplicate and commercial preview facts preserve independent eviden
   assert.match(preview, /«Недостаточно данных» и «Не удалось проверить» не подтверждают/u);
 });
 
-test('storefront caller access includes the verified user handoff and its chat scope', () => {
-  const ui = source('apps/miniapp/src/pages/settings/settings-storefront-section.tsx');
-  for (const label of ['Разрешённые пользователи', 'Добавить пользователя', 'Отозвать доступ'])
-    assert.ok(ui.includes(label), label);
-  assert.match(fact('karavan-storefront'), /«Добавить пользователя».*перешлите.*сообщение.*срок/iu);
-  assert.match(fact('karavan-storefront'), /только в этом чате/iu);
+test('adding a participant with an existing storefront retrieves placement and per-chat caller access', () => {
+  const question =
+    'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить';
+  const answers = createSupportRouter(knowledge).selectKnowledge(question);
+  const callerAccess = fact('karavan-storefront');
+  const placement = fact('karavan-chat-marketplace');
+  for (const answer of [callerAccess, placement])
+    assert.ok(
+      answers.some((entry) => entry.answer === answer),
+      question,
+    );
+
+  const settings = 'apps/miniapp/src/pages/settings/';
+  for (const [file, label] of [
+    ['karavan-shop/manager.tsx', 'Кнопки в чате'],
+    ['storefront-workspace.tsx', 'Объявления в чате'],
+    ['settings-storefront-section.tsx', 'Выдать доступ через бота'],
+    ['settings-storefront-section.tsx', 'Отозвать доступ'],
+    ['karavan-shop/manager.tsx', 'Продавцы и витрины в Караване'],
+  ]) {
+    assert.ok(source(settings + file).includes(label), label);
+    assert.ok(callerAccess.includes(`«${label}»`), label);
+  }
+  assert.match(callerAccess, /перешлите сообщение самого участника и выберите срок/iu);
+  assert.match(callerAccess, /только в этом чате/iu);
+  assert.match(callerAccess, /витрина от этого не появится в магазине/iu);
+  assert.match(placement, /уже создал витрину.*«Управлять магазином»/iu);
+  assert.match(placement, /ID MAX.*«Найти продавца».*«Разместить выбранную витрину»/u);
+  assert.match(placement, /«По заявкам».*участник подаёт заявку.*администратор рассматривает/iu);
 });
 
 test('customer knowledge uses the public project name without renaming the MAX platform', () => {

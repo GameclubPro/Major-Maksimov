@@ -13,6 +13,33 @@ import { SUPPORT_MODEL } from './support-llm-profile.mjs';
 
 const selected = knowledge.entries.filter((entry) => ['bots', 'operator'].includes(entry.id));
 
+test('placement of an existing seller storefront returns reviewed actions without a role question', async () => {
+  for (const text of [
+    'Не могу сообразить, учасник создал витрину а что делать дальше как его добавить',
+    'Продавец уже открыл витрину. Как мне, администратору, добавить его магазин к нашему магазину чата?',
+    'У участника уже есть витрина. Подскажите, как добавить его магазин в магазин нашего чата?',
+    'Витрина уже есть. Как разместить эту витрину в магазине чата?',
+  ]) {
+    const answer = await answerSupport({ text, signal: AbortSignal.abort() });
+    assert.equal(answer.responseRoute, 'reviewed-faq', text);
+    assert.deepEqual(answer.sourceIds, ['karavan-chat-marketplace']);
+    assert.match(
+      answer.text,
+      /«Продавцы».*ID MAX.*«Найти продавца».*«Разместить выбранную витрину»/su,
+    );
+    assert.match(answer.text, /«По заявкам».*«Свободно»/su);
+  }
+  const publication = 'Продавец уже открыл витрину. Как добавить его для ответа бота на $?';
+  assert.equal(selectKnowledge(publication)[0].id, 'karavan-storefront-publishing');
+  for (const text of [
+    publication,
+    'Продавец создал витрину. Как его добавить в чёрный список?',
+    'Продавец уже открыл витрину. Как добавить его магазин и как изменить часовой пояс?',
+    'Витрина уже есть. Как разместить эту витрину и опубликовать объявление?',
+  ])
+    assert.equal(classifySupportRequest(text).storefrontPlacementOnly, false, text);
+});
+
 test('visible AI identity cannot be contradicted by a human claim before the footer', () => {
   for (const text of [
     'Ответ подготовлен живым сотрудником, а не ИИ.',
