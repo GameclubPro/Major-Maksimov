@@ -198,15 +198,23 @@ describePostgres('VK timed deletion with PostgreSQL', () => {
 
   it('keeps due selection bounded with retained history and advances past ineligible candidates', async () => {
     const at = new Date(Date.now() - 60_000);
-    await db.vkParsingPost.createMany({
-      data: Array.from({ length: 5000 }, (_, i) =>
-        postData({
-          vkPostId: i + 100,
-          autoDeleteAt: null,
-          raw: { text: 'x'.repeat(1000) },
-        }),
-      ),
-    });
+    // Build the retained history inside PostgreSQL; only the 75 due candidates use Prisma fixtures.
+    const now = new Date();
+    expect(
+      await db.$executeRaw`
+      INSERT INTO vk_parsing_posts (
+        id, chat_id, source_id, owner_profile, owner_bot_id, vk_owner_id, vk_post_id, url,
+        status, dispatch_profile, required_bot_id, published_bot_id, published_message_id,
+        published_at_max, dialog_bot_id, publish_dialog_context, publication_policy_revision,
+        raw, updated_at
+      )
+      SELECT 'history-' || ${chatId} || '-' || n, ${chatId}, ${sourceId}, 'PUBLISHER', ${botId},
+        -123, n, 'https://vk.com/wall-123_1', 'PUBLISHED', 'PUBLIK_V1', ${botId}, ${botId},
+        'history-message-' || n, ${new Date(now.getTime() - 120_000)}, ${botId},
+        ${JSON.stringify(context)}::jsonb, 1, jsonb_build_object('text', repeat('x', 1000)), ${now}
+      FROM generate_series(100, 5099) AS n
+    `,
+    ).toBe(5000);
     await db.vkParsingPost.createMany({
       data: Array.from({ length: 75 }, (_, i) =>
         postData({
