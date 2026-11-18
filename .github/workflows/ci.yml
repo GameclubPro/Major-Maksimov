@@ -94,7 +94,7 @@ jobs:
           if ! command -v redis-server >/dev/null; then
             for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
               if [[ -f "$apt_source_file" ]]; then
-                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
+                sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
               fi
             done
             printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
@@ -224,7 +224,7 @@ jobs:
           if ! command -v redis-server >/dev/null; then
             for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
               if [[ -f "$apt_source_file" ]]; then
-                sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
+                sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
               fi
             done
             printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-redis >/dev/null
@@ -244,6 +244,12 @@ jobs:
           MAXIM_TEST_POSTGRES_URL: ${{ env.DATABASE_URL }}
           TZ: UTC
         run: node --test --test-concurrency=1 infra/scripts/outcome-cohort-online.native.test.mjs infra/scripts/outcome-cohort-historical.native.test.mjs
+      - name: Routing index online migration with native PostgreSQL
+        if: matrix.shard == 'compatibility'
+        env:
+          MAXIM_TEST_POSTGRES_URL: ${{ env.DATABASE_URL }}
+          TZ: UTC
+        run: node --test --test-concurrency=1 infra/scripts/routing-index-online.native.test.mjs
       - name: Selected Publisher target cancellation with native PostgreSQL
         if: matrix.shard == 'compatibility'
         env:
@@ -340,7 +346,7 @@ jobs:
         run: |
           for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
             if [[ -f "$apt_source_file" ]]; then
-              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
+              sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
             fi
           done
           printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null
@@ -450,7 +456,7 @@ jobs:
         run: |
           for apt_source_file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
             if [[ -f "$apt_source_file" ]]; then
-              sudo sed -i -E 's#https?://(azure\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
+              sudo sed -i -E 's#https?://(azure\.|[a-z]{2}(-[a-z]+)+-[0-9]+\.ec2\.)?archive\.ubuntu\.com/#https://archive.ubuntu.com/#g; s#https?://security\.ubuntu\.com/#https://security.ubuntu.com/#g; s#https?://mirrors\.edge\.kernel\.org/#https://archive.ubuntu.com/#g' "$apt_source_file"
             fi
           done
           printf '%s\n' 'Acquire::Languages "none";' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99maxim-browser >/dev/null

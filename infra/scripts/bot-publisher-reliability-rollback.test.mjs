@@ -411,11 +411,15 @@ const manualReaderMutations = [
 
 test('both API rollback paths retain shared member and immutable Publisher effect protections', () => {
   const fixture = mkdtempSync(resolve(tmpdir(), 'maxim-bot-publisher-rollback-'));
+  const topology = resolve(root, 'infra/scripts/lib/deploy-topology.sh');
+  const rejection =
+    'Rollback target lacks member-effect, final-policy, manual-command readers or immutable Publisher receipt fences.';
   const git = (...args) =>
     execFileSync('git', args, {
       cwd: fixture,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 8_000,
     }).trim();
   const commit = () => {
     git('add', '.');
@@ -430,26 +434,83 @@ test('both API rollback paths retain shared member and immutable Publisher effec
     );
     return git('rev-parse', 'HEAD');
   };
-  const check = (sha) =>
-    spawnSync(
-      'bash',
+  const checkResult = (result, expected, name, expectedError = '') => {
+    assert.ifError(result.error);
+    assert.equal(result.signal, null, name);
+    assert.equal(result.status, expected, `${name}: ${result.stderr}`);
+    assert.equal(result.stderr.trim(), expectedError, name);
+  };
+  const checkCommit = (sha, name, expected = 0, capture = false) => {
+    const result = spawnSync(
+      'timeout',
       [
+        '--kill-after=1s',
+        '8s',
+        'bash',
         '-c',
-        'source "$1"; maxim_topology_require_bot_publisher_reliability "$2"',
+        `
+          source "$1"
+          if [[ "$3" == capture ]]; then
+            git() {
+              if [[ "$#" -eq 2 && "$1" == show ]]; then
+                printf '%s\\n' "\${2#*:}" >> "$proof_dir/paths"
+              fi
+              command git "$@"
+            }
+            node() {
+              [[ "$#" -eq 2 && "$1" == -e ]] || return 2
+              printf '%s' "$2" > "$proof_dir/verifier"
+              cat > "$proof_dir/inputs"
+              command node "$@" < "$proof_dir/inputs"
+            }
+          fi
+          maxim_topology_require_bot_publisher_reliability "$2"
+        `,
         'reliability-test',
-        resolve(root, 'infra/scripts/lib/deploy-topology.sh'),
+        topology,
         sha,
+        capture ? 'capture' : '',
       ],
-      { cwd: fixture, encoding: 'utf8' },
+      {
+        cwd: fixture,
+        encoding: 'utf8',
+        env: { ...process.env, proof_dir: resolve(fixture, '.git') },
+      },
     );
+    checkResult(result, expected, name, expected === 1 ? rejection : '');
+  };
   try {
     git('init', '-q');
-    for (const [path] of protectedSources) {
+    for (const path of new Set(protectedSources.map(([path]) => path))) {
       mkdirSync(dirname(resolve(fixture, path)), { recursive: true });
       writeFileSync(resolve(fixture, path), readFileSync(resolve(root, path)));
     }
-    const positive = check(commit());
-    assert.equal(positive.status, 0, positive.stderr);
+    checkCommit(commit(), 'current executor with proof capture', 0, true);
+    const captured = (name) => readFileSync(resolve(fixture, '.git', name), 'utf8');
+    const paths = captured('paths').trimEnd().split('\n');
+    const inputs = captured('inputs').split('\0');
+    assert.equal(inputs.pop(), '', 'Proof inputs must be NUL terminated');
+    assert.equal(paths.length, inputs.length, 'Every read must supply exactly one proof input');
+    assert.equal(new Set(paths).size, paths.length, 'Proof input paths must be unique');
+    const verifier = captured('verifier');
+    // Reuse the real verifier and input order. A compatible and an incompatible commit
+    // below still exercise the original Bash and Git path without the capture functions.
+    const checkSources = (name, expected, path, content) => {
+      assert.ok(path === undefined || paths.includes(path), `Fixture path is not checked: ${path}`);
+      const sources = inputs.map((input, index) =>
+        paths[index] === path ? content.replace(/\n+$/u, '') : input,
+      );
+      const result = spawnSync(process.execPath, ['-e', verifier], {
+        cwd: fixture,
+        encoding: 'utf8',
+        input: `${sources.join('\0')}\0`,
+        timeout: 5_000,
+        killSignal: 'SIGKILL',
+      });
+      assert.equal(result.error, undefined, `${name}: ${result.error}`);
+      checkResult(result, expected, name);
+    };
+    checkSources('current executor from captured sources', 0);
     const unbanPath = 'apps/api/src/admin/manual-member-unban-attempt.ts';
     const unban = readFileSync(resolve(root, unbanPath), 'utf8');
     const markedUnban =
@@ -471,8 +532,7 @@ test('both API rollback paths retain shared member and immutable Publisher effec
     },`,
     );
     writeFileSync(resolve(fixture, unbanPath), legacyUnban);
-    const legacy = check(commit());
-    assert.equal(legacy.status, 0, legacy.stderr);
+    checkCommit(commit(), 'compatible legacy executor');
     writeFileSync(
       resolve(fixture, unbanPath),
       legacyUnban.replace(
@@ -480,22 +540,22 @@ test('both API rollback paths retain shared member and immutable Publisher effec
         '      await revalidateRoute?.();\n      await readTargetAccess();',
       ),
     );
-    assert.equal(check(commit()).status, 1, 'Legacy routing must remain the last awaited proof');
-    writeFileSync(resolve(fixture, unbanPath), unban);
+    checkCommit(commit(), 'Legacy routing must remain the last awaited proof', 1);
     for (const [path, guard] of protectedSources) {
       const source = readFileSync(resolve(root, path), 'utf8');
       assert.ok(source.includes(guard), `Fixture guard missing: ${guard}`);
-      writeFileSync(resolve(fixture, path), source.replaceAll(guard, 'unsafe_legacy_executor'));
-      assert.equal(check(commit()).status, 1, `Rollback erased ${guard}`);
-      writeFileSync(resolve(fixture, path), source);
+      checkSources(
+        `Rollback erased ${guard}`,
+        1,
+        path,
+        source.replaceAll(guard, 'unsafe_legacy_executor'),
+      );
     }
     for (const { path, name, mutate } of [...unbanAttemptMutations, ...manualReaderMutations]) {
       const source = readFileSync(resolve(root, path), 'utf8');
       const changed = mutate(source);
       assert.notEqual(changed, source, `Fixture mutation had no effect: ${name}`);
-      writeFileSync(resolve(fixture, path), changed);
-      assert.equal(check(commit()).status, 1, `Rollback accepted ${name}`);
-      writeFileSync(resolve(fixture, path), source);
+      checkSources(`Rollback accepted ${name}`, 1, path, changed);
     }
     for (const path of [
       'infra/scripts/vps-runtime-rollback.sh',

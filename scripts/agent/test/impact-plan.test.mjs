@@ -142,6 +142,21 @@ test('keeps other agent tools and migration preparer tests deployment-free', () 
   }
 });
 
+test('deploys each exact routing preparation image input only to the shared API', () => {
+  for (const path of [
+    'scripts/agent/routing-index-online-target.mjs',
+    'scripts/agent/routing-index-online-prepare.mjs',
+    'scripts/agent/routing-index-catalog.mjs',
+    'scripts/agent/online-migration-receipts.mjs',
+  ]) {
+    const plan = planFor([{ status: 'M', path }]);
+    assert.deepEqual(plan.deploy.components, ['api-shared'], path);
+    for (const check of ['repo-static', 'docs', 'agent-tools', 'infra', 'prisma', 'api'])
+      assert.ok(plan.checks.includes(check), `${path}: ${check}`);
+    assert.deepEqual(plan.unknownPaths, []);
+  }
+});
+
 test('keeps workspace tests out of production deploy scope', () => {
   const plan = planFor([
     { status: 'M', path: 'packages/contracts/test/publication-contract.spec.ts' },

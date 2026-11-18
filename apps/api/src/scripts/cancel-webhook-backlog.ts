@@ -23,8 +23,9 @@ const statuses = ['RECEIVED', 'QUEUED', 'FAILED'] as const;
 const pageSize = 200;
 type PendingCursor = { id: string; at: Date; chatKey: string | null };
 
-// FLAG: Walk only current message ordering heads, including NULL chat keys. The
-// retained terminal FAILED history must not consume a stopped-fleet capture budget.
+// FLAG: Walk only current message ordering heads, including NULL chat keys. Keep
+// chat in both ORDER BY variants so PostgreSQL can use the complete ordered index;
+// for NULL chat it is constant and leaves the (created_at,id) order unchanged.
 export function backlogPendingReceiptPageSql(nullChat: boolean, cursor: PendingCursor | null) {
   const chat = Prisma.sql`COALESCE(NULLIF(BTRIM(normalized_payload->'message'->>'chatId'), ''), NULLIF(BTRIM(normalized_payload->>'chatId'), ''))`;
   return Prisma.sql`WITH page AS MATERIALIZED (
@@ -43,7 +44,7 @@ export function backlogPendingReceiptPageSql(nullChat: boolean, cursor: PendingC
             : Prisma.sql`AND (${chat},created_at,id) > (${cursor.chatKey},${cursor.at},${cursor.id})`
           : Prisma.empty
       }
-    ORDER BY ${nullChat ? Prisma.empty : Prisma.sql`${chat},`} created_at,id LIMIT 200
+    ORDER BY ${chat},created_at,id LIMIT 200
   ) SELECT page.*, e.normalized_payload AS update, e.semantic_key AS "semanticKey",
       (e.legacy_disposition_id IS NULL AND e.source_disposition_id IS NULL) AS eligible
     FROM page CROSS JOIN LATERAL (SELECT * FROM webhook_events WHERE id=page.id OFFSET 0) e
@@ -106,6 +107,48 @@ export function backlogReceiptPageSql(
           ORDER BY page.created_at, page.id`;
 }
 
+async function assertBacklogPagePlan(
+  db: Database,
+  scan: { name: string; index: string },
+  query: Prisma.Sql,
+  continuation = false,
+) {
+  type Node = Record<string, unknown> & { Plans?: Node[] };
+  const plans = await readBacklogPage<Array<{ 'QUERY PLAN': Array<{ Plan: Node }> }>>(
+    db,
+    Prisma.sql`EXPLAIN (FORMAT JSON) ${query}`,
+  );
+  const scans: Node[] = [];
+  let orderedCursor = false,
+    pageSort = false;
+  const visit = (node: Node, inPage = false) => {
+    inPage ||= node['Subplan Name'] === 'CTE page';
+    if (node['Relation Name'] === 'webhook_events') scans.push(node);
+    if (inPage && ['Sort', 'Incremental Sort'].includes(String(node['Node Type']))) pageSort = true;
+    if (
+      inPage &&
+      node['Index Name'] === scan.index &&
+      /\bcreated_at,\s*id\)\s*>/.test(String(node['Index Cond']))
+    )
+      orderedCursor = true;
+    for (const child of node.Plans ?? []) visit(child, inPage);
+  };
+  visit(plans[0]!['QUERY PLAN'][0]!.Plan);
+  if (
+    scans.length !== 2 ||
+    scans.some((node) => !['Index Scan', 'Index Only Scan'].includes(String(node['Node Type']))) ||
+    !scans.some((node) => node['Index Name'] === scan.index) ||
+    !scans.some((node) => node['Index Name'] === 'webhook_events_pkey')
+  )
+    throw new Error(
+      `Cancellation ${scan.name} requires indexed page and primary-key reads: ${scans
+        .map((node) => `${node['Node Type']}:${node['Index Name']}`)
+        .join(',')}`,
+    );
+  if (continuation && (pageSort || !orderedCursor))
+    throw new Error(`Cancellation ${scan.name} requires an ordered index cursor`);
+}
+
 // FLAG: The host stops every writer before invoking this bounded, resumable writer.
 // Source/claim uncertainty is retained; cancellation never fabricates absence or success.
 export async function captureBacklogReceipts(
@@ -121,39 +164,18 @@ export async function captureBacklogReceipts(
   const scansToRun = [
     ...(['RECEIVED', 'QUEUED'] as const).map((status) => ({
       name: status,
+      checkCursorPlan: false,
       query: (cursor: PendingCursor | null) => backlogReceiptPageSql(status, cutoff, cursor),
       index: 'webhook_events_status_created_at_id_idx',
     })),
     ...[false, true].map((nullChat) => ({
       name: nullChat ? 'PENDING_MESSAGE_NULL_CHAT' : 'PENDING_MESSAGE',
+      checkCursorPlan: true,
       query: (cursor: PendingCursor | null) => backlogPendingReceiptPageSql(nullChat, cursor),
       index: 'webhook_events_ordered_chat_head_idx',
     })),
   ];
-  for (const scan of scansToRun) {
-    const plans = await readBacklogPage<
-      Array<{ 'QUERY PLAN': Array<{ Plan: Record<string, unknown> }> }>
-    >(db, Prisma.sql`EXPLAIN (FORMAT JSON) ${scan.query(null)}`);
-    const scans: Array<Record<string, unknown>> = [];
-    const visit = (node: Record<string, unknown>) => {
-      if (node['Relation Name'] === 'webhook_events') scans.push(node);
-      for (const child of (node.Plans ?? []) as Array<Record<string, unknown>>) visit(child);
-    };
-    visit(plans[0]!['QUERY PLAN'][0]!.Plan);
-    if (
-      scans.length !== 2 ||
-      scans.some(
-        (node) => !['Index Scan', 'Index Only Scan'].includes(String(node['Node Type'])),
-      ) ||
-      !scans.some((node) => node['Index Name'] === scan.index) ||
-      !scans.some((node) => node['Index Name'] === 'webhook_events_pkey')
-    )
-      throw new Error(
-        `Cancellation ${scan.name} requires indexed page and primary-key reads: ${scans
-          .map((node) => `${node['Node Type']}:${node['Index Name']}`)
-          .join(',')}`,
-      );
-  }
+  for (const scan of scansToRun) await assertBacklogPagePlan(db, scan, scan.query(null));
   await db.$executeRaw(Prisma.sql`INSERT INTO webhook_backlog_cancellations (id, cutoff, source_sha, image_id)
     VALUES (${request.id}, ${cutoff}, ${request.sourceSha}, ${request.imageId}) ON CONFLICT (id) DO NOTHING`);
   const operation = await db.webhookBacklogCancellation.findUniqueOrThrow({
@@ -170,9 +192,16 @@ export async function captureBacklogReceipts(
     captured = 0;
   for (const scan of scansToRun) {
     let cursor: PendingCursor | null = null;
+    let checkCursorPlan = scan.checkCursorPlan;
     while (true) {
       if (Date.now() >= deadline || scanned >= 500_000)
         throw new Error('Cancellation capture budget exhausted');
+      const query = scan.query(cursor);
+      if (cursor && checkCursorPlan) {
+        await assertBacklogPagePlan(db, scan, query, true);
+        checkCursorPlan = false;
+        if (Date.now() >= deadline) throw new Error('Cancellation capture budget exhausted');
+      }
       const page: Array<{
         id: string;
         at: Date;
@@ -180,7 +209,7 @@ export async function captureBacklogReceipts(
         semanticKey: string | null;
         eligible: boolean;
         chatKey?: string | null;
-      }> = await readBacklogPage(db, scan.query(cursor));
+      }> = await readBacklogPage(db, query);
       if (!page.length) break;
       scanned += page.length;
       await confirmEraserSourceHolds(

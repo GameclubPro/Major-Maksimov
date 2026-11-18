@@ -486,7 +486,7 @@ describe('WebhookRoutingService', () => {
     expect(queueMetricsService.getWebhookDefaultShardSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  it('checks outstanding chat work with an existence query instead of a full count', async () => {
+  it('checks the first pending chat event and searches individual shards only for unknown queues', async () => {
     const { service, prisma } = createService();
     const webhookEventId = 'evt-exists-shape';
     const chatId = 'chat-exists-shape';
@@ -501,14 +501,18 @@ describe('WebhookRoutingService', () => {
       | undefined;
     const sqlText = readSqlText(query).replace(/\s+/gu, ' ');
     const quarantineMarker = `${WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINE_PREFIX}:`;
-    expect(sqlText).toContain('SELECT EXISTS');
+    expect(sqlText).toContain('head.id IS NOT NULL AS has_pending');
+    expect(sqlText).toContain('WHEN head.id IS NULL THEN NULL');
     expect(sqlText).toContain('LIMIT 1');
     expect(sqlText).toContain('status = \'FAILED\'::"WebhookStatus"');
     expect(sqlText).toContain('next_enqueue_at IS NOT NULL');
-    expect(sqlText).toContain(`LEFT(COALESCE(error_message, ''), 37) = '${quarantineMarker}'`);
+    expect(sqlText).toContain(`LEFT(COALESCE(e.error_message, ''), 37) = '${quarantineMarker}'`);
+    expect(sqlText).toContain('CROSS JOIN LATERAL');
+    expect(sqlText).not.toContain('MATERIALIZED');
     expect(query?.values).not.toContain(37);
     expect(query?.values).not.toContain(quarantineMarker);
     expect(query?.values).toEqual(expect.arrayContaining([webhookEventId, chatId]));
+    expect(query?.values).toEqual(expect.arrayContaining([...DEFAULT_WEBHOOK_QUEUE_NAMES]));
     expect(sqlText).not.toMatch(/COUNT\s*\(\s*\*\s*\)/iu);
   });
 
