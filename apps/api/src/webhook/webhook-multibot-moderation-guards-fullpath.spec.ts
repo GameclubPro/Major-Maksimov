@@ -1633,6 +1633,139 @@ describeStores('native current-rule authorization across mirrored bot delivery',
     expect(s.messages.has(messageId)).toBe(true);
   });
 
+  it.each([
+    'normal',
+    'independent reason before write',
+    'near deadline',
+    'chat access 404',
+    'interrupted executor change',
+    'Retry-After',
+  ])('paces stale live-link source reads without settling deletion: %s', async (scenario) => {
+    const s = await fixture(2);
+    const effectiveAt = new Date(Date.now() - 2 * 60 * 60_000);
+    const [chatId] = await s.seedCatalog(1, {
+      maxMessageLengthEnabled: false,
+      antiSpamEnabled: false,
+      linkPolicy: 'BLOCKLIST_ONLY',
+      linkPolicyRevision: 1,
+      linkPolicyEffectiveAt: effectiveAt,
+    });
+    const messageId = `stale-link-source-${randomUUID()}`;
+    source(s, chatId!, messageId, 'https://blocked.example/path');
+    const currentMessage = s.messages.get(messageId)!;
+    s.messages.delete(messageId);
+    s.messageLookupFailures.set(messageId, { status: 404, code: 'fixture.lookup.not_found' });
+    const executeAt = new Date(Date.now() - 1_000);
+    const retryUntilAt = new Date(Date.now() + (scenario === 'near deadline' ? 14 : 60) * 60_000);
+    const input: EnsureModerationDeleteIntentInput = {
+      chatId: chatId!,
+      messageId,
+      subjectUserId: 'fixture-user',
+      sourceMessageAt: new Date(Date.now() - 60 * 60_000),
+      originBotId: s.bots[0]!.id,
+      entityType: 'CHAT',
+      messageAuthorKind: 'user',
+      reasonKey: 'link',
+      ruleCode: 'LINK_BLOCKED_DELETE',
+      executeAt,
+      retryUntilAt,
+      event: {
+        userId: 'fixture-user',
+        eventType: 'MESSAGE',
+        metadata: { linkPolicyRevision: 1, linkPolicyEffectiveAt: effectiveAt.toISOString() },
+      },
+    };
+    const ensured = await s.intents.ensureIntent(input, { enqueue: false });
+    const where = { id: ensured.intentId! };
+    const load = () => s.prisma.moderationDeleteIntent.findUniqueOrThrow({ where });
+    const attempt = () => s.intents.attemptIntent(where.id, { deferGuardFailure: true });
+    await expect(attempt()).resolves.toMatchObject({ status: 'RETRYABLE', confirmed: false });
+    const first = await load();
+    expect(first.lastErrorCode).toBe('live_link_exact_source_unavailable');
+    expect(first.lastStatusCode).toBe(404);
+    expect(first.nextAttemptAt.getTime()).toBeLessThan(Date.now() + 10_000);
+    await s.prisma.moderationDeleteIntent.update({ where, data: { nextAttemptAt: executeAt } });
+    const addReason = () =>
+      s.intents.ensureIntent(
+        { ...input, reasonKey: 'another-reason', ruleCode: 'ANTI_SPAM' },
+        { enqueue: false },
+      );
+    const exactRead = s.max.getExactMessageRow.bind(s.max);
+    if (scenario === 'independent reason before write') {
+      const wakeupOwner = s.intents as unknown as {
+        enqueueWakeup: typeof s.intents['enqueueWakeup'];
+      };
+      // Prevent the ready wakeup from claiming the row before we can inspect the committed schedule.
+      const wakeup = jest.spyOn(wakeupOwner, 'enqueueWakeup').mockResolvedValue(undefined);
+      jest.spyOn(s.max, 'getExactMessageRow').mockImplementationOnce(async (...args) => {
+        // The guard already read the old reason set. Commit a new reason while the GET is pending.
+        await addReason();
+        expect(wakeup).not.toHaveBeenCalled();
+        return exactRead(...args);
+      });
+    } else if (scenario === 'chat access 404') {
+      jest.spyOn(s.max, 'getExactMessageRow').mockRejectedValueOnce(
+        Object.assign(new Error('Chat not found'), {
+          code: 'chat.not.found',
+          response: { status: 404 },
+        }),
+      );
+    } else if (scenario === 'interrupted executor change') {
+      const leaseToken = randomUUID();
+      await s.prisma.moderationDeleteIntent.update({
+        where,
+        data: { status: 'IN_PROGRESS', leaseToken, leaseExpiresAt: new Date(Date.now() + 60_000) },
+      });
+      const oldBot = first.lastBotId!;
+      const otherBot = s.bots.find((bot) => bot.id !== oldBot)!.id;
+      // Simulate the next worker recording its executor and exiting before the lookup settles.
+      expect(await s.intents['recordAttemptBot'](where.id, leaseToken, otherBot)).toBe(true);
+      expect(await load()).toMatchObject({ lastBotId: otherBot, lastErrorCode: null });
+      await s.prisma.moderationDeleteIntent.update({
+        where,
+        data: { leaseExpiresAt: executeAt },
+      });
+    } else if (scenario === 'Retry-After') {
+      jest.spyOn(s.max, 'getExactMessageRow').mockRejectedValueOnce(
+        Object.assign(new Error('Source unreadable'), {
+          response: { status: 404, headers: { 'retry-after': '1200' } },
+        }),
+      );
+    }
+    const before = Date.now();
+    await expect(attempt()).resolves.toMatchObject({ status: 'RETRYABLE', confirmed: false });
+    const second = await load();
+    if (scenario === 'normal' || scenario === 'Retry-After') {
+      const minimumWait = scenario === 'Retry-After' ? 20 : 15;
+      expect(second.nextAttemptAt.getTime()).toBeGreaterThanOrEqual(before + minimumWait * 60_000);
+    } else if (scenario === 'independent reason before write') {
+      expect(second.nextAttemptAt.getTime()).toBeLessThanOrEqual(Date.now());
+    } else {
+      expect(second.nextAttemptAt.getTime()).toBeLessThan(Date.now() + 30_000);
+    }
+    if (scenario === 'chat access 404') expect(second.lastErrorCode).toBe('chat.not.found');
+    expect(second).toMatchObject({
+      attemptCount: 2,
+      retryUntilAt,
+      deleteDispatchStartedAt: null,
+      remoteDeleteSucceededAt: null,
+      leaseToken: null,
+    });
+    if (scenario !== 'normal') return;
+    const count = s.requests.length;
+    await attempt();
+    expect(s.requests).toHaveLength(count);
+    expect(s.effects).toEqual([]);
+
+    // An independent reason gets its original due time even after a slow retry was stored.
+    await addReason();
+    expect((await load()).nextAttemptAt).toEqual(executeAt);
+    s.messageLookupFailures.delete(messageId);
+    s.messages.set(messageId, currentMessage);
+    await expect(attempt()).resolves.toMatchObject({ status: 'SUCCEEDED', confirmed: true });
+    expect(s.effects.filter((effect) => effect.method === 'delete')).toHaveLength(1);
+  });
+
   it.each(
     [false, true].flatMap((deferGuardFailure) =>
       [15_000, 120_000].map((deadlineMs) => ({ deferGuardFailure, deadlineMs })),

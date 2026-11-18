@@ -121,6 +121,7 @@ test('separates typed transport, MAX admission and database failures in bounded 
     ['40P01', 'database_deadlock'],
     ['55P03', 'database_lock_unavailable'],
     ['57014', 'database_statement_canceled'],
+    ['live_link_exact_source_unavailable', 'live_link_exact_source_unavailable'],
   ];
   for (const [ordinal, [code]] of cases.entries()) {
     await db.query(
@@ -168,6 +169,7 @@ test('keeps malformed codes and suggestive raw errors unknown without leaking th
     'MAX_API_INTERNAL_RATE_LIMIT_private',
     'P2010_private',
     'P2034_private',
+    'live_link_exact_source_unavailable_private',
     '57014_private',
     'private-token',
   ];

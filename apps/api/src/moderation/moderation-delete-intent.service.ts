@@ -187,6 +187,8 @@ import {
 import {
   LinkHistoryDeleteGuardService,
   LinkHistoryDeleteGuardRejectedError,
+  LiveLinkSourceUnavailableError,
+  LIVE_LINK_SOURCE_UNAVAILABLE_CODE,
 } from './link-history-delete-guard.service';
 import {
   TrafficProtectionDeleteGuardService,
@@ -290,6 +292,8 @@ import {
 const DEFAULT_RETRY_HORIZON_MS = 24 * 60 * 60_000;
 const DEFAULT_RETRY_BASE_MS = 5_000;
 const DEFAULT_RETRY_MAX_MS = 5 * 60_000;
+const STALE_LIVE_LINK_SOURCE_AGE_MS = 30 * 60_000;
+const STALE_LIVE_LINK_SOURCE_RETRY_MS = 15 * 60_000;
 const DEFAULT_CAPABILITY_RETRY_MS = 30_000;
 const DEFAULT_LEASE_MS = 60_000;
 const DEFAULT_SWEEP_BATCH_SIZE = 100;
@@ -765,6 +769,7 @@ type DeleteErrorDetails = {
   message: string;
   retryDelayMs: number | null;
   certifiedCapabilityLoss?: true;
+  repeatedLiveLinkRetryAfterMs?: number;
 };
 
 type ReplacementCleanupRecoveryCandidate = {
@@ -3258,16 +3263,32 @@ export class ModerationDeleteIntentService {
             }
             const internalQuotaDeferral =
               !intent.retentionOwned && error.guardError instanceof MaxApiInternalRateLimitError;
-            // FLAG: A guard GET's HTTP 429 keeps its validated retry floor in either
-            // durable path. This delay grants no handoff authority or renewed deadline.
-            const guardRetryDelayMs = Math.max(
-              this.retryDelayMs(intent.attemptCount),
-              internalQuotaDeferral
+            const liveLinkSourceUnavailable =
+              error.origin === 'guard' &&
+              error.guardError instanceof LiveLinkSourceUnavailableError;
+            // FLAG: A validated guard GET retry floor survives either durable path.
+            // It grants no handoff authority or renewed deadline.
+            const guardRetryAfterMs =
+              internalQuotaDeferral || liveLinkSourceUnavailable || details.statusCode === 429
                 ? (details.retryDelayMs ?? 0)
-                : details.statusCode === 429
-                  ? readMaxRetryAfterMs(error.guardError, Date.now())
-                  : 0,
-            );
+                : 0;
+            const repeatedLiveLinkSourceWait =
+              liveLinkSourceUnavailable &&
+              !dispatchMarkerPersisted &&
+              !unresolvedDeleteDispatch &&
+              !this.hasDeleteMutationEvidence(intent) &&
+              !intent.retentionOwned &&
+              intent.lastBotId === botId &&
+              intent.lastErrorCode === LIVE_LINK_SOURCE_UNAVAILABLE_CODE &&
+              intent.lastStatusCode === details.statusCode;
+            const retryDetails: DeleteErrorDetails = {
+              ...details,
+              status: 'RETRYABLE',
+              retryDelayMs: Math.max(this.retryDelayMs(intent.attemptCount), guardRetryAfterMs),
+              ...(repeatedLiveLinkSourceWait
+                ? { repeatedLiveLinkRetryAfterMs: guardRetryAfterMs }
+                : {}),
+            };
             if (
               !terminalGuardRejection &&
               !internalQuotaDeferral &&
@@ -3285,11 +3306,7 @@ export class ModerationDeleteIntentService {
                 return await this.finishRetryableAttempt(
                   intent,
                   leaseToken,
-                  {
-                    ...details,
-                    status: 'RETRYABLE',
-                    retryDelayMs: guardRetryDelayMs,
-                  },
+                  retryDetails,
                   'guarded',
                 );
               } catch (persistenceError) {
@@ -3308,12 +3325,7 @@ export class ModerationDeleteIntentService {
                   },
                   error.guardError,
                 )
-              : await this.finishRetryableAttempt(intent, leaseToken, {
-                  ...details,
-                  status: 'RETRYABLE',
-                  errorCode: details.errorCode,
-                  retryDelayMs: guardRetryDelayMs,
-                });
+              : await this.finishRetryableAttempt(intent, leaseToken, retryDetails);
             // FLAG: Internal quota rejection proves no DELETE happened. Its durable retry
             // may continue independently while the original engine finishes its other rules.
             if (terminalGuardRejection || internalQuotaDeferral) {
@@ -4381,6 +4393,7 @@ export class ModerationDeleteIntentService {
             messageId: intent.messageId,
             subjectUserId: intent.subjectUserId,
             botId,
+            classifyLiveSourceFailure: true,
           });
           if (result === 'absent') {
             throw new ModerationDeleteGuardedMessageAbsentError(
@@ -4649,11 +4662,12 @@ export class ModerationDeleteIntentService {
           r.ruleCode === LINK_HISTORY_RECOVERY_RULE_CODE,
       )
     ) {
+      const linkParams = { ...params, classifyLiveSourceFailure: true } as const;
       await prepare(
         () =>
           deferred
-            ? this.linkHistoryDeleteGuard.prepareForDispatch(params)
-            : this.linkHistoryDeleteGuard.assertIntentStillActionable(params),
+            ? this.linkHistoryDeleteGuard.prepareForDispatch(linkParams)
+            : this.linkHistoryDeleteGuard.assertIntentStillActionable(linkParams),
         keysFor(
           (r) => r === LINK_BLOCKED_DELETE_RULE_CODE || r === LINK_HISTORY_RECOVERY_RULE_CODE,
         ),
@@ -6806,22 +6820,36 @@ export class ModerationDeleteIntentService {
       currentIntent: IntentRow,
       executor: Pick<Prisma.TransactionClient, '$executeRaw'>,
       allowSlowVerification = false,
+      liveLinkSchedule?: 'slow' | 'independent',
     ): Promise<number> => {
       const now = Date.now();
       // FLAG: Receipts refused by exact local settlement retain all evidence. Expired
       // reconciliation backs off; an ambiguous GET never establishes absence.
       const expiredAutoDeleteVerification =
         allowSlowVerification && this.isExpiredAutoDeleteVerification(currentIntent, now);
-      const requestedNextAt = new Date(
-        now +
-          Math.max(
-            1_000,
-            details.retryDelayMs ?? 1_000,
-            expiredAutoDeleteVerification
-              ? expiredAutoDeleteVerificationDelay(currentIntent.retryUntilAt, now)
-              : 0,
-          ),
-      );
+      const slowLiveLinkSource =
+        liveLinkSchedule === 'slow' &&
+        now + STALE_LIVE_LINK_SOURCE_RETRY_MS < currentIntent.retryUntilAt.getTime();
+      const retryAfterMs = details.repeatedLiveLinkRetryAfterMs ?? 0;
+      const requestedNextAt =
+        liveLinkSchedule === 'independent'
+          ? new Date(
+              Math.max(
+                currentIntent.nextAttemptAt.getTime(),
+                retryAfterMs > 0 ? now + retryAfterMs : now,
+              ),
+            )
+          : new Date(
+              now +
+                Math.max(
+                  1_000,
+                  details.retryDelayMs ?? 1_000,
+                  expiredAutoDeleteVerification
+                    ? expiredAutoDeleteVerificationDelay(currentIntent.retryUntilAt, now)
+                    : 0,
+                  slowLiveLinkSource ? STALE_LIVE_LINK_SOURCE_RETRY_MS : 0,
+                ),
+            );
       const hasRemoteSuccessMarker = this.hasRemoteSuccessMarker(currentIntent);
       const hasUnresolvedDispatch = this.hasDeleteDispatchMarker(currentIntent);
       const hasDefinitiveFollowupPending = hasRemoteSuccessMarker || hasUnresolvedDispatch;
@@ -6864,7 +6892,7 @@ export class ModerationDeleteIntentService {
         WHERE "id" = ${currentIntent.id}
           AND "status" = CAST('IN_PROGRESS' AS "ModerationDeleteIntentStatus")
           AND "lease_token" = ${leaseToken}
-          AND (${!requireInitialUnattempted} OR (
+          AND (${!requireInitialUnattempted && liveLinkSchedule === undefined} OR (
             (${requireInitialUnattempted !== true} OR "attempt_count" = 1)
             AND "lease_expires_at" > (clock_timestamp() AT TIME ZONE 'UTC')
             AND "delete_dispatch_started_at" IS NULL
@@ -6874,46 +6902,77 @@ export class ModerationDeleteIntentService {
           ))
       `);
     };
-    const changed = this.isExpiredAutoDeleteVerification(intent, Date.now())
-      ? await this.prisma.$transaction(
-          async (tx) => {
-            // FLAG: A concurrent reason writer locks this parent before inserting its reason.
-            // Lock first, then classify in a fresh READ COMMITTED statement; the loaded snapshot
-            // cannot postpone an independent obligation behind historical cleanup verification.
-            const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    const inspectRepeatedLiveLink =
+      details.repeatedLiveLinkRetryAfterMs !== undefined &&
+      !!intent.sourceMessageAt &&
+      intent.sourceMessageAt.getTime() <= Date.now() - STALE_LIVE_LINK_SOURCE_AGE_MS;
+    const changed =
+      inspectRepeatedLiveLink || this.isExpiredAutoDeleteVerification(intent, Date.now())
+        ? await this.prisma.$transaction(
+            async (tx) => {
+              // FLAG: A concurrent reason writer locks this parent before inserting its reason.
+              // Lock first, then classify in a fresh READ COMMITTED statement; the loaded snapshot
+              // cannot postpone an independent obligation behind historical cleanup verification.
+              const locked = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
               SELECT "id" FROM "moderation_delete_intents"
               WHERE "id" = ${intent.id}
                 AND "status" = CAST('IN_PROGRESS' AS "ModerationDeleteIntentStatus")
                 AND "lease_token" = ${leaseToken}
               FOR UPDATE
             `);
-            if (!locked[0]) return 0;
-            const latestRows = await tx.$queryRaw<IntentRow[]>(Prisma.sql`
+              if (!locked[0]) return 0;
+              const latestRows = await tx.$queryRaw<IntentRow[]>(Prisma.sql`
               SELECT ${this.intentSelectSql('intent')}
               FROM "moderation_delete_intents" intent
               WHERE intent."id" = ${intent.id}
               LIMIT 1
             `);
-            return latestRows[0] ? persistRetry(latestRows[0], tx, true) : 0;
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
-        )
-      : details.certifiedCapabilityLoss &&
-          details.status === 'WAITING_CAPABILITY' &&
-          !this.hasDeleteMutationEvidence(intent)
-        ? await this.prisma.$transaction(async (tx) => {
-            const updated = await persistRetry(intent, tx);
-            if (updated === 1)
-              await this.persistStopWordsGuardDiagnostic(
-                tx,
-                intent.id,
-                'permission_changed',
-                'CAPABILITY_DEFERRED',
-                'all',
-              );
-            return updated;
-          })
-        : await persistRetry(intent, this.prisma);
+              const latest = latestRows[0];
+              if (!latest) return 0;
+              let liveLinkSchedule: 'slow' | 'independent' | undefined;
+              if (
+                inspectRepeatedLiveLink &&
+                !this.hasDeleteMutationEvidence(latest) &&
+                !latest.retentionOwned
+              ) {
+                // FLAG: Read a complete bounded reason set after locking the parent.
+                // Preserve a competing reason's ready time instead of applying the stale backoff.
+                const reasons = await tx.moderationDeleteIntentReason.findMany({
+                  where: { intentId: latest.id },
+                  select: { ruleCode: true },
+                  orderBy: { reasonKey: 'asc' },
+                  take: 2,
+                });
+                if (reasons.length >= 2) {
+                  liveLinkSchedule = 'independent';
+                } else if (
+                  reasons[0]?.ruleCode === LINK_BLOCKED_DELETE_RULE_CODE &&
+                  latest.sourceMessageAt?.getTime() === intent.sourceMessageAt?.getTime() &&
+                  latest.retryUntilAt.getTime() === intent.retryUntilAt.getTime()
+                ) {
+                  liveLinkSchedule = 'slow';
+                }
+              }
+              return persistRetry(latest, tx, true, liveLinkSchedule);
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+          )
+        : details.certifiedCapabilityLoss &&
+            details.status === 'WAITING_CAPABILITY' &&
+            !this.hasDeleteMutationEvidence(intent)
+          ? await this.prisma.$transaction(async (tx) => {
+              const updated = await persistRetry(intent, tx);
+              if (updated === 1)
+                await this.persistStopWordsGuardDiagnostic(
+                  tx,
+                  intent.id,
+                  'permission_changed',
+                  'CAPABILITY_DEFERRED',
+                  'all',
+                );
+              return updated;
+            })
+          : await persistRetry(intent, this.prisma);
     if (changed === 0) {
       if (requireInitialUnattempted === 'guarded') throw new ModerationDeleteIntentLeaseLostError();
       if (requireInitialUnattempted)
@@ -7645,7 +7704,20 @@ export class ModerationDeleteIntentService {
   ): Promise<boolean> {
     const changed = await this.prisma.$executeRaw(Prisma.sql`
       UPDATE "moderation_delete_intents"
-      SET "last_bot_id" = ${botId}, "updated_at" = CURRENT_TIMESTAMP
+      SET "last_bot_id" = ${botId}, "updated_at" = CURRENT_TIMESTAMP,
+        -- FLAG: An interrupted owner change must not attach the previous bot's failure to this bot.
+        "last_error_code" = CASE
+          WHEN "last_bot_id" IS DISTINCT FROM ${botId}
+            AND "last_error_code" = ${LIVE_LINK_SOURCE_UNAVAILABLE_CODE}
+          THEN NULL ELSE "last_error_code" END,
+        "last_error" = CASE
+          WHEN "last_bot_id" IS DISTINCT FROM ${botId}
+            AND "last_error_code" = ${LIVE_LINK_SOURCE_UNAVAILABLE_CODE}
+          THEN NULL ELSE "last_error" END,
+        "last_status_code" = CASE
+          WHEN "last_bot_id" IS DISTINCT FROM ${botId}
+            AND "last_error_code" = ${LIVE_LINK_SOURCE_UNAVAILABLE_CODE}
+          THEN NULL ELSE "last_status_code" END
       WHERE "id" = ${intentId}
         AND "status" = CAST('IN_PROGRESS' AS "ModerationDeleteIntentStatus")
         AND "lease_token" = ${leaseToken}

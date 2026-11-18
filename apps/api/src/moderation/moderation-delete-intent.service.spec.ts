@@ -3,6 +3,7 @@ import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-auth
 import { performance } from 'node:perf_hooks';
 import { Job, RedisConnection, type MinimalQueue, type Queue } from 'bullmq';
 import type { ModerationDeleteIntentJob } from './moderation-delete-intent.queue';
+import type { LinkHistoryDeleteGuardService } from './link-history-delete-guard.service';
 import type { DeleteIntentLeaseCheck } from './moderation-delete-intent-lease';
 import { MaxApiInternalRateLimitError, type MaxClientService } from '../max/max-client.service';
 import { MaxModerationApiBudgetError } from '../max/max-moderation-api-budget';
@@ -292,7 +293,9 @@ function createService(
   prismaOverrides: Record<string, unknown> = {},
   maxClientOverrides: Record<string, unknown> = {},
   maxBotLinkOverrides: Record<string, unknown> = {},
-  linkHistoryDeleteGuardOverrides?: Record<string, unknown>,
+  linkHistoryDeleteGuardOverrides?: Partial<
+    Pick<LinkHistoryDeleteGuardService, 'assertIntentStillActionable'>
+  >,
   photoDuplicateRuntimePolicyOverrides?: Record<string, unknown>,
   commercialOcrDeleteGuardOverrides?: Record<string, unknown>,
   participantImmunityOverrides?: Record<string, unknown>,
@@ -7879,10 +7882,13 @@ describe('ModerationDeleteIntentService', () => {
       const deleteMessage = jest.fn().mockImplementation(async () => {
         events.push('max-delete');
       });
-      const assertIntentStillActionable = jest.fn().mockImplementation(async () => {
-        events.push('history-guard');
-        return 'allowed';
-      });
+      type LinkGuard = LinkHistoryDeleteGuardService['assertIntentStillActionable'];
+      const assertIntentStillActionable = jest.fn<ReturnType<LinkGuard>, Parameters<LinkGuard>>(
+        async () => {
+          events.push('history-guard');
+          return 'allowed';
+        },
+      );
       const queryRaw = jest.fn().mockResolvedValueOnce([intent]).mockResolvedValueOnce([completed]);
       const { service } = createService(
         {},
@@ -7901,6 +7907,7 @@ describe('ModerationDeleteIntentService', () => {
         messageId: 'message-1',
         subjectUserId: 'user-1',
         botId: 'bot-1',
+        classifyLiveSourceFailure: true,
       });
       expect(events).toEqual(['history-guard', 'dispatch-fence', 'history-guard', 'max-delete']);
     },

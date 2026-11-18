@@ -6,6 +6,12 @@ import {
 import { Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { isMaxExactMessageLookupMissingIdError } from '../max/max-exact-message-lookup.error';
+import { wasMaxMemberMutationAttempted } from '../max/max-member-error.util';
+import {
+  isMaxMutationOutcomeAmbiguous,
+  wasMaxMessageSendAttempted,
+} from '../max/max-mutation-outcome.util';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { AutomaticDeleteAuthorAccessService } from '../max/automatic-delete-author-access.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../max/max-client.service';
@@ -57,6 +63,43 @@ export class LinkHistoryDeleteGuardRejectedError extends Error {
   }
 }
 
+export const LIVE_LINK_SOURCE_UNAVAILABLE_CODE = 'live_link_exact_source_unavailable';
+
+export class LiveLinkSourceUnavailableError extends Error {
+  readonly code = LIVE_LINK_SOURCE_UNAVAILABLE_CODE;
+
+  constructor(
+    readonly statusCode: 404 | undefined,
+    cause: unknown,
+  ) {
+    super('The exact message for live link moderation could not be read', { cause });
+    this.name = 'LiveLinkSourceUnavailableError';
+  }
+}
+
+function isExactSourceRead404(error: unknown): boolean {
+  const failure = error as {
+    code?: unknown;
+    config?: { method?: unknown };
+    response?: {
+      status?: unknown;
+      config?: { method?: unknown };
+      data?: { code?: unknown; error?: { code?: unknown } };
+    };
+  } | null;
+  const response = failure?.response;
+  if (response?.status !== 404) return false;
+  const methods = [failure?.config?.method, response.config?.method];
+  const codes = [response.data?.code, response.data?.error?.code, failure?.code];
+  return (
+    methods.every((method) => method === undefined || method === 'get' || method === 'GET') &&
+    !codes.some(
+      (code) =>
+        typeof code === 'string' && /^(?:chat[._]|access[._]|permission[._])/iu.test(code.trim()),
+    )
+  );
+}
+
 @Injectable()
 export class LinkHistoryDeleteGuardService {
   private readonly deleteEnabled: boolean;
@@ -82,6 +125,7 @@ export class LinkHistoryDeleteGuardService {
     messageId: string;
     subjectUserId: string | null;
     botId: string;
+    classifyLiveSourceFailure?: true;
   }): Promise<LinkHistoryDeleteGuardResult> {
     return finalizeDeleteAuthority(await this.prepareForDispatch(params));
   }
@@ -280,15 +324,33 @@ export class LinkHistoryDeleteGuardService {
       );
     }
 
-    const exactRow = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, {
-      trafficClass: 'critical',
-      sourceTag: usesLiveSemantics
-        ? MAX_API_SOURCE_TAGS.MODERATION_DELETE
-        : LINK_HISTORY_RECOVERY_SOURCE_TAG,
-      ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
-      botId: params.botId,
-      bypassCache: true,
-    });
+    let exactRow: Awaited<ReturnType<MaxClientService['getExactMessageRow']>>;
+    try {
+      exactRow = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, {
+        trafficClass: 'critical',
+        sourceTag: usesLiveSemantics
+          ? MAX_API_SOURCE_TAGS.MODERATION_DELETE
+          : LINK_HISTORY_RECOVERY_SOURCE_TAG,
+        ignoreFailureMetricStatuses: MODERATION_CHAT_ACTION_TERMINAL_FAILURE_METRIC_STATUSES,
+        botId: params.botId,
+        bypassCache: true,
+      });
+    } catch (error) {
+      const http404 = isExactSourceRead404(error);
+      // FLAG: Only this exact source read supplies the retry hint. Unknown content
+      // remains unavailable, and the hint grants no deletion or access authority.
+      if (
+        params.classifyLiveSourceFailure === true &&
+        usesLiveSemantics &&
+        allReasons.length === 1 &&
+        (http404 || isMaxExactMessageLookupMissingIdError(error)) &&
+        !wasMaxMessageSendAttempted(error) &&
+        !wasMaxMemberMutationAttempted(error) &&
+        !isMaxMutationOutcomeAmbiguous(error)
+      )
+        throw new LiveLinkSourceUnavailableError(http404 ? 404 : undefined, error);
+      throw error;
+    }
     if (!exactRow) {
       return 'absent';
     }

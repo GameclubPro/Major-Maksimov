@@ -110,7 +110,8 @@ export function buildDeleteRetryHeadsAuditSql(explain = false) {
           'snapshot_stale', 'access_state_unconfirmed', 'access_denied', 'bot_not_actionable',
           'moderation_delete_reasons_no_longer_authorized', 'live_reason_invalid', 'live_policy_inactive',
           'live_policy_revision_changed', 'live_author_access_unknown', 'live_admin_immune',
-          'live_message_identity_changed', 'live_violation_no_longer_present')
+          'live_message_identity_changed', 'live_violation_no_longer_present',
+          'live_link_exact_source_unavailable')
           THEN row.last_error_code
         WHEN row.last_error_code IS NULL AND row.last_error IS NULL THEN 'none'
         ELSE 'other' END AS last_failure_family,

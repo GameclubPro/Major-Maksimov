@@ -168,6 +168,12 @@ before editing it; copying these notes does not install a fix or prove the deplo
    their existing exponential backoff. Malformed and overflowing hints are ignored. A hint beyond
    the original deadline expires an unattempted intent; it never renews authority. Keep the existing
    return/throw and handoff qualification, fresh checks and unknown-effect fences unchanged.
+   Repeated exact source read failures for a live link deletion more than 30 minutes
+   old may defer the next read by 15 minutes. Require two failures of the same kind
+   from the same bot, one live link reason under the current lease, and no dispatch
+   marker or remote success evidence. Keep the ordinary cadence near the original
+   deadline or when another reason is present. A new reason can bring the next retry
+   forward. The error records source unavailability and all deletion guards still run.
    An ambiguous exact-presence read receiving HTTP 429, a concrete local rate-limit error or
    5xx retains its dispatch marker and schedules a durable retry without access refresh or
    peer-bot probes. These failures prove neither message absence nor lost bot capabilities.
