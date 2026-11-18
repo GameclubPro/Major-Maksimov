@@ -3,15 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import {
+  activityReleaseReceiptKey,
   HIGHER_PRIORITY_ACTIVITY_ACQUIRE_SCRIPT,
   HIGHER_PRIORITY_ACTIVITY_KEY,
   HIGHER_PRIORITY_ACTIVITY_LEASE_MS,
-  HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
   HIGHER_PRIORITY_ACTIVITY_RENEW_MS,
   HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
   HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
   RETENTION_PRIORITY_TRAFFIC_KEY_PREFIX,
   RETENTION_PRIORITY_TRAFFIC_TTL_SEC,
+  settleHigherPriorityActivity,
 } from '../max/retention-priority-admission';
 import type { AdminAccessEpochMutationMetric } from '../chat-context/chat-context-cache.service';
 import {
@@ -271,7 +272,7 @@ export class WebhookIngressMetricsService implements OnModuleDestroy {
       );
     } catch {
       await this.redis
-        .set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, 'receipt_counter_unknown')
+        .set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, 'receipt_counter_unknown', 'NX')
         .catch(() => undefined);
       this.logWriteFailure();
     }
@@ -282,7 +283,7 @@ export class WebhookIngressMetricsService implements OnModuleDestroy {
     let acquired = false;
     const unavailable = async () => {
       await this.redis
-        .set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, 'receipt_observation_unknown')
+        .set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, 'receipt_observation_unknown', 'NX')
         .catch(() => undefined);
     };
     try {
@@ -306,9 +307,10 @@ export class WebhookIngressMetricsService implements OnModuleDestroy {
           renewing = this.redis
             .eval(
               HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
-              2,
+              3,
               HIGHER_PRIORITY_ACTIVITY_KEY,
               HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+              activityReleaseReceiptKey(operationId),
               operationId,
               String(HIGHER_PRIORITY_ACTIVITY_LEASE_MS),
             )
@@ -333,20 +335,7 @@ export class WebhookIngressMetricsService implements OnModuleDestroy {
         // tracked independently; its marker remains until Redis confirms release.
         const settlement: Promise<void> = (async () => {
           await renewing;
-          try {
-            if (
-              (await this.redis.eval(
-                HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
-                2,
-                HIGHER_PRIORITY_ACTIVITY_KEY,
-                HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
-                operationId,
-              )) !== 1
-            )
-              await unavailable();
-          } catch {
-            await unavailable();
-          }
+          await settleHigherPriorityActivity(this.redis, operationId);
         })()
           .catch(unavailable)
           .finally(() => this.receiptObservationSettlements.delete(settlement));

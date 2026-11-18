@@ -1,3 +1,5 @@
+import type Redis from 'ioredis';
+import { raceWithTimeout } from '../common/promise-timeout.util';
 import { ALL_WEBHOOK_QUEUE_NAMES } from '../webhook/webhook-queues';
 import {
   AUXILIARY_QUEUE_NAMES,
@@ -17,6 +19,15 @@ export const HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY =
 export const HIGHER_PRIORITY_ACTIVITY_LEASE_MS = 30_000;
 export const HIGHER_PRIORITY_ACTIVITY_RENEW_MS = 5_000;
 export const HIGHER_PRIORITY_ACTIVITY_LIMIT = 4_096;
+export const HIGHER_PRIORITY_ACTIVITY_RELEASE_RECEIPT_TTL_MS = 60_000;
+export const HIGHER_PRIORITY_ACTIVITY_RELEASE_RECEIPT_LIMIT = 8_192;
+const HIGHER_PRIORITY_ACTIVITY_SETTLEMENT_TIMEOUT_MS = 200;
+const ACTIVITY_RELEASE_RECEIPT_PREFIX = 'maxapi:retention-priority:activity-released:v1';
+
+export function activityReleaseReceiptKey(id: string): string {
+  const kind = id.startsWith('receipt:') ? 'sql' : 'http';
+  return `${ACTIVITY_RELEASE_RECEIPT_PREFIX}:${kind}`;
+}
 export const RETENTION_PRIORITY_RESERVATION_MARKER = 'retention-priority:v1:';
 
 export const RETENTION_PRIORITY_QUEUE_NAMES = Object.freeze([
@@ -104,35 +115,125 @@ local time = redis.call('TIME')
 local nowMs = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local count = redis.pcall('ZCARD', KEYS[1])
 if type(count) == 'table' or count >= ${HIGHER_PRIORITY_ACTIVITY_LIMIT} then
-  redis.call('SET', KEYS[2], 'activity_coverage_unavailable')
+  redis.call('SET', KEYS[2], 'activity_coverage_unavailable', 'NX')
   return 0
 end
 redis.call('ZADD', KEYS[1], nowMs + tonumber(ARGV[2]), ARGV[1])
 return 1
 `;
 
-export const HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT = `
--- MAX_HIGHER_PRIORITY_ACTIVITY_RENEW_V1
+const ACTIVITY_RELEASE_RECEIPT_LUA = `
 local time = redis.call('TIME')
 local nowMs = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-local score = redis.pcall('ZSCORE', KEYS[1], ARGV[1])
-if type(score) == 'table' or not score or tonumber(score) <= nowMs then
-  redis.call('SET', KEYS[2], 'activity_coverage_lost')
+local activityKey, unavailableKey, receiptKey = KEYS[1], KEYS[2], KEYS[3]
+local id = ARGV[1]
+local receiptTtlMs = ${HIGHER_PRIORITY_ACTIVITY_RELEASE_RECEIPT_TTL_MS}
+local function validSet(key)
+  local kind = redis.call('TYPE', key).ok
+  return kind == 'none' or kind == 'zset'
+end
+local function validReceiptSet()
+  local kind = redis.call('TYPE', receiptKey).ok
+  if kind == 'none' then return true end
+  if kind ~= 'zset' then return false end
+  local ttl = redis.call('PTTL', receiptKey)
+  return ttl >= 0 and ttl <= receiptTtlMs
+end
+local function freshReceipt(score)
+  return score and tonumber(score) > nowMs and tonumber(score) <= nowMs + receiptTtlMs
+end
+local function unavailable(reason)
+  redis.call('SET', unavailableKey, reason, 'NX')
   return 0
 end
-redis.call('ZADD', KEYS[1], 'XX', nowMs + tonumber(ARGV[2]), ARGV[1])
+`;
+
+export const HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT = `
+-- MAX_HIGHER_PRIORITY_ACTIVITY_RENEW_V2
+${ACTIVITY_RELEASE_RECEIPT_LUA}
+if not validSet(activityKey) or not validReceiptSet() then
+  return unavailable('activity_coverage_lost')
+end
+local active = redis.call('ZSCORE', activityKey, id)
+local receipt = redis.call('ZSCORE', receiptKey, id)
+if not active and freshReceipt(receipt) then return 1 end
+if receipt or not active or tonumber(active) <= nowMs then
+  return unavailable('activity_coverage_lost')
+end
+redis.call('ZADD', activityKey, 'XX', nowMs + tonumber(ARGV[2]), id)
 return 1
 `;
 
+// FLAG: Write the exact completion proof before removing its active marker. A
+// missing member, or a receipt coexisting with an active member, is not proof.
 export const HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT = `
--- MAX_HIGHER_PRIORITY_ACTIVITY_RELEASE_V1
-local result = redis.pcall('ZREM', KEYS[1], ARGV[1])
-if type(result) == 'table' or result ~= 1 then
-  redis.call('SET', KEYS[2], 'activity_release_unknown')
-  return 0
+-- MAX_HIGHER_PRIORITY_ACTIVITY_RELEASE_V2
+${ACTIVITY_RELEASE_RECEIPT_LUA}
+if not validSet(activityKey) or not validReceiptSet() then
+  return unavailable('activity_release_unknown')
 end
+local active = redis.call('ZSCORE', activityKey, id)
+local receipt = redis.call('ZSCORE', receiptKey, id)
+if not active and freshReceipt(receipt) then return 1 end
+if not active or receipt then return unavailable('activity_release_unknown') end
+local count = redis.call('ZCARD', receiptKey)
+local limit = ${HIGHER_PRIORITY_ACTIVITY_RELEASE_RECEIPT_LIMIT}
+if count > limit then return unavailable('activity_release_unknown') end
+if count == limit then
+  local oldest = redis.call('ZRANGE', receiptKey, 0, 0)[1]
+  if redis.call('ZSCORE', activityKey, oldest) then
+    return unavailable('activity_release_unknown')
+  end
+  redis.call('ZREM', receiptKey, oldest)
+end
+redis.call('ZADD', receiptKey, nowMs + receiptTtlMs, id)
+redis.call('PEXPIRE', receiptKey, receiptTtlMs)
+redis.call('ZREM', activityKey, id)
 return 1
 `;
+
+function boundPriorityActivityObservation<T>(operation: Promise<T>): Promise<T> {
+  return raceWithTimeout({
+    operation,
+    timeoutMs: HIGHER_PRIORITY_ACTIVITY_SETTLEMENT_TIMEOUT_MS,
+    onTimeout: () => {
+      throw new Error('Redis priority activity observation timed out');
+    },
+  });
+}
+
+export async function settleHigherPriorityActivity(
+  redis: Pick<Redis, 'eval' | 'set'>,
+  id: string,
+): Promise<void> {
+  // FLAG: Only this observation may be retried after a lost reply. SQL, HTTP
+  // and quota reservation have already run under their own result contracts.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result: unknown = await boundPriorityActivityObservation(
+        redis.eval(
+          HIGHER_PRIORITY_ACTIVITY_RELEASE_SCRIPT,
+          3,
+          HIGHER_PRIORITY_ACTIVITY_KEY,
+          HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+          activityReleaseReceiptKey(id),
+          id,
+        ),
+      );
+      if (result === 0 || result === 1) return;
+      break;
+    } catch {
+      // The Redis command may already have executed. Reuse the exact ID.
+    }
+  }
+  try {
+    await boundPriorityActivityObservation(
+      redis.set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, 'activity_release_failed', 'NX'),
+    );
+  } catch {
+    // The active lease and Redis dependency checks still deny cleanup while unavailable.
+  }
+}
 
 // FLAG: Run before every limiter write. Stale leases remain evidence of an unknown
 // observation, never an empty fleet. Missing queue data is valid only under a fresh

@@ -21,7 +21,9 @@ import {
   RETENTION_PRIORITY_RESERVATION_MARKER,
   RETENTION_PRIORITY_TRAFFIC_TTL_SEC,
   RETENTION_PRIORITY_VERSION,
+  activityReleaseReceiptKey,
   retentionPriorityQueueKeys,
+  settleHigherPriorityActivity,
   retentionPriorityTrafficKey,
   type RetentionPriorityReservationOptions,
 } from './retention-priority-admission';
@@ -1167,7 +1169,10 @@ export class MaxClientService implements OnModuleDestroy {
   private readonly pendingTimeouts = new Set<NodeJS.Timeout>();
   private readonly pendingSleeps = new Map<NodeJS.Timeout, () => void>();
   private stopping = false;
-  private readonly higherPriorityActivityTimers = new Map<string, NodeJS.Timeout>();
+  private readonly higherPriorityActivity = new Map<
+    string,
+    { timer: NodeJS.Timeout; renewing?: Promise<void> }
+  >();
   private readonly pendingHigherPriorityActivityReleases = new Set<Promise<void>>();
   private readonly priorityHttpSource = new AsyncLocalStorage<string | null>();
   private readonly keyedActionTimeouts = new Map<string, NodeJS.Timeout>();
@@ -1386,8 +1391,7 @@ export class MaxClientService implements OnModuleDestroy {
     this.muteApiBudget.close();
     this.actionFailureLog.close();
     this.mediaUploadValidationCache.clear();
-    for (const timer of this.higherPriorityActivityTimers.values()) clearInterval(timer);
-    this.higherPriorityActivityTimers.clear();
+    for (const { timer } of this.higherPriorityActivity.values()) clearInterval(timer);
     for (const timeout of new Set([
       ...this.pendingTimeouts,
       ...this.keyedActionTimeouts.values(),
@@ -8765,6 +8769,10 @@ export class MaxClientService implements OnModuleDestroy {
       // even if a delayed timer wakes after the remote cooldown has ended.
       if (Date.now() - startedAtMs < maxWaitMs) reservation = await reserve();
     }
+    if (this.stopping) {
+      this.releaseHigherPriorityActivity(activityId);
+      throw new Error('MAX client is stopping');
+    }
     if (activityId) this.renewHigherPriorityActivity(activityId);
     this.recordRateLimitUsageWithoutWaiting(botId, trafficClass, sourceTag);
     return activityId;
@@ -8944,43 +8952,50 @@ export class MaxClientService implements OnModuleDestroy {
 
   private renewHigherPriorityActivity(id: string): void {
     const timer = setInterval(() => {
-      void this.limiterRedis
+      if (activity.renewing) return;
+      activity.renewing = this.limiterRedis
         .eval(
           HIGHER_PRIORITY_ACTIVITY_RENEW_SCRIPT,
-          2,
+          3,
           HIGHER_PRIORITY_ACTIVITY_KEY,
           HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY,
+          activityReleaseReceiptKey(id),
           id,
           String(HIGHER_PRIORITY_ACTIVITY_LEASE_MS),
         )
-        .catch(() => this.markPriorityActivityUnavailable('activity_renew_failed'));
+        .then(
+          () => undefined,
+          () => this.markPriorityActivityUnavailable('activity_renew_failed'),
+        )
+        .finally(() => {
+          activity.renewing = undefined;
+        });
     }, HIGHER_PRIORITY_ACTIVITY_RENEW_MS);
+    const activity: { timer: NodeJS.Timeout; renewing?: Promise<void> } = { timer };
     timer.unref();
-    this.higherPriorityActivityTimers.set(id, timer);
+    this.higherPriorityActivity.set(id, activity);
   }
 
   private releaseHigherPriorityActivity(id: string | undefined): void {
     if (!id) return;
-    const timer = this.higherPriorityActivityTimers.get(id);
-    if (timer) clearInterval(timer);
-    this.higherPriorityActivityTimers.delete(id);
-    // FLAG: Cleanup observation cannot delay a completed higher-priority HTTP result.
-    // Until this exact release settles, its marker continues to deny retention.
-    const release = this.limiterRedis
-      .zrem(HIGHER_PRIORITY_ACTIVITY_KEY, id)
-      .then(async (removed) => {
-        if (removed !== 1) await this.markPriorityActivityUnavailable('activity_release_unknown');
-      })
-      .catch(() => this.markPriorityActivityUnavailable('activity_release_failed'))
-      .finally(() => {
-        this.pendingHigherPriorityActivityReleases.delete(release);
-      });
+    const activity = this.higherPriorityActivity.get(id);
+    if (activity) clearInterval(activity.timer);
+    this.higherPriorityActivity.delete(id);
+    // FLAG: Wait for any renewal in the background. HTTP completion owns the result;
+    // this settlement and any retry apply only to the exact Redis observation.
+    const release = (
+      activity?.renewing
+        ? activity.renewing.then(() => settleHigherPriorityActivity(this.limiterRedis, id))
+        : settleHigherPriorityActivity(this.limiterRedis, id)
+    ).finally(() => {
+      this.pendingHigherPriorityActivityReleases.delete(release);
+    });
     this.pendingHigherPriorityActivityReleases.add(release);
   }
 
   private async markPriorityActivityUnavailable(reason: string): Promise<void> {
     try {
-      await this.limiterRedis.set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, reason);
+      await this.limiterRedis.set(HIGHER_PRIORITY_ACTIVITY_UNAVAILABLE_KEY, reason, 'NX');
     } catch {
       // FLAG: Redis failure cannot authorize retention; its permit/reservation fails closed.
     }
