@@ -85,7 +85,9 @@ if [[ -n "$FIXTURE_DIFF_BASELINE" ]]; then PRE_PULL_HEAD="$FIXTURE_DIFF_BASELINE
 reexec_if_current_script_changed
 require_deploy_lock
 if [[ "$LOADED_CONTROLLER" == new ]]; then maxim_outcome_cohort_prepare; fi
-if [[ "$LOADED_CONTROLLER" == new ]]; then maxim_routing_index_prepare; fi
+if [[ "$LOADED_CONTROLLER" == new ]]; then
+  maxim_routing_index_prepare "$EXPECTED_DEPLOY_SHA" ROUTING_INDEX_RELEASE_STATE
+fi
 if [[ "$FIXTURE_NATIVE_PROBE" == 1 ]]; then maxim_photo_native_probe; fi
 if [[ "$FIXTURE_ERASER_PROBE" == 1 ]]; then maxim_eraser_install_rate_limit_reader_floor; fi
 printf 'PAUSE\\nMIGRATION\\n' >> "$FIXTURE_LOG"
@@ -107,6 +109,7 @@ function photoNativeHelper(revision) {
 
 function routingIndexHelper(revision) {
   return `maxim_routing_index_prepare() {
+  [[ "$*" == "$EXPECTED_DEPLOY_SHA ROUTING_INDEX_RELEASE_STATE" ]] || return 99
   printf 'ROUTING\\t${revision}\\n' >> "$FIXTURE_LOG"
 }
 `;

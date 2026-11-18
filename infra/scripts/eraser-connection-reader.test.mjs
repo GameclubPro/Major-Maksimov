@@ -140,7 +140,7 @@ test('install precedes migration and new writers; rollback guards precede compon
   const install = deploy.indexOf('maxim_eraser_install_connection_request_floor "$TARGET_SHA"');
   assert.ok(install > deploy.indexOf('TARGET_SHA="$(git rev-parse HEAD)"'));
   assert.ok(install < deploy.indexOf('\n  begin_release_runtime_transition\n'));
-  assert.ok(install < deploy.indexOf('\n  if ! run_migrations; then'));
+  assert.ok(install < deploy.search(/^[ \t]+if ! run_migrations; then$/mu));
   assert.ok(install < deploy.indexOf('recreate_service_wave "admin"'));
   assert.ok(install < deploy.indexOf('node apps/eraser/dist/migrate.js'));
   const immutable = read('infra/scripts/vps-release-rollback.sh');

@@ -76,8 +76,8 @@ DO $guard$ BEGIN
     RAISE EXCEPTION 'ROUTING_INDEX_RECEIPT_METADATA_UNAVAILABLE';
   END IF;
 END $guard$;
-WITH definition AS MATERIALIZED (
- SELECT relation.oid IS NOT NULL AS present,
+WITH definitions AS MATERIALIZED (
+ SELECT expected.name, relation.oid IS NOT NULL AS present,
   COALESCE(current_setting('server_version_num')::int BETWEEN 160000 AND 169999
     AND relation.relkind = 'i' AND relation.relpersistence = 'p'
     AND relation.reltablespace = 0 AND relation.reloptions IS NULL
@@ -88,24 +88,30 @@ WITH definition AS MATERIALIZED (
     AND state.indrelid = parent.oid AND method.amname = 'btree'
     AND NOT state.indisunique AND NOT state.indisprimary AND NOT state.indisexclusion
     AND state.indimmediate AND state.indisvalid AND state.indisready AND state.indislive
-    AND state.indnkeyatts = 4 AND state.indnatts = 4 AND 0 = ALL(state.indoption::smallint[])
+    AND state.indnkeyatts = cardinality(expected.classes) AND state.indnatts = state.indnkeyatts
+    AND 0 = ALL(state.indoption::smallint[])
     AND pg_get_expr(state.indexprs,state.indrelid,false) = ${quote(ROUTING_INDEX_EXPRESSION)}
     AND pg_get_expr(state.indpred,state.indrelid,false) = ${quote(ROUTING_INDEX_PREDICATE)}
-    AND ARRAY(SELECT pg_get_indexdef(relation.oid,k,false) FROM generate_series(2,4) k ORDER BY k)
-      = ARRAY['queue_name','created_at','id']
+    AND ARRAY(SELECT pg_get_indexdef(relation.oid,k,false) FROM generate_series(2,state.indnatts::int) k ORDER BY k)
+      = expected.keys
     AND NOT EXISTS (SELECT 1 FROM unnest(state.indclass::oid[]) binding
       JOIN pg_opclass definition ON definition.oid=binding
       WHERE NOT definition.opcdefault OR definition.opcnamespace <> 'pg_catalog'::regnamespace)
     AND ARRAY(SELECT definition.opcname::text FROM unnest(state.indclass::oid[]) WITH ORDINALITY binding(oid,ordinal)
       JOIN pg_opclass definition ON definition.oid=binding.oid ORDER BY binding.ordinal)
-      = ARRAY['text_ops','text_ops','timestamp_ops','text_ops']
+      = expected.classes
     AND (state.indcollation::oid[])[0] = (SELECT typcollation FROM pg_type WHERE oid='text'::regtype)
-    AND (state.indcollation::oid[])[1] = (SELECT attcollation FROM pg_attribute WHERE attrelid=parent.oid AND attname='queue_name' AND NOT attisdropped)
-    AND (state.indcollation::oid[])[2] = (SELECT attcollation FROM pg_attribute WHERE attrelid=parent.oid AND attname='created_at' AND NOT attisdropped)
-    AND (state.indcollation::oid[])[3] = (SELECT attcollation FROM pg_attribute WHERE attrelid=parent.oid AND attname='id' AND NOT attisdropped), false) AS exact
- FROM (SELECT to_regclass('public.webhook_events') AS oid) expected
- LEFT JOIN pg_class parent ON parent.oid=expected.oid
- LEFT JOIN pg_class relation ON relation.oid=to_regclass('public.webhook_events_chat_queue_head_idx')
+    AND NOT EXISTS (SELECT 1 FROM unnest(expected.keys) WITH ORDINALITY k(attname,position)
+      LEFT JOIN pg_attribute a ON a.attrelid=parent.oid AND a.attname=k.attname AND NOT a.attisdropped
+      WHERE a.attcollation IS DISTINCT FROM (state.indcollation::oid[])[k.position::int]), false) AS exact
+ FROM (VALUES
+   ('index', 'webhook_events_chat_queue_head_idx', ARRAY['queue_name','created_at','id'],
+    ARRAY['text_ops','text_ops','timestamp_ops','text_ops']),
+   ('orderedIndex', 'webhook_events_ordered_chat_head_idx', ARRAY['created_at','id'],
+    ARRAY['text_ops','timestamp_ops','text_ops'])
+ ) expected(name,relation,keys,classes)
+ LEFT JOIN pg_class parent ON parent.oid=to_regclass('public.webhook_events')
+ LEFT JOIN pg_class relation ON relation.oid=to_regclass('public.' || expected.relation)
  LEFT JOIN pg_index state ON state.indexrelid=relation.oid
  LEFT JOIN pg_am method ON method.oid=relation.relam
 ), receipts AS MATERIALIZED (
@@ -114,15 +120,15 @@ WITH definition AS MATERIALIZED (
  FROM public._prisma_migrations LIMIT 4097
 ), artifacts AS MATERIALIZED (
  SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
- WHERE n.nspname='public' AND left(c.relname,least(length('${ROUTING_INDEX_TARGET.index}'),52))=left('${ROUTING_INDEX_TARGET.index}',52)
-  AND c.relname ~ '_cc(new|old)[0-9]*$' LIMIT 17
+ WHERE n.nspname='public' AND c.relname ~ '^webhook_events_(chat_queue|ordered_chat)_head_idx.*_cc(new|old)[0-9]*$' LIMIT 17
 ), builders AS MATERIALIZED (
  SELECT progress.pid FROM pg_stat_progress_create_index progress
  WHERE progress.relid=to_regclass('public.webhook_events')
   AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database()) LIMIT 17
 ), ${historicalCompatibilityCtes}
 SELECT json_build_object('supportedVersion',current_setting('server_version_num')::int BETWEEN 160000 AND 169999,
- 'index',(SELECT row_to_json(definition) FROM definition),
+ 'index',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='index'),
+ 'orderedIndex',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='orderedIndex'),
  'receipts',COALESCE((SELECT json_agg(receipts) FROM receipts),'[]'::json),
  'artifacts',COALESCE((SELECT json_agg(relname) FROM artifacts),'[]'::json),
  'builders',COALESCE((SELECT json_agg(builders) FROM builders),'[]'::json),

@@ -12,6 +12,8 @@ source "$ROOT_DIR/infra/scripts/lib/legacy-cold-maintenance.sh" || exit $?
 source "$ROOT_DIR/infra/scripts/lib/deploy-topology.sh"
 # shellcheck source=infra/scripts/lib/change-impact-components.generated.sh
 source "$ROOT_DIR/infra/scripts/lib/change-impact-components.generated.sh"
+# shellcheck source=infra/scripts/lib/routing-index-online-prepare.sh
+source "$ROOT_DIR/infra/scripts/lib/routing-index-online-prepare.sh"
 
 MAIN_PROJECT_NAME="infra"
 COMPOSE_FILES=(--env-file ".env" -p "$MAIN_PROJECT_NAME" -f "infra/docker-compose.yml")
@@ -660,6 +662,7 @@ commit_recovered_release() {
   maxim_require_ordinary_effect_authority "$ROOT_DIR" || return
   verify_synchronized_checkout || return
   verify_controller_runtime_compatibility || return
+  maxim_routing_index_require_release "${COMPONENT_SOURCE_SHA[api-shared]}" COMPOSE_FILES || return
   local release_id
   local component
   local smoke
