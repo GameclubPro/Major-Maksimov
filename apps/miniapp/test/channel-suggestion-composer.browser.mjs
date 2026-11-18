@@ -73,6 +73,99 @@ async function checkControls(page, selector) {
   return boxes;
 }
 
+async function setVisualViewport(page, dimensions) {
+  await page.evaluate((dimensions) => {
+    // Keyboard overlays can shrink and pan the visual viewport while CSS media queries
+    // still see the original layout viewport.
+    if (dimensions) {
+      for (const [property, value] of Object.entries(dimensions)) {
+        Object.defineProperty(visualViewport, property, { configurable: true, value });
+      }
+    } else {
+      delete visualViewport.height;
+      delete visualViewport.offsetTop;
+    }
+    visualViewport.dispatchEvent(new Event('resize'));
+    visualViewport.dispatchEvent(new Event('scroll'));
+  }, dimensions);
+}
+
+async function assertVisibleCaret(editor, stage) {
+  const geometry = await editor.evaluate((node) => {
+    const selection = getSelection();
+    const caret = selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+    if (caret?.collapsed && !caret.getBoundingClientRect().height && caret.startOffset > 0) {
+      caret.setStart(caret.startContainer, caret.startOffset - 1);
+    }
+    const rect = caret?.getBoundingClientRect();
+    const body = node.closest('.channel-suggest-body').getBoundingClientRect();
+    const bar = document.querySelector('.channel-suggest-composer__bar').getBoundingClientRect();
+    const top = visualViewport.offsetTop;
+    const bottom = top + visualViewport.height;
+    const hit = rect && document.elementFromPoint(rect.left, rect.top + rect.height / 2);
+    return {
+      active: document.activeElement === node,
+      layoutHeight: innerHeight,
+      top,
+      bottom,
+      body: body.toJSON(),
+      bar: bar.toJSON(),
+      caret: rect?.toJSON(),
+      hit: !!hit && node.contains(hit),
+    };
+  });
+  const details = JSON.stringify(geometry);
+  assert.ok(geometry.layoutHeight > geometry.bottom, 'keyboard must only obscure visual viewport');
+  assert.ok(geometry.active && geometry.caret?.height, stage + ': ' + details);
+  assert.ok(
+    geometry.caret.top >= Math.max(geometry.top, geometry.body.top) - 1 &&
+      geometry.caret.bottom <=
+        Math.min(geometry.bottom, geometry.body.bottom, geometry.bar.top) + 1 &&
+      geometry.hit,
+    stage + ': ' + details,
+  );
+  assert.ok(
+    geometry.bar.top >= geometry.top && geometry.bar.bottom <= geometry.bottom + 1,
+    stage + ' action bar: ' + details,
+  );
+  return geometry;
+}
+
+async function checkOverlayKeyboard(page, editor, viewport, font) {
+  await page.setViewportSize(viewport);
+  await page.evaluate((font) => (document.documentElement.style.fontSize = font + 'px'), font);
+  const text = Array.from({ length: 18 }, (_, index) => 'Строка ' + (index + 1)).join('\n');
+  await editor.fill(text);
+  const metrics = [];
+  try {
+    await setVisualViewport(page, { height: 310, offsetTop: 110 });
+    for (const [atStart, input] of [
+      [true, 'Начало '],
+      [false, ' Конец'],
+    ]) {
+      await editor.evaluate((node, atStart) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        range.collapse(atStart);
+        const selection = getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }, atStart);
+      await settleVisualFrame(page);
+      await page.keyboard.insertText(input);
+      // Panning on input is common when iOS moves to the currently edited line.
+      await setVisualViewport(page, { height: 310, offsetTop: atStart ? 140 : 185 });
+      await settleVisualFrame(page);
+      metrics.push(await assertVisibleCaret(editor, atStart ? 'first line' : 'last line'));
+    }
+    assert.equal(await editor.innerText(), 'Начало ' + text + ' Конец');
+  } finally {
+    await setVisualViewport(page, null);
+    await editor.blur();
+  }
+  return metrics;
+}
+
 try {
   for (const engine of [chromium, webkit]) {
     if (
@@ -143,6 +236,15 @@ try {
             );
           assert.ok(nameFits, 'expanded channel name is readable');
           await destination.click();
+          for (const [viewport, font] of [
+            [{ width: 393, height: 780 }, 16],
+            [{ width: 320, height: 740 }, 32],
+          ]) {
+            const keyboard = await checkOverlayKeyboard(page, editor, viewport, font);
+            results.push({ engine: engine.name(), theme, viewport, font, keyboard });
+          }
+          await page.setViewportSize({ width: 393, height: 780 });
+          await page.evaluate(() => (document.documentElement.style.fontSize = '16px'));
           const draft = 'Объявление с фото.\nОписание товара и цена.\nПоследняя строка.';
           await editor.fill(draft);
           await editor.evaluate((node) => {
@@ -340,7 +442,7 @@ try {
           assert.deepEqual(errors, []);
           assert.deepEqual(await page.evaluate(() => window.suggestionLayoutTest.sendRequests), []);
           console.log(
-            `Suggestion composer ${engine.name()} ${theme}: long names, text scaling, media, scrolling, focus and native Back passed.`,
+            `Suggestion composer ${engine.name()} ${theme}: long names, text scaling, media, keyboards, scrolling, focus and native Back passed.`,
           );
         } finally {
           await context.close();

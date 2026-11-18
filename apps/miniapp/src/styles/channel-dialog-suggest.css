@@ -4,6 +4,11 @@
   }
 
   .app-shell--immersive.app-shell--suggest-dialog {
+    /* FLAG: The visual viewport can pan as well as shrink when the keyboard opens. */
+    --immersive-height: min(
+      100dvh,
+      calc(var(--app-viewport-height) + var(--app-visual-viewport-top, 0px))
+    );
     --suggest-dialog-top-bleed: 0px;
     --immersive-top-bleed: 0px;
   }
@@ -22,7 +27,9 @@
       calc(var(--safe-bottom) + 4px),
       calc(var(--suggest-keyboard-reserve) + 6px)
     );
-    --suggest-bar-space: calc(var(--suggest-bar-height) + var(--suggest-bar-bottom) + 12px);
+    --suggest-bar-space: calc(
+      var(--suggest-bar-height) + var(--suggest-bar-bottom) + var(--suggest-bar-gap, 12px)
+    );
     position: relative;
     display: grid;
     /* FLAG: Long recipient names must shrink inside the viewport, never size its grid track. */
@@ -32,7 +39,7 @@
     min-height: 0;
     min-width: 0;
     overflow: hidden;
-    padding: 0 16px;
+    padding: var(--app-visual-viewport-top, 0px) 16px 0;
     background: var(--suggest-surface);
     color: var(--suggest-ink);
     letter-spacing: 0;
@@ -43,6 +50,7 @@
   }
 
   .channel-dialog-screen--suggest .channel-dialog-shell--suggest {
+    container: suggestion / size;
     position: relative;
     width: min(100%, 680px);
     height: 100%;
@@ -757,7 +765,7 @@
     }
   }
 
-  @media (max-height: 600px) {
+  @container suggestion (max-height: 600px) {
     .channel-suggest-heading {
       padding: 0;
     }
@@ -776,7 +784,14 @@
     }
   }
 
-  @media (max-height: 400px) {
+  @container suggestion (max-height: 400px) {
+    .channel-suggest-body {
+      --suggest-bar-gap: 6px;
+    }
+    .channel-suggest-composer__bar {
+      min-height: 49px;
+      padding-top: 4px;
+    }
     .channel-suggest-tabs {
       margin-bottom: 4px;
       padding: 2px;
@@ -805,19 +820,19 @@
     }
   }
 
-  @media (max-height: 400px) {
+  @container suggestion (max-height: 400px) {
     .channel-dialog-screen--suggest
       .channel-suggest-composer__rich-editor
       .max-rich-text-editor__surface {
       min-height: 56px;
-      max-height: clamp(56px, calc(100dvh - 250px), 140px);
+      max-height: clamp(56px, calc(100cqh - 250px), 140px);
       padding: 8px;
       line-height: 1.4;
       overflow-y: auto;
     }
   }
 
-  @media (max-width: 360px) and (max-height: 400px) {
+  @container suggestion (max-height: 400px) and (max-width: 340px) {
     /* FLAG: Short keyboard viewports need one scrollable tool row to retain editable space. */
     .channel-suggest-composer__modifier-row {
       display: flex;

@@ -41,7 +41,7 @@
     min-width: 0;
   }
 
-  @media (min-width: 560px), (max-height: 400px) {
+  @container suggestion (min-width: 528px) or (max-height: 400px) {
     .channel-suggest-composer__bar:not([hidden]) {
       grid-template-columns: minmax(0, 1fr) auto;
     }
@@ -52,7 +52,7 @@
       padding-inline: 6px;
     }
   }
-  @media (min-width: 560px) and (max-height: 400px) {
+  @container suggestion (min-width: 528px) and (max-height: 400px) {
     .channel-suggest-composer__tools > .channel-suggest-composer__tool {
       flex-basis: auto;
     }
@@ -64,7 +64,7 @@
       padding-inline: 10px;
     }
   }
-  @media (max-width: 559px) and (max-height: 400px) {
+  @container suggestion (width < 528px) and (max-height: 400px) {
     .channel-suggest-composer__tools {
       flex-wrap: nowrap;
     }

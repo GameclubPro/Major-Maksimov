@@ -51,6 +51,7 @@ import { openFileInputPicker, resolveFileInputActivationMode } from '../lib/file
 import { maxSelectionChanged, setMaxClosingConfirmation } from '../lib/max-bridge';
 import { queryKeys } from '../lib/query-keys';
 import { describeUserFacingError } from '../lib/user-facing-error';
+import { getEditorCaretBounds } from '../lib/use-visible-editor-caret';
 import '../styles/channel-dialog-suggest.css';
 import '../styles/channel-dialog-mobile-actions.css';
 
@@ -499,15 +500,17 @@ export function ChannelSuggestDialogPage({
       return Number.isFinite(value) ? Math.max(0, value) : 0;
     };
 
-    const getFocusedAnchor = (): HTMLElement => {
-      const activeElement = document.activeElement;
-      if (activeElement instanceof HTMLElement && composer.contains(activeElement)) {
-        const linkPanel = activeElement.closest<HTMLElement>('.max-rich-text-editor__link-panel');
-        const editorSurface = activeElement.closest<HTMLElement>('.max-rich-text-editor__surface');
-        return linkPanel ?? editorSurface ?? activeElement;
+    const revealLine = (
+      scroller: HTMLElement,
+      bounds: { top: number; bottom: number },
+      top: number,
+      bottom: number,
+    ) => {
+      if (bottom <= top) return;
+      const delta = bounds.top < top ? bounds.top - top : Math.max(0, bounds.bottom - bottom);
+      if (Math.abs(delta) > 1) {
+        scroller.scrollBy({ top: delta, behavior: 'instant' });
       }
-
-      return composer;
     };
 
     const readKeyboardLayout = () => {
@@ -568,48 +571,50 @@ export function ChannelSuggestDialogPage({
       suggestionKeyboardBaselineRef.current = null;
     };
 
-    const keepFocusedEditorVisible = (behavior: ScrollBehavior) => {
-      if (!isEditorFocused) {
+    const keepFocusedEditorVisible = () => {
+      const editor = document.activeElement;
+      if (!isEditorFocused || !(editor instanceof HTMLElement) || !isSuggestEditorTarget(editor)) {
         return;
       }
 
       const visualViewport = window.visualViewport;
-      const viewportRect = viewport.getBoundingClientRect();
       const visualTop = visualViewport?.offsetTop ?? 0;
       const keyboardLayout = syncKeyboardReserve();
       if (!keyboardLayout) {
         return;
       }
+      const viewportRect = viewport.getBoundingClientRect();
       const visibleTop = Math.max(viewportRect.top, visualTop);
       const visibleBottom = Math.min(viewportRect.bottom, keyboardLayout.visibleBottomPx);
       const barTop = suggestBarRef.current?.getBoundingClientRect().top;
-      const protectedBottom =
-        typeof barTop === 'number' ? Math.min(visibleBottom, barTop - 12) : visibleBottom;
-      const targetRect = getFocusedAnchor().getBoundingClientRect();
-      const bottomGap = targetRect.bottom + 18 - protectedBottom;
-
-      if (bottomGap > 1) {
-        viewport.scrollBy({ top: Math.ceil(bottomGap), behavior });
-        return;
+      const protectedBottom = Math.min(visibleBottom, barTop ?? visibleBottom);
+      const caretBounds = editor.isContentEditable ? getEditorCaretBounds(editor) : null;
+      if (editor.isContentEditable && !caretBounds) return;
+      // FLAG: Reveal the active line in the editor and then in the form. Scrolling to
+      // the bottom of the editor on input hides upper lines when the keyboard is open.
+      if (caretBounds && editor.scrollHeight > editor.clientHeight) {
+        const bounds = editor.getBoundingClientRect();
+        revealLine(editor, caretBounds(), bounds.top + 4, bounds.bottom - 4);
       }
-
-      const topGap = visibleTop + 10 - targetRect.top;
-      if (topGap > 1) {
-        viewport.scrollBy({ top: -Math.ceil(topGap), behavior });
-      }
+      revealLine(
+        viewport,
+        caretBounds?.() ?? editor.getBoundingClientRect(),
+        visibleTop + 6,
+        protectedBottom - 6,
+      );
     };
 
-    const scheduleKeepVisible = (behavior: ScrollBehavior = 'auto') => {
+    const scheduleKeepVisible = () => {
       window.cancelAnimationFrame(frameId);
-      frameId = window.requestAnimationFrame(() => keepFocusedEditorVisible(behavior));
+      frameId = window.requestAnimationFrame(keepFocusedEditorVisible);
     };
 
     const scheduleSettlingPasses = () => {
-      scheduleKeepVisible('smooth');
+      scheduleKeepVisible();
       for (const delay of [80, 180, 320]) {
         const timerId = window.setTimeout(() => {
           timers.delete(timerId);
-          scheduleKeepVisible('auto');
+          scheduleKeepVisible();
         }, delay);
         timers.add(timerId);
       }
@@ -632,17 +637,17 @@ export function ChannelSuggestDialogPage({
       setEditorFocused(false);
     };
 
-    const handleViewportChange = () => {
-      syncKeyboardReserve();
-      scheduleKeepVisible('auto');
+    const handleEditingUpdate = () => {
+      if (isEditorFocused) scheduleKeepVisible();
     };
 
     composer.addEventListener('focusin', handleFocusIn);
     composer.addEventListener('focusout', handleFocusOut);
-    composer.addEventListener('input', handleViewportChange);
-    window.addEventListener('resize', handleViewportChange, { passive: true });
-    window.visualViewport?.addEventListener('resize', handleViewportChange);
-    window.visualViewport?.addEventListener('scroll', handleViewportChange);
+    composer.addEventListener('input', handleEditingUpdate);
+    document.addEventListener('selectionchange', handleEditingUpdate);
+    window.addEventListener('resize', handleEditingUpdate, { passive: true });
+    window.visualViewport?.addEventListener('resize', handleEditingUpdate);
+    window.visualViewport?.addEventListener('scroll', handleEditingUpdate);
 
     if (isSuggestEditorTarget(document.activeElement)) {
       setEditorFocused(true);
@@ -659,10 +664,11 @@ export function ChannelSuggestDialogPage({
       }
       composer.removeEventListener('focusin', handleFocusIn);
       composer.removeEventListener('focusout', handleFocusOut);
-      composer.removeEventListener('input', handleViewportChange);
-      window.removeEventListener('resize', handleViewportChange);
-      window.visualViewport?.removeEventListener('resize', handleViewportChange);
-      window.visualViewport?.removeEventListener('scroll', handleViewportChange);
+      composer.removeEventListener('input', handleEditingUpdate);
+      document.removeEventListener('selectionchange', handleEditingUpdate);
+      window.removeEventListener('resize', handleEditingUpdate);
+      window.visualViewport?.removeEventListener('resize', handleEditingUpdate);
+      window.visualViewport?.removeEventListener('scroll', handleEditingUpdate);
     };
   }, [dialogQuery.isSuccess]);
 
@@ -1805,6 +1811,7 @@ export function ChannelSuggestDialogPage({
                           onNormalizationReadyChange={setEditorReady}
                           onActiveToolsChange={setActiveTools}
                           ariaLabel="Текст объявления"
+                          manageCaretVisibility={false}
                           className="channel-suggest-composer__rich-editor"
                           onPasteFiles={canUploadImages ? prepareDraftImagesFromFiles : undefined}
                         />

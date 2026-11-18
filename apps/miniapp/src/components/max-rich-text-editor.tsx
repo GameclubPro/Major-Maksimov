@@ -48,6 +48,7 @@ export type MaxRichTextEditorProps = {
   onNormalizationReadyChange?: (ready: boolean) => void;
   onActiveToolsChange?: (tools: ReadonlySet<MaxMarkdownTool>) => void;
   viewportBottomInset?: number;
+  manageCaretVisibility?: boolean;
 };
 
 const LINK_PLACEHOLDER_URL = 'https://max.ru/';
@@ -88,11 +89,12 @@ export const MaxRichTextEditor = forwardRef<MaxRichTextEditorHandle, MaxRichText
       onNormalizationReadyChange,
       onActiveToolsChange,
       viewportBottomInset = 0,
+      manageCaretVisibility = true,
     },
     ref,
   ) {
     const editorRef = useRef<HTMLDivElement | null>(null);
-    useVisibleEditorCaret(editorRef, viewportBottomInset);
+    useVisibleEditorCaret(editorRef, viewportBottomInset, manageCaretVisibility);
     const savedRangeRef = useRef<Range | null>(null);
     const editingLinkRef = useRef<HTMLAnchorElement | null>(null);
     const lastEmittedMarkdownRef = useRef(value);
