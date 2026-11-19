@@ -601,6 +601,28 @@ export type SafetyDeskGiveawayWinnerNotificationDeadEndItem = z.infer<
   typeof safetyDeskGiveawayWinnerNotificationDeadEndItemSchema
 >;
 
+export const safetyDeskGiveawayNotificationLookupSchema = z.object({
+  item: safetyDeskGiveawayWinnerNotificationDeadEndItemSchema.nullable(),
+});
+
+const safetyDeskGiveawayPendingResultsSchema = z.object({
+  hasMore: z.boolean(),
+  items: z
+    .array(
+      z.object({
+        giveawayId: z.string(),
+        title: z.string(),
+        sourceChatId: z.string(),
+        status: z.enum(['DUE', 'PROCESSING', 'WAITING']),
+        nextAttemptAt: z.string().datetime(),
+        overdueMs: z.number().int().nonnegative(),
+        attempts: z.number().int().nonnegative(),
+        claimDeadlineAt: z.string().datetime().nullable(),
+      }),
+    )
+    .max(50),
+});
+
 const safetyDeskDeleteRuntimeWindowSchema = z.object({
   count: z.number().int().nonnegative(),
   oldestAt: z.string().datetime().nullable(),
@@ -631,6 +653,7 @@ export const safetyDeskDeleteRuntimeResponseSchema = z.object({
   }),
   items: z.array(safetyDeskDeleteIntentItemSchema).default([]),
   ambiguousSends: z.array(safetyDeskAmbiguousSendItemSchema).default([]),
+  giveawayPendingResults: safetyDeskGiveawayPendingResultsSchema.optional(),
   giveawayWinnerNotificationDeadEnds: z
     .array(safetyDeskGiveawayWinnerNotificationDeadEndItemSchema)
     .max(50)

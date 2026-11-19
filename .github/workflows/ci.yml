@@ -406,6 +406,9 @@ jobs:
       - name: Required subscription drafts and response races
         if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-required-subscription.browser.mjs
+      - name: Giveaway participation, claim recovery and organizer drafts
+        if: matrix.shard == '2/4'
+        run: node apps/miniapp/scripts/check-giveaway-browser.mjs
       - name: Settings draft saves and response races
         if: matrix.shard == '2/4'
         run: node apps/miniapp/test/settings-draft.browser.mjs

@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { safetyDeskApiClient } from './safety-desk-api-client';
 import {
   type SafetyDeskDeleteIntentItem,
   type SafetyDeskDeleteIntentStatus,
@@ -8,7 +10,6 @@ import { Refresh, Search } from 'iconoir-react';
 import { DeleteEvidence } from './delete-evidence';
 import {
   giveawayWinnerNotificationEventAt,
-  giveawayWinnerNotificationStatusLabel,
   matchesGiveawayWinnerNotificationQuery,
 } from './giveaway-notification-observability';
 import {
@@ -24,54 +25,42 @@ import {
   formatDuration,
   type DeleteFilter,
 } from './safety-desk-model';
-import { InfoCell, Metric } from './safety-desk-ui';
+import { DiagnosticTimeline, InfoCell, Metric } from './safety-desk-ui';
 
 export function DeleteRuntimeMetrics({
   runtime,
 }: {
   runtime: SafetyDeskDeleteRuntimeResponse | null;
 }) {
-  return (
-    <>
-      <Metric
-        label="Режим"
-        value={deleteRolloutModeLabel(runtime?.rolloutMode ?? 'off')}
-        tone="neutral"
-      />
-      <Metric
-        label="Cleanup"
-        value={runtime?.replacementCleanupEnabled ? 'Вкл' : 'Выкл'}
-        tone={runtime?.replacementCleanupEnabled ? 'success' : 'neutral'}
-      />
-      <Metric label="Открыто" value={String(runtime?.summary.open ?? 0)} tone="warning" />
-      <Metric label="Просрочено" value={String(runtime?.summary.due.count ?? 0)} tone="danger" />
-      <Metric
-        label="Зависло"
-        value={String(runtime?.summary.staleLeases.count ?? 0)}
-        tone="danger"
-      />
-      <Metric
-        label="Неясные отправки"
-        value={String(runtime?.summary.ambiguousSends.count ?? 0)}
-        tone="danger"
-      />
-      <Metric
-        label="DM победителям"
-        value={String(runtime?.summary.giveawayWinnerNotificationDeadEnds.count ?? 0)}
-        tone="danger"
-      />
-      <Metric label="Ошибки" value={String(runtime?.summary.failed ?? 0)} tone="danger" />
-      <Metric
-        label="Старейшее"
-        value={
-          runtime?.summary.oldestOpen.ageMs == null
-            ? 'Нет'
-            : formatDuration(runtime.summary.oldestOpen.ageMs)
-        }
-        tone="neutral"
-      />
-    </>
-  );
+  const summary = runtime?.summary;
+  const pendingResults = runtime?.giveawayPendingResults;
+  const metrics = [
+    ['Режим', deleteRolloutModeLabel(runtime?.rolloutMode ?? 'off'), 'neutral'],
+    [
+      'Cleanup',
+      runtime?.replacementCleanupEnabled ? 'Вкл' : 'Выкл',
+      runtime?.replacementCleanupEnabled ? 'success' : 'neutral',
+    ],
+    ['Открыто', summary?.open ?? 0, 'warning'],
+    ['Просрочено', summary?.due.count ?? 0, 'danger'],
+    ['Зависло', summary?.staleLeases.count ?? 0, 'danger'],
+    ['Неясные отправки', summary?.ambiguousSends.count ?? 0, 'danger'],
+    ['DM победителям', summary?.giveawayWinnerNotificationDeadEnds.count ?? 0, 'danger'],
+    [
+      'Итоги в очереди',
+      pendingResults ? `${pendingResults.items.length}${pendingResults.hasMore ? '+' : ''}` : '—',
+      'warning',
+    ],
+    ['Ошибки', summary?.failed ?? 0, 'danger'],
+    [
+      'Старейшее',
+      summary?.oldestOpen.ageMs == null ? 'Нет' : formatDuration(summary.oldestOpen.ageMs),
+      'neutral',
+    ],
+  ] as const;
+  return metrics.map(([label, value, tone]) => (
+    <Metric key={label} label={label} value={String(value)} tone={tone} />
+  ));
 }
 
 export function DeleteDesk({
@@ -107,6 +96,12 @@ export function DeleteDesk({
     runtime?.giveawayWinnerNotificationDeadEnds ?? []
   ).filter((item) => matchesGiveawayWinnerNotificationQuery(item, query));
 
+  const normalizedQuery = query.trim().toLowerCase();
+  const pendingGiveawayResults = (runtime?.giveawayPendingResults?.items ?? []).filter((item) =>
+    [item.giveawayId, item.sourceChatId, item.title].some((value) =>
+      value.toLowerCase().includes(normalizedQuery),
+    ),
+  );
   return (
     <section className="desk-grid delete-grid">
       <section className="queue-panel" aria-label="Диагностика удалений">
@@ -141,6 +136,45 @@ export function DeleteDesk({
         </div>
 
         <div className="queue-list">
+          {runtime?.giveawayPendingResults && runtime.giveawayPendingResults.items.length > 0 && (
+            <section className="ambiguous-send-strip" aria-label="Публикация итогов розыгрышей">
+              <header>
+                <strong>Публикация итогов</strong>
+                <span>
+                  {runtime.giveawayPendingResults.hasMore
+                    ? 'Первые 50 по сроку'
+                    : runtime.giveawayPendingResults.items.length}
+                </span>
+              </header>
+              {pendingGiveawayResults.map((item) => (
+                <article key={item.giveawayId} className="ambiguous-send-row">
+                  <span>
+                    <strong>{item.title}</strong>
+                    <small>
+                      Розыгрыш {item.giveawayId} · чат {item.sourceChatId}
+                    </small>
+                    {item.claimDeadlineAt && (
+                      <small>
+                        Ближайший срок подтверждения{' '}
+                        {formatDateTime(new Date(item.claimDeadlineAt))}
+                      </small>
+                    )}
+                  </span>
+                  <span>
+                    {item.status === 'PROCESSING'
+                      ? 'В обработке'
+                      : item.status === 'DUE'
+                        ? `Задержка ${formatDuration(item.overdueMs)}`
+                        : 'Ожидает попытки'}
+                    <small>
+                      {formatDateTime(new Date(item.nextAttemptAt))} · попыток {item.attempts}
+                    </small>
+                  </span>
+                </article>
+              ))}
+              {!pendingGiveawayResults.length && <p>В показанных итогах совпадений нет.</p>}
+            </section>
+          )}
           {runtime && runtime.summary.giveawayWinnerNotificationDeadEnds.count > 0 && (
             <section
               className="ambiguous-send-strip giveaway-notification-strip"
@@ -148,39 +182,24 @@ export function DeleteDesk({
             >
               <header>
                 <strong>Уведомления победителям</strong>
-                <span>{runtime.summary.giveawayWinnerNotificationDeadEnds.count}</span>
+                <span>
+                  {runtime.giveawayWinnerNotificationDeadEnds.length} из{' '}
+                  {runtime.summary.giveawayWinnerNotificationDeadEnds.count}
+                </span>
               </header>
               <div>
                 {giveawayWinnerNotificationDeadEnds.map((item) => (
-                  <article
-                    className="ambiguous-send-row giveaway-notification-row"
-                    key={item.notificationId}
-                    title={item.lastError ?? undefined}
-                  >
-                    <span className="risk-dot is-high" />
-                    <span>
-                      <strong>{item.giveawayTitle || item.giveawayId}</strong>
-                      <small>
-                        Чат {item.sourceChatId} · пользователь {item.userId}
-                      </small>
-                      <small>
-                        notification {item.notificationId} · winner {item.winnerId}
-                      </small>
-                      <small>{item.lastError || 'Ошибка не зафиксирована'}</small>
-                    </span>
-                    <span className="giveaway-notification-row__meta">
-                      <GiveawayWinnerNotificationStatusBadge status={item.status} />
-                      <code>{item.botId || 'bot неизвестен'}</code>
-                      <small>
-                        попыток {item.attemptCount} ·{' '}
-                        {formatDateTime(new Date(giveawayWinnerNotificationEventAt(item)))}
-                      </small>
-                    </span>
-                  </article>
+                  <GiveawayNotificationRow key={item.notificationId} item={item} />
                 ))}
                 {giveawayWinnerNotificationDeadEnds.length === 0 && (
-                  <div className="delete-empty-line">Под строку поиска уведомлений нет.</div>
+                  <div className="delete-empty-line">В показанных уведомлениях совпадений нет.</div>
                 )}
+                {!giveawayWinnerNotificationDeadEnds.some(
+                  (item) => item.notificationId === query.trim(),
+                ) &&
+                  /^[a-zA-Z0-9_-]{1,128}$/u.test(query.trim()) && (
+                    <GiveawayNotificationLookup key={query.trim()} id={query.trim()} />
+                  )}
               </div>
             </section>
           )}
@@ -292,19 +311,20 @@ function DeleteDetails({
       </header>
 
       <div className="review-meta delete-meta">
-        <InfoCell label="Чат" value={item.chatId} />
-        <InfoCell label="Сообщение" value={item.messageId} />
-        <InfoCell label="Возраст" value={formatDuration(item.ageMs)} />
-        <InfoCell label="Попытки" value={String(item.attemptCount)} />
-        <InfoCell label="Тип" value={item.entityType ?? 'Не определен'} />
-        <InfoCell label="Маршрут" value={item.routingState} />
-        <InfoCell
-          label="Эффективная политика"
-          value={deleteRoutingPolicyLabel(item.effectiveRoutingPolicy)}
-        />
-        <InfoCell label="Заданная политика" value={deleteRoutingPolicyLabel(item.routingPolicy)} />
-        <InfoCell label="Cross-bot" value={item.crossBotEnabled ? 'Разрешён' : 'Выключен'} />
-        <InfoCell label="Исходный бот" value={item.originBotId || 'Не указан'} />
+        {[
+          ['Чат', item.chatId],
+          ['Сообщение', item.messageId],
+          ['Возраст', formatDuration(item.ageMs)],
+          ['Попытки', String(item.attemptCount)],
+          ['Тип', item.entityType ?? 'Не определен'],
+          ['Маршрут', item.routingState],
+          ['Эффективная политика', deleteRoutingPolicyLabel(item.effectiveRoutingPolicy)],
+          ['Заданная политика', deleteRoutingPolicyLabel(item.routingPolicy)],
+          ['Cross-bot', item.crossBotEnabled ? 'Разрешён' : 'Выключен'],
+          ['Исходный бот', item.originBotId || 'Не указан'],
+        ].map(([label, value]) => (
+          <InfoCell key={label} label={label} value={value} />
+        ))}
       </div>
 
       <div className="delete-detail-scroll">
@@ -379,54 +399,36 @@ function DeleteDetails({
           <div className="delete-section__head">
             <h3>Временная шкала</h3>
           </div>
-          <dl className="delete-timeline">
-            <div>
-              <dt>Создано</dt>
-              <dd>{formatDateTime(new Date(item.createdAt))}</dd>
-            </div>
-            <div>
-              <dt>Следующая попытка</dt>
-              <dd>{formatDateTime(new Date(item.nextAttemptAt))}</dd>
-            </div>
-            <div>
-              <dt>Повторять до</dt>
-              <dd>{formatDateTime(new Date(item.retryUntilAt))}</dd>
-            </div>
-            <div>
-              <dt>Последняя попытка</dt>
-              <dd>
-                {item.lastAttemptAt ? formatDateTime(new Date(item.lastAttemptAt)) : 'Еще не было'}
-              </dd>
-            </div>
-            <div>
-              <dt>Lease до</dt>
-              <dd>
-                {item.leaseExpiresAt
+          <DiagnosticTimeline
+            rows={[
+              ['Создано', formatDateTime(new Date(item.createdAt))],
+              ['Следующая попытка', formatDateTime(new Date(item.nextAttemptAt))],
+              ['Повторять до', formatDateTime(new Date(item.retryUntilAt))],
+              [
+                'Последняя попытка',
+                item.lastAttemptAt ? formatDateTime(new Date(item.lastAttemptAt)) : 'Еще не было',
+              ],
+              [
+                'Lease до',
+                item.leaseExpiresAt
                   ? formatDateTime(new Date(item.leaseExpiresAt))
-                  : 'Нет активного lease'}
-              </dd>
-            </div>
-            <div>
-              <dt>Незакрытый dispatch</dt>
-              <dd>
-                {item.deleteDispatchStartedAt
+                  : 'Нет активного lease',
+              ],
+              [
+                'Незакрытый dispatch',
+                item.deleteDispatchStartedAt
                   ? `${formatDateTime(new Date(item.deleteDispatchStartedAt))} · ${item.deleteDispatchStartedBotId || 'бот неизвестен'}`
-                  : 'Нет'}
-              </dd>
-            </div>
-            <div>
-              <dt>Подтверждение MAX</dt>
-              <dd>
-                {item.remoteDeleteSucceededAt
+                  : 'Нет',
+              ],
+              [
+                'Подтверждение MAX',
+                item.remoteDeleteSucceededAt
                   ? `${formatDateTime(new Date(item.remoteDeleteSucceededAt))} · ${item.remoteDeleteSucceededBotId || 'бот неизвестен'}`
-                  : 'Не зафиксировано'}
-              </dd>
-            </div>
-            <div>
-              <dt>Последний бот</dt>
-              <dd>{item.lastBotId || 'Не выбран'}</dd>
-            </div>
-          </dl>
+                  : 'Не зафиксировано',
+              ],
+              ['Последний бот', item.lastBotId || 'Не выбран'],
+            ]}
+          />
         </section>
       </div>
       {terminal && (
@@ -475,15 +477,66 @@ function DeleteStatusBadge({ status }: { status: SafetyDeskDeleteIntentStatus })
   return <span className={`status-badge is-delete-${statusClass}`}>{labels[status]}</span>;
 }
 
-function GiveawayWinnerNotificationStatusBadge({
-  status,
+function GiveawayNotificationRow({
+  item,
 }: {
-  status: SafetyDeskGiveawayWinnerNotificationDeadEndItem['status'];
+  item: SafetyDeskGiveawayWinnerNotificationDeadEndItem;
 }) {
-  const statusClass = status.toLowerCase().replaceAll('_', '-');
   return (
-    <span className={`status-badge is-delete-${statusClass}`}>
-      {giveawayWinnerNotificationStatusLabel(status)}
-    </span>
+    <article
+      className="ambiguous-send-row giveaway-notification-row"
+      key={item.notificationId}
+      title={item.lastError ?? undefined}
+    >
+      <span className="risk-dot is-high" />
+      <span>
+        <strong>{item.giveawayTitle || item.giveawayId}</strong>
+        <small>
+          Чат {item.sourceChatId} · пользователь {item.userId}
+        </small>
+        <small>
+          notification {item.notificationId} · winner {item.winnerId}
+        </small>
+        <small>{item.lastError || 'Ошибка не зафиксирована'}</small>
+      </span>
+      <span className="giveaway-notification-row__meta">
+        <DeleteStatusBadge status={item.status} />
+        <code>{item.botId || 'bot неизвестен'}</code>
+        <small>
+          попыток {item.attemptCount} ·{' '}
+          {formatDateTime(new Date(giveawayWinnerNotificationEventAt(item)))}
+        </small>
+      </span>
+    </article>
+  );
+}
+
+function GiveawayNotificationLookup({ id }: { id: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'missing' | 'error'>('idle');
+  const [item, setItem] = useState<SafetyDeskGiveawayWinnerNotificationDeadEndItem | null>(null);
+  async function lookup() {
+    setState('loading');
+    try {
+      const result = await safetyDeskApiClient.fetchGiveawayNotificationDeadEnd(id);
+      setItem(result.item);
+      setState(result.item ? 'idle' : 'missing');
+    } catch {
+      setState('error');
+    }
+  }
+  if (item) return <GiveawayNotificationRow item={item} />;
+  return (
+    <div>
+      <button
+        className="ghost-action"
+        type="button"
+        disabled={state === 'loading'}
+        onClick={() => void lookup()}
+      >
+        Найти по точному ID уведомления
+      </button>
+      {state === 'missing' && <small role="status">Сбоя с таким ID нет.</small>}
+      {state === 'error' && <small role="alert">Не удалось проверить уведомление.</small>}
+    </div>
   );
 }

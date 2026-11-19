@@ -114,7 +114,10 @@ native('managed giveaway winner deadlines on PostgreSQL', () => {
     const max: jest.Mocked<
       Pick<
         MaxClientService,
-        'hasChatMember' | 'editMessageInlineKeyboard' | 'sendMessageImmediateWithResolvedLink'
+        | 'hasChatMember'
+        | 'editMessageInlineKeyboard'
+        | 'sendMessageImmediateWithResolvedLink'
+        | 'sendMessageImmediateToUser'
       >
     > = {
       hasChatMember: jest.fn().mockImplementation(async () => {
@@ -122,6 +125,7 @@ native('managed giveaway winner deadlines on PostgreSQL', () => {
         return true;
       }),
       editMessageInlineKeyboard: jest.fn().mockImplementation(assertOutsideTransaction),
+      sendMessageImmediateToUser: jest.fn(),
       sendMessageImmediateWithResolvedLink: jest.fn().mockImplementation(async () => {
         await assertOutsideTransaction();
         return { messageId: 'unexpected-new-send', url: null };
@@ -233,6 +237,59 @@ native('managed giveaway winner deadlines on PostgreSQL', () => {
     expect(f.max.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
   }
 
+  it('cancels a winner DM when its exact notification lock lasts past the claim deadline', async () => {
+    const f = await fixture();
+    await db.managedGiveawayResultsSync.create({ data: { giveawayId: f.giveaway.id } });
+    const notification = await db.managedGiveawayWinnerNotification.create({
+      data: { winnerId: f.winner.id },
+    });
+    let observedWait = false;
+    const outbound = jest.fn();
+    f.max.sendMessageImmediateToUser.mockImplementation(async (_userId, _text, options) => {
+      if (!options?.beforeSend) throw new Error('Final giveaway DM guard is missing');
+      await assertOutsideTransaction();
+      const blocker = await pool.connect();
+      let authorization: Promise<Outcome> | undefined;
+      try {
+        await blocker.query('BEGIN');
+        await blocker.query(
+          'SELECT id FROM managed_giveaway_winner_notifications WHERE id = $1 FOR UPDATE',
+          [notification.id],
+        );
+        const pid = (await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid'))
+          .rows[0]!.pid;
+        const deadline = new Date(Date.now() + 900);
+        await db.managedGiveawayWinner.update({
+          where: { id: f.winner.id },
+          data: { claimDeadlineAt: deadline },
+        });
+        authorization = options.beforeSend().then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        );
+        await waitForBlockedWriter(pid);
+        observedWait = true;
+        await waitForDeadline(deadline);
+      } finally {
+        await blocker.query('ROLLBACK');
+        blocker.release();
+      }
+      const authorized = await authorization!;
+      if ('error' in authorized) throw authorized.error;
+      outbound();
+      return { messageId: 'should-not-have-been-sent', url: null };
+    });
+
+    await f.service['processWinnerNotificationOutbox']('runner', f.giveaway.id);
+    expect(observedWait).toBe(true);
+    expect(outbound).not.toHaveBeenCalled();
+    expect(
+      await db.managedGiveawayWinnerNotification.findUniqueOrThrow({
+        where: { id: notification.id },
+      }),
+    ).toMatchObject({ status: 'CANCELED', dispatchedAt: null, remoteMessageId: null });
+  });
+
   it.each(['claim', 'delivery'] as const)(
     'rejects %s when the deadline elapses during the winner row lock wait',
     async (action) => {
@@ -284,6 +341,48 @@ native('managed giveaway winner deadlines on PostgreSQL', () => {
     },
   );
 
+  it('cannot finish a draw after reloading a successor’s PostgreSQL lease', async () => {
+    const f = await fixture();
+    await db.managedGiveawayWinner.delete({ where: { id: f.winner.id } });
+    await db.managedGiveaway.update({
+      where: { id: f.giveaway.id },
+      data: { status: 'ACTIVE', completedAt: null, resultsMessageId: null },
+    });
+    type Draw = {
+      findGiveawayById(id: string): Promise<unknown>;
+      drawGiveaway(id: string, source: 'runner'): Promise<unknown>;
+    };
+    const draw = f.service as unknown as Draw;
+    const findGiveaway = draw.findGiveawayById.bind(draw);
+    let successorLease: Date | undefined;
+    jest
+      .spyOn(draw, 'findGiveawayById')
+      .mockImplementationOnce(findGiveaway)
+      .mockImplementationOnce(async (id) => {
+        // A second connection acquires the row after aging the first lease.
+        const read = await pool.query<{ locked_at: Date }>(
+          "SELECT locked_at FROM managed_giveaways WHERE id = $1 AND status = 'DRAWING'",
+          [id],
+        );
+        const owned = read.rows[0]!.locked_at;
+        successorLease = new Date(owned.getTime() + 61_000);
+        const takeover = await pool.query(
+          "UPDATE managed_giveaways SET locked_at = $2 WHERE id = $1 AND status = 'DRAWING' AND locked_at < $3",
+          [id, successorLease, new Date(successorLease.getTime() - 60_000)],
+        );
+        expect(takeover.rowCount).toBe(1);
+        return findGiveaway(id);
+      });
+    await expect(draw.drawGiveaway(f.giveaway.id, 'runner')).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(
+      await db.managedGiveaway.findUniqueOrThrow({ where: { id: f.giveaway.id } }),
+    ).toMatchObject({ lockedAt: successorLease, status: 'DRAWING' });
+    expect(await db.managedGiveawayWinner.count({ where: { giveawayId: f.giveaway.id } })).toBe(0);
+    expect(f.max.hasChatMember).not.toHaveBeenCalled();
+  });
+
   it('claims before the deadline and preserves the already-CLAIMED response after expiry', async () => {
     const f = await fixture();
     await expect(f.service.claimGiveaway(f.giveaway.id, user)).resolves.toMatchObject({
@@ -296,7 +395,7 @@ native('managed giveaway winner deadlines on PostgreSQL', () => {
       winner: { status: 'CLAIMED' },
     });
     expect(f.max.hasChatMember).toHaveBeenCalledTimes(1);
-    expect(f.max.editMessageInlineKeyboard).toHaveBeenCalledTimes(1);
+    expect(f.max.editMessageInlineKeyboard).not.toHaveBeenCalled();
     expect(await db.auditLog.count({ where: { chatId: f.chatId } })).toBe(1);
   });
 

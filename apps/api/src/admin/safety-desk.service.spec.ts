@@ -232,7 +232,9 @@ function createFixture() {
       findUnique: jest.fn(),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
+    managedGiveawayResultsSync: { findMany: jest.fn().mockResolvedValue([]) },
     managedGiveawayWinnerNotification: {
+      findUnique: jest.fn().mockResolvedValue(null),
       groupBy: jest.fn().mockResolvedValue([]),
       findMany: jest.fn().mockResolvedValue([]),
     },
@@ -397,7 +399,26 @@ describe('SafetyDeskService', () => {
       }),
     ]);
 
+    const overdueAt = new Date(Date.now() - 60_000);
+    const nextAt = new Date(Date.now() + 60_000);
+    prisma.managedGiveawayResultsSync.findMany.mockResolvedValue(
+      Array.from({ length: 51 }, (_, index) => ({
+        giveawayId: `giveaway-${index}`,
+        attempts: 2,
+        nextAttemptAt: index === 0 ? overdueAt : nextAt,
+        leaseUntil: index === 1 ? nextAt : null,
+        giveaway: { title: 'Итоги', sourceChatId: 'chat-1', winners: [] },
+      })),
+    );
     const runtime = await service.getDeleteRuntime();
+    expect(runtime.giveawayPendingResults?.hasMore).toBe(true);
+    expect(runtime.giveawayPendingResults?.items).toHaveLength(50);
+    expect(runtime.giveawayPendingResults?.items.slice(0, 3).map((row) => row.status)).toEqual([
+      'DUE',
+      'PROCESSING',
+      'WAITING',
+    ]);
+    expect(runtime.giveawayPendingResults?.items[0]?.overdueMs).toBeGreaterThanOrEqual(60_000);
 
     expect(runtime).toMatchObject({
       rolloutMode: 'canary',
@@ -484,6 +505,20 @@ describe('SafetyDeskService', () => {
         attemptCount: 2,
       }),
     ]);
+    prisma.managedGiveawayWinnerNotification.findUnique.mockResolvedValueOnce(
+      createGiveawayWinnerNotificationDeadEnd({
+        id: 'older-than-page',
+        lastError: 'secret_token=private',
+      }),
+    );
+    const lookup = await service.getGiveawayNotificationDeadEnd('older-than-page');
+    expect(lookup.item?.notificationId).toBe('older-than-page');
+    expect(prisma.managedGiveawayWinnerNotification.findUnique.mock.calls[0]?.[0]).toMatchObject({
+      where: { id: 'older-than-page', status: { in: ['AMBIGUOUS', 'FAILED_TERMINAL'] } },
+    });
+    await expect(service.getGiveawayNotificationDeadEnd('does-not-exist')).resolves.toEqual({
+      item: null,
+    });
     expect(runtime.giveawayWinnerNotificationDeadEnds[0]?.lastError).toContain('[redacted]');
     expect(runtime.giveawayWinnerNotificationDeadEnds[0]?.lastError).not.toContain('winner-secret');
     expect(runtime.giveawayWinnerNotificationDeadEnds[0]?.lastError).not.toContain('query-secret');

@@ -776,6 +776,38 @@ describe('MaxMembershipLookupService', () => {
     expect(maxClient.hasChatMember).not.toHaveBeenCalled();
   });
 
+  it('keeps a fresh giveaway decision independent of an outstanding cacheable probe', async () => {
+    const cachedReadStarted = createDeferred<void>();
+    const finishCachedRead =
+      createDeferred<Awaited<ReturnType<MaxClientService['getChatMembersAccess']>>>();
+    const getChatMembersAccess = jest.fn<
+      ReturnType<MaxClientService['getChatMembersAccess']>,
+      Parameters<MaxClientService['getChatMembersAccess']>
+    >(async (_chatId, _ids, options) => {
+      if (options?.bypassCache) return new Map();
+      cachedReadStarted.resolve();
+      return finishCachedRead.promise;
+    });
+    const lookup = new MaxMembershipLookupService(
+      { getChatMembersAccess } as unknown as MaxClientService,
+      createConfigMock() as never,
+    );
+    const policy = 'giveaway_interactive';
+    const options = { allowStaleOnError: false, botId: 'bot-1' };
+    const cached = lookup.getMembership('fresh-chat', '21', policy, options);
+    await cachedReadStarted.promise;
+    const fresh = lookup.getMembership('fresh-chat', '21', policy, {
+      ...options,
+      forceRefresh: true,
+    });
+    finishCachedRead.resolve(
+      new Map([['21', { userId: '21', isAdmin: false, isOwner: false, permissions: [] }]]),
+    );
+    await expect(Promise.all([cached, fresh])).resolves.toEqual([true, false]);
+    expect(getChatMembersAccess).toHaveBeenCalledTimes(2);
+    await lookup.onModuleDestroy();
+  });
+
   it('reports whether membership resolutions are fresh or stale fallbacks', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-29T10:07:00.000Z'));
 

@@ -94,6 +94,11 @@ export class SafetyDeskController {
     return this.safetyDeskService.getDeleteRuntime();
   }
 
+  @Get('runtime/giveaway-notifications/:id')
+  getGiveawayNotificationDeadEnd(@Param('id') id: string) {
+    return this.safetyDeskService.getGiveawayNotificationDeadEnd(id);
+  }
+
   @Get('runtime/night-mode-transitions')
   getNightModeTransitionRuntime(@Query('offset') offset: string | undefined) {
     return this.safetyDeskService.getNightModeTransitionRuntime(offset);

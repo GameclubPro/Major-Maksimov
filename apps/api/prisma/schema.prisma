@@ -4017,6 +4017,7 @@ model ManagedGiveaway {
   endsAt               DateTime              @map("ends_at")
   claimHours           Int                   @default(24) @map("claim_hours")
   requiredChannelIds   Json                  @default("[]") @map("required_channel_ids")
+  draftRevision        Int                   @default(1) @map("draft_revision")
   status               ManagedGiveawayStatus @default(DRAFT)
   publicationMessageId String?               @map("publication_message_id")
   publicationBotId     String?               @map("publication_bot_id")
@@ -4029,6 +4030,7 @@ model ManagedGiveaway {
   drawnAt              DateTime?             @map("drawn_at")
   completedAt          DateTime?             @map("completed_at")
   canceledAt           DateTime?             @map("canceled_at")
+  archivedAt           DateTime?             @map("archived_at")
   lockedAt             DateTime?             @map("locked_at")
   sendLockKey          String?               @map("send_lock_key")
   createdAt            DateTime              @default(now()) @map("created_at")
@@ -4038,6 +4040,7 @@ model ManagedGiveaway {
   prizes  ManagedGiveawayPrize[]
   entries ManagedGiveawayEntry[]
   winners ManagedGiveawayWinner[]
+  resultsSync ManagedGiveawayResultsSync?
 
   @@index([sourceChatId, status, createdAt], map: "managed_giveaways_source_chat_id_status_created_at_idx")
   @@index([sourceChatId, id], map: "managed_giveaways_eraser_bootstrap_idx")
@@ -4049,6 +4052,20 @@ model ManagedGiveaway {
   @@index([sourceChatId, publicationMessageId], map: "managed_giveaways_chat_publication_message_idx")
   @@index([sourceChatId, resultsMessageId], map: "managed_giveaways_chat_results_message_idx")
   @@map("managed_giveaways")
+}
+
+model ManagedGiveawayResultsSync {
+  giveawayId    String    @id @map("giveaway_id")
+  revision      Int       @default(1)
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  leaseToken    String?   @map("lease_token")
+  leaseUntil    DateTime? @map("lease_until")
+  attempts      Int       @default(0)
+
+  giveaway ManagedGiveaway @relation(fields: [giveawayId], references: [id], onDelete: Cascade)
+
+  @@index([nextAttemptAt, giveawayId], map: "managed_giveaway_results_sync_due_idx")
+  @@map("managed_giveaway_results_sync")
 }
 
 model ManagedGiveawayPrize {

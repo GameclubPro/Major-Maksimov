@@ -9,6 +9,7 @@ import {
   type ManagedGiveawayPublic,
   type ManagedGiveawaySummary,
 } from '@maxim/contracts';
+import { ApiRequestError } from '../api-request-error';
 import { PREVIEW_CHANNEL_ID, PREVIEW_CHANNEL_TITLE } from '../design-preview';
 import type { PreviewState } from './preview-transport-state';
 import {
@@ -31,6 +32,34 @@ export const PREVIEW_GIVEAWAY_RUNTIME_STATE_KEY = 'maxim.preview.giveaway.runtim
 
 function createBroadcastHandoffResponse() {
   return { botUrl: 'https://max.ru/maxim-bot' };
+}
+
+function previewGiveawayDetails(
+  state: PreviewState,
+  details: ManagedGiveawayDetails,
+): ManagedGiveawayDetails {
+  const channels = new Map(state.channels.map((channel) => [channel.id, channel]));
+  const saved = new Map(details.requiredChannels?.map((channel) => [channel.id, channel]));
+  return cloneJson({
+    ...details,
+    requiredChannels: details.requiredChannelIds.map((id) => {
+      const channel = channels.get(id) ?? saved.get(id);
+      return { id, title: channel?.title || 'Канал из условий', link: channel?.link ?? null };
+    }),
+  });
+}
+
+function assertPreviewDraftRevision(
+  details: ManagedGiveawayDetails,
+  payload: Record<string, unknown> | null,
+) {
+  if (
+    details.status !== 'DRAFT' ||
+    !details.draftRevision ||
+    payload?.expectedRevision !== details.draftRevision
+  ) {
+    throw new ApiRequestError(409, '', 'Черновик изменился. Проверьте сохранённую версию.');
+  }
 }
 
 export function buildGiveawaySummary(details: ManagedGiveawayDetails): ManagedGiveawaySummary {
@@ -331,6 +360,7 @@ export function createDraftGiveaway(
 
   return managedGiveawayDetailsSchema.parse({
     id: `giveaway-${entityType}-${now.getTime()}`,
+    draftRevision: 1,
     title: entityType === 'chat' ? 'Новый розыгрыш в чате' : 'Новый розыгрыш в канале',
     status: 'DRAFT',
     hasImage: false,
@@ -469,14 +499,16 @@ export function handleChatGiveawayPreviewRequest(
     }
 
     if (method === 'GET') {
-      return cloneJson(details);
+      return previewGiveawayDetails(state, details);
     }
 
     if (method === 'PUT') {
       const payload = parseJsonBody(init) as Record<string, unknown> | null;
+      assertPreviewDraftRevision(details, payload);
       const updated = managedGiveawayDetailsSchema.parse({
         ...details,
         ...(payload ?? {}),
+        draftRevision: (details.draftRevision ?? 1) + 1,
         prizes: normalizePreviewGiveawayPrizes((payload ?? details).prizes),
         sourceChatId: chatId,
         updatedAt: readPreviewClock(state.clock).toISOString(),
@@ -497,6 +529,7 @@ export function handleChatGiveawayPreviewRequest(
       throw new Error(`Preview giveaway not found: ${tail[1]}`);
     }
 
+    assertPreviewDraftRevision(details, parseJsonBody(init) as Record<string, unknown> | null);
     const published = managedGiveawayDetailsSchema.parse({
       ...details,
       status: details.startsAt ? 'SCHEDULED' : 'ACTIVE',
@@ -507,6 +540,17 @@ export function handleChatGiveawayPreviewRequest(
     });
     state.chatGiveaways = upsertGiveaway(state.chatGiveaways, published);
     return cloneJson(published);
+  }
+
+  if (
+    tail[0] === 'giveaways' &&
+    tail[1] &&
+    tail[2] === 'refresh-publication' &&
+    method === 'POST'
+  ) {
+    const details = findGiveaway(state.chatGiveaways, tail[1]);
+    if (!details) throw new Error('Розыгрыш не найден.');
+    return cloneJson(details);
   }
 
   if (tail[0] === 'giveaways' && tail[1] && tail[2] === 'close' && method === 'POST') {
@@ -636,14 +680,16 @@ export function handleChannelGiveawayPreviewRequest(
     }
 
     if (method === 'GET') {
-      return cloneJson(details);
+      return previewGiveawayDetails(state, details);
     }
 
     if (method === 'PUT') {
       const payload = parseJsonBody(init) as Record<string, unknown> | null;
+      assertPreviewDraftRevision(details, payload);
       const updated = managedGiveawayDetailsSchema.parse({
         ...details,
         ...(payload ?? {}),
+        draftRevision: (details.draftRevision ?? 1) + 1,
         prizes: normalizePreviewGiveawayPrizes((payload ?? details).prizes),
         sourceChatId: channelId,
         entityType: 'channel',
@@ -665,6 +711,7 @@ export function handleChannelGiveawayPreviewRequest(
       throw new Error(`Preview giveaway not found: ${tail[1]}`);
     }
 
+    assertPreviewDraftRevision(details, parseJsonBody(init) as Record<string, unknown> | null);
     const published = managedGiveawayDetailsSchema.parse({
       ...details,
       status: details.startsAt ? 'SCHEDULED' : 'ACTIVE',
@@ -675,6 +722,17 @@ export function handleChannelGiveawayPreviewRequest(
     });
     state.channelGiveaways = upsertGiveaway(state.channelGiveaways, published);
     return cloneJson(published);
+  }
+
+  if (
+    tail[0] === 'giveaways' &&
+    tail[1] &&
+    tail[2] === 'refresh-publication' &&
+    method === 'POST'
+  ) {
+    const details = findGiveaway(state.channelGiveaways, tail[1]);
+    if (!details) throw new Error('Розыгрыш не найден.');
+    return cloneJson(details);
   }
 
   if (tail[0] === 'giveaways' && tail[1] && tail[2] === 'close' && method === 'POST') {

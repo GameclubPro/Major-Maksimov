@@ -363,6 +363,7 @@ export function createInitialState(search: string, clock: PreviewClock): Preview
   );
   const chatGiveaways = [
     managedGiveawayDetailsSchema.parse({
+      draftRevision: 1,
       id: 'giveaway-chat-1',
       title: 'Субботний розыгрыш двора',
       status: 'DRAFT',
@@ -524,6 +525,7 @@ export function createInitialState(search: string, clock: PreviewClock): Preview
   }));
   const channelGiveaways = [
     managedGiveawayDetailsSchema.parse({
+      draftRevision: 1,
       id: 'giveaway-channel-1',
       title: 'Розыгрыш мерча',
       status: 'SCHEDULED',

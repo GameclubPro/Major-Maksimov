@@ -546,6 +546,42 @@ component_manifest_matches_runtime() {
   fi
 }
 
+verify_giveaway_writer_rollout() {
+  local target_sha="$1" target_mode baseline_sha baseline_mode image_ref image_id retained_id
+  GIVEAWAY_FIRST_WRITER=0
+  target_mode="$(node infra/scripts/assert-managed-giveaway-source.mjs "$target_sha" --writer-mode)" || return 1
+  [[ "$target_mode" == writer ]] || return 0
+
+  baseline_sha="$(release_field api-shared sourceSha)" || return 1
+  node infra/scripts/assert-managed-giveaway-source.mjs "$baseline_sha" || return 1
+  baseline_mode="$(node infra/scripts/assert-managed-giveaway-source.mjs "$baseline_sha" --writer-mode)" || return 1
+  if [[ "$baseline_mode" == writer ]]; then return 0; fi
+  if [[ "$baseline_mode" != reader ]]; then
+    echo "Deploy the compatible giveaway reader before activating its writer." >&2
+    return 1
+  fi
+  image_ref="$(release_field api-shared imageRef)" || return 1
+  image_id="$(release_field api-shared imageId)" || return 1
+  if [[ "$image_ref" != "maxim-api:${baseline_sha}" || ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    ! retained_id="$(docker image inspect --format '{{.Id}}' "$image_ref")" || [[ "$retained_id" != "$image_id" ]]; then
+    echo "Giveaway writer requires the retained API image recorded for its compatible rollback source." >&2
+    return 1
+  fi
+  # FLAG: A reviewed recovery uses the transition's retained base. Its roles may already be stopped.
+  if [[ -z "$RECOVERY_BASE_MANIFEST" ]] && ! component_manifest_matches_runtime api-shared; then
+    echo "Running API roles do not match the compatible giveaway rollback image." >&2
+    return 1
+  fi
+  GIVEAWAY_FIRST_WRITER=1
+}
+
+quiesce_giveaway_writer_transition() {
+  [[ "$GIVEAWAY_FIRST_WRITER" == 1 ]] || return 0
+  # FLAG: Moderation is already stopped. HTTP and the action timer also own giveaway mutations.
+  docker compose "${COMPOSE_FILES[@]}" stop -t "$MAXIM_WEBHOOK_ROLLOUT_STOP_TIMEOUT_SEC" api-action api-admin || return 1
+  maxim_webhook_rollout_verify_services_stopped COMPOSE_FILES api-action api-admin
+}
+
 impact_plan_selects_component() {
   local component="$1"
   local source_sha
@@ -1740,6 +1776,11 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   maxim_topology_refuse_dirty_api_build_inputs
 fi
 
+GIVEAWAY_FIRST_WRITER=0
+if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
+  verify_giveaway_writer_rollout "$(git rev-parse --verify HEAD)" || exit 1
+fi
+
 TARGET_SHA="$(git rev-parse HEAD)"
 if [[ "$DEPLOY_MODE" != eraser-only ]]; then
   if [[ "$BUILD_API_IMAGE" -eq 1 ]] || contains_service eraser "${SERVICES[@]}"; then
@@ -1858,6 +1899,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   maxim_routing_index_require_release "$TARGET_SHA" COMPOSE_FILES "$ROUTING_INDEX_RELEASE_STATE"
   maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES
   maxim_webhook_quiesce_legacy_ingress_for_multibot_cutover COMPOSE_FILES
+  quiesce_giveaway_writer_transition || exit 1
   # FLAG: The first command-authority migration is an effects cutoff only after every
   # legacy webhook producer and detached moderation handler has stopped.
   if [[ "$ROUTING_INDEX_RELEASE_STATE" == compatible_pending ]]; then

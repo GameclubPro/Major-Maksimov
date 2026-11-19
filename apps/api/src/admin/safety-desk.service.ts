@@ -4,6 +4,7 @@ import {
   safetyDeskDecisionRequestSchema,
   safetyDeskDecisionResponseSchema,
   safetyDeskDeleteRuntimeResponseSchema,
+  safetyDeskGiveawayNotificationLookupSchema,
   safetyDeskRetryDeleteIntentRequestSchema,
   safetyDeskQueueResponseSchema,
   type SafetyDeskAuditEntry,
@@ -401,6 +402,40 @@ export class SafetyDeskService {
     });
   }
 
+  async getGiveawayNotificationDeadEnd(id: string) {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/u.test(id)) {
+      throw new BadRequestException('Некорректный ID уведомления.');
+    }
+    const row = await this.prisma.managedGiveawayWinnerNotification.findUnique({
+      where: { id, status: { in: [...GIVEAWAY_WINNER_NOTIFICATION_DEAD_END_STATUSES] } },
+      select: GIVEAWAY_WINNER_NOTIFICATION_DIAGNOSTIC_SELECT,
+    });
+    return safetyDeskGiveawayNotificationLookupSchema.parse({
+      item: row ? this.mapGiveawayWinnerNotificationDeadEnd(row) : null,
+    });
+  }
+
+  private mapGiveawayWinnerNotificationDeadEnd(row: GiveawayWinnerNotificationDiagnosticRow) {
+    return {
+      notificationId: row.id,
+      giveawayId: row.winner.giveaway.id,
+      giveawayTitle: row.winner.giveaway.title,
+      sourceChatId: row.winner.giveaway.sourceChatId,
+      winnerId: row.winnerId,
+      userId: row.winner.entry.userId,
+      botId: row.botId,
+      status: row.status,
+      attemptCount: row.attemptCount,
+      lastError: this.sanitizeSafetyDeskLastError(row.lastError),
+      nextAttemptAt: row.nextAttemptAt.toISOString(),
+      lockedAt: row.lockedAt?.toISOString() ?? null,
+      dispatchedAt: row.dispatchedAt?.toISOString() ?? null,
+      ambiguousAt: row.ambiguousAt?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  }
+
   async getDeleteRuntime(): Promise<SafetyDeskDeleteRuntimeResponse> {
     const now = new Date();
     const staleSendFenceBefore = new Date(now.getTime() - MAX_SEND_FENCE_STALE_MS);
@@ -434,6 +469,7 @@ export class SafetyDeskService {
       recentRulesAmbiguousSends,
       giveawayWinnerNotificationDeadEndGroups,
       giveawayWinnerNotificationDeadEndRows,
+      pendingGiveawayResults,
     ] = await Promise.all([
       this.prisma.moderationDeleteIntent.groupBy({
         by: ['status'],
@@ -597,6 +633,32 @@ export class SafetyDeskService {
         take: GIVEAWAY_WINNER_NOTIFICATION_DEAD_END_LIMIT,
         select: GIVEAWAY_WINNER_NOTIFICATION_DIAGNOSTIC_SELECT,
       }),
+      this.prisma.managedGiveawayResultsSync.findMany({
+        where: {
+          nextAttemptAt: { not: null },
+          giveaway: { archivedAt: null, status: 'COMPLETED' },
+        },
+        orderBy: [{ nextAttemptAt: 'asc' }, { giveawayId: 'asc' }],
+        take: 51,
+        select: {
+          giveawayId: true,
+          attempts: true,
+          nextAttemptAt: true,
+          leaseUntil: true,
+          giveaway: {
+            select: {
+              title: true,
+              sourceChatId: true,
+              winners: {
+                where: { status: 'SELECTED', claimDeadlineAt: { not: null } },
+                select: { claimDeadlineAt: true },
+                orderBy: { claimDeadlineAt: 'asc' },
+                take: 1,
+              },
+            },
+          },
+        },
+      }),
     ]);
 
     const statusCounts = this.buildDeleteIntentStatusCounts(statusGroups);
@@ -714,26 +776,9 @@ export class SafetyDeskService {
         oldestGiveawayWinnerNotificationDeadEndAt = updatedAt;
       }
     }
-    const giveawayWinnerNotificationDeadEnds = (
-      giveawayWinnerNotificationDeadEndRows as GiveawayWinnerNotificationDiagnosticRow[]
-    ).map((row) => ({
-      notificationId: row.id,
-      giveawayId: row.winner.giveaway.id,
-      giveawayTitle: row.winner.giveaway.title,
-      sourceChatId: row.winner.giveaway.sourceChatId,
-      winnerId: row.winnerId,
-      userId: row.winner.entry.userId,
-      botId: row.botId,
-      status: row.status,
-      attemptCount: row.attemptCount,
-      lastError: this.sanitizeSafetyDeskLastError(row.lastError),
-      nextAttemptAt: row.nextAttemptAt.toISOString(),
-      lockedAt: row.lockedAt?.toISOString() ?? null,
-      dispatchedAt: row.dispatchedAt?.toISOString() ?? null,
-      ambiguousAt: row.ambiguousAt?.toISOString() ?? null,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    }));
+    const giveawayWinnerNotificationDeadEnds = giveawayWinnerNotificationDeadEndRows.map((row) =>
+      this.mapGiveawayWinnerNotificationDeadEnd(row),
+    );
 
     return safetyDeskDeleteRuntimeResponseSchema.parse({
       generatedAt: now.toISOString(),
@@ -776,6 +821,26 @@ export class SafetyDeskService {
       items,
       ambiguousSends,
       giveawayWinnerNotificationDeadEnds,
+      giveawayPendingResults: {
+        hasMore: pendingGiveawayResults.length > 50,
+        items: pendingGiveawayResults.slice(0, 50).flatMap((row) => {
+          const due = row.nextAttemptAt;
+          if (!due) return [];
+          const processing = row.leaseUntil !== null && row.leaseUntil > now;
+          return [
+            {
+              giveawayId: row.giveawayId,
+              title: row.giveaway.title,
+              sourceChatId: row.giveaway.sourceChatId,
+              status: processing ? 'PROCESSING' : due <= now ? 'DUE' : 'WAITING',
+              nextAttemptAt: due.toISOString(),
+              attempts: row.attempts,
+              overdueMs: processing ? 0 : Math.max(0, now.getTime() - due.getTime()),
+              claimDeadlineAt: row.giveaway.winners[0]?.claimDeadlineAt?.toISOString() ?? null,
+            },
+          ];
+        }),
+      },
     });
   }
 

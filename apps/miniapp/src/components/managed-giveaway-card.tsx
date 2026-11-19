@@ -26,6 +26,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 
+import { ApiRequestError } from '../lib/api-request-error';
 import { getChannels } from '../lib/api/root-client';
 import {
   cancelManagedGiveaway,
@@ -36,6 +37,7 @@ import {
   getManagedGiveaways,
   markManagedGiveawayWinnerDelivered,
   publishManagedGiveaway,
+  refreshManagedGiveawayPublication,
   rerollManagedGiveawayWinner,
   resolveManagedGiveawayRequiredChannel,
   updateManagedGiveaway,
@@ -718,6 +720,20 @@ function ManagedGiveawayCardImpl(
   const [editingGiveawayId, setEditingGiveawayId] = useState<string | null>(null);
   const [draft, setDraft] = useState<GiveawayEditorDraft | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState<GiveawayEditorDraft | null>(null);
+  const [draftRevision, setDraftRevision] = useState<number | null>(null);
+  const [revisionConflict, setRevisionConflict] = useState(false);
+  const photoRequest = useRef<AbortController | null>(null);
+  const [preparingPhoto, setPreparingPhoto] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const photoIssue = useRef(false);
+  const clearPhotoWork = useCallback(() => {
+    photoRequest.current?.abort();
+    photoRequest.current = null;
+    photoIssue.current = false;
+    setPreparingPhoto(false);
+    setPhotoError('');
+  }, []);
+  useEffect(() => () => photoRequest.current?.abort(), []);
   const [editorError, setEditorError] = useState('');
   const [validationHint, setValidationHint] = useState('');
   const [editorStep, setEditorStep] = useState<GiveawayEditorStepId>('basics');
@@ -802,8 +818,18 @@ function ManagedGiveawayCardImpl(
       return getManagedGiveaway(api, entityType, entityId, featuredGiveawayId);
     },
     enabled: editorMode === 'closed' && Boolean(entityId) && Boolean(featuredGiveawayId),
-    refetchOnWindowFocus: false,
-    refetchInterval: featuredItem?.status === 'DRAWING' ? 5_000 : false,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => {
+      if (featuredItem?.status === 'DRAWING') return 5_000;
+      if (featuredItem?.status !== 'COMPLETED') return false;
+      const details = query.state.data;
+      return details?.status !== 'COMPLETED' ||
+        details.winners.some(
+          (winner) => winner.status === 'SELECTED' || winner.status === 'CLAIMED',
+        )
+        ? 15_000
+        : false;
+    },
   });
 
   const channelsQuery = useQuery({
@@ -814,41 +840,16 @@ function ManagedGiveawayCardImpl(
   });
 
   useEffect(() => {
-    if (!draftDetailsQuery.data) {
+    const details = draftDetailsQuery.data;
+    if (!details || details.id !== editingGiveawayId || editorMode !== 'edit' || savedSnapshot)
       return;
-    }
-
-    const nextDraft = toEditorDraft(draftDetailsQuery.data);
+    const nextDraft = toEditorDraft(details);
     setDraft(nextDraft);
     setSavedSnapshot(nextDraft);
+    setDraftRevision(details.draftRevision ?? null);
     setEditorError('');
     setValidationHint('');
-  }, [draftDetailsQuery.data]);
-
-  useEffect(() => {
-    if (editorMode === 'closed') {
-      return;
-    }
-
-    if (editorMode === 'edit') {
-      if (!editingGiveawayId) {
-        setEditorMode('closed');
-        setDraft(null);
-        setSavedSnapshot(null);
-        return;
-      }
-
-      const matching = sortedItems.find((item) => item.id === editingGiveawayId);
-      if (!matching || matching.status !== 'DRAFT') {
-        setEditorMode('closed');
-        setEditingGiveawayId(null);
-        setDraft(null);
-        setSavedSnapshot(null);
-        setEditorError('');
-        setValidationHint('');
-      }
-    }
-  }, [editingGiveawayId, editorMode, sortedItems]);
+  }, [draftDetailsQuery.data, editingGiveawayId, editorMode, savedSnapshot]);
 
   useEffect(() => {
     setOpenHintKey(null);
@@ -1025,14 +1026,19 @@ function ManagedGiveawayCardImpl(
     }
     return draft.requiredChannelIds.map((channelId) => {
       const channel = channelById.get(channelId);
-      const externalChannel = resolvedExternalChannels[channelId];
+      const fresh = resolvedExternalChannels[channelId];
+      const saved = draftDetailsQuery.data?.requiredChannels?.find((item) => item.id === channelId);
       return {
         id: channelId,
-        title: channel?.title?.trim() || externalChannel?.title?.trim() || 'Канал из условий',
-        link: channel?.link ?? externalChannel?.link ?? null,
+        title:
+          channel?.title?.trim() ||
+          fresh?.title?.trim() ||
+          saved?.title?.trim() ||
+          'Канал из условий',
+        link: channel?.link ?? fresh?.link ?? saved?.link ?? null,
       };
     });
-  }, [channelById, draft, resolvedExternalChannels]);
+  }, [channelById, draft, resolvedExternalChannels, draftDetailsQuery.data]);
 
   const ownedSelectableChannels = useMemo(
     () => ownedChannels.filter((channel) => channel.id !== entityId),
@@ -1100,13 +1106,24 @@ function ManagedGiveawayCardImpl(
   });
 
   const updateMutation = useMutation({
-    mutationFn: (params: { giveawayId: string; payload: UpdateManagedGiveawayPayload }) =>
-      updateManagedGiveaway(api, entityType, entityId, params.giveawayId, params.payload),
+    mutationFn: (params: {
+      giveawayId: string;
+      payload: UpdateManagedGiveawayPayload;
+      expectedRevision: number;
+    }) =>
+      updateManagedGiveaway(
+        api,
+        entityType,
+        entityId,
+        params.giveawayId,
+        params.payload,
+        params.expectedRevision,
+      ),
   });
 
   const publishMutation = useMutation({
-    mutationFn: (giveawayId: string) =>
-      publishManagedGiveaway(api, entityType, entityId, giveawayId),
+    mutationFn: (params: { giveawayId: string; expectedRevision: number }) =>
+      publishManagedGiveaway(api, entityType, entityId, params.giveawayId, params.expectedRevision),
   });
 
   const cancelMutation = useMutation({
@@ -1117,6 +1134,28 @@ function ManagedGiveawayCardImpl(
   const resolveRequiredChannelMutation = useMutation({
     mutationFn: (value: string) =>
       resolveManagedGiveawayRequiredChannel(api, entityType, entityId, value),
+  });
+
+  const refreshPublicationMutation = useMutation({
+    mutationFn: (giveawayId: string) =>
+      refreshManagedGiveawayPublication(api, entityType, entityId, giveawayId),
+    onSuccess: () => {
+      void refetchManagedGiveaways();
+      pushToast({ tone: 'success', title: 'Итоги обновлены в MAX' });
+    },
+    onError: (error) => {
+      const message = formatApiError(error, 'Не удалось обновить итоги.');
+      if (
+        error instanceof ApiRequestError &&
+        error.status === 409 &&
+        (error.code === 'GIVEAWAY_RESULTS_SYNC_PENDING' ||
+          message === 'Итоги ожидают обновления в MAX.')
+      ) {
+        pushToast({ tone: 'info', title: 'Итоги ожидают обновления в MAX' });
+        return;
+      }
+      pushToast({ tone: 'danger', title: 'Не удалось обновить итоги', description: message });
+    },
   });
 
   const closeMutation = useMutation({
@@ -1151,11 +1190,15 @@ function ManagedGiveawayCardImpl(
     cancelMutation.isPending ||
     resolveRequiredChannelMutation.isPending ||
     closeMutation.isPending ||
+    refreshPublicationMutation.isPending ||
     rerollMutation.isPending ||
     deliverMutation.isPending ||
     deleteMutation.isPending;
 
   const clearEditor = useCallback(() => {
+    clearPhotoWork();
+    setDraftRevision(null);
+    setRevisionConflict(false);
     setPendingConfirmation(null);
     setEditorMode('closed');
     setEditingGiveawayId(null);
@@ -1168,10 +1211,13 @@ function ManagedGiveawayCardImpl(
     setChannelModalSelection([]);
     setChannelLinkValue('');
     setResolvedExternalChannels({});
-  }, []);
+  }, [clearPhotoWork]);
 
   const applyEditorPayload = (giveaway: ManagedGiveawayDetails) => {
     const nextDraft = toEditorDraft(giveaway);
+    setDraftRevision(giveaway.draftRevision ?? null);
+    setRevisionConflict(false);
+    clearPhotoWork();
     setEditorMode('edit');
     setEditingGiveawayId(giveaway.id);
     setDraft(nextDraft);
@@ -1219,6 +1265,7 @@ function ManagedGiveawayCardImpl(
   };
 
   const clearPublicationImage = () => {
+    clearPhotoWork();
     updateDraft((current) => ({
       ...current,
       imageEnabled: false,
@@ -1236,9 +1283,14 @@ function ManagedGiveawayCardImpl(
       return;
     }
 
+    clearPhotoWork();
+    const request = new AbortController();
+    photoRequest.current = request;
+    setPreparingPhoto(true);
     try {
       const { prepareBroadcastImage } = await import('../lib/broadcast-image');
-      const prepared = await prepareBroadcastImage(file);
+      const prepared = await prepareBroadcastImage(file, { signal: request.signal });
+      if (photoRequest.current !== request || request.signal.aborted) return;
       updateDraft((current) => ({
         ...current,
         imageEnabled: true,
@@ -1247,16 +1299,18 @@ function ManagedGiveawayCardImpl(
         imageFileName: prepared.fileName,
       }));
     } catch (error: unknown) {
+      if (photoRequest.current !== request || request.signal.aborted) return;
       const message =
         error instanceof Error && error.message.trim()
           ? error.message
           : 'Не удалось подготовить фото.';
-      setValidationHint(message);
-      pushToast({
-        tone: 'danger',
-        title: 'Не удалось добавить фото',
-        description: message,
-      });
+      photoIssue.current = true;
+      setPhotoError(message);
+    } finally {
+      if (photoRequest.current === request && !request.signal.aborted) {
+        photoRequest.current = null;
+        setPreparingPhoto(false);
+      }
     }
   };
 
@@ -1341,10 +1395,7 @@ function ManagedGiveawayCardImpl(
 
   const applyFinishPreset = (hours: number) => {
     updateDraft((current) => {
-      const base =
-        parseDateTimeInput(current.startsAtLocal) ??
-        parseDateTimeInput(current.endsAtLocal) ??
-        roundToNextQuarter(new Date());
+      const base = parseDateTimeInput(current.startsAtLocal) ?? new Date();
       const nextEnd = addHours(base, hours);
       nextEnd.setSeconds(0, 0);
       return {
@@ -1613,17 +1664,22 @@ function ManagedGiveawayCardImpl(
       await refetchManagedGiveaways();
       pushToast({
         tone: 'success',
-        title: 'Розыгрыш удалён',
+        title: 'Розыгрыш в архиве',
       });
       return true;
     } catch (error: unknown) {
       pushToast({
         tone: 'danger',
-        title: 'Не удалось удалить розыгрыш',
-        description: formatApiError(error, 'Не удалось удалить розыгрыш.'),
+        title: 'Не удалось архивировать розыгрыш',
+        description: formatApiError(error, 'Не удалось архивировать розыгрыш.'),
       });
       return false;
     }
+  };
+
+  const checkedRevision = (revision: number | null | undefined) => {
+    if (!revision) throw new ApiRequestError(409, '', 'Откройте актуальную версию черновика.');
+    return revision;
   };
 
   const saveEditor = async ({
@@ -1631,7 +1687,7 @@ function ManagedGiveawayCardImpl(
   }: {
     silent?: boolean;
   } = {}): Promise<ManagedGiveawayDetails | null> => {
-    if (!draft) {
+    if (!draft || photoRequest.current || photoIssue.current || revisionConflict) {
       return null;
     }
 
@@ -1668,7 +1724,11 @@ function ManagedGiveawayCardImpl(
       const saved =
         editorMode === 'create' || !editingGiveawayId
           ? await createMutation.mutateAsync(payload)
-          : await updateMutation.mutateAsync({ giveawayId: editingGiveawayId, payload });
+          : await updateMutation.mutateAsync({
+              giveawayId: editingGiveawayId,
+              payload,
+              expectedRevision: checkedRevision(draftRevision),
+            });
 
       applyEditorPayload(saved);
       await refetchManagedGiveaways();
@@ -1680,6 +1740,8 @@ function ManagedGiveawayCardImpl(
       }
       return saved;
     } catch (error: unknown) {
+      if (error instanceof ApiRequestError && error.status === 409 && editingGiveawayId)
+        setRevisionConflict(true);
       const message = formatApiError(error, 'Не удалось сохранить черновик.');
       setEditorError(message);
       if (!silent) {
@@ -1694,7 +1756,7 @@ function ManagedGiveawayCardImpl(
   };
 
   const publishEditor = async () => {
-    if (!draft) {
+    if (!draft || photoRequest.current || photoIssue.current || revisionConflict) {
       return;
     }
 
@@ -1734,6 +1796,7 @@ function ManagedGiveawayCardImpl(
 
     try {
       let targetId = editingGiveawayId;
+      let expectedRevision = draftRevision;
 
       if (editorMode === 'create' || !targetId) {
         const created = await saveEditor({ silent: true });
@@ -1741,19 +1804,24 @@ function ManagedGiveawayCardImpl(
           return;
         }
         targetId = created.id;
+        expectedRevision = created.draftRevision ?? null;
       } else if (isDirty) {
         const updated = await saveEditor({ silent: true });
         if (!updated) {
           return;
         }
         targetId = updated.id;
+        expectedRevision = updated.draftRevision ?? null;
       }
 
       if (!targetId) {
         throw new Error('Черновик не найден.');
       }
 
-      await publishMutation.mutateAsync(targetId);
+      await publishMutation.mutateAsync({
+        giveawayId: targetId,
+        expectedRevision: checkedRevision(expectedRevision),
+      });
       await refetchManagedGiveaways();
       clearEditor();
       pushToast({
@@ -1761,6 +1829,7 @@ function ManagedGiveawayCardImpl(
         title: 'Розыгрыш опубликован',
       });
     } catch (error: unknown) {
+      if (error instanceof ApiRequestError && error.status === 409) setRevisionConflict(true);
       const message = formatApiError(error, 'Не удалось опубликовать розыгрыш.');
       setEditorError(message);
       pushToast({
@@ -1860,6 +1929,7 @@ function ManagedGiveawayCardImpl(
   };
 
   const handleFinalPrimaryAction = () => {
+    if (photoRequest.current || photoIssue.current || revisionConflict) return;
     if (firstConfigIssue) {
       showEditorIssue(firstConfigIssue, 'Закончите настройку');
       return;
@@ -1891,7 +1961,7 @@ function ManagedGiveawayCardImpl(
       clearEditor();
       pushToast({
         tone: 'success',
-        title: 'Черновик удалён',
+        title: 'Черновик отменён',
       });
       return true;
     } catch (error: unknown) {
@@ -1899,7 +1969,7 @@ function ManagedGiveawayCardImpl(
       setEditorError(message);
       pushToast({
         tone: 'danger',
-        title: 'Не удалось удалить',
+        title: 'Не удалось отменить черновик',
         description: message,
       });
       return false;
@@ -2118,7 +2188,12 @@ function ManagedGiveawayCardImpl(
     { enabled: isEditingOpen && pendingConfirmation === null, priority: 640 },
   );
   const publicationTextReady = Boolean(draft?.description.trim());
-  const canSaveEditor = Boolean(draft) && validation.valid && (editorMode === 'create' || isDirty);
+  const draftActionBlocked = Boolean(preparingPhoto || photoError || revisionConflict);
+  const canSaveEditor =
+    !draftActionBlocked &&
+    Boolean(draft) &&
+    validation.valid &&
+    (editorMode === 'create' || isDirty);
   const isScheduledStart = Boolean(draft?.startsAtLocal.trim());
   const finalPrimaryLabel = firstConfigIssue
     ? 'Проверить'
@@ -2239,6 +2314,8 @@ function ManagedGiveawayCardImpl(
         </div>
       );
     }
+
+    if (!featuredItem && listQuery.error) return null;
 
     if (featuredItem) {
       const currentIsDraft = featuredItem.status === 'DRAFT';
@@ -2367,7 +2444,9 @@ function ManagedGiveawayCardImpl(
             </div>
           ) : null}
 
-          {featuredItem.publicationUrl || featuredItem.resultsUrl ? (
+          {featuredItem.publicationUrl ||
+          featuredItem.resultsUrl ||
+          featuredItem.status === 'COMPLETED' ? (
             <div className="managed-giveaway__dashboard-links">
               {featuredItem.publicationUrl ? (
                 <button
@@ -2389,6 +2468,16 @@ function ManagedGiveawayCardImpl(
                   disabled={isBusy}
                 >
                   Поделиться
+                </button>
+              ) : null}
+              {featuredItem.status === 'COMPLETED' ? (
+                <button
+                  type="button"
+                  className="button button--ghost managed-giveaway__dashboard-link"
+                  disabled={isBusy}
+                  onClick={() => refreshPublicationMutation.mutate(featuredItem.id)}
+                >
+                  {refreshPublicationMutation.isPending ? 'Обновляем…' : 'Обновить итоги в MAX'}
                 </button>
               ) : null}
               {featuredItem.resultsUrl ? (
@@ -2442,7 +2531,7 @@ function ManagedGiveawayCardImpl(
                 disabled={isBusy}
                 onClick={requestDeleteFeaturedGiveaway}
               >
-                {deleteMutation.isPending ? 'Удаляем…' : 'Удалить розыгрыш'}
+                {deleteMutation.isPending ? 'Архивируем…' : 'В архив'}
               </button>
             ) : null}
           </div>
@@ -2572,6 +2661,20 @@ function ManagedGiveawayCardImpl(
 
   const renderEditorSurface = () => {
     if (!draft) {
+      if (draftDetailsQuery.error) {
+        return (
+          <div className="managed-giveaway__error-inline" role="alert">
+            {formatApiError(draftDetailsQuery.error, 'Не удалось загрузить черновик.')}
+            <button
+              type="button"
+              className="button button--ghost"
+              onClick={() => void draftDetailsQuery.refetch()}
+            >
+              Повторить
+            </button>
+          </div>
+        );
+      }
       return (
         <div className="managed-giveaway__surface managed-giveaway__surface--editor">
           <div className="managed-giveaway__hero-head">
@@ -2606,8 +2709,8 @@ function ManagedGiveawayCardImpl(
                 className="button button--ghost managed-giveaway__hero-button managed-giveaway__hero-button--danger"
                 onClick={requestCancelEditorDraft}
                 disabled={isBusy}
-                aria-label={editorMode === 'create' ? 'Сбросить черновик' : 'Удалить розыгрыш'}
-                title={editorMode === 'create' ? 'Сбросить черновик' : 'Удалить розыгрыш'}
+                aria-label={editorMode === 'create' ? 'Сбросить черновик' : 'Отменить черновик'}
+                title={editorMode === 'create' ? 'Сбросить черновик' : 'Отменить черновик'}
               >
                 <IconoirSprite variant="iconoir" icon="Trash" aria-hidden />
               </button>
@@ -3216,7 +3319,7 @@ function ManagedGiveawayCardImpl(
                       }
                     />
                   </div>
-                  {draft.imageEnabled ? (
+                  {draft.imageEnabled || preparingPhoto || photoError ? (
                     <div className="managed-giveaway__section-actions managed-giveaway__section-actions--align-end">
                       <button
                         type="button"
@@ -3230,6 +3333,8 @@ function ManagedGiveawayCardImpl(
                   ) : null}
                 </div>
 
+                {preparingPhoto ? <p role="status">Готовим фото…</p> : null}
+                {photoError ? <p role="alert">{photoError}</p> : null}
                 {draft.imageEnabled ? (
                   giveawayImageSource(draft) ? (
                     <details className="managed-giveaway__publication-image">
@@ -3268,7 +3373,51 @@ function ManagedGiveawayCardImpl(
             {validationHint}
           </div>
         ) : null}
-        {editorError ? (
+        {revisionConflict ? (
+          <section className="managed-giveaway__error-inline" role="alert">
+            <strong>Черновик изменился. Ваши правки остаются в редакторе.</strong>
+            <button
+              type="button"
+              className="button button--ghost"
+              disabled={draftDetailsQuery.isFetching}
+              onClick={() => void draftDetailsQuery.refetch()}
+            >
+              Проверить сохранённую версию
+            </button>
+            {draftDetailsQuery.error ? (
+              <p>{formatApiError(draftDetailsQuery.error, 'Не удалось загрузить черновик.')}</p>
+            ) : null}
+            {draftDetailsQuery.data &&
+            (draftDetailsQuery.data.draftRevision !== draftRevision ||
+              draftDetailsQuery.data.status !== 'DRAFT') ? (
+              <div>
+                <p>
+                  {draftDetailsQuery.data.title} · {buildStatusLabel(draftDetailsQuery.data.status)}{' '}
+                  · {formatDateTime(draftDetailsQuery.data.updatedAt)}
+                </p>
+                <p>{draftDetailsQuery.data.description}</p>
+                <p>
+                  Мест: {draftDetailsQuery.data.prizes.length} · До{' '}
+                  {formatDateTime(draftDetailsQuery.data.endsAt)}
+                </p>
+                {draftDetailsQuery.data.status === 'DRAFT' ? (
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => applyEditorPayload(draftDetailsQuery.data!)}
+                  >
+                    Заменить мои правки сохранённой версией
+                  </button>
+                ) : (
+                  <button type="button" className="button button--ghost" onClick={clearEditor}>
+                    Закрыть редактор
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+        {editorError && !revisionConflict ? (
           <div className="managed-giveaway__error-inline" role="alert" aria-live="assertive">
             {editorError}
           </div>
@@ -3308,7 +3457,7 @@ function ManagedGiveawayCardImpl(
                 }
                 goToNextStep();
               }}
-              disabled={isBusy || !draft}
+              disabled={isBusy || !draft || (editorStep === 'prizes' && draftActionBlocked)}
             >
               {isBusy
                 ? activeEditorStepIndex >= editorSteps.length - 1
@@ -3532,17 +3681,20 @@ function ManagedGiveawayCardImpl(
         };
       case 'delete':
         return {
-          title: 'Удалить розыгрыш?',
-          summary: `«${pendingConfirmation.title}» будет удалён без возможности восстановления.`,
-          confirmLabel: 'Удалить розыгрыш',
-          confirmBusyLabel: 'Удаляем…',
-          cancelLabel: 'Не удалять',
+          title: 'Убрать розыгрыш в архив?',
+          summary: `«${pendingConfirmation.title}» исчезнет из списка. Пост и итоги останутся в MAX.`,
+          confirmLabel: 'В архив',
+          confirmBusyLabel: 'Архивируем…',
+          cancelLabel: 'Оставить в списке',
           tone: 'danger' as const,
         };
     }
   })();
   const canSaveBeforeExit =
-    pendingConfirmation?.kind === 'discard-editor' && Boolean(draft) && validation.valid;
+    pendingConfirmation?.kind === 'discard-editor' &&
+    Boolean(draft) &&
+    validation.valid &&
+    !draftActionBlocked;
 
   return (
     <div

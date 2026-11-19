@@ -574,6 +574,7 @@ if [[ "$SELECT_API" -eq 1 ]]; then
     echo "Prisma compatibility preflight passed for $commit_label $commit_sha."
   }
 
+  maxim_topology_require_giveaway_state_reader "$API_SOURCE_SHA" <"$APPLIED_MIGRATIONS_FILE"
   ensure_commit_has_applied_migrations "$API_SOURCE_SHA" "API component source"
   maxim_routing_index_require_release "$API_SOURCE_SHA" COMPOSE_FILES
 fi

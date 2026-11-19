@@ -39,6 +39,7 @@ const expectedCommands = [
   'npm run check:miniapp',
   'npm run build:miniapp:production',
   'npm run screenshots:miniapp:smoke',
+  'node apps/miniapp/scripts/check-giveaway-browser.mjs',
   ...browserFiles.map((path) => `node ${path}`),
   ...['categories', 'boundaries', 'queue'].map(
     (group) => `SHOP_SIMPLE_ONLY=${group} node apps/miniapp/test/karavan-shop-simple.browser.mjs`,

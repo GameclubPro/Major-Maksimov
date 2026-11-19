@@ -129,6 +129,10 @@ export const updateManagedGiveawayRequestSchema = z
   });
 export type UpdateManagedGiveawayRequest = z.infer<typeof updateManagedGiveawayRequestSchema>;
 
+export const managedGiveawayDraftRevisionSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+});
+
 export const managedGiveawayPrizeSchema = z.object({
   id: z.string(),
   position: z.number().int().min(1),
@@ -176,7 +180,15 @@ export const managedGiveawaySummarySchema = z.object({
 });
 export type ManagedGiveawaySummary = z.infer<typeof managedGiveawaySummarySchema>;
 
+export const managedGiveawayPublicChannelSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  link: z.string().nullable(),
+});
+export type ManagedGiveawayPublicChannel = z.infer<typeof managedGiveawayPublicChannelSchema>;
+
 export const managedGiveawayDetailsSchema = managedGiveawaySummarySchema.extend({
+  draftRevision: z.number().int().positive().optional(),
   sourceChatId: z.string(),
   entityType: managedEntityTypeSchema,
   description: managedGiveawayDescriptionSchema,
@@ -186,19 +198,13 @@ export const managedGiveawayDetailsSchema = managedGiveawaySummarySchema.extend(
   imageFileName: z.string(),
   claimHours: z.number().int().min(1).max(336),
   requiredChannelIds: z.array(z.string()),
+  requiredChannels: z.array(managedGiveawayPublicChannelSchema).optional(),
   publicationMessageId: z.string().nullable(),
   resultsMessageId: z.string().nullable(),
   prizes: z.array(managedGiveawayPrizeSchema),
   winners: z.array(managedGiveawayWinnerSchema),
 });
 export type ManagedGiveawayDetails = z.infer<typeof managedGiveawayDetailsSchema>;
-
-export const managedGiveawayPublicChannelSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  link: z.string().nullable(),
-});
-export type ManagedGiveawayPublicChannel = z.infer<typeof managedGiveawayPublicChannelSchema>;
 
 export const managedGiveawayPublicWinnerSchema = z.object({
   prizePosition: z.number().int().min(1),

@@ -1,3 +1,4 @@
+import { DiagnosticTimeline } from './safety-desk-ui';
 import type { SafetyDeskPublicationDeliveryEvidenceResponse } from '@maxim/contracts/safety-desk';
 import { useMemo } from 'react';
 import { safetyDeskApiClient } from './safety-desk-api-client';
@@ -120,40 +121,18 @@ export function PublicationDeliveryEvidence({
               Квитанция получателя расходится с журналом действий. Результат требует проверки.
             </p>
           )}
-          <dl className="delete-timeline">
-            <div>
-              <dt>Снимок</dt>
-              <dd>{observationTime(snapshot.observedAt)}</dd>
-            </div>
-            <div>
-              <dt>Получатель записан</dt>
-              <dd>{observationTime(snapshot.acceptedAt)}</dd>
-            </div>
-            <div>
-              <dt>Начало внешнего действия</dt>
-              <dd>{observationTime(snapshot.action.dispatchStartedAt)}</dd>
-            </div>
-            <div>
-              <dt>Завершение в журнале</dt>
-              <dd>{observationTime(snapshot.action.journalCompletedAt)}</dd>
-            </div>
-            <div>
-              <dt>Сохранённое время отправки</dt>
-              <dd>{observationTime(snapshot.recipient.savedSendAt)}</dd>
-            </div>
-            <div>
-              <dt>Проверка присутствия</dt>
-              <dd>{observationTime(snapshot.verification.observedAt)}</dd>
-            </div>
-            <div>
-              <dt>Следующая назначенная попытка</dt>
-              <dd>{observationTime(snapshot.waiting.nextAttemptAt)}</dd>
-            </div>
-            <div>
-              <dt>С первой отсрочки</dt>
-              <dd>{observationDuration(snapshot.waiting.ageSinceFirstDeferralMs)}</dd>
-            </div>
-          </dl>
+          <DiagnosticTimeline
+            rows={[
+              ['Снимок', observationTime(snapshot.observedAt)],
+              ['Получатель записан', observationTime(snapshot.acceptedAt)],
+              ['Начало внешнего действия', observationTime(snapshot.action.dispatchStartedAt)],
+              ['Завершение в журнале', observationTime(snapshot.action.journalCompletedAt)],
+              ['Сохранённое время отправки', observationTime(snapshot.recipient.savedSendAt)],
+              ['Проверка присутствия', observationTime(snapshot.verification.observedAt)],
+              ['Следующая назначенная попытка', observationTime(snapshot.waiting.nextAttemptAt)],
+              ['С первой отсрочки', observationDuration(snapshot.waiting.ageSinceFirstDeferralMs)],
+            ]}
+          />
           <p>
             Сохранённое время отправки не является временем записи квитанции. Возраст первой
             отсрочки не равен суммарному времени ожидания.

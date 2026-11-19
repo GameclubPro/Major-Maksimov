@@ -2,13 +2,20 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import {
+  allocateMiniappBaseUrl,
+  ensureMiniappDevServer,
+  stopChildProcess,
+} from '../../../scripts/miniapp-local-server.mjs';
+import {
   applyNativeVisualMode,
   installNativeVisualModeInitScript,
 } from '../../../scripts/miniapp-native-visual-mode.mjs';
 import { installMaxBridgeShimInitScript } from '../../../scripts/miniapp-max-bridge-shim.mjs';
 
-const base = process.env.MINIAPP_GIVEAWAY_TEST_BASE ?? 'http://127.0.0.1:5174/app/';
-const browser = await chromium.launch({ headless: true });
+const existingBase = process.env.MINIAPP_GIVEAWAY_TEST_BASE;
+const base = existingBase || (await allocateMiniappBaseUrl('http://127.0.0.1/app/'));
+const server = await ensureMiniappDevServer(base, { reuseServer: Boolean(existingBase) });
+let browser;
 const viewports = [
   { width: 320, height: 568 },
   { width: 393, height: 852 },
@@ -38,6 +45,7 @@ async function assertParticipationLayout(page) {
 }
 
 try {
+  browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 375, height: 667 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -97,19 +105,21 @@ try {
     true,
     'New participants see the offer before their participation status',
   );
+  await page.evaluate(() => window.giveawayTest.setPromotion(null, 12));
+  await main.getByText('Все призовые места · 12', { exact: true }).click();
+  await main
+    .getByText('Подарок 12 с длинным описанием для проверки переноса', { exact: true })
+    .waitFor({ state: 'visible' });
+  await assertParticipationLayout(page);
+  assert.equal(await main.locator('.giveaway-page__cover').count(), 0);
   await page.evaluate(
-    (base64) => window.giveawayTest.setPromotion(base64, 12),
+    (base64) => window.giveawayTest.setPromotion(base64),
     avatarImage.toString('base64'),
   );
   await main.locator('.giveaway-page__cover').waitFor();
   await page.waitForFunction(
     () => document.querySelector('.giveaway-page__cover')?.naturalWidth > 0,
   );
-  await main.getByText('Все призовые места · 12', { exact: true }).click();
-  await main
-    .getByText('Подарок 12 с длинным описанием для проверки переноса', { exact: true })
-    .waitFor({ state: 'visible' });
-  await assertParticipationLayout(page);
   await page.evaluate(() => window.giveawayTest.setPromotion('broken-image'));
   await main.locator('.giveaway-page__cover').waitFor({ state: 'detached' });
   await page.evaluate(() => window.giveawayTest.setPromotion(null));
@@ -220,9 +230,28 @@ try {
   assert.equal(await main.locator('.giveaway-page__ticket').count(), 0);
   await main.getByRole('button', { name: 'К опубликованным итогам' }).click();
   assert.equal(await page.evaluate(() => window.giveawayTest.openedUrl), 'https://max.ru/results');
+  await page.evaluate(() => {
+    window.giveawayTest.mode = 'claim-unavailable';
+  });
+  await primary.click();
+  await main.getByRole('button', { name: 'Повторить подтверждение' }).waitFor();
+  assert.equal(
+    await main.locator('.giveaway-page__condition-list [data-state="missing"]').count(),
+    0,
+  );
+  await page.evaluate(() => {
+    window.giveawayTest.mode = 'claim-missing';
+  });
+  await primary.click();
+  const missing = main.locator('.giveaway-page__condition-list li[data-state="missing"]');
+  await missing.getByRole('button').click();
+  assert.equal(await page.evaluate(() => window.giveawayTest.openedUrl), 'https://max.ru/extra-0');
+  await page.evaluate(() => {
+    window.giveawayTest.mode = 'verified';
+  });
   await primary.click();
   await main.getByRole('heading', { name: 'Выигрыш подтверждён' }).waitFor();
-  assert.equal(await page.evaluate(() => window.giveawayTest.claims), 1);
+  assert.equal(await page.evaluate(() => window.giveawayTest.claims), 3);
   await page.evaluate(() => window.giveawayTest.setScenario('expired'));
   await main.getByRole('heading', { name: 'Срок подтверждения истёк' }).waitFor();
   assert.equal(await main.getByRole('button', { name: 'Подтвердить выигрыш' }).count(), 0);
@@ -230,6 +259,86 @@ try {
   await page.evaluate(() => window.giveawayTest.setScenario('canceled'));
   await main.getByRole('heading', { name: 'Розыгрыш отменён' }).waitFor();
   assert.equal(await main.locator('.giveaway-page__verification.is-verified').count(), 0);
+
+  const editorTest = await browser.newPage({ viewport: { width: 393, height: 852 } });
+  await editorTest.goto(new URL('test/browser/giveaway.html?editor', base).href);
+  const editor = editorTest.locator('.managed-giveaway');
+  await editor.getByRole('button', { name: 'Продолжить настройку' }).click();
+  const title = editor.getByPlaceholder('Например: Розыгрыш на выходные');
+  await title.fill('Мой текст');
+  await editorTest.evaluate(() => window.changeDraftInAnotherSession());
+  await editor.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await editor.getByRole('button', { name: 'Проверить сохранённую версию' }).click();
+  await editor.getByRole('button', { name: 'Заменить мои правки сохранённой версией' }).waitFor();
+  assert.equal(await title.inputValue(), 'Мой текст');
+  await editor.getByRole('button', { name: 'Заменить мои правки сохранённой версией' }).click();
+  assert.equal(await title.inputValue(), 'Версия второго организатора');
+  await editorTest.clock.setFixedTime(new Date('2030-01-10T09:30:00Z'));
+  const date = editor.getByLabel('Дата завершения', { exact: true });
+  await editor.getByRole('button', { name: 'Сразу', exact: true }).click();
+  await editor.getByRole('button', { name: '24 часа', exact: true }).click();
+  const firstDate = await date.inputValue();
+  await editor.getByRole('button', { name: '48 часов', exact: true }).click();
+  assert.notEqual(await date.inputValue(), firstDate);
+  await editor.getByRole('button', { name: '24 часа', exact: true }).click();
+  assert.equal(await date.inputValue(), firstDate);
+  await editor.getByRole('button', { name: 'К условиям' }).click();
+  await editor.getByText('Гостевой канал', { exact: true }).waitFor();
+  await editor.getByText('https://max.ru/giveaway-guest', { exact: true }).waitFor();
+  await editor.getByRole('button', { name: 'К призам' }).click();
+  await editorTest.evaluate(() => {
+    const decode = window.createImageBitmap.bind(window);
+    window.createImageBitmap = async (...args) => {
+      window.createImageBitmap = decode;
+      await new Promise((resolve) => {
+        window.finishOldGiveawayPhoto = resolve;
+      });
+      return decode(...args);
+    };
+  });
+  const fileInput = editor.locator('.managed-giveaway__file-input');
+  await fileInput.setInputFiles({
+    name: 'first.webp',
+    mimeType: 'image/webp',
+    buffer: avatarImage,
+  });
+  await editorTest.waitForFunction(() => typeof window.finishOldGiveawayPhoto === 'function');
+  assert.equal(
+    await editor.getByRole('button', { name: 'Опубликовать', exact: true }).isDisabled(),
+    true,
+  );
+  await fileInput.setInputFiles({
+    name: 'second.webp',
+    mimeType: 'image/webp',
+    buffer: avatarImage,
+  });
+  await editor
+    .locator('.managed-giveaway__publication-image summary strong')
+    .filter({ hasText: /^second[.]/u })
+    .waitFor();
+  await editorTest.evaluate(() => window.finishOldGiveawayPhoto());
+  await editor.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await editorTest.getByText('Черновик сохранён', { exact: true }).waitFor();
+  assert.match(
+    await editor.locator('.managed-giveaway__publication-image summary strong').textContent(),
+    /^second[.]/u,
+  );
+  await editorTest.reload();
+  await editor.getByRole('button', { name: 'Продолжить настройку' }).waitFor();
+  await editorTest.evaluate(() => window.finishEmptyGiveaway());
+  const refreshResults = editor.getByRole('button', { name: 'Обновить итоги в MAX' });
+  await editorTest.evaluate(() => window.queueNextGiveawayRefresh());
+  await refreshResults.click();
+  await editorTest.getByText('Итоги ожидают обновления в MAX', { exact: true }).waitFor();
+  await refreshResults.click();
+  await editorTest.getByText('Итоги обновлены в MAX', { exact: true }).waitFor();
+  await editor.getByRole('button', { name: 'В архив', exact: true }).click();
+  const confirmation = editorTest.getByRole('dialog', { name: 'Убрать розыгрыш в архив?' });
+  await confirmation.getByText(/останутся в MAX/u).waitFor();
+  await confirmation.getByRole('button', { name: 'В архив', exact: true }).click();
+  await editorTest.getByText('Розыгрыш в архиве', { exact: true }).waitFor();
+  assert.equal(await editor.getByRole('button', { name: 'В архив', exact: true }).count(), 0);
+  await editorTest.close();
 
   for (const theme of ['light', 'dark']) {
     for (const viewport of viewports.slice(0, 3)) {
@@ -316,8 +425,12 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(
-    'Giveaway browser checks passed: stage-aware offer/prizes/cover, participation, errors/retry, claim/results, long conditions, five viewport sizes, light/dark, photo preview/remove, and editor navigation without overlap.',
+    'Giveaway browser checks passed: participation and claim recovery, concurrent draft edits, deadline presets, photo replacement, five viewport sizes, light/dark, editor navigation.',
   );
 } finally {
-  await browser.close();
+  try {
+    await browser?.close();
+  } finally {
+    await stopChildProcess(server);
+  }
 }

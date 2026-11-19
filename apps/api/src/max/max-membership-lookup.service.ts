@@ -176,6 +176,7 @@ type PendingSingleLookupBatch = {
   policy: MembershipLookupPolicyConfig;
   policyName: MaxMembershipLookupPolicy;
   botId: string | null;
+  bypassTransportCache: boolean;
   lookups: Map<string, PendingSingleLookup>;
   scheduled: boolean;
   timeout: NodeJS.Timeout | null;
@@ -627,6 +628,9 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     const basePolicy = MEMBERSHIP_LOOKUP_POLICIES[policyName];
     const policy = this.resolveEffectivePolicy(normalizedChatId, policyName, basePolicy, now);
     const allowStaleOnError = options.allowStaleOnError ?? policy.allowStaleOnError;
+    // FLAG: A fresh eligibility decision cannot share a probe that may read the transport cache.
+    const bypassTransportCache =
+      requireReadRoute || (options.forceRefresh === true && !allowStaleOnError);
     const chatBackoffKey = this.buildChatBackoffKey(normalizedChatId, policyName, lookupBotId);
     const pendingPromises = new Map<string, Promise<MaxMembershipLookupResolution>>();
     const usersToLookup: string[] = [];
@@ -738,7 +742,12 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
       }
       if (backoff) this.backoffUntilMs.delete(cacheKey);
 
-      const inFlightKey = this.buildInFlightKey(cacheKey, policyName, allowStaleOnError);
+      const inFlightKey = this.buildInFlightKey(
+        cacheKey,
+        policyName,
+        allowStaleOnError,
+        bypassTransportCache,
+      );
       const inFlight = this.inFlight.get(inFlightKey);
       if (inFlight) {
         pendingPromises.set(userId, inFlight);
@@ -777,6 +786,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
           policyName,
           allowStaleOnError,
           lookupBotId,
+          bypassTransportCache,
         ),
       );
     } else if (usersToLookup.length > 1) {
@@ -786,6 +796,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
         policyName,
         allowStaleOnError,
         lookupBotId,
+        bypassTransportCache,
       );
       for (const [userId, promise] of batchPromises) {
         pendingPromises.set(userId, promise);
@@ -871,9 +882,16 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     policyName: MaxMembershipLookupPolicy,
     allowStaleOnError: boolean,
     botId: string | null,
+    bypassTransportCache: boolean,
   ): Promise<MaxMembershipLookupResolution> {
     const policy = MEMBERSHIP_LOOKUP_POLICIES[policyName];
-    const batchKey = this.buildSingleLookupBatchKey(chatId, policyName, botId, allowStaleOnError);
+    const batchKey = this.buildSingleLookupBatchKey(
+      chatId,
+      policyName,
+      botId,
+      allowStaleOnError,
+      bypassTransportCache,
+    );
     let batch = this.pendingSingleLookupBatches.get(batchKey);
     if (!batch) {
       batch = {
@@ -881,6 +899,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
         policy,
         policyName,
         botId,
+        bypassTransportCache,
         lookups: new Map(),
         scheduled: false,
         timeout: null,
@@ -891,7 +910,12 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     }
 
     const cacheKey = this.buildCacheKey(chatId, userId, botId, policyName);
-    const inFlightKey = this.buildInFlightKey(cacheKey, policyName, allowStaleOnError);
+    const inFlightKey = this.buildInFlightKey(
+      cacheKey,
+      policyName,
+      allowStaleOnError,
+      bypassTransportCache,
+    );
     const cacheEpoch = this.retainCacheEpoch(cacheKey);
     const probeSequence = this.beginProbe(cacheKey);
     const lookupPromise = new Promise<MaxMembershipLookupResolution>((resolve) => {
@@ -956,9 +980,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
             return await this.maxClient.getChatMembersAccess(batch.chatId, userIds, {
               trafficClass: batch.policy.trafficClass,
               timeoutMs: this.resolveLookupTimeoutMs(batch.policy.trafficClass),
-              ...(batch.policyName === 'moderation_required_subscription'
-                ? { bypassCache: true }
-                : {}),
+              ...(batch.bypassTransportCache ? { bypassCache: true } : {}),
               ...(batch.policy.sourceTag ? { sourceTag: batch.policy.sourceTag } : {}),
               ...(batch.policy.ignoreFailureMetricStatuses
                 ? { ignoreFailureMetricStatuses: batch.policy.ignoreFailureMetricStatuses }
@@ -1113,6 +1135,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     policyName: MaxMembershipLookupPolicy,
     allowStaleOnError: boolean,
     botId: string | null,
+    bypassTransportCache: boolean,
   ): Map<string, Promise<MaxMembershipLookupResolution>> {
     const normalizedUserIds = Array.from(new Set(userIds));
     const policy = MEMBERSHIP_LOOKUP_POLICIES[policyName];
@@ -1135,7 +1158,7 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
               return await this.maxClient.getChatMembersAccess(chatId, normalizedUserIds, {
                 trafficClass: policy.trafficClass,
                 timeoutMs: this.resolveLookupTimeoutMs(policy.trafficClass),
-                ...(policyName === 'moderation_required_subscription' ? { bypassCache: true } : {}),
+                ...(bypassTransportCache ? { bypassCache: true } : {}),
                 ...(policy.sourceTag ? { sourceTag: policy.sourceTag } : {}),
                 ...(policy.ignoreFailureMetricStatuses
                   ? { ignoreFailureMetricStatuses: policy.ignoreFailureMetricStatuses }
@@ -1286,7 +1309,12 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     const promises = new Map<string, Promise<MaxMembershipLookupResolution>>();
     for (const userId of normalizedUserIds) {
       const cacheKey = this.buildCacheKey(chatId, userId, botId, policyName);
-      const inFlightKey = this.buildInFlightKey(cacheKey, policyName, allowStaleOnError);
+      const inFlightKey = this.buildInFlightKey(
+        cacheKey,
+        policyName,
+        allowStaleOnError,
+        bypassTransportCache,
+      );
       const trackedPromise = batchLookupPromise
         .then((results) => results.get(userId) ?? { membership: null, fresh: false })
         .finally(() => {
@@ -2062,8 +2090,9 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     cacheKey: string,
     policyName: MaxMembershipLookupPolicy,
     allowStaleOnError: boolean,
+    bypassTransportCache: boolean,
   ): string {
-    return `${cacheKey}|${policyName}|${allowStaleOnError ? 'stale' : 'strict'}`;
+    return `${cacheKey}|${policyName}|${allowStaleOnError ? 'stale' : 'strict'}|${bypassTransportCache ? 'remote' : 'cached'}`;
   }
 
   private deleteInFlightLookups(cacheKey: string): void {
@@ -2084,12 +2113,13 @@ export class MaxMembershipLookupService implements OnModuleInit, OnModuleDestroy
     policyName: MaxMembershipLookupPolicy,
     botId: string | null,
     allowStaleOnError: boolean,
+    bypassTransportCache: boolean,
   ): string {
     const normalizedBotId = this.normalizeBotScopedCacheBotId(botId);
     const routeKey = normalizedBotId
       ? `${this.buildChatPolicyKey(chatId, policyName)}:${normalizedBotId}`
       : this.buildChatPolicyKey(chatId, policyName);
-    return `${routeKey}:${allowStaleOnError ? 'stale' : 'strict'}`;
+    return `${routeKey}:${allowStaleOnError ? 'stale' : 'strict'}:${bypassTransportCache ? 'remote' : 'cached'}`;
   }
 
   private shouldReadLegacyCache(botId: string | null): boolean {

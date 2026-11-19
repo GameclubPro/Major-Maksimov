@@ -3,9 +3,9 @@ import {
   giveawayEligibilityStateSchema,
   managedEntityTypeSchema,
   managedGiveawayDetailsSchema,
+  managedGiveawayDraftRevisionSchema,
   managedGiveawayParticipantStateSchema,
   managedGiveawayPublicSchema,
-  managedGiveawaySummarySchema,
   managedGiveawayWinnerSchema,
   markManagedGiveawayWinnerDeliveredRequestSchema,
   MAX_BROADCAST_IMAGE_BASE64_LENGTH,
@@ -83,10 +83,7 @@ import {
 } from '../max/max-bot-link.service';
 import { normalizeMembershipAccessSnapshot } from '../max/max-bot-access-policy.util';
 import { collectActiveManagedEntityBotMembershipIdsByChat } from '../max/managed-entity-bot-access.util';
-import {
-  classifyMaxTerminalChatActionError,
-  ManagedEntityAccessLossService,
-} from '../max/managed-entity-access-loss.service';
+import { ManagedEntityAccessLossService } from '../max/managed-entity-access-loss.service';
 import { isAmbiguousMaxSendError } from '../max/max-send-ambiguity.util';
 import { MaxRoutedPublicationService } from '../max/max-routed-publication.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -106,6 +103,20 @@ import {
   type ManagedGiveawayDueFamily,
   type ManagedGiveawayDueRow,
 } from './managed-giveaway-due-selection';
+import { writeGiveawayDrawEntries } from './managed-giveaway-draw-write';
+import {
+  GIVEAWAY_NOTIFICATION_INCLUDE,
+  readGiveawayHistoryPage,
+  readGiveawayParticipant,
+  readPublicGiveaway,
+  type ParticipantGiveawayRead,
+  type PublicGiveawayRead,
+} from './managed-giveaway-read-model';
+import {
+  enqueueGiveawayResultsSync,
+  MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+  processGiveawayResultsSync,
+} from './managed-giveaway-results-sync';
 
 type GiveawayActionSource = 'miniapp' | 'private_bot' | 'runner' | 'private_claim';
 
@@ -151,22 +162,6 @@ const MANAGED_GIVEAWAY_INCLUDE = {
     orderBy: [{ selectedAt: 'asc' }],
   },
 } as const satisfies Prisma.ManagedGiveawayInclude;
-const MANAGED_GIVEAWAY_WINNER_NOTIFICATION_INCLUDE = {
-  winner: {
-    include: {
-      giveaway: {
-        include: {
-          prizes: {
-            orderBy: { position: 'asc' },
-          },
-        },
-      },
-      prize: true,
-      entry: true,
-    },
-  },
-} as const satisfies Prisma.ManagedGiveawayWinnerNotificationInclude;
-
 type PersistedGiveawayWithRelations = Prisma.ManagedGiveawayGetPayload<{
   include: typeof MANAGED_GIVEAWAY_INCLUDE;
 }>;
@@ -176,7 +171,7 @@ type PersistedManagedGiveawayEntry = Prisma.ManagedGiveawayEntryGetPayload<Recor
 type PersistedManagedGiveawayWinner = Prisma.ManagedGiveawayWinnerGetPayload<Record<string, never>>;
 type PersistedManagedGiveawayWinnerNotification =
   Prisma.ManagedGiveawayWinnerNotificationGetPayload<{
-    include: typeof MANAGED_GIVEAWAY_WINNER_NOTIFICATION_INCLUDE;
+    include: typeof GIVEAWAY_NOTIFICATION_INCLUDE;
   }>;
 type WinnerNotificationOutboxOptions = {
   notificationIds?: readonly string[];
@@ -198,8 +193,14 @@ type GiveawayRerollCandidate = {
   drawRank: string;
 };
 type GiveawayDrawClaimResult =
-  | { status: 'claimed'; giveaway: PersistedGiveawayWithRelations; drawSeed: string }
+  | {
+      status: 'claimed';
+      giveaway: PersistedGiveawayWithRelations;
+      drawSeed: string;
+      leaseAt: Date;
+    }
   | { status: 'completed'; giveaway: PersistedGiveawayWithRelations };
+type GiveawayMembershipRoute = { kind: 'unavailable' } | { kind: 'available'; botId?: string };
 type GiveawayEligibilityResult = {
   state: GiveawayEligibilityState;
   reason: string | null;
@@ -330,32 +331,18 @@ export class ManagedGiveawayService {
   ): Promise<ManagedGiveawaySummary[]> {
     await this.assertAdminEntityAccess(sourceChatId, user, entityType);
 
-    const rows = await this.prisma.managedGiveaway.findMany({
-      where: {
-        sourceChatId,
-        entityType: this.toPrismaEntityType(entityType),
-      },
-      orderBy: [{ createdAt: 'desc' }],
-      include: {
-        entries: {
-          select: {
-            eligibilityState: true,
-          },
-        },
-        winners: {
-          where: {
-            status: {
-              not: ManagedGiveawayWinnerStatus.REROLLED,
-            },
-          },
-          select: {
-            id: true,
-          },
-        },
-      },
-    });
-
-    return rows.map((row) => managedGiveawaySummarySchema.parse(this.mapGiveawaySummary(row)));
+    const type = this.toPrismaEntityType(entityType);
+    const rows: ManagedGiveawaySummary[] = [];
+    let page = await readGiveawayHistoryPage(this.prisma, sourceChatId, type);
+    while (page.length) {
+      rows.push(...page);
+      if (page.length < 30) break;
+      const last = page[page.length - 1]!;
+      page = await readGiveawayHistoryPage(this.prisma, sourceChatId, type, {
+        before: { createdAt: new Date(last.createdAt), id: last.id },
+      });
+    }
+    return rows;
   }
 
   async createManagedGiveaway(
@@ -427,7 +414,23 @@ export class ManagedGiveawayService {
     await this.assertAdminEntityAccess(sourceChatId, user, entityType);
 
     const row = await this.findGiveawayForSource(sourceChatId, giveawayId, entityType);
-    return managedGiveawayDetailsSchema.parse(this.mapGiveawayDetails(row));
+    const requiredChannelIds = this.readRequiredChannelIds(row.requiredChannelIds);
+    const requiredChannels = await mapWithConcurrencyLimit(
+      requiredChannelIds,
+      MANAGED_GIVEAWAY_METADATA_CONCURRENCY,
+      async (id) => {
+        const presentation = await this.resolveChatPresentation(id);
+        return {
+          id,
+          title: await this.resolveSourceTitle(id, presentation.title),
+          link: presentation.link,
+        };
+      },
+    );
+    return managedGiveawayDetailsSchema.parse({
+      ...this.mapGiveawayDetails(row),
+      requiredChannels,
+    });
   }
 
   async refreshManagedGiveawayPublication(
@@ -440,7 +443,31 @@ export class ManagedGiveawayService {
     await this.assertAdminEntityAccess(sourceChatId, user, entityType);
 
     const giveaway = await this.findGiveawayForSource(sourceChatId, giveawayId, entityType);
-    await this.editGiveawayPublicationIfNeeded(giveaway, giveaway.status, source);
+    if (giveaway.status === ManagedGiveawayStatus.COMPLETED) {
+      await this.prisma.$transaction(async (tx) => {
+        await this.lockGiveawayForWinnerMutation(tx, giveaway.id);
+        await enqueueGiveawayResultsSync(tx, giveaway.id, {
+          allowCreate: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+        });
+      });
+      if (!(await this.syncGiveawayResults(giveaway.id, source))) {
+        if (
+          !MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED &&
+          !(await this.prisma.managedGiveawayResultsSync.findFirst({
+            where: { giveawayId: giveaway.id },
+            select: { giveawayId: true },
+          }))
+        ) {
+          throw new BadRequestException('Не удалось обновить итоги в MAX.');
+        }
+        throw new ConflictException({
+          message: 'Итоги ожидают обновления в MAX.',
+          code: 'GIVEAWAY_RESULTS_SYNC_PENDING',
+        });
+      }
+    } else if (!(await this.editGiveawayPublicationIfNeeded(giveaway, giveaway.status, source))) {
+      throw new BadRequestException('Не удалось обновить публикацию в MAX.');
+    }
     await this.writeAuditLog(sourceChatId, user.userId, 'REFRESH_GIVEAWAY_PUBLICATION', {
       giveawayId,
       entityType,
@@ -466,11 +493,17 @@ export class ManagedGiveawayService {
       throw new BadRequestException('Изменять можно только черновик розыгрыша.');
     }
 
+    const expectedRevision = this.readExpectedDraftRevision(body);
     const payload = this.parseManagedGiveawayDraft(body);
     const updated = await this.prisma.$transaction(async (tx) => {
       const editable = await tx.managedGiveaway.updateMany({
-        where: { id: existing.id, status: ManagedGiveawayStatus.DRAFT, lockedAt: null },
-        data: { actorUserId: user.userId },
+        where: {
+          id: existing.id,
+          status: ManagedGiveawayStatus.DRAFT,
+          lockedAt: null,
+          draftRevision: expectedRevision,
+        },
+        data: { actorUserId: user.userId, draftRevision: { increment: 1 } },
       });
       if (editable.count !== 1) {
         throw new ConflictException('Черновик уже изменён или публикуется. Обновите экран.');
@@ -528,12 +561,17 @@ export class ManagedGiveawayService {
     user: AuthUser,
     entityType: ManagedEntityType,
     source: GiveawayActionSource = 'miniapp',
+    body?: unknown,
   ): Promise<ManagedGiveawayDetails> {
     await this.assertAdminEntityAccess(sourceChatId, user, entityType);
 
+    const expectedRevision = this.readExpectedDraftRevision(body);
     let giveaway = await this.findGiveawayForSource(sourceChatId, giveawayId, entityType);
     if (giveaway.status !== ManagedGiveawayStatus.DRAFT) {
       throw new BadRequestException('Публиковать можно только черновик розыгрыша.');
+    }
+    if (giveaway.draftRevision !== expectedRevision) {
+      throw new ConflictException('Черновик изменился. Проверьте актуальную версию.');
     }
     const now = new Date();
     if (!giveaway.lockedAt && giveaway.endsAt.getTime() <= now.getTime()) {
@@ -632,6 +670,7 @@ export class ManagedGiveawayService {
         status: ManagedGiveawayStatus.DRAFT,
         lockedAt: null,
         updatedAt: giveaway.updatedAt,
+        draftRevision: expectedRevision,
         endsAt: { gt: publicationLockAt },
       },
       data: {
@@ -640,8 +679,8 @@ export class ManagedGiveawayService {
       },
     });
     if (lock.count === 0) {
-      throw new BadRequestException(
-        'Публикация розыгрыша уже выполняется или требует ручной проверки.',
+      throw new ConflictException(
+        'Черновик изменился или уже публикуется. Проверьте актуальную версию.',
       );
     }
 
@@ -854,9 +893,10 @@ export class ManagedGiveawayService {
     const claimDeadlineAt = this.buildGiveawayClaimDeadlineAt(giveaway, now);
     const nextWinnerId = randomUUID();
     const rerollTransaction = this.prisma.$transaction(async (tx) => {
+      await this.lockGiveawayForWinnerMutation(tx, giveawayId);
       await tx.managedGiveawayEntry.update({
         where: { id: nextEntry.entry.id },
-        data: { drawRank: nextEntry.drawRank, checkedAt: now },
+        data: { drawRank: nextEntry.drawRank },
       });
 
       await tx.managedGiveawayWinner.update({
@@ -908,6 +948,9 @@ export class ManagedGiveawayService {
         },
       });
 
+      await enqueueGiveawayResultsSync(tx, giveawayId, {
+        allowCreate: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+      });
       return tx.managedGiveaway.findUniqueOrThrow({
         where: { id: giveaway.id },
         include: MANAGED_GIVEAWAY_INCLUDE,
@@ -923,7 +966,7 @@ export class ManagedGiveawayService {
     });
 
     await this.editGiveawayPublicationIfNeeded(updated, ManagedGiveawayStatus.COMPLETED, source);
-    const resultsConfirmed = await this.republishGiveawayResults(updated, source);
+    const resultsConfirmed = await this.syncGiveawayResults(updated.id, source);
     const refreshed = await this.findGiveawayById(updated.id);
     if (resultsConfirmed) {
       await this.processWinnerNotificationOutbox(
@@ -973,6 +1016,7 @@ export class ManagedGiveawayService {
 
     const updated = await this.prisma
       .$transaction(async (tx) => {
+        await this.lockGiveawayForWinnerMutation(tx, giveawayId);
         const transitioned = await this.transitionCurrentGiveawayWinner(
           tx,
           winner,
@@ -981,6 +1025,9 @@ export class ManagedGiveawayService {
         if (!transitioned) {
           throw new ConflictException('Состояние победителя изменилось. Обновите экран.');
         }
+        await enqueueGiveawayResultsSync(tx, giveawayId, {
+          allowCreate: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+        });
         return { id: winner.id };
       })
       .catch((error: unknown) => {
@@ -1003,7 +1050,7 @@ export class ManagedGiveawayService {
     });
 
     await this.editGiveawayPublicationIfNeeded(refreshed, ManagedGiveawayStatus.COMPLETED, source);
-    await this.republishGiveawayResults(refreshed, source);
+    await this.syncGiveawayResults(refreshed.id, source);
 
     return managedGiveawayDetailsSchema.parse(this.mapGiveawayDetails(refreshed));
   }
@@ -1066,147 +1113,49 @@ export class ManagedGiveawayService {
   ): Promise<void> {
     await this.assertAdminEntityAccess(sourceChatId, user, entityType);
 
-    const giveaway = await this.findGiveawayForSource(sourceChatId, giveawayId, entityType);
-    if (
-      giveaway.status !== ManagedGiveawayStatus.COMPLETED &&
-      giveaway.status !== ManagedGiveawayStatus.CANCELED
-    ) {
-      throw new BadRequestException('Удалять можно только завершённый или отменённый розыгрыш.');
+    const archived = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM managed_giveaways
+        WHERE id = ${giveawayId} AND source_chat_id = ${sourceChatId}
+          AND entity_type::text = ${this.toPrismaEntityType(entityType)}
+          AND status IN ('COMPLETED', 'CANCELED') AND archived_at IS NULL
+        FOR NO KEY UPDATE
+      `;
+      if (!rows.length) return false;
+      const result = await tx.managedGiveaway.updateMany({
+        where: {
+          id: giveawayId,
+          lockedAt: null,
+          sendLockKey: null,
+          winners: {
+            none: {
+              OR: [
+                {
+                  status: {
+                    in: [ManagedGiveawayWinnerStatus.SELECTED, ManagedGiveawayWinnerStatus.CLAIMED],
+                  },
+                },
+                { notification: { status: { in: ['DISPATCHING', 'AMBIGUOUS'] } } },
+              ],
+            },
+          },
+          OR: [{ resultsSync: null }, { resultsSync: { nextAttemptAt: null, leaseToken: null } }],
+        },
+        data: { archivedAt: new Date() },
+      });
+      return result.count === 1;
+    });
+    if (!archived) {
+      throw new ConflictException(
+        'Завершите выдачу призов и публикацию итогов перед архивированием.',
+      );
     }
 
-    await this.deleteGiveawayPublishedMessages(giveaway, source);
-
-    await this.prisma.managedGiveaway.delete({
-      where: { id: giveaway.id },
-    });
-
-    await this.writeAuditLog(sourceChatId, user.userId, 'DELETE_GIVEAWAY', {
+    await this.writeAuditLog(sourceChatId, user.userId, 'ARCHIVE_GIVEAWAY', {
       giveawayId,
       entityType,
       source,
-      status: giveaway.status,
     });
-  }
-
-  private async deleteGiveawayPublishedMessages(
-    giveaway: PersistedGiveawayWithRelations,
-    source: GiveawayActionSource,
-  ): Promise<void> {
-    const messages = this.collectGiveawayPublishedMessages(giveaway);
-    for (const message of messages) {
-      let deleteBotId = message.botId;
-      const attemptedBotIds = new Set<string>();
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        let deleteAttemptStartedAt: Date | null = null;
-        try {
-          if (!deleteBotId) {
-            deleteBotId = await this.resolveGiveawayDeleteBotId(giveaway.sourceChatId);
-          }
-          if (!deleteBotId || attemptedBotIds.has(deleteBotId)) {
-            throw new Error('No MAX bot with delete_message capability is available');
-          }
-          attemptedBotIds.add(deleteBotId);
-          deleteAttemptStartedAt = new Date();
-          await this.maxClient.deleteMessage(giveaway.sourceChatId, message.messageId, {
-            immediate: true,
-            ...buildManagedGiveawayMaxApiOptions(source, 'delete', deleteBotId),
-          });
-          break;
-        } catch (error: unknown) {
-          const classification = deleteAttemptStartedAt
-            ? classifyMaxTerminalChatActionError(error)
-            : null;
-          if (classification?.kind === 'message_not_found') {
-            this.logger.debug(
-              {
-                giveawayId: giveaway.id,
-                messageId: message.messageId,
-                kind: message.kind,
-                botId: deleteBotId,
-              },
-              'Managed giveaway published message was already missing during delete',
-            );
-            break;
-          }
-
-          if (deleteAttemptStartedAt) {
-            await this.recordManagedGiveawayMaxAccessLoss({
-              giveaway,
-              botId: deleteBotId,
-              source: `managed_giveaway:${message.kind}:delete`,
-              operation: 'delete',
-              lifecycleEventAt: deleteAttemptStartedAt,
-              error,
-            });
-          }
-
-          if (classification?.kind === 'managed_entity_access_lost' && attempt === 0) {
-            try {
-              const survivorBotId = await this.resolveGiveawayDeleteBotId(giveaway.sourceChatId);
-              if (survivorBotId && !attemptedBotIds.has(survivorBotId)) {
-                deleteBotId = survivorBotId;
-                continue;
-              }
-            } catch (survivorError: unknown) {
-              this.logger.warn(
-                {
-                  giveawayId: giveaway.id,
-                  messageId: message.messageId,
-                  kind: message.kind,
-                  botId: deleteBotId,
-                  err:
-                    survivorError instanceof Error ? survivorError.message : String(survivorError),
-                },
-                'Failed to resolve a survivor bot for managed giveaway message delete',
-              );
-            }
-          }
-
-          this.logger.warn(
-            {
-              giveawayId: giveaway.id,
-              messageId: message.messageId,
-              kind: message.kind,
-              botId: deleteBotId,
-              err: error instanceof Error ? error.message : String(error),
-            },
-            'Failed to delete managed giveaway published message',
-          );
-          throw new BadRequestException(
-            'Не удалось удалить опубликованные сообщения розыгрыша в MAX. Повторите позже или проверьте права бота.',
-          );
-        }
-      }
-    }
-  }
-
-  private collectGiveawayPublishedMessages(
-    giveaway: PersistedGiveawayWithRelations,
-  ): Array<{ kind: 'publication' | 'results'; messageId: string; botId: string | null }> {
-    const messages: Array<{
-      kind: 'publication' | 'results';
-      messageId: string;
-      botId: string | null;
-    }> = [];
-    const seenMessageIds = new Set<string>();
-    const publicationBotId = this.normalizeNonEmptyString(giveaway.publicationBotId);
-    const resultsBotId = this.normalizeNonEmptyString(giveaway.resultsBotId);
-    const push = (
-      kind: 'publication' | 'results',
-      messageId: string | null,
-      botId: string | null,
-    ) => {
-      const normalizedMessageId = this.normalizeNonEmptyString(messageId);
-      if (!normalizedMessageId || seenMessageIds.has(normalizedMessageId)) {
-        return;
-      }
-      seenMessageIds.add(normalizedMessageId);
-      messages.push({ kind, messageId: normalizedMessageId, botId });
-    };
-
-    push('publication', giveaway.publicationMessageId, publicationBotId ?? null);
-    push('results', giveaway.resultsMessageId, resultsBotId ?? null);
-    return messages;
   }
 
   async resolveManagedGiveawayRequiredChannel(
@@ -1229,22 +1178,25 @@ export class ManagedGiveawayService {
   }
 
   async getPublicGiveaway(giveawayId: string, _user: AuthUser): Promise<ManagedGiveawayPublic> {
-    const refreshed = await this.findPublicGiveawayById(giveawayId);
-    await this.upsertParticipantChatAccess(refreshed);
-
-    return managedGiveawayPublicSchema.parse(await this.mapPublicGiveaway(refreshed));
+    const row = await this.readVisibleGiveaway(giveawayId, () =>
+      readPublicGiveaway(this.prisma, giveawayId),
+    );
+    return managedGiveawayPublicSchema.parse(await this.mapPublicGiveaway(row));
   }
 
   async getGiveawayParticipantState(
     giveawayId: string,
     user: AuthUser,
   ): Promise<ManagedGiveawayParticipantState> {
-    const refreshed = await this.findPublicGiveawayById(giveawayId);
-    await this.upsertParticipantChatAccess(refreshed);
-    const claimBotId = await this.resolveGiveawayParticipantClaimBotId(refreshed.sourceChatId);
-
+    const row = await this.readVisibleGiveaway(giveawayId, () =>
+      readGiveawayParticipant(this.prisma, giveawayId, user.userId),
+    );
+    const claimBotId =
+      row.winners.length > 0
+        ? await this.resolveGiveawayParticipantClaimBotId(row.sourceChatId)
+        : null;
     return managedGiveawayParticipantStateSchema.parse(
-      this.mapParticipantState(refreshed, user.userId, claimBotId),
+      this.mapParticipantState(row, user.userId, claimBotId),
     );
   }
 
@@ -1252,7 +1204,9 @@ export class ManagedGiveawayService {
     giveawayId: string,
     user: AuthUser,
   ): Promise<ManagedGiveawayParticipantState> {
-    const refreshed = await this.findPublicGiveawayById(giveawayId);
+    const refreshed = await this.readVisibleGiveaway(giveawayId, () =>
+      readGiveawayParticipant(this.prisma, giveawayId, user.userId),
+    );
     this.assertGiveawayOpenForEntry(refreshed);
     await this.upsertParticipantChatAccess(refreshed);
 
@@ -1318,18 +1272,8 @@ export class ManagedGiveawayService {
       });
     }
 
-    const latest = await this.findGiveawayById(refreshed.id);
-    await this.editGiveawayPublicationIfNeeded(latest, latest.status, 'miniapp').catch(
-      (error: unknown) => {
-        this.logger.warn(
-          { giveawayId: latest.id, err: error instanceof Error ? error.message : String(error) },
-          'Giveaway entry saved; publication refresh deferred',
-        );
-      },
-    );
-    const claimBotId = await this.resolveGiveawayParticipantClaimBotId(latest.sourceChatId);
     return managedGiveawayParticipantStateSchema.parse(
-      this.mapParticipantState(latest, user.userId, claimBotId),
+      this.mapParticipantState({ ...refreshed, entries: [saved], winners: [] }, user.userId),
     );
   }
 
@@ -1361,17 +1305,7 @@ export class ManagedGiveawayService {
       throw new BadRequestException('Приз уже обработан.');
     }
     if (winner.claimDeadlineAt && winner.claimDeadlineAt.getTime() <= Date.now()) {
-      await this.prisma.managedGiveawayWinner.updateMany({
-        where: {
-          id: winner.id,
-          status: ManagedGiveawayWinnerStatus.SELECTED,
-          claimDeadlineAt: { lte: new Date() },
-        },
-        data: {
-          status: ManagedGiveawayWinnerStatus.EXPIRED,
-          expiredAt: new Date(),
-        },
-      });
+      await this.expireGiveawayWinner(giveawayId, winner.id, new Date());
       throw new BadRequestException('Срок подтверждения приза уже истёк.');
     }
 
@@ -1382,9 +1316,11 @@ export class ManagedGiveawayService {
       allowStaleMembershipOnError: false,
     });
     if (eligibility.state !== GiveawayEligibilityState.VERIFIED) {
-      throw new BadRequestException(
-        eligibility.reason || 'Не удалось повторно подтвердить выполнение условий розыгрыша.',
-      );
+      throw new BadRequestException({
+        message: eligibility.reason || 'Не удалось подтвердить выполнение условий розыгрыша.',
+        missingChannelIds: eligibility.missingChannelIds,
+        code: 'GIVEAWAY_CLAIM_MISSING_CHANNELS',
+      });
     }
 
     const updated = await this.prisma
@@ -1424,8 +1360,6 @@ export class ManagedGiveawayService {
       include: MANAGED_GIVEAWAY_INCLUDE,
     });
 
-    await this.editGiveawayPublicationIfNeeded(refreshed, ManagedGiveawayStatus.COMPLETED, source);
-    await this.republishGiveawayResults(refreshed, source);
     const prizeDisplayTitleById = this.buildPrizeDisplayTitleById(refreshed.prizes);
 
     return claimManagedGiveawayResponseSchema.parse({
@@ -1443,6 +1377,16 @@ export class ManagedGiveawayService {
     const now = new Date();
     const firstFamily = this.giveawayDueFirstFamily;
     this.giveawayDueFirstFamily = (firstFamily + 1) % MANAGED_GIVEAWAY_DUE_FAMILIES.length;
+    await this.expireDueGiveawayClaims(now);
+    const dueResults = await this.prisma.managedGiveawayResultsSync.findMany({
+      where: { nextAttemptAt: { lte: now }, giveaway: { archivedAt: null } },
+      orderBy: [{ nextAttemptAt: 'asc' }, { giveawayId: 'asc' }],
+      select: { giveawayId: true },
+      take: decision.action === 'slow' ? 3 : 6,
+    });
+    for (const { giveawayId } of dueResults) {
+      await this.syncGiveawayResults(giveawayId, 'runner');
+    }
     await this.processWinnerNotificationOutbox(
       'runner',
       undefined,
@@ -1451,7 +1395,6 @@ export class ManagedGiveawayService {
         : GIVEAWAY_WINNER_NOTIFICATION_BATCH_SIZE,
       { synchronizeResultsBeforeDispatch: true },
     );
-    await this.expireDueGiveawayClaims(now);
     const staleLockBefore = new Date(now.getTime() - GIVEAWAY_LOCK_STALE_MS);
     const processingLimit =
       decision.action === 'slow'
@@ -1704,6 +1647,7 @@ export class ManagedGiveawayService {
     const row = await this.prisma.managedGiveaway.findFirst({
       where: {
         sourceChatId,
+        archivedAt: null,
         entityType: this.toPrismaEntityType(entityType),
         status: {
           in: [
@@ -1778,7 +1722,11 @@ export class ManagedGiveawayService {
     giveaway: ManagedGiveawayDetails;
     winner: ManagedGiveawayWinner;
   } | null> {
-    const giveaway = await this.findGiveawayById(giveawayId);
+    const giveaway = await this.prisma.managedGiveaway.findUnique({
+      where: { id: giveawayId },
+      include: MANAGED_GIVEAWAY_INCLUDE,
+    });
+    if (!giveaway) return null;
     const winner = giveaway.winners.find(
       (row) =>
         row.id === winnerId &&
@@ -1848,6 +1796,14 @@ export class ManagedGiveawayService {
     await this.adminService.getSettings(sourceChatId, user);
   }
 
+  private readExpectedDraftRevision(body: unknown): number {
+    const parsed = managedGiveawayDraftRevisionSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new ConflictException('Обновите приложение и проверьте актуальный черновик.');
+    }
+    return parsed.data.expectedRevision;
+  }
+
   private parseManagedGiveawayDraft(body: unknown): UpdateManagedGiveawayRequest {
     const parsed = updateManagedGiveawayRequestSchema.safeParse(body);
     if (!parsed.success) {
@@ -1906,6 +1862,7 @@ export class ManagedGiveawayService {
       where: {
         id: giveawayId,
         sourceChatId,
+        archivedAt: null,
         entityType: this.toPrismaEntityType(entityType),
       },
       include: MANAGED_GIVEAWAY_INCLUDE,
@@ -1931,6 +1888,26 @@ export class ManagedGiveawayService {
     return row;
   }
 
+  private async readVisibleGiveaway<T extends PublicGiveawayRead | ParticipantGiveawayRead>(
+    giveawayId: string,
+    load: () => Promise<T | null>,
+  ): Promise<T> {
+    let row = await load();
+    const now = Date.now();
+    if (
+      row?.status === ManagedGiveawayStatus.SCHEDULED &&
+      row.startsAt &&
+      row.startsAt.getTime() <= now &&
+      row.endsAt.getTime() > now
+    ) {
+      await this.activateScheduledGiveawayIfDue(await this.findGiveawayById(giveawayId));
+      row = await load();
+    }
+    if (!row) throw new NotFoundException('Розыгрыш не найден.');
+    this.assertGiveawayPubliclyAccessible(row);
+    return row;
+  }
+
   private async findPublicGiveawayById(
     giveawayId: string,
   ): Promise<PersistedGiveawayWithRelations> {
@@ -1944,7 +1921,17 @@ export class ManagedGiveawayService {
     return refreshed;
   }
 
-  private assertGiveawayPubliclyAccessible(giveaway: PersistedGiveawayWithRelations): void {
+  private assertGiveawayPubliclyAccessible(
+    giveaway: Pick<
+      PublicGiveawayRead,
+      | 'status'
+      | 'publishedAt'
+      | 'publicationMessageId'
+      | 'publicationUrl'
+      | 'resultsMessageId'
+      | 'resultsUrl'
+    >,
+  ): void {
     const hasPublicReference =
       Boolean(giveaway.publishedAt) ||
       Boolean(giveaway.publicationMessageId?.trim()) ||
@@ -2006,6 +1993,7 @@ export class ManagedGiveawayService {
 
     return {
       ...summary,
+      draftRevision: row.draftRevision,
       sourceChatId: row.sourceChatId,
       entityType: this.fromPrismaEntityType(row.entityType),
       description: row.description,
@@ -2101,9 +2089,7 @@ export class ManagedGiveawayService {
     return titlesById;
   }
 
-  private async mapPublicGiveaway(
-    row: PersistedGiveawayWithRelations,
-  ): Promise<ManagedGiveawayPublic> {
+  private async mapPublicGiveaway(row: PublicGiveawayRead): Promise<ManagedGiveawayPublic> {
     const requiredChannelIds = this.readRequiredChannelIds(row.requiredChannelIds).filter(
       (channelId) => channelId !== row.sourceChatId,
     );
@@ -2141,7 +2127,7 @@ export class ManagedGiveawayService {
       claimHours: row.claimHours,
       requiredChannelIds,
       requiredChannels: requiredPresentations.map(({ id, title, link }) => ({ id, title, link })),
-      entriesCount: this.countPublicGiveawayEntries(row.entries),
+      entriesCount: row._count.entries,
       winnersCount: row.winners.filter(
         (winner) => winner.status !== ManagedGiveawayWinnerStatus.REROLLED,
       ).length,
@@ -2174,7 +2160,7 @@ export class ManagedGiveawayService {
   }
 
   private mapParticipantState(
-    row: PersistedGiveawayWithRelations,
+    row: ParticipantGiveawayRead,
     userId: string,
     claimBotId?: string | null,
   ): ManagedGiveawayParticipantState {
@@ -2199,12 +2185,7 @@ export class ManagedGiveawayService {
       eligibilityReason: entry?.eligibilityReason ?? null,
       missingChannelIds:
         entry?.eligibilityState === GiveawayEligibilityState.REJECTED
-          ? (() => {
-              const storedMissingChannelIds = this.readMissingChannelIds(entry.missingChannelIds);
-              return storedMissingChannelIds.length > 0
-                ? storedMissingChannelIds
-                : this.buildGiveawayMandatoryChannelIds(row);
-            })()
+          ? this.readMissingChannelIds(entry.missingChannelIds)
           : [],
       joinedAt: entry?.joinedAt.toISOString() ?? null,
       isWinner: Boolean(winner),
@@ -2262,8 +2243,13 @@ export class ManagedGiveawayService {
     return status === ManagedGiveawayWinnerStatus.SELECTED ||
       status === ManagedGiveawayWinnerStatus.CLAIMED ||
       status === ManagedGiveawayWinnerStatus.DELIVERED
-      ? (winner.entry.displayName ?? null)
+      ? this.resolveSafePublicName(winner.entry.displayName, winner.entry.userId)
       : null;
+  }
+
+  private resolveSafePublicName(name: string | null | undefined, userId: string): string | null {
+    const value = name?.trim();
+    return !value || value === userId || value === `user:${userId}` ? null : value;
   }
 
   private resolveEffectiveWinnerStatus(
@@ -2277,6 +2263,15 @@ export class ManagedGiveawayService {
     }
 
     return winner.status;
+  }
+
+  private async lockGiveawayForWinnerMutation(tx: Prisma.TransactionClient, giveawayId: string) {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM managed_giveaways
+      WHERE id = ${giveawayId} AND archived_at IS NULL AND status = 'COMPLETED'
+      FOR NO KEY UPDATE
+    `;
+    if (!rows.length) throw new ConflictException('Розыгрыш уже находится в архиве.');
   }
 
   private async transitionCurrentGiveawayWinner(
@@ -2418,16 +2413,14 @@ export class ManagedGiveawayService {
     }
   }
 
-  private async buildGiveawayEntryButton(
-    giveaway: Pick<PersistedGiveawayWithRelations, 'id' | 'sourceChatId' | 'entries'>,
+  private buildGiveawayEntryButton(
+    giveaway: Pick<PersistedGiveawayWithRelations, 'id' | 'sourceChatId'>,
     botId?: string | null,
   ): Promise<MaxMessageButton | null> {
     return this.buildGiveawayMiniappButton(
       giveaway.sourceChatId,
       giveaway.id,
-      `Участвовать · ${this.formatGiveawayEntriesCount(
-        this.countPublicGiveawayEntries(giveaway.entries),
-      )}`,
+      'Участвовать',
       botId,
     );
   }
@@ -2488,28 +2481,6 @@ export class ManagedGiveawayService {
     }
 
     return null;
-  }
-
-  private formatGiveawayEntriesCount(value: number): string {
-    if (value >= 1_000_000) {
-      const normalized =
-        value >= 10_000_000 ? (value / 1_000_000).toFixed(0) : (value / 1_000_000).toFixed(1);
-      return `${normalized.replace(/\.0$/u, '')}M`;
-    }
-
-    if (value >= 1_000) {
-      const normalized = value >= 10_000 ? (value / 1_000).toFixed(0) : (value / 1_000).toFixed(1);
-      return `${normalized.replace(/\.0$/u, '')}K`;
-    }
-
-    return String(Math.max(0, value));
-  }
-
-  private countPublicGiveawayEntries(
-    entries: ReadonlyArray<{ eligibilityState: GiveawayEligibilityState }>,
-  ): number {
-    return entries.filter((entry) => entry.eligibilityState !== GiveawayEligibilityState.REJECTED)
-      .length;
   }
 
   private buildGiveawayPublicationText(
@@ -2700,10 +2671,12 @@ export class ManagedGiveawayService {
     }
 
     if (winner.claimDeadlineAt) {
-      lines.push(`До: ${winner.claimDeadlineAt.toLocaleString('ru-RU')}`);
+      lines.push(
+        `До: ${winner.claimDeadlineAt.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК'}`,
+      );
     }
 
-    lines.push('', 'Итоги уже опубликованы в группе.');
+    lines.push('', 'Итоги опубликованы.');
     return lines.join('\n');
   }
 
@@ -2853,11 +2826,12 @@ export class ManagedGiveawayService {
           status: { not: ManagedGiveawayWinnerStatus.REROLLED },
           giveaway: {
             status: ManagedGiveawayStatus.COMPLETED,
+            archivedAt: null,
             ...(params.giveawayId ? { id: params.giveawayId } : {}),
           },
         },
       },
-      include: MANAGED_GIVEAWAY_WINNER_NOTIFICATION_INCLUDE,
+      include: GIVEAWAY_NOTIFICATION_INCLUDE,
       orderBy: [{ nextAttemptAt: 'asc' }, { createdAt: 'asc' }],
       take: Math.max(1, Math.min(GIVEAWAY_WINNER_NOTIFICATION_BATCH_SIZE, params.batchSize)),
     });
@@ -2878,8 +2852,14 @@ export class ManagedGiveawayService {
     for (const [giveawayId, notificationIds] of notificationIdsByGiveawayId) {
       let resultsConfirmed = false;
       try {
-        const giveaway = await this.findGiveawayById(giveawayId);
-        resultsConfirmed = await this.republishGiveawayResults(giveaway, source);
+        if (MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED) {
+          await this.prisma.managedGiveawayResultsSync.upsert({
+            where: { giveawayId },
+            create: { giveawayId, nextAttemptAt: new Date() },
+            update: {},
+          });
+        }
+        resultsConfirmed = await this.syncGiveawayResults(giveawayId, source);
       } catch (error: unknown) {
         this.logger.warn(
           {
@@ -2946,6 +2926,7 @@ export class ManagedGiveawayService {
           nextAttemptAt: new Date(
             deferredAt.getTime() + GIVEAWAY_WINNER_NOTIFICATION_RETRY_BASE_MS,
           ),
+          lastError: 'Ожидает синхронизации итогов в MAX.',
         },
       });
     } catch (error: unknown) {
@@ -3013,6 +2994,19 @@ export class ManagedGiveawayService {
       return;
     }
 
+    const stillClaimable = {
+      status: ManagedGiveawayWinnerStatus.SELECTED,
+      OR: [{ claimDeadlineAt: null }, { claimDeadlineAt: { gt: new Date() } }],
+      giveaway: { archivedAt: null, resultsSync: { nextAttemptAt: null } },
+    };
+    if (
+      this.resolveEffectiveWinnerStatus(notification.winner) !==
+      ManagedGiveawayWinnerStatus.SELECTED
+    ) {
+      await this.cancelObsoleteWinnerNotification(notification, leaseAt);
+      return;
+    }
+
     const attemptCount = notification.attemptCount + 1;
     const winner = notification.winner;
     const giveaway = winner.giveaway;
@@ -3033,19 +3027,34 @@ export class ManagedGiveawayService {
       const options = {
         ...(baseOptions ?? {}),
         beforeSend: async () => {
-          const dispatchedAt = new Date();
-          const transitioned = await this.prisma.managedGiveawayWinnerNotification.updateMany({
-            where: {
-              id: notification.id,
-              status: notification.status,
-              lockedAt: leaseAt,
-            },
-            data: {
-              status: ManagedGiveawayWinnerNotificationStatus.DISPATCHING,
-              dispatchedAt,
-              botId: notificationBotId ?? null,
-              lastError: null,
-            },
+          const transitioned = await this.prisma.$transaction(async (tx) => {
+            // FLAG: Take the same parent/winner order as prize updates, then the exact outbox row.
+            // The clock read must follow all lock waits before authorizing the outbound request.
+            await tx.$executeRaw`SELECT id FROM managed_giveaways WHERE id = ${giveaway.id} FOR NO KEY UPDATE`;
+            await tx.$executeRaw`SELECT id FROM managed_giveaway_winners WHERE id = ${winner.id} AND giveaway_id = ${giveaway.id} FOR NO KEY UPDATE`;
+            await tx.$executeRaw`SELECT id FROM managed_giveaway_winner_notifications WHERE id = ${notification.id} AND winner_id = ${winner.id} FOR UPDATE`;
+            const [clock] = await tx.$queryRaw<{ dispatchedAt: Date }[]>`
+              SELECT clock_timestamp() AT TIME ZONE 'UTC' AS "dispatchedAt"
+            `;
+            if (!clock) throw new Error('Database dispatch clock unavailable');
+            const { dispatchedAt } = clock;
+            return tx.managedGiveawayWinnerNotification.updateMany({
+              where: {
+                id: notification.id,
+                status: notification.status,
+                lockedAt: leaseAt,
+                winner: {
+                  ...stillClaimable,
+                  OR: [{ claimDeadlineAt: null }, { claimDeadlineAt: { gt: dispatchedAt } }],
+                },
+              },
+              data: {
+                status: ManagedGiveawayWinnerNotificationStatus.DISPATCHING,
+                dispatchedAt,
+                botId: notificationBotId ?? null,
+                lastError: null,
+              },
+            });
           });
           if (transitioned.count === 0) {
             throw new Error('Managed giveaway winner notification dispatch lease was lost');
@@ -3095,6 +3104,8 @@ export class ManagedGiveawayService {
         );
       }
     } catch (error: unknown) {
+      if (!dispatchStarted && (await this.cancelObsoleteWinnerNotification(notification, leaseAt)))
+        return;
       if (acceptedRemoteMessageId) {
         const completedAt = new Date();
         await this.prisma.managedGiveawayWinnerNotification.updateMany({
@@ -3181,6 +3192,32 @@ export class ManagedGiveawayService {
     }
   }
 
+  private async cancelObsoleteWinnerNotification(
+    notification: PersistedManagedGiveawayWinnerNotification,
+    leaseAt: Date,
+  ): Promise<boolean> {
+    const result = await this.prisma.managedGiveawayWinnerNotification.updateMany({
+      where: {
+        id: notification.id,
+        status: notification.status,
+        lockedAt: leaseAt,
+        winner: {
+          OR: [
+            { status: { not: ManagedGiveawayWinnerStatus.SELECTED } },
+            { claimDeadlineAt: { lte: new Date() } },
+            { giveaway: { archivedAt: { not: null } } },
+          ],
+        },
+      },
+      data: {
+        status: ManagedGiveawayWinnerNotificationStatus.CANCELED,
+        lockedAt: null,
+        lastError: 'Победитель больше не ожидает подтверждения приза.',
+      },
+    });
+    return result.count === 1;
+  }
+
   private winnerNotificationRetryDelayMs(attemptCount: number): number {
     const exponent = Math.max(0, Math.min(10, attemptCount - 1));
     return Math.min(
@@ -3198,10 +3235,10 @@ export class ManagedGiveawayService {
     giveaway: PersistedGiveawayWithRelations,
     status: ManagedGiveawayStatus,
     source: GiveawayActionSource = 'miniapp',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const messageId = giveaway.publicationMessageId?.trim() ?? '';
     if (!messageId) {
-      return;
+      return false;
     }
 
     let publicationBotId: string | undefined;
@@ -3235,7 +3272,7 @@ export class ManagedGiveawayService {
             buildManagedGiveawayMaxApiOptions(source, 'send'),
           );
         }
-        return;
+        return true;
       }
 
       if (status === ManagedGiveawayStatus.ACTIVE) {
@@ -3263,7 +3300,7 @@ export class ManagedGiveawayService {
             buildManagedGiveawayMaxApiOptions(source, 'send'),
           );
         }
-        return;
+        return true;
       }
 
       const buttons = await this.buildGiveawayPostActionRows(
@@ -3290,6 +3327,7 @@ export class ManagedGiveawayService {
           buildManagedGiveawayMaxApiOptions(source, 'send'),
         );
       }
+      return true;
     } catch (error: unknown) {
       this.logger.warn(
         {
@@ -3310,6 +3348,7 @@ export class ManagedGiveawayService {
           error,
         });
       }
+      return false;
     }
   }
 
@@ -3503,9 +3542,28 @@ export class ManagedGiveawayService {
     return { kind: 'retryable' };
   }
 
+  private async syncGiveawayResults(giveawayId: string, source: GiveawayActionSource) {
+    try {
+      const publish = async (assertCurrent?: () => Promise<void>) => {
+        const giveaway = await this.findGiveawayById(giveawayId);
+        if (giveaway.status !== ManagedGiveawayStatus.COMPLETED || giveaway.archivedAt)
+          return false;
+        await assertCurrent?.();
+        return this.republishGiveawayResults(giveaway, source, assertCurrent);
+      };
+      return await processGiveawayResultsSync(this.prisma, giveawayId, publish, {
+        publishWithoutIntent: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED ? undefined : publish,
+      });
+    } catch (error: unknown) {
+      this.logger.warn({ giveawayId, err: error }, 'Failed to synchronize giveaway results');
+      return false;
+    }
+  }
+
   private async republishGiveawayResults(
     giveaway: PersistedGiveawayWithRelations,
     source: GiveawayActionSource = 'miniapp',
+    assertCurrent?: () => Promise<void>,
   ): Promise<boolean> {
     const baseResultsTextPayload = this.buildGiveawayResultsTextPayload(giveaway);
     const sendOptions = buildManagedGiveawayMaxApiOptions(source, 'send');
@@ -3566,6 +3624,7 @@ export class ManagedGiveawayService {
               },
               resultsTextPayload,
               source,
+              assertCurrent,
             );
           }
           return false;
@@ -3583,6 +3642,7 @@ export class ManagedGiveawayService {
       const lock = await this.prisma.managedGiveaway.updateMany({
         where: {
           id: giveaway.id,
+          archivedAt: null,
           resultsMessageId: null,
           lockedAt: null,
         },
@@ -3624,6 +3684,7 @@ export class ManagedGiveawayService {
                 );
                 return options ? { options } : {};
               },
+              beforeSendMutation: assertCurrent,
               onDispatchAttempt: ({ botId }) => {
                 maxSendAttemptStartedAt = new Date();
                 maxSendAttempted = true;
@@ -3635,6 +3696,7 @@ export class ManagedGiveawayService {
                 await this.buildGiveawayResultsMessageOptions(giveaway, resultsBotId, source),
                 resultsTextPayload.textFormat,
               );
+              await assertCurrent?.();
               maxSendAttemptStartedAt = new Date();
               maxSendAttempted = true;
               return resultsBotId
@@ -3677,6 +3739,7 @@ export class ManagedGiveawayService {
             },
             resultsTextPayload,
             source,
+            assertCurrent,
           );
         }
         return true;
@@ -3726,13 +3789,14 @@ export class ManagedGiveawayService {
       }
     }
 
-    return this.editGiveawayResultsMessage(giveaway, resultsTextPayload, source);
+    return this.editGiveawayResultsMessage(giveaway, resultsTextPayload, source, assertCurrent);
   }
 
   private async editGiveawayResultsMessage(
     giveaway: PersistedGiveawayWithRelations,
     resultsTextPayload: GiveawayResultsTextPayload,
     source: GiveawayActionSource,
+    assertCurrent?: () => Promise<void>,
   ): Promise<boolean> {
     const resultsMessageId = giveaway.resultsMessageId?.trim();
     if (!resultsMessageId) {
@@ -3758,7 +3822,7 @@ export class ManagedGiveawayService {
           giveaway.sourceChatId,
           resultsMessageId,
           resultsTextPayload.text,
-          resultOptions,
+          assertCurrent ? { ...resultOptions, beforeEditMutation: assertCurrent } : resultOptions,
           buildManagedGiveawayMaxApiOptions(source, 'send', resultsBotId),
         );
       } else {
@@ -3766,7 +3830,7 @@ export class ManagedGiveawayService {
           giveaway.sourceChatId,
           resultsMessageId,
           resultsTextPayload.text,
-          resultOptions,
+          assertCurrent ? { ...resultOptions, beforeEditMutation: assertCurrent } : resultOptions,
           buildManagedGiveawayMaxApiOptions(source, 'send'),
         );
       }
@@ -3779,6 +3843,7 @@ export class ManagedGiveawayService {
           resultsBotId: resultsBotId ?? null,
           source,
           error,
+          assertCurrent,
         })
       ) {
         return true;
@@ -3810,6 +3875,7 @@ export class ManagedGiveawayService {
     resultsBotId: string | null;
     source: GiveawayActionSource;
     error: unknown;
+    assertCurrent?: () => Promise<void>;
   }): Promise<boolean> {
     if (!this.isDefinitiveGiveawayResultsEditFailure(params.error)) {
       return false;
@@ -3855,6 +3921,7 @@ export class ManagedGiveawayService {
       params.giveaway.id,
       params.resultsMessageId,
     );
+    await params.assertCurrent?.();
     const replaced = await this.prisma.managedGiveaway.updateMany({
       where: {
         id: params.giveaway.id,
@@ -3893,6 +3960,7 @@ export class ManagedGiveawayService {
         sendLockKey: replacementSendLockKey,
       },
       params.source,
+      params.assertCurrent,
     );
   }
 
@@ -3968,7 +4036,9 @@ export class ManagedGiveawayService {
     return value.replace(/([\\_*[\]()`~+])/g, '\\$1');
   }
 
-  private assertGiveawayOpenForEntry(giveaway: PersistedGiveawayWithRelations): void {
+  private assertGiveawayOpenForEntry(
+    giveaway: Pick<ParticipantGiveawayRead, 'status' | 'startsAt' | 'endsAt'>,
+  ): void {
     const now = Date.now();
     if (giveaway.status !== ManagedGiveawayStatus.ACTIVE) {
       throw new BadRequestException(
@@ -3986,7 +4056,10 @@ export class ManagedGiveawayService {
   }
 
   private async evaluateGiveawayEligibility(
-    giveaway: PersistedGiveawayWithRelations,
+    giveaway: Pick<
+      ParticipantGiveawayRead,
+      'id' | 'entityType' | 'sourceChatId' | 'requiredChannelIds'
+    >,
     userId: string,
     options: GiveawayEligibilityCheckOptions = {},
   ): Promise<GiveawayEligibilityResult> {
@@ -3994,15 +4067,24 @@ export class ManagedGiveawayService {
       giveaway.requiredChannelIds,
     ).filter((channelId) => channelId !== giveaway.sourceChatId);
     const mandatoryChannelIds = [giveaway.sourceChatId, ...additionalRequiredChannels];
-    const lookupBotIdByChannelId =
-      await this.resolveGiveawayMembershipLookupBotIds(mandatoryChannelIds);
+    const routes = await this.resolveGiveawayMembershipRoutes(mandatoryChannelIds);
+    const unavailableChannelId = mandatoryChannelIds.find(
+      (channelId) => routes.get(channelId)?.kind === 'unavailable',
+    );
+    if (unavailableChannelId) {
+      return this.resolveGiveawayEligibilityLookupFailure(giveaway, userId, {
+        ...options,
+        failedChannelId: unavailableChannelId,
+      });
+    }
     const missingChannelIds: string[] = [];
 
     if (this.membershipLookupService) {
       const lookupPolicy = this.resolveGiveawayLookupPolicy(options);
 
       for (const channelId of mandatoryChannelIds) {
-        const botId = lookupBotIdByChannelId.get(channelId) ?? null;
+        const route = routes.get(channelId);
+        const botId = route?.kind === 'available' ? route.botId : undefined;
         const membership = await this.membershipLookupService.getMembership(
           channelId,
           userId,
@@ -4030,7 +4112,8 @@ export class ManagedGiveawayService {
     try {
       const fallbackLookupSource: GiveawayActionSource =
         options.lookupPolicy === 'giveaway_draw_background' ? 'runner' : 'miniapp';
-      const sourceBotId = lookupBotIdByChannelId.get(giveaway.sourceChatId) ?? null;
+      const sourceRoute = routes.get(giveaway.sourceChatId);
+      const sourceBotId = sourceRoute?.kind === 'available' ? sourceRoute.botId : undefined;
       const isMember = await this.maxClient.hasChatMember(giveaway.sourceChatId, userId, {
         ...buildManagedGiveawayMaxApiOptions(fallbackLookupSource, 'membership', sourceBotId),
       });
@@ -4039,7 +4122,8 @@ export class ManagedGiveawayService {
       }
 
       for (const channelId of additionalRequiredChannels) {
-        const botId = lookupBotIdByChannelId.get(channelId) ?? null;
+        const route = routes.get(channelId);
+        const botId = route?.kind === 'available' ? route.botId : undefined;
         const hasAdditionalSubscription = await this.maxClient.hasChatMember(channelId, userId, {
           ...buildManagedGiveawayMaxApiOptions(fallbackLookupSource, 'membership', botId),
         });
@@ -4073,7 +4157,7 @@ export class ManagedGiveawayService {
   }
 
   private buildGiveawayEligibilityResult(
-    giveaway: PersistedGiveawayWithRelations,
+    giveaway: Pick<ParticipantGiveawayRead, 'entityType' | 'sourceChatId'>,
     missingChannelIds: string[],
     options: GiveawayEligibilityCheckOptions = {},
   ): GiveawayEligibilityResult {
@@ -4116,7 +4200,10 @@ export class ManagedGiveawayService {
   }
 
   private resolveGiveawayEligibilityLookupFailure(
-    giveaway: PersistedGiveawayWithRelations,
+    giveaway: Pick<
+      ParticipantGiveawayRead,
+      'id' | 'entityType' | 'sourceChatId' | 'requiredChannelIds'
+    >,
     userId: string,
     options: GiveawayEligibilityCheckOptions = {},
     error?: unknown,
@@ -4257,16 +4344,30 @@ export class ManagedGiveawayService {
     }
 
     const userIds = Array.from(new Set(entries.map((entry) => entry.userId)));
+    if (!userIds.length) return new Map();
     const mandatoryChannelIds = this.buildGiveawayMandatoryChannelIds(giveaway);
     const lookupPolicy: MaxMembershipLookupPolicy =
       source === 'runner' ? 'giveaway_draw_background' : 'giveaway_draw_interactive';
     const membershipByChannelId = new Map<string, Map<string, boolean | null>>();
     const allowStaleOnError = false;
-    const lookupBotIdByChannelId =
-      await this.resolveGiveawayMembershipLookupBotIds(mandatoryChannelIds);
+    const routes = await this.resolveGiveawayMembershipRoutes(mandatoryChannelIds);
+    const unavailableChannelId = mandatoryChannelIds.find(
+      (channelId) => routes.get(channelId)?.kind === 'unavailable',
+    );
+    if (unavailableChannelId) {
+      if (source === 'runner') {
+        throw new ManagedGiveawayMembershipLookupUnavailableError(
+          'transient',
+          unavailableChannelId,
+          null,
+        );
+      }
+      throw new BadRequestException(GIVEAWAY_RUNNER_LOOKUP_RETRY_MESSAGE);
+    }
 
     for (const channelId of mandatoryChannelIds) {
-      const botId = lookupBotIdByChannelId.get(channelId) ?? null;
+      const route = routes.get(channelId);
+      const botId = route?.kind === 'available' ? route.botId : undefined;
       membershipByChannelId.set(
         channelId,
         await this.membershipLookupService.getMemberships(channelId, userIds, lookupPolicy, {
@@ -4643,71 +4744,33 @@ export class ManagedGiveawayService {
     }
   }
 
+  private async expireGiveawayWinner(giveawayId: string, winnerId: string, now: Date) {
+    await this.prisma.$transaction(async (tx) => {
+      await this.lockGiveawayForWinnerMutation(tx, giveawayId);
+      const expired = await tx.managedGiveawayWinner.updateMany({
+        where: {
+          id: winnerId,
+          status: ManagedGiveawayWinnerStatus.SELECTED,
+          claimDeadlineAt: { lte: now },
+        },
+        data: { status: ManagedGiveawayWinnerStatus.EXPIRED, expiredAt: now },
+      });
+      if (expired.count > 0)
+        await enqueueGiveawayResultsSync(tx, giveawayId, {
+          allowCreate: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+        });
+    });
+  }
+
   private async expireDueGiveawayClaims(now: Date): Promise<void> {
     const dueWinners = await this.prisma.managedGiveawayWinner.findMany({
-      where: {
-        status: ManagedGiveawayWinnerStatus.SELECTED,
-        claimDeadlineAt: {
-          lte: now,
-        },
-      },
-      select: {
-        id: true,
-        giveawayId: true,
-      },
+      where: { status: ManagedGiveawayWinnerStatus.SELECTED, claimDeadlineAt: { lte: now } },
+      select: { id: true, giveawayId: true },
+      orderBy: [{ claimDeadlineAt: 'asc' }, { id: 'asc' }],
       take: 100,
     });
-
-    if (dueWinners.length === 0) {
-      return;
-    }
-
-    const winnerIds = dueWinners.map((winner) => winner.id);
-    await this.prisma.managedGiveawayWinner.updateMany({
-      where: {
-        id: { in: winnerIds },
-        status: ManagedGiveawayWinnerStatus.SELECTED,
-      },
-      data: {
-        status: ManagedGiveawayWinnerStatus.EXPIRED,
-        expiredAt: now,
-      },
-    });
-
-    const giveawayIds = Array.from(new Set(dueWinners.map((winner) => winner.giveawayId)));
-    const giveawaySourceRows = await this.prisma.managedGiveaway.findMany({
-      where: { id: { in: giveawayIds } },
-      select: { id: true, sourceChatId: true },
-    });
-    const sourceChatIdByGiveawayId = new Map(
-      giveawaySourceRows.map((row) => [row.id, this.normalizeNonEmptyString(row.sourceChatId)]),
-    );
-    const accessBlockedSourceChatIds = await this.findAccessBlockedGiveawaySourceChatIds(
-      giveawaySourceRows.map((row) => row.sourceChatId),
-    );
-
-    for (const giveawayId of giveawayIds) {
-      const sourceChatId = sourceChatIdByGiveawayId.get(giveawayId) ?? null;
-      if (sourceChatId && accessBlockedSourceChatIds.has(sourceChatId)) {
-        continue;
-      }
-      try {
-        const giveaway = await this.findGiveawayById(giveawayId);
-        await this.editGiveawayPublicationIfNeeded(
-          giveaway,
-          ManagedGiveawayStatus.COMPLETED,
-          'runner',
-        );
-        await this.republishGiveawayResults(giveaway, 'runner');
-      } catch (error: unknown) {
-        this.logger.warn(
-          {
-            giveawayId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to refresh giveaway after winner claim expiry',
-        );
-      }
+    for (const winner of dueWinners) {
+      await this.expireGiveawayWinner(winner.giveawayId, winner.id, now);
     }
   }
 
@@ -4743,6 +4806,7 @@ export class ManagedGiveawayService {
         status: 'claimed',
         giveaway: await this.findGiveawayById(giveaway.id),
         drawSeed,
+        leaseAt: now,
       };
     }
 
@@ -4775,6 +4839,7 @@ export class ManagedGiveawayService {
           status: 'claimed',
           giveaway: await this.findGiveawayById(current.id),
           drawSeed: resumedSeed,
+          leaseAt: now,
         };
       }
     }
@@ -4801,6 +4866,16 @@ export class ManagedGiveawayService {
 
     const giveaway = drawClaim.giveaway;
     const drawSeed = drawClaim.drawSeed;
+    const leaseAt = drawClaim.leaseAt;
+    // FLAG: A reload may observe a successor. Only the timestamp written by this
+    // acquisition authorizes a draw or release. A takeover requires a later timestamp.
+    if (
+      giveaway.status !== ManagedGiveawayStatus.DRAWING ||
+      giveaway.lockedAt?.getTime() !== leaseAt.getTime() ||
+      giveaway.drawSeed !== drawSeed
+    ) {
+      throw new ConflictException('Итоги уже обрабатывает другой исполнитель.');
+    }
     let winnersToCreate: Array<{
       winnerId: ReturnType<typeof randomUUID>;
       prize: PersistedManagedGiveawayPrize;
@@ -4874,28 +4949,29 @@ export class ManagedGiveawayService {
           where: {
             id: giveaway.id,
             status: ManagedGiveawayStatus.DRAWING,
-            lockedAt: giveaway.lockedAt,
+            lockedAt: leaseAt,
             drawSeed,
           },
           data: { status: ManagedGiveawayStatus.DRAWING },
         });
         if (owned.count !== 1)
           throw new ConflictException('Итоги уже обрабатывает другой исполнитель.');
+        const ranksById = new Map(rankedEntries.map((row) => [row.entry.id, row.drawRank]));
+        const checkedAt = new Date();
+        await writeGiveawayDrawEntries(
+          tx,
+          giveaway.id,
+          refreshedEntries.map((entry) => ({
+            id: entry.id,
+            eligibilityState: entry.eligibilityState,
+            eligibilityReason: entry.eligibilityReason,
+            missingChannelIds: this.readMissingChannelIds(entry.missingChannelIds),
+            drawRank: ranksById.get(entry.id) ?? null,
+          })),
+          checkedAt,
+        );
         const completedAt = new Date();
         const claimDeadlineAt = this.buildGiveawayClaimDeadlineAt(giveaway, completedAt);
-        const ranksById = new Map(rankedEntries.map((row) => [row.entry.id, row.drawRank]));
-        for (const entry of refreshedEntries) {
-          await tx.managedGiveawayEntry.update({
-            where: { id: entry.id },
-            data: {
-              eligibilityState: entry.eligibilityState,
-              eligibilityReason: entry.eligibilityReason,
-              missingChannelIds: this.readMissingChannelIds(entry.missingChannelIds),
-              drawRank: ranksById.get(entry.id) ?? null,
-              checkedAt: completedAt,
-            },
-          });
-        }
 
         await tx.managedGiveawayWinner.deleteMany({
           where: {
@@ -4935,6 +5011,9 @@ export class ManagedGiveawayService {
           },
         });
 
+        await enqueueGiveawayResultsSync(tx, giveaway.id, {
+          allowCreate: MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED,
+        });
         return tx.managedGiveaway.findUniqueOrThrow({
           where: { id: giveaway.id },
           include: MANAGED_GIVEAWAY_INCLUDE,
@@ -4945,7 +5024,7 @@ export class ManagedGiveawayService {
         where: {
           id: giveaway.id,
           status: ManagedGiveawayStatus.DRAWING,
-          lockedAt: giveaway.lockedAt,
+          lockedAt: leaseAt,
           drawSeed,
         },
         data: {
@@ -4961,8 +5040,11 @@ export class ManagedGiveawayService {
     }
 
     await this.editGiveawayPublicationIfNeeded(completed, ManagedGiveawayStatus.COMPLETED, source);
-    const resultsConfirmed = await this.republishGiveawayResults(completed, source);
-    const refreshed = await this.findGiveawayById(completed.id);
+    const resultsConfirmed = await this.syncGiveawayResults(completed.id, source);
+    const refreshed =
+      resultsConfirmed && winnersToCreate.length > 0
+        ? await this.findGiveawayById(completed.id)
+        : completed;
     if (resultsConfirmed && winnersToCreate.length > 0) {
       await this.processWinnerNotificationOutbox(
         source,
@@ -4987,7 +5069,7 @@ export class ManagedGiveawayService {
   }
 
   private async upsertParticipantChatAccess(
-    giveaway: PersistedGiveawayWithRelations,
+    giveaway: Pick<PersistedGiveawayWithRelations, 'sourceChatId' | 'entityType'>,
   ): Promise<void> {
     const resolvedBotId = await this.resolveReadBotAssignment(giveaway.sourceChatId);
 
@@ -5046,7 +5128,11 @@ export class ManagedGiveawayService {
   }
 
   private resolveUserDisplayName(user: AuthUser): string {
-    return user.displayName?.trim() || user.username?.trim() || `user:${user.userId}`;
+    return (
+      this.resolveSafePublicName(user.displayName, user.userId) ??
+      this.resolveSafePublicName(user.username, user.userId) ??
+      'Участник'
+    );
   }
 
   private buildGiveawayLaunchUrl(giveawayId: string): string | null {
@@ -5275,9 +5361,9 @@ export class ManagedGiveawayService {
     return (await this.resolveSendBotAssignmentRouteAware(chatId)).botId;
   }
 
-  private async resolveGiveawayMembershipLookupBotIds(
+  private async resolveGiveawayMembershipRoutes(
     chatIds: readonly string[],
-  ): Promise<Map<string, string>> {
+  ): Promise<Map<string, GiveawayMembershipRoute>> {
     const normalizedChatIds = Array.from(
       new Set(
         chatIds
@@ -5285,28 +5371,23 @@ export class ManagedGiveawayService {
           .filter((chatId): chatId is string => Boolean(chatId)),
       ),
     );
-    const botIdByChatId = new Map<string, string>();
-
-    await Promise.all(
-      normalizedChatIds.map(async (chatId) => {
-        const botId = await this.resolveGiveawayMembershipLookupBotId(chatId);
-        if (botId) {
-          botIdByChatId.set(chatId, botId);
-        }
-      }),
+    return new Map(
+      await Promise.all(
+        normalizedChatIds.map(async (chatId) => {
+          return [chatId, await this.resolveGiveawayMembershipRoute(chatId)] as const;
+        }),
+      ),
     );
-
-    return botIdByChatId;
   }
 
-  private async resolveGiveawayMembershipLookupBotId(chatId: string): Promise<string | null> {
+  private async resolveGiveawayMembershipRoute(chatId: string): Promise<GiveawayMembershipRoute> {
     try {
       const assigned = await this.resolveReadBotAssignmentRouteAware(chatId);
       if (assigned.botId?.trim()) {
-        return assigned.botId.trim();
+        return { kind: 'available', botId: assigned.botId.trim() };
       }
       if (assigned.routeResolved) {
-        return null;
+        return { kind: 'unavailable' };
       }
     } catch (error: unknown) {
       this.logger.warn(
@@ -5316,6 +5397,7 @@ export class ManagedGiveawayService {
         },
         'Failed to resolve giveaway membership lookup bot route',
       );
+      return { kind: 'unavailable' };
     }
 
     let persisted: { primaryBotId?: string | null; botId?: string | null } | null = null;
@@ -5332,16 +5414,16 @@ export class ManagedGiveawayService {
         },
         'Failed to resolve giveaway membership lookup bot from persisted chat',
       );
-      return null;
+      return { kind: 'unavailable' };
     }
     const primaryBotId =
       typeof persisted?.primaryBotId === 'string' ? persisted.primaryBotId.trim() : '';
     if (primaryBotId) {
-      return primaryBotId;
+      return { kind: 'available', botId: primaryBotId };
     }
 
     const botId = typeof persisted?.botId === 'string' ? persisted.botId.trim() : '';
-    return botId || null;
+    return { kind: 'available', botId: botId || undefined };
   }
 
   private async resolveGiveawayButtonBotAssignment(sourceChatId: string): Promise<{
@@ -5396,20 +5478,6 @@ export class ManagedGiveawayService {
           ? persisted.botId.trim()
           : null;
     return normalizedBotId ?? undefined;
-  }
-
-  private async resolveGiveawayDeleteBotId(sourceChatId: string): Promise<string | null> {
-    const normalizedSourceChatId = sourceChatId.trim();
-    if (!normalizedSourceChatId) {
-      return null;
-    }
-
-    const botId = await this.maxBotLinkService?.resolveBotIdForModerationAction({
-      chatId: normalizedSourceChatId,
-      action: 'delete_message',
-      fallbackToPrimary: true,
-    });
-    return this.normalizeNonEmptyString(botId);
   }
 
   private async resolveGiveawayParticipantClaimBotId(sourceChatId: string): Promise<string | null> {

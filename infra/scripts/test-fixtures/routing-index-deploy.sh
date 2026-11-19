@@ -66,7 +66,7 @@ case "$failure" in
     exit 0 ;;
 esac
 case "$failure" in
-  compatible|changed-before-pause|changed-after-pause|applied|lock|authority|prepare|capacity|prepare-incomplete|ref-rollback-*) ;;
+  compatible|changed-before-pause|changed-after-pause|giveaway-stop-refused|applied|lock|authority|prepare|capacity|prepare-incomplete|ref-rollback-*) ;;
   *) exit 99 ;;
 esac
 
@@ -178,6 +178,24 @@ fi
 
 # Exercise the actual release decisions without accessing Docker or any stores.
 controller=infra/scripts/vps-pull-build-up.sh
+# The extracted controller function below reads these settings.
+# shellcheck disable=SC2034
+{
+  GIVEAWAY_FIRST_WRITER=0
+  if [[ "$failure" == giveaway-stop-refused ]]; then GIVEAWAY_FIRST_WRITER=1; fi
+  MAXIM_WEBHOOK_ROLLOUT_STOP_TIMEOUT_SEC=60
+}
+docker() {
+  [[ "$*" == "compose ${COMPOSE_FILES[*]} stop -t 60 api-action api-admin" ]] || return 99
+  echo fixture-giveaway-stop
+}
+maxim_webhook_rollout_verify_services_stopped() {
+  [[ "$*" == "COMPOSE_FILES api-action api-admin" ]] || return 99
+  echo fixture-giveaway-verify
+  [[ "$failure" != giveaway-stop-refused ]]
+}
+# shellcheck disable=SC1090
+source <(sed -n '/^quiesce_giveaway_writer_transition() {$/,/^}$/p' "$controller")
 # shellcheck disable=SC1090
 source <(sed -n '/^  maxim_routing_index_preflight /p' "$controller")
 phase=prepare
