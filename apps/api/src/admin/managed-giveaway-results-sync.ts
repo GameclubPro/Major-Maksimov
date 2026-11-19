@@ -3,7 +3,7 @@ import type { Prisma } from '../prisma/prisma-client';
 
 type ResultsStore = Pick<Prisma.TransactionClient, 'managedGiveawayResultsSync'>;
 // FLAG: Deploy the compatible reader before enabling creation of new durable intents.
-export const MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED = false;
+export const MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED = true;
 const LEASE_MS = 120_000;
 const RETRY_BASE_MS = 30_000;
 const MAX_RETRY_MS = 30 * 60_000;
