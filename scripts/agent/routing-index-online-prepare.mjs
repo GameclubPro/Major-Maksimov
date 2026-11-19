@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createMultibotPrepareEnvironment } from './multibot-online-prepare.mjs';
@@ -9,13 +10,22 @@ import {
   ROUTING_INDEX_TARGET,
   verifyRoutingIndexDatabaseUrl,
 } from './routing-index-online-target.mjs';
-import { routingIndexStateSql, verifyRoutingIndexState } from './routing-index-catalog.mjs';
+import {
+  GIVEAWAY_DEFERRAL_MIGRATIONS,
+  routingIndexStateSql,
+  verifyGiveawayDeferralState,
+  verifyRoutingIndexState,
+} from './routing-index-catalog.mjs';
 
 export function createRoutingIndexMigrationPrefix(root) {
   const source = readRoutingIndexSource(root);
-  const migrationNames = source
-    .filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration)
-    .map(({ name }) => name);
+  return createMigrationDirectory(
+    root,
+    source.filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration),
+  );
+}
+
+function createMigrationDirectory(root, migrations) {
   const workspaceTemp = resolve(root, 'apps/api/.migration-prepare');
   mkdirSync(workspaceTemp, { recursive: true, mode: 0o700 });
   const tempRoot = mkdtempSync(resolve(workspaceTemp, 'routing-'));
@@ -27,8 +37,13 @@ export function createRoutingIndexMigrationPrefix(root) {
       resolve(directory, 'migration_lock.toml'),
       resolve(migrationsPath, 'migration_lock.toml'),
     );
-    for (const name of migrationNames)
-      cpSync(resolve(directory, name), resolve(migrationsPath, name), { recursive: true });
+    for (const { name, checksum } of migrations) {
+      const sql = readFileSync(resolve(directory, name, 'migration.sql'));
+      if (createHash('sha256').update(sql).digest('hex') !== checksum)
+        throw new Error('ROUTING_INDEX_SOURCE_CHECKSUM_MISMATCH');
+      mkdirSync(resolve(migrationsPath, name), { mode: 0o700 });
+      writeFileSync(resolve(migrationsPath, name, 'migration.sql'), sql, { mode: 0o600 });
+    }
     const configPath = resolve(tempRoot, 'prisma.config.ts');
     writeFileSync(
       configPath,
@@ -40,14 +55,14 @@ export default defineConfig({
 });\n`,
       { mode: 0o600 },
     );
-    return { tempRoot, configPath, migrationNames };
+    return { tempRoot, configPath, migrationNames: migrations.map(({ name }) => name) };
   } catch (error) {
     rmSync(tempRoot, { recursive: true, force: true });
     throw error;
   }
 }
 
-async function readState(databaseUrl, source) {
+async function readState(databaseUrl, source, verify = verifyRoutingIndexState) {
   const { default: pg } = await import('pg');
   const client = new pg.Client({
     connectionString: databaseUrl,
@@ -59,7 +74,7 @@ async function readState(databaseUrl, source) {
     await client.connect();
     const results = await client.query(routingIndexStateSql);
     const rows = (Array.isArray(results) ? results : [results]).flatMap((result) => result.rows);
-    return verifyRoutingIndexState(rows[0]?.json_build_object, source);
+    return verify(rows[0]?.json_build_object, source);
   } finally {
     await client.end();
   }
@@ -70,18 +85,39 @@ export async function runRoutingIndexOnlinePrepare({
   env = process.env,
   inspect = readState,
   runPrisma = spawnSync,
+  giveawayDeferral = false,
 } = {}) {
-  if (!env.DATABASE_URL?.trim() || !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME)
+  if (
+    !env.DATABASE_URL?.trim() ||
+    (!giveawayDeferral && !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME)
+  )
     throw new Error('ROUTING_INDEX_TAGGED_DATABASE_REQUIRED');
   verifyRoutingIndexDatabaseUrl(env.DATABASE_URL);
   if (Object.hasOwn(env, 'PGOPTIONS')) throw new Error('ROUTING_INDEX_DATABASE_OPTIONS_BLOCKED');
-  const prepareEnv = createMultibotPrepareEnvironment(env);
+  const prepareEnv = createMultibotPrepareEnvironment(
+    giveawayDeferral
+      ? { ...env, MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME: `maxim-online-${randomUUID()}` }
+      : env,
+  );
   const source = readRoutingIndexSource(root);
-  const before = await inspect(prepareEnv.DATABASE_URL, source);
-  if (before.state === 'already_applied') return { state: 'already_applied' };
-  if (before.pending.length !== 1 || before.pending[0] !== 'routing')
+  const verify = giveawayDeferral ? verifyGiveawayDeferralState : verifyRoutingIndexState;
+  const complete = giveawayDeferral ? 'compatible_pending' : 'already_applied';
+  const before = await inspect(prepareEnv.DATABASE_URL, source, verify);
+  if (before.state === complete) return { state: complete };
+  const expected = giveawayDeferral ? 'prepare_giveaway_deferral' : 'prepare_routing';
+  if (
+    before.state !== expected ||
+    (!giveawayDeferral && (before.pending.length !== 1 || before.pending[0] !== 'routing'))
+  )
     throw new Error('ROUTING_INDEX_STATE_INVALID');
-  const prefix = createRoutingIndexMigrationPrefix(root);
+  // FLAG: The deferral path gives Prisma the verified historical prefix and exactly the pinned giveaway SQL.
+  const migrations = giveawayDeferral
+    ? [
+        ...source.filter(({ name }) => name < ROUTING_INDEX_TARGET.migration),
+        ...GIVEAWAY_DEFERRAL_MIGRATIONS,
+      ]
+    : source.filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration);
+  const prefix = createMigrationDirectory(root, migrations);
   try {
     const result = runPrisma(
       process.execPath,
@@ -96,14 +132,14 @@ export async function runRoutingIndexOnlinePrepare({
         cwd: root,
         env: prepareEnv,
         stdio: 'ignore',
-        timeout: ROUTING_INDEX_TARGET.statementMs + 30_000,
+        timeout: giveawayDeferral ? 60_000 : ROUTING_INDEX_TARGET.statementMs + 30_000,
       },
     );
     if (result.error || result.signal || result.status !== 0)
       throw new Error('ROUTING_INDEX_PRISMA_DEPLOY_FAILED');
-    const after = await inspect(prepareEnv.DATABASE_URL, source);
-    if (after.state !== 'already_applied') throw new Error('ROUTING_INDEX_PREPARATION_INCOMPLETE');
-    return { state: 'applied' };
+    const after = await inspect(prepareEnv.DATABASE_URL, readRoutingIndexSource(root), verify);
+    if (after.state !== complete) throw new Error('ROUTING_INDEX_PREPARATION_INCOMPLETE');
+    return { state: giveawayDeferral ? complete : 'applied' };
   } finally {
     rmSync(prefix.tempRoot, { recursive: true, force: true });
   }
@@ -111,8 +147,10 @@ export async function runRoutingIndexOnlinePrepare({
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
-    if (process.argv.length !== 2) throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
-    console.log(JSON.stringify(await runRoutingIndexOnlinePrepare()));
+    const giveawayDeferral = process.argv.length === 3 && process.argv[2] === '--giveaway-deferral';
+    if (process.argv.length !== 2 && !giveawayDeferral)
+      throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
+    console.log(JSON.stringify(await runRoutingIndexOnlinePrepare({ giveawayDeferral })));
   } catch {
     console.error('ROUTING_INDEX_PREPARATION_FAILED; receipts and indexes preserved.');
     process.exitCode = 1;

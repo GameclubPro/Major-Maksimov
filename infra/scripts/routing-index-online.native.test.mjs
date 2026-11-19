@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { rmSync } from 'node:fs';
+import { cpSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import {
+  GIVEAWAY_DEFERRAL_MIGRATIONS,
+  verifyGiveawayDeferralState,
+} from '../../scripts/agent/routing-index-catalog.mjs';
 import { createRoutingIndexMigrationPrefix } from '../../scripts/agent/routing-index-online-prepare.mjs';
 import {
   readRoutingIndexSource,
@@ -261,6 +265,140 @@ test(
     }
   },
 );
+
+for (const scenario of ['fresh', 'resume', 'failed']) {
+  test(
+    `fixed giveaway migration runner with genuine Prisma receipts: ${scenario}`,
+    { skip: !nativeUrl, timeout: 240_000 },
+    async () => {
+      const base = new URL(nativeUrl);
+      assert.ok(
+        ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname) &&
+          base.pathname.includes('race_test'),
+      );
+      const { default: pg } = await import('pg');
+      const admin = new pg.Client({ connectionString: nativeUrl });
+      const database = `giveaway_routing_ci_${randomUUID().replaceAll('-', '')}`;
+      const own = new URL(nativeUrl);
+      own.pathname = `/${database}`;
+      const db = new pg.Client({ connectionString: own.href });
+      const snapshot = async () => outcome(await db.query(routingIndexStateSql));
+      const runner = (...args) => {
+        const env = routingChildEnv(own.href);
+        if (args[0] === '--giveaway-deferral') delete env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME;
+        return spawnSync(
+          process.execPath,
+          [resolve(root, 'scripts/agent/routing-index-online-prepare.mjs'), ...args],
+          { cwd: root, env, encoding: 'utf8', timeout: 90_000 },
+        );
+      };
+      const [first, second] = GIVEAWAY_DEFERRAL_MIGRATIONS;
+      let prefix;
+      await admin.connect();
+      try {
+        await admin.query(`CREATE DATABASE "${database}"`);
+        await db.connect();
+        prefix = createRoutingIndexMigrationPrefix(root);
+        const basePath = resolve(prefix.tempRoot, 'migrations');
+        rmSync(resolve(basePath, ROUTING_INDEX_TARGET.migration), { recursive: true });
+        if (scenario === 'resume') {
+          cpSync(
+            resolve(root, 'apps/api/prisma/migrations', first.name),
+            resolve(basePath, first.name),
+            { recursive: true },
+          );
+        }
+        const bootstrap = spawnSync(
+          process.execPath,
+          [
+            resolve(root, 'node_modules/prisma/build/index.js'),
+            'migrate',
+            'deploy',
+            '--config',
+            prefix.configPath,
+          ],
+          { cwd: root, env: routingChildEnv(own.href), stdio: 'ignore', timeout: 120_000 },
+        );
+        assert.equal(bootstrap.status, 0, 'Prisma prerequisite history');
+        const before = await snapshot();
+        assert.equal(
+          verifyGiveawayDeferralState(before, source).pending.length,
+          scenario === 'resume' ? 1 : 2,
+        );
+        if (scenario === 'failed') {
+          await db.query(`CREATE FUNCTION fixture_block_ddl() RETURNS event_trigger LANGUAGE plpgsql AS
+          'BEGIN RAISE EXCEPTION ''fixture rejection''; END';
+          CREATE EVENT TRIGGER fixture_reject_new_table ON ddl_command_start WHEN TAG IN ('CREATE TABLE')
+          EXECUTE FUNCTION fixture_block_ddl()`);
+        }
+        const result = runner('--giveaway-deferral');
+        const after = await snapshot();
+        const receipts = after.receipts.filter(
+          (entry) => entry.name === first.name || entry.name === second.name,
+        );
+        assert.equal(receipts.length, 2);
+        assert.ok(
+          receipts.some(
+            (row) => row.name === first.name && row.checksum === first.checksum && row.finished,
+          ),
+        );
+        assert.equal(after.index.present, false);
+        assert.ok(after.orderedIndex.exact);
+        assert.ok(!after.receipts.some((row) => row.name === ROUTING_INDEX_TARGET.migration));
+        if (scenario === 'failed') {
+          assert.equal(result.status, 1);
+          assert.ok(
+            receipts.some(
+              (row) =>
+                row.name === second.name &&
+                !row.finished &&
+                !row.rolled_back &&
+                row.checksum === second.checksum,
+            ),
+          );
+          await db.query('DROP EVENT TRIGGER fixture_reject_new_table');
+          assert.equal(runner('--giveaway-deferral').status, 1);
+          assert.deepEqual(await snapshot(), after);
+          return;
+        }
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout).state, 'compatible_pending');
+        assert.deepEqual(verifyGiveawayDeferralState(after, source).pending, []);
+        assert.equal(runner('--giveaway-deferral').status, 0);
+        assert.deepEqual(await snapshot(), after);
+        const schema = await db.query(
+          `SELECT draft_revision, archived_at FROM managed_giveaways LIMIT 0`,
+        );
+        assert.equal(schema.fields.length, 2);
+        assert.equal(
+          (await db.query('SELECT count(*)::int AS count FROM managed_giveaway_results_sync'))
+            .rows[0].count,
+          0,
+        );
+        if (scenario === 'resume') {
+          await db.query('ALTER TABLE managed_giveaways ALTER COLUMN draft_revision SET DEFAULT 2');
+          assert.equal(runner('--giveaway-deferral').status, 1);
+          await db.query('ALTER TABLE managed_giveaways ALTER COLUMN draft_revision SET DEFAULT 1');
+          await db.query(
+            'ALTER INDEX managed_giveaway_results_sync_due_idx RENAME TO fixture_hidden_due_idx',
+          );
+          assert.equal(runner('--giveaway-deferral').status, 1);
+          assert.deepEqual((await snapshot()).receipts, after.receipts);
+        }
+        if (scenario === 'fresh') {
+          const ordinary = runner();
+          assert.equal(ordinary.status, 0, ordinary.stderr);
+          assert.equal(verifyRoutingIndexState(await snapshot(), source).state, 'already_applied');
+        }
+      } finally {
+        if (prefix) rmSync(prefix.tempRoot, { recursive: true, force: true });
+        await db.end();
+        await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+        await admin.end();
+      }
+    },
+  );
+}
 
 test(
   'interrupted routing migration retains its failed receipt and invalid index and never retries',
