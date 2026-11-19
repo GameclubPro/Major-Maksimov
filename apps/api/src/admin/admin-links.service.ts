@@ -2,7 +2,6 @@ import { MaxClientService } from '../max/max-client.service';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
-  evaluateLinkRulesPolicy,
   linkRulesPreviewRequestSchema,
   type LinkRulesPreviewResponse,
 } from '@maxim/contracts/settings';
@@ -11,7 +10,10 @@ import { resolveEnabledNavigationTargetOptions } from '../moderation/navigation/
 import { adaptMaxMessageNavigationView } from '../moderation/navigation/max-navigation-view.adapter';
 import { isEnforceableLinkPolicyTarget } from '../moderation/navigation/link-policy-target.util';
 import { resolveEnabledNavigationTargets } from '../moderation/navigation/max-handle-navigation';
-import { isRuntimeLinkPolicyActive } from '../moderation/link-rules-policy.runtime';
+import {
+  evaluateRuntimeLinkRulesPolicy,
+  isRuntimeLinkPolicyActive,
+} from '../moderation/link-rules-policy.runtime';
 import { ManagedEntitiesService } from './managed-entities.service';
 
 @Injectable()
@@ -35,7 +37,7 @@ export class AdminLinksService {
       this.maxClient,
       isRuntimeLinkPolicyActive('ALERT_ONLY', parsed.data.policy),
     );
-    const result = evaluateLinkRulesPolicy(parsed.data.policy, targets);
+    const result = evaluateRuntimeLinkRulesPolicy(parsed.data.policy, targets);
     return {
       allowed: result.allowed,
       reason: result.reason,

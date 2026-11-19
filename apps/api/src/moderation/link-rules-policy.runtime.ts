@@ -8,6 +8,7 @@ import {
 } from '@maxim/contracts/settings';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
+import { readGoogleSearchLinkDestination } from './navigation/google-search-link-destination';
 import type { PrismaService } from '../prisma/prisma.service';
 
 export type RuntimeLinkRulesPolicy =
@@ -37,7 +38,29 @@ export function evaluateRuntimeLinkRulesPolicy(
   targets: readonly NavigationTargetEvidence[],
   nowMs = Date.now(),
 ): LinkRulesPolicyEvaluation<NavigationTargetEvidence> {
-  return evaluateLinkRulesPolicy(policy, targets.filter(isEnforceableLinkPolicyTarget), nowMs);
+  let remaining = targets.filter(isEnforceableLinkPolicyTarget);
+  let result = evaluateLinkRulesPolicy(policy, remaining, nowMs);
+  // FLAG: Only fill a missing allowlist match. Check every remaining link and
+  // retain the original evidence and precedence of any explicit wrapper rule.
+  while (
+    !result.allowed &&
+    result.reason === 'NOT_ALLOWED' &&
+    result.target.kind === 'external_url'
+  ) {
+    const target = result.target;
+    const destination = readGoogleSearchLinkDestination(target.target);
+    if (!destination) return result;
+    const resolved = evaluateLinkRulesPolicy(
+      policy,
+      [{ kind: 'external_url', target: destination }],
+      nowMs,
+    );
+    if (!resolved.allowed) return { ...resolved, target };
+    remaining = remaining.slice(remaining.indexOf(target) + 1);
+    if (remaining.length === 0) return { allowed: true, reason: 'ALL_TARGETS_ALLOWED' };
+    result = evaluateLinkRulesPolicy(policy, remaining, nowMs);
+  }
+  return result;
 }
 
 export function isRuntimeLinkPolicyActive(legacyPolicy: string, value: unknown): boolean {

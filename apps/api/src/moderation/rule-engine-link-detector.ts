@@ -7,6 +7,7 @@ import {
 import { LinkPolicy } from '../prisma/prisma-client';
 import { extractUrlsFromText as extractTextUrls } from '../common/url-text.util';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
+import { readGoogleSearchLinkDestination } from './navigation/google-search-link-destination';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import {
   evaluateRuntimeLinkRulesPolicy,
@@ -96,12 +97,11 @@ export function detectBlockedLink(
     return 'Links are not allowed by policy';
   }
 
-  const resolvedLinks = resolveDetectedLinks(
-    links,
+  const isAllowlisted =
     typeof allowlistMatcher === 'object'
       ? allowlistMatcher.link
-      : (allowlistMatcher ?? createAllowlistLinkMatcher(allowlist)),
-  );
+      : (allowlistMatcher ?? createAllowlistLinkMatcher(allowlist));
+  const resolvedLinks = resolveDetectedLinks(links, isAllowlisted);
   const allowlistedExplicitDomains = new Set(
     resolvedLinks
       .filter((link) => link.allowlisted && link.explicit && link.match.normalizedDomain)
@@ -114,6 +114,11 @@ export function detectBlockedLink(
   );
   for (const link of resolvedLinks) {
     if (link.allowlisted) {
+      continue;
+    }
+
+    const destination = readGoogleSearchLinkDestination(link.raw);
+    if (destination && isAllowlisted(destination)) {
       continue;
     }
 
@@ -164,10 +169,16 @@ export function prepareLinkAllowlist(allowlist: readonly string[]): PreparedLink
 }
 
 function createNavigationMatcher(matchers: AllowlistMatchers): NavigationAllowlistMatcher {
-  return (value) =>
-    buildNavigationTargetAllowlistPolicyKeys(value).some((key) =>
-      isAllowlistedNavigationPolicyKey(matchers, key),
+  return (value) => {
+    const matches = (key: NavigationAllowlistPolicyKey) =>
+      isAllowlistedNavigationPolicyKey(matchers, key);
+    if (buildNavigationTargetAllowlistPolicyKeys(value).some(matches)) return true;
+    if (value.kind !== 'external_url') return false;
+    const destination = readGoogleSearchLinkDestination(value.target);
+    return Boolean(
+      destination && buildNavigationAllowlistPolicyKeys(destination, value.kind).some(matches),
     );
+  };
 }
 
 export function buildNavigationTargetAllowlistPolicyKeys(
