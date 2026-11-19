@@ -91,6 +91,42 @@ test('the ordinary path runs the capacity check and confirms preparation before 
   ]);
 });
 
+const giveawayDeferralStart = [
+  'fixture-state:preflight:prepare_giveaway_deferral',
+  'fixture-state:prepare:prepare_giveaway_deferral',
+  'fixture-giveaway-prisma',
+];
+
+test('giveaway migrations alone run before journaling and require a confirmed routing deferral', () => {
+  assert.deepEqual(runScenario('giveaway-deferral'), [
+    ...giveawayDeferralStart,
+    'fixture-state:prepare:compatible_pending',
+    'fixture-journal',
+    'fixture-state:rollout:compatible_pending',
+    'fixture-pause',
+    'fixture-state:post-migration:compatible_pending',
+    'fixture-transition',
+  ]);
+});
+
+test('a failed giveaway migration runner stops before journaling or replacing roles', () => {
+  assert.deepEqual(runScenario('deferral-runner-failed', false), giveawayDeferralStart);
+});
+
+test('a successful giveaway runner still stops if the expected deferred state was not observed', () => {
+  assert.deepEqual(runScenario('deferral-wrong-readback', false), [
+    ...giveawayDeferralStart,
+    'fixture-state:prepare:already_applied',
+  ]);
+});
+
+test('the giveaway runner requires current deploy authority after preflight', () => {
+  assert.deepEqual(runScenario('deferral-authority', false), [
+    'fixture-state:preflight:prepare_giveaway_deferral',
+    'fixture-authority-refused',
+  ]);
+});
+
 test('capacity refusal does not touch the current release', () => {
   assert.deepEqual(runScenario('capacity', false), [
     'fixture-state:preflight:prepare_routing',

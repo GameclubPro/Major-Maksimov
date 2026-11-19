@@ -27,6 +27,10 @@ import {
 } from './routing-index-online-state.mjs';
 import { OUTCOME_COHORT_TARGETS } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
+  GIVEAWAY_DEFERRAL_MIGRATIONS,
+  verifyGiveawayDeferralState,
+} from '../../scripts/agent/routing-index-catalog.mjs';
+import {
   assessRoutingIndexPrepareCapacity,
   checkRoutingIndexPrepareCapacity,
 } from './routing-index-prepare-capacity.mjs';
@@ -115,6 +119,172 @@ test('release admission defers only the sole optional migration with exact order
       () => verifyReleaseRoutingState({ ...pending, ...change }, release),
       /ROUTING_INDEX_/u,
     );
+});
+
+const giveawaySource = [
+  ...source.filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration),
+  ...GIVEAWAY_DEFERRAL_MIGRATIONS,
+];
+const giveawaySnapshot = (applied) => ({
+  ...snapshot(),
+  giveawaySchema: {
+    draft: applied >= 1 ? 'exact' : 'absent',
+    results: applied >= 2 ? 'exact' : 'absent',
+  },
+  orderedIndex: { present: true, exact: true },
+  receipts: [
+    ...receipts(),
+    ...GIVEAWAY_DEFERRAL_MIGRATIONS.slice(0, applied).map((migration, i) => ({
+      ...migration,
+      id: `giveaway-${i}`,
+      finished: true,
+      rolled_back: false,
+      steps: 1,
+      started_at: `2026-11-19T00:0${i}:03.000Z`,
+      finished_at: `2026-11-19T00:0${i}:04.000Z`,
+    })),
+  ],
+});
+
+test('giveaway deferral admits only the missing reviewed suffix and keeps later index preparation possible', () => {
+  assert.deepEqual(
+    source.filter(({ name }) => GIVEAWAY_DEFERRAL_MIGRATIONS.some((item) => item.name === name)),
+    GIVEAWAY_DEFERRAL_MIGRATIONS,
+  );
+  for (const applied of [0, 1, 2]) {
+    const catalog = giveawaySnapshot(applied);
+    const state = applied === 2 ? 'compatible_pending' : 'prepare_giveaway_deferral';
+    assert.deepEqual(verifyGiveawayDeferralState(catalog, giveawaySource), {
+      state,
+      pending: GIVEAWAY_DEFERRAL_MIGRATIONS.slice(applied).map(({ name }) => name),
+    });
+    assert.equal(
+      verifyReleaseRoutingState(catalog, { source: giveawaySource, supportsOrdered: true }),
+      state,
+    );
+    assert.equal(
+      verifyReleaseRoutingState(catalog, { source: giveawaySource, supportsOrdered: false }),
+      'prepare_routing',
+    );
+    assert.deepEqual(verifyRoutingIndexState(catalog, giveawaySource), {
+      state: 'prepare_routing',
+      pending: ['routing'],
+    });
+  }
+});
+
+test('giveaway deferral rejects unreceipted, missing and mismatched schema objects', () => {
+  for (const applied of [0, 1, 2]) {
+    const catalog = giveawaySnapshot(applied);
+    for (const phase of ['draft', 'results']) {
+      for (const observation of ['absent', 'exact', 'drift']) {
+        if (catalog.giveawaySchema[phase] === observation) continue;
+        const changed = {
+          ...catalog,
+          giveawaySchema: { ...catalog.giveawaySchema, [phase]: observation },
+        };
+        assert.throws(
+          () => verifyGiveawayDeferralState(changed, giveawaySource),
+          /GIVEAWAY_DEFERRAL_SCHEMA_INVALID/u,
+        );
+      }
+    }
+  }
+});
+
+test('giveaway deferral rejects receipt drift, a gap, rolled-back or incomplete attempts and competing work', () => {
+  const badSource = giveawaySource.map((migration) =>
+    migration.name === GIVEAWAY_DEFERRAL_MIGRATIONS[0].name
+      ? { ...migration, checksum: '0'.repeat(64) }
+      : migration,
+  );
+  for (const target of [
+    badSource,
+    giveawaySource.slice(0, -1),
+    [...giveawaySource, { name: '20990101120000_later_work', checksum: 'a'.repeat(64) }],
+  ]) {
+    assert.throws(
+      () => verifyGiveawayDeferralState(giveawaySnapshot(0), target),
+      /GIVEAWAY_DEFERRAL_SOURCE_INVALID/u,
+    );
+  }
+  const future = { name: '20990101120000_later_work', checksum: 'a'.repeat(64) };
+  assert.equal(
+    verifyReleaseRoutingState(giveawaySnapshot(2), {
+      source: [...giveawaySource, future],
+      supportsOrdered: true,
+    }),
+    'prepare_routing',
+  );
+  for (const update of [
+    (s) => {
+      s.receipts.splice(-2, 1);
+    },
+    (s) => {
+      s.receipts.at(-1).checksum = 'b'.repeat(64);
+    },
+    (s) => {
+      s.receipts.at(-1).steps = 0;
+    },
+    (s) => {
+      s.receipts.at(-1).steps = 2;
+    },
+    (s) => {
+      s.receipts.at(-1).finished = false;
+    },
+    (s) => {
+      s.receipts.at(-1).rolled_back = true;
+    },
+    (s) => {
+      s.receipts.at(-1).started_at = s.receipts.at(-2).started_at;
+    },
+    (s) => {
+      delete s.receipts.at(-1).finished_at;
+    },
+    (s) => {
+      s.receipts.push({ ...s.receipts.at(-1), id: 'extra' });
+    },
+    (s) => {
+      s.receipts.push({ ...s.receipts.at(-1), id: 'foreign', ...future });
+    },
+    (s) => {
+      s.receipts.splice(0, 1);
+    },
+    (s) => {
+      s.orderedIndex.exact = false;
+    },
+    (s) => {
+      s.artifacts.push('webhook_events_chat_queue_head_idx_ccnew');
+    },
+    (s) => {
+      s.builders.push({ pid: 100 });
+    },
+    (s) => {
+      s.index = { present: true, exact: true };
+    },
+  ]) {
+    const catalog = giveawaySnapshot(2);
+    update(catalog);
+    assert.throws(() => verifyGiveawayDeferralState(catalog, giveawaySource), /ROUTING_INDEX_/u);
+  }
+  const complete = giveawaySnapshot(2);
+  complete.index = { present: true, exact: true };
+  complete.receipts.push({
+    ...complete.receipts.at(-1),
+    id: 'routing',
+    name: ROUTING_INDEX_TARGET.migration,
+    checksum: ROUTING_INDEX_TARGET.checksum,
+  });
+  assert.throws(
+    () => verifyGiveawayDeferralState(complete, giveawaySource),
+    /GIVEAWAY_DEFERRAL_STATE_INVALID/u,
+  );
+  assert.equal(
+    verifyReleaseRoutingState(complete, { source: giveawaySource, supportsOrdered: true }),
+    'already_applied',
+  );
+  const laterSchema = { ...complete, giveawaySchema: { draft: 'exact', results: 'drift' } };
+  assert.equal(verifyRoutingIndexState(laterSchema, giveawaySource).state, 'already_applied');
 });
 
 test('release proof uses the selected commit for migration bytes, identity and compatibility marker', async (t) => {

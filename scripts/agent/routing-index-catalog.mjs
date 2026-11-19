@@ -10,6 +10,17 @@ const fail = (code) => {
   throw new Error(`ROUTING_INDEX_${code}`);
 };
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
+export const GIVEAWAY_DEFERRAL_MIGRATIONS = Object.freeze([
+  Object.freeze({
+    name: '20261119043000_add_managed_giveaway_draft_revision',
+    checksum: '3be3ba6283160de1058aa0a6a4c30282c7ef4d73f1c7c7818c61e67fc6c68136',
+  }),
+  Object.freeze({
+    name: '20261119043001_add_managed_giveaway_results_sync',
+    checksum: '4805a6edb067bfdb75e388e8461f315c0022eee1f36c1ef09f7d2c712d387e7c',
+  }),
+]);
+
 // FLAG: Only these verified failed versions can accompany the pinned later successful
 // version of the same migration. They never satisfy an applied-migration requirement.
 const RECOVERED_PREDECESSORS = new Map([
@@ -66,6 +77,56 @@ export const ROUTING_INDEX_EXPRESSION =
 export const ROUTING_INDEX_PREDICATE =
   "(((status = ANY (ARRAY['RECEIVED'::\"WebhookStatus\", 'QUEUED'::\"WebhookStatus\"])) OR ((status = 'FAILED'::\"WebhookStatus\") AND ((next_enqueue_at IS NOT NULL) OR (\"left\"(COALESCE(error_message, ''::text), 37) = 'WEBHOOK_HOT_PATH_TIMEOUT_QUARANTINED:'::text)))) AND (lower(COALESCE(NULLIF(btrim((normalized_payload ->> 'type'::text)), ''::text), NULLIF(btrim((normalized_payload ->> 'update_type'::text)), ''::text))) = ANY (ARRAY['message_created'::text, 'message_edited'::text])))";
 
+// FLAG: These fixed catalog names prove both committed objects and clean absence before replay.
+// No giveaway or webhook application rows are read by this check.
+const giveawaySchemaCtes = `giveaway_relations AS MATERIALIZED (
+  SELECT to_regclass('public.managed_giveaways') AS parent,
+    to_regclass('public.managed_giveaway_results_sync') AS sync,
+    to_regclass('public.managed_giveaway_results_sync_due_idx') AS due
+), giveaway_columns AS MATERIALIZED (
+  SELECT expected.rel, expected.name, a.attnum IS NOT NULL AS present,
+    COALESCE(format_type(a.atttypid,a.atttypmod)=expected.data_type AND a.attnotnull=expected.required
+      AND a.attidentity='' AND a.attgenerated=''
+      AND (pg_get_expr(d.adbin,d.adrelid) IS NOT DISTINCT FROM expected.initial),false) AS exact
+  FROM giveaway_relations r CROSS JOIN (VALUES
+    ('parent','draft_revision','integer',true,'1'),
+    ('parent','archived_at','timestamp(3) without time zone',false,NULL),
+    ('sync','giveaway_id','text',true,NULL), ('sync','revision','integer',true,'1'),
+    ('sync','next_attempt_at','timestamp(3) without time zone',false,NULL),
+    ('sync','lease_token','text',false,NULL), ('sync','lease_until','timestamp(3) without time zone',false,NULL),
+    ('sync','attempts','integer',true,'0')
+  ) AS expected(rel,name,data_type,required,initial)
+  LEFT JOIN pg_attribute a ON a.attrelid=CASE WHEN expected.rel='parent' THEN r.parent ELSE r.sync END
+    AND a.attname=expected.name AND a.attnum>0 AND NOT a.attisdropped
+  LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+), giveaway_schema AS MATERIALIZED (
+  SELECT CASE WHEN p.relkind IS DISTINCT FROM 'r' OR p.relpersistence IS DISTINCT FROM 'p' THEN 'drift'
+    WHEN NOT draft.present THEN 'absent' WHEN draft.exact THEN 'exact' ELSE 'drift' END AS draft,
+    CASE WHEN NOT archive.present AND r.sync IS NULL AND r.due IS NULL THEN 'absent'
+      WHEN archive.exact AND t.relkind='r' AND t.relpersistence='p'
+      AND (SELECT bool_and(exact) FROM giveaway_columns WHERE rel='sync')
+      AND EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid=r.sync AND k.contype='p'
+        AND k.convalidated AND k.conkey=ARRAY[gid.attnum])
+      AND EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid=r.sync AND k.contype='f'
+        AND k.convalidated AND k.confrelid=r.parent AND k.conkey=ARRAY[gid.attnum] AND k.confkey=ARRAY[pid.attnum]
+        AND k.confupdtype='c' AND k.confdeltype='c')
+      AND i.indrelid=r.sync AND i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisunique
+      AND i.indnkeyatts=2 AND i.indnatts=2 AND i.indexprs IS NULL AND i.indpred IS NULL
+      AND am.amname='btree' AND 0=ALL(i.indoption::smallint[])
+      AND pg_get_indexdef(r.due,1,false)='next_attempt_at' AND pg_get_indexdef(r.due,2,false)='giveaway_id'
+      THEN 'exact' ELSE 'drift' END AS results
+  FROM giveaway_relations r
+  CROSS JOIN (SELECT present,exact FROM giveaway_columns WHERE name='draft_revision') draft
+  CROSS JOIN (SELECT present,exact FROM giveaway_columns WHERE name='archived_at') archive
+  LEFT JOIN pg_class p ON p.oid=r.parent
+  LEFT JOIN pg_class t ON t.oid=r.sync
+  LEFT JOIN pg_attribute gid ON gid.attrelid=r.sync AND gid.attname='giveaway_id' AND NOT gid.attisdropped
+  LEFT JOIN pg_attribute pid ON pid.attrelid=r.parent AND pid.attname='id' AND NOT pid.attisdropped
+  LEFT JOIN pg_index i ON i.indexrelid=r.due
+  LEFT JOIN pg_class idx ON idx.oid=r.due
+  LEFT JOIN pg_am am ON am.oid=idx.relam
+)`;
+
 export const routingIndexStateSql = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '2500ms';
 SET LOCAL lock_timeout = '250ms';
@@ -115,7 +176,7 @@ WITH definitions AS MATERIALIZED (
  LEFT JOIN pg_index state ON state.indexrelid=relation.oid
  LEFT JOIN pg_am method ON method.oid=relation.relam
 ), receipts AS MATERIALIZED (
- SELECT id, migration_name AS name, checksum, started_at, finished_at IS NOT NULL AS finished,
+ SELECT id, migration_name AS name, checksum, started_at, finished_at, finished_at IS NOT NULL AS finished,
   rolled_back_at IS NOT NULL AS rolled_back, applied_steps_count AS steps
  FROM public._prisma_migrations LIMIT 4097
 ), artifacts AS MATERIALIZED (
@@ -125,17 +186,18 @@ WITH definitions AS MATERIALIZED (
  SELECT progress.pid FROM pg_stat_progress_create_index progress
  WHERE progress.relid=to_regclass('public.webhook_events')
   AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database()) LIMIT 17
-), ${historicalCompatibilityCtes}
+), ${giveawaySchemaCtes}, ${historicalCompatibilityCtes}
 SELECT json_build_object('supportedVersion',current_setting('server_version_num')::int BETWEEN 160000 AND 169999,
  'index',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='index'),
  'orderedIndex',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='orderedIndex'),
  'receipts',COALESCE((SELECT json_agg(receipts) FROM receipts),'[]'::json),
  'artifacts',COALESCE((SELECT json_agg(relname) FROM artifacts),'[]'::json),
  'builders',COALESCE((SELECT json_agg(builders) FROM builders),'[]'::json),
+ 'giveawaySchema',(SELECT row_to_json(giveaway_schema) FROM giveaway_schema),
  'historicalCompatibility',${historicalCompatibilityProjection});
 COMMIT;`;
 
-export function verifyRoutingIndexState(snapshot, source) {
+function readRoutingCatalog(snapshot, source) {
   if (
     !snapshot ||
     snapshot.supportedVersion !== true ||
@@ -188,10 +250,89 @@ export function verifyRoutingIndexState(snapshot, source) {
   }
   const applied = active.get(ROUTING_INDEX_TARGET.migration);
   if (applied && applied.steps !== 1) fail('RECEIPT_BLOCKED');
-  if (!applied && [...active.keys()].some((name) => name > ROUTING_INDEX_TARGET.migration))
-    fail('RECEIPT_BLOCKED');
   if ((applied && !snapshot.index.exact) || (!applied && snapshot.index.present))
     fail('INDEX_BLOCKED');
+  if (!applied && snapshot.receipts.some(({ name }) => name > ROUTING_INDEX_TARGET.migration)) {
+    // FLAG: A later receipt can precede the optional index only for the exact reviewed
+    // giveaway prefix. A failed or rolled-back attempt never authorizes replay or skipping.
+    assertGiveawaySource(source, false);
+    if (snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
+      fail('GIVEAWAY_DEFERRAL_ORDERED_INDEX_REQUIRED');
+    const permitted = new Set(GIVEAWAY_DEFERRAL_MIGRATIONS.map(({ name }) => name));
+    if (
+      snapshot.receipts.some(
+        (r) =>
+          r.name > ROUTING_INDEX_TARGET.migration &&
+          (r.rolled_back !== false || !permitted.has(r.name)),
+      )
+    )
+      fail('RECEIPT_BLOCKED');
+    let missing = false;
+    let lastFinished = -Infinity;
+    for (const { name, checksum } of GIVEAWAY_DEFERRAL_MIGRATIONS) {
+      const receipt = active.get(name);
+      if (!receipt) {
+        missing = true;
+        continue;
+      }
+      const start = Date.parse(receipt.started_at);
+      const end = Date.parse(receipt.finished_at);
+      if (
+        missing ||
+        receipt.checksum !== checksum ||
+        receipt.steps !== 1 ||
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        start > end ||
+        start < lastFinished
+      )
+        fail('RECEIPT_BLOCKED');
+      lastFinished = end;
+    }
+  }
+  if (!applied && GIVEAWAY_DEFERRAL_MIGRATIONS.some(({ name }) => active.has(name))) {
+    assertGiveawaySchema(snapshot, active);
+  }
+  return { active, applied };
+}
+
+function assertGiveawaySource(source, exactTail) {
+  const index = source.findIndex(({ name }) => name === ROUTING_INDEX_TARGET.migration);
+  if (
+    index < 0 ||
+    source[index].checksum !== ROUTING_INDEX_TARGET.checksum ||
+    (exactTail && source.length !== index + 1 + GIVEAWAY_DEFERRAL_MIGRATIONS.length) ||
+    !GIVEAWAY_DEFERRAL_MIGRATIONS.every(({ name, checksum }, offset) => {
+      const found = source[index + 1 + offset];
+      return found?.name === name && found.checksum === checksum;
+    })
+  )
+    fail('GIVEAWAY_DEFERRAL_SOURCE_INVALID');
+}
+
+function assertGiveawaySchema(snapshot, active) {
+  const [draft, results] = GIVEAWAY_DEFERRAL_MIGRATIONS;
+  if (
+    snapshot.giveawaySchema?.draft !== (active.has(draft.name) ? 'exact' : 'absent') ||
+    snapshot.giveawaySchema?.results !== (active.has(results.name) ? 'exact' : 'absent')
+  )
+    fail('GIVEAWAY_DEFERRAL_SCHEMA_INVALID');
+}
+
+export function verifyGiveawayDeferralState(snapshot, source) {
+  assertGiveawaySource(source, true);
+  const { active, applied } = readRoutingCatalog(snapshot, source);
+  if (applied || snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
+    fail('GIVEAWAY_DEFERRAL_STATE_INVALID');
+  assertGiveawaySchema(snapshot, active);
+  const pending = GIVEAWAY_DEFERRAL_MIGRATIONS.map(({ name }) => name).filter(
+    (name) => !active.has(name),
+  );
+  return { state: pending.length ? 'prepare_giveaway_deferral' : 'compatible_pending', pending };
+}
+
+export function verifyRoutingIndexState(snapshot, source) {
+  const { applied } = readRoutingCatalog(snapshot, source);
   return applied
     ? { state: 'already_applied', pending: [] }
     : { state: 'prepare_routing', pending: ['routing'] };

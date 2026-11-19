@@ -7,7 +7,9 @@ import {
 } from '../../scripts/agent/routing-index-online-target.mjs';
 import { OUTCOME_COHORT_TARGETS } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
+  GIVEAWAY_DEFERRAL_MIGRATIONS,
   routingIndexStateSql,
+  verifyGiveawayDeferralState,
   verifyRoutingIndexState,
 } from '../../scripts/agent/routing-index-catalog.mjs';
 import { runOutcomeCohortCommand } from './outcome-cohort-online-state.mjs';
@@ -159,11 +161,13 @@ export function verifyReleaseRoutingState(snapshot, { source, supportsOrdered })
   if (
     state === 'prepare_routing' &&
     supportsOrdered === true &&
-    source.at(-1)?.name === ROUTING_INDEX_TARGET.migration &&
     snapshot.orderedIndex?.present === true &&
     snapshot.orderedIndex.exact === true
-  )
-    return 'compatible_pending';
+  ) {
+    if (source.at(-1)?.name === ROUTING_INDEX_TARGET.migration) return 'compatible_pending';
+    if (source.at(-1)?.name === GIVEAWAY_DEFERRAL_MIGRATIONS.at(-1).name)
+      return verifyGiveawayDeferralState(snapshot, source).state;
+  }
   return state;
 }
 

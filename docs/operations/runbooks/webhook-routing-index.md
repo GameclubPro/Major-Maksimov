@@ -38,9 +38,17 @@ the sole pending migration is the pinned optional index. The new index, its rece
 build or repair artifacts must all be absent. In this state the deploy skips the index
 supervisor and the ordinary Prisma runner, which would otherwise apply the pending index.
 The state must still match before queue pause and again before replacing API roles. Other
-migrations may not be skipped. Both API rollback paths refuse a target that requires a missing
-index; a verified compatible target also skips the ref-based rollback's Prisma runner. Recovery
-finalization verifies the API component source against the live state before recording it.
+migrations may not be skipped. The two pinned managed giveaway migrations are a fixed
+prerequisite for this state. With the exact ordered-chat index and an absent optional index,
+a compatible release may run just those additive migrations from its verified image before
+creating the runtime transition journal. Prisma records both unchanged source checksums. If
+either receipt is missing, invalid or out of order after the attempt, rollout stops. A verified
+readback must show that only the routing index remains pending before the regular fence. The
+routing index itself still uses its original limits and supervisor.
+
+Both API rollback paths refuse a source that cannot read the applied migrations or requires a
+missing index. A verified compatible target also skips the ref-based rollback's Prisma runner.
+Recovery finalization verifies the API component source against the live state before recording it.
 
 When the index cannot be deferred and still needs preparation, the exact-green-SHA deploy runs
 the capacity checks and supervises the build after verifying the immutable API image, while the
