@@ -88,6 +88,9 @@
   },
   "overrides": {
     "@babel/core": "7.29.7",
+    "@prisma/config@7.9.0": {
+      "effect": "3.22.1"
+    },
     "axios": "1.20.0",
     "brace-expansion@>=1.0.0 <2.0.0": "1.1.18",
     "brace-expansion@>=2.0.0 <3.0.0": "2.1.4",
