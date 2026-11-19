@@ -408,6 +408,12 @@ Native administrator suggestion editing and rejection use the [private-card revi
   allow-all, deny-selected, allow-selected and deny-all. Exact typed targets take precedence
   over domains; a longer matching domain takes precedence over its parent. Every enforceable
   navigation target must pass, and actual MAX user mentions retain their exemption.
+- In allowlist modes only, a recognized HTTPS Google Search link can use the existing rule for
+  its declared web destination when the original link has no matching rule. Accept one
+  unambiguous `url` on `www.google.com/url`, the observed tracking fields and an optional
+  empty `q`. Use the destination's usual exact and domain precedence. Leave other forms to
+  the original URL's rules. Do not fetch or recursively unwrap links. Keep the original
+  navigation evidence and leave stop-word and blocked-site checks independent.
 - Link policy, rules and link sanctions use the ordinary settings CAS. Initial single-chat
   adoption carries a bounded legacy allowlist snapshot and verifies its independent revision
   under the parent Chat lock. Activating JSON freezes legacy list mutation endpoints; old clients

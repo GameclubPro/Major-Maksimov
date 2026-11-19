@@ -5,6 +5,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { linkRulesPolicySchema } from '@maxim/contracts/settings';
+import type { MaxClientService } from '../max/max-client.service';
 import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
 import { LinkHistoryRecoveryService } from './link-history-recovery.service';
 import { LinkHistoryDeleteGuardService } from './link-history-delete-guard.service';
@@ -64,10 +65,11 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
   });
   const settings = () => db.chatSettings.findUniqueOrThrow({ where: { chatId } });
 
-  it.each(['link', 'plain_handle', 'named_handle'] as const)(
+  it.each(['link', 'plain_handle', 'named_handle', 'google_result'] as const)(
     'runs real policy/lease SQL and final rechecks for %s',
     async (carrier) => {
-      if (carrier !== 'link')
+      const isHandle = carrier === 'plain_handle' || carrier === 'named_handle';
+      if (isHandle)
         await db.chatSettings.update({
           where: { chatId },
           data: {
@@ -84,7 +86,22 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
             },
           },
         });
+      if (carrier === 'google_result')
+        await db.chatSettings.update({
+          where: { chatId },
+          data: {
+            linkRulesPolicy: linkRulesPolicySchema.parse({
+              version: 1,
+              mode: 'ALLOW_SELECTED',
+              rules: [
+                { id: 'shop', effect: 'ALLOW', kind: 'WEB_DOMAIN', target: 'www.wildberries.ru' },
+              ],
+            }),
+          },
+        });
       const current = await settings();
+      const googleResult = (destination: string) =>
+        `https://www.google.com/url?sa=t&source=web&url=${encodeURIComponent(destination)}`;
       const row = {
         id: 'message-1',
         timestamp: current.linkPolicyEffectiveAt!.getTime(),
@@ -92,7 +109,11 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
         sender: { user_id: 'user-1', is_bot: false },
         body: {
           mid: 'message-1',
-          text: carrier === 'link' ? 'site' : '@azov_overhear',
+          text: isHandle
+            ? '@azov_overhear'
+            : carrier === 'google_result'
+              ? googleResult('https://blocked.example/path')
+              : 'site',
           markup:
             carrier === 'link'
               ? [{ type: 'link', from: 0, length: 4, url: 'https://blocked.example/path' }]
@@ -101,11 +122,29 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
                 : [],
         },
       };
+      const allowedGoogleRow = {
+        ...row,
+        id: 'allowed-google-result',
+        body: {
+          mid: 'allowed-google-result',
+          text: googleResult('https://www.wildberries.ru/catalog/123/detail.aspx'),
+          markup: [],
+        },
+      };
       const handleLookup = createHandleLookupMock().mockResolvedValue(PUBLIC_HANDLE_CHANNEL);
       const max = {
         resolvePublicChannelHandle: handleLookup,
-        listMessages: jest.fn().mockResolvedValue([row]),
-        getExactMessageRow: jest.fn().mockResolvedValue(row),
+        listMessages: jest
+          .fn()
+          .mockResolvedValue(carrier === 'google_result' ? [row, allowedGoogleRow] : [row]),
+        getExactMessageRow: jest
+          .fn<
+            ReturnType<MaxClientService['getExactMessageRow']>,
+            Parameters<MaxClientService['getExactMessageRow']>
+          >()
+          .mockImplementation(async (_chatId, messageId) =>
+            messageId === allowedGoogleRow.id ? allowedGoogleRow : row,
+          ),
         getChatMemberAccess: jest
           .fn()
           .mockResolvedValue({ userId: 'user-1', isAdmin: false, isOwner: false, permissions: [] }),
@@ -136,6 +175,7 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
       expect(intents.ensureIntent).toHaveBeenCalledWith(
         expect.objectContaining({
           chatId,
+          messageId: row.id,
           sourceMessageAt: current.linkPolicyEffectiveAt,
           event: expect.objectContaining({
             metadata: expect.objectContaining({
@@ -145,6 +185,7 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
           }),
         }),
       );
+      expect(intents.ensureIntent).toHaveBeenCalledTimes(1);
       const reason = {
         ruleCode: 'LINK_BLOCKED_DELETE',
         reasonKey: 'new-link',
@@ -175,7 +216,7 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
         botId: 'link-native-bot',
       };
       const preparation = await guard.prepareForDispatch(input);
-      if (carrier !== 'link') {
+      if (isHandle) {
         handleLookup.mockRejectedValue(new Error('identity unconfirmed'));
         await expect(guard.assertIntentStillActionable(input)).rejects.toMatchObject({
           code: 'live_violation_no_longer_present',
@@ -189,6 +230,16 @@ integration('link rules policy with PostgreSQL authority and recovery', () => {
           },
         });
         handleLookup.mockClear();
+        await expect(guard.assertIntentStillActionable(input)).rejects.toMatchObject({
+          code: 'live_violation_no_longer_present',
+        });
+        expect(handleLookup).not.toHaveBeenCalled();
+      }
+      if (carrier === 'google_result') {
+        max.getExactMessageRow.mockResolvedValue({
+          ...row,
+          body: { ...allowedGoogleRow.body, mid: row.id },
+        });
         await expect(guard.assertIntentStillActionable(input)).rejects.toMatchObject({
           code: 'live_violation_no_longer_present',
         });

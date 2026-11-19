@@ -120,6 +120,33 @@ describe.each(['standalone', 'prepared'] as const)('typed link moderation (%s)',
     ).toBe(true);
   });
 
+  it('uses the Google search destination only for legacy link moderation', () => {
+    const allowlist = ['domain:www.wildberries.ru'];
+    const allowed =
+      'https://www.google.com/url?sa=t&source=web&url=https%3A%2F%2Fwww.wildberries.ru%2Fcatalog%2F123%2Fdetail.aspx';
+    const unlisted = allowed.replace('www.wildberries.ru', 'elsewhere.test');
+
+    expect(detectBlockedLink(allowed, LinkPolicy.ALLOWLIST_ONLY, allowlist)).toBeNull();
+    expect(
+      detectBlockedLink('', LinkPolicy.ALLOWLIST_ONLY, allowlist, undefined, [
+        target('external_url', allowed),
+      ]),
+    ).toBeNull();
+    expect(detectBlockedLink(unlisted, LinkPolicy.ALLOWLIST_ONLY, allowlist)).toBe(
+      `Link ${unlisted} is not in allowlist`,
+    );
+    expect(
+      detectBlockedLink('', LinkPolicy.ALLOWLIST_ONLY, allowlist, undefined, [
+        target('external_url', unlisted),
+      ]),
+    ).toBe(`Link ${unlisted} is not in allowlist`);
+    expect(detectBlockedLink(allowed, LinkPolicy.BLOCKLIST_ONLY, allowlist)).toBe(
+      'Links are not allowed by policy',
+    );
+    expect(createAllowlistLinkMatcher(allowlist)(allowed)).toBe(false);
+    expect(prepareLinkAllowlist(allowlist).link(allowed)).toBe(false);
+  });
+
   it('does not silently drop an extracted URL rejected by strict normalization', () => {
     const url = 'https://example.com@evil.test/path';
     expect(detectBlockedLink(url, LinkPolicy.ALLOWLIST_ONLY, ['domain:example.com'])).toBe(
