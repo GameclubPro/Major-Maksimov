@@ -11,6 +11,11 @@ import { Prisma } from '../../prisma/prisma-client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MaxClientService } from '../../max/max-client.service';
 import { MaxBotRegistryService } from '../../max/max-bot-registry.service';
+import {
+  readKaravanPublicationSource,
+  readKaravanSourceIdentity,
+  readKaravanSourceRow,
+} from '../karavan-storefront/karavan-publication-source';
 
 export const karavanPublicationPrincipalSchema = z
   .object({
@@ -24,17 +29,6 @@ export const karavanPublicationPrincipalSchema = z
 export type KaravanPublicationPrincipal = z.infer<typeof karavanPublicationPrincipalSchema>;
 const digest = (input: unknown) =>
   createHash('sha256').update(canonicalKaravanMarketplaceJson(input)).digest('hex');
-const row = (input: unknown): Record<string, unknown> | null =>
-  input && typeof input === 'object' && !Array.isArray(input)
-    ? (input as Record<string, unknown>)
-    : null;
-const id = (input: unknown): string | null =>
-  typeof input === 'string'
-    ? input
-    : typeof input === 'number' && Number.isSafeInteger(input)
-      ? String(input)
-      : null;
-
 /** FLAG: Publication permission is independent from authority to manage the marketplace. */
 @Injectable()
 export class KaravanMarketplacePublicationPolicyService {
@@ -137,32 +131,17 @@ export class KaravanMarketplacePublicationPolicyService {
           actor.explicitPrivilegeEvidence !== true))
     )
       throw new ForbiddenException('Публикация больше недоступна.');
-    const body = row(message.body);
-    const sender = row(message.sender);
-    const directText = typeof body?.text === 'string' ? body.text.trim() : '';
-    const link = row(message.link);
-    const forwarded = row(link?.message);
-    const forwardedBody = row(forwarded?.body);
-    const forwardSender = row(link?.sender);
-    const forwardSubject = id(
-      link?.sender_id ??
-        link?.senderId ??
-        forwardSender?.user_id ??
-        forwardSender?.userId ??
-        forwardSender?.id,
-    );
-    const text =
-      directText ||
-      (link?.type === 'forward' && typeof forwardedBody?.text === 'string'
-        ? forwardedBody.text.trim()
-        : '');
-    const actualSubject = directText ? actorMaxUserId : forwardSubject;
+    const body = readKaravanSourceRow(message.body);
+    const sender = readKaravanSourceRow(message.sender);
+    const source = readKaravanPublicationSource(message);
+    const actualSubject = source?.kind === 'direct' ? actorMaxUserId : source?.senderId;
     if (
-      id(body?.mid ?? message.message_id) !== sourceMessageId ||
-      id(sender?.user_id ?? sender?.userId ?? sender?.id ?? message.sender_id) !== actorMaxUserId ||
+      readKaravanSourceIdentity(body?.mid, message.message_id) !== sourceMessageId ||
+      readKaravanSourceIdentity(sender?.user_id, sender?.userId, sender?.id, message.sender_id) !==
+        actorMaxUserId ||
       sender?.is_bot !== false ||
       actualSubject !== subjectMaxUserId ||
-      !text.startsWith('$')
+      !source?.text.startsWith('$')
     )
       throw new ForbiddenException('Исходное сообщение изменилось или не подтверждает продавца.');
     const principal: KaravanPublicationPrincipal = {
@@ -173,8 +152,8 @@ export class KaravanMarketplacePublicationPolicyService {
         sourceMessageId,
         actorMaxUserId,
         subjectMaxUserId,
-        text,
-        direct: !!directText,
+        text: source.text,
+        direct: source.kind === 'direct',
       }),
       policyHash: local.policyHash,
     };

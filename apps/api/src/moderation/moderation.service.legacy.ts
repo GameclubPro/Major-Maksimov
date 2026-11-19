@@ -672,6 +672,10 @@ import {
   type RelayContext,
 } from '../integrations/karavan-storefront/karavan-storefront-relay.service';
 import {
+  readKaravanPublicationSource,
+  readKaravanWebhookMessage,
+} from '../integrations/karavan-storefront/karavan-publication-source';
+import {
   WebhookCanonicalExecutionService,
   WebhookFinishPersistenceError,
   type WebhookCanonicalExecutionContext,
@@ -2081,7 +2085,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             karavanStorefrontEnabled: settings.karavanStorefrontEnabled,
             storefrontTexts: settings,
             karavanStorefrontAdminsOnly: this.readKaravanStorefrontAdminsOnly(settings),
-            storefrontOwnerUserId: this.readKaravanStorefrontOwnerUserId(update, senderId),
           })
         ) {
           return;
@@ -2131,7 +2134,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
               karavanStorefrontEnabled: settings.karavanStorefrontEnabled,
               storefrontTexts: settings,
               karavanStorefrontAdminsOnly: this.readKaravanStorefrontAdminsOnly(settings),
-              storefrontOwnerUserId: this.readKaravanStorefrontOwnerUserId(update, senderId),
             })
           ) {
             return false;
@@ -2572,7 +2574,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             karavanStorefrontEnabled: settings.karavanStorefrontEnabled,
             storefrontTexts: settings,
             karavanStorefrontAdminsOnly: this.readKaravanStorefrontAdminsOnly(settings),
-            storefrontOwnerUserId: this.readKaravanStorefrontOwnerUserId(update, senderId),
           })
         ) {
           return;
@@ -2622,7 +2623,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           karavanStorefrontEnabled: settings.karavanStorefrontEnabled,
           storefrontTexts: settings,
           karavanStorefrontAdminsOnly: this.readKaravanStorefrontAdminsOnly(settings),
-          storefrontOwnerUserId: this.readKaravanStorefrontOwnerUserId(update, senderId),
         }))
       ) {
         await suppressDeferredPhotoAnalysisActions();
@@ -2787,7 +2787,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             karavanStorefrontEnabled: settings.karavanStorefrontEnabled,
             storefrontTexts: settings,
             karavanStorefrontAdminsOnly: this.readKaravanStorefrontAdminsOnly(settings),
-            storefrontOwnerUserId: this.readKaravanStorefrontOwnerUserId(update, senderId),
           })
         ) {
           return;
@@ -4003,13 +4002,22 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
-    const { update, karavanStorefrontAdminsOnly, storefrontOwnerUserId, ...context } = params;
+    const { update, karavanStorefrontAdminsOnly, ...context } = params;
+    const source = readKaravanPublicationSource(readKaravanWebhookMessage(update.raw));
+    const forwardedSubject = source?.kind === 'forward' ? source.senderId : null;
+    const botId =
+      this.maxBotContextService?.getActiveBotId() ??
+      this.readExecutionOwnerBotId(update) ??
+      update.botId ??
+      null;
     const result = await this.karavanStorefrontRelayService.handleMessageCreated({
       ...context,
       raw: update.raw,
-      botId: update.botId ?? null,
+      botId,
       ...(karavanStorefrontAdminsOnly ? { karavanStorefrontAdminsOnly: true } : {}),
-      ...(storefrontOwnerUserId ? { storefrontOwnerUserId } : {}),
+      ...(forwardedSubject && forwardedSubject !== context.senderId
+        ? { storefrontOwnerUserId: forwardedSubject }
+        : {}),
     });
 
     return result === 'handled' || result === 'duplicate';
@@ -4022,53 +4030,6 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     return (
       (settings as { karavanStorefrontAdminsOnly?: unknown }).karavanStorefrontAdminsOnly === true
     );
-  }
-
-  private readKaravanStorefrontOwnerUserId(update: MaxUpdate, actorUserId: string): string | null {
-    const raw = this.asRecord(update.raw);
-    const message = this.findKaravanRawMessage(raw);
-    const body = this.asRecord(message?.body);
-    const directText =
-      this.readString(body?.text) ??
-      this.readString(body?.caption) ??
-      this.readString(message?.text) ??
-      this.readString(message?.caption);
-    if (directText?.trim()) return null;
-    const link = this.asRecord(message?.link);
-    if (this.readString(link?.type)?.toLowerCase() !== 'forward') return null;
-    const sender = this.asRecord(link?.sender);
-    const forwardedUserId = this.readString(
-      link?.sender_id ?? link?.senderId ?? sender?.user_id ?? sender?.userId ?? sender?.id,
-    );
-    return forwardedUserId && forwardedUserId !== actorUserId.trim() ? forwardedUserId : null;
-  }
-
-  private findKaravanRawMessage(
-    raw: Record<string, unknown> | null,
-  ): Record<string, unknown> | null {
-    if (!raw) {
-      return null;
-    }
-    const direct = this.asRecord(raw.message);
-    if (direct) {
-      return direct;
-    }
-    for (const key of ['message_created', 'data', 'event', raw.update_type, raw.type]) {
-      if (typeof key !== 'string' || !key) {
-        continue;
-      }
-      const envelope = this.asRecord(raw[key]);
-      const nested = this.asRecord(envelope?.message);
-      if (nested) {
-        return nested;
-      }
-      const data = this.asRecord(envelope?.data);
-      const nestedData = this.asRecord(data?.message);
-      if (nestedData) {
-        return nestedData;
-      }
-    }
-    return null;
   }
 
   private buildLinkExplanation(

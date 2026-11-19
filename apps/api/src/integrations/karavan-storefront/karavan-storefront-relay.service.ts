@@ -21,6 +21,11 @@ import {
 } from '../../max/max-client.service';
 import { RedisCounterService } from '../../moderation/redis-counter.service';
 import { KaravanStorefrontAuthorizationService } from './karavan-storefront-authorization.service';
+import {
+  readKaravanPublicationSource,
+  readKaravanSourceRow,
+  readKaravanWebhookMessage,
+} from './karavan-publication-source';
 
 export type RelayContext = {
   karavanStorefrontEnabled: boolean;
@@ -155,11 +160,15 @@ export class KaravanStorefrontRelayService {
       return 'noop';
     }
 
-    const trigger = this.resolveStorefrontRelayTrigger(context);
-    if (!trigger) {
+    const message = readKaravanWebhookMessage(context.raw);
+    const legacyEnvelopeText = this.readString(readKaravanSourceRow(context.raw)?.text);
+    const source = this.resolvePublicationSource(context, message);
+    const legacySource = legacyEnvelopeText
+      ? this.resolvePublicationSource(context, message, legacyEnvelopeText)
+      : source;
+    if (!source?.text.startsWith('$') && !legacySource?.text.startsWith('$')) {
       return 'noop';
     }
-
     if (
       context.karavanStorefrontAdminsOnly &&
       (!this.authorizationService ||
@@ -192,10 +201,16 @@ export class KaravanStorefrontRelayService {
       // `$` is an explicit seller action, so each logical source message starts
       // from a fresh storefront lookup. Concurrent messages from the same seller
       // still share one in-flight request.
-      const storefrontOwnerUserId = this.resolveStorefrontOwnerUserId(context);
+      const scoped = await this.marketplaceResolver?.shouldUseScopedRelay(context.chatId);
+      const selectedSource = scoped ? source : legacySource;
+      if (!selectedSource?.text.startsWith('$') || (scoped && !selectedSource.subjectId))
+        return 'noop';
+
+      const trigger: StorefrontRelayTrigger = selectedSource.text === '$' ? 'bare' : 'prefixed';
+      const storefrontOwnerUserId = selectedSource.subjectId ?? context.senderId.trim();
       let scopedPublication: KaravanScopedPublication | null = null;
       let store: LookupStore | null | undefined;
-      if (await this.marketplaceResolver?.shouldUseScopedRelay(context.chatId)) {
+      if (scoped) {
         if (!this.marketplaceResolver || !context.botId) return 'failed';
         const resolved = await this.marketplaceResolver.resolve({
           chatId: context.chatId,
@@ -223,6 +238,7 @@ export class KaravanStorefrontRelayService {
       const texts = resolveKaravanStorefrontTexts(context.storefrontTexts);
       pendingAudit = await this.createPendingAuditLog({
         context,
+        storefrontOwnerUserId,
         store,
         idempotencyKey,
         variant,
@@ -249,7 +265,14 @@ export class KaravanStorefrontRelayService {
           : store
             ? this.buildStorefrontMessageOptions(context.messageId!, store.url, texts)
             : this.buildDirectoryMessageOptions(context.messageId!, texts),
-        this.buildDispatchOptions({ context, store, idempotencyKey, variant, scopedPublication }),
+        this.buildDispatchOptions({
+          context,
+          storefrontOwnerUserId,
+          store,
+          idempotencyKey,
+          variant,
+          scopedPublication,
+        }),
       );
       keepClaim = true;
 
@@ -403,143 +426,24 @@ export class KaravanStorefrontRelayService {
     return !this.isPrivateDirectChat(context.chatId);
   }
 
-  private resolveStorefrontRelayTrigger(context: RelayContext): StorefrontRelayTrigger | null {
-    const visibleText = this.extractVisibleText(context);
-    const normalized = visibleText?.trimStart();
-    if (!normalized?.startsWith('$')) {
-      return null;
+  private resolvePublicationSource(
+    context: RelayContext,
+    message: ReturnType<typeof readKaravanWebhookMessage>,
+    legacyEnvelopeText?: string,
+  ): { text: string; subjectId: string | null } | null {
+    const actorId = context.senderId.trim();
+    const expectedSubject = context.storefrontOwnerUserId?.trim() || actorId;
+    if (context.raw == null) {
+      // Legacy callers without a MAX payload can only supply their own text.
+      const text = this.readString(context.text);
+      return text && expectedSubject === actorId ? { text, subjectId: actorId } : null;
     }
-
-    return normalized.trim() === '$' ? 'bare' : 'prefixed';
-  }
-
-  // FLAG: Normalized text can include reply/quote previews; use it only without raw payload or after a validated forward.
-  private extractVisibleText(context: RelayContext): string | null {
-    const raw = this.asRecord(context.raw);
-    const message = this.extractRawMessage(raw);
-    if (!message) {
-      return raw ? null : this.readString(context.text);
-    }
-
-    const directText = this.extractMessageText(message) ?? this.readString(raw?.text);
-    if (directText) {
-      return directText;
-    }
-
-    const link = this.asRecord(message.link);
-    if (
-      this.readLowerString(link?.type) !== 'forward' ||
-      !this.isForwardFromContextSender(link, context.senderId, context.storefrontOwnerUserId)
-    ) {
-      return null;
-    }
-
-    return this.extractMessageText(this.asRecord(link?.message)) ?? this.readString(context.text);
-  }
-
-  private extractRawMessage(raw: Record<string, unknown> | null): Record<string, unknown> | null {
-    const directMessage = this.asRecord(raw?.message);
-    if (directMessage) {
-      return directMessage;
-    }
-
-    const envelopeKeys = ['message_created', 'data', 'event'];
-    for (const typeKey of [raw?.update_type, raw?.type]) {
-      if (typeof typeKey === 'string' && typeKey.trim()) {
-        envelopeKeys.push(typeKey);
-      }
-    }
-
-    for (const key of envelopeKeys) {
-      const envelope = this.asRecord(raw?.[key]);
-      if (!envelope) {
-        continue;
-      }
-
-      const nestedMessage = this.asRecord(envelope.message);
-      if (nestedMessage) {
-        return nestedMessage;
-      }
-
-      const nestedData = this.asRecord(envelope.data);
-      const nestedDataMessage = this.asRecord(nestedData?.message);
-      if (nestedDataMessage) {
-        return nestedDataMessage;
-      }
-    }
-
-    return null;
-  }
-
-  private extractMessageText(message: Record<string, unknown> | null): string | null {
-    const body = this.asRecord(message?.body);
-    const candidates = [
-      body?.text,
-      body?.caption,
-      body?.plain,
-      message?.text,
-      message?.caption,
-      message?.plain,
-      message?.message_text,
-      message?.messageText,
-    ];
-
-    for (const candidate of candidates) {
-      const text = this.readString(candidate);
-      if (text) {
-        return text;
-      }
-    }
-
-    return null;
-  }
-
-  private isForwardFromContextSender(
-    link: Record<string, unknown> | null,
-    contextSenderId: string,
-    expectedOwnerUserId?: string | null,
-  ): boolean {
-    const sender = this.asRecord(link?.sender);
-    const forwardSenderId = this.readString(
-      link?.sender_id ?? link?.senderId ?? sender?.user_id ?? sender?.userId ?? sender?.id,
-    );
-
-    if (!forwardSenderId) {
-      return true;
-    }
-    if (forwardSenderId === contextSenderId.trim()) {
-      return true;
-    }
-    // A caller that parsed the update envelope may supply the forwarded seller
-    // explicitly. Keep the old strict behavior for unannotated compatibility
-    // contexts, while allowing actor/seller identity to be separated safely.
-    return Boolean(expectedOwnerUserId?.trim() && forwardSenderId === expectedOwnerUserId.trim());
-  }
-
-  private resolveStorefrontOwnerUserId(context: RelayContext): string {
-    const explicit = context.storefrontOwnerUserId?.trim();
-    if (explicit) {
-      return explicit;
-    }
-
-    const raw = this.asRecord(context.raw);
-    const message = this.extractRawMessage(raw);
-    const link = this.asRecord(message?.link);
-    // A real outer message takes precedence over any forward metadata. In
-    // that case the actor is also the storefront owner for lookup purposes.
-    if (this.extractMessageText(message)?.trim()) {
-      return context.senderId.trim();
-    }
-    if (this.readLowerString(link?.type) === 'forward') {
-      const sender = this.asRecord(link?.sender);
-      const forwardedUserId = this.readString(
-        link?.sender_id ?? link?.senderId ?? sender?.user_id ?? sender?.userId ?? sender?.id,
-      );
-      if (forwardedUserId && forwardedUserId === context.senderId.trim()) {
-        return forwardedUserId;
-      }
-    }
-    return context.senderId.trim();
+    const source = readKaravanPublicationSource(message, legacyEnvelopeText);
+    if (!source) return null;
+    if (source.kind === 'direct') return { text: source.text, subjectId: actorId };
+    if (!source.senderId && expectedSubject !== actorId) return null;
+    if (source.senderId && source.senderId !== expectedSubject) return null;
+    return { text: source.text, subjectId: source.senderId };
   }
 
   private isPrivateDirectChat(chatId: string): boolean {
@@ -683,6 +587,7 @@ export class KaravanStorefrontRelayService {
 
   private buildDispatchOptions(params: {
     context: RelayContext;
+    storefrontOwnerUserId: string;
     store: LookupStore | null;
     idempotencyKey: string;
     variant: StorefrontRelayVariant;
@@ -709,7 +614,7 @@ export class KaravanStorefrontRelayService {
         karavanStorefrontRelay: {
           sourceMessageId: params.context.messageId ?? null,
           actorUserId: params.context.senderId,
-          storefrontOwnerUserId: this.resolveStorefrontOwnerUserId(params.context),
+          storefrontOwnerUserId: params.storefrontOwnerUserId,
           senderId: params.context.senderId,
           requestedBotId: params.context.botId ?? null,
           storeId: params.store?.id ?? null,
@@ -722,6 +627,7 @@ export class KaravanStorefrontRelayService {
 
   private async createPendingAuditLog(params: {
     context: RelayContext;
+    storefrontOwnerUserId: string;
     store: LookupStore | null;
     idempotencyKey: string;
     variant: StorefrontRelayVariant;
@@ -738,7 +644,7 @@ export class KaravanStorefrontRelayService {
       idempotencyKey: params.idempotencyKey,
       requestedBotId: params.context.botId ?? null,
       actorUserId: params.context.senderId,
-      storefrontOwnerUserId: this.resolveStorefrontOwnerUserId(params.context),
+      storefrontOwnerUserId: params.storefrontOwnerUserId,
       variant: params.variant,
       store: params.store
         ? {
@@ -816,8 +722,7 @@ export class KaravanStorefrontRelayService {
   }
 
   private extractReplySourceMessageId(rawValue: unknown): string | null {
-    const raw = this.asRecord(rawValue);
-    const message = this.extractRawMessage(raw);
+    const message = readKaravanWebhookMessage(rawValue);
     const link = this.asRecord(message?.link);
     if (this.readLowerString(link?.type) !== 'reply') {
       return null;
