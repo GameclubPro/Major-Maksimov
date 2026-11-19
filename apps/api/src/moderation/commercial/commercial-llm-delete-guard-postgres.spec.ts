@@ -362,7 +362,7 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
     const h = await fixture(false, true, createDefaultCommercialAdsPolicy(), text);
     const metadata = h.input.reasons[0]!.metadata;
     metadata.commercialAiObservation!.inputSha256 = createHash('sha256')
-      .update(text.replace('\n', ' '))
+      .update(text.replace(/\n/gu, ' '))
       .digest('hex');
     await expect(h.guard.authorize(h.input)).rejects.toBeInstanceOf(
       CommercialLlmGuardRejectedError,

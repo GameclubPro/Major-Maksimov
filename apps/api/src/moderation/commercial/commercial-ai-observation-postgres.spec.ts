@@ -310,7 +310,7 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       expect(
         await writer.seed({
           ...input,
-          request: { ...input.request, excerpt: excerpt.replace('\n', ' ') },
+          request: { ...input.request, excerpt: excerpt.replace(/\n/gu, ' ') },
         }),
       ).toBe('invalid');
       expect(await writer.seed(input)).toBe('written');

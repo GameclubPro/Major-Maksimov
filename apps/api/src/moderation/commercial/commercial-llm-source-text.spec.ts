@@ -30,7 +30,7 @@ function parse(message: Record<string, unknown>) {
 }
 const original =
   'Посоветуйте магазин мебели\nРемонт квартир под ключ по договору, принимаем заказы.';
-const flat = original.replace('\n', ' ');
+const flat = original.replace(/\n/gu, ' ');
 describe('visible commercial model source', () => {
   it('preserves the original body despite a flat presentation alias at intake and exact dispatch', () => {
     const parsed = parse({ text: flat, body: { mid: 'mid', text: original } });
