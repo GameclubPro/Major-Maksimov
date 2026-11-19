@@ -33,6 +33,8 @@ import {
   type MaxUpdate,
 } from './moderation.service.spec-support';
 import { MaxActionLedgerService } from '../max/max-action-ledger.service';
+import { MaxBotContextService } from '../max/max-bot-context.service';
+import type { KaravanStorefrontRelayService } from '../integrations/karavan-storefront/karavan-storefront-relay.service';
 import type { AdminService } from '../admin/admin.service';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { classifyDuplicateEventTime } from './duplicate-enforcement-safety';
@@ -4517,7 +4519,7 @@ describe('ModerationService', () => {
     expect(prisma.moderationEvent.create).not.toHaveBeenCalled();
   });
 
-  it('runs Karavan storefront relay for a forwarded dollar-prefixed seller post after violation admin recheck', async () => {
+  it('passes the executing bot to Karavan for a forwarded seller post after violation admin recheck', async () => {
     const prisma = {
       chat: {
         upsert: jest.fn().mockResolvedValue({
@@ -4570,7 +4572,9 @@ describe('ModerationService', () => {
       notifyModerators: jest.fn(),
     };
     const karavanStorefrontRelayService = {
-      handleMessageCreated: jest.fn().mockResolvedValue('handled'),
+      handleMessageCreated: jest
+        .fn<Promise<'handled'>, Parameters<KaravanStorefrontRelayService['handleMessageCreated']>>()
+        .mockResolvedValue('handled'),
     };
     const chatContextCache = createAdminAccessEpochCache({
       adminUserIds: ['existing-admin'],
@@ -4578,6 +4582,8 @@ describe('ModerationService', () => {
     const baseUpdate = createUpdate();
     const update = {
       ...baseUpdate,
+      botId: 'observation-bot',
+      executionOwnerBotId: 'old-owner-bot',
       message: {
         ...baseUpdate.message!,
         text: '$ Овощной Кирова 12Г',
@@ -4613,7 +4619,9 @@ describe('ModerationService', () => {
       }
     ).karavanStorefrontRelayService = karavanStorefrontRelayService;
 
-    await service.handleUpdate(update);
+    const botContext = new MaxBotContextService();
+    Object.assign(service, { maxBotContextService: botContext });
+    await botContext.runWithBot('executing-bot', () => service.handleUpdate(update));
 
     expect(maxClient.getChatMembersAccess).toHaveBeenCalledTimes(1);
     expect(karavanStorefrontRelayService.handleMessageCreated).toHaveBeenCalledWith({
@@ -4631,7 +4639,7 @@ describe('ModerationService', () => {
       senderName: 'Алексей',
       text: '$ Овощной Кирова 12Г',
       raw: update.raw,
-      botId: null,
+      botId: 'executing-bot',
     });
     expect(maxClient.deleteMessage).not.toHaveBeenCalled();
     expect(maxClient.sendMessage).not.toHaveBeenCalled();
