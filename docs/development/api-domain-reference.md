@@ -147,6 +147,7 @@ communities require an explicit designation before agent-initiated test mutation
 - Internal `startapp` links use `MAX_ENTRY_BOT_ID` with default-bot fallback, not whichever bot executes an action. Ordinary `start` links remain bot-specific.
 - `startapp` payloads are limited to 512 characters and `[A-Za-z0-9_-]`; use `MaxBotLinkService`, `max-deep-link.util.ts`, and the shared launch-route patterns.
 - Profile handoff payloads (`pmh-` and `pm2_`) are dedicated flows. Generic button schemas reject them, and profile caches remain route-bot-scoped.
+- The Publisher author profile shortcut authorizes the exact comment in its signed discussion. The private bot shortcut is short lived and bound to the caller. The bot reads the original comment before delivering the profile link in private.
 - Trust validated `initData`/`WebAppData` with the correct bot-token HMAC only; `initDataUnsafe` is convenience data.
 - Sanction explanations, warnings, and published rules append the fixed admin-contact link through dedicated `*AdminContactButtonEnabled`/`Url` fields. Mute/ban notices do not include it.
 - Empty stored editable bot-speech text means inherited catalog copy; any non-empty value is custom even if it matches an old default. Never infer inheritance by string comparison.

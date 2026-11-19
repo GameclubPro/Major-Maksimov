@@ -301,6 +301,12 @@ const ALLOWED_TUNNEL_ROUTES: readonly TunnelRouteRule[] = [
   },
   {
     method: 'POST',
+    pattern: new RegExp(
+      `^/(chats|channels)/${ENTITY_ID_SEGMENT}/dialog/comments/messages/${ENTITY_ID_SEGMENT}/profile/handoff$`,
+    ),
+  },
+  {
+    method: 'POST',
     pattern: new RegExp(`^/channels/${ENTITY_ID_SEGMENT}/dialog/suggest/video$`),
   },
   {

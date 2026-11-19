@@ -4,6 +4,7 @@ import {
   type BroadcastHandoffResponse,
   type ProfileMentionHandoffRequest,
 } from '@maxim/contracts';
+import { commentAuthorProfileHandoffRequestSchema } from '@maxim/contracts/channel-dialog';
 import type { LastEntityType } from '../last-chat';
 import type { ApiTransport } from './transport';
 
@@ -28,5 +29,21 @@ export async function handoffEntityMemberProfile(
     method: 'POST',
     body: JSON.stringify(requestBody),
   });
+  return broadcastHandoffResponseSchema.parse(response);
+}
+
+export async function handoffPublisherCommentAuthorProfile(
+  api: ApiTransport,
+  entityType: LastEntityType,
+  chatId: string,
+  messageId: string,
+  token: string,
+): Promise<BroadcastHandoffResponse> {
+  const requestBody = commentAuthorProfileHandoffRequestSchema.parse({ token });
+  const entitySegment = entityType === 'channel' ? 'channels' : 'chats';
+  const response = await api.request(
+    `/${entitySegment}/${encodeURIComponent(chatId)}/dialog/comments/messages/${encodeURIComponent(messageId)}/profile/handoff`,
+    { method: 'POST', body: JSON.stringify(requestBody) },
+  );
   return broadcastHandoffResponseSchema.parse(response);
 }

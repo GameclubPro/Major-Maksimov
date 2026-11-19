@@ -484,6 +484,10 @@ export type UpdateChannelDialogNotificationsResponse = z.infer<
   typeof updateChannelDialogNotificationsResponseSchema
 >;
 
+export const commentAuthorProfileHandoffRequestSchema = /*#__PURE__*/ z
+  .object({ token: z.string().trim().min(16).max(256) })
+  .strict();
+
 export const deleteChannelDialogMessageRequestSchema = /*#__PURE__*/ z.object({
   token: z.string().trim().min(16).max(256),
 });
