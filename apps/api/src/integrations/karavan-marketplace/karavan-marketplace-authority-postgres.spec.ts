@@ -304,7 +304,7 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
       link: {
         type: 'forward',
         sender: { user_id: subjectMaxUserId },
-        message: { body: { text: '$Витрина' } },
+        message: { text: '$Витрина' },
       },
     };
     max.getExactMessageRow.mockResolvedValue(message);
@@ -317,14 +317,60 @@ postgres('Karavan exact authority and actor-bound handoffs', () => {
       subjectMaxUserId,
       botId,
     });
+    await expect(service.introspect(issued.authority)).resolves.toMatchObject({
+      action: 'resolve_publication',
+      actorMaxUserId,
+    });
     max.getExactMessageRow.mockResolvedValue({
       ...message,
-      link: { ...message.link, message: { body: { text: '$Изменено' } } },
+      link: { ...message.link, message: { text: '$Изменено' } },
     });
     await expect(service.introspect(issued.authority)).rejects.toThrow('Публикация изменилась');
     max.getExactMessageRow.mockResolvedValue(message);
     await db.karavanStorefrontAllowlistEntry.deleteMany({ where: { chatId } });
     await expect(service.introspect(issued.authority)).rejects.toThrow('Публикация изменилась');
+  });
+
+  it('attests a direct caption and refuses ambiguous aliases, actor text, or an unverified forwarder', async () => {
+    await db.chatSettings.create({
+      data: { chatId, karavanStorefrontEnabled: true, karavanStorefrontAdminsOnly: false },
+    });
+    const forwardedSellerId = '987654321';
+    const sourceMessageId = 'synthetic-caption';
+    const message = {
+      body: { mid: sourceMessageId, caption: '$Товар' },
+      sender: { user_id: actorMaxUserId, is_bot: false },
+    };
+    max.getExactMessageRow.mockResolvedValue(message);
+    const input = { ...scope(), action: 'resolve_publication' as const };
+    const options = { sourceMessageId, subjectMaxUserId: actorMaxUserId, botId };
+    const { authority } = await service.issuePublication(input, options);
+    await expect(service.introspect(authority)).resolves.toMatchObject({ actorMaxUserId });
+    await expect(
+      service.issuePublication(input, { ...options, botId: 'observation_bot' }),
+    ).rejects.toThrow('Маршрут публикации не подтверждён');
+
+    const forward = {
+      type: 'forward',
+      sender: { user_id: forwardedSellerId },
+      message: { text: '$Витрина' },
+    };
+    for (const payload of [
+      { ...message, body: { ...message.body, text: 'Обычная запись' }, link: forward },
+      {
+        ...message,
+        body: { mid: sourceMessageId },
+        link: { ...forward, sender_id: actorMaxUserId },
+      },
+      { ...message, body: { mid: sourceMessageId }, link: { ...forward, sender: undefined } },
+      { ...message, body: { mid: sourceMessageId }, link: { ...forward, type: 'reply' } },
+      { ...message, link: forward },
+    ]) {
+      max.getExactMessageRow.mockResolvedValue(payload);
+      await expect(
+        service.issuePublication(input, { ...options, subjectMaxUserId: forwardedSellerId }),
+      ).rejects.toThrow('не подтверждает продавца');
+    }
   });
 
   it('invalidates an outstanding proof after real Redis session logout', async () => {

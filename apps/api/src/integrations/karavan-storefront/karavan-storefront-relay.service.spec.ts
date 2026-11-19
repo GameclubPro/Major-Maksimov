@@ -725,6 +725,64 @@ describe('KaravanStorefrontRelayService', () => {
     }
   });
 
+  it('keeps an anonymous forward out of a scoped lookup', async () => {
+    const resolver = {
+      shouldUseScopedRelay: jest.fn().mockResolvedValue(true),
+      resolve: jest.fn(),
+    };
+    const fixture = createService({ resolver });
+
+    try {
+      await expect(
+        fixture.service.handleMessageCreated({
+          ...baseContext,
+          raw: {
+            message: { body: null, link: { type: 'forward', message: { text: '$ Клубника' } } },
+          },
+        }),
+      ).resolves.toBe('noop');
+      expect(resolver.resolve).not.toHaveBeenCalled();
+      expect(fixture.maxClient.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      fixture.restore();
+    }
+  });
+
+  it('uses a direct caption as the actor text and keeps conflicting aliases out of lookup', async () => {
+    const fixture = createService();
+    try {
+      const forward = {
+        type: 'forward',
+        sender: { user_id: 'seller-42' },
+        message: { text: '$ Чужой товар' },
+      };
+      await expect(
+        fixture.service.handleMessageCreated({
+          ...baseContext,
+          storefrontOwnerUserId: 'seller-42',
+          raw: { message: { body: { caption: '$ Мой товар' }, link: forward } },
+        }),
+      ).resolves.toBe('handled');
+      expect(fixture.fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining('/by-max-user/1001'),
+        expect.anything(),
+      );
+
+      fixture.fetchMock.mockClear();
+      fixture.maxClient.sendMessage.mockClear();
+      await expect(
+        fixture.service.handleMessageCreated({
+          ...baseContext,
+          raw: { message: { body: { text: 'Другой текст', caption: '$ Товар' }, link: forward } },
+        }),
+      ).resolves.toBe('noop');
+      expect(fixture.fetchMock).not.toHaveBeenCalled();
+      expect(fixture.maxClient.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      fixture.restore();
+    }
+  });
+
   it('reads a forwarded seller post from a webhook event envelope', async () => {
     const fixture = createService();
 
@@ -891,6 +949,30 @@ describe('KaravanStorefrontRelayService', () => {
       fixture.restore();
     }
   });
+
+  it.each([false, true])(
+    'uses retained envelope text only for a legacy chat (scoped=%s)',
+    async (scoped) => {
+      const resolver = {
+        shouldUseScopedRelay: jest.fn().mockResolvedValue(scoped),
+        resolve: jest.fn(),
+      };
+      const fixture = createService({ resolver });
+      try {
+        await expect(
+          fixture.service.handleMessageCreated({
+            ...baseContext,
+            raw: { text: '$', message: { body: {} } },
+          }),
+        ).resolves.toBe(scoped ? 'noop' : 'handled');
+        expect(fixture.fetchMock).toHaveBeenCalledTimes(scoped ? 0 : 1);
+        expect(resolver.resolve).not.toHaveBeenCalled();
+        expect(fixture.maxClient.sendMessage).toHaveBeenCalledTimes(scoped ? 0 : 1);
+      } finally {
+        fixture.restore();
+      }
+    },
+  );
 
   it('keeps the normalized text fallback for raw-less compatibility contexts', async () => {
     const fixture = createService();
