@@ -13,7 +13,10 @@ export async function createPublisherPostImport(
   payload: PublisherPostImportCreateRequest,
 ): Promise<PublisherPostImportSession> {
   const body = JSON.stringify(publisherPostImportCreateRequestSchema.parse(payload));
-  const response = await api.request('/publisher/post-imports', { method: 'POST', body });
+  const response = await api.request('/publisher/post-imports?contractVersion=2', {
+    method: 'POST',
+    body,
+  });
   return publisherPostImportSessionSchema.parse(response);
 }
 
@@ -21,7 +24,7 @@ export async function getActivePublisherPostImport(
   api: ApiTransport,
   options: { signal?: AbortSignal } = {},
 ): Promise<PublisherPostImportCurrentResponse> {
-  const response = await api.request('/publisher/post-imports/active', {
+  const response = await api.request('/publisher/post-imports/active?contractVersion=2', {
     signal: options.signal,
   });
   return publisherPostImportCurrentResponseSchema.parse(response);
@@ -33,7 +36,7 @@ export async function getPublisherPostImportByToken(
   options: { signal?: AbortSignal } = {},
 ): Promise<PublisherPostImportCurrentResponse> {
   const response = await api.request(
-    `/publisher/post-imports/by-token/${encodeURIComponent(startToken)}`,
+    `/publisher/post-imports/by-token/${encodeURIComponent(startToken)}?contractVersion=2`,
     { signal: options.signal },
   );
   return publisherPostImportCurrentResponseSchema.parse(response);
@@ -42,7 +45,9 @@ export async function getPublisherPostImportByToken(
 export async function cancelPublisherPostImport(
   api: ApiTransport,
 ): Promise<PublisherPostImportSession> {
-  const response = await api.request('/publisher/post-imports', { method: 'DELETE' });
+  const response = await api.request('/publisher/post-imports?contractVersion=2', {
+    method: 'DELETE',
+  });
   return publisherPostImportSessionSchema.parse(response);
 }
 

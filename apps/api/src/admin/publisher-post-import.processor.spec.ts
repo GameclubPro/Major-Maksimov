@@ -75,7 +75,7 @@ describe('PublisherPostImportProcessor', () => {
     expect(runtimeBoundary.assertDispatchEnabled).toHaveBeenCalledTimes(1);
     expect(attestation.assertAttested).toHaveBeenCalledTimes(1);
     expect(dispatchHealth.assertDispatchAllowed).toHaveBeenCalledTimes(1);
-    expect(processing.process).toHaveBeenCalledWith('session-1');
+    expect(processing.process).toHaveBeenCalledWith('session-1', true);
     expect(queue.enqueueNotification).toHaveBeenCalledWith({
       sessionId: 'session-1',
       notification: 'ready',

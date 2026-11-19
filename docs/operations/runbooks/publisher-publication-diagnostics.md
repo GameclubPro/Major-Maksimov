@@ -1,5 +1,24 @@
 # Publisher Publication Diagnostics
 
+## MAX post import and album delivery
+
+Check the import separately from publication delivery. `WAITING` in collection mode
+means the author has not clicked «Готово». `READY` means a draft exists and can contain
+items requiring author review. It is not a confirmed post. Diagnose import refusals by
+the bounded reason and snapshot source in `Publisher forwarded post import rejected`.
+Keep unavailable and ambiguous outcomes separate. Do not replay a SEND based on a log gap.
+Collect sanitized counts without post text, URLs, bot credentials or identifiers.
+
+Measure counts of complete and partial import results, failures per reason and collection
+mode, time from capture to terminal result, and confirmed/unknown deliveries separately.
+Use the same observation window and cap for before/after comparisons, and report omitted
+coverage. Open a mixed draft again before checking the preview and sent post in MAX.
+
+New ordered revisions can contain images and multiple videos. The API rollback verifier
+requires a reader capable of sending an entire ordered revision. Validate the migration
+and rollback checks before deployment. Older mini app sessions cannot edit or activate a
+draft with mixed media. Use the normal release workflow to recover the compatible API.
+
 Use the fixed read-only catalog to distinguish missing actor access, missing bot/catalog
 evidence, disabled publication policy and attempted/ambiguous deliveries:
 

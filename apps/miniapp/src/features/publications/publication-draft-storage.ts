@@ -1,3 +1,4 @@
+import { publicationImportReviewSchema } from '@maxim/contracts/publication-draft';
 import type { BroadcastImage, BroadcastLinkButton } from '@maxim/contracts';
 import { channelPostSignatureSettingsSchema } from '@maxim/contracts/channel-post-signature';
 import {
@@ -309,6 +310,14 @@ export function parsePublicationDraftEnvelope(value: unknown): PublicationDraft 
     mediaFileName: readString(draft.mediaFileName),
     ...(cloudDraft ? { cloudDraft } : {}),
     ...(cloudRequestId ? { cloudRequestId } : {}),
+    importReview: publicationImportReviewSchema.safeParse(draft.importReview).data,
+    ...(Array.isArray(draft.mediaOrder)
+      ? {
+          mediaOrder: draft.mediaOrder
+            .filter((key): key is string => typeof key === 'string' && key.length <= 280)
+            .slice(0, MAX_PUBLICATION_IMAGES),
+        }
+      : {}),
     retainedAssets: Array.isArray(draft.retainedAssets)
       ? draft.retainedAssets.slice(0, MAX_PUBLICATION_IMAGES).flatMap((asset) => {
           const parsed = publicationAssetSchema.safeParse(asset);

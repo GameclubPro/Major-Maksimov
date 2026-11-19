@@ -24,6 +24,8 @@ export function buildPublisherPostImportNotificationJobId(
 export type PublisherPostImportNotification =
   | 'prompt'
   | 'need_forward'
+  | 'collecting'
+  | 'collected'
   | 'processing'
   | 'ready'
   | 'failed'
@@ -103,11 +105,7 @@ export class PublisherPostImportQueueService {
         requestedAt: requestedAt.toISOString(),
       },
       {
-        jobId: buildPublisherPostImportNotificationJobId(
-          sessionId,
-          params.notification,
-          dedupeKey,
-        ),
+        jobId: buildPublisherPostImportNotificationJobId(sessionId, params.notification, dedupeKey),
         priority: 1,
         attempts: 4,
         backoff: { type: 'exponential', delay: 1_000 },

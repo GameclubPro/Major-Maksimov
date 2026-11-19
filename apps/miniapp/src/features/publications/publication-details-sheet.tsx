@@ -1,3 +1,4 @@
+import { formatPublicationMediaSummary } from './publication-page-formatters';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import type {
@@ -456,14 +457,19 @@ export function PublicationDetailsSheet({
               <div className="publication-details-sheet__message">
                 {details.content.media.length > 0 ? (
                   <span className="publication-details-sheet__media">
-                    {details.hasVideo ? 'Видео' : `${details.mediaCount} фото`}
+                    {formatPublicationMediaSummary({
+                      ...details,
+                      videoCount:
+                        details.videoCount ??
+                        details.content.media.filter((item) => item.type === 'video').length,
+                    })}
                   </span>
                 ) : null}
                 <MaxMarkdownPreview
                   value={details.content.text}
                   sourceFormat={details.content.textFormat}
                   normalizeWhitespace
-                  fallback={details.hasVideo ? 'Видео без текста' : null}
+                  fallback={null}
                 />
               </div>
 

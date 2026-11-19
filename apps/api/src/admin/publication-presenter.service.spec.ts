@@ -236,7 +236,13 @@ describe('PublicationPresenterService', () => {
       canonicalContentRevision: {
         text: `**${'Текст'.repeat(50)}** [Ссылка](https://example.com/path)`,
         textFormat: 'MARKDOWN',
-        assets: [],
+        assets: [
+          { asset: { mimeType: 'video/mp4', durablePayload: null } },
+          { asset: { mimeType: 'image/jpeg' } },
+          {
+            asset: { mimeType: 'application/octet-stream', durablePayload: { token: 'retained' } },
+          },
+        ],
       },
       targets: [],
       audienceSelection: 'SELECTED',
@@ -249,6 +255,7 @@ describe('PublicationPresenterService', () => {
       updatedAt: new Date('2026-08-27T10:00:00.000Z'),
     });
 
+    expect(summary).toMatchObject({ mediaCount: 3, videoCount: 2, hasVideo: true });
     expect(summary.contentPreview).toBe('Текст'.repeat(32));
     expect(summary.contentPreviewFormat).toBe('plain');
     expect(summary.contentPreview).not.toMatch(/\*\*|\[[^\]]*$/u);

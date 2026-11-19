@@ -1,4 +1,9 @@
 import {
+  publicationAlbumMediaSelect,
+  requireCompatiblePublicationCopy,
+  requirePublicationAlbumEditor,
+} from './publication-album-write-compatibility';
+import {
   readPublicationLatePolicy,
   snapshotPublicationDeliveryDeadline,
   withDefaultPublicationLatePolicy,
@@ -81,7 +86,10 @@ import {
   selectCurrentRevisionFailedPublicationPage,
   selectPublicationSearchPage,
 } from './publication-failed-page-query';
-import { isImportedEmptyPublicationDraft } from './publication-imported-draft';
+import {
+  assertPublicationImportReviewResolved,
+  isImportedEmptyPublicationDraft,
+} from './publication-imported-draft';
 import { readPublicationRetryAuthorizedAt } from './publication-late-policy';
 import {
   PublicationPublisherRoutingService,
@@ -617,7 +625,7 @@ export class PublicationService {
 
     const request = this.normalizeCreateRequest(parsed.data);
     this.assertNewPublicationProfile(dispatchProfile);
-    const requestHash = this.hashMutationRequest(request);
+    const requestHash = this.hashMutationRequest(this.publicationMutationIdentity(request));
     const replay = await this.findMutationReplay(user.userId, request.requestId, requestHash);
     if (replay) {
       await this.get(replay.publicationId, user, dispatchProfile);
@@ -668,6 +676,12 @@ export class PublicationService {
     let publicationId: string;
     try {
       publicationId = await this.prisma.$transaction(async (tx: any) => {
+        await requireCompatiblePublicationCopy(
+          tx,
+          user.userId,
+          request.mediaVersion,
+          request.content.media,
+        );
         const publication = await tx.publication.create({
           data: {
             actorUserId: user.userId,
@@ -794,7 +808,10 @@ export class PublicationService {
       throw new BadRequestException(parsed.error.format());
     }
     const request = this.normalizeUpdateRequest(parsed.data);
-    const requestHash = this.hashMutationRequest({ publicationId, ...request });
+    const requestHash = this.hashMutationRequest({
+      publicationId,
+      ...this.publicationMutationIdentity(request),
+    });
     const replay = await this.findMutationReplay(user.userId, request.requestId, requestHash);
     if (replay) {
       await this.assertPublicationOwner(publicationId, user.userId, dispatchProfile);
@@ -815,7 +832,7 @@ export class PublicationService {
       include: {
         schedule: true,
         targets: { orderBy: { position: 'asc' } },
-        canonicalContentRevision: true,
+        canonicalContentRevision: { include: { assets: publicationAlbumMediaSelect } },
       },
     });
     if (!existing) {
@@ -834,6 +851,7 @@ export class PublicationService {
         currentRevision: existing.version,
       });
     }
+    requirePublicationAlbumEditor(request.mediaVersion, existing.canonicalContentRevision);
     const audienceChanged =
       request.audience !== undefined &&
       !this.isPublicationAudienceEquivalent(request.audience, existing);
@@ -873,6 +891,13 @@ export class PublicationService {
       request.intent ?? (existing.lifecycle === PublicationLifecycle.DRAFT ? 'draft' : 'publish');
     if (desiredIntent === 'publish' && !schedule) {
       throw new BadRequestException('Выберите время публикации.');
+    }
+    if (
+      desiredIntent === 'publish' &&
+      existing.lifecycle === PublicationLifecycle.DRAFT &&
+      existing.dispatchProfile === PublicationDispatchProfile.PUBLIK_V1
+    ) {
+      assertPublicationImportReviewResolved(existing.schedule?.rule);
     }
     if (
       desiredIntent === 'publish' &&
@@ -936,6 +961,14 @@ export class PublicationService {
     const nextVersion = existing.version + 1;
     try {
       await this.prisma.$transaction(async (tx: any) => {
+        if (request.content)
+          await requireCompatiblePublicationCopy(
+            tx,
+            user.userId,
+            request.mediaVersion,
+            request.content.media,
+            publicationId,
+          );
         const calendarAlreadyLocked = shouldRebuildSchedule || preparedContent !== null;
         if (calendarAlreadyLocked) {
           await this.lockPublicationCalendar(tx);
@@ -3707,6 +3740,12 @@ export class PublicationService {
     if (actualPublicationId !== expectedPublicationId) {
       throw new BadRequestException('Ключ повтора относится к другой публикации.');
     }
+  }
+
+  private publicationMutationIdentity<T extends { mediaVersion?: 2 }>(request: T) {
+    const mutation = { ...request };
+    delete mutation.mediaVersion;
+    return mutation;
   }
 
   private hashMutationRequest(value: unknown): string {

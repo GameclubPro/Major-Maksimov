@@ -12,6 +12,7 @@ export function usePublicationAssetPreviews(
     () =>
       JSON.stringify(
         assets.flatMap((asset) => {
+          if (asset.type !== 'image') return [];
           const source = asset.sourcePublicationId ?? publicationId;
           return source ? [[source, asset.id]] : [];
         }),

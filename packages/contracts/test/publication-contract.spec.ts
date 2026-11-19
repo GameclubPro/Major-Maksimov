@@ -256,7 +256,7 @@ describe('publication contracts', () => {
     );
   });
 
-  it('rejects image/video mixes and video inputs with two sources', () => {
+  it('accepts ordered mixed media and rejects videos with two sources', () => {
     expect(
       publicationContentInputSchema.safeParse({
         text: '',
@@ -276,7 +276,7 @@ describe('publication contracts', () => {
           },
         ],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
 
     expect(
       publicationContentInputSchema.safeParse({

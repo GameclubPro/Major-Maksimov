@@ -1,3 +1,4 @@
+import { formatPublicationMediaSummary } from '../src/features/publications/publication-page-formatters';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -110,4 +111,17 @@ test('recurrence units read naturally for one, few and many periods', () => {
     getPublicationRecurrenceIntervalNotice('weekly', 12)?.title,
     '84 дня между публикациями',
   );
+});
+
+test('album labels distinguish mixed media, video albums, and older summaries without exact counts', () => {
+  assert.equal(
+    formatPublicationMediaSummary({ mediaCount: 3, videoCount: 2, hasVideo: true }),
+    '1 фото · 2 видео',
+  );
+  assert.equal(
+    formatPublicationMediaSummary({ mediaCount: 2, videoCount: 2, hasVideo: true }),
+    '2 видео',
+  );
+  assert.equal(formatPublicationMediaSummary({ mediaCount: 3, hasVideo: true }), '3 вложения');
+  assert.equal(formatPublicationMediaSummary({ mediaCount: 4, hasVideo: false }), '4 фото');
 });

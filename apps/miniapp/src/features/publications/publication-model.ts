@@ -1,3 +1,5 @@
+import type { PublicationImportReview } from '@maxim/contracts/publication-draft';
+import { publicationAlbum } from './publication-album';
 import type {
   BroadcastImage,
   BroadcastLinkButton,
@@ -320,6 +322,8 @@ export type PublicationDraft = {
   mediaBase64: string;
   mediaMimeType: string;
   mediaFileName: string;
+  importReview?: PublicationImportReview;
+  mediaOrder?: string[];
   retainedAssets: PublicationRetainedAsset[];
 };
 
@@ -990,6 +994,9 @@ export function hasPublicationDraftChanges(
     initialDraft.onceDate === currentDraft.onceDate &&
     initialDraft.onceTime === currentDraft.onceTime &&
     initialDraft.scheduleTimezone === currentDraft.scheduleTimezone &&
+    JSON.stringify(initialDraft.importReview) === JSON.stringify(currentDraft.importReview) &&
+    JSON.stringify(initialDraft.mediaOrder ?? []) ===
+      JSON.stringify(currentDraft.mediaOrder ?? []) &&
     initialDraft.mediaType === currentDraft.mediaType &&
     initialDraft.mediaBase64 === currentDraft.mediaBase64 &&
     initialDraft.mediaMimeType === currentDraft.mediaMimeType &&
@@ -1090,10 +1097,12 @@ export function rebasePublicationDraft(
     'mediaMimeType',
     'mediaFileName',
     'retainedAssets',
+    'mediaOrder',
   ]);
 
   return {
     ...latest,
+    importReview: changed(['importReview']) ? local.importReview : latest.importReview,
     postPublish: changed(['postPublish']) ? local.postPublish : latest.postPublish,
     title: baseline.title !== local.title ? local.title : latest.title,
     text: textChanged ? local.text : latest.text,
@@ -1132,6 +1141,7 @@ export function rebasePublicationDraft(
           mediaMimeType: local.mediaMimeType,
           mediaFileName: local.mediaFileName,
           retainedAssets: local.retainedAssets,
+          mediaOrder: local.mediaOrder,
         }
       : {
           images: latest.images,
@@ -1149,46 +1159,7 @@ export function buildPublicationContent(draft: PublicationDraft): PublicationCon
   const buttons = (draft.buttonEnabled ? trimBroadcastLinkButtons(draft.buttons) : []).map(
     (button, index) => ({ ...button, row: index }),
   );
-  const selectedVideo =
-    draft.mediaType === 'video' && (draft.mediaBase64 || draft.mediaPayload)
-      ? {
-          type: 'video' as const,
-          payload: draft.mediaPayload,
-          base64: draft.mediaBase64,
-          mimeType: draft.mediaMimeType,
-          fileName: draft.mediaFileName,
-        }
-      : null;
-  const retainedVideo = draft.retainedAssets.find((asset) => asset.type === 'video');
-  const retainedImages = draft.retainedAssets
-    .filter((asset) => asset.type === 'image')
-    .map((asset) => ({
-      type: 'image-ref' as const,
-      assetId: asset.id,
-      ...(asset.sourcePublicationId || draft.cloudDraft?.id
-        ? { sourcePublicationId: asset.sourcePublicationId ?? draft.cloudDraft?.id }
-        : {}),
-    }));
-  const newImages = draft.images.map((image) => ({
-    type: 'image' as const,
-    base64: image.base64,
-    mimeType: image.mimeType,
-    fileName: image.fileName,
-  }));
-  const media = selectedVideo
-    ? [selectedVideo]
-    : retainedVideo
-      ? [
-          {
-            type: 'video-ref' as const,
-            assetId: retainedVideo.id,
-            ...(retainedVideo.sourcePublicationId || draft.cloudDraft?.id
-              ? { sourcePublicationId: retainedVideo.sourcePublicationId ?? draft.cloudDraft?.id }
-              : {}),
-          },
-        ]
-      : [...retainedImages, ...newImages];
-
+  const media = publicationAlbum(draft).map((item) => item.input);
   return {
     text: draft.text.trim(),
     postPublish: draft.postPublish,

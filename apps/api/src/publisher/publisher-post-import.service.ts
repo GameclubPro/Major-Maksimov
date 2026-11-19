@@ -12,12 +12,14 @@ import {
   publisherPostImportCreateRequestSchema,
   publisherPostImportFailureCodeSchema,
   publisherPostImportOmissionSchema,
+  publisherPostImportWarningSchema,
   type PublisherPostImportCurrentResponse,
   type PublisherPostImportOmission,
   type PublisherPostImportSession,
 } from '@maxim/contracts/publisher';
 import type { MaxUpdate } from '@maxim/contracts';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { isPrivateDirectChatId } from '../common/chat-id.util';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import {
   PublicationLifecycle,
@@ -26,6 +28,13 @@ import {
 } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { buildPublisherBotDescriptor } from './publisher-bot-descriptor';
+import {
+  PUBLISHER_POST_IMPORT_COLLECTION_LIMIT,
+  PUBLISHER_POST_IMPORT_COLLECT_PREFIX,
+  PUBLISHER_POST_IMPORT_FINISH_PREFIX,
+  readPublisherPostImportInputMessages,
+  type PublisherPostImportInputMessage,
+} from './publisher-post-import-input';
 import { PublisherPostImportQueueService } from './publisher-post-import.queue';
 import { PublisherPrivateFlowLeaseService } from './publisher-private-flow-lease.service';
 import {
@@ -54,6 +63,10 @@ type SessionRow = {
   omissions: unknown;
   expiresAt: Date;
   captureGuardUntil?: Date | null;
+  inputMode?: string;
+  inputOpenedAt?: Date | null;
+  inputMessages?: unknown;
+  warnings?: unknown;
 };
 
 export type PublisherPostImportAsset = {
@@ -79,7 +92,11 @@ export class PublisherPostImportService {
     this.enabled = configService.get<boolean>('PUBLISHER_POST_IMPORT_ENABLED', false);
   }
 
-  async create(user: AuthUser, body: unknown): Promise<PublisherPostImportSession> {
+  async create(
+    user: AuthUser,
+    body: unknown,
+    withDetails = false,
+  ): Promise<PublisherPostImportSession> {
     if (!this.enabled) {
       throw new ServiceUnavailableException({
         code: 'PUBLISHER_POST_IMPORT_DISABLED',
@@ -105,22 +122,23 @@ export class PublisherPostImportService {
     });
     if (replay) {
       await this.ensurePrivateFlow(replay);
-      return this.present(replay);
+      return this.present(replay, withDetails);
     }
 
     const active = await this.findActiveSession(actorUserId);
     if (active) {
       await this.ensurePrivateFlow(active);
-      return this.present(active);
+      return this.present(active, withDetails);
     }
 
     try {
       const created = await this.createSessionWithPrivateFlow({
         actorUserId,
         requestId: parsed.data.requestId,
+        inputMode: parsed.data.inputMode,
         expiresAt: new Date(now.getTime() + POST_IMPORT_WAITING_TTL_MS),
       });
-      return this.present(created);
+      return this.present(created, withDetails);
     } catch (error: unknown) {
       const exactReplay = await this.prisma.publisherPostImportSession.findUnique({
         where: {
@@ -133,7 +151,7 @@ export class PublisherPostImportService {
       });
       if (exactReplay) {
         await this.ensurePrivateFlow(exactReplay);
-        return this.present(exactReplay);
+        return this.present(exactReplay, withDetails);
       }
       if (!this.isUniqueConflict(error)) throw error;
       const concurrent = await this.findActiveSession(actorUserId);
@@ -141,11 +159,14 @@ export class PublisherPostImportService {
         throw error;
       }
       await this.ensurePrivateFlow(concurrent);
-      return this.present(concurrent);
+      return this.present(concurrent, withDetails);
     }
   }
 
-  async getCurrent(user: AuthUser): Promise<PublisherPostImportCurrentResponse> {
+  async getCurrent(
+    user: AuthUser,
+    withDetails = false,
+  ): Promise<PublisherPostImportCurrentResponse> {
     const actorUserId = user.userId.trim();
     const now = new Date();
     await this.expireWaitingSessions(actorUserId, now);
@@ -173,12 +194,13 @@ export class PublisherPostImportService {
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
-    return { session: session ? this.present(session) : null };
+    return { session: session ? this.present(session, withDetails) : null };
   }
 
   async getByToken(
     user: AuthUser,
     startToken: string,
+    withDetails = false,
   ): Promise<PublisherPostImportCurrentResponse> {
     const normalizedToken = startToken.trim();
     if (!/^[A-Za-z0-9_-]{8,64}$/u.test(normalizedToken)) {
@@ -189,15 +211,31 @@ export class PublisherPostImportService {
         startToken: normalizedToken,
         publisherBotId: this.publisherBotId,
         actorUserId: user.userId.trim(),
-        status: PublisherPostImportStatus.READY,
         expiresAt: { gt: new Date() },
-        publication: { is: { lifecycle: PublicationLifecycle.DRAFT } },
+        ...(withDetails
+          ? {
+              OR: [
+                {
+                  status: {
+                    in: [PublisherPostImportStatus.FAILED, PublisherPostImportStatus.EXPIRED],
+                  },
+                },
+                {
+                  status: PublisherPostImportStatus.READY,
+                  publication: { is: { lifecycle: PublicationLifecycle.DRAFT } },
+                },
+              ],
+            }
+          : {
+              status: PublisherPostImportStatus.READY,
+              publication: { is: { lifecycle: PublicationLifecycle.DRAFT } },
+            }),
       },
     });
-    return { session: session ? this.present(session) : null };
+    return { session: session ? this.present(session, withDetails) : null };
   }
 
-  async cancel(user: AuthUser): Promise<PublisherPostImportSession> {
+  async cancel(user: AuthUser, withDetails = false): Promise<PublisherPostImportSession> {
     const actorUserId = user.userId.trim();
     const active = await this.findActiveSession(actorUserId);
     if (!active) {
@@ -238,7 +276,7 @@ export class PublisherPostImportService {
         dedupeKey: `api-${current.updatedAt.getTime()}`,
       });
     }
-    return this.present(current);
+    return this.present(current, withDetails);
   }
 
   async getImageAsset(
@@ -293,6 +331,13 @@ export class PublisherPostImportService {
       await this.handleCancelCallback(update, callback);
       return true;
     }
+    if (
+      callback?.payload.startsWith(PUBLISHER_POST_IMPORT_COLLECT_PREFIX) ||
+      callback?.payload.startsWith(PUBLISHER_POST_IMPORT_FINISH_PREFIX)
+    ) {
+      await this.handleCollectionCallback(callback);
+      return true;
+    }
 
     const startToken = this.extractImportStartToken(update);
     if (startToken !== null) {
@@ -310,7 +355,8 @@ export class PublisherPostImportService {
     const now = new Date();
     await this.expireWaitingSessions(privateMessage.actorUserId, now);
     const forward = this.extractForwardedMessage(update);
-    if (forward) {
+    const hasDirectContent = this.hasDirectImportContent(update);
+    if (forward || hasDirectContent) {
       const priorCapture = await this.prisma.publisherPostImportSession.findUnique({
         where: {
           publisherBotId_incomingMessageId: {
@@ -319,10 +365,13 @@ export class PublisherPostImportService {
           },
         },
       });
-      if (priorCapture?.status === PublisherPostImportStatus.PROCESSING) {
-        await this.enqueueProcessSafe(priorCapture.id);
-      }
-      if (priorCapture) {
+      if (
+        priorCapture?.actorUserId === privateMessage.actorUserId &&
+        priorCapture.privateChatId === privateMessage.privateChatId
+      ) {
+        if (priorCapture.status === PublisherPostImportStatus.PROCESSING) {
+          await this.enqueueProcessSafe(priorCapture.id);
+        }
         return true;
       }
     }
@@ -351,14 +400,27 @@ export class PublisherPostImportService {
     if (!session) {
       return false;
     }
-    if (session.status === PublisherPostImportStatus.WAITING) {
-      await this.ensurePrivateFlow(session);
+    const mode = session.inputMode ?? 'forward';
+    if (mode !== 'forward') {
+      // FLAG: New imports accept input only after the exact owner's private bot handoff.
+      // Never absorb a delayed message from before that handoff or from a different dialog.
+      if (!session.inputOpenedAt || session.privateChatId !== privateMessage.privateChatId) {
+        return false;
+      }
+      if (this.isPrivateCommand(update)) {
+        return false;
+      }
+      const sentAt = Date.parse(update.message?.createdAt ?? '');
+      if (!Number.isFinite(sentAt) || sentAt < session.inputOpenedAt.getTime() - 1_000) {
+        return true;
+      }
     }
-    const importActive =
-      session.status === PublisherPostImportStatus.WAITING ||
-      session.status === PublisherPostImportStatus.PROCESSING;
-    if (!importActive && !forward) {
-      return false;
+    if (session.status !== PublisherPostImportStatus.WAITING && !forward) {
+      return (
+        mode !== 'forward' &&
+        session.status === PublisherPostImportStatus.PROCESSING &&
+        hasDirectContent
+      );
     }
     if (options.duplicate) {
       return true;
@@ -367,7 +429,19 @@ export class PublisherPostImportService {
       return true;
     }
 
-    if (!forward) {
+    await this.ensurePrivateFlow(session);
+    const hasContent = Boolean(forward) || (mode !== 'forward' && hasDirectContent);
+    if (!hasContent && mode !== 'forward') {
+      return true;
+    }
+    if (mode === 'collection') {
+      await this.appendCollectionMessage(session.id, privateMessage, {
+        messageId: privateMessage.incomingMessageId,
+        webhookEventId: webhookEventId?.trim() || null,
+      });
+      return true;
+    }
+    if (!hasContent) {
       await this.prisma.publisherPostImportSession.updateMany({
         where: { id: session.id, status: PublisherPostImportStatus.WAITING },
         data: {
@@ -395,6 +469,7 @@ export class PublisherPostImportService {
           actorUserId: privateMessage.actorUserId,
           status: PublisherPostImportStatus.WAITING,
           incomingMessageId: null,
+          ...(session.inputMode ? { inputMode: mode } : {}),
           expiresAt: { gt: now },
         },
         data: {
@@ -437,6 +512,139 @@ export class PublisherPostImportService {
     return true;
   }
 
+  private async handleCollectionCallback(callback: {
+    payload: string;
+    actorUserId: string | null;
+  }): Promise<void> {
+    const isFinish = callback.payload.startsWith(PUBLISHER_POST_IMPORT_FINISH_PREFIX);
+    const prefix = isFinish
+      ? PUBLISHER_POST_IMPORT_FINISH_PREFIX
+      : PUBLISHER_POST_IMPORT_COLLECT_PREFIX;
+    const startToken = callback.payload.slice(prefix.length);
+    if (!callback.actorUserId || !/^[A-Za-z0-9_-]{8,64}$/u.test(startToken)) return;
+    const now = new Date();
+    const session = await this.prisma.publisherPostImportSession.findFirst({
+      where: {
+        startToken,
+        publisherBotId: this.publisherBotId,
+        actorUserId: callback.actorUserId,
+        status: PublisherPostImportStatus.WAITING,
+        expiresAt: { gt: now },
+        inputMode: isFinish ? 'collection' : 'message',
+        inputOpenedAt: { not: null },
+        privateChatId: { not: null },
+      },
+    });
+    if (!session?.privateChatId || !session.inputOpenedAt) return;
+    await this.ensurePrivateFlow(session);
+    const notification = isFinish ? 'processing' : 'collecting';
+    const changed = await this.prisma.publisherPostImportSession.updateMany({
+      where: {
+        id: session.id,
+        status: PublisherPostImportStatus.WAITING,
+        expiresAt: { gt: now },
+        inputMode: isFinish ? 'collection' : 'message',
+        ...(isFinish ? { incomingMessageId: { not: null } } : { incomingMessageId: null }),
+      },
+      data: {
+        ...(isFinish
+          ? {
+              status: PublisherPostImportStatus.PROCESSING,
+              notificationLockedAt: null,
+              notificationLockToken: null,
+              notificationDispatchStartedAt: null,
+              capturedAt: now,
+              captureGuardUntil: new Date(now.getTime() + POST_IMPORT_SECOND_FORWARD_GUARD_MS),
+              expiresAt: new Date(now.getTime() + POST_IMPORT_PROCESSING_TTL_MS),
+            }
+          : { inputMode: 'collection', inputOpenedAt: now }),
+        notificationKind: notification,
+        notificationPending: true,
+      },
+    });
+    if (changed.count !== 1) return;
+    await Promise.all([
+      this.enqueueNotificationSafe({
+        sessionId: session.id,
+        notification,
+        privateChatId: session.privateChatId,
+        dedupeKey: 'collection-transition',
+      }),
+      ...(isFinish ? [this.enqueueProcessSafe(session.id)] : []),
+    ]);
+    if (isFinish) await this.releasePrivateFlow(session);
+  }
+
+  private async appendCollectionMessage(
+    sessionId: string,
+    identity: { actorUserId: string; privateChatId: string },
+    entry: PublisherPostImportInputMessage,
+  ): Promise<void> {
+    // FLAG: Commit the bounded list with a compare-and-set, including the WAITING status.
+    // Finish and cancel can win a race without admitting another message into their snapshot.
+    const where = {
+      id: sessionId,
+      publisherBotId: this.publisherBotId,
+      actorUserId: identity.actorUserId,
+      privateChatId: identity.privateChatId,
+      inputMode: 'collection',
+      status: PublisherPostImportStatus.WAITING,
+      expiresAt: { gt: new Date() },
+    };
+    for (let attempt = 0; attempt < PUBLISHER_POST_IMPORT_COLLECTION_LIMIT; attempt++) {
+      const session = await this.prisma.publisherPostImportSession.findFirst({ where });
+      if (!session) return;
+      const inputs = readPublisherPostImportInputMessages(session.inputMessages);
+      if (
+        inputs.length >= PUBLISHER_POST_IMPORT_COLLECTION_LIMIT ||
+        inputs.some(({ messageId }) => messageId === entry.messageId)
+      )
+        return;
+      const updated = await this.prisma.publisherPostImportSession.updateMany({
+        where: { ...where, inputMessages: { equals: inputs } },
+        data: {
+          ...(inputs.length === 0
+            ? {
+                incomingMessageId: entry.messageId,
+                sourceWebhookEventId: entry.webhookEventId,
+              }
+            : {}),
+          inputMessages: [...inputs, entry],
+          notificationKind: 'collected',
+          notificationPending: true,
+        },
+      });
+      if (updated.count === 1) {
+        await this.enqueueNotificationSafe({
+          sessionId,
+          notification: 'collected',
+          privateChatId: identity.privateChatId,
+          dedupeKey: entry.messageId,
+        });
+        return;
+      }
+    }
+    // Failure is visible to the authenticated webhook owner. A retry still uses the same message ID.
+    throw new ServiceUnavailableException('Не удалось добавить сообщение в пост.');
+  }
+
+  private hasDirectImportContent(update: MaxUpdate): boolean {
+    const message = this.extractRawMessage(update.raw);
+    const body = this.asRecord(message?.body) ?? message;
+    return Boolean(
+      this.readString(body?.text) ||
+      (Array.isArray(body?.attachments) && body.attachments.length > 0),
+    );
+  }
+
+  private isPrivateCommand(update: MaxUpdate): boolean {
+    const text = update.message?.text?.trim() ?? '';
+    return (
+      !this.extractForwardedMessage(update) &&
+      (/^\/(?:start|vk)(?:\s|$)/iu.test(text) || /^старт$/iu.test(text))
+    );
+  }
+
   private async handleImportStart(update: MaxUpdate, startToken: string): Promise<void> {
     const identity = this.extractPrivateMessageIdentity(update);
     if (!identity) {
@@ -455,20 +663,26 @@ export class PublisherPostImportService {
       return;
     }
     await this.ensurePrivateFlow(session);
-    await this.prisma.publisherPostImportSession.updateMany({
+    if (session.privateChatId && session.privateChatId !== identity.privateChatId) return;
+    const notification =
+      session.inputMode === 'collection'
+        ? readPublisherPostImportInputMessages(session.inputMessages).length > 0
+          ? 'collected'
+          : 'collecting'
+        : 'prompt';
+    const prepared = await this.prisma.publisherPostImportSession.updateMany({
       where: { id: session.id, status: PublisherPostImportStatus.WAITING },
       data: {
         privateChatId: identity.privateChatId,
-        notificationKind: 'prompt',
+        inputOpenedAt: session.inputOpenedAt ?? new Date(),
+        notificationKind: notification,
         notificationPending: true,
-        notificationLockedAt: null,
-        notificationLockToken: null,
-        notificationDispatchStartedAt: null,
       },
     });
+    if (prepared.count === 0) return;
     await this.enqueueNotificationSafe({
       sessionId: session.id,
-      notification: 'prompt',
+      notification,
       privateChatId: identity.privateChatId,
       dedupeKey: update.updateId,
     });
@@ -538,7 +752,13 @@ export class PublisherPostImportService {
     const actorUserId = message?.senderId?.trim() ?? '';
     const privateChatId = message?.chatId?.trim() ?? '';
     const incomingMessageId = message?.messageId?.trim() ?? '';
-    if (!/^\d+$/u.test(actorUserId) || !/^\d+$/u.test(privateChatId) || !incomingMessageId) {
+    if (
+      !/^\d+$/u.test(actorUserId) ||
+      !isPrivateDirectChatId(privateChatId) ||
+      message?.entityType === 'channel' ||
+      !incomingMessageId ||
+      incomingMessageId.length > 512
+    ) {
       return null;
     }
     const rawMessage = this.extractRawMessage(update.raw);
@@ -635,6 +855,7 @@ export class PublisherPostImportService {
   private async createSessionWithPrivateFlow(params: {
     actorUserId: string;
     requestId: string;
+    inputMode?: 'forward' | 'message';
     expiresAt: Date;
   }) {
     const id = randomUUID();
@@ -643,6 +864,7 @@ export class PublisherPostImportService {
       publisherBotId: this.publisherBotId,
       actorUserId: params.actorUserId,
       requestId: params.requestId,
+      ...(params.inputMode ? { inputMode: params.inputMode } : {}),
       startToken: randomBytes(18).toString('base64url'),
       expiresAt: params.expiresAt,
     };
@@ -682,13 +904,25 @@ export class PublisherPostImportService {
     });
   }
 
-  private present(row: SessionRow): PublisherPostImportSession {
+  private present(row: SessionRow, withDetails: boolean): PublisherPostImportSession {
     const status = row.status.toLowerCase() as PublisherPostImportSession['status'];
     const omissionParse = publisherPostImportOmissionSchema.array().safeParse(row.omissions);
     const omissions: PublisherPostImportOmission[] = omissionParse.success
       ? omissionParse.data
       : [];
-    const failureParse = publisherPostImportFailureCodeSchema.safeParse(row.failureCode);
+    const legacyFailureCodes: Record<string, PublisherPostImportSession['failureCode']> = {
+      empty_content: 'unsupported_content',
+      media_invalid: 'media_download_failed',
+      image_dimensions: 'image_too_large',
+      draft_quota: 'internal_error',
+    };
+    const failureParse = publisherPostImportFailureCodeSchema.safeParse(
+      (!withDetails && row.failureCode ? legacyFailureCodes[row.failureCode] : null) ??
+        row.failureCode,
+    );
+    const warnings = withDetails
+      ? publisherPostImportWarningSchema.array().max(128).safeParse(row.warnings)
+      : null;
     const botUrl =
       row.status === PublisherPostImportStatus.WAITING
         ? `https://max.ru/${encodeURIComponent(this.publisherBotId)}?start=${encodeURIComponent(
@@ -706,6 +940,13 @@ export class PublisherPostImportService {
           ? failureParse.data
           : null,
       omissions,
+      ...(withDetails && (row.inputMode === 'message' || row.inputMode === 'collection')
+        ? { inputMode: row.inputMode }
+        : {}),
+      ...(withDetails && row.inputMode === 'collection'
+        ? { collectedCount: readPublisherPostImportInputMessages(row.inputMessages).length }
+        : {}),
+      ...(warnings?.success && warnings.data.length > 0 ? { warnings: warnings.data } : {}),
     };
   }
 

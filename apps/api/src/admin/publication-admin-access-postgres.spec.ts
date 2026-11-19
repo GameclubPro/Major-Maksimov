@@ -268,7 +268,10 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
       ],
     });
     presenter = new PublicationPresenterService(db as never);
-    content = new PublicationContentService(db as never, {} as never);
+    const mediaValidator = {
+      validateMediaUploadPayload: validateMaxMediaUploadPayload,
+    } satisfies Pick<MaxClientService, 'validateMediaUploadPayload'>;
+    content = new PublicationContentService(db as never, mediaValidator as MaxClientService);
     const selectedAccess = new PublisherSelectedAccessService(
       db as never,
       {
@@ -1046,6 +1049,149 @@ postgres('entity administrators share Publisher publications on PostgreSQL', () 
       if (type === 'video') expect(uploadVideo).not.toHaveBeenCalled();
     },
   );
+
+  it('saves a video-photo-video album and prepares the same ordered attachments from its frozen revision', async () => {
+    const videoReference = async (token: string) => {
+      const source = await createPublication([chatId], 'DRAFT', true);
+      const assetId = source.contentRevisions[0]!.assets[0]!.assetId;
+      await db.publicationAsset.update({
+        where: { id: assetId },
+        data: {
+          bytes: null,
+          sizeBytes: 2_000_000,
+          mimeType: 'video/mp4',
+          durablePayload: { [PUBLICATION_UPLOADED_VIDEO_FIELD]: { version: 1, botId, token } },
+        },
+      });
+      return { type: 'video-ref' as const, assetId, sourcePublicationId: source.id };
+    };
+    const first = await videoReference('alb-first');
+    const last = await videoReference('alb-last');
+    const contentInput = {
+      text: 'Ordered album https://example.test/info',
+      textFormat: 'plain' as const,
+      buttons: [],
+      media: [
+        first,
+        {
+          type: 'image' as const,
+          base64: imageFixture.toString('base64'),
+          mimeType: 'image/jpeg',
+          fileName: 'cover.jpg',
+        },
+        last,
+      ],
+    };
+    const saved = await drafts.save(null, admin, {
+      requestId: randomUUID(),
+      title: 'Ordered mixed album',
+      content: contentInput,
+      targets: [{ chatId, entityType: 'chat' }],
+      state: draftState,
+    });
+    publications.push(saved.publication.id);
+    const reopened = await drafts.get(saved.publication.id, admin);
+    expect(reopened.publication.content.media.map((asset) => asset.type)).toEqual([
+      'video',
+      'image',
+      'video',
+    ]);
+    const retained = reopened.publication.content.media.map((asset) => ({
+      type: asset.type === 'image' ? ('image-ref' as const) : ('video-ref' as const),
+      assetId: asset.id,
+      sourcePublicationId: saved.publication.id,
+    }));
+    const legacyDraftWrite = {
+      requestId: randomUUID(),
+      title: 'Old editor retained only one video',
+      content: { ...contentInput, media: [retained[0]!] },
+      targets: [{ chatId, entityType: 'chat' }],
+      state: draftState,
+    };
+    const upgradeRequired = { response: { code: 'PUBLICATION_ALBUM_CLIENT_UPDATE_REQUIRED' } };
+    await expect(
+      drafts.save(saved.publication.id, admin, {
+        ...legacyDraftWrite,
+        expectedRevision: saved.publication.version,
+      }),
+    ).rejects.toMatchObject(upgradeRequired);
+    await expect(drafts.save(null, admin, legacyDraftWrite)).rejects.toMatchObject(upgradeRequired);
+    await expect(
+      service.update(
+        saved.publication.id,
+        admin,
+        { expectedRevision: saved.publication.version, requestId: randomUUID(), intent: 'publish' },
+        'PUBLIK_V1',
+      ),
+    ).rejects.toMatchObject(upgradeRequired);
+    const unchanged = await drafts.get(saved.publication.id, admin);
+    expect(unchanged.publication.version).toBe(saved.publication.version);
+    expect(unchanged.publication.content.media).toEqual(reopened.publication.content.media);
+    const versionedDraftWrite = { ...legacyDraftWrite, mediaVersion: 2 };
+    const intentionalCopy = await drafts.save(null, admin, versionedDraftWrite);
+    publications.push(intentionalCopy.publication.id);
+    expect(intentionalCopy.publication.content.media.map((asset) => asset.id)).toEqual([
+      retained[0]!.assetId,
+    ]);
+    const testRequest = {
+      requestId: randomUUID(),
+      sourceTarget: { chatId, entityType: 'chat' as const },
+      content: { ...contentInput, media: retained },
+    };
+    const expected = {
+      attachments: [
+        { type: 'video', payload: { token: 'alb-first' } },
+        { type: 'image', payload: { token: 'native-image-token' } },
+        { type: 'video', payload: { token: 'alb-last' } },
+      ],
+    };
+    testMedia.length = 0;
+    await service.sendTest(admin, testRequest);
+    expect(testMedia).toEqual([expected]);
+    const publication = await db.publication.findUniqueOrThrow({
+      where: { id: saved.publication.id },
+      include: { schedule: true },
+    });
+    const occurrence = await db.publicationOccurrence.create({
+      data: {
+        publicationId: publication.id,
+        scheduleId: publication.schedule!.id,
+        scheduleRevision: publication.schedule!.revision,
+        contentRevisionId: publication.canonicalContentRevisionId!,
+        scheduledAt: new Date('2030-01-01T12:00:00Z'),
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+      },
+    });
+    const broadcast = await db.managedBroadcast.create({
+      data: {
+        sourceChatId: chatId,
+        actorUserId: admin.userId,
+        targetChatIds: [chatId],
+        buttons: [],
+        dispatchProfile: 'PUBLIK_V1',
+        requiredBotId: botId,
+        publicationOccurrenceId: occurrence.id,
+        publicationContentRevisionId: occurrence.contentRevisionId,
+      },
+    });
+    mediaBroadcasts.push(broadcast.id);
+    const execution = await mediaRuntime.loadManagedBroadcastExecutionMedia(broadcast);
+    const parsed = safeParseTrustedPublicationTestBroadcastRequest(
+      await content.buildLegacyTestPayload(testRequest, admin.userId),
+    );
+    if (!parsed.success) throw new Error(parsed.error.message);
+    await expect(
+      mediaRuntime.resolveManagedBroadcastExecutionMedia(
+        execution,
+        parsed.data,
+        'chat',
+        chatId,
+        admin.userId,
+        botId,
+      ),
+    ).resolves.toEqual(expected);
+  });
 
   it('rejects unrelated, private, Major-only and different-bot shared-media sources', async () => {
     const invalidBotSource = await createPublication(

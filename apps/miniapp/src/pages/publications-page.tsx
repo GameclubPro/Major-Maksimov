@@ -1,3 +1,5 @@
+import { reviewNeedsChoice } from '../features/publications/publication-import-review-model';
+import { acceptUploadedVideo, publicationAlbum } from '../features/publications/publication-album';
 import { PublicationFeedFeedback } from '../features/publications/publication-feed-feedback';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
 import { PublicationLatePolicyFields } from '../features/publications/publication-late-policy-fields';
@@ -30,6 +32,7 @@ import { PublicationHubHeader } from '../features/publications/publication-hub-h
 import {
   formatDraftTiming,
   formatLoadedCount,
+  formatPublicationMediaSummary,
   formatPublicationSchedule,
   formatPublicationTargets,
   formatTargetSummary,
@@ -313,15 +316,19 @@ export function PublicationsPage({
   const contentSectionRef = useRef<HTMLElement | null>(null);
   const targetsSectionRef = useRef<HTMLElement | null>(null);
   const timingSectionRef = useRef<HTMLElement | null>(null);
-  const { previews: assetPreviews, rememberVideo } = useLocalPublicationVideoPreview({
+  const videoRead = {
     api,
-    userId,
-    session: isEditor ? editorContext : null,
     publicationId:
       draft.cloudDraft?.id ??
       (editorContext?.kind === 'edit' || editorContext?.kind === 'import'
         ? editorContext.publicationId
         : null),
+  };
+  const { previews: assetPreviews, rememberVideo } = useLocalPublicationVideoPreview({
+    api,
+    userId,
+    session: isEditor ? editorContext : null,
+    publicationId: videoRead.publicationId,
     assets: draft.retainedAssets,
   });
 
@@ -507,6 +514,11 @@ export function PublicationsPage({
     : getPublicationExplicitSlotsLimitFeedback(draft);
   const validationIssues = useMemo<BroadcastPublishIssueAction[]>(() => {
     const issues: BroadcastPublishIssueAction[] = [];
+    if (reviewNeedsChoice(draft.importReview))
+      issues.push({
+        label: 'Перенос',
+        onClick: () => focusEditorSection('content', 'Проверьте части исходного сообщения.'),
+      });
     if (imagesNeedReselection) {
       issues.push({
         label: 'Фото',
@@ -679,6 +691,8 @@ export function PublicationsPage({
     if (mediaPreparing) {
       return reject('content', 'Дождитесь завершения подготовки фото.');
     }
+    if (reviewNeedsChoice(draft.importReview))
+      return reject('content', 'Проверьте части исходного сообщения.');
     if (imagesNeedReselection) {
       return reject('content', 'Добавьте фото снова или выберите «Без фото».');
     }
@@ -1020,13 +1034,7 @@ export function PublicationsPage({
         title={publication.title || formatPublicationTargets(publication)}
         preview={publication.contentPreview}
         previewFormat={publication.contentPreviewFormat}
-        fallback={
-          publication.hasVideo
-            ? 'Видео без текста'
-            : publication.mediaCount > 0
-              ? 'Фото без текста'
-              : null
-        }
+        fallback={formatPublicationMediaSummary(publication)}
         eyebrow={getPublicationFeedStatusLabel(publication)}
         tone={getLifecycleTone(publication)}
         busy={pending}
@@ -1476,23 +1484,20 @@ export function PublicationsPage({
     );
   }
 
-  async function handlePublicationVideoFile(file: File | undefined): Promise<void> {
+  async function handlePublicationVideoFile(
+    file: File | undefined,
+    replaceKey?: string,
+    warningIndex?: number,
+  ): Promise<void> {
     if (!file) {
       return;
     }
-    if (
-      missingImageCount > 0 ||
-      draft.images.length > 0 ||
-      draft.retainedAssets.some((asset) => asset.type === 'image')
-    ) {
-      pushToast({
-        tone: 'info',
-        title:
-          missingImageCount > 0
-            ? 'Сначала завершите восстановление фото'
-            : 'Сначала удалите добавленные фото',
-      });
-      return;
+    if (missingImageCount > 0 || (!replaceKey && publicationAlbum(draft).length >= 10)) {
+      throw new Error(
+        missingImageCount > 0
+          ? 'Сначала завершите восстановление фото'
+          : 'В альбоме уже 10 вложений',
+      );
     }
     setVideoPreparing(true);
     const abort = new AbortController();
@@ -1500,16 +1505,7 @@ export function PublicationsPage({
     try {
       const asset = await uploadPublicationVideo(api, file, abort.signal, setVideoUploadProgress);
       abort.signal.throwIfAborted();
-      setDraft((current) => ({
-        ...current,
-        images: [],
-        retainedAssets: [asset],
-        mediaType: null,
-        mediaPayload: null,
-        mediaBase64: '',
-        mediaMimeType: '',
-        mediaFileName: '',
-      }));
+      setDraft((current) => acceptUploadedVideo(current, asset, replaceKey, warningIndex));
       rememberVideo(asset.id, file);
       discardMissingImages();
       setFieldError('');
@@ -1670,6 +1666,7 @@ export function PublicationsPage({
               importing={editorContext?.kind === 'import'}
               importOmissions={importOmissions}
               importedAssetPreviews={assetPreviews}
+              videoRead={videoRead}
               customButtons={visibleCustomButtons}
               systemButtons={systemButtons}
               previewTargets={draft.targets}
@@ -1794,6 +1791,7 @@ export function PublicationsPage({
               open={pendingReview}
               draft={draft}
               previews={assetPreviews}
+              videoRead={videoRead}
               facts={[
                 `Кому · ${formatTargetSummary(draft.targets)}`,
                 editScope === 'retry' ? null : formatTimezoneLabel(draft.scheduleTimezone),

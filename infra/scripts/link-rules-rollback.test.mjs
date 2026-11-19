@@ -14,6 +14,35 @@ test('both rollback entrypoints require the persisted selective link reader', ()
   assert.doesNotThrow(() => assertLinkRulesSource(read));
 });
 
+test('selective rollback readers retain the filtered targets, resolved address and original denial evidence', () => {
+  const reader = 'apps/api/src/moderation/link-rules-policy.runtime.ts';
+  const source = read(reader);
+  const start = source.indexOf(
+    '  const enforceableTargets = targets.filter(isEnforceableLinkPolicyTarget);',
+  );
+  const end = source.indexOf('\n}', start);
+  assert.ok(start > 0 && end > start);
+  const direct =
+    source.slice(0, start) +
+    '  return evaluateLinkRulesPolicy(policy, targets.filter(isEnforceableLinkPolicyTarget), nowMs);' +
+    source.slice(end);
+  const check = (value) => assertLinkRulesSource((path) => (path === reader ? value : read(path)));
+  assert.doesNotThrow(() => check(direct));
+  for (const [before, after] of [
+    ['targets.filter(isEnforceableLinkPolicyTarget)', 'targets'],
+    ['readSearchLinkDestination(target.target)', 'null'],
+    [
+      'evaluateLinkRulesPolicy(policy, policyTargets, nowMs)',
+      'evaluateLinkRulesPolicy(policy, targets, nowMs)',
+    ],
+    ['enforceableTargets[policyTargets.indexOf(result.target)]!', 'result.target'],
+  ]) {
+    const changed = source.replace(before, after);
+    assert.notEqual(changed, source);
+    assert.throws(() => check(changed), /selective link policy reader/);
+  }
+});
+
 test('runtime link reader follows the installed pause boundary and precedes rollback work', () => {
   const source = read('infra/scripts/vps-runtime-rollback.sh');
   const pauseBoundary =

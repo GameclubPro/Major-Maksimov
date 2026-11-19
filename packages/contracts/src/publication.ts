@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { offsetTimestampSchema } from './validator-compat.js';
 import { MAX_HTTP_BUTTON_URL_LENGTH, normalizeHttpButtonUrl } from './button-url.js';
 
-export const MAX_PUBLICATION_IMAGES = 10;
+export const MAX_PUBLICATION_MEDIA = 10;
+export const MAX_PUBLICATION_IMAGES = MAX_PUBLICATION_MEDIA;
 export const MAX_PUBLICATION_IMAGE_BASE64_LENGTH = 12_000_000;
 export const MAX_PUBLICATION_IMAGES_TOTAL_BASE64_LENGTH = 32_000_000;
 export const MAX_PUBLICATION_VIDEO_BASE64_LENGTH = 32_000_000;
@@ -235,48 +236,39 @@ export const publicationDraftContentInputSchema = z
     text: z.string().max(MAX_PUBLICATION_TEXT_LENGTH).default(''),
     textFormat: publicationTextFormatSchema.default('plain'),
     buttons: z.array(publicationButtonSchema).max(MAX_PUBLICATION_BUTTONS).default([]),
-    media: z.array(publicationMediaInputSchema).max(MAX_PUBLICATION_IMAGES).default([]),
+    media: z.array(publicationMediaInputSchema).max(MAX_PUBLICATION_MEDIA).default([]),
   })
   .superRefine((value, ctx) => {
-    const videos = value.media.filter((item) => item.type === 'video' || item.type === 'video-ref');
-    const images = value.media.filter((item) => item.type === 'image' || item.type === 'image-ref');
-    const inlineImageBase64Length = value.media.reduce(
-      (total, item) => total + (item.type === 'image' ? item.base64.length : 0),
+    const inlineLength = value.media.reduce(
+      (total, item) =>
+        total + (item.type === 'image' || item.type === 'video' ? item.base64.length : 0),
       0,
     );
-    if (inlineImageBase64Length > MAX_PUBLICATION_IMAGES_TOTAL_BASE64_LENGTH) {
+    if (inlineLength > MAX_PUBLICATION_IMAGES_TOTAL_BASE64_LENGTH) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['media'],
-        message: 'Суммарный размер фото слишком большой.',
+        message: 'Суммарный размер фото и видео слишком большой.',
       });
     }
-    if (videos.length > 1 || (videos.length > 0 && images.length > 0)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['media'],
-        message: 'Добавьте либо до 10 фото, либо одно видео.',
-      });
-    }
-    const video = videos[0];
-    if (video?.type === 'video') {
-      const hasPayload = video.payload !== null && Object.keys(video.payload).length > 0;
-      const hasBytes = video.base64.length > 0;
-      if (hasPayload === hasBytes) {
+    value.media.forEach((item, index) => {
+      if (item.type !== 'video') return;
+      const hasPayload = item.payload !== null && Object.keys(item.payload).length > 0;
+      const hasBytes = item.base64.length > 0;
+      if (
+        hasPayload === hasBytes ||
+        (hasBytes && !item.mimeType.toLowerCase().startsWith('video/'))
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['media'],
-          message: 'Добавьте видеофайл или сохранённое видео.',
+          path: ['media', index],
+          message:
+            hasPayload === hasBytes
+              ? 'Добавьте видеофайл или сохранённое видео.'
+              : 'Неверный формат видео.',
         });
       }
-      if (hasBytes && !video.mimeType.toLowerCase().startsWith('video/')) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['media'],
-          message: 'Неверный формат видео.',
-        });
-      }
-    }
+    });
   });
 export const publicationContentInputSchema = publicationDraftContentInputSchema.superRefine(
   (value, ctx) => {
@@ -501,6 +493,7 @@ export const publicationScheduleSchema = publicationScheduleInputSchema.and(
 export type PublicationSchedule = z.infer<typeof publicationScheduleSchema>;
 
 const publicationMutationBaseSchema = z.object({
+  mediaVersion: z.literal(2).optional(),
   title: z.string().trim().max(120).default(''),
   content: publicationContentInputSchema,
   audience: publicationAudienceInputSchema,
@@ -595,6 +588,7 @@ export const publicationSummarySchema = z.object({
   audienceSelection: publicationAudienceSelectionSchema,
   audienceMode: publicationAudienceModeSchema,
   mediaCount: z.number().int().min(0),
+  videoCount: z.number().int().min(0).optional(),
   hasVideo: z.boolean(),
   schedule: publicationScheduleSchema.nullable(),
   dispatchIssue: publicationDispatchIssueSchema.nullable().optional().default(null),

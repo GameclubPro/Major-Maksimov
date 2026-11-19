@@ -307,6 +307,7 @@ export const publisherPostImportCreateRequestSchema = z
       .string()
       .trim()
       .regex(/^[A-Za-z0-9_-]{8,128}$/u),
+    inputMode: z.enum(['forward', 'message']).optional(),
   })
   .strict();
 export type PublisherPostImportCreateRequest = z.infer<
@@ -325,6 +326,10 @@ export type PublisherPostImportStatus = z.infer<typeof publisherPostImportStatus
 
 export const publisherPostImportFailureCodeSchema = z.enum([
   'invalid_forward',
+  'empty_content',
+  'media_invalid',
+  'image_dimensions',
+  'draft_quota',
   'message_unavailable',
   'unsupported_content',
   'text_too_long',
@@ -344,6 +349,29 @@ export const publisherPostImportOmissionSchema = z.enum([
 ]);
 export type PublisherPostImportOmission = z.infer<typeof publisherPostImportOmissionSchema>;
 
+export const publisherPostImportWarningSchema = z
+  .object({
+    messageIndex: z.number().int().min(1).max(12),
+    itemIndex: z.number().int().positive().optional(),
+    mediaPosition: z.number().int().nonnegative().optional(),
+    kind: z.enum(['image', 'video', 'link', 'text', 'attachment']),
+    reason: z.enum([
+      'unavailable',
+      'too_large',
+      'invalid',
+      'limit',
+      'unsupported',
+      'duplicate',
+      'optional_link',
+      'outer_comment',
+      'outer_media',
+    ]),
+    value: z.string().min(1).max(4_000).optional(),
+  })
+  .strict();
+
+export type PublisherPostImportWarning = z.infer<typeof publisherPostImportWarningSchema>;
+
 export const publisherPostImportSessionSchema = z
   .object({
     id: z.string().trim().min(1),
@@ -353,6 +381,9 @@ export const publisherPostImportSessionSchema = z
     botUrl: z.string().url().nullable(),
     failureCode: publisherPostImportFailureCodeSchema.nullable(),
     omissions: z.array(publisherPostImportOmissionSchema),
+    inputMode: z.enum(['forward', 'message', 'collection']).optional(),
+    collectedCount: z.number().int().min(0).max(10).optional(),
+    warnings: z.array(publisherPostImportWarningSchema).max(128).optional(),
   })
   .strict();
 export type PublisherPostImportSession = z.infer<typeof publisherPostImportSessionSchema>;

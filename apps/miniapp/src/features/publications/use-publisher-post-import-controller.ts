@@ -1,3 +1,4 @@
+import type { PublisherPostImportWarning } from '@maxim/contracts/publisher';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { PublisherPostImportOmission } from '@maxim/contracts/publisher';
 import { useEffect, useRef, useState } from 'react';
@@ -38,6 +39,7 @@ type PublisherPostImportControllerOptions = {
     publicationId: string,
     sessionId: string | null,
     omissions: PublisherPostImportOmission[],
+    warnings?: PublisherPostImportWarning[],
   ) => void;
 };
 
@@ -108,17 +110,26 @@ export function usePublisherPostImportController({
   }, [editorOpen, enabled, hydrated, searchParams]);
 
   const createMutation = useMutation({
-    mutationFn: (requestId: string) => createPublisherPostImport(api, { requestId }),
+    mutationFn: (requestId: string) =>
+      createPublisherPostImport(api, { requestId, inputMode: 'message' }),
     onSuccess: (session) => {
       pendingRequestIdRef.current = null;
       setCreateSheetOpen(false);
       queryClient.setQueryData(ACTIVE_IMPORT_QUERY_KEY, { session });
+      if (routeToken !== null && session.id !== displayedSession?.id) {
+        removeRouteParams(searchParams, setSearchParams, ['import', 'draft']);
+      }
       if (session.status === 'waiting') {
         if (!session.botUrl || !openMaxBotLinkAndClose(session.botUrl)) {
           pushToast({ tone: 'danger', title: 'Не удалось открыть диалог Публика' });
         }
       } else if (session.status === 'ready' && session.publicationId) {
-        onOpenDraftRef.current(session.publicationId, session.id, session.omissions);
+        onOpenDraftRef.current(
+          session.publicationId,
+          session.id,
+          session.omissions,
+          session.warnings,
+        );
       }
     },
     onError: (error) => {
@@ -211,7 +222,12 @@ export function usePublisherPostImportController({
     }
     autoOpenedImportRef.current = autoOpenKey;
     const context = resolvePublisherPostImportDraftContext(session, publicationId);
-    onOpenDraftRef.current(publicationId, context.sessionId, context.omissions);
+    onOpenDraftRef.current(
+      publicationId,
+      context.sessionId,
+      context.omissions,
+      context.sessionId ? session?.warnings : undefined,
+    );
   }, [
     activeImportQuery.isPending,
     editorOpen,
@@ -279,7 +295,11 @@ export function usePublisherPostImportController({
     void queryClient.invalidateQueries({ queryKey: SERVER_DRAFTS_QUERY_KEY });
   }
 
+  const lookup = validRouteToken ? routeImportQuery : activeImportQuery;
   const statusProps: PublisherPostImportStatusProps = {
+    readError:
+      lookup.isError && !displayedSession ? 'Не удалось загрузить состояние переноса' : null,
+    onReadRetry: () => void lookup.refetch(),
     session: displayedSession,
     drafts: [],
     busy: createMutation.isPending || cancelMutation.isPending || openingDraft,
@@ -290,7 +310,12 @@ export function usePublisherPostImportController({
     },
     onOpenDraft(publicationId) {
       const context = resolvePublisherPostImportDraftContext(displayedSession, publicationId);
-      onOpenDraftRef.current(publicationId, context.sessionId, context.omissions);
+      onOpenDraftRef.current(
+        publicationId,
+        context.sessionId,
+        context.omissions,
+        context.sessionId ? displayedSession?.warnings : undefined,
+      );
     },
     onRetry: startImport,
     onCancel: () => cancelMutation.mutate(),

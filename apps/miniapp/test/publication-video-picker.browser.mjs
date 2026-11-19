@@ -357,7 +357,8 @@ try {
       await review.waitFor({ state: 'detached' });
       assert.equal(await page.locator('.publications-page.is-editor').count(), 1);
 
-      await input.setInputFiles(tooLarge);
+      const replaceVideo = selected.getByLabel('Заменить видео 1', { exact: true });
+      await replaceVideo.setInputFiles(tooLarge);
       await error.waitFor({ state: 'visible' });
       assert.match(
         await selected.textContent(),
@@ -371,7 +372,7 @@ try {
         'Invalid replacement must preserve the local preview',
       );
 
-      await input.setInputFiles({
+      await replaceVideo.setInputFiles({
         name: 'empty.mp4',
         mimeType: 'video/mp4',
         buffer: Buffer.alloc(0),
@@ -379,14 +380,14 @@ try {
       await page.waitForFunction(() =>
         document.querySelector('.publication-video-error')?.textContent.includes('Видео пустое'),
       );
-      await input.setInputFiles(smallVideo);
+      await replaceVideo.setInputFiles(smallVideo);
       await error.waitFor({ state: 'detached' });
       await selected.waitFor({ state: 'visible' });
       await page.waitForFunction((url) => window.__videoRevokedUrls.includes(url), localUrl);
       const replacementUrl = await selected.locator('video').getAttribute('src');
       await page.locator('.publication-video-upload').waitFor({ state: 'detached' });
       binaryMode = 'failure';
-      await input.setInputFiles(smallVideo);
+      await replaceVideo.setInputFiles(smallVideo);
       await page.waitForFunction(() =>
         document.querySelector('.publication-video-error')?.textContent.includes('MAX не принял'),
       );
@@ -397,7 +398,7 @@ try {
         'Upload failure must preserve preview',
       );
       binaryMode = 'slow';
-      await input.setInputFiles(smallVideo);
+      await replaceVideo.setInputFiles(smallVideo);
       await page.getByRole('button', { name: 'Отменить загрузку видео', exact: true }).waitFor();
       await page.evaluate(() => window.__MAXIM_VISUAL_BRIDGE_PRESS_BACK__());
       assert.equal(
@@ -416,7 +417,7 @@ try {
         'Cancelled upload must preserve preview',
       );
       binaryMode = 'success';
-      await input.setInputFiles({
+      await replaceVideo.setInputFiles({
         name: '36mb.mp4',
         mimeType: 'video/mp4',
         buffer: Buffer.alloc(36_000_000),
@@ -457,7 +458,7 @@ try {
       );
       assert.match(await editor.textContent(), /regression edited/u);
       const longName = 'Очень длинное название видео '.repeat(5).slice(0, 122) + '.webm';
-      await input.setInputFiles({ ...smallVideo, name: longName });
+      await replaceVideo.setInputFiles({ ...smallVideo, name: longName });
       const longOpener = selected.getByRole('button', {
         name: `Посмотреть видео: ${longName}`,
         exact: true,

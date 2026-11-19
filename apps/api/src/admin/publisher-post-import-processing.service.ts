@@ -2,6 +2,7 @@ import type { PublicationContentInput } from '@maxim/contracts/publication';
 import type {
   PublisherPostImportFailureCode,
   PublisherPostImportOmission,
+  PublisherPostImportWarning,
 } from '@maxim/contracts/publisher';
 import { maxUpdateSchema } from '@maxim/contracts';
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
@@ -46,6 +47,17 @@ import {
   PUBLICATION_MAX_IMAGE_BYTES,
   PUBLICATION_MAX_TOTAL_IMAGE_BYTES,
 } from './publication-media-limits';
+import {
+  assertPublicationDraftQuota,
+  lockPublicationDraftQuota,
+  PublicationDraftQuotaError,
+} from './publication-draft-quota';
+import {
+  PUBLISHER_POST_IMPORT_COLLECTION_LIMIT,
+  readPublisherPostImportInputMessages,
+} from '../publisher/publisher-post-import-input';
+import { extractMaxVideoDownloadUrl } from '../max/max-video-download-url.util';
+import { BROADCAST_IMAGE_MAX_BYTES } from './admin.service.support';
 import { PUBLICATION_MAX_VIDEO_BYTES } from './publication-video-media';
 
 const POST_IMPORT_LEASE_MS = 2 * 60_000;
@@ -53,6 +65,24 @@ const POST_IMPORT_MAX_IMAGES = 10;
 const POST_IMPORT_MAX_TEXT_LENGTH = 4_000;
 const POST_IMPORT_FETCH_TIMEOUT_MS = 20_000;
 const POST_IMPORT_ALLOWED_MEDIA_HOSTS = ['max.ru', 'oneme.ru', 'mycdn.me', 'okcdn.ru'] as const;
+
+type ImportSource = {
+  message: Record<string, unknown>;
+  outer?: Record<string, unknown>;
+  absent?: boolean;
+  messageIndex: number;
+};
+type ImportedContent = PublicationBinaryContentInput & {
+  omissions: PublisherPostImportOmission[];
+  warnings: PublisherPostImportWarning[];
+};
+type MediaCandidate = {
+  attachment: Record<string, unknown>;
+  kind: 'image' | 'video';
+  messageIndex: number;
+  itemIndex: number;
+  mediaPosition: number;
+};
 
 type ProcessResult = 'ready' | 'failed' | 'noop';
 type PublisherPostImportSnapshotSource = 'webhook_receipt' | 'remote_exact';
@@ -68,6 +98,7 @@ type PublisherPostImportRejectionKind =
   | 'image_normalization_output_too_large'
   | 'image_transcode_failed'
   | 'receipt_bot_mismatch'
+  | 'captured_message_absent'
   | 'receipt_identity_missing'
   | 'receipt_normalized_identity_mismatch'
   | 'receipt_payload_invalid'
@@ -103,7 +134,7 @@ export class PublisherPostImportProcessingService {
     private readonly publicationContentService: PublicationContentService,
   ) {}
 
-  async process(sessionId: string): Promise<ProcessResult> {
+  async process(sessionId: string, lastAttempt = false): Promise<ProcessResult> {
     const now = new Date();
     const lockToken = randomUUID();
     const claimed = await this.prisma.publisherPostImportSession.updateMany({
@@ -127,6 +158,14 @@ export class PublisherPostImportProcessingService {
     if (!session) {
       return 'noop';
     }
+    const inputMode =
+      session.inputMode === 'message' || session.inputMode === 'collection'
+        ? session.inputMode
+        : 'forward';
+    const outcomeTiming = () => ({
+      inputMode,
+      elapsedMs: session.capturedAt ? Math.max(0, Date.now() - session.capturedAt.getTime()) : null,
+    });
     let snapshotSource: PublisherPostImportSnapshotSource = 'remote_exact';
 
     try {
@@ -144,41 +183,100 @@ export class PublisherPostImportProcessingService {
           'Exact forwarded message identity is unavailable',
         );
       }
-      let exactMessage: Record<string, unknown> | null = null;
-      if (session.sourceWebhookEventId?.trim()) {
-        snapshotSource = 'webhook_receipt';
-        exactMessage = await this.loadPersistedForwardReceipt({
-          sourceWebhookEventId: session.sourceWebhookEventId,
-          publisherBotId: session.publisherBotId,
-          actorUserId: session.actorUserId,
-          privateChatId,
-          incomingMessageId,
+      const captured = session.inputMessages;
+      const storedEntries = readPublisherPostImportInputMessages(captured);
+      if (
+        (captured != null &&
+          (!Array.isArray(captured) || captured.length !== storedEntries.length)) ||
+        storedEntries.length > PUBLISHER_POST_IMPORT_COLLECTION_LIMIT ||
+        new Set(storedEntries.map((entry) => entry.messageId)).size !== storedEntries.length ||
+        (storedEntries.length > 0 && storedEntries[0]!.messageId !== incomingMessageId)
+      ) {
+        throw new PublisherPostImportTerminalError(
+          'message_unavailable',
+          'Invalid captured message list',
+        );
+      }
+      const entries = storedEntries.length
+        ? storedEntries
+        : [{ messageId: incomingMessageId, webhookEventId: session.sourceWebhookEventId }];
+      const allowDirect = session.inputMode === 'message' || session.inputMode === 'collection';
+      let nextRenewal = Date.now() + POST_IMPORT_LEASE_MS / 3;
+      const renew = async () => {
+        if (Date.now() >= session.expiresAt.getTime()) {
+          throw new PublisherPostImportTerminalError(
+            'processing_timeout',
+            'Import deadline expired',
+          );
+        }
+        if (Date.now() < nextRenewal) return;
+        const current = await this.prisma.publisherPostImportSession.updateMany({
+          where: { id: sessionId, lockToken, status: PublisherPostImportStatus.PROCESSING },
+          data: { lockedAt: new Date() },
+        });
+        if (current.count !== 1) throw new PublisherPostImportSupersededError();
+        nextRenewal = Date.now() + POST_IMPORT_LEASE_MS / 3;
+      };
+      const sources: ImportSource[] = [];
+      for (const [index, entry] of entries.entries()) {
+        await renew();
+        let exactMessage: Record<string, unknown> | null = null;
+        if (entry.webhookEventId) {
+          snapshotSource = 'webhook_receipt';
+          exactMessage = await this.loadPersistedForwardReceipt({
+            sourceWebhookEventId: entry.webhookEventId,
+            publisherBotId: session.publisherBotId,
+            actorUserId: session.actorUserId,
+            privateChatId,
+            incomingMessageId: entry.messageId,
+            allowDirect,
+          });
+        }
+        if (!exactMessage) {
+          snapshotSource = 'remote_exact';
+          try {
+            exactMessage = await this.loadRemoteIncomingMessage(
+              privateChatId,
+              entry.messageId,
+              session.publisherBotId,
+            );
+          } catch (error: unknown) {
+            if (
+              entries.length > 1 &&
+              error instanceof PublisherPostImportTerminalError &&
+              error.rejectionKind === 'captured_message_absent'
+            ) {
+              sources.push({ message: {}, messageIndex: index + 1, absent: true });
+              continue;
+            }
+            throw error;
+          }
+        }
+        this.assertExactSender(exactMessage, session.actorUserId);
+        const linked = this.extractLinkedForward(exactMessage);
+        if (
+          !linked &&
+          (!allowDirect ||
+            this.readString(this.asRecord(exactMessage.link)?.type)?.toLowerCase() === 'forward')
+        ) {
+          throw new PublisherPostImportTerminalError('invalid_forward', 'Incomplete forward');
+        }
+        sources.push({
+          message: linked ?? exactMessage,
+          outer: linked ? exactMessage : undefined,
+          messageIndex: index + 1,
         });
       }
-      if (!exactMessage) {
-        snapshotSource = 'remote_exact';
-        exactMessage = await this.loadRemoteIncomingMessage(
-          privateChatId,
-          incomingMessageId,
-          session.publisherBotId,
-        );
-      }
-      this.assertExactSender(exactMessage, session.actorUserId);
-      const linkedMessage = this.extractLinkedForward(exactMessage);
-      if (!linkedMessage) {
-        throw new PublisherPostImportTerminalError(
-          'invalid_forward',
-          'Exact message is not a MAX forward',
-        );
-      }
-
-      const content = await this.buildContent(linkedMessage, session.publisherBotId);
+      const content = await this.buildContent(sources, session.publisherBotId, lastAttempt, renew);
+      await renew();
       const prepared = await this.publicationContentService.prepareBinaryContentRevision(content);
       await this.publicationContentService.assertPublisherCompatibleContent(
         prepared,
         session.actorUserId,
       );
       const publicationId = await this.prisma.$transaction(async (tx: any) => {
+        await lockPublicationDraftQuota(tx, session.actorUserId);
+        await assertPublicationDraftQuota(tx, session.actorUserId, null, prepared);
         const publicationRequestId = `post-import-${session.id}`;
         const publication = await tx.publication.create({
           data: {
@@ -204,6 +302,39 @@ export class PublisherPostImportProcessingService {
           where: { id: publication.id },
           data: { canonicalContentRevisionId: revision.id },
         });
+        if (content.warnings.length || content.omissions.length) {
+          await tx.publicationSchedule.create({
+            data: {
+              publicationId: publication.id,
+              mode: 'NOW',
+              timezone: 'Europe/Moscow',
+              status: 'DRAFT',
+              rule: {
+                formatVersion: 1,
+                timingMode: 'now',
+                scheduleKind: 'slots',
+                scheduleTimezone: 'Europe/Moscow',
+                scheduledSlots: [],
+                onceDate: '',
+                onceTime: '',
+                recurrence: {
+                  frequency: 'weekly',
+                  interval: 1,
+                  weekdays: [],
+                  times: [],
+                  startsAt: null,
+                  endsAt: null,
+                  maxOccurrences: null,
+                },
+                importReview: {
+                  omissions: content.omissions,
+                  warnings: content.warnings,
+                  resolved: [],
+                },
+              },
+            },
+          });
+        }
         await tx.publicationMutationRecord.create({
           data: {
             actorUserId: session.actorUserId,
@@ -232,6 +363,7 @@ export class PublisherPostImportProcessingService {
             publicationId: publication.id,
             failureCode: null,
             omissions: content.omissions,
+            warnings: content.warnings,
             notificationKind: 'ready',
             notificationPending: true,
             notificationLockedAt: null,
@@ -248,8 +380,21 @@ export class PublisherPostImportProcessingService {
         }
         return publication.id as string;
       });
+      const mediaKinds = new Set(content.media.map((item) => item.type));
+      const mediaKind =
+        mediaKinds.size > 1
+          ? 'mixed'
+          : (content.media[0]?.type ?? (content.text.trim() ? 'text' : null));
       this.logger.log(
-        { sessionId, publicationId, snapshotSource },
+        {
+          sessionId,
+          publicationId,
+          snapshotSource,
+          ...outcomeTiming(),
+          mediaKind,
+          mediaCount: content.media.length,
+          warningCount: content.warnings.length,
+        },
         'Publisher forwarded post import completed',
       );
       return 'ready';
@@ -259,17 +404,25 @@ export class PublisherPostImportProcessingService {
       }
       if (error instanceof PublisherPostImportTerminalError) {
         if (await this.fail(session.id, lockToken, error.code)) {
-          this.logTerminalFailure(session.id, error.code, error.rejectionKind, snapshotSource);
+          this.logTerminalFailure(
+            session.id,
+            error.code,
+            error.rejectionKind,
+            snapshotSource,
+            outcomeTiming(),
+          );
         }
         return 'failed';
       }
       if (error instanceof BadRequestException) {
-        if (await this.fail(session.id, lockToken, 'unsupported_content')) {
+        const code = error instanceof PublicationDraftQuotaError ? 'draft_quota' : 'media_invalid';
+        if (await this.fail(session.id, lockToken, code)) {
           this.logTerminalFailure(
             session.id,
-            'unsupported_content',
+            code,
             'content_validation',
             snapshotSource,
+            outcomeTiming(),
           );
         }
         return 'failed';
@@ -311,145 +464,285 @@ export class PublisherPostImportProcessingService {
   }
 
   private async buildContent(
-    linkedMessage: Record<string, unknown>,
+    input: Record<string, unknown> | ImportSource[],
     publisherBotId: string,
-  ): Promise<PublicationBinaryContentInput & { omissions: PublisherPostImportOmission[] }> {
-    const sourceText = this.extractText(linkedMessage);
-    if (sourceText.length > POST_IMPORT_MAX_TEXT_LENGTH) {
-      throw new PublisherPostImportTerminalError('text_too_long', 'Forwarded text is too long');
-    }
-    const markup = extractIncomingMessageMarkup(linkedMessage);
-    let rendered = markup.length > 0 ? renderIncomingMarkupAsMarkdown(sourceText, markup) : null;
-    const omissions: PublisherPostImportOmission[] = [];
-    if (markup.length > 0 && rendered === null) {
-      omissions.push('formatting_not_preserved');
-    }
-    if (rendered && rendered.length > POST_IMPORT_MAX_TEXT_LENGTH) {
-      rendered = null;
-      omissions.push('formatting_not_preserved');
-    }
-
-    const rawAttachments = this.extractAttachments(linkedMessage);
-    if (rawAttachments.some((item) => this.readAttachmentType(item) === 'inline_keyboard')) {
-      omissions.push('buttons_not_imported');
-    }
-    const shareAttachments = rawAttachments.filter(
-      (item) => this.readAttachmentType(item) === 'share',
-    );
-    const attachments = rawAttachments.filter((item) => {
-      const type = this.readAttachmentType(item);
-      return type !== 'inline_keyboard' && type !== 'share';
-    });
-    const types = attachments.map((item) => this.readAttachmentType(item));
-    if (types.some((type) => type !== 'image' && type !== 'photo' && type !== 'video')) {
-      omissions.push('attachments_not_imported');
-    }
-    const transferableAttachments = attachments.filter((item) => {
-      const type = this.readAttachmentType(item);
-      return type === 'image' || type === 'photo' || type === 'video';
-    });
-    const imageAttachments = transferableAttachments.filter((item) => {
-      const type = this.readAttachmentType(item);
-      return type === 'image' || type === 'photo';
-    });
-    const videoAttachments = transferableAttachments.filter(
-      (item) => this.readAttachmentType(item) === 'video',
-    );
-    if (imageAttachments.length > POST_IMPORT_MAX_IMAGES) {
-      throw new PublisherPostImportTerminalError('too_many_images', 'Forward has too many images');
-    }
-    if (
-      videoAttachments.length > 1 ||
-      (videoAttachments.length > 0 && imageAttachments.length > 0)
-    ) {
-      throw new PublisherPostImportTerminalError(
-        'unsupported_content',
-        'Mixed media forwards are not supported',
-      );
-    }
-
-    const media: PublicationBinaryMediaInput[] = [];
-    if (imageAttachments.length > 0) {
-      const downloadedImages = await this.downloadImportedImages(imageAttachments);
-      downloadedImages.forEach((downloaded, index) => {
-        media.push({
-          type: 'image',
-          bytes: downloaded.bytes,
-          mimeType: downloaded.mimeType,
-          fileName: `forwarded-image-${index + 1}.${downloaded.extension}`,
+    lastAttempt = false,
+    renew?: () => Promise<void>,
+  ): Promise<ImportedContent> {
+    const sources: ImportSource[] = Array.isArray(input)
+      ? input
+      : [{ message: input, messageIndex: 1 }];
+    const warnings: PublisherPostImportWarning[] = [];
+    const omissions = new Set<PublisherPostImportOmission>();
+    const candidates: MediaCandidate[] = [];
+    const paragraphs: { raw: string; markdown: string | null }[] = [];
+    const shareCards: { url: string; messageIndex: number; itemIndex: number }[] = [];
+    const warn = (warning: PublisherPostImportWarning) => {
+      if (warnings.length < 128) warnings.push(warning);
+    };
+    let nextMediaPosition = 0;
+    let lastFailure: PublisherPostImportTerminalError | undefined;
+    for (const { message, outer, messageIndex, absent } of sources) {
+      if (absent) {
+        warn({ kind: 'attachment', messageIndex, reason: 'unavailable' });
+        lastFailure = new PublisherPostImportTerminalError(
+          'message_unavailable',
+          'Captured message unavailable',
+        );
+        continue;
+      }
+      const raw = this.extractText(message);
+      if (raw.length > POST_IMPORT_MAX_TEXT_LENGTH) {
+        lastFailure = new PublisherPostImportTerminalError('text_too_long', 'Text exceeds limit');
+        warn({ messageIndex, kind: 'text', reason: 'too_large' });
+      } else if (raw.trim()) {
+        const markup = extractIncomingMessageMarkup(message);
+        const markdown = markup.length ? renderIncomingMarkupAsMarkdown(raw, markup) : null;
+        if (markup.length && (!markdown || markdown.length > POST_IMPORT_MAX_TEXT_LENGTH))
+          omissions.add('formatting_not_preserved');
+        paragraphs.push({
+          raw,
+          markdown: markdown && markdown.length <= POST_IMPORT_MAX_TEXT_LENGTH ? markdown : null,
         });
-      });
-    } else if (videoAttachments.length === 1) {
-      const attachment = videoAttachments[0]!;
-      let url = this.extractAttachmentUrl(attachment, 'video');
-      if (!url) {
-        const token = this.extractVideoToken(attachment);
-        if (token) {
-          try {
-            url = await this.maxClient.getVideoDownloadUrl(token, {
-              botId: publisherBotId,
-              trafficClass: 'interactive',
-              actionHealthLane: 'background',
-              sourceTag: MAX_API_SOURCE_TAGS.PUBLISHER_POST_IMPORT,
-              timeoutMs: 5_000,
-            });
-          } catch (error: unknown) {
-            const status = this.readHttpStatus(error);
-            if (status === 400 || status === 403 || status === 404) {
-              throw new PublisherPostImportTerminalError(
-                'media_download_failed',
-                'MAX video token is no longer available',
-              );
-            }
-            throw new PublisherPostImportTransientError('MAX video token lookup failed');
+      }
+      let attachments = this.extractAttachments(message);
+      if (outer) {
+        const comment = this.extractText(outer);
+        if (comment.trim() && comment !== raw) {
+          if (comment.length <= POST_IMPORT_MAX_TEXT_LENGTH)
+            warn({ messageIndex, kind: 'text', reason: 'outer_comment', value: comment });
+          else warn({ messageIndex, kind: 'text', reason: 'too_large' });
+        }
+        const extra = this.extractAttachments(outer);
+        if (extra.length) {
+          if (!attachments.length) {
+            attachments = extra;
+            warn({ messageIndex, kind: 'attachment', reason: 'outer_media' });
+          } else {
+            warn({ messageIndex, kind: 'attachment', reason: 'unsupported' });
           }
         }
       }
-      if (!url) {
-        throw new PublisherPostImportTerminalError(
+      for (const [index, attachment] of attachments.entries()) {
+        const type = this.readAttachmentType(attachment);
+        const itemIndex = index + 1;
+        if (type === 'inline_keyboard') {
+          omissions.add('buttons_not_imported');
+          continue;
+        }
+        if (type === 'share') {
+          const url = this.extractSafeShareUrl(attachment);
+          if (url) shareCards.push({ url, messageIndex, itemIndex });
+          else warn({ messageIndex, itemIndex, kind: 'link', reason: 'invalid' });
+          continue;
+        }
+        if (type !== 'photo' && type !== 'image' && type !== 'video') {
+          omissions.add('attachments_not_imported');
+          warn({ messageIndex, itemIndex, kind: 'attachment', reason: 'unsupported' });
+          continue;
+        }
+        const kind = type === 'photo' ? 'image' : type;
+        const mediaPosition = nextMediaPosition++;
+        if (candidates.length >= POST_IMPORT_MAX_IMAGES) {
+          warn({ messageIndex, itemIndex, mediaPosition, kind, reason: 'limit' });
+          continue;
+        }
+        candidates.push({ attachment, kind, itemIndex, messageIndex, mediaPosition });
+      }
+    }
+    const media: PublicationBinaryMediaInput[] = [];
+    const hashes = new Set<string>();
+    let retainedBytes = 0;
+    const accept = (candidate: MediaCandidate, item: PublicationBinaryMediaInput) => {
+      const { messageIndex, itemIndex, kind, mediaPosition } = candidate;
+      const hash = createHash('sha256').update(item.bytes).digest('hex');
+      if (hashes.has(hash)) {
+        warn({ messageIndex, itemIndex, mediaPosition, kind, reason: 'duplicate' });
+        return;
+      }
+      if (retainedBytes + item.bytes.length > PUBLICATION_MAX_TOTAL_IMAGE_BYTES) {
+        lastFailure = new PublisherPostImportTerminalError(
+          'media_too_large',
+          'Album exceeds size limit',
+        );
+        warn({ messageIndex, itemIndex, mediaPosition, kind, reason: 'too_large' });
+        return;
+      }
+      hashes.add(hash);
+      retainedBytes += item.bytes.length;
+      media.push(item);
+    };
+    const rejected = (candidate: MediaCandidate, e: unknown) => {
+      // FLAG: Retry transient transport failures; only known terminal item failures can be omitted.
+      if (e instanceof PublisherPostImportTransientError && lastAttempt) {
+        e = new PublisherPostImportTerminalError(
           'media_download_failed',
-          'Forwarded video has no durable download URL',
+          'Media temporarily unavailable after retries',
         );
       }
-      const downloaded = await this.downloadMedia(url, PUBLICATION_MAX_VIDEO_BYTES, 'video');
-      media.push({
-        type: 'video',
-        bytes: downloaded.bytes,
-        mimeType: downloaded.mimeType,
-        fileName: `forwarded-video.${this.extensionForMime(downloaded.mimeType, 'mp4')}`,
-      });
-    }
-
-    let importedText = rendered ?? sourceText;
-    let textFormat: PublicationContentInput['textFormat'] = rendered ? 'markdown' : 'plain';
-    if (importedText.trim().length === 0 && media.length === 0) {
-      const shareUrl = shareAttachments
-        .map((attachment) => this.extractSafeShareUrl(attachment))
-        .find((candidate): candidate is string => candidate !== null);
-      if (shareUrl) {
-        importedText = shareUrl;
-        textFormat = 'plain';
-      }
-    }
-    if (importedText.trim().length === 0 && media.length === 0) {
-      throw new PublisherPostImportTerminalError('unsupported_content', 'Forwarded post is empty');
-    }
-    return {
-      text: importedText,
-      textFormat,
-      buttons: [],
-      media,
-      omissions: [...new Set(omissions)],
+      if (!(e instanceof PublisherPostImportTerminalError)) throw e;
+      lastFailure = e;
+      const { messageIndex, itemIndex, kind, mediaPosition } = candidate;
+      const reason =
+        e.code === 'media_too_large' ||
+        e.code === 'image_too_large' ||
+        e.code === 'image_dimensions'
+          ? 'too_large'
+          : e.code === 'media_invalid'
+            ? 'invalid'
+            : 'unavailable';
+      warn({ messageIndex, itemIndex, mediaPosition, kind, reason });
     };
+    for (let index = 0; index < candidates.length; ) {
+      await renew?.();
+      const first = candidates[index]!;
+      if (first.kind === 'video') {
+        try {
+          accept(
+            first,
+            await this.downloadImportedVideo(
+              first.attachment,
+              publisherBotId,
+              PUBLICATION_MAX_TOTAL_IMAGE_BYTES - retainedBytes,
+            ),
+          );
+        } catch (e: unknown) {
+          rejected(first, e);
+        }
+        index++;
+        continue;
+      }
+      let end = index + 1;
+      while (end < candidates.length && candidates[end]!.kind === 'image') end++;
+      const batch = candidates.slice(index, end);
+      const results = await this.downloadImportedImages(
+        batch.map((x) => x.attachment),
+        PUBLICATION_MAX_TOTAL_IMAGE_BYTES - retainedBytes,
+        lastAttempt,
+      );
+      for (const [offset, row] of results.entries()) {
+        const candidate = batch[offset]!;
+        if ('error' in row) {
+          rejected(candidate, row.error);
+          continue;
+        }
+        accept(candidate, {
+          type: 'image',
+          bytes: row.bytes,
+          mimeType: row.mimeType,
+          fileName: `forwarded-image-${index + offset + 1}.${row.extension}`,
+        });
+      }
+      index = end;
+    }
+    const rawParagraphs = paragraphs.map((p) => p.raw);
+    let text = rawParagraphs.join('\n\n');
+    let textFormat: PublicationContentInput['textFormat'] = 'plain';
+    if (paragraphs.length === 1 && paragraphs[0]!.markdown) {
+      text = paragraphs[0]!.markdown;
+      textFormat = 'markdown';
+    } else if (paragraphs.some((p) => p.markdown)) {
+      omissions.add('formatting_not_preserved');
+    }
+    if (text.length > POST_IMPORT_MAX_TEXT_LENGTH) {
+      throw new PublisherPostImportTerminalError(
+        'text_too_long',
+        'Combined message text exceeds limit',
+      );
+    }
+    for (const { url, messageIndex, itemIndex } of shareCards) {
+      if (!text.trim() && !media.length) text = url;
+      else if (!text.includes(url))
+        warn({ messageIndex, itemIndex, kind: 'link', reason: 'optional_link', value: url });
+    }
+    if (!text.trim() && !media.length && !warnings.some((w) => w.reason === 'outer_comment')) {
+      throw (
+        lastFailure ??
+        new PublisherPostImportTerminalError('empty_content', 'No transferable content')
+      );
+    }
+    return { text, textFormat, buttons: [], media, warnings, omissions: [...omissions] };
   }
 
+  private async downloadImportedVideo(
+    attachment: Record<string, unknown>,
+    botId: string,
+    remainingBytes: number,
+  ): Promise<PublicationBinaryMediaInput> {
+    if (remainingBytes <= 0)
+      throw new PublisherPostImportTerminalError('media_too_large', 'Album exceeds size limit');
+    const direct = this.extractAttachmentUrl(attachment, 'video');
+    const token = this.extractVideoToken(attachment);
+    const limit = Math.min(PUBLICATION_MAX_VIDEO_BYTES, remainingBytes);
+    const fetchVideo = async (url: string): Promise<PublicationBinaryMediaInput> => {
+      const result = await this.downloadMedia(url, limit, 'video');
+      try {
+        const validated = await this.maxClient.validateMediaUploadPayload('video', result.bytes);
+        return {
+          type: 'video',
+          bytes: result.bytes,
+          mimeType: validated.mimeType,
+          fileName: `forwarded-video.${validated.extension}`,
+        };
+      } catch (e: unknown) {
+        if (e instanceof MaxMediaUploadValidationError)
+          throw new PublisherPostImportTerminalError(
+            'media_invalid',
+            'Forwarded video is not valid',
+          );
+        throw e;
+      }
+    };
+    if (direct) {
+      try {
+        return await fetchVideo(direct);
+      } catch (e: unknown) {
+        if (
+          !token ||
+          !(e instanceof PublisherPostImportTerminalError) ||
+          !['media_invalid', 'media_download_failed'].includes(e.code)
+        )
+          throw e;
+      }
+    }
+    if (!token)
+      throw new PublisherPostImportTerminalError(
+        'media_download_failed',
+        'Video source unavailable',
+      );
+    let url: string | null;
+    try {
+      url = await this.maxClient.getVideoDownloadUrl(token, {
+        botId,
+        trafficClass: 'interactive',
+        actionHealthLane: 'background',
+        sourceTag: MAX_API_SOURCE_TAGS.PUBLISHER_POST_IMPORT,
+        timeoutMs: 5000,
+      });
+    } catch (e: unknown) {
+      if ([400, 403, 404].includes(this.readHttpStatus(e) ?? 0))
+        throw new PublisherPostImportTerminalError(
+          'media_download_failed',
+          'Video no longer available',
+        );
+      throw new PublisherPostImportTransientError('MAX video token lookup failed');
+    }
+    if (!url || url === direct)
+      throw new PublisherPostImportTerminalError(
+        'media_download_failed',
+        'No playable video source',
+      );
+    return fetchVideo(url);
+  }
   private async downloadImportedImages(
     attachments: readonly Record<string, unknown>[],
-  ): Promise<Array<{ bytes: Buffer; mimeType: string; extension: string }>> {
+    remainingBytes: number,
+    lastAttempt: boolean,
+  ): Promise<Array<{ bytes: Buffer; mimeType: string; extension: string } | { error: unknown }>> {
     const controller = new AbortController();
-    const images = new Array<{ bytes: Buffer; mimeType: string; extension: string }>(
-      attachments.length,
-    );
+    const images = new Array<
+      { bytes: Buffer; mimeType: string; extension: string } | { error: unknown }
+    >(attachments.length);
     let cursor = 0;
     let totalBytes = 0;
     let failure: { error: unknown } | null = null;
@@ -461,32 +754,46 @@ export class PublisherPostImportProcessingService {
         while (!controller.signal.aborted) {
           const index = cursor++;
           if (index >= attachments.length) return;
-          const url = this.extractAttachmentUrl(attachments[index]!, 'image');
-          if (!url) {
-            throw new PublisherPostImportTerminalError(
-              'media_download_failed',
-              'Forwarded image has no durable download URL',
+          try {
+            const url = this.extractAttachmentUrl(attachments[index]!, 'image');
+            if (!url) {
+              throw new PublisherPostImportTerminalError(
+                'media_download_failed',
+                'Forwarded image has no durable download URL',
+              );
+            }
+            const raw = await this.downloadMedia(
+              url,
+              PUBLICATION_MAX_IMAGE_BYTES,
+              'image',
+              controller.signal,
             );
+            if (controller.signal.aborted) return;
+            const downloaded = await this.prepareImportedImage(raw);
+            if (controller.signal.aborted) return;
+            totalBytes += downloaded.bytes.length;
+            if (totalBytes > remainingBytes) {
+              throw new PublisherPostImportTerminalError(
+                'media_too_large',
+                'Forwarded images exceed the total media limit',
+              );
+            }
+            images[index] = downloaded;
+          } catch (error: unknown) {
+            if (lastAttempt && error instanceof PublisherPostImportTransientError) {
+              images[index] = { error };
+              continue;
+            }
+            if (!(error instanceof PublisherPostImportTerminalError)) throw error;
+            images[index] = { error };
+            if (error.code === 'media_too_large') {
+              controller.abort(error);
+              return;
+            }
           }
-          const raw = await this.downloadMedia(
-            url,
-            PUBLICATION_MAX_IMAGE_BYTES,
-            'image',
-            controller.signal,
-          );
-          if (controller.signal.aborted) return;
-          const downloaded = await this.prepareImportedImage(raw);
-          if (controller.signal.aborted) return;
-          totalBytes += downloaded.bytes.length;
-          if (totalBytes > PUBLICATION_MAX_TOTAL_IMAGE_BYTES) {
-            throw new PublisherPostImportTerminalError(
-              'media_too_large',
-              'Forwarded images exceed the total media limit',
-            );
-          }
-          images[index] = downloaded;
         }
       } catch (error: unknown) {
+        if (controller.signal.aborted) return;
         if (!failure) {
           failure = { error };
           controller.abort(error);
@@ -495,7 +802,7 @@ export class PublisherPostImportProcessingService {
     });
     await Promise.all(workers);
     if (failure) throw (failure as { error: unknown }).error;
-    return images;
+    return Array.from(images, (image) => image ?? { error: controller.signal.reason });
   }
 
   private async prepareImportedImage(downloaded: {
@@ -504,11 +811,13 @@ export class PublisherPostImportProcessingService {
   }): Promise<{ bytes: Buffer; mimeType: string; extension: string }> {
     try {
       const validated = await this.maxClient.validateMediaUploadPayload('image', downloaded.bytes);
-      return {
-        bytes: downloaded.bytes,
-        mimeType: validated.mimeType,
-        extension: validated.extension,
-      };
+      if (downloaded.bytes.length <= BROADCAST_IMAGE_MAX_BYTES) {
+        return {
+          bytes: downloaded.bytes,
+          mimeType: validated.mimeType,
+          extension: validated.extension,
+        };
+      }
     } catch (error: unknown) {
       if (!(error instanceof MaxMediaUploadValidationError)) {
         throw error;
@@ -519,10 +828,7 @@ export class PublisherPostImportProcessingService {
     }
 
     try {
-      return await normalizeUnsupportedMaxImageUpload(
-        downloaded.bytes,
-        PUBLICATION_MAX_IMAGE_BYTES,
-      );
+      return await normalizeUnsupportedMaxImageUpload(downloaded.bytes, BROADCAST_IMAGE_MAX_BYTES);
     } catch (error: unknown) {
       if (error instanceof MaxMediaUploadValidationError) {
         throw this.mapImageValidationFailure(error);
@@ -536,7 +842,9 @@ export class PublisherPostImportProcessingService {
                 ? 'image_normalization_input_pixel_limit_exceeded'
                 : 'image_normalization_output_too_large';
           throw new PublisherPostImportTerminalError(
-            'image_too_large',
+            rejectionKind === 'image_normalization_output_too_large'
+              ? 'image_too_large'
+              : 'image_dimensions',
             'Forwarded image cannot be normalized within the image limits',
             rejectionKind,
           );
@@ -559,7 +867,7 @@ export class PublisherPostImportProcessingService {
       error.code === MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DECODE_BUDGET_EXCEEDED
     ) {
       return new PublisherPostImportTerminalError(
-        'image_too_large',
+        'image_dimensions',
         'Forwarded image exceeds the decode or dimension limit',
         error.code === MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DIMENSIONS_EXCEEDED
           ? 'image_dimensions_exceeded'
@@ -711,6 +1019,7 @@ export class PublisherPostImportProcessingService {
     expectedType: 'image' | 'video',
   ): string | null {
     const payload = this.asRecord(attachment.payload) ?? attachment;
+    if (expectedType === 'video') return extractMaxVideoDownloadUrl(payload);
     const candidates: Array<{ url: string; score: number }> = [];
     const visit = (value: unknown, key: string, depth: number): void => {
       if (depth > 4) {
@@ -797,6 +1106,7 @@ export class PublisherPostImportProcessingService {
       throw new PublisherPostImportTerminalError(
         'message_unavailable',
         'Forwarded message disappeared before import',
+        'captured_message_absent',
       );
     }
     return this.resolveExactMessage(exactResponse, incomingMessageId);
@@ -804,6 +1114,7 @@ export class PublisherPostImportProcessingService {
 
   private async loadPersistedForwardReceipt(params: {
     sourceWebhookEventId: string | null;
+    allowDirect?: boolean;
     publisherBotId: string;
     actorUserId: string;
     privateChatId: string;
@@ -870,8 +1181,8 @@ export class PublisherPostImportProcessingService {
       this.readString(recipient?.chat_type ?? recipient?.chatType)?.toLowerCase() !== 'dialog' ||
       this.readString(sender?.user_id ?? sender?.userId ?? sender?.id) !== params.actorUserId ||
       !rawMessageIdMatches ||
-      this.readString(link?.type)?.toLowerCase() !== 'forward' ||
-      !this.asRecord(link?.message)
+      (!params.allowDirect &&
+        (this.readString(link?.type)?.toLowerCase() !== 'forward' || !this.asRecord(link?.message)))
     ) {
       throw new PublisherPostImportTerminalError(
         'message_unavailable',
@@ -1000,9 +1311,10 @@ export class PublisherPostImportProcessingService {
     failureCode: PublisherPostImportFailureCode,
     rejectionKind: PublisherPostImportRejectionKind,
     snapshotSource: PublisherPostImportSnapshotSource,
+    timing: { inputMode: string; elapsedMs: number | null },
   ): void {
     this.logger.log(
-      { sessionId, failureCode, rejectionKind, snapshotSource },
+      { sessionId, failureCode, rejectionKind, snapshotSource, ...timing },
       'Publisher forwarded post import rejected',
     );
   }

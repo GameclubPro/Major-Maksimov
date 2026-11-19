@@ -189,6 +189,55 @@ describe('PublicationDraftsService', () => {
       'owner',
     );
   });
+  it('preserves original import warnings when an older editor omits them or a new editor changes their text', async () => {
+    const { service, tx, get } = setup();
+    const warning = {
+      kind: 'link',
+      messageIndex: 1,
+      itemIndex: 1,
+      reason: 'optional_link',
+      value: 'https://example.com/original',
+    };
+    const review = { omissions: [], warnings: [warning], resolved: [] };
+    tx.publication.findFirst.mockResolvedValue({
+      id: 'draft',
+      actorUserId: 'original-author',
+      version: 1,
+      schedule: { rule: { ...request.state, importReview: review } },
+      canonicalContentRevision: { revision: 1 },
+    });
+    get.mockResolvedValue({ publication: { id: 'draft', version: 2 }, state: null } as never);
+    await service.save('draft', actor, { ...request, expectedRevision: 1 });
+    expect(tx.$executeRaw.mock.calls[0][0].values).toEqual(['publication-drafts:original-author']);
+    expect(tx.publicationSchedule.upsert.mock.calls[0][0].update.rule.importReview).toEqual({
+      ...review,
+      restored: [],
+    });
+    await service.save('draft', actor, {
+      ...request,
+      expectedRevision: 1,
+      state: {
+        ...request.state,
+        importReview: {
+          ...review,
+          resolved: [0],
+          warnings: [{ ...warning, value: 'https://example.com/other' }],
+        },
+      },
+    });
+    expect(tx.publicationSchedule.upsert.mock.calls[1][0].update.rule.importReview).toEqual({
+      ...review,
+      resolved: [0],
+      restored: [],
+    });
+    await expect(
+      service.save('draft', actor, {
+        ...request,
+        expectedRevision: 1,
+        state: { ...request.state, importReview: { ...review, resolved: [1] } },
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
   it('checks ownership, never-dispatched state and expected version inside the transaction', async () => {
     const { service, tx, get } = setup();
     tx.publication.findFirst.mockResolvedValue({

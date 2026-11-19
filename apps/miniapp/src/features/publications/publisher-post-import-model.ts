@@ -32,6 +32,14 @@ export function shouldOfferPublisherButtonRecovery(
 
 function describeImportFailure(code: PublisherPostImportSession['failureCode']): string {
   switch (code) {
+    case 'empty_content':
+      return 'В сообщении нет текста или медиа';
+    case 'media_invalid':
+      return 'Файл повреждён или имеет другой формат';
+    case 'image_dimensions':
+      return 'Слишком большое разрешение фото';
+    case 'draft_quota':
+      return 'Освободите место в черновиках';
     case 'invalid_forward':
       return 'Перешлите исходный пост';
     case 'message_unavailable':
@@ -79,8 +87,11 @@ export function resolvePublisherPostImportPresentation(
   switch (session.status) {
     case 'waiting':
       return {
-        title: 'Жду пост',
-        detail: null,
+        title: session.inputMode === 'collection' ? 'Собираю пост' : 'Жду пост',
+        detail:
+          session.inputMode === 'collection'
+            ? `Сообщений: ${session.collectedCount ?? 0}. Когда закончите, нажмите «Готово» в диалоге.`
+            : null,
         tone: 'neutral',
         action: session.botUrl ? 'open-bot' : null,
       };

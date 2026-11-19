@@ -128,21 +128,6 @@ test('new photos preserve retained assets and share the ten-photo limit', () => 
   assert.match(retainedMediaSource, /onRemove\(asset\.id\)/u);
 });
 
-test('selecting video with photos reports the conflict before mutating media', () => {
-  const handler = pageSource.match(
-    /async function handlePublicationVideoFile[\s\S]*?function confirmDraftClear/u,
-  )?.[0];
-  assert.ok(handler);
-  assert.ok(handler.indexOf("asset.type === 'image'") < handler.indexOf('setVideoPreparing(true)'));
-  assert.match(handler, /Сначала удалите добавленные фото/u);
-  assert.match(contentEditorSource, /blockedReason=\{videoBlockedReason\}/u);
-  assert.match(contentEditorSource, /onBlocked=\{\(\) => videoBlockedReason && onInfo/u);
-  assert.match(
-    videoToolSource,
-    /interactionBlocked \? \([\s\S]*?publication-video-tool__blocker[\s\S]*?\) : \([\s\S]*?<input/u,
-  );
-});
-
 test('video failures remain next to the picker instead of depending on transient toasts', () => {
   assert.match(contentEditorSource, /const \[videoError, setVideoError\] = useState\(''\)/u);
   assert.match(contentEditorSource, /onFile=\{handleVideoFile\}/u);

@@ -2,6 +2,60 @@ import { PublisherPostImportStatus } from '../prisma/prisma-client';
 import { PublisherPostImportDeliveryService } from './publisher-post-import-delivery.service';
 
 describe('PublisherPostImportDeliveryService', () => {
+  it('keeps the latest count pending when a message arrives during the first confirmed collection send', async () => {
+    const inputs = [{ messageId: 'first', webhookEventId: 'r1' }];
+    const row = {
+      id: 'session',
+      publisherBotId: 'publik',
+      privateChatId: '42',
+      startToken: 'token',
+      status: PublisherPostImportStatus.WAITING,
+      inputMode: 'collection',
+      inputMessages: inputs,
+      notificationPending: true,
+      notificationKind: 'collected',
+      botStatusMessageId: null,
+    };
+    const update = jest
+      .fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 })
+      .mockResolvedValueOnce({ count: 1 });
+    const send = jest.fn(
+      async (_chat: string, _text: string, options: { beforeSend: () => Promise<void> }) => {
+        await options.beforeSend();
+        return { messageId: 'confirmed-message' };
+      },
+    );
+    const service = new PublisherPostImportDeliveryService(
+      {
+        publisherPostImportSession: {
+          findUnique: jest.fn().mockResolvedValue(row),
+          updateMany: update,
+        },
+      } as never,
+      { sendMessageImmediateWithId: send } as never,
+    );
+    await service.deliver({
+      version: 1,
+      kind: 'notify',
+      sessionId: 'session',
+      notification: 'collected',
+      requestedAt: new Date().toISOString(),
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(update.mock.calls[2][0]).toMatchObject({
+      where: { notificationKind: 'collected', inputMessages: { equals: inputs } },
+      data: { notificationPending: false },
+    });
+    const carry = update.mock.calls[3][0];
+    expect(carry.where.notificationLockToken).toBe(
+      update.mock.calls[2][0].where.notificationLockToken,
+    );
+    expect(carry.data.botStatusMessageId).toBe('confirmed-message');
+    expect(carry.data).not.toHaveProperty('notificationPending');
+  });
   it('builds the ready mini app link against the exact Publisher bot and exact draft', async () => {
     const publisherPostImportSession = {
       findUnique: jest.fn().mockResolvedValue({
@@ -65,16 +119,14 @@ describe('PublisherPostImportDeliveryService', () => {
     };
     const maxClient = {
       editMessageInlineKeyboard: jest.fn(),
-      sendMessageImmediateWithId: jest.fn().mockImplementation(
-        async (
-          _chatId: string,
-          _text: string,
-          options: { beforeSend?: () => Promise<void> },
-        ) => {
-          await options.beforeSend?.();
-          return { messageId: 'ready-message-1' };
-        },
-      ),
+      sendMessageImmediateWithId: jest
+        .fn()
+        .mockImplementation(
+          async (_chatId: string, _text: string, options: { beforeSend?: () => Promise<void> }) => {
+            await options.beforeSend?.();
+            return { messageId: 'ready-message-1' };
+          },
+        ),
     };
     const service = new PublisherPostImportDeliveryService(
       { publisherPostImportSession } as never,
@@ -122,16 +174,14 @@ describe('PublisherPostImportDeliveryService', () => {
     };
     const maxClient = {
       editMessageInlineKeyboard: jest.fn(),
-      sendMessageImmediateWithId: jest.fn().mockImplementation(
-        async (
-          _chatId: string,
-          _text: string,
-          options: { beforeSend?: () => Promise<void> },
-        ) => {
-          await options.beforeSend?.();
-          return { messageId: 'failed-message-1' };
-        },
-      ),
+      sendMessageImmediateWithId: jest
+        .fn()
+        .mockImplementation(
+          async (_chatId: string, _text: string, options: { beforeSend?: () => Promise<void> }) => {
+            await options.beforeSend?.();
+            return { messageId: 'failed-message-1' };
+          },
+        ),
     };
     const service = new PublisherPostImportDeliveryService(
       { publisherPostImportSession } as never,
@@ -149,8 +199,18 @@ describe('PublisherPostImportDeliveryService', () => {
     expect(maxClient.editMessageInlineKeyboard).not.toHaveBeenCalled();
     expect(maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
       '42',
-      'Этот тип поста пока не поддерживается',
-      expect.objectContaining({ buttons: [], beforeSend: expect.any(Function) }),
+      expect.stringContaining('добавьте файлы'),
+      expect.objectContaining({
+        buttons: [
+          [
+            expect.objectContaining({
+              text: 'Открыть редактор',
+              url: expect.stringContaining('startapp=pi_'),
+            }),
+          ],
+        ],
+        beforeSend: expect.any(Function),
+      }),
       expect.objectContaining({ botId: 'se14088825_bot' }),
     );
   });

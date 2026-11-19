@@ -19,6 +19,7 @@ export type PublicationCloudIdentity = { id: string; revision: number };
 export function publicationDraftState(draft: PublicationDraft): PublicationDraftState {
   return {
     formatVersion: 1,
+    ...(draft.importReview ? { importReview: draft.importReview } : {}),
     timingMode: draft.timingMode,
     scheduleKind: draft.scheduleKind,
     scheduleTimezone: draft.scheduleTimezone,
@@ -70,6 +71,7 @@ export function samePublicationDraftMedia(
     (left.images === right.images || (!left.images.length && !right.images.length)) &&
     (left.retainedAssets === right.retainedAssets ||
       (!left.retainedAssets.length && !right.retainedAssets.length)) &&
+    left.mediaOrder === right.mediaOrder &&
     left.mediaType === right.mediaType &&
     left.mediaBase64 === right.mediaBase64 &&
     left.mediaPayload === right.mediaPayload &&
@@ -91,6 +93,7 @@ export function withSavedPublicationMedia(
     mediaMimeType: '',
     mediaFileName: '',
     retainedAssets: assets,
+    mediaOrder: undefined,
   };
 }
 

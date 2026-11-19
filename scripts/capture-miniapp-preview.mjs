@@ -1038,7 +1038,7 @@ const scenarioBehaviors = [
       const dialog = page.getByRole('dialog', { name: 'Новый пост' });
       await dialog.waitFor({ state: 'visible' });
       await dialog.getByRole('button', { name: 'Написать' }).waitFor({ state: 'visible' });
-      await dialog.getByRole('button', { name: 'Переслать' }).waitFor({ state: 'visible' });
+      await dialog.getByRole('button', { name: 'Перенести из MAX' }).waitFor({ state: 'visible' });
     },
   },
   {

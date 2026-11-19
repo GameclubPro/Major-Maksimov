@@ -1,3 +1,4 @@
+import { formatPublicationMediaSummary } from './publication-page-formatters';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import type { PublicationSummary } from '@maxim/contracts/publication';
 import type { PublisherPostImportSession } from '@maxim/contracts/publisher';
@@ -12,16 +13,12 @@ function resolveDraftPreview(publication: PublicationSummary): string {
   if (publication.contentPreview.trim()) {
     return publication.contentPreview;
   }
-  if (publication.hasVideo) {
-    return 'Видео';
-  }
-  if (publication.mediaCount > 0) {
-    return `Фото: ${publication.mediaCount}`;
-  }
-  return 'Без текста';
+  return formatPublicationMediaSummary(publication) ?? 'Без текста';
 }
 
 export type PublisherPostImportStatusProps = {
+  readError?: string | null;
+  onReadRetry?: () => void;
   session: PublisherPostImportSession | null;
   drafts: PublicationSummary[];
   busy?: boolean;
@@ -36,6 +33,8 @@ export type PublisherPostImportStatusProps = {
 
 export function PublisherPostImportStatus({
   session,
+  readError,
+  onReadRetry,
   drafts,
   busy = false,
   hasMoreDrafts = false,
@@ -62,13 +61,26 @@ export function PublisherPostImportStatus({
           : null;
   const cancelable = session?.status === 'waiting' || session?.status === 'processing';
 
-  if (!presentation && visibleDrafts.length === 0) {
+  if (!readError && !presentation && visibleDrafts.length === 0) {
     return null;
   }
 
   return (
     <div className="publisher-post-imports">
-      {presentation && session ? (
+      {readError ? (
+        <div className="publisher-post-import-status is-danger" role="alert">
+          <span className="publisher-post-import-status__copy">
+            <strong>{readError}</strong>
+          </span>
+          <button
+            type="button"
+            className="publisher-post-import-status__action"
+            onClick={onReadRetry}
+          >
+            Загрузить снова
+          </button>
+        </div>
+      ) : presentation && session ? (
         <div
           className={cn('publisher-post-import-status', `is-${presentation.tone}`)}
           role={presentation.tone === 'danger' ? 'alert' : 'status'}
