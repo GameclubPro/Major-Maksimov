@@ -120,31 +120,64 @@ describe.each(['standalone', 'prepared'] as const)('typed link moderation (%s)',
     ).toBe(true);
   });
 
-  it('uses the Google search destination only for legacy link moderation', () => {
-    const allowlist = ['domain:www.wildberries.ru'];
-    const allowed =
-      'https://www.google.com/url?sa=t&source=web&url=https%3A%2F%2Fwww.wildberries.ru%2Fcatalog%2F123%2Fdetail.aspx';
-    const unlisted = allowed.replace('www.wildberries.ru', 'elsewhere.test');
-
-    expect(detectBlockedLink(allowed, LinkPolicy.ALLOWLIST_ONLY, allowlist)).toBeNull();
-    expect(
-      detectBlockedLink('', LinkPolicy.ALLOWLIST_ONLY, allowlist, undefined, [
-        target('external_url', allowed),
-      ]),
-    ).toBeNull();
-    expect(detectBlockedLink(unlisted, LinkPolicy.ALLOWLIST_ONLY, allowlist)).toBe(
-      `Link ${unlisted} is not in allowlist`,
-    );
-    expect(
-      detectBlockedLink('', LinkPolicy.ALLOWLIST_ONLY, allowlist, undefined, [
-        target('external_url', unlisted),
-      ]),
-    ).toBe(`Link ${unlisted} is not in allowlist`);
-    expect(detectBlockedLink(allowed, LinkPolicy.BLOCKLIST_ONLY, allowlist)).toBe(
+  it.each([
+    [
+      'Google',
+      (destination: string) =>
+        `https://www.google.com/url?sa=t&source=web&url=${encodeURIComponent(destination)}`,
+    ],
+    [
+      'DuckDuckGo',
+      (destination: string) =>
+        `https://duckduckgo.com/l/?uddg=${encodeURIComponent(destination)}&rut=${'a'.repeat(64)}`,
+    ],
+    [
+      'Bing',
+      (destination: string) =>
+        `https://www.bing.com/ck/a?!&&u=a1${Buffer.from(destination).toString('base64url')}&ntb=1`,
+    ],
+  ] as const)('uses the %s search destination for legacy link moderation', (_engine, wrap) => {
+    const shopAllowlist = ['domain:www.wildberries.ru'];
+    const allowed = wrap('https://www.wildberries.ru/catalog/123/detail.aspx');
+    const unlisted = wrap('https://elsewhere.test/catalog/123/detail.aspx');
+    const allowlist = [...shopAllowlist, `domain:${new URL(unlisted).hostname}`];
+    for (const navigationTargets of [undefined, [target('external_url', allowed)]]) {
+      expect(
+        detectBlockedLink(
+          allowed,
+          LinkPolicy.ALLOWLIST_ONLY,
+          shopAllowlist,
+          undefined,
+          navigationTargets,
+        ),
+      ).toBeNull();
+    }
+    for (const navigationTargets of [undefined, [target('external_url', unlisted)]]) {
+      expect(
+        detectBlockedLink(
+          unlisted,
+          LinkPolicy.ALLOWLIST_ONLY,
+          allowlist,
+          undefined,
+          navigationTargets,
+        ),
+      ).toBe(`Link ${unlisted} is not in allowlist`);
+    }
+    expect(detectBlockedLink(allowed, LinkPolicy.BLOCKLIST_ONLY, shopAllowlist)).toBe(
       'Links are not allowed by policy',
     );
-    expect(createAllowlistLinkMatcher(allowlist)(allowed)).toBe(false);
-    expect(prepareLinkAllowlist(allowlist).link(allowed)).toBe(false);
+    expect(createAllowlistLinkMatcher(shopAllowlist)(allowed)).toBe(false);
+    expect(prepareLinkAllowlist(shopAllowlist).link(allowed)).toBe(false);
+  });
+
+  it('checks an unfamiliar redirect URL against its own host', () => {
+    const link = 'https://redirect.example/l/?uddg=https%3A%2F%2Fwww.wildberries.ru%2F';
+    expect(detectBlockedLink(link, LinkPolicy.ALLOWLIST_ONLY, ['domain:www.wildberries.ru'])).toBe(
+      `Link ${link} is not in allowlist`,
+    );
+    expect(
+      detectBlockedLink(link, LinkPolicy.ALLOWLIST_ONLY, ['domain:redirect.example']),
+    ).toBeNull();
   });
 
   it('does not silently drop an extracted URL rejected by strict normalization', () => {

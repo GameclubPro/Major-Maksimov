@@ -92,28 +92,55 @@ describe('AdminLinksService preview', () => {
     ).resolves.toMatchObject({ allowed: true, targetsCount: 2 });
   });
 
-  it('applies the chat allowlist to the destination of a Google search result', async () => {
-    const h = harness();
-    const policy = linkRulesPolicySchema.parse({
-      version: 1,
-      mode: 'ALLOW_SELECTED',
-      rules: [{ id: 'shop', effect: 'ALLOW', kind: 'WEB_DOMAIN', target: 'www.wildberries.ru' }],
-    });
-    const searchResult =
-      'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.wildberries.ru/&ved=2ahUKEwiZn-TrjJKYAxU9FBAIHdK0PRwQFnoECBIQAQ&sqi=2&usg=AOvVaw3UH6IVlWT3gwuvSBbKHOQ_';
-    await expect(
-      h.service.preview('chat-1', h.user, { policy, text: searchResult }),
-    ).resolves.toEqual({ allowed: true, reason: 'ALL_TARGETS_ALLOWED', targetsCount: 1 });
-
-    const unlisted = searchResult.replace('https://www.wildberries.ru/', 'https://elsewhere.test/');
-    await expect(h.service.preview('chat-1', h.user, { policy, text: unlisted })).resolves.toEqual({
-      allowed: false,
-      reason: 'NOT_ALLOWED',
-      target: unlisted,
-      targetsCount: 1,
-    });
-    expect(h.handleLookup).not.toHaveBeenCalled();
-  });
+  it.each([
+    [
+      'Google',
+      (destination: string) =>
+        `https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=${destination}&ved=2ahUKEwiZn-TrjJKYAxU9FBAIHdK0PRwQFnoECBIQAQ&sqi=2&usg=AOvVaw3UH6IVlWT3gwuvSBbKHOQ_`,
+    ],
+    [
+      'DuckDuckGo',
+      (destination: string) =>
+        `https://duckduckgo.com/l/?uddg=${encodeURIComponent(destination)}&rut=${'f'.repeat(64)}`,
+    ],
+    [
+      'Bing',
+      (destination: string) =>
+        `https://www.bing.com/ck/a?!&&p=${'e'.repeat(64)}&ptn=3&ver=2&hsh=4&fclid=351aab7f-37aa-6faa-1250-bad236596e68&psq=shop&u=a1${Buffer.from(destination).toString('base64url')}&ntb=1`,
+    ],
+    [
+      'Yahoo',
+      (destination: string) =>
+        `https://r.search.yahoo.com/_ylt=example;_ylu=example/RV=2/RE=1234567890/RO=10/RU=${encodeURIComponent(destination)}/RK=2/RS=example`,
+    ],
+  ] as const)(
+    'applies the chat allowlist to the destination of a %s search result',
+    async (_engine, wrap) => {
+      const h = harness();
+      const allowed = wrap('https://www.wildberries.ru/');
+      const unlisted = wrap('https://elsewhere.test/');
+      const policy = linkRulesPolicySchema.parse({
+        version: 1,
+        mode: 'ALLOW_SELECTED',
+        rules: [
+          { id: 'shop', effect: 'ALLOW', kind: 'WEB_DOMAIN', target: 'www.wildberries.ru' },
+          { id: 'search', effect: 'ALLOW', kind: 'WEB_DOMAIN', target: new URL(unlisted).hostname },
+        ],
+      });
+      await expect(h.service.preview('chat-1', h.user, { policy, text: allowed })).resolves.toEqual(
+        { allowed: true, reason: 'ALL_TARGETS_ALLOWED', targetsCount: 1 },
+      );
+      await expect(
+        h.service.preview('chat-1', h.user, { policy, text: unlisted }),
+      ).resolves.toEqual({
+        allowed: false,
+        reason: 'NOT_ALLOWED',
+        target: unlisted,
+        targetsCount: 1,
+      });
+      expect(h.handleLookup).not.toHaveBeenCalled();
+    },
+  );
 
   it('requires every link to pass even when one exact exception is allowed', async () => {
     const h = harness();
