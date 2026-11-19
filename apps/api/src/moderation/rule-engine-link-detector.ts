@@ -7,7 +7,7 @@ import {
 import { LinkPolicy } from '../prisma/prisma-client';
 import { extractUrlsFromText as extractTextUrls } from '../common/url-text.util';
 import { isEnforceableLinkPolicyTarget } from './navigation/link-policy-target.util';
-import { readGoogleSearchLinkDestination } from './navigation/google-search-link-destination';
+import { readSearchLinkDestination } from './navigation/search-link-destination';
 import type { NavigationTargetEvidence } from './navigation/navigation-evidence.types';
 import {
   evaluateRuntimeLinkRulesPolicy,
@@ -117,11 +117,6 @@ export function detectBlockedLink(
       continue;
     }
 
-    const destination = readGoogleSearchLinkDestination(link.raw);
-    if (destination && isAllowlisted(destination)) {
-      continue;
-    }
-
     if (
       !link.explicit &&
       link.match.normalizedDomain &&
@@ -172,12 +167,10 @@ function createNavigationMatcher(matchers: AllowlistMatchers): NavigationAllowli
   return (value) => {
     const matches = (key: NavigationAllowlistPolicyKey) =>
       isAllowlistedNavigationPolicyKey(matchers, key);
-    if (buildNavigationTargetAllowlistPolicyKeys(value).some(matches)) return true;
-    if (value.kind !== 'external_url') return false;
-    const destination = readGoogleSearchLinkDestination(value.target);
-    return Boolean(
-      destination && buildNavigationAllowlistPolicyKeys(destination, value.kind).some(matches),
-    );
+    const destination = value.kind === 'external_url' && readSearchLinkDestination(value.target);
+    return destination
+      ? buildNavigationAllowlistPolicyKeys(destination, value.kind).some(matches)
+      : buildNavigationTargetAllowlistPolicyKeys(value).some(matches);
   };
 }
 
@@ -250,10 +243,16 @@ function resolveDetectedLinks(
 
   for (const raw of links) {
     const match = resolveAllowlistMatch(raw);
+    const destination = readSearchLinkDestination(raw);
     resolved.push({
       raw,
-      match: match ?? { normalizedLink: raw, normalizedDomain: null },
-      allowlisted: match !== null && allowlistMatcher(raw),
+      match: {
+        normalizedLink: match?.normalizedLink ?? raw,
+        normalizedDomain: destination
+          ? (resolveAllowlistMatch(destination)?.normalizedDomain ?? null)
+          : (match?.normalizedDomain ?? null),
+      },
+      allowlisted: match !== null && allowlistMatcher(destination ?? raw),
       explicit: isExplicitLink(raw),
     });
   }

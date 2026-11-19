@@ -88,7 +88,7 @@ describe('link policy runtime boundary', () => {
   });
 });
 
-describe('Google Search destinations', () => {
+describe('search result destinations', () => {
   const nowMs = Date.parse('2026-11-07T10:00:00.000Z');
   const rule = (changes: Partial<LinkRule>): LinkRule =>
     linkRuleSchema.parse({ id: 'rule-one', effect: 'DENY', kind: 'WEB_EXACT', ...changes });
@@ -132,7 +132,7 @@ describe('Google Search destinations', () => {
         [permitted],
         nowMs,
       ),
-    ).toMatchObject({ allowed: false, matchedRule: { id: 'no-google' } });
+    ).toMatchObject({ allowed: true });
   });
 
   it('declines fallback for unrecognized destinations and ambiguous Google links', () => {
@@ -153,6 +153,10 @@ describe('Google Search destinations', () => {
       wrapper.replace('&q=', '&q=https://unlisted.example'),
       wrapper + '&url=https://unlisted.example',
       wrapper + '&next=https://unlisted.example',
+      `https://r.duckduckgo.com/l/?uddg=${encodeURIComponent(direct)}`,
+      `https://www.bing.com/ck/a?u=a1${Buffer.from(direct).toString('base64url')}=`,
+      `https://r.search.yahoo.com/RU=${encodeURIComponent(direct)}/RK=2/RS=example`,
+      'https://yandex.ru/clck/jsredir?text=&etext=opaque',
     ]) {
       expect(evaluateRuntimeLinkRulesPolicy(configured, [target(value)], nowMs)).toMatchObject({
         allowed: false,
