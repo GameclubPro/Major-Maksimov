@@ -28,6 +28,7 @@ import {
 } from './preview-transport-runtime';
 import { buildAuthorBadge, cloneJson, parseJsonBody } from './preview-transport-shared';
 import {
+  commentAuthorProfileHandoffRequestSchema,
   updateCommentRestrictionRequestSchema,
   type CommentRestriction,
 } from '@maxim/contracts/channel-dialog';
@@ -740,6 +741,20 @@ export const handleDialogPreviewRequest: PreviewRequestHandler = (context) => {
         restrictions.set(prefix + targetUserId, updated);
         return cloneJson(updated);
       }
+    }
+    if (
+      entity.tail[2] === 'messages' &&
+      entity.tail.length === 6 &&
+      entity.tail[3] &&
+      entity.tail[4] === 'profile' &&
+      entity.tail[5] === 'handoff' &&
+      method === 'POST'
+    ) {
+      const { token } = commentAuthorProfileHandoffRequestSchema.parse(parseJsonBody(init));
+      const bucket = getPreviewDialogBucket(state, entity.entityType, 'comments', token);
+      const message = findPreviewDialogMessage(bucket, decodeURIComponent(entity.tail[3]));
+      if (!message) throw new Error('Комментарий не найден.');
+      return { botUrl: buildPreviewProfileHandoffUrl(message.authorUserId) };
     }
     if (
       entity.tail[2] === 'messages' &&

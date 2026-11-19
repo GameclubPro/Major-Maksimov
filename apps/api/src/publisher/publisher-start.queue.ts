@@ -8,6 +8,7 @@ import { isManagedEntityForwardedRecoveryMessage } from '../common/managed-entit
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { readWebhookEventTimestamp } from '../webhook/webhook-semantic-event-key';
 import { PrismaService } from '../prisma/prisma.service';
+import { PUBLISHER_COMMENT_ACTION } from './publisher-comment-notification.service';
 
 export const PUBLISHER_START_QUEUE = 'publisher-start';
 export const PUBLISHER_START_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -17,13 +18,22 @@ export function isFreshPublisherStart(requestedAt: string): boolean {
   return Number.isFinite(age) && age >= -60_000 && age <= PUBLISHER_START_MAX_AGE_MS;
 }
 
-export type PublisherStartJob = {
-  version: 1 | 2 | 3;
+type PublisherStartTarget = {
   publisherBotId: string;
   privateChatId: string;
   requestedAt: string;
   dispatchStarted?: boolean;
 };
+
+export type PublisherCommentProfileStartJob = PublisherStartTarget & {
+  version: 4;
+  actorUserId: string;
+  signedStartPayload: string;
+};
+
+export type PublisherStartJob =
+  | (PublisherStartTarget & { version: 1 | 2 | 3 })
+  | PublisherCommentProfileStartJob;
 
 @Injectable()
 export class PublisherStartQueueService {
@@ -151,6 +161,13 @@ export class PublisherStartQueueService {
       data: { status: 'ATTEMPTED' },
     });
     return claimed.count === 1;
+  }
+
+  async findProfileComment(commentId: string) {
+    return this.prisma.auditLog.findUnique({
+      where: { id: commentId, action: PUBLISHER_COMMENT_ACTION },
+      select: { actorUserId: true, payload: true },
+    });
   }
 
   async completeIntent(id: string, status: 'SENT' | 'UNKNOWN'): Promise<void> {

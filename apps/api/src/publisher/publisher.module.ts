@@ -75,6 +75,7 @@ import {
 } from './publisher-video-upload.queue';
 import { PublisherVideoUploadProcessor } from './publisher-video-upload.processor';
 import { PublisherCommentNotificationService } from './publisher-comment-notification.service';
+import { PublisherCommentProfileService } from './publisher-comment-profile.service';
 
 const publisherRuntimeProviders = roleRunsPublisher(getAppRole())
   ? [
@@ -102,6 +103,7 @@ const sharedPublisherProviders = [
   SuggestionNativeQueueService,
   PublisherAccessRefreshPolicy,
   PublisherCommentNotificationService,
+  PublisherCommentProfileService,
   PublisherBackgroundWorkCoordinatorService,
   PublisherRuntimeHeartbeatReaderService,
   PublisherReadinessService,

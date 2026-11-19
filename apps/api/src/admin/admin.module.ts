@@ -97,6 +97,7 @@ import { AdminSuggestionDeliveryRecoveryService } from './admin-suggestion-deliv
 import { AdminSuperBanProcessor } from './admin-super-ban.processor';
 import { ADMIN_SUPER_BAN_QUEUE } from './admin-super-ban.queue';
 import { AdminDialogController } from './admin-dialog.controller';
+import { PublisherCommentAuthorProfileController } from './publisher-comment-author-profile.controller';
 import { AdminGiveawayController } from './admin-giveaway.controller';
 import { AdminManualModerationController } from './admin-manual-moderation.controller';
 import { AdminPollController } from './admin-poll.controller';
@@ -277,6 +278,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     PublisherVkParsingController,
     PublisherVkBotReviewController,
     AdminDialogController,
+    PublisherCommentAuthorProfileController,
     CommentModerationController,
     AdminGiveawayController,
     AdminPollController,

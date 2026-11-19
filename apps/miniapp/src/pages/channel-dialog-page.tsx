@@ -70,7 +70,10 @@ import {
   commentModerationKey,
   getCommentModerationState,
 } from '../lib/api/comment-moderation-client';
-import { commentRestrictionLabel } from '../lib/comment-restriction';
+import {
+  commentRestrictionLabel,
+  describeCommentRestrictionError,
+} from '../lib/comment-restriction';
 import type { CommentModerationTarget } from '../components/comment-moderation-sheet';
 import { formatDialogAttachmentSize } from '../lib/dialog-attachment-size';
 import type { PreparedCommentDialogAttachment } from '../lib/dialog-attachments';
@@ -1151,6 +1154,8 @@ type SwipeReplyGesture = {
 
 type CommentDraftAttachment = PreparedCommentDialogAttachment;
 
+type CommentAuthorProfileHandoff = { messageId: string } | { userId: string; displayName: string };
+
 type PreparingAttachmentState = {
   kind: AttachmentInputKind;
   total: number;
@@ -1318,8 +1323,9 @@ export function ChannelDialogPage({
     !(dialogQuery.error && isTerminalDialogApiMessage(normalizeApiError(dialogQuery.error)));
 
   const moderationContext = { api, profile, entityType, chatId, token };
+  const moderationQueryKey = commentModerationKey(moderationContext);
   const moderationQuery = useQuery({
-    queryKey: commentModerationKey(moderationContext),
+    queryKey: moderationQueryKey,
     queryFn: ({ signal }) => getCommentModerationState(moderationContext, signal),
     enabled: shouldLoadDialog && dialogType === 'comments' && dialogQuery.isSuccess,
     retry: false,
@@ -2739,6 +2745,18 @@ export function ChannelDialogPage({
     };
   };
 
+  const showCommentWriteError = (error: unknown, fallback: string) => {
+    const restrictionMessage =
+      dialogType === 'comments' ? describeCommentRestrictionError(error) : null;
+    if (restrictionMessage) {
+      void queryClient.invalidateQueries({ queryKey: moderationQueryKey, exact: true });
+    }
+    pushToast({
+      tone: 'danger',
+      title: restrictionMessage ?? describeUserFacingError(error, fallback),
+    });
+  };
+
   const sendMutation = useMutation({
     mutationFn: (payload: { text: string; attachments: CommentDraftAttachment[] }) =>
       entityType === 'channel'
@@ -2768,15 +2786,12 @@ export function ChannelDialogPage({
       });
     },
     onError: (error) => {
-      pushToast({
-        tone: 'danger',
-        title: describeUserFacingError(
-          error,
-          dialogType === 'suggest'
-            ? 'Не удалось отправить предложение'
-            : 'Не удалось отправить комментарий',
-        ),
-      });
+      showCommentWriteError(
+        error,
+        dialogType === 'suggest'
+          ? 'Не удалось отправить предложение'
+          : 'Не удалось отправить комментарий',
+      );
     },
   });
 
@@ -2803,10 +2818,7 @@ export function ChannelDialogPage({
       });
     },
     onError: (error) => {
-      pushToast({
-        tone: 'danger',
-        title: describeUserFacingError(error, 'Не удалось обновить комментарий'),
-      });
+      showCommentWriteError(error, 'Не удалось обновить комментарий');
     },
   });
 
@@ -2873,10 +2885,7 @@ export function ChannelDialogPage({
       if (context?.previousDialog) {
         queryClient.setQueryData(dialogQueryKey, context.previousDialog);
       }
-      pushToast({
-        tone: 'danger',
-        title: describeUserFacingError(error, 'Не удалось сохранить реакцию'),
-      });
+      showCommentWriteError(error, 'Не удалось сохранить реакцию');
     },
     onSettled: () => {
       void queryClient.invalidateQueries({
@@ -2885,10 +2894,14 @@ export function ChannelDialogPage({
     },
   });
   const profileHandoffMutation = useMutation({
-    mutationFn: async ({ userId, displayName }: { userId: string; displayName: string }) => {
-      const { handoffEntityMemberProfile } =
+    mutationFn: async (target: CommentAuthorProfileHandoff) => {
+      const { handoffPublisherCommentAuthorProfile, handoffEntityMemberProfile } =
         await import('../lib/api/member-profile-handoff-client');
-      return handoffEntityMemberProfile(api, entityType, chatId, userId, { displayName });
+      return 'messageId' in target
+        ? handoffPublisherCommentAuthorProfile(api, entityType, chatId, target.messageId, token)
+        : handoffEntityMemberProfile(api, entityType, chatId, target.userId, {
+            displayName: target.displayName,
+          });
     },
     onSuccess: (result) => {
       if (!openMaxBotLinkAndClose(result.botUrl)) {
@@ -3272,22 +3285,22 @@ export function ChannelDialogPage({
   };
 
   const handleAuthorProfileActivate = (message: ChannelDialogMessage) => {
-    if (dialogType !== 'comments' || profileHandoffMutation.isPending) {
+    if (dialogType !== 'comments' || !chatId || profileHandoffMutation.isPending) {
       return;
     }
 
-    const normalizedUserId = message.authorUserId.trim();
-    if (!normalizedUserId || !chatId) {
+    const userId = message.authorUserId.trim();
+    if (!userId || (profile === 'publisher' && !token)) {
       return;
     }
 
-    const displayName = getAuthorLabel(message).trim() || 'Пользователь';
     maxImpact('soft');
     dismissMessageActions();
-    profileHandoffMutation.mutate({
-      userId: normalizedUserId,
-      displayName,
-    });
+    profileHandoffMutation.mutate(
+      profile === 'publisher'
+        ? { messageId: message.id }
+        : { userId, displayName: getAuthorLabel(message).trim() || 'Пользователь' },
+    );
   };
 
   const scrollToMessage = (

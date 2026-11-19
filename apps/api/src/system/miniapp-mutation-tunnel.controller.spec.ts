@@ -63,6 +63,36 @@ describe('MiniappMutationTunnelController', () => {
     controller.onModuleDestroy();
   });
 
+  it('forwards author profile handoffs only for comments', async () => {
+    const controller = new MiniappMutationTunnelController();
+    const fetch = jest.fn<ReturnType<typeof global.fetch>, Parameters<typeof global.fetch>>();
+    global.fetch = fetch;
+    try {
+      const suffix = '/messages/example-comment/profile/handoff';
+      const auth = 'InitData auth_date=1&hash=test';
+      for (const target of ['/channels/-10', '/chats/-20']) {
+        fetch.mockResolvedValueOnce(new Response('{}'));
+        await controller.tunnel(
+          { method: 'POST', path: `${target}/dialog/comments${suffix}` },
+          auth,
+          TEST_USER,
+          createReply() as never,
+        );
+      }
+      await expect(
+        controller.tunnel(
+          { method: 'POST', path: `/channels/-10/dialog/suggest${suffix}` },
+          auth,
+          TEST_USER,
+          createReply() as never,
+        ),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.onModuleDestroy();
+    }
+  });
+
   it('allows only the exact source-free network metadata POST paths', async () => {
     const controller = new MiniappMutationTunnelController();
     global.fetch = jest

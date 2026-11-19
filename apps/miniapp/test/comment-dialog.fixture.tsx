@@ -7,16 +7,23 @@ import { ChannelDialogPage } from '../src/pages/channel-dialog-page';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
 import { bindMaxBackButton, syncMaxNativeEnvironment } from '../src/lib/max-bridge';
 import { runNativeBackHandlers } from '../src/lib/native-back';
+import { buildApiErrorMessage } from '../src/lib/api-error';
+import { createApiRequestError } from '../src/lib/api-request-error';
 import type {
   ChannelDialogMessage,
   ChannelDialogResponse,
+  CommentRestriction,
   DeleteChannelDialogMessageResponse,
   ToggleChannelDialogReactionResponse,
 } from '@maxim/contracts/channel-dialog';
 import type { ApiTransport } from '../src/lib/api/transport';
 
 const preview = createPreviewApiTransport();
-const route = '/channels/preview-channel/dialog/comments';
+const params = new URLSearchParams(location.search);
+const profile = params.get('profile') === 'publisher' ? 'publisher' : 'moderation';
+const entityType = params.get('entity') === 'chat' ? 'chat' : 'channel';
+const chatId = `preview-${entityType}`;
+const route = `/${entityType === 'channel' ? 'channels' : 'chats'}/${chatId}/dialog/comments`;
 const token = 'preview-comments-token-0001';
 const initial = await preview.request<ChannelDialogResponse>(`${route}?token=${token}`);
 const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -39,20 +46,23 @@ let pendingSend: { resolve: () => void; reject: (error: Error) => void } | null 
 let holdSend = false;
 let holdDelete = false;
 let pendingDelete: { resolve: () => void; reject: (error: Error) => void } | null = null;
-const profileRequests: string[] = [];
+const profileRequests: { path: string; body: unknown }[] = [];
 const deleteRequests: { id: string; token: string | null }[] = [];
 let failNotificationSave = false;
-const profile =
-  new URLSearchParams(location.search).get('profile') === 'publisher' ? 'publisher' : 'moderation';
+let restriction: CommentRestriction | null = null;
+let restrictOnNextSend = false;
 const api: ApiTransport = {
   ...preview,
   async request(path, init = {}) {
-    if (path.startsWith(route) && (!init.method || init.method === 'GET')) {
-      return structuredClone(data) as never;
+    if (path.startsWith(`${route}/moderation?`) && restriction) {
+      return { canManage: false, restriction };
+    }
+    if (path.startsWith(`${route}?`) && (!init.method || init.method === 'GET')) {
+      return structuredClone(data);
     }
     const payload = JSON.parse(String(init.body ?? '{}'));
     if (path.endsWith('/profile/handoff') && init.method === 'POST') {
-      profileRequests.push(path);
+      profileRequests.push({ path, body: payload });
       return { botUrl: 'https://max.ru/synthetic_profile_bot?start=profile' } as never;
     }
     if (path.endsWith('/notifications') && init.method === 'PUT') {
@@ -85,6 +95,23 @@ const api: ApiTransport = {
       return { ok: true, notificationSettings: settings } as never;
     }
     if (path.endsWith('/messages') && init.method === 'POST') {
+      if (restrictOnNextSend) {
+        restrictOnNextSend = false;
+        restriction = {
+          userId: 'preview-admin',
+          displayName: null,
+          kind: 'BAN',
+          expiresAt: null,
+          reason: 'Нарушение правил обсуждения',
+          revision: 1,
+        };
+        const response = JSON.stringify({
+          code: 'COMMENT_RESTRICTED',
+          message: 'Вы заблокированы в комментариях этого сообщества.',
+          restriction,
+        });
+        throw createApiRequestError(403, response, buildApiErrorMessage(403, response));
+      }
       if (holdSend) {
         await new Promise<void>((resolve, reject) => {
           pendingSend = { resolve, reject };
@@ -147,6 +174,9 @@ Object.assign(window, {
   commentTest: {
     deleteRequests,
     profileRequests,
+    restrictOnNextSend() {
+      restrictOnNextSend = true;
+    },
     holdDelete() {
       holdDelete = true;
     },
@@ -204,12 +234,12 @@ function renderFixture(userId = 'preview-admin') {
   root.render(
     <QueryClientProvider client={client}>
       <ToastProvider>
-        <MemoryRouter initialEntries={[`/channel/preview-channel/dialog/comments?token=${token}`]}>
+        <MemoryRouter initialEntries={[`/${entityType}/${chatId}/dialog/comments?token=${token}`]}>
           <div className="app-shell app-shell--no-topbar app-shell--immersive app-shell--comments-dialog">
             <div className="shell-content">
               <Routes>
                 <Route
-                  path="/channel/:chatId/dialog/comments"
+                  path={`/${entityType}/:chatId/dialog/comments`}
                   element={<ChannelDialogPage api={api} profile={profile} userId={userId} />}
                 />
               </Routes>

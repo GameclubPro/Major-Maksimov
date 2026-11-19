@@ -6,6 +6,7 @@ import { PublisherAutoReplyAuthoringService } from './publisher-auto-reply-autho
 import { PublisherPostImportService } from './publisher-post-import.service';
 import { PublisherSuggestionAdminCallbackObserverService } from './publisher-suggestion-admin-callback-observer.service';
 import { PublisherStartQueueService } from './publisher-start.queue';
+import { PublisherCommentProfileService } from './publisher-comment-profile.service';
 
 @Injectable()
 export class PublisherPrivateDialogFlowRouterService {
@@ -16,6 +17,7 @@ export class PublisherPrivateDialogFlowRouterService {
     private readonly start: PublisherStartQueueService,
     @Optional() private readonly vkReview?: PublisherVkBotReviewQueueService,
     @Optional() private readonly nativeReview?: SuggestionNativeQueueService,
+    @Optional() private readonly commentProfile?: PublisherCommentProfileService,
   ) {}
 
   async observeWebhook(
@@ -23,6 +25,7 @@ export class PublisherPrivateDialogFlowRouterService {
     webhookEventId: string | null,
     options: { duplicate?: boolean } = {},
   ): Promise<boolean> {
+    if (await this.commentProfile?.observeWebhook(update)) return true;
     if (await this.nativeReview?.observeWebhook(update)) return true;
     if (await this.vkReview?.observeWebhook(update)) return true;
     if (await this.suggestionAdminCallbacks.observeWebhook(update, webhookEventId, options)) {

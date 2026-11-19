@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPreviewState } from '../src/lib/api/preview-transport-state';
 import { handleDialogPreviewRequest } from '../src/lib/api/preview-transport-dialog';
-import { commentRestrictionLabel } from '../src/lib/comment-restriction';
+import {
+  commentRestrictionLabel,
+  describeCommentRestrictionError,
+} from '../src/lib/comment-restriction';
+import { createApiRequestError } from '../src/lib/api-request-error';
 import { commentModerationKey } from '../src/lib/api/comment-moderation-client';
 import type { CommentRestriction } from '@maxim/contracts/channel-dialog';
 
@@ -77,5 +81,33 @@ test('comment moderation labels and cache identities retain scope', () => {
   assert.notDeepEqual(
     commentModerationKey(context),
     commentModerationKey({ ...context, entityType: 'channel' }),
+  );
+});
+
+test('comment write feedback distinguishes temporary restrictions from unrelated permission errors', () => {
+  const forbidden = 'Недостаточно прав для этого действия.';
+  const restriction = {
+    userId: 'user-1',
+    displayName: null,
+    kind: 'MUTE',
+    expiresAt: '2026-09-16T11:00:00.000Z',
+    reason: '',
+    revision: 1,
+  };
+  assert.equal(
+    describeCommentRestrictionError(
+      createApiRequestError(
+        403,
+        JSON.stringify({ code: 'COMMENT_RESTRICTED', restriction }),
+        forbidden,
+      ),
+    ),
+    'Вам временно запрещено писать комментарии.',
+  );
+  assert.equal(
+    describeCommentRestrictionError(
+      createApiRequestError(403, JSON.stringify({ code: 'MINIAPP_PROFILE_FORBIDDEN' }), forbidden),
+    ),
+    null,
   );
 });

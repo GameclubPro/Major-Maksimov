@@ -4259,7 +4259,7 @@ describe('MaxClientService inline keyboard guardrails', () => {
         requestedAt: new Date().toISOString(),
       };
       const restoredJob = () => {
-        const job = {
+        const job: Pick<Job<PublisherStartJob>, 'id' | 'data' | 'updateData'> = {
           id: 'publisher-start-snapshot-fixture',
           data: { ...original },
           updateData: async (data: PublisherStartJob) => {
