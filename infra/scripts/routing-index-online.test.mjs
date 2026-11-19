@@ -64,7 +64,8 @@ const filesystem = (device, availableBytes) => ({ device, mount: '/', availableB
 
 test('release admission defers only the sole optional migration with exact ordered index proof', () => {
   const pending = { ...snapshot(), orderedIndex: { present: true, exact: true } };
-  const release = { source, supportsOrdered: true };
+  const onlyRoutingPending = source.filter((entry) => entry.name <= ROUTING_INDEX_TARGET.migration);
+  const release = { source: onlyRoutingPending, supportsOrdered: true };
   assert.equal(verifyReleaseRoutingState(pending, release), 'compatible_pending');
   assert.equal(verifyRoutingIndexState(pending, source).state, 'prepare_routing');
   assert.equal(
@@ -84,7 +85,7 @@ test('release admission defers only the sole optional migration with exact order
     verifyReleaseRoutingState(pending, {
       ...release,
       source: [
-        ...source,
+        ...onlyRoutingPending,
         {
           name: '20990101120000_later_migration',
           checksum: 'a'.repeat(64),

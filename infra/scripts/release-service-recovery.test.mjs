@@ -140,13 +140,23 @@ test(
     });
     assert.equal(await firstLine(child), 'ready');
     const executor = readLiveIdentity(child.pid);
-    assert.throws(() => assertExecutorStopped(executor), { code: 'EXECUTOR_STILL_PRESENT' });
+    // This test owns one process. Keep its real stat and the kernel process-group check.
+    const options = {
+      fileSystem: {
+        readFileSync: fs.readFileSync,
+        readdirSync: (directory) =>
+          fs.readdirSync(directory).filter((name) => name === String(child.pid)),
+      },
+    };
+    assert.throws(() => assertExecutorStopped(executor, options), {
+      code: 'EXECUTOR_STILL_PRESENT',
+    });
     killOwnedGroup(child.pid);
     assert.deepEqual(await bounded(exited, 'Detached test executor did not exit.'), {
       code: null,
       signal: 'SIGKILL',
     });
-    assert.deepEqual(assertExecutorStopped(executor), {
+    assert.deepEqual(assertExecutorStopped(executor, options), {
       bootId: executor.bootId,
       previousBoot: false,
     });

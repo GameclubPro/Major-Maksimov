@@ -54,6 +54,7 @@ native('managed giveaway due nomination on PostgreSQL and Redis', () => {
     'managed_giveaway_entries',
     'managed_giveaway_winners',
     'managed_giveaway_winner_notifications',
+    'managed_giveaway_results_sync',
     'managed_entity_access_edges',
     'chat_bot_memberships',
   ] as const;

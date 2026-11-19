@@ -1,3 +1,4 @@
+import { DiagnosticTimeline } from './safety-desk-ui';
 import type { SafetyDeskDeleteEvidenceResponse } from '@maxim/contracts/safety-desk';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AdminApiError } from './api-response';
@@ -104,28 +105,15 @@ export function DeleteEvidence({ intentId }: { intentId: string }) {
           <p>
             <strong>{deletionLabels[snapshot.deletion.outcome]}</strong>
           </p>
-          <dl className="delete-timeline">
-            <div>
-              <dt>Снимок подтверждений</dt>
-              <dd>{time(snapshot.observedAt)}</dd>
-            </div>
-            <div>
-              <dt>Удаление принято</dt>
-              <dd>{time(snapshot.deletion.createdAt)}</dd>
-            </div>
-            <div>
-              <dt>Первое исполнение</dt>
-              <dd>{time(snapshot.deletion.firstAttemptAt)}</dd>
-            </div>
-            <div>
-              <dt>Ответ MAX / проверка отсутствия</dt>
-              <dd>{time(snapshot.deletion.acknowledgedAt)}</dd>
-            </div>
-            <div>
-              <dt>Завершение сохранено</dt>
-              <dd>{time(snapshot.deletion.completedAt)}</dd>
-            </div>
-          </dl>
+          <DiagnosticTimeline
+            rows={[
+              ['Снимок подтверждений', time(snapshot.observedAt)],
+              ['Удаление принято', time(snapshot.deletion.createdAt)],
+              ['Первое исполнение', time(snapshot.deletion.firstAttemptAt)],
+              ['Ответ MAX / проверка отсутствия', time(snapshot.deletion.acknowledgedAt)],
+              ['Завершение сохранено', time(snapshot.deletion.completedAt)],
+            ]}
+          />
           <p>
             {snapshot.originCoverage === 'partial'
               ? 'Для части причин сохранена связь с исходным событием. Каждая связь проверяется отдельно.'

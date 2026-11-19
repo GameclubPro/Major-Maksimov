@@ -615,6 +615,11 @@ ROLLBACK_API_IMAGE="maxim-api:runtime-rollback-${TARGET_FULL_SHA}"
 echo "Runtime rollback: $CURRENT_HEAD -> $TARGET_HEAD"
 echo "Services: ${SERVICES[*]}"
 ensure_rollback_migrations_compatible
+if ! giveaway_migration_receipts="$(read_applied_prisma_migrations)"; then
+  echo "Could not read applied Prisma migrations for giveaway compatibility; refusing runtime rollback." >&2
+  exit 1
+fi
+maxim_topology_require_giveaway_state_reader "$TARGET_FULL_SHA" <<<"$giveaway_migration_receipts" || exit 1
 maxim_check_deploy_disk_capacity 1 0
 require_market_statistics_lock_dispatch "$TARGET_FULL_SHA" || exit 1
 require_pair_release_admission_dispatch "$TARGET_FULL_SHA" || exit 1

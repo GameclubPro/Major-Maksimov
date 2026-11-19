@@ -19,6 +19,13 @@ import {
   type ManagedGiveawayDueRow,
 } from './managed-giveaway-due-selection';
 
+jest.mock('./managed-giveaway-results-sync', () => ({
+  ...jest.requireActual<typeof import('./managed-giveaway-results-sync')>(
+    './managed-giveaway-results-sync',
+  ),
+  MANAGED_GIVEAWAY_RESULTS_SYNC_ACTIVATED: true,
+}));
+
 function createConfigMock(options: { token?: string; previousToken?: string } = {}) {
   return {
     get: jest.fn((key: string) => {
@@ -69,6 +76,14 @@ function createPrismaMock() {
       create: jest.fn(),
       createMany: jest.fn(),
     },
+    managedGiveawayResultsSync: {
+      upsert: jest.fn().mockResolvedValue({}),
+      findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest
+        .fn()
+        .mockResolvedValue({ revision: 1, attempts: 0, nextAttemptAt: new Date(0) }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
     managedGiveawayWinnerNotification: {
       create: jest.fn(),
       createMany: jest.fn(),
@@ -89,10 +104,16 @@ function createPrismaMock() {
       create: jest.fn().mockResolvedValue(undefined),
     },
     $transaction: jest.fn(),
+    $executeRaw: jest.fn().mockResolvedValue(1),
     $queryRaw: jest.fn() as jest.MockedFunction<Prisma.TransactionClient['$queryRaw']>,
   };
   prisma.$transaction.mockImplementation(async (callback) => callback(prisma));
-  prisma.$queryRaw.mockResolvedValue([]);
+  prisma.$queryRaw.mockImplementation(((query: TemplateStringsArray | Prisma.Sql) =>
+    Promise.resolve(
+      ('strings' in query ? query.strings : query).join('').includes('AS "dispatchedAt"')
+        ? [{ dispatchedAt: new Date() }]
+        : [],
+    )) as Prisma.TransactionClient['$queryRaw']);
   return prisma;
 }
 
@@ -266,6 +287,7 @@ function createChatContextCacheMock(
 
 function createGiveaway(overrides: Record<string, unknown> = {}) {
   return {
+    draftRevision: 1,
     id: 'giveaway-1',
     sourceChatId: 'source-1',
     entityType: ChatEntityType.CHANNEL,
@@ -300,6 +322,11 @@ function createGiveaway(overrides: Record<string, unknown> = {}) {
     entries: [],
     winners: [],
     ...overrides,
+    _count: {
+      entries: Array.isArray(overrides.entries)
+        ? overrides.entries.filter((entry) => entry.eligibilityState !== 'REJECTED').length
+        : 0,
+    },
   };
 }
 
@@ -445,6 +472,30 @@ describe('ManagedGiveawayService', () => {
     jest.useRealTimers();
   });
 
+  it('rejects publication for a stale or absent draft version before sending', async () => {
+    const prisma = createPrismaMock();
+    const max = createMaxClientMock();
+    const service = new ManagedGiveawayService(
+      prisma as never,
+      max as never,
+      {} as never,
+      {} as never,
+      createConfigMock() as never,
+    );
+    jest.spyOn(service as any, 'assertAdminEntityAccess').mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'findGiveawayForSource')
+      .mockResolvedValue(createGiveaway({ status: 'DRAFT', draftRevision: 2 }));
+    const user = { userId: 'admin', username: null, displayName: null };
+    for (const body of [undefined, { expectedRevision: 1 }]) {
+      await expect(
+        service.publishManagedGiveaway('source-1', 'giveaway-1', user, 'channel', 'miniapp', body),
+      ).rejects.toBeInstanceOf(ConflictException);
+    }
+    expect(prisma.managedGiveaway.updateMany).not.toHaveBeenCalled();
+    expect(max.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
+  });
+
   it('serializes the empty-current-giveaway check with creation', async () => {
     const prisma = createPrismaMock();
     const service = new ManagedGiveawayService(
@@ -517,7 +568,9 @@ describe('ManagedGiveawayService', () => {
       createGiveaway({ status: 'DRAFT', endsAt: new Date(Date.now() - 1) }),
     );
     await expect(
-      service.publishManagedGiveaway('source-1', 'giveaway-1', user, 'channel'),
+      service.publishManagedGiveaway('source-1', 'giveaway-1', user, 'channel', 'miniapp', {
+        expectedRevision: 1,
+      }),
     ).rejects.toThrow('Время завершения уже прошло');
     expect(prisma.managedGiveaway.updateMany).not.toHaveBeenCalled();
     expect(maxClient.sendMessageImmediateWithResolvedLink).not.toHaveBeenCalled();
@@ -533,7 +586,7 @@ describe('ManagedGiveawayService', () => {
       createConfigMock() as never,
     );
     const giveaway = createGiveaway({ endsAt: new Date(Date.now() + 60_000) });
-    jest.spyOn(service as any, 'findPublicGiveawayById').mockResolvedValue(giveaway);
+    prisma.managedGiveaway.findUnique.mockResolvedValue(giveaway);
     jest.spyOn(service as any, 'upsertParticipantChatAccess').mockResolvedValue(undefined);
     jest
       .spyOn(service as any, 'evaluateGiveawayEligibility')
@@ -570,7 +623,7 @@ describe('ManagedGiveawayService', () => {
       createConfigMock() as never,
     );
     const giveaway = createGiveaway({ endsAt: new Date('2026-09-11T10:00:01Z') });
-    jest.spyOn(service as any, 'findPublicGiveawayById').mockResolvedValue(giveaway);
+    prisma.managedGiveaway.findUnique.mockResolvedValue(giveaway);
     jest.spyOn(service as any, 'upsertParticipantChatAccess').mockResolvedValue(undefined);
     jest
       .spyOn(service as any, 'evaluateGiveawayEligibility')
@@ -636,9 +689,12 @@ describe('ManagedGiveawayService', () => {
       prizes: [createPrize()],
     });
     jest.spyOn(service as any, 'findGiveawayById').mockResolvedValue(giveaway);
-    jest
-      .spyOn(service as any, 'claimGiveawayForDraw')
-      .mockResolvedValue({ status: 'claimed', giveaway, drawSeed: 'lease-seed' });
+    jest.spyOn(service as any, 'claimGiveawayForDraw').mockResolvedValue({
+      status: 'claimed',
+      giveaway,
+      drawSeed: 'lease-seed',
+      leaseAt: giveaway.lockedAt,
+    });
     jest
       .spyOn(service as any, 'evaluateGiveawayEligibilityForDraw')
       .mockResolvedValue(
@@ -662,6 +718,35 @@ describe('ManagedGiveawayService', () => {
     });
   });
 
+  it('rejects a draw that reloads another worker’s lease after its initial acquisition', async () => {
+    const prisma = createPrismaMock();
+    const service = new ManagedGiveawayService(
+      prisma as never,
+      createMaxClientMock() as never,
+      {} as never,
+      {} as never,
+      createConfigMock() as never,
+    );
+    const active = createGiveaway({ status: 'ACTIVE', drawSeed: 'seed' });
+    const successor = createGiveaway({
+      ...active,
+      status: 'DRAWING',
+      lockedAt: new Date(Date.now() + 61_000),
+    });
+    const draw = service as unknown as {
+      findGiveawayById(id: string): Promise<typeof active>;
+      drawGiveaway(id: string, source: 'runner'): Promise<typeof active>;
+    };
+    jest
+      .spyOn(draw, 'findGiveawayById')
+      .mockResolvedValueOnce(active)
+      .mockResolvedValueOnce(successor);
+    prisma.managedGiveaway.updateMany.mockResolvedValue({ count: 1 });
+    await expect(draw.drawGiveaway(active.id, 'runner')).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.managedGiveaway.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it('starts the claim window after the membership scan, not when draw begins', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-09-11T10:00:00Z'));
     const prisma = createPrismaMock();
@@ -682,9 +767,12 @@ describe('ManagedGiveawayService', () => {
       claimHours: 1,
     });
     jest.spyOn(service as any, 'findGiveawayById').mockResolvedValue(giveaway);
-    jest
-      .spyOn(service as any, 'claimGiveawayForDraw')
-      .mockResolvedValue({ status: 'claimed', giveaway, drawSeed: 'seed' });
+    jest.spyOn(service as any, 'claimGiveawayForDraw').mockResolvedValue({
+      status: 'claimed',
+      giveaway,
+      drawSeed: 'seed',
+      leaseAt: giveaway.lockedAt,
+    });
     jest
       .spyOn(service as any, 'evaluateGiveawayEligibilityForDraw')
       .mockImplementation(async () => {
@@ -707,284 +795,24 @@ describe('ManagedGiveawayService', () => {
     });
   });
 
-  it('deletes published giveaway messages with their persisted author bots before removing the giveaway', async () => {
+  it('archives a finished giveaway without deleting remote posts or participant history', async () => {
     const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
+    const max = createMaxClientMock();
     const service = new ManagedGiveawayService(
       prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
+      max as never,
+      {} as never,
       { getChannelSettings: jest.fn().mockResolvedValue({}) } as never,
       createConfigMock() as never,
     );
-
-    prisma.managedGiveaway.findFirst.mockResolvedValue(
-      createGiveaway({
-        status: ManagedGiveawayStatus.COMPLETED,
-        publicationMessageId: 'publication-1',
-        publicationBotId: 'publication-author-bot',
-        resultsMessageId: 'results-1',
-        resultsBotId: 'results-author-bot',
-      }),
-    );
-    prisma.managedGiveaway.delete.mockResolvedValue(createGiveaway());
-    maxClient.deleteMessage.mockResolvedValue(undefined);
-
-    await service.deleteManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
-
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      1,
-      'source-1',
-      'publication-1',
-      expectManagedGiveawaySendOptions({
-        immediate: true,
-        botId: 'publication-author-bot',
-      }),
-    );
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      2,
-      'source-1',
-      'results-1',
-      expectManagedGiveawaySendOptions({
-        immediate: true,
-        botId: 'results-author-bot',
-      }),
-    );
-    expect(prisma.managedGiveaway.delete).toHaveBeenCalledWith({
-      where: { id: 'giveaway-1' },
+    prisma.$queryRaw.mockResolvedValueOnce([{ id: 'giveaway-1' }]);
+    await service.deleteManagedGiveaway('source-1', 'giveaway-1', user, 'channel');
+    expect(prisma.managedGiveaway.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'giveaway-1', lockedAt: null }),
+      data: { archivedAt: expect.any(Date) },
     });
-    expect(prisma.auditLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          action: 'DELETE_GIVEAWAY',
-        }),
-      }),
-    );
-  });
-
-  it('routes legacy giveaway message deletes through explicit delete-capable bots', async () => {
-    const deleteAttemptStartedAt = new Date('2026-08-20T12:00:00.123Z');
-    jest.useFakeTimers().setSystemTime(deleteAttemptStartedAt);
-
-    const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
-    const maxBotLinkService = createMaxBotLinkMock();
-    const managedEntityAccessLossService = createManagedEntityAccessLossMock();
-    const deleteError = createMaxApiError(403, 'Forbidden', 'chat.denied');
-    const service = new ManagedGiveawayService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
-      { getChannelSettings: jest.fn().mockResolvedValue({}) } as never,
-      createConfigMock() as never,
-      undefined,
-      maxBotLinkService as never,
-      managedEntityAccessLossService as never,
-    );
-
-    prisma.managedGiveaway.findFirst.mockResolvedValue(
-      createGiveaway({
-        status: ManagedGiveawayStatus.COMPLETED,
-        publicationMessageId: 'legacy-publication-1',
-        publicationBotId: null,
-        resultsMessageId: 'legacy-results-1',
-        resultsBotId: null,
-      }),
-    );
-    maxBotLinkService.resolveBotIdForModerationAction
-      .mockResolvedValueOnce('publication-delete-bot')
-      .mockResolvedValueOnce('results-delete-bot')
-      .mockResolvedValueOnce('results-delete-bot');
-    maxClient.deleteMessage.mockResolvedValueOnce(undefined).mockRejectedValueOnce(deleteError);
-
-    await expect(
-      service.deleteManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
-    ).rejects.toThrow(BadRequestException);
-
-    expect(maxBotLinkService.resolveBotIdForModerationAction).toHaveBeenNthCalledWith(1, {
-      chatId: 'source-1',
-      action: 'delete_message',
-      fallbackToPrimary: true,
-    });
-    expect(maxBotLinkService.resolveBotIdForModerationAction).toHaveBeenNthCalledWith(2, {
-      chatId: 'source-1',
-      action: 'delete_message',
-      fallbackToPrimary: true,
-    });
-    expect(maxBotLinkService.resolveBotIdForModerationAction).toHaveBeenNthCalledWith(3, {
-      chatId: 'source-1',
-      action: 'delete_message',
-      fallbackToPrimary: true,
-    });
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      1,
-      'source-1',
-      'legacy-publication-1',
-      expectManagedGiveawaySendOptions({ immediate: true, botId: 'publication-delete-bot' }),
-    );
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      2,
-      'source-1',
-      'legacy-results-1',
-      expectManagedGiveawaySendOptions({ immediate: true, botId: 'results-delete-bot' }),
-    );
-    expect(managedEntityAccessLossService.recordIfManagedEntityAccessLost).toHaveBeenCalledWith({
-      chatId: 'source-1',
-      botId: 'results-delete-bot',
-      entityType: ChatEntityType.CHANNEL,
-      source: 'managed_giveaway:results:delete',
-      operation: 'delete',
-      error: deleteError,
-      lifecycleEventAt: deleteAttemptStartedAt,
-      lifecycleEventType: 'live_probe',
-      lifecycleSource: 'live_probe',
-    });
+    expect(max.deleteMessage).not.toHaveBeenCalled();
     expect(prisma.managedGiveaway.delete).not.toHaveBeenCalled();
-  });
-
-  it('retries a persisted giveaway message delete through a survivor after terminal origin loss', async () => {
-    const deleteAttemptStartedAt = new Date('2026-08-20T12:00:00.123Z');
-    jest.useFakeTimers().setSystemTime(deleteAttemptStartedAt);
-    const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
-    const maxBotLinkService = createMaxBotLinkMock();
-    const managedEntityAccessLossService = createManagedEntityAccessLossMock();
-    const terminalError = createMaxApiError(403, 'Forbidden', 'chat.denied');
-    const service = new ManagedGiveawayService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
-      { getChannelSettings: jest.fn().mockResolvedValue({}) } as never,
-      createConfigMock() as never,
-      undefined,
-      maxBotLinkService as never,
-      managedEntityAccessLossService as never,
-    );
-
-    prisma.managedGiveaway.findFirst.mockResolvedValue(
-      createGiveaway({
-        status: ManagedGiveawayStatus.COMPLETED,
-        publicationMessageId: 'publication-1',
-        publicationBotId: 'origin-bot',
-      }),
-    );
-    prisma.managedGiveaway.delete.mockResolvedValue(createGiveaway());
-    maxClient.deleteMessage.mockRejectedValueOnce(terminalError).mockResolvedValueOnce(undefined);
-    maxBotLinkService.resolveBotIdForModerationAction.mockResolvedValueOnce('survivor-bot');
-
-    await service.deleteManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
-
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      1,
-      'source-1',
-      'publication-1',
-      expectManagedGiveawaySendOptions({ immediate: true, botId: 'origin-bot' }),
-    );
-    expect(maxClient.deleteMessage).toHaveBeenNthCalledWith(
-      2,
-      'source-1',
-      'publication-1',
-      expectManagedGiveawaySendOptions({ immediate: true, botId: 'survivor-bot' }),
-    );
-    expect(managedEntityAccessLossService.recordIfManagedEntityAccessLost).toHaveBeenCalledWith({
-      chatId: 'source-1',
-      botId: 'origin-bot',
-      entityType: ChatEntityType.CHANNEL,
-      source: 'managed_giveaway:publication:delete',
-      operation: 'delete',
-      error: terminalError,
-      lifecycleEventAt: deleteAttemptStartedAt,
-      lifecycleEventType: 'live_probe',
-      lifecycleSource: 'live_probe',
-    });
-    expect(maxBotLinkService.resolveBotIdForModerationAction).toHaveBeenCalledWith({
-      chatId: 'source-1',
-      action: 'delete_message',
-      fallbackToPrimary: true,
-    });
-    expect(prisma.managedGiveaway.delete).toHaveBeenCalledWith({
-      where: { id: 'giveaway-1' },
-    });
-  });
-
-  it('keeps survivor route lookup failures inside the managed giveaway delete error boundary', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
-    const maxBotLinkService = createMaxBotLinkMock();
-    const managedEntityAccessLossService = createManagedEntityAccessLossMock();
-    const terminalError = createMaxApiError(403, 'Forbidden', 'chat.denied');
-    const survivorLookupError = new Error('route database unavailable');
-    const service = new ManagedGiveawayService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
-      { getChannelSettings: jest.fn().mockResolvedValue({}) } as never,
-      createConfigMock() as never,
-      undefined,
-      maxBotLinkService as never,
-      managedEntityAccessLossService as never,
-    );
-    const warnSpy = jest.spyOn((service as any).logger, 'warn');
-
-    prisma.managedGiveaway.findFirst.mockResolvedValue(
-      createGiveaway({
-        status: ManagedGiveawayStatus.COMPLETED,
-        publicationMessageId: 'publication-1',
-        publicationBotId: 'origin-bot',
-      }),
-    );
-    maxClient.deleteMessage.mockRejectedValueOnce(terminalError);
-    maxBotLinkService.resolveBotIdForModerationAction.mockRejectedValueOnce(survivorLookupError);
-
-    await expect(
-      service.deleteManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
-    ).rejects.toThrow(BadRequestException);
-
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        giveawayId: 'giveaway-1',
-        messageId: 'publication-1',
-        botId: 'origin-bot',
-        err: survivorLookupError.message,
-      }),
-      'Failed to resolve a survivor bot for managed giveaway message delete',
-    );
-    expect(prisma.managedGiveaway.delete).not.toHaveBeenCalled();
-  });
-
-  it('treats already missing giveaway publication messages as deleted', async () => {
-    const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
-    const managedEntityAccessLossService = createManagedEntityAccessLossMock();
-    const service = new ManagedGiveawayService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
-      { getChannelSettings: jest.fn().mockResolvedValue({}) } as never,
-      createConfigMock() as never,
-      undefined,
-      undefined,
-      managedEntityAccessLossService as never,
-    );
-
-    prisma.managedGiveaway.findFirst.mockResolvedValue(
-      createGiveaway({
-        status: ManagedGiveawayStatus.CANCELED,
-        publicationMessageId: 'publication-missing-1',
-        publicationBotId: 'publication-author-bot',
-      }),
-    );
-    prisma.managedGiveaway.delete.mockResolvedValue(createGiveaway());
-    maxClient.deleteMessage.mockRejectedValueOnce(
-      createMaxApiError(404, 'message not found', 'message.not.found'),
-    );
-
-    await service.deleteManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
-
-    expect(prisma.managedGiveaway.delete).toHaveBeenCalledWith({
-      where: { id: 'giveaway-1' },
-    });
-    expect(managedEntityAccessLossService.recordIfManagedEntityAccessLost).not.toHaveBeenCalled();
   });
 
   it('stores repeated prize titles as unique winner slots', async () => {
@@ -1303,7 +1131,7 @@ describe('ManagedGiveawayService', () => {
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
-  it('refreshes publication button with the current participants count after enter', async () => {
+  it('does not edit the published post again when participation is saved', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-21T10:12:00.000Z'));
 
     const prisma = createPrismaMock();
@@ -1341,15 +1169,7 @@ describe('ManagedGiveawayService', () => {
 
     await service.enterGiveaway('giveaway-1', user);
 
-    expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
-      'source-1',
-      'publication-1',
-      null,
-      expect.objectContaining({
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 1' })]],
-      }),
-      expectManagedGiveawaySendOptions(),
-    );
+    expect(maxClient.editMessageInlineKeyboard).not.toHaveBeenCalled();
   });
 
   it('uses the persisted publication bot when refreshing an existing giveaway post', async () => {
@@ -1393,64 +1213,18 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveawayEntry.upsert.mockResolvedValue(savedEntry);
     maxClient.hasChatMember.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
 
-    await service.enterGiveaway('giveaway-1', user);
+    jest.spyOn(service as any, 'assertAdminEntityAccess').mockResolvedValue(undefined);
+    prisma.managedGiveaway.findFirst.mockResolvedValue(latest);
+    await service.refreshManagedGiveawayPublication('source-1', 'giveaway-1', user, 'channel');
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
       'source-1',
       'publication-1',
       null,
       expect.objectContaining({
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 1' })]],
+        buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
       }),
       expectManagedGiveawaySendOptions({ botId: 'publication-author-bot' }),
-    );
-  });
-
-  it('does not count rejected entries in the published giveaway button', async () => {
-    jest.useFakeTimers().setSystemTime(new Date('2026-03-21T10:12:30.000Z'));
-
-    const prisma = createPrismaMock();
-    const maxClient = createMaxClientMock();
-    const service = new ManagedGiveawayService(
-      prisma as never,
-      maxClient as never,
-      { invalidate: jest.fn() } as never,
-      {} as never,
-      createConfigMock() as never,
-    );
-
-    const initial = createGiveaway({
-      description: 'Текст публикации',
-      publicationMessageId: 'publication-1',
-      entries: [],
-    });
-    const savedEntry = createEntry({
-      eligibilityState: GiveawayEligibilityState.REJECTED,
-      missingChannelIds: ['extra-1'],
-    });
-    const latest = createGiveaway({
-      description: 'Текст публикации',
-      publicationMessageId: 'publication-1',
-      entries: [savedEntry],
-    });
-
-    prisma.managedGiveaway.findUnique
-      .mockResolvedValueOnce(initial)
-      .mockResolvedValueOnce(initial)
-      .mockResolvedValueOnce(latest);
-    prisma.managedGiveawayEntry.upsert.mockResolvedValue(savedEntry);
-    maxClient.hasChatMember.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-
-    await service.enterGiveaway('giveaway-1', user);
-
-    expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
-      'source-1',
-      'publication-1',
-      null,
-      expect.objectContaining({
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 0' })]],
-      }),
-      expectManagedGiveawaySendOptions(),
     );
   });
 
@@ -1490,7 +1264,9 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveawayEntry.upsert.mockResolvedValue(savedEntry);
     maxClient.hasChatMember.mockResolvedValueOnce(true).mockResolvedValueOnce(true);
 
-    await service.enterGiveaway('giveaway-1', user);
+    jest.spyOn(service as any, 'assertAdminEntityAccess').mockResolvedValue(undefined);
+    prisma.managedGiveaway.findFirst.mockResolvedValue(latest);
+    await service.refreshManagedGiveawayPublication('source-1', 'giveaway-1', user, 'channel');
 
     expect(maxClient.editMessageInlineKeyboard).toHaveBeenCalledWith(
       'source-1',
@@ -1506,7 +1282,7 @@ describe('ManagedGiveawayService', () => {
       'publication-1',
       null,
       expect.objectContaining({
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 1' })]],
+        buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
       }),
       expectManagedGiveawaySendOptions(),
     );
@@ -1972,15 +1748,7 @@ describe('ManagedGiveawayService', () => {
 
     await service.getPublicGiveaway('giveaway-1', user);
 
-    const upsert = prisma.chat.upsert.mock.calls[0]?.[0];
-    expect(upsert?.create).toEqual(
-      expect.objectContaining({
-        botId: 'stale-read-bot',
-        primaryBotId: 'stale-read-bot',
-      }),
-    );
-    expect(upsert?.update).not.toHaveProperty('botId');
-    expect(upsert?.update).not.toHaveProperty('primaryBotId');
+    expect(prisma.chat.upsert).not.toHaveBeenCalled();
   });
 
   it('rejects participation for an unpublished giveaway id', async () => {
@@ -2009,7 +1777,7 @@ describe('ManagedGiveawayService', () => {
     );
   });
 
-  it('falls back to the full mandatory list for legacy rejected entries without missingChannelIds', async () => {
+  it('does not invent missing subscriptions for legacy rejected entries', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-03-21T10:20:00.000Z'));
 
     const prisma = createPrismaMock();
@@ -2037,7 +1805,7 @@ describe('ManagedGiveawayService', () => {
 
     const result = await service.getGiveawayParticipantState('giveaway-1', user);
 
-    expect(result.missingChannelIds).toEqual(['source-1', 'extra-1', 'extra-2']);
+    expect(result.missingChannelIds).toEqual([]);
   });
 
   it('publishes giveaway results as a linked reply to the original post', async () => {
@@ -2311,6 +2079,7 @@ describe('ManagedGiveawayService', () => {
       expect.objectContaining({
         where: {
           id: 'giveaway-1',
+          archivedAt: null,
           resultsMessageId: null,
           lockedAt: null,
         },
@@ -2444,14 +2213,21 @@ describe('ManagedGiveawayService', () => {
       url: 'https://max.ru/channels/source-1/messages/publication-1',
     });
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledWith(
       'source-1',
       '<h1>Жирный заголовок</h1><p>Текст с <strong>акцентом</strong>, <em>курсивом</em> и <a href="https://max.ru/">ссылкой</a>.</p>',
       expect.objectContaining({
         textFormat: 'html',
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 0' })]],
+        buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
       }),
       expectManagedGiveawaySendOptions(),
     );
@@ -2486,7 +2262,7 @@ describe('ManagedGiveawayService', () => {
         expect(prepared.options).toEqual(
           expect.objectContaining({
             imagePayload: { token: 'route-survivor-upload' },
-            buttons: [[expect.objectContaining({ text: 'Участвовать · 0' })]],
+            buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
           }),
         );
         request.onDispatchAttempt({ botId: 'route-survivor-bot', job: {} });
@@ -2534,7 +2310,14 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveaway.update.mockResolvedValue(published);
     maxClient.uploadImage.mockResolvedValue({ token: 'route-survivor-upload' });
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxRoutedPublicationService.publish).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2594,7 +2377,14 @@ describe('ManagedGiveawayService', () => {
 
     try {
       await expect(
-        service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
+        service.publishManagedGiveaway(
+          'source-1',
+          'giveaway-1',
+          user as never,
+          'channel',
+          'miniapp',
+          { expectedRevision: 1 },
+        ),
       ).rejects.toThrow(
         'Routed MAX publication service is required for production managed giveaways',
       );
@@ -2683,6 +2473,8 @@ describe('ManagedGiveawayService', () => {
       'giveaway-1',
       user as never,
       'channel',
+      'miniapp',
+      { expectedRevision: 1 },
     );
 
     expect(recovered).toEqual(
@@ -2754,7 +2546,14 @@ describe('ManagedGiveawayService', () => {
     );
 
     await expect(
-      service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
+      service.publishManagedGiveaway(
+        'source-1',
+        'giveaway-1',
+        user as never,
+        'channel',
+        'miniapp',
+        { expectedRevision: 1 },
+      ),
     ).rejects.toThrow('требует ручной проверки');
 
     expect(maxActionLedgerService.assertCanEnqueue).toHaveBeenCalledTimes(1);
@@ -2772,7 +2571,7 @@ describe('ManagedGiveawayService', () => {
         const prepared = await request.prepareAttempt({ botId: 'retry-bot-2', job: {} });
         expect(prepared.options).toEqual(
           expect.objectContaining({
-            buttons: [[expect.objectContaining({ text: 'Участвовать · 0' })]],
+            buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
           }),
         );
         request.onDispatchAttempt({ botId: 'retry-bot-2', job: {} });
@@ -2825,7 +2624,14 @@ describe('ManagedGiveawayService', () => {
       .mockResolvedValueOnce(null);
     prisma.managedGiveaway.update.mockResolvedValue(published);
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(prisma.managedGiveaway.updateMany).toHaveBeenNthCalledWith(1, {
       where: {
@@ -2843,6 +2649,7 @@ describe('ManagedGiveawayService', () => {
         status: ManagedGiveawayStatus.DRAFT,
         lockedAt: null,
         updatedAt: expect.any(Date),
+        draftRevision: 1,
         endsAt: { gt: expect.any(Date) },
       },
       data: {
@@ -2889,7 +2696,14 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveaway.findFirst.mockResolvedValueOnce(draft).mockResolvedValueOnce(null);
 
     await expect(
-      service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
+      service.publishManagedGiveaway(
+        'source-1',
+        'giveaway-1',
+        user as never,
+        'channel',
+        'miniapp',
+        { expectedRevision: 1 },
+      ),
     ).rejects.toMatchObject({ response: { status: 503 } });
 
     expect(maxRoutedPublicationService.publish).toHaveBeenCalledTimes(1);
@@ -2925,7 +2739,14 @@ describe('ManagedGiveawayService', () => {
     maxClient.sendMessageImmediateWithResolvedLink.mockRejectedValue(timeoutError);
 
     await expect(
-      service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
+      service.publishManagedGiveaway(
+        'source-1',
+        'giveaway-1',
+        user as never,
+        'channel',
+        'miniapp',
+        { expectedRevision: 1 },
+      ),
     ).rejects.toBe(timeoutError);
 
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledTimes(1);
@@ -2936,6 +2757,7 @@ describe('ManagedGiveawayService', () => {
         status: ManagedGiveawayStatus.DRAFT,
         lockedAt: null,
         updatedAt: expect.any(Date),
+        draftRevision: 1,
         endsAt: { gt: expect.any(Date) },
       },
       data: {
@@ -2951,7 +2773,14 @@ describe('ManagedGiveawayService', () => {
       lockedAt: new Date('2026-03-21T12:35:00.000Z'),
     });
     await expect(
-      service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel'),
+      service.publishManagedGiveaway(
+        'source-1',
+        'giveaway-1',
+        user as never,
+        'channel',
+        'miniapp',
+        { expectedRevision: 1 },
+      ),
     ).rejects.toThrow('требует ручной проверки');
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledTimes(1);
   });
@@ -2995,14 +2824,21 @@ describe('ManagedGiveawayService', () => {
       url: 'https://max.ru/channels/source-1/messages/publication-1',
     });
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxClient.sendMessageImmediateWithResolvedLink).toHaveBeenCalledWith(
       'source-1',
       '<p><a href="https://dev.max.ru/docs-api"><strong><em><u>MAX Docs</u></em></strong></a></p>',
       expect.objectContaining({
         textFormat: 'html',
-        buttons: [[expect.objectContaining({ text: 'Участвовать · 0' })]],
+        buttons: [[expect.objectContaining({ text: 'Участвовать' })]],
       }),
       expectManagedGiveawaySendOptions(),
     );
@@ -3054,11 +2890,18 @@ describe('ManagedGiveawayService', () => {
       url: null,
     });
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxClient.sendMessageImmediateWithResolvedLink.mock.calls[0]?.[2]?.buttons).toEqual([
       [expect.objectContaining({ text: '📞 Заказать рекламу' })],
-      [expect.objectContaining({ text: 'Участвовать · 0' })],
+      [expect.objectContaining({ text: 'Участвовать' })],
     ]);
 
     maxClient.editMessageInlineKeyboard.mockResolvedValue(undefined);
@@ -3121,7 +2964,14 @@ describe('ManagedGiveawayService', () => {
       url: 'https://max.ru/channels/source-1/messages/publication-1',
     });
 
-    await service.publishManagedGiveaway('source-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxBotLinkService.resolveBotIdForSend).toHaveBeenCalledWith({
       chatId: 'source-1',
@@ -3141,7 +2991,7 @@ describe('ManagedGiveawayService', () => {
           [
             expect.objectContaining({
               type: 'link',
-              text: 'Участвовать · 0',
+              text: 'Участвовать',
               url: expect.stringContaining('https://max.ru/entry_bot?startapp=gg-'),
             }),
           ],
@@ -3222,7 +3072,14 @@ describe('ManagedGiveawayService', () => {
       url: 'https://max.ru/channels/source-route-1/messages/publication-route-1',
     });
 
-    await service.publishManagedGiveaway('source-route-1', 'giveaway-1', user as never, 'channel');
+    await service.publishManagedGiveaway(
+      'source-route-1',
+      'giveaway-1',
+      user as never,
+      'channel',
+      'miniapp',
+      { expectedRevision: 1 },
+    );
 
     expect(maxBotLinkService.resolveBotRoute).toHaveBeenCalledWith({
       purpose: 'send_message',
@@ -3243,7 +3100,7 @@ describe('ManagedGiveawayService', () => {
           [
             expect.objectContaining({
               type: 'link',
-              text: 'Участвовать · 0',
+              text: 'Участвовать',
               url: expect.stringContaining('https://max.ru/active-giveaway-bot?startapp=gg-'),
             }),
           ],
@@ -3312,9 +3169,10 @@ describe('ManagedGiveawayService', () => {
       resolveBotIdForRead: jest.fn().mockResolvedValue('dormant-bot'),
       resolveBotId: jest.fn().mockResolvedValue('dormant-bot'),
     };
+    const maxClient = createMaxClientMock();
     const service = new ManagedGiveawayService(
       prisma as never,
-      createMaxClientMock() as never,
+      maxClient as never,
       { invalidate: jest.fn() } as never,
       {} as never,
       createConfigMock() as never,
@@ -3322,9 +3180,14 @@ describe('ManagedGiveawayService', () => {
       maxBotLinkService as never,
     );
 
+    const giveaway = createGiveaway({ sourceChatId: 'required-dormant-1', entityType: 'CHANNEL' });
+    const eligibility = service as unknown as {
+      evaluateGiveawayEligibility(row: typeof giveaway, userId: string): Promise<{ state: string }>;
+    };
     await expect(
-      (service as any).resolveGiveawayMembershipLookupBotId('required-dormant-1'),
-    ).resolves.toBeNull();
+      eligibility.evaluateGiveawayEligibility(giveaway, 'participant'),
+    ).resolves.toMatchObject({ state: 'PENDING', missingChannelIds: [] });
+    expect(maxClient.hasChatMember).not.toHaveBeenCalled();
 
     expect(maxBotLinkService.resolveBotRoute).toHaveBeenCalledWith({
       purpose: 'read',
@@ -3824,6 +3687,7 @@ describe('ManagedGiveawayService', () => {
       where: {
         id: 'giveaway-1',
         resultsMessageId: null,
+        archivedAt: null,
         lockedAt: null,
       },
       data: {
@@ -4086,6 +3950,7 @@ describe('ManagedGiveawayService', () => {
         .mockResolvedValueOnce({ count: 0 })
         .mockResolvedValueOnce({ count: 0 })
         .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 })
         .mockResolvedValueOnce({ count: 1 });
       maxClient.sendMessageImmediateToUser.mockImplementation(async () => {
         jest.setSystemTime(new Date('2026-03-21T13:02:00.000Z'));
@@ -4128,6 +3993,7 @@ describe('ManagedGiveawayService', () => {
       .mockResolvedValueOnce({ count: 0 })
       .mockResolvedValueOnce({ count: 0 })
       .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 })
       .mockResolvedValueOnce({ count: 1 });
     maxClient.sendMessageImmediateToUser.mockRejectedValue(
       new Error('background action lane unavailable before send'),
@@ -4224,7 +4090,7 @@ describe('ManagedGiveawayService', () => {
     });
 
     expect(resultsSpy).toHaveBeenCalledTimes(1);
-    expect(resultsSpy).toHaveBeenCalledWith(giveaway, 'runner');
+    expect(resultsSpy).toHaveBeenCalledWith(giveaway, 'runner', expect.any(Function));
     expect(prisma.managedGiveawayWinnerNotification.findMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
@@ -4279,6 +4145,7 @@ describe('ManagedGiveawayService', () => {
           OR: [{ lockedAt: null }, { lockedAt: { lt: new Date('2026-03-21T12:59:00.000Z') } }],
         },
         data: {
+          lastError: 'Ожидает синхронизации итогов в MAX.',
           nextAttemptAt: new Date('2026-03-21T13:00:30.000Z'),
         },
       });
@@ -4329,6 +4196,8 @@ describe('ManagedGiveawayService', () => {
     const txNotificationUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
     prisma.$transaction.mockImplementation(async (callback) =>
       callback({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: giveaway.id }]),
+        managedGiveawayResultsSync: prisma.managedGiveawayResultsSync,
         managedGiveawayEntry: {
           update: jest.fn().mockResolvedValue(nextEntry),
         },
@@ -4618,14 +4487,6 @@ describe('ManagedGiveawayService', () => {
           : activeEntry),
       ...data,
     }));
-    const txManagedEntryUpdate = jest.fn().mockImplementation(async ({ where, data }) => ({
-      ...(where.id === removedEntry.id
-        ? removedEntry
-        : where.id === lateRejectedEntry.id
-          ? lateRejectedEntry
-          : activeEntry),
-      ...data,
-    }));
     const txWinnerCreateMany = jest.fn().mockResolvedValue({ count: 1 });
     const txNotificationCreateMany = jest.fn().mockResolvedValue({ count: 1 });
     const outboxSpy = jest.spyOn(service as any, 'processWinnerNotificationOutbox');
@@ -4634,17 +4495,17 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveaway.findUnique
       .mockResolvedValueOnce(initial)
       .mockResolvedValueOnce(drawStarted)
-      .mockResolvedValueOnce(completed);
+      .mockResolvedValue(completed);
     prisma.managedGiveawayEntry.update = prismaEntryUpdate;
+    const txDrawWrite = jest.fn().mockResolvedValue(3);
     prisma.$transaction.mockImplementation(async (callback) =>
       callback({
+        $executeRaw: txDrawWrite,
+        managedGiveawayResultsSync: prisma.managedGiveawayResultsSync,
         managedGiveaway: {
           update: jest.fn().mockResolvedValue(undefined),
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
           findUniqueOrThrow: jest.fn().mockResolvedValue(completed),
-        },
-        managedGiveawayEntry: {
-          update: txManagedEntryUpdate,
         },
         managedGiveawayWinner: {
           deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
@@ -4664,20 +4525,25 @@ describe('ManagedGiveawayService', () => {
 
     await (service as any).drawGiveaway('giveaway-1', 'runner');
 
-    expect(txManagedEntryUpdate).toHaveBeenCalledWith({
-      where: { id: 'entry-removed' },
-      data: expect.objectContaining({
-        eligibilityState: GiveawayEligibilityState.REJECTED,
-        missingChannelIds: ['source-1'],
-      }),
-    });
-    expect(txManagedEntryUpdate).toHaveBeenCalledWith({
-      where: { id: 'entry-late' },
-      data: expect.objectContaining({
-        eligibilityState: GiveawayEligibilityState.VERIFIED,
-        missingChannelIds: [],
-      }),
-    });
+    const write = txDrawWrite.mock.calls[0]?.[0] as Prisma.Sql;
+    expect(
+      JSON.parse(
+        String(write.values.find((value) => typeof value === 'string' && value.startsWith('['))),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'entry-removed',
+          eligibilityState: 'REJECTED',
+          missingChannelIds: ['source-1'],
+        }),
+        expect.objectContaining({
+          id: 'entry-late',
+          eligibilityState: 'VERIFIED',
+          missingChannelIds: [],
+        }),
+      ]),
+    );
     expect(txWinnerCreateMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -4898,13 +4764,16 @@ describe('ManagedGiveawayService', () => {
     prisma.managedGiveaway.findUnique
       .mockResolvedValueOnce(initial)
       .mockResolvedValueOnce(drawStarted)
-      .mockResolvedValueOnce(completed);
+      .mockResolvedValue(completed);
     prisma.managedGiveawayEntry.update = jest.fn().mockImplementation(async ({ data }) => ({
       ...entry,
       ...data,
     }));
+    const txDrawWrite = jest.fn().mockResolvedValue(1);
     prisma.$transaction.mockImplementation(async (callback) =>
       callback({
+        $executeRaw: txDrawWrite,
+        managedGiveawayResultsSync: prisma.managedGiveawayResultsSync,
         managedGiveaway: {
           update: jest.fn().mockResolvedValue(undefined),
           updateMany: jest.fn().mockResolvedValue({ count: 1 }),
@@ -5417,6 +5286,11 @@ describe('ManagedGiveawayService', () => {
 
     try {
       const prisma = createPrismaMock();
+      prisma.$queryRaw.mockResolvedValueOnce([{ id: 'giveaway-1' }]);
+      prisma.managedGiveawayWinner.updateMany.mockResolvedValueOnce({ count: 1 });
+      prisma.managedGiveawayResultsSync.findMany.mockResolvedValueOnce([
+        { giveawayId: 'giveaway-1' },
+      ]);
       prisma.managedGiveawayWinner.findMany.mockResolvedValueOnce([
         { id: 'winner-1', giveawayId: 'giveaway-1' },
       ]);
@@ -5446,7 +5320,8 @@ describe('ManagedGiveawayService', () => {
 
       expect(prisma.managedGiveawayWinner.updateMany).toHaveBeenCalledWith({
         where: {
-          id: { in: ['winner-1'] },
+          id: 'winner-1',
+          claimDeadlineAt: { lte: new Date('2026-03-23T13:30:00.000Z') },
           status: ManagedGiveawayWinnerStatus.SELECTED,
         },
         data: {

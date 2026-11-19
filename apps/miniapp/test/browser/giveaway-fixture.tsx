@@ -6,6 +6,10 @@ import {
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router';
+import { ManagedGiveawayCard } from '../../src/components/managed-giveaway-card';
+import { ToastProvider } from '../../src/components/ui/toast';
+import { ApiRequestError } from '../../src/lib/api-request-error';
+import { createPreviewApiTransport } from '../../src/lib/api/preview-transport';
 import { GiveawayPage } from '../../src/pages/giveaway-page';
 import type { ApiTransport } from '../../src/lib/api/transport';
 
@@ -75,7 +79,7 @@ const fixture = {
   openedUrl: '',
   setPromotion(coverBase64: string | null, prizeCount = 1) {
     data.imageEnabled = Boolean(coverBase64);
-    data.imageMimeType = 'image/webp';
+    data.imageMimeType = coverBase64 ? 'image/webp' : '';
     data.imageBase64 = coverBase64 ?? '';
     data.prizes = managedGiveawayPublicSchema.shape.prizes.parse(
       Array.from({ length: prizeCount }, (_, index) => {
@@ -177,6 +181,18 @@ const api = {
     }
     if (path.endsWith('/claim')) {
       fixture.claims += 1;
+      if (fixture.mode === 'claim-unavailable')
+        throw new ApiRequestError(503, '', 'Проверка временно недоступна.');
+      if (fixture.mode === 'claim-missing') {
+        throw new ApiRequestError(
+          400,
+          JSON.stringify({
+            code: 'GIVEAWAY_CLAIM_MISSING_CHANNELS',
+            missingChannelIds: ['extra-0'],
+          }),
+          'Подписка не подтверждена.',
+        );
+      }
       participant = { ...participant, winnerStatus: 'CLAIMED', canClaim: false };
       return {
         ok: true,
@@ -207,12 +223,77 @@ const api = {
     return { ...data, serverTime: new Date().toISOString() };
   },
 } as ApiTransport;
+const editor = new URLSearchParams(location.search).has('editor');
+const editorApi = editor ? createPreviewApiTransport() : null;
+let queueNextRefresh = false;
+if (editorApi) {
+  const path = '/chats/preview-chat/giveaways/giveaway-chat-1';
+  const request = editorApi.request;
+  editorApi.request = async (requestPath, init) => {
+    if (queueNextRefresh && requestPath.endsWith('/refresh-publication')) {
+      queueNextRefresh = false;
+      throw new ApiRequestError(
+        409,
+        JSON.stringify({ code: 'GIVEAWAY_RESULTS_SYNC_PENDING' }),
+        'Итоги ожидают обновления в MAX.',
+      );
+    }
+    return request(requestPath, init);
+  };
+  Object.assign(window, {
+    queueNextGiveawayRefresh: () => {
+      queueNextRefresh = true;
+    },
+    finishEmptyGiveaway: async () => {
+      const latest = (await editorApi.request(path)) as { draftRevision: number };
+      await editorApi.request(`${path}/publish`, {
+        method: 'POST',
+        body: JSON.stringify({ expectedRevision: latest.draftRevision }),
+      });
+      await editorApi.request(`${path}/close`, { method: 'POST' });
+      await client.invalidateQueries();
+    },
+    changeDraftInAnotherSession: async () => {
+      const latest = (await editorApi.request(path)) as {
+        draftRevision: number;
+        prizes: unknown[];
+      };
+      await editorApi.request(path, {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...latest,
+          title: 'Версия второго организатора',
+          requiredChannelIds: ['external-partner'],
+          requiredChannels: [
+            {
+              id: 'external-partner',
+              title: 'Гостевой канал',
+              link: 'https://max.ru/giveaway-guest',
+            },
+          ],
+          expectedRevision: latest.draftRevision,
+        }),
+      });
+    },
+  });
+}
 createRoot(document.getElementById('root')!).render(
   <QueryClientProvider client={client}>
     <MemoryRouter initialEntries={['/giveaways/browser-test']}>
-      <Routes>
-        <Route path="/giveaways/:giveawayId" element={<GiveawayPage api={api} />} />
-      </Routes>
+      {editorApi ? (
+        <ToastProvider>
+          <ManagedGiveawayCard
+            api={editorApi}
+            entityId="preview-chat"
+            entityType="chat"
+            onClosePanel={() => undefined}
+          />
+        </ToastProvider>
+      ) : (
+        <Routes>
+          <Route path="/giveaways/:giveawayId" element={<GiveawayPage api={api} />} />
+        </Routes>
+      )}
     </MemoryRouter>
   </QueryClientProvider>,
 );

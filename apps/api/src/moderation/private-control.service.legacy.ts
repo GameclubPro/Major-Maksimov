@@ -1539,6 +1539,13 @@ export class PrivateControlService {
       }
     }
 
+    if (session.screen === 'giveaway' || session.pendingInput?.kind.startsWith('giveaway_')) {
+      this.resetSessionToPrimaryScreen(session);
+      const view = await this.renderEntityGiveawayMovedToMiniappScreen(context, session);
+      await this.respond(context, session, view, { callbackId: null, notification: null });
+      return;
+    }
+
     const imageSourceAttachment = extractPrivateFirstImageSourceAttachment(context.update);
     const fileAttachment = extractPrivateFirstFileAttachment(context.update);
     const hasVideoAttachment = hasPrivateVideoAttachment(context.update);
@@ -1560,28 +1567,6 @@ export class PrivateControlService {
         notification: null,
       });
       return;
-    }
-
-    if (
-      session.screen === 'giveaway' &&
-      session.selectedChatId &&
-      session.selectedEntityType &&
-      !context.text.trim().startsWith('/') &&
-      (context.text.trim().length > 0 ||
-        imageSourceAttachment !== null ||
-        hasVideoAttachment ||
-        fileAttachment !== null)
-    ) {
-      const giveaway = await this.getManagedGiveawayForSession(context.actor, session);
-      if (giveaway?.status === 'DRAFT') {
-        const notice = await this.captureGiveawayContent(context, session, context.text);
-        const view = await this.renderGiveawayContentFollowUp(context, session, notice);
-        await this.respond(context, session, view, {
-          callbackId: null,
-          notification: null,
-        });
-        return;
-      }
     }
 
     if (
@@ -3472,33 +3457,6 @@ export class PrivateControlService {
         return;
       }
 
-      case 'giveaway_publish': {
-        if (!session.selectedChatId || !session.selectedEntityType) {
-          throw new BadRequestException('Сначала выберите чат или канал.');
-        }
-
-        const giveaway = await this.getManagedGiveawayForSession(context.actor, session);
-        if (!giveaway || giveaway.status !== 'DRAFT') {
-          throw new BadRequestException('Черновик розыгрыша не найден.');
-        }
-
-        await this.managedGiveawayService.publishManagedGiveaway(
-          session.selectedChatId,
-          giveaway.id,
-          context.actor,
-          session.selectedEntityType,
-          'private_bot',
-        );
-        session.managedGiveawayId = giveaway.id;
-        session.pendingInput = null;
-        const view = await this.renderGiveawayScreen(context, session, 'Розыгрыш опубликован.');
-        await this.respond(context, session, view, {
-          callbackId: context.callbackId,
-          notification: 'Опубликовано',
-        });
-        return;
-      }
-
       case 'giveaway_close': {
         if (!session.selectedChatId || !session.selectedEntityType) {
           throw new BadRequestException('Сначала выберите чат или канал.');
@@ -5356,7 +5314,7 @@ export class PrivateControlService {
       chatId,
       giveawayId,
       actor,
-      nextDraft,
+      { ...nextDraft, expectedRevision: giveaway.draftRevision },
       entityType,
       'private_bot',
     );
@@ -6570,7 +6528,7 @@ export class PrivateControlService {
       text: [
         privateMarkdownTitle('Розыгрыш'),
         '',
-        'Итоги уже зафиксированы. Подтверждение победителя больше не требуется.',
+        'По этой ссылке больше нельзя подтвердить приз.',
       ].join('\n'),
       options: {
         buttons: [[this.callbackButton('Главный экран', this.cb('home'))]],

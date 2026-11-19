@@ -11,6 +11,7 @@ import {
   getGiveawayParticipantState,
   getPublicGiveaway,
 } from '../lib/api/giveaway-client';
+import { ApiRequestError } from '../lib/api-request-error';
 import type { ApiTransport } from '../lib/api/transport';
 import {
   buildGiveawayConditions,
@@ -56,6 +57,7 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
   const queryClient = useQueryClient();
   const [nowMs, setNowMs] = useState(Date.now);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [claimFailureChannels, setClaimFailureChannels] = useState<string[] | null>(null);
   const [returnPending, setReturnPending] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [failedImage, setFailedImage] = useState<string | null>(null);
@@ -144,6 +146,7 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
     awaitingReturn.current = false;
     setReturnPending(false);
     setActionError(null);
+    setClaimFailureChannels(null);
     try {
       // FLAG: An older GET must not overwrite the result of an explicit check.
       await queryClient.cancelQueries({ queryKey: participantKey });
@@ -151,6 +154,15 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
       else await claimMutation.mutateAsync();
     } catch (error) {
       if (mounted.current) {
+        if (kind === 'claim') {
+          const ids =
+            error instanceof ApiRequestError && error.code === 'GIVEAWAY_CLAIM_MISSING_CHANNELS'
+              ? error.payload?.missingChannelIds
+              : null;
+          setClaimFailureChannels(
+            Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [],
+          );
+        }
         setActionError(describeUserFacingError(error, 'Проверка недоступна. Повторите попытку.'));
         maxNotify('error');
         refreshQueries();
@@ -194,9 +206,18 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
   const busy = checking || claimMutation.isPending || refreshing;
   const readError = participantQuery.error ?? giveawayQuery.error;
   const unavailable = Boolean(readError || actionError);
-  const conditions = giveaway
+  const conditionsAtEntry = giveaway
     ? buildGiveawayConditions(giveaway, unavailable ? null : participant, checking)
     : [];
+  const conditions =
+    claimFailureChannels !== null
+      ? conditionsAtEntry.map((condition) => ({
+          ...condition,
+          state: claimFailureChannels.includes(condition.id)
+            ? ('missing' as const)
+            : ('unknown' as const),
+        }))
+      : conditionsAtEntry;
   const checkedCount = conditions.filter((condition) => condition.state === 'verified').length;
   const verified =
     participant?.joined && participant.eligibilityState === 'VERIFIED' && !unavailable;
@@ -254,20 +275,24 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
           : checking
             ? 'Проверяем условия'
             : 'Подтверждаем'
-        : unavailable
-          ? 'Повторить проверку'
-          : claimable
-            ? 'Подтвердить выигрыш'
-            : entryOpen
-              ? verified
-                ? 'Проверить ещё раз'
-                : participant?.joined || returnPending
-                  ? 'Проверить подписки'
-                  : 'Проверить и участвовать'
-              : phase === 'DRAWING'
-                ? 'Обновить итоги'
-                : 'Обновить статус';
-  const showConditions = giveaway && phase !== 'COMPLETED' && phase !== 'CANCELED';
+        : claimable && claimFailureChannels !== null && !readError
+          ? 'Повторить подтверждение'
+          : unavailable
+            ? 'Повторить проверку'
+            : claimable
+              ? 'Подтвердить выигрыш'
+              : entryOpen
+                ? verified
+                  ? 'Проверить ещё раз'
+                  : participant?.joined || returnPending
+                    ? 'Проверить подписки'
+                    : 'Проверить и участвовать'
+                : phase === 'DRAWING'
+                  ? 'Обновить итоги'
+                  : 'Обновить статус';
+  const showClaimConditions = claimable && claimFailureChannels !== null;
+  const showConditions =
+    giveaway && ((phase !== 'COMPLETED' && phase !== 'CANCELED') || showClaimConditions);
   const statusTone =
     fatalError || unavailable
       ? 'error'
@@ -548,7 +573,7 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
                 </li>
               ))}
             </ol>
-            {participant?.checkedAt ? (
+            {!showClaimConditions && participant?.checkedAt ? (
               <p className="giveaway-page__checked-at">
                 Последняя проверка:{' '}
                 <time dateTime={participant.checkedAt}>

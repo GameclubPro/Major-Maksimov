@@ -4922,6 +4922,10 @@ describe('PrivateControlService', () => {
     await service.handleUpdate(createPrivateCallbackUpdate('pc2|giveaway_input_prompt|title'));
     expect(getLastEditedText(maxClient)).toContain('Розыгрыши перенесены в mini app');
 
+    await service.handleUpdate(createPrivateCallbackUpdate('pc2|giveaway_publish'));
+    expect(getLastEditedText(maxClient)).toContain('Розыгрыши перенесены в mini app');
+    expect(managedGiveawayService.publishManagedGiveaway).not.toHaveBeenCalled();
+
     await service.handleUpdate(createPrivateCallbackUpdate('pc2|giveaway_reroll|winner-1'));
     expect(getLastEditedText(maxClient)).toContain('Розыгрыши перенесены в mini app');
 
@@ -4942,6 +4946,38 @@ describe('PrivateControlService', () => {
     expect(decodeStartAppRoute(String(launchButton?.url ?? ''))).toBe(
       `/chat/${encodeURIComponent(chats[0].id)}/settings?focus=giveaway&handoff=1`,
     );
+  });
+
+  it('redirects persisted giveaway input to the mini app without changing the draft', async () => {
+    const { service, maxClient, chats, managedGiveawayService } = createHarness();
+    const session = createDefaultPrivateControlSession();
+    session.selectedChatId = chats[0].id;
+    session.selectedEntityType = 'chat';
+    session.screen = 'giveaway';
+    session.pendingInput = { kind: 'giveaway_content' };
+    session.managedGiveawayId = 'giveaway-1';
+    await (
+      service as unknown as { saveSession(userId: string, value: unknown): Promise<void> }
+    ).saveSession('user-1', session);
+
+    await service.handleUpdate(createPrivateTextUpdate('Текст из старого редактора'));
+
+    expect(getLastUiText(maxClient)).toContain('Розыгрыши перенесены в mini app');
+    expect(managedGiveawayService.updateManagedGiveaway).not.toHaveBeenCalled();
+    expect(managedGiveawayService.publishManagedGiveaway).not.toHaveBeenCalled();
+  });
+
+  it('explains an unavailable winner claim link without offering confirmation', async () => {
+    const { service, maxClient, managedGiveawayService } = createHarness();
+    managedGiveawayService.getGiveawayClaimContext.mockResolvedValueOnce(null);
+
+    await service.handleBotStarted(createBotStartedGiveawayClaimUpdate());
+
+    expect(getLastUiText(maxClient)).toContain('По этой ссылке больше нельзя подтвердить приз.');
+    expect(getLastButtons(maxClient).flat()).not.toContainEqual(
+      expect.objectContaining({ text: 'Подтвердить приз' }),
+    );
+    expect(managedGiveawayService.claimGiveaway).not.toHaveBeenCalled();
   });
 
   it('renders giveaway winner notice on bot_started deep link without confirmation CTA', async () => {

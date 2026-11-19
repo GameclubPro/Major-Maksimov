@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "policyRulesAfter": "20260718183000_add_vk_rich_text_channel_link",
-  "baselineThrough": "20261118120000_index_webhook_chat_queue_head",
-  "baselineNamesSha256": "ba2261a5aa978517c85bb8448542c0f18f2b6dcf8bbf32adc8888b6166432c5f",
-  "baselineContentsSha256": "a8b8f5053d8da55e2456170b80d46c20b9c37b21dd2f7d6ac299a6472c6e50e4",
+  "baselineThrough": "20261119043001_add_managed_giveaway_results_sync",
+  "baselineNamesSha256": "b4f39333acc57353e6002a64e78e129f8f70ab9938b54f022c8152312f75c82a",
+  "baselineContentsSha256": "236d96a0882979c69b8f436d9a545a108b9929bb68c93b8c7a0587c01df7e7f7",
   "approvedDestructive": {
     "20260930180000_add_duplicate_policy_revisions": {
       "reason": "Manual review approved one pure SQL policy-signature function and one static BEFORE INSERT OR UPDATE revision trigger. The parser classifies executable function bodies and CREATE TRIGGER EXECUTE FUNCTION as destructive, but this migration has no dynamic SQL, DROP, DELETE, index build or existing-data backfill.",
@@ -204,6 +204,9 @@
     }
   },
   "nonConcurrentIndexExceptions": {
+    "20261119043001_add_managed_giveaway_results_sync": {
+      "reason": "The due index is built on a new, empty table before any writer can use it. The migration bounds lock acquisition and neither scans existing giveaway rows nor backfills historical sends."
+    },
     "20261023010000_add_statistics_exchange_v2": {
       "reason": "All indexes belong to new empty server policy, immutable generation or isolated projection tables. The existing binding receives only compatible Boolean/text columns; no retained statistics are scanned, rewritten or indexed."
     },

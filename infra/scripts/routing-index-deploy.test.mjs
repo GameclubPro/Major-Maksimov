@@ -52,6 +52,18 @@ test('a changed routing state stops the release before queue pause and Prisma', 
   ]);
 });
 
+test('first giveaway activation stops before Prisma and role replacement when either mutator still runs', () => {
+  assert.deepEqual(runScenario('giveaway-stop-refused', false), [
+    'fixture-state:preflight:compatible_pending',
+    'fixture-state:prepare:compatible_pending',
+    'fixture-journal',
+    'fixture-state:rollout:compatible_pending',
+    'fixture-pause',
+    'fixture-giveaway-stop',
+    'fixture-giveaway-verify',
+  ]);
+});
+
 test('an incompatible post-migration snapshot stops the release before role replacement', () => {
   assert.deepEqual(runScenario('changed-after-pause', false), [
     'fixture-state:preflight:compatible_pending',

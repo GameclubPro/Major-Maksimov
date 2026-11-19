@@ -76,9 +76,19 @@ test(
       prefix = undefined;
       const snapshot = async () => outcome(await db.query(routingIndexStateSql));
       const pending = await snapshot();
-      const selected = { source, supportsOrdered: true };
+      const selected = {
+        source: source.filter((entry) => entry.name <= ROUTING_INDEX_TARGET.migration),
+        supportsOrdered: true,
+      };
       assert.equal(verifyRoutingIndexState(pending, source).state, 'prepare_routing');
       assert.equal(verifyReleaseRoutingState(pending, selected), 'compatible_pending');
+      const giveawayMigration = '20261119043000_add_managed_giveaway_draft_revision';
+      const withGiveaway = source.filter((entry) => entry.name <= giveawayMigration);
+      assert.equal(withGiveaway.at(-1)?.name, giveawayMigration);
+      assert.equal(
+        verifyReleaseRoutingState(pending, { source: withGiveaway, supportsOrdered: true }),
+        'prepare_routing',
+      );
       const { definition } = (
         await db.query(
           "SELECT pg_get_indexdef('public.webhook_events_ordered_chat_head_idx'::regclass) AS definition",

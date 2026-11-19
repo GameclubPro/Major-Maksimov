@@ -1,6 +1,7 @@
 import {
   safetyDeskDecisionResponseSchema,
   safetyDeskDeleteRuntimeResponseSchema,
+  safetyDeskGiveawayNotificationLookupSchema,
   safetyDeskDeleteEvidenceResponseSchema,
   safetyDeskQueueResponseSchema,
   safetyDeskRetentionRuntimeResponseSchema,
@@ -109,6 +110,13 @@ export class SafetyDeskApiClient {
 
   fetchQueue(): Promise<SafetyDeskQueueResponse> {
     return this.transport.request(`${SAFETY_DESK_API_BASE}/queue`, safetyDeskQueueResponseSchema);
+  }
+
+  fetchGiveawayNotificationDeadEnd(id: string) {
+    return this.transport.request(
+      `${SAFETY_DESK_API_BASE}/runtime/giveaway-notifications/${encodeURIComponent(id)}`,
+      safetyDeskGiveawayNotificationLookupSchema,
+    );
   }
 
   fetchDeleteRuntime(): Promise<SafetyDeskDeleteRuntimeResponse> {

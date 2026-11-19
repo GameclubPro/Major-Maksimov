@@ -23,3 +23,16 @@ export function InfoCell({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+export function DiagnosticTimeline({ rows }: { rows: readonly (readonly [string, string])[] }) {
+  return (
+    <dl className="delete-timeline">
+      {rows.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}

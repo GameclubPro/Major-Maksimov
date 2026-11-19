@@ -1401,6 +1401,19 @@ maxim_topology_require_message_duplicate_delete_guard() {
   fi
 }
 
+maxim_topology_require_giveaway_state_reader() {
+  local commit_sha="$1" migration
+  # FLAG: Both controllers pass their locked applied-migration receipts on stdin.
+  # Once installed, archives and unfinished result revisions can outlive the writer.
+  while IFS= read -r migration; do
+    if [[ "$migration" == 20261119043001_add_managed_giveaway_results_sync ]]; then
+      node infra/scripts/assert-managed-giveaway-source.mjs "$commit_sha" || return 1
+      break
+    fi
+  done
+  return 0
+}
+
 maxim_topology_require_participant_report_guard() {
   local commit_sha="$1"
   local guard_source

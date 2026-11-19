@@ -25,12 +25,6 @@ export function matchesGiveawayWinnerNotificationQuery(
     .includes(normalizedQuery);
 }
 
-export function giveawayWinnerNotificationStatusLabel(
-  status: SafetyDeskGiveawayWinnerNotificationDeadEndItem['status'],
-): string {
-  return status === 'AMBIGUOUS' ? 'Неясно' : 'Ошибка';
-}
-
 export function giveawayWinnerNotificationEventAt(
   item: SafetyDeskGiveawayWinnerNotificationDeadEndItem,
 ): string {

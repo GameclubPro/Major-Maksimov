@@ -66,8 +66,16 @@ export class AdminGiveawayController {
     @Param('chatId') chatId: string,
     @Param('giveawayId') giveawayId: string,
     @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
   ) {
-    return this.managedGiveawayService.publishManagedGiveaway(chatId, giveawayId, user, 'chat');
+    return this.managedGiveawayService.publishManagedGiveaway(
+      chatId,
+      giveawayId,
+      user,
+      'chat',
+      'miniapp',
+      body,
+    );
   }
 
   @Post('chats/:chatId/giveaways/:giveawayId/close')
@@ -201,8 +209,16 @@ export class AdminGiveawayController {
     @Param('chatId') chatId: string,
     @Param('giveawayId') giveawayId: string,
     @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
   ) {
-    return this.managedGiveawayService.publishManagedGiveaway(chatId, giveawayId, user, 'channel');
+    return this.managedGiveawayService.publishManagedGiveaway(
+      chatId,
+      giveawayId,
+      user,
+      'channel',
+      'miniapp',
+      body,
+    );
   }
 
   @Post('channels/:chatId/giveaways/:giveawayId/close')

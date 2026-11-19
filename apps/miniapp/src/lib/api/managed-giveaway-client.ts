@@ -66,13 +66,14 @@ export async function updateManagedGiveaway(
   entityId: string,
   giveawayId: string,
   payload: UpdateManagedGiveawayPayload,
+  expectedRevision: number,
 ): Promise<ManagedGiveawayDetails> {
   const requestBody = updateManagedGiveawayRequestSchema.parse(payload);
   const response = await api.request(
     `${resolveEntityBase(entityType, entityId)}/giveaways/${giveawayId}`,
     {
       method: 'PUT',
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify({ ...requestBody, expectedRevision }),
     },
   );
   return managedGiveawayDetailsSchema.parse(response);
@@ -83,9 +84,23 @@ export async function publishManagedGiveaway(
   entityType: 'chat' | 'channel',
   entityId: string,
   giveawayId: string,
+  expectedRevision: number,
 ): Promise<ManagedGiveawayDetails> {
   const response = await api.request(
     `${resolveEntityBase(entityType, entityId)}/giveaways/${giveawayId}/publish`,
+    { method: 'POST', body: JSON.stringify({ expectedRevision }) },
+  );
+  return managedGiveawayDetailsSchema.parse(response);
+}
+
+export async function refreshManagedGiveawayPublication(
+  api: ApiTransport,
+  entityType: 'chat' | 'channel',
+  entityId: string,
+  giveawayId: string,
+): Promise<ManagedGiveawayDetails> {
+  const response = await api.request(
+    `${resolveEntityBase(entityType, entityId)}/giveaways/${giveawayId}/refresh-publication`,
     { method: 'POST' },
   );
   return managedGiveawayDetailsSchema.parse(response);
