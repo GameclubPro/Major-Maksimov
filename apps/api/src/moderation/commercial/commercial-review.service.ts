@@ -29,6 +29,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '../../prisma/prisma-client';
 import {
   sanitizeCommercialCorpusText,
+  sanitizeCommercialMessageExcerpt,
   hasResidualCommercialContactCandidate,
 } from '../../scripts/commercial-corpus-sanitization.util';
 import { COMMERCIAL_INTENT_QUALITY_DECISION_VERSION } from './commercial-policy-cohorts';
@@ -167,8 +168,10 @@ function boundedCodes(values: readonly string[]): string[] {
 function digest(value: string | undefined): string | null {
   return value && /^[a-f0-9]{64}$/u.test(value) ? value : null;
 }
-function redact(value: string, limit: number): string {
-  const sanitized = sanitizeCommercialCorpusText(value);
+function redact(value: string, limit: number, message = false): string {
+  const sanitized = message
+    ? sanitizeCommercialMessageExcerpt(value)
+    : sanitizeCommercialCorpusText(value);
   return hasResidualCommercialContactCandidate(sanitized)
     ? '[контактные данные скрыты]'
     : sanitized.slice(0, limit).replace(/[\uD800-\uDBFF]$/u, '');
@@ -232,6 +235,10 @@ function makeMetadata(input: Candidate): CommercialReviewEvidenceMetadata {
         )
       : [],
   });
+  const excerpt =
+    input.source === 'TEXT'
+      ? sanitizeCommercialMessageExcerpt(input.text)
+      : sanitizeCommercialCorpusText(input.text);
   return commercialReviewEvidenceMetadataSchema.parse({
     schemaVersion: 2,
     samplingProbability:
@@ -264,8 +271,8 @@ function makeMetadata(input: Candidate): CommercialReviewEvidenceMetadata {
     imageReviewRequired: input.source === 'OCR' || input.imageReviewRequired === true,
     sourceExcerptComplete:
       input.sourceExcerptComplete === false ||
-      sanitizeCommercialCorpusText(input.text).length > 2500 ||
-      hasResidualCommercialContactCandidate(sanitizeCommercialCorpusText(input.text))
+      excerpt.length > 2500 ||
+      hasResidualCommercialContactCandidate(excerpt)
         ? false
         : (input.sourceExcerptComplete ?? null),
     messageCreatedAt:
@@ -318,7 +325,7 @@ function semanticBinding(row: Pick<ReviewRow, 'source' | 'qualityMetadata' | 'ev
   return {
     sourceSnapshotSha256: quality.sourceSnapshotSha256,
     excerptSha256: createHash('sha256')
-      .update(redact(evidence.excerpt, 2500), 'utf8')
+      .update(redact(evidence.excerpt, 2500, true), 'utf8')
       .digest('hex'),
   };
 }
@@ -399,7 +406,7 @@ export class CommercialReviewService {
       const qualityMetadata = makeMetadata(input);
       const evidence = {
         source: input.source,
-        excerpt: redact(input.text, 2500),
+        excerpt: redact(input.text, 2500, input.source === 'TEXT'),
         score: Number.isFinite(input.score) ? Math.max(0, Math.min(100, input.score)) : 0,
         actionBand: boundedCodes([input.actionBand])[0] ?? 'UNKNOWN',
         messageDisposition: input.messageDisposition,
@@ -1198,7 +1205,7 @@ export class CommercialReviewService {
     return parsed.success
       ? {
           ...parsed.data,
-          excerpt: redact(parsed.data.excerpt, 2500),
+          excerpt: redact(parsed.data.excerpt, 2500, row.source === 'TEXT'),
           reviewReason: redact(parsed.data.reviewReason, 500),
         }
       : null;

@@ -182,7 +182,12 @@ integration('commercial ad settings and administrator reports with PostgreSQL', 
 
   async function save(
     body: unknown,
-    options: { commercialAiDeleteOnly?: boolean } = { commercialAiDeleteOnly: true },
+    options: Pick<
+      Parameters<typeof saveChatSettings>[0],
+      'commercialAiDeleteOnly' | 'networkWrite'
+    > = {
+      commercialAiDeleteOnly: true,
+    },
   ): Promise<ChatSettings> {
     return saveChatSettings({
       prisma: db as PrismaService,
@@ -193,7 +198,7 @@ integration('commercial ad settings and administrator reports with PostgreSQL', 
       source: 'miniapp',
       resolveBotAssignmentData: resolveAssignment,
       assertRequiredSubscriptionSettings: async () => undefined,
-      commercialAiDeleteOnly: options.commercialAiDeleteOnly,
+      ...options,
       assertBotCapabilities: capabilities,
       refreshExecutionReadiness: readiness,
     });
@@ -501,6 +506,64 @@ integration('commercial ad settings and administrator reports with PostgreSQL', 
     expect(cache.invalidate).toHaveBeenCalledWith(otherChatId);
     expect(params.scheduleReadinessRefresh).toHaveBeenCalledTimes(1);
     expect(params.onPartialApplied).not.toHaveBeenCalled();
+  });
+
+  it('copies the filter switch from a legacy chat without clearing recipient categories or grants', async () => {
+    const recipientPolicy = createDefaultCommercialAdsPolicy();
+    recipientPolicy.categories.BUSINESS = 'ALLOW';
+    recipientPolicy.exceptions.push({
+      id: randomUUID(),
+      userId: '111',
+      userName: 'Иван',
+      categories: ['SERVICES'],
+      expiresAt: null,
+    });
+    const source = await currentBody();
+    expect(source.commercialAdsPolicy).toBeNull();
+    await db.chatSettings.create({
+      data: {
+        chatId: otherChatId,
+        commercialAdsFilterEnabled: false,
+        commercialAdsPolicy: recipientPolicy,
+      },
+    });
+    const params = bulkParams(source, [otherChatId]);
+    await applySettingsToAllChats({
+      ...params,
+      settingKeys: ['commercialAdsPolicy', 'commercialAdsFilterEnabled'],
+    });
+    const after = await db.chatSettings.findUniqueOrThrow({ where: { chatId: otherChatId } });
+    expect(after.commercialAdsFilterEnabled).toBe(true);
+    expect(after.commercialAdsPolicy).toEqual(recipientPolicy);
+  });
+
+  it('changes network categories while preserving recipient grants on replacement and legacy clients', async () => {
+    const current = createDefaultCommercialAdsPolicy();
+    current.exceptions.push({
+      id: randomUUID(),
+      userId: '111',
+      userName: 'Иван',
+      categories: ['SERVICES'],
+      expiresAt: null,
+    });
+    await db.chatSettings.update({ where: { chatId }, data: { commercialAdsPolicy: current } });
+    const requested = createDefaultCommercialAdsPolicy();
+    requested.categories.BUSINESS = 'ALLOW';
+    requested.exceptions.push({
+      id: randomUUID(),
+      userId: '222',
+      userName: 'Анна',
+      categories: ['BUSINESS'],
+      expiresAt: null,
+    });
+    const options = { networkWrite: { authoredKeys: ['commercialAdsPolicy' as const] } };
+    const expected = { ...requested, exceptions: current.exceptions };
+    for (const commercialAdsPolicy of [requested, null]) {
+      await save({ ...(await currentBody()), commercialAdsPolicy }, options);
+      expect(
+        (await db.chatSettings.findUniqueOrThrow({ where: { chatId } })).commercialAdsPolicy,
+      ).toEqual(expected);
+    }
   });
 
   it('rejects a new recipient personal-sale BLOCK during bulk apply with AI disabled', async () => {

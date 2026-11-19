@@ -432,11 +432,15 @@ describe('commercial deterministic benchmark', () => {
       const actionBand = String(metadata.actionBand ?? 'UNKNOWN');
       if (
         hardEnforcementLabels.has(item.label) &&
-        actionBand !== 'WARN' &&
-        actionBand !== 'DELETE' &&
-        actionBand !== 'DELETE_AND_ESCALATE'
+        !isCommercialMessageDeleteEligible(
+          actionBand,
+          metadata.actionable === true,
+          metadata.messageDisposition,
+        )
       ) {
-        hardEnforcementMisses.push(`${item.label}: action=${actionBand}`);
+        hardEnforcementMisses.push(
+          `${item.label}: action=${actionBand}, actionable=${String(metadata.actionable)}, disposition=${String(metadata.messageDisposition)}`,
+        );
       }
       bySubtype.set(subtype, (bySubtype.get(subtype) ?? 0) + 1);
       byAction.set(actionBand, (byAction.get(actionBand) ?? 0) + 1);

@@ -127,7 +127,7 @@ describe('AdminCommercialAdsService', () => {
     h.classifier.preview.mockResolvedValue(result);
     const before = structuredClone(request);
     await expect(h.service.preview('chat-1', user, request)).resolves.toEqual(result);
-    expect(h.classifier.preview).toHaveBeenCalledWith(request, stored);
+    expect(h.classifier.preview).toHaveBeenCalledWith(request, stored, 'chat-1');
     expect(h.prisma.chatSettings.findUnique).toHaveBeenCalledWith({ where: { chatId: 'chat-1' } });
     expect(h.redis.incrementWithTtl).toHaveBeenCalledWith(
       `commercial-preview:v1:${user.userId}`,
@@ -142,7 +142,7 @@ describe('AdminCommercialAdsService', () => {
     const h = harness();
     const request = { text: 'Сообщение', policy: null, enabled: false };
     await h.service.preview('chat-1', user, request);
-    expect(h.classifier.preview).toHaveBeenCalledWith(request, DEFAULT_CHAT_SETTINGS);
+    expect(h.classifier.preview).toHaveBeenCalledWith(request, DEFAULT_CHAT_SETTINGS, 'chat-1');
     expect(h.prisma.auditLog.createMany).not.toHaveBeenCalled();
   });
 

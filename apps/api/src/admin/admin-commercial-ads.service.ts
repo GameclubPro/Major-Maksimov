@@ -45,7 +45,7 @@ export class AdminCommercialAdsService {
       return unavailable();
     }
     const settings = await this.prisma.chatSettings.findUnique({ where: { chatId } });
-    return this.classifier.preview(parsed.data, settings ?? DEFAULT_CHAT_SETTINGS);
+    return this.classifier.preview(parsed.data, settings ?? DEFAULT_CHAT_SETTINGS, chatId);
   }
 
   async feedback(chatId: string, user: AuthUser, body: unknown): Promise<{ ok: true }> {

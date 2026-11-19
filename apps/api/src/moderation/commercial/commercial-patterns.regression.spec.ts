@@ -70,6 +70,22 @@ function collectSignals(text: string) {
 }
 
 describe('commercial pattern regressions', () => {
+  it('keeps a priced service offer when the seller disclaims unrelated furniture sales', () => {
+    const offer =
+      'Оказываем услуги по ремонту квартир под ключ. Замер бесплатно, цены от 1200 рублей. Звоните +7 000 000 00 00.';
+    for (const text of [offer, offer + ' Мебель не продаём.']) {
+      expect(detect(text)).toMatchObject({
+        primarySubtype: 'SERVICES',
+        actionable: true,
+        messageDisposition: 'DELETE',
+      });
+    }
+    expect(
+      collectSignals('Отчет по каналу: ER24 12%, рекламный пост стоил 500р, размещение не продаём.')
+        .negativeSignals,
+    ).toContain('context:channel-metrics-not-selling');
+  });
+
   it.each([
     {
       label: 'accounting subscription service',

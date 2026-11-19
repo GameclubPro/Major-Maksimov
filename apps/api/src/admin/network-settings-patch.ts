@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
+import { commercialAdsPolicySchema } from '@maxim/contracts/settings';
 import { messageRetentionHoursSchema } from '@maxim/contracts/settings-field-schemas';
 import {
   channelPostSignatureSettingsSchema,
@@ -151,10 +152,17 @@ export function commonNetworkSettingsFields(
 ): Record<string, NetworkSettingsField> {
   return Object.fromEntries(
     paths.map((path) => {
-      const first = getPath(snapshots[0], path) ?? null;
+      const read = (snapshot: unknown) => {
+        const value = getPath(snapshot, path) ?? null;
+        if (path !== 'commercialAdsPolicy' || value === null) return value;
+        // FLAG: A network edits categories. Participant grants belong to the exact chat.
+        const policy = commercialAdsPolicySchema.parse(value);
+        return { ...policy, exceptions: [] };
+      };
+      const first = read(snapshots[0]);
       return [
         path,
-        snapshots.every((snapshot) => isDeepStrictEqual(getPath(snapshot, path) ?? null, first))
+        snapshots.every((snapshot) => isDeepStrictEqual(read(snapshot), first))
           ? { kind: 'common', value: first }
           : { kind: 'mixed' },
       ];

@@ -18,7 +18,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma, type CommercialReviewSample } from '../../prisma/prisma-client';
 import {
   hasResidualCommercialContactCandidate,
-  sanitizeCommercialCorpusText,
+  sanitizeCommercialMessageExcerpt,
 } from '../../scripts/commercial-corpus-sanitization.util';
 import { commercialReviewEvidenceHash, type Candidate } from './commercial-review.service';
 import { fingerprintCommercialDeleteText } from './commercial-delete-binding';
@@ -92,7 +92,7 @@ function prepareSeed(input: CommercialAiObservationSeed) {
   const source = commercialLlmSourceSchema.parse(input.request.source);
   const candidate = input.candidate;
   if (typeof candidate.text !== 'string' || candidate.text.length > 2500) return null;
-  const excerpt = sanitizeCommercialCorpusText(candidate.text);
+  const excerpt = sanitizeCommercialMessageExcerpt(candidate.text);
   const groups = candidate.campaignGroupIds;
   if (
     !commercialLlmSourceCurrent(source) ||

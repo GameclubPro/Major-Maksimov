@@ -1,3 +1,5 @@
+import { commercialLlmSourceUpdate } from './commercial-llm-source-text';
+import { sanitizeCommercialMessageExcerpt } from '../../scripts/commercial-corpus-sanitization.util';
 import { evaluateCommercialAdsAiPolicy } from './commercial-ads-runtime-policy.service';
 import type { CommercialLlmObservationResult } from './commercial-llm.protocol';
 import {
@@ -173,11 +175,13 @@ export class CommercialLlmDeleteGuardService {
       reject();
     const row = await this.maxClient.getExactMessageRow(params.chatId, params.messageId, options);
     if (!row) return 'absent';
-    const message = this.parser.parse({
-      type: 'message_created',
-      updateId: 'commercial-ai-guard',
-      message: row,
-    }).message;
+    const message = commercialLlmSourceUpdate(
+      this.parser.parse({
+        type: 'message_created',
+        updateId: 'commercial-ai-guard',
+        message: row,
+      }),
+    ).message;
     if (
       !message ||
       message.chatId !== params.chatId ||
@@ -187,6 +191,17 @@ export class CommercialLlmDeleteGuardService {
       fingerprintCommercialDeleteText(message.text) !== source.sourceSha256
     )
       reject();
+    if (source.version === 3) {
+      // FLAG: A result for an older flattened excerpt cannot authorize the current message layout.
+      const observedInput = policyMetadata?.commercialAiObservation as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        observedInput?.inputSha256 !==
+        fingerprintCommercialDeleteText(sanitizeCommercialMessageExcerpt(message.text))
+      )
+        reject();
+    }
     // FLAG: Remote source/access reads can outlive AI authority. Revalidate before
     // spending the logical message's daily protection; final dispatch checks still apply.
     const settings = await this.currentSettings(source);

@@ -1,4 +1,5 @@
 import { chatRulesSchema, chatSettingsSchema, stopWordsPolicySchema } from '@maxim/contracts';
+import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import {
   buildNetworkSettingsPatch,
   commonNetworkSettingsFields,
@@ -41,6 +42,34 @@ describe('source-free network settings patches', () => {
     const paths = networkSettingsPaths('chat', 'duplicates');
     expect(paths).not.toContain('duplicateCompareMode');
     expect(commonNetworkSettingsFields(paths, [next])).not.toHaveProperty('duplicateCompareMode');
+  });
+
+  it('compares network commercial categories independently of participant grants and preserves legacy identity', () => {
+    const policy = createDefaultCommercialAdsPolicy();
+    const withGrant = {
+      ...policy,
+      exceptions: [
+        {
+          id: 'ba8fd838-8abd-4d1b-8398-8657db75076e',
+          userId: '111',
+          userName: 'Иван',
+          categories: ['SERVICES'],
+          expiresAt: null,
+        },
+      ],
+    };
+    const read = (...policies: unknown[]) =>
+      commonNetworkSettingsFields(
+        ['commercialAdsPolicy'],
+        policies.map((commercialAdsPolicy) => ({ commercialAdsPolicy })),
+      ).commercialAdsPolicy;
+    expect(read(withGrant, policy)).toEqual({ kind: 'common', value: policy });
+    expect(read(withGrant, withGrant)).toEqual({ kind: 'common', value: policy });
+    expect(read(null, null)).toEqual({ kind: 'common', value: null });
+    expect(read(null, policy)).toEqual({ kind: 'mixed' });
+    expect(
+      read(policy, { ...policy, categories: { ...policy.categories, BUSINESS: 'ALLOW' } }),
+    ).toEqual({ kind: 'mixed' });
   });
 
   it('changes speech style without copying individual messages or media', () => {

@@ -286,6 +286,11 @@ export function sanitizeCommercialCorpusText(
   return (options.preserveLayout ? sanitized : sanitized.replace(/\s+/gu, ' ')).trim();
 }
 
+// FLAG: Message excerpts keep assertion boundaries for model input, human review and policy checks.
+export function sanitizeCommercialMessageExcerpt(value: string): string {
+  return sanitizeCommercialCorpusText(value, { preserveLayout: true });
+}
+
 export function isCommercialCorpusTextSanitized(value: string): boolean {
   return (
     sanitizeCommercialCorpusText(value, { preserveLayout: true }) === value &&

@@ -300,6 +300,27 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       expect(await prisma.commercialReviewSample.count({ where: { chatId } })).toBe(2);
     });
 
+    it('binds the same sanitized multiline input to model and human evidence', async () => {
+      const input = seed({
+        text: 'Посоветуйте мастерскую.\nПринимаем заказы. Номер: +7 900 000 00 00.',
+      });
+      const excerpt = input.request.excerpt;
+      expect(excerpt).toContain('\n');
+      expect(excerpt).toContain('[phone]');
+      expect(
+        await writer.seed({
+          ...input,
+          request: { ...input.request, excerpt: excerpt.replace(/\n/gu, ' ') },
+        }),
+      ).toBe('invalid');
+      expect(await writer.seed(input)).toBe('written');
+      await review.recordCandidate(input.candidate);
+      expect((await humanRow(input)).evidence).toMatchObject({ excerpt });
+      expect((await envelope(input)).source.excerptSha256).toBe(
+        commercialAiObservationInputSha256(excerpt),
+      );
+    });
+
     it('requires exact original author/text, sanitized input and immutable sampled metadata', async () => {
       const input = seed({ text: 'Кто узнавал номер мастера: +7 999 123-45-67?' });
       expect(input.request.excerpt).not.toBe(input.candidate.text);
@@ -418,7 +439,7 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
       ).toBe(0);
     });
 
-    it.each(['allowed-commercial', 'blocked-personal-sale'] as const)(
+    it.each(['allowed-commercial', 'blocked-personal-sale', 'policy-unavailable'] as const)(
       'records the actual category-policy outcome for %s',
       async (scenario) => {
         const input = seed();
@@ -444,14 +465,29 @@ const decision: NonNullable<CommercialAiQualityAttempt['actualSynchronousDecisio
         expect(await writer.seed(input)).toBe('written');
         const complete = analysis(
           input,
-          scenario === 'allowed-commercial' ? 'COMMERCIAL' : 'NOT_COMMERCIAL',
+          scenario === 'blocked-personal-sale' ? 'NOT_COMMERCIAL' : 'COMMERCIAL',
         );
         complete.result!.reasonCodes =
-          scenario === 'allowed-commercial' ? ['SERVICE_OFFER'] : ['PERSONAL_SALE'];
+          scenario === 'blocked-personal-sale' ? ['PERSONAL_SALE'] : ['SERVICE_OFFER'];
         complete.result!.protocolVersion = 2;
-        complete.policyDeleteEligible = scenario === 'blocked-personal-sale';
-        expect(await writer.update({ ...binding(input), analysis: complete })).toBe('written');
-        expect((await envelope(input)).attempts[0]?.analysis).toEqual(complete);
+        const unavailable = scenario === 'policy-unavailable';
+        complete.policyDeleteEligible = unavailable ? null : scenario === 'blocked-personal-sale';
+        const registration = unavailable
+          ? ({
+              state: 'REJECTED',
+              intentIdSha256: null,
+              reason: 'DEPENDENCY_UNAVAILABLE',
+            } as const)
+          : undefined;
+        expect(await writer.update({ ...binding(input), analysis: complete, registration })).toBe(
+          'written',
+        );
+        const attempt = (await envelope(input)).attempts[0]!;
+        expect(attempt.analysis).toEqual(complete);
+        if (registration) {
+          expect(attempt.registration).toEqual(registration);
+          expect(attempt.execution.state).toBe('NOT_REQUESTED');
+        }
       },
     );
 

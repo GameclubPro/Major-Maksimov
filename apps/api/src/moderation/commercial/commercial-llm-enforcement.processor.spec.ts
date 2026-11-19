@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import { CommercialLlmEnforcementProcessor } from './commercial-llm-enforcement.processor';
 import { CommercialAiObservationGate } from './commercial-ai-runtime-observation';
 import type { CommercialAiObservationService } from './commercial-ai-observation.service';
@@ -25,7 +26,7 @@ const result: CommercialLlmObservationResult = {
     attempts: 1,
   },
 };
-function fixture() {
+function fixture(explicitPolicy = false) {
   const now = Date.now();
   const offer = buildCommercialLlmOffer(
     {
@@ -35,9 +36,10 @@ function fixture() {
       originBotId: 'bot',
       text: 'Мастерская принимает заказы на ремонт.',
       eventAt: new Date(now).toISOString(),
-      settings: { commercialAdsFilterEnabled: true } as Parameters<
-        typeof buildCommercialLlmOffer
-      >[0]['settings'],
+      settings: {
+        commercialAdsFilterEnabled: true,
+        ...(explicitPolicy ? { commercialAdsPolicy: createDefaultCommercialAdsPolicy() } : {}),
+      } as Parameters<typeof buildCommercialLlmOffer>[0]['settings'],
       origin: {
         sourceWebhookEventId: randomUUID(),
         sourceReceivingBotId: 'bot',
@@ -119,6 +121,45 @@ async function settle() {
 }
 
 describe('source-bound asynchronous AI observation', () => {
+  it('retains a completed classification without delete authority when the settings read fails', async () => {
+    const h = fixture(true);
+    const reply = {
+      ...result,
+      protocolVersion: 2,
+      reasonCodes: ['SERVICE_OFFER'],
+    } satisfies CommercialLlmObservationResult;
+    const processor = new CommercialLlmEnforcementProcessor(
+      h.mailbox,
+      { classify: async () => reply },
+      { ensureIntent: h.ensureIntent },
+      async () => true,
+      { writer: h.writer, gate: h.gate },
+      {
+        evaluateAi: async () => {
+          throw new Error('settings unavailable');
+        },
+      },
+    );
+    expect(await processor.run(h.worker, new AbortController().signal)).toMatchObject({
+      outcome: 'unavailable_skipped',
+    });
+    await settle();
+    expect(h.mailbox.prove).not.toHaveBeenCalled();
+    expect(h.ensureIntent).not.toHaveBeenCalled();
+    expect(h.writer.update).toHaveBeenCalledTimes(1);
+    expect(h.writer.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: expect.objectContaining({ version: 3 }),
+        analysis: expect.objectContaining({
+          state: 'COMPLETE',
+          classificationOrigin: 'MODEL',
+          result: reply,
+          policyDeleteEligible: null,
+        }),
+        registration: { state: 'REJECTED', intentIdSha256: null, reason: 'DEPENDENCY_UNAVAILABLE' },
+      }),
+    );
+  });
   it('retains the actual response before a later authority veto and never registers its deletion', async () => {
     const h = fixture();
     const processor = new CommercialLlmEnforcementProcessor(

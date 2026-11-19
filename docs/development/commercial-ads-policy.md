@@ -16,8 +16,10 @@ Omitted fields in older writes preserve it; explicit null clears it.
 Each grant names one canonical user, nonempty categories and an optional exact expiry.
 All blocked categories need an active matching grant. Grants never waive other moderation
 rules, immunity, source identity or deadlines. Bulk category application preserves each
-recipient chat's own grants; it cannot copy another chat's participant permissions.
-Settings revision checks serialize concurrent writes.
+recipient chat's own grants. Copying from a legacy source preserves the recipient's entire
+policy because the source has no explicit categories. The network editor compares explicit
+categories independently of participant grants and writes categories against each recipient's
+own settings revision. Only the single-chat editor can change its participant grants.
 
 Deterministic category evidence requires a real commercial detector result and preserves its
 safe context. A separate bounded resolver inspects every unprotected offer block; ranked

@@ -2,7 +2,7 @@ import { commercialAdsPolicySchema } from '@maxim/contracts/settings';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
-  sanitizeCommercialCorpusText,
+  sanitizeCommercialMessageExcerpt,
   hasResidualCommercialContactCandidate,
 } from '../../scripts/commercial-corpus-sanitization.util';
 import {
@@ -231,7 +231,7 @@ export function prepareCommercialLlmOffer(
   // FLAG: Admission never renews the event deadline or accepts historical/replayed sources.
   if (!Number.isFinite(eventAtMs)) return { reason: 'invalid_event_time' };
   if (eventAtMs < now - 10_000 || eventAtMs > now + 5_000) return { reason: 'stale_event' };
-  const excerpt = sanitizeCommercialCorpusText(input.text);
+  const excerpt = sanitizeCommercialMessageExcerpt(input.text);
   if (!excerpt.trim() || excerpt.length > 2500 || hasResidualCommercialContactCandidate(excerpt))
     return { reason: 'unsanitized_contact' };
   const source = commercialLlmSourceSchema.safeParse({
