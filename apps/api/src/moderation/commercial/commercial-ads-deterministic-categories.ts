@@ -19,7 +19,11 @@ const SALE =
 const COMMUNITY_INVITE =
   /(?:^|[^\p{L}])(?:вступайте|подпишитесь|подписывайтесь|присоединяйтесь|переходите)(?:[^.!?;\n]{0,60})(?:канал|групп|сообществ|чат)[\p{L}]*/iu;
 const COMMERCIAL_CONTENT =
-  /(?:каталог|товар|ассортимент|скидк|акци[яию]|продаж|заказ|услуг|прайс)[\p{L}]*/iu;
+  /(?:^|[^\p{L}])(?:каталог|товар|ассортимент|скидк|акци[яию]|продаж|заказ|услуг|прайс)[\p{L}]*/iu;
+const OWNED_COMMUNITY =
+  /(?:^|[^\p{L}])(?:наш[\p{L}]*|коммерческ[\p{L}]*)\s+(?:канал|чат|групп|сообществ)[\p{L}]*/iu;
+const COMMUNITY_FOLLOW = /(?:^|[^\p{L}])(?:подписывайтесь|подпишитесь|вступайте)(?=$|[^\p{L}])/iu;
+const COMMUNITY_CONTINUATION = /^(?:там|здесь|в\s+н[её]м|в\s+ней)(?=$|[^\p{L}])/iu;
 const ANCILLARY =
   /(?:доставк[аиуойе]+(?:\s+[^,.!;\n]{0,30})?\s+(?:бесплатн[\p{L}]*|включен[\p{L}]*)|бесплатн[\p{L}]*\s+доставк[\p{L}]*|помо(?:жем|гу)\s+(?:подобрать|выбрать)\s+(?:цвет|размер|товар|оттенок)[\p{L}]*|подбор\s+(?:цвета|размера|товара|оттенка))/giu;
 const WEAK_RETAIL = new Set([
@@ -52,6 +56,13 @@ const SERVICE_HEAD_MARKERS = ADS_SERVICE_SPECIALTY_MARKERS.filter(
     ].includes(marker),
 );
 function hasServiceHeading(text: string): boolean {
+  // FLAG: A specialty heading can name work the seller expressly declines to do.
+  if (
+    /^[^,.!?;\n]{1,80}\s+не\s+(?:выполня|оказыва|предоставля|предлага|производ|дела)[\p{L}]*/iu.test(
+      text,
+    )
+  )
+    return false;
   const heading = normalizeCommercialText(text).replace(/^(?:отдельно|также)\s+/u, '');
   const firstWord = /^[\p{L}-]+/u.exec(heading)?.[0] ?? '';
   if (/(?:ный|ная|ное|ные|ных|ного|ную|ным|ными|ской|ские|ский|ская|ское)$/u.test(firstWord))
@@ -162,17 +173,28 @@ export function deterministicCommercialCategories(
         hasServiceHeading(serviceText)
       );
     });
-  const community = windows.some(
-    (text) =>
-      (affirmative(COMMUNITY_INVITE, text) && COMMERCIAL_CONTENT.test(text)) ||
-      (/(?:наш|коммерческ[\p{L}]*)\s+(?:канал|чат|групп[\p{L}]*|сообществ[\p{L}]*)/iu.test(text) &&
-        COMMERCIAL_CONTENT.test(text) &&
-        affirmative(
-          /(?:^|[^\p{L}])(?:подписывайтесь|подпишитесь|вступайте)(?=$|[^\p{L}])/iu,
-          text,
-        )) ||
-      matches(ADS_CHANNEL_PLACEMENT_PATTERNS, text),
-  );
+  // FLAG: The commercial purpose must belong to the invitation or its description.
+  const community =
+    windows.some((text) => matches(ADS_CHANNEL_PLACEMENT_PATTERNS, text)) ||
+    blocks.some((block) =>
+      block.some((text, index) => {
+        const next = block[index + 1] ?? '';
+        if (COMMUNITY_INVITE.test(text)) {
+          return affirmative(
+            COMMUNITY_INVITE,
+            text,
+            (match) =>
+              COMMERCIAL_CONTENT.test(text.slice(match.index)) ||
+              (COMMUNITY_CONTINUATION.test(next) && COMMERCIAL_CONTENT.test(next)),
+          );
+        }
+        return (
+          OWNED_COMMUNITY.test(text) &&
+          COMMERCIAL_CONTENT.test(text) &&
+          (affirmative(COMMUNITY_FOLLOW, text) || affirmative(COMMUNITY_FOLLOW, next))
+        );
+      }),
+    );
   return [
     ...(service ? ['SERVICES' as const] : []),
     ...(business ? ['BUSINESS' as const] : []),

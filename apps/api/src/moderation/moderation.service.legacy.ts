@@ -92,6 +92,7 @@ import {
 } from './closed-chat-message-moderation.service';
 import { resolveModerationSanctionExpiry } from './moderation-sanction-expiry.util';
 import { CommercialReviewService } from './commercial/commercial-review.service';
+import { commercialLlmSourceUpdate } from './commercial/commercial-llm-source-text';
 import { buildCommercialTextQualityObservation } from './commercial/commercial-quality-observation';
 import { CommercialLlmEnforcementService } from './commercial/commercial-llm-enforcement.service';
 import {
@@ -2460,6 +2461,9 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
           violations: detection.violations,
         })
       ).filter((violation) => violation.ruleCode !== 'TOPIC_FILTER_MISMATCH');
+      const activeCommercialAi =
+        settings.commercialAdsFilterEnabled && this.commercialAi?.enabled() === true;
+      const commercialUpdate = activeCommercialAi ? commercialLlmSourceUpdate(update) : update;
       // FLAG: Capture precedes competing-rule exits; this immutable revision grants no sanction.
       let commercialQualityObservation: ReturnType<typeof buildCommercialTextQualityObservation> =
         null;
@@ -2476,11 +2480,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
             chatId,
             userId: senderId,
             messageId,
-            text,
+            text: commercialUpdate.message?.text ?? text,
             settings,
             messageCreatedAt: extractCommercialOcrSourceCreatedAt(update.raw),
             violation: detectedViolations.find((item) => item.ruleCode === 'COMMERCIAL_AD'),
-            activeAiEnforcement: this.commercialAi?.enabled() === true,
+            activeAiEnforcement: activeCommercialAi,
             commercialCampaignContext,
           });
           if (commercialQualityObservation) {
@@ -2499,7 +2503,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       const violations =
         this.commercialAi?.evaluate(
           detectedViolations,
-          update,
+          commercialUpdate,
           settings,
           !!reportCommand ||
             latestSenderChatAdminCheck.isAdmin ||

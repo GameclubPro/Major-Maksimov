@@ -1108,6 +1108,21 @@ export async function saveChatSettings(params: {
     parsed.data.settingsRevision !== currentSettings?.updatedAt?.toISOString()
   )
     throw chatSettingsRevisionConflict();
+  const storedCommercialPolicy = commercialAdsPolicySchema.safeParse(
+    currentSettings?.commercialAdsPolicy,
+  );
+  // FLAG: Network category edits retain the recipient's own grants under its revision fence.
+  // A group request cannot clear invalid storage or import grants from another recipient.
+  if (params.networkWrite?.authoredKeys?.includes('commercialAdsPolicy')) {
+    if (currentSettings?.commercialAdsPolicy != null && !storedCommercialPolicy.success)
+      throw chatSettingsRevisionConflict();
+    const recipientPolicy = storedCommercialPolicy.success ? storedCommercialPolicy.data : null;
+    const requested = parsed.data.commercialAdsPolicy;
+    parsed.data.commercialAdsPolicy =
+      requested == null
+        ? recipientPolicy
+        : { ...requested, exceptions: recipientPolicy?.exceptions ?? [] };
+  }
   if (
     hasOwnSetting(params.body, 'commercialAdsPolicy') &&
     (!params.networkWrite?.authoredKeys ||
@@ -1119,9 +1134,6 @@ export async function saveChatSettings(params: {
       commercialAiDeleteOnly: params.commercialAiDeleteOnly,
     });
   }
-  const storedCommercialPolicy = commercialAdsPolicySchema.safeParse(
-    currentSettings?.commercialAdsPolicy,
-  );
   const settingsInput = {
     ...parsed.data,
     linkRulesPolicy: linkRulesWrite.policy,

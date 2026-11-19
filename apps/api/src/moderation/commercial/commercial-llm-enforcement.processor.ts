@@ -1,5 +1,8 @@
 import type { CommercialAdsRuntimePolicyService } from './commercial-ads-runtime-policy.service';
-import type { CommercialLlmClassifier } from './commercial-llm.protocol';
+import type {
+  CommercialLlmClassifier,
+  CommercialLlmObservationResult,
+} from './commercial-llm.protocol';
 import { createHash } from 'node:crypto';
 import type {
   CommercialAiQualityAnalysis,
@@ -23,6 +26,28 @@ import {
   COMMERCIAL_LLM_DELETE_RULE_CODE,
   COMMERCIAL_LLM_INFERENCE_TIMEOUT_MS,
 } from './commercial-llm-enforcement.protocol';
+
+function completedAnalysis(
+  result: CommercialLlmObservationResult,
+  observedAt: string,
+  policyDeleteEligible: boolean | null,
+): CommercialAiQualityAnalysis {
+  const consultation = result.pool?.consultationOutcome;
+  const reason =
+    consultation === 'no_capacity'
+      ? 'NO_CAPACITY'
+      : consultation === 'budget_exhausted'
+        ? 'BUDGET_EXHAUSTED'
+        : null;
+  return {
+    state: 'COMPLETE',
+    result,
+    classificationOrigin: reason ? 'POLICY_ABSTENTION' : 'MODEL',
+    policyDeleteEligible: reason ? false : policyDeleteEligible,
+    observedAt,
+    reason,
+  };
+}
 
 export class CommercialLlmEnforcementProcessor {
   constructor(
@@ -112,31 +137,39 @@ export class CommercialLlmEnforcementProcessor {
           : this.classifier;
       const result = await classifier.classify(item.request.excerpt, workSignal, valid);
       analysisCompleted = true;
-      const categoryDecision =
-        source.version === 3
-          ? await this.categoryPolicy?.evaluateAi(source, item.request.excerpt, result)
-          : undefined;
+      const observedAt = new Date().toISOString();
+      let categoryDecision:
+        | Awaited<ReturnType<CommercialAdsRuntimePolicyService['evaluateAi']>>
+        | undefined;
+      if (source.version === 3) {
+        try {
+          categoryDecision = await this.categoryPolicy?.evaluateAi(
+            source,
+            item.request.excerpt,
+            result,
+          );
+        } catch (error) {
+          // FLAG: A model reply is still evidence when the settings read fails.
+          // No permission is inferred and no proof or intent is created for this reply.
+          observe({
+            analysis: completedAnalysis(result, observedAt, null),
+            registration: {
+              state: 'REJECTED',
+              intentIdSha256: null,
+              reason: 'DEPENDENCY_UNAVAILABLE',
+            },
+          });
+          throw error;
+        }
+      }
       const policyMayDelete =
         source.version === 3
           ? categoryDecision?.mayDelete === true
           : commercialLlmMayDelete(result, source);
       // FLAG: Record the actual reply before any later source-authority veto.
       // A response and policy eligibility never establish a DELETE receipt.
-      const abstention = result.pool?.consultationOutcome;
-      const policyAbstention = abstention === 'no_capacity' || abstention === 'budget_exhausted';
       observe({
-        analysis: {
-          state: 'COMPLETE',
-          result,
-          classificationOrigin: policyAbstention ? 'POLICY_ABSTENTION' : 'MODEL',
-          policyDeleteEligible: policyMayDelete,
-          observedAt: new Date().toISOString(),
-          reason: policyAbstention
-            ? abstention === 'no_capacity'
-              ? 'NO_CAPACITY'
-              : 'BUDGET_EXHAUSTED'
-            : null,
-        },
+        analysis: completedAnalysis(result, observedAt, policyMayDelete),
       });
       if (!(await valid())) {
         observe({

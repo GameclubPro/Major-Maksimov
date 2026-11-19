@@ -126,4 +126,17 @@ describe('deterministic categories describe offers rather than ranking or incide
       }),
     ).toEqual([]);
   });
+
+  it.each([
+    ['Монтаж не выполняем.', ['BUSINESS']],
+    ['Монтаж выполняем за отдельную плату.', ['SERVICES', 'BUSINESS']],
+    ['Вступайте в чат волонтёров, завтра убираем парк.', ['BUSINESS']],
+    ['Принимаем заказы, а также вступайте в наш чат волонтёров.', ['BUSINESS']],
+    ['Вступайте в наш канал с каталогом.', ['BUSINESS', 'COMMUNITIES']],
+    ['Вступайте в наш канал. Там каталог товаров и скидки.', ['BUSINESS', 'COMMUNITIES']],
+  ])('attributes a separate offer in a goods listing: %s', (ending, categories) => {
+    const offer =
+      'Продаём краску оптом и в розницу, от 500 рублей. В наличии, заказывайте в личку.';
+    expect(deterministicCommercialCategories(detect(offer + ' ' + ending))).toEqual(categories);
+  });
 });

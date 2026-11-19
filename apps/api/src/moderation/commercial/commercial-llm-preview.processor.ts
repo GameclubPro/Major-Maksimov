@@ -1,10 +1,7 @@
 import { commercialLlmHasPinnedServerIdentity } from './commercial-llm-enforcement.protocol';
 import type { CommercialLlmSecondaryScheduler } from './commercial-llm-secondary-scheduler';
 import type { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
-import {
-  sanitizeCommercialCorpusText,
-  hasResidualCommercialContactCandidate,
-} from '../../scripts/commercial-corpus-sanitization.util';
+import { isCommercialCorpusTextSanitized } from '../../scripts/commercial-corpus-sanitization.util';
 
 // FLAG: Diagnostic inference has no intent writer, source proof or moderation effects.
 export async function processCommercialLlmPreview(
@@ -17,11 +14,7 @@ export async function processCommercialLlmPreview(
   const { raw, request } = task;
   let result = null;
   try {
-    if (
-      request.deadlineAtMs <= Date.now() ||
-      sanitizeCommercialCorpusText(request.excerpt) !== request.excerpt ||
-      hasResidualCommercialContactCandidate(request.excerpt)
-    )
+    if (request.deadlineAtMs <= Date.now() || !isCommercialCorpusTextSanitized(request.excerpt))
       return;
     // FLAG: The caller deadline revokes the result, not an already dispatched computation.
     // Drain its bounded terminal response under the client's existing timeout; aborting on

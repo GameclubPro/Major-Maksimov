@@ -30,20 +30,26 @@ let detector: CommercialAdDetector | undefined;
 
 export function commercialAdsDetectionCategories(
   detection: CommercialDetection | null,
-  result?: Pick<CommercialLlmObservationResult, 'classification' | 'reasonCodes'>,
 ): CommercialAdCategory[] {
-  if (result?.classification === 'NOT_COMMERCIAL') {
+  if (detection?.safeContextBucket === 'private_one_off_sale') return ['PERSONAL_SALE'];
+  return detection ? deterministicCommercialCategories(detection) : [];
+}
+
+type AiDecision = Pick<CommercialLlmObservationResult, 'classification' | 'reasonCodes'>;
+
+function modelCategories(result: AiDecision): CommercialAdCategory[] {
+  if (result.classification === 'NOT_COMMERCIAL') {
     return result.reasonCodes.length === 1 && result.reasonCodes[0] === 'PERSONAL_SALE'
       ? ['PERSONAL_SALE']
       : [];
   }
-  if (result?.classification === 'UNSURE') return [];
-  if (detection?.safeContextBucket === 'private_one_off_sale') return ['PERSONAL_SALE'];
-  const categories = new Set<CommercialAdCategory>(
-    detection ? deterministicCommercialCategories(detection) : [],
-  );
-  if (result?.reasonCodes.includes('COMMERCIAL_COMMUNITY')) categories.add('COMMUNITIES');
-  return [...categories];
+  if (result.classification !== 'COMMERCIAL') return [];
+  // FLAG: Incidental lexical subtypes cannot widen the model's explicit set of offered categories.
+  const categories: CommercialAdCategory[] = [];
+  if (result.reasonCodes.includes('SERVICE_OFFER')) categories.push('SERVICES');
+  if (result.reasonCodes.includes('BUSINESS_OFFER')) categories.push('BUSINESS');
+  if (result.reasonCodes.includes('COMMERCIAL_COMMUNITY')) categories.push('COMMUNITIES');
+  return categories;
 }
 
 export function detectCommercialAdsCategories(
@@ -51,6 +57,8 @@ export function detectCommercialAdsCategories(
   settings: CommercialDeleteSettings,
   result?: Pick<CommercialLlmObservationResult, 'classification' | 'reasonCodes'>,
 ): CommercialAdCategory[] {
+  const categories = result ? modelCategories(result) : null;
+  if (categories?.length === 0) return [];
   const rawLoweredText = normalizeCommercialRawText(text);
   const normalizedText = normalizePreparedCommercialText(rawLoweredText);
   const detection = (detector ??= new CommercialAdDetector()).detect({
@@ -59,32 +67,24 @@ export function detectCommercialAdsCategories(
     settings: settings as ChatSettings,
     commercialCampaignContext: null,
   });
-  if (result?.classification !== 'COMMERCIAL')
-    return commercialAdsDetectionCategories(detection, result);
+  if (categories === null) return commercialAdsDetectionCategories(detection);
 
-  // FLAG: The model names every actual offer category. Incidental lexical subtypes cannot
-  // widen that result and turn an allowed offer into a blocked service or community.
-  const categories: CommercialAdCategory[] = [];
-  if (result.reasonCodes.includes('SERVICE_OFFER')) categories.push('SERVICES');
-  if (result.reasonCodes.includes('BUSINESS_OFFER')) categories.push('BUSINESS');
-  if (result.reasonCodes.includes('COMMERCIAL_COMMUNITY')) categories.push('COMMUNITIES');
-  if (!categories.length) return [];
-
-  const state = collectCommercialSignals({
-    normalizedText,
-    rawLoweredText,
-    profile: resolveCommercialThresholds(settings),
-    commercialCampaignContext: null,
-  });
-  const safeContext =
-    detection?.safeContextBucket ??
-    deriveCommercialSafeContextBucket({
+  let safeContext = detection?.safeContextBucket;
+  if (safeContext === undefined) {
+    const state = collectCommercialSignals({
+      normalizedText,
+      rawLoweredText,
+      profile: resolveCommercialThresholds(settings),
+      commercialCampaignContext: null,
+    });
+    // FLAG: The same buyer and quoted-discussion veto also applies to a 9B personal-sale label.
+    safeContext = deriveCommercialSafeContextBucket({
       text: rawLoweredText,
       matchedSignals: state.matchedSignals,
       negativeSignals: state.negativeSignals,
-      // FLAG: Semantic categories do not remove existing buyer, quote or private-sale protection.
       hasCommercialHit: detection !== null,
     });
+  }
   if (safeContext === 'private_one_off_sale') return ['PERSONAL_SALE'];
   return safeContext === 'none' ? categories : [];
 }
@@ -132,6 +132,8 @@ export class CommercialAdsRuntimePolicyService {
     text: string,
     result: CommercialLlmObservationResult,
   ) {
+    if (source.version === 3 && modelCategories(result).length === 0)
+      return { mayDelete: false, categories: [] as CommercialAdCategory[] };
     const settings = await this.prisma.chatSettings.findUnique({
       where: { chatId: source.chatId },
     });

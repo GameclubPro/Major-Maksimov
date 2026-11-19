@@ -326,7 +326,12 @@ export async function applySettingsToAllChats(params: {
     majorSettingsUpdatePayload.linkPolicy = linkRulesLegacyShadow(copiedLinkRulesPolicy!);
   delete majorSettingsUpdatePayload.linkRulesPolicy;
   for (const key of LINK_RULES_METADATA_KEYS) delete majorSettingsUpdatePayload[key];
-  if (!hasOwnSetting(params.body, 'commercialAdsPolicy'))
+  // FLAG: A legacy source has no category rules to copy. Its null must preserve each
+  // recipient's policy and grants, including when the source is itself a recipient.
+  if (
+    !hasOwnSetting(params.body, 'commercialAdsPolicy') ||
+    majorSettingsUpdatePayload.commercialAdsPolicy == null
+  )
     delete majorSettingsUpdatePayload.commercialAdsPolicy;
   const policyFreeUpdatePayload: Omit<
     typeof majorSettingsUpdatePayload,

@@ -83,7 +83,10 @@ classification. It must not be interpreted as a deterministic KEEP or model resu
 For source v3, a commercial classification may be kept by category ALLOW, and a
 pinned 9B personal-sale classification may be blocked by explicit policy. The writer
 records classification and actual policy eligibility separately and checks model and
-source identity. Legacy source versions keep their existing validation. These
+source identity. If reading current settings fails after the model responds, the
+attempt records the completed classification, unknown eligibility and a dependency
+refusal. The failure grants no permission to delete. Legacy source versions keep their
+existing validation. These
 observations do not relax the separate frozen-policy quality certification gates.
 
 ## Independent quality evaluation

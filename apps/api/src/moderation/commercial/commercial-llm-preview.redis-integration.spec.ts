@@ -77,8 +77,8 @@ const busyKeys = [legacy, pool].flatMap((entry) => [
     await redis.del(...cleanup);
   });
   afterAll(() => redis?.disconnect());
-  const submit = () => {
-    const response = mailbox.classify(text);
+  const submit = (excerpt = text) => {
+    const response = mailbox.classify(excerpt);
     // Install a rejection observer immediately, including when testing races.
     const settled = response.then(
       (value) => ({ value }),
@@ -97,7 +97,7 @@ const busyKeys = [legacy, pool].flatMap((entry) => [
   };
 
   it('admits one request and returns only its pinned result after ready expiry', async () => {
-    const first = submit();
+    const first = submit('Первая строка\nВторая строка');
     const task = await take();
     await expect(mailbox.classify(text)).rejects.toMatchObject({ kind: 'BUSY' });
     await redis.del(keys.ready);

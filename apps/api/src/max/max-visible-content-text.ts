@@ -7,7 +7,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 /** Visible aliases of one message only; replies and forwards belong to separate content. */
 export function extractMaxVisibleContentTextSegments(
   message: Record<string, unknown>,
-  options: { preserveParagraphBoundaries?: boolean } = {},
+  options: { preserveParagraphBoundaries?: boolean; preferLineBreaks?: boolean } = {},
 ): string[] {
   const body = asRecord(message.body);
   const content = asRecord(message.content);
@@ -37,6 +37,7 @@ export function extractMaxVisibleContentTextSegments(
   const segments = new Map<string, string>();
   const paragraphCount = (value: string) =>
     value.match(/[\f\u2029]|\n[\p{Zs}\t]*\n/gu)?.length ?? 0;
+  const lineCount = (value: string) => value.match(/\r\n|[\r\n\v\f\u2028\u2029]/gu)?.length ?? 0;
   for (const value of candidates) {
     if (typeof value !== 'string') continue;
     const key = value.replace(/\s+/gu, ' ').trim().toLowerCase();
@@ -49,7 +50,8 @@ export function extractMaxVisibleContentTextSegments(
       previous === undefined ||
       (options.preserveParagraphBoundaries !== false &&
         paragraphCount(value.replace(/\r\n|\r|\v|\u2028/gu, '\n')) >
-          paragraphCount(previous.replace(/\r\n|\r|\v|\u2028/gu, '\n')))
+          paragraphCount(previous.replace(/\r\n|\r|\v|\u2028/gu, '\n'))) ||
+      (options.preferLineBreaks === true && lineCount(value) > lineCount(previous))
     )
       segments.set(key, value);
   }

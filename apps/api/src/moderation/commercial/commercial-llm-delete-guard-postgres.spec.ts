@@ -8,7 +8,7 @@ import {
   COMMERCIAL_LLM_POLICY_VERSION,
   type CommercialLlmObservationResult,
 } from './commercial-llm.protocol';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import type { MaxBotLinkService } from '../../max/max-bot-link.service';
 import type { MaxClientService } from '../../max/max-client.service';
@@ -188,6 +188,9 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
             commercialLlmSource: source,
             ...(policy
               ? {
+                  commercialAiObservation: {
+                    inputSha256: createHash('sha256').update(offer.excerpt).digest('hex'),
+                  },
                   commercialAdsDecision: {
                     version: 1,
                     result: classified ?? positive,
@@ -354,6 +357,23 @@ const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() 
       expect(h.max.getChatMemberAccess).toHaveBeenCalledTimes(1);
     },
   );
+  it('rejects an older flattened model input for the exact multiline source', async () => {
+    const text = 'Мастерская принимает заказы на ремонт мебели.\nРаботаем по договору.';
+    const h = await fixture(false, true, createDefaultCommercialAdsPolicy(), text);
+    const metadata = h.input.reasons[0]!.metadata;
+    metadata.commercialAiObservation!.inputSha256 = createHash('sha256')
+      .update(text.replace('\n', ' '))
+      .digest('hex');
+    await expect(h.guard.authorize(h.input)).rejects.toBeInstanceOf(
+      CommercialLlmGuardRejectedError,
+    );
+    expect(h.consume).not.toHaveBeenCalled();
+    metadata.commercialAiObservation!.inputSha256 = createHash('sha256').update(text).digest('hex');
+    await expect(h.guard.authorize(h.input)).resolves.toMatchObject({
+      reasonKeys: [h.input.reasons[0]!.reasonKey],
+    });
+  });
+
   it('executes a fresh v3 blocked service using semantic category evidence and 9B identity', async () => {
     const h = await fixture(false, true, createDefaultCommercialAdsPolicy());
     expect(h.source.version).toBe(3);

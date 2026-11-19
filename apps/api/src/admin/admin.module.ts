@@ -108,6 +108,7 @@ import { AdminLinksController } from './admin-links.controller';
 import { AdminLinksService } from './admin-links.service';
 import { AdminCommercialAdsController } from './admin-commercial-ads.controller';
 import { AdminCommercialAdsService } from './admin-commercial-ads.service';
+import { CommercialTextRuntimePolicyModule } from '../moderation/commercial/commercial-text-runtime-policy.module';
 import { CommercialAdsPreviewService } from '../moderation/commercial/commercial-ads-preview.service';
 import { AdminMessageRetentionController } from './admin-message-retention.controller';
 import { AdminMessageRetentionService } from './admin-message-retention.service';
@@ -246,6 +247,7 @@ import { PublisherAutoReplyAuthoringProcessor } from './publisher-auto-reply-aut
     ModerationDeleteIntentModule,
     MessageDuplicateStateModule,
     RedisCounterModule,
+    CommercialTextRuntimePolicyModule,
     PublisherModule,
   ],
   controllers: [

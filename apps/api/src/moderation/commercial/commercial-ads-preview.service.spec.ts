@@ -1,3 +1,8 @@
+import {
+  CommercialTextRuntimePolicyService,
+  COMMERCIAL_TEXT_BASELINE_POLICY_COHORTS,
+  fingerprintCommercialTextSettingsProfile,
+} from './commercial-text-runtime-policy.service';
 import { ConfigService } from '@nestjs/config';
 import { createDefaultCommercialAdsPolicy } from '@maxim/contracts/settings';
 import { CommercialAdsPreviewService } from './commercial-ads-preview.service';
@@ -24,17 +29,84 @@ const settings = {
 const text =
   'Ремонтируем стиральные машины. Выезд ежедневно, гарантия. Принимаем заказы, запись по телефону +7 900 000 10 42.';
 function fixture(ai = false) {
-  const service = new CommercialAdsPreviewService(
+  const authority = jest
+    .fn<
+      ReturnType<CommercialTextRuntimePolicyService['authority']>,
+      Parameters<CommercialTextRuntimePolicyService['authority']>
+    >()
+    .mockResolvedValue({
+      mode: 'baseline',
+      revision: 0,
+      baselineAllowed: true,
+      promotedPolicyCohorts: COMMERCIAL_TEXT_BASELINE_POLICY_COHORTS,
+    });
+  const preview = new CommercialAdsPreviewService(
     new ConfigService({
       COMMERCIAL_LLM_ENFORCEMENT_ENABLED: ai,
       REDIS_URL: 'redis://127.0.0.1:1',
       COMMERCIAL_LLM_ENDPOINT: 'http://127.0.0.1:1',
     }),
+    { authority },
   );
-  return { service };
+  const service = {
+    preview: (
+      input: Parameters<CommercialAdsPreviewService['preview']>[0],
+      saved: Parameters<CommercialAdsPreviewService['preview']>[1],
+    ) => preview.preview(input, saved, 'preview-chat'),
+  };
+  return { service, authority };
 }
 describe('commercial preview without moderation effects', () => {
   afterEach(() => jest.restoreAllMocks());
+  it.each(['off', 'unavailable'] as const)(
+    'honors deterministic %s authority for the draft chat and profile',
+    async (mode) => {
+      const { service, authority } = fixture();
+      authority.mockResolvedValue({
+        mode,
+        revision: 1,
+        baselineAllowed: false,
+        promotedPolicyCohorts: [],
+      });
+      const classification = {
+        commercialAdsSensitivity: 'STRICT' as const,
+        commercialAdsWarnThreshold: 38,
+        commercialAdsDeleteThreshold: 55,
+      };
+      const result = await service.preview(
+        { text, policy: null, enabled: true, classification },
+        settings,
+      );
+      expect(result.decision).toBe(mode === 'off' ? 'KEEP' : 'UNAVAILABLE');
+      expect(authority).toHaveBeenCalledWith(
+        'preview-chat',
+        fingerprintCommercialTextSettingsProfile(classification),
+      );
+    },
+  );
+  it('only previews cleanup of a current-order offer for chats with its promoted policy', async () => {
+    const { service, authority } = fixture();
+    const request = {
+      text: 'Принимаю заказы на пряники. Пишите 8 900 000 10 42.',
+      policy: null,
+      enabled: true,
+    };
+    authority.mockResolvedValue({
+      mode: 'canary',
+      revision: 1,
+      baselineAllowed: true,
+      promotedPolicyCohorts: [],
+    });
+    await expect(service.preview(request, settings)).resolves.toMatchObject({ decision: 'KEEP' });
+    authority.mockResolvedValue({
+      mode: 'canary',
+      revision: 1,
+      baselineAllowed: true,
+      promotedPolicyCohorts: ['commercial-intent-quality-v1'],
+    });
+    await expect(service.preview(request, settings)).resolves.toMatchObject({ decision: 'DELETE' });
+  });
+
   it('uses the complete unsaved sensitivity profile without changing saved settings', async () => {
     const { service } = fixture();
     const saved = { ...settings, commercialAdsWarnThreshold: 60, commercialAdsDeleteThreshold: 82 };
@@ -187,6 +259,13 @@ describe('commercial preview without moderation effects', () => {
     jest.spyOn(CommercialLlmPreviewMailbox.prototype, 'classify').mockResolvedValue(result);
     const { service } = fixture(true);
     const policy = createDefaultCommercialAdsPolicy();
+    const mixed =
+      'Посоветуйте магазин мебели\nРемонт квартир под ключ по договору, принимаем заказы. Звоните 8 900 000 00 00';
+    const multiline = await service.preview({ text: mixed, policy, enabled: true }, settings);
+    expect(multiline).toMatchObject({ decision: 'DELETE', categories: ['SERVICES'] });
+    expect(CommercialLlmPreviewMailbox.prototype.classify).toHaveBeenCalledWith(
+      'Посоветуйте магазин мебели\nРемонт квартир под ключ по договору, принимаем заказы. Звоните [phone]',
+    );
     const shortOffer = 'Мастерская принимает заказы на ремонт мебели. Работаем по договору.';
     expect(
       await service.preview({ text: shortOffer, policy, enabled: true }, settings),

@@ -1,10 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   resolveCommercialAdsPolicy,
   type CommercialAdsPreviewRequest,
   type CommercialAdsPreviewResponse,
 } from '@maxim/contracts/settings';
+import {
+  CommercialTextRuntimePolicyService,
+  fingerprintCommercialTextSettingsProfile,
+} from './commercial-text-runtime-policy.service';
 import { CommercialAdDetector } from './commercial-ad.detector';
 import { isCommercialMessageDeleteEligible } from './commercial-action-policy';
 import {
@@ -24,7 +28,7 @@ import { commercialLlmHasPinnedServerIdentity } from './commercial-llm-enforceme
 import { createCommercialLlmRedis } from './commercial-llm-shadow.lease';
 import { CommercialLlmPreviewMailbox } from './commercial-llm-preview.mailbox';
 import {
-  sanitizeCommercialCorpusText,
+  sanitizeCommercialMessageExcerpt,
   hasResidualCommercialContactCandidate,
 } from '../../scripts/commercial-corpus-sanitization.util';
 
@@ -33,11 +37,16 @@ export class CommercialAdsPreviewService {
   private readonly detector = new CommercialAdDetector();
   private busy = false;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Inject(CommercialTextRuntimePolicyService)
+    private readonly textPolicy: Pick<CommercialTextRuntimePolicyService, 'authority'>,
+  ) {}
 
   async preview(
     input: CommercialAdsPreviewRequest,
     settings: CommercialDeleteSettings,
+    chatId: string,
   ): Promise<CommercialAdsPreviewResponse> {
     if (!input.enabled) return { decision: 'KEEP', categories: [], reason: 'FILTER_DISABLED' };
     const effective = {
@@ -46,13 +55,27 @@ export class CommercialAdsPreviewService {
       commercialAdsFilterEnabled: true,
       commercialAdsPolicy: input.policy,
     };
+    const aiEnabled =
+      this.config.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', false) === true;
+    const authority = aiEnabled
+      ? null
+      : await this.textPolicy.authority(
+          chatId,
+          fingerprintCommercialTextSettingsProfile(effective),
+        );
+    if (authority?.mode === 'unavailable') return this.unavailable();
+    if (authority?.baselineAllowed === false)
+      return { decision: 'KEEP', categories: [], reason: 'FILTER_DISABLED' };
     const rawLoweredText = normalizeCommercialRawText(input.text);
-    const detection = this.detector.detect({
-      normalizedText: normalizePreparedCommercialText(rawLoweredText),
-      rawLoweredText,
-      settings: effective as import('../../prisma/prisma-client').ChatSettings,
-      commercialCampaignContext: null,
-    });
+    const detection = aiEnabled
+      ? null
+      : this.detector.detect({
+          normalizedText: normalizePreparedCommercialText(rawLoweredText),
+          rawLoweredText,
+          settings: effective as import('../../prisma/prisma-client').ChatSettings,
+          commercialCampaignContext: null,
+          promotedPolicyCohorts: authority?.promotedPolicyCohorts,
+        });
     let categories = commercialAdsDetectionCategories(detection);
     let advertising = !!detection;
     let eligible =
@@ -62,10 +85,7 @@ export class CommercialAdsPreviewService {
         detection.actionable === true,
         detection.messageDisposition,
       );
-    const aiEnabled =
-      this.config.get<boolean>('COMMERCIAL_LLM_ENFORCEMENT_ENABLED', false) === true;
     if (!aiEnabled && !detection && input.policy !== null) {
-      const rawLoweredText = normalizeCommercialRawText(input.text);
       const state = collectCommercialSignals({
         normalizedText: normalizePreparedCommercialText(rawLoweredText),
         rawLoweredText,
@@ -91,7 +111,7 @@ export class CommercialAdsPreviewService {
       this.busy = true;
       let redis: ReturnType<typeof createCommercialLlmRedis> | undefined;
       try {
-        const excerpt = sanitizeCommercialCorpusText(input.text);
+        const excerpt = sanitizeCommercialMessageExcerpt(input.text);
         if (
           !excerpt.trim() ||
           excerpt.length > 2500 ||
@@ -103,7 +123,12 @@ export class CommercialAdsPreviewService {
         const result = await new CommercialLlmPreviewMailbox(redis).classify(excerpt);
         if (!commercialLlmHasPinnedServerIdentity(result))
           throw new CommercialLlmError('INVALID_RESPONSE');
-        categories = detectCommercialAdsCategories(input.text, effective, result);
+        categories = detectCommercialAdsCategories(excerpt, effective, result);
+        if (input.policy !== null && categories.length && input.text !== excerpt) {
+          // FLAG: The runner evaluates its input and the dispatch guard evaluates the exact source.
+          const sourceCategories = detectCommercialAdsCategories(input.text, effective, result);
+          if (sourceCategories.join() !== categories.join()) categories = [];
+        }
         advertising =
           result.classification === 'COMMERCIAL' || categories.includes('PERSONAL_SALE');
         eligible = categories.includes('PERSONAL_SALE')

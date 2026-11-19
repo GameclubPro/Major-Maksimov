@@ -129,6 +129,21 @@ describe('category policy on the actual commercial detector and pinned AI respon
 
   it.each([
     'Ищу мастера на ремонт мебели, посоветуйте специалиста.',
+    'Это мошенники! Не пишите им. Они рассылают: «Продам свой велосипед».',
+    'Пример рекламы для модераторов: «Мастерская принимает заказы на ремонт мебели».',
+  ])('keeps protected context when 9B calls it a personal sale: %s', (text) => {
+    const policy = createDefaultCommercialAdsPolicy();
+    policy.categories.PERSONAL_SALE = 'BLOCK';
+    expect(
+      evaluateCommercialAdsAiPolicy({
+        ...fixture(policy, text),
+        result: { ...positive, classification: 'NOT_COMMERCIAL', reasonCodes: ['PERSONAL_SALE'] },
+      }),
+    ).toMatchObject({ mayDelete: false, categories: [] });
+  });
+
+  it.each([
+    'Ищу мастера на ремонт мебели, посоветуйте специалиста.',
     'Пример рекламы для модераторов: «Мастерская принимает заказы на ремонт мебели».',
   ])('preserves protected contexts even with a coarse commercial AI label: %s', (messageText) => {
     expect(evaluateCommercialAdsAiPolicy(fixture(undefined, messageText))).toMatchObject({
@@ -314,5 +329,16 @@ describe('category policy on the actual commercial detector and pinned AI respon
       mayDelete: false,
       categories: ['PERSONAL_SALE'],
     });
+  });
+
+  it('retains a paid service classification when the same author denies selling furniture', () => {
+    const offer =
+      'Оказываем услуги по ремонту квартир под ключ. Замер бесплатно, цены от 1200 рублей. Звоните +7 000 000 00 00.';
+    for (const message of [offer, offer + ' Мебель не продаём.']) {
+      expect(evaluateCommercialAdsAiPolicy(fixture(undefined, message))).toMatchObject({
+        categories: ['SERVICES'],
+        mayDelete: true,
+      });
+    }
   });
 });
