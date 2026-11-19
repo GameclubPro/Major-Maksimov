@@ -45,7 +45,14 @@ const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
   month: 'long',
   hour: '2-digit',
   minute: '2-digit',
+  timeZone: 'Europe/Moscow',
 });
+const plural = new Intl.PluralRules('ru-RU');
+
+function countWithNoun(count: number, one: string, few: string, many: string) {
+  const form = plural.select(count);
+  return `${count.toLocaleString('ru-RU')} ${form === 'one' ? one : form === 'few' ? few : many}`;
+}
 
 export function GiveawayPage({ api }: { api: ApiTransport }) {
   const { giveawayId = '' } = useParams();
@@ -233,31 +240,33 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
     ? 'Розыгрыш'
     : checking
       ? 'Проверяем условия'
-      : unavailable
-        ? 'Проверка недоступна'
-        : phase === 'CANCELED'
-          ? 'Розыгрыш отменён'
-          : participant?.isWinner
-            ? expired
-              ? 'Срок подтверждения истёк'
-              : participant.winnerStatus === 'DELIVERED'
-                ? 'Приз выдан'
-                : participant.winnerStatus === 'CLAIMED'
-                  ? 'Выигрыш подтверждён'
-                  : 'Вы победили!'
-            : phase === 'COMPLETED'
-              ? 'Итоги подведены'
-              : phase === 'DRAWING'
-                ? 'Подводим итоги'
-                : phase === 'SCHEDULED'
-                  ? 'Скоро начинаем'
-                  : verified
-                    ? 'Вы участвуете'
-                    : participant?.eligibilityState === 'REJECTED'
-                      ? 'Осталось подписаться'
-                      : participant?.eligibilityState === 'PENDING'
-                        ? 'Заявка ожидает проверки'
-                        : 'Ваше участие';
+      : claimable && !readError && conditions.some((condition) => condition.state === 'missing')
+        ? 'Подпишитесь, чтобы подтвердить выигрыш'
+        : unavailable
+          ? 'Проверка недоступна'
+          : phase === 'CANCELED'
+            ? 'Розыгрыш отменён'
+            : participant?.isWinner
+              ? expired
+                ? 'Срок подтверждения истёк'
+                : participant.winnerStatus === 'DELIVERED'
+                  ? 'Приз выдан'
+                  : participant.winnerStatus === 'CLAIMED'
+                    ? 'Выигрыш подтверждён'
+                    : 'Вы победили!'
+              : phase === 'COMPLETED'
+                ? 'Итоги подведены'
+                : phase === 'DRAWING'
+                  ? 'Подводим итоги'
+                  : phase === 'SCHEDULED'
+                    ? 'Скоро начинаем'
+                    : verified
+                      ? 'Вы участвуете'
+                      : participant?.eligibilityState === 'REJECTED'
+                        ? 'Осталось подписаться'
+                        : participant?.eligibilityState === 'PENDING'
+                          ? 'Заявка ожидает проверки'
+                          : 'Ваше участие';
   const target = claimable
     ? participant?.claimDeadlineAt
     : phase === 'SCHEDULED'
@@ -321,6 +330,8 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
       ? (giveaway?.resultsUrl ?? giveaway?.publicationUrl)
       : giveaway?.publicationUrl;
   const personalStatusFirst = Boolean(
+    loading ||
+    checking ||
     participant?.joined ||
     participant?.isWinner ||
     unavailable ||
@@ -332,10 +343,37 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
   const prizes = [...(giveaway?.prizes ?? [])].sort(
     (left, right) => left.position - right.position,
   );
-  const description = giveaway?.description.trim() ?? '';
+  const firstPrize = prizes[0];
+  const firstPrizeTitle = firstPrize?.displayTitle || firstPrize?.title;
+  const sharedPrize =
+    firstPrize &&
+    prizes.every(
+      (prize, index) =>
+        prize.position === index + 1 && (prize.displayTitle || prize.title) === firstPrizeTitle,
+    );
+  const coverVisible = imageSource && failedImage !== imageSource;
+  const description = giveaway?.description.trim();
+  const showStatus =
+    personalStatusFirst || loading || checking || phase === 'SCHEDULED' || fatalError;
+  const PrizeHeading = showStatus ? 'h2' : 'h1';
+  const postLabel =
+    phase === 'COMPLETED' && giveaway?.resultsUrl ? 'К опубликованным итогам' : 'К посту розыгрыша';
+  const sortedConditions = [...conditions].sort(
+    (a, b) => Number(b.state === 'missing') - Number(a.state === 'missing'),
+  );
+  const prizeList = (items: typeof prizes) => (
+    <ol className="giveaway-page__prizes">
+      {items.map((prize) => (
+        <li key={prize.id}>
+          <span>{prize.position}</span>
+          <strong>{prize.displayTitle || prize.title}</strong>
+        </li>
+      ))}
+    </ol>
+  );
   const promotion = giveaway ? (
     <section className="giveaway-page__promotion" aria-label="О розыгрыше">
-      {imageSource && failedImage !== imageSource ? (
+      {coverVisible ? (
         <img
           className="giveaway-page__cover"
           src={imageSource}
@@ -344,58 +382,65 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
         />
       ) : null}
       <div className="giveaway-page__promotion-copy">
-        <span className="giveaway-page__eyebrow">
-          {phase === 'COMPLETED'
-            ? 'Розыгрыш завершён'
-            : phase === 'ACTIVE'
-              ? 'Участвуйте и выигрывайте'
-              : phase === 'SCHEDULED'
-                ? 'Скоро начнётся'
-                : phase === 'DRAWING'
-                  ? 'Подводим итоги'
-                  : phase === 'CANCELED'
-                    ? 'Розыгрыш отменён'
-                    : 'О розыгрыше'}
-        </span>
-        <h2>{giveaway.title}</h2>
+        {!coverVisible ? (
+          <div className="giveaway-page__art" aria-hidden="true">
+            <i />
+            <i />
+          </div>
+        ) : null}
         {prizes.length ? (
-          <div className="giveaway-page__prizes">
-            <h3>
-              <IconoirSprite variant="iconoir" icon="Trophy" aria-hidden="true" /> Призы
-            </h3>
-            <ol>
-              {prizes.slice(0, 3).map((prize) => (
-                <li key={prize.id}>
-                  <span>{prize.position}</span>
-                  <strong>{prize.displayTitle || prize.title}</strong>
-                </li>
-              ))}
-            </ol>
+          <p className="giveaway-page__places">
+            {sharedPrize && prizes.length > 1
+              ? `Места 1–${prizes.length}`
+              : sharedPrize
+                ? '1 место'
+                : countWithNoun(prizes.length, 'призовое место', 'призовых места', 'призовых мест')}
+          </p>
+        ) : null}
+        <PrizeHeading className="giveaway-page__title">{giveaway.title}</PrizeHeading>
+        {sharedPrize ? (
+          <p className="giveaway-page__featured-prize">{firstPrizeTitle}</p>
+        ) : prizes.length ? (
+          <div>
+            {prizeList(prizes.slice(0, 3))}
             {prizes.length > 3 ? (
               <details>
                 <summary>Все призовые места · {prizes.length}</summary>
-                <ol start={4}>
-                  {prizes.slice(3).map((prize) => (
-                    <li key={prize.id}>
-                      <span>{prize.position}</span>
-                      <strong>{prize.displayTitle || prize.title}</strong>
-                    </li>
-                  ))}
-                </ol>
+                {prizeList(prizes.slice(3))}
               </details>
             ) : null}
           </div>
         ) : null}
-        {description.length > 220 ? (
-          <details className="giveaway-page__description">
-            <summary>
-              {description.slice(0, 220).trimEnd()}… <span>Подробнее</span>
-            </summary>
-            <p>{description}</p>
-          </details>
-        ) : description ? (
-          <p className="giveaway-page__description">{description}</p>
-        ) : null}
+      </div>
+    </section>
+  ) : null;
+  const descriptionDetails = description ? (
+    <details className="giveaway-page__details">
+      <summary>Описание розыгрыша</summary>
+      <p>{description}</p>
+    </details>
+  ) : null;
+  const prioritizeConditions = showConditions && (participant?.joined || unavailable) && !claimable;
+  const metrics = giveaway ? (
+    <section className="giveaway-page__metrics" aria-label="Сроки и заявки">
+      {target ? (
+        <div className="giveaway-page__timer">
+          <span>
+            {claimable ? 'Подтвердить до' : phase === 'SCHEDULED' ? 'Начало' : 'Приём заявок до'}
+          </span>
+          <time dateTime={target}>{dateFormatter.format(new Date(target))} МСК</time>
+          <strong
+            role="timer"
+            aria-live="off"
+            aria-label={`Осталось ${formatGiveawayCountdown(Date.parse(target), nowMs)}`}
+          >
+            Осталось {formatGiveawayCountdown(Date.parse(target), nowMs)}
+          </strong>
+        </div>
+      ) : null}
+      <div className="giveaway-page__counts">
+        <small>Заявок</small>
+        <strong>{giveaway.entriesCount.toLocaleString('ru-RU')}</strong>
       </div>
     </section>
   ) : null;
@@ -415,108 +460,95 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
             avatarUrl={giveaway?.sourceAvatarUrl}
           />
           <div className="giveaway-page__source">
-            <span>Розыгрыш в MAX</span>
             <strong>{giveaway?.sourceTitle ?? 'Майор'}</strong>
+            <span>Розыгрыш</span>
           </div>
-          <button
-            className="giveaway-page__icon-button"
-            type="button"
-            onClick={close}
-            aria-label="Закрыть розыгрыш"
-            title="Закрыть"
-          >
-            <IconoirSprite variant="iconoir" icon="Xmark" />
-          </button>
+          <div className="giveaway-page__header-actions">
+            {postUrl ? (
+              <button
+                type="button"
+                className="giveaway-page__icon-button giveaway-page__post-link"
+                aria-label={postLabel}
+                title={postLabel}
+                onClick={() => openMaxBotLink(postUrl)}
+              >
+                <IconoirSprite variant="iconoir" icon="OpenNewWindow" aria-hidden="true" />
+              </button>
+            ) : null}
+            <button
+              className="giveaway-page__icon-button"
+              type="button"
+              onClick={close}
+              aria-label="Закрыть розыгрыш"
+              title="Закрыть"
+            >
+              <IconoirSprite variant="iconoir" icon="Xmark" />
+            </button>
+          </div>
         </header>
         {!personalStatusFirst ? promotion : null}
-        <section
-          className="giveaway-page__participation-status"
-          aria-busy={Boolean(loading || busy)}
-        >
-          <div
-            className={`giveaway-page__verification ${loading || checking || phase === 'DRAWING' ? 'is-checking' : ''} ${statusTone === 'success' || statusTone === 'winner' ? 'is-verified' : ''}`}
-            aria-hidden="true"
+        {showStatus ? (
+          <section
+            className="giveaway-page__participation-status"
+            aria-busy={Boolean(loading || busy)}
           >
-            <IconoirSprite variant="iconoir" icon={StateIcon} />
-          </div>
-          <p className="giveaway-page__eyebrow">
-            {phase === 'COMPLETED'
-              ? 'Результат розыгрыша'
-              : phase === 'DRAWING'
-                ? 'Приём завершён'
-                : 'Ваш статус'}
-          </p>
-          <h1 id="giveaway-overlay-title" aria-live="polite">
-            {fatalError ? 'Не удалось открыть розыгрыш' : loading ? 'Загружаем розыгрыш' : title}
-          </h1>
-          {!loading && !unavailable && !participant?.joined && entryOpen ? (
-            <p>Ваша заявка ещё не зарегистрирована.</p>
-          ) : null}
-          {verified && entryOpen ? (
-            <p>Подписки подтверждены. Перед итогами проверим их снова.</p>
-          ) : null}
-          {!loading && !unavailable && phase === 'COMPLETED' && !participant?.isWinner ? (
-            <p>
-              {participant?.joined
-                ? 'В этот раз ваша заявка не выиграла.'
-                : 'Приём заявок завершён.'}
-            </p>
-          ) : null}
-          {phase === 'DRAWING' ? <p>Приём заявок закрыт. Ожидаем результаты.</p> : null}
-          {!unavailable && participant?.eligibilityState === 'PENDING' && entryOpen ? (
-            <p>MAX пока не подтвердил подписки. Заявка сохранена, допуск ещё не подтверждён.</p>
-          ) : null}
-          {participant?.isWinner && !expired && participant.prizePosition ? (
-            <p className="giveaway-page__personal-prize">
-              {participant.prizePosition} место
-              {participant.prizeDisplayTitle || participant.prizeTitle
-                ? ` · ${participant.prizeDisplayTitle || participant.prizeTitle}`
-                : ''}
-            </p>
-          ) : null}
-          {phase === 'CANCELED' ? <p>Приём заявок остановлен. Победители не выбираются.</p> : null}
-        </section>
-        {giveaway ? (
-          <section className="giveaway-page__metrics" aria-label="Сроки и заявки">
-            {target ? (
-              <div className="giveaway-page__timer">
+            <div
+              className={`giveaway-page__verification ${loading || checking || phase === 'DRAWING' ? 'is-checking' : ''} ${statusTone === 'success' || statusTone === 'winner' ? 'is-verified' : ''}`}
+              aria-hidden="true"
+            >
+              <IconoirSprite variant="iconoir" icon={StateIcon} />
+            </div>
+            <h1 id="giveaway-overlay-title" aria-live="polite">
+              {fatalError ? 'Не удалось открыть розыгрыш' : loading ? 'Загружаем розыгрыш' : title}
+            </h1>
+            {verified && entryOpen ? <p>Перед итогами проверим подписки ещё раз.</p> : null}
+            {!loading && !unavailable && phase === 'COMPLETED' && !participant?.isWinner ? (
+              <p>
+                {participant?.joined
+                  ? 'В этот раз ваша заявка не выиграла.'
+                  : 'Приём заявок завершён.'}
+              </p>
+            ) : null}
+            {!unavailable && participant?.eligibilityState === 'PENDING' && entryOpen ? (
+              <p>Заявка сохранена. MAX ещё проверяет подписки.</p>
+            ) : null}
+            {participant?.isWinner && !expired && participant.prizePosition ? (
+              <p className="giveaway-page__personal-prize">
+                {participant.prizePosition} место
+                {participant.prizeDisplayTitle || participant.prizeTitle
+                  ? ` · ${participant.prizeDisplayTitle || participant.prizeTitle}`
+                  : ''}
+              </p>
+            ) : null}
+            {phase === 'CANCELED' ? <p>Победители не выбираются.</p> : null}
+            {participant?.entryId && verified && (entryOpen || phase === 'DRAWING') ? (
+              <div className="giveaway-page__ticket">
                 <span>
-                  {claimable
-                    ? 'На подтверждение'
-                    : phase === 'SCHEDULED'
-                      ? 'До начала'
-                      : 'До закрытия приёма'}
+                  Заявка № <strong>{participant.entryId}</strong>
                 </span>
-                <strong
-                  role="timer"
-                  aria-label={formatGiveawayCountdown(Date.parse(target), nowMs)}
-                >
-                  {formatGiveawayCountdown(Date.parse(target), nowMs)}
-                </strong>
-                <time dateTime={target}>{dateFormatter.format(new Date(target))}</time>
               </div>
             ) : null}
-            <div className="giveaway-page__counts">
-              <span>
-                <IconoirSprite variant="iconoir" icon="User" aria-hidden="true" />
-                <strong>{giveaway.entriesCount.toLocaleString('ru-RU')}</strong>
-                <small>заявок</small>
-              </span>
-              <span>
-                <IconoirSprite variant="iconoir" icon="Trophy" aria-hidden="true" />
-                <strong>{giveaway.prizes.length}</strong>
-                <small>мест</small>
-              </span>
-            </div>
           </section>
         ) : null}
-        {personalStatusFirst ? promotion : null}
+        {actionError || readError || fatalError ? (
+          <p className="giveaway-page__error" role="alert">
+            {actionError ??
+              describeUserFacingError(readError, 'Не удалось загрузить данные. Повторите попытку.')}
+          </p>
+        ) : null}
+        {!prioritizeConditions ? metrics : null}
         {showConditions ? (
           <section className="giveaway-page__conditions" aria-label="Условия участия">
             <div className="giveaway-page__section-heading">
-              <h2>Условия участия</h2>
+              <h2>Подписки</h2>
               <span>
-                {checkedCount} из {conditions.length}
+                {conditions.some(
+                  (condition) => condition.state === 'verified' || condition.state === 'missing',
+                )
+                  ? `${checkedCount} из ${conditions.length}`
+                  : giveaway.entityType === 'chat'
+                    ? countWithNoun(conditions.length, 'условие', 'условия', 'условий')
+                    : countWithNoun(conditions.length, 'канал', 'канала', 'каналов')}
               </span>
             </div>
             <div
@@ -532,7 +564,7 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
               ))}
             </div>
             <ol className="giveaway-page__condition-list">
-              {conditions.map((condition, index) => (
+              {sortedConditions.map((condition) => (
                 <li key={condition.id} data-state={condition.state}>
                   <span className="giveaway-page__condition-mark" aria-hidden="true">
                     {condition.state === 'verified' ? (
@@ -540,7 +572,7 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
                     ) : condition.state === 'checking' ? (
                       <IconoirSprite variant="iconoir" icon="RefreshDouble" />
                     ) : (
-                      index + 1
+                      <IconoirSprite variant="iconoir" icon="Community" />
                     )}
                   </span>
                   <div>
@@ -573,24 +605,17 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
                 </li>
               ))}
             </ol>
-            {!showClaimConditions && participant?.checkedAt ? (
+            {!unavailable && !showClaimConditions && participant?.checkedAt ? (
               <p className="giveaway-page__checked-at">
-                Последняя проверка:{' '}
+                Проверено{' '}
                 <time dateTime={participant.checkedAt}>
-                  {dateFormatter.format(new Date(participant.checkedAt))}
+                  {dateFormatter.format(new Date(participant.checkedAt))} МСК
                 </time>
               </p>
             ) : null}
           </section>
         ) : null}
-        {participant?.entryId && verified && (entryOpen || phase === 'DRAWING') ? (
-          <div className="giveaway-page__ticket">
-            <IconoirSprite variant="iconoir" icon="CheckCircle" aria-hidden="true" />
-            <span>
-              Заявка принята<strong>№ {participant.entryId}</strong>
-            </span>
-          </div>
-        ) : null}
+        {prioritizeConditions ? metrics : null}
         {phase === 'COMPLETED' ? (
           <section className="giveaway-page__results">
             <h2>Победители</h2>
@@ -616,14 +641,17 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
             )}
           </section>
         ) : null}
+        {personalStatusFirst && giveaway ? (
+          <details className="giveaway-page__details">
+            <summary>{giveaway.title}</summary>
+            {promotion}
+            {description ? <p>{description}</p> : null}
+          </details>
+        ) : (
+          descriptionDetails
+        )}
       </div>
       <footer className="giveaway-page__participation-actions">
-        {actionError || readError || fatalError ? (
-          <p className="giveaway-page__error" role="alert">
-            {actionError ??
-              describeUserFacingError(readError, 'Не удалось загрузить данные. Повторите попытку.')}
-          </p>
-        ) : null}
         <button
           type="button"
           className="giveaway-page__primary"
@@ -657,18 +685,6 @@ function GiveawayParticipation({ api, giveawayId }: { api: ApiTransport; giveawa
           )}
           <span>{actionLabel}</span>
         </button>
-        {postUrl ? (
-          <button
-            type="button"
-            className="giveaway-page__post-link"
-            onClick={() => openMaxBotLink(postUrl)}
-          >
-            {phase === 'COMPLETED' && giveaway?.resultsUrl
-              ? 'К опубликованным итогам'
-              : 'К посту розыгрыша'}
-            <IconoirSprite variant="iconoir" icon="NavArrowRight" aria-hidden="true" />
-          </button>
-        ) : null}
       </footer>
     </main>
   );

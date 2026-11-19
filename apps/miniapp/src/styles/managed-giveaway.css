@@ -2973,4 +2973,312 @@
     color: var(--app-page-background);
     box-shadow: none;
   }
+
+  /* A previous draft notification must not cover the final publication decision. */
+  .action-confirm-sheet.managed-giveaway__publish-confirmation {
+    z-index: 1701;
+  }
+
+  .managed-giveaway {
+    --giveaway-desk-cover: linear-gradient(120deg, #1c202e 12%, #292944 66%, #3c3792);
+    --giveaway-desk-cover-text: #fff;
+    --giveaway-desk-cover-secondary: #dedff8;
+    --giveaway-desk-cover-pattern: rgb(171 166 255 / 17%);
+    --giveaway-desk-cover-mask: linear-gradient(90deg, transparent 15%, #000 80%);
+    --giveaway-desk-status-default: #b1b1f5;
+    --giveaway-desk-status-success: #73dbb4;
+    --giveaway-desk-status-danger: #ff9eaa;
+    --giveaway-desk-highlight: #7168e8;
+    --giveaway-desk-action: #5045c6;
+    --giveaway-desk-action-text: #fff;
+  }
+
+  .managed-giveaway__dashboard-cover {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: grid;
+    justify-items: start;
+    align-content: end;
+    gap: 12px;
+    min-height: 112px;
+    padding: clamp(16px, 5vw, 28px);
+    border-radius: 20px;
+    background: var(--giveaway-desk-cover);
+    color: var(--giveaway-desk-cover-text);
+  }
+
+  .managed-giveaway__dashboard-cover::after {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-radial-gradient(
+      ellipse 165px 120px at 106% -38%,
+      transparent 0 16px,
+      var(--giveaway-desk-cover-pattern) 17px,
+      transparent 18px
+    );
+    mask-image: var(--giveaway-desk-cover-mask);
+  }
+
+  .managed-giveaway__dashboard-cover h2 {
+    margin: 0;
+    color: var(--giveaway-desk-cover-text);
+    font-size: clamp(1.45rem, 5.8vw, 2rem);
+    font-weight: 800;
+    line-height: 1.12;
+    letter-spacing: -0.035em;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+  }
+
+  .managed-giveaway__state {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--giveaway-desk-cover-secondary);
+    font-size: 0.8rem;
+    font-weight: 700;
+  }
+
+  .managed-giveaway__state::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--giveaway-desk-status-default);
+  }
+
+  .managed-giveaway__state.is-success::before {
+    background: var(--giveaway-desk-status-success);
+  }
+  .managed-giveaway__state.is-danger::before {
+    background: var(--giveaway-desk-status-danger);
+  }
+
+  .managed-giveaway__ledger {
+    display: grid;
+    gap: 0;
+    min-width: 0;
+    margin: 0;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .managed-giveaway__ledger > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding-block: 9px;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .managed-giveaway__ledger dt {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+  .managed-giveaway__ledger dd {
+    margin: 0;
+    font-weight: 800;
+    font-size: 0.94rem;
+    overflow-wrap: anywhere;
+  }
+  .managed-giveaway__desk-actions,
+  .managed-giveaway__channel-options {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+  .managed-giveaway__desk-actions:empty {
+    display: none;
+  }
+  .managed-giveaway__desk-actions .button {
+    min-height: 46px;
+  }
+  .managed-giveaway__detail-body {
+    display: grid;
+    gap: 8px;
+  }
+  .managed-giveaway__detail-body ul {
+    padding: 0;
+    margin: 0;
+    list-style: none;
+    display: grid;
+    gap: 7px;
+  }
+  .managed-giveaway__detail-body li {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: baseline;
+  }
+  .managed-giveaway__detail-body li span {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+  }
+  .managed-giveaway__post-copy {
+    white-space: pre-wrap;
+  }
+  .managed-giveaway__detail-body p,
+  .managed-giveaway__post-copy,
+  .managed-giveaway__channel-options p {
+    margin: 0;
+  }
+  .managed-giveaway__disclosure {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    border-bottom: 1px solid var(--color-border);
+  }
+  .managed-giveaway__disclosure > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 46px;
+    font-weight: 750;
+    cursor: pointer;
+    list-style: none;
+  }
+  .managed-giveaway__disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+  .managed-giveaway__disclosure > summary::after {
+    content: '';
+    flex: 0 0 7px;
+    height: 7px;
+    margin-inline: 6px;
+    border: solid currentColor;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+  }
+  .managed-giveaway__disclosure[open] > summary::after {
+    transform: rotate(225deg);
+  }
+  .managed-giveaway__disclosure[open] > :last-child {
+    padding-block-end: 12px;
+  }
+  .managed-giveaway__source-condition {
+    display: grid;
+    gap: 4px;
+    padding: 12px 14px;
+    border-inline-start: 3px solid var(--giveaway-desk-highlight);
+    border-radius: 2px 10px 10px 2px;
+    background: var(--color-surface-muted);
+  }
+  .managed-giveaway__source-condition span {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+  }
+  .managed-giveaway--editing .managed-giveaway__channel-copy {
+    min-width: 0;
+  }
+  .managed-giveaway--editing .managed-giveaway__channel-copy :is(strong, small) {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .managed-giveaway--editing .managed-giveaway__channel-remove {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .managed-giveaway--editing .managed-giveaway__hero-title-row h2 {
+    font-size: clamp(1.5rem, 5vw, 1.9rem);
+    letter-spacing: -0.035em;
+    overflow-wrap: anywhere;
+  }
+  .managed-giveaway--editing .managed-giveaway__step-strip {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+    gap: 6px;
+  }
+  .managed-giveaway--editing .managed-giveaway__step-pill {
+    padding: 5px 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-height: 44px;
+    border: 0;
+    border-top: 3px solid var(--color-border);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .managed-giveaway--editing .managed-giveaway__step-pill.is-active {
+    border-top-color: var(--giveaway-desk-highlight);
+  }
+  .managed-giveaway--editing .managed-giveaway__step-pill[aria-current] strong {
+    color: var(--text-primary);
+  }
+  .managed-giveaway--editing .managed-giveaway__step-pill-index {
+    width: auto;
+    min-height: 0;
+    color: var(--text-secondary);
+    background: transparent;
+    border: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .managed-giveaway--editing .managed-giveaway__split-fields {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+    align-items: end;
+  }
+  .managed-giveaway--editing .managed-giveaway__split-fields .time-field__button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-inline: 10px;
+  }
+  .managed-giveaway--editing .time-field__copy {
+    flex: 1 1 auto;
+    min-width: max-content;
+  }
+  .managed-giveaway--editing .time-field__icon {
+    flex: 0 0 22px;
+    width: 22px;
+    height: 22px;
+  }
+  .managed-giveaway--editing .time-field__icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .managed-giveaway--editing .managed-giveaway__quick-actions .managed-giveaway__chip-button,
+  .managed-giveaway--editing .managed-giveaway__prize-presets .managed-giveaway__chip-button {
+    min-height: 44px;
+  }
+  .managed-giveaway--editing
+    .managed-giveaway__hero-title-row
+    .managed-giveaway__hero-button--danger {
+    min-width: 44px;
+    min-height: 44px;
+    flex-basis: 44px;
+  }
+  :is(.managed-giveaway--editing, .managed-giveaway--dashboard) .button--accent {
+    border-color: transparent;
+    background: var(--giveaway-desk-action);
+    color: var(--giveaway-desk-action-text);
+  }
+  :is(.managed-giveaway--editing, .managed-giveaway--dashboard) :is(button, summary):focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+  }
+
+  .managed-giveaway--editing .managed-giveaway__choice-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .managed-giveaway--editing .managed-giveaway__quick-actions .managed-giveaway__chip-button {
+    width: auto;
+    min-width: 64px;
+    max-width: none;
+    padding-inline: 10px;
+    white-space: nowrap;
+  }
+  .managed-giveaway--editing .managed-giveaway__subsection:first-child {
+    border-top: 0;
+  }
 }

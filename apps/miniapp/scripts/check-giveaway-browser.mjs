@@ -40,13 +40,17 @@ async function assertParticipationLayout(page) {
     };
   });
   assert.equal(layout.horizontalOverflow, false, JSON.stringify(layout));
+  assert.ok(
+    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1),
+    'The page must not scroll horizontally',
+  );
   assert.ok(layout.contentBottom <= layout.footerTop + 1, 'Footer must not cover content');
   assert.ok(layout.primaryTop >= 0 && layout.primaryBottom <= layout.height);
 }
 
 try {
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 375, height: 667 } });
+  const page = await browser.newPage({ viewport: { width: 393, height: 852 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const avatarImage = await readFile(new URL('../../../bot.webp', import.meta.url));
@@ -93,18 +97,24 @@ try {
   await main.getByRole('heading', { name: 'Подарки для подписчиков', exact: true }).waitFor();
   assert.equal(await main.getByText('Сертификат на 5 000 ₽', { exact: true }).count(), 1);
   assert.equal(await main.locator('.giveaway-page__cover').count(), 0);
-  assert.equal(
-    await main.evaluate((element) =>
-      Boolean(
-        element
-          .querySelector('.giveaway-page__promotion')
-          .compareDocumentPosition(element.querySelector('.giveaway-page__participation-status')) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-      ),
-    ),
-    true,
-    'New participants see the offer before their participation status',
-  );
+  const firstCondition = main.locator('.giveaway-page__condition-list li').first();
+  for (const viewport of viewports.slice(0, 2)) {
+    await page.setViewportSize(viewport);
+    const initialRow = await firstCondition.boundingBox();
+    const initialFooter = await main.locator('footer').boundingBox();
+    const offer = main.getByRole('region', { name: 'О розыгрыше' });
+    const prize = await offer.getByText('Сертификат на 5 000 ₽', { exact: true }).boundingBox();
+    const border = await offer.boundingBox();
+    assert.ok(
+      prize.y + prize.height <= border.y + border.height + 1,
+      'The offer must show the entire prize name on a narrow screen',
+    );
+    assert.ok(
+      initialRow && initialRow.y >= 0 && initialRow.y + initialRow.height <= initialFooter.y + 1,
+      'At first open the first subscription must be fully visible above the action',
+    );
+    await assertParticipationLayout(page);
+  }
   await page.evaluate(() => window.giveawayTest.setPromotion(null, 12));
   await main.getByText('Все призовые места · 12', { exact: true }).click();
   await main
@@ -147,6 +157,17 @@ try {
   });
   await primary.click();
   await main.getByRole('heading', { name: 'Осталось подписаться' }).waitFor();
+  assert.equal(await firstCondition.getAttribute('data-state'), 'missing');
+  assert.ok(
+    await main.evaluate((element) => {
+      const conditions = element.querySelector('.giveaway-page__conditions');
+      const promotion = element.querySelector('.giveaway-page__promotion');
+      return Boolean(
+        conditions.compareDocumentPosition(promotion) & Node.DOCUMENT_POSITION_FOLLOWING,
+      );
+    }),
+    'A missing subscription must precede the general giveaway details',
+  );
   assert.equal(await main.getByRole('progressbar').getAttribute('aria-valuenow'), '1');
   await page.evaluate(() => {
     window.giveawayTest.mode = 'verified';
@@ -323,6 +344,12 @@ try {
     await editor.locator('.managed-giveaway__publication-image summary strong').textContent(),
     /^second[.]/u,
   );
+  await editor.getByRole('button', { name: 'Опубликовать', exact: true }).click();
+  const review = editorTest.getByRole('dialog', { name: 'Опубликовать розыгрыш?' });
+  await review.getByText('Версия второго организатора', { exact: true }).waitFor();
+  await review.getByText('Завершение', { exact: true }).waitFor();
+  await review.getByRole('button', { name: 'Вернуться к настройкам' }).click();
+  await review.waitFor({ state: 'detached' });
   await editorTest.reload();
   await editor.getByRole('button', { name: 'Продолжить настройку' }).waitFor();
   await editorTest.evaluate(() => window.finishEmptyGiveaway());
@@ -341,7 +368,7 @@ try {
   await editorTest.close();
 
   for (const theme of ['light', 'dark']) {
-    for (const viewport of viewports.slice(0, 3)) {
+    for (const viewport of [...viewports.slice(0, 3), { width: 667, height: 375 }]) {
       const context = await browser.newContext({ viewport, colorScheme: theme });
       await installNativeVisualModeInitScript(context);
       const profile = {
@@ -353,8 +380,9 @@ try {
       const editorPage = await context.newPage();
       editorPage.on('pageerror', (error) => errors.push(error.message));
       await editorPage.goto(
-        new URL('chat/preview-chat/settings?preview=1&device=iphone&focus=giveaway', base).href,
+        new URL('chat/preview-chat/settings?preview=1&device=iphone', base).href,
       );
+      await editorPage.getByRole('button', { name: 'Розыгрыши', exact: true }).click();
       const card = editorPage.locator('.managed-giveaway');
       await card.waitFor();
       await applyNativeVisualMode(editorPage, profile);
@@ -372,6 +400,21 @@ try {
           headingBounds.y >= panelHeader.y + panelHeader.height - 1,
           'New step must start below the panel header',
         );
+        if (step === 'basics' && viewport.width > viewport.height) {
+          const clock = card.locator('.time-field__button:visible').last();
+          await clock.scrollIntoViewIfNeeded();
+          const bounds = await clock.evaluate((button) => {
+            const value = document.createRange();
+            value.selectNodeContents(button.querySelector('.time-field__value'));
+            const text = value.getBoundingClientRect();
+            const icon = button.querySelector('.time-field__icon').getBoundingClientRect();
+            return { textRight: text.right, iconLeft: icon.left };
+          });
+          assert.ok(
+            bounds.textRight <= bounds.iconLeft + 1,
+            'The last minute digit must remain clear of the clock icon in landscape',
+          );
+        }
         const dock = card.locator('.managed-giveaway__action-dock');
         await dock.scrollIntoViewIfNeeded();
         const geometry = await card.evaluate((element) => {
@@ -420,12 +463,31 @@ try {
             .click();
         }
       }
+      if (viewport.width === 320) {
+        await editorPage.goto(
+          new URL('channel/preview-channel/settings?preview=1&device=iphone', base).href,
+        );
+        await editorPage.getByRole('button', { name: 'Розыгрыши', exact: true }).click();
+        const dashboard = editorPage.locator('.managed-giveaway--dashboard');
+        const endEarly = dashboard.getByRole('button', {
+          name: 'Завершить досрочно',
+          includeHidden: true,
+        });
+        await dashboard.getByText('Запланирован', { exact: true }).waitFor();
+        assert.equal(await endEarly.isVisible(), false);
+        await dashboard.locator('summary').filter({ hasText: 'Другие действия' }).click();
+        await endEarly.click();
+        const dialog = editorPage.getByRole('dialog', { name: 'Завершить розыгрыш?' });
+        await dialog.getByRole('button', { name: 'Не сейчас' }).click();
+        await dialog.waitFor({ state: 'detached' });
+        await dashboard.getByText('Запланирован', { exact: true }).waitFor();
+      }
       await context.close();
     }
   }
   assert.deepEqual(errors, []);
   console.log(
-    'Giveaway browser checks passed: participation and claim recovery, concurrent draft edits, deadline presets, photo replacement, five viewport sizes, light/dark, editor navigation.',
+    'Giveaway browser checks passed: participation and claim recovery, concurrent draft edits, deadline presets, photo replacement, first-screen subscriptions, landscape time fields, light/dark, chat and channel settings.',
   );
 } finally {
   try {
