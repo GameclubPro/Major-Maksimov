@@ -21,6 +21,15 @@ export const GIVEAWAY_DEFERRAL_MIGRATIONS = Object.freeze([
   }),
 ]);
 
+export const PUBLISHER_DEFERRAL_MIGRATION = Object.freeze({
+  name: '20261120012500_add_publisher_post_import_inputs',
+  checksum: '190f2ae80de68275057346bd98884791d108867e1359c76e44138ca63961d120',
+});
+export const PUBLISHER_DEFERRAL_MIGRATIONS = Object.freeze([
+  ...GIVEAWAY_DEFERRAL_MIGRATIONS,
+  PUBLISHER_DEFERRAL_MIGRATION,
+]);
+
 // FLAG: Only these verified failed versions can accompany the pinned later successful
 // version of the same migration. They never satisfy an applied-migration requirement.
 const RECOVERED_PREDECESSORS = new Map([
@@ -127,6 +136,28 @@ const giveawaySchemaCtes = `giveaway_relations AS MATERIALIZED (
   LEFT JOIN pg_am am ON am.oid=idx.relam
 )`;
 
+// FLAG: Prove the four immutable Publisher columns with catalog metadata only.
+const publisherSchemaCtes = `publisher_table AS MATERIALIZED (
+  SELECT oid FROM pg_class WHERE oid=to_regclass('public.publisher_post_import_sessions')
+    AND relkind='r' AND relpersistence='p' AND NOT relispartition
+), publisher_columns AS MATERIALIZED (
+  SELECT a.attnum IS NOT NULL AS present, COALESCE(
+    format_type(a.atttypid,a.atttypmod)=expected.data_type AND a.attnotnull=expected.required
+    AND a.attidentity='' AND a.attgenerated='' AND a.attinhcount=0 AND a.attislocal
+    AND (pg_get_expr(d.adbin,d.adrelid) IS NOT DISTINCT FROM expected.initial),false) AS exact
+  FROM publisher_table t CROSS JOIN (VALUES
+    ('input_mode','text',true,$expr$'forward'::text$expr$),
+    ('input_opened_at','timestamp(3) without time zone',false,NULL),
+    ('input_messages','jsonb',true,$expr$'[]'::jsonb$expr$),
+    ('warnings','jsonb',true,$expr$'[]'::jsonb$expr$)
+  ) expected(name,data_type,required,initial)
+  LEFT JOIN pg_attribute a ON a.attrelid=t.oid AND a.attname=expected.name AND NOT a.attisdropped
+  LEFT JOIN pg_attrdef d ON d.adrelid=t.oid AND d.adnum=a.attnum
+), publisher_schema AS MATERIALIZED (
+  SELECT CASE WHEN count(*)<>4 THEN 'invalid' WHEN bool_and(NOT present) THEN 'absent'
+    WHEN bool_and(exact) THEN 'exact' ELSE 'invalid' END AS state FROM publisher_columns
+)`;
+
 export const routingIndexStateSql = `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '2500ms';
 SET LOCAL lock_timeout = '250ms';
@@ -186,7 +217,7 @@ WITH definitions AS MATERIALIZED (
  SELECT progress.pid FROM pg_stat_progress_create_index progress
  WHERE progress.relid=to_regclass('public.webhook_events')
   AND progress.datid=(SELECT oid FROM pg_database WHERE datname=current_database()) LIMIT 17
-), ${giveawaySchemaCtes}, ${historicalCompatibilityCtes}
+), ${giveawaySchemaCtes}, ${publisherSchemaCtes}, ${historicalCompatibilityCtes}
 SELECT json_build_object('supportedVersion',current_setting('server_version_num')::int BETWEEN 160000 AND 169999,
  'index',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='index'),
  'orderedIndex',(SELECT json_build_object('present',present,'exact',exact) FROM definitions WHERE name='orderedIndex'),
@@ -194,6 +225,7 @@ SELECT json_build_object('supportedVersion',current_setting('server_version_num'
  'artifacts',COALESCE((SELECT json_agg(relname) FROM artifacts),'[]'::json),
  'builders',COALESCE((SELECT json_agg(builders) FROM builders),'[]'::json),
  'giveawaySchema',(SELECT row_to_json(giveaway_schema) FROM giveaway_schema),
+ 'publisherSchema',(SELECT state FROM publisher_schema),
  'historicalCompatibility',${historicalCompatibilityProjection});
 COMMIT;`;
 
@@ -255,10 +287,13 @@ function readRoutingCatalog(snapshot, source) {
   if (!applied && snapshot.receipts.some(({ name }) => name > ROUTING_INDEX_TARGET.migration)) {
     // FLAG: A later receipt can precede the optional index only for the exact reviewed
     // giveaway prefix. A failed or rolled-back attempt never authorizes replay or skipping.
-    assertGiveawaySource(source, false);
+    const tail = active.has(PUBLISHER_DEFERRAL_MIGRATION.name)
+      ? PUBLISHER_DEFERRAL_MIGRATIONS
+      : GIVEAWAY_DEFERRAL_MIGRATIONS;
+    assertDeferralSource(source, false, tail);
     if (snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
       fail('GIVEAWAY_DEFERRAL_ORDERED_INDEX_REQUIRED');
-    const permitted = new Set(GIVEAWAY_DEFERRAL_MIGRATIONS.map(({ name }) => name));
+    const permitted = new Set(tail.map(({ name }) => name));
     if (
       snapshot.receipts.some(
         (r) =>
@@ -269,7 +304,7 @@ function readRoutingCatalog(snapshot, source) {
       fail('RECEIPT_BLOCKED');
     let missing = false;
     let lastFinished = -Infinity;
-    for (const { name, checksum } of GIVEAWAY_DEFERRAL_MIGRATIONS) {
+    for (const { name, checksum } of tail) {
       const receipt = active.get(name);
       if (!receipt) {
         missing = true;
@@ -293,16 +328,18 @@ function readRoutingCatalog(snapshot, source) {
   if (!applied && GIVEAWAY_DEFERRAL_MIGRATIONS.some(({ name }) => active.has(name))) {
     assertGiveawaySchema(snapshot, active);
   }
+  if (!applied && active.has(PUBLISHER_DEFERRAL_MIGRATION.name))
+    assertPublisherSchema(snapshot, active);
   return { active, applied };
 }
 
-function assertGiveawaySource(source, exactTail) {
+function assertDeferralSource(source, exactTail, tail) {
   const index = source.findIndex(({ name }) => name === ROUTING_INDEX_TARGET.migration);
   if (
     index < 0 ||
     source[index].checksum !== ROUTING_INDEX_TARGET.checksum ||
-    (exactTail && source.length !== index + 1 + GIVEAWAY_DEFERRAL_MIGRATIONS.length) ||
-    !GIVEAWAY_DEFERRAL_MIGRATIONS.every(({ name, checksum }, offset) => {
+    (exactTail && source.length !== index + 1 + tail.length) ||
+    !tail.every(({ name, checksum }, offset) => {
       const found = source[index + 1 + offset];
       return found?.name === name && found.checksum === checksum;
     })
@@ -319,16 +356,42 @@ function assertGiveawaySchema(snapshot, active) {
     fail('GIVEAWAY_DEFERRAL_SCHEMA_INVALID');
 }
 
-export function verifyGiveawayDeferralState(snapshot, source) {
-  assertGiveawaySource(source, true);
+function assertPublisherSchema(snapshot, active) {
+  if (
+    snapshot.publisherSchema !==
+    (active.has(PUBLISHER_DEFERRAL_MIGRATION.name) ? 'exact' : 'absent')
+  ) {
+    fail('PUBLISHER_DEFERRAL_SCHEMA_INVALID');
+  }
+}
+
+function verifyDeferralState(snapshot, source, tail, preparation) {
+  assertDeferralSource(source, true, tail);
   const { active, applied } = readRoutingCatalog(snapshot, source);
   if (applied || snapshot.orderedIndex?.present !== true || snapshot.orderedIndex.exact !== true)
     fail('GIVEAWAY_DEFERRAL_STATE_INVALID');
   assertGiveawaySchema(snapshot, active);
-  const pending = GIVEAWAY_DEFERRAL_MIGRATIONS.map(({ name }) => name).filter(
-    (name) => !active.has(name),
+  if (tail === PUBLISHER_DEFERRAL_MIGRATIONS) assertPublisherSchema(snapshot, active);
+  const pending = tail.map(({ name }) => name).filter((name) => !active.has(name));
+  return { state: pending.length ? preparation : 'compatible_pending', pending };
+}
+
+export function verifyGiveawayDeferralState(snapshot, source) {
+  return verifyDeferralState(
+    snapshot,
+    source,
+    GIVEAWAY_DEFERRAL_MIGRATIONS,
+    'prepare_giveaway_deferral',
   );
-  return { state: pending.length ? 'prepare_giveaway_deferral' : 'compatible_pending', pending };
+}
+
+export function verifyPublisherDeferralState(snapshot, source) {
+  return verifyDeferralState(
+    snapshot,
+    source,
+    PUBLISHER_DEFERRAL_MIGRATIONS,
+    'prepare_publisher_deferral',
+  );
 }
 
 export function verifyRoutingIndexState(snapshot, source) {

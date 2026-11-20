@@ -9,10 +9,20 @@ the bounded reason and snapshot source in `Publisher forwarded post import rejec
 Keep unavailable and ambiguous outcomes separate. Do not replay a SEND based on a log gap.
 Collect sanitized counts without post text, URLs, bot credentials or identifiers.
 
-Measure counts of complete and partial import results, failures per reason and collection
-mode, time from capture to terminal result, and confirmed/unknown deliveries separately.
-Use the same observation window and cap for before/after comparisons, and report omitted
-coverage. Open a mixed draft again before checking the preview and sent post in MAX.
+For completed drafts, group `importCompleteness` as `complete`, `partial`, or
+`review_only` (an empty draft with a proposed addition). `lossWarningCount` counts
+item warnings for missing or changed content. `omissionKindCount` covers distinct
+categories, including lost formatting or buttons. These counts can overlap.
+`suggestionCount` counts optional links and forwarding comments. Each item counter
+caps at 128. A notice about transferring outer media is informational.
+
+Use `inputKind` for the observed direct message, genuine forward, or explicit collection.
+Rejections before source identification have `inputKind=unknown`. `inputMode` records
+the selected entry mode. `mediaKind` describes the saved draft. Compute p50/p95 from
+non-null `elapsedMs`, and report the denominator and missing results for the window.
+The worker logs omit results written by recovery or exhausted-retry handling. Report this
+coverage gap when a reviewed session count for the same window is unavailable. Track confirmed
+and unknown deliveries separately. Open a mixed draft again before checking the preview and sent post in MAX.
 
 New ordered revisions can contain images and multiple videos. The API rollback verifier
 requires a reader capable of sending an entire ordered revision. Validate the migration

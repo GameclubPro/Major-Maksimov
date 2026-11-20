@@ -66,7 +66,7 @@ case "$failure" in
     exit 0 ;;
 esac
 case "$failure" in
-  compatible|changed-before-pause|changed-after-pause|giveaway-stop-refused|applied|lock|authority|prepare|capacity|prepare-incomplete|giveaway-deferral|deferral-runner-failed|deferral-wrong-readback|deferral-authority|ref-rollback-*) ;;
+  compatible|changed-before-pause|changed-after-pause|giveaway-stop-refused|applied|lock|authority|prepare|capacity|prepare-incomplete|giveaway-deferral|publisher-deferral|deferral-runner-failed|deferral-wrong-readback|deferral-authority|ref-rollback-*) ;;
   *) exit 99 ;;
 esac
 
@@ -113,9 +113,10 @@ node() {
       case "$failure:$phase" in
         changed-before-pause:rollout|changed-after-pause:post-migration|capacity:*|prepare-incomplete:*)
           state=prepare_routing ;;
-        giveaway-deferral:*|deferral-runner-failed:*|deferral-wrong-readback:*|deferral-authority:*)
+        giveaway-deferral:*|publisher-deferral:*|deferral-runner-failed:*|deferral-wrong-readback:*|deferral-authority:*)
           if [[ ! -f "$tmpdir/giveaway-prepared" ]]; then
             state=prepare_giveaway_deferral
+            if [[ "$failure" == publisher-deferral ]]; then state=prepare_publisher_deferral; fi
           elif [[ "$failure" == deferral-wrong-readback ]]; then
             state=already_applied
           else
@@ -194,9 +195,11 @@ controller=infra/scripts/vps-pull-build-up.sh
   MAXIM_WEBHOOK_ROLLOUT_STOP_TIMEOUT_SEC=60
 }
 docker() {
-  if [[ "$1" == compose && "$*" == *' --giveaway-deferral' ]]; then
+  local deferral=--giveaway-deferral
+  if [[ "$failure" == publisher-deferral ]]; then deferral=--publisher-deferral; fi
+  if [[ "$1" == compose && "$*" == *" $deferral" ]]; then
     local -a expected=(compose "${MIGRATION_COMPOSE_FILES[@]}" run --rm --no-deps --pull never api-ingress
-      node scripts/agent/routing-index-online-prepare.mjs --giveaway-deferral)
+      node scripts/agent/routing-index-online-prepare.mjs "$deferral")
     local arg
     [[ "$phase" == prepare && "$BASHPID" == "$deploy_owner" ]] || return 99
     [[ "$MAXIM_MIGRATION_API_IMAGE" == "$MAXIM_API_IMAGE" && "$#" == "${#expected[@]}" ]] || return 99
@@ -204,7 +207,7 @@ docker() {
       [[ "$1" == "$arg" ]] || return 99
       shift
     done
-    echo fixture-giveaway-prisma >&3
+    if [[ "$failure" == publisher-deferral ]]; then echo fixture-publisher-prisma >&3; else echo fixture-giveaway-prisma >&3; fi
     [[ "$failure" != deferral-runner-failed ]] || return 1
     touch "$tmpdir/giveaway-prepared"
     return 0

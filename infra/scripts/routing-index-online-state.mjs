@@ -8,6 +8,8 @@ import {
 import { OUTCOME_COHORT_TARGETS } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
+  PUBLISHER_DEFERRAL_MIGRATION,
+  verifyPublisherDeferralState,
   routingIndexStateSql,
   verifyGiveawayDeferralState,
   verifyRoutingIndexState,
@@ -165,6 +167,8 @@ export function verifyReleaseRoutingState(snapshot, { source, supportsOrdered })
     snapshot.orderedIndex.exact === true
   ) {
     if (source.at(-1)?.name === ROUTING_INDEX_TARGET.migration) return 'compatible_pending';
+    if (source.at(-1)?.name === PUBLISHER_DEFERRAL_MIGRATION.name)
+      return verifyPublisherDeferralState(snapshot, source).state;
     if (source.at(-1)?.name === GIVEAWAY_DEFERRAL_MIGRATIONS.at(-1).name)
       return verifyGiveawayDeferralState(snapshot, source).state;
   }

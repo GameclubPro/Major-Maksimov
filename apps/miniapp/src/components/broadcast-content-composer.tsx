@@ -54,6 +54,7 @@ export type BroadcastContentComposerProps = {
   image?: BroadcastContentComposerImage;
   images?: BroadcastImage[];
   orderedMedia?: ReactNode;
+  orderedMediaLabel?: string | null;
   retainedImages?: ReactNode;
   retainedImageCount?: number;
   maxImages?: number;
@@ -93,6 +94,7 @@ export function BroadcastContentComposer({
   images,
   retainedImages,
   orderedMedia,
+  orderedMediaLabel,
   retainedImageCount = 0,
   maxImages,
   allowImages = true,
@@ -535,11 +537,8 @@ export function BroadcastContentComposer({
             <span className="broadcast-content-composer__media-label" aria-live="polite">
               {isPreparingImage
                 ? `${preparingImages.done}/${preparingImages.total}`
-                : previewImageCount > 1
-                  ? `${previewImageCount} фото`
-                  : previewImageCount === 1
-                    ? '1 фото'
-                    : videoLabel}
+                : (orderedMediaLabel ??
+                  (previewImageCount ? `${previewImageCount} фото` : videoLabel))}
             </span>
           ) : null}
           {onOpenButtons && buttonsActive && !showToolLabels && !showButtonsLabel ? (

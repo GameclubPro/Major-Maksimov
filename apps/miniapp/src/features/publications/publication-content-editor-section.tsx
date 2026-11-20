@@ -1,3 +1,4 @@
+import { formatPublicationMediaSummary } from './publication-page-formatters';
 import type { PublicationVideoRead } from './publication-remote-video';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import type { BroadcastLinkButton } from '@maxim/contracts';
@@ -100,7 +101,9 @@ export function PublicationContentEditorSection({
 }: PublicationContentEditorSectionProps) {
   const [videoError, setVideoError] = useState('');
   const videoErrorId = useId();
-  const albumSize = publicationAlbum(draft).length;
+  const album = publicationAlbum(draft);
+  const albumSize = album.length;
+  const videoCount = album.filter((item) => item.type === 'video').length;
   const retainedImageCount = albumSize - draft.images.length;
   const maxLocalImageCount = Math.max(0, MAX_PUBLICATION_IMAGES - retainedImageCount);
   const imageInputAllowed = albumSize < MAX_PUBLICATION_IMAGES;
@@ -234,6 +237,11 @@ export function PublicationContentEditorSection({
         maxLength={PUBLICATION_TEXT_MAX_LENGTH}
         images={draft.images}
         retainedImageCount={retainedImageCount}
+        orderedMediaLabel={formatPublicationMediaSummary({
+          mediaCount: albumSize,
+          videoCount,
+          hasVideo: videoCount > 0,
+        })}
         orderedMedia={
           albumSize ? (
             <PublicationAlbumEditor

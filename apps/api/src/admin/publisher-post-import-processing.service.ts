@@ -75,6 +75,8 @@ type ImportSource = {
 type ImportedContent = PublicationBinaryContentInput & {
   omissions: PublisherPostImportOmission[];
   warnings: PublisherPostImportWarning[];
+  lossWarningCount: number;
+  suggestionCount: number;
 };
 type MediaCandidate = {
   attachment: Record<string, unknown>;
@@ -162,8 +164,11 @@ export class PublisherPostImportProcessingService {
       session.inputMode === 'message' || session.inputMode === 'collection'
         ? session.inputMode
         : 'forward';
+    let inputKind: 'collection' | 'direct' | 'forward' | 'unknown' =
+      inputMode === 'collection' ? 'collection' : 'unknown';
     const outcomeTiming = () => ({
       inputMode,
+      inputKind,
       elapsedMs: session.capturedAt ? Math.max(0, Date.now() - session.capturedAt.getTime()) : null,
     });
     let snapshotSource: PublisherPostImportSnapshotSource = 'remote_exact';
@@ -261,6 +266,7 @@ export class PublisherPostImportProcessingService {
         ) {
           throw new PublisherPostImportTerminalError('invalid_forward', 'Incomplete forward');
         }
+        if (inputMode !== 'collection') inputKind = linked ? 'forward' : 'direct';
         sources.push({
           message: linked ?? exactMessage,
           outer: linked ? exactMessage : undefined,
@@ -394,6 +400,15 @@ export class PublisherPostImportProcessingService {
           mediaKind,
           mediaCount: content.media.length,
           warningCount: content.warnings.length,
+          lossWarningCount: content.lossWarningCount,
+          suggestionCount: content.suggestionCount,
+          omissionKindCount: content.omissions.length,
+          importCompleteness:
+            mediaKind === null
+              ? 'review_only'
+              : content.lossWarningCount || content.omissions.length
+                ? 'partial'
+                : 'complete',
         },
         'Publisher forwarded post import completed',
       );
@@ -477,7 +492,14 @@ export class PublisherPostImportProcessingService {
     const candidates: MediaCandidate[] = [];
     const paragraphs: { raw: string; markdown: string | null }[] = [];
     const shareCards: { url: string; messageIndex: number; itemIndex: number }[] = [];
+    let lossWarningCount = 0;
+    let suggestionCount = 0;
     const warn = (warning: PublisherPostImportWarning) => {
+      if (warning.reason === 'outer_comment' || warning.reason === 'optional_link') {
+        suggestionCount = Math.min(128, suggestionCount + 1);
+      } else if (warning.reason !== 'outer_media') {
+        lossWarningCount = Math.min(128, lossWarningCount + 1);
+      }
       if (warnings.length < 128) warnings.push(warning);
     };
     let nextMediaPosition = 0;
@@ -661,7 +683,16 @@ export class PublisherPostImportProcessingService {
         new PublisherPostImportTerminalError('empty_content', 'No transferable content')
       );
     }
-    return { text, textFormat, buttons: [], media, warnings, omissions: [...omissions] };
+    return {
+      text,
+      textFormat,
+      buttons: [],
+      media,
+      warnings,
+      omissions: [...omissions],
+      lossWarningCount,
+      suggestionCount,
+    };
   }
 
   private async downloadImportedVideo(

@@ -213,10 +213,15 @@ describe('PublisherPostImportProcessingService', () => {
         publicationId: 'publication-1',
         snapshotSource: 'webhook_receipt',
         inputMode: 'collection',
+        inputKind: 'collection',
         elapsedMs: 1250,
         mediaKind: 'text',
         mediaCount: 0,
         warningCount: 2,
+        suggestionCount: 2,
+        lossWarningCount: 0,
+        omissionKindCount: 0,
+        importCompleteness: 'complete',
       },
       'Publisher forwarded post import completed',
     );
@@ -252,6 +257,55 @@ describe('PublisherPostImportProcessingService', () => {
       }),
     );
   });
+
+  it.each([
+    [
+      'direct',
+      { body: { text: 'Полезный текст', attachments: [{ type: 'inline_keyboard' }] } },
+      0,
+      1,
+    ],
+    [
+      'forward',
+      {
+        link: {
+          type: 'forward',
+          message: { text: 'Полезный текст', attachments: [{ type: 'file' }] },
+        },
+      },
+      1,
+      1,
+    ],
+  ] as const)(
+    'reports a partial import for real %s content in message mode',
+    async (inputKind, source, lossWarningCount, omissionKindCount) => {
+      const { service } = createFixture(
+        {
+          mid: 'incoming-mid-1',
+          sender: { user_id: 42 },
+          recipient: { chat_id: 42, chat_type: 'dialog' },
+          ...source,
+        },
+        { inputMode: 'message' },
+      );
+      const logger = (
+        service as unknown as { logger: { log: (data: unknown, message: string) => void } }
+      ).logger;
+      const log = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+      await expect(service.process('session-1')).resolves.toBe('ready');
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputKind,
+          inputMode: 'message',
+          importCompleteness: 'partial',
+          lossWarningCount,
+          omissionKindCount,
+          suggestionCount: 0,
+        }),
+        'Publisher forwarded post import completed',
+      );
+    },
+  );
 
   it('applies the manual draft quota before creating an imported revision', async () => {
     const { service, tx, prisma } = createFixture();
@@ -484,6 +538,7 @@ describe('PublisherPostImportProcessingService', () => {
         rejectionKind: 'empty_content',
         snapshotSource: 'remote_exact',
         inputMode: 'forward',
+        inputKind: 'forward',
         elapsedMs: 0,
       },
       'Publisher forwarded post import rejected',
@@ -779,6 +834,7 @@ describe('PublisherPostImportProcessingService', () => {
         rejectionKind: 'content_validation',
         snapshotSource: 'remote_exact',
         inputMode: 'forward',
+        inputKind: 'forward',
         elapsedMs: 0,
       },
       'Publisher forwarded post import rejected',

@@ -91,6 +91,7 @@ try {
       await applyNativeVisualMode(page, { safeTop: 0, safeBottom: 20 });
       const names = () => page.locator('.publication-album__caption small').allTextContents();
       assert.deepEqual(await names(), ['a.jpg', 'b.mp4', 'c.mp4']);
+      assert.equal(await page.getByText('1 фото · 2 видео', { exact: true }).count(), 1);
       const text = page.getByRole('textbox', { name: 'Текст публикации', exact: true });
       assert.doesNotMatch(await text.innerText(), /example\.org/u);
       await page.getByRole('button', { name: 'Добавить в текст', exact: true }).click();

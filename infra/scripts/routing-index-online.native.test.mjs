@@ -8,6 +8,8 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
+  PUBLISHER_DEFERRAL_MIGRATION,
+  verifyPublisherDeferralState,
   verifyGiveawayDeferralState,
 } from '../../scripts/agent/routing-index-catalog.mjs';
 import { createRoutingIndexMigrationPrefix } from '../../scripts/agent/routing-index-online-prepare.mjs';
@@ -267,9 +269,16 @@ test(
   },
 );
 
-for (const scenario of ['fresh', 'resume', 'failed']) {
+for (const scenario of [
+  'fresh',
+  'resume',
+  'failed',
+  'publisher-fresh',
+  'publisher-after-giveaway',
+  'publisher-failed',
+]) {
   test(
-    `fixed giveaway migration runner with genuine Prisma receipts: ${scenario}`,
+    `fixed migration deferral with genuine Prisma receipts: ${scenario}`,
     { skip: !nativeUrl, timeout: 240_000 },
     async (t) => {
       const base = new URL(nativeUrl);
@@ -278,6 +287,8 @@ for (const scenario of ['fresh', 'resume', 'failed']) {
           base.pathname.includes('race_test'),
       );
       const [first, second] = GIVEAWAY_DEFERRAL_MIGRATIONS;
+      const publisher = scenario.startsWith('publisher-');
+      const last = publisher ? PUBLISHER_DEFERRAL_MIGRATION : second;
       // FLAG: The one-off deferral only accepts the release ending at these exact migrations.
       // Exercise that release from real immutable SQL even after newer migrations are committed.
       const releaseRoot = mkdtempSync(resolve(tmpdir(), 'routing-giveaway-release-'));
@@ -291,7 +302,7 @@ for (const scenario of ['fresh', 'resume', 'failed']) {
         resolve(files, 'migrations/migration_lock.toml'),
         resolve(fixture, 'migrations/migration_lock.toml'),
       );
-      for (const { name } of source.filter(({ name }) => name <= second.name)) {
+      for (const { name } of source.filter(({ name }) => name <= last.name)) {
         cpSync(resolve(files, 'migrations', name), resolve(fixture, 'migrations', name), {
           recursive: true,
         });
@@ -306,7 +317,8 @@ for (const scenario of ['fresh', 'resume', 'failed']) {
       const snapshot = async () => outcome(await db.query(routingIndexStateSql));
       const runner = (...args) => {
         const env = routingChildEnv(own.href);
-        if (args[0] === '--giveaway-deferral') delete env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME;
+        if (args[0] === '--giveaway-deferral' || args[0] === '--publisher-deferral')
+          delete env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME;
         return spawnSync(
           process.execPath,
           [resolve(root, 'scripts/agent/routing-index-online-prepare.mjs'), ...args],
@@ -330,6 +342,13 @@ for (const scenario of ['fresh', 'resume', 'failed']) {
             { recursive: true },
           );
         }
+        if (scenario === 'publisher-after-giveaway') {
+          for (const { name } of GIVEAWAY_DEFERRAL_MIGRATIONS) {
+            cpSync(resolve(files, 'migrations', name), resolve(basePath, name), {
+              recursive: true,
+            });
+          }
+        }
         const bootstrap = spawnSync(
           process.execPath,
           [
@@ -348,6 +367,78 @@ for (const scenario of ['fresh', 'resume', 'failed']) {
         );
         assert.equal(bootstrap.status, 0, 'Prisma prerequisite history');
         const before = await snapshot();
+        if (publisher) {
+          const args = ['--publisher-deferral'];
+          const expected =
+            scenario === 'publisher-after-giveaway'
+              ? [last.name]
+              : [first.name, second.name, last.name];
+          assert.deepEqual(verifyPublisherDeferralState(before, releaseSource), {
+            state: 'prepare_publisher_deferral',
+            pending: expected,
+          });
+          assert.equal(
+            verifyReleaseRoutingState(before, { source: releaseSource, supportsOrdered: true }),
+            'prepare_publisher_deferral',
+          );
+          assert.equal(before.publisherSchema, 'absent');
+          await db.query('ALTER TABLE publisher_post_import_sessions ADD COLUMN warnings jsonb');
+          assert.equal(runner(...args).status, 1);
+          assert.deepEqual((await snapshot()).receipts, before.receipts);
+          await db.query('ALTER TABLE publisher_post_import_sessions DROP COLUMN warnings');
+          if (scenario === 'publisher-failed') {
+            await db.query(`CREATE FUNCTION fixture_block_publisher() RETURNS event_trigger LANGUAGE plpgsql AS
+              'BEGIN RAISE EXCEPTION ''fixture Publisher DDL refusal''; END';
+              CREATE EVENT TRIGGER fixture_reject_publisher ON ddl_command_start WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION fixture_block_publisher()`);
+            assert.equal(runner(...args).status, 1);
+            await db.query('DROP EVENT TRIGGER fixture_reject_publisher');
+            const blocked = await snapshot();
+            assert.ok(
+              blocked.receipts.some((r) => r.finished === false && r.rolled_back === false),
+            );
+            assert.equal(runner(...args).status, 1);
+            assert.deepEqual((await snapshot()).receipts, blocked.receipts);
+            return;
+          }
+          const applied = runner(...args);
+          assert.equal(applied.status, 0, applied.stderr);
+          const after = await snapshot();
+          assert.equal(after.publisherSchema, 'exact');
+          assert.equal(after.index.present, false);
+          assert.equal(after.orderedIndex.exact, true);
+          assert.deepEqual(verifyPublisherDeferralState(after, releaseSource), {
+            state: 'compatible_pending',
+            pending: [],
+          });
+          assert.equal(
+            verifyReleaseRoutingState(after, { source: releaseSource, supportsOrdered: true }),
+            'compatible_pending',
+          );
+          assert.equal(
+            verifyReleaseRoutingState(after, {
+              source: [
+                ...releaseSource,
+                { name: '20990101000000_unreviewed', checksum: 'd'.repeat(64) },
+              ],
+              supportsOrdered: true,
+            }),
+            'prepare_routing',
+          );
+          assert.throws(() =>
+            verifyReleaseRoutingState(after, {
+              source: releaseSource.slice(0, -1),
+              supportsOrdered: true,
+            }),
+          );
+          assert.equal(runner(...args).status, 0);
+          assert.deepEqual((await snapshot()).receipts, after.receipts);
+          await db.query(
+            'ALTER TABLE publisher_post_import_sessions ALTER COLUMN input_opened_at SET NOT NULL',
+          );
+          assert.equal(runner(...args).status, 1);
+          assert.deepEqual((await snapshot()).receipts, after.receipts);
+          return;
+        }
         if (source.length > releaseSource.length) {
           assert.throws(
             () => verifyGiveawayDeferralState(before, source),
