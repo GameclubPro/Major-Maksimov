@@ -1,4 +1,6 @@
+import { BadRequestException } from '@nestjs/common';
 import type { MaxUpdate } from '@maxim/contracts';
+import type { ManualModerationService } from '../admin/manual-moderation.service';
 import { SanctionAction } from '../prisma/prisma-client';
 import { ModerationReleaseCallbackService } from './moderation-release-callback.service';
 import { buildModerationReleaseCallbackPayload } from './moderation-release-callback.util';
@@ -75,6 +77,7 @@ function createHarness(
     actorIsAdmin?: boolean;
     manualModerationError?: Error;
     fenceInvalidated?: boolean;
+    unbanRecorded?: boolean;
   } = {},
 ) {
   const sanctionEvent = params.sanctionEvent ?? createSanctionEvent();
@@ -97,20 +100,27 @@ function createHarness(
   };
   const releaseSideEffect = jest.fn();
   const manualModeration = {
-    applyManualModerationAction: jest.fn().mockImplementation(async () => {
-      if (params.manualModerationError) {
-        throw params.manualModerationError;
-      }
-      releaseSideEffect();
-      return {
-        ok: true,
-        action: sanctionEvent.action === SanctionAction.BAN ? 'UNBAN' : 'UNMUTE',
-        userId: sanctionEvent.userId,
-        muteDurationHours: null,
-        muteExpiresAt: null,
-        message: sanctionEvent.action === SanctionAction.BAN ? 'Блокировка снята' : 'Мут снят',
-      };
-    }),
+    applyManualModerationAction: jest
+      .fn()
+      .mockImplementation(
+        async (...args: Parameters<ManualModerationService['applyManualModerationAction']>) => {
+          if (params.manualModerationError) {
+            throw params.manualModerationError;
+          }
+          releaseSideEffect();
+          if (params.unbanRecorded !== false && sanctionEvent.action === SanctionAction.BAN) {
+            args[5]?.onModerationEventRecorded?.('confirmed-unban-1');
+          }
+          return {
+            ok: true,
+            action: sanctionEvent.action === SanctionAction.BAN ? 'UNBAN' : 'UNMUTE',
+            userId: sanctionEvent.userId,
+            muteDurationHours: null,
+            muteExpiresAt: null,
+            message: sanctionEvent.action === SanctionAction.BAN ? 'Блокировка снята' : 'Мут снят',
+          };
+        },
+      ),
   };
   const sanctionStateFence = {
     isSanctionEventInvalidated: jest.fn().mockResolvedValue(params.fenceInvalidated === true),
@@ -180,18 +190,69 @@ describe('ModerationReleaseCallbackService', () => {
         actorAlreadyVerified: true,
         allowTargetDisplayNameRemoteLookup: false,
         expectedSanctionEventId: SANCTION_EVENT_ID,
-        attemptUnbanWithRemove: true,
+        onModerationEventRecorded: expect.any(Function),
       },
     );
     expect(maxClient.answerCallback).toHaveBeenCalledWith(
       'callback-release-1',
-      'Блокировка снята',
       undefined,
+      {
+        messageId: 'message-release-1',
+        text: '[Пользователь](max://user/target-user-1)\nБан снят. Участник уже в чате.',
+        options: {
+          textFormat: 'markdown',
+          replaceCallbackPayloadPrefixes: [
+            buildModerationReleaseCallbackPayload('UNBAN', SANCTION_EVENT_ID),
+          ],
+        },
+      },
       {
         ignoreFailureMetricStatuses: [400, 404],
         botId: 'bot-1',
         rateLimitEntityId: 'chat-1',
       },
+    );
+  });
+
+  it.each([
+    { unbanRecorded: false },
+    { manualModerationError: new BadRequestException({ code: 'MAX_MEMBER_RESTORE_UNAVAILABLE' }) },
+  ])('keeps a verification button when the ban is not confirmed as lifted', async (params) => {
+    const { service, maxClient } = createHarness(params);
+    const payload = buildModerationReleaseCallbackPayload('UNBAN', SANCTION_EVENT_ID);
+
+    await service.tryHandle(createCallbackUpdate({ action: 'UNBAN' }));
+
+    expect(maxClient.answerCallback).toHaveBeenCalledWith(
+      'callback-release-1',
+      undefined,
+      {
+        messageId: 'message-release-1',
+        text: '[Пользователь](max://user/target-user-1)\nДобавьте в чат, затем нажмите «Проверить».',
+        options: {
+          textFormat: 'markdown',
+          replaceCallbackPayloadPrefixes: [payload],
+          buttons: [[{ type: 'callback', text: 'Проверить', payload, intent: 'positive' }]],
+        },
+      },
+      expect.objectContaining({ botId: 'bot-1', rateLimitEntityId: 'chat-1' }),
+    );
+  });
+
+  it('offers to add the person after a recorded local unban', async () => {
+    const { service, maxClient } = createHarness({
+      sanctionEvent: createSanctionEvent({
+        metadata: { mode: 'LOCAL_REJOIN', targetDisplayName: 'Вова' },
+      }),
+    });
+    await service.tryHandle(createCallbackUpdate({ action: 'UNBAN' }));
+    expect(maxClient.answerCallback).toHaveBeenCalledWith(
+      'callback-release-1',
+      undefined,
+      expect.objectContaining({
+        text: '[Вова](max://user/target-user-1)\nБан снят. Можно добавить в чат.',
+      }),
+      expect.anything(),
     );
   });
 

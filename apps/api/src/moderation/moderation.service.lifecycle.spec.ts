@@ -1,3 +1,4 @@
+import type { ManualModerationService } from '../admin/manual-moderation.service';
 import {
   USER_AGREEMENT_SHORT_NOTICE,
   SanctionAction,
@@ -6478,14 +6479,21 @@ describe('ModerationService', () => {
         answerCallback: jest.fn().mockResolvedValue(undefined),
       };
       const manualBridge = {
-        applyManualModerationAction: jest.fn().mockResolvedValue({
-          ok: true,
-          action,
-          userId: 'Target-User-ABC',
-          muteDurationHours: null,
-          muteExpiresAt: null,
-          message: notification,
-        }),
+        applyManualModerationAction: jest
+          .fn()
+          .mockImplementation(
+            async (...args: Parameters<ManualModerationService['applyManualModerationAction']>) => {
+              args[5]?.onModerationEventRecorded?.('released-event-1');
+              return {
+                ok: true,
+                action,
+                userId: 'Target-User-ABC',
+                muteDurationHours: null,
+                muteExpiresAt: null,
+                message: notification,
+              };
+            },
+          ),
       };
       const service = createModerationServiceWithManualBridge({
         prisma,
@@ -6549,13 +6557,18 @@ describe('ModerationService', () => {
           actorAlreadyVerified: true,
           allowTargetDisplayNameRemoteLookup: false,
           expectedSanctionEventId: sanctionEventId,
-          ...(action === 'UNBAN' ? { attemptUnbanWithRemove: true } : {}),
+          ...(action === 'UNBAN' ? { onModerationEventRecorded: expect.any(Function) } : {}),
         },
       );
       expect(maxClient.answerCallback).toHaveBeenCalledWith(
         'callback-release-1',
-        notification,
-        undefined,
+        action === 'UNBAN' ? undefined : notification,
+        action === 'UNBAN'
+          ? expect.objectContaining({
+              messageId: 'msg-release-1',
+              text: expect.stringContaining('Бан снят. Участник уже в чате.'),
+            })
+          : undefined,
         {
           ignoreFailureMetricStatuses: [400, 404],
           botId: 'bot-1',

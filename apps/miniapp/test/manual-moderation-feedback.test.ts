@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { describeManualModerationFeedback } from '../src/lib/manual-moderation-feedback';
+import { ApiRequestError } from '../src/lib/api-request-error';
+import {
+  describeManualModerationFeedback,
+  describeManualModerationReleaseError,
+} from '../src/lib/manual-moderation-feedback';
 
 type Result = Parameters<typeof describeManualModerationFeedback>[0];
 const describe = (message: string, overrides: Partial<Result> = {}) =>
@@ -34,6 +38,25 @@ test('known block results remain distinct from removing a participant', () => {
   ]) {
     assert.equal(describe(message, { action: 'BAN', muteDurationHours: null }), expected);
   }
+});
+
+test('confirmed unban is concise and the manual check gives the next action', () => {
+  for (const message of [
+    'Бан снят.',
+    'Блокировка снята. Участник уже в чате, добавлять его повторно не понадобилось.',
+    'Блокировка снята, участник возвращён в чат.',
+  ]) {
+    assert.equal(describe(message, { action: 'UNBAN', muteDurationHours: null }), 'Бан снят.');
+  }
+  const error = new ApiRequestError(
+    400,
+    '{"code":"MAX_MEMBER_RESTORE_UNAVAILABLE"}',
+    'MAX больше не поддерживает возврат участника через API.',
+  );
+  assert.equal(
+    describeManualModerationReleaseError(error, 'Не удалось снять бан.'),
+    'Добавьте участника в MAX, затем проверьте.',
+  );
 });
 
 test('different outcomes and multi-chat counts are not inferred from the requested action', () => {

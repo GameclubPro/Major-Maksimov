@@ -3449,7 +3449,7 @@ describe('AdminService.applyManualModerationAction', () => {
       userId: 'user-4',
       muteDurationHours: null,
       muteExpiresAt: null,
-      message: 'Блокировка снята, участник возвращён в чат.',
+      message: 'Бан снят.',
     });
   });
 
@@ -3925,10 +3925,16 @@ describe('AdminService.applyManualModerationAction', () => {
     );
 
     expect(maxClient.cancelScheduledUnban).toHaveBeenCalledWith('chat-1', 'user-4');
+    expect(maxClient.getChatMemberAccess).toHaveBeenCalledWith(
+      'chat-1',
+      'user-4',
+      expect.objectContaining({ bypassCache: true }),
+    );
     expect(maxClient.unbanMember).not.toHaveBeenCalled();
     expect(maxClient.clearTerminalBanStateAfterConfirmedUnban).toHaveBeenCalledWith(
       'chat-1',
       'user-4',
+      expect.any(Date),
     );
     expect(redisCounter.deleteKeysByPattern).toHaveBeenCalledWith(
       buildDuplicateUserPattern('chat-1', 'user-4'),
@@ -3973,7 +3979,7 @@ describe('AdminService.applyManualModerationAction', () => {
       userId: 'user-4',
       muteDurationHours: null,
       muteExpiresAt: null,
-      message: 'Блокировка снята. Участник уже в чате, добавлять его повторно не понадобилось.',
+      message: 'Бан снят.',
     });
   });
 

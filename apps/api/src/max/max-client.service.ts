@@ -5815,7 +5815,10 @@ export class MaxClientService implements OnModuleDestroy {
         callbackData.message = {
           text: messageEdit!.text.trim(),
           ...(messageEdit?.options?.textFormat ? { format: messageEdit.options.textFormat } : {}),
-          ...(attachments.length > 0 ? { attachments } : {}),
+          ...(attachments.length > 0 ||
+          (messageId && messageEdit?.options?.replaceCallbackPayloadPrefixes?.length)
+            ? { attachments }
+            : {}),
         };
         if (!pollTarget) await assertOwnership?.();
       }
