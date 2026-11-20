@@ -14,7 +14,7 @@ task worktree, focused checks, one submission aggregate, GitHub checks and one g
 | Existing feature tests and browser server setup      | [Feature regression map](development/feature-regressions.md)                                                                                |
 | Local dependencies and disposable PostgreSQL/Redis   | [Local environment](development/agent-local-environment.md)                                                                                 |
 | Accumulated CI scope and verified registry delivery  | [CI image delivery](development/ci-image-delivery.md)                                                                                       |
-| Separate release-service installation or activation | [Release service](operations/runbooks/durable-release-service.md); not required for the routine release path                                |
+| Separate release-service installation or activation  | [Release service](operations/runbooks/durable-release-service.md); not required for the routine release path                                |
 | Intended behavior, defects and conflicting evidence  | [Behavior evidence](development/behavior-evidence.md)                                                                                       |
 | API domains and compatibility boundaries             | [API reference](development/api-domain-reference.md)                                                                                        |
 | Product UI decisions and settings navigation         | [Active decisions](development/miniapp-product-decisions.md) and [settings contract](miniapp-settings-overview-design.md)                   |
@@ -25,6 +25,8 @@ task worktree, focused checks, one submission aggregate, GitHub checks and one g
 | Refactoring an existing boundary                     | [Preserved contracts](refactor-safe-boundaries.md) and [candidate roadmap](operations/plans/2026-11-01-safe-refactoring-roadmap.md)         |
 | Workspace and runtime overview                       | [Project description](project-description.md)                                                                                               |
 | Read-only local observation and email alerts         | [Local runtime observer](operations/runbooks/local-runtime-observer.md)                                                                     |
+
+For tasks across Major and a partner project, use the [project pairs map](development/project-pairs.md).
 
 Independent Lastik work starts with [its scoped instructions](../apps/eraser/AGENTS.md).
 Advertising buttons and Birzhik profiles use the [marketplace contract](development/marketplace-integration.md);
