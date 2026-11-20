@@ -119,10 +119,7 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
     'apps/api/src/admin/publisher-dialog-context.service.ts',
     ['raw.version !== 1', 'raw.dialogBotId !== expectedDialogBotId'],
   ],
-  [
-    'apps/api/src/admin/publication.service.ts',
-    ['readPublicationLatePolicy(rule)', 'maxResults: 300'],
-  ],
+  ['apps/api/src/admin/publication.service.ts', ['maxResults: 300']],
   [
     'apps/api/src/admin/admin-managed-broadcast-media-runtime.ts',
     [
@@ -135,18 +132,49 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
   ],
 ];
 
-export function assertPublicationPolicySource(readSource) {
-  for (const [path, required] of PUBLICATION_POLICY_SOURCE_CHECKS) {
-    const source = readSource(path)
-      .replace(/\/\*[\s\S]*?\*\//gu, '')
-      .replace(/^\s*\/\/.*$/gmu, '');
+const publicationServicePath = 'apps/api/src/admin/publication.service.ts';
+
+// FLAG: An older compatible image keeps its reader inline. The projected layout needs both
+// executable service calls and the extracted reader before it is safe to use for rollback.
+export const PUBLICATION_CALENDAR_PROJECTION_CHECKS = [
+  [
+    publicationServicePath,
+    ['countRecurrenceRollupOccurrences(rule, grouped)', 'countableCalendarOccurrenceWhere(rule)'],
+  ],
+  [
+    'apps/api/src/admin/publication-calendar-projection.ts',
+    [
+      'const countsCanceled = Boolean(readPublicationLatePolicy(rule))',
+      'return readPublicationLatePolicy(rule) ? {}',
+    ],
+  ],
+];
+
+function compactSource(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '')
+    .replace(/\s+/gu, '');
+}
+
+function assertSourceChecks(readSource, checks) {
+  for (const [path, required] of checks) {
+    const source = compactSource(readSource(path));
     for (const fragment of required) {
-      // Formatting is immaterial; the executable reader and each dispatch caller must exist.
-      if (!source.replace(/\s+/gu, '').includes(fragment.replace(/\s+/gu, '')))
+      if (!source.includes(fragment.replace(/\s+/gu, '')))
         throw new Error(
           `Rollback target lacks publication deadline/preparation reader: ${path} (${fragment})`,
         );
     }
+  }
+}
+
+export function assertPublicationPolicySource(readSource) {
+  assertSourceChecks(readSource, PUBLICATION_POLICY_SOURCE_CHECKS);
+  if (
+    !compactSource(readSource(publicationServicePath)).includes('readPublicationLatePolicy(rule)')
+  ) {
+    assertSourceChecks(readSource, PUBLICATION_CALENDAR_PROJECTION_CHECKS);
   }
 }
 
