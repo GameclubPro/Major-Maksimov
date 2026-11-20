@@ -13,6 +13,7 @@ import {
   ModerationSanctionStateLockUnavailableError,
 } from '../moderation/moderation-sanction-state-lock.service';
 import { AdminService } from './admin.service';
+import type { AdminManualModerationRuntime } from './admin-manual-moderation-runtime';
 import { ChatEntityType } from '../prisma/prisma-client';
 import {
   createAdminServiceFixture,
@@ -579,6 +580,63 @@ describe('channel member bans', () => {
 });
 
 describe('AdminService sanction state ordering', () => {
+  it('records a confirmed group BAN when source message cleanup fails', async () => {
+    const prisma = createPrismaMock();
+    const kickMember = jest
+      .fn<ReturnType<MaxClientService['kickMember']>, Parameters<MaxClientService['kickMember']>>()
+      .mockResolvedValue(undefined);
+    const maxClient = createBanMaxClient({
+      getChatSnapshot: jest.fn().mockResolvedValue({ isPublic: false, link: null }),
+      kickMember,
+    });
+    const service = createService(prisma, maxClient);
+    const { sanctionStateFence } = installSanctionStateHarness(service);
+    const cleanup = jest
+      .spyOn(
+        service as unknown as Pick<
+          AdminManualModerationRuntime,
+          'resolveManualBanSourceCleanupSummary'
+        >,
+        'resolveManualBanSourceCleanupSummary',
+      )
+      .mockRejectedValue(new Error('source cleanup unavailable'));
+    const options = {
+      ...VERIFIED_COMMAND_OPTIONS,
+      fanoutLedgerJobId: 'job-confirmed-group-ban-cleanup-failure',
+    };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(
+        service.applyManualSystemBan('chat-1', 'user-3', ADMIN_ACTOR, 'group_command', options),
+      ).resolves.toEqual(
+        expect.objectContaining({ ok: true, message: 'Участник удалён из чата.' }),
+      );
+    }
+
+    expect(kickMember).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(prisma.moderationEvent.create).toHaveBeenCalledTimes(1);
+    expect(prisma.moderationEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        chatId: 'chat-1',
+        userId: 'user-3',
+        ruleCode: 'MANUAL_BAN',
+        action: 'BAN',
+        metadata: expect.objectContaining({ mode: 'MAX_REMOVE_ONLY', source: 'group_command' }),
+      }),
+    });
+    expect(prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ chatId: 'chat-1', action: 'MANUAL_BAN_MEMBER' }),
+    });
+    expect(sanctionStateFence.commit).toHaveBeenCalledTimes(1);
+    expect(sanctionStateFence.markRemoteConfirmedEventMissing).not.toHaveBeenCalled();
+    await expect(
+      prisma.manualModerationFanoutLedgerEntry.count({
+        where: { operation: 'COMMAND_SOURCE_BAN', status: 'SUCCEEDED' },
+      }),
+    ).resolves.toBe(1);
+  });
+
   it('coalesces a second group BAN after the first command commits the active sanction', async () => {
     const prisma = createPrismaMock();
     let activeBanEvent: {
