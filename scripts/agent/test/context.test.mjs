@@ -119,7 +119,8 @@ test('does not scan environment, ignored, untracked, binary or linked source con
   const outside = mkdtempSync(join(tmpdir(), 'maxim-context-outside-'));
   t.after(() => rmSync(outside, { recursive: true, force: true }));
   write(outside, 'secret.ts', 'FLAG: SYMLINK_SECRET\n');
-  symlinkSync(outside, join(repo, 'escape'));
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  symlinkSync(outside, join(repo, 'escape'), linkType);
   const result = context(repo, [
     '--path',
     '.env.md',

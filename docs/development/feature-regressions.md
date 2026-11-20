@@ -11,6 +11,57 @@ Browser scripts run directly with Node; inspect their server setup before execut
 Local preview and MAX Bridge shims do not prove live rights, delivery or physical-device behavior.
 The impact planner and staged commit helper still own final validation.
 
+## Local Checks By Product
+
+These checks use synthetic events or browser fixtures. They require no live bot tokens and
+produce no actions in MAX. For store-backed checks, set up disposable PostgreSQL and Redis
+as described in the [local environment guide](agent-local-environment.md).
+
+### Major Webhook And Moderation
+
+Run the fixed-bot suite for changes to webhook routing, executor selection or permissions.
+The suite drives real queues and stores through a simulated MAX transport. For a single rule,
+choose its focused case from the sections below. Use the [multibot catalog load runner](../../apps/api/src/scripts/loadtest-multibot-catalog.ts)
+when the change needs evidence about workload shape, queue drain or split role behavior.
+
+```bash
+node scripts/agent/with-test-stores.mjs --migrate -- node scripts/agent/focused.mjs --test apps/api/src/webhook/webhook-multibot-fixed-fullpath.spec.ts
+```
+
+### Publik Editor And Calendar
+
+Open the publication editor with the Publisher profile and preview transport. For calendar input
+and confirmation behavior, run the calendar browser case in the [Publisher and VK section](#publisher-and-vk).
+For schedule persistence or recipient selection, use that section's corresponding API tests.
+
+```bash
+npm run emulator:miniapp -- --route '/publications?profile=publisher'
+```
+
+### Safety Desk Runtime Overview
+
+Build the admin app and run the overview smoke. It serves the build on loopback and intercepts
+API requests inside the browser using [runtime overview fixtures](../../apps/admin/test/runtime-overview-fixture.ts).
+Run the smoke without `--runtime-overview` for the rest of the browser scenarios. The development
+server `dev:admin` instead proxies requests to a running local API.
+
+```bash
+npm run build --workspace @maxim/admin
+npm run smoke:admin -- --runtime-overview
+```
+
+### Lastik Connection And Cleanup
+
+Run the connection unit tests for changes to connection decisions. For policy persistence,
+webhook ingestion or cleanup scheduling, use the store suite. It creates Lastik's own schema in
+disposable stores and uses simulated MAX responses. Follow the [Lastik instructions](../../apps/eraser/AGENTS.md)
+for its focused test commands and reader compatibility checks.
+
+```bash
+TZ=UTC node --import tsx --test apps/eraser/test/connection.test.ts
+npm run test:eraser:stores
+```
+
 ## Participants And Moderation UI
 
 Keep participant state bound to chat, filters and cursor. Cached first pages must keep

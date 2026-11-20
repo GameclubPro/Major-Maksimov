@@ -224,10 +224,8 @@ export function createTaskContext(options) {
             try {
               const decoded = decodeURIComponent(filename);
               if (isAbsolute(decoded) || decoded.includes('\\')) throw new Error('absolute link');
-              target = normalizePath(
-                root,
-                relative(root, resolve(root, dirname(path), decoded || name)),
-              );
+              const relativeTarget = relative(root, resolve(root, dirname(path), decoded || name));
+              target = normalizePath(root, relativeTarget.split(sep).join('/'));
             } catch {
               notices.push(
                 `${path}:${index + 1}: local link omitted (outside repository or invalid path).`,

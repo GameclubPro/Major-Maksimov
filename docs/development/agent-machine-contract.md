@@ -18,9 +18,17 @@ scope cannot be combined with explicit worktree/staged/range modes or `verify --
 
 ## Configured Workspace And Ownership
 
-`workspace` is a separately installed local coordinator, not an npm script or a file
-in this repository. Inspect `workspace --help` for the installed version's commands.
-When it is configured, use one task identity and its returned checkout throughout:
+`workspace` is a separately installed local coordinator. Inspect `workspace help`
+for the installed version's commands. Windows Codex can call the coordinator installed in WSL
+through a login shell. This example uses Ubuntu 24.04 from PowerShell.
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -- bash -lc 'workspace inspect --repos major --summary --json'
+```
+
+The returned source path comes from the coordinator's registry. Check it even when Codex
+is open in a Windows checkout. Use one task identity and the checkout returned by the
+coordinator throughout the Linux workflow. Run the following commands in the Linux shell.
 
 ```bash
 : "${WORKSPACE_TASK:?Set a new descriptive task id}"
@@ -146,7 +154,7 @@ aligned with the [maintained integration runbook](../operations/runbooks/karavan
 | Canonical commands, authority, payload hash | [Shared schemas](../../packages/contracts/src/karavan-marketplace.ts), [proxy](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-proxy.service.ts), [management tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-management.spec.ts).                                                                             |
 | Current human/bot authority and binding     | [Authority service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority.service.ts), [binding status](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-binding-status.service.ts), [native authority tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-authority-postgres.spec.ts). |
 | Retained one-time seller/historical handoff | [Handoff service](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-handoff.service.ts), [integration controller tests](../../apps/api/src/integrations/karavan-marketplace/karavan-marketplace-integration.controller.spec.ts).                                                                                                                |
-| Current shop entry and uncertain commands | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [management link](../../apps/miniapp/test/karavan-shop-management-link.test.ts), [connection/recovery flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                                                                                                                                                                                               |
+| Current shop entry and uncertain commands   | [Compact shop](../../apps/miniapp/test/karavan-shop-simple.browser.mjs), [management link](../../apps/miniapp/test/karavan-shop-management-link.test.ts), [connection/recovery flow](../../apps/miniapp/test/karavan-marketplace.browser.mjs), [chat settings route](../../apps/miniapp/test/karavan-shop-route.browser.mjs).                                         |
 
 Karavan's matching handlers and release configuration remain documented in its own
 `docs/chat-marketplaces-release.md`. Pair configuration checks do not prove protocol or runtime

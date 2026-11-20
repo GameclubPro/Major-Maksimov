@@ -29,7 +29,11 @@ For a local API with persistent development stores:
    cp .env.example apps/api/.env
    ```
 
-   Edit `apps/api/.env` for a dedicated development bot and local values. API npm scripts
+   Edit `apps/api/.env` for a dedicated development bot and local values before starting the
+   API. The example contains deployment URLs. Set the webhook origin to a dedicated
+   development endpoint for a live test. For offline development, use the
+   [local test scenarios](docs/development/feature-regressions.md) with fake MAX instead.
+   API npm scripts
    execute in `apps/api`, where Nest and Prisma load `.env`; a root `.env` alone is not
    their configuration. For host-side Node processes, use
    `DATABASE_URL=postgresql://maxim:maxim@127.0.0.1:5432/maxim?schema=public` and
