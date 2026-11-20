@@ -6,7 +6,7 @@ Prisma client. Public API scripts own code generation and its lock.
 
 ## One-time setup and routine checks
 
-For environment setup only:
+For full environment setup, run the doctor on Linux or WSL.
 
 ```bash
 node scripts/agent/doctor.mjs --browser
@@ -24,8 +24,8 @@ The doctor checks local tools, dependency presence and the matching Playwright C
 credentials or change Codex settings. Dependency presence is not lockfile-integrity validation;
 use `npm ci` after dependency changes. A running Docker daemon is optional when native test stores work.
 
-Tools depend on scope: Node 24/npm, Git and the Docker Compose CLI support repository
-and documentation checks; GitHub CLI handles delivery. Tooling/infra work additionally uses
+Node 24/npm, Git and the Docker Compose CLI support repository and documentation checks.
+GitHub CLI handles delivery. Tooling and infrastructure work additionally use
 ripgrep, Python 3, ShellCheck and jq. Native store work needs PostgreSQL 16 server/client
 binaries and Redis 7 server/client. Keep `initdb`, `postgres`, `pg_isready`, `createdb`,
 `psql`, `redis-server` and `redis-cli` on PATH. For workflow editing, install the actionlint version
@@ -48,7 +48,7 @@ that prefix's library path. Do not weaken repository-signature validation or ove
 user wrappers. Record installed versions/checksums locally, outside Git. Refresh stale package
 indexes on a download 404 instead of falling back silently to an older server.
 
-Install the browser revision required by this checkout:
+On Linux or WSL, install the browser revision required by this checkout:
 
 ```bash
 npx playwright install chromium
@@ -57,6 +57,26 @@ npx playwright install chromium
 If the browser launch reports missing OS libraries, use the supported Playwright dependency
 installer with administrator access. Existing compatible system libraries need no reinstall.
 Keep WSL projects, node_modules and temporary databases on the Linux filesystem for I/O efficiency.
+
+## Local UI on Windows
+
+Use Windows Node 24 and run these commands in PowerShell from the Windows checkout.
+
+```powershell
+npm.cmd ci
+npx.cmd playwright install chromium
+node scripts/agent/doctor.mjs --ui --browser
+```
+
+The UI profile checks the tools, dependencies and browser needed for local UI work.
+Use `npm.cmd run dev:miniapp` or `npm.cmd run dev:admin` to start a local preview.
+Install Playwright WebKit when a selected case uses it.
+
+Use the Linux task checkout for native store tests, the full submission workflow and the
+Bash release scripts. The Windows Codex app can use the existing Linux tools through
+`wsl.exe`. For work that needs Linux validation or delivery, start in the Linux task worktree
+so editing, verification and submission use the same files. Keep dependencies separate between
+Windows and Linux checkouts. See [configured workspace and ownership](agent-machine-contract.md#configured-workspace-and-ownership).
 
 ## API CI partitioning
 

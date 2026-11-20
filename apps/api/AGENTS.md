@@ -80,7 +80,8 @@ code. Its detailed guards remain mandatory. Do not load unrelated domain section
   `platform-api.max.ru` host. Check validated configuration before writing a probe; use the normal
   client admission/cooldown and exact bot scope even for read-only diagnostic requests.
 - Tokens go only in `Authorization`, never query strings or output. Keep the Russian CA bundle.
-  Production uses authenticated HTTPS webhooks; long polling is development-only.
+  Use authenticated HTTPS webhooks. MAX documents long polling for development,
+  but MAXIM has no local polling command. Use synthetic webhook tests for local work.
 - Current `MaxClientService` defaults to 30 rps per bot token (`MAX_API_GLOBAL_RPS`). This is a
   project limit, not a guaranteed MAX allowance. Keep shared per-token admission/cooldown,
   source/lane priorities and per-role/chat/message limits; do not raise quotas without evidence.

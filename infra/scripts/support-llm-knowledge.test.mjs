@@ -164,7 +164,11 @@ test('schedule timezone facts match the displayed device timezone implementation
   );
   assert.match(
     source('apps/miniapp/src/pages/publications-page.tsx'),
-    /publication-schedule-timezone/u,
+    /<PublicationTimingSection\b/u,
+  );
+  assert.match(
+    source('apps/miniapp/src/features/publications/publication-timing-section.tsx'),
+    /className="publication-schedule-timezone"/u,
   );
   const answer = fact('publisher-schedule-timezone');
   assert.match(answer, /устройства или браузера/iu);

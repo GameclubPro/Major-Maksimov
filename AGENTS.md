@@ -35,8 +35,9 @@
 
 ## Validate And Deliver
 
-1. Inspect the branch, diff and scoped notes. Use `node scripts/agent/doctor.mjs --browser` only
-   for environment setup; run `node scripts/agent/preflight.mjs` before expensive checks.
+1. Inspect branch, diff and scoped notes. For setup, see the
+   [local environment guide](docs/development/agent-local-environment.md).
+   Run `node scripts/agent/preflight.mjs` before expensive checks.
 2. For changed methods, find callers and test doubles with `rg` before broad tests. Keep doubles
    typed against the real contract. Run the affected unit and native integration cases first.
 3. Select scope with `node scripts/agent/plan.mjs --worktree`. While editing use
@@ -48,7 +49,7 @@
 4. Public API scripts own generator locks. Do not invoke `*:unlocked`, `*:source` or raw Prisma
    generation to bypass them. Native stores: `node scripts/agent/with-test-stores.mjs --migrate --`
    followed by the public validation command. Report store-dependent skips; mocks are not native
-   coverage. See [local environment](docs/development/agent-local-environment.md).
+   coverage.
 5. Run `git diff --check`, stage owned paths, then
    `./infra/scripts/local-commit-push.sh "commit message" branch`. The helper is staged-only;
    use `--all` only intentionally and `--include-agents` for any staged `AGENTS.md`. It refuses
@@ -100,8 +101,8 @@ See [release details](docs/development-reliability-plan.md).
 - Report written, locally validated, CI-verified, deployed and production-accepted separately.
   Run the user's final monitoring window only after its other gates are ready. Preserve failures
   and missing coverage; do not claim all bots/functions are green from one healthy sample.
-- At task start/end run the [ownership check](docs/development-reliability-plan.md#worktree-ownership-and-completion).
-  Preserve inherited changes; finish owned edits before success. Report pending checks/CI/deploy/
-  acceptance. Fix defects; update affected notes/runbooks.
+- [Record ownership before editing and check before completion](docs/development-reliability-plan.md#worktree-ownership-and-completion).
+  Preserve inherited work and finish owned edits. Report pending checks, CI, deploy and acceptance.
+  Fix defects and update affected references.
 - Keep these entry files short. Put detailed invariants in task-selected references and historical
   observations in dated incidents; never put temporary PIDs, release status, secrets or guesses here.
