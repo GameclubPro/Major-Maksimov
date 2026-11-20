@@ -10710,26 +10710,57 @@ export class AdminService implements OnModuleDestroy {
       );
     }
 
+    const currentChatCommand = source === 'group_command' && options.fanoutAllChats !== true;
+    // FLAG: An ancillary failure must not hide a confirmed current-chat BAN. Keep
+    // lease and effect uncertainty failures fenced, and retain successful summaries.
+    const runConfirmedBanFollowUp = async <Result>(
+      operation: string,
+      run: () => Promise<Result>,
+    ): Promise<Result | null> => {
+      await leaseGuard.assertOwned();
+      try {
+        return await run();
+      } catch (error: unknown) {
+        if (
+          !currentChatCommand ||
+          this.isManualModerationOrderingFailure(error) ||
+          this.isAmbiguousAttemptedMaxMemberMutation(error) ||
+          wasMaxMemberMutationConfirmed(error)
+        ) {
+          throw error;
+        }
+        await leaseGuard.assertOwned();
+        this.logger.warn(
+          {
+            chatId,
+            targetUserId,
+            operation,
+            err: error instanceof Error ? error.message : String(error),
+          },
+          'Manual group ban follow-up failed after confirmed MAX member action',
+        );
+        return null;
+      }
+    };
+
     let moderationEventId: string;
     try {
-      await leaseGuard.assertOwned();
-      await this.deleteAdminGlobalSpammerExemption(user.userId, targetUserId);
-      await leaseGuard.assertOwned();
-      await this.globalSpammerIntelligence?.recordManualBanObservation({
-        chatId,
-        targetUserId,
-        actorUserId: user.userId,
-        source,
-        executionMode,
-      });
+      await runConfirmedBanFollowUp('clear_spammer_exemption', () =>
+        this.deleteAdminGlobalSpammerExemption(user.userId, targetUserId),
+      );
+      await runConfirmedBanFollowUp('record_spammer_observation', async () =>
+        this.globalSpammerIntelligence?.recordManualBanObservation({
+          chatId,
+          targetUserId,
+          actorUserId: user.userId,
+          source,
+          executionMode,
+        }),
+      );
 
-      await leaseGuard.assertOwned();
-      let recentMessageCleanup = this.summarizeManualModerationCleanup({
-        candidateMessageIds: [],
-        deletedMessageIds: [],
-        pendingMessageIds: [],
-        failedMessageIds: [],
-      });
+      let recentMessageCleanup: Awaited<
+        ReturnType<AdminService['resolveManualBanSourceCleanupSummary']>
+      > | null;
       let crossChatFanout = this.summarizeManualBanFanout({
         removedChatIds: [],
         skippedChatIds: [],
@@ -10738,21 +10769,9 @@ export class AdminService implements OnModuleDestroy {
         failedMessageDeleteCount: 0,
       });
 
-      if (source === 'group_command' || source === 'private_command') {
-        const shouldFanoutBan = options.fanoutAllChats === true || source === 'private_command';
-        if (shouldFanoutBan) {
-          const followUp = await this.resolveManualBanFollowUpSummaries({
-            sourceChatId: chatId,
-            targetUserId,
-            actor: user,
-            source,
-            rootIntentKey: options.fanoutLedgerJobId ?? null,
-            leaseGuard,
-          });
-          recentMessageCleanup = followUp.sourceMessageCleanup;
-          crossChatFanout = followUp.crossChatFanout;
-        } else {
-          const queuedCleanup = await this.resolveManualBanSourceCleanupSummary({
+      if (currentChatCommand) {
+        recentMessageCleanup = await runConfirmedBanFollowUp('clean_source_messages', () =>
+          this.resolveManualBanSourceCleanupSummary({
             sourceChatId: chatId,
             targetUserId,
             actor: user,
@@ -10760,9 +10779,20 @@ export class AdminService implements OnModuleDestroy {
             rootIntentKey: options.fanoutLedgerJobId ?? null,
             botId: resolvedBotId,
             leaseGuard,
-          });
-          recentMessageCleanup = queuedCleanup;
-        }
+          }),
+        );
+      } else {
+        await leaseGuard.assertOwned();
+        const followUp = await this.resolveManualBanFollowUpSummaries({
+          sourceChatId: chatId,
+          targetUserId,
+          actor: user,
+          source,
+          rootIntentKey: options.fanoutLedgerJobId ?? null,
+          leaseGuard,
+        });
+        recentMessageCleanup = followUp.sourceMessageCleanup;
+        crossChatFanout = followUp.crossChatFanout;
       }
 
       await leaseGuard.assertOwned();
