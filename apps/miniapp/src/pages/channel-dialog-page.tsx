@@ -77,15 +77,16 @@ import {
 import type { CommentModerationTarget } from '../components/comment-moderation-sheet';
 import { formatDialogAttachmentSize } from '../lib/dialog-attachment-size';
 import type { PreparedCommentDialogAttachment } from '../lib/dialog-attachments';
+import { downloadDialogFile } from '../lib/dialog-file-download';
 import { openFileInputPicker, resolveFileInputActivationMode } from '../lib/file-input-picker';
 import type { LastEntityType } from '../lib/last-chat';
 import {
-  downloadMaxFile,
   maxImpact,
   maxNotify,
   maxSelectionChanged,
   openMaxBotLink,
   openMaxBotLinkAndClose,
+  openPrivateBotHandoff,
 } from '../lib/max-bridge';
 import { useDialogFocusTrap } from '../lib/dialog-focus';
 import { useNativeBackHandler } from '../lib/native-back';
@@ -757,7 +758,7 @@ function CommentMessageAttachments({
                 onClick={(event) => {
                   event.stopPropagation();
                   if (url) {
-                    void downloadMaxFile(url, fileName);
+                    void downloadDialogFile(url, fileName);
                   }
                 }}
                 disabled={!url}
@@ -2903,8 +2904,9 @@ export function ChannelDialogPage({
             displayName: target.displayName,
           });
     },
-    onSuccess: (result) => {
-      if (!openMaxBotLinkAndClose(result.botUrl)) {
+    onSuccess: (result, target) => {
+      const open = 'messageId' in target ? openMaxBotLinkAndClose : openPrivateBotHandoff;
+      if (!open(result.botUrl)) {
         pushToast({
           tone: 'danger',
           title: 'Не удалось открыть бота',

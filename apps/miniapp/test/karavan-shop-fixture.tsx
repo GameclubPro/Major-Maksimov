@@ -395,6 +395,9 @@ const api = {
       return karavanMarketplaceOperationSchema.parse(structuredClone(operation));
     }
     if (path.includes('/karavan-storefront/allowlist')) {
+      if (init.method === 'POST' && path.endsWith('/handoff')) {
+        return { botUrl: 'https://max.ru/synthetic_major_bot?start=ka2-example' };
+      }
       if (init.method === 'DELETE') {
         const index = allowedUsers.findIndex((user) => path.endsWith('/' + user.id));
         if (index >= 0) allowedUsers.splice(index, 1);

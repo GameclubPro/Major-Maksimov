@@ -1,3 +1,5 @@
+import type { MaxClientService } from '../max/max-client.service';
+import { markMaxMessageSendAttempted } from '../max/max-mutation-outcome.util';
 import duplicateRulesCases from '../../../../packages/contracts/test/fixtures/duplicate-rules.json';
 import {
   BadRequestException,
@@ -671,6 +673,12 @@ function createHarness(
   let videoUploadCounter = 0;
   const maxClient = {
     sendMessage: jest.fn().mockResolvedValue(undefined),
+    sendMessageImmediateWithId: jest
+      .fn<
+        ReturnType<MaxClientService['sendMessageImmediateWithId']>,
+        Parameters<MaxClientService['sendMessageImmediateWithId']>
+      >()
+      .mockResolvedValue({ messageId: 'msg-private-chat-1', url: null }),
     sendCustomMessageImmediateWithResolvedLink: jest.fn().mockImplementation(async () => {
       previewMessageCounter += 1;
       return { messageId: `msg-preview-${previewMessageCounter}`, url: null };
@@ -680,7 +688,10 @@ function createHarness(
       .mockResolvedValue({ messageId: 'msg-preview-1', url: null }),
     sendCustomMessageImmediate: jest.fn().mockResolvedValue({ message_id: 'msg-custom-1' }),
     sendMessageImmediateToUser: jest
-      .fn()
+      .fn<
+        ReturnType<MaxClientService['sendMessageImmediateToUser']>,
+        Parameters<MaxClientService['sendMessageImmediateToUser']>
+      >()
       .mockResolvedValue({ messageId: 'msg-private-1', url: null }),
     uploadImage: jest.fn().mockImplementation(async () => {
       imageUploadCounter += 1;
@@ -2799,6 +2810,11 @@ describe('PrivateControlService', () => {
         maxClient.sendMessage.mockClear();
       }
 
+      if (flow === 'profile' && route !== 'known') {
+        maxClient.sendMessageImmediateToUser.mockRejectedValueOnce(
+          Object.assign(new Error('Private chat does not exist'), { response: { status: 404 } }),
+        );
+      }
       const result =
         flow === 'rules'
           ? await service.handoffRulesFromMiniapp(chats[0].id, actor)
@@ -2848,6 +2864,16 @@ describe('PrivateControlService', () => {
       }
 
       await service.handleBotStarted(createBotStartedPrivateUpdate(payload, { botId }));
+      if (flow === 'profile' && route === 'known') {
+        expect(maxClient.sendMessageImmediateWithId).toHaveBeenCalledWith(
+          '152517912',
+          expect.stringContaining('Юлия'),
+          expect.anything(),
+          expect.objectContaining({ botId }),
+        );
+        expect(maxClient.sendMessage).not.toHaveBeenCalled();
+        return;
+      }
       expect(maxClient.sendMessage.mock.calls).not.toHaveLength(0);
       expect(maxClient.sendMessage.mock.calls.every(([chatId]) => chatId === '152517912')).toBe(
         true,
@@ -4403,6 +4429,121 @@ describe('PrivateControlService', () => {
     expect(getLastSentText(maxClient)).not.toContain('Request failed with status code 403');
   });
 
+  it('reopens the same Karavan allowlist and resumes the selected user after bot start', async () => {
+    const { service, maxClient, karavanStorefrontAllowlistService } = createHarness();
+    const botId = '777000_bot';
+    const actor = { userId: 'user-1', launchBotId: botId, username: null, displayName: null };
+    const chatId = '-70000000000001';
+    const open = () => service.handoffKaravanStorefrontAllowlistFromMiniapp(chatId, actor);
+
+    const first = await open();
+    expect(await open()).toEqual(first);
+    expect(maxClient.sendMessageImmediateToUser).toHaveBeenCalledTimes(1);
+    expect(maxClient.sendMessageImmediateToUser).toHaveBeenCalledWith(
+      actor.userId,
+      expect.stringContaining('Перешлите сообщение пользователя'),
+      expect.objectContaining({ buttons: expect.any(Array) }),
+      expect.objectContaining({ botId }),
+    );
+    await service.handleBotStarted(
+      createBotStartedPrivateUpdate(extractStartPayload(first.botUrl), { botId }),
+    );
+    expect(maxClient.sendMessage).not.toHaveBeenCalled();
+
+    await service.handleUpdate({ ...createPrivateForwardedModerationUpdate(''), botId });
+    const duration = getLastButtons(maxClient)
+      .flat()
+      .find((button) => (button as { payload?: string }).payload?.endsWith('|1d')) as {
+      payload: string;
+    };
+    expect(await open()).toEqual(first);
+    expect(maxClient.sendMessageImmediateToUser).toHaveBeenLastCalledWith(
+      actor.userId,
+      expect.stringContaining('Срок разрешения'),
+      expect.anything(),
+      expect.objectContaining({ botId }),
+    );
+    await service.handleBotStarted(
+      createBotStartedPrivateUpdate(extractStartPayload(first.botUrl), { botId }),
+    );
+    await service.handleUpdate(createPrivateCallbackUpdate(duration.payload, { botId }));
+    expect(karavanStorefrontAllowlistService.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId, userId: 'user-77' }),
+    );
+  });
+
+  it('does not repeat a pending Karavan prompt when a second launch opens the bot', async () => {
+    const { service, maxClient } = createHarness();
+    const botId = '777000_bot';
+    const actor = { userId: 'user-1', launchBotId: botId, username: null, displayName: null };
+    const open = () =>
+      service.handoffKaravanStorefrontAllowlistFromMiniapp('-70000000000001', actor);
+    let releaseSend!: () => void;
+    let sending!: () => void;
+    const sendStarted = new Promise<void>((resolve) => {
+      sending = resolve;
+    });
+    maxClient.sendMessageImmediateToUser.mockImplementationOnce(async () => {
+      sending();
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      return { messageId: 'prompt', url: null };
+    });
+
+    const first = open();
+    await sendStarted;
+    try {
+      const second = await open();
+      await service.handleBotStarted(
+        createBotStartedPrivateUpdate(extractStartPayload(second.botUrl), { botId }),
+      );
+      expect(maxClient.sendMessageImmediateToUser).toHaveBeenCalledTimes(1);
+      expect(maxClient.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      releaseSend();
+      await first;
+    }
+  });
+
+  it('recovers Karavan allowlist delivery on a plain start after MAX denies direct send', async () => {
+    const { service, maxClient } = createHarness();
+    const botId = '777000_bot';
+    const actor = { userId: 'user-1', launchBotId: botId, username: null, displayName: null };
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce({ response: { status: 403 } });
+
+    await service.handoffKaravanStorefrontAllowlistFromMiniapp('-70000000000001', actor);
+    await service.handleBotStarted(createBotStartedPrivateUpdate('', { botId: 'different_bot' }));
+    expect(getLastSentText(maxClient)).not.toContain('Разрешение для витрины');
+    await service.handleBotStarted(createBotStartedPrivateUpdate('', { botId }));
+    expect(getLastSentText(maxClient)).toContain('Разрешение для витрины');
+  });
+
+  it('keeps the current Karavan allowlist when an old duration button is pressed', async () => {
+    const { service, maxClient, karavanStorefrontAllowlistService } = createHarness();
+    const botId = '777000_bot';
+    const actor = { userId: 'user-1', launchBotId: botId, username: null, displayName: null };
+    const chatId = '-70000000000001';
+    const open = () => service.handoffKaravanStorefrontAllowlistFromMiniapp(chatId, actor);
+
+    await open();
+    await service.handleUpdate({ ...createPrivateForwardedModerationUpdate(''), botId });
+    const oldButtons = getLastButtons(maxClient).flat() as Array<{
+      payload?: string;
+      text: string;
+    }>;
+    const oldDuration = oldButtons.find((button) => button.payload?.endsWith('|1d'))!.payload!;
+    const cancel = oldButtons.find((button) => button.text === 'Отмена')!.payload!;
+    await service.handleUpdate(createPrivateCallbackUpdate(cancel, { botId }));
+    const next = await open();
+    await service.handleUpdate(createPrivateCallbackUpdate(oldDuration, { botId }));
+
+    expect(await open()).toEqual(next);
+    expect(karavanStorefrontAllowlistService.upsert).not.toHaveBeenCalled();
+    await service.handleUpdate({ ...createPrivateForwardedModerationUpdate(''), botId });
+    expect(getLastSentText(maxClient)).toContain('Срок разрешения');
+  });
+
   it('hands off Karavan allowlist, accepts one forwarded user, and grants a selected duration', async () => {
     const { service, maxClient, karavanStorefrontAllowlistService } = createHarness();
     const actor = {
@@ -4412,6 +4553,7 @@ describe('PrivateControlService', () => {
       displayName: 'Тестовый пользователь',
     };
 
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce({ response: { status: 403 } });
     const handoff = await service.handoffKaravanStorefrontAllowlistFromMiniapp(
       '-70000000000001',
       actor,
@@ -4477,6 +4619,7 @@ describe('PrivateControlService', () => {
       displayName: 'Тестовый пользователь',
     };
 
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce({ response: { status: 403 } });
     const handoff = await service.handoffKaravanStorefrontAllowlistFromMiniapp(
       '-70000000000001',
       actor,
@@ -4568,6 +4711,9 @@ describe('PrivateControlService', () => {
       new Map([['user-42', { displayName: 'Юлия Максимова' }]]),
     );
 
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce(
+      Object.assign(new Error('Private chat does not exist'), { response: { status: 404 } }),
+    );
     const result = await service.handoffProfileMentionFromMiniapp(
       chats[0].id,
       actor,
@@ -4677,6 +4823,9 @@ describe('PrivateControlService', () => {
       chatTitle: channels[0].title,
     };
 
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce(
+      Object.assign(new Error('Private chat does not exist'), { response: { status: 404 } }),
+    );
     const result = await service.handoffProfileMentionFromMiniapp(
       channels[0].id,
       actor,
@@ -4762,14 +4911,16 @@ describe('PrivateControlService', () => {
       'chat',
     );
 
-    expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
-    expect(getLastSentText(maxClient)).toContain('<a href="max://user/user-77">Мария</a>');
+    expect(maxClient.sendMessageImmediateWithId).toHaveBeenCalledTimes(1);
+    expect(maxClient.sendMessageImmediateWithId.mock.calls[0]?.[1]).toContain(
+      '<a href="max://user/user-77">Мария</a>',
+    );
 
     await service.handleBotStarted(
       createBotStartedPrivateUpdate(extractStartPayload(result.botUrl)),
     );
 
-    expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(maxClient.sendMessage).not.toHaveBeenCalled();
   });
 
   it('ignores an empty bot_started right after proactive profile mention delivery', async () => {
@@ -4795,13 +4946,123 @@ describe('PrivateControlService', () => {
       'chat',
     );
 
-    expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
+    expect(maxClient.sendMessage).not.toHaveBeenCalled();
     maxClient.sendMessage.mockClear();
 
     await service.handleBotStarted(createBotStartedPrivateUpdate(''));
 
     expect(maxClient.sendMessage).not.toHaveBeenCalled();
     expect(maxClient.answerCallback).not.toHaveBeenCalled();
+  });
+
+  it('delivers a profile to the requesting user without a saved private chat', async () => {
+    const { service, maxClient, chats } = createHarness();
+    const actor = { userId: 'user-1', username: null, displayName: 'Администратор' };
+    const result = await service.handoffProfileMentionFromMiniapp(
+      chats[0].id,
+      actor,
+      'user-8',
+      { displayName: 'Анна' },
+      'chat',
+    );
+
+    expect(maxClient.sendMessageImmediateToUser).toHaveBeenCalledWith(
+      actor.userId,
+      expect.stringContaining('<a href="max://user/user-8">Анна</a>'),
+      { textFormat: 'html' },
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
+    await service.handleBotStarted(
+      createBotStartedPrivateUpdate(extractStartPayload(result.botUrl)),
+    );
+    expect(maxClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserves a selected Karavan participant when profile delivery overlaps their forward', async () => {
+    const { service, maxClient, karavanStorefrontAllowlistService, chats } = createHarness();
+    const botId = '777000_bot';
+    const actor = { userId: 'user-1', launchBotId: botId, username: null, displayName: null };
+    const chatId = chats[0].id;
+    await service.handoffKaravanStorefrontAllowlistFromMiniapp(chatId, actor);
+    maxClient.sendMessageImmediateToUser.mockImplementationOnce(async () => {
+      await service.handleUpdate({ ...createPrivateForwardedModerationUpdate(''), botId });
+      return { messageId: 'profile', url: null };
+    });
+
+    await service.handoffProfileMentionFromMiniapp(
+      chatId,
+      actor,
+      'user-8',
+      { displayName: 'Анна' },
+      'chat',
+    );
+
+    const duration = getLastButtons(maxClient)
+      .flat()
+      .find((button) => (button as { payload?: string }).payload?.endsWith('|1d')) as {
+      payload: string;
+    };
+    await service.handleUpdate(createPrivateCallbackUpdate(duration.payload, { botId }));
+    expect(karavanStorefrontAllowlistService.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId, userId: 'user-77' }),
+    );
+  });
+
+  it.each([403, 404])(
+    'delivers a new profile on plain bot_started after proactive private chat SEND returns %i',
+    async (status) => {
+      const { service, maxClient, chats } = createHarness();
+      const actor = { userId: 'user-1', username: null, displayName: 'Администратор' };
+      await service.handleBotStarted(createBotStartedPrivateUpdate(''));
+      maxClient.sendMessage.mockClear();
+
+      await service.handoffProfileMentionFromMiniapp(
+        chats[0].id,
+        actor,
+        'user-7',
+        { displayName: 'Ирина' },
+        'chat',
+      );
+      maxClient.sendMessageImmediateWithId.mockRejectedValueOnce(
+        markMaxMessageSendAttempted(
+          Object.assign(new Error('Private chat refused'), { response: { status } }),
+        ),
+      );
+      await service.handoffProfileMentionFromMiniapp(
+        chats[0].id,
+        actor,
+        'user-8',
+        { displayName: 'Анна' },
+        'chat',
+      );
+
+      await service.handleBotStarted(createBotStartedPrivateUpdate(''));
+
+      expect(maxClient.sendMessage).toHaveBeenCalledTimes(1);
+      expect(getLastSentText(maxClient)).toContain('<a href="max://user/user-8">Анна</a>');
+    },
+  );
+
+  it('does not expose a profile fallback after an uncertain MAX send', async () => {
+    const { service, maxClient, chats } = createHarness();
+    const actor = { userId: 'user-1', username: null, displayName: 'Администратор' };
+    const error = markMaxMessageSendAttempted(new Error('Connection lost after POST'));
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce(error);
+
+    await expect(
+      service.handoffProfileMentionFromMiniapp(
+        chats[0].id,
+        actor,
+        'user-8',
+        { displayName: 'Анна' },
+        'chat',
+      ),
+    ).rejects.toBe(error);
+
+    await service.handleBotStarted(createBotStartedPrivateUpdate(''));
+
+    expect(maxClient.sendMessageImmediateToUser).toHaveBeenCalledTimes(1);
+    expect(getLastSentText(maxClient)).not.toContain('max://user/user-8');
   });
 
   it('escapes profile mention display name in html handoff text', async () => {
@@ -4814,6 +5075,9 @@ describe('PrivateControlService', () => {
       chatTitle: chats[0].title,
     };
 
+    maxClient.sendMessageImmediateToUser.mockRejectedValueOnce(
+      Object.assign(new Error('Private chat does not exist'), { response: { status: 404 } }),
+    );
     const result = await service.handoffProfileMentionFromMiniapp(
       chats[0].id,
       actor,

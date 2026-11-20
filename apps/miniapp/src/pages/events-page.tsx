@@ -83,7 +83,7 @@ import {
   readManagedEntityWorkspaceState,
   saveManagedEntityStatsPreferenceForWorkspace,
 } from '../lib/managed-entity-workspace';
-import { openMaxBotLinkAndClose } from '../lib/max-bridge';
+import { openPrivateBotHandoff } from '../lib/max-bridge';
 import {
   resolveModerationFeedReason,
   trafficModerationLabels,
@@ -2760,11 +2760,11 @@ function EventsWorkspace({ api }: { api: ApiTransport }) {
       handoffChatMemberProfile(api, chatId ?? '', userId, { displayName }),
     onSuccess: (result) => {
       if (!activeView.current) return;
-      if (!openMaxBotLinkAndClose(result.botUrl)) {
+      if (!openPrivateBotHandoff(result.botUrl)) {
         pushToast({
           tone: 'danger',
           title: 'Не удалось открыть бота',
-          description: 'Ссылка на профиль пустая.',
+          description: 'Попробуйте ещё раз.',
         });
       }
     },

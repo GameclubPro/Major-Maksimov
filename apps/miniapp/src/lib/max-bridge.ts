@@ -70,7 +70,7 @@ function shouldSkipNativeSideEffects(): boolean {
   return client === 'preview' || client === 'browser';
 }
 
-function resolveNativeSideEffectBridge() {
+export function resolveNativeSideEffectBridge() {
   const bridge = resolveBridge();
   if (!bridge || shouldSkipNativeSideEffects() || !hasBridgeRuntimePayload(bridge)) {
     return undefined;
@@ -450,9 +450,9 @@ export function syncMaxNativeEnvironment(
   };
 }
 
-function parseMaxUrl(url: string): URL | null {
+export function parseMaxUrl(url: string, absolute = false): URL | null {
   try {
-    return new URL(url, window.location.href);
+    return new URL(url, absolute ? undefined : window.location.href);
   } catch {
     return null;
   }
@@ -498,14 +498,21 @@ export function closeMaxMiniApp(fallback?: () => void): void {
 
 type LinkOpenMethod = 'bridge-external' | 'bridge-max' | 'location' | 'popup' | 'noop';
 
-export function openLink(url: string): LinkOpenMethod {
+export function openLink(url: string, maxOnly = false): LinkOpenMethod {
   const normalizedUrl = url.trim();
   if (!normalizedUrl) {
     return 'noop';
   }
 
-  const parsed = parseMaxUrl(normalizedUrl);
-  const isDeepLink = Boolean(parsed && isMaxDeepLink(parsed));
+  const parsed = parseMaxUrl(normalizedUrl, maxOnly);
+  const isDeepLink = parsed !== null && isMaxDeepLink(parsed);
+  if (
+    maxOnly &&
+    (!isDeepLink || parsed.username || parsed.password || parsed.port || parsed.pathname === '/')
+  ) {
+    return 'noop';
+  }
+
   const bridge = resolveBridge();
 
   if (isDeepLink) {
@@ -544,6 +551,11 @@ export function openMaxBotLink(url: string): LinkOpenMethod {
   return openLink(url);
 }
 
+export function openPrivateBotHandoff(url: string): boolean {
+  // FLAG: MAX does not acknowledge openMaxLink. Keep the current screen available for retry.
+  return openMaxProfileLink(url, false);
+}
+
 export function openMaxBotLinkAndClose(url: string): boolean {
   const normalizedUrl = url.trim();
   if (!normalizedUrl) {
@@ -557,26 +569,16 @@ export function openMaxBotLinkAndClose(url: string): boolean {
   return true;
 }
 
-export function openMaxProfileLink(url: string): boolean {
-  const normalizedUrl = url.trim();
-  if (!normalizedUrl) {
+export function openMaxProfileLink(url: string, closeOnOpen = true): boolean {
+  try {
+    const method = openLink(url, true);
+    if (closeOnOpen && method === 'bridge-max') {
+      scheduleMiniAppClose();
+    }
+    return method !== 'noop';
+  } catch {
     return false;
   }
-
-  const bridge = resolveBridge();
-  const parsed = parseMaxUrl(normalizedUrl);
-  if (!parsed || !isMaxDeepLink(parsed)) {
-    return false;
-  }
-
-  if (typeof bridge?.openMaxLink === 'function') {
-    bridge.openMaxLink(normalizedUrl);
-    scheduleMiniAppClose();
-    return true;
-  }
-
-  window.location.assign(normalizedUrl);
-  return true;
 }
 
 export function canShareMaxContent(): boolean {
@@ -624,30 +626,6 @@ export async function shareNativeContent(payload: {
   }
 
   throw new Error('Native share недоступен в этой версии MAX.');
-}
-
-export function canDownloadNativeFile(url: string): boolean {
-  const parsed = parseMaxUrl(url.trim());
-  return Boolean(
-    parsed && parsed.protocol === 'https:' && resolveNativeSideEffectBridge()?.downloadFile,
-  );
-}
-
-export async function downloadMaxFile(url: string, fileName: string): Promise<LinkOpenMethod> {
-  const normalizedUrl = url.trim();
-  const normalizedFileName = fileName.trim() || 'file';
-  const bridge = resolveNativeSideEffectBridge();
-
-  if (normalizedUrl && canDownloadNativeFile(normalizedUrl)) {
-    try {
-      await Promise.resolve(bridge?.downloadFile?.(normalizedUrl, normalizedFileName));
-      return 'bridge-external';
-    } catch {
-      // Fall through to regular link opening when the native client refuses the download.
-    }
-  }
-
-  return openMaxBotLink(normalizedUrl);
 }
 
 export function setMaxClosingConfirmation(enabled: boolean): void {

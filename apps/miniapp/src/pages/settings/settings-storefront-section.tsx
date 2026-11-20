@@ -23,7 +23,7 @@ import {
   revokeKaravanStorefrontAllowlistEntry,
 } from '../../lib/api/chat-settings-client';
 import { cn } from '../../lib/cn';
-import { maxNotify, openMaxBotLinkAndClose } from '../../lib/max-bridge';
+import { maxNotify, openPrivateBotHandoff } from '../../lib/max-bridge';
 import { describeUserFacingError } from '../../lib/user-facing-error';
 import '../../styles/settings-storefront.css';
 
@@ -116,7 +116,7 @@ export function SettingsStorefrontSection({
   const handoffMutation = useMutation({
     mutationFn: () => handoffKaravanStorefrontAllowlist(api, chatId ?? ''),
     onSuccess: ({ botUrl }) => {
-      if (!openMaxBotLinkAndClose(botUrl)) {
+      if (!openPrivateBotHandoff(botUrl)) {
         pushToast({
           tone: 'danger',
           title: 'Не удалось открыть бота',
@@ -128,10 +128,10 @@ export function SettingsStorefrontSection({
 
       pushToast({
         tone: 'info',
-        title: 'Открываем бота',
-        description: 'Перешлите ему сообщение пользователя и выберите срок доступа.',
+        title: 'Продолжите в чате с ботом',
+        description: 'Перешлите сообщение пользователя и выберите срок доступа.',
+        replaceKey: 'karavan-storefront-allowlist-handoff',
       });
-      maxNotify('success');
     },
     onError: (error) => {
       pushToast({

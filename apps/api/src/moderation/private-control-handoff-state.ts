@@ -76,6 +76,8 @@ export function clearPendingPrivateProfileMentionHandoff(session: PrivateSession
   session.pendingProfileMentionChatId = null;
   session.pendingProfileMentionUserId = null;
   session.pendingProfileMentionDisplayName = null;
+  session.pendingProfileMentionExpiresAt = null;
+  session.pendingProfileMentionBotId = null;
 }
 
 function readDeliveredHandoffState(

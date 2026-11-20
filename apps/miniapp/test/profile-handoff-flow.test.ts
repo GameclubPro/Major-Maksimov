@@ -14,7 +14,7 @@ const channelStatsPageSource = readFileSync(
 test('member profile handoffs persist the display name before opening MAX', () => {
   for (const source of [eventsPageSource, channelStatsPageSource]) {
     assert.match(source, /profileHandoffMutation = useMutation/u);
-    assert.match(source, /onSuccess:[\s\S]*?openMaxBotLinkAndClose\(result\.botUrl\)/u);
+    assert.match(source, /onSuccess:[\s\S]*?openPrivateBotHandoff\(result\.botUrl\)/u);
     assert.match(source, /Persist the name before opening MAX/u);
     assert.doesNotMatch(source, /ProfileKeepalive/u);
   }

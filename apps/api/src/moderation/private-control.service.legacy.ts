@@ -53,6 +53,12 @@ import {
 } from '../integrations/karavan-storefront/karavan-storefront-allowlist.service';
 import { collectBotTokenSecrets } from '../common/bot-token.util';
 import { isPrivateDirectChatId } from '../common/chat-id.util';
+import {
+  deliverKaravanAllowlistPrompt,
+  prepareKaravanAllowlistLaunch,
+  readKaravanAllowlistForwardedTargets,
+  renderKaravanAllowlistDurationPrompt,
+} from './private-control-karavan-allowlist-prompt';
 import { buildChatUserDisplayNameUpsert } from '../common/chat-user-display-name-read-model.util';
 import { resolveMaxUserDisplayName } from '../common/max-user-display-name.util';
 import {
@@ -184,7 +190,6 @@ import {
 import {
   dedupePrivateForwardedModerationTargets,
   dedupePrivateForwardedRulesSources,
-  extractForwardedModerationTargets,
   extractPrivateForwardedModerationTargets,
   extractPrivateForwardedRulesSources,
   parsePrivateForwardedModerationCommand,
@@ -230,6 +235,7 @@ import {
 import {
   clearPendingPrivateProfileMentionHandoff,
   clearPrivateHandoffDelivery,
+  markPrivateHandoffDelivered,
   readPendingPrivateProfileMentionDisplayName,
   rememberPendingPrivateProfileMentionHandoff,
   wasPrivateHandoffRecentlyDelivered,
@@ -244,10 +250,8 @@ import {
   preparePrivateHandoffBot,
   type PrivateScreenHandoffKind,
 } from './private-control-handoff-delivery';
-import {
-  deliverPrivateProfileMentionHandoffToKnownPrivateChat,
-  renderPrivateProfileMentionMessage,
-} from './private-control-profile-mention-handoff';
+import { trySendPrivateHandoff } from './private-control-handoff-send';
+import { renderPrivateProfileMentionMessage } from './private-control-profile-mention-handoff';
 import {
   buildPrivateGiveawayHandoffStartPayload,
   buildPrivateKaravanAllowlistStartPayload,
@@ -482,49 +486,61 @@ export class PrivateControlService {
     }
 
     const profileMentionPayload = this.parseProfileMentionStartPayload(startPayload);
-    if (profileMentionPayload) {
-      const session = await this.loadSession(context.actor.userId);
-      this.rememberPrivateChatRoute(session, context);
-      const pendingDisplayName = readPendingPrivateProfileMentionDisplayName(
-        session,
-        profileMentionPayload.chatId,
-        profileMentionPayload.userId,
-      );
-
-      if (
-        wasPrivateHandoffRecentlyDelivered(
-          session,
-          'profileMention',
-          context.chatId,
-          PROFILE_MENTION_HANDOFF_DEDUP_WINDOW_MS,
-        )
-      ) {
-        clearPrivateHandoffDelivery(session, 'profileMention');
+    const session = await this.loadSession(context.actor.userId);
+    this.rememberPrivateChatRoute(session, context);
+    const pendingProfile = this.readFreshProfileMentionHandoff(session);
+    if (
+      !startPayload &&
+      session.pendingKaravanAllowlist &&
+      (!pendingProfile ||
+        session.pendingKaravanAllowlist.expiresAt - KARAVAN_ALLOWLIST_FLOW_TTL_MS >=
+          (session.pendingProfileMentionExpiresAt ?? 0) -
+            PROFILE_MENTION_HANDOFF_DEDUP_WINDOW_MS) &&
+      (await this.handleKaravanAllowlistStarted(context, null))
+    )
+      return;
+    const profileTarget = profileMentionPayload ?? (!startPayload ? pendingProfile : null);
+    if (profileTarget) {
+      const matchesPending =
+        pendingProfile?.chatId === profileTarget.chatId &&
+        pendingProfile.userId === profileTarget.userId;
+      const pendingDisplayName =
+        matchesPending || !session.pendingProfileMentionExpiresAt
+          ? readPendingPrivateProfileMentionDisplayName(
+              session,
+              profileTarget.chatId,
+              profileTarget.userId,
+            )
+          : null;
+      const deliveredAt = session.lastProfileMentionHandoffDeliveredAt;
+      const lastDeliveryChatId = session.lastProfileMentionHandoffDeliveredChatId;
+      const alreadyDelivered =
+        matchesPending &&
+        deliveredAt !== null &&
+        Date.now() - deliveredAt < PROFILE_MENTION_HANDOFF_DEDUP_WINDOW_MS &&
+        (lastDeliveryChatId === null || lastDeliveryChatId === context.chatId);
+      if (matchesPending) {
         clearPendingPrivateProfileMentionHandoff(session);
-        await this.saveSession(context.actor.userId, session);
-        return;
+        clearPrivateHandoffDelivery(session, 'profileMention');
       }
-
-      clearPendingPrivateProfileMentionHandoff(session);
       await this.saveSession(context.actor.userId, session);
+      if (alreadyDelivered) return;
       const deliveryBotId = this.resolvePrivateDeliveryBotId(context, session);
       const resolvedDisplayName = await this.resolveProfileMentionDisplayName(
-        profileMentionPayload.chatId,
-        profileMentionPayload.userId,
-        pendingDisplayName ?? profileMentionPayload.displayName,
+        profileTarget.chatId,
+        profileTarget.userId,
+        pendingDisplayName ?? profileTarget.displayName,
         deliveryBotId,
       );
       await this.sendProfileMentionToPrivateChat(
         context.chatId,
         resolvedDisplayName,
-        profileMentionPayload.userId,
+        profileTarget.userId,
         deliveryBotId,
       );
       return;
     }
 
-    const session = await this.loadSession(context.actor.userId);
-    this.rememberPrivateChatRoute(session, context);
     if (
       startPayload === BROADCAST_HANDOFF_START_PAYLOAD ||
       this.hasRetiredPublishingSession(session)
@@ -533,19 +549,6 @@ export class PrivateControlService {
         callbackId: null,
         notification: null,
       });
-      return;
-    }
-    if (
-      !startPayload &&
-      wasPrivateHandoffRecentlyDelivered(
-        session,
-        'profileMention',
-        context.chatId,
-        PROFILE_MENTION_HANDOFF_DEDUP_WINDOW_MS,
-      )
-    ) {
-      clearPrivateHandoffDelivery(session, 'profileMention');
-      await this.saveSession(context.actor.userId, session);
       return;
     }
     const channelSuggestionPayload =
@@ -678,89 +681,144 @@ export class PrivateControlService {
       throw new BadRequestException('Список разрешённых пользователей временно недоступен.');
     }
 
-    const session = await this.loadSession(user.userId);
-    const existing = session.pendingKaravanAllowlist;
-    if (existing && existing.expiresAt > Date.now()) {
-      throw new BadRequestException(
-        'Сначала завершите текущее добавление пользователя или нажмите «Отмена».',
-      );
-    }
+    const { flow, botId, botUrl } = await prepareKaravanAllowlistLaunch(
+      this.redisCounter,
+      this.sessionKey(user.userId),
+      async () => {
+        const session = await this.loadSession(user.userId);
+        const existing = session.pendingKaravanAllowlist;
+        const botId = this.sessionBotContext.currentBotId() ?? session.lastPrivateBotId;
+        const reusable =
+          existing &&
+          existing.expiresAt > Date.now() &&
+          existing.actorUserId === user.userId &&
+          (!existing.botId || existing.botId === botId);
+        if (reusable && existing.chatId !== chatId) {
+          throw new BadRequestException(
+            'Уже начато добавление для другого чата. Откройте его настройки, чтобы продолжить, или напишите боту «отмена».',
+          );
+        }
 
-    const chatTitle = await this.resolveKaravanAllowlistChatTitle(chatId, user);
+        const flow: PendingKaravanAllowlistFlow =
+          reusable && existing.chatId === chatId
+            ? existing
+            : {
+                chatId,
+                chatTitle: await this.resolveKaravanAllowlistChatTitle(chatId, user),
+                actorUserId: user.userId,
+                botId,
+                nonce: this.createKaravanAllowlistNonce(),
+                stage: 'await_forward',
+                targetUserId: null,
+                targetDisplayName: null,
+                sourceMessageId: null,
+                expiresAt: Date.now() + KARAVAN_ALLOWLIST_FLOW_TTL_MS,
+              };
+        const botUrl = this.buildBotStartUrl(
+          this.buildKaravanAllowlistStartPayload(flow, botId),
+          botId,
+        );
+        if (!botUrl) {
+          throw new BadRequestException('Ссылка на личный чат бота не настроена.');
+        }
 
-    const botId = user.launchBotId?.trim() || session.lastPrivateBotId?.trim() || null;
-    const nonce = this.createKaravanAllowlistNonce();
-    const startPayload = this.buildKaravanAllowlistStartPayload(
-      { chatId, actorUserId: user.userId, nonce },
-      botId,
+        if (flow !== existing) {
+          session.pendingKaravanAllowlist = flow;
+          await this.saveSession(user.userId, session);
+        }
+        return { flow, botId, botUrl };
+      },
     );
-    const botUrl = this.buildBotStartUrl(startPayload, botId);
-    if (!botUrl) {
-      throw new BadRequestException('Ссылка на личный чат бота не настроена.');
+    if (botId && this.redisCounter) {
+      const prompt = this.renderKaravanAllowlistPrompt(flow);
+      await deliverKaravanAllowlistPrompt({
+        flow,
+        redis: this.redisCounter,
+        send: () =>
+          this.maxClient.sendMessageImmediateToUser(
+            user.userId,
+            limitPrivateControlMessageText(prompt.text),
+            { ...prompt.options, textFormat: 'markdown' },
+            {
+              botId,
+              timeoutMs: this.privateDialogSendTimeoutMs,
+              ignoreFailureMetricStatuses: PRIVATE_DIALOG_TERMINAL_FAILURE_METRIC_STATUSES,
+            },
+          ),
+        onFailure: (error) =>
+          this.logger.warn(
+            { botId, err: this.extractStatusCode(error) },
+            'Failed to proactively deliver Karavan allowlist prompt',
+          ),
+      });
     }
-
-    session.pendingKaravanAllowlist = {
-      chatId,
-      chatTitle,
-      actorUserId: user.userId,
-      botId,
-      nonce,
-      stage: 'await_forward',
-      targetUserId: null,
-      targetDisplayName: null,
-      sourceMessageId: null,
-      expiresAt: Date.now() + KARAVAN_ALLOWLIST_FLOW_TTL_MS,
-    };
-    await this.saveSession(user.userId, session);
     return karavanStorefrontHandoffResponseSchema.parse({ botUrl });
   }
 
   private async handleKaravanAllowlistStarted(
     context: PrivateContext,
-    start: { chatId: string; actorUserId: string; nonce: string },
-  ): Promise<void> {
+    start: { chatId: string; actorUserId: string; nonce: string } | null,
+  ): Promise<boolean> {
     const session = await this.loadSession(context.actor.userId);
-    this.rememberPrivateChatRoute(session, context);
     const flow = session.pendingKaravanAllowlist;
     const currentBotId = this.sessionBotContext.currentBotId();
-    const bound = Boolean(
-      flow &&
-      flow.chatId === start.chatId &&
-      flow.actorUserId === start.actorUserId &&
-      flow.actorUserId === context.actor.userId &&
-      flow.nonce === start.nonce &&
-      (!flow.botId || !currentBotId || flow.botId === currentBotId),
-    );
-    if (!flow || !bound) {
+    if (
+      !flow ||
+      flow.expiresAt <= Date.now() ||
+      flow.actorUserId !== context.actor.userId ||
+      (flow.botId && flow.botId !== currentBotId) ||
+      (start &&
+        (flow.chatId !== start.chatId ||
+          flow.actorUserId !== start.actorUserId ||
+          flow.nonce !== start.nonce))
+    ) {
+      if (!start) return false;
       await this.sendImmediate(
         context.chatId,
         'Ссылка добавления устарела или уже использована. Вернитесь в настройки чата и запустите добавление ещё раз.',
         undefined,
         this.resolvePrivateDeliveryBotId(context, session),
       );
-      return;
-    }
-    if (flow.expiresAt <= Date.now()) {
-      session.pendingKaravanAllowlist = null;
-      await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
-        callbackId: null,
-        notification: null,
-      });
-      return;
+      return true;
     }
 
     await this.ensureKaravanAllowlistChatTitle(flow, context.actor);
+    const prompt = this.renderKaravanAllowlistPrompt(flow);
+    const botId = this.resolvePrivateDeliveryBotId(context, session);
+    const send = () =>
+      this.sendImmediate(
+        context.chatId,
+        limitPrivateControlMessageText(prompt.text),
+        { ...prompt.options, textFormat: 'markdown' },
+        botId,
+        true,
+      );
+    if (this.redisCounter) {
+      await deliverKaravanAllowlistPrompt({
+        flow,
+        redis: this.redisCounter,
+        send,
+        onFailure: (error) =>
+          this.logger.warn(
+            { botId, status: this.extractStatusCode(error) },
+            'Failed to send Karavan allowlist prompt after bot start',
+          ),
+      });
+    } else {
+      await send();
+    }
+    return true;
+  }
 
-    flow.stage = 'await_forward';
-    await this.respond(
-      context,
-      session,
-      this.renderKaravanAllowlistForwardPrompt(flow.chatId, undefined, flow.nonce, flow.chatTitle),
-      {
-        callbackId: null,
-        notification: null,
-      },
-    );
+  private renderKaravanAllowlistPrompt(flow: PendingKaravanAllowlistFlow): PrivateView {
+    return flow.stage === 'await_duration'
+      ? this.renderKaravanAllowlistDurationPrompt(flow)
+      : this.renderKaravanAllowlistForwardPrompt(
+          flow.chatId,
+          undefined,
+          flow.nonce,
+          flow.chatTitle,
+        );
   }
 
   private async processKaravanAllowlistText(
@@ -800,12 +858,7 @@ export class PrivateControlService {
       return true;
     }
 
-    const targets = dedupePrivateForwardedModerationTargets(
-      extractForwardedModerationTargets(context.update, null, {
-        messageNodeMode: 'incoming-message',
-        readPrivateForwardedFields: true,
-      }),
-    );
+    const targets = readKaravanAllowlistForwardedTargets(context.update);
     if (targets.length !== 1) {
       await this.respond(
         context,
@@ -863,14 +916,19 @@ export class PrivateControlService {
       });
       return;
     }
+    const nonce = callback.args[0]?.trim();
+    if (nonce !== flow.nonce) {
+      if (!context.callbackId) return;
+      await this.answerCallbackQuiet(
+        context.callbackId,
+        'Кнопка устарела',
+        this.privateCallbackAckTimeoutMs,
+        this.resolvePrivateDeliveryBotId(context, session),
+        context.chatId,
+      );
+      return;
+    }
     if (callback.action === KARAVAN_ALLOWLIST_CANCEL_CALLBACK_ACTION) {
-      if (callback.args[0] !== flow.nonce) {
-        await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
-          callbackId: context.callbackId,
-          notification: 'Кнопка устарела',
-        });
-        return;
-      }
       session.pendingKaravanAllowlist = null;
       await this.respond(context, session, this.renderKaravanAllowlistCancelledView(), {
         callbackId: context.callbackId,
@@ -878,7 +936,7 @@ export class PrivateControlService {
       });
       return;
     }
-    if (flow.expiresAt <= Date.now() || flow.stage !== 'await_duration') {
+    if (flow.expiresAt <= Date.now()) {
       session.pendingKaravanAllowlist = null;
       await this.respond(context, session, this.renderKaravanAllowlistExpiredView(), {
         callbackId: context.callbackId,
@@ -886,10 +944,9 @@ export class PrivateControlService {
       });
       return;
     }
-    const nonce = callback.args[0]?.trim() ?? '';
     const parsedDuration = karavanStorefrontDurationSchema.safeParse(callback.args[1]);
-    if (!nonce || nonce !== flow.nonce || !parsedDuration.success || !flow.targetUserId) {
-      await this.respond(context, session, this.renderKaravanAllowlistDurationPrompt(flow), {
+    if (flow.stage !== 'await_duration' || !parsedDuration.success || !flow.targetUserId) {
+      await this.respond(context, session, this.renderKaravanAllowlistPrompt(flow), {
         callbackId: context.callbackId,
         notification: 'Кнопка устарела',
       });
@@ -972,56 +1029,15 @@ export class PrivateControlService {
   }
 
   private renderKaravanAllowlistDurationPrompt(flow: PendingKaravanAllowlistFlow): PrivateView {
-    const label = flow.targetDisplayName?.trim() || 'Пользователь';
-    const chatTitle = formatKaravanAllowlistChatTitle(flow.chatId, flow.chatTitle);
-    return {
-      text: [
-        privateMarkdownTitle('Срок разрешения'),
-        '',
-        `Пользователь: ${escapePrivateMarkdown(label)}`,
-        `Чат: ${escapePrivateMarkdown(chatTitle)}`,
-        '',
-        'Выберите срок публикации витрин:',
-      ].join('\n'),
-      options: {
-        buttons: [
-          [
-            this.callbackButton(
-              '1 день',
-              this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, '1d'),
-            ),
-            this.callbackButton(
-              '7 дней',
-              this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, '7d'),
-            ),
-          ],
-          [
-            this.callbackButton(
-              '30 дней',
-              this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, '30d'),
-            ),
-            this.callbackButton(
-              '90 дней',
-              this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, '90d'),
-            ),
-          ],
-          [
-            this.callbackButton(
-              'Бессрочно',
-              this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, 'forever'),
-              'positive',
-            ),
-          ],
-          [
-            this.callbackButton(
-              'Отмена',
-              this.cb(KARAVAN_ALLOWLIST_CANCEL_CALLBACK_ACTION, flow.nonce),
-              'negative',
-            ),
-          ],
-        ],
-      },
-    };
+    return renderKaravanAllowlistDurationPrompt(flow, (label, duration, intent) =>
+      this.callbackButton(
+        label,
+        duration
+          ? this.cb(KARAVAN_ALLOWLIST_CALLBACK_ACTION, flow.nonce, duration)
+          : this.cb(KARAVAN_ALLOWLIST_CANCEL_CALLBACK_ACTION, flow.nonce),
+        intent,
+      ),
+    );
   }
 
   private renderKaravanAllowlistGrantedView(
@@ -1467,11 +1483,9 @@ export class PrivateControlService {
       );
     }
 
-    const session = await this.loadSession(user.userId);
-    const handoffBotId = preparePrivateHandoffBot(
-      session,
-      this.sessionBotContext.currentBotId() ?? user.launchBotId,
-    );
+    const scopedBotId = this.sessionBotContext.currentBotId() ?? user.launchBotId;
+    const deliverySession = await this.loadSession(user.userId);
+    const handoffBotId = preparePrivateHandoffBot(deliverySession, scopedBotId);
     const botUrl = this.buildBotStartUrl(
       this.buildProfileMentionStartPayload(
         {
@@ -1488,16 +1502,62 @@ export class PrivateControlService {
       throw new BadRequestException('Ссылка на личный чат бота не настроена.');
     }
 
+    const deliveryChatId = deliverySession.lastPrivateChatId;
+    const message = renderPrivateProfileMentionMessage({
+      displayName: resolvedDisplayName,
+      userId: normalizedTargetUserId,
+    });
+    const sendOptions = {
+      ignoreFailureMetricStatuses: PRIVATE_DIALOG_TERMINAL_FAILURE_METRIC_STATUSES,
+      timeoutMs: this.privateDialogSendTimeoutMs,
+      ...(handoffBotId ? { botId: handoffBotId } : {}),
+    };
+    const delivery = await trySendPrivateHandoff(
+      () =>
+        deliveryChatId
+          ? this.maxClient.sendMessageImmediateWithId(
+              deliveryChatId,
+              message.text,
+              message.options,
+              sendOptions,
+            )
+          : this.maxClient.sendMessageImmediateToUser(
+              user.userId,
+              message.text,
+              message.options,
+              sendOptions,
+            ),
+      (error) =>
+        this.logger.warn(
+          {
+            botId: handoffBotId,
+            entityType,
+            err: error instanceof Error ? error.message : String(error),
+          },
+          'Failed to proactively deliver profile mention handoff to private chat',
+        ),
+    );
+
+    // FLAG: Reload the private session before publishing a fallback. Another dialog flow
+    // can advance while MAX sends the profile.
+    const session = await this.loadSession(user.userId);
+    preparePrivateHandoffBot(session, scopedBotId);
     rememberPendingPrivateProfileMentionHandoff(session, {
       chatId: sourceChatId,
       displayName: resolvedDisplayName,
       userId: normalizedTargetUserId,
     });
+    session.pendingProfileMentionExpiresAt = Date.now() + PROFILE_MENTION_HANDOFF_DEDUP_WINDOW_MS;
+    session.pendingProfileMentionBotId = this.sessionBotContext.currentBotId();
+    clearPrivateHandoffDelivery(session, 'profileMention');
+    if (delivery.outcome === 'sent') {
+      markPrivateHandoffDelivered(
+        session,
+        'profileMention',
+        delivery.receipt.chatId ?? deliveryChatId,
+      );
+    }
     await this.saveSession(user.userId, session);
-    await this.deliverProfileMentionHandoffToKnownPrivateChat(user, session, {
-      displayName: resolvedDisplayName,
-      userId: normalizedTargetUserId,
-    });
 
     return broadcastHandoffResponseSchema.parse({ botUrl });
   }
@@ -1505,15 +1565,15 @@ export class PrivateControlService {
   private async processTextMessage(context: PrivateContext): Promise<void> {
     const session = await this.loadSession(context.actor.userId);
     this.rememberPrivateChatRoute(session, context);
+    if (session.pendingKaravanAllowlist) {
+      await this.processKaravanAllowlistText(context, session);
+      return;
+    }
     if (this.hasRetiredPublishingSession(session)) {
       await this.respond(context, session, this.renderPublikHandoff(session), {
         callbackId: null,
         notification: null,
       });
-      return;
-    }
-    if (session.pendingKaravanAllowlist) {
-      await this.processKaravanAllowlistText(context, session);
       return;
     }
     const directText = this.extractDirectIncomingText(context.update);
@@ -7632,6 +7692,7 @@ export class PrivateControlService {
     text: string,
     options?: MaxSendMessageOptions,
     botId?: string,
+    strict = false,
   ): Promise<void> {
     try {
       await this.maxClient.sendMessage(chatId, text, options, {
@@ -7641,7 +7702,7 @@ export class PrivateControlService {
         ...(botId ? { botId } : {}),
       });
     } catch (error: unknown) {
-      if (this.isTerminalPrivateDialogDeliveryError(error)) {
+      if (!strict && this.isTerminalPrivateDialogDeliveryError(error)) {
         this.logger.debug(
           {
             chatId,
@@ -7989,32 +8050,25 @@ export class PrivateControlService {
     return readPrivateControlString(assignedBot?.botId) ?? undefined;
   }
 
-  private async deliverProfileMentionHandoffToKnownPrivateChat(
-    user: AuthUser,
-    session: PrivateSession,
-    payload: { displayName: string; userId: string },
-  ): Promise<void> {
-    await deliverPrivateProfileMentionHandoffToKnownPrivateChat(session, payload, {
-      send: (privateChatId, message) =>
-        this.sendImmediate(
-          privateChatId,
-          message.text,
-          message.options,
-          session.lastPrivateBotId?.trim() || undefined,
-        ),
-      saveSession: (currentSession) => this.saveSession(user.userId, currentSession),
-      onFailure: (error, privateChatId) => {
-        this.logger.warn(
-          {
-            userId: user.userId,
-            chatId: privateChatId,
-            targetUserId: payload.userId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to proactively deliver profile mention handoff to private chat',
-        );
-      },
-    });
+  private readFreshProfileMentionHandoff(session: PrivateSession): {
+    chatId: string;
+    userId: string;
+    displayName: string;
+  } | null {
+    if (
+      session.pendingProfileMentionExpiresAt === null ||
+      session.pendingProfileMentionExpiresAt <= Date.now() ||
+      session.pendingProfileMentionBotId !== this.sessionBotContext.currentBotId() ||
+      !session.pendingProfileMentionChatId ||
+      !session.pendingProfileMentionUserId
+    ) {
+      return null;
+    }
+    return {
+      chatId: session.pendingProfileMentionChatId,
+      userId: session.pendingProfileMentionUserId,
+      displayName: session.pendingProfileMentionDisplayName ?? 'Пользователь',
+    };
   }
 
   private compactButtonLayout(
