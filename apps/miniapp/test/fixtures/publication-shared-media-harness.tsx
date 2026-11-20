@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { publicationDetailsSchema } from '@maxim/contracts/publication';
 import { ToastProvider } from '../../src/components/ui/toast';
 import { usePublicationEditorSession } from '../../src/features/publications/use-publication-editor-session';
+import { PublicationRemoteVideo } from '../../src/features/publications/publication-remote-video';
 import { usePublicationAssetPreviews } from '../../src/features/publications/use-publication-asset-previews';
 import {
   buildTestPublicationRequest,
@@ -72,7 +73,19 @@ function AssetPreviews({
   assets: readonly PublicationRetainedAsset[];
 }) {
   const previews = usePublicationAssetPreviews(api, publicationId, assets);
-  return <output data-testid="previews">{JSON.stringify(previews)}</output>;
+  const video = assets.find((asset) => asset.type === 'video');
+  return (
+    <>
+      <output data-testid="previews">{JSON.stringify(previews)}</output>
+      {video ? (
+        <PublicationRemoteVideo
+          source={{ api, publicationId: video.sourcePublicationId ?? publicationId }}
+          assetId={video.id}
+          label={video.fileName}
+        />
+      ) : null}
+    </>
+  );
 }
 
 function Harness() {

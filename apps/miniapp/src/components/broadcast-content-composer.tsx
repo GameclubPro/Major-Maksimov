@@ -53,6 +53,8 @@ export type BroadcastContentComposerProps = {
   maxLength: number;
   image?: BroadcastContentComposerImage;
   images?: BroadcastImage[];
+  orderedMedia?: ReactNode;
+  orderedMediaLabel?: string | null;
   retainedImages?: ReactNode;
   retainedImageCount?: number;
   maxImages?: number;
@@ -91,6 +93,8 @@ export function BroadcastContentComposer({
   image,
   images,
   retainedImages,
+  orderedMedia,
+  orderedMediaLabel,
   retainedImageCount = 0,
   maxImages,
   allowImages = true,
@@ -533,11 +537,8 @@ export function BroadcastContentComposer({
             <span className="broadcast-content-composer__media-label" aria-live="polite">
               {isPreparingImage
                 ? `${preparingImages.done}/${preparingImages.total}`
-                : previewImageCount > 1
-                  ? `${previewImageCount} фото`
-                  : previewImageCount === 1
-                    ? '1 фото'
-                    : videoLabel}
+                : (orderedMediaLabel ??
+                  (previewImageCount ? `${previewImageCount} фото` : videoLabel))}
             </span>
           ) : null}
           {onOpenButtons && buttonsActive && !showToolLabels && !showButtonsLabel ? (
@@ -641,46 +642,47 @@ export function BroadcastContentComposer({
           >
             <div className="broadcast-message-card__phone">
               <div className="broadcast-message-card__bubble">
-                {previewImageCount > 0 || pendingImageSlots > 0 ? (
-                  <div
-                    className={cn(
-                      'broadcast-message-card__media-grid',
-                      `is-count-${Math.min(maxImageCount + retainedImageCount, previewImageCount + pendingImageSlots)}`,
-                    )}
-                  >
-                    {retainedImages}
-                    {imagePreviewItems.map((item) => (
-                      <figure
-                        key={`${item.fileName}-${item.index}`}
-                        className="broadcast-message-card__media-frame"
-                      >
-                        <img className="broadcast-message-card__image" src={item.url} alt="" />
-                        <button
-                          type="button"
-                          className="broadcast-message-card__media-remove"
-                          onClick={() => removeImage(item.index)}
-                          disabled={isBusy}
-                          aria-label={`Убрать фото ${item.index + 1}`}
-                          title={`Убрать фото ${item.index + 1}`}
+                {orderedMedia ??
+                  (previewImageCount > 0 || pendingImageSlots > 0 ? (
+                    <div
+                      className={cn(
+                        'broadcast-message-card__media-grid',
+                        `is-count-${Math.min(maxImageCount + retainedImageCount, previewImageCount + pendingImageSlots)}`,
+                      )}
+                    >
+                      {retainedImages}
+                      {imagePreviewItems.map((item) => (
+                        <figure
+                          key={`${item.fileName}-${item.index}`}
+                          className="broadcast-message-card__media-frame"
                         >
-                          <IconoirSprite
-                            variant="iconoir"
-                            icon="Xmark"
-                            aria-hidden
-                            focusable="false"
-                          />
-                        </button>
-                      </figure>
-                    ))}
-                    {Array.from({ length: pendingImageSlots }, (_, index) => (
-                      <span
-                        key={`pending-image-${index}`}
-                        className="broadcast-message-card__media-frame broadcast-message-card__media-frame--loading"
-                        aria-hidden
-                      />
-                    ))}
-                  </div>
-                ) : null}
+                          <img className="broadcast-message-card__image" src={item.url} alt="" />
+                          <button
+                            type="button"
+                            className="broadcast-message-card__media-remove"
+                            onClick={() => removeImage(item.index)}
+                            disabled={isBusy}
+                            aria-label={`Убрать фото ${item.index + 1}`}
+                            title={`Убрать фото ${item.index + 1}`}
+                          >
+                            <IconoirSprite
+                              variant="iconoir"
+                              icon="Xmark"
+                              aria-hidden
+                              focusable="false"
+                            />
+                          </button>
+                        </figure>
+                      ))}
+                      {Array.from({ length: pendingImageSlots }, (_, index) => (
+                        <span
+                          key={`pending-image-${index}`}
+                          className="broadcast-message-card__media-frame broadcast-message-card__media-frame--loading"
+                          aria-hidden
+                        />
+                      ))}
+                    </div>
+                  ) : null)}
 
                 {videoLabel ? (
                   <span className="broadcast-message-card__video-preview">

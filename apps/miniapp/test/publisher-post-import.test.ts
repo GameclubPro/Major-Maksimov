@@ -138,7 +138,7 @@ test('publisher import client validates payloads and uses the active-session end
       if (init?.responseType === 'blob') {
         return new Blob(['image'], { type: 'image/png' });
       }
-      if (path.endsWith('/active') || path.includes('/by-token/')) {
+      if (path.split('?')[0]?.endsWith('/active') || path.includes('/by-token/')) {
         return { session: ready };
       }
       return ready;
@@ -161,10 +161,10 @@ test('publisher import client validates payloads and uses the active-session end
   assert.deepEqual(
     calls.map(([path, init]) => [path, init?.method ?? 'GET', init?.responseType ?? 'json']),
     [
-      ['/publisher/post-imports', 'POST', 'json'],
-      ['/publisher/post-imports/active', 'GET', 'json'],
-      ['/publisher/post-imports/by-token/token%2F12345678', 'GET', 'json'],
-      ['/publisher/post-imports', 'DELETE', 'json'],
+      ['/publisher/post-imports?contractVersion=2', 'POST', 'json'],
+      ['/publisher/post-imports/active?contractVersion=2', 'GET', 'json'],
+      ['/publisher/post-imports/by-token/token%2F12345678?contractVersion=2', 'GET', 'json'],
+      ['/publisher/post-imports?contractVersion=2', 'DELETE', 'json'],
       ['/publisher/post-imports/session-1/assets/asset%2F1', 'GET', 'blob'],
     ],
   );
@@ -218,7 +218,7 @@ test('preview transport exposes a ready import, durable draft, and private image
 
 test('publication import stays isolated and reloadable without replacing the manual draft', () => {
   assert.match(createSheetSource, /aria-label="Написать"/u);
-  assert.match(createSheetSource, /aria-label="Переслать"/u);
+  assert.match(createSheetSource, /aria-label="Перенести из MAX"/u);
   assert.doesNotMatch(createSheetSource, />Вставить</u);
   assert.match(
     pageSource,
@@ -259,6 +259,6 @@ test('publication import stays isolated and reloadable without replacing the man
   );
   assert.match(
     statusCss,
-    /publisher-post-import-status__action \{[\s\S]*?grid-column: 2 \/ 4;[\s\S]*?grid-row: 2;/u,
+    /publisher-post-import-status__action \{[\s\S]*?grid-column: 2 \/ -1;[\s\S]*?grid-row: 2;/u,
   );
 });

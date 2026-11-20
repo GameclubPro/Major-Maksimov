@@ -582,6 +582,26 @@ quiesce_giveaway_writer_transition() {
   maxim_webhook_rollout_verify_services_stopped COMPOSE_FILES api-action api-admin
 }
 
+quiesce_publisher_album_transition() {
+  local baseline_sha baseline_image_id
+  baseline_sha="$(release_field api-shared sourceSha || true)"
+  baseline_image_id="$(release_field api-shared imageId || true)"
+  if [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]] &&
+    [[ "$baseline_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] &&
+    git cat-file -e "${baseline_sha}:apps/api/src/admin/publication-album-write-compatibility.ts" 2>/dev/null &&
+    verify_service_image_id api-admin "$baseline_image_id" 2>/dev/null; then
+    return 0
+  fi
+
+  # FLAG: Publisher imports are outside the webhook queue pause. Stop legacy HTTP
+  # editors before the new worker can produce a draft those editors could truncate.
+  if maxim_webhook_rollout_verify_services_stopped COMPOSE_FILES api-admin 2>/dev/null; then
+    return 0
+  fi
+  docker compose "${COMPOSE_FILES[@]}" stop -t "$MAXIM_WEBHOOK_ROLLOUT_STOP_TIMEOUT_SEC" api-admin || return 1
+  maxim_webhook_rollout_verify_services_stopped COMPOSE_FILES api-admin
+}
+
 impact_plan_selects_component() {
   local component="$1"
   local source_sha
@@ -1933,6 +1953,7 @@ if [[ "$BUILD_API_IMAGE" -eq 1 ]]; then
   persist_statistics_central_deploy_epoch
 
   maxim_webhook_assert_api_rollout_quiescence COMPOSE_FILES
+  quiesce_publisher_album_transition || exit 1
   recreate_service_wave "action, publisher and retention" "api-action" "api-publisher" "api-message-retention"
   maxim_webhook_assert_api_rollout_quiescence COMPOSE_FILES
   recreate_service_wave "admin" "api-admin"

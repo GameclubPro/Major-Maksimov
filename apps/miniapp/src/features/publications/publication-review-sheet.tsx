@@ -1,3 +1,5 @@
+import { PublicationRemoteVideo, type PublicationVideoRead } from './publication-remote-video';
+import { publicationAlbum } from './publication-album';
 import { PublicationVideoPlayer } from './publication-video-preview';
 import { useState } from 'react';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
@@ -16,6 +18,7 @@ export function PublicationReviewSheet({
   open,
   draft,
   previews,
+  videoRead,
   facts,
   confirmLabel,
   busy,
@@ -24,6 +27,7 @@ export function PublicationReviewSheet({
 }: {
   open: boolean;
   draft: PublicationDraft;
+  videoRead?: PublicationVideoRead;
   previews: readonly PublisherPostImportAssetPreview[];
   facts: string[];
   confirmLabel: string;
@@ -37,30 +41,13 @@ export function PublicationReviewSheet({
   const signature = target?.entityType === 'channel' ? target.publisherChannelPostSignature : null;
   const systemButtons = buildPublicationSystemButtons(target ? [target] : []);
   const customButtons = draft.buttonEnabled ? trimBroadcastLinkButtons(draft.buttons) : [];
-  const media = [
-    ...draft.retainedAssets.map((asset) => ({
-      id: asset.id,
-      type: asset.type,
-      name: asset.fileName,
-      url: previews.find((preview) => preview.assetId === asset.id)?.url,
-    })),
-    ...draft.images.map((image, index) => ({
-      id: `local-${index}`,
-      type: 'image' as const,
-      name: image.fileName,
-      url: `data:${image.mimeType};base64,${image.base64}`,
-    })),
-    ...(draft.mediaType === 'video' && draft.mediaBase64
-      ? [
-          {
-            id: 'local-video',
-            type: 'video' as const,
-            name: draft.mediaFileName,
-            url: `data:${draft.mediaMimeType};base64,${draft.mediaBase64}`,
-          },
-        ]
-      : []),
-  ];
+  const media = publicationAlbum(draft).map((item) => ({
+    id: item.key,
+    assetId: item.assetId,
+    type: item.type,
+    name: item.name,
+    url: item.preview ?? previews.find((preview) => preview.assetId === item.assetId)?.url,
+  }));
   return (
     <ActionConfirmSheet
       id="publication-review"
@@ -110,6 +97,17 @@ export function PublicationReviewSheet({
                     ) : (
                       <img src={item.url} alt={item.name || `Фото ${index + 1}`} />
                     )
+                  ) : item.type === 'video' && item.assetId && videoRead ? (
+                    <PublicationRemoteVideo
+                      source={{
+                        ...videoRead,
+                        publicationId:
+                          draft.retainedAssets.find((asset) => asset.id === item.assetId)
+                            ?.sourcePublicationId ?? videoRead.publicationId,
+                      }}
+                      assetId={item.assetId}
+                      label={item.name || 'Видео'}
+                    />
                   ) : (
                     <span className="publication-preview__unavailable">
                       {item.type === 'video' ? 'Видео' : `Фото ${index + 1}`} · Предпросмотр

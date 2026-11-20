@@ -46,6 +46,17 @@ either receipt is missing, invalid or out of order after the attempt, rollout st
 readback must show that only the routing index remains pending before the regular fence. The
 routing index itself still uses its original limits and supervisor.
 
+The exact release ending at `20261120012500_add_publisher_post_import_inputs` may use a
+second fixed deferral. Its sole additional migration has SHA-256
+`190f2ae80de68275057346bd98884791d108867e1359c76e44138ca63961d120`.
+It adds four columns to the existing Publisher session table with a five-second DDL lock
+timeout. Catalog inspection requires the columns to be absent before Prisma records the
+migration, then verifies their types, nullability and defaults after commit. The verified
+image can apply the two preceding giveaway migrations first if they are still pending.
+The successful ordered prefix and both modules' catalogs must match before the release can
+continue. Partial objects, failed receipts and an unknown migration tail stop this deferral.
+A later release containing another migration returns to the normal routing-index admission.
+
 Both API rollback paths refuse a source that cannot read the applied migrations or requires a
 missing index. A verified compatible target also skips the ref-based rollback's Prisma runner.
 Recovery finalization verifies the API component source against the live state before recording it.

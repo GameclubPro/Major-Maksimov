@@ -13,10 +13,23 @@ import type {
   PublisherPostImportNotification,
 } from '../publisher/publisher-post-import.queue';
 
+import {
+  PUBLISHER_POST_IMPORT_COLLECT_PREFIX,
+  PUBLISHER_POST_IMPORT_FINISH_PREFIX,
+  PUBLISHER_POST_IMPORT_COLLECTION_LIMIT,
+  readPublisherPostImportInputMessages,
+} from '../publisher/publisher-post-import-input';
+
 const FAILURE_TEXT: Record<string, string> = {
   invalid_forward: 'Не удалось распознать пересылку',
   message_unavailable: 'Сообщение больше недоступно',
-  unsupported_content: 'Этот тип поста пока не поддерживается',
+  unsupported_content:
+    'Не удалось перенести содержимое. Выберите другой пост или добавьте файлы в редакторе.',
+  empty_content:
+    'В сообщении нет текста, фото, видео или доступной ссылки. Добавьте материалы в редакторе.',
+  media_invalid: 'Файл не удалось прочитать. Загрузите исходное фото или видео в редакторе.',
+  image_dimensions: 'Фото слишком большого разрешения. Уменьшите его и добавьте в редакторе.',
+  draft_quota: 'В черновиках больше нет места. Удалите ненужные черновики и повторите импорт.',
   text_too_long: 'Текст длиннее 4 000 символов',
   too_many_images: 'В посте больше 10 фото',
   image_too_large: 'Одно из фото больше 8 МБ',
@@ -43,6 +56,13 @@ export class PublisherPostImportDeliveryService {
     if (!session || !this.notificationMatchesState(job.notification, session.status)) {
       return;
     }
+    const waitingSnapshot =
+      session.status === PublisherPostImportStatus.WAITING
+        ? {
+            notificationKind: job.notification,
+            inputMessages: { equals: readPublisherPostImportInputMessages(session.inputMessages) },
+          }
+        : undefined;
     const privateChatId = job.privateChatId?.trim() || session.privateChatId?.trim() || '';
     if (!privateChatId) {
       return;
@@ -55,6 +75,7 @@ export class PublisherPostImportDeliveryService {
         status: session.status,
         notificationPending: true,
         notificationKind: job.notification,
+        ...waitingSnapshot,
         notificationDispatchStartedAt: null,
         OR: [
           { notificationLockedAt: null },
@@ -74,12 +95,20 @@ export class PublisherPostImportDeliveryService {
       return;
     }
 
-    const content = this.resolveContent(job.notification, session.failureCode);
+    const count = readPublisherPostImportInputMessages(session.inputMessages).length;
+    const content = this.resolveContent(
+      job.notification,
+      session.failureCode,
+      session.inputMode,
+      count,
+      Array.isArray(session.warnings) && session.warnings.length > 0,
+    );
     const buttons = this.resolveButtons(
       job.notification,
       session.startToken,
       session.publisherBotId,
       session.publicationId,
+      session.inputMode,
     );
     const requestOptions = {
       botId: session.publisherBotId,
@@ -103,7 +132,12 @@ export class PublisherPostImportDeliveryService {
             : undefined,
           { ...requestOptions, rateLimitEntityId: privateChatId },
         );
-        await this.recordDeliveredState(session.id, session.status, notificationLockToken);
+        await this.recordDeliveredState(
+          session.id,
+          session.status,
+          notificationLockToken,
+          waitingSnapshot,
+        );
         return;
       } catch (error: unknown) {
         this.logger.warn(
@@ -116,8 +150,7 @@ export class PublisherPostImportDeliveryService {
       }
     }
 
-    const shouldSendTerminalMessage =
-      job.notification === 'ready' || job.notification === 'failed';
+    const shouldSendTerminalMessage = job.notification === 'ready' || job.notification === 'failed';
     if (session.botStatusMessageId && !shouldSendTerminalMessage) {
       try {
         await this.maxClient.editMessageInlineKeyboard(
@@ -133,7 +166,12 @@ export class PublisherPostImportDeliveryService {
           },
           requestOptions,
         );
-        await this.recordDeliveredState(session.id, session.status, notificationLockToken);
+        await this.recordDeliveredState(
+          session.id,
+          session.status,
+          notificationLockToken,
+          waitingSnapshot,
+        );
         return;
       } catch (error: unknown) {
         await this.releaseDeliveryClaim(session.id, notificationLockToken);
@@ -156,6 +194,7 @@ export class PublisherPostImportDeliveryService {
             const marked = await this.prisma.publisherPostImportSession.updateMany({
               where: {
                 id: session.id,
+                ...waitingSnapshot,
                 notificationPending: true,
                 notificationLockToken,
                 notificationDispatchStartedAt: null,
@@ -174,6 +213,7 @@ export class PublisherPostImportDeliveryService {
         session.id,
         session.status,
         notificationLockToken,
+        waitingSnapshot,
         sent.messageId,
         privateChatId,
       );
@@ -203,21 +243,33 @@ export class PublisherPostImportDeliveryService {
     sessionId: string,
     status: PublisherPostImportStatus,
     notificationLockToken: string,
+    waitingSnapshot?: {
+      notificationKind: PublisherPostImportNotification;
+      inputMessages: { equals: ReturnType<typeof readPublisherPostImportInputMessages> };
+    },
     botStatusMessageId?: string,
     privateChatId?: string,
   ): Promise<void> {
-    await this.prisma.publisherPostImportSession.updateMany({
-      where: { id: sessionId, status, notificationLockToken },
-      data: {
-        lastNotifiedStatus: status,
-        notificationPending: false,
-        notificationLockedAt: null,
-        notificationLockToken: null,
-        notificationDispatchStartedAt: null,
-        ...(botStatusMessageId ? { botStatusMessageId } : {}),
-        ...(privateChatId ? { privateChatId } : {}),
-      },
+    const finished = {
+      lastNotifiedStatus: status,
+      notificationLockedAt: null,
+      notificationLockToken: null,
+      notificationDispatchStartedAt: null,
+      ...(botStatusMessageId ? { botStatusMessageId } : {}),
+      ...(privateChatId ? { privateChatId } : {}),
+    };
+    const updated = await this.prisma.publisherPostImportSession.updateMany({
+      where: { id: sessionId, status, notificationLockToken, ...waitingSnapshot },
+      data: { ...finished, notificationPending: false },
     });
+    if (waitingSnapshot && updated.count === 0) {
+      // FLAG: A later message may arrive while MAX acknowledges the previous one. Keep the
+      // newest pending update and reuse the confirmed message id; never clear a newer owner's claim.
+      await this.prisma.publisherPostImportSession.updateMany({
+        where: { id: sessionId, notificationLockToken },
+        data: finished,
+      });
+    }
   }
 
   private async releaseDeliveryClaim(
@@ -237,16 +289,25 @@ export class PublisherPostImportDeliveryService {
   private resolveContent(
     notification: PublisherPostImportNotification,
     failureCode: string | null,
+    inputMode: string,
+    count: number,
+    hasWarnings: boolean,
   ) {
     switch (notification) {
       case 'prompt':
-        return 'Перешлите один пост';
+        return inputMode === 'message'
+          ? 'Пришлите текст, ссылку, фото или видео. Можно переслать готовый пост.'
+          : 'Перешлите один пост';
+      case 'collecting':
+        return `Пришлите до ${PUBLISHER_POST_IMPORT_COLLECTION_LIMIT} сообщений по порядку. Затем нажмите «Готово».`;
+      case 'collected':
+        return `Принято сообщений: ${count} из ${PUBLISHER_POST_IMPORT_COLLECTION_LIMIT}. Нажмите «Готово», чтобы собрать черновик.`;
       case 'need_forward':
         return 'Нужно переслать готовый пост';
       case 'processing':
         return 'Пост принят';
       case 'ready':
-        return 'Черновик готов';
+        return hasWarnings ? 'Черновик готов. Проверьте замечания в редакторе.' : 'Черновик готов';
       case 'failed':
         return FAILURE_TEXT[failureCode ?? ''] ?? FAILURE_TEXT.internal_error!;
       case 'canceled':
@@ -259,28 +320,52 @@ export class PublisherPostImportDeliveryService {
     startToken: string,
     publisherBotId: string,
     publicationId: string | null,
+    inputMode: string,
   ) {
-    if (notification === 'prompt' || notification === 'need_forward') {
+    const url = `https://max.ru/${encodeURIComponent(publisherBotId)}?startapp=pi_${encodeURIComponent(startToken)}`;
+    const cancel = {
+      type: 'callback' as const,
+      text: 'Отмена',
+      payload: `${PUBLISHER_POST_IMPORT_CANCEL_PAYLOAD_PREFIX}${startToken}`,
+    };
+    if (notification === 'prompt' && inputMode === 'message') {
       return [
         [
           {
             type: 'callback' as const,
-            text: 'Отмена',
-            payload: `${PUBLISHER_POST_IMPORT_CANCEL_PAYLOAD_PREFIX}${startToken}`,
+            text: 'Добавить несколько сообщений',
+            payload: `${PUBLISHER_POST_IMPORT_COLLECT_PREFIX}${startToken}`,
           },
         ],
+        [cancel],
       ];
     }
+    if (notification === 'collected') {
+      return [
+        [
+          {
+            type: 'callback' as const,
+            text: 'Готово',
+            payload: `${PUBLISHER_POST_IMPORT_FINISH_PREFIX}${startToken}`,
+          },
+        ],
+        [cancel],
+      ];
+    }
+    if (
+      notification === 'collecting' ||
+      notification === 'prompt' ||
+      notification === 'need_forward'
+    )
+      return [[cancel]];
+    if (notification === 'failed')
+      return [[{ type: 'link' as const, text: 'Открыть редактор', url }]];
     if (notification !== 'ready') {
       return [];
     }
     if (!publicationId?.trim()) {
       return [];
     }
-    const startParam = `pi_${startToken}`;
-    const url = `https://max.ru/${encodeURIComponent(publisherBotId)}?startapp=${encodeURIComponent(
-      startParam,
-    )}`;
     return [[{ type: 'link' as const, text: 'Открыть черновик', url }]];
   }
 
@@ -291,6 +376,8 @@ export class PublisherPostImportDeliveryService {
     switch (notification) {
       case 'prompt':
       case 'need_forward':
+      case 'collecting':
+      case 'collected':
         return status === PublisherPostImportStatus.WAITING;
       case 'processing':
         return status === PublisherPostImportStatus.PROCESSING;

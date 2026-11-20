@@ -259,6 +259,7 @@ test('normal deploy resumes only after every API role has the target image', () 
   const deploy = read('infra/scripts/vps-pull-build-up.sh');
   execFileSync('bash', ['-n', resolve(root, 'infra/scripts/vps-pull-build-up.sh')]);
   const quiesce = callIndex(deploy, 'maxim_webhook_quiesce_for_api_rollout COMPOSE_FILES');
+  const publisherFence = callIndex(deploy, 'quiesce_publisher_album_transition || exit 1', quiesce);
   const actionRecreate = callIndex(
     deploy,
     'recreate_service_wave "action, publisher and retention"',
@@ -288,7 +289,8 @@ test('normal deploy resumes only after every API role has the target image', () 
     resume,
   );
 
-  assert.ok(quiesce < actionRecreate);
+  assert.ok(quiesce < publisherFence);
+  assert.ok(publisherFence < actionRecreate);
   assert.ok(actionRecreate < moderationRecreate);
   assert.ok(moderationRecreate < enqueueRecreate);
   assert.ok(enqueueRecreate < imageFence);
@@ -312,6 +314,54 @@ test('normal deploy resumes only after every API role has the target image', () 
     ].length >= 6,
   );
   assert.match(deploy, /cleanup\(\) \{\n {2}maxim_webhook_rollout_warn_if_paused/u);
+});
+
+test('the first ordered album writer requires a stopped legacy HTTP editor', () => {
+  const deploy = read('infra/scripts/vps-pull-build-up.sh');
+  const start = callIndex(deploy, 'quiesce_publisher_album_transition() {');
+  const end = callIndex(deploy, '\n}', start) + 2;
+  for (const [mode, status, output] of [
+    ['compatible', 0, 'writer-ready\n'],
+    ['legacy', 0, 'stop-admin\nwriter-ready\n'],
+    ['drifted', 0, 'stop-admin\nwriter-ready\n'],
+    ['stuck', 1, 'stop-admin\n'],
+  ]) {
+    const result = spawnSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail
+${deploy.slice(start, end)}
+COMPOSE_FILES=(-p infra)
+MAXIM_WEBHOOK_ROLLOUT_STOP_TIMEOUT_SEC=30
+mode="$1"
+stopped=0
+release_field() {
+  case "$2" in
+    sourceSha) printf '%040d' 1 ;;
+    imageId) printf 'sha256:%064d' 1 ;;
+  esac
+}
+git() { [[ "$mode" == compatible || "$mode" == drifted ]]; }
+verify_service_image_id() { [[ "$mode" == compatible ]]; }
+docker() {
+  [[ "$*" == 'compose -p infra stop -t 30 api-admin' ]] || return 2
+  printf 'stop-admin\\n'
+  if [[ "$mode" != stuck ]]; then stopped=1; fi
+}
+maxim_webhook_rollout_verify_services_stopped() {
+  [[ "$*" == 'COMPOSE_FILES api-admin' && "$stopped" == 1 ]]
+}
+quiesce_publisher_album_transition || exit 1
+printf 'writer-ready\\n'`,
+        'album-rollout-fixture',
+        mode,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(result.status, status, mode);
+    assert.equal(result.stdout, output, mode);
+  }
 });
 
 test('both API rollback paths use the same exact-version queue fence', () => {

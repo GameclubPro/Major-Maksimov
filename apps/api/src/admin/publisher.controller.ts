@@ -39,28 +39,59 @@ export class PublisherController {
   ) {}
 
   @Post('post-imports')
-  createPostImport(@CurrentUser() user: AuthUser, @Body() body: unknown) {
-    return this.postImportService.create(user, body);
+  createPostImport(
+    @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
+    @Query('contractVersion') contractVersion?: unknown,
+  ) {
+    return this.postImportService.create(
+      user,
+      body,
+      this.parseImportContractVersion(contractVersion),
+    );
   }
 
   @Get('post-imports')
-  getPostImport(@CurrentUser() user: AuthUser) {
-    return this.postImportService.getCurrent(user);
+  getPostImport(
+    @CurrentUser() user: AuthUser,
+    @Query('contractVersion') contractVersion?: unknown,
+  ) {
+    return this.postImportService.getCurrent(
+      user,
+      this.parseImportContractVersion(contractVersion),
+    );
   }
 
   @Get('post-imports/active')
-  getActivePostImport(@CurrentUser() user: AuthUser) {
-    return this.postImportService.getCurrent(user);
+  getActivePostImport(
+    @CurrentUser() user: AuthUser,
+    @Query('contractVersion') contractVersion?: unknown,
+  ) {
+    return this.postImportService.getCurrent(
+      user,
+      this.parseImportContractVersion(contractVersion),
+    );
   }
 
   @Get('post-imports/by-token/:startToken')
-  getPostImportByToken(@Param('startToken') startToken: string, @CurrentUser() user: AuthUser) {
-    return this.postImportService.getByToken(user, startToken);
+  getPostImportByToken(
+    @Param('startToken') startToken: string,
+    @CurrentUser() user: AuthUser,
+    @Query('contractVersion') contractVersion?: unknown,
+  ) {
+    return this.postImportService.getByToken(
+      user,
+      startToken,
+      this.parseImportContractVersion(contractVersion),
+    );
   }
 
   @Delete('post-imports')
-  cancelPostImport(@CurrentUser() user: AuthUser) {
-    return this.postImportService.cancel(user);
+  cancelPostImport(
+    @CurrentUser() user: AuthUser,
+    @Query('contractVersion') contractVersion?: unknown,
+  ) {
+    return this.postImportService.cancel(user, this.parseImportContractVersion(contractVersion));
   }
 
   @Get('post-imports/:sessionId/assets/:assetId')
@@ -316,6 +347,12 @@ export class PublisherController {
       return value;
     }
     throw new BadRequestException('Unsupported managed entity type');
+  }
+
+  private parseImportContractVersion(value: unknown): boolean {
+    if (value === undefined || value === '1') return false;
+    if (value === '2') return true;
+    throw new BadRequestException('Недопустимая версия импорта.');
   }
 
   private parseAutoReplyContractVersion(value: string | undefined): 1 | 2 {

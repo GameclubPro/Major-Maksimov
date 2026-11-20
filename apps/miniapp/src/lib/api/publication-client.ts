@@ -156,7 +156,7 @@ export async function createPublication(
   api: ApiTransport,
   payload: CreatePublicationRequest,
 ): Promise<PublicationDetails> {
-  const request = createPublicationRequestSchema.parse(payload);
+  const request = createPublicationRequestSchema.parse({ ...payload, mediaVersion: 2 });
   const body = JSON.stringify(request);
   const timeoutMs = resolvePublicationMediaMutationTimeout(request.content);
   return runPublicationApiRequest(
@@ -176,7 +176,7 @@ export async function updatePublication(
   publicationId: string,
   payload: UpdatePublicationRequest,
 ): Promise<PublicationDetails> {
-  const request = updatePublicationRequestSchema.parse(payload);
+  const request = updatePublicationRequestSchema.parse({ ...payload, mediaVersion: 2 });
   const body = JSON.stringify(request);
   const timeoutMs = request.content
     ? resolvePublicationMediaMutationTimeout(request.content)

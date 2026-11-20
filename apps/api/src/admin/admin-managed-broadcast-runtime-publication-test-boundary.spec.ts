@@ -67,6 +67,54 @@ async function preparePublicationTest(
 }
 
 describe('AdminManagedBroadcastRuntime publication test request boundary', () => {
+  it('retains ordered test attachments, canonicalizes images, and distinguishes reordered retries', async () => {
+    const { runtime } = createRuntime();
+    const video = (token: string) => ({
+      type: 'video',
+      fileName: 'movie.mp4',
+      mimeType: 'video/mp4',
+      payload: { token },
+    });
+    const album = [
+      video('first'),
+      { type: 'image', base64: TINY_JPEG_BASE64, mimeType: 'image/png', fileName: 'cover.png' },
+      video('last'),
+    ];
+    const prepared = await preparePublicationTest(
+      runtime,
+      createPayload({ text: '', publicationTestAlbum: album }),
+    );
+    const reordered = await preparePublicationTest(
+      runtime,
+      createPayload({ text: '', publicationTestAlbum: [...album].reverse() }),
+    );
+    expect(prepared.idempotencyHash).not.toEqual(reordered.idempotencyHash);
+    expect(prepared.payload.publicationTestAlbum[1]).toMatchObject({
+      mimeType: 'image/jpeg',
+      fileName: 'cover.jpg',
+    });
+    const mediaRuntime = (runtime as any).mediaRuntime;
+    jest.spyOn(mediaRuntime, 'uploadManagedBroadcastImage').mockResolvedValue({ token: 'photo' });
+    await expect(
+      mediaRuntime.resolveManagedBroadcastMedia(
+        prepared.payload,
+        'chat',
+        'chat-1',
+        'user-1',
+        'publisher',
+        undefined,
+        undefined,
+        { trustedPublicationTestPayload: true, trustedPublicationVideoMarkers: true },
+      ),
+    ).resolves.toEqual({
+      attachments: [
+        { type: 'video', payload: { token: 'first' } },
+        { type: 'image', payload: { token: 'photo' } },
+        { type: 'video', payload: { token: 'last' } },
+      ],
+    });
+  });
+
   it('accepts 4000 characters while preserving access, button normalization, and idempotency', async () => {
     const { runtime, assertAdminAccess } = createRuntime();
     const text = 'x'.repeat(4_000);

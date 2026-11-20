@@ -343,7 +343,11 @@ test('retry content saves omit a new send while an explicit schedule repair reta
     assert.equal(contentOnly.content?.text, 'Исправленный текст');
     await assert.rejects(updatePublication(api, 'publication-live-all', contentOnly), /stop/u);
     const sent = JSON.parse(calls.at(-1)?.init?.body ?? '{}') as Record<string, unknown>;
-    assert.deepEqual(Object.keys(sent).sort(), Object.keys(contentOnly).sort());
+    assert.deepEqual(
+      Object.keys(sent).sort(),
+      [...Object.keys(contentOnly), 'mediaVersion'].sort(),
+    );
+    assert.equal(sent.mediaVersion, 2);
   }
   const publishNowDraft = buildUpdatePublicationRequest(draft, 2, 'draft-publish');
   assert.equal(publishNowDraft.schedule?.mode, 'now');
@@ -1675,6 +1679,10 @@ test('publication media mutations reserve enough time for mobile uploads', async
     /stop/u,
   );
 
+  assert.deepEqual(
+    calls.map((call) => JSON.parse(String(call.init?.body)).mediaVersion),
+    [2, undefined, 2, 2],
+  );
   assert.deepEqual(
     calls.map((call) => [call.path, call.init?.method, call.init?.timeoutMs]),
     [

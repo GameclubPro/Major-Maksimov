@@ -28,6 +28,8 @@ import {
 import { OUTCOME_COHORT_TARGETS } from '../../scripts/agent/outcome-cohort-online-targets.mjs';
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
+  PUBLISHER_DEFERRAL_MIGRATION,
+  verifyPublisherDeferralState,
   verifyGiveawayDeferralState,
 } from '../../scripts/agent/routing-index-catalog.mjs';
 import {
@@ -144,6 +146,35 @@ const giveawaySnapshot = (applied) => ({
       finished_at: `2026-11-19T00:0${i}:04.000Z`,
     })),
   ],
+});
+
+test('Publisher deferral requires its exact tail after the giveaway prefix and proves partial prerequisite history', () => {
+  const source = [...giveawaySource, PUBLISHER_DEFERRAL_MIGRATION];
+  const catalog = { ...giveawaySnapshot(1), publisherSchema: 'absent' };
+  assert.deepEqual(verifyPublisherDeferralState(catalog, source), {
+    state: 'prepare_publisher_deferral',
+    pending: [GIVEAWAY_DEFERRAL_MIGRATIONS[1].name, PUBLISHER_DEFERRAL_MIGRATION.name],
+  });
+  for (const altered of [
+    [...giveawaySource, { ...PUBLISHER_DEFERRAL_MIGRATION, checksum: 'a'.repeat(64) }],
+    [...giveawaySource.slice(0, -1), PUBLISHER_DEFERRAL_MIGRATION],
+    [...source, { name: '20990101000000_unreviewed', checksum: 'b'.repeat(64) }],
+  ])
+    assert.throws(() => verifyPublisherDeferralState(catalog, altered), /DEFERRAL_SOURCE_INVALID/);
+  for (const publisherSchema of ['exact', 'invalid', undefined]) {
+    assert.throws(
+      () => verifyPublisherDeferralState({ ...catalog, publisherSchema }, source),
+      /PUBLISHER_DEFERRAL_SCHEMA_INVALID/,
+    );
+  }
+  assert.throws(
+    () =>
+      verifyPublisherDeferralState(
+        { ...catalog, orderedIndex: { present: true, exact: false } },
+        source,
+      ),
+    /DEFERRAL_/,
+  );
 });
 
 test('giveaway deferral admits only the missing reviewed suffix and keeps later index preparation possible', () => {

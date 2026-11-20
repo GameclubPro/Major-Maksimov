@@ -1,5 +1,34 @@
 # Publisher Publication Diagnostics
 
+## MAX post import and album delivery
+
+Check the import separately from publication delivery. `WAITING` in collection mode
+means the author has not clicked «Готово». `READY` means a draft exists and can contain
+items requiring author review. It is not a confirmed post. Diagnose import refusals by
+the bounded reason and snapshot source in `Publisher forwarded post import rejected`.
+Keep unavailable and ambiguous outcomes separate. Do not replay a SEND based on a log gap.
+Collect sanitized counts without post text, URLs, bot credentials or identifiers.
+
+For completed drafts, group `importCompleteness` as `complete`, `partial`, or
+`review_only` (an empty draft with a proposed addition). `lossWarningCount` counts
+item warnings for missing or changed content. `omissionKindCount` covers distinct
+categories, including lost formatting or buttons. These counts can overlap.
+`suggestionCount` counts optional links and forwarding comments. Each item counter
+caps at 128. A notice about transferring outer media is informational.
+
+Use `inputKind` for the observed direct message, genuine forward, or explicit collection.
+Rejections before source identification have `inputKind=unknown`. `inputMode` records
+the selected entry mode. `mediaKind` describes the saved draft. Compute p50/p95 from
+non-null `elapsedMs`, and report the denominator and missing results for the window.
+The worker logs omit results written by recovery or exhausted-retry handling. Report this
+coverage gap when a reviewed session count for the same window is unavailable. Track confirmed
+and unknown deliveries separately. Open a mixed draft again before checking the preview and sent post in MAX.
+
+New ordered revisions can contain images and multiple videos. The API rollback verifier
+requires a reader capable of sending an entire ordered revision. Validate the migration
+and rollback checks before deployment. Older mini app sessions cannot edit or activate a
+draft with mixed media. Use the normal release workflow to recover the compatible API.
+
 Use the fixed read-only catalog to distinguish missing actor access, missing bot/catalog
 evidence, disabled publication policy and attempted/ambiguous deliveries:
 

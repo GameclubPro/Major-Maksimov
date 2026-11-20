@@ -16,6 +16,22 @@ import {
 } from './publication-model';
 import { PUBLICATION_WEEKDAYS } from './publication-page-options';
 
+export function formatPublicationMediaSummary(
+  publication: Pick<PublicationSummary, 'mediaCount' | 'hasVideo' | 'videoCount'>,
+): string | null {
+  const { mediaCount, videoCount, hasVideo } = publication;
+  if (!mediaCount) return null;
+  if (mediaCount === 1) return hasVideo ? 'Видео' : 'Фото';
+  if (videoCount === undefined && hasVideo) {
+    return formatRussianCountLabel(mediaCount, 'вложение', 'вложения', 'вложений');
+  }
+  const videos = videoCount ?? 0;
+  const photos = mediaCount - videos;
+  return [photos > 0 ? `${photos} фото` : '', videos > 0 ? `${videos} видео` : '']
+    .filter(Boolean)
+    .join(' · ');
+}
+
 export function formatDateTime(value: string | null, timezone = 'Europe/Moscow'): string {
   if (!value) {
     return '';

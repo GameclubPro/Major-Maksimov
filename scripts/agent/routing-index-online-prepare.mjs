@@ -12,6 +12,8 @@ import {
 } from './routing-index-online-target.mjs';
 import {
   GIVEAWAY_DEFERRAL_MIGRATIONS,
+  PUBLISHER_DEFERRAL_MIGRATIONS,
+  verifyPublisherDeferralState,
   routingIndexStateSql,
   verifyGiveawayDeferralState,
   verifyRoutingIndexState,
@@ -86,35 +88,43 @@ export async function runRoutingIndexOnlinePrepare({
   inspect = readState,
   runPrisma = spawnSync,
   giveawayDeferral = false,
+  publisherDeferral = false,
 } = {}) {
-  if (
-    !env.DATABASE_URL?.trim() ||
-    (!giveawayDeferral && !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME)
-  )
+  if (giveawayDeferral && publisherDeferral) throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
+  const deferral = giveawayDeferral || publisherDeferral;
+  if (!env.DATABASE_URL?.trim() || (!deferral && !env.MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME))
     throw new Error('ROUTING_INDEX_TAGGED_DATABASE_REQUIRED');
   verifyRoutingIndexDatabaseUrl(env.DATABASE_URL);
   if (Object.hasOwn(env, 'PGOPTIONS')) throw new Error('ROUTING_INDEX_DATABASE_OPTIONS_BLOCKED');
   const prepareEnv = createMultibotPrepareEnvironment(
-    giveawayDeferral
+    deferral
       ? { ...env, MAXIM_MULTIBOT_PREPARE_APPLICATION_NAME: `maxim-online-${randomUUID()}` }
       : env,
   );
   const source = readRoutingIndexSource(root);
-  const verify = giveawayDeferral ? verifyGiveawayDeferralState : verifyRoutingIndexState;
-  const complete = giveawayDeferral ? 'compatible_pending' : 'already_applied';
+  const verify = publisherDeferral
+    ? verifyPublisherDeferralState
+    : giveawayDeferral
+      ? verifyGiveawayDeferralState
+      : verifyRoutingIndexState;
+  const complete = deferral ? 'compatible_pending' : 'already_applied';
   const before = await inspect(prepareEnv.DATABASE_URL, source, verify);
   if (before.state === complete) return { state: complete };
-  const expected = giveawayDeferral ? 'prepare_giveaway_deferral' : 'prepare_routing';
+  const expected = publisherDeferral
+    ? 'prepare_publisher_deferral'
+    : giveawayDeferral
+      ? 'prepare_giveaway_deferral'
+      : 'prepare_routing';
   if (
     before.state !== expected ||
-    (!giveawayDeferral && (before.pending.length !== 1 || before.pending[0] !== 'routing'))
+    (!deferral && (before.pending.length !== 1 || before.pending[0] !== 'routing'))
   )
     throw new Error('ROUTING_INDEX_STATE_INVALID');
-  // FLAG: The deferral path gives Prisma the verified historical prefix and exactly the pinned giveaway SQL.
-  const migrations = giveawayDeferral
+  // FLAG: The deferral path gives Prisma the verified historical prefix and exactly the pinned additive tail.
+  const migrations = deferral
     ? [
         ...source.filter(({ name }) => name < ROUTING_INDEX_TARGET.migration),
-        ...GIVEAWAY_DEFERRAL_MIGRATIONS,
+        ...(publisherDeferral ? PUBLISHER_DEFERRAL_MIGRATIONS : GIVEAWAY_DEFERRAL_MIGRATIONS),
       ]
     : source.filter(({ name }) => name <= ROUTING_INDEX_TARGET.migration);
   const prefix = createMigrationDirectory(root, migrations);
@@ -132,14 +142,14 @@ export async function runRoutingIndexOnlinePrepare({
         cwd: root,
         env: prepareEnv,
         stdio: 'ignore',
-        timeout: giveawayDeferral ? 60_000 : ROUTING_INDEX_TARGET.statementMs + 30_000,
+        timeout: deferral ? 60_000 : ROUTING_INDEX_TARGET.statementMs + 30_000,
       },
     );
     if (result.error || result.signal || result.status !== 0)
       throw new Error('ROUTING_INDEX_PRISMA_DEPLOY_FAILED');
     const after = await inspect(prepareEnv.DATABASE_URL, readRoutingIndexSource(root), verify);
     if (after.state !== complete) throw new Error('ROUTING_INDEX_PREPARATION_INCOMPLETE');
-    return { state: giveawayDeferral ? complete : 'applied' };
+    return { state: deferral ? complete : 'applied' };
   } finally {
     rmSync(prefix.tempRoot, { recursive: true, force: true });
   }
@@ -148,9 +158,13 @@ export async function runRoutingIndexOnlinePrepare({
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   try {
     const giveawayDeferral = process.argv.length === 3 && process.argv[2] === '--giveaway-deferral';
-    if (process.argv.length !== 2 && !giveawayDeferral)
+    const publisherDeferral =
+      process.argv.length === 3 && process.argv[2] === '--publisher-deferral';
+    if (process.argv.length !== 2 && !giveawayDeferral && !publisherDeferral)
       throw new Error('ROUTING_INDEX_ARGUMENTS_INVALID');
-    console.log(JSON.stringify(await runRoutingIndexOnlinePrepare({ giveawayDeferral })));
+    console.log(
+      JSON.stringify(await runRoutingIndexOnlinePrepare({ giveawayDeferral, publisherDeferral })),
+    );
   } catch {
     console.error('ROUTING_INDEX_PREPARATION_FAILED; receipts and indexes preserved.');
     process.exitCode = 1;

@@ -1,3 +1,4 @@
+import { type PublicationTestMedia } from './publication-ordered-media';
 import {
   publicationPostPublishSchema,
   type PublicationContentInput,
@@ -270,6 +271,40 @@ export class PublicationContentService {
   }
 
   async buildLegacyTestPayload(request: TestPublicationRequest, actorUserId: string) {
+    const mixed =
+      request.content.media.length > 1 &&
+      request.content.media.some((item) => item.type === 'video' || item.type === 'video-ref');
+    if (!mixed) return this.buildLegacySingleMediaPayload(request, actorUserId);
+    const publicationTestAlbum: PublicationTestMedia[] = [];
+    for (const item of request.content.media) {
+      const single = await this.buildLegacySingleMediaPayload(
+        { ...request, content: { ...request.content, media: [item] } },
+        actorUserId,
+      );
+      if (single.mediaType === 'video' && single.mediaPayload) {
+        publicationTestAlbum.push({
+          type: 'video',
+          payload: single.mediaPayload,
+          mimeType: single.mediaMimeType,
+          fileName: single.mediaFileName,
+        });
+      } else if (single.images[0]) {
+        publicationTestAlbum.push({ type: 'image', ...single.images[0] });
+      } else {
+        throw new BadRequestException('Медиа публикации больше недоступно.');
+      }
+    }
+    const base = await this.buildLegacySingleMediaPayload(
+      { ...request, content: { ...request.content, media: [] } },
+      actorUserId,
+    );
+    return { ...base, publicationTestAlbum };
+  }
+
+  private async buildLegacySingleMediaPayload(
+    request: TestPublicationRequest,
+    actorUserId: string,
+  ) {
     const images: Array<{ base64: string; mimeType: string; fileName: string }> = [];
     let video: { payload: Record<string, unknown>; mimeType: string; fileName: string } | null =
       null;

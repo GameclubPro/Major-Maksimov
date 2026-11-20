@@ -114,11 +114,11 @@ export function PublicationCreateSheet({
               <small>Текст, фото, видео и кнопки</small>
             </span>
           </button>
-          <button type="button" onClick={onForward} disabled={busy} aria-label="Переслать">
+          <button type="button" onClick={onForward} disabled={busy} aria-label="Перенести из MAX">
             <IconoirSprite variant="iconoir" icon="Forward" aria-hidden />
             <span>
-              <strong>{busy ? 'Открываю...' : 'Переслать из MAX'}</strong>
-              <small>Взять за основу готовый пост</small>
+              <strong>{busy ? 'Открываю...' : 'Перенести из MAX'}</strong>
+              <small>Отправить сообщение или переслать пост Публику</small>
             </span>
           </button>
         </div>

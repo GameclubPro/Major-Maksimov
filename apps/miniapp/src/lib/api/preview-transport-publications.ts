@@ -309,6 +309,7 @@ export function buildPreviewPublicationDetails(
     audienceSelection: request.audience.selection,
     audienceMode: request.audience.mode,
     mediaCount: assets.length,
+    videoCount: assets.filter((asset) => asset.type === 'video').length,
     hasVideo: assets.some((asset) => asset.type === 'video'),
     schedule,
     delivery,

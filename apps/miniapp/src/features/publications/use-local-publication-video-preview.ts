@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ApiTransport } from '../../lib/api/transport';
 import type { PublicationEditorContext, PublicationRetainedAsset } from './publication-model';
 import { usePublicationAssetPreviews } from './use-publication-asset-previews';
@@ -6,7 +6,7 @@ import type { PublisherPostImportAssetPreview } from './use-publisher-post-impor
 
 type LocalVideo = {
   assetId: string;
-  file: File;
+  url: string;
   api: ApiTransport;
   userId: string;
   sessionKey: string | null;
@@ -38,36 +38,42 @@ export function useLocalPublicationVideoPreview({
 }) {
   const sessionKey = getPublicationVideoPreviewSessionKey(session);
   const savedPreviews = usePublicationAssetPreviews(api, publicationId, assets);
-  const [localVideo, setLocalVideo] = useState<LocalVideo | null>(null);
-  const [preview, setPreview] = useState<PublisherPostImportAssetPreview | null>(null);
-  const active =
-    localVideo &&
-    session &&
-    localVideo.sessionKey === sessionKey &&
-    localVideo.api === api &&
-    localVideo.userId === userId &&
-    assets.some((asset) => asset.id === localVideo.assetId && asset.type === 'video')
-      ? localVideo
-      : null;
-
+  const [localVideos, setLocalVideos] = useState<LocalVideo[]>([]);
+  const currentUrls = useRef(new Set<string>());
+  const matches = (item: LocalVideo) =>
+    Boolean(
+      session &&
+      item.api === api &&
+      item.userId === userId &&
+      item.sessionKey === sessionKey &&
+      assets.some((asset) => asset.id === item.assetId && asset.type === 'video'),
+    );
+  const active = localVideos.filter(matches);
+  useEffect(
+    () => () => {
+      for (const url of currentUrls.current) URL.revokeObjectURL(url);
+      currentUrls.current.clear();
+    },
+    [],
+  );
   useEffect(() => {
-    if (!active) setLocalVideo(null);
-  }, [active, localVideo]);
-
-  useEffect(() => {
-    setPreview(null);
-    if (!active) return;
-    const url = URL.createObjectURL(active.file);
-    setPreview({ assetId: active.assetId, url });
-    return () => URL.revokeObjectURL(url);
-  }, [active]);
-
-  const currentPreview = active && preview?.assetId === active.assetId ? preview : null;
+    const expired = localVideos.filter((item) => !matches(item));
+    if (!expired.length) return;
+    for (const item of expired) {
+      URL.revokeObjectURL(item.url);
+      currentUrls.current.delete(item.url);
+    }
+    setLocalVideos((items) => items.filter((item) => !expired.includes(item)));
+  }, [api, assets, userId, sessionKey, session, localVideos]);
   return {
-    previews: currentPreview
-      ? [...savedPreviews.filter((item) => item.assetId !== currentPreview.assetId), currentPreview]
-      : savedPreviews,
-    rememberVideo: (assetId: string, file: File) =>
-      setLocalVideo({ assetId, file, api, userId, sessionKey }),
+    previews: [
+      ...savedPreviews,
+      ...active.map(({ assetId, url }): PublisherPostImportAssetPreview => ({ assetId, url })),
+    ],
+    rememberVideo: (assetId: string, file: File) => {
+      const url = URL.createObjectURL(file);
+      currentUrls.current.add(url);
+      setLocalVideos((items) => [...items, { assetId, url, api, userId, sessionKey }]);
+    },
   };
 }

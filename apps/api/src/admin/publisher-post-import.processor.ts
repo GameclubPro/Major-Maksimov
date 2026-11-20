@@ -44,15 +44,17 @@ export class PublisherPostImportProcessor extends WorkerHost {
       await this.delivery.deliver(job.data);
       return;
     }
+    const configuredAttempts = job.opts?.attempts;
+    const maxAttempts =
+      typeof configuredAttempts === 'number' && Number.isFinite(configuredAttempts)
+        ? Math.max(1, Math.trunc(configuredAttempts))
+        : 1;
+    const lastAttempt = (job.attemptsMade ?? 0) + 1 >= maxAttempts;
     let result: Awaited<ReturnType<PublisherPostImportProcessingService['process']>>;
     try {
-      result = await this.processing.process(job.data.sessionId);
+      result = await this.processing.process(job.data.sessionId, lastAttempt);
     } catch (error: unknown) {
-      const maxAttempts =
-        typeof job.opts.attempts === 'number' && Number.isFinite(job.opts.attempts)
-          ? Math.max(1, Math.trunc(job.opts.attempts))
-          : 1;
-      if (job.attemptsMade + 1 >= maxAttempts) {
+      if (lastAttempt) {
         const failed = await this.processing.failInternalAfterFinalAttempt(job.data.sessionId);
         if (failed) {
           await this.queue.enqueueNotification({

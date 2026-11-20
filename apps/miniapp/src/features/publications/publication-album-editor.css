@@ -1,0 +1,112 @@
+@layer components {
+  .publication-album {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .publication-album .publication-album__item {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    margin: 0;
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+  .publication-album__summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .publication-album__summary > img,
+  .publication-album__placeholder,
+  .publication-album .publication-album__play {
+    width: 62px;
+    height: 54px;
+    border: 0;
+    border-radius: 7px;
+    padding: 0;
+    object-fit: cover;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    background: var(--color-surface-tint);
+    overflow: hidden;
+  }
+  .publication-album .publication-album__play {
+    position: relative;
+  }
+  .publication-album__play video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .publication-album__play b {
+    position: absolute;
+    color: white;
+    text-shadow: 0 1px 4px black;
+  }
+  .publication-album__caption {
+    display: grid;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    gap: 2px;
+  }
+  .publication-album__caption small {
+    color: var(--color-ink-muted);
+  }
+  .publication-album__remote {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .publication-album__remote button {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--color-surface-tint);
+    color: var(--color-accent);
+    font: inherit;
+  }
+  .publication-album__actions {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .publication-album .publication-album__actions button,
+  .publication-album__replace {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+    max-width: 100%;
+    border: 0;
+    border-radius: 7px;
+    background: var(--color-surface-tint);
+    color: var(--color-ink);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  .publication-album__actions button:disabled {
+    opacity: 0.45;
+  }
+  .publication-album__replace input {
+    position: absolute;
+    inset: 0;
+    max-width: 100%;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+  }
+  .publication-album__replace:focus-within {
+    outline: 2px solid var(--color-accent);
+  }
+}

@@ -1,4 +1,9 @@
 import {
+  publicationTestMediaFields,
+  type PublicationTestMedia,
+  type PublicationTestPayload,
+} from './publication-ordered-media';
+import {
   MAX_BROADCAST_IMAGES,
   type BroadcastImage,
   type ManagedEntityType,
@@ -65,7 +70,8 @@ export type ManagedBroadcastRequestMedia = Pick<
   | 'mediaPayload'
   | 'mediaMimeType'
   | 'mediaFileName'
->;
+> &
+  Pick<PublicationTestPayload, 'publicationTestAlbum'>;
 
 type PublicationExecutionAsset = {
   id: string;
@@ -143,7 +149,7 @@ export class AdminManagedBroadcastMediaRuntime {
   }
 
   async resolveManagedBroadcastMedia(
-    payload: SendBroadcastRequest,
+    payload: PublicationTestPayload,
     entityType: ManagedEntityType,
     sourceChatId: string,
     actorUserId: string,
@@ -152,6 +158,30 @@ export class AdminManagedBroadcastMediaRuntime {
     onProgress?: ManagedBroadcastProgressCallback,
     options: ManagedBroadcastMediaResolutionOptions = {},
   ): Promise<ManagedBroadcastResolvedMedia> {
+    const { publicationTestAlbum, ...base } = payload;
+    if (publicationTestAlbum) {
+      if (!options.trustedPublicationTestPayload)
+        throw new BadRequestException('Некорректный тип медиа.');
+      const attachments: MaxAttachmentPayload[] = [];
+      for (const item of publicationTestAlbum) {
+        const single = await this.resolveManagedBroadcastMedia(
+          { ...base, ...publicationTestMediaFields(item) },
+          entityType,
+          sourceChatId,
+          actorUserId,
+          botId,
+          maxApiOptions,
+          onProgress,
+          options,
+        );
+        const attachment = single.imagePayload
+          ? { type: 'image' as const, payload: single.imagePayload }
+          : single.attachments?.[0];
+        if (!attachment) throw new BadRequestException('Не удалось подготовить вложение.');
+        attachments.push(attachment);
+      }
+      return { attachments };
+    }
     const images = this.resolveManagedBroadcastRequestImages(payload);
     if (images.length === 1) {
       const imagePayload = await this.uploadManagedBroadcastImage(
@@ -399,57 +429,52 @@ export class AdminManagedBroadcastMediaRuntime {
     if (source.actorUserId !== actorUserId) {
       throw new BadRequestException('Медиа публикации больше недоступно.');
     }
-    const videos = source.assets.filter(
-      (asset) =>
-        this.readObjectPayloadOrNull(asset.durablePayload) !== null ||
-        asset.mimeType.toLowerCase().startsWith('video/'),
-    );
-    if (videos.length > 0) {
-      if (videos.length !== 1 || source.assets.length !== 1) {
-        throw new BadRequestException(
-          'В одной публикации можно добавить либо фотографии, либо одно видео.',
-        );
-      }
-      const asset = videos[0];
-      const payload = this.readObjectPayloadOrNull(asset.durablePayload);
-      let videoPayload: Record<string, unknown>;
-      if (payload && !(PUBLICATION_UPLOADED_VIDEO_FIELD in payload)) {
-        // FLAG: Historical untagged durable payloads retain their existing contract.
-        videoPayload = payload;
-      } else {
-        const mimeType = asset.mimeType.trim().toLowerCase();
-        const uploaded = readPublicationUploadedVideo(payload, botId ?? '');
-        if (!mimeType.startsWith('video/')) {
-          throw new BadRequestException('Видео публикации больше недоступно.');
-        }
-        if (uploaded) {
-          // FLAG: An exact-bot remote video never selects local bytes, even above 24 MB.
-          videoPayload = uploaded;
-        } else {
-          if (asset.sizeBytes > PUBLICATION_MAX_VIDEO_BYTES) {
-            throw new BadRequestException('Видео слишком большое. Максимум 24 МБ.');
-          }
-          const bytes = await this.loadPublicationExecutionAssetBytes(source, asset);
-          videoPayload = await this.uploadManagedBroadcastPublicationVideoBytes(
-            bytes,
-            mimeType,
-            asset.fileName,
-            entityType,
-            sourceChatId,
-            actorUserId,
-            botId,
-            maxApiOptions,
-            onProgress,
-            asset.id,
-          );
-        }
-      }
-      return { attachments: [{ type: 'video', payload: videoPayload }] };
+    if (source.assets.length > MAX_BROADCAST_IMAGES) {
+      throw new BadRequestException('Можно добавить до 10 вложений.');
     }
-
-    const images = source.assets.slice(0, MAX_BROADCAST_IMAGES);
     const attachments: MaxAttachmentPayload[] = [];
-    for (const asset of images) {
+    // FLAG: The immutable revision defines one ordered MAX post. Prepare all items before SEND.
+    for (const asset of source.assets) {
+      if (
+        this.readObjectPayloadOrNull(asset.durablePayload) ||
+        asset.mimeType.toLowerCase().startsWith('video/')
+      ) {
+        const payload = this.readObjectPayloadOrNull(asset.durablePayload);
+        let videoPayload: Record<string, unknown>;
+        if (payload && !(PUBLICATION_UPLOADED_VIDEO_FIELD in payload)) {
+          // FLAG: Historical untagged durable payloads retain their existing contract.
+          videoPayload = payload;
+        } else {
+          const mimeType = asset.mimeType.trim().toLowerCase();
+          const uploaded = readPublicationUploadedVideo(payload, botId ?? '');
+          if (!mimeType.startsWith('video/')) {
+            throw new BadRequestException('Видео публикации больше недоступно.');
+          }
+          if (uploaded) {
+            // FLAG: An exact-bot remote video never selects local bytes, even above 24 MB.
+            videoPayload = uploaded;
+          } else {
+            if (asset.sizeBytes > PUBLICATION_MAX_VIDEO_BYTES) {
+              throw new BadRequestException('Видео слишком большое. Максимум 24 МБ.');
+            }
+            const bytes = await this.loadPublicationExecutionAssetBytes(source, asset);
+            videoPayload = await this.uploadManagedBroadcastPublicationVideoBytes(
+              bytes,
+              mimeType,
+              asset.fileName,
+              entityType,
+              sourceChatId,
+              actorUserId,
+              botId,
+              maxApiOptions,
+              onProgress,
+              asset.id,
+            );
+          }
+        }
+        attachments.push({ type: 'video', payload: videoPayload });
+        continue;
+      }
       // FLAG: Preserve the scheduled execution's existing image cap; authoring/test
       // limits are separate. Fetch and validate one binary image at a time.
       if (asset.sizeBytes > BROADCAST_IMAGE_MAX_BYTES) {
@@ -467,9 +492,10 @@ export class AdminManagedBroadcastMediaRuntime {
         maxApiOptions,
         onProgress,
       );
-      if (imagePayload) attachments.push({ type: 'image', payload: imagePayload });
+      if (!imagePayload) throw new BadRequestException('Не удалось подготовить фото.');
+      attachments.push({ type: 'image', payload: imagePayload });
     }
-    return images.length === 1
+    return attachments.length === 1 && attachments[0]?.type === 'image'
       ? attachments[0]
         ? { imagePayload: attachments[0].payload }
         : {}
@@ -559,9 +585,45 @@ export class AdminManagedBroadcastMediaRuntime {
       );
     if (videoAssets.length > 0) {
       if (videoAssets.length !== 1 || contentRevision.assets.length !== 1) {
-        throw new BadRequestException(
-          'В одной публикации можно добавить либо фотографии, либо одно видео.',
+        const publicationTestAlbum: PublicationTestMedia[] = contentRevision.assets.map(
+          ({ asset }) => {
+            const payload = this.readObjectPayloadOrNull(asset.durablePayload);
+            const mimeType = asset.mimeType.trim();
+            const fileName = asset.fileName.trim();
+            if (payload || mimeType.toLowerCase().startsWith('video/')) {
+              if (!payload && !asset.bytes)
+                throw new BadRequestException('Видео публикации больше недоступно.');
+              return {
+                type: 'video',
+                mimeType,
+                fileName,
+                payload:
+                  payload && !(PUBLICATION_UPLOADED_VIDEO_FIELD in payload)
+                    ? payload
+                    : { [PUBLICATION_VIDEO_ASSET_ID_FIELD]: asset.id },
+              };
+            }
+            if (!asset.bytes) throw new BadRequestException('Фото публикации больше недоступно.');
+            return {
+              type: 'image',
+              base64: Buffer.from(asset.bytes).toString('base64'),
+              mimeType,
+              fileName,
+            };
+          },
         );
+        return {
+          imageEnabled: false,
+          imageBase64: '',
+          imageMimeType: '',
+          imageFileName: '',
+          images: [],
+          mediaType: null,
+          mediaPayload: null,
+          mediaFileName: '',
+          mediaMimeType: '',
+          publicationTestAlbum,
+        };
       }
 
       const [{ asset, payload }] = videoAssets;
@@ -611,9 +673,21 @@ export class AdminManagedBroadcastMediaRuntime {
   }
 
   async validateManagedBroadcastMediaPayload(
-    payload: SendBroadcastRequest,
+    payload: PublicationTestPayload,
     options: Pick<ManagedBroadcastTestOptions, 'trustedPublicationTestPayload'> = {},
   ): Promise<void> {
+    const { publicationTestAlbum, ...base } = payload;
+    if (publicationTestAlbum) {
+      if (!options.trustedPublicationTestPayload)
+        throw new BadRequestException('Некорректный тип медиа.');
+      for (const item of publicationTestAlbum) {
+        if (item.type !== 'image') continue;
+        const single = { ...base, ...publicationTestMediaFields(item) };
+        await this.validateManagedBroadcastMediaPayload(single, options);
+        Object.assign(item, single.images[0]);
+      }
+      return;
+    }
     const images = this.resolveManagedBroadcastRequestImages(payload);
     if (images.length === 0) {
       return;

@@ -126,6 +126,8 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
   [
     'apps/api/src/admin/admin-managed-broadcast-media-runtime.ts',
     [
+      'for (const asset of source.assets)',
+      "attachments.push({ type: 'video', payload: videoPayload })",
       'actorUserId: asset.actorUserId',
       'contentRevisionId: source.contentRevisionId',
       'where: publicationAssetReferenceWhere(actorUserId,',

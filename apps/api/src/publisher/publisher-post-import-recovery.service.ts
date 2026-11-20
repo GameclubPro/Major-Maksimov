@@ -214,6 +214,8 @@ export class PublisherPostImportRecoveryService implements OnModuleInit, OnModul
     switch (value) {
       case 'prompt':
       case 'need_forward':
+      case 'collecting':
+      case 'collected':
       case 'processing':
       case 'ready':
       case 'failed':

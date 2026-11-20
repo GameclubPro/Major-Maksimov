@@ -1,8 +1,12 @@
 import {
-  MAX_PUBLICATION_SERVER_DRAFTS,
-  MAX_PUBLICATION_DRAFT_STORAGE_BYTES,
+  publicationAlbumMediaSelect,
+  requireCompatiblePublicationCopy,
+  requirePublicationAlbumEditor,
+} from './publication-album-write-compatibility';
+import {
   publicationDraftResponseSchema,
   publicationDraftStateSchema,
+  publicationImportReviewSchema,
   savePublicationDraftRequestSchema,
 } from '@maxim/contracts/publication-draft';
 import { publicationActionRequestSchema } from '@maxim/contracts/publication';
@@ -16,10 +20,7 @@ import { createHash } from 'node:crypto';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
 import { Prisma, type PublicationScheduleMode } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
-import {
-  PublicationContentService,
-  type PreparedPublicationContentRevision,
-} from './publication-content.service';
+import { PublicationContentService } from './publication-content.service';
 import { PublicationPresenterService } from './publication-presenter.service';
 import { PUBLICATION_ASSET_METADATA_SELECT } from './publication-media-limits';
 import { PublicationPublisherRoutingService } from './publication-publisher-routing.service';
@@ -29,7 +30,7 @@ import {
   publicationAdminTargetWhere,
 } from './publication-admin-access';
 import { PublisherPolicyService } from './publisher-policy.service';
-import { publicationAssetReferenceWhere } from './publication-asset-access';
+import { assertPublicationDraftQuota, lockPublicationDraftQuota } from './publication-draft-quota';
 
 const draftWhere = (actorUserId: string, mode: 'read' | 'manage' = 'read') => ({
   ...publicationAdminAccessWhere(publicationAdminScope(actorUserId), 'PUBLIK_V1', mode),
@@ -112,7 +113,13 @@ export class PublicationDraftsService {
     if (id && request.expectedRevision === undefined)
       throw new BadRequestException('Укажите версию черновика.');
     const hash = createHash('sha256')
-      .update(JSON.stringify({ operation: 'save_draft', id, request }))
+      .update(
+        JSON.stringify({
+          operation: 'save_draft',
+          id,
+          request: { ...request, mediaVersion: undefined },
+        }),
+      )
       .digest('hex');
     const replayWhere = {
       actorUserId_requestId: { actorUserId: user.userId, requestId: request.requestId },
@@ -136,20 +143,31 @@ export class PublicationDraftsService {
     try {
       saved = await this.prisma.$transaction(
         async (tx) => {
-          await tx.$executeRaw(
-            Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`publication-drafts:${user.userId}`}))`,
-          );
           const current = id
             ? await tx.publication.findFirst({
                 where: { id, ...draftWhere(user.userId, 'manage') },
-                include: { canonicalContentRevision: { select: { revision: true } } },
+                include: {
+                  canonicalContentRevision: {
+                    select: { revision: true, assets: publicationAlbumMediaSelect },
+                  },
+                  schedule: { select: { rule: true } },
+                },
               })
             : null;
           if (id && !current)
             throw new NotFoundException('Черновик не найден или уже опубликован.');
           if (current && current.version !== request.expectedRevision)
             throw new ConflictException('Черновик изменён на другом устройстве. Обновите его.');
-          await this.assertQuota(
+          await lockPublicationDraftQuota(tx, current?.actorUserId ?? user.userId);
+          requirePublicationAlbumEditor(request.mediaVersion, current?.canonicalContentRevision);
+          await requireCompatiblePublicationCopy(
+            tx,
+            user.userId,
+            request.mediaVersion,
+            request.content.media,
+            id ?? undefined,
+          );
+          await assertPublicationDraftQuota(
             tx,
             current?.actorUserId ?? user.userId,
             id,
@@ -201,7 +219,42 @@ export class PublicationDraftsService {
               position,
             })),
           });
-          const state = request.state;
+          const { importReview: submittedReview, ...editorState } = request.state;
+          const previousRule = current?.schedule?.rule;
+          const storedReview =
+            previousRule && typeof previousRule === 'object' && !Array.isArray(previousRule)
+              ? previousRule.importReview
+              : undefined;
+          const parsedReview = publicationImportReviewSchema.safeParse(storedReview);
+          if (storedReview !== undefined && !parsedReview.success)
+            throw new ConflictException(
+              'Не удалось проверить замечания к импорту. Переоткройте черновик.',
+            );
+          const review = parsedReview.success ? parsedReview.data : undefined;
+          const resolved = review
+            ? [...new Set([...review.resolved, ...(submittedReview?.resolved ?? [])])]
+            : [];
+          const restored = review
+            ? [...new Set([...(review.restored ?? []), ...(submittedReview?.restored ?? [])])]
+            : [];
+          if (
+            review &&
+            (resolved.some((index) => !review.warnings[index]) ||
+              restored.some((index) => {
+                const warning = review.warnings[index];
+                return (
+                  !warning ||
+                  !resolved.includes(index) ||
+                  !['image', 'video'].includes(warning.kind) ||
+                  warning.mediaPosition === undefined
+                );
+              }))
+          )
+            throw new BadRequestException('Проверьте номера выбранных вложений.');
+          const state = {
+            ...editorState,
+            ...(review ? { importReview: { ...review, resolved, restored } } : {}),
+          };
           const mode: PublicationScheduleMode =
             state.timingMode === 'now'
               ? 'NOW'
@@ -292,74 +345,6 @@ export class PublicationDraftsService {
         },
       });
     });
-  }
-
-  private async assertQuota(
-    tx: Prisma.TransactionClient,
-    actorUserId: string,
-    excludeId: string | null,
-    content: PreparedPublicationContentRevision,
-    actingActorUserId = actorUserId,
-  ) {
-    const drafts = await tx.publication.findMany({
-      where: {
-        actorUserId,
-        dispatchProfile: 'PUBLIK_V1',
-        lifecycle: 'DRAFT',
-        ...(excludeId ? { id: { not: excludeId } } : {}),
-      },
-      take: MAX_PUBLICATION_SERVER_DRAFTS + 1,
-      select: {
-        canonicalContentRevision: {
-          select: { assets: { select: { asset: { select: { sizeBytes: true } } } } },
-        },
-      },
-    });
-    if (drafts.length >= MAX_PUBLICATION_SERVER_DRAFTS)
-      throw new BadRequestException(
-        `Можно сохранить до ${MAX_PUBLICATION_SERVER_DRAFTS} черновиков.`,
-      );
-    const referencesToResolve = content.assets.filter((asset) => asset.kind === 'reference');
-    // FLAG: One asset cannot appear with two source hints and let a valid pair authorize
-    // its unrelated sibling. The final content writer also rejects duplicate links.
-    if (
-      new Set(referencesToResolve.map((asset) => asset.assetId)).size !== referencesToResolve.length
-    )
-      throw new BadRequestException('Один и тот же медиафайл добавлен несколько раз.');
-    const references = referencesToResolve.length
-      ? await tx.publicationAsset.findMany({
-          where: {
-            OR: referencesToResolve.map((asset) =>
-              publicationAssetReferenceWhere(actingActorUserId, asset, excludeId ?? undefined),
-            ),
-          },
-          select: { id: true, sizeBytes: true },
-        })
-      : [];
-    if (references.length !== referencesToResolve.length)
-      throw new BadRequestException('Медиа черновика недоступно.');
-    const bytes =
-      drafts.reduce(
-        (total, draft) =>
-          total +
-          (draft.canonicalContentRevision?.assets.reduce(
-            (sum, link) => sum + link.asset.sizeBytes,
-            0,
-          ) ?? 0),
-        0,
-      ) +
-      content.assets.reduce(
-        (total, asset) =>
-          total +
-          (asset.kind === 'prepared'
-            ? asset.sizeBytes
-            : references.find((ref) => ref.id === asset.assetId)!.sizeBytes),
-        0,
-      );
-    if (bytes > MAX_PUBLICATION_DRAFT_STORAGE_BYTES)
-      throw new BadRequestException(
-        'Медиа черновиков превышают 128 МБ. Удалите ненужные черновики.',
-      );
   }
 
   private async pruneUnusedRevisions(

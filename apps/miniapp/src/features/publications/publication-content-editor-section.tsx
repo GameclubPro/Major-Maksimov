@@ -1,3 +1,5 @@
+import { formatPublicationMediaSummary } from './publication-page-formatters';
+import type { PublicationVideoRead } from './publication-remote-video';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import type { BroadcastLinkButton } from '@maxim/contracts';
 import { MAX_PUBLICATION_IMAGES } from '@maxim/contracts/publication';
@@ -16,7 +18,10 @@ import {
   type PublicationDraft,
   type PublicationTarget,
 } from './publication-model';
-import { PublicationRetainedMedia } from './publication-retained-media';
+import { PublicationImportReviewPanel } from './publication-import-review';
+import { restoreImportAsset } from './publication-album';
+import { PublicationAlbumEditor } from './publication-album-editor';
+import { publicationAlbum, withAlbumPhotos } from './publication-album';
 import type { PublisherPostImportAssetPreview } from './use-publisher-post-import-asset-previews';
 import { PublicationVideoTool } from './publication-video-tool';
 import './publication-content-editor-section.css';
@@ -27,6 +32,7 @@ type PublicationContentEditorSectionProps = {
   setDraft: Dispatch<SetStateAction<PublicationDraft>>;
   importOmissions: PublisherPostImportOmission[];
   importing: boolean;
+  videoRead: PublicationVideoRead;
   importedAssetPreviews: readonly PublisherPostImportAssetPreview[];
   customButtons: BroadcastLinkButton[];
   systemButtons: BroadcastSystemButtonPreview[];
@@ -49,7 +55,11 @@ type PublicationContentEditorSectionProps = {
   onResolveMissingImages: (currentImageCount: number) => void;
   onPreviewTargetChange: (targetKey: string) => void;
   onOpenButtons: () => void;
-  onVideoFile: (file: File | undefined) => Promise<void>;
+  onVideoFile: (
+    file: File | undefined,
+    replaceKey?: string,
+    warningIndex?: number,
+  ) => Promise<void>;
   onImagePreparationChange: (preparing: boolean) => void;
   onFieldError: (message: string) => void;
   onInfo: (message: string) => void;
@@ -62,6 +72,7 @@ export function PublicationContentEditorSection({
   importOmissions,
   importing,
   importedAssetPreviews,
+  videoRead,
   customButtons,
   systemButtons,
   previewTargets,
@@ -90,15 +101,17 @@ export function PublicationContentEditorSection({
 }: PublicationContentEditorSectionProps) {
   const [videoError, setVideoError] = useState('');
   const videoErrorId = useId();
-  const retainedImageCount = draft.retainedAssets.filter((asset) => asset.type === 'image').length;
+  const album = publicationAlbum(draft);
+  const albumSize = album.length;
+  const videoCount = album.filter((item) => item.type === 'video').length;
+  const retainedImageCount = albumSize - draft.images.length;
   const maxLocalImageCount = Math.max(0, MAX_PUBLICATION_IMAGES - retainedImageCount);
-  const imageInputAllowed =
-    !retainedVideo && draft.mediaType !== 'video' && draft.images.length < maxLocalImageCount;
+  const imageInputAllowed = albumSize < MAX_PUBLICATION_IMAGES;
   const videoBlockedReason =
     missingImageCount > 0
       ? 'Сначала завершите восстановление фото'
-      : retainedImageCount > 0 || draft.images.length > 0
-        ? 'Сначала удалите фото'
+      : albumSize >= MAX_PUBLICATION_IMAGES
+        ? 'В альбоме уже 10 вложений'
         : null;
 
   async function handleVideoFile(file: File | undefined): Promise<void> {
@@ -114,6 +127,38 @@ export function PublicationContentEditorSection({
           ? 'Загрузка видео отменена.'
           : describeUserFacingError(error, 'Не удалось подготовить видео. Повторите выбор.'),
       );
+    }
+  }
+
+  async function restoreWarningFile(file: File, index: number) {
+    const warning = draft.importReview?.warnings[index];
+    if (!warning || isBusy) return;
+    setVideoError('');
+    try {
+      if (publicationAlbum(draft).length >= MAX_PUBLICATION_IMAGES)
+        throw new Error('В альбоме уже 10 вложений');
+      if (warning.kind === 'video') {
+        await onVideoFile(file, undefined, index);
+      } else {
+        onImagePreparationChange(true);
+        const { prepareComposerImageFiles } = await import('../../lib/broadcast-image-preparation');
+        const prepared = await prepareComposerImageFiles({
+          files: [file],
+          currentImages: draft.images,
+          signal: new AbortController().signal,
+        });
+        if (!prepared.addedCount)
+          throw new Error(
+            prepared.failedMessages[0] || 'Фото не добавлено. Проверьте размер и повторы.',
+          );
+        setDraft((current) =>
+          restoreImportAsset(current, index, { photo: prepared.images.at(-1)! }),
+        );
+      }
+    } catch (error) {
+      setVideoError(describeUserFacingError(error, 'Не удалось восстановить вложение.'));
+    } finally {
+      if (warning.kind !== 'video') onImagePreparationChange(false);
     }
   }
 
@@ -154,23 +199,17 @@ export function PublicationContentEditorSection({
           disabled={isBusy}
         />
       ) : null}
+      <PublicationImportReviewPanel
+        draft={draft}
+        setDraft={setDraft}
+        busy={isBusy}
+        onRestore={restoreWarningFile}
+      />
       <PublicationImportButtonsNotice
-        omissions={importing ? importOmissions : []}
+        omissions={draft.importReview?.omissions ?? (importing ? importOmissions : [])}
         customButtonCount={customButtonCount}
         disabled={isBusy}
         onAdd={onOpenButtons}
-      />
-      <PublicationRetainedMedia
-        assets={draft.retainedAssets.filter((asset) => asset.type === 'video')}
-        previews={importedAssetPreviews}
-        disabled={isBusy}
-        onRemove={(assetId) => {
-          setVideoError('');
-          setDraft((current) => ({
-            ...current,
-            retainedAssets: current.retainedAssets.filter((asset) => asset.id !== assetId),
-          }));
-        }}
       />
       {imagesNeedReselection ? (
         <div className="publications-inline-notice is-warning" role="alert">
@@ -198,38 +237,25 @@ export function PublicationContentEditorSection({
         maxLength={PUBLICATION_TEXT_MAX_LENGTH}
         images={draft.images}
         retainedImageCount={retainedImageCount}
-        retainedImages={draft.retainedAssets
-          .filter((asset) => asset.type === 'image')
-          .map((asset, index) => {
-            const url = importedAssetPreviews.find((preview) => preview.assetId === asset.id)?.url;
-            return (
-              <figure key={asset.id} className="broadcast-message-card__media-frame">
-                {url ? (
-                  <img className="broadcast-message-card__image" src={url} alt="" />
-                ) : (
-                  <span
-                    className="broadcast-message-card__media-frame--loading"
-                    aria-label={`Сохранённое фото ${index + 1}`}
-                  />
-                )}
-                <button
-                  type="button"
-                  className="broadcast-message-card__media-remove"
-                  disabled={isBusy}
-                  aria-label={`Убрать сохранённое фото ${index + 1}`}
-                  title="Убрать фото"
-                  onClick={() =>
-                    setDraft((current) => ({
-                      ...current,
-                      retainedAssets: current.retainedAssets.filter((item) => item.id !== asset.id),
-                    }))
-                  }
-                >
-                  <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-                </button>
-              </figure>
-            );
-          })}
+        orderedMediaLabel={formatPublicationMediaSummary({
+          mediaCount: albumSize,
+          videoCount,
+          hasVideo: videoCount > 0,
+        })}
+        orderedMedia={
+          albumSize ? (
+            <PublicationAlbumEditor
+              draft={draft}
+              setDraft={setDraft}
+              previews={importedAssetPreviews}
+              videoRead={videoRead}
+              busy={isBusy}
+              onVideoFile={onVideoFile}
+              onPreparing={onImagePreparationChange}
+              onError={setVideoError}
+            />
+          ) : undefined
+        }
         maxImages={Math.max(1, maxLocalImageCount)}
         allowImages={imageInputAllowed}
         buttons={customButtons}
@@ -254,7 +280,7 @@ export function PublicationContentEditorSection({
             onBlocked={() => videoBlockedReason && onInfo(videoBlockedReason)}
           />
         }
-        videoLabel={draft.mediaType === 'video' ? draft.mediaFileName || 'Видео' : null}
+        videoLabel={null}
         disabled={operationBusy}
         textError={
           fieldError.includes('текст') ||
@@ -272,26 +298,11 @@ export function PublicationContentEditorSection({
         onImagesChange={(images) => {
           setVideoError('');
           onResolveMissingImages(images.length);
-          setDraft((current) => ({
-            ...current,
-            images,
-          }));
+          setDraft((current) => withAlbumPhotos(current, images));
           onFieldError('');
         }}
         onImagePreparationChange={onImagePreparationChange}
         onOpenButtons={onOpenButtons}
-        onClearVideo={() => {
-          setVideoError('');
-          setDraft((current) => ({
-            ...current,
-            retainedAssets: current.retainedAssets.filter((asset) => asset.type !== 'video'),
-            mediaType: null,
-            mediaPayload: null,
-            mediaBase64: '',
-            mediaMimeType: '',
-            mediaFileName: '',
-          }));
-        }}
         onError={onInfo}
       />
       {videoPreparing ? (

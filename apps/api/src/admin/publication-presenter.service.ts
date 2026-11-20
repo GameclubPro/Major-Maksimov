@@ -150,6 +150,10 @@ export function scopedPublicationOccurrenceStatus(
   return 'CANCELED';
 }
 
+function isVideoAsset(asset: { mimeType: string; durablePayload?: unknown }): boolean {
+  return asset.durablePayload != null || asset.mimeType.toLowerCase().startsWith('video/');
+}
+
 type PublicationTargetRow = {
   targetChatId: string;
   entityType: ChatEntityType;
@@ -364,6 +368,10 @@ export class PublicationPresenterService {
     const delivery =
       preloadedDeliveryStats ?? row.deliveryStats ?? (await this.loadDeliveryStats(row.id));
     const content = row.canonicalContentRevision;
+    const videoCount =
+      content?.assets.filter((link: { asset: { mimeType: string; durablePayload?: unknown } }) =>
+        isVideoAsset(link.asset),
+      ).length ?? 0;
     const contentPreviewSource = content?.text?.trim() ?? '';
     const contentPreview =
       content?.textFormat === PublicationContentFormat.MARKDOWN
@@ -403,12 +411,8 @@ export class PublicationPresenterService {
       audienceSelection: canManageAllTargets ? row.audienceSelection : 'SELECTED',
       audienceMode: canManageAllTargets ? row.audienceMode : 'SNAPSHOT',
       mediaCount: content?.assets.length ?? 0,
-      hasVideo:
-        content?.assets.some(
-          (link: any) =>
-            link.asset.durablePayload !== null ||
-            link.asset.mimeType.toLowerCase().startsWith('video/'),
-        ) ?? false,
+      videoCount,
+      hasVideo: videoCount > 0,
       schedule:
         row.schedule &&
         !(
@@ -464,11 +468,7 @@ export class PublicationPresenterService {
         buttons: readStoredPublicationButtons(content.buttons),
         media: content.assets.map((link: any) => ({
           id: link.asset.id,
-          type:
-            link.asset.durablePayload !== null ||
-            link.asset.mimeType.toLowerCase().startsWith('video/')
-              ? 'video'
-              : 'image',
+          type: isVideoAsset(link.asset) ? 'video' : 'image',
           mimeType: link.asset.mimeType,
           fileName: link.asset.fileName,
           sizeBytes: link.asset.sizeBytes,

@@ -52,6 +52,50 @@ function createService(prisma: unknown = {}) {
 }
 
 describe('PublicationContentService', () => {
+  it('carries the full mixed media order from the publication test request into private delivery', async () => {
+    const payload = await createService().buildLegacyTestPayload(
+      {
+        requestId: 'publication-test-ordered',
+        sourceTarget: { entityType: 'channel', chatId: 'channel-1' },
+        content: {
+          text: 'caption',
+          textFormat: 'plain',
+          buttons: [],
+          media: [
+            {
+              type: 'video',
+              base64: TINY_VALID_MP4.toString('base64'),
+              mimeType: 'video/mp4',
+              fileName: 'clip.mp4',
+              payload: null,
+            },
+            {
+              type: 'image',
+              base64: TINY_JPEG.toString('base64'),
+              mimeType: 'image/jpeg',
+              fileName: 'cover.jpg',
+            },
+            {
+              type: 'video',
+              base64: '',
+              mimeType: 'video/mp4',
+              fileName: 'second.mp4',
+              payload: { token: 'existing' },
+            },
+          ],
+        },
+      } as Parameters<PublicationContentService['buildLegacyTestPayload']>[0],
+      'owner',
+    );
+    expect(payload).toMatchObject({
+      publicationTestAlbum: [
+        { type: 'video', fileName: 'clip.mp4' },
+        { type: 'image', fileName: 'cover.jpg' },
+        { type: 'video', fileName: 'second.mp4', payload: { token: 'existing' } },
+      ],
+    });
+  });
+
   it('prepares imported image and video bytes with the same assets as public base64', async () => {
     const service = createService();
     for (const [type, bytes, fileName, mimeType] of [

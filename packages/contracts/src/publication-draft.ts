@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  publisherPostImportOmissionSchema,
+  publisherPostImportWarningSchema,
+} from './publisher.js';
 import { utcTimestampSchema } from './validator-compat.js';
 import {
   publicationDetailsSchema,
@@ -25,7 +29,15 @@ const zone = z
     }
   }, 'Выберите корректный часовой пояс.');
 
+export const publicationImportReviewSchema = z.object({
+  omissions: z.array(publisherPostImportOmissionSchema).max(3),
+  warnings: z.array(publisherPostImportWarningSchema).max(128),
+  restored: z.array(z.number().int().min(0).max(127)).max(128).optional(),
+  resolved: z.array(z.number().int().min(0).max(127)).max(128),
+});
+export type PublicationImportReview = z.infer<typeof publicationImportReviewSchema>;
 export const publicationDraftStateSchema = z.object({
+  importReview: publicationImportReviewSchema.optional(),
   formatVersion: z.literal(1),
   timingMode: z.enum(['now', 'once', 'schedule']),
   scheduleKind: z.enum(['slots', 'recurrence']),
@@ -53,6 +65,7 @@ export type PublicationDraftState = z.infer<typeof publicationDraftStateSchema>;
 
 export const savePublicationDraftRequestSchema = z
   .object({
+    mediaVersion: z.literal(2).optional(),
     requestId: z
       .string()
       .trim()

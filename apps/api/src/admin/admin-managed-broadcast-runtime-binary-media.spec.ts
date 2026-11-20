@@ -453,14 +453,27 @@ describe('canonical Publication execution binary media', () => {
     expect(uploadVideo).not.toHaveBeenCalled();
   });
 
-  it('rejects mixed image/video revisions before any upload', async () => {
+  it('prepares every item of an immutable mixed album in order', async () => {
     const { load, resolve, assetFindFirst, uploadImage, uploadVideo } = createRuntime([
+      createAsset({ id: 'video-1', mimeType: 'video/mp4', durablePayload: { token: 'video-1' } }),
       createAsset(),
-      createAsset({ id: 'video', mimeType: 'video/mp4' }),
+      createAsset({
+        id: 'video-2',
+        mimeType: 'video/mp4',
+        durablePayload: {
+          [PUBLICATION_UPLOADED_VIDEO_FIELD]: { version: 1, botId: 'publisher', token: 'video-2' },
+        },
+      }),
     ]);
-    await expect(resolve(await load())).rejects.toThrow('либо фотографии, либо одно видео');
-    expect(assetFindFirst).not.toHaveBeenCalled();
-    expect(uploadImage).not.toHaveBeenCalled();
+    await expect(resolve(await load())).resolves.toEqual({
+      attachments: [
+        { type: 'video', payload: { token: 'video-1' } },
+        { type: 'image', payload: { token: 'image-token' } },
+        { type: 'video', payload: { token: 'video-2' } },
+      ],
+    });
+    expect(assetFindFirst).toHaveBeenCalledTimes(1);
+    expect(uploadImage).toHaveBeenCalledTimes(1);
     expect(uploadVideo).not.toHaveBeenCalled();
   });
 

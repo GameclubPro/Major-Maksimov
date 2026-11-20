@@ -1,0 +1,53 @@
+@layer components {
+  .publication-import-review {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border-radius: 12px;
+    color: var(--color-ink);
+    background: var(--publication-warning-bg);
+    border: 1px solid var(--publication-warning-border);
+    overflow-wrap: anywhere;
+  }
+  .publication-import-review p {
+    margin: 0;
+  }
+  .publication-import-review__row {
+    display: grid;
+    gap: 4px;
+  }
+  .publication-import-review__row small {
+    white-space: pre-wrap;
+    color: var(--color-ink-muted);
+  }
+  .publication-import-review__actions {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .publication-import-review__actions button,
+  .publication-import-review__actions label {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 8px;
+    background: var(--color-surface);
+    color: var(--color-ink);
+    font: inherit;
+  }
+  .publication-import-review__actions input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    opacity: 0;
+  }
+  .publication-import-review__actions label:focus-within {
+    outline: 2px solid var(--color-accent);
+  }
+}

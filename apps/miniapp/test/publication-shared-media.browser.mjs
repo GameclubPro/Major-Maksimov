@@ -82,6 +82,22 @@ try {
           },
         ]);
       };
+      const openPreview = async () => {
+        if (kind === 'video') {
+          await page.getByRole('button', { name: /Посмотреть видео/u }).click();
+          await page.getByRole('dialog', { name: /Видео:/u }).waitFor();
+          await page
+            .getByRole('dialog', { name: /Видео:/u })
+            .getByRole('button', { name: 'Закрыть видео', exact: true })
+            .click();
+        } else {
+          await page.waitForFunction(
+            () =>
+              JSON.parse(document.querySelector('[data-testid="previews"]').textContent).length ===
+              1,
+          );
+        }
+      };
       await page.goto(`${base}publication-shared-media-test?kind=${kind}`);
       await page.getByTestId('state').waitFor();
       await page.waitForFunction(
@@ -96,15 +112,13 @@ try {
       );
       assert.equal((await read()).cloud, null);
       assert.equal((await read()).retainedAssets[0].sourcePublicationId, details.id);
-      await page.waitForFunction(
-        () =>
-          JSON.parse(document.querySelector('[data-testid="previews"]').textContent).length === 1,
-      );
+      await openPreview();
       assert.equal(previews.at(-1).sourceId, details.id);
 
       await click('Сохранить черновик');
       const initialSave = await next(saves, 'draft save');
       const frozenBody = initialSave.request().postData();
+      assert.equal(initialSave.request().postDataJSON().mediaVersion, 2);
       expectReference(initialSave.request().postDataJSON(), details.id);
       assert.equal(initialSave.request().postDataJSON().expectedRevision, undefined);
       await click('Отправить тест');
@@ -157,10 +171,7 @@ try {
 
       sourceRevoked = true;
       await click('Обновить предпросмотр');
-      await page.waitForFunction(
-        () =>
-          JSON.parse(document.querySelector('[data-testid="previews"]').textContent).length === 1,
-      );
+      await openPreview();
       assert.equal(previews.at(-1).sourceId, draftId);
       await click('Отправить тест');
       const afterAck = await next(tests, 'private test from saved copy');

@@ -1,3 +1,5 @@
+import { ApiRequestError } from '../../lib/api-request-error';
+import type { PublisherPostImportWarning } from '@maxim/contracts/publisher';
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
@@ -139,11 +141,13 @@ export function usePublicationEditorSession({
       mode,
       sessionId,
       omissions,
+      warnings,
     }: {
       publicationId: string;
       mode: 'edit' | 'duplicate' | 'import' | 'draft' | 'draft-copy';
       sessionId?: string | null;
       omissions?: PublisherPostImportOmission[];
+      warnings?: PublisherPostImportWarning[];
     }) =>
       (mode === 'draft' || mode === 'draft-copy' || mode === 'import'
         ? import('../../lib/api/publication-drafts-client')
@@ -155,7 +159,7 @@ export function usePublicationEditorSession({
         : getPublication(api, publicationId).then((details) => ({ details, serverDraft: null }))
       ).then(({ details, serverDraft }) => {
         if (mode === 'import' && details.lifecycle !== 'DRAFT') {
-          throw new Error('Этот черновик уже опубликован');
+          throw new ApiRequestError(410, '', 'Этот черновик уже опубликован');
         }
         return {
           details,
@@ -163,11 +167,15 @@ export function usePublicationEditorSession({
           mode,
           sessionId: sessionId ?? null,
           omissions: omissions ?? [],
+          warnings: warnings ?? [],
         };
       }),
-    onSuccess: ({ details, serverDraft, mode, sessionId, omissions }) => {
+    onSuccess: ({ details, serverDraft, mode, sessionId, omissions, warnings }) => {
       savedCreateDraftRef.current = { draft, missingImageCount };
       const sourceDraft = serverDraft ?? createPublicationDraftFromDetails(details);
+      if (mode === 'import' && !sourceDraft.importReview && (warnings.length || omissions.length)) {
+        sourceDraft.importReview = { omissions, warnings, resolved: [] };
+      }
       const isolatedDraft =
         mode === 'duplicate' || mode === 'draft-copy'
           ? {
@@ -208,7 +216,11 @@ export function usePublicationEditorSession({
       });
     },
     onError: (error, variables) => {
-      if (variables.mode === 'import') {
+      if (
+        variables.mode === 'import' &&
+        error instanceof ApiRequestError &&
+        [404, 410].includes(error.status)
+      ) {
         postImport.dismissStaleImport();
       }
       editorReturnFocusRef.current = null;
@@ -229,6 +241,15 @@ export function usePublicationEditorSession({
     setSearchParams,
     onOpenDraft: openImportedDraft,
   });
+  if (
+    openPublicationMutation.isError &&
+    openPublicationMutation.variables?.mode === 'import' &&
+    postImport.hasImportRoute
+  ) {
+    postImport.statusProps.readError = 'Не удалось открыть черновик';
+    const retry = openPublicationMutation.variables;
+    postImport.statusProps.onReadRetry = () => openPublicationMutation.mutate(retry);
+  }
   const refreshEditedPublicationMutation = useMutation({
     mutationFn: (publicationId: string) => getPublication(api, publicationId),
     onSuccess: (details) => {
@@ -367,6 +388,7 @@ export function usePublicationEditorSession({
     publicationId: string,
     sessionId: string | null = null,
     omissions: PublisherPostImportOmission[] = [],
+    warnings: PublisherPostImportWarning[] = [],
   ) {
     if (!isPublisherProfile || !hydrated || openPublicationMutation.isPending) {
       return;
@@ -374,7 +396,13 @@ export function usePublicationEditorSession({
     if (!editorReturnFocusRef.current) {
       rememberEditorReturnFocus(publicationId);
     }
-    openPublicationMutation.mutate({ publicationId, mode: 'import', sessionId, omissions });
+    openPublicationMutation.mutate({
+      publicationId,
+      mode: 'import',
+      sessionId,
+      omissions,
+      warnings,
+    });
   }
 
   function requestCreateEditor() {

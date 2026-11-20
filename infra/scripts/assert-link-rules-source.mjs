@@ -24,6 +24,30 @@ function executable(source) {
     .replace(/\s+/gu, ' ');
 }
 
+function hasSelectiveLinkReader(source) {
+  const signature = executable(`export function evaluateRuntimeLinkRulesPolicy(
+    policy: LinkRulesPolicy,
+    targets: readonly NavigationTargetEvidence[],
+    nowMs = Date.now(),
+  ): LinkRulesPolicyEvaluation<NavigationTargetEvidence> {`);
+  const direct =
+    'return evaluateLinkRulesPolicy(policy, targets.filter(isEnforceableLinkPolicyTarget), nowMs);';
+  const withSearchDestination =
+    executable(`const enforceableTargets = targets.filter(isEnforceableLinkPolicyTarget);
+    if (policy.mode !== 'ALLOW_SELECTED') {
+      return evaluateLinkRulesPolicy(policy, enforceableTargets, nowMs);
+    }
+    const policyTargets = enforceableTargets.map((target) => {
+      if (target.kind !== 'external_url') return target;
+      const destination = readSearchLinkDestination(target.target);
+      return destination ? { kind: target.kind, target: destination, enforceable: true } : target;
+    });
+    const result = evaluateLinkRulesPolicy(policy, policyTargets, nowMs);
+    if (result.allowed) return result;
+    return { ...result, target: enforceableTargets[policyTargets.indexOf(result.target)]! };`);
+  return [direct, withSearchDestination].some((body) => source.includes(`${signature} ${body} }`));
+}
+
 export function assertLinkRulesSource(read) {
   // FLAG: Persisted selective link rules and queued reasons need compatible readers even
   // after all chats switch to allow-all. The legacy shadow enum cannot authorize a rollback.
@@ -34,9 +58,7 @@ export function assertLinkRulesSource(read) {
     /linkRulesPolicy\s+Json\?/u.test(source.schema) &&
     source.evaluator.includes('export function evaluateLinkRulesPolicy') &&
     source.reader.includes('linkRulesPolicySchema.safeParse(value)') &&
-    source.reader.includes(
-      'return evaluateLinkRulesPolicy(policy, targets.filter(isEnforceableLinkPolicyTarget), nowMs)',
-    ) &&
+    hasSelectiveLinkReader(source.reader) &&
     source.detector.includes('readRuntimeLinkRulesPolicy(linkRulesPolicy)') &&
     source.detector.includes('evaluateRuntimeLinkRulesPolicy(rules.policy, targets)') &&
     source.guard.includes('linkRulesPolicy: true') &&

@@ -1,4 +1,9 @@
 import {
+  publicationTestAlbumSchema,
+  publicationTestMediaFields,
+  type PublicationTestPayload,
+} from './publication-ordered-media';
+import {
   type BroadcastImage,
   type SendBroadcastRequest,
   sendBroadcastRequestSchema,
@@ -193,6 +198,56 @@ function maskTrustedPublicationImages(images: BroadcastImage[]): BroadcastImage[
 }
 
 export function safeParseTrustedPublicationTestBroadcastRequest(
+  body: unknown,
+): { success: true; data: PublicationTestPayload } | { success: false; error: z.ZodError } {
+  if (body && typeof body === 'object' && 'publicationTestAlbum' in body) {
+    const { publicationTestAlbum, ...base } = body;
+    const parsed = publicationTestAlbumSchema.safeParse(publicationTestAlbum);
+    if (!parsed.success) return parsed;
+    let first: SendBroadcastRequest | undefined;
+    let totalImageBase64 = 0;
+    for (const item of parsed.data) {
+      const single = safeParseSinglePublicationTestRequest({
+        ...base,
+        ...publicationTestMediaFields(item),
+      });
+      if (!single.success) return single;
+      first ??= single.data;
+      if (item.type === 'image') totalImageBase64 += item.base64.length;
+    }
+    if (!first || totalImageBase64 > MAX_PUBLICATION_IMAGES_TOTAL_BASE64_LENGTH) {
+      return {
+        success: false,
+        error: new z.ZodError([
+          {
+            code: 'custom',
+            path: ['publicationTestAlbum'],
+            message: 'Суммарный размер фото слишком большой.',
+          },
+        ]),
+      };
+    }
+    return {
+      success: true,
+      data: {
+        ...first,
+        imageEnabled: false,
+        imageBase64: '',
+        imageMimeType: '',
+        imageFileName: '',
+        images: [],
+        mediaType: null,
+        mediaPayload: null,
+        mediaMimeType: '',
+        mediaFileName: '',
+        publicationTestAlbum: parsed.data,
+      },
+    };
+  }
+  return safeParseSinglePublicationTestRequest(body);
+}
+
+function safeParseSinglePublicationTestRequest(
   body: unknown,
 ): { success: true; data: SendBroadcastRequest } | { success: false; error: z.ZodError } {
   const trustedFields = trustedPublicationTestFieldsSchema.safeParse(body);

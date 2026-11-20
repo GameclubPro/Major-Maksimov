@@ -88,7 +88,10 @@ function createFixture(
   sessionOverrides: Record<string, unknown> = {},
 ) {
   const tx = {
+    $executeRaw: jest.fn().mockResolvedValue(1),
+    publicationSchedule: { create: jest.fn().mockResolvedValue({}) },
     publication: {
+      findMany: jest.fn().mockResolvedValue([]),
       create: jest.fn().mockResolvedValue({ id: 'publication-1' }),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -157,6 +160,164 @@ describe('PublisherPostImportProcessingService', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('combines direct and forwarded items only in the collection owner dialog, storing review with the draft', async () => {
+    const { service, prisma, tx, maxClient, contentService } = createFixture(undefined, {
+      inputMode: 'collection',
+      inputMessages: [
+        { messageId: 'incoming-mid-1', webhookEventId: 'r1' },
+        { messageId: 'second', webhookEventId: 'r2' },
+      ],
+    });
+    const first = persistedForwardReceipt({
+      incomingMessageId: 'incoming-mid-1',
+      linkedMessage: {},
+    });
+    const firstMessage = first.normalizedPayload.raw.message;
+    const direct = {
+      ...first,
+      normalizedPayload: {
+        ...first.normalizedPayload,
+        raw: {
+          ...first.normalizedPayload.raw,
+          message: {
+            ...firstMessage,
+            link: null,
+            body: { mid: 'incoming-mid-1', text: 'Личный текст' },
+          },
+        },
+      },
+    };
+    const second = persistedForwardReceipt({
+      incomingMessageId: 'second',
+      linkedMessage: {
+        text: 'Исходный пост',
+        attachments: [{ type: 'share', payload: { url: 'https://example.com/ref' } }],
+      },
+    });
+    Object.assign(second.normalizedPayload.raw.message.body!, { text: 'Комментарий автора' });
+    prisma.webhookEvent.findUnique.mockResolvedValueOnce(direct).mockResolvedValueOnce(second);
+    const log = jest
+      .spyOn(
+        (service as unknown as { logger: { log: (data: unknown, message: string) => void } })
+          .logger,
+        'log',
+      )
+      .mockImplementation(() => undefined);
+    jest.setSystemTime(new Date(NOW.getTime() + 1250));
+    await expect(service.process('session-1')).resolves.toBe('ready');
+    expect(log).toHaveBeenCalledWith(
+      {
+        sessionId: 'session-1',
+        publicationId: 'publication-1',
+        snapshotSource: 'webhook_receipt',
+        inputMode: 'collection',
+        inputKind: 'collection',
+        elapsedMs: 1250,
+        mediaKind: 'text',
+        mediaCount: 0,
+        warningCount: 2,
+        suggestionCount: 2,
+        lossWarningCount: 0,
+        omissionKindCount: 0,
+        importCompleteness: 'complete',
+      },
+      'Publisher forwarded post import completed',
+    );
+    expect(maxClient.getExactMessageRow).not.toHaveBeenCalled();
+    expect(contentService.prepareBinaryContentRevision).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Личный текст\n\nИсходный пост' }),
+    );
+    expect(tx.publicationSchedule.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          rule: expect.objectContaining({
+            importReview: {
+              resolved: [],
+              omissions: [],
+              warnings: [
+                {
+                  messageIndex: 2,
+                  kind: 'text',
+                  reason: 'outer_comment',
+                  value: 'Комментарий автора',
+                },
+                {
+                  messageIndex: 2,
+                  itemIndex: 1,
+                  kind: 'link',
+                  reason: 'optional_link',
+                  value: 'https://example.com/ref',
+                },
+              ],
+            },
+          }),
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'direct',
+      { body: { text: 'Полезный текст', attachments: [{ type: 'inline_keyboard' }] } },
+      0,
+      1,
+    ],
+    [
+      'forward',
+      {
+        link: {
+          type: 'forward',
+          message: { text: 'Полезный текст', attachments: [{ type: 'file' }] },
+        },
+      },
+      1,
+      1,
+    ],
+  ] as const)(
+    'reports a partial import for real %s content in message mode',
+    async (inputKind, source, lossWarningCount, omissionKindCount) => {
+      const { service } = createFixture(
+        {
+          mid: 'incoming-mid-1',
+          sender: { user_id: 42 },
+          recipient: { chat_id: 42, chat_type: 'dialog' },
+          ...source,
+        },
+        { inputMode: 'message' },
+      );
+      const logger = (
+        service as unknown as { logger: { log: (data: unknown, message: string) => void } }
+      ).logger;
+      const log = jest.spyOn(logger, 'log').mockImplementation(() => undefined);
+      await expect(service.process('session-1')).resolves.toBe('ready');
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputKind,
+          inputMode: 'message',
+          importCompleteness: 'partial',
+          lossWarningCount,
+          omissionKindCount,
+          suggestionCount: 0,
+        }),
+        'Publisher forwarded post import completed',
+      );
+    },
+  );
+
+  it('applies the manual draft quota before creating an imported revision', async () => {
+    const { service, tx, prisma } = createFixture();
+    tx.publication.findMany.mockResolvedValue(
+      Array.from({ length: 50 }, () => ({ canonicalContentRevision: null })),
+    );
+    await expect(service.process('session-1')).resolves.toBe('failed');
+    expect(tx.$executeRaw).toHaveBeenCalled();
+    expect(tx.publication.create).not.toHaveBeenCalled();
+    expect(prisma.publisherPostImportSession.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ failureCode: 'draft_quota' }) }),
+    );
   });
 
   it('falls back to remote exact lookup and preserves structured UTF-16 markup', async () => {
@@ -314,7 +475,7 @@ describe('PublisherPostImportProcessingService', () => {
 
     await expect(
       internal.buildContent({ attachments: [{ type: 'share', ...shareFields }] }, 'publik_bot'),
-    ).rejects.toMatchObject({ code: 'unsupported_content' });
+    ).rejects.toMatchObject({ code: 'empty_content' });
   });
 
   it('keeps transferable text and reports omitted unsupported attachments', async () => {
@@ -366,16 +527,19 @@ describe('PublisherPostImportProcessingService', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: PublisherPostImportStatus.FAILED,
-          failureCode: 'unsupported_content',
+          failureCode: 'empty_content',
         }),
       }),
     );
     expect(terminalLog).toHaveBeenCalledWith(
       {
         sessionId: 'session-1',
-        failureCode: 'unsupported_content',
-        rejectionKind: 'unsupported_content',
+        failureCode: 'empty_content',
+        rejectionKind: 'empty_content',
         snapshotSource: 'remote_exact',
+        inputMode: 'forward',
+        inputKind: 'forward',
+        elapsedMs: 0,
       },
       'Publisher forwarded post import rejected',
     );
@@ -384,23 +548,49 @@ describe('PublisherPostImportProcessingService', () => {
     expect(JSON.stringify(terminalLog.mock.calls)).not.toContain('actorUserId');
   });
 
-  it('keeps mixed photo and video posts terminal', async () => {
-    const { service } = createFixture();
-    const internal = service as unknown as {
-      buildContent: (message: Record<string, unknown>, botId: string) => Promise<unknown>;
+  it('imports photo and token-backed video in source order without reading the thumbnail', async () => {
+    const { service, maxClient } = createFixture();
+    maxClient.getVideoDownloadUrl.mockResolvedValue('https://v.max.ru/asset.mp4');
+    const internals = service as unknown as {
+      buildContent: (
+        message: Record<string, unknown>,
+        botId: string,
+      ) => Promise<{ media: Array<{ type: string }>; text: string; warnings: unknown[] }>;
+      downloadMedia: (
+        url: string,
+        max: number,
+        type: string,
+      ) => Promise<{ bytes: Buffer; mimeType: string }>;
     };
-
-    await expect(
-      internal.buildContent(
-        {
-          attachments: [
-            { type: 'image', payload: { url: 'https://i.max.ru/photo' } },
-            { type: 'video', payload: { token: 'video-token' } },
-          ],
-        },
-        'publik_bot',
-      ),
-    ).rejects.toMatchObject({ code: 'unsupported_content' });
+    const fetch = jest
+      .spyOn(internals, 'downloadMedia')
+      .mockImplementation(async (_url, _max, type) => ({
+        bytes: Buffer.from(type),
+        mimeType: type === 'image' ? 'image/jpeg' : 'video/mp4',
+      }));
+    const draft = await internals.buildContent(
+      {
+        text: 'Автор https://example.com',
+        attachments: [
+          {
+            type: 'video',
+            payload: { token: 'video-token', thumbnail: { url: 'https://v.max.ru/poster.jpg' } },
+          },
+          { type: 'file' },
+          { type: 'image', payload: { url: 'https://i.max.ru/photo' } },
+        ],
+      },
+      'publik_bot',
+    );
+    expect(draft.media.map((item) => item.type)).toEqual(['video', 'image']);
+    expect(draft.text).toBe('Автор https://example.com');
+    expect(draft.warnings).toEqual([
+      { messageIndex: 1, itemIndex: 2, kind: 'attachment', reason: 'unsupported' },
+    ]);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://v.max.ru/asset.mp4',
+      'https://i.max.ru/photo',
+    ]);
   });
 
   it('recovers an official body=null pure forward from its exact authenticated receipt', async () => {
@@ -595,8 +785,8 @@ describe('PublisherPostImportProcessingService', () => {
 
   it.each([
     [MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.INVALID_PAYLOAD, 'media_download_failed'],
-    [MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DIMENSIONS_EXCEEDED, 'image_too_large'],
-    [MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DECODE_BUDGET_EXCEEDED, 'image_too_large'],
+    [MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DIMENSIONS_EXCEEDED, 'image_dimensions'],
+    [MAX_MEDIA_UPLOAD_VALIDATION_ERROR_CODES.IMAGE_DECODE_BUDGET_EXCEEDED, 'image_dimensions'],
   ] as const)('maps image validation code %s to %s', async (validationCode, failureCode) => {
     const { service, maxClient } = createFixture();
     maxClient.validateMediaUploadPayload.mockRejectedValue(
@@ -633,16 +823,19 @@ describe('PublisherPostImportProcessingService', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: PublisherPostImportStatus.FAILED,
-          failureCode: 'unsupported_content',
+          failureCode: 'media_invalid',
         }),
       }),
     );
     expect(terminalLog).toHaveBeenCalledWith(
       {
         sessionId: 'session-1',
-        failureCode: 'unsupported_content',
+        failureCode: 'media_invalid',
         rejectionKind: 'content_validation',
         snapshotSource: 'remote_exact',
+        inputMode: 'forward',
+        inputKind: 'forward',
+        elapsedMs: 0,
       },
       'Publisher forwarded post import rejected',
     );
@@ -700,21 +893,25 @@ describe('PublisherPostImportProcessingService', () => {
       downloadMedia: () => Promise<{ bytes: Buffer; mimeType: string }>;
     };
     internal.downloadMedia = jest.fn(async () => ({
-      bytes: Buffer.alloc(7_000_000),
+      bytes: Buffer.alloc(5_000_000),
       mimeType: 'image/jpeg',
     }));
 
     await expect(
       internal.buildContent(
         {
-          attachments: [1, 2, 3, 4].map((id) => ({
+          attachments: [1, 2, 3, 4, 5].map((id) => ({
             type: 'image',
             payload: { url: `https://i.max.ru/${id}` },
           })),
         },
         'publik_bot',
       ),
-    ).rejects.toMatchObject({ code: 'media_too_large' });
+    ).resolves.toMatchObject({
+      warnings: expect.arrayContaining([
+        expect.objectContaining({ kind: 'image', reason: 'too_large' }),
+      ]),
+    });
   });
 
   it('stops new album work, aborts siblings and settles them before reporting a size failure', async () => {
@@ -730,12 +927,12 @@ describe('PublisherPostImportProcessingService', () => {
     };
     const started: number[] = [];
     const settled: number[] = [];
-    const bytes = Buffer.alloc(8_000_000);
+    const bytes = Buffer.alloc(6_000_000);
     internal.downloadMedia = jest.fn(async (url, _limit, _type, signal) => {
       const index = Number(url.split('/').at(-1));
       started.push(index);
-      if (index <= 3) return { bytes, mimeType: 'image/jpeg' };
-      if (index === 4) return { bytes: Buffer.from([1]), mimeType: 'image/jpeg' };
+      if (index <= 4) return { bytes, mimeType: 'image/jpeg' };
+      if (index === 5) return { bytes: Buffer.from([1]), mimeType: 'image/jpeg' };
       return new Promise<{ bytes: Buffer; mimeType: string }>((_resolve, reject) => {
         signal!.addEventListener(
           'abort',
@@ -757,9 +954,13 @@ describe('PublisherPostImportProcessingService', () => {
         },
         'publik_bot',
       ),
-    ).rejects.toMatchObject({ code: 'media_too_large' });
-    expect(started).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(settled).toEqual([5, 6]);
+    ).resolves.toMatchObject({
+      warnings: expect.arrayContaining([
+        expect.objectContaining({ kind: 'image', reason: 'too_large' }),
+      ]),
+    });
+    expect(started).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(settled).toEqual([6, 7]);
   });
 
   it('keeps owned binary results without creating base64 representations', async () => {
@@ -794,13 +995,11 @@ describe('PublisherPostImportProcessingService', () => {
     internal.downloadMedia = jest
       .fn()
       .mockResolvedValue({ bytes: Buffer.alloc(8_000_000), mimeType: 'image/webp' });
-    internal.prepareImportedImage = jest
-      .fn()
-      .mockResolvedValue({
-        bytes: Buffer.alloc(1_000_000),
-        mimeType: 'image/jpeg',
-        extension: 'jpg',
-      });
+    internal.prepareImportedImage = jest.fn().mockResolvedValue({
+      bytes: Buffer.alloc(1_000_000),
+      mimeType: 'image/jpeg',
+      extension: 'jpg',
+    });
     const content = await internal.buildContent(
       {
         attachments: [1, 2, 3, 4].map((index) => ({
@@ -810,7 +1009,10 @@ describe('PublisherPostImportProcessingService', () => {
       },
       'publik_bot',
     );
-    expect(content.media).toHaveLength(4);
+    expect(content.media).toHaveLength(1);
+    expect(content).toMatchObject({
+      warnings: expect.arrayContaining([expect.objectContaining({ reason: 'duplicate' })]),
+    });
     expect(internal.downloadMedia).toHaveBeenCalledTimes(4);
   });
 

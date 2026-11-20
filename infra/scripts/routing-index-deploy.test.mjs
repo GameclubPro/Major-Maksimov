@@ -109,6 +109,20 @@ test('giveaway migrations alone run before journaling and require a confirmed ro
   ]);
 });
 
+test('Publisher fixed migrations run under the same authority and require compatible readback before runtime transitions', () => {
+  assert.deepEqual(runScenario('publisher-deferral'), [
+    'fixture-state:preflight:prepare_publisher_deferral',
+    'fixture-state:prepare:prepare_publisher_deferral',
+    'fixture-publisher-prisma',
+    'fixture-state:prepare:compatible_pending',
+    'fixture-journal',
+    'fixture-state:rollout:compatible_pending',
+    'fixture-pause',
+    'fixture-state:post-migration:compatible_pending',
+    'fixture-transition',
+  ]);
+});
+
 test('a failed giveaway migration runner stops before journaling or replacing roles', () => {
   assert.deepEqual(runScenario('deferral-runner-failed', false), giveawayDeferralStart);
 });

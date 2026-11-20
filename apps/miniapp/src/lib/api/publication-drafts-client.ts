@@ -24,7 +24,7 @@ export async function saveServerPublicationDraft(
   id: string | null,
   payload: SavePublicationDraftRequest,
 ) {
-  const parsed = savePublicationDraftRequestSchema.parse(payload);
+  const parsed = savePublicationDraftRequestSchema.parse({ ...payload, mediaVersion: 2 });
   const response = await api.request(
     id ? `/publications/drafts/${encodeURIComponent(id)}` : '/publications/drafts',
     {
