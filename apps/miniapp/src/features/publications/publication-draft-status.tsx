@@ -11,13 +11,15 @@ import './publication-drafts.css';
 export function PublicationDraftSaveIndicator({
   state,
   dirty,
+  deviceCopyIsCurrent,
 }: {
   state: DraftSaveState;
   dirty: boolean;
+  deviceCopyIsCurrent?: boolean;
 }) {
   return (
     <small className="publication-draft-indicator" role="status">
-      {publicationDraftSaveLabel(state, dirty)}
+      {publicationDraftSaveLabel(state, dirty, deviceCopyIsCurrent)}
     </small>
   );
 }

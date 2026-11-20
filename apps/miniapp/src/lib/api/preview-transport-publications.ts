@@ -32,6 +32,7 @@ import {
   type PublicationTarget,
 } from '@maxim/contracts/publication';
 import { publicationPostActionRequestSchema } from '@maxim/contracts/publication-post-action-request';
+import { confirmPreviewCalendarReplacement } from './preview-publication-conflict';
 import {
   PREVIEW_CHANNEL_ID,
   PREVIEW_CHANNEL_TITLE,
@@ -288,6 +289,7 @@ export function buildPreviewPublicationDetails(
   const schedule = request.schedule
     ? {
         ...request.schedule,
+        conflictConfirmation: undefined,
         status: request.intent === 'draft' ? ('DRAFT' as const) : ('ACTIVE' as const),
         revision: 1,
         nextOccurrenceAt: occurrences[0]?.scheduledAt ?? null,
@@ -671,62 +673,19 @@ export function assertPreviewPublicationRevision(
   }
 }
 
-export function hasPreviewPublicationScheduleConflict(
-  state: PreviewState,
-  request: Pick<CreatePublicationRequest, 'audience' | 'schedule' | 'intent'>,
-  excludedPublicationId: string | null = null,
-): boolean {
-  if (request.intent !== 'publish' || !request.schedule || request.schedule.mode === 'now') {
-    return false;
-  }
-  const incomingSlots = new Set(
-    buildPreviewPublicationSlots(request.schedule, readPreviewClock(state.clock)).map((slot) =>
-      Date.parse(slot),
-    ),
-  );
-  const incomingTargets = new Set(
-    request.audience.targets.map((target) => `${target.entityType}:${target.chatId}`),
-  );
-  return state.publications.some((publication) => {
-    if (
-      publication.id === excludedPublicationId ||
-      publication.lifecycle === 'COMPLETED' ||
-      publication.lifecycle === 'CANCELED'
-    ) {
-      return false;
-    }
-    const sharesTarget = publication.targets.some((target) =>
-      incomingTargets.has(`${target.entityType}:${target.chatId}`),
-    );
-    return (
-      sharesTarget &&
-      publication.occurrences.some(
-        (occurrence) =>
-          (occurrence.status === 'SCHEDULED' || occurrence.status === 'IN_PROGRESS') &&
-          incomingSlots.has(Date.parse(occurrence.scheduledAt)),
-      )
-    );
-  });
-}
-
-export function assertPreviewPublicationScheduleAvailability(
+function assertPreviewPublicationScheduleAvailability(
   state: PreviewState,
   request: Pick<CreatePublicationRequest, 'audience' | 'schedule' | 'intent'>,
   excludedPublicationId: string | null = null,
 ): void {
-  const replaceConflicts =
-    request.schedule &&
-    request.schedule.mode !== 'now' &&
-    request.schedule.replaceConflicts === true;
-  if (
-    !replaceConflicts &&
-    hasPreviewPublicationScheduleConflict(state, request, excludedPublicationId)
-  ) {
-    throwPreviewPublicationError(
-      'PUBLICATION_SCHEDULE_CONFLICT',
-      'Это время уже занято другой публикацией.',
-    );
-  }
+  confirmPreviewCalendarReplacement(
+    state,
+    request,
+    excludedPublicationId,
+    buildPreviewPublicationSlots,
+    () => readPreviewClock(state.clock),
+    (id) => syncPreviewPublication(state, id),
+  );
 }
 
 export function buildPreviewPublicationContentInput(
@@ -1295,6 +1254,31 @@ export function handlePublicationsRequest(
       }
     }
     return cloneJson(syncPreviewPublication(state, publicationId));
+  }
+
+  if (segments[2] === 'occurrences' && segments[4] === 'skip' && method === 'POST') {
+    const request = publicationActionRequestSchema.parse(parseJsonBody(init));
+    assertPreviewPublicationRevision(publication, request.expectedRevision);
+    const occurrenceId = decodeURIComponent(segments[3] ?? '');
+    const occurrence = publication.occurrences.find((item) => item.id === occurrenceId);
+    if (
+      !occurrence ||
+      occurrence.status !== 'SCHEDULED' ||
+      publication.schedule?.mode !== 'recurrence' ||
+      publication.lifecycle !== 'ACTIVE' ||
+      Date.parse(occurrence.scheduledAt) <= readPreviewClock(state.clock).getTime()
+    ) {
+      throw new Error('Этот выпуск уже изменился или начал отправляться.');
+    }
+    occurrence.status = 'CANCELED';
+    occurrence.skippedByEditor = true;
+    for (const delivery of state.publicationDeliveries) {
+      if (delivery.occurrenceId === occurrence.id && delivery.status === 'PENDING')
+        delivery.status = 'CANCELED';
+    }
+    publication.version += 1;
+    publication.updatedAt = readPreviewClock(state.clock).toISOString();
+    return cloneJson(syncPreviewPublication(state, publication.id));
   }
 
   if (segments[2] === 'deliveries' && segments.length === 3 && method === 'GET') {

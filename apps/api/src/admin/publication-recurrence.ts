@@ -1,6 +1,8 @@
 import type { PublicationScheduleInput } from '@maxim/contracts/publication';
 import { DateTime, IANAZone } from 'luxon';
 
+export const PUBLICATION_RECURRENCE_LOOKAHEAD_MS = 450 * 24 * 60 * 60_000;
+
 export interface ExpandPublicationScheduleOptions {
   from: Date;
   to: Date;
@@ -84,7 +86,7 @@ function expandRecurrenceSchedule(
   const startsAtMs = startsAt?.getTime() ?? window.fromMs;
   const endsAtMs = endsAt?.getTime() ?? window.toMs;
 
-  if (endsAtMs < startsAtMs) {
+  if (endsAt && endsAtMs < startsAtMs) {
     throw new RangeError('Publication recurrence must end after it starts.');
   }
 
@@ -106,18 +108,17 @@ function expandRecurrenceSchedule(
 
   const timezone = schedule.timezone;
   const anchor = DateTime.fromMillis(startsAtMs, { zone: timezone });
-  const firstDay = DateTime.fromMillis(effectiveFromMs, { zone: timezone }).startOf('day');
-  const lastDay = DateTime.fromMillis(effectiveToMs, { zone: timezone }).startOf('day');
+  const localDay = (ms: number) =>
+    DateTime.fromMillis(ms, { zone: timezone }).startOf('day').setZone('UTC', {
+      keepLocalTime: true,
+    });
+  const firstDay = localDay(effectiveFromMs);
+  const lastDay = localDay(effectiveToMs);
   const times = schedule.times.map(parseLocalTime).sort(compareLocalTimes);
-  const weekdays = new Set(schedule.weekdays);
   const result: Date[] = [];
   const seen = new Set<number>();
 
-  for (let day = firstDay; localDayIsOnOrBefore(day, lastDay); day = day.plus({ days: 1 })) {
-    if (!recurrenceIncludesDay(schedule, day, anchor, weekdays)) {
-      continue;
-    }
-
+  for (const day of recurrenceDays(schedule, firstDay, lastDay, anchor)) {
     for (const time of times) {
       const candidate = resolveLocalDateTime(day, time.hour, time.minute, timezone);
       if (!candidate) {
@@ -138,6 +139,61 @@ function expandRecurrenceSchedule(
   }
 
   return result;
+}
+
+function* recurrenceDays(
+  schedule: Extract<PublicationScheduleInput, { mode: 'recurrence' }>,
+  firstDay: DateTime,
+  lastDay: DateTime,
+  anchor: DateTime,
+): Generator<DateTime> {
+  if (schedule.frequency === 'daily') {
+    const elapsed = localDateOrdinal(firstDay) - localDateOrdinal(anchor);
+    const daysUntilMatch = (schedule.interval - (elapsed % schedule.interval)) % schedule.interval;
+    for (
+      let day = firstDay.plus({ days: daysUntilMatch });
+      localDayIsOnOrBefore(day, lastDay);
+      day = day.plus({ days: schedule.interval })
+    ) {
+      yield day;
+    }
+    return;
+  }
+  const firstWeek = firstDay.startOf('week');
+  const elapsed = (localDateOrdinal(firstWeek) - localDateOrdinal(anchor.startOf('week'))) / 7;
+  const weeksUntilMatch = (schedule.interval - (elapsed % schedule.interval)) % schedule.interval;
+  const weekdays = [...new Set(schedule.weekdays)].sort((left, right) => left - right);
+  for (
+    let week = firstWeek.plus({ weeks: weeksUntilMatch });
+    localDayIsOnOrBefore(week, lastDay);
+    week = week.plus({ weeks: schedule.interval })
+  ) {
+    for (const weekday of weekdays) {
+      const day = week.plus({ days: weekday - 1 });
+      if (localDayIsOnOrBefore(firstDay, day) && localDayIsOnOrBefore(day, lastDay)) yield day;
+    }
+  }
+}
+
+export function findNextPublicationRecurrenceSlot(
+  schedule: Extract<PublicationScheduleInput, { mode: 'recurrence' }>,
+  from: Date,
+  existingCount = 0,
+): Date | null {
+  const startsAt = schedule.startsAt ? new Date(schedule.startsAt) : from;
+  const searchFrom = startsAt > from ? startsAt : from;
+  const lookaheadEnd = new Date(searchFrom.getTime() + PUBLICATION_RECURRENCE_LOOKAHEAD_MS);
+  const endsAt = schedule.endsAt ? new Date(schedule.endsAt) : null;
+  const searchTo = endsAt && endsAt < lookaheadEnd ? endsAt : lookaheadEnd;
+  if (searchTo < searchFrom) return null;
+  return (
+    expandPublicationSchedule(schedule, {
+      from: searchFrom,
+      to: searchTo,
+      existingCount,
+      maxResults: 1,
+    })[0] ?? null
+  );
 }
 
 function assertRecurrenceShape(
@@ -162,31 +218,6 @@ function assertRecurrenceShape(
   ) {
     throw new RangeError('maxOccurrences must be a positive integer or null.');
   }
-}
-
-function recurrenceIncludesDay(
-  schedule: Extract<PublicationScheduleInput, { mode: 'recurrence' }>,
-  day: DateTime,
-  anchor: DateTime,
-  weekdays: ReadonlySet<number>,
-): boolean {
-  const dayOrdinal = localDateOrdinal(day);
-  const anchorOrdinal = localDateOrdinal(anchor);
-
-  if (schedule.frequency === 'daily') {
-    const dayOffset = dayOrdinal - anchorOrdinal;
-    return dayOffset >= 0 && dayOffset % schedule.interval === 0;
-  }
-
-  const dayWeekOrdinal = localDateOrdinal(day.startOf('week'));
-  const anchorWeekOrdinal = localDateOrdinal(anchor.startOf('week'));
-  const weekOffset = (dayWeekOrdinal - anchorWeekOrdinal) / 7;
-  return (
-    weekOffset >= 0 &&
-    Number.isInteger(weekOffset) &&
-    weekOffset % schedule.interval === 0 &&
-    weekdays.has(day.weekday)
-  );
 }
 
 function resolveLocalDateTime(

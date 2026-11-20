@@ -313,6 +313,7 @@ export type PublicationDraft = {
   timingMode: PublicationTimingMode;
   scheduleKind: PublicationScheduleKind;
   scheduledSlots: string[];
+  onceAt: string | null;
   onceDate: string;
   onceTime: string;
   scheduleTimezone: string;
@@ -876,6 +877,8 @@ export function hasSamePublicationTargetMetadata(
 ): boolean {
   const leftReadiness = left.readiness ?? null;
   const rightReadiness = right.readiness ?? null;
+  const leftButtons = left.publisherChannelPostSignature?.customButtons ?? [];
+  const rightButtons = right.publisherChannelPostSignature?.customButtons ?? [];
   return (
     left.title === right.title &&
     left.avatarUrl === right.avatarUrl &&
@@ -892,6 +895,13 @@ export function hasSamePublicationTargetMetadata(
       right.publisherChannelPostSignature?.presentation &&
     left.publisherChannelPostSignature?.text === right.publisherChannelPostSignature?.text &&
     left.publisherChannelPostSignature?.url === right.publisherChannelPostSignature?.url &&
+    left.publisherChannelPostSignature?.customButtonsEnabled ===
+      right.publisherChannelPostSignature?.customButtonsEnabled &&
+    leftButtons.length === rightButtons.length &&
+    leftButtons.every((button, index) => {
+      const other = rightButtons[index];
+      return button.id === other?.id && button.text === other.text && button.url === other.url;
+    }) &&
     leftReadiness?.state === rightReadiness?.state &&
     leftReadiness?.canPublish === rightReadiness?.canPublish &&
     leftReadiness?.canUseChatComments === rightReadiness?.canUseChatComments &&
@@ -917,6 +927,7 @@ export function createEmptyPublicationDraft(targets: PublicationTarget[] = []): 
     timingMode: 'now',
     scheduleKind: 'slots',
     scheduledSlots: [],
+    onceAt: null,
     onceDate: '',
     onceTime: '',
     scheduleTimezone: resolveBroadcastScheduleTimezone(),
@@ -945,6 +956,7 @@ export function createPublicationDuplicateDraft(draft: PublicationDraft): Public
     timingMode: 'schedule',
     scheduleKind: 'slots',
     scheduledSlots: [],
+    onceAt: null,
     onceDate: '',
     onceTime: '',
     recurrence: empty.recurrence,
@@ -960,6 +972,14 @@ export function isPublicationDraftEmpty(draft: PublicationDraft): boolean {
     draft.images.length > 0 ||
     draft.retainedAssets.length > 0 ||
     draft.buttons.some((button) => button.text.trim() || button.url.trim()) ||
+    draft.scheduledSlots.length > 0 ||
+    draft.onceDate ||
+    draft.onceTime ||
+    draft.recurrence.times.length > 0 ||
+    draft.recurrence.weekdays.length > 0 ||
+    draft.recurrence.startsAt ||
+    draft.recurrence.endsAt ||
+    draft.recurrence.maxOccurrences !== null ||
     draft.mediaType === 'video'
   );
 }
@@ -991,6 +1011,7 @@ export function hasPublicationDraftChanges(
     JSON.stringify(initialDraft.latePolicy) === JSON.stringify(currentDraft.latePolicy) &&
     initialDraft.timingMode === currentDraft.timingMode &&
     initialDraft.scheduleKind === currentDraft.scheduleKind &&
+    initialDraft.onceAt === currentDraft.onceAt &&
     initialDraft.onceDate === currentDraft.onceDate &&
     initialDraft.onceTime === currentDraft.onceTime &&
     initialDraft.scheduleTimezone === currentDraft.scheduleTimezone &&
@@ -1084,6 +1105,7 @@ export function rebasePublicationDraft(
     'timingMode',
     'scheduleKind',
     'scheduledSlots',
+    'onceAt',
     'onceDate',
     'onceTime',
     'scheduleTimezone',
@@ -1117,6 +1139,7 @@ export function rebasePublicationDraft(
           timingMode: local.timingMode,
           scheduleKind: local.scheduleKind,
           scheduledSlots: local.scheduledSlots,
+          onceAt: local.onceAt,
           onceDate: local.onceDate,
           onceTime: local.onceTime,
           scheduleTimezone: local.scheduleTimezone,
@@ -1127,6 +1150,7 @@ export function rebasePublicationDraft(
           timingMode: latest.timingMode,
           scheduleKind: latest.scheduleKind,
           scheduledSlots: latest.scheduledSlots,
+          onceAt: latest.onceAt,
           onceDate: latest.onceDate,
           onceTime: latest.onceTime,
           scheduleTimezone: latest.scheduleTimezone,
@@ -1326,11 +1350,9 @@ export function createPublicationDraftFromDetails(
   const timingMode: PublicationTimingMode =
     !schedule || schedule.mode === 'now' ? 'now' : schedule.mode === 'once' ? 'once' : 'schedule';
   const scheduledSlots =
-    schedule?.mode === 'once'
-      ? [schedule.at]
-      : schedule?.mode === 'slots'
-        ? filterFuturePublicationSlots(schedule.slots, nowMs, 0)
-        : fallback.scheduledSlots;
+    schedule?.mode === 'slots'
+      ? filterFuturePublicationSlots(schedule.slots, nowMs, 0)
+      : fallback.scheduledSlots;
   const recurrence =
     schedule?.mode === 'recurrence'
       ? {
@@ -1365,6 +1387,7 @@ export function createPublicationDraftFromDetails(
     timingMode,
     scheduleKind: schedule?.mode === 'recurrence' ? 'recurrence' : 'slots',
     scheduledSlots: scheduledSlots.length > 0 ? scheduledSlots : fallback.scheduledSlots,
+    onceAt: schedule?.mode === 'once' ? schedule.at : null,
     onceDate,
     onceTime,
     scheduleTimezone: schedule?.timezone ?? fallback.scheduleTimezone,
@@ -1403,11 +1426,11 @@ export function hasFuturePublicationSlot(slots: readonly string[], nowMs = Date.
 }
 
 export function getPublicationOnceSlot(
-  draft: Pick<PublicationDraft, 'onceDate' | 'onceTime' | 'scheduleTimezone' | 'scheduledSlots'>,
+  draft: Pick<PublicationDraft, 'onceAt' | 'onceDate' | 'onceTime' | 'scheduleTimezone'>,
 ): string | null {
-  const at = draft.scheduledSlots[0];
+  const at = draft.onceAt;
   if (!at || !draft.onceDate || !draft.onceTime) return null;
-  // FLAG: Never submit a cached calendar slot that disagrees with the visible one-time fields.
+  // FLAG: Never submit the cached instant if it disagrees with the visible one-time fields.
   return formatPublicationScheduleField(at, draft.scheduleTimezone) ===
     `${draft.onceDate}T${draft.onceTime}`
     ? at

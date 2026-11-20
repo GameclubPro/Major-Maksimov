@@ -124,6 +124,75 @@ try {
   console.log(
     'PASS: failed cloud flush closes safely with local persistence and restores the draft after reload',
   );
+
+  const unavailable = await browser.newPage();
+  await unavailable.addInitScript(() => {
+    Object.defineProperty(window, 'indexedDB', {
+      get: () => {
+        throw new Error('Denied');
+      },
+    });
+    Storage.prototype.setItem = () => {
+      throw new Error('Full');
+    };
+  });
+  await unavailable.route('**/publication-session-test*', (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: `<html><body><div id="root"></div><script type="module">
+  import RefreshRuntime from '/app/@react-refresh';RefreshRuntime.injectIntoGlobalHook(window);
+  window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>(type)=>type;window.__vite_plugin_react_preamble_installed__=true;
+  await import('/app/test/fixtures/publication-session-harness.tsx');</script></body></html>`,
+    }),
+  );
+  let acknowledge = false;
+  const writes = [];
+  await unavailable.route('**/api/publications/drafts', async (route) => {
+    const payload = route.request().postDataJSON();
+    writes.push(payload);
+    if (!acknowledge) return reply(route, { message: 'Облако недоступно' }, 500);
+    return reply(route, {
+      publication: {
+        ...details,
+        id: 'confirmed-draft',
+        lifecycle: 'DRAFT',
+        occurrences: [],
+        content: { ...details.content, text: payload.content.text },
+      },
+      state: payload.state,
+    });
+  });
+  await unavailable.goto(`${base}publication-session-test`);
+  await unavailable.getByTestId('state').waitFor();
+  await unavailable.waitForFunction(
+    () => JSON.parse(document.querySelector('[data-testid="state"]').textContent).hydrated,
+  );
+  await unavailable.getByRole('button', { name: 'Создать', exact: true }).click();
+  const draftText = unavailable.getByLabel('Текст');
+  await draftText.fill('Правки без копии');
+  const close = unavailable.getByRole('button', { name: 'Назад', exact: true });
+  await close.click();
+  await unavailable.waitForFunction(() => {
+    const state = JSON.parse(document.querySelector('[data-testid="state"]').textContent);
+    return state.confirm && state.closeSaveFailed && !state.closing;
+  });
+  const rejected = JSON.parse(await unavailable.getByTestId('state').innerText());
+  assert.equal(rejected.context.kind, 'create');
+  assert.equal(rejected.deviceCopyIsCurrent, false);
+  assert.equal(await draftText.inputValue(), 'Правки без копии');
+  acknowledge = true;
+  await close.click();
+  await unavailable.waitForFunction(() => {
+    const state = JSON.parse(document.querySelector('[data-testid="state"]').textContent);
+    return !state.context && !state.closing;
+  });
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].requestId, writes[1].requestId);
+  assert.equal(writes[1].content.text, 'Правки без копии');
+  console.log(
+    'PASS: both device stores fail safely and cloud retry closes only after acknowledgement',
+  );
+  await unavailable.close();
 } finally {
   await browser?.close();
   await stopChildProcess(server);

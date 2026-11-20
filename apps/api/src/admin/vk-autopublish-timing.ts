@@ -1,11 +1,13 @@
+import {
+  resolveVkParsingSourceSpacingMinutes,
+  VK_PARSING_MIN_SOURCE_SPACING_MINUTES,
+} from '@maxim/contracts/vk-parsing';
 import { DateTime, IANAZone } from 'luxon';
 
 export const VK_AUTOPUBLISH_DEFAULT_TIMEZONE = 'Europe/Moscow';
-export const VK_AUTOPUBLISH_MIN_SOURCE_SPACING_MS = 5 * 60_000;
+export const VK_AUTOPUBLISH_MIN_SOURCE_SPACING_MS = VK_PARSING_MIN_SOURCE_SPACING_MINUTES * 60_000;
 export const VK_AUTOPUBLISH_CHAT_SLOT_CLEARANCE_MS = 60_000;
 
-const DEFAULT_PUBLISH_INTERVAL_MINUTES = 60;
-const DEFAULT_MIN_PUBLISH_INTERVAL_MINUTES = 30;
 const DEFAULT_DAILY_LIMIT = 3;
 const DEFAULT_WORK_HOURS_START = '09:00';
 const DEFAULT_WORK_HOURS_END = '22:00';
@@ -94,23 +96,7 @@ export function resolveVkAutoPublishSourceSpacingMs(
   settings: Pick<VkAutoPublishTimingSettings, 'distributeEvenlyEnabled'>,
   source: Pick<VkAutoPublishTimingSource, 'publishIntervalMinutes' | 'minPublishIntervalMinutes'>,
 ): number {
-  const publishIntervalMinutes = readFiniteNumber(
-    source.publishIntervalMinutes,
-    (value) => value > 0,
-    DEFAULT_PUBLISH_INTERVAL_MINUTES,
-  );
-  const minPublishIntervalMinutes = readFiniteNumber(
-    source.minPublishIntervalMinutes,
-    (value) => value >= 0,
-    DEFAULT_MIN_PUBLISH_INTERVAL_MINUTES,
-  );
-  const effectiveMinutes = Math.max(
-    VK_AUTOPUBLISH_MIN_SOURCE_SPACING_MS / 60_000,
-    settings.distributeEvenlyEnabled ? publishIntervalMinutes : 0,
-    minPublishIntervalMinutes,
-  );
-
-  return effectiveMinutes * 60_000;
+  return resolveVkParsingSourceSpacingMinutes(settings.distributeEvenlyEnabled, source) * 60_000;
 }
 
 export function isVkAutoPublishTimeAllowed(
@@ -460,14 +446,6 @@ function isMinuteInRange(minute: number, range: ParsedDailyRange): boolean {
     return minute >= range.startMinute && minute < range.endMinute;
   }
   return minute >= range.startMinute || minute < range.endMinute;
-}
-
-function readFiniteNumber(
-  value: number | null | undefined,
-  predicate: (value: number) => boolean,
-  fallback: number,
-): number {
-  return typeof value === 'number' && Number.isFinite(value) && predicate(value) ? value : fallback;
 }
 
 function readPositiveInteger(value: number | null | undefined, fallback: number): number {

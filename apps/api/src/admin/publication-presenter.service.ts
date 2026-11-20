@@ -28,6 +28,11 @@ import {
 } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { readStoredPublicationButtons } from './publication-buttons';
+import {
+  PUBLICATION_CALENDAR_SLOT_OCCUPIED,
+  PUBLICATION_CALENDAR_SLOT_SKIPPED,
+} from './publication-calendar-projection';
+import { findNextPublicationRecurrenceSlot } from './publication-recurrence';
 import { PUBLICATION_ASSET_METADATA_SELECT } from './publication-media-limits';
 import {
   buildPublicationDispatchIssueIndex,
@@ -125,6 +130,7 @@ const PUBLICATION_DETAILS_OCCURRENCE_SELECT = {
   contentRevision: { select: { revision: true } },
   dispatchFirstBlockedAt: true,
   dispatchBlockedAt: true,
+  dispatchBlockerCode: true,
   _count: { select: { legacyBroadcasts: true } },
 } as const;
 
@@ -510,6 +516,14 @@ export class PublicationPresenterService {
           dispatchBlockedSince: occurrence.dispatchFirstBlockedAt?.toISOString() ?? null,
           dispatchCheckedAt: occurrence.dispatchBlockedAt?.toISOString() ?? null,
           requiresScheduleDecision: occurrence.dispatchIssue === 'decision_required',
+          ...(occurrence.status === PublicationOccurrenceStatus.CANCELED &&
+          occurrence.dispatchBlockerCode === PUBLICATION_CALENDAR_SLOT_OCCUPIED
+            ? { calendarConflict: true }
+            : {}),
+          ...(occurrence.status === PublicationOccurrenceStatus.CANCELED &&
+          occurrence.dispatchBlockerCode === PUBLICATION_CALENDAR_SLOT_SKIPPED
+            ? { skippedByEditor: true }
+            : {}),
           dispatchIssue:
             row.dispatchProfile === PublicationDispatchProfile.PUBLIK_V1
               ? occurrence.dispatchIssue === 'decision_required'
@@ -876,11 +890,21 @@ export class PublicationPresenterService {
 
   private mapSchedule(schedule: any, nextOccurrenceAt: Date | null) {
     const rule = publicationScheduleInputSchema.parse(schedule.rule);
+    const now = new Date();
+    const upcomingFirstOccurrence =
+      !nextOccurrenceAt &&
+      rule.mode === 'recurrence' &&
+      schedule.status === PublicationScheduleStatus.ACTIVE &&
+      schedule.nextMaterializeAt &&
+      rule.startsAt &&
+      new Date(rule.startsAt) > now
+        ? findNextPublicationRecurrenceSlot(rule, now)
+        : null;
     return publicationScheduleSchema.parse({
       ...rule,
       status: schedule.status,
       revision: schedule.revision,
-      nextOccurrenceAt: nextOccurrenceAt?.toISOString() ?? null,
+      nextOccurrenceAt: (nextOccurrenceAt ?? upcomingFirstOccurrence)?.toISOString() ?? null,
       lastError: schedule.lastError,
     });
   }

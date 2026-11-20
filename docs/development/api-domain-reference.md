@@ -534,6 +534,7 @@ Native administrator suggestion editing and rejection use the [private-card revi
 - Circuit state persists `terminalFailureCount`, `circuitOpenedAt`, `circuitReasonCode`, `circuitReason`, and `circuitRetryAt`; scheduled sync skips open circuits, while manual refresh/re-add may clear and retry with the reason still visible.
 - Initial source-added backfill and first successful sync do not autopublish history. Eligibility requires `autoPublishEnabledAt` and a real VK publication timestamp at/after that baseline.
 - Entity and source automation settings both apply: baseline, mode, daily/min-interval limits, quiet hours, priority, and `publishScheduledAt` are rechecked by the worker.
+- Changing the publication interval preserves the saved minimum. Bulk cadence edits require each source to still be configured for automatic delivery under the chat lock. Switching to manual clears eligible Auto intents and preserves source pauses imposed by burst protection.
 - Governor `pause` defers VK autopublish; `slow` must not starve a single job. Increment publish attempts only at a real MAX attempt.
 - Diagnose with `npm run vk-parsing:diagnose --workspace @maxim/api -- --json --limit 20`; set `REDIS_URL` for BullMQ counts and use `--window-hours` for the error window.
 

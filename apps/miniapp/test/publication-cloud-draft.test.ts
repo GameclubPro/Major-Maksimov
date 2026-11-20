@@ -107,6 +107,39 @@ test('drafts persist incomplete authoring state without creating occurrences', a
   );
 });
 
+test('date-only work can be saved and each timing mode restores only its own selection', async () => {
+  const { api, make } = setup({
+    ...createEmptyPublicationDraft(),
+    timingMode: 'once',
+    scheduleTimezone: 'Europe/Moscow',
+    onceDate: '2030-01-03',
+    onceTime: '13:17',
+    onceAt: '2030-01-03T10:17:00.000Z',
+    scheduledSlots: ['2030-01-04T10:27:00.000Z', '2030-01-05T10:37:00.000Z'],
+  });
+  const controller = make();
+  assert.equal(controller.dirty, true);
+  const saved = await controller.flush();
+  const server = await getServerPublicationDraft(api, saved.cloudDraft!.id);
+  const restored = draftFromServer(server);
+  assert.equal(server.publication.occurrences.length, 0);
+  assert.deepEqual(server.state?.scheduledSlots, ['2030-01-03T10:17:00.000Z']);
+  assert.equal(restored.onceAt, '2030-01-03T10:17:00.000Z');
+  assert.deepEqual(restored.scheduledSlots, [
+    '2030-01-04T10:27:00.000Z',
+    '2030-01-05T10:37:00.000Z',
+  ]);
+  const legacy = { ...server.state! };
+  delete legacy.onceAt;
+  delete legacy.calendarSlots;
+  const legacyRestored = draftFromServer({
+    ...server,
+    state: { ...legacy, scheduledSlots: ['2030-01-03T10:17:00.000Z'] },
+  });
+  assert.equal(legacyRestored.onceAt, '2030-01-03T10:17:00.000Z');
+  assert.deepEqual(legacyRestored.scheduledSlots, []);
+});
+
 test('autosave uploads media once, then writes references and preserves newer typing', async () => {
   const { dependencies, writes, make } = setup({
     ...initial(),

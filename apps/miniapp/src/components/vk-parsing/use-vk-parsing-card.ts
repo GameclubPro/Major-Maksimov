@@ -8,6 +8,7 @@ import type {
   VkParsingFeedQuery,
   VkParsingPost,
   VkParsingPostFilterStatus,
+  VkParsingSource,
 } from '@maxim/contracts';
 import {
   addVkParsingSource,
@@ -36,6 +37,7 @@ import { resolveVkParsingInitialLinkSelection } from './link-selection';
 import { vkDraftFingerprint, vkSourceLinkKey } from './workflow';
 import {
   buildVkParsingSourceConnectionToast,
+  isVkAutomaticSource,
   mergeVkParsingMutationFeed,
   resolveVkParsingPollInterval,
 } from './model';
@@ -46,6 +48,25 @@ import {
   type VkParsingHintKey,
   type VkParsingSettingKey,
 } from './types';
+
+export type VkBulkSourceResult = {
+  saved: string[];
+  remaining: string[];
+  failed?: { id: string; error: string };
+};
+
+export type VkBulkSourceUpdate = Pick<
+  UpdateVkParsingSourceRequest,
+  'publishIntervalMinutes' | 'dailyLimit'
+>;
+
+function matchesBulkSourceUpdate(source: VkParsingSource, payload: VkBulkSourceUpdate) {
+  return (
+    (payload.publishIntervalMinutes === undefined ||
+      source.publishIntervalMinutes === payload.publishIntervalMinutes) &&
+    (payload.dailyLimit === undefined || source.dailyLimit === payload.dailyLimit)
+  );
+}
 
 type UseVkParsingCardParams = {
   api: ApiTransport;
@@ -236,42 +257,40 @@ export function useVkParsingCard({ api, chatId, active, entityType }: UseVkParsi
       payload,
     }: {
       sourceIds: string[];
-      payload: UpdateVkParsingSourceRequest;
-    }) => {
-      let nextFeed = feedQuery.data ?? null;
-      let saved = 0;
+      payload: VkBulkSourceUpdate;
+    }): Promise<VkBulkSourceResult> => {
+      const saved: string[] = [];
+      let nextFeed = feedQuery.data;
       for (const sourceId of sourceIds) {
         try {
-          nextFeed = await updateVkParsingSource(api, entityType, chatId, sourceId, payload);
-          saved += 1;
+          const source = nextFeed?.sources.find(({ id }) => id === sourceId);
+          if (source && !isVkAutomaticSource(source)) {
+            throw new Error('Группа больше не публикует автоматически.');
+          }
+          if (!source || !matchesBulkSourceUpdate(source, payload)) {
+            nextFeed = await updateVkParsingSource(api, entityType, chatId, sourceId, {
+              ...payload,
+              ifAutomatic: true,
+            });
+            updateScopedFeedCache(nextFeed);
+          }
+          saved.push(sourceId);
         } catch (error) {
-          throw new Error(
-            `Сохранено для ${saved} из ${sourceIds.length} групп. ${normalizeApiError(error)}`,
-          );
+          return {
+            saved,
+            remaining: sourceIds.slice(saved.length),
+            failed: { id: sourceId, error: normalizeApiError(error) },
+          };
         }
       }
-      if (!nextFeed) {
-        throw new Error('Группы не выбраны.');
-      }
-      return nextFeed;
+      return { saved, remaining: [] };
     },
-    onSuccess: (nextFeed) => {
-      updateScopedFeedCache(nextFeed);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.vkParsing(entityType, chatId) });
-      setSaveFeedbackRevision((revision) => revision + 1);
-      maxNotify('success');
+    onSuccess: (result) => {
+      if (!result.failed) setSaveFeedbackRevision((revision) => revision + 1);
+      maxNotify(result.failed ? 'error' : 'success');
     },
-    onError: (error) => {
-      pushToast({
-        tone: 'danger',
-        title: 'Не все настройки сохранены',
-        description: normalizeApiError(error),
-      });
-      maxNotify('error');
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.vkParsing(entityType, chatId) });
-    },
+    onSettled: (_result, _error, _variables) =>
+      queryClient.invalidateQueries({ queryKey: queryKeys.vkParsing(entityType, chatId) }),
   });
 
   const sourcePresetMutation = useMutation({
@@ -621,8 +640,8 @@ export function useVkParsingCard({ api, chatId, active, entityType }: UseVkParsi
 
   async function updateSources(
     sourceIds: string[],
-    payload: UpdateVkParsingSourceRequest,
-  ): Promise<boolean> {
+    payload: VkBulkSourceUpdate,
+  ): Promise<VkBulkSourceResult | null> {
     if (
       updateSourceMutation.isPending ||
       updateSourcesMutation.isPending ||
@@ -630,17 +649,14 @@ export function useVkParsingCard({ api, chatId, active, entityType }: UseVkParsi
       settingsUpdateInFlightRef.current ||
       sourceIds.length === 0
     ) {
-      return false;
+      return null;
     }
 
     setSaveFeedbackRevision(0);
     sourceUpdateInFlightRef.current = true;
     setIsSourceUpdateInFlight(true);
     try {
-      await updateSourcesMutation.mutateAsync({ sourceIds, payload });
-      return true;
-    } catch {
-      return false;
+      return await updateSourcesMutation.mutateAsync({ sourceIds, payload });
     } finally {
       sourceUpdateInFlightRef.current = false;
       setIsSourceUpdateInFlight(false);

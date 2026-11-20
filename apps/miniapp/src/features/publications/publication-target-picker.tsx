@@ -454,7 +454,7 @@ export function PublicationTargetPicker({
         ) : null}
         <span className="publication-target-picker__summary-copy">
           <strong>{summaryTitle}</strong>
-          <small>{summaryMeta}</small>
+          {!compactSummary || notice ? <small>{summaryMeta}</small> : null}
         </span>
         {!compactSummary ? (
           <span className="publication-target-picker__summary-action">

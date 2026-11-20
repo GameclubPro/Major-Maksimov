@@ -234,6 +234,7 @@ export function createPreviewVkParsingFeed(chatId: string, now: Date): VkParsing
         lastSeenAt: addHours(now, -1.8).toISOString(),
         missingSinceAt: null,
         unavailableAt: null,
+        queueKind: 'auto',
         publishQueuedAt: addHours(now, -0.3).toISOString(),
         publishScheduledAt: addHours(now, 0.8).toISOString(),
         lastError: null,
@@ -425,6 +426,14 @@ function normalizePreviewVkFeed(feed: VkParsingFeed): VkParsingFeed {
         ).length,
         queuedPostCount: posts.filter(
           (post) => post.publishQueuedAt && ['NEW', 'FAILED'].includes(post.status),
+        ).length,
+        cancellableAutoPostCount: posts.filter(
+          (post) =>
+            post.queueKind === 'auto' &&
+            post.publishQueuedAt &&
+            !post.publishLockedAt &&
+            post.publishAttemptCount === 0 &&
+            ['NEW', 'FAILED'].includes(post.status),
         ).length,
         publishedPostCount: posts.filter((post) =>
           ['PUBLISHED', 'CHANGED_AFTER_PUBLISH'].includes(post.status),
@@ -666,7 +675,11 @@ export function handleVkParsingPreviewRequest(
                 (source.autoPublishPausedReason === null ||
                   source.autoPublishPausedReason === 'manual' ||
                   source.autoPublishPausedReason === 'preset');
-              if (resolvedAutoPublishMode === 'AUTO' && !sourceCanEnable) {
+              if (
+                (resolvedAutoPublishMode === 'AUTO' && !sourceCanEnable) ||
+                (resolvedAutoPublishMode === 'MANUAL' &&
+                  source.autoPublishPausedReason === 'circuit_breaker')
+              ) {
                 return source;
               }
               return resolvedAutoPublishMode === 'AUTO'
@@ -687,6 +700,17 @@ export function handleVkParsingPreviewRequest(
                     updatedAt: nowIso,
                   };
             }),
+      posts:
+        resolvedAutoPublishMode === 'MANUAL'
+          ? currentFeed.posts.map((post) =>
+              post.queueKind === 'auto' &&
+              !post.publishLockedAt &&
+              post.publishAttemptCount === 0 &&
+              ['NEW', 'FAILED'].includes(post.status)
+                ? { ...post, queueKind: null, publishQueuedAt: null, publishScheduledAt: null }
+                : post,
+            )
+          : currentFeed.posts,
     });
     writeFeed(feed);
     return { handled: true, value: cloneJson(feed) };
@@ -937,7 +961,21 @@ export function handleVkParsingPreviewRequest(
 
   if (tail[1] === 'sources' && tail[2] && tail.length === 3 && method === 'PATCH') {
     const sourceId = decodeURIComponent(tail[2]);
-    const payload = updateVkParsingSourceRequestSchema.parse(parseJsonBody(init));
+    const { ifAutomatic, ...payload } = updateVkParsingSourceRequestSchema.parse(
+      parseJsonBody(init),
+    );
+    const currentSource = readFeed().sources.find((source) => source.id === sourceId);
+    if (
+      ifAutomatic &&
+      (!currentSource?.importEnabled ||
+        !currentSource.autoPublishEnabled ||
+        currentSource.autoPublishPausedAt !== null ||
+        currentSource.autoPublishPausedReason === 'circuit_breaker' ||
+        currentSource.publishMode === 'REVIEW' ||
+        currentSource.publishMode === 'BOT_REVIEW')
+    ) {
+      throw new ApiRequestError(409, '', 'Группа больше не публикует автоматически.');
+    }
     const nowIso = readPreviewClock(state.clock).toISOString();
     const feed = vkParsingFeedSchema.parse({
       ...readFeed(),
@@ -946,6 +984,11 @@ export function handleVkParsingPreviewRequest(
           ? {
               ...source,
               ...payload,
+              ...(payload.autoPublishEnabled === true
+                ? { autoPublishPausedAt: null, autoPublishPausedReason: null }
+                : payload.autoPublishEnabled === false
+                  ? { autoPublishPausedAt: nowIso, autoPublishPausedReason: 'manual' }
+                  : {}),
               autoPublishEnabledAt:
                 payload.publishMode === 'BOT_REVIEW'
                   ? null
@@ -1070,6 +1113,7 @@ export function handleVkParsingPreviewRequest(
     const updatedPost: VkParsingPost = {
       ...post,
       status: 'NEW',
+      queueKind: 'manual',
       publishQueuedAt: nowIso,
       publishScheduledAt: addHours(readPreviewClock(state.clock), 1).toISOString(),
       publishLockedAt: null,
@@ -1104,6 +1148,7 @@ export function handleVkParsingPreviewRequest(
     const updatedPost: VkParsingPost = {
       ...post,
       status: 'NEW',
+      queueKind: 'manual',
       publishQueuedAt: post.publishQueuedAt ?? nowIso,
       publishScheduledAt: payload.scheduledAt,
       publishLockedAt: null,
@@ -1130,6 +1175,7 @@ export function handleVkParsingPreviewRequest(
     const nowIso = readPreviewClock(state.clock).toISOString();
     const updatedPost: VkParsingPost = {
       ...post,
+      queueKind: null,
       publishQueuedAt: null,
       publishScheduledAt: null,
       publishLockedAt: null,
@@ -1158,6 +1204,7 @@ export function handleVkParsingPreviewRequest(
     const updatedPost: VkParsingPost = {
       ...post,
       status: 'NEW',
+      queueKind: 'manual',
       publishQueuedAt: nowIso,
       publishScheduledAt: nowIso,
       publishLockedAt: null,

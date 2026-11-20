@@ -155,15 +155,54 @@ try {
           await feedback.count(),
           0,
         );
+        const multiDate = scenario === 'android-dark';
+        if (multiDate) {
+          for (const [day, time] of [
+            ['2030-01-02', '13:27'],
+            ['2030-01-03', '13:37'],
+          ]) {
+            const dayButton = page.locator(`[data-broadcast-schedule-day="${day}"]`);
+            if (!(await dayButton.isVisible())) await summary.click();
+            await dayButton.click();
+            if (
+              !(await page
+                .locator('.broadcast-planner__custom-time .time-field__button')
+                .isVisible())
+            ) {
+              await page
+                .locator('.broadcast-planner__dock')
+                .getByRole('button', { name: 'Время', exact: true })
+                .click();
+            }
+            await chooseTime(page, time);
+            await page
+              .getByRole('button', { name: `Удалить время ${time}`, exact: true })
+              .waitFor();
+            await page.getByRole('button', { name: /^Готово/u }).click();
+          }
+        }
+        const modes = page.getByRole('group', { name: 'Время публикации', exact: true });
+        await modes.getByRole('button', { name: 'Отложить', exact: true }).click();
+        await modes.getByRole('button', { name: 'Расписание', exact: true }).click();
         await primary.click();
         const review = page.getByRole('dialog', { name: 'Проверка публикации', exact: true });
         await review.waitFor();
         assert.match(
-          await review.locator('.publication-preview__facts').textContent(),
-          /1 янв., 13:17/u,
+          await review.locator('.publication-review-timing > time').textContent(),
+          /1 января 2030 г\. в 13:17/u,
         );
+        if (multiDate) {
+          await review.getByText('Ещё 2 даты', { exact: true }).click();
+          const additional = review.locator('.publication-review-timing details time');
+          assert.deepEqual(await additional.allTextContents(), [
+            '2 января 2030 г. в 13:27',
+            '3 января 2030 г. в 13:37',
+          ]);
+        }
         await page.screenshot({ path: `${output}/${scenario}-review.png` });
-        await page.clock.setFixedTime(new Date('2030-01-01T10:16:00Z'));
+        await page.clock.setFixedTime(
+          new Date(multiDate ? '2030-01-03T10:36:00Z' : '2030-01-01T10:16:00Z'),
+        );
         await review.getByRole('button', { name: 'Сохранить расписание', exact: true }).click();
         await feedback.waitFor();
         check(

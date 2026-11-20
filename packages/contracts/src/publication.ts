@@ -356,12 +356,18 @@ export const publicationNowScheduleSchema = z.object({
   mode: z.literal('now'),
   timezone: publicationTimezoneSchema,
 });
+const publicationConflictConfirmationSchema = z
+  .string()
+  .regex(/^[a-f0-9]{64}$/u)
+  .optional();
+
 export const publicationOnceScheduleSchema = z.object({
   mode: z.literal('once'),
   latePolicy: publicationLatePolicySchema.optional(),
   timezone: publicationTimezoneSchema,
   at: publicationDateTimeSchema,
   replaceConflicts: z.boolean().default(false),
+  conflictConfirmation: publicationConflictConfirmationSchema,
 });
 export const publicationSlotsScheduleSchema = z.object({
   mode: z.literal('slots'),
@@ -375,6 +381,7 @@ export const publicationSlotsScheduleSchema = z.object({
       `Можно запланировать не более ${MAX_PUBLICATION_EXPLICIT_SLOTS} отправок.`,
     ),
   replaceConflicts: z.boolean().default(false),
+  conflictConfirmation: publicationConflictConfirmationSchema,
 });
 export const publicationRecurrenceScheduleSchema = z
   .object({
@@ -395,6 +402,7 @@ export const publicationRecurrenceScheduleSchema = z
       .nullable()
       .default(null),
     replaceConflicts: z.boolean().default(false),
+    conflictConfirmation: publicationConflictConfirmationSchema,
   })
   .superRefine((value, ctx) => {
     if (value.frequency === 'weekly' && value.weekdays.length === 0) {
@@ -565,6 +573,8 @@ export const publicationOccurrenceSummarySchema = z.object({
   dispatchBlockedSince: publicationDateTimeSchema.nullable().optional(),
   dispatchCheckedAt: publicationDateTimeSchema.nullable().optional(),
   requiresScheduleDecision: z.boolean().optional(),
+  calendarConflict: z.boolean().optional(),
+  skippedByEditor: z.boolean().optional(),
   delivery: publicationDeliveryStatsSchema,
   canRetry: z.boolean(),
   contentRevision: z.number().int().min(1).optional(),

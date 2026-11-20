@@ -40,6 +40,52 @@ export function layoutChannelCustomButtonRows<T extends { text: string }>(
   return rows;
 }
 
+export function layoutChannelPostActionRows<T>(
+  fullWidth: readonly (T | null | undefined)[],
+  customRows: readonly (readonly T[])[],
+  identify: (button: T) => string | null,
+  canJoin: (button: T) => boolean,
+): T[][] {
+  const rows: T[][] = [];
+  const seen = new Set<string>();
+  function add(button: T): boolean {
+    const key = identify(button);
+    if (key && seen.has(key)) return false;
+    if (key) seen.add(key);
+    return true;
+  }
+  for (const button of fullWidth) {
+    if (button != null && add(button)) rows.push([button]);
+  }
+  for (const row of customRows) {
+    let compactRow: T[] | null = null;
+    for (const button of row) {
+      if (!add(button)) continue;
+      if (!canJoin(button)) {
+        rows.push([button]);
+        compactRow = null;
+      } else if (compactRow) {
+        compactRow.push(button);
+        compactRow = null;
+      } else {
+        compactRow = [button];
+        rows.push(compactRow);
+      }
+    }
+  }
+  return rows;
+}
+
+export function channelPostActionLinkIdentity(value: string | null | undefined): string | null {
+  const url = value?.trim();
+  if (!url) return null;
+  try {
+    return new URL(url).toString();
+  } catch {
+    return url;
+  }
+}
+
 export const channelCustomPostButtonSchema = z.object({
   id: z.string().uuid(),
   text: z.string().trim().min(1, 'Введите название кнопки.').max(32),

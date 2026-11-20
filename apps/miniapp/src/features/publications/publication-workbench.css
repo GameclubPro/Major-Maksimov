@@ -184,29 +184,43 @@
       var(--color-accent) 34%,
       var(--color-border)
     );
-    --publication-ui-page: #f4f7f5;
-    --publication-ui-surface: #ffffff;
+    --publication-ui-page: #f5f1eb;
+    --publication-ui-surface: #fffcf8;
     --publication-ui-surface-raised: #ffffff;
-    --publication-ui-surface-muted: #f0f4f2;
-    --publication-ui-surface-tint: #e8f1ec;
-    --publication-ui-ink: #14211b;
-    --publication-ui-ink-muted: #43544b;
-    --publication-ui-ink-subtle: #596a61;
-    --publication-ui-border: #dbe3df;
-    --publication-ui-border-strong: #c5d0ca;
+    --publication-ui-surface-muted: #f2ece3;
+    --publication-ui-surface-tint: #f8e5d6;
+    --publication-ui-ink: #2b211d;
+    --publication-ui-ink-muted: #51453e;
+    --publication-ui-ink-subtle: #6a5a52;
+    --publication-ui-border: #e4d9d0;
+    --publication-ui-border-strong: #ccbbae;
+    --publisher-editor-header-surface: #302824;
+    --publisher-editor-header-ink: #fff7ef;
+    --publisher-editor-header-border: color-mix(
+      in srgb,
+      var(--publisher-editor-header-ink) 16%,
+      transparent
+    );
+    --publisher-editor-header-secondary: color-mix(
+      in srgb,
+      var(--publisher-editor-header-ink) 86%,
+      transparent
+    );
+    --publisher-editor-header-danger: #ffb28e;
     background: var(--color-surface);
   }
 
   .publications-page.is-publisher.is-editor .publications-editor-header {
-    min-height: 56px;
+    min-height: 60px;
     display: grid;
     grid-template-columns: 44px minmax(0, 1fr) 44px;
     align-items: center;
     gap: 8px;
     margin: 0;
     padding: 6px 12px;
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface);
+    border-bottom: 1px solid var(--publisher-editor-header-border);
+    background: var(--publisher-editor-header-surface);
+    color: var(--publisher-editor-header-ink);
   }
 
   .publications-page.is-publisher.is-editor .publications-editor-header > span {
@@ -214,9 +228,16 @@
   }
 
   .publications-page.is-publisher.is-editor .publications-editor-header h1 {
-    font-size: 1.14rem;
+    color: inherit;
+    font-size: clamp(1.14rem, 4.9vw, 1.42rem);
     font-weight: 820;
     line-height: 1.2;
+  }
+
+  .publications-page.is-publisher.is-editor
+    .publications-editor-header
+    .publication-draft-indicator {
+    color: var(--publisher-editor-header-secondary);
   }
 
   .publications-page.is-publisher.is-editor .publications-editor-header > button {
@@ -226,10 +247,11 @@
     border: 0;
     border-radius: 8px;
     background: transparent;
+    color: inherit;
   }
 
   .publications-page.is-publisher.is-editor .publications-editor-header > button:last-child {
-    color: var(--publication-danger-ink);
+    color: var(--publisher-editor-header-danger);
   }
 
   html[data-max-client='native']
@@ -241,7 +263,7 @@
   }
 
   .publications-page.is-publisher.is-editor > .publications-editor {
-    background: var(--surface-page);
+    background: var(--publication-ui-page);
   }
 
   .publications-page.is-publisher.is-editor .publication-editor-section {
@@ -304,11 +326,11 @@
   .publications-page.is-publisher.is-editor
     .publication-target-picker.is-compact
     .publication-target-picker__summary {
-    min-height: 60px;
+    min-height: 48px;
     grid-template-columns: minmax(0, 1fr) 20px;
     gap: 10px;
     padding: 7px 12px;
-    border-radius: 8px;
+    border-radius: 10px;
     background: var(--color-surface);
   }
 
@@ -577,16 +599,17 @@
   }
 
   html[data-max-theme='dark'] .publications-page.is-publisher.is-editor {
-    --publication-ui-page: #101412;
-    --publication-ui-surface: #171c19;
-    --publication-ui-surface-raised: #1b211e;
-    --publication-ui-surface-muted: #1d2420;
-    --publication-ui-surface-tint: #203229;
-    --publication-ui-ink: #f1f5f2;
-    --publication-ui-ink-muted: #bac5bf;
-    --publication-ui-ink-subtle: #8f9e96;
-    --publication-ui-border: #2b342f;
-    --publication-ui-border-strong: #3a4640;
+    --publication-ui-page: #1b1816;
+    --publication-ui-surface: #221e1b;
+    --publication-ui-surface-raised: #2a2522;
+    --publication-ui-surface-muted: #2c2623;
+    --publication-ui-surface-tint: #382a22;
+    --publication-ui-ink: #f7efe9;
+    --publication-ui-ink-muted: #d0c1b7;
+    --publication-ui-ink-subtle: #ae9f95;
+    --publication-ui-border: #3d342e;
+    --publication-ui-border-strong: #52443b;
+    --publisher-editor-header-surface: #2b2320;
   }
 
   @media (min-width: 768px) {

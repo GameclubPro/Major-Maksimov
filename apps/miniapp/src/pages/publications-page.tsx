@@ -2,7 +2,7 @@ import { reviewNeedsChoice } from '../features/publications/publication-import-r
 import { acceptUploadedVideo, publicationAlbum } from '../features/publications/publication-album';
 import { PublicationFeedFeedback } from '../features/publications/publication-feed-feedback';
 import { AppIcon as IconoirSprite } from '../components/ui/app-icon';
-import { PublicationLatePolicyFields } from '../features/publications/publication-late-policy-fields';
+import { PublicationTimingSection } from '../features/publications/publication-timing-section';
 import { SearchField } from '../components/ui/search-field';
 import { formatPublicationLatePolicy } from '../features/publications/publication-late-policy-presentation';
 import { usePublicationEditorSession } from '../features/publications/use-publication-editor-session';
@@ -12,7 +12,6 @@ import {
   PublicationDeliveryActionSheets,
 } from '../features/publications/publication-action-sheets';
 import { usePublicationList } from '../features/publications/use-publication-list';
-import { usePublicationCalendar } from '../features/publications/use-publication-calendar';
 import { publicationQueryKeys as queryKeys } from '../features/publications/publication-query-keys';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { type PublicationSummary } from '@maxim/contracts/publication';
@@ -30,7 +29,6 @@ import { StatusState } from '../components/ui/status-state';
 import { useToast } from '../components/ui/toast';
 import { PublicationHubHeader } from '../features/publications/publication-hub-header';
 import {
-  formatDraftTiming,
   formatLoadedCount,
   formatPublicationMediaSummary,
   formatPublicationSchedule,
@@ -49,7 +47,7 @@ import {
 import { PublicationFeedCard } from '../features/publications/publication-feed-card';
 import { PublicationCreateSheet } from '../features/publications/publication-create-sheet';
 import { PublicationButtonsSheet } from '../features/publications/publication-buttons-sheet';
-import { formatTimezoneLabel } from '../lib/timezone-label';
+import { PublicationReviewTiming } from '../features/publications/publication-review-timing';
 import {
   buildPublicationSaveFeedback,
   buildPublicationSystemButtons,
@@ -64,19 +62,15 @@ import {
   getPublicationExplicitSlotsLimitFeedback,
   getPublicationFeedStatusLabel,
   getPublicationPrimaryActionLabel,
-  getPublicationOnceSlot,
   getPublicationTargetKey,
   hasSamePublicationTargetMetadata,
   getPublicationTimingIssue,
   isIsolatedPublicationEditor,
   isPublicationRevisionConflictError,
   PUBLICATION_TEXT_MAX_LENGTH,
-  PUBLICATION_MIN_SCHEDULE_DELAY_MS,
   publicationDraftNeedsVideoReselection,
-  shouldReviewPublicationScheduleConflict,
   type PublicationEntityFilter,
   type PublicationStatusFilter,
-  type PublicationTimingMode,
 } from '../features/publications/publication-model';
 import {
   LegacyPublicationsEntry,
@@ -113,7 +107,6 @@ import {
   uploadPublicationVideo,
   type PublicationVideoUploadProgress,
 } from '../lib/api/publication-video-upload';
-import { resolveBroadcastScheduleTimezone } from '../lib/broadcast-schedule';
 import { formatRussianCountLabel } from '../lib/broadcast-audience';
 import { cn } from '../lib/cn';
 import { maxImpact, maxNotify } from '../lib/max-bridge';
@@ -127,6 +120,7 @@ import '../features/publications/publication-workbench.css';
 import { PublicationPostPublishFields } from '../features/publications/publication-post-publish-fields';
 import { publicationPostPublishLabels } from '../features/publications/publication-post-actions-presentation';
 import { savePublicationWithAccessRefresh } from '../features/publications/publication-save-access-refresh';
+import { readPublicationScheduleConflict } from '../features/publications/publication-schedule-conflict';
 import { useLocalPublicationVideoPreview } from '../features/publications/use-local-publication-video-preview';
 import { PublicationDeliveryNote } from '../features/publications/publication-delivery-note';
 import {
@@ -150,27 +144,11 @@ const LazyPublicationDetailsSheet = lazy(() =>
     default: module.PublicationDetailsSheet,
   })),
 );
-const LazyPublicationRecurrenceFields = lazy(() =>
-  import('../features/publications/publication-recurrence-fields').then((module) => ({
-    default: module.PublicationRecurrenceFields,
-  })),
-);
-const LazyPublicationOnceFields = lazy(() =>
-  import('../features/publications/publication-zoned-fields').then((module) => ({
-    default: module.PublicationOnceFields,
-  })),
-);
 const LazyPublicationContentEditorSection = lazy(() =>
   import('../features/publications/publication-content-editor-section').then((module) => ({
     default: module.PublicationContentEditorSection,
   })),
 );
-const LazyBroadcastSchedulePlanner = lazy(() =>
-  import('../components/broadcast-schedule-planner').then((module) => ({
-    default: module.BroadcastSchedulePlanner,
-  })),
-);
-
 export function PublicationsPage({
   api,
   profile = 'moderation',
@@ -238,8 +216,6 @@ export function PublicationsPage({
     setValidationStarted,
     pendingReview,
     setPendingReview,
-    timingPreparing,
-    setTimingPreparing,
     pendingConflict,
     setPendingConflict,
     pendingEditorClose,
@@ -361,14 +337,13 @@ export function PublicationsPage({
     draftHydrationError: publisherDraftHydration.error,
     draftHydrationFailed: publisherDraftHydration.isError,
   });
-  const calendarAvailabilityQuery = usePublicationCalendar(api, isEditor, draft, editorContext);
 
   const saveMutation = useMutation({
     mutationFn: async ({
-      replaceConflicts,
+      conflictConfirmation,
       controller,
     }: {
-      replaceConflicts: boolean;
+      conflictConfirmation?: string;
       controller: AbortController;
     }) => {
       try {
@@ -379,11 +354,24 @@ export function PublicationsPage({
           editorContext,
           editorSession.canPreservePublicationSchedule(snapshot),
         );
-        const requestId = requestIds.resolveSaveRequestId(snapshot, context, replaceConflicts);
+        const replaceConflicts = Boolean(conflictConfirmation);
+        const requestId = requestIds.resolveSaveRequestId(
+          snapshot,
+          context,
+          replaceConflicts,
+          conflictConfirmation,
+        );
         return await savePublicationWithAccessRefresh({
           api,
           targets: snapshot.targets.map(({ id, entityType }) => ({ id, entityType })),
-          save: preparePublicationSave(api, snapshot, context, requestId, replaceConflicts),
+          save: preparePublicationSave(
+            api,
+            snapshot,
+            context,
+            requestId,
+            replaceConflicts,
+            conflictConfirmation,
+          ),
           signal: controller.signal,
           onRefreshing: () => setRefreshingSaveAccess(true),
         });
@@ -417,8 +405,18 @@ export function PublicationsPage({
     },
     onError: (error, variables) => {
       if (variables.controller.signal.aborted) return;
-      if (shouldReviewPublicationScheduleConflict(error, draft, variables.replaceConflicts)) {
-        setPendingConflict(true);
+      const conflict =
+        draft.timingMode === 'now'
+          ? null
+          : readPublicationScheduleConflict(
+              error,
+              draft.targets,
+              draft.scheduleTimezone,
+              Boolean(variables.conflictConfirmation),
+            );
+      if (conflict) {
+        setPendingReview(false);
+        setPendingConflict(conflict);
         return;
       }
       if (draft.cloudDraft && isPublicationRevisionConflictError(error))
@@ -497,7 +495,6 @@ export function PublicationsPage({
     refreshEditedPublicationMutation.isPending ||
     initialTargetRoute.pending ||
     publisherDraftHydration.isPending ||
-    timingPreparing ||
     videoPreparing ||
     editorClosePending ||
     editorSession.discardDraftMutation.isPending;
@@ -742,14 +739,14 @@ export function PublicationsPage({
 
     setValidationStarted(true);
     setPendingReview(false);
-    setPendingConflict(false);
+    setPendingConflict(null);
     focusEditorSection('timing', explicitSlotsLimitFeedback.title);
     pushToast(explicitSlotsLimitFeedback);
     maxNotify(explicitSlotsLimitFeedback.notification);
     return true;
   }
 
-  function submitPublication(replaceConflicts: boolean) {
+  function submitPublication(conflictConfirmation?: string) {
     if (mediaPreparing || saveAbort.current || saveMutation.isPending) {
       return;
     }
@@ -759,7 +756,7 @@ export function PublicationsPage({
     }
     const controller = new AbortController();
     saveAbort.current = controller;
-    saveMutation.mutate({ replaceConflicts, controller });
+    saveMutation.mutate({ conflictConfirmation, controller });
   }
 
   function handlePrimaryAction() {
@@ -781,22 +778,6 @@ export function PublicationsPage({
       testMutation.mutate();
       return;
     }
-  }
-
-  function updateOnceSlot(onceDate: string, onceTime: string, scheduledAt: string | null) {
-    setDraft((current) => {
-      const preservedAt =
-        current.onceDate === onceDate && current.onceTime === onceTime
-          ? getPublicationOnceSlot(current)
-          : null;
-      return {
-        ...current,
-        onceDate,
-        onceTime,
-        scheduledSlots: preservedAt ? [preservedAt] : scheduledAt ? [scheduledAt] : [],
-      };
-    });
-    setFieldError('');
   }
 
   function renderFilters() {
@@ -1305,185 +1286,6 @@ export function PublicationsPage({
     );
   }
 
-  async function changeTimingMode(mode: PublicationTimingMode) {
-    if (isBusy || draft.timingMode === mode) return;
-    setFieldError('');
-    if (mode !== 'once' || !draft.onceDate || !draft.onceTime) {
-      setDraft((current) => ({
-        ...current,
-        timingMode: mode,
-        ...(mode === 'once' ? { scheduledSlots: [] } : {}),
-      }));
-      return;
-    }
-    setTimingPreparing(true);
-    try {
-      const { parsePublicationScheduleField } =
-        await import('../features/publications/publication-schedule-fields');
-      setDraft((current) => {
-        const at =
-          getPublicationOnceSlot(current) ??
-          parsePublicationScheduleField(
-            `${current.onceDate}T${current.onceTime}`,
-            current.scheduleTimezone,
-          );
-        return { ...current, timingMode: 'once', scheduledSlots: at ? [at] : [] };
-      });
-    } catch {
-      focusEditorSection('timing', 'Не удалось открыть выбор времени. Попробуйте ещё раз.');
-    } finally {
-      setTimingPreparing(false);
-    }
-  }
-
-  function renderTiming() {
-    const onceDate = draft.onceDate;
-    const onceTime = draft.onceTime;
-    return (
-      <section
-        ref={timingSectionRef}
-        className="publication-editor-section publication-editor-section--timing"
-      >
-        <div className="publication-editor-section__head">
-          <strong>Когда</strong>
-          {draft.timingMode === 'now' ? null : <small>{formatDraftTiming(draft)}</small>}
-        </div>
-        <div className="publication-timing-tabs" role="group" aria-label="Время публикации">
-          {(
-            [
-              { value: 'now', label: 'Сейчас' },
-              { value: 'once', label: 'Отложить' },
-              { value: 'schedule', label: 'Расписание' },
-            ] as Array<{ value: PublicationTimingMode; label: string }>
-          ).map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={draft.timingMode === option.value}
-              className={cn(draft.timingMode === option.value && 'is-active')}
-              onClick={() => void changeTimingMode(option.value)}
-              disabled={isBusy}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-
-        {draft.timingMode !== 'now' ? (
-          <div className="publication-schedule-timezone">
-            <IconoirSprite variant="iconoir" icon="Clock" aria-hidden />
-            <span>
-              {formatTimezoneLabel(
-                draft.timingMode === 'schedule' && draft.scheduleKind === 'slots'
-                  ? resolveBroadcastScheduleTimezone()
-                  : draft.scheduleTimezone,
-              )}
-            </span>
-          </div>
-        ) : null}
-
-        {draft.timingMode !== 'now' ? (
-          <PublicationLatePolicyFields
-            value={editorSession.getEffectiveLatePolicy(draft)}
-            recurring={draft.timingMode === 'schedule' && draft.scheduleKind === 'recurrence'}
-            disabled={isBusy}
-            onChange={(latePolicy) => setDraft((current) => ({ ...current, latePolicy }))}
-          />
-        ) : null}
-
-        {draft.timingMode === 'once' ? (
-          <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
-            <LazyPublicationOnceFields
-              date={onceDate}
-              time={onceTime}
-              timezone={draft.scheduleTimezone}
-              disabled={isBusy}
-              dateError={
-                validationStarted && timingIssue?.field === 'date' ? timingIssue.message : undefined
-              }
-              timeError={
-                validationStarted && timingIssue?.field === 'time' ? timingIssue.message : undefined
-              }
-              onChange={updateOnceSlot}
-            />
-          </Suspense>
-        ) : draft.timingMode === 'schedule' ? (
-          <>
-            <div className="publication-schedule-kind" role="group" aria-label="Тип расписания">
-              {(
-                [
-                  { value: 'slots', label: 'Даты' },
-                  { value: 'recurrence', label: 'Повтор' },
-                ] as const
-              ).map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  aria-pressed={draft.scheduleKind === option.value}
-                  className={cn(draft.scheduleKind === option.value && 'is-active')}
-                  onClick={() => {
-                    setDraft((current) => ({ ...current, scheduleKind: option.value }));
-                    setFieldError('');
-                  }}
-                  disabled={isBusy}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            {draft.scheduleKind === 'recurrence' ? (
-              <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
-                <LazyPublicationRecurrenceFields
-                  draft={draft}
-                  setDraft={setDraft}
-                  isBusy={isBusy}
-                  setFieldError={setFieldError}
-                />
-              </Suspense>
-            ) : (
-              <Suspense fallback={null}>
-                <LazyBroadcastSchedulePlanner
-                  preciseTime
-                  minimumLeadMs={PUBLICATION_MIN_SCHEDULE_DELAY_MS}
-                  value={draft.scheduledSlots}
-                  error={validationStarted ? timingIssue?.message : undefined}
-                  occupiedSlots={
-                    calendarAvailabilityQuery.data?.slots.map((slot) => slot.scheduledAt) ?? []
-                  }
-                  onChange={(scheduledSlots) => {
-                    setDraft((current) => ({ ...current, scheduledSlots }));
-                    setFieldError('');
-                  }}
-                  managedBroadcastsLoading={calendarAvailabilityQuery.isLoading}
-                  calendarRefreshing={calendarAvailabilityQuery.isFetching}
-                  currentTargetLabel={formatTargetSummary(draft.targets)}
-                  targetContextLabel={formatTargetSummary(draft.targets)}
-                  timingMode="scheduled"
-                  availableTimingModes={['scheduled']}
-                  viewMode="compose"
-                  allowRecipe={false}
-                  disabled={isBusy}
-                />
-              </Suspense>
-            )}
-          </>
-        ) : null}
-
-        {draft.timingMode === 'schedule' &&
-        draft.scheduleKind === 'slots' &&
-        calendarAvailabilityQuery.isError ? (
-          <div className="publications-calendar-error" role="alert">
-            <span>Не удалось загрузить занятое время.</span>
-            <button type="button" onClick={() => void calendarAvailabilityQuery.refetch()}>
-              <IconoirSprite variant="iconoir" icon="Refresh" aria-hidden />
-              <span>Повторить</span>
-            </button>
-          </div>
-        ) : null}
-      </section>
-    );
-  }
-
   async function handlePublicationVideoFile(
     file: File | undefined,
     replaceKey?: string,
@@ -1551,7 +1353,11 @@ export function PublicationsPage({
               {editorTitle}
             </h1>
             {!editing ? (
-              <PublicationDraftSaveIndicator state={cloudDraft} dirty={cloudDraft.dirty} />
+              <PublicationDraftSaveIndicator
+                state={cloudDraft}
+                dirty={cloudDraft.dirty}
+                deviceCopyIsCurrent={editorSession.deviceCopyIsCurrent}
+              />
             ) : null}
           </span>
           <button
@@ -1695,7 +1501,20 @@ export function PublicationsPage({
             />
           </Suspense>
 
-          {editScope === 'retry' ? null : renderTiming()}
+          {editScope === 'retry' ? null : (
+            <PublicationTimingSection
+              api={api}
+              context={editorContext}
+              draft={draft}
+              setDraft={setDraft}
+              setFieldError={setFieldError}
+              timingSectionRef={timingSectionRef}
+              validationStarted={validationStarted}
+              timingIssue={timingIssue}
+              latePolicy={editorSession.getEffectiveLatePolicy(draft)}
+              isBusy={isBusy}
+            />
+          )}
 
           <PublicationPostPublishFields
             value={draft.postPublish}
@@ -1792,12 +1611,12 @@ export function PublicationsPage({
               draft={draft}
               previews={assetPreviews}
               videoRead={videoRead}
+              timingDetails={
+                editScope === 'retry' ? null : <PublicationReviewTiming draft={draft} />
+              }
               facts={[
                 `Кому · ${formatTargetSummary(draft.targets)}`,
-                editScope === 'retry' ? null : formatTimezoneLabel(draft.scheduleTimezone),
-                editScope === 'retry'
-                  ? 'Отправка · после ручного повтора'
-                  : `Когда · ${formatDraftTiming(draft)}`,
+                editScope === 'retry' ? 'Отправка · после ручного повтора' : null,
                 editScope === 'retry' || draft.timingMode === 'now'
                   ? null
                   : `При задержке · ${formatPublicationLatePolicy(
@@ -1811,7 +1630,7 @@ export function PublicationsPage({
               onClose={() => !isBusy && setPendingReview(false)}
               onConfirm={() => {
                 setPendingReview(false);
-                submitPublication(false);
+                submitPublication();
               }}
             />
           </Suspense>
@@ -1892,9 +1711,16 @@ export function PublicationsPage({
       <ActionConfirmSheet
         id="publication-editor-close"
         open={pendingEditorClose}
-        title="Закрыть без сохранения?"
-        summary="Внесённые изменения будут потеряны."
-        confirmLabel="Закрыть"
+        title={
+          editorSession.editorCloseSaveFailed ? 'Не удалось сохранить' : 'Закрыть без сохранения?'
+        }
+        summary="Несохранённые правки будут потеряны."
+        confirmLabel={editorSession.editorCloseSaveFailed ? 'Выйти без сохранения' : 'Закрыть'}
+        extraActionLabel={editorSession.editorCloseSaveFailed ? 'Повторить' : undefined}
+        onExtraAction={() => {
+          setPendingEditorClose(false);
+          requestCloseEditor(true);
+        }}
         cancelLabel="Остаться"
         tone="danger"
         isBusy={isBusy}
@@ -1948,22 +1774,42 @@ export function PublicationsPage({
 
       <ActionConfirmSheet
         id="publication-conflict"
-        open={pendingConflict}
-        title="Есть пересечение"
-        summary="Будут отменены только будущие отправки в совпадающее время для выбранных получателей. Уже опубликованные сообщения и другие даты останутся без изменений."
-        previewTitle={formatDraftTiming(draft)}
-        previewMeta={`Получатели: ${formatTargetSummary(draft.targets)}`}
-        confirmLabel="Отменить и сохранить"
-        cancelLabel="Другое время"
+        open={pendingConflict !== null}
+        title={pendingConflict?.changed ? 'Пересечения изменились' : 'Уже запланировано'}
+        summary={
+          pendingConflict?.confirmation
+            ? 'Эти отправки будут сняты с расписания.'
+            : 'Выберите другое время.'
+        }
+        previewTitle={
+          pendingConflict?.rows.length ? (
+            <ul className="publication-preview__facts">
+              {pendingConflict.rows.map((row, index) => (
+                <li key={index}>
+                  {row.target} · {row.time}
+                </li>
+              ))}
+            </ul>
+          ) : undefined
+        }
+        previewMeta={
+          pendingConflict && pendingConflict.count > pendingConflict.rows.length
+            ? `Показано ${pendingConflict.rows.length} из ${pendingConflict.count}`
+            : undefined
+        }
+        confirmLabel={pendingConflict?.confirmation ? 'Заменить отправки' : 'Выбрать время'}
+        cancelLabel={pendingConflict?.confirmation ? 'Другое время' : 'Назад'}
         tone="danger"
         isBusy={saveMutation.isPending}
         onClose={() => {
-          setPendingConflict(false);
+          setPendingConflict(null);
           setFieldError('Выберите другое время.');
         }}
         onConfirm={() => {
-          setPendingConflict(false);
-          submitPublication(true);
+          const confirmation = pendingConflict?.confirmation;
+          setPendingConflict(null);
+          if (confirmation) submitPublication(confirmation);
+          else focusEditorSection('timing', 'Выберите другое время.');
         }}
       />
 

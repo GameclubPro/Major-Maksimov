@@ -1,9 +1,10 @@
+import { isVkAutomaticSource } from './model';
 import type { VkParsingSettings, VkParsingSource } from '@maxim/contracts/vk-parsing';
 
 export type AutopostStatusTone = 'success' | 'warning' | 'danger' | 'muted';
 export type AutopostStatusModel = { title: string; reason: string; tone: AutopostStatusTone };
 
-function timeMinutes(value: string | null): number | null {
+export function timeMinutes(value: string | null): number | null {
   const match = /^(?:([01]\d|2[0-3])):([0-5]\d)$/u.exec(value ?? '');
   return match ? Number(match[1]) * 60 + Number(match[2]) : null;
 }
@@ -22,16 +23,16 @@ export function buildAutopostStatus(
   now = new Date(),
 ): AutopostStatusModel {
   if (settings.autoPublishKillSwitchEnabled) {
-    return { title: 'На паузе', reason: 'Автопубликация приостановлена', tone: 'muted' };
+    return { title: 'На паузе', reason: '', tone: 'muted' };
   }
   if (!settings.autoPublishEnabled) {
-    return { title: 'Ручной режим', reason: 'Автопубликация выключена', tone: 'muted' };
+    return { title: 'Ручной режим', reason: '', tone: 'muted' };
   }
   const active = sources.filter((source) => source.status === 'ACTIVE' && source.importEnabled);
   if (!active.length) {
     return {
       title: 'Нет источников',
-      reason: 'Нет групп с включённым сбором постов',
+      reason: '',
       tone: 'warning',
     };
   }
@@ -44,12 +45,11 @@ export function buildAutopostStatus(
       tone: 'muted',
     };
   }
-  const automatic = active.filter(
-    (source) =>
-      source.autoPublishEnabled &&
-      source.publishMode !== 'REVIEW' &&
-      source.publishMode !== 'BOT_REVIEW',
-  );
+  const blocked = active.filter((source) => source.autoPublishPausedReason === 'circuit_breaker');
+  const automatic = active.filter(isVkAutomaticSource);
+  if (!automatic.length && blocked.length) {
+    return { title: 'Сработала защита', reason: '', tone: 'danger' };
+  }
   if (!automatic.length) {
     return {
       title: 'Авто не настроено',
@@ -90,25 +90,13 @@ export function buildAutopostStatus(
       tone: 'muted',
     };
   }
-  const blocked = automatic.filter(
-    (source) => source.autoPublishPausedReason === 'circuit_breaker',
-  );
-  if (blocked.length === automatic.length) {
-    return {
-      title: 'Сработала защита',
-      reason: 'Автопубликация групп приостановлена',
-      tone: 'danger',
-    };
-  }
   const available = automatic.filter(
-    (source) =>
-      source.autoPublishPausedReason !== 'circuit_breaker' &&
-      !withinRange(minutes, source.quietHoursStart, source.quietHoursEnd),
+    (source) => !withinRange(minutes, source.quietHoursStart, source.quietHoursEnd),
   );
   if (!available.length) {
     return {
       title: 'Источники на паузе',
-      reason: 'Перерыв в публикациях или защита групп',
+      reason: 'Перерыв по расписанию групп',
       tone: 'warning',
     };
   }
@@ -118,13 +106,13 @@ export function buildAutopostStatus(
   if (errors.length || blocked.length) {
     return {
       title: 'Требует внимания',
-      reason: 'У групп есть ошибки или ограничения',
+      reason: errors.length ? 'Проверьте группы с ошибками' : '',
       tone: 'warning',
     };
   }
   return {
     title: 'Авто включено',
-    reason: `Групп, готовых к публикации: ${available.length} из ${active.length}`,
+    reason: '',
     tone: 'success',
   };
 }

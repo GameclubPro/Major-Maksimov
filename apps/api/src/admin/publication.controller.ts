@@ -203,6 +203,24 @@ export class PublicationController {
     );
   }
 
+  @Post(':publicationId/occurrences/:occurrenceId/skip')
+  @MiniappProfiles('publisher')
+  skipOccurrence(
+    @Param('publicationId') publicationId: string,
+    @Param('occurrenceId') occurrenceId: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
+    @CurrentMiniappProfile() profile: MiniappProfile = 'publisher',
+  ) {
+    return this.publicationService.skipOccurrence(
+      publicationId,
+      occurrenceId,
+      user,
+      body,
+      this.toDispatchProfile(profile),
+    );
+  }
+
   @Post(':publicationId/occurrences/:occurrenceId/retry')
   @MiniappProfiles('publisher')
   retryOccurrence(

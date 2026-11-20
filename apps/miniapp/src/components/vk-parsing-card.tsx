@@ -56,6 +56,7 @@ export function VkParsingCard({
   const botReview = useVkBotReviewState(api, chatId, active && entityType === 'channel');
   const { feed, feedQuery, sources, settings, posts, editingPost } = state;
   const [view, setView] = useState<WorkspaceView>('posts');
+  const [configuredSourceId, setConfiguredSourceId] = useState<string | null>(null);
   const [discardEditor, setDiscardEditor] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const tabsId = useId();
@@ -125,6 +126,8 @@ export function VkParsingCard({
       onApplyPreset={state.applySourcePreset}
       onUpdateSource={state.updateSource}
       onRemoveSource={state.removeSource}
+      configuredId={configuredSourceId}
+      onConfigureSource={setConfiguredSourceId}
       onOpenAutomation={() => setView('automation')}
     />
   );
@@ -337,23 +340,38 @@ export function VkParsingCard({
             sourceControls
           ) : (
             <div className="vk-automation-view">
-              <VkPublicationOptions
-                settings={settings}
-                disabled={state.isSavingSettings}
-                onUpdate={state.updateSetting}
-              />
               <SchedulerPanel
                 settings={settings}
                 sources={sources}
                 status={status}
                 queueCount={queueCount}
-                publishedCount={sources.reduce((sum, source) => sum + source.publishedPostCount, 0)}
+                queue={feed.queue}
+                now={now}
+                windowStorageKey={`publik.vk.schedule-window.v1.${entityType}.${chatId}`}
+                onOpenQueue={() => {
+                  state.selectSource(null);
+                  state.selectStatusFilter('QUEUED');
+                  setView('posts');
+                }}
+                onOpenSource={(sourceId) => {
+                  setConfiguredSourceId(sourceId);
+                  setView('sources');
+                }}
                 isSaving={state.isSavingSettings}
                 isSavingSource={state.isSavingSource}
                 settingsSaved={state.settingsSaved}
                 onUpdateSetting={state.updateSetting}
                 onUpdateSources={state.updateSources}
-              />
+              >
+                <details className="vk-automation-appearance">
+                  <summary>Оформление</summary>
+                  <VkPublicationOptions
+                    settings={settings}
+                    disabled={state.isSavingSettings}
+                    onUpdate={state.updateSetting}
+                  />
+                </details>
+              </SchedulerPanel>
               {entityType === 'channel' ? (
                 <BotReviewPanel api={api} chatId={chatId} active={active} />
               ) : null}

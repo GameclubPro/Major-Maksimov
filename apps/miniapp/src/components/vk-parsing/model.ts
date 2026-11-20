@@ -61,18 +61,68 @@ export function resolveVkParsingAutopostMode(
   if (activeSources.length === 0 || activeSources.some((source) => source.autoPublishEnabled)) {
     return 'auto';
   }
-  const hasRepairableSource = activeSources.some(
-    (source) =>
-      source.publishMode !== 'REVIEW' &&
-      source.publishMode !== 'BOT_REVIEW' &&
-      source.syncStatus !== 'ERROR' &&
-      source.terminalFailureCount === 0 &&
-      source.circuitOpenedAt === null &&
-      (source.autoPublishPausedReason === null ||
-        source.autoPublishPausedReason === 'manual' ||
-        source.autoPublishPausedReason === 'preset'),
-  );
+  const hasRepairableSource = activeSources.some(canEnableVkAutoSource);
   return hasRepairableSource ? 'manual' : 'auto';
+}
+
+export function canEnableVkAutoSource(
+  source: Pick<
+    VkParsingSource,
+    | 'importEnabled'
+    | 'autoPublishEnabled'
+    | 'publishMode'
+    | 'syncStatus'
+    | 'terminalFailureCount'
+    | 'circuitOpenedAt'
+    | 'autoPublishPausedReason'
+  >,
+): boolean {
+  return (
+    source.importEnabled &&
+    !source.autoPublishEnabled &&
+    source.publishMode !== 'REVIEW' &&
+    source.publishMode !== 'BOT_REVIEW' &&
+    source.syncStatus !== 'ERROR' &&
+    source.terminalFailureCount === 0 &&
+    source.circuitOpenedAt === null &&
+    (source.autoPublishPausedReason === null ||
+      source.autoPublishPausedReason === 'manual' ||
+      source.autoPublishPausedReason === 'preset')
+  );
+}
+
+export function isVkAutomaticSource(
+  source: Pick<
+    VkParsingSource,
+    | 'status'
+    | 'importEnabled'
+    | 'autoPublishEnabled'
+    | 'publishMode'
+    | 'autoPublishPausedAt'
+    | 'autoPublishPausedReason'
+  >,
+): boolean {
+  return (
+    source.status === 'ACTIVE' &&
+    source.importEnabled &&
+    source.autoPublishEnabled &&
+    source.autoPublishPausedAt === null &&
+    source.autoPublishPausedReason !== 'circuit_breaker' &&
+    source.publishMode !== 'REVIEW' &&
+    source.publishMode !== 'BOT_REVIEW'
+  );
+}
+
+export function getVkAutoEnableSources(
+  settings: Pick<VkParsingFeed['settings'], 'autoPublishEnabled' | 'autoPublishKillSwitchEnabled'>,
+  sources: readonly VkParsingSource[],
+) {
+  const resuming = settings.autoPublishEnabled && settings.autoPublishKillSwitchEnabled;
+  return sources.filter(
+    (source) =>
+      isVkAutomaticSource(source) ||
+      (!resuming && source.status === 'ACTIVE' && canEnableVkAutoSource(source)),
+  );
 }
 
 export function buildVkParsingAutopostModeUpdate(

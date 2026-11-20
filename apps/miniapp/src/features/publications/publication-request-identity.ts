@@ -90,12 +90,14 @@ export function buildPublicationSaveRequestKey(
   draft: PublicationDraft,
   context: PublicationSaveRequestContext,
   replaceConflicts: boolean,
+  conflictConfirmation?: string,
 ): PublicationRequestKey {
   const request = buildPublicationSaveRequest(
     draft,
     context,
     REQUEST_KEY_PLACEHOLDER,
     replaceConflicts,
+    conflictConfirmation,
   );
 
   return createRequestKey({

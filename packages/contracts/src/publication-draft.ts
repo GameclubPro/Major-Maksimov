@@ -44,6 +44,8 @@ export const publicationDraftStateSchema = z.object({
   scheduleTimezone: zone,
   latePolicy: publicationLatePolicySchema.optional(),
   scheduledSlots: z.array(utcTimestampSchema).max(MAX_PUBLICATION_EXPLICIT_SLOTS),
+  calendarSlots: z.array(utcTimestampSchema).max(MAX_PUBLICATION_EXPLICIT_SLOTS).optional(),
+  onceAt: instant.optional(),
   onceDate: z.string().max(10),
   onceTime: time,
   buttons: z

@@ -815,6 +815,67 @@ describePostgres('PostgreSQL VK import concurrent publication result', () => {
     await importer?.$disconnect();
   });
 
+  it('counts only unstarted Auto posts as affected by switching to Manual', async () => {
+    const manual = await row();
+    const { vkPostId } = manual;
+    const {
+      chatId,
+      sourceId,
+      ownerProfile,
+      ownerBotId,
+      vkOwnerId,
+      contentHash,
+      url,
+      publishQueuedAt,
+      publishScheduledAt,
+    } = manual;
+    const sameSource = {
+      chatId,
+      sourceId,
+      ownerProfile,
+      ownerBotId,
+      vkOwnerId,
+      contentHash,
+      url,
+      publishQueuedAt,
+      publishScheduledAt,
+    };
+    await writer.vkParsingPost.createMany({
+      data: [
+        { ...sameSource, vkPostId: vkPostId + 1, publishReason: 'autopublish' },
+        {
+          ...sameSource,
+          vkPostId: vkPostId + 2,
+          publishReason: 'autopublish',
+          publishAttemptCount: 1,
+        },
+        {
+          ...sameSource,
+          vkPostId: vkPostId + 3,
+          publishReason: 'autopublish',
+          publishLockedAt: new Date(),
+        },
+      ],
+    });
+    const config = new ConfigService();
+    const feed = new VkParsingFeedService(writer as never, {} as never, config);
+    const ownerScope = { ownerProfile: 'PUBLISHER', ownerBotId: botId } as const;
+    const readFeed = () =>
+      feed.buildFeed(
+        chatId,
+        { enabled: true, canUse: true, reasonCode: null, reason: null },
+        { status: 'QUEUED' },
+        ownerScope,
+      );
+    let result = await readFeed();
+    expect(result.sources[0]).toMatchObject({ queuedPostCount: 4, cancellableAutoPostCount: 1 });
+    expect(result.queue.find((post) => post.id === manual.id)?.queueKind).toBe('manual');
+    await service.clearQueuedAutoPublishForChat(chatId, ownerScope);
+    result = await readFeed();
+    expect(result.sources[0]).toMatchObject({ queuedPostCount: 3, cancellableAutoPostCount: 0 });
+    expect(remote).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: '120s', resolveRetryAtMs: () => Date.now() + 120_000 },
     { label: '2h', resolveRetryAtMs: () => Date.now() + 7_200_000 },

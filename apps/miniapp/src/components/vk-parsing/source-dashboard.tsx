@@ -1,6 +1,7 @@
 import { AppIcon as IconoirSprite } from '../ui/app-icon';
 
 import { useState, type FormEvent } from 'react';
+import { resolveVkParsingSourceSpacingMinutes } from '@maxim/contracts/vk-parsing';
 import type {
   BulkUpdateVkParsingSourcesRequest,
   UpdateVkParsingSourceRequest,
@@ -43,6 +44,8 @@ type SourceDashboardProps = {
   onRefresh: () => void;
   onRefreshSource: (sourceId: string) => void;
   onRemoveSource: (sourceId: string) => void;
+  configuredId: string | null;
+  onConfigureSource: (sourceId: string | null) => void;
   onOpenAutomation: () => void;
 };
 
@@ -70,8 +73,9 @@ export function SourceDashboard(props: SourceDashboardProps) {
     onSelectAllBulkSources,
     onApplyPreset,
     onOpenAutomation,
+    configuredId,
+    onConfigureSource: setConfiguredId,
   } = props;
-  const [configuredId, setConfiguredId] = useState<string | null>(null);
   const [removing, setRemoving] = useState<VkParsingSource | null>(null);
   const configured = sources.find((source) => source.id === configuredId) ?? null;
   const mode = configured ? resolveSourceDeliveryMode(configured) : 'MANUAL';
@@ -327,12 +331,12 @@ export function SourceDashboard(props: SourceDashboardProps) {
                 </div>
                 <div className="vk-field-grid">
                   <CommittedNumberField
-                    label="Перерыв, минут"
+                    label="Интервал, мин"
                     ariaLabel={`Интервал публикаций для ${configured.title}, минут`}
                     value={configured.publishIntervalMinutes}
                     min={5}
                     max={10080}
-                    disabled={isSavingSource}
+                    disabled={isSavingSource || !settings.distributeEvenlyEnabled}
                     onCommit={(publishIntervalMinutes) =>
                       onUpdateSource(configured.id, { publishIntervalMinutes })
                     }
@@ -347,6 +351,14 @@ export function SourceDashboard(props: SourceDashboardProps) {
                     onCommit={(dailyLimit) => onUpdateSource(configured.id, { dailyLimit })}
                   />
                 </div>
+                <span className="vk-effective-interval">
+                  Минимальный перерыв ·{' '}
+                  {resolveVkParsingSourceSpacingMinutes(
+                    settings.distributeEvenlyEnabled,
+                    configured,
+                  )}{' '}
+                  мин
+                </span>
                 <details className="vk-workspace-details">
                   <summary>Дополнительные настройки</summary>
                   <CommittedNumberField

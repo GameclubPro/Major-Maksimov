@@ -904,6 +904,7 @@ describe('Publication performance and pagination', () => {
     expect(publicationFindFirst.mock.calls[0]?.[0].include.occurrences.select).toEqual({
       dispatchFirstBlockedAt: true,
       dispatchBlockedAt: true,
+      dispatchBlockerCode: true,
       id: true,
       scheduleId: true,
       scheduleRevision: true,
@@ -917,6 +918,7 @@ describe('Publication performance and pagination', () => {
     expect(occurrenceFindMany.mock.calls[0]?.[0].select).toEqual({
       dispatchFirstBlockedAt: true,
       dispatchBlockedAt: true,
+      dispatchBlockerCode: true,
       id: true,
       scheduleId: true,
       scheduleRevision: true,

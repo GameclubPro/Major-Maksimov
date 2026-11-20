@@ -74,7 +74,7 @@ export function PublicationImportReviewPanel({
                 </label>
               ) : null}
               <button type="button" disabled={busy} onClick={() => decide(index, false)}>
-                {offerText || restore ? 'Пропустить' : 'Принять'}
+                {warning.reason === 'outer_media' ? 'Понятно' : 'Пропустить'}
               </button>
             </div>
           </div>

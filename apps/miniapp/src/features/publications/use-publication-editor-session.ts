@@ -18,6 +18,7 @@ import { isPublisherDraftRouteId } from './publisher-post-import-route';
 import { stripPublisherOnlyPublicationRouteParams } from './publication-page-options';
 import { draftFromServer } from './publication-cloud-draft-model';
 import { resolvePublicationDraftLatePolicy } from './publication-late-policy-presentation';
+import type { PublicationScheduleConflictReview } from './publication-schedule-conflict';
 import {
   shouldPersistPublicationDraft,
   type PublicationEditorContext,
@@ -67,6 +68,7 @@ export function usePublicationEditorSession({
     discardMissingImages,
     resolveMissingImages,
     flushDraft,
+    deviceCopyIsCurrent,
   } = usePublicationComposer(
     isEditor,
     persistenceEnabled,
@@ -89,9 +91,11 @@ export function usePublicationEditorSession({
   const [fieldError, setFieldError] = useState('');
   const [validationStarted, setValidationStarted] = useState(false);
   const [pendingReview, setPendingReview] = useState(false);
-  const [timingPreparing, setTimingPreparing] = useState(false);
-  const [pendingConflict, setPendingConflict] = useState(false);
+  const [pendingConflict, setPendingConflict] = useState<PublicationScheduleConflictReview | null>(
+    null,
+  );
   const [pendingEditorClose, setPendingEditorClose] = useState(false);
+  const [editorCloseSaveFailed, setEditorCloseSaveFailed] = useState(false);
   const [pendingDraftClear, setPendingDraftClear] = useState(false);
   const [draftsOpen, setDraftsOpen] = useState(false);
   const [cloudReloadConfirm, setCloudReloadConfirm] = useState(false);
@@ -437,47 +441,43 @@ export function usePublicationEditorSession({
     maxImpact('soft');
   }
 
-  function requestCloseEditor(preserveDraft: boolean, isBusy: boolean) {
-    if (isBusy) {
-      return;
-    }
+  async function requestCloseEditor(preserveDraft: boolean, isBusy: boolean) {
+    if (isBusy || editorClosePending) return;
     setEditorClosePending(true);
-    void cloudDraft
-      .flush()
-      .then(async (snapshot) => {
-        if (editorContext?.kind !== 'edit') {
-          replaceDraft(snapshot, missingImageCount);
-          if (
-            savedCreateDraftRef.current?.draft.cloudDraft?.id === snapshot.cloudDraft?.id &&
-            snapshot.cloudDraft
-          )
-            savedCreateDraftRef.current = { draft: snapshot, missingImageCount };
-        }
-        await flushDraft();
-        const baseline = isolatedDraftBaselineRef.current;
+    setEditorCloseSaveFailed(false);
+    try {
+      const snapshot = await cloudDraft.flush();
+      if (editorContext?.kind !== 'edit') {
+        replaceDraft(snapshot, missingImageCount);
         if (
-          editorContext?.kind === 'edit' &&
-          baseline &&
-          hasPublicationDraftChanges(baseline, draft)
+          savedCreateDraftRef.current?.draft.cloudDraft?.id === snapshot.cloudDraft?.id &&
+          snapshot.cloudDraft
         ) {
-          setPendingEditorClose(true);
-          return;
+          savedCreateDraftRef.current = { draft: snapshot, missingImageCount };
         }
-        closeEditor(preserveDraft);
-      })
-      .catch(async () => {
-        await flushDraft();
-        if (persistenceEnabled) {
-          closeEditor(true);
-          pushToast({
-            tone: 'info',
-            title: 'Не удалось сохранить изменения',
-          });
-        } else {
-          setPendingEditorClose(true);
-        }
-      })
-      .finally(() => setEditorClosePending(false));
+      }
+      await flushDraft();
+      const baseline = isolatedDraftBaselineRef.current;
+      if (
+        editorContext?.kind === 'edit' &&
+        baseline &&
+        hasPublicationDraftChanges(baseline, draft)
+      ) {
+        setPendingEditorClose(true);
+        return;
+      }
+      closeEditor(preserveDraft);
+    } catch {
+      if (persistenceEnabled && (await flushDraft()) === 'complete') {
+        closeEditor(true);
+        pushToast({ tone: 'info', title: 'Черновик сохранён на устройстве' });
+      } else {
+        setEditorCloseSaveFailed(true);
+        setPendingEditorClose(true);
+      }
+    } finally {
+      setEditorClosePending(false);
+    }
   }
 
   function closeEditor(preserveDraft: boolean) {
@@ -489,8 +489,9 @@ export function usePublicationEditorSession({
     setImportOmissions([]);
     setButtonsOpen(false);
     setPendingReview(false);
-    setPendingConflict(false);
+    setPendingConflict(null);
     setPendingEditorClose(false);
+    setEditorCloseSaveFailed(false);
     setPendingDraftClear(false);
     setRevisionConflictPublicationId(null);
     setFieldError('');
@@ -515,8 +516,9 @@ export function usePublicationEditorSession({
     setImportOmissions([]);
     setButtonsOpen(false);
     setPendingReview(false);
-    setPendingConflict(false);
+    setPendingConflict(null);
     setPendingEditorClose(false);
+    setEditorCloseSaveFailed(false);
     setPendingDraftClear(false);
     setRevisionConflictPublicationId(null);
     setFieldError('');
@@ -544,6 +546,7 @@ export function usePublicationEditorSession({
     setDraft,
     hydrated,
     hasSavedDraft,
+    deviceCopyIsCurrent,
     imagesNeedReselection,
     missingImageCount,
     replaceDraft,
@@ -551,6 +554,7 @@ export function usePublicationEditorSession({
     discardMissingImages,
     resolveMissingImages,
     editorClosePending,
+    editorCloseSaveFailed,
     setEditorClosePending,
     editorTitleRef,
     buttonsOpen,
@@ -565,8 +569,6 @@ export function usePublicationEditorSession({
     setValidationStarted,
     pendingReview,
     setPendingReview,
-    timingPreparing,
-    setTimingPreparing,
     pendingConflict,
     setPendingConflict,
     pendingEditorClose,

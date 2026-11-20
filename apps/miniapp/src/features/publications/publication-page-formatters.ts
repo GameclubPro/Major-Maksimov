@@ -49,6 +49,17 @@ export function formatDateTime(value: string | null, timezone = 'Europe/Moscow')
   }).format(date);
 }
 
+export function formatPublicationReviewDate(value: string, timezone: string, time = true): string {
+  if (!Number.isFinite(Date.parse(value))) return '';
+  return new Intl.DateTimeFormat('ru-RU', {
+    timeZone: timezone,
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    ...(time ? { hour: '2-digit', minute: '2-digit' } : {}),
+  }).format(new Date(value));
+}
+
 export function formatDateInput(value: string | null): string {
   return value ? formatLocalDateTimeInputValue(value).slice(0, 10) : '';
 }
