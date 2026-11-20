@@ -175,6 +175,11 @@ describe('commercial corpus sanitization', () => {
     },
   );
 
+  it('maps a contact with a supplementary digit between intact emoji', () => {
+    const input = '🦊 Телефон +\u{1D7DF} 900 000 10 42 🐚';
+    expect(sanitizeCommercialCorpusText(input)).toBe('🦊 Телефон [phone] 🐚');
+  });
+
   it('preserves non-contact Unicode text and masks entire obfuscated URLs first', () => {
     expect(sanitizeCommercialCorpusText('Текст\u200b без контактов, размер １２ см')).toBe(
       'Текст\u200b без контактов, размер １２ см',

@@ -85,7 +85,7 @@ function privacyScan(value: string): { text: string; starts: number[]; ends: num
   const ends: number[] = [];
   let offset = 0;
   for (const character of value) {
-    const width = character.length;
+    const width = character.length === 2 ? 2 : 1;
     if (!/\p{Cf}/u.test(character)) {
       if (/\p{Nd}/u.test(character) && !/[0-9]/u.test(character)) {
         const point = character.codePointAt(0)!;
@@ -101,9 +101,12 @@ function privacyScan(value: string): { text: string; starts: number[]; ends: num
         ends.push(offset + width);
       } else {
         text += character;
-        for (let unit = 0; unit < width; unit++) {
-          starts.push(offset + unit);
-          ends.push(offset + unit + 1);
+        // FLAG: Each iterated code point contributes at most two UTF-16 units.
+        starts.push(offset);
+        ends.push(offset + 1);
+        if (width === 2) {
+          starts.push(offset + 1);
+          ends.push(offset + 2);
         }
       }
     }
