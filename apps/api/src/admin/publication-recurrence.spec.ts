@@ -3,6 +3,7 @@ import {
   assertPublicationTimezone,
   expandPublicationSchedule,
   isValidPublicationTimezone,
+  previewPublicationRecurrence,
 } from './publication-recurrence';
 
 const window = {
@@ -180,5 +181,107 @@ describe('publication recurrence', () => {
     expect(() =>
       expandPublicationSchedule(recurrence({ timezone: 'Invalid/Timezone' }), window),
     ).toThrow(RangeError);
+  });
+});
+
+describe('publication recurrence preview', () => {
+  const now = new Date('2026-11-20T12:00:01Z');
+
+  it('calculates a count-limited series beyond the materialization horizon and next-slot search', () => {
+    expect(
+      previewPublicationRecurrence(
+        recurrence({
+          timezone: 'UTC',
+          startsAt: '2028-01-03T10:00:00Z',
+          frequency: 'weekly',
+          interval: 31,
+          weekdays: [1],
+          maxOccurrences: 4,
+          times: ['09:00'],
+        }),
+        { from: now, now },
+      ),
+    ).toEqual({
+      state: 'finite',
+      timezone: 'UTC',
+      firstOccurrenceAt: '2028-08-07T09:00:00.000Z',
+      lastOccurrenceAt: '2030-05-20T09:00:00.000Z',
+    });
+  });
+
+  it('finds a date-only end by stepping backward from the rule boundary across years', () => {
+    const rule = recurrence({
+      timezone: 'UTC',
+      startsAt: '2026-11-19T00:00:00Z',
+      frequency: 'weekly',
+      weekdays: [2, 5],
+      times: ['09:00', '18:00'],
+      endsAt: '2400-03-10T10:00:00Z',
+    });
+    expect(previewPublicationRecurrence(rule, { from: now, now })).toEqual({
+      state: 'finite',
+      timezone: 'UTC',
+      firstOccurrenceAt: '2026-11-20T18:00:00.000Z',
+      lastOccurrenceAt: '2400-03-10T09:00:00.000Z',
+    });
+    expect(
+      previewPublicationRecurrence({ ...rule, maxOccurrences: 3 }, { from: now, now }),
+    ).toMatchObject({ lastOccurrenceAt: '2026-11-24T18:00:00.000Z' });
+    expect(
+      previewPublicationRecurrence(
+        { ...rule, maxOccurrences: 300, endsAt: '2026-11-27T15:00:00Z' },
+        { from: now, now },
+      ),
+    ).toMatchObject({ lastOccurrenceAt: '2026-11-27T09:00:00.000Z' });
+  });
+
+  it('resolves wall-time transitions with the materializer in both traversal directions', () => {
+    for (const [start, end, first, last] of [
+      ['2026-03-28', '2026-03-29', '2026-03-28T01:30:00.000Z', '2026-03-28T01:30:00.000Z'],
+      ['2026-10-24', '2026-10-25', '2026-10-24T00:30:00.000Z', '2026-10-25T00:30:00.000Z'],
+    ]) {
+      const from = new Date(`${start}T00:00:00Z`);
+      const rule = recurrence({
+        timezone: 'Europe/Berlin',
+        times: ['02:30'],
+        startsAt: from.toISOString(),
+        endsAt: `${end}T10:00:00Z`,
+      });
+      expect(previewPublicationRecurrence(rule, { from, now: from })).toMatchObject({
+        state: 'finite',
+        firstOccurrenceAt: first,
+        lastOccurrenceAt: last,
+      });
+    }
+  });
+
+  it('counts past catch-up and preserved skips without displaying them as future dates', () => {
+    const from = new Date('2026-11-18T10:00:00Z');
+    const rule = recurrence({
+      timezone: 'UTC',
+      startsAt: from.toISOString(),
+      times: ['10:00'],
+      maxOccurrences: 5,
+    });
+    const options = {
+      from,
+      now,
+      skippedAt: new Set([Date.parse('2026-11-22T10:00:00Z')]),
+    };
+    expect(previewPublicationRecurrence(rule, options)).toMatchObject({
+      state: 'finite',
+      firstOccurrenceAt: '2026-11-21T10:00:00.000Z',
+      lastOccurrenceAt: '2026-11-21T10:00:00.000Z',
+    });
+    expect(previewPublicationRecurrence({ ...rule, maxOccurrences: 3 }, options)).toMatchObject({
+      state: 'empty',
+      firstOccurrenceAt: null,
+      lastOccurrenceAt: null,
+    });
+    expect(previewPublicationRecurrence({ ...rule, maxOccurrences: null }, options)).toMatchObject({
+      state: 'unbounded',
+      firstOccurrenceAt: '2026-11-21T10:00:00.000Z',
+      lastOccurrenceAt: null,
+    });
   });
 });

@@ -154,6 +154,146 @@ postgres('Publication calendar with PostgreSQL', () => {
     await db.$disconnect();
   });
 
+  it('previews a distant, sparse count-limited schedule using its local anchor across DST', async () => {
+    jest.setSystemTime(new Date('2027-03-19T09:00:00Z'));
+    const schedule = {
+      ...recurrence,
+      timezone: 'Europe/Berlin',
+      startsAt: '2027-03-28T00:00:00.000Z',
+      frequency: 'weekly',
+      interval: 2,
+      weekdays: [7],
+      times: ['02:30'],
+      maxOccurrences: 3,
+    };
+    await expect(service.previewSchedule(user, { schedule }, profile)).resolves.toEqual({
+      state: 'finite',
+      timezone: 'Europe/Berlin',
+      firstOccurrenceAt: '2027-04-11T00:30:00.000Z',
+      lastOccurrenceAt: '2027-05-09T00:30:00.000Z',
+    });
+    expect(await publicationCount()).toBe(0);
+    expect(await db.publicationOccurrence.count()).toBe(0);
+  });
+
+  it('previews the exact last reachable slot before a saved date limit', async () => {
+    const series = await create({
+      ...recurrence,
+      interval: 2,
+      times: ['10:00', '18:00'],
+      endsAt: '2026-11-24T12:00:00.000Z',
+    });
+    const before = await readSeries(series.id);
+    const slots = await slotsFor(series.id);
+    await expect(
+      service.previewSchedule(
+        user,
+        { editing: { publicationId: series.id, expectedRevision: 1 } },
+        profile,
+      ),
+    ).resolves.toEqual({
+      state: 'finite',
+      timezone: 'UTC',
+      firstOccurrenceAt: '2026-11-20T10:00:00.000Z',
+      lastOccurrenceAt: '2026-11-24T10:00:00.000Z',
+    });
+    expect(await readSeries(series.id)).toEqual(before);
+    expect(await slotsFor(series.id)).toEqual(slots);
+  });
+
+  it('previews content and audience edits without restoring a skipped slot or extending a count limit', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 5 });
+    const [sentFirst, sentSecond, skipped] = await slotsFor(series.id);
+    await db.publicationOccurrence.updateMany({
+      where: { id: { in: [sentFirst.id, sentSecond.id] } },
+      data: { status: 'SENT' },
+    });
+    await service.skipOccurrence(
+      series.id,
+      skipped.id,
+      user,
+      { expectedRevision: 1, requestId: randomUUID() },
+      profile,
+    );
+    jest.setSystemTime(new Date('2026-11-21T12:00:00Z'));
+    const editing = { publicationId: series.id, expectedRevision: 2 };
+    const before = await readSeries(series.id);
+    const originalSlots = await slotsFor(series.id);
+
+    const preserved = await service.previewSchedule(user, { editing }, profile);
+    const rebooked = await service.previewSchedule(
+      user,
+      { editing, audience: withAudience(secondChat) },
+      profile,
+    );
+    const expected = {
+      state: 'finite',
+      timezone: 'UTC',
+      firstOccurrenceAt: '2026-11-23T10:00:00.000Z',
+      lastOccurrenceAt: '2026-11-24T10:00:00.000Z',
+    };
+    expect(preserved).toEqual(expected);
+    expect(rebooked).toEqual(expected);
+    expect(await readSeries(series.id)).toEqual(before);
+    expect(await slotsFor(series.id)).toEqual(originalSlots);
+
+    await service.update(
+      series.id,
+      user,
+      { expectedRevision: 2, requestId: randomUUID(), audience: withAudience(secondChat) },
+      profile,
+    );
+    expect(
+      (await slotsFor(series.id))
+        .filter((slot) => slot.scheduleRevision === 2 && slot.status === 'SCHEDULED')
+        .map((slot) => slot.scheduledAt.toISOString()),
+    ).toEqual([expected.firstOccurrenceAt, expected.lastOccurrenceAt]);
+  });
+
+  it('requires the current revision and full Publisher access before previewing a saved series', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 3 });
+    await service.update(
+      series.id,
+      user,
+      {
+        expectedRevision: 1,
+        requestId: randomUUID(),
+        audience: withAudience(firstChat, secondChat),
+      },
+      profile,
+    );
+
+    const request = { editing: { publicationId: series.id, expectedRevision: 2 } };
+    await expect(
+      service.previewSchedule(
+        user,
+        { editing: { ...request.editing, expectedRevision: 1 } },
+        profile,
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: { code: 'PUBLICATION_REVISION_CONFLICT' },
+    });
+
+    try {
+      await db.managedEntityAccessEdge.updateMany({
+        where: { chatId: secondChat, userId: user.userId, botId },
+        data: { state: 'USER_DENIED' },
+      });
+      await expect(service.previewSchedule(user, request, profile)).rejects.toMatchObject({
+        status: 404,
+      });
+      await expect(
+        service.previewSchedule(user, { ...request, audience: withAudience(firstChat) }, profile),
+      ).rejects.toMatchObject({ status: 404 });
+    } finally {
+      await db.managedEntityAccessEdge.updateMany({
+        where: { chatId: secondChat, userId: user.userId, botId },
+        data: { state: 'GRANTED' },
+      });
+    }
+  });
+
   it.each([null, 3])(
     'admits a distant start with limit %s and materializes its first slot once',
     async (maxOccurrences) => {

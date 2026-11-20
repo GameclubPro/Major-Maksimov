@@ -1,8 +1,14 @@
-import type { PublicationScheduleInput } from '@maxim/contracts/publication';
+import type {
+  PublicationScheduleInput,
+  PublicationSchedulePreviewResponse,
+} from '@maxim/contracts/publication';
 import { DateTime, IANAZone } from 'luxon';
 
 export const PUBLICATION_RECURRENCE_HORIZON_MS = 14 * 24 * 60 * 60_000;
 const PUBLICATION_RECURRENCE_LOOKAHEAD_MS = 450 * 24 * 60 * 60_000;
+const PUBLICATION_PREVIEW_MAX_CANDIDATES = 4_096;
+const PUBLICATION_PREVIEW_LAST_TIMESTAMP = Date.parse('9999-12-31T23:59:59.999Z');
+type Recurrence = Extract<PublicationScheduleInput, { mode: 'recurrence' }>;
 
 export interface ExpandPublicationScheduleOptions {
   from: Date;
@@ -107,7 +113,32 @@ function expandRecurrenceSchedule(
     return [];
   }
 
-  const timezone = schedule.timezone;
+  const result: Date[] = [];
+  const seen = new Set<number>();
+  for (const candidate of recurrenceCandidates(
+    schedule,
+    startsAtMs,
+    effectiveFromMs,
+    effectiveToMs,
+    1,
+  )) {
+    if (candidate === null || seen.has(candidate)) continue;
+    seen.add(candidate);
+    result.push(new Date(candidate));
+    if (result.length >= remainingOccurrences) break;
+  }
+  return result;
+}
+
+function* recurrenceCandidates(
+  schedule: Recurrence,
+  startsAtMs: number,
+  effectiveFromMs: number,
+  effectiveToMs: number,
+  direction: 1 | -1,
+): Generator<number | null> {
+  if (effectiveFromMs > effectiveToMs) return;
+  const { timezone } = schedule;
   const anchor = DateTime.fromMillis(startsAtMs, { zone: timezone });
   const localDay = (ms: number) =>
     DateTime.fromMillis(ms, { zone: timezone }).startOf('day').setZone('UTC', {
@@ -115,31 +146,17 @@ function expandRecurrenceSchedule(
     });
   const firstDay = localDay(effectiveFromMs);
   const lastDay = localDay(effectiveToMs);
-  const times = schedule.times.map(parseLocalTime).sort(compareLocalTimes);
-  const result: Date[] = [];
-  const seen = new Set<number>();
-
-  for (const day of recurrenceDays(schedule, firstDay, lastDay, anchor)) {
+  const times = [...new Set(schedule.times)]
+    .map(parseLocalTime)
+    .sort((left, right) => compareLocalTimes(left, right) * direction);
+  for (const day of recurrenceDays(schedule, firstDay, lastDay, anchor, direction)) {
     for (const time of times) {
-      const candidate = resolveLocalDateTime(day, time.hour, time.minute, timezone);
-      if (!candidate) {
-        continue;
-      }
-
-      const candidateMs = candidate.toMillis();
-      if (candidateMs < effectiveFromMs || candidateMs > effectiveToMs || seen.has(candidateMs)) {
-        continue;
-      }
-
-      seen.add(candidateMs);
-      result.push(candidate.toJSDate());
-      if (result.length >= remainingOccurrences) {
-        return result;
-      }
+      const candidate = resolveLocalDateTime(day, time.hour, time.minute, timezone)?.toMillis();
+      yield candidate !== undefined && candidate >= effectiveFromMs && candidate <= effectiveToMs
+        ? candidate
+        : null;
     }
   }
-
-  return result;
 }
 
 function* recurrenceDays(
@@ -147,33 +164,145 @@ function* recurrenceDays(
   firstDay: DateTime,
   lastDay: DateTime,
   anchor: DateTime,
+  direction: 1 | -1,
 ): Generator<DateTime> {
+  const fromDay = direction === 1 ? firstDay : lastDay;
+  const toDay = direction === 1 ? lastDay : firstDay;
+  const within = (day: DateTime) =>
+    (localDateOrdinal(day) - localDateOrdinal(toDay)) * direction <= 0;
+  const offsetToMatch = (elapsed: number) => {
+    const position = ((elapsed % schedule.interval) + schedule.interval) % schedule.interval;
+    if (position === 0) return 0;
+    return direction === 1 ? schedule.interval - position : -position;
+  };
   if (schedule.frequency === 'daily') {
-    const elapsed = localDateOrdinal(firstDay) - localDateOrdinal(anchor);
-    const daysUntilMatch = (schedule.interval - (elapsed % schedule.interval)) % schedule.interval;
+    const elapsed = localDateOrdinal(fromDay) - localDateOrdinal(anchor);
     for (
-      let day = firstDay.plus({ days: daysUntilMatch });
-      localDayIsOnOrBefore(day, lastDay);
-      day = day.plus({ days: schedule.interval })
+      let day = fromDay.plus({ days: offsetToMatch(elapsed) });
+      within(day);
+      day = day.plus({ days: schedule.interval * direction })
     ) {
       yield day;
     }
     return;
   }
-  const firstWeek = firstDay.startOf('week');
-  const elapsed = (localDateOrdinal(firstWeek) - localDateOrdinal(anchor.startOf('week'))) / 7;
-  const weeksUntilMatch = (schedule.interval - (elapsed % schedule.interval)) % schedule.interval;
-  const weekdays = [...new Set(schedule.weekdays)].sort((left, right) => left - right);
+  const fromWeek = fromDay.startOf('week');
+  const toWeek = toDay.startOf('week');
+  const elapsed = (localDateOrdinal(fromWeek) - localDateOrdinal(anchor.startOf('week'))) / 7;
+  const weekdays = [...new Set(schedule.weekdays)].sort(
+    (left, right) => (left - right) * direction,
+  );
   for (
-    let week = firstWeek.plus({ weeks: weeksUntilMatch });
-    localDayIsOnOrBefore(week, lastDay);
-    week = week.plus({ weeks: schedule.interval })
+    let week = fromWeek.plus({ weeks: offsetToMatch(elapsed) });
+    (localDateOrdinal(week) - localDateOrdinal(toWeek)) * direction <= 0;
+    week = week.plus({ weeks: schedule.interval * direction })
   ) {
     for (const weekday of weekdays) {
       const day = week.plus({ days: weekday - 1 });
       if (localDayIsOnOrBefore(firstDay, day) && localDayIsOnOrBefore(day, lastDay)) yield day;
     }
   }
+}
+
+export function previewPublicationRecurrence(
+  schedule: Recurrence,
+  options: {
+    from: Date;
+    now: Date;
+    existingCount?: number;
+    firstMaterialized?: Date;
+    lastMaterialized?: Date;
+    skippedAt?: ReadonlySet<number>;
+  },
+): PublicationSchedulePreviewResponse {
+  const { timezone, maxOccurrences } = schedule;
+  const { from, now, existingCount = 0, firstMaterialized, lastMaterialized, skippedAt } = options;
+  const unavailable = {
+    state: 'unavailable',
+    timezone,
+    firstOccurrenceAt: null,
+    lastOccurrenceAt: null,
+  } as const;
+  if (!isValidPublicationTimezone(timezone)) return { ...unavailable, timezone: null };
+  assertRecurrenceShape(schedule);
+  const startsAtMs = schedule.startsAt
+    ? parseScheduleDate(schedule.startsAt, 'startsAt').getTime()
+    : from.getTime();
+  const lower = Math.max(startsAtMs, from.getTime());
+  const upper = schedule.endsAt
+    ? parseScheduleDate(schedule.endsAt, 'endsAt').getTime()
+    : PUBLICATION_PREVIEW_LAST_TIMESTAMP;
+  const upcomingAfter = now.getTime();
+  const remaining = maxOccurrences === null ? null : Math.max(0, maxOccurrences - existingCount);
+  let first = firstMaterialized?.getTime();
+  let last = lastMaterialized?.getTime();
+  let inspected = 0;
+
+  const include = (candidate: number) => {
+    if (candidate < upcomingAfter || skippedAt?.has(candidate)) return;
+    first = first === undefined ? candidate : Math.min(first, candidate);
+    last = last === undefined ? candidate : Math.max(last, candidate);
+  };
+  if (remaining !== null && remaining > 0) {
+    let consumed = 0;
+    for (const candidate of recurrenceCandidates(schedule, startsAtMs, lower, upper, 1)) {
+      if (++inspected > PUBLICATION_PREVIEW_MAX_CANDIDATES) return unavailable;
+      if (candidate === null) continue;
+      include(candidate);
+      if (++consumed >= remaining) break;
+    }
+    if (consumed < remaining && schedule.endsAt === null) return unavailable;
+  } else if (remaining === null) {
+    const firstUnmaterialized = Math.max(lower, upcomingAfter);
+    if (first === undefined) {
+      for (const candidate of recurrenceCandidates(
+        schedule,
+        startsAtMs,
+        firstUnmaterialized,
+        upper,
+        1,
+      )) {
+        if (++inspected > PUBLICATION_PREVIEW_MAX_CANDIDATES) return unavailable;
+        if (candidate === null || skippedAt?.has(candidate)) continue;
+        include(candidate);
+        break;
+      }
+    }
+    if (first !== undefined && schedule.endsAt !== null) {
+      for (const candidate of recurrenceCandidates(
+        schedule,
+        startsAtMs,
+        firstUnmaterialized,
+        upper,
+        -1,
+      )) {
+        if (++inspected > PUBLICATION_PREVIEW_MAX_CANDIDATES) return unavailable;
+        if (candidate === null || skippedAt?.has(candidate)) continue;
+        include(candidate);
+        break;
+      }
+    }
+    if (schedule.endsAt === null) {
+      return first === undefined
+        ? unavailable
+        : {
+            state: 'unbounded',
+            timezone,
+            firstOccurrenceAt: new Date(first).toISOString(),
+            lastOccurrenceAt: null,
+          };
+    }
+  }
+
+  if (first === undefined || last === undefined) {
+    return { state: 'empty', timezone, firstOccurrenceAt: null, lastOccurrenceAt: null };
+  }
+  return {
+    state: 'finite',
+    timezone,
+    firstOccurrenceAt: new Date(first).toISOString(),
+    lastOccurrenceAt: new Date(last).toISOString(),
+  };
 }
 
 export function findNextPublicationRecurrenceSlot(

@@ -117,6 +117,7 @@ try {
         const page = await context.newPage();
         const errors = [],
           patches = [];
+        const forecastRequests = [];
         page.on('pageerror', (error) => errors.push(error.message));
         let current = publication(schedule);
         // FLAG: Every API response and mutation is local to this disposable browser fixture.
@@ -128,7 +129,7 @@ try {
         await page.route('**/publication-schedule-edit-test*', (route) =>
           route.fulfill({
             contentType: 'text/html',
-            body: `<html><body><div id="root"></div><script type="module">
+            body: `<html lang="ru" data-max-theme="${colorScheme}"><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="root"></div><script type="module">
             import RefreshRuntime from '/app/@react-refresh';RefreshRuntime.injectIntoGlobalHook(window);
             window.$RefreshReg$=()=>{};window.$RefreshSig$=()=>(type)=>type;window.__vite_plugin_react_preamble_installed__=true;
             await import('/app/test/fixtures/publication-schedule-edit-harness.tsx');</script></body></html>`,
@@ -138,7 +139,22 @@ try {
           const request = route.request(),
             url = new URL(request.url());
           let data;
-          if (url.pathname.endsWith('/calendar-availability')) {
+          if (url.pathname.endsWith('/schedule-preview')) {
+            forecastRequests.push(request.postDataJSON());
+            if (forecastRequests.length === 2) {
+              return route.fulfill({
+                status: 503,
+                contentType: 'application/json',
+                body: JSON.stringify({ message: 'Недоступно' }),
+              });
+            }
+            data = {
+              state: 'finite',
+              firstOccurrenceAt: '2030-01-03T10:00:00.000Z',
+              lastOccurrenceAt: '2030-02-28T10:00:00.000Z',
+              timezone: 'Europe/Moscow',
+            };
+          } else if (url.pathname.endsWith('/calendar-availability')) {
             const body = request.postDataJSON();
             data = { from: body.from, to: body.to, slots: [] };
           } else if (url.pathname.endsWith('/saved-publication')) {
@@ -215,6 +231,29 @@ try {
           assert.match(reviewFacts, /Все актуальные повторы/u);
         else assert.doesNotMatch(reviewFacts, /Все актуальные повторы|Только последний повтор/u);
 
+        if (name === 'recover-recurring') {
+          const bounds = review.locator('.publication-review-timing');
+          await bounds.getByText('Первый выпуск', { exact: false }).waitFor();
+          assert.deepEqual(
+            await bounds.locator('time').evaluateAll((times) => times.map((time) => time.dateTime)),
+            ['2030-01-03T10:00:00.000Z', '2030-02-28T10:00:00.000Z'],
+          );
+          assert.deepEqual(forecastRequests, [
+            { editing: { publicationId: current.id, expectedRevision: current.version } },
+          ]);
+          if (deviceName === 'android') {
+            if (process.env.MINIAPP_SCHEDULE_PREVIEW_SCREENSHOT) {
+              await review.screenshot({ path: process.env.MINIAPP_SCHEDULE_PREVIEW_SCREENSHOT });
+            }
+            await review.getByRole('button', { name: 'Назад', exact: true }).click();
+            await page.getByRole('button', { name: 'Проверить расписание', exact: true }).click();
+            await bounds.getByText('Даты выпусков не рассчитаны', { exact: true }).waitFor();
+            assert.match(await bounds.innerText(), /Каждые 2 нед\./u);
+            assert.equal(await bounds.locator('time').count(), 0);
+            assert.equal(await review.getByRole('button', { name: 'Сохранить' }).isEnabled(), true);
+          }
+        }
+
         await review.getByRole('button', { name: 'Сохранить', exact: true }).click();
         await page.locator('.publications-page:not(.is-editor)').waitFor();
         assert.equal(patches.length, 1);
@@ -222,6 +261,30 @@ try {
         assert.equal('audience' in patches[0], false);
         assert.equal('intent' in patches[0], false);
         assert.equal(patches[0].content.text, 'Правка без изменения расписания');
+        if (name === 'recover-recurring' && deviceName === 'android') {
+          await page
+            .getByRole('button', { name: 'Действия: Сохраненный пост', exact: true })
+            .click();
+          await page
+            .getByRole('button', { name: 'Изменить будущие отправки', exact: true })
+            .click();
+          await editor.waitFor();
+          await page.locator('.publication-target-picker__summary').click();
+          await page
+            .getByRole('button', { name: 'Выбрать Садоводы Южного, чат', exact: true })
+            .click();
+          await page.getByRole('button', { name: 'Завершить выбор получателей' }).click();
+          await page.getByRole('button', { name: 'Проверить расписание', exact: true }).click();
+          await review.locator('.publication-review-timing time').first().waitFor();
+          assert.deepEqual(forecastRequests.at(-1).editing, {
+            publicationId: current.id,
+            expectedRevision: 5,
+          });
+          await review.getByRole('button', { name: 'Сохранить', exact: true }).click();
+          await page.locator('.publications-page:not(.is-editor)').waitFor();
+          assert.deepEqual(forecastRequests.at(-1).audience, patches[1].audience);
+          assert.deepEqual(forecastRequests.at(-1).schedule, patches[1].schedule);
+        }
         assert.deepEqual(
           current.schedule.slots ?? current.schedule.at,
           schedule.slots ?? schedule.at,

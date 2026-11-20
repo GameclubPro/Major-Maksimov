@@ -199,6 +199,11 @@ releases in the original series and places the remaining schedule in a continuat
 moves keep the saved audience and delivery policy. A conflict or an already prepared release
 leaves the schedule intact. The same request can recover the result after a lost response.
 
+The confirmation of a recurring post shows the first and last planned releases the server can
+calculate. The preview uses the schedule's time zone and the saved revision for edits. Changing
+only the audience uses the remaining limit and skips. An unavailable preview preserves the
+existing timing summary and the normal save path.
+
 Switching between a single date, selected dates and recurring dates preserves the editor's
 working values. The publish request uses the active mode. Closing a draft without a saved
 server or device copy requires an explicit discard. The [calendar browser](../../apps/miniapp/test/publication-calendar-validation.browser.mjs)

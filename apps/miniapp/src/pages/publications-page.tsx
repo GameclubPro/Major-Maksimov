@@ -47,7 +47,6 @@ import {
 import { PublicationFeedCard } from '../features/publications/publication-feed-card';
 import { PublicationCreateSheet } from '../features/publications/publication-create-sheet';
 import { PublicationButtonsSheet } from '../features/publications/publication-buttons-sheet';
-import { PublicationReviewTiming } from '../features/publications/publication-review-timing';
 import {
   buildPublicationSaveFeedback,
   buildPublicationSystemButtons,
@@ -1608,11 +1607,18 @@ export function PublicationsPage({
           >
             <LazyPublicationReviewSheet
               open={pendingReview}
+              api={api}
               draft={draft}
               previews={assetPreviews}
               videoRead={videoRead}
-              timingDetails={
-                editScope === 'retry' ? null : <PublicationReviewTiming draft={draft} />
+              timingContext={
+                editScope === 'retry'
+                  ? undefined
+                  : resolvePublicationSaveRequestContext(
+                      draft,
+                      editorContext,
+                      preservesSavedSchedule,
+                    )
               }
               facts={[
                 `Кому · ${formatTargetSummary(draft.targets)}`,

@@ -1,7 +1,8 @@
 import { PublicationRemoteVideo, type PublicationVideoRead } from './publication-remote-video';
 import { publicationAlbum } from './publication-album';
 import { PublicationVideoPlayer } from './publication-video-preview';
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
+import type { ApiTransport } from '../../lib/api/transport';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
 import { ActionConfirmSheet } from '../../components/ui/action-confirm-sheet';
 import {
@@ -10,6 +11,8 @@ import {
   type PublicationDraft,
 } from './publication-model';
 import { buildPublicationReviewButtonRows } from './publication-review-buttons';
+import { PublicationReviewTiming } from './publication-review-timing';
+import type { PublicationSaveRequestContext } from './publication-save-request';
 import type { PublisherPostImportAssetPreview } from './use-publisher-post-import-asset-previews';
 import './publication-review-sheet.css';
 
@@ -19,7 +22,8 @@ export function PublicationReviewSheet({
   previews,
   videoRead,
   facts,
-  timingDetails,
+  timingContext,
+  api,
   confirmLabel,
   busy,
   onClose,
@@ -30,7 +34,8 @@ export function PublicationReviewSheet({
   videoRead?: PublicationVideoRead;
   previews: readonly PublisherPostImportAssetPreview[];
   facts: string[];
-  timingDetails?: ReactNode;
+  timingContext?: PublicationSaveRequestContext;
+  api: ApiTransport;
   confirmLabel: string;
   busy: boolean;
   onClose: () => void;
@@ -148,7 +153,9 @@ export function PublicationReviewSheet({
               <li key={fact}>{fact}</li>
             ))}
           </ul>
-          {timingDetails}
+          {open && timingContext ? (
+            <PublicationReviewTiming api={api} draft={draft} context={timingContext} />
+          ) : null}
         </>
       }
     />
