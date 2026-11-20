@@ -100,7 +100,7 @@ export function formatPublicationTargets(publication: PublicationSummary): strin
   );
 }
 
-function formatRecurrence(draft: PublicationDraft): string {
+function formatRecurrence(draft: PublicationDraft, includeLimit = true): string {
   if (
     !draft.recurrence.startsAt ||
     draft.recurrence.times.length === 0 ||
@@ -128,12 +128,17 @@ function formatRecurrence(draft: PublicationDraft): string {
     : draft.recurrence.endsAt
       ? `до ${new Intl.DateTimeFormat('ru-RU', { timeZone: draft.scheduleTimezone, day: 'numeric', month: 'short' }).format(new Date(draft.recurrence.endsAt))}`
       : 'без лимита';
-  return [frequency, weekdays, [...draft.recurrence.times].sort().join(', '), limit]
+  return [
+    frequency,
+    weekdays,
+    [...draft.recurrence.times].sort().join(', '),
+    includeLimit ? limit : null,
+  ]
     .filter(Boolean)
     .join(' · ');
 }
 
-export function formatDraftTiming(draft: PublicationDraft): string {
+export function formatDraftTiming(draft: PublicationDraft, includeRecurrenceLimit = true): string {
   if (draft.timingMode === 'now') {
     return 'Сейчас';
   }
@@ -143,7 +148,7 @@ export function formatDraftTiming(draft: PublicationDraft): string {
     );
   }
   if (draft.scheduleKind === 'recurrence') {
-    return formatRecurrence(draft);
+    return formatRecurrence(draft, includeRecurrenceLimit);
   }
   const slots = sortAndUniqueBroadcastSlots(draft.scheduledSlots);
   if (slots.length === 0) {

@@ -9,6 +9,7 @@
   }
 
   .publication-review-timing > time,
+  .publication-review-timing > span > time,
   .publication-review-timing > strong {
     color: var(--publication-ui-ink, var(--color-ink));
     font-weight: 750;

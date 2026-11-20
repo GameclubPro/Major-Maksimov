@@ -6,7 +6,6 @@ import {
 import {
   snapshotPublicationDeliveryDeadline,
   withDefaultPublicationLatePolicy,
-  withPreservedPublicationLatePolicy,
   resolvePublicationRecurrenceFrom,
 } from './publication-late-policy';
 import {
@@ -163,6 +162,7 @@ import {
   resolveEffectivePublicationDeliveryStatus,
 } from './publication-legacy-automated-absence';
 import * as publicationManualRetrySafety from './publication-manual-retry-safety';
+import { previewPublicationSchedule } from './publication-schedule-preview';
 import {
   expandInitialPublicationSchedule,
   expandPublicationSchedule,
@@ -170,8 +170,11 @@ import {
   PUBLICATION_RECURRENCE_HORIZON_MS,
 } from './publication-recurrence';
 import {
+  arePublicationSchedulesEquivalent,
   assertPublishableSchedule,
   normalizePublicationSchedule,
+  resolvePublicationScheduleUpdate,
+  stableStringifyPublicationValue,
 } from './publication-schedule-normalization';
 import {
   deferPublicationRecurrencePreparation,
@@ -459,6 +462,22 @@ export class PublicationService {
               status: parsed.data.status,
             })
           : null,
+    });
+  }
+
+  previewSchedule(
+    user: AuthUser,
+    body: unknown,
+    dispatchProfile: PublicationDispatchProfile = PublicationDispatchProfile.PUBLIK_V1,
+  ) {
+    this.assertNewPublicationProfile(dispatchProfile);
+    return previewPublicationSchedule({
+      prisma: this.prisma,
+      body,
+      access: () => this.publicationAccessWhere(user.userId, dispatchProfile),
+      isAudienceEquivalent: (audience, existing) =>
+        this.isPublicationAudienceEquivalent(audience, existing),
+      pastGraceMs: PUBLICATION_PAST_GRACE_MS,
     });
   }
 
@@ -896,27 +915,13 @@ export class PublicationService {
       targets = await this.resolvePersistedPublicationTargets(user, existing.targets, rootProfile);
     }
     const now = new Date();
-    const existingSchedule =
-      existing.schedule && existing.schedule.status !== PublicationScheduleStatus.DRAFT
-        ? publicationScheduleInputSchema.parse(existing.schedule.rule)
-        : null;
-    const previousSchedulePolicy =
-      existingSchedule ??
-      (existing.schedule?.status === PublicationScheduleStatus.DRAFT
-        ? (publicationScheduleInputSchema.safeParse(existing.schedule.rule).data ?? null)
-        : null);
-    let schedule =
-      request.schedule === undefined
-        ? existingSchedule
-        : request.schedule === null
-          ? null
-          : withPreservedPublicationLatePolicy(
-              this.normalizeSchedule(request.schedule, now),
-              previousSchedulePolicy,
-              existingSchedule !== null,
-              (previous, schedule) =>
-                this.arePublicationSchedulesEquivalent(previous, schedule, true),
-            );
+    const { existingSchedule, schedule: resolvedSchedule } = resolvePublicationScheduleUpdate(
+      existing.schedule,
+      request.schedule,
+      now,
+      PUBLICATION_PAST_GRACE_MS,
+    );
+    let schedule = resolvedSchedule;
     const desiredIntent =
       request.intent ?? (existing.lifecycle === PublicationLifecycle.DRAFT ? 'draft' : 'publish');
     if (desiredIntent === 'publish' && !schedule) {
@@ -938,7 +943,7 @@ export class PublicationService {
     const currentIntent = existing.lifecycle === PublicationLifecycle.DRAFT ? 'draft' : 'publish';
     const scheduleChanged =
       request.schedule !== undefined &&
-      !this.arePublicationSchedulesEquivalent(existingSchedule, schedule);
+      !arePublicationSchedulesEquivalent(existingSchedule, schedule);
     const scheduleRebuildRequested =
       audienceChanged || scheduleChanged || desiredIntent !== currentIntent;
     const repairErroredSchedule =
@@ -3069,63 +3074,6 @@ export class PublicationService {
     );
   }
 
-  private arePublicationSchedulesEquivalent(
-    left: PublicationScheduleInput | null,
-    right: PublicationScheduleInput | null,
-    ignoreLatePolicy = false,
-  ): boolean {
-    if (left === null || right === null) {
-      return left === right;
-    }
-    return (
-      this.stableStringify(this.canonicalizePublicationSchedule(left, ignoreLatePolicy)) ===
-      this.stableStringify(this.canonicalizePublicationSchedule(right, ignoreLatePolicy))
-    );
-  }
-
-  private canonicalizePublicationSchedule(
-    schedule: PublicationScheduleInput,
-    ignoreLatePolicy = false,
-  ): unknown {
-    if (schedule.mode === 'now') {
-      return { mode: schedule.mode, timezone: schedule.timezone };
-    }
-    if (schedule.mode === 'once') {
-      return {
-        mode: schedule.mode,
-        timezone: schedule.timezone,
-        ...(!ignoreLatePolicy && 'latePolicy' in schedule
-          ? { latePolicy: schedule.latePolicy }
-          : {}),
-        at: new Date(schedule.at).toISOString(),
-      };
-    }
-    if (schedule.mode === 'slots') {
-      return {
-        mode: schedule.mode,
-        timezone: schedule.timezone,
-        ...(!ignoreLatePolicy && 'latePolicy' in schedule
-          ? { latePolicy: schedule.latePolicy }
-          : {}),
-        slots: [...new Set(schedule.slots.map((slot) => new Date(slot).getTime()))]
-          .sort((left, right) => left - right)
-          .map((slot) => new Date(slot).toISOString()),
-      };
-    }
-    return {
-      mode: schedule.mode,
-      timezone: schedule.timezone,
-      ...(!ignoreLatePolicy && 'latePolicy' in schedule ? { latePolicy: schedule.latePolicy } : {}),
-      frequency: schedule.frequency,
-      interval: schedule.interval,
-      weekdays: schedule.frequency === 'weekly' ? [...schedule.weekdays].sort((a, b) => a - b) : [],
-      times: [...schedule.times].sort(),
-      startsAt: schedule.startsAt ? new Date(schedule.startsAt).toISOString() : null,
-      endsAt: schedule.endsAt ? new Date(schedule.endsAt).toISOString() : null,
-      maxOccurrences: schedule.maxOccurrences,
-    };
-  }
-
   private normalizeCreateRequest(request: CreatePublicationRequest): CreatePublicationRequest {
     return {
       ...request,
@@ -3793,20 +3741,7 @@ export class PublicationService {
   }
 
   private hashMutationRequest(value: unknown): string {
-    return createHash('sha256').update(this.stableStringify(value)).digest('hex');
-  }
-
-  private stableStringify(value: unknown): string {
-    if (Array.isArray(value)) {
-      return `[${value.map((item) => this.stableStringify(item)).join(',')}]`;
-    }
-    if (value && typeof value === 'object') {
-      return `{${Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => `${JSON.stringify(key)}:${this.stableStringify(item)}`)
-        .join(',')}}`;
-    }
-    return JSON.stringify(value);
+    return createHash('sha256').update(stableStringifyPublicationValue(value)).digest('hex');
   }
 
   private toPrismaEntityType(entityType: 'chat' | 'channel'): ChatEntityType {

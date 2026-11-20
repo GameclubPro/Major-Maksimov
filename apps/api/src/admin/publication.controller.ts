@@ -82,6 +82,17 @@ export class PublicationController {
     );
   }
 
+  @Post('schedule-preview')
+  @HttpCode(HttpStatus.OK)
+  @MiniappProfiles('publisher')
+  schedulePreview(
+    @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
+    @CurrentMiniappProfile() profile: MiniappProfile = 'publisher',
+  ) {
+    return this.publicationService.previewSchedule(user, body, this.toDispatchProfile(profile));
+  }
+
   @Get('legacy')
   @MiniappProfiles('publisher')
   listLegacy(@CurrentUser() user: AuthUser, @Query() query: unknown) {

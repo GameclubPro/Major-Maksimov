@@ -31,6 +31,7 @@ describe('PublicationController', () => {
 
     for (const handler of [
       PublicationController.prototype.list,
+      PublicationController.prototype.schedulePreview,
       PublicationController.prototype.get,
       PublicationController.prototype.update,
       PublicationController.prototype.pause,
@@ -52,6 +53,7 @@ describe('PublicationController', () => {
       list: jest.fn(),
       create: jest.fn(),
       getCalendarAvailability: jest.fn(),
+      previewSchedule: jest.fn(),
       get: jest.fn(),
       update: jest.fn(),
       pause: jest.fn(),
@@ -74,6 +76,7 @@ describe('PublicationController', () => {
     controller.list(user, query, 'publisher');
     controller.create(user, body, 'publisher');
     controller.calendarAvailability(user, body, 'publisher');
+    controller.schedulePreview(user, body, 'publisher');
     controller.refreshTargets('publication-1', user);
     controller.get('publication-1', user, 'publisher');
     controller.update('publication-1', user, body, 'publisher');
@@ -97,6 +100,11 @@ describe('PublicationController', () => {
       PublicationDispatchProfile.PUBLIK_V1,
     );
     expect(publicationService.getCalendarAvailability).toHaveBeenCalledWith(
+      user,
+      body,
+      PublicationDispatchProfile.PUBLIK_V1,
+    );
+    expect(publicationService.previewSchedule).toHaveBeenCalledWith(
       user,
       body,
       PublicationDispatchProfile.PUBLIK_V1,

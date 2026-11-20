@@ -15,6 +15,8 @@ import {
   publicationContentInputSchema,
   publicationDraftContentInputSchema,
   publicationScheduleInputSchema,
+  publicationSchedulePreviewRequestSchema,
+  publicationSchedulePreviewResponseSchema,
   DEFAULT_PUBLICATION_LATE_POLICY,
   publicationDeliverySchema,
   publicationDeliveryStatsSchema,
@@ -29,6 +31,26 @@ import {
 } from '@maxim/contracts/publication';
 
 describe('publication contracts', () => {
+  it('preserves schedule omission and rejects an unbounded preview with an invented end date', () => {
+    const editing = { publicationId: 'saved-series', expectedRevision: 4 };
+    expect(publicationSchedulePreviewRequestSchema.parse({ editing })).toEqual({ editing });
+    expect(publicationSchedulePreviewRequestSchema.parse({ editing, schedule: null })).toEqual({
+      editing,
+      schedule: null,
+    });
+    expect(publicationSchedulePreviewRequestSchema.safeParse({ schedule: null }).success).toBe(
+      false,
+    );
+    expect(
+      publicationSchedulePreviewResponseSchema.safeParse({
+        state: 'unbounded',
+        timezone: 'UTC',
+        firstOccurrenceAt: '2026-11-20T10:00:00.000Z',
+        lastOccurrenceAt: '2026-11-21T10:00:00.000Z',
+      }).success,
+    ).toBe(false);
+  });
+
   it.each(['image-ref', 'video-ref'] as const)(
     'preserves a bounded %s source across publication requests',
     (type) => {

@@ -22,9 +22,13 @@ import {
   testPublication,
   updatePublication,
 } from '../src/lib/api/publication-client';
+import { getPublicationSchedulePreview } from '../src/lib/api/publication-schedule-preview-client';
 
 test('preview moves a single release once and creates a distinct continuation with its remaining count', async () => {
-  const api = createPreviewApiTransport({ search: '?profile=publisher' });
+  const api = createPreviewApiTransport({
+    search: '?profile=publisher',
+    clock: { now: () => new Date('2030-01-01T00:00:00.000Z') },
+  });
   const source = await getPublication(api, 'publication-neighborhood-digest');
   const [first, second, third] = source.occurrences;
   assert.ok(first && second && third && source.schedule?.mode === 'recurrence');
@@ -64,6 +68,22 @@ test('preview moves a single release once and creates a distinct continuation wi
     continuation.source.occurrences.find(({ id }) => id === third.id)?.status,
     'CANCELED',
   );
+});
+
+test('preview transport does not present its sample recurrence dates as the series bounds', async () => {
+  const api = createPreviewApiTransport({ search: '?profile=publisher' });
+  const source = await getPublication(api, 'publication-neighborhood-digest');
+  const result = await getPublicationSchedulePreview(
+    api,
+    { editing: { publicationId: source.id, expectedRevision: source.version } },
+    new AbortController().signal,
+  );
+  assert.deepEqual(result, {
+    state: 'unavailable',
+    firstOccurrenceAt: null,
+    lastOccurrenceAt: null,
+    timezone: source.schedule?.timezone,
+  });
 });
 
 test('preview publications support list, CRUD, actions, and delivery review', async () => {

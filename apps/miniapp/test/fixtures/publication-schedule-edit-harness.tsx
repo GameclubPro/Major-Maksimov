@@ -6,6 +6,7 @@ import { ToastProvider } from '../../src/components/ui/toast';
 import { createPreviewApiTransport } from '../../src/lib/api/preview-transport';
 import type { ApiTransport } from '../../src/lib/api/transport';
 import '../../src/styles.css';
+import '../../src/styles/publisher-workspace.css';
 
 const preview = createPreviewApiTransport({
   search: '?preview=1&profile=publisher',

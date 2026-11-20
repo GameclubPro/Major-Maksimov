@@ -136,13 +136,8 @@ function mergeRouteSearch(currentSearch: string, targetSearch: string): string {
   const merged = new URLSearchParams(currentSearch);
   const target = new URLSearchParams(targetSearch);
 
-  for (const key of new Set(target.keys())) {
-    merged.delete(key);
-  }
-
-  for (const [key, value] of target.entries()) {
-    merged.append(key, value);
-  }
+  target.forEach((_, key) => merged.delete(key));
+  target.forEach((value, key) => merged.append(key, value));
 
   const serialized = merged.toString();
   return serialized ? `?${serialized}` : '';

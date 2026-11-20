@@ -15,6 +15,7 @@ import {
   publicationCalendarAvailabilityRequestSchema,
   publicationCalendarAvailabilityResponseSchema,
   publicationDetailsSchema,
+  publicationSchedulePreviewRequestSchema,
   publicationOccurrenceRescheduleRequestSchema,
   type PublicationPostActions,
   publicationTargetsRefreshResponseSchema,
@@ -933,6 +934,23 @@ export function handlePublicationsRequest(
 ) {
   if (segments.length === 2 && segments[1] === 'legacy' && method === 'GET') {
     return handleLegacyPublicationsRequest(state, url);
+  }
+
+  if (segments.length === 2 && segments[1] === 'schedule-preview' && method === 'POST') {
+    const { schedule, editing } = publicationSchedulePreviewRequestSchema.parse(
+      parseJsonBody(init),
+    );
+    const saved = editing
+      ? state.publications.find((item) => item.id === editing.publicationId)
+      : null;
+    if (editing && saved) assertPreviewPublicationRevision(saved, editing.expectedRevision);
+    // Preview fixtures sample a few dates. Only the API can promise the complete recurrence bounds.
+    return {
+      state: 'unavailable',
+      firstOccurrenceAt: null,
+      lastOccurrenceAt: null,
+      timezone: schedule?.timezone ?? saved?.schedule?.timezone ?? null,
+    };
   }
 
   if (segments.length === 2 && segments[1] === 'calendar-availability' && method === 'POST') {

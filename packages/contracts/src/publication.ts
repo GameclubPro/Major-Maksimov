@@ -443,6 +443,49 @@ export const publicationScheduleInputSchema = z.discriminatedUnion('mode', [
 ]);
 export type PublicationScheduleInput = z.infer<typeof publicationScheduleInputSchema>;
 
+export const publicationSchedulePreviewRequestSchema = z
+  .object({
+    schedule: publicationRecurrenceScheduleSchema.nullable().optional(),
+    audience: publicationAudienceInputSchema.optional(),
+    editing: z
+      .object({
+        publicationId: z.string().trim().min(1).max(256),
+        expectedRevision: z.number().int().min(1),
+      })
+      .optional(),
+  })
+  .refine((request) => request.editing !== undefined || request.schedule != null, {
+    path: ['schedule'],
+    message: 'Укажите расписание серии.',
+  });
+export type PublicationSchedulePreviewRequest = z.infer<
+  typeof publicationSchedulePreviewRequestSchema
+>;
+
+export const publicationSchedulePreviewResponseSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('finite'),
+    timezone: publicationTimezoneSchema,
+    firstOccurrenceAt: publicationDateTimeSchema,
+    lastOccurrenceAt: publicationDateTimeSchema,
+  }),
+  z.object({
+    state: z.literal('unbounded'),
+    timezone: publicationTimezoneSchema,
+    firstOccurrenceAt: publicationDateTimeSchema,
+    lastOccurrenceAt: z.null(),
+  }),
+  z.object({
+    state: z.enum(['empty', 'unavailable']),
+    timezone: publicationTimezoneSchema.nullable(),
+    firstOccurrenceAt: z.null(),
+    lastOccurrenceAt: z.null(),
+  }),
+]);
+export type PublicationSchedulePreviewResponse = z.infer<
+  typeof publicationSchedulePreviewResponseSchema
+>;
+
 export const publicationCalendarAvailabilityRequestSchema = z
   .object({
     audience: publicationAudienceInputSchema,
