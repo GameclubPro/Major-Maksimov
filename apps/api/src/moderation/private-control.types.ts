@@ -209,6 +209,8 @@ export type PrivateSession = {
   pendingProfileMentionChatId: string | null;
   pendingProfileMentionUserId: string | null;
   pendingProfileMentionDisplayName: string | null;
+  pendingProfileMentionExpiresAt: number | null;
+  pendingProfileMentionBotId: string | null;
   selectedChatId: string | null;
   selectedEntityType: ManagedEntityType | null;
   managedGiveawayId: string | null;

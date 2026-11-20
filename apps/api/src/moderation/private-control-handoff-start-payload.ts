@@ -25,10 +25,17 @@ export type PrivateKaravanAllowlistStart = {
 };
 
 const KARAVAN_ALLOWLIST_SCOPE = 'karavan-allowlist-v2';
+const KARAVAN_ALLOWLIST_COMPACT_PREFIX = 'ka3-';
+const KARAVAN_ALLOWLIST_COMPACT_SCOPE = 'karavan-allowlist-v3';
+const KARAVAN_ALLOWLIST_COMPACT_COMPONENT = /^[A-Za-z0-9_-]+$/u;
 
-function signKaravanPayload(encoded: string, botToken: string): string {
+function signKaravanPayload(
+  encoded: string,
+  botToken: string,
+  scope = KARAVAN_ALLOWLIST_SCOPE,
+): string {
   return createHmac('sha256', botToken.trim())
-    .update(`${KARAVAN_ALLOWLIST_SCOPE}:${encoded}`)
+    .update(`${scope}:${encoded}`)
     .digest('hex')
     .slice(0, 16);
 }
@@ -38,37 +45,64 @@ export function buildPrivateKaravanAllowlistStartPayload(
   botToken: string,
 ): string {
   const nonce = params.nonce?.trim() || randomBytes(12).toString('base64url');
+  const chatId = params.chatId.trim();
+  const actorUserId = params.actorUserId.trim();
   const encoded = Buffer.from(
-    JSON.stringify({ v: 1, c: params.chatId.trim(), a: params.actorUserId.trim(), n: nonce }),
+    JSON.stringify({ v: 1, c: chatId, a: actorUserId, n: nonce }),
     'utf8',
   ).toString('base64url');
   const payload = `${KARAVAN_ALLOWLIST_START_PREFIX}${encoded}.${signKaravanPayload(encoded, botToken)}`;
-  if (!isValidMaxBotStartPayload(payload)) {
-    throw new Error('Karavan allowlist start payload is too long or contains invalid characters');
+  if (isValidMaxBotStartPayload(payload)) return payload;
+
+  // Keep the existing links readable and the full nonce when long IDs exceed MAX's limit.
+  const fields = [chatId, actorUserId, nonce];
+  if (fields.every((field) => KARAVAN_ALLOWLIST_COMPACT_COMPONENT.test(field))) {
+    const compact = fields.join('.');
+    const signature = signKaravanPayload(compact, botToken, KARAVAN_ALLOWLIST_COMPACT_SCOPE);
+    const compactPayload = `${KARAVAN_ALLOWLIST_COMPACT_PREFIX}${compact}.${signature}`;
+    if (isValidMaxBotStartPayload(compactPayload)) return compactPayload;
   }
-  return payload;
+  throw new Error('Karavan allowlist start payload is too long or contains invalid characters');
 }
 
 export function parsePrivateKaravanAllowlistStartPayload(
   payload: string | null,
   botTokens: readonly string[],
 ): PrivateKaravanAllowlistStart | null {
-  if (!payload?.startsWith(KARAVAN_ALLOWLIST_START_PREFIX) || !isValidMaxBotStartPayload(payload)) {
+  if (!isValidMaxBotStartPayload(payload)) return null;
+  const compact = payload.startsWith(KARAVAN_ALLOWLIST_COMPACT_PREFIX);
+  if (!compact && !payload.startsWith(KARAVAN_ALLOWLIST_START_PREFIX)) {
     return null;
   }
-  const raw = payload.slice(KARAVAN_ALLOWLIST_START_PREFIX.length);
+  const prefix = compact ? KARAVAN_ALLOWLIST_COMPACT_PREFIX : KARAVAN_ALLOWLIST_START_PREFIX;
+  const scope = compact ? KARAVAN_ALLOWLIST_COMPACT_SCOPE : KARAVAN_ALLOWLIST_SCOPE;
+  const raw = payload.slice(prefix.length);
   const separator = raw.lastIndexOf('.');
   if (separator <= 0) return null;
   const encoded = raw.slice(0, separator);
   const signature = raw.slice(separator + 1).toLowerCase();
   if (!/^[a-f0-9]{16}$/u.test(signature)) return null;
   const valid = botTokens.some((token) => {
-    const expected = signKaravanPayload(encoded, token);
+    const expected = signKaravanPayload(encoded, token, scope);
     const left = Buffer.from(signature, 'utf8');
     const right = Buffer.from(expected, 'utf8');
     return left.length === right.length && timingSafeEqual(left, right);
   });
   if (!valid) return null;
+  if (compact) {
+    const fields = encoded.split('.');
+    const [chatId, actorUserId, nonce] = fields;
+    if (
+      fields.length !== 3 ||
+      !chatId ||
+      !actorUserId ||
+      !nonce ||
+      !fields.every((field) => KARAVAN_ALLOWLIST_COMPACT_COMPONENT.test(field))
+    ) {
+      return null;
+    }
+    return { chatId, actorUserId, nonce };
+  }
   try {
     const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Record<
       string,

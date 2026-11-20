@@ -31,6 +31,8 @@ describe('private control session normalizer', () => {
       pendingProfileMentionChatId: null,
       pendingProfileMentionUserId: null,
       pendingProfileMentionDisplayName: null,
+      pendingProfileMentionExpiresAt: null,
+      pendingProfileMentionBotId: null,
       selectedChatId: null,
       selectedEntityType: null,
       managedGiveawayId: null,

@@ -1,9 +1,12 @@
 import {
   buildPrivateGiveawayHandoffStartPayload,
+  buildPrivateKaravanAllowlistStartPayload,
   buildPrivateProfileMentionStartPayload,
   parsePrivateGiveawayHandoffStartPayload,
+  parsePrivateKaravanAllowlistStartPayload,
   parsePrivateProfileMentionStartPayload,
 } from './private-control-handoff-start-payload';
+import { MAX_BOT_START_MAX_LENGTH } from '../max/max-deep-link.util';
 import {
   GIVEAWAY_HANDOFF_START_PAYLOAD,
   GIVEAWAY_HANDOFF_START_PREFIX,
@@ -17,6 +20,37 @@ function buildLegacyPayload(prefix: string, payload: unknown): string {
 }
 
 describe('private control handoff start payloads', () => {
+  it('preserves the existing storefront payload for IDs that fit', () => {
+    const flow = { chatId: '-123', actorUserId: '456', nonce: 'test_nonce-12345' };
+    const payload = buildPrivateKaravanAllowlistStartPayload(flow, botToken);
+
+    expect(payload).toMatch(/^ka2-/u);
+    expect(parsePrivateKaravanAllowlistStartPayload(payload, [botToken])).toEqual(flow);
+  });
+
+  it.each([
+    ['-9223372036854775808', '9223372036854775807'],
+    ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002'],
+  ])(
+    'preserves the signed storefront handoff when long IDs need a compact link',
+    (chatId, actorUserId) => {
+      const flow = { chatId, actorUserId, nonce: 'test_nonce-12345' };
+      const payload = buildPrivateKaravanAllowlistStartPayload(flow, botToken);
+
+      expect(payload).toMatch(/^ka3-/u);
+      expect(payload.length).toBeLessThanOrEqual(MAX_BOT_START_MAX_LENGTH);
+      expect(parsePrivateKaravanAllowlistStartPayload(payload, ['other-token', botToken])).toEqual(
+        flow,
+      );
+      expect(parsePrivateKaravanAllowlistStartPayload(payload, ['other-token'])).toBeNull();
+      expect(
+        parsePrivateKaravanAllowlistStartPayload(payload.replace(actorUserId, 'other-user'), [
+          botToken,
+        ]),
+      ).toBeNull();
+    },
+  );
+
   it('builds and parses compact giveaway handoff payloads when possible', () => {
     const payload = buildPrivateGiveawayHandoffStartPayload(
       {

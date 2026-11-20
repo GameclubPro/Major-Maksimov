@@ -6,6 +6,7 @@ import {
   openLink,
   openMaxBotLink,
   openMaxBotLinkAndClose,
+  openPrivateBotHandoff,
   readyMaxMiniApp,
   syncMaxNativeEnvironment,
 } from '../src/lib/max-bridge';
@@ -502,6 +503,38 @@ test('openMaxBotLinkAndClose closes miniapp after bot start handoff bridge open'
   assert.deepEqual(opened, ['https://max.ru/777000_bot?start=broadcast_handoff']);
   assert.deepEqual(assignedUrls, []);
   assert.equal(closeCount, 1);
+});
+
+test('private bot handoff validates the destination and keeps the current screen for retry', async () => {
+  const opened: string[] = [];
+  const assigned: string[] = [];
+  let closeCount = 0;
+  setMockWindow({ openMaxLink: (url) => opened.push(url), close: () => closeCount++ }, assigned);
+  const url = 'https://max.ru/major_bot?start=ka2-example';
+
+  assert.equal(openPrivateBotHandoff('https://max.ru@invalid.example/major_bot'), false);
+  assert.equal(openPrivateBotHandoff('https://user@max.ru/major_bot'), false);
+  assert.equal(openPrivateBotHandoff('https://max.ru'), false);
+  assert.equal(openPrivateBotHandoff('max://user/123'), false);
+  assert.equal(openPrivateBotHandoff(url), true);
+  assert.equal(openPrivateBotHandoff(url), true);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual(opened, [url, url]);
+  assert.deepEqual(assigned, []);
+  assert.equal(closeCount, 0);
+
+  setMockWindow(
+    {
+      openMaxLink: () => {
+        throw new Error('Bridge unavailable');
+      },
+    },
+    assigned,
+  );
+  assert.equal(openPrivateBotHandoff(url), false);
+  setMockWindow(null, assigned);
+  assert.equal(openPrivateBotHandoff(url), true);
+  assert.deepEqual(assigned, [url]);
 });
 
 test('storefront launch never closes Major when MAX does not acknowledge navigation', async () => {

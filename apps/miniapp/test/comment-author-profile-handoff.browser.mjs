@@ -42,7 +42,14 @@ try {
     const id = await comment.locator('[data-message-id]').getAttribute('data-message-id');
     assert.ok(id);
     await avatar.click();
-    await page.waitForFunction(() => window.__MAXIM_VISUAL_BRIDGE_CLOSED__);
+    if (profile === 'publisher') {
+      await page.waitForFunction(() => window.__MAXIM_VISUAL_BRIDGE_CLOSED__);
+    } else {
+      await page.waitForFunction(() =>
+        window.__MAXIM_VISUAL_BRIDGE_EVENTS__.some(({ type }) => type === 'openMaxLink'),
+      );
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    }
     assert.deepEqual(await page.evaluate(() => window.commentTest.profileRequests), [
       profile === 'publisher'
         ? {
@@ -62,7 +69,7 @@ try {
       ),
       [
         { type: 'openMaxLink', url: botUrl },
-        { type: 'close', url: undefined },
+        ...(profile === 'publisher' ? [{ type: 'close', url: undefined }] : []),
       ],
     );
   }

@@ -12,6 +12,7 @@ import type { AuthUser } from '../common/decorators/current-user.decorator';
 import { isManagedEntityForwardedRecoveryMessage } from '../common/managed-entity-forwarded-recovery.util';
 import { raceWithTimeout } from '../common/promise-timeout.util';
 import { shouldPreferActiveContentInputForForward } from './private-control-forward-routing';
+import { readKaravanAllowlistForwardedTargets } from './private-control-karavan-allowlist-prompt';
 import { AdminDialogLinkService } from '../admin/admin-dialog-link.service';
 import { AdminService } from '../admin/admin.service';
 import { AdminSettingsService } from '../admin/admin-settings.service';
@@ -83,7 +84,18 @@ export class PrivateControlService extends LegacyPrivateControlService {
             timeoutMs: FORWARDED_RECOVERY_SESSION_LOOKUP_TIMEOUT_MS,
             onTimeout: () => null,
           });
-          preferContentInput = session ? shouldPreferActiveContentInputForForward(session) : false;
+          const flow = session?.pendingKaravanAllowlist;
+          preferContentInput = Boolean(
+            session &&
+            (shouldPreferActiveContentInputForForward(session) ||
+              (flow?.stage === 'await_forward' &&
+                flow.actorUserId === userId &&
+                flow.expiresAt > Date.now() &&
+                (!flow.botId || flow.botId === update.botId) &&
+                readKaravanAllowlistForwardedTargets(update).some(
+                  (target) => target.userId !== userId,
+                ))),
+          );
         } catch {
           // Managed-entity recovery must not depend on optional private-session storage.
           preferContentInput = false;

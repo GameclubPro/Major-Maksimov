@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 import type { ApiTransport } from '../../lib/api/transport';
 import { handoffEntityMemberProfile } from '../../lib/api/member-profile-handoff-client';
-import { openMaxBotLinkAndClose } from '../../lib/max-bridge';
+import { openPrivateBotHandoff } from '../../lib/max-bridge';
 
 export function ReportProfileLink({
   api,
@@ -26,7 +26,7 @@ export function ReportProfileLink({
         displayName: name || 'Пользователь',
       }),
     onSuccess: (result) => {
-      if (!openMaxBotLinkAndClose(result.botUrl)) throw new Error('Profile link unavailable');
+      if (!openPrivateBotHandoff(result.botUrl)) throw new Error('Profile link unavailable');
     },
   });
   return (

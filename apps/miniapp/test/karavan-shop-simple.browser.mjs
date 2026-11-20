@@ -64,6 +64,56 @@ try {
             await home.getByText('Магазин выключен', { exact: true }).waitFor();
             const calls = await page.evaluate(() => window.__shopRequests.filter(row => row.body?.command?.operation === 'status'));
             assert.equal(calls.length, 1); assert.deepEqual(calls[0].body, original);
+          } else if (group === 'allowlist-handoff') {
+            await begin('simple_community_network');
+            await page.evaluate(() => {
+              window.WebApp.close = () => {
+                window.__MAXIM_VISUAL_BRIDGE_CLOSED__ = true;
+              };
+            });
+            await home.getByRole('button', { name: 'Кнопки в чате', exact: true }).click();
+            const publications = page.getByRole('dialog', {
+              name: 'Объявления в чате',
+              exact: true,
+            });
+            await publications
+              .getByRole('radio', {
+                name: 'Администраторы и выбранные пользователи',
+                exact: true,
+              })
+              .check();
+            const addUser = publications.getByRole('button', {
+              name: 'Добавить пользователя',
+              exact: true,
+            });
+            const expectedUrl = 'https://max.ru/synthetic_major_bot?start=ka2-example';
+            for (const count of [1, 2]) {
+              await addUser.click();
+              await page.waitForFunction(
+                (expected) => window.__shopOpened.length === expected,
+                count,
+              );
+              assert.equal(await addUser.isEnabled(), true);
+            }
+            await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 100)));
+            assert.deepEqual(await page.evaluate(() => window.__shopOpened), [
+              expectedUrl,
+              expectedUrl,
+            ]);
+            assert.equal(
+              await page.evaluate(() => Boolean(window.__MAXIM_VISUAL_BRIDGE_CLOSED__)),
+              false,
+            );
+            assert.equal(
+              await page.evaluate(
+                () =>
+                  window.__shopRequests.filter(({ path }) =>
+                    path.endsWith('/karavan-storefront/allowlist/handoff'),
+                  ).length,
+              ),
+              2,
+            );
+            await shot('allowlist-handoff', publications);
           } else if (group === 'boundaries') {
             await begin('simple_missing_buyer_link');
             assert.equal(await home.getByRole('button', { name: 'Управлять магазином', exact: true }).isDisabled(), true);

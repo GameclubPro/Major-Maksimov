@@ -49,7 +49,7 @@ import {
   buildMembershipActivitySnapshotParts,
   isMembershipActivityPage,
 } from '../lib/logs-dashboard-cache';
-import { openMaxBotLinkAndClose } from '../lib/max-bridge';
+import { openPrivateBotHandoff } from '../lib/max-bridge';
 import { queryKeys } from '../lib/query-keys';
 import {
   readStatsSnapshot,
@@ -455,7 +455,7 @@ function ChannelStatsWorkspace({ api }: { api: ApiTransport }) {
       handoffChannelMemberProfile(api, chatId, userId, { displayName }),
     onSuccess: (result) => {
       if (!activeView.current) return;
-      if (!openMaxBotLinkAndClose(result.botUrl)) {
+      if (!openPrivateBotHandoff(result.botUrl)) {
         pushToast({
           tone: 'danger',
           title: 'Не удалось открыть бота',
