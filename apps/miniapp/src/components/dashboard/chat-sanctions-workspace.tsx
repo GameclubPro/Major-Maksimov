@@ -6,6 +6,11 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 
 import type { ApiTransport } from '../../lib/api/transport';
 import { getChatSanctions } from '../../lib/api/chat-sanctions-client';
+import {
+  describeManualModerationReleaseError,
+  MAX_UNBAN_CHECK_GUIDANCE,
+  MAX_UNBAN_CHECK_LABEL,
+} from '../../lib/manual-moderation-feedback';
 import { describeUserFacingError } from '../../lib/user-facing-error';
 import {
   formatSanctionRemaining,
@@ -265,7 +270,7 @@ export function ChatSanctionsWorkspace({
           {selected.action === 'BAN'
             ? selected.banOnRejoin || isMaxMemberRestoreAvailable()
               ? 'Снять бан'
-              : 'Проверить снятие в MAX'
+              : MAX_UNBAN_CHECK_LABEL
             : 'Снять мут'}
         </button>
       ) : null}
@@ -637,7 +642,7 @@ export function ChatSanctionsWorkspace({
           selected?.action === 'BAN'
             ? !selectedNeedsMaxCheck
               ? 'Снять бан?'
-              : 'Проверить снятие в MAX?'
+              : `${MAX_UNBAN_CHECK_LABEL}?`
             : 'Снять мут?'
         }
         summary={selected?.userDisplayName}
@@ -645,12 +650,10 @@ export function ChatSanctionsWorkspace({
         previewMeta={
           release.error ? (
             <span role="alert">
-              {describeUserFacingError(release.error, 'Не удалось снять ограничение.')}
+              {describeManualModerationReleaseError(release.error, 'Не удалось снять ограничение.')}
             </span>
           ) : selectedNeedsMaxCheck ? (
-            'Снимите блокировку вручную в MAX. Проверка подтвердит возвращение участника в чат.'
-          ) : selected ? (
-            `Назначено ${formatDate(selected.createdAt)}`
+            MAX_UNBAN_CHECK_GUIDANCE
           ) : undefined
         }
         confirmLabel={
@@ -661,7 +664,7 @@ export function ChatSanctionsWorkspace({
               : 'Снять мут'
         }
         confirmDisabled={!releaseAvailable}
-        confirmBusyLabel={selectedNeedsMaxCheck ? 'Проверяем...' : 'Снимаем...'}
+        confirmBusyLabel={selectedNeedsMaxCheck ? 'Проверяем…' : 'Снимаем…'}
         tone="accent"
         isBusy={release.isPending}
         onClose={() => {

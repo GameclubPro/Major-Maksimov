@@ -1,12 +1,16 @@
-import { Logger } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
+import { formatManualModerationUserLabel } from '../admin/manual-moderation-notice.util';
 import type { MaxUpdate } from '@maxim/contracts';
 import type { ManualModerationService } from '../admin/manual-moderation.service';
 import {
   MAX_API_SOURCE_TAGS,
+  type MaxCallbackMessageEdit,
   type MaxChatMemberAccess,
   type MaxClientService,
 } from '../max/max-client.service';
+import { MaxMemberRestoreUnavailableError } from '../max/max-member-restore-capability';
 import { SanctionAction } from '../prisma/prisma-client';
+import { LOCAL_CHAT_BAN_MODE } from './local-chat-ban';
 import { resolveModerationSanctionExpiry } from './moderation-sanction-expiry.util';
 import type { PrismaService } from '../prisma/prisma.service';
 import {
@@ -15,6 +19,7 @@ import {
   extractMaxCallbackUserId,
 } from './max-callback-update.util';
 import {
+  buildModerationReleaseCallbackPayload,
   parseModerationReleaseCallbackPayload,
   type ModerationReleaseCallback,
 } from './moderation-release-callback.util';
@@ -137,6 +142,7 @@ export class ModerationReleaseCallbackService {
         return;
       }
 
+      let unbanRecorded = false;
       const result = await this.manualModeration.applyManualModerationAction(
         sanctionEvent.chatId,
         sanctionEvent.userId,
@@ -155,11 +161,26 @@ export class ModerationReleaseCallbackService {
           actorAlreadyVerified: true,
           allowTargetDisplayNameRemoteLookup: false,
           expectedSanctionEventId: sanctionEvent.id,
-          ...(release.action === 'UNBAN' ? { attemptUnbanWithRemove: true } : {}),
+          ...(release.action === 'UNBAN'
+            ? { onModerationEventRecorded: () => (unbanRecorded = true) }
+            : {}),
         },
       );
-      await this.answerCallbackSafe(callbackId, result.message, botId, messageChatId);
+      if (release.action === 'UNBAN') {
+        await this.answerUnban(callbackId, update, sanctionEvent, release, unbanRecorded);
+      } else {
+        await this.answerCallbackSafe(callbackId, result.message, botId, messageChatId);
+      }
     } catch (error: unknown) {
+      const response = error instanceof BadRequestException ? error.getResponse() : null;
+      if (
+        release.action === 'UNBAN' &&
+        (error instanceof MaxMemberRestoreUnavailableError ||
+          readField(response, 'code') === 'MAX_MEMBER_RESTORE_UNAVAILABLE')
+      ) {
+        await this.answerUnban(callbackId, update, sanctionEvent, release, false);
+        return;
+      }
       if (error instanceof ModerationSanctionStateChangedError) {
         await this.answerCallbackSafe(
           callbackId,
@@ -195,6 +216,51 @@ export class ModerationReleaseCallbackService {
         messageChatId,
       );
     }
+  }
+
+  private async answerUnban(
+    callbackId: string,
+    update: MaxUpdate,
+    event: ModerationReleaseSanctionEvent,
+    release: ModerationReleaseCallback,
+    recorded: boolean,
+  ): Promise<void> {
+    const localBan = readField(event.metadata, 'mode') === LOCAL_CHAT_BAN_MODE;
+    const status = recorded
+      ? localBan
+        ? 'Бан снят. Можно добавить в чат.'
+        : 'Бан снят. Участник уже в чате.'
+      : 'Добавьте в чат, затем нажмите «Проверить».';
+    const botId = readString(update.botId) ?? undefined;
+    const messageId = readString(update.message?.messageId);
+    if (!botId || !messageId) {
+      await this.answerCallbackSafe(
+        callbackId,
+        recorded ? status : 'Добавьте участника в MAX, затем проверьте.',
+        botId,
+        event.chatId,
+      );
+      return;
+    }
+
+    const label = formatManualModerationUserLabel(
+      readString(readField(event.metadata, 'targetDisplayName')),
+      event.userId,
+    );
+    const payload = buildModerationReleaseCallbackPayload(release.action, release.sanctionEventId);
+    // FLAG: The callback edits its own notice. Keep unrelated attachments and replace only this
+    // sanction's button. A native unban without a recorded event still needs verification.
+    await this.answerCallbackSafe(callbackId, undefined, botId, event.chatId, {
+      messageId,
+      text: `${label}\n${status}`,
+      options: {
+        textFormat: 'markdown',
+        replaceCallbackPayloadPrefixes: [payload],
+        ...(recorded
+          ? {}
+          : { buttons: [[{ type: 'callback', text: 'Проверить', payload, intent: 'positive' }]] }),
+      },
+    });
   }
 
   private async loadSanctionEvent(
@@ -269,9 +335,10 @@ export class ModerationReleaseCallbackService {
     notification?: string,
     botId?: string,
     rateLimitEntityId?: string,
+    messageEdit?: MaxCallbackMessageEdit,
   ): Promise<void> {
     try {
-      await this.maxClient.answerCallback(callbackId, notification, undefined, {
+      await this.maxClient.answerCallback(callbackId, notification, messageEdit, {
         ignoreFailureMetricStatuses: CALLBACK_TERMINAL_FAILURE_METRIC_STATUSES,
         ...(botId ? { botId } : {}),
         ...(rateLimitEntityId?.trim() ? { rateLimitEntityId: rateLimitEntityId.trim() } : {}),
@@ -286,6 +353,12 @@ export class ModerationReleaseCallbackService {
       );
     }
   }
+}
+
+function readField(value: unknown, field: string): unknown {
+  return value && typeof value === 'object' && Object.hasOwn(value, field)
+    ? (value as Record<string, unknown>)[field]
+    : undefined;
 }
 
 function readString(value: unknown): string | null {

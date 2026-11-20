@@ -7040,6 +7040,54 @@ describe('MaxClientService inline keyboard guardrails', () => {
     await service.onModuleDestroy();
   });
 
+  it('explicitly removes the last matching callback button from the edited message', async () => {
+    const payload = 'moderation-release:v2:unban:c2FuY3Rpb24';
+    const httpService = {
+      request: jest
+        .fn()
+        .mockReturnValueOnce(
+          of({
+            status: 200,
+            data: {
+              messages: [
+                {
+                  body: {
+                    mid: 'mid.ban-notice',
+                    attachments: [
+                      {
+                        type: 'inline_keyboard',
+                        payload: {
+                          buttons: [[{ type: 'callback', text: 'Разбанить', payload }]],
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          }),
+        )
+        .mockReturnValueOnce(of({ status: 200, data: { success: true } })),
+    };
+    const service = createService(httpService);
+
+    await service.answerCallback('released-ban', undefined, {
+      messageId: 'mid.ban-notice',
+      text: 'Бан снят.',
+      options: { replaceCallbackPayloadPrefixes: [payload] },
+    });
+
+    expect(httpService.request).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        method: 'post',
+        url: 'https://platform-api2.max.ru/answers',
+        params: { callback_id: 'released-ban' },
+        data: { message: { text: 'Бан снят.', attachments: [] } },
+      }),
+    );
+    await service.onModuleDestroy();
+  });
+
   it('answers callback against the exact message while replacing only matching callback rows', async () => {
     const existingImage = { type: 'image', payload: { token: 'poll-image-token' } };
     const existingComments = {

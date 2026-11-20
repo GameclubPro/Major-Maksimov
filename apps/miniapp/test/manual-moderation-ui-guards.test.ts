@@ -6,6 +6,10 @@ const eventsPageSource = readFileSync(
   new URL('../src/pages/events-page.tsx', import.meta.url),
   'utf8',
 );
+const historyControlsSource = readFileSync(
+  new URL('../src/components/violation-moderation-controls.tsx', import.meta.url),
+  'utf8',
+);
 const confirmSheetSource = readFileSync(
   new URL('../src/components/ui/action-confirm-sheet.tsx', import.meta.url),
   'utf8',
@@ -62,22 +66,19 @@ test('participant confirmations and mutation results stay bound to their origina
 });
 
 test('history actions keep the confirmation visible until the request settles', () => {
-  const start = eventsPageSource.indexOf('function ViolationModerationControls');
-  assert.ok(start >= 0);
-  const source = eventsPageSource.slice(start);
-  const actionStart = source.indexOf('const applyAction =');
-  const actionEnd = source.indexOf('const openScopeAction =', actionStart);
+  const actionStart = historyControlsSource.indexOf('const applyAction =');
+  const actionEnd = historyControlsSource.indexOf('const openScopeAction =', actionStart);
   assert.ok(actionStart >= 0 && actionEnd > actionStart);
-  const action = source.slice(actionStart, actionEnd);
+  const action = historyControlsSource.slice(actionStart, actionEnd);
   assert.match(action, /if \(applyLock\.current \|\| applyMutation\.isPending\) return;/u);
   assert.match(action, /applyLock\.current = true;/u);
   assert.doesNotMatch(action, /setPendingScopeAction\(null\)/u);
   assert.match(
-    eventsPageSource,
+    historyControlsSource,
     /confirmBusy=\{applyMutation\.isPending && pendingScopeChoice === 'current_chat'\}/u,
   );
   assert.match(
-    eventsPageSource,
+    historyControlsSource,
     /extraActionBusy=\{applyMutation\.isPending && pendingScopeChoice === 'all_chats'\}/u,
   );
 });

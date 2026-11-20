@@ -9908,12 +9908,17 @@ export class AdminService implements OnModuleDestroy {
         await this.maxClient.cancelScheduledUnban(chatId, targetUserId);
       }
 
+      const membershipCheckedAt = new Date();
       unbanMode = await this.resolveManualUnbanExecutionMode(chatId, targetUserId, resolvedBotId);
       if (unbanMode === 'ALREADY_PRESENT') {
         releaseStateConfirmed = true;
         try {
           await leaseGuard.assertOwned();
-          await this.clearTerminalBanStateAfterConfirmedUnban(chatId, targetUserId);
+          await this.clearTerminalBanStateAfterConfirmedUnban(
+            chatId,
+            targetUserId,
+            membershipCheckedAt,
+          );
         } catch (error: unknown) {
           throw markMaxMemberMutationConfirmed(error);
         }
@@ -9936,7 +9941,7 @@ export class AdminService implements OnModuleDestroy {
           if (error instanceof MaxMemberRestoreUnavailableError) {
             throw new BadRequestException({
               code: error.code,
-              message: error.message,
+              message: 'Добавьте участника в MAX, затем проверьте.',
               retryable: false,
             });
           }
@@ -10006,6 +10011,7 @@ export class AdminService implements OnModuleDestroy {
       throw error;
     }
     await this.commitManualSanctionStateFence(sanctionFence, moderationEventId);
+    options.onModerationEventRecorded?.(moderationEventId);
 
     return manualModerationActionResultSchema.parse({
       ok: true,
@@ -10013,10 +10019,7 @@ export class AdminService implements OnModuleDestroy {
       userId: targetUserId,
       muteDurationHours: null,
       muteExpiresAt: null,
-      message:
-        unbanMode === 'ALREADY_PRESENT'
-          ? 'Блокировка снята. Участник уже в чате, добавлять его повторно не понадобилось.'
-          : 'Блокировка снята, участник возвращён в чат.',
+      message: 'Бан снят.',
     });
   }
 
@@ -13138,12 +13141,13 @@ export class AdminService implements OnModuleDestroy {
         chatId,
         targetUserId,
         {
+          bypassCache: true,
           trafficClass: 'critical',
           actionHealthLane: ADMIN_ACTION_HEALTH_LANE,
           ...(botId ? { botId } : {}),
         } as never,
       );
-      return targetAccess ? 'ALREADY_PRESENT' : 'MAX_UNBLOCK';
+      return targetAccess?.userId === targetUserId ? 'ALREADY_PRESENT' : 'MAX_UNBLOCK';
     } catch (error: unknown) {
       this.logger.debug(
         {

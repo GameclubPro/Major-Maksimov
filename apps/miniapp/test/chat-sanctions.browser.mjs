@@ -19,6 +19,7 @@ try {
     await installNativeVisualModeInitScript(context);
     await installMaxBridgeShimInitScript(context, { platform: 'ios' });
     const page = await context.newPage();
+    await page.clock.setFixedTime(new Date('2026-11-20T12:00:00Z'));
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     const url = new URL('chat/preview-chat/events?preview=1&device=iphone-se', base);
@@ -29,11 +30,14 @@ try {
     assert.equal(await rows.count(), 4);
     const oldBan = rows.filter({ hasText: 'Александр Кузнецов' });
     await oldBan.locator('.sanctions-workspace__details-trigger').click();
-    await page.getByRole('button', { name: /^(Снять бан|Проверить снятие в MAX)$/u }).click();
+    await page.getByRole('button', { name: 'Проверить снятие в MAX', exact: true }).click();
     const confirmation = page.getByRole('dialog', {
-      name: /^(Снять бан|Проверить снятие в MAX)\?$/u,
+      name: 'Проверить снятие в MAX?',
     });
-    await confirmation.getByRole('button', { name: /^(Снять бан|Проверить)$/u }).click();
+    await confirmation
+      .getByText('Добавьте участника в MAX, затем проверьте.', { exact: true })
+      .waitFor();
+    await confirmation.getByRole('button', { name: 'Проверить', exact: true }).click();
     await confirmation.waitFor({ state: 'hidden' });
     await oldBan.waitFor({ state: 'hidden' });
     await page.getByLabel('Состояние ограничения').selectOption('archive');

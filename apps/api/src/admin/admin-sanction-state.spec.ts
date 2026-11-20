@@ -433,6 +433,7 @@ describe('existing sanction-button unban attempt', () => {
     expect(maxClient.clearTerminalBanStateAfterConfirmedUnban).toHaveBeenCalledWith(
       'chat-1',
       'user-4',
+      expect.any(Date),
     );
     expect(harness.sanctionStateFence.commit).toHaveBeenCalled();
     expect(prisma.moderationEvent.create).toHaveBeenCalledWith(
