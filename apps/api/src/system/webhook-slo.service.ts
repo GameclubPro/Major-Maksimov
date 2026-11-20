@@ -285,9 +285,12 @@ export class WebhookSloService {
         if (!event.processedAt) {
           return null;
         }
-        return Math.max(0, event.processedAt.getTime() - event.createdAt.getTime());
+        return event.processedAt.getTime() - event.createdAt.getTime();
       })
-      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .filter(
+        (value): value is number =>
+          typeof value === 'number' && Number.isFinite(value) && value >= 0,
+      )
       .sort((left, right) => left - right);
     const p95ProcessingMs = this.percentile(durations, 0.95);
     const p99ProcessingMs = this.percentile(durations, 0.99);
@@ -305,9 +308,12 @@ export class WebhookSloService {
         if (!event.queuedAt) {
           return null;
         }
-        return Math.max(0, event.queuedAt.getTime() - event.createdAt.getTime());
+        return event.queuedAt.getTime() - event.createdAt.getTime();
       })
-      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .filter(
+        (value): value is number =>
+          typeof value === 'number' && Number.isFinite(value) && value >= 0,
+      )
       .sort((left, right) => left - right);
     const enqueueUnderTargetRatio =
       enqueueDurations.length > 0
@@ -343,7 +349,8 @@ export class WebhookSloService {
       processedEvents,
       failedEvents,
       sampleLimit: this.sampleLimit,
-      sampledProcessedEvents: durations.length,
+      // FLAG: The limit and truncation describe selected rows. Latency excludes invalid clocks.
+      sampledProcessedEvents: processedSample.length,
       processedSampleTruncated,
       processedSampledFrom: this.readOldestSampleTimestamp(
         processedSample,
@@ -359,7 +366,7 @@ export class WebhookSloService {
       membershipCache,
       enqueue: {
         targetMs: this.targetEnqueueMs,
-        sampledEvents: enqueueDurations.length,
+        sampledEvents: enqueueSample.length,
         sampleTruncated: enqueueSampleTruncated,
         sampledFrom: this.readOldestSampleTimestamp(enqueueSample, (event) => event.queuedAt),
         p95LatencyMs: this.percentile(enqueueDurations, 0.95),

@@ -57,7 +57,9 @@ or truncated samples are not a complete inventory. The report explicitly declare
 `metadata_ready` does not prove MAX write permission or completed activation: raw
 permission data and the activation handshake are outside this diagnostic. Positive bot
 proofs do not expire; old/null expiry alone is not a blocker. `bot_access_unconfirmed`
-means a missing/future confirmation timestamp, and `route_quarantined` is separate.
+also covers an unknown or missing stored bot role when the connection checks pass, or a
+missing/future confirmation timestamp. A confirmed ordinary member yields `bot_not_admin`.
+The saved occurrence blocker records the earlier dispatch decision. `route_quarantined` is separate.
 Report schema v2 treats confirmed ADMIN/OWNER grants as durable, matching runtime
 authorization. Older v1 reports can contain `actor_authority_stale` and
 `actor_edge_expired`; these historical age labels are not current authorization failures.

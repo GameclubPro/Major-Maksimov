@@ -6,6 +6,8 @@ import {
   PUBLISHER_COMMENT_ACTION,
 } from './publisher-comment-notification.service';
 import { PublisherCommentNotificationDeliveryService } from './publisher-comment-notification-delivery.service';
+import type { PublisherReadinessService } from './publisher-readiness.service';
+import { PublisherSetupRequiredException } from './publisher-errors';
 import type { PublisherCommentNotificationJob } from './publisher-chat-comment.queue';
 
 const databaseUrl = process.env.CHAT_ROUTING_POSTGRES_RACE_DATABASE_URL?.trim() ?? '';
@@ -20,6 +22,10 @@ postgres('Publisher comment notification outbox on PostgreSQL', () => {
   let delivery: PublisherCommentNotificationDeliveryService;
   const queue = { enqueueNotification: jest.fn() };
   const sent = jest.fn();
+  const ready = jest.fn<
+    ReturnType<PublisherReadinessService['assertEntityReady']>,
+    Parameters<PublisherReadinessService['assertEntityReady']>
+  >();
   let beforeSendHook: (() => Promise<void>) | null = null;
   const env = { role: process.env.APP_ROLE, name: process.env.APP_SERVICE_NAME };
   const target = () => ({ entityType: 'chat' as const, chatId, threadId: 'thread-1' });
@@ -78,6 +84,9 @@ postgres('Publisher comment notification outbox on PostgreSQL', () => {
     chatId = `notify-${randomUUID()}`;
     await db.chat.create({ data: { id: chatId, title: 'Notification test', entityType: 'CHAT' } });
     beforeSendHook = null;
+    ready
+      .mockReset()
+      .mockResolvedValue({ chatId, entityType: 'chat', requiredBotId: botId, policyRevision: 0 });
     queue.enqueueNotification.mockReset().mockResolvedValue(undefined);
     sent.mockReset().mockResolvedValue({ messageId: 'remote-1' });
     service = new PublisherCommentNotificationService(
@@ -109,7 +118,10 @@ postgres('Publisher comment notification outbox on PostgreSQL', () => {
           url: `https://max.ru/${botId}?startapp=test`,
         }),
       } as never,
-      { assertEntityReady: async () => ({ requiredBotId: botId, entityType: 'chat' }) } as never,
+      { assertEntityReady: ready } satisfies Pick<
+        PublisherReadinessService,
+        'assertEntityReady'
+      > as unknown as PublisherReadinessService,
       { dispatchEnabled: true, assertDispatchEnabled: () => {} } as never,
       { assertAttested: async () => {} } as never,
       { assertDispatchAllowed: async () => {} } as never,
@@ -300,6 +312,72 @@ postgres('Publisher comment notification outbox on PostgreSQL', () => {
     expect(
       await db.publisherCommentNotificationDelivery.findFirst({ where: { eventId: row.id } }),
     ).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it.each(['before_batch', 'before_send'] as const)(
+    'defers a persistent setup blocker %s and ignores duplicate wakeups until recheck',
+    async (phase) => {
+      await service.updateSettings(target(), 'recipient', 'all', 'thread');
+      const row = await comment('author');
+      const blocker = new PublisherSetupRequiredException([chatId], 'policy_disabled');
+      if (phase === 'before_batch') ready.mockRejectedValueOnce(blocker);
+      else
+        beforeSendHook = async () => {
+          ready.mockRejectedValueOnce(blocker);
+        };
+      await delivery.process(job(row.id));
+      beforeSendHook = null;
+      const event = await db.publisherCommentNotificationEvent.findUniqueOrThrow({
+        where: { id: row.id },
+      });
+      expect(event.completed).toBe(false);
+      expect(event.lockToken).toBeNull();
+      expect(event.lockedUntil).toEqual(event.availableAt);
+      expect(event.availableAt.getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
+      const calls = ready.mock.calls.length;
+      await delivery.recoverOnce();
+      await delivery.process(job(row.id));
+      expect(queue.enqueueNotification).not.toHaveBeenCalled();
+      expect(ready).toHaveBeenCalledTimes(calls);
+      expect(sent).not.toHaveBeenCalled();
+      await db.publisherCommentNotificationEvent.update({
+        where: { id: row.id },
+        data: { lockedUntil: new Date(0), availableAt: new Date(0) },
+      });
+      await delivery.recoverOnce();
+      expect(queue.enqueueNotification).toHaveBeenCalledWith(row.id);
+      await delivery.process(job(row.id));
+      expect(sent).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('retries only the same fenced receipt after a transient PostgreSQL failure', async () => {
+    await service.updateSettings(target(), 'recipient', 'all', 'thread');
+    const row = await comment('author');
+    const original = db.publisherCommentNotificationDelivery.updateMany.bind(
+      db.publisherCommentNotificationDelivery,
+    );
+    let writes = 0;
+    const spy = jest
+      .spyOn(db.publisherCommentNotificationDelivery, 'updateMany')
+      .mockImplementation((args) => {
+        if (args?.data.status === 'SENT' && ++writes === 1)
+          throw new Error('temporary receipt write failure');
+        return original(args);
+      });
+    try {
+      await delivery.process(job(row.id));
+      await delivery.process(job(row.id));
+      expect(writes).toBe(2);
+      expect(sent).toHaveBeenCalledTimes(1);
+      expect(
+        await db.publisherCommentNotificationDelivery.findFirstOrThrow({
+          where: { eventId: row.id },
+        }),
+      ).toMatchObject({ status: 'SENT', messageId: 'remote-1', attempts: 1 });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('does not send again when the receipt cannot be persisted after MAX success', async () => {

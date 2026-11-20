@@ -2,7 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Queue, Worker, type Job } from 'bullmq';
 import type { Config } from './config.js';
 import { MaxError, type MaxTransport } from './max.js';
-import { Store, CHAT_BUFFER, HOUSEKEEPING_INTERVAL_MS } from './store.js';
+import { Store, CHAT_BUFFER, HOUSEKEEPING_INTERVAL_MS, type RightsReadFailure } from './store.js';
 import { ServiceError, type Candidate, type Lane } from './types.js';
 import { ProgressLog } from './progress-log.js';
 import type { HousekeepingHealth } from './housekeeping.js';
@@ -11,6 +11,48 @@ export const MAX_WAKEUPS = 64;
 export const MAX_SAFETY_WAKEUPS = 2;
 export const ERASER_CONNECTION_REQUEST_VERSION = 1;
 export const MAX_CONNECTION_WAKEUPS = 16;
+// FLAG: Fixed BullMQ slot keys bound this read. Missing metadata on an existing job
+// means the observation failed. Never admit a second lease into an unreadable slot.
+const SLOT_TIMESTAMPS = `
+local result = {}
+for i, key in ipairs(KEYS) do
+  local stamp = redis.call('HGET', key, 'timestamp')
+  if not stamp and redis.call('EXISTS', key) == 1 then
+    return redis.error_reply('Lastik slot timestamp missing')
+  end
+  result[i] = stamp or false
+end
+return result`;
+
+const slotCommands = new WeakMap<object, Set<number>>();
+async function readSlots(queue: Pick<Queue, 'client' | 'toKey'>, count: number) {
+  const ids = Array.from({ length: count }, (_, index) => `slot-${index}`);
+  const redis = await queue.client;
+  const command = `lastikSlotTimestamps${count}`;
+  let defined = slotCommands.get(redis);
+  if (!defined) {
+    defined = new Set();
+    slotCommands.set(redis, defined);
+  }
+  if (!defined.has(count)) {
+    redis.defineCommand(command, { numberOfKeys: count, lua: SLOT_TIMESTAMPS });
+    defined.add(count);
+  }
+  const rows: unknown = await redis.runCommand(
+    command,
+    ids.map((id) => queue.toKey(id)),
+  );
+  if (!Array.isArray(rows) || rows.length !== count) throw new Error('Incomplete slot snapshot');
+  return ids.map((id, index) => {
+    const value: unknown = rows[index];
+    if (value === null) return { id, occupied: false, timestamp: null };
+    const timestamp = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0)
+      throw new Error('Invalid slot timestamp');
+    return { id, occupied: true, timestamp };
+  });
+}
+
 const WORKER_PROGRESS_LIMIT_MS = 120_000;
 const DIAGNOSTIC_LOG_INTERVAL_MS = 30_000;
 class DeleteSettlementError extends Error {
@@ -209,13 +251,7 @@ export class CleanupRuntime {
     if (this.connectionRunning || this.stopping || !this.connectionQueue) return;
     this.connectionRunning = true;
     try {
-      const slots = await Promise.all(
-        Array.from({ length: MAX_CONNECTION_WAKEUPS }, async (_, index) => {
-          const id = `slot-${index}`;
-          const job = await this.connectionQueue!.getJob(id);
-          return { id, occupied: Boolean(job), timestamp: job?.timestamp ?? null };
-        }),
-      );
+      const slots = await readSlots(this.connectionQueue, MAX_CONNECTION_WAKEUPS);
       this.sampleWorker(this.connectionObservation, slots);
       const available = slots.filter((slot) => !slot.occupied);
       if (available.length) {
@@ -272,7 +308,7 @@ export class CleanupRuntime {
       };
       // FLAG: The callback runs after MAX rate admission, so a delayed job cannot send new probes
       // beyond its explicit opt-in, lease or cancellation deadline.
-      await this.max.rights(chatId, before);
+      await this.max.rights(chatId, before, 'connection');
       const botCheckedAt = Date.now();
       await before();
       actorCheck = true;
@@ -321,18 +357,10 @@ export class CleanupRuntime {
     this.running = true;
     try {
       // FLAG: Fixed slot IDs bound queued work across scheduler replicas, not just one process.
-      const slots = await Promise.all(
-        Array.from({ length: MAX_WAKEUPS }, async (_, index) => {
-          const id = `slot-${index}`;
-          const job = await this.queue!.getJob(id);
-          return {
-            id,
-            purpose: index < MAX_WAKEUPS - MAX_SAFETY_WAKEUPS ? 'due' : 'safety',
-            occupied: Boolean(job),
-            timestamp: job?.timestamp ?? null,
-          };
-        }),
-      );
+      const slots = (await readSlots(this.queue, MAX_WAKEUPS)).map((slot, index) => ({
+        ...slot,
+        purpose: index < MAX_WAKEUPS - MAX_SAFETY_WAKEUPS ? 'due' : 'safety',
+      }));
       this.sampleWorker(this.cleanupObservation, slots);
       // FLAG: Reserve only two fixed slots for the shared safety budget. A backlog of slow
       // safety probes cannot occupy all ordinary slots or expire their health deadline.
@@ -381,6 +409,8 @@ export class CleanupRuntime {
     let error: string | null = null;
     let wait = 1000;
     let retryAtMs: number | undefined;
+    let rightsFailure: RightsReadFailure | undefined;
+    let proofContext: Omit<RightsReadFailure, 'status'> | undefined;
     try {
       let policy = await this.store.active(chatId, leaseToken);
       if (!policy || this.stopping || !this.config.enabled) return;
@@ -402,6 +432,7 @@ export class CleanupRuntime {
           // FLAG: Evidence begins before admission/request; reusing it never extends freshness.
           if (Date.now() - rightsAt >= 30_000) {
             rightsAt = Date.now();
+            proofContext = { revision: policy.revision, generation: policy.connection_generation };
             await this.max.rights(chatId, undefined, purpose === 'safety' ? 'safety' : undefined);
             await this.store.connection(chatId, 'connected');
           }
@@ -428,6 +459,7 @@ export class CleanupRuntime {
         }
         if (Date.now() - rightsAt >= 30_000) {
           rightsAt = Date.now();
+          proofContext = { revision: policy.revision, generation: policy.connection_generation };
           await this.max.rights(chatId);
           await this.store.connection(chatId, 'connected');
         }
@@ -492,6 +524,12 @@ export class CleanupRuntime {
         error = failure.code;
         wait = failure.status === 403 ? 300_000 : 5000;
         if (failure.status === 429) retryAtMs = failure.retryAtMs;
+        else if (
+          (failure.rightsSource === 'cleanup' || failure.rightsSource === 'safety') &&
+          failure.status >= 400 &&
+          proofContext
+        )
+          rightsFailure = { ...proofContext, status: failure.status };
         if (failure.code === 'eraser_rights_missing')
           await this.store.connection(chatId, 'no_access');
       } else if (failure instanceof DeleteSettlementError) {
@@ -503,7 +541,7 @@ export class CleanupRuntime {
         wait = 5000;
       }
     } finally {
-      await this.store.finishVisit(chatId, leaseToken, error, wait, retryAtMs);
+      await this.store.finishVisit(chatId, leaseToken, error, wait, retryAtMs, rightsFailure);
     }
   }
   health(): {

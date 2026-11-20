@@ -266,7 +266,35 @@ test('fixed slots include every status, ERROR/cancellation causes and bounded ac
   await db.exec(
     "UPDATE managed_entity_access_edges SET state='GRANTED'; UPDATE publisher_entity_bindings SET bot_access_state=NULL;",
   );
-  assert.equal((await report(db)).rows[0].access_reason, 'bot_not_admin');
+  assert.equal((await report(db)).rows[0].access_reason, 'bot_access_unconfirmed');
+});
+
+test('both publication reports distinguish unknown bot roles from confirmed ordinary members', async (t) => {
+  const db = await setup(t);
+  await seed(db);
+  await db.exec(`INSERT INTO chats VALUES ('${chat}','CHANNEL',NULL);
+    INSERT INTO publication_occurrences(id,publication_id,schedule_id,status,scheduled_at,dispatch_profile,required_bot_id,dispatch_blocker_code)
+    VALUES ('private-past','private-p','private-s','IN_PROGRESS','1970-01-01','PUBLIK_V1','private-bot','bot_not_admin');
+    UPDATE publisher_entity_bindings SET last_webhook_at='1970-01-01',bot_access_checked_at='1970-01-01';`);
+  for (const [state, expected] of [
+    ['UNKNOWN', 'bot_access_unconfirmed'],
+    [null, 'bot_access_unconfirmed'],
+    ['CONFIRMED_MEMBER', 'bot_not_admin'],
+    ['CONFIRMED_ADMIN', 'metadata_ready'],
+  ]) {
+    await db.query('UPDATE publisher_entity_bindings SET bot_access_state=$1', [state]);
+    const slot = await report(db);
+    assert.deepEqual([...new Set(slot.rows.map((row) => row.access_reason))], [expected]);
+    const general = (await db.query(buildPublisherPublicationsAuditSql())).rows[0]
+      .json_build_object;
+    const reasons = general.target_reasons.filter((row) => row.occurrence_status === 'IN_PROGRESS');
+    assert.deepEqual([...new Set(reasons.map((row) => row.reason))], [expected]);
+    assert.ok(
+      general.blockers.some(
+        (row) => row.occurrence_status === 'IN_PROGRESS' && row.blocker === 'bot_not_admin',
+      ),
+    );
+  }
 });
 
 test('bounded envelope metadata distinguishes missing parent, locks and exact content/bot mismatches', async (t) => {

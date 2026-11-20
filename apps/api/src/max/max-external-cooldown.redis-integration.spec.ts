@@ -58,6 +58,8 @@ function nativeTransportFixture(
       trafficClass: 'critical' | 'interactive' | 'background',
       sourceTag?: string | null,
     ): Promise<void>;
+    recordRateLimitOutcome(params: { origin: 'external_429' | 'internal_limiter' }): Promise<void>;
+    acquireCircuitPermit(botId: string): Promise<{ halfOpenProbeToken: string | null }>;
     registerCriticalFailure(
       botId: string,
       permit: { halfOpenProbeToken: string | null },
@@ -76,6 +78,72 @@ function nativeTransportFixture(
 }
 
 describeRedis('MAX transport wait lifetime', () => {
+  it('keeps a newer circuit probe and its confirmed recovery when a superseded probe fails', async () => {
+    const { service, internals, botId } = nativeTransportFixture(undefined, {
+      MAX_API_CIRCUIT_FAILURE_THRESHOLD: 3,
+    });
+    const redis = internals.limiterRedis;
+    const prefix = `maxapi:circuit:v1:${botId}`;
+    const open = `${prefix}:open-until`;
+    const probe = `${prefix}:half-open-probe`;
+    const failures = `${prefix}:failures`;
+    try {
+      await redis.set(open, '1', 'PX', 60_000);
+      const first = await internals.acquireCircuitPermit(botId);
+      await redis.pexpireat(probe, 1);
+      const second = await internals.acquireCircuitPermit(botId);
+      expect(first.halfOpenProbeToken).toEqual(expect.any(String));
+      expect(second.halfOpenProbeToken).not.toBe(first.halfOpenProbeToken);
+      // Old failures may still occupy the rolling window when a replacement probe starts.
+      const now = Date.now();
+      await redis.set(failures, `${now},${now}`, 'PX', 60_000);
+      await internals.registerCriticalFailure(botId, first);
+      expect(await redis.get(probe)).toBe(second.halfOpenProbeToken);
+      expect(await redis.get(open)).toBe('1');
+      await redis.pexpireat(probe, 1);
+      await service.getOwnProfile({ botId, trafficClass: 'background' });
+      expect(await redis.get(open)).toBeNull();
+      await internals.registerCriticalFailure(botId, second);
+      expect(await redis.get(open)).toBeNull();
+      expect((await redis.get(failures))?.split(',')).toHaveLength(1);
+    } finally {
+      await redis.del(open, probe, failures);
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('keeps a circuit half open when its private send fails a local final guard', async () => {
+    const { service, internals, request, botId } = nativeTransportFixture();
+    const redis = internals.limiterRedis;
+    const open = `maxapi:circuit:v1:${botId}:open-until`;
+    const probe = `maxapi:circuit:v1:${botId}:half-open-probe`;
+    try {
+      await redis.set(open, '1', 'PX', 60_000);
+      const cancelled = new Error('Subscription cancelled');
+      await expect(
+        service.sendMessageImmediateToUser(
+          '7',
+          'Fixture',
+          {
+            beforeSend: async () => {
+              throw cancelled;
+            },
+          },
+          { botId },
+        ),
+      ).rejects.toBe(cancelled);
+      expect(request).not.toHaveBeenCalled();
+      expect(await redis.get(open)).toBe('1');
+      expect(await redis.get(probe)).toBeNull();
+      await service.getOwnProfile({ botId });
+      expect(await redis.get(open)).toBeNull();
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      await redis.del(open, probe);
+      await service.onModuleDestroy();
+    }
+  });
+
   it('does not reserve or dispatch when a timer resumes after the wait budget and cooldown', async () => {
     const { service, internals, request, tokenKey } = nativeTransportFixture(undefined, {
       MAX_API_RATE_LIMIT_WAIT_MS_BACKGROUND: 20,
@@ -695,6 +763,52 @@ describeRedis('MAX external cooldown atomic admission', () => {
       );
     }
   });
+
+  it.each(['external_429', 'internal_limiter'] as const)(
+    'returns %s while diagnostics are still pending and preserves the token cooldown',
+    async (origin) => {
+      const { service, request, internals, tokenKey, botId } = nativeTransportFixture();
+      let entered!: () => void;
+      let release!: () => void;
+      const writing = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const writer = jest
+        .spyOn(internals, 'recordRateLimitOutcome')
+        .mockImplementation(async () => {
+          entered();
+          await blocked;
+        });
+      const failure = Object.assign(new Error('rate limited'), { response: { status: 429 } });
+      let result: unknown;
+      try {
+        if (origin === 'external_429') request.mockReturnValueOnce(throwError(() => failure));
+        else await redis.set(`${tokenKey}:cooldown`, '1', 'PX', 30_000);
+        const read = service
+          .getOwnProfile({ botId, trafficClass: 'background' })
+          .catch((error: unknown) => {
+            result = error;
+          });
+        await writing;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (origin === 'external_429') expect(result).toBe(failure);
+        else
+          expect(result).toMatchObject({ code: 'MAX_API_INTERNAL_RATE_LIMIT', preDispatch: true });
+        expect(await redis.pttl(`${tokenKey}:cooldown`)).toBeGreaterThan(0);
+        expect(writer).toHaveBeenCalledWith(expect.objectContaining({ origin }));
+        release();
+        await read;
+      } finally {
+        release();
+        writer.mockRestore();
+        await service.onModuleDestroy();
+        await redis.del(`${tokenKey}:cooldown`);
+      }
+    },
+  );
 
   it('retains shared external 429 cooldown before waiting for circuit bookkeeping', async () => {
     const { botId, tokenKey, service, request, internals } = nativeTransportFixture();

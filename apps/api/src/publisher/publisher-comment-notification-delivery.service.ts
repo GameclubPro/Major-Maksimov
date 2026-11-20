@@ -1,4 +1,7 @@
-import { checkPublisherCommentReadiness } from './publisher-comment-readiness';
+import {
+  checkPublisherCommentReadiness,
+  PublisherCommentSetupBlockedError,
+} from './publisher-comment-readiness';
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { UnrecoverableError } from 'bullmq';
@@ -31,6 +34,8 @@ import { PublisherRuntimeBoundaryService } from './publisher-runtime-boundary.se
 
 const LEASE_MS = 60_000;
 const RECOVERY_MS = 30_000;
+const SETUP_RECHECK_MS = 15 * 60_000;
+const CONFIRMED_RECEIPT_WRITE_ATTEMPTS = 3;
 const FANOUT_BATCH = 100;
 const SEND_BATCH = 10;
 class NotificationCancelled extends Error {}
@@ -175,10 +180,13 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
     if (!claim.count) return;
     let completed = false;
     let continueNow = false;
+    let setupRetryAt: Date | null = null;
+    let expiresAt: Date | null = null;
     try {
       const event = await this.prisma.publisherCommentNotificationEvent.findUniqueOrThrow({
         where: { id: job.eventId },
       });
+      expiresAt = event.expiresAt;
       const target = this.target(event);
       const comment = await readPublisherNotificationComment(this.prisma, target, event.id);
       if (!comment || event.expiresAt <= new Date()) {
@@ -213,14 +221,19 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
       });
       completed = refreshed.expanded && !pending;
       continueNow = !refreshed.expanded || Boolean(pending && pending.availableAt <= new Date());
+    } catch (error: unknown) {
+      // FLAG: A persistent pre-send blocker delays the event without changing any recipient receipt.
+      if (!expiresAt || !(error instanceof PublisherCommentSetupBlockedError)) throw error;
+      setupRetryAt = new Date(Math.min(expiresAt.getTime(), Date.now() + SETUP_RECHECK_MS));
     } finally {
       await this.prisma.publisherCommentNotificationEvent.updateMany({
         where: { id: job.eventId, lockToken },
         data: {
           completed,
           lockToken: null,
-          lockedUntil: null,
-          availableAt: new Date(Date.now() + RECOVERY_MS),
+          // FLAG: Retain the retry time for both the outbox scanner and previously queued jobs.
+          lockedUntil: setupRetryAt,
+          availableAt: setupRetryAt ?? new Date(Date.now() + RECOVERY_MS),
         },
       });
     }
@@ -299,7 +312,7 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
             target.threadId,
             'Открыть комментарии',
           );
-    let claimed = false;
+    let sendStartedAt: Date | null = null;
     let receipt: { messageId: string };
     try {
       receipt = await this.maxClient.sendMessageImmediateToUser(
@@ -315,6 +328,7 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
             )
               throw new NotificationCancelled();
             // FLAG: Lease and recipient CAS must commit before POST /messages, with no network in SQL.
+            const started = new Date();
             await this.prisma.$transaction(async (tx) => {
               const lease = await tx.publisherCommentNotificationEvent.updateMany({
                 where: {
@@ -329,11 +343,11 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
               if (!lease.count) throw new NotificationLeaseLost();
               const result = await tx.publisherCommentNotificationDelivery.updateMany({
                 where: { id: delivery.id, status: 'PENDING' },
-                data: { status: 'SENDING', sendStartedAt: new Date(), attempts: { increment: 1 } },
+                data: { status: 'SENDING', sendStartedAt: started, attempts: { increment: 1 } },
               });
               if (!result.count) throw new NotificationLeaseLost();
             });
-            claimed = true;
+            sendStartedAt = started;
           },
         },
         {
@@ -345,7 +359,12 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
         },
       );
     } catch (error: unknown) {
-      if (error instanceof NotificationLeaseLost) throw error;
+      const claimed = sendStartedAt !== null;
+      if (
+        error instanceof NotificationLeaseLost ||
+        (!claimed && error instanceof PublisherCommentSetupBlockedError)
+      )
+        throw error;
       const status =
         error instanceof NotificationCancelled
           ? 'SKIPPED'
@@ -374,10 +393,27 @@ export class PublisherCommentNotificationDeliveryService implements OnModuleInit
       return;
     }
     // FLAG: A failed receipt write must leave SENDING fenced, never reset it to PENDING.
-    await this.prisma.publisherCommentNotificationDelivery.updateMany({
-      where: { id: delivery.id, status: { in: ['SENDING', 'UNKNOWN'] } },
-      data: { status: 'SENT', messageId: receipt.messageId, errorCode: null },
-    });
+    if (!sendStartedAt) throw new Error('Publisher notification receipt has no send fence');
+    for (let attempt = 1; attempt <= CONFIRMED_RECEIPT_WRITE_ATTEMPTS; attempt++) {
+      try {
+        const persisted = await this.prisma.publisherCommentNotificationDelivery.updateMany({
+          where: {
+            id: delivery.id,
+            sendStartedAt,
+            OR: [
+              { status: { in: ['SENDING', 'UNKNOWN'] }, messageId: null },
+              { status: 'SENT', messageId: receipt.messageId },
+            ],
+          },
+          data: { status: 'SENT', messageId: receipt.messageId, errorCode: null },
+        });
+        if (persisted.count !== 1)
+          throw new Error('Could not confirm Publisher notification receipt');
+        return;
+      } catch (error: unknown) {
+        if (attempt === CONFIRMED_RECEIPT_WRITE_ATTEMPTS) throw error;
+      }
+    }
   }
 
   private async finish(id: string, status: 'SKIPPED'): Promise<void> {

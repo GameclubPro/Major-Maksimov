@@ -5,6 +5,7 @@ import {
   readMaxWebhookAckDeadlineAtMs,
   registerMaxWebhookHttpRouteLimits,
 } from './webhook-http-route-limit';
+import type { WebhookSubscriptionStatusService } from '../system/webhook-subscription-status.service';
 import { WebhookIngestionService } from './webhook-ingestion.service';
 
 describe('WebhookIngestionService', () => {
@@ -48,7 +49,10 @@ describe('WebhookIngestionService', () => {
       isAllowed: jest.fn().mockResolvedValue(overrides.allowed ?? true),
     };
     const webhookSubscriptionStatusService = {
-      markIncomingWebhook: jest.fn().mockResolvedValue(undefined),
+      recordIncomingWebhook: jest.fn<
+        ReturnType<WebhookSubscriptionStatusService['recordIncomingWebhook']>,
+        Parameters<WebhookSubscriptionStatusService['recordIncomingWebhook']>
+      >(),
     };
     const webhookIngressMetricsService = {
       recordReceiptPersistence: jest.fn().mockResolvedValue(undefined),
@@ -171,23 +175,7 @@ describe('WebhookIngestionService', () => {
     } as never);
     await Promise.resolve();
 
-    expect(webhookSubscriptionStatusService.markIncomingWebhook).toHaveBeenCalledWith('bot-1');
-  });
-
-  it('acknowledges a persisted webhook when Redis cannot record its delivery time', async () => {
-    const { service, webhookService, webhookSubscriptionStatusService } = createService();
-    webhookSubscriptionStatusService.markIncomingWebhook.mockRejectedValueOnce(
-      new Error('Redis unavailable'),
-    );
-    await expect(
-      service.ingest({ botId: 'bot-1', secretPath: 'secret-path' }, {}, {
-        headers: { 'x-max-bot-api-secret': 'secret-header' },
-        ip: '127.0.0.1',
-      } as never),
-    ).resolves.toMatchObject({ ok: true });
-    await flushImmediate();
-    expect(webhookService.storeReceipt).toHaveBeenCalledTimes(1);
-    expect(webhookSubscriptionStatusService.markIncomingWebhook).toHaveBeenCalledWith('bot-1');
+    expect(webhookSubscriptionStatusService.recordIncomingWebhook).toHaveBeenCalledWith('bot-1');
   });
 
   it('acknowledges a legacy-compatible duplicate without scheduling business preparation', async () => {
@@ -259,7 +247,7 @@ describe('WebhookIngestionService', () => {
       outcome: 'failed',
       latencyMs: expect.any(Number),
     });
-    expect(webhookSubscriptionStatusService.markIncomingWebhook).not.toHaveBeenCalled();
+    expect(webhookSubscriptionStatusService.recordIncomingWebhook).not.toHaveBeenCalled();
   });
 
   it('does not wait for Redis metric persistence before resolving the webhook ACK path', async () => {

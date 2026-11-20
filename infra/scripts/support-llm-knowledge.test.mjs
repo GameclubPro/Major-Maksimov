@@ -164,7 +164,12 @@ test('schedule timezone facts match the displayed device timezone implementation
   );
   assert.match(
     source('apps/miniapp/src/pages/publications-page.tsx'),
-    /publication-schedule-timezone/u,
+    /<PublicationTimingSection\b/u,
+  );
+  const timing = source('apps/miniapp/src/features/publications/publication-timing-section.tsx');
+  assert.match(
+    timing,
+    /<span>\s*\{formatTimezoneLabel\(\s*draft\.timingMode === 'schedule' && draft\.scheduleKind === 'slots'\s*\? resolveBroadcastScheduleTimezone\(\)\s*: draft\.scheduleTimezone/u,
   );
   const answer = fact('publisher-schedule-timezone');
   assert.match(answer, /устройства или браузера/iu);

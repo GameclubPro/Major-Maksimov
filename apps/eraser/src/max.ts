@@ -1,7 +1,12 @@
 import type { Config } from './config.js';
 import { HttpAdmissionDeferred, HttpLimiter } from './limiter.js';
 import { record, parseMessage, type Message } from './types.js';
-import { HttpTelemetry, type HttpPurpose, type TransportMetrics } from './telemetry.js';
+import {
+  HttpTelemetry,
+  type HttpPurpose,
+  type RightsSource,
+  type TransportMetrics,
+} from './telemetry.js';
 
 const ERASER_WEBHOOK_UPDATE_TYPES = [
   'message_created',
@@ -11,6 +16,12 @@ const ERASER_WEBHOOK_UPDATE_TYPES = [
   'bot_removed',
 ] as const;
 
+function subscriptionCoversUpdates(types: unknown): boolean {
+  if (!Array.isArray(types) || !types.every((value) => typeof value === 'string' && value.trim()))
+    return false;
+  const reported = new Set(types.map((value: string) => value.trim().toLowerCase()));
+  return ERASER_WEBHOOK_UPDATE_TYPES.every((value) => reported.has(value));
+}
 const HTTP_DATE =
   /^(?:[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT|[A-Z][a-z]+, \d{2}-[A-Z][a-z]{2}-\d{2} \d{2}:\d{2}:\d{2} GMT|[A-Z][a-z]{2} [A-Z][a-z]{2} (?: \d|\d{2}) \d{2}:\d{2}:\d{2} \d{4})$/;
 
@@ -33,13 +44,29 @@ export class MaxError extends Error {
     readonly attempted: boolean,
     readonly retryAfterMs = 1000,
     readonly retryAtMs = Date.now() + retryAfterMs,
+    readonly rightsSource?: RightsSource,
   ) {
     super(`MAX ${status || 'transport'} ${code}`);
   }
 }
+type SubscriptionStatus =
+  | 'not_checked'
+  | 'verified'
+  | 'coverage_unknown'
+  | 'coverage_incomplete'
+  | 'missing'
+  | 'conflict'
+  | 'identity_mismatch'
+  | 'unavailable';
+export type SubscriptionObservation = { status: SubscriptionStatus; observedAt: string | null };
 export type MaxTransport = {
+  subscriptionObservation?(): SubscriptionObservation;
   metrics?(): TransportMetrics;
-  rights(chatId: string, before?: () => Promise<void>, purpose?: 'safety'): Promise<void>;
+  rights(
+    chatId: string,
+    before?: () => Promise<void>,
+    purpose?: 'safety' | 'connection',
+  ): Promise<void>;
   actorRights(chatId: string, actorUserId: string, before?: () => Promise<void>): Promise<void>;
   pin(chatId: string): Promise<string | null>;
   page(chatId: string, upperMs: number, lowerMs?: number, purpose?: 'safety'): Promise<Message[]>;
@@ -47,6 +74,45 @@ export type MaxTransport = {
   presence(chatId: string, messageId: string): Promise<'present' | 'unknown'>;
 };
 export class MaxClient implements MaxTransport {
+  private observedSubscription: SubscriptionObservation = {
+    status: 'not_checked',
+    observedAt: null,
+  };
+  subscriptionObservation(): SubscriptionObservation {
+    return { ...this.observedSubscription };
+  }
+  async observeSubscription(): Promise<void> {
+    // FLAG: The production bootstrap registers separately after nginx is ready. Read-only
+    // observations also work before registration and never change the subscription.
+    const url = this.config.webhookUrl ?? 'https://major-maksimov.ru/eraser/webhook';
+    let status: SubscriptionStatus = 'unavailable';
+    try {
+      const identity = await this.request('GET', '/me', { metric: 'identity' });
+      if (identity.is_bot !== true || String(identity.user_id) !== this.config.botId) {
+        status = 'identity_mismatch';
+      } else {
+        const result = await this.request('GET', '/subscriptions', { metric: 'subscriptions' });
+        const list = result.subscriptions;
+        if (Array.isArray(list)) {
+          if (!list.length) status = 'missing';
+          else if (list.length !== 1 || record(list[0])?.url !== url) status = 'conflict';
+          else {
+            const types = record(list[0])?.update_types;
+            status =
+              types == null
+                ? 'coverage_unknown'
+                : subscriptionCoversUpdates(types)
+                  ? 'verified'
+                  : 'coverage_incomplete';
+          }
+        }
+      }
+    } catch {
+      // A failed diagnostic has no authority to start or stop deletion.
+    }
+    this.observedSubscription = { status, observedAt: new Date().toISOString() };
+  }
+
   constructor(
     private readonly config: Config,
     private readonly limiter: Pick<HttpLimiter, 'acquire' | 'cooldownUntil'>,
@@ -66,6 +132,7 @@ export class MaxClient implements MaxTransport {
       body?: unknown;
       purpose?: 'safety';
       metric: HttpPurpose;
+      rightsSource?: RightsSource;
     },
   ): Promise<Record<string, unknown>> {
     try {
@@ -110,7 +177,7 @@ export class MaxClient implements MaxTransport {
       throw new MaxError(0, 'transport_unknown', method === 'DELETE');
     }
     const receivedAt = Date.now();
-    this.telemetry.response(options.metric, response.status);
+    this.telemetry.response(options.metric, response.status, options.rightsSource);
     const retryAtMs = retryDeadline(
       response.ok ? null : response.headers.get('retry-after'),
       receivedAt,
@@ -141,15 +208,21 @@ export class MaxClient implements MaxTransport {
         method === 'DELETE' && response.status !== 429,
         retryAtMs - receivedAt,
         retryAtMs,
+        options.rightsSource,
       );
     }
     if (!body) throw new MaxError(0, 'malformed_response', method === 'DELETE');
     return body;
   }
-  async rights(chatId: string, before?: () => Promise<void>, purpose?: 'safety'): Promise<void> {
+  async rights(
+    chatId: string,
+    before?: () => Promise<void>,
+    purpose?: 'safety' | 'connection',
+  ): Promise<void> {
     const member = await this.request('GET', `/chats/${encodeURIComponent(chatId)}/members/me`, {
       before,
-      purpose,
+      purpose: purpose === 'safety' ? 'safety' : undefined,
+      rightsSource: purpose ?? (before ? 'settings' : 'cleanup'),
       metric: purpose === 'safety' ? 'safety_rights' : 'bot_rights',
     });
     const role = String(member.role ?? member.status ?? '').toLowerCase();
@@ -323,13 +396,7 @@ export class MaxClient implements MaxTransport {
     // https://dev.max.ru/docs-api/methods/GET/subscriptions
     // Missing type evidence preserves URL confirmation, but never certifies event coverage.
     if (updateTypes === undefined || updateTypes === null) return { updateTypes: 'unknown' };
-    if (
-      !Array.isArray(updateTypes) ||
-      updateTypes.some((value) => typeof value !== 'string' || !value.trim())
-    )
-      throw new Error('MAX webhook subscription readback unconfirmed');
-    const reported = new Set(updateTypes.map((value: string) => value.trim().toLowerCase()));
-    if (ERASER_WEBHOOK_UPDATE_TYPES.some((value) => !reported.has(value)))
+    if (!subscriptionCoversUpdates(updateTypes))
       throw new Error('MAX webhook subscription readback unconfirmed');
     return { updateTypes: 'verified' };
   }

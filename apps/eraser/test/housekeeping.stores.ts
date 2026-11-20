@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 import pg from 'pg';
+import { observePoolErrors } from '../src/pool-errors.js';
 import { migrate } from '../src/migrate.js';
 import { Store } from '../src/store.js';
 
@@ -165,4 +166,29 @@ test('adaptive passes drain backlog with finite pages and expose stale observati
   }
   await maintenance.housekeeping();
   assert.equal(maintenance.housekeepingHealth().lastErrorCode, null);
+});
+
+test('an idle PostgreSQL disconnect leaves the process and replacement connection available', async () => {
+  const own = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const logs: string[] = [];
+  observePoolErrors(own, (line) => {
+    logs.push(line);
+    return true;
+  });
+  try {
+    const {
+      rows: [identity],
+    } = await own.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    const observed = new Promise<void>((resolve) => own.once('error', () => resolve()));
+    await admin.query('SELECT pg_terminate_backend($1)', [identity!.pid]);
+    await observed;
+    const replacement = await own.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    assert.notEqual(replacement.rows[0]!.pid, identity!.pid);
+    assert.deepEqual(
+      logs.map((line) => JSON.parse(line)),
+      [{ service: 'eraser', code: 'idle_database_connection_lost' }],
+    );
+  } finally {
+    await own.end();
+  }
 });

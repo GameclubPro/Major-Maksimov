@@ -878,7 +878,7 @@ const MAX_API_SOURCE_METRICS_TTL_SEC = 6 * 60 * 60;
 const MAX_API_SERVICE_CAPACITY_METRICS_TTL_SEC = 2 * 60;
 const MAX_API_RATE_LIMIT_OUTCOME_KEY_PREFIX = 'maxapi:rate-limit:v1';
 const MAX_API_RATE_LIMIT_LOG_COALESCE_MS = 60_000;
-const MAX_API_USAGE_METRICS_IN_FLIGHT_LIMIT = 128;
+const MAX_API_METRICS_IN_FLIGHT_LIMIT = 128;
 const MAX_API_CIRCUIT_KEY_PREFIX = 'maxapi:circuit:v1';
 const DEFAULT_MAX_API_CIRCUIT_HALF_OPEN_PROBE_SEC = 60;
 const MAX_API_CRITICAL_NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -1058,7 +1058,11 @@ local threshold = tonumber(ARGV[1])
 local windowMs = tonumber(ARGV[2])
 local openMs = tonumber(ARGV[3])
 local stateTtlMs = tonumber(ARGV[4])
-local forceOpen = tonumber(ARGV[5]) == 1
+-- FLAG: A late probe still counts as a normal failure. Only the current owner can force the circuit open.
+local probeToken = ARGV[5]
+local currentProbe = redis.call('GET', KEYS[3])
+local forceOpen = probeToken ~= '' and currentProbe == probeToken
+local superseded = probeToken ~= '' and currentProbe and currentProbe ~= probeToken
 local retained = {}
 local failuresRaw = redis.call('GET', KEYS[1]) or ''
 
@@ -1072,7 +1076,7 @@ table.insert(retained, nowMs)
 redis.call('SET', KEYS[1], table.concat(retained, ','), 'PX', stateTtlMs)
 
 local openUntilMs = tonumber(redis.call('GET', KEYS[2]) or '0')
-if forceOpen or #retained >= threshold then
+if forceOpen or (not superseded and #retained >= threshold) then
   openUntilMs = nowMs + openMs
   redis.call('SET', KEYS[2], tostring(openUntilMs), 'PX', stateTtlMs)
   redis.call('DEL', KEYS[3])
@@ -1181,9 +1185,10 @@ export class MaxClientService implements OnModuleDestroy {
     this.logger.warn(summary, 'MAX action failure window summary'),
   );
   private readonly registeredSourceMetricDimensions = new Set<string>();
-  private usageMetricWritesInFlight = 0;
-  private droppedUsageMetricWrites = 0;
-  private usageMetricDropWarnedAtMs = 0;
+  private readonly rateLimitObservations = {
+    usage: { pending: 0, dropped: 0, warnedAt: 0 },
+    outcome: { pending: 0, dropped: 0, warnedAt: 0 },
+  };
   private readonly listBotChatsInFlight = new Map<string, Promise<MaxBotChat[]>>();
   private readonly currentChatMemberAccessInFlight = new Map<
     string,
@@ -7581,6 +7586,11 @@ export class MaxClientService implements OnModuleDestroy {
           }
           throw error;
         }
+        if (wasMaxPreDispatchGuardRejected(error)) {
+          // FLAG: A rejected final guard provides no HTTP response for this circuit probe.
+          await this.releaseUnusedHalfOpenProbe(bot.id, circuitPermit);
+          throw error;
+        }
         if (this.shouldIgnoreActionHealthFailure(error, options)) {
           await this.closeCircuitAfterSuccessfulProbe(bot.id, circuitPermit);
           throw error;
@@ -7634,17 +7644,19 @@ export class MaxClientService implements OnModuleDestroy {
           await this.closeCircuitAfterSuccessfulProbe(bot.id, circuitPermit);
         }
         if (status === 429) {
-          await this.recordRateLimitOutcome({
-            origin: 'external_429',
-            botId: bot.id,
-            chatId: options.chatId ?? null,
-            trafficClass,
-            sourceTag,
-            statusCode: status,
-            retryAfterMs: cooldownMs,
-            retryAfterSource: requestedRetryAfterMs ? 'max' : 'default',
-            reason: this.extractErrorMessage(error) || 'MAX API 429 rate limit',
-          });
+          this.observeRateLimit('outcome', () =>
+            this.recordRateLimitOutcome({
+              origin: 'external_429',
+              botId: bot.id,
+              chatId: options.chatId ?? null,
+              trafficClass,
+              sourceTag,
+              statusCode: status,
+              retryAfterMs: cooldownMs,
+              retryAfterSource: requestedRetryAfterMs ? 'max' : 'default',
+              reason: this.extractErrorMessage(error) || 'MAX API 429 rate limit',
+            }),
+          );
         }
         throw error;
       }
@@ -8745,16 +8757,19 @@ export class MaxClientService implements OnModuleDestroy {
       const elapsedMs = Date.now() - startedAtMs;
       const remainingWaitMs = maxWaitMs - elapsedMs;
       if (remainingWaitMs <= 0 || reservation.limitScope === 'retention_priority') {
-        await this.recordRateLimitOutcome({
-          origin: 'internal_limiter',
-          botId,
-          chatId,
-          trafficClass,
-          sourceTag,
-          reason: reservation.reason,
-          retryAfterMs: reservation.retryAfterMs,
-          limitScope: reservation.limitScope,
-        });
+        const refusal = reservation;
+        this.observeRateLimit('outcome', () =>
+          this.recordRateLimitOutcome({
+            origin: 'internal_limiter',
+            botId,
+            chatId,
+            trafficClass,
+            sourceTag,
+            reason: refusal.reason,
+            retryAfterMs: refusal.retryAfterMs,
+            limitScope: refusal.limitScope,
+          }),
+        );
         throw markMaxApiCapacityRefusal(
           new MaxApiInternalRateLimitError(
             reservation.reason,
@@ -9037,6 +9052,29 @@ export class MaxClientService implements OnModuleDestroy {
     retryAfterSource?: 'max' | 'default';
     limitScope?: MaxApiRateLimitScope;
   }): Promise<void> {
+    const logKey = `${params.origin}:${params.botId}:${params.trafficClass}`;
+    const nowMs = Date.now();
+    const lastLoggedAtMs = this.rateLimitLogAtMsByKey.get(logKey) ?? 0;
+    if (nowMs - lastLoggedAtMs >= MAX_API_RATE_LIMIT_LOG_COALESCE_MS) {
+      this.rateLimitLogAtMsByKey.set(logKey, nowMs);
+      this.logger.warn(
+        {
+          botId: params.botId,
+          chatId: params.chatId,
+          trafficClass: params.trafficClass,
+          sourceTag: this.normalizeMetricSourceTag(params.sourceTag),
+          origin: params.origin,
+          statusCode: params.statusCode ?? null,
+          retryAfterMs: params.retryAfterMs ?? null,
+          ...(params.retryAfterSource ? { retryAfterSource: params.retryAfterSource } : {}),
+          limitScope: params.limitScope ?? null,
+        },
+        params.origin === 'external_429'
+          ? 'MAX API returned external HTTP 429'
+          : 'MAX API internal limiter rejected request before dispatch',
+      );
+    }
+
     const nowSec = Math.floor(Date.now() / 1_000);
     const metricKeys = [
       `${MAX_API_RATE_LIMIT_OUTCOME_KEY_PREFIX}:${params.origin}:${params.botId}:${params.trafficClass}:${nowSec}`,
@@ -9061,29 +9099,6 @@ export class MaxClientService implements OnModuleDestroy {
           err: error instanceof Error ? error.message : String(error),
         },
         'Failed to record MAX API rate-limit outcome metric',
-      );
-    }
-
-    const logKey = `${params.origin}:${params.botId}:${params.trafficClass}`;
-    const nowMs = Date.now();
-    const lastLoggedAtMs = this.rateLimitLogAtMsByKey.get(logKey) ?? 0;
-    if (nowMs - lastLoggedAtMs >= MAX_API_RATE_LIMIT_LOG_COALESCE_MS) {
-      this.rateLimitLogAtMsByKey.set(logKey, nowMs);
-      this.logger.warn(
-        {
-          botId: params.botId,
-          chatId: params.chatId,
-          trafficClass: params.trafficClass,
-          sourceTag: this.normalizeMetricSourceTag(params.sourceTag),
-          origin: params.origin,
-          statusCode: params.statusCode ?? null,
-          retryAfterMs: params.retryAfterMs ?? null,
-          ...(params.retryAfterSource ? { retryAfterSource: params.retryAfterSource } : {}),
-          limitScope: params.limitScope ?? null,
-        },
-        params.origin === 'external_429'
-          ? 'MAX API returned external HTTP 429'
-          : 'MAX API internal limiter rejected request before dispatch',
       );
     }
 
@@ -9121,32 +9136,33 @@ export class MaxClientService implements OnModuleDestroy {
     trafficClass: MaxApiTrafficClass,
     sourceTag?: string | null,
   ): void {
-    // FLAG: Usage observation cannot hold an admitted request past its quota window.
-    // Bound actual unsettled writes; never retry an unknown metric EXEC or count a drop as zero.
-    if (this.usageMetricWritesInFlight >= MAX_API_USAGE_METRICS_IN_FLIGHT_LIMIT) {
-      this.droppedUsageMetricWrites++;
+    this.observeRateLimit('usage', () => this.recordRateLimitUsage(botId, trafficClass, sourceTag));
+  }
+
+  private observeRateLimit(kind: 'usage' | 'outcome', write: () => Promise<void>): void {
+    // FLAG: Both admissions and refusals release callers independently of observational Redis writes.
+    // Count actual unsettled writes and report a lost observation without retrying an unknown EXEC.
+    const state = this.rateLimitObservations[kind];
+    if (state.pending >= MAX_API_METRICS_IN_FLIGHT_LIMIT) {
+      state.dropped++;
       const nowMs = Date.now();
-      if (nowMs - this.usageMetricDropWarnedAtMs >= MAX_API_RATE_LIMIT_LOG_COALESCE_MS) {
-        this.usageMetricDropWarnedAtMs = nowMs;
+      if (nowMs - state.warnedAt >= MAX_API_RATE_LIMIT_LOG_COALESCE_MS) {
+        state.warnedAt = nowMs;
         this.logger.warn(
-          {
-            pendingWrites: this.usageMetricWritesInFlight,
-            droppedObservations: this.droppedUsageMetricWrites,
-          },
-          'MAX API usage metrics incomplete under write pressure',
+          { pendingWrites: state.pending, droppedObservations: state.dropped },
+          `MAX API ${kind} metrics incomplete under write pressure`,
         );
       }
       return;
     }
-    this.usageMetricWritesInFlight++;
+    state.pending++;
     try {
-      // Invoke now so the admission bucket is captured before yielding to HTTP.
-      void this.recordRateLimitUsage(botId, trafficClass, sourceTag).then(
-        () => this.usageMetricWritesInFlight--,
-        () => this.usageMetricWritesInFlight--,
+      void write().then(
+        () => state.pending--,
+        () => state.pending--,
       );
     } catch {
-      this.usageMetricWritesInFlight--;
+      state.pending--;
     }
   }
 
@@ -9482,7 +9498,7 @@ export class MaxClientService implements OnModuleDestroy {
         String(this.circuitWindowSec * 1_000),
         String(this.circuitOpenSec * 1_000),
         String(this.resolveCircuitStateTtlMs()),
-        permit.halfOpenProbeToken ? '1' : '0',
+        permit.halfOpenProbeToken ?? '',
       );
     } catch (error: unknown) {
       this.logger.warn(

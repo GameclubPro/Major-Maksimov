@@ -452,7 +452,10 @@ jest.mock('ioredis', () => {
                 const windowMs = Number(argValues[1]);
                 const openMs = Number(argValues[2]);
                 const stateTtlMs = Number(argValues[3]);
-                const forceOpen = Number(argValues[4]) === 1;
+                const token = String(argValues[4]);
+                const current = readEntry(keys[2])?.value;
+                const forceOpen = Boolean(token) && current === token;
+                const superseded = Boolean(token && current && token !== current);
                 const failures = readFailures(keys[0], nowMs - windowMs);
                 failures.push(nowMs);
                 store.set(keys[0], {
@@ -460,7 +463,7 @@ jest.mock('ioredis', () => {
                   expiresAtMs: nowMs + stateTtlMs,
                 });
                 let openUntilMs = Number(readEntry(keys[1])?.value ?? 0);
-                if (forceOpen || failures.length >= threshold) {
+                if (forceOpen || (!superseded && failures.length >= threshold)) {
                   openUntilMs = nowMs + openMs;
                   store.set(keys[1], {
                     value: String(openUntilMs),

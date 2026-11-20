@@ -119,10 +119,7 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
     'apps/api/src/admin/publisher-dialog-context.service.ts',
     ['raw.version !== 1', 'raw.dialogBotId !== expectedDialogBotId'],
   ],
-  [
-    'apps/api/src/admin/publication.service.ts',
-    ['readPublicationLatePolicy(rule)', 'maxResults: 300'],
-  ],
+  ['apps/api/src/admin/publication.service.ts', ['maxResults: 300']],
   [
     'apps/api/src/admin/admin-managed-broadcast-media-runtime.ts',
     [
@@ -135,19 +132,76 @@ export const PUBLICATION_POLICY_SOURCE_CHECKS = [
   ],
 ];
 
-export function assertPublicationPolicySource(readSource) {
-  for (const [path, required] of PUBLICATION_POLICY_SOURCE_CHECKS) {
-    const source = readSource(path)
-      .replace(/\/\*[\s\S]*?\*\//gu, '')
-      .replace(/^\s*\/\/.*$/gmu, '');
-    for (const fragment of required) {
-      // Formatting is immaterial; the executable reader and each dispatch caller must exist.
-      if (!source.replace(/\s+/gu, '').includes(fragment.replace(/\s+/gu, '')))
-        throw new Error(
-          `Rollback target lacks publication deadline/preparation reader: ${path} (${fragment})`,
-        );
-    }
+const scheduleService = 'apps/api/src/admin/publication.service.ts';
+const calendarProjection = 'apps/api/src/admin/publication-calendar-projection.ts';
+
+function executableSource(source) {
+  return (source ?? '')
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '')
+    .replace(/\s+/gu, '');
+}
+
+function requireFragments(path, source, fragments) {
+  for (const fragment of fragments) {
+    if (!source.includes(fragment.replace(/\s+/gu, '')))
+      throw new Error(
+        `Rollback target lacks publication deadline/preparation reader: ${path} (${fragment})`,
+      );
   }
+}
+
+function assertCalendarReader(readSource) {
+  const service = executableSource(readSource(scheduleService));
+  // FLAG: Older builds read latePolicy inline. Once an occurrence filter is delegated,
+  // require its caller and implementation even in the release with a still-inline rollup.
+  const delegated = service.includes('countableCalendarOccurrenceWhere');
+  const filter = delegated
+    ? '...countableCalendarOccurrenceWhere(rule)'
+    : '...(readPublicationLatePolicy(rule) ? {} : { status: { not: PublicationOccurrenceStatus.CANCELED } })';
+  const where = 'where: { scheduleId: schedule.id, scheduleRevision: schedule.revision, ';
+  requireFragments(scheduleService, service, [
+    `this.prisma.publicationOccurrence.count({ ${where}${filter}`,
+    `this.prisma.publicationOccurrence.findFirst({ ${where}${filter}`,
+  ]);
+  const delegatedRollup = service.includes('countRecurrenceRollupOccurrences');
+  if (!delegatedRollup)
+    requireFragments(scheduleService, service, [
+      '!readPublicationLatePolicy(rule) && group.status === PublicationOccurrenceStatus.CANCELED ? count : count + group._count._all',
+    ]);
+  if (!delegated && !delegatedRollup) return;
+  const projection = executableSource(readSource(calendarProjection));
+  const imports =
+    service.match(/import\{([^}]*)\}from'\.\/publication-calendar-projection'/u)?.[1]?.split(',') ??
+    [];
+  const requireImport = (name) => {
+    if (!imports.includes(name))
+      throw new Error(`Rollback target lacks publication calendar import: ${name}`);
+  };
+  if (delegated) {
+    requireImport('countableCalendarOccurrenceWhere');
+    requireFragments(calendarProjection, projection, [
+      'export function countableCalendarOccurrenceWhere(rule: unknown,): Prisma.PublicationOccurrenceWhereInput { return readPublicationLatePolicy(rule) ? {} : {',
+    ]);
+  }
+  if (delegatedRollup) {
+    requireImport('countRecurrenceRollupOccurrences');
+    requireFragments(scheduleService, service, [
+      'const countedOccurrences = countRecurrenceRollupOccurrences(rule, grouped)',
+    ]);
+    requireFragments(calendarProjection, projection, [
+      'export function countRecurrenceRollupOccurrences(',
+      'const countsCanceled = Boolean(readPublicationLatePolicy(rule))',
+      'const counts = countsCanceled || group.status !== PublicationOccurrenceStatus.CANCELED',
+      'return count + (counts ? group._count._all : 0)',
+    ]);
+  }
+}
+
+export function assertPublicationPolicySource(readSource) {
+  for (const [path, required] of PUBLICATION_POLICY_SOURCE_CHECKS)
+    requireFragments(path, executableSource(readSource(path)), required);
+  assertCalendarReader(readSource);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

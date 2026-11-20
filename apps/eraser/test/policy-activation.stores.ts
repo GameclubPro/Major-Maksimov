@@ -111,6 +111,12 @@ async function http(t: TestContext, overrides: Partial<MaxTransport> = {}, httpS
   assert.ok(address && typeof address === 'object');
   return {
     checks: () => checks,
+    webhook: (value: Record<string, unknown>) =>
+      fetch(`http://127.0.0.1:${address.port}/webhook`, {
+        method: 'POST',
+        headers: { 'x-max-bot-api-secret': settings.webhookSecret },
+        body: JSON.stringify(value),
+      }),
     save: async (value: UpdatePolicy) => {
       const response = await fetch(`http://127.0.0.1:${address.port}/internal/v1/chats/-1/policy`, {
         method: 'PUT',
@@ -700,4 +706,19 @@ test('exact replay committed during MAX admission returns its receipt when the c
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, committed);
   await fenced('no_access', 2);
+});
+
+test('a reordered lifecycle redelivery preserves a newer exact activation', async (t) => {
+  await store.bootstrap('-1', 48, protection());
+  const api = await http(t);
+  const before = { update_type: 'bot_removed', chat_id: -1, timestamp: 42 };
+  const after = { timestamp: 42, chat_id: -1, update_type: 'bot_removed' };
+  assert.equal((await api.webhook(before)).status, 200);
+  const denied = (await store.policy('-1'))!;
+  await updatePolicy(store, '-1', input({ expectedRevision: denied.revision }));
+  assert.equal((await api.webhook(after)).status, 200);
+  assert.equal((await store.policy('-1'))!.connection_status, 'connected');
+  assert.equal((await store.policy('-1'))!.connection_generation, denied.connection_generation);
+  assert.equal((await api.webhook({ ...before, timestamp: 43 })).status, 200);
+  assert.equal((await store.policy('-1'))!.connection_status, 'missing');
 });

@@ -91,6 +91,10 @@ async function exactLookupFailure(
   const registerCriticalFailure: MaxClientService['registerCriticalFailure'] = async () =>
     undefined;
   const recordRateLimitOutcome: MaxClientService['recordRateLimitOutcome'] = async () => undefined;
+  const rateLimitObservations = {
+    usage: { pending: 0, dropped: 0, warnedAt: 0 },
+    outcome: { pending: 0, dropped: 0, warnedAt: 0 },
+  } satisfies MaxClientService['rateLimitObservations'];
   const chatMembersAccessInFlight: MaxClientService['chatMembersAccessInFlight'] = new Map();
   const limiterRedis: Pick<MaxClientService['limiterRedis'], 'eval'> = {
     eval: jest.fn(async () => 0),
@@ -119,6 +123,7 @@ async function exactLookupFailure(
     logUserFacingActionFailure,
     registerCriticalFailure,
     recordRateLimitOutcome,
+    rateLimitObservations,
     chatMembersAccessInFlight,
     limiterRedis,
   });
@@ -139,6 +144,7 @@ async function exactLookupFailure(
               ['get', '/messages/m1'],
             ],
     );
+    if (http429) expect(error).toMatchObject({ isAxiosError: true, response: { status: 429 } });
     return error;
   }
   throw new Error('Expected the exact MAX lookup to reject the supplied response');

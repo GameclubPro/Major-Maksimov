@@ -1,5 +1,10 @@
 import type { HousekeepingHealth } from './housekeeping.js';
-import { HTTP_PURPOSES, type TransportMetrics } from './telemetry.js';
+import {
+  HTTP_PURPOSES,
+  RIGHTS_OUTCOMES,
+  RIGHTS_SOURCES,
+  type TransportMetrics,
+} from './telemetry.js';
 
 type WorkerSample = {
   healthy: boolean;
@@ -84,6 +89,13 @@ export class ProgressLog {
             transport: {
               scope: metrics.scope,
               since: metrics.since,
+              rightsResponses: RIGHTS_SOURCES.flatMap((source) => {
+                const row = metrics.rightsResponses.find((sample) => sample.source === source);
+                if (!row) return [];
+                return [
+                  { source, ...Object.fromEntries(RIGHTS_OUTCOMES.map((key) => [key, row[key]])) },
+                ];
+              }),
               requests: HTTP_PURPOSES.flatMap((purpose) => {
                 const row = metrics.requests.find((request) => request.purpose === purpose);
                 return row

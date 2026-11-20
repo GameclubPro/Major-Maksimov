@@ -19,7 +19,43 @@ type RequestCounters = {
   rateLimited: number;
   transportErrors: number;
 };
+export const RIGHTS_SOURCES = ['cleanup', 'safety', 'connection', 'settings'] as const;
+export type RightsSource = (typeof RIGHTS_SOURCES)[number];
+export const RIGHTS_OUTCOMES = [
+  'ok',
+  'unauthorized',
+  'forbidden',
+  'missing',
+  'rateLimited',
+  'other4xx',
+  'serverError',
+  'other',
+] as const;
+type RightsCounts = Record<(typeof RIGHTS_OUTCOMES)[number], number>;
+function rightsCounts(): RightsCounts {
+  return {
+    ok: 0,
+    unauthorized: 0,
+    forbidden: 0,
+    missing: 0,
+    rateLimited: 0,
+    other4xx: 0,
+    serverError: 0,
+    other: 0,
+  };
+}
+function rightsOutcome(status: number): keyof RightsCounts {
+  if (status >= 200 && status < 300) return 'ok';
+  if (status === 401) return 'unauthorized';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'missing';
+  if (status === 429) return 'rateLimited';
+  if (status >= 400 && status < 500) return 'other4xx';
+  if (status >= 500 && status < 600) return 'serverError';
+  return 'other';
+}
 export type TransportMetrics = {
+  rightsResponses: Array<RightsCounts & { source: RightsSource }>;
   scope: 'process';
   since: string;
   observedAt: string;
@@ -35,6 +71,7 @@ export type TransportMetrics = {
 // response bodies or error text. These process observations are not durable effect receipts.
 export class HttpTelemetry {
   private readonly since: string;
+  private readonly rights = new Map(RIGHTS_SOURCES.map((source) => [source, rightsCounts()]));
   private readonly requests = new Map<HttpPurpose, RequestCounters>(
     HTTP_PURPOSES.map((purpose) => [
       purpose,
@@ -52,7 +89,8 @@ export class HttpTelemetry {
   attempt(purpose: HttpPurpose): void {
     this.requests.get(purpose)!.attempts++;
   }
-  response(purpose: HttpPurpose, status: number): void {
+  response(purpose: HttpPurpose, status: number, source?: RightsSource): void {
+    if (source) this.rights.get(source)![rightsOutcome(status)]++;
     const counters = this.requests.get(purpose)!;
     counters.responses++;
     if (status >= 200 && status < 300) counters.httpSuccesses++;
@@ -78,6 +116,7 @@ export class HttpTelemetry {
   snapshot(): TransportMetrics {
     return {
       scope: 'process',
+      rightsResponses: [...this.rights].map(([source, counts]) => ({ source, ...counts })),
       since: this.since,
       observedAt: new Date(this.now()).toISOString(),
       requests: [...this.requests].map(([purpose, counters]) => ({ purpose, ...counters })),
