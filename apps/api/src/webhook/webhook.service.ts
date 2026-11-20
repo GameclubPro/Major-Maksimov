@@ -489,10 +489,14 @@ export class WebhookService extends RuntimeWorkerOwner implements OnModuleDestro
       await this.observePublisherWebhook(update, null, true);
       return;
     }
-    await Promise.all([
+    // FLAG: A failed projection must retain both admission slots until its sibling settles.
+    const writes = await Promise.allSettled([
       this.persistMembershipTransition(update),
       this.persistUserDisplayNameSnapshots(update),
     ]);
+    for (const write of writes) {
+      if (write.status === 'rejected') throw write.reason;
+    }
   }
 
   private recordReceiptDiagnostics(update: MaxUpdate): void {

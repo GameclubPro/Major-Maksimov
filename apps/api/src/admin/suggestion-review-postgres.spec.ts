@@ -4,6 +4,7 @@ import { ForbiddenException } from '@nestjs/common';
 import { createPrismaClient, type PrismaClient } from '../prisma/prisma-client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { MaxClientService } from '../max/max-client.service';
+import { usesMaxFinalAuthorityCheckpoint } from '../max/max-action-pre-dispatch-guard';
 import type { MaxBotLinkService } from '../max/max-bot-link.service';
 import type { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import type { PublisherReadinessService } from '../publisher/publisher-readiness.service';
@@ -39,6 +40,9 @@ native('suggestion review with PostgreSQL and Redis', () => {
   let send: jest.MockedFunction<MaxClientService['sendMessageImmediateToUser']>;
   let memberAccess: jest.MockedFunction<MaxClientService['getChatMemberAccess']>;
   let editedCards: string[];
+  let reserveEdit: jest.MockedFunction<() => Promise<void>>;
+  let botAccess: jest.MockedFunction<MaxClientService['getCurrentChatMemberAccess']>;
+  let activation: jest.MockedFunction<MaxBotLinkService['assertChatBotAccessProbeAllowed']>;
   let authorize: jest.MockedFunction<ManagedEntitiesService['assertChannelAdminAccess']>;
   const chats: string[] = [];
 
@@ -64,6 +68,9 @@ native('suggestion review with PostgreSQL and Redis', () => {
   });
   beforeEach(() => {
     editedCards = [];
+    reserveEdit = jest.fn<Promise<void>, []>().mockResolvedValue(undefined);
+    botAccess = jest.fn().mockResolvedValue({ isAdmin: true });
+    activation = jest.fn().mockResolvedValue(null);
     memberAccess = jest
       .fn<
         ReturnType<MaxClientService['getChatMemberAccess']>,
@@ -94,10 +101,11 @@ native('suggestion review with PostgreSQL and Redis', () => {
       .mockResolvedValue();
     const max = {
       sendMessageImmediateToUser: send,
-      getCurrentChatMemberAccess: jest.fn().mockResolvedValue({ isAdmin: true }),
+      getCurrentChatMemberAccess: botAccess,
       getChatMemberAccess: memberAccess,
       editMessageInlineKeyboard: jest.fn(async (_chat, _message, _text, options) => {
-        await options?.beforeEditMutation?.();
+        if (!usesMaxFinalAuthorityCheckpoint(options?.beforeEditMutation)) await reserveEdit();
+        await options?.beforeEditMutation?.(reserveEdit);
         editedCards.push(_message);
         return true;
       }),
@@ -112,7 +120,7 @@ native('suggestion review with PostgreSQL and Redis', () => {
       db as unknown as PrismaService,
       max as unknown as MaxClientService,
       {
-        assertChatBotAccessProbeAllowed: jest.fn().mockResolvedValue({}),
+        assertChatBotAccessProbeAllowed: activation,
         buildEntryMiniappStartUrlSync: () => 'https://max.ru/major?startapp=review',
         buildPublisherMiniappStartUrlSync: () => 'https://max.ru/publik?startapp=review',
       } as unknown as MaxBotLinkService,
@@ -242,6 +250,56 @@ native('suggestion review with PostgreSQL and Redis', () => {
       expect(send).not.toHaveBeenCalled();
     },
   );
+
+  it('saves edit quota on a bot rights refusal and rechecks after an activation change', async () => {
+    const row = await seed();
+    await db.channelSuggestionAdminDelivery.create({
+      data: {
+        auditLogId: row.id,
+        adminUserId: actor.userId,
+        botKey: 'major',
+        botId: 'major',
+        privateChatId: 'private-admin',
+        remoteMessageId: 'card',
+        status: 'SENT',
+        sentAt: new Date(),
+      },
+    });
+    await service.save(row.id, 'moderation', actor, request('New content'));
+    const effect = await db.suggestionReviewEffect.findFirstOrThrow({
+      where: { suggestionId: row.id, kind: 'sync' },
+    });
+    botAccess.mockRejectedValueOnce({ response: { status: 403 } });
+    await effects.process(effect.id, 'moderation');
+    await effects.process(effect.id, 'moderation');
+    expect(botAccess).toHaveBeenCalledTimes(1);
+    expect(reserveEdit).not.toHaveBeenCalled();
+    expect(editedCards).toEqual([]);
+    expect(
+      await db.suggestionReviewEffect.findUniqueOrThrow({ where: { id: effect.id } }),
+    ).toMatchObject({ status: 'PENDING', attemptedAt: null });
+
+    const active: NonNullable<Awaited<ReturnType<typeof activation>>> = {
+      status: 'ACTIVE',
+      botAccessState: 'UNKNOWN',
+      botAccessSource: null,
+      botAccessCheckedAt: null,
+      lifecycleEventAt: null,
+      permissionsSnapshot: { explicitActivationSourceAt: new Date().toISOString() },
+      chat: { entityType: 'CHANNEL' },
+    };
+    activation.mockResolvedValue(active);
+    reserveEdit.mockImplementationOnce(async () => {
+      activation.mockResolvedValue({ ...active, lifecycleEventAt: new Date() });
+    });
+    await effects.process(effect.id, 'moderation');
+    expect(editedCards).toEqual([]);
+
+    await effects.process(effect.id, 'moderation');
+    expect(botAccess).toHaveBeenCalledTimes(3);
+    expect(reserveEdit).toHaveBeenCalledTimes(2);
+    expect(editedCards).toEqual(['card']);
+  });
 
   it.each(['moderation', 'publisher'] as const)(
     'allows exactly one concurrent editor for %s and preserves author and original',

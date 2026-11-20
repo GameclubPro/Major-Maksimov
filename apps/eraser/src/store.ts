@@ -51,6 +51,8 @@ function effectiveDueSql(hours: Hours): string {
 }
 export const CHAT_BUFFER = 200;
 export type PolicyRow = Policy & {
+  rights_failure_count: number;
+  rights_retry_at: Date | null;
   normal_next_at: Date;
   live_due: boolean;
   due_floor: string | null;
@@ -81,6 +83,7 @@ export type PolicyRow = Policy & {
   historical_deferred_from: string | null;
   historical_deferred_to: string | null;
 };
+export type RightsReadFailure = { status: number; revision: number; generation: string };
 type ProtectionState = {
   ready: boolean;
   complete_through: Date | null;
@@ -789,6 +792,7 @@ export class Store {
       // removal, stale operation or proof consumed by a lock wait cannot lift the durable fence.
       const updated = await client.query(
         `UPDATE eraser_policies SET enabled=$2,hours=$3,revision=revision+1,last_operation_id=$4,updated_at=CURRENT_TIMESTAMP,last_error=NULL,
+        rights_failure_count=0,rights_retry_at=NULL,
         connection_status=CASE WHEN $2 THEN 'connected' ELSE connection_status END,
         activation_id=CASE WHEN enabled <> $2 THEN $5::uuid ELSE activation_id END,
         enabled_at=CASE WHEN NOT enabled AND $2 THEN CURRENT_TIMESTAMP ELSE enabled_at END,
@@ -1005,6 +1009,7 @@ export class Store {
       // identity and all protection/effect holds survive activation; only this request may enable.
       const result = await client.query(
         `UPDATE eraser_policies p SET enabled=true,revision=revision+1,connection_status='connected',
+         rights_failure_count=0,rights_retry_at=NULL,
          activation_id=$3,enabled_at=clock_timestamp(),first_enabled_at=COALESCE(first_enabled_at,clock_timestamp()),
          live_floor=LEAST((EXTRACT(EPOCH FROM clock_timestamp())*1000)::bigint-hours*3600000::bigint+1,live_gap_at,safety_gap_at),
          live_upper=NULL,live_cursor=NULL,history_cursor=GREATEST(COALESCE(history_cursor,0),
@@ -1265,7 +1270,7 @@ export class Store {
     return this.transaction(async (client) => {
       const rows = (
         await client.query<{ chat_id: string }>(
-          `SELECT chat_id FROM eraser_policies WHERE enabled AND connection_status NOT IN ('missing','no_access') AND ${schedule}<=CURRENT_TIMESTAMP AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) ORDER BY ${schedule},chat_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
+          `SELECT chat_id FROM eraser_policies WHERE enabled AND connection_status NOT IN ('missing','no_access') AND ${schedule}<=CURRENT_TIMESTAMP AND (rights_retry_at IS NULL OR rights_retry_at<=CURRENT_TIMESTAMP) AND (lease_until IS NULL OR lease_until<CURRENT_TIMESTAMP) ORDER BY ${schedule},chat_id LIMIT $1 FOR UPDATE SKIP LOCKED`,
           [limit],
         )
       ).rows;
@@ -1287,6 +1292,7 @@ export class Store {
     error: string | null = null,
     waitMs = 1000,
     retryAtMs?: number,
+    rightsFailure?: RightsReadFailure,
   ): Promise<void> {
     await this.transaction(async (client) => {
       const policy = (
@@ -1298,6 +1304,31 @@ export class Store {
       if (!policy) return;
       // FLAG: Recompute from current durable inputs under the same lock used by ingress.
       // A stale visit cannot replace a newer event's due wake with its idle polling delay.
+      if (
+        rightsFailure &&
+        (rightsFailure.revision !== policy.revision ||
+          rightsFailure.generation !== policy.connection_generation)
+      ) {
+        // FLAG: A response from a superseded visit cannot delay a fresh activation.
+        rightsFailure = undefined;
+        error = null;
+      }
+      if (
+        rightsFailure &&
+        policy.enabled &&
+        !['missing', 'no_access'].includes(policy.connection_status)
+      ) {
+        // FLAG: Delay subsequent membership reads for this chat. Only a proven rights
+        // denial may change its connection fence. Issued effects keep their journals.
+        const count = Math.min(9, policy.rights_failure_count + 1);
+        const base = rightsFailure.status === 403 ? 300_000 : 5000;
+        waitMs = Math.min(900_000, base * 2 ** (count - 1));
+        await client.query(
+          `UPDATE eraser_policies SET rights_failure_count=$2,
+           rights_retry_at=clock_timestamp()+($3 * INTERVAL '1 millisecond') WHERE chat_id=$1`,
+          [chatId, count, waitMs],
+        );
+      }
       await this.reschedule(client, policy, error, waitMs, retryAtMs);
       await client.query(
         'UPDATE eraser_policies SET lease_token=NULL,lease_until=NULL,last_error=$3 WHERE chat_id=$1 AND lease_token=$2',
@@ -1308,7 +1339,7 @@ export class Store {
   async connection(chatId: string, status: 'connected' | 'no_access'): Promise<void> {
     // FLAG: Passive rights observations cannot undo an authenticated removal or proven denial.
     await this.pool.query(
-      "UPDATE eraser_policies SET connection_status=$2,connection_generation=connection_generation+CASE WHEN $2='no_access' THEN 1 ELSE 0 END WHERE chat_id=$1 AND ($2<>'connected' OR connection_status NOT IN ('missing','no_access'))",
+      "UPDATE eraser_policies SET connection_status=$2,rights_failure_count=CASE WHEN $2='connected' THEN 0 ELSE rights_failure_count END,rights_retry_at=CASE WHEN $2='connected' THEN NULL ELSE rights_retry_at END,connection_generation=connection_generation+CASE WHEN $2='no_access' THEN 1 ELSE 0 END WHERE chat_id=$1 AND ($2<>'connected' OR connection_status NOT IN ('missing','no_access'))",
       [chatId, status],
     );
   }
@@ -1937,17 +1968,27 @@ export class Store {
       ]);
     });
   }
-  async ingest(raw: Record<string, unknown>, receiptKey: string, message?: Message): Promise<void> {
+  async ingest(
+    raw: Record<string, unknown>,
+    receiptKey: string,
+    message?: Message,
+    lifecycleKey?: string,
+  ): Promise<void> {
     await this.transaction(async (client) => {
-      if (
-        !(
-          await client.query(
-            'INSERT INTO eraser_webhook_receipts(receipt_key) VALUES($1) ON CONFLICT DO NOTHING RETURNING receipt_key',
-            [receiptKey],
-          )
-        ).rowCount
-      )
-        return;
+      const primary = await client.query(
+        'INSERT INTO eraser_webhook_receipts(receipt_key) VALUES($1) ON CONFLICT DO NOTHING RETURNING receipt_key',
+        [receiptKey],
+      );
+      if (lifecycleKey) {
+        // FLAG: Retain the legacy digest for older readers and seed its canonical alias
+        // even on an exact pre-upgrade replay. Only one receipt can advance the fence.
+        const alias = await client.query(
+          'INSERT INTO eraser_webhook_receipts(receipt_key) VALUES($1) ON CONFLICT DO NOTHING RETURNING receipt_key',
+          [lifecycleKey],
+        );
+        if (!alias.rowCount) return;
+      }
+      if (!primary.rowCount) return;
       if (message) {
         // FLAG: The policy lock orders bitmap writes and completed-window clearing. Future
         // events do not invalidate an unrelated in-flight page or create message-sized journals.

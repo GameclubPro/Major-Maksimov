@@ -38,6 +38,9 @@ before editing it; copying these notes does not install a fix or prove the deplo
    CAS and the checkpoint transaction's rollback on receipt rejection. The native multibot
    regression races mirror settlement with positive checkpoint recovery and independent
    execution; ordinary ordered-predecessor waits remain quiet typed scheduling events.
+   Duplicate membership and display-name repairs retain admission until both writes settle,
+   including after either fails or the HTTP ACK expires. Subscription freshness coalesces
+   the latest confirmed receipt time per authenticated bot and retries separately from ACK.
 2. **Bound database work before expensive predicates.** A result `LIMIT` does not bound scans,
    sorts or correlated probes. Use indexed keyset pages with raw cursors retained before filtering,
    bounded materialization and primary-key payload reads. Keep due work separate from terminal
@@ -422,6 +425,8 @@ healthy small fixture cannot justify an unobserved production build or a weaker 
   do not recreate healthy roles to apply a test-only fix or merely repair manifest bookkeeping.
 - Measure only **closed** receipt-created cohorts: `from < until <= observedAt`. Include every
   status, pending/failed counts and ages, cap/truncation, missing samples and invalid-clock counts.
+  The dashboard's sample size and truncation describe selected rows. Its percentiles and
+  target ratios exclude inverted clocks, including when every selected duration is invalid.
   Label completed-only percentiles as such; report PROCESSED separately from DUPLICATE/CANCELLED.
   An empty or future window is not success. Measure remote actions separately from receipt settlement.
   When that 30-second window saturates, use `postgres-audit webhook-cohort --short --explain`

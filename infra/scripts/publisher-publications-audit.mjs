@@ -176,7 +176,7 @@ export function buildPublisherPublicationsAuditSql(explain = false) {
         THEN 'binding_missing_or_wrong_bot'
       WHEN b.status::text IS DISTINCT FROM 'ACTIVE' OR (
         b.bot_access_state::text IN ('CONFIRMED_MEMBER', 'CONFIRMED_ADMIN', 'CONFIRMED_OWNER')
-        OR (b.bot_access_state::text = 'UNKNOWN' AND b.last_webhook_at IS NOT NULL)
+        OR (coalesce(b.bot_access_state::text, 'UNKNOWN') = 'UNKNOWN' AND b.last_webhook_at IS NOT NULL)
       ) IS NOT TRUE THEN 'binding_not_connected'
       WHEN policy.publik_enabled = false THEN 'policy_disabled'
       WHEN c.chat_id IS NULL OR c.status <> 'ACTIVE' THEN 'catalog_missing_or_inactive'
@@ -186,8 +186,8 @@ export function buildPublisherPublicationsAuditSql(explain = false) {
       WHEN e.user_role::text NOT IN ('OWNER', 'ADMIN') THEN 'actor_not_admin'
       WHEN e.entity_type IS DISTINCT FROM t.entity_type THEN 'actor_edge_type_mismatch'
       WHEN chat.entity_type IS DISTINCT FROM t.entity_type THEN 'chat_type_mismatch'
-      WHEN b.bot_access_state::text NOT IN ('CONFIRMED_ADMIN', 'CONFIRMED_OWNER')
-        THEN 'bot_not_admin'
+      WHEN coalesce(b.bot_access_state::text, 'UNKNOWN') = 'UNKNOWN' THEN 'bot_access_unconfirmed'
+      WHEN b.bot_access_state::text = 'CONFIRMED_MEMBER' THEN 'bot_not_admin'
       WHEN b.bot_access_checked_at IS NULL OR b.bot_access_checked_at > (statement_timestamp() AT TIME ZONE 'UTC')
         THEN 'bot_access_unconfirmed'
       WHEN b.send_route_quarantined_until > (statement_timestamp() AT TIME ZONE 'UTC') THEN 'route_quarantined'

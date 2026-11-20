@@ -175,3 +175,48 @@ test('process reset and returned snapshot changes cannot masquerade as durable l
     0,
   );
 });
+
+test('membership response classes retain their caller and ordinary aggregate', async () => {
+  const statuses = [401, 403, 404, 500];
+  const client = new MaxClient(settings, admitted, async () =>
+    Response.json({}, { status: statuses.shift()! }),
+  );
+  await assert.rejects(client.rights('-1'));
+  await assert.rejects(client.rights('-1', guarded));
+  await assert.rejects(client.rights('-1', guarded, 'connection'));
+  await assert.rejects(client.rights('-1', undefined, 'safety'));
+  const snapshot = client.metrics();
+  const bySource = Object.fromEntries(snapshot.rightsResponses.map((row) => [row.source, row]));
+  assert.equal(bySource.cleanup!.unauthorized, 1);
+  assert.equal(bySource.settings!.forbidden, 1);
+  assert.equal(bySource.connection!.missing, 1);
+  assert.equal(bySource.safety!.serverError, 1);
+  assert.equal(snapshot.requests.find((r) => r.purpose === 'bot_rights')!.responses, 3);
+});
+
+test('production webhook observation reports missing, unknown and verified coverage using reads only', async () => {
+  const url = 'https://major-maksimov.ru/eraser/webhook';
+  const all = ['message_created', 'message_edited', 'message_removed', 'bot_added', 'bot_removed'];
+  for (const [subscriptions, expected] of [
+    [[], 'missing'],
+    [[{ url }], 'coverage_unknown'],
+    [[{ url, update_types: all }], 'verified'],
+    [[{ url, update_types: [] }], 'coverage_incomplete'],
+    [[{ url: 'other' }], 'conflict'],
+  ] as const) {
+    const methods: string[] = [];
+    const client = new MaxClient(settings, admitted, async (input, init) => {
+      methods.push(init!.method!);
+      return Response.json(
+        new URL(String(input)).pathname === '/me'
+          ? { user_id: '1', is_bot: true }
+          : { subscriptions },
+      );
+    });
+    assert.equal(client.subscriptionObservation().status, 'not_checked');
+    await client.observeSubscription();
+    assert.equal(client.subscriptionObservation().status, expected);
+    assert.ok(client.subscriptionObservation().observedAt);
+    assert.deepEqual(methods, ['GET', 'GET']);
+  }
+});

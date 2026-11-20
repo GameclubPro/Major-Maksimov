@@ -1,5 +1,6 @@
 import { Redis } from 'ioredis';
 import pg from 'pg';
+import { observePoolErrors } from './pool-errors.js';
 import { config } from './config.js';
 import { HttpLimiter } from './limiter.js';
 import { MaxClient } from './max.js';
@@ -21,6 +22,7 @@ const pool = new pg.Pool({
   connectionTimeoutMillis: 2000,
   options: '-c timezone=UTC -c statement_timeout=5000 -c lock_timeout=2000',
 });
+observePoolErrors(pool);
 try {
   const client = new MaxClient(
     settings,

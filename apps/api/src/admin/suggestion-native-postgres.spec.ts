@@ -103,7 +103,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
         const source = messages.get(id);
         if (!source) throw new Error('Test card snapshot missing');
         const attachments = attachmentBuilder.buildEditableMessageAttachments(source, options);
-        await options?.beforeEditMutation?.();
+        await options?.beforeEditMutation?.(async () => undefined);
         messages.set(id, { body: { text, attachments } });
         return true;
       });
@@ -1303,7 +1303,7 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
           expiresAt: new Date(Date.now() + 60000),
         },
       });
-      await options?.beforeEditMutation?.();
+      await options?.beforeEditMutation?.(async () => undefined);
       throw new Error('Sync must not reach PUT');
     });
     await effects.process(sync.id, 'moderation');
@@ -1318,11 +1318,11 @@ native('native suggestion dialog on real PostgreSQL/Redis', () => {
     const f = await seed();
     jest
       .spyOn(effects, 'assertDispatchAccess')
-      .mockResolvedValueOnce()
+      .mockResolvedValueOnce(undefined)
       .mockRejectedValue(new ForbiddenException('Access removed'));
     let dispatched = false;
     edit.mockImplementation(async (_chat, _id, _text, options) => {
-      await options?.beforeEditMutation?.();
+      await options?.beforeEditMutation?.(async () => undefined);
       dispatched = true;
       return true;
     });

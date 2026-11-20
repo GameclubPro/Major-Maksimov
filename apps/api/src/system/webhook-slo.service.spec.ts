@@ -267,7 +267,7 @@ describe('WebhookSloService', () => {
         sampledFrom: '2026-04-29T11:59:55.900Z',
         p95LatencyMs: 1600,
         p99LatencyMs: 1600,
-        underTargetRatio: 0.667,
+        underTargetRatio: 0.5,
         oldestPendingLagSec: 8,
         oldestPendingEventId: 'evt-pending-enqueue',
         lastQueuedAt: '2026-04-29T11:59:58.600Z',
@@ -474,6 +474,43 @@ describe('WebhookSloService', () => {
       2,
       expect.objectContaining({ take: 5_001 }),
     );
+  });
+
+  it('reports sampled rows and truncation even when every duration has an inverted clock', async () => {
+    const createdAt = new Date('2026-04-29T11:59:59.000Z');
+    const before = new Date(createdAt.getTime() - 1);
+    const prisma = {
+      $transaction: (queries: Promise<unknown>[]) => Promise.all(queries),
+      webhookEvent: {
+        count: jest.fn().mockResolvedValue(2),
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce(Array(2).fill({ createdAt, processedAt: before }))
+          .mockResolvedValueOnce(Array(2).fill({ createdAt, queuedAt: before })),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+      webhookExecutionClaim: { count: jest.fn().mockResolvedValue(0) },
+    };
+    const service = new WebhookSloService(
+      prisma as never,
+      createConfig({ SYSTEM_WEBHOOK_SLO_SAMPLE_LIMIT: 1 }) as never,
+    );
+    await expect(service.getSnapshot()).resolves.toMatchObject({
+      sampledProcessedEvents: 1,
+      processedSampleTruncated: true,
+      processedSampledFrom: before.toISOString(),
+      p95ProcessingMs: null,
+      p99ProcessingMs: null,
+      underTargetRatio: null,
+      enqueue: {
+        sampledEvents: 1,
+        sampleTruncated: true,
+        sampledFrom: before.toISOString(),
+        p95LatencyMs: null,
+        p99LatencyMs: null,
+        underTargetRatio: null,
+      },
+    });
   });
 
   it('reports independently truncated processing and enqueue samples', async () => {

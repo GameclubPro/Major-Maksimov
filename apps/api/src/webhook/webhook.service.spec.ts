@@ -2051,6 +2051,48 @@ describe('WebhookService', () => {
     expect(prisma.managedEntityLocalActivity.upsert).not.toHaveBeenCalled();
   });
 
+  it('retains duplicate repair admission until the membership transaction settles after a name write fails', async () => {
+    const fixture = createAtomicMembershipFixture();
+    const failure = new Error('display name unavailable');
+    let unlock!: () => void;
+    const lock = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    fixture.tx.$queryRaw.mockImplementationOnce(async () => {
+      await lock;
+      return [{ id: '-100-membership' }];
+    });
+    const prisma = {
+      ...fixture.prisma,
+      chatUserDisplayName: {},
+      $executeRaw: jest.fn().mockRejectedValue(failure),
+    };
+    const service = new WebhookService(
+      prisma as never,
+      new ConfigService(),
+      maxBotLinkService as never,
+    );
+    const update = buildMembershipUpdate({
+      updateId: 'duplicate-under-lock',
+      type: 'user_added',
+      createdAt: '2026-07-20T10:05:00.000Z',
+    });
+    update.message!.senderName = 'Member';
+    const outcome = service
+      .repairDuplicateReceiptReadModels(update)
+      .catch((error: unknown) => error);
+    try {
+      await flushDeferredWebhookWork();
+      expect(prisma.$executeRaw).toHaveBeenCalled();
+      expect(fixture.tx.$queryRaw).toHaveBeenCalled();
+      expect(service.nextPreparationCompletion()).not.toBeNull();
+    } finally {
+      unlock();
+    }
+    await expect(outcome).resolves.toBe(failure);
+    expect(service.nextPreparationCompletion()).toBeNull();
+  });
+
   it('repairs membership activity projection when MAX redelivers a duplicate join event', async () => {
     const prisma = {
       webhookEvent: {

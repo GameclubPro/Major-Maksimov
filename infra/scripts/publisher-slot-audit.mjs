@@ -234,7 +234,8 @@ export function buildPublisherSlotAuditSql(actor, chat, minute, explain = false)
       WHEN e.chat_id IS NULL THEN 'actor_edge_missing' WHEN e.state::text IS DISTINCT FROM 'GRANTED' THEN 'actor_denied'
       WHEN e.user_role IS NULL OR e.user_role::text NOT IN ('ADMIN','OWNER') THEN 'actor_not_admin'
       WHEN e.entity_type IS DISTINCT FROM o.entity_type THEN 'actor_edge_type_mismatch'
-      WHEN b.bot_access_state IS NULL OR b.bot_access_state::text NOT IN ('CONFIRMED_ADMIN','CONFIRMED_OWNER') THEN 'bot_not_admin'
+      WHEN coalesce(b.bot_access_state::text, 'UNKNOWN') = 'UNKNOWN' THEN 'bot_access_unconfirmed'
+      WHEN b.bot_access_state::text NOT IN ('CONFIRMED_ADMIN','CONFIRMED_OWNER') THEN 'bot_not_admin'
       WHEN b.bot_access_checked_at IS NULL OR b.bot_access_checked_at>(statement_timestamp() AT TIME ZONE 'UTC') THEN 'bot_access_unconfirmed'
       WHEN b.send_route_quarantined_until>(statement_timestamp() AT TIME ZONE 'UTC') THEN 'route_quarantined' ELSE 'metadata_ready' END AS access_reason
     FROM scoped o LEFT JOIN LATERAL (SELECT mode,status,revision FROM public.publication_schedules WHERE id=o.schedule_id LIMIT 1 OFFSET 0) s ON true

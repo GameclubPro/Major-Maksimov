@@ -6,6 +6,7 @@ import type { MiniappProfile } from '@maxim/contracts/publisher';
 import { Prisma, type SuggestionReviewEffect } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { MAX_API_SOURCE_TAGS, MaxClientService } from '../max/max-client.service';
+import { withMaxFinalAuthorityCheckpoint } from '../max/max-action-pre-dispatch-guard';
 import { MaxBotLinkService } from '../max/max-bot-link.service';
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { PublisherReadinessService } from '../publisher/publisher-readiness.service';
@@ -34,8 +35,19 @@ export const suggestionObject = (value: unknown): Record<string, unknown> =>
 const string = (value: unknown) => (typeof value === 'string' ? value : '');
 const STALE_MS = 120_000;
 const PREPARATION_DEADLINE_MS = 24 * 60 * 60_000;
+const BOT_RIGHTS_RECHECK_MS = 60_000;
+const MAX_BOT_RIGHTS_REFUSALS = 256;
 
 class SuggestionReviewRecipientAccessRemoved extends ForbiddenException {}
+
+class SuggestionReviewBotRightsProbeDeferred extends Error {
+  constructor(
+    readonly retryAt: number,
+    cause?: unknown,
+  ) {
+    super('Suggestion review bot rights probe deferred', { cause });
+  }
+}
 
 const PREPARATION_MESSAGES = {
   publication_pending: 'Ожидает завершения публикации.',
@@ -53,6 +65,12 @@ class SuggestionReviewPreparationError extends Error {
 }
 
 function preparationFailure(error: unknown) {
+  if (error instanceof SuggestionReviewBotRightsProbeDeferred)
+    return {
+      reason: 'bot_rights_probe_deferred',
+      message: 'Ожидает проверки прав бота в канале.',
+      retryMs: Math.max(1_000, error.retryAt - Date.now()),
+    };
   if (error instanceof ManagedEntityActivationRequiredError)
     return {
       reason: 'activation_required',
@@ -78,6 +96,7 @@ function preparationFailure(error: unknown) {
 @Injectable()
 export class SuggestionReviewEffectsService {
   private readonly logger = new Logger(SuggestionReviewEffectsService.name);
+  private readonly botRightsRefusals = new Map<string, { epoch: string; retryAt: number }>();
   constructor(
     private readonly prisma: PrismaService,
     private readonly max: MaxClientService,
@@ -530,8 +549,19 @@ export class SuggestionReviewEffectsService {
             textFormat: message.textFormat,
             requireAllAttachmentsPreserved: true,
             replaceOwnedInlineKeyboard: true,
-            beforeEditMutation: async () => {
-              await this.assertDispatchAccess(row.chatId, effect.botId, profile, card.adminUserId);
+            beforeEditMutation: withMaxFinalAuthorityCheckpoint(async (checkpoint) => {
+              const verifyActivation = await this.assertDispatchAccess(
+                row.chatId,
+                effect.botId,
+                profile,
+                card.adminUserId,
+                { debounceBotRightsRefusal: true },
+              );
+              if (!checkpoint) throw new Error('Missing suggestion edit dispatch checkpoint');
+              // FLAG: Remote rights checks precede quota. Recheck the local activation epoch,
+              // personal editor and exact review revision after any wait at the checkpoint.
+              await checkpoint();
+              await verifyActivation?.();
               const active = await this.prisma.suggestionReviewDialog.findUnique({
                 where: { deliveryId: card.id },
               });
@@ -561,7 +591,7 @@ export class SuggestionReviewEffectsService {
                 suggestionObject(current.payload).reviewStatus !== payload.reviewStatus
               )
                 throw new SuggestionReviewPreparationError('source_changed');
-            },
+            }),
           },
           {
             botId: effect.botId,
@@ -586,12 +616,26 @@ export class SuggestionReviewEffectsService {
     }
   }
 
+  private accessEpoch(
+    state: Awaited<ReturnType<MaxBotLinkService['assertChatBotAccessProbeAllowed']>>,
+  ): string {
+    return JSON.stringify([
+      state?.status,
+      state?.botAccessState,
+      state?.botAccessCheckedAt,
+      state?.lifecycleEventAt,
+      state?.botAccessSource,
+      suggestionObject(state?.permissionsSnapshot).explicitActivationSourceAt,
+    ]);
+  }
+
   async assertDispatchAccess(
     chatId: string,
     botId: string,
     profile: MiniappProfile,
     actorId: string,
-  ) {
+    preparation?: { debounceBotRightsRefusal: true },
+  ): Promise<(() => Promise<void>) | undefined> {
     if (!actorId) throw new ForbiddenException('Administrator identity unavailable');
     if (profile === 'publisher') {
       const route = await this.readiness.assertEntityReady(chatId, 'suggestion_publish');
@@ -599,17 +643,45 @@ export class SuggestionReviewEffectsService {
     } else if (!this.registry.getActionableBots().some((bot) => bot.id === botId)) {
       throw new ForbiddenException('Suggestion bot is not active');
     }
-    await this.links.assertChatBotAccessProbeAllowed(chatId, botId);
+    const activation = await this.links.assertChatBotAccessProbeAllowed(chatId, botId);
+    const epoch = this.accessEpoch(activation);
+    const refusalKey = JSON.stringify([profile, botId, chatId]);
+    const savedRefusal = preparation ? this.botRightsRefusals.get(refusalKey) : undefined;
+    if (savedRefusal?.epoch === epoch && savedRefusal.retryAt > Date.now())
+      throw new SuggestionReviewBotRightsProbeDeferred(savedRefusal.retryAt);
     const options = {
       botId,
       bypassCache: true,
       timeoutMs: 8_000,
       sourceTag: MAX_API_SOURCE_TAGS.SUGGESTION_DELIVERY,
     };
-    const bot = await this.max.getCurrentChatMemberAccess(chatId, options);
+    const bot = await this.max
+      .getCurrentChatMemberAccess(chatId, options)
+      .catch((error: unknown) => {
+        if (!preparation || privateSuggestionReviewErrorDiagnostic(error).httpStatus !== 403)
+          throw error;
+        // FLAG: A provider refusal only suppresses repeat background preparation reads. No
+        // positive authority is cached, and a fresh activation epoch bypasses this suppression.
+        const retryAt = Date.now() + BOT_RIGHTS_RECHECK_MS;
+        this.botRightsRefusals.delete(refusalKey);
+        this.botRightsRefusals.set(refusalKey, { epoch, retryAt });
+        if (this.botRightsRefusals.size > MAX_BOT_RIGHTS_REFUSALS) {
+          const oldest = this.botRightsRefusals.keys().next().value;
+          if (oldest !== undefined) this.botRightsRefusals.delete(oldest);
+        }
+        throw new SuggestionReviewBotRightsProbeDeferred(retryAt, error);
+      });
     if (!bot.isAdmin && !bot.isOwner) throw new ForbiddenException('Bot admin access removed');
     const actor = await this.max.getChatMemberAccess(chatId, actorId, options);
     if (!actor || (!actor.isAdmin && !actor.isOwner) || this.registry.isKnownBotUserId(actorId))
       throw new SuggestionReviewRecipientAccessRemoved('Administrator access removed');
+    if (!preparation) return undefined;
+    if (this.botRightsRefusals.get(refusalKey)?.epoch === epoch)
+      this.botRightsRefusals.delete(refusalKey);
+    return async () => {
+      const current = await this.links.assertChatBotAccessProbeAllowed(chatId, botId);
+      if (this.accessEpoch(current) !== epoch)
+        throw new SuggestionReviewPreparationError('source_changed');
+    };
   }
 }

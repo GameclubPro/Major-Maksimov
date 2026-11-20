@@ -11,6 +11,8 @@ const WEBHOOK_SUBSCRIPTION_STATUS_KEY = 'system:webhook-subscription:status:v1';
 const WEBHOOK_SUBSCRIPTION_SYNC_STATE_KEY = 'system:webhook-subscription:sync-state:v1';
 const WEBHOOK_SUBSCRIPTION_INGRESS_KEY = 'system:webhook-subscription:ingress:v1';
 const LOCAL_SNAPSHOT_CACHE_TTL_MS = 2_000;
+const INGRESS_FLUSH_MS = 250;
+const INGRESS_RETRY_MS = 2_000;
 const MARK_INCOMING_WEBHOOK_LUA = `
 local key = KEYS[1]
 local botField = ARGV[1]
@@ -47,15 +49,32 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
   private readonly requiredUpdateTypes: readonly string[];
   private cachedSnapshot: WebhookSubscriptionSnapshot | null = null;
   private cachedAtMs = 0;
+  private readonly pendingIngress = new Map<string, number>();
+  private ingressTimer: NodeJS.Timeout | null = null;
+  private ingressFlush: Promise<void> | null = null;
+  private closing = false;
+  private nextIngressWarningMs = 0;
 
   constructor(configService: ConfigService) {
-    this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'));
+    this.redis = new Redis(configService.getOrThrow<string>('REDIS_URL'), {
+      commandTimeout: 2_000,
+      maxRetriesPerRequest: 1,
+    });
     this.requiredUpdateTypes = resolveRequiredWebhookUpdateTypes(
       configService.get?.<string>('MAX_EXTENDED_WEBHOOK_LIFECYCLE_MODE', 'shadow') ?? 'shadow',
     );
   }
 
   async onModuleDestroy() {
+    this.closing = true;
+    if (this.ingressTimer) clearTimeout(this.ingressTimer);
+    await this.ingressFlush;
+    if (this.pendingIngress.size) await this.flushIncomingWebhookMarks();
+    if (this.pendingIngress.size)
+      this.logger.warn(
+        { bots: this.pendingIngress.size },
+        'Latest webhook ingress times were not saved before shutdown',
+      );
     await this.redis.quit();
   }
 
@@ -197,6 +216,50 @@ export class WebhookSubscriptionStatusService implements OnModuleDestroy {
 
   async writeSyncState(state: WebhookSubscriptionSyncState): Promise<void> {
     await this.redis.set(WEBHOOK_SUBSCRIPTION_SYNC_STATE_KEY, JSON.stringify(state));
+  }
+
+  recordIncomingWebhook(botId: string, occurredAtMs = Date.now()): void {
+    // FLAG: Only authenticated receipt identities enter this map. Keep one maximum per bot,
+    // including during an outage, without retaining a promise or Redis command per receipt.
+    if (this.closing) return;
+    this.pendingIngress.set(botId, Math.max(this.pendingIngress.get(botId) ?? 0, occurredAtMs));
+    this.scheduleIngressFlush(INGRESS_FLUSH_MS);
+  }
+
+  private scheduleIngressFlush(delayMs: number): void {
+    if (this.closing || this.ingressTimer || this.ingressFlush || !this.pendingIngress.size) return;
+    this.ingressTimer = setTimeout(() => {
+      this.ingressTimer = null;
+      this.ingressFlush = this.flushIncomingWebhookMarks().then((failed) => {
+        this.ingressFlush = null;
+        this.scheduleIngressFlush(failed ? INGRESS_RETRY_MS : INGRESS_FLUSH_MS);
+      });
+    }, delayMs);
+    this.ingressTimer.unref();
+  }
+
+  private async flushIncomingWebhookMarks(): Promise<boolean> {
+    let failed = this.redis.status !== 'ready';
+    if (!failed) {
+      await Promise.all(
+        Array.from(this.pendingIngress, async ([botId, at]) => {
+          try {
+            await this.markIncomingWebhook(botId, new Date(at).toISOString());
+            if (this.pendingIngress.get(botId) === at) this.pendingIngress.delete(botId);
+          } catch {
+            failed = true;
+          }
+        }),
+      );
+    }
+    if (failed && Date.now() >= this.nextIngressWarningMs) {
+      this.nextIngressWarningMs = Date.now() + 60_000;
+      this.logger.warn(
+        { bots: this.pendingIngress.size },
+        'Latest webhook ingress times await Redis',
+      );
+    }
+    return failed;
   }
 
   async markIncomingWebhook(botId: string, occurredAt = new Date().toISOString()): Promise<void> {

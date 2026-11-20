@@ -2,6 +2,7 @@ import { WebhookSubscriptionStatusService } from './webhook-subscription-status.
 import { MAX_REQUIRED_WEBHOOK_UPDATE_TYPES } from '../max/max-webhook-subscription.constants';
 
 type RedisMock = {
+  status: string;
   get: jest.Mock<Promise<string | null>, [string]>;
   set: jest.Mock<Promise<'OK'>, [string, string]>;
   hgetall: jest.Mock<Promise<Record<string, string>>, [string]>;
@@ -19,6 +20,7 @@ jest.mock('ioredis', () => ({
     const strings = new Map<string, string>();
     const hashes = new Map<string, Record<string, string>>();
     const instance: RedisMock = {
+      status: 'ready',
       strings,
       hashes,
       get: jest.fn(async (key) => strings.get(key) ?? null),
@@ -115,6 +117,44 @@ describe('WebhookSubscriptionStatusService', () => {
     expect(redisInstances[0]?.eval).toHaveBeenCalledTimes(2);
 
     await service.onModuleDestroy();
+  });
+
+  it('coalesces confirmed receipt times per bot during disconnects and pending Redis writes', async () => {
+    jest.useFakeTimers();
+    const service = new WebhookSubscriptionStatusService({
+      getOrThrow: () => 'redis://localhost',
+    } as never);
+    const redis = redisInstances[0]!;
+    let release!: (result: number) => void;
+    const blocked = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const base = Date.now();
+      redis.status = 'reconnecting';
+      for (let n = 0; n < 100; n++) service.recordIncomingWebhook('bot-1', base + n);
+      await jest.advanceTimersByTimeAsync(250);
+      expect(redis.eval).not.toHaveBeenCalled();
+      redis.status = 'ready';
+      redis.eval.mockImplementationOnce(() => blocked);
+      await jest.advanceTimersByTimeAsync(2_000);
+      expect(redis.eval.mock.calls.map((args) => args.slice(3))).toEqual([
+        ['bot:bot-1', String(base + 99)],
+      ]);
+      for (let n = 0; n < 100; n++) service.recordIncomingWebhook('bot-1', base + 100 + n);
+      service.recordIncomingWebhook('bot-2', base + 50);
+      await jest.advanceTimersByTimeAsync(2_000);
+      expect(redis.eval).toHaveBeenCalledTimes(1);
+      release(1);
+      await service.onModuleDestroy();
+      expect(redis.eval.mock.calls.slice(1).map((args) => args.slice(3))).toEqual([
+        ['bot:bot-1', String(base + 199)],
+        ['bot:bot-2', String(base + 50)],
+      ]);
+    } finally {
+      release(1);
+      jest.useRealTimers();
+    }
   });
 
   it('retains subscription configuration but trusts only atomic ingress over old or newer snapshot times', async () => {

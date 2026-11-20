@@ -113,7 +113,7 @@ export class WebhookIngestionService {
       outcome: 'persisted',
       latencyMs: Date.now() - receiptPersistenceStartedAtMs,
     });
-    this.markIncomingWebhookAsync(bot.id);
+    this.webhookSubscriptionStatusService.recordIncomingWebhook(bot.id);
 
     if (result.duplicate) {
       try {
@@ -312,20 +312,6 @@ export class WebhookIngestionService {
       'Webhook ingress admission budget exceeded; requesting MAX redelivery',
     );
     throw new ServiceUnavailableException('Webhook ingress capacity exceeded');
-  }
-
-  private markIncomingWebhookAsync(botId: string): void {
-    void Promise.resolve()
-      .then(() => this.webhookSubscriptionStatusService.markIncomingWebhook(botId))
-      .catch((error: unknown) => {
-        this.logger.warn(
-          {
-            botId,
-            err: error instanceof Error ? error.message : String(error),
-          },
-          'Failed to persist incoming webhook status asynchronously',
-        );
-      });
   }
 
   private recordReceiptPersistenceAsync(

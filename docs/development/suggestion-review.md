@@ -115,7 +115,12 @@ Reconciliation may release only a provably unattempted stale claim and never sta
 Major dialog jobs execute on `admin-suggestion-delivery` in the action role. Publik uses
 `publisher-suggestion-admin` in `api-publisher`, retaining identity/dispatch gates. Fresh exact
 bot/actor checks precede processing; card edits recheck ownership, access and content revision
-at mutation. Jobs retain original source timestamps and a five-minute command admission window.
+at mutation. Background card edits check bot and recipient rights before reserving edit
+quota. After the reservation they verify the same activation epoch, ownership and current card
+revision. A bot rights probe returning 403 delays other background checks for the same bot
+and channel by at most a minute. A changed activation epoch bypasses that delay. User-initiated
+checks still read fresh rights. Jobs retain original source timestamps and a five-minute
+command admission window.
 
 Rejection and notification intent commit together in `suggestion_review_effects`. Replies use
 the submission bot and audit author. Final dispatch rechecks current bot and reviewer access.

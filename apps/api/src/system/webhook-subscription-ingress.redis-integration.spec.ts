@@ -20,6 +20,7 @@ native('webhook subscription ingress on Redis', () => {
     ];
     const cleanup = new Redis(url.toString());
     const at = (ms: number) => new Date(Date.UTC(2026, 10, 18) + ms).toISOString();
+    let firstClosed = false;
     try {
       const writes = Array.from({ length: 80 }, (_, i) =>
         (i % 3 ? first : second).markIncomingWebhook(i % 2 ? 'bot-a' : 'bot-b', at((i * 73) % 80)),
@@ -39,6 +40,17 @@ native('webhook subscription ingress on Redis', () => {
         },
         lastGlobalIncomingWebhookAt: at(79),
       });
+      for (const ms of [81, 83, 82]) first.recordIncomingWebhook('bot-a', Date.parse(at(ms)));
+      first.recordIncomingWebhook('bot-b', Date.parse(at(70)));
+      await first.onModuleDestroy();
+      firstClosed = true;
+      await expect(second.getSyncState()).resolves.toMatchObject({
+        bots: {
+          'bot-a': { lastIncomingWebhookAt: at(83) },
+          'bot-b': { lastIncomingWebhookAt: at(78) },
+        },
+        lastGlobalIncomingWebhookAt: at(83),
+      });
     } finally {
       try {
         await cleanup.del(
@@ -46,7 +58,11 @@ native('webhook subscription ingress on Redis', () => {
           'system:webhook-subscription:ingress:v1',
         );
       } finally {
-        await Promise.all([first.onModuleDestroy(), second.onModuleDestroy(), cleanup.quit()]);
+        await Promise.all([
+          firstClosed ? undefined : first.onModuleDestroy(),
+          second.onModuleDestroy(),
+          cleanup.quit(),
+        ]);
       }
     }
   });

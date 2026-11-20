@@ -18,6 +18,21 @@ import {
   type PolicyActivationGuard,
 } from './types.js';
 
+function lifecycleReceipt(value: Record<string, unknown>): string | undefined {
+  if (value.update_type !== 'bot_removed') return undefined;
+  // FLAG: JSON member order is not event identity. Preserve array order and every value.
+  const sorted = JSON.stringify(value, (_key, item: unknown) => {
+    const object = record(item);
+    return object
+      ? Object.fromEntries(
+          Object.keys(object)
+            .sort()
+            .map((key) => [key, object[key]]),
+        )
+      : item;
+  });
+  return 'lifecycle-v1:' + createHash('sha256').update(sorted).digest('hex');
+}
 function equalSecret(actual: unknown, expected: string): boolean {
   if (typeof actual !== 'string' || !expected) return false;
   return timingSafeEqual(
@@ -147,6 +162,7 @@ export function createHttpServer(
             service: 'eraser',
             commitSha: config.commitSha,
             enabled: config.enabled,
+            subscription: max.subscriptionObservation?.(),
             ...health,
           });
         }
@@ -165,7 +181,7 @@ export function createHttpServer(
               : undefined;
           const key = createHash('sha256').update(JSON.stringify(value)).digest('hex');
           // FLAG: No diagnostics or permission probes are ever sent to a chat from this endpoint.
-          await store.ingest(value, key, message);
+          await store.ingest(value, key, message, lifecycleReceipt(value));
           return send(response, 200, { success: true });
         }
         if (!equalSecret(request.headers.authorization, `Bearer ${config.controlToken}`))

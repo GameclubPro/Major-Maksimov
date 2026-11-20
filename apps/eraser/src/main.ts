@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { observePoolErrors } from './pool-errors.js';
 import { Redis } from 'ioredis';
 import { config } from './config.js';
 import { Store } from './store.js';
@@ -17,6 +18,7 @@ const pool = new pg.Pool({
   application_name: 'lastik',
   options: '-c timezone=UTC -c statement_timeout=5000 -c lock_timeout=2000',
 });
+observePoolErrors(pool);
 const redis = new Redis(settings.redisUrl, { maxRetriesPerRequest: 1 });
 redis.on('error', () => {});
 const store = new Store(pool, settings.enabled);
@@ -35,11 +37,21 @@ const max = new MaxClient(
 );
 const runtime = new CleanupRuntime(store, max, settings);
 const server = createHttpServer(store, max, runtime, settings, () => redis.ping());
+let observation: Promise<void> | undefined;
+let observationTimer: ReturnType<typeof setInterval> | undefined;
+function observeSubscription() {
+  if (!observation && !startupAbort.signal.aborted) {
+    observation = max.observeSubscription().finally(() => {
+      observation = undefined;
+    });
+  }
+}
 let closing: Promise<void> | undefined;
 let startup: Promise<boolean> | undefined;
 function close(): Promise<void> {
   if (closing) return closing;
   startupAbort.abort();
+  clearInterval(observationTimer);
   runtime.stopAdmission();
   closing = (async () => {
     const deadline = setTimeout(() => process.exit(1), 30_000);
@@ -48,6 +60,7 @@ function close(): Promise<void> {
       await startup?.catch(() => {});
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await runtime.close();
+      await observation;
       await redis.quit();
       await pool.end();
       clearTimeout(deadline);
@@ -78,7 +91,14 @@ try {
       subscribe: async () => {
         if (settings.enabled) await max.subscribe();
       },
-      start: () => runtime.start(),
+      start: async () => {
+        await runtime.start();
+        if (settings.enabled && !startupAbort.signal.aborted) {
+          observeSubscription();
+          observationTimer = setInterval(observeSubscription, 300_000);
+          observationTimer.unref();
+        }
+      },
     },
     startupAbort.signal,
   );

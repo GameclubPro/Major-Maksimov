@@ -811,3 +811,32 @@ test('a complete safety proof clears a covered ordinary gap while retaining its 
   await store.finishVisit('-1', wakeup.leaseToken);
   assert.ok((await store.policy('-1'))!.normal_next_at.getTime() <= Date.now() + 1500);
 });
+
+test('membership retry delay survives ingress and restart, grows only per chat and clears on activation or successful rights', async () => {
+  await enable();
+  const policy = (await store.policy('-1'))!;
+  const failure = {
+    status: 404,
+    revision: policy.revision,
+    generation: policy.connection_generation,
+  };
+  for (const expected of [5000, 10000]) {
+    // Only advance the simulated clock boundary between independent attempts.
+    await pool.query("UPDATE eraser_policies SET rights_retry_at=NULL WHERE chat_id='-1'");
+    const job = await wake();
+    const before = Date.now();
+    await store.finishVisit('-1', job.leaseToken, 'not.found', 5000, undefined, failure);
+    const row = (await store.policy('-1'))!;
+    assert.ok(row.rights_retry_at!.getTime() >= before + expected - 100);
+    assert.ok(row.rights_retry_at!.getTime() <= Date.now() + expected + 100);
+    await store.ingest({}, randomUUID(), message('late', Date.now() - 48 * HOUR));
+    assert.deepEqual(await new Store(pool, true).reserve(1), []);
+    assert.equal(row.connection_status, 'connected');
+  }
+  await store.connection('-1', 'connected');
+  assert.equal((await store.policy('-1'))!.rights_failure_count, 0);
+  const leased = await wake();
+  await update(48);
+  await store.finishVisit('-1', leased.leaseToken, 'obsolete', 5000, undefined, failure);
+  assert.equal((await store.policy('-1'))!.rights_retry_at, null);
+});

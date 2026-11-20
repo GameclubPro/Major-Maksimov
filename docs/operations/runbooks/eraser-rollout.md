@@ -448,3 +448,26 @@ At the configured maximum, maintenance can admit 23.04 million candidates and
 46.08 million receipts per day. These are scheduling ceilings, not measured sustained
 throughput. See the [storage measurements and remaining acceptance gates](../plans/2026-10-29-lastik-storage-acceptance.md)
 and [Lastik backup profile](postgres-recurring-backups.md#independent-lastik-profile).
+
+## Membership and subscription observations
+
+Every five minutes the active Lastik process reads its identity and subscription through the
+shared MAX limiter. The separate installer still owns initial registration in the standard
+bootstrap. Before installation, the read can report `missing`. The local health response exposes
+`subscription.status` and `subscription.observedAt`. Check both fields when investigating
+missing events. `coverage_unknown` means MAX returned the right URL without an explicit list
+of update types. The observation never sends messages or updates the subscription.
+
+The bounded progress log includes `transport.rightsResponses` by caller and HTTP status class.
+Compare counters only within one process lifetime (`transport.since`). Cleanup membership
+reads that repeatedly receive HTTP errors back off per chat, starting at five seconds
+(five minutes for 403) and doubling to a fifteen-minute ceiling. Successful bot rights
+or a fresh accepted activation reset this delay. An ordinary 404 keeps the existing
+membership status. The independent shared 429 deadline continues to govern all callers.
+Migration `0011-rights-read-backoff.sql` adds two fields to the policy table. Older readers
+may resume their prior read cadence after rollback.
+
+New authenticated removal receipts retain the original digest and a second digest independent
+of JSON member order. Receipts stored before this change carry only their original digest until
+an exact redelivery supplies the additional one or the receipt expires. Both digests use the
+existing seven-day retention. The ordinary message path still stores a single receipt.
