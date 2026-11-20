@@ -6,6 +6,7 @@ import type {
 import {
   buildPublicationContent,
   createPublicationDraftFromDetails,
+  getPublicationOnceSlot,
   type PublicationDraft,
   type PublicationRetainedAsset,
 } from './publication-model';
@@ -16,6 +17,20 @@ import {
 
 export type PublicationCloudIdentity = { id: string; revision: number };
 
+export function publicationDraftStoredTiming(
+  draft: Pick<PublicationDraft, 'timingMode' | 'onceAt' | 'scheduledSlots'>,
+): Pick<PublicationDraftState, 'onceAt' | 'scheduledSlots' | 'calendarSlots'> {
+  if (draft.timingMode !== 'once') {
+    return { onceAt: draft.onceAt, scheduledSlots: draft.scheduledSlots };
+  }
+  // FLAG: Older mini apps still read the active once instant from scheduledSlots.
+  return {
+    onceAt: draft.onceAt,
+    scheduledSlots: draft.onceAt ? [draft.onceAt] : [],
+    calendarSlots: draft.scheduledSlots,
+  };
+}
+
 export function publicationDraftState(draft: PublicationDraft): PublicationDraftState {
   return {
     formatVersion: 1,
@@ -24,7 +39,7 @@ export function publicationDraftState(draft: PublicationDraft): PublicationDraft
     scheduleKind: draft.scheduleKind,
     scheduleTimezone: draft.scheduleTimezone,
     latePolicy: draft.latePolicy,
-    scheduledSlots: draft.scheduledSlots,
+    ...publicationDraftStoredTiming(draft),
     onceDate: draft.onceDate,
     onceTime: draft.onceTime,
     recurrence: draft.recurrence,
@@ -56,10 +71,50 @@ export function serverDraftRequest(
 
 export function draftFromServer(response: PublicationDraftResponse): PublicationDraft {
   const draft = createPublicationDraftFromDetails(response.publication);
+  if (!response.state) {
+    return {
+      ...draft,
+      cloudDraft: { id: response.publication.id, revision: response.publication.version },
+    };
+  }
+  const { calendarSlots, ...state } = response.state;
   return {
     ...draft,
-    ...(response.state ?? {}),
+    ...state,
+    ...splitLegacyPublicationTiming({ ...state, calendarSlots }),
     cloudDraft: { id: response.publication.id, revision: response.publication.version },
+  };
+}
+
+export function splitLegacyPublicationTiming({
+  onceAt,
+  onceDate,
+  onceTime,
+  scheduledSlots,
+  calendarSlots,
+  scheduleTimezone,
+  timingMode,
+}: Pick<
+  PublicationDraftState,
+  | 'onceAt'
+  | 'onceDate'
+  | 'onceTime'
+  | 'scheduledSlots'
+  | 'calendarSlots'
+  | 'scheduleTimezone'
+  | 'timingMode'
+>): Pick<PublicationDraft, 'onceAt' | 'scheduledSlots'> {
+  if (onceAt !== undefined) return { onceAt, scheduledSlots: calendarSlots ?? scheduledSlots };
+  if (timingMode !== 'once') return { onceAt: null, scheduledSlots };
+  // FLAG: Old drafts stored the UTC instant for a one-time post in the calendar array.
+  return {
+    onceAt: getPublicationOnceSlot({
+      onceAt: scheduledSlots[0] ?? null,
+      onceDate,
+      onceTime,
+      scheduleTimezone,
+    }),
+    scheduledSlots: [],
   };
 }
 

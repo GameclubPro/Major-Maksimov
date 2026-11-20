@@ -7,7 +7,13 @@ import {
   type VkParsingRefreshResult,
 } from '@maxim/contracts';
 import { InjectQueue } from '@nestjs/bullmq';
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Queue } from 'bullmq';
 import type { AuthUser } from '../common/decorators/current-user.decorator';
@@ -225,6 +231,18 @@ export class VkSourceService {
         throw new NotFoundException('VK-источник не найден.');
       }
 
+      const { ifAutomatic, ...patch } = parsed.data;
+      if (
+        ifAutomatic &&
+        (!source.importEnabled ||
+          !source.autoPublishEnabled ||
+          source.autoPublishPausedAt !== null ||
+          source.autoPublishPausedReason === 'circuit_breaker' ||
+          isVkManualReviewMode(source.publishMode))
+      ) {
+        throw new ConflictException('Группа больше не публикует автоматически.');
+      }
+
       const now = new Date();
       const nextAutoPublishEnabled = parsed.data.autoPublishEnabled ?? source.autoPublishEnabled;
       const nextPublishMode = parsed.data.publishMode ?? source.publishMode;
@@ -244,12 +262,6 @@ export class VkSourceService {
           : undefined;
       const importEnabled = parsed.data.importEnabled ?? source.importEnabled;
       const shouldQueueSync = parsed.data.importEnabled === true && !source.importEnabled;
-      const normalizedSchedulePatch =
-        parsed.data.publishIntervalMinutes !== undefined &&
-        parsed.data.minPublishIntervalMinutes === undefined &&
-        source.minPublishIntervalMinutes > parsed.data.publishIntervalMinutes
-          ? { minPublishIntervalMinutes: parsed.data.publishIntervalMinutes }
-          : {};
       if (nextPublishMode === VK_BOT_REVIEW_MODE) {
         if (this.configService.get<boolean>('VK_BOT_REVIEW_ENABLED') === false) {
           throw new BadRequestException('Согласование в боте временно отключено.');
@@ -342,8 +354,7 @@ export class VkSourceService {
       await tx.vkParsingSource.update({
         where: { id: source.id },
         data: {
-          ...parsed.data,
-          ...normalizedSchedulePatch,
+          ...patch,
           ...(nextPublishMode === VK_BOT_REVIEW_MODE
             ? {
                 autoPublishEnabled: false,
@@ -400,7 +411,7 @@ export class VkSourceService {
             ...ownerScope,
             sourceId: source.id,
             before: this.pickAuditedSourceSettings(source),
-            after: { ...parsed.data, ...normalizedSchedulePatch },
+            after: patch,
           }),
         },
       });

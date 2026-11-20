@@ -33,7 +33,17 @@ const details = publicationDetailsSchema.parse({
   audienceMode: 'SNAPSHOT',
   mediaCount: 0,
   hasVideo: false,
-  schedule: null,
+  schedule: {
+    mode: 'recurrence',
+    status: 'ACTIVE',
+    timezone: 'Europe/Moscow',
+    frequency: 'daily',
+    times: ['12:00'],
+    startsAt: '2030-01-12T09:00:00Z',
+    nextOccurrenceAt: '2030-01-12T09:00:00Z',
+    revision: 1,
+    lastError: null,
+  },
   delivery: { ...empty, total: 2, ambiguous: staleCount ? 0 : 2 },
   actionableDelivery: empty,
   createdAt: '2026-11-01T10:00:00Z',
@@ -41,6 +51,17 @@ const details = publicationDetailsSchema.parse({
   content: { revision: 2, text: 'Новая версия', textFormat: 'plain', buttons: [], media: [] },
   targets,
   occurrences: [
+    ...[
+      ['later-occurrence', '2030-01-13T09:00:00Z'],
+      ['next-occurrence', '2030-01-12T09:00:00Z'],
+    ].map(([id, scheduledAt]) => ({
+      id,
+      scheduledAt,
+      status: 'SCHEDULED',
+      contentRevision: 2,
+      canRetry: false,
+      delivery: empty,
+    })),
     {
       id: 'old-occurrence',
       scheduledAt: '2026-11-08T16:00:00Z',

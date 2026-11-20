@@ -1177,7 +1177,7 @@ describe('VkParsingService', () => {
     );
   });
 
-  it('cascades global Manual to every active Publisher source and clears queued autopublish', async () => {
+  it('switches eligible Publisher sources to Manual without removing burst protection and clears queued autopublish', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-28T09:05:00.000Z'));
     const { service, prisma } = createFixture();
     prisma.vkParsingSettings.findUnique.mockResolvedValue({
@@ -1200,6 +1200,10 @@ describe('VkParsingService', () => {
         ownerProfile: VkParsingOwnerProfile.PUBLISHER,
         ownerBotId: 'publisher-bot',
         status: 'ACTIVE',
+        OR: [
+          { autoPublishPausedReason: null },
+          { autoPublishPausedReason: { not: 'circuit_breaker' } },
+        ],
       },
       data: {
         autoPublishEnabled: false,
@@ -1512,7 +1516,7 @@ describe('VkParsingService', () => {
     expect(readQueryRawSql(prisma)).toContain('FOR UPDATE OF chat');
   });
 
-  it('lowers a stale minimum pause when the requested publish interval becomes shorter', async () => {
+  it('preserves the saved minimum pause when the requested publish interval becomes shorter', async () => {
     const { service, prisma } = createFixture();
     prisma.vkParsingSource.findFirst.mockResolvedValue(
       createSource({ publishIntervalMinutes: 180, minPublishIntervalMinutes: 180 }),
@@ -1526,9 +1530,11 @@ describe('VkParsingService', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           publishIntervalMinutes: 30,
-          minPublishIntervalMinutes: 30,
         }),
       }),
+    );
+    expect(prisma.vkParsingSource.update.mock.calls[0]?.[0]?.data).not.toHaveProperty(
+      'minPublishIntervalMinutes',
     );
   });
 

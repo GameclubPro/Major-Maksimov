@@ -32,6 +32,7 @@ type VkParsingSettingsRow = Prisma.VkParsingSettingsGetPayload<Record<string, ne
 type SourcePostStats = {
   newPostCount: number;
   queuedPostCount: number;
+  cancellableAutoPostCount: number;
   publishedPostCount: number;
   skippedPostCount: number;
   failedPostCount: number;
@@ -339,6 +340,13 @@ export class VkParsingFeedService {
           where publish_queued_at is not null
             and status in (${VK_POST_STATUS_NEW}, ${VK_POST_STATUS_FAILED})
         )::int as "queuedPostCount",
+        count(*) filter (
+          where publish_reason = 'autopublish'
+            and publish_locked_at is null
+            and publish_attempt_count = 0
+            and status in (${VK_POST_STATUS_NEW}, ${VK_POST_STATUS_FAILED})
+            and (publish_queued_at is not null or publish_idempotency_key is not null or publish_scheduled_at is not null)
+        )::int as "cancellableAutoPostCount",
         count(*) filter (where status in (${VK_POST_STATUS_PUBLISHED}, ${VK_POST_STATUS_CHANGED_AFTER_PUBLISH}))::int as "publishedPostCount",
         count(*) filter (where status = ${VK_POST_STATUS_SKIPPED})::int as "skippedPostCount",
         count(*) filter (where status = ${VK_POST_STATUS_FAILED})::int as "failedPostCount"
@@ -354,6 +362,7 @@ export class VkParsingFeedService {
         {
           newPostCount: this.readNumber(row.newPostCount) ?? 0,
           queuedPostCount: this.readNumber(row.queuedPostCount) ?? 0,
+          cancellableAutoPostCount: this.readNumber(row.cancellableAutoPostCount) ?? 0,
           publishedPostCount: this.readNumber(row.publishedPostCount) ?? 0,
           skippedPostCount: this.readNumber(row.skippedPostCount) ?? 0,
           failedPostCount: this.readNumber(row.failedPostCount) ?? 0,
@@ -430,6 +439,12 @@ export class VkParsingFeedService {
         ? post.lastAvailabilityCheckedAt.toISOString()
         : null,
       unavailableAt: post.unavailableAt ? post.unavailableAt.toISOString() : null,
+      queueKind:
+        post.publishReason === 'autopublish'
+          ? 'auto'
+          : post.publishReason === 'manual-retry' || post.publishReason === 'manual-schedule'
+            ? 'manual'
+            : null,
       publishQueuedAt: post.publishQueuedAt ? post.publishQueuedAt.toISOString() : null,
       publishScheduledAt: post.publishScheduledAt ? post.publishScheduledAt.toISOString() : null,
       publishCancelledAt: post.publishCancelledAt ? post.publishCancelledAt.toISOString() : null,
@@ -513,6 +528,7 @@ export class VkParsingFeedService {
         : null,
       newPostCount: stats?.newPostCount ?? 0,
       queuedPostCount: stats?.queuedPostCount ?? 0,
+      cancellableAutoPostCount: stats?.cancellableAutoPostCount ?? 0,
       publishedPostCount: stats?.publishedPostCount ?? 0,
       skippedPostCount: stats?.skippedPostCount ?? 0,
       failedPostCount: stats?.failedPostCount ?? 0,

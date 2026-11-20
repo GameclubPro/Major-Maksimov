@@ -49,10 +49,11 @@ export function usePublicationCloudDraft(options: {
           options.api,
           id,
         ),
-      persist: (draft) =>
-        latest.current.persistLocal
-          ? savePublicationDraft(draft, options.userId)
-          : Promise.resolve(),
+      persist: async (draft) => {
+        if (latest.current.persistLocal) {
+          await savePublicationDraft(draft, options.userId).catch(() => undefined);
+        }
+      },
       changed: (draft) => latest.current.setDraft(draft),
       stateChanged: setState,
       canSave: () => latest.current.enabled,

@@ -232,6 +232,7 @@ function extractSqlValues(query: unknown): readonly unknown[] {
 function createPublicationUpdateTransaction() {
   return {
     $executeRaw: jest.fn().mockResolvedValue(1),
+    $queryRaw: jest.fn().mockResolvedValue([]),
     publication: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       update: jest.fn().mockResolvedValue({}),
@@ -247,6 +248,7 @@ function createPublicationUpdateTransaction() {
     },
     publicationOccurrence: {
       findMany: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       createMany: jest.fn(),
     },
@@ -1128,6 +1130,7 @@ describe('PublicationService', () => {
       });
       const tx = {
         $executeRaw: jest.fn().mockResolvedValue(1),
+        $queryRaw: jest.fn().mockResolvedValue([]),
         publication: {
           create: jest.fn().mockResolvedValue({ id: 'publication-300-slots' }),
           update: jest.fn().mockResolvedValue({}),
@@ -4199,6 +4202,7 @@ describe('PublicationService', () => {
         _count: { select: { legacyBroadcasts: true } },
         dispatchFirstBlockedAt: true,
         dispatchBlockedAt: true,
+        dispatchBlockerCode: true,
       },
     });
   });

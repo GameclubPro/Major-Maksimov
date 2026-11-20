@@ -221,6 +221,58 @@ describe('VkSourceService autopublish cleanup', () => {
     expectCleanupQuery(prisma.vkParsingPost.updateMany.mock.calls[0]?.[0], ['source-1']);
   });
 
+  it('does not change the protected minimum when changing the publication interval', async () => {
+    const { prisma, service } = createFixture();
+    prisma.vkParsingSource.findFirst.mockResolvedValue(
+      createSource({
+        autoPublishEnabled: true,
+        autoPublishPausedAt: null,
+        minPublishIntervalMinutes: 30,
+      }),
+    );
+    await service.updateSource(
+      'channel-1',
+      'source-1',
+      { userId: 'admin-1' },
+      {
+        publishIntervalMinutes: 20,
+        ifAutomatic: true,
+      },
+    );
+    const data = prisma.vkParsingSource.update.mock.calls[0]?.[0].data;
+    expect(data?.publishIntervalMinutes).toBe(20);
+    expect(data).not.toHaveProperty('minPublishIntervalMinutes');
+    expect(data).not.toHaveProperty('ifAutomatic');
+  });
+
+  it.each([
+    { autoPublishEnabled: false },
+    { autoPublishPausedAt: new Date(), autoPublishPausedReason: 'circuit_breaker' },
+    { importEnabled: false },
+    { publishMode: 'REVIEW' },
+  ])('rejects stale bulk scope before modifying a group (%j)', async (change) => {
+    const { prisma, service } = createFixture();
+    prisma.vkParsingSource.findFirst.mockResolvedValue(
+      createSource({
+        autoPublishEnabled: true,
+        autoPublishPausedAt: null,
+        ...change,
+      }),
+    );
+    await expect(
+      service.updateSource(
+        'channel-1',
+        'source-1',
+        { userId: 'admin-1' },
+        {
+          dailyLimit: 4,
+          ifAutomatic: true,
+        },
+      ),
+    ).rejects.toThrow('Группа больше не публикует автоматически.');
+    expect(prisma.vkParsingSource.update).not.toHaveBeenCalled();
+  });
+
   it('requires an explicit recipient before entering bot review', async () => {
     const { prisma, service } = createFixture();
     await expect(

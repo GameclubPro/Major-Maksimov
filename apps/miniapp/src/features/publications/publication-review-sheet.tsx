@@ -1,16 +1,15 @@
 import { PublicationRemoteVideo, type PublicationVideoRead } from './publication-remote-video';
 import { publicationAlbum } from './publication-album';
 import { PublicationVideoPlayer } from './publication-video-preview';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
 import { ActionConfirmSheet } from '../../components/ui/action-confirm-sheet';
-import { trimBroadcastLinkButtons } from '../../lib/broadcast-link-buttons';
 import {
-  buildPublicationSystemButtons,
   getPublicationTargetKey,
   getPublicationTargetTitle,
   type PublicationDraft,
 } from './publication-model';
+import { buildPublicationReviewButtonRows } from './publication-review-buttons';
 import type { PublisherPostImportAssetPreview } from './use-publisher-post-import-asset-previews';
 import './publication-review-sheet.css';
 
@@ -20,6 +19,7 @@ export function PublicationReviewSheet({
   previews,
   videoRead,
   facts,
+  timingDetails,
   confirmLabel,
   busy,
   onClose,
@@ -30,6 +30,7 @@ export function PublicationReviewSheet({
   videoRead?: PublicationVideoRead;
   previews: readonly PublisherPostImportAssetPreview[];
   facts: string[];
+  timingDetails?: ReactNode;
   confirmLabel: string;
   busy: boolean;
   onClose: () => void;
@@ -39,8 +40,7 @@ export function PublicationReviewSheet({
   const target =
     draft.targets.find((item) => getPublicationTargetKey(item) === targetKey) ?? draft.targets[0];
   const signature = target?.entityType === 'channel' ? target.publisherChannelPostSignature : null;
-  const systemButtons = buildPublicationSystemButtons(target ? [target] : []);
-  const customButtons = draft.buttonEnabled ? trimBroadcastLinkButtons(draft.buttons) : [];
+  const buttonRows = buildPublicationReviewButtonRows(target, draft);
   const media = publicationAlbum(draft).map((item) => ({
     id: item.key,
     assetId: item.assetId,
@@ -126,26 +126,30 @@ export function PublicationReviewSheet({
           {signature?.enabled && signature.presentation === 'signature' ? (
             <p className="publication-preview__signature">{signature.text}</p>
           ) : null}
-          {systemButtons.length || customButtons.length ? (
+          {buttonRows.length ? (
             <div className="publication-preview__buttons" aria-label="Кнопки публикации">
-              {customButtons.map((button, index) => (
-                <span key={`custom-${index}`} title={button.url}>
-                  {button.text}
-                </span>
-              ))}
-              {systemButtons.map((button) => (
-                <span key={button.kind}>{button.text}</span>
+              {buttonRows.map((row, rowIndex) => (
+                <div key={rowIndex} className="publication-preview__button-row">
+                  {row.map((button, index) => (
+                    <span key={index} title={button.url}>
+                      {button.text}
+                    </span>
+                  ))}
+                </div>
               ))}
             </div>
           ) : null}
         </div>
       }
       previewMeta={
-        <ul className="publication-preview__facts">
-          {facts.map((fact) => (
-            <li key={fact}>{fact}</li>
-          ))}
-        </ul>
+        <>
+          <ul className="publication-preview__facts">
+            {facts.map((fact) => (
+              <li key={fact}>{fact}</li>
+            ))}
+          </ul>
+          {timingDetails}
+        </>
       }
     />
   );

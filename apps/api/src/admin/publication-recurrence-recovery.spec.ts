@@ -37,6 +37,7 @@ function createHarness() {
   const claim = jest.fn().mockResolvedValue({ count: 1 });
   const latest = jest.fn().mockResolvedValue(null);
   const tx = {
+    $executeRaw: jest.fn().mockResolvedValue(1),
     publicationSchedule: {
       updateMany: jest.fn((args) =>
         args.data.status === PublicationScheduleStatus.ERROR || args.data.lastError
@@ -63,7 +64,6 @@ function createHarness() {
     },
     logger: { warn: jest.fn() },
     resolveOccurrenceTargets: jest.fn().mockResolvedValue([{ chatId: 'chat', entityType: 'chat' }]),
-    lockPublicationCalendar: jest.fn().mockResolvedValue(undefined),
     reservePublicationCalendar: jest.fn().mockResolvedValue(undefined),
   });
   return {
@@ -73,6 +73,7 @@ function createHarness() {
     publicationUpdate,
     occurrenceCreate,
     latest,
+    executeRaw: tx.$executeRaw,
     transaction,
     claim,
   };
@@ -272,7 +273,7 @@ describe('Publication recurrence preparation recovery', () => {
       }),
     );
     expect(harness.publicationUpdate).toHaveBeenCalledTimes(1);
-    expect(harness.service.lockPublicationCalendar).toHaveBeenCalledTimes(2);
+    expect(harness.executeRaw).toHaveBeenCalledTimes(2);
     expect(harness.publicationUpdate).toHaveBeenCalledWith({
       where: { id: 'publication', lifecycle: PublicationLifecycle.ACTIVE, version: 1 },
       data: { lifecycle: PublicationLifecycle.ERROR },

@@ -48,8 +48,14 @@ test('publishing page owns media preparation and blocks review, test, publish, a
     contentEditorSource,
     /<BroadcastContentComposer[\s\S]*?disabled=\{operationBusy\}[\s\S]*?onImagePreparationChange=\{onImagePreparationChange\}/u,
   );
-  assert.match(sessionSource, /function requestCloseEditor[\s\S]*?if \(isBusy\) \{/u);
-  assert.match(pageSource, /function submitPublication[\s\S]*?if \(mediaPreparing\) \{/u);
+  assert.match(
+    sessionSource,
+    /function requestCloseEditor[\s\S]*?if \(isBusy \|\| editorClosePending\) return;/u,
+  );
+  assert.match(
+    pageSource,
+    /function submitPublication[\s\S]*?if \(mediaPreparing \|\| saveAbort.current \|\| saveMutation.isPending\) \{/u,
+  );
   assert.match(pageSource, /function handlePrimaryAction[\s\S]*?if \(mediaPreparing\) \{/u);
   assert.match(
     pageSource,

@@ -156,6 +156,11 @@
     gap: 2px;
     text-align: left;
   }
+  .publication-occurrences .publication-occurrences__actions > .publication-occurrences__skip {
+    min-height: 44px;
+    min-width: 44px;
+    padding-inline: 10px;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .publication-details-dispatch-notice > button.is-refreshing svg {

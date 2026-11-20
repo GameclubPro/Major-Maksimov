@@ -1515,7 +1515,8 @@ export function PublisherAutoRepliesPage({ api, userId }: { api: ApiTransport; u
   const rules = rulesQuery.data?.items ?? [];
   const loading = entityQuery.isLoading || rulesQuery.isLoading;
   const refreshing = entityQuery.isFetching || rulesQuery.isFetching;
-  const rowBusyId = toggleMutation.variables?.rule.id ?? deleteMutation.variables?.id ?? null;
+  const togglingRuleId = toggleMutation.isPending ? toggleMutation.variables.rule.id : null;
+  const deletingRuleId = deleteMutation.isPending ? deleteMutation.variables.id : null;
 
   return (
     <section className="publisher-auto-replies-page" aria-busy={refreshing || undefined}>
@@ -1638,7 +1639,7 @@ export function PublisherAutoRepliesPage({ api, userId }: { api: ApiTransport; u
               api={api}
               chatId={chatId}
               rule={rule}
-              busy={rowBusyId === rule.id}
+              busy={togglingRuleId === rule.id || deletingRuleId === rule.id}
               conflict={conflictRuleId === rule.id}
               onToggle={(enabled) => toggleMutation.mutate({ rule, enabled })}
               onEdit={() => setEditorTarget({ kind: 'edit', rule })}

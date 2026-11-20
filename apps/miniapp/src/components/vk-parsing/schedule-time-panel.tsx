@@ -5,6 +5,12 @@ import type {
   UpdateVkParsingSettingsRequest,
   VkParsingSettings,
 } from '@maxim/contracts/vk-parsing';
+import {
+  hydrateMirroredItem,
+  readLocalMirrorItem,
+  saveMirroredItem,
+} from '../../lib/native-storage';
+import { timeMinutes } from './autopost-status';
 import { TimeField } from '../ui/time-field';
 import { formatTimezoneLabel } from '../../lib/timezone-label';
 import { VkInfoButton } from './info-button';
@@ -134,12 +140,42 @@ export function VkTimeRange({
   );
 }
 
+type ScheduleWindow = Pick<
+  VkParsingSettings,
+  'workHoursStart' | 'workHoursEnd' | 'quietHoursStart' | 'quietHoursEnd'
+>;
+
+function readPreviousScheduleWindow(value: string | null): ScheduleWindow | null {
+  if (!value) return null;
+  try {
+    const { workHoursStart, workHoursEnd, quietHoursStart, quietHoursEnd } = JSON.parse(value);
+    if (
+      typeof workHoursStart !== 'string' ||
+      timeMinutes(workHoursStart) === null ||
+      typeof workHoursEnd !== 'string' ||
+      timeMinutes(workHoursEnd) === null ||
+      (quietHoursStart !== null &&
+        (typeof quietHoursStart !== 'string' || timeMinutes(quietHoursStart) === null)) ||
+      (quietHoursEnd !== null &&
+        (typeof quietHoursEnd !== 'string' || timeMinutes(quietHoursEnd) === null)) ||
+      (quietHoursStart === null) !== (quietHoursEnd === null) ||
+      (workHoursStart === workHoursEnd && quietHoursStart === null)
+    )
+      return null;
+    return { workHoursStart, workHoursEnd, quietHoursStart, quietHoursEnd };
+  } catch {
+    return null;
+  }
+}
+
 export function ScheduleTimePanel({
   settings,
+  storageKey,
   disabled,
   onUpdate,
 }: {
   settings: VkParsingSettings;
+  storageKey: string;
   disabled: boolean;
   onUpdate: (payload: UpdateVkParsingSettingsRequest) => Promise<boolean>;
 }) {
@@ -147,27 +183,39 @@ export function ScheduleTimePanel({
     settings.workHoursStart === settings.workHoursEnd &&
     !settings.quietHoursStart &&
     !settings.quietHoursEnd;
-  const [lastWindow, setLastWindow] = useState({
-    workHoursStart: allDay ? '09:00' : settings.workHoursStart,
-    workHoursEnd: allDay ? '22:00' : settings.workHoursEnd,
-    quietHoursStart: settings.quietHoursStart,
-    quietHoursEnd: settings.quietHoursEnd,
-  });
+  const { workHoursStart, workHoursEnd, quietHoursStart, quietHoursEnd } = settings;
+  const [storedWindow, setStoredWindow] = useState(() =>
+    readPreviousScheduleWindow(readLocalMirrorItem(storageKey)),
+  );
   useEffect(() => {
-    if (!allDay)
-      setLastWindow({
-        workHoursStart: settings.workHoursStart,
-        workHoursEnd: settings.workHoursEnd,
-        quietHoursStart: settings.quietHoursStart,
-        quietHoursEnd: settings.quietHoursEnd,
-      });
-  }, [
-    allDay,
-    settings.workHoursStart,
-    settings.workHoursEnd,
-    settings.quietHoursStart,
-    settings.quietHoursEnd,
-  ]);
+    if (!allDay) return;
+    let alive = true;
+    void hydrateMirroredItem(storageKey).then((value) => {
+      if (alive) setStoredWindow(readPreviousScheduleWindow(value));
+    });
+    return () => {
+      alive = false;
+    };
+  }, [allDay, storageKey]);
+  async function toggleAllDay(checked: boolean) {
+    if (!checked) {
+      return onUpdate(
+        storedWindow ?? {
+          workHoursStart: '09:00',
+          workHoursEnd: '22:00',
+          quietHoursStart: null,
+          quietHoursEnd: null,
+        },
+      );
+    }
+    const previous = { workHoursStart, workHoursEnd, quietHoursStart, quietHoursEnd };
+    const saved = await onUpdate(vkAllDayScheduleUpdate());
+    if (saved) {
+      saveMirroredItem(storageKey, JSON.stringify(previous));
+      setStoredWindow(previous);
+    }
+    return saved;
+  }
   return (
     <div className="vk-schedule-time-panel">
       <div className="vk-section-heading">
@@ -187,7 +235,7 @@ export function ScheduleTimePanel({
         label="Круглосуточно"
         checked={allDay}
         disabled={disabled}
-        onChange={(checked) => onUpdate(checked ? vkAllDayScheduleUpdate() : lastWindow)}
+        onChange={toggleAllDay}
       />
       <label className="vk-timezone-field">
         <span>Часовой пояс</span>

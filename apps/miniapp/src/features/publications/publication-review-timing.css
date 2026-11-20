@@ -1,0 +1,33 @@
+@layer pages {
+  .publication-review-timing {
+    display: grid;
+    gap: 4px;
+    padding-block: 10px;
+    border-top: 1px solid var(--color-border);
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .publication-review-timing > time,
+  .publication-review-timing > strong {
+    color: var(--publication-ui-ink, var(--color-ink));
+    font-weight: 750;
+  }
+
+  .publication-review-timing > span {
+    color: var(--publication-ui-ink-muted, var(--color-ink-muted));
+  }
+
+  .publication-review-timing summary {
+    width: fit-content;
+    min-height: 44px;
+    align-content: center;
+    color: var(--color-accent);
+    cursor: pointer;
+  }
+
+  .publication-review-timing ol {
+    margin-block: 0;
+    padding-inline-start: 24px;
+  }
+}

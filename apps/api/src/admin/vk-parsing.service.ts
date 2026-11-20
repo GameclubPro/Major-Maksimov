@@ -299,6 +299,10 @@ export class VkParsingService {
             chatId,
             ...ownerScope,
             status: 'ACTIVE',
+            OR: [
+              { autoPublishPausedReason: null },
+              { autoPublishPausedReason: { not: 'circuit_breaker' } },
+            ],
           },
           data: {
             autoPublishEnabled: false,

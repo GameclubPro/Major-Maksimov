@@ -6,6 +6,8 @@ import {
 } from './vk-parsing-common.js';
 export {
   buildVkParsingSourceLink,
+  resolveVkParsingSourceSpacingMinutes,
+  VK_PARSING_MIN_SOURCE_SPACING_MINUTES,
   normalizeVkParsingSourceLink,
   VK_PARSING_MAX_DELETE_AFTER_MINUTES,
   VK_PARSING_MAX_SOURCE_LINK_URL_LENGTH,
@@ -183,6 +185,7 @@ export const vkParsingSourceSchema = z.object({
   lastAutoPublishedAt: z.string().datetime().nullable().default(null),
   newPostCount: z.number().int().min(0).default(0),
   queuedPostCount: z.number().int().min(0).default(0),
+  cancellableAutoPostCount: z.number().int().min(0).optional(),
   publishedPostCount: z.number().int().min(0).default(0),
   skippedPostCount: z.number().int().min(0).default(0),
   failedPostCount: z.number().int().min(0).default(0),
@@ -252,6 +255,7 @@ export const vkParsingPostSchema = z.object({
   missingSeenCount: z.number().int().min(0).default(0),
   lastAvailabilityCheckedAt: z.string().datetime().nullable().default(null),
   unavailableAt: z.string().datetime().nullable().default(null),
+  queueKind: z.enum(['auto', 'manual']).nullable().optional(),
   publishQueuedAt: z.string().datetime().nullable().default(null),
   publishScheduledAt: z.string().datetime().nullable().default(null),
   publishCancelledAt: z.string().datetime().nullable().default(null),
@@ -417,6 +421,7 @@ export type UpdateVkParsingSettingsRequest = z.infer<typeof updateVkParsingSetti
 
 export const updateVkParsingSourceRequestSchema = z
   .object({
+    ifAutomatic: z.literal(true).optional(),
     importEnabled: z.boolean().optional(),
     autoPublishEnabled: z.boolean().optional(),
     publishIntervalMinutes: z.number().int().min(5).max(10080).optional(),
@@ -427,9 +432,17 @@ export const updateVkParsingSourceRequestSchema = z
     quietHoursStart: vkParsingTimeOfDaySchema.nullable().optional(),
     quietHoursEnd: vkParsingTimeOfDaySchema.nullable().optional(),
   })
-  .refine((value) => Object.keys(value).length > 0, {
+  .refine((value) => Object.keys(value).some((key) => key !== 'ifAutomatic'), {
     message: 'Передайте хотя бы одну настройку.',
-  });
+  })
+  .refine(
+    (value) =>
+      !value.ifAutomatic ||
+      Object.keys(value).every(
+        (key) => key === 'ifAutomatic' || key === 'publishIntervalMinutes' || key === 'dailyLimit',
+      ),
+    { message: 'Для групп с авто можно изменить только частоту и дневной лимит.' },
+  );
 export type UpdateVkParsingSourceRequest = z.infer<typeof updateVkParsingSourceRequestSchema>;
 
 export const bulkUpdateVkParsingSourcesRequestSchema = z.object({

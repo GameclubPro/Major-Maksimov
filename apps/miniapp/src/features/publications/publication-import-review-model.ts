@@ -23,6 +23,9 @@ const reasons = {
 
 export function describeImportWarning(warning: PublisherPostImportWarning) {
   const prefix = 'Сообщение ' + warning.messageIndex;
+  if (warning.kind === 'text' && warning.reason === 'too_large') {
+    return prefix + ' · Текст слишком длинный';
+  }
   return (
     prefix +
     ' · ' +

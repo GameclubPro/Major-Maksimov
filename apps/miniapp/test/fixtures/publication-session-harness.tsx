@@ -93,6 +93,8 @@ function Harness() {
           text: session.draft.text,
           missing: session.missingImageCount,
           confirm: session.pendingEditorClose,
+          closeSaveFailed: session.editorCloseSaveFailed,
+          deviceCopyIsCurrent: session.deviceCopyIsCurrent,
           opening: session.openPublicationMutation.isPending,
           refreshing: session.refreshEditedPublicationMutation.isPending,
           closing: session.editorClosePending,

@@ -47,6 +47,31 @@ try {
           ? route.continue()
           : route.abort(),
       );
+      // This preview transport runs inside the browser. Record its actual mutations so
+      // the custom field test can detect a write even if the visible value stays the same.
+      if (name === 'android-dark') {
+        await context.route('**/src/lib/api/preview-transport-runtime.ts*', async (route) => {
+          const response = await route.fetch();
+          const source = await response.text();
+          const marker = 'for (const handler of handlers)';
+          assert.ok(source.includes(marker));
+          await route.fulfill({
+            response,
+            body: source.replace(
+              marker,
+              `
+              if (context.method === 'PATCH' && context.url.pathname.includes('/vk-parsing/sources/')) {
+                const sourceId = context.url.pathname.split('/').at(-1);
+                const body = JSON.parse(context.init.body);
+                (window.__vkSourceWrites ??= []).push({ sourceId, body });
+                if (sourceId === window.__vkFailSource) throw new Error('Сбой сохранения группы');
+              }
+              ${marker}
+            `,
+            ),
+          });
+        });
+      }
       await installMaxBridgeShimInitScript(context, {}, { colorScheme });
       await installNativeVisualModeInitScript(context);
       const page = await context.newPage();
@@ -153,6 +178,11 @@ try {
       await filter.selectOption('');
 
       await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+      const appearance = page.locator('.vk-automation-appearance > summary');
+      const hero = page.locator('.vk-autopost-panel__heading');
+      assert.ok((await hero.boundingBox()).y < (await appearance.boundingBox()).y);
+      await page.screenshot({ path: path.join(screenshots, `${name}-automation.png`) });
+      await appearance.click();
       const options = page.getByRole('region', { name: 'Оформление и удаление постов' });
       await options.getByRole('switch', { name: 'Первоисточник', exact: true }).check();
       await options.getByRole('button', { name: 'Своя ссылка', exact: true }).click();
@@ -197,11 +227,77 @@ try {
       );
       await page.getByRole('tab', { name: 'Посты', exact: true }).click();
       await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+      await appearance.click();
       assert.equal(
         await sourceInput.inputValue(),
         'https://example.com/original?article=12345678901234567890',
       );
       assert.equal(await customMinutes.inputValue(), '90');
+
+      await appearance.click();
+      const advanced = page.locator('.vk-autopost-advanced > summary');
+      await advanced.click();
+      const intervalField = page.getByRole('spinbutton', { name: 'Интервал публикаций в минутах' });
+      const tempo = page.getByRole('group', { name: 'Темп публикации' });
+      if (name === 'android-dark') {
+        await page.evaluate(() => {
+          window.__vkSourceWrites = [];
+        });
+      }
+      await tempo.getByRole('button', { name: 'Другой', exact: true }).click();
+      assert.equal(await intervalField.inputValue(), '5');
+      await intervalField.fill('90');
+      await page.getByRole('button', { name: 'Отмена', exact: true }).click();
+      await tempo.getByRole('button', { name: 'Другой', exact: true }).click();
+      assert.equal(await intervalField.inputValue(), '5');
+      await intervalField.fill('25');
+      await page
+        .locator('.vk-custom-interval')
+        .getByRole('button', { name: 'Сохранить', exact: true })
+        .click();
+      await intervalField.waitFor({ state: 'hidden' });
+      await page.getByText('Минимальный перерыв · 25 мин', { exact: true }).waitFor();
+      if (name === 'android-dark') {
+        assert.deepEqual(await page.evaluate(() => window.__vkSourceWrites), [
+          {
+            sourceId: 'preview-vk-source-yuzhnoe',
+            body: { ifAutomatic: true, publishIntervalMinutes: 25 },
+          },
+        ]);
+        // Turn on the second group so two distinct destinations are involved in a save.
+        await page.getByRole('tab', { name: /Группы/u }).click();
+        await page
+          .locator('.vk-source-card')
+          .filter({ hasText: 'Афиша Юга' })
+          .getByRole('button', { name: /Настройки группы/u })
+          .click();
+        await page
+          .getByRole('combobox', { name: 'Способ доставки постов группы' })
+          .selectOption('QUEUE');
+        const secondGroup = page.getByRole('dialog', { name: 'Афиша Юга' });
+        await secondGroup.getByRole('spinbutton', { name: /Интервал публикаций для/ }).waitFor();
+        await secondGroup.getByRole('button', { name: 'Закрыть панель', exact: true }).click();
+        await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+        await advanced.click();
+        await page.evaluate(() => {
+          window.__vkSourceWrites = [];
+          window.__vkFailSource = 'preview-vk-source-afisha';
+        });
+        await tempo.getByRole('button', { name: '1 час', exact: true }).click();
+        const failed = page.locator('.vk-bulk-failure');
+        await failed.getByText('Сохранено · 1 из 2', { exact: true }).waitFor();
+        assert.match(await failed.innerText(), /Афиша Юга/u);
+        await page.evaluate(() => {
+          window.__vkFailSource = null;
+        });
+        await failed.getByRole('button', { name: 'Повторить для оставшихся' }).click();
+        await failed.waitFor({ state: 'hidden' });
+        assert.deepEqual(
+          (await page.evaluate(() => window.__vkSourceWrites)).map(({ sourceId }) => sourceId),
+          ['preview-vk-source-yuzhnoe', 'preview-vk-source-afisha', 'preview-vk-source-afisha'],
+        );
+      }
+      await advanced.click();
 
       await page.getByRole('radio', { name: 'Пауза', exact: true }).click();
       await page.waitForFunction(
@@ -233,8 +329,17 @@ try {
       await allDay.check();
       await page.getByText('Нет перерыва', { exact: true }).waitFor();
       assert.equal(await allDay.isChecked(), true);
+      await page.getByRole('tab', { name: 'Посты', exact: true }).click();
+      await page.getByRole('tab', { name: 'Автоматизация', exact: true }).click();
+      await advanced.click();
+      await page.getByRole('button', { name: 'Время', exact: true }).click();
       await allDay.uncheck();
       await page.getByRole('button', { name: /^Время публикаций: с/u }).waitFor();
+      const quietStart = page.getByRole('button', {
+        name: 'Перерыв в публикациях: с: 23:00',
+        exact: true,
+      });
+      await quietStart.waitFor();
       assert.equal(await page.locator('.vk-autopost-panel__schedule').isVisible(), false);
       assert.equal(
         await page

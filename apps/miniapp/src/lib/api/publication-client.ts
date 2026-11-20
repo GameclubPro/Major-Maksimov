@@ -141,6 +141,19 @@ export async function getPublication(
   );
 }
 
+export async function skipPublicationOccurrence(
+  api: ApiTransport,
+  publicationId: string,
+  occurrenceId: string,
+  request: PublicationActionRequest,
+): Promise<PublicationDetails> {
+  const response = await api.request(
+    `/publications/${encodeURIComponent(publicationId)}/occurrences/${encodeURIComponent(occurrenceId)}/skip`,
+    { method: 'POST', body: JSON.stringify(publicationActionRequestSchema.parse(request)) },
+  );
+  return publicationDetailsSchema.parse(response);
+}
+
 export async function refreshPublicationTargets(
   api: ApiTransport,
   publicationId: string,

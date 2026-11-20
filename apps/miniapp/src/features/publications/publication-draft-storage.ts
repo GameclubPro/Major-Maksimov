@@ -7,7 +7,6 @@ import {
   publicationLatePolicySchema,
 } from '@maxim/contracts/publication';
 import { publisherEntityReadinessSchema } from '@maxim/contracts/publisher';
-import { formatLocalDateTimeInputValue } from '../../lib/broadcast-schedule';
 import { publicationPostPublishSchema } from '@maxim/contracts/publication';
 import {
   createEmptyPublicationDraft,
@@ -16,6 +15,11 @@ import {
   PublicationTarget,
   PublicationTimingMode,
 } from './publication-model';
+import {
+  publicationDraftStoredTiming,
+  splitLegacyPublicationTiming,
+} from './publication-cloud-draft-model';
+import { formatPublicationScheduleField } from './publication-time-presentation';
 
 const STORAGE_VERSION = 3;
 const LEGACY_STORAGE_VERSIONS = new Set([1, 2]);
@@ -49,7 +53,9 @@ type DraftMediaCacheEntry = {
 };
 
 const draftMediaCache = new Map<string, DraftMediaCacheEntry>();
-const draftStorageQueues = new Map<string, Promise<void>>();
+const draftStorageQueues = new Map<string, Promise<unknown>>();
+
+export type PublicationDraftDeviceCopy = 'complete' | 'partial' | 'unavailable';
 
 export type PublicationDraftLoadState = {
   draft: PublicationDraft | null;
@@ -267,14 +273,23 @@ export function parsePublicationDraftEnvelope(value: unknown): PublicationDraft 
   const scheduledSlots = Array.isArray(draft.scheduledSlots)
     ? draft.scheduledSlots.filter((item): item is string => typeof item === 'string')
     : [];
+  const calendarSlots = Array.isArray(draft.calendarSlots)
+    ? draft.calendarSlots.filter((item): item is string => typeof item === 'string')
+    : undefined;
   const shouldRestoreLegacySlots =
     hasExplicitTimingFields ||
     timingMode === 'once' ||
     (timingMode === 'schedule' && scheduleKind === 'slots');
   const shouldRestoreLegacyRecurrence =
     hasExplicitTimingFields || (timingMode === 'schedule' && scheduleKind === 'recurrence');
-  const storedOnceValue = scheduledSlots[0] ? formatLocalDateTimeInputValue(scheduledSlots[0]) : '';
+  const scheduleTimezone = readString(draft.scheduleTimezone) || 'Europe/Moscow';
+  const storedOnceValue =
+    !hasExplicitTimingFields && timingMode === 'once'
+      ? formatPublicationScheduleField(scheduledSlots[0] ?? null, scheduleTimezone)
+      : '';
   const [storedOnceDate = '', storedOnceTime = ''] = storedOnceValue.split('T');
+  const onceDate = hasExplicitTimingFields ? readString(draft.onceDate) : storedOnceDate;
+  const onceTime = hasExplicitTimingFields ? readString(draft.onceTime) : storedOnceTime;
   return {
     title: readString(draft.title),
     latePolicy: publicationLatePolicySchema.safeParse(draft.latePolicy).data,
@@ -290,16 +305,18 @@ export function parsePublicationDraftEnvelope(value: unknown): PublicationDraft 
     targets: readTargets(draft.targets),
     timingMode,
     scheduleKind,
-    scheduledSlots: shouldRestoreLegacySlots ? scheduledSlots : [],
-    onceDate:
-      hasExplicitTimingFields || timingMode === 'once'
-        ? readString(draft.onceDate) || storedOnceDate
-        : '',
-    onceTime:
-      hasExplicitTimingFields || timingMode === 'once'
-        ? readString(draft.onceTime) || storedOnceTime
-        : '',
-    scheduleTimezone: readString(draft.scheduleTimezone) || 'Europe/Moscow',
+    ...splitLegacyPublicationTiming({
+      onceAt: draft.onceAt === null || typeof draft.onceAt === 'string' ? draft.onceAt : undefined,
+      onceDate,
+      onceTime,
+      scheduledSlots: shouldRestoreLegacySlots ? scheduledSlots : [],
+      calendarSlots,
+      scheduleTimezone,
+      timingMode,
+    }),
+    onceDate,
+    onceTime,
+    scheduleTimezone,
     recurrence: shouldRestoreLegacyRecurrence
       ? readRecurrence(draft.recurrence)
       : safeTimingDefaults,
@@ -338,12 +355,13 @@ export function parsePublicationDraftEnvelope(value: unknown): PublicationDraft 
 }
 
 function openDraftDb(): Promise<IDBDatabase | null> {
-  if (typeof window === 'undefined' || !window.indexedDB) {
-    return Promise.resolve(null);
-  }
   return new Promise((resolve) => {
     let request: IDBOpenDBRequest;
     try {
+      if (typeof window === 'undefined' || !window.indexedDB) {
+        resolve(null);
+        return;
+      }
       request = window.indexedDB.open(DB_NAME, DB_VERSION);
     } catch {
       resolve(null);
@@ -577,10 +595,10 @@ async function writeIndexedState(
   }
 }
 
-function enqueueDraftStorageMutation(
+function enqueueDraftStorageMutation<T>(
   storageKey: string,
-  mutation: () => Promise<void>,
-): Promise<void> {
+  mutation: () => Promise<T>,
+): Promise<T> {
   const previous = draftStorageQueues.get(storageKey) ?? Promise.resolve();
   const queued = previous.then(mutation, mutation);
   draftStorageQueues.set(storageKey, queued);
@@ -602,11 +620,12 @@ function readLocalEnvelope(storageKey: string): unknown {
   }
 }
 
-function writeLocalEnvelope(storageKey: string, envelope: DraftEnvelope): void {
+function writeLocalEnvelope(storageKey: string, envelope: DraftEnvelope): boolean {
   try {
     window.localStorage.setItem(storageKey, JSON.stringify(envelope));
+    return true;
   } catch {
-    // IndexedDB remains the primary storage in quota-limited WebViews.
+    return false;
   }
 }
 
@@ -669,7 +688,7 @@ export async function savePublicationDraft(
   draft: PublicationDraft,
   userId: string,
   options: { missingImageCount?: number; nowMs?: number } = {},
-): Promise<void> {
+): Promise<PublicationDraftDeviceCopy> {
   const storageKey = buildPublicationDraftStorageKey(requirePublicationDraftUserId(userId));
   const persisted = preparePublicationDraftForIndexedPersistence(draft);
   const requestedMissingImageCount =
@@ -685,13 +704,12 @@ export async function savePublicationDraft(
   const envelope: DraftEnvelope = {
     version: STORAGE_VERSION,
     savedAt: new Date(options.nowMs ?? Date.now()).toISOString(),
-    draft: persisted.draft,
+    draft: { ...persisted.draft, ...publicationDraftStoredTiming(draft) },
     hasImages,
     imageCount: persisted.images.length + missingImageCount,
   };
-  writeLocalEnvelope(storageKey, envelope);
-
-  await enqueueDraftStorageMutation(storageKey, async () => {
+  const localWriteSucceeded = writeLocalEnvelope(storageKey, envelope);
+  return enqueueDraftStorageMutation(storageKey, async () => {
     const cachedMedia = draftMediaCache.get(storageKey);
     const mediaChanged =
       imagesNeedReselection || !cachedMedia?.stored || cachedMedia.images !== persisted.images;
@@ -706,6 +724,12 @@ export async function savePublicationDraft(
     if (!indexedWriteSucceeded) {
       draftMediaCache.delete(storageKey);
     }
+    if (!indexedWriteSucceeded && !localWriteSucceeded) return 'unavailable';
+    const needsVideo =
+      draft.mediaType === 'video' && Boolean(draft.mediaPayload || draft.mediaBase64);
+    return missingImageCount > 0 || needsVideo || (!indexedWriteSucceeded && hasImages)
+      ? 'partial'
+      : 'complete';
   });
 }
 

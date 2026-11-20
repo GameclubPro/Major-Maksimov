@@ -5,9 +5,15 @@ export function publicationDraftNeedsAttention(state: DraftSaveState): boolean {
   return ['error', 'conflict', 'unavailable'].includes(state.status);
 }
 
-export function publicationDraftSaveLabel(state: DraftSaveState, dirty: boolean): string {
+export function publicationDraftSaveLabel(
+  state: DraftSaveState,
+  dirty: boolean,
+  deviceCopyIsCurrent = false,
+): string {
   if (state.status === 'saving') return 'Сохраняется...';
-  if (publicationDraftNeedsAttention(state) || dirty) return 'Не сохранено';
+  if (publicationDraftNeedsAttention(state) || dirty) {
+    return deviceCopyIsCurrent ? 'На этом устройстве' : 'Не сохранено';
+  }
   return state.status === 'saved' ? 'Сохранено' : '';
 }
 

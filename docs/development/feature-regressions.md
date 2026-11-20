@@ -185,6 +185,22 @@ a preset must not enable sources or publish history. VK errors and malformed/par
 responses never prove that a source post disappeared. Keep feed polling bounded and
 diagnostics separate from the ordinary feed; do not return global aggregates to that path.
 
+The publication calendar includes recurring dates before they become dispatch rows. Confirming
+a replacement binds it to the occupied slots reviewed in the dialog. A materialized historical
+collision skips the affected occurrence. An editor can also skip a future occurrence before
+delivery preparation begins. Changing only the audience preserves the unused finite count
+and keeps skipped dates out of conflict checks for the new recipients. A skip counts toward
+even a legacy series limit. Upcoming releases appear in chronological order before history.
+Check these cases with the [PostgreSQL calendar suite](../../apps/api/src/admin/publication-calendar-projection-postgres.spec.ts).
+
+Switching between a single date, selected dates and recurring dates preserves the editor's
+working values. The publish request uses the active mode. Closing a draft without a saved
+server or device copy requires an explicit discard. The [calendar browser](../../apps/miniapp/test/publication-calendar-validation.browser.mjs)
+and [editor session browser](../../apps/miniapp/test/publication-session.browser.mjs) verify
+these boundaries. VK's custom interval field stays local until the editor applies it to the
+eligible sources. The [VK workspace browser](../../apps/miniapp/test/vk-workspace.browser.mjs)
+covers the field, mode changes and queue controls.
+
 Publik text preserves ordinary line breaks and the number of interior blank rows through
 native Enter, review, draft save and reopening. Native editors may leave the first line as
 a text node before `div`/`p` siblings; serialization must include the boundary before those

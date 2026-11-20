@@ -175,6 +175,8 @@ try {
             const queue = page.locator('.vk-queue-item').first();
             // Native date inputs expose different roles across browser engines.
             const input = queue.locator('.date-field input[type=date]');
+            assert.equal(await input.isVisible(), false);
+            await queue.locator('summary').click();
             await input.waitFor();
             const original = await input.inputValue();
             const name = await input.getAttribute('aria-label');

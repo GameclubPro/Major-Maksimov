@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPreviewApiTransport } from '../src/lib/api/preview-transport';
+import { ApiRequestError } from '../src/lib/api-request-error';
 import {
   buildPublicationContent,
   createPublicationDraftFromDetails,
@@ -358,9 +359,7 @@ test('preview legacy publications support bound cursors, filters, and history', 
 
 test('preview publications expose schedule conflicts and allow explicit replacement', async () => {
   const api = createPreviewApiTransport();
-  const existing = await getPublication(api, 'publication-neighborhood-digest');
-  const occupiedAt = existing.occurrences[0]?.scheduledAt;
-  assert.ok(occupiedAt);
+  const occupiedAt = '2034-11-15T15:30:00.000Z';
   const request = {
     requestId: 'conflict_request_001',
     title: 'Конфликт',
@@ -383,18 +382,40 @@ test('preview publications expose schedule conflicts and allow explicit replacem
     },
     intent: 'publish' as const,
   };
+  const existing = await createPublication(api, { ...request, requestId: 'conflict_existing_001' });
+
+  let confirmation: string | undefined;
+  await assert.rejects(createPublication(api, request), (error: unknown) => {
+    assert.ok(error instanceof ApiRequestError);
+    assert.equal(error.code, 'PUBLICATION_SCHEDULE_CONFLICT');
+    assert.deepEqual(error.payload?.conflicts, [
+      { chatId: 'preview-chat', scheduledAt: occupiedAt },
+    ]);
+    assert.equal(error.payload?.conflictCount, 1);
+    assert.equal(typeof error.payload?.conflictConfirmation, 'string');
+    confirmation = error.payload?.conflictConfirmation as string;
+    return true;
+  });
 
   await assert.rejects(
-    createPublication(api, request),
-    (error: unknown) =>
-      error instanceof Error &&
-      (error as Error & { code?: string }).code === 'PUBLICATION_SCHEDULE_CONFLICT',
+    createPublication(api, {
+      ...request,
+      requestId: 'conflict_bad_confirmation',
+      schedule: {
+        ...request.schedule,
+        replaceConflicts: true,
+        conflictConfirmation: '1'.repeat(64),
+      },
+    }),
+    { code: 'PUBLICATION_SCHEDULE_CONFLICT' },
   );
 
   const replaced = await createPublication(api, {
     ...request,
     requestId: 'conflict_request_002',
-    schedule: { ...request.schedule, replaceConflicts: true },
+    schedule: { ...request.schedule, replaceConflicts: true, conflictConfirmation: confirmation },
   });
   assert.equal(replaced.lifecycle, 'ACTIVE');
+  assert.equal((await getPublication(api, existing.id)).occurrences[0]?.status, 'CANCELED');
+  assert.ok(!replaced.schedule || !('conflictConfirmation' in replaced.schedule));
 });

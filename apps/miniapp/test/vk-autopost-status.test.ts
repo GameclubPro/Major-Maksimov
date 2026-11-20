@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { vkParsingSettingsSchema, vkParsingSourceSchema } from '@maxim/contracts/vk-parsing';
+import { getVkAutoEnableSources, isVkAutomaticSource } from '../src/components/vk-parsing/model';
 import { buildAutopostStatus } from '../src/components/vk-parsing/autopost-status';
 import { parseVkQueueDate, resolveVkQueueQuickSlot } from '../src/components/vk-parsing/queue-time';
 
@@ -92,14 +93,51 @@ test('autopost status respects source quiet windows, burst protection and partia
     'Источники на паузе',
   );
   assert.equal(
-    buildAutopostStatus(settings, [{ ...source, autoPublishPausedReason: 'circuit_breaker' }], now)
-      .title,
+    buildAutopostStatus(
+      settings,
+      [{ ...source, autoPublishEnabled: false, autoPublishPausedReason: 'circuit_breaker' }],
+      now,
+    ).title,
     'Сработала защита',
   );
   assert.equal(
     buildAutopostStatus(settings, [source, { ...source, syncStatus: 'ERROR' }], now).tone,
     'warning',
   );
+});
+
+test('a protected group stays visible beside a healthy group and does not count for enabling', () => {
+  const protect = {
+    ...source,
+    id: 'paused',
+    autoPublishEnabled: false,
+    autoPublishPausedAt: now.toISOString(),
+    autoPublishPausedReason: 'circuit_breaker',
+  };
+  const manual = {
+    ...source,
+    id: 'manual',
+    autoPublishEnabled: false,
+    autoPublishPausedReason: 'manual',
+  };
+  const inactive = { ...source, id: 'inactive', importEnabled: false };
+  const review = { ...source, id: 'review', publishMode: 'REVIEW' as const };
+  const sources = [source, manual, protect, inactive, review];
+  assert.deepEqual(
+    sources.filter(isVkAutomaticSource).map(({ id }) => id),
+    ['source'],
+  );
+  assert.deepEqual(
+    getVkAutoEnableSources(settings, sources).map(({ id }) => id),
+    ['source', 'manual'],
+  );
+  assert.deepEqual(
+    getVkAutoEnableSources({ ...settings, autoPublishKillSwitchEnabled: true }, sources).map(
+      ({ id }) => id,
+    ),
+    ['source'],
+  );
+  assert.equal(buildAutopostStatus(settings, [source, protect], now).tone, 'warning');
 });
 
 test('queue input rejects empty, past, invalid and nonexistent local timestamps', () => {

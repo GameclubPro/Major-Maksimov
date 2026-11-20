@@ -1,4 +1,9 @@
-import type { PublicationTargetInput } from '@maxim/contracts/publication';
+import type {
+  PublicationScheduleInput,
+  PublicationTargetInput,
+} from '@maxim/contracts/publication';
+import { ConflictException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import {
   ChatEntityType,
   Prisma,
@@ -8,6 +13,10 @@ import {
   PublicationScheduleStatus,
 } from '../prisma/prisma-client';
 import { buildPublicationCalendarTargetPredicates } from './publication-calendar';
+import {
+  projectPublicationCalendar,
+  type ProjectedPublicationConflict,
+} from './publication-calendar-projection';
 import {
   buildUnsafePublicationExecutionDeliveryWhere,
   throwPublicationExecutionRequiresManualReview,
@@ -40,6 +49,128 @@ export type PublicationCalendarConflicts = {
   }>;
   occurrences: PublicationCalendarConflictOccurrence[];
 };
+
+function calendarTargetKey(entityType: ChatEntityType, chatId: string): string {
+  return `${entityType}:${chatId}`;
+}
+
+export async function assertProjectedPublicationSlotsAvailable(
+  client: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  targets: readonly PublicationTargetInput[],
+  slots: Date[],
+  excludePublicationId?: string,
+): Promise<void> {
+  if (!slots.length) return;
+  const times = slots.map((slot) => slot.getTime());
+  const projected = await projectPublicationCalendar(client, {
+    targets,
+    from: new Date(Math.min(...times)),
+    to: new Date(Math.max(...times)),
+    points: slots,
+    excludePublicationId,
+    now: new Date(),
+  });
+  if (projected.length) {
+    throw new ConflictException({
+      code: 'PUBLICATION_CONFLICT_REQUIRES_MANUAL_REVIEW',
+      message: 'Это время занято серией. Измените её отдельно или выберите другое время.',
+      ...describePublicationCalendarConflict(
+        { reservations: [], occurrences: [] },
+        targets,
+        projected,
+      ),
+    });
+  }
+}
+
+export function describePublicationCalendarConflict(
+  conflicts: PublicationCalendarConflicts,
+  targets: readonly PublicationTargetInput[],
+  projected: ProjectedPublicationConflict[] = [],
+) {
+  const requestedTargets = new Set(
+    targets.map((target) =>
+      calendarTargetKey(
+        target.entityType === 'channel' ? ChatEntityType.CHANNEL : ChatEntityType.CHAT,
+        target.chatId,
+      ),
+    ),
+  );
+  const slots = new Map<string, { chatId: string; scheduledAt: string }>();
+  const addSlot = (chatId: string, scheduledAt: Date) => {
+    slots.set(JSON.stringify([chatId, scheduledAt.toISOString()]), {
+      chatId,
+      scheduledAt: scheduledAt.toISOString(),
+    });
+  };
+  for (const row of [...conflicts.reservations, ...projected]) {
+    addSlot(row.targetChatId, row.scheduledAt);
+  }
+  for (const occurrence of conflicts.occurrences) {
+    for (const target of occurrence.publication.targets) {
+      if (requestedTargets.has(calendarTargetKey(target.entityType, target.targetChatId))) {
+        addSlot(target.targetChatId, occurrence.scheduledAt);
+      }
+    }
+  }
+  const details = [...slots.keys()].sort().map((key) => slots.get(key)!);
+  const identities = [
+    ...conflicts.reservations.map((row) =>
+      JSON.stringify([
+        'reservation',
+        row.broadcastId,
+        row.entityType,
+        row.targetChatId,
+        row.scheduledAt.toISOString(),
+      ]),
+    ),
+    ...conflicts.occurrences.map((row) =>
+      JSON.stringify([
+        'occurrence',
+        row.id,
+        row.scheduleRevision,
+        row.scheduledAt.toISOString(),
+        row.publication.targets
+          .map((target) => calendarTargetKey(target.entityType, target.targetChatId))
+          .sort(),
+      ]),
+    ),
+  ].sort();
+  return {
+    conflicts: details.slice(0, 20),
+    conflictCount: details.length,
+    ...(projected.length === 0
+      ? {
+          conflictConfirmation: createHash('sha256')
+            .update(JSON.stringify(identities))
+            .digest('hex'),
+        }
+      : {}),
+  };
+}
+
+export function assertPublicationCalendarReplacementConfirmation(
+  schedule: Exclude<PublicationScheduleInput, { mode: 'now' }>,
+  conflicts: PublicationCalendarConflicts,
+  targets: readonly PublicationTargetInput[],
+): void {
+  const hasConflicts = conflicts.reservations.length > 0 || conflicts.occurrences.length > 0;
+  if (!hasConflicts && !schedule.conflictConfirmation) return;
+  const details = describePublicationCalendarConflict(conflicts, targets);
+  if (
+    !schedule.replaceConflicts ||
+    (schedule.conflictConfirmation &&
+      schedule.conflictConfirmation !== details.conflictConfirmation)
+  ) {
+    throw new ConflictException({
+      code: 'PUBLICATION_SCHEDULE_CONFLICT',
+      message: hasConflicts
+        ? 'В выбранное время уже запланирована публикация.'
+        : 'Расписание изменилось. Проверьте время перед сохранением.',
+      ...details,
+    });
+  }
+}
 
 export async function findPublicationCalendarConflicts(
   client: Pick<

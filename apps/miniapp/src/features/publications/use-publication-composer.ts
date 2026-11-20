@@ -12,6 +12,7 @@ import {
   flushPublicationDraftStorage,
   loadPublicationDraft,
   savePublicationDraft,
+  type PublicationDraftDeviceCopy,
 } from './publication-draft-storage';
 import {
   createEmptyPublicationDraft,
@@ -32,7 +33,8 @@ type PublicationComposerState = {
   clearDraft: (targets?: PublicationTarget[]) => Promise<void>;
   discardMissingImages: () => void;
   resolveMissingImages: (currentImageCount: number) => void;
-  flushDraft: () => Promise<void>;
+  flushDraft: () => Promise<PublicationDraftDeviceCopy>;
+  deviceCopyIsCurrent: boolean;
 };
 
 export type PublicationImageRecoveryState = {
@@ -88,7 +90,11 @@ export function usePublicationComposer(
   const [missingImageCount, setMissingImageCount] = useState(0);
   const [persistencePending, setPersistencePending] = useState(false);
   const saveTimerRef = useRef<number | null>(null);
-  const persistenceOperationRef = useRef<Promise<void>>(Promise.resolve());
+  const persistenceOperationRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [deviceCopy, setDeviceCopy] = useState<{
+    draft: PublicationDraft;
+    result: PublicationDraftDeviceCopy;
+  } | null>(null);
   const mountedRef = useRef(true);
   const draftRef = useRef(draft);
   const missingImageCountRef = useRef(missingImageCount);
@@ -134,64 +140,73 @@ export function usePublicationComposer(
     [updateMissingImageRecovery],
   );
 
-  const trackPersistence = useCallback((operation: Promise<void>): Promise<void> => {
-    const tracked = operation.catch(() => undefined);
-    persistenceOperationRef.current = tracked;
+  const trackPersistence = useCallback(<T>(operation: Promise<T>): Promise<T> => {
+    persistenceOperationRef.current = operation;
     if (mountedRef.current) {
       setPersistencePending(true);
     }
-    void tracked.finally(() => {
-      if (mountedRef.current && persistenceOperationRef.current === tracked) {
+    const settle = () => {
+      if (mountedRef.current && persistenceOperationRef.current === operation) {
         setPersistencePending(false);
       }
-    });
-    return tracked;
+    };
+    void operation.then(settle, settle);
+    return operation;
   }, []);
 
   const persistSnapshot = useCallback(
-    (snapshot: PublicationDraft, missingImages: number): Promise<void> => {
+    async (
+      snapshot: PublicationDraft,
+      missingImages: number,
+    ): Promise<PublicationDraftDeviceCopy> => {
       if (!normalizedUserId) {
-        return Promise.resolve();
+        return 'unavailable';
       }
       const hasDraft = missingImages > 0 || !isPublicationDraftEmpty(snapshot);
-      if (mountedRef.current) {
-        setHasSavedDraft(hasDraft);
-      }
-      return trackPersistence(
+      const operation = trackPersistence(
         hasDraft
           ? savePublicationDraft(snapshot, normalizedUserId, {
               missingImageCount: missingImages,
             })
-          : clearPublicationDraft(normalizedUserId),
+          : clearPublicationDraft(normalizedUserId).then(() => 'complete' as const),
       );
+      const result = await operation.catch(() => 'unavailable' as const);
+      if (mountedRef.current && persistenceOperationRef.current === operation) {
+        setHasSavedDraft(hasDraft && result !== 'unavailable');
+        setDeviceCopy(hasDraft ? { draft: snapshot, result } : null);
+      }
+      return result;
     },
     [normalizedUserId, trackPersistence],
   );
 
-  const flushDraft = useCallback(async (): Promise<void> => {
+  const flushDraft = useCallback(async (): Promise<PublicationDraftDeviceCopy> => {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
     if (normalizedUserId && hydratedRef.current && persistenceEnabledRef.current) {
-      await persistSnapshot(draftRef.current, missingImageCountRef.current);
+      return persistSnapshot(draftRef.current, missingImageCountRef.current);
     }
-    await persistenceOperationRef.current;
+    await persistenceOperationRef.current.catch(() => undefined);
     if (normalizedUserId) {
-      await flushPublicationDraftStorage(normalizedUserId);
+      await flushPublicationDraftStorage(normalizedUserId).catch(() => undefined);
     }
+    return 'unavailable';
   }, [normalizedUserId, persistSnapshot]);
 
   useEffect(() => {
     if (!enabled || !normalizedUserId) {
       replaceDraft(createEmptyPublicationDraft());
       setHasSavedDraft(false);
+      setDeviceCopy(null);
       setHydrated(true);
       return undefined;
     }
 
     replaceDraft(createEmptyPublicationDraft());
     setHasSavedDraft(false);
+    setDeviceCopy(null);
     setHydrated(false);
     let cancelled = false;
     void loadPublicationDraft(normalizedUserId)
@@ -290,6 +305,7 @@ export function usePublicationComposer(
       }
       replaceDraft(createEmptyPublicationDraft(targets));
       setHasSavedDraft(false);
+      setDeviceCopy(null);
       if (normalizedUserId) {
         await trackPersistence(clearPublicationDraft(normalizedUserId));
       }
@@ -327,6 +343,7 @@ export function usePublicationComposer(
     imagesNeedReselection,
     missingImageCount,
     persistencePending,
+    deviceCopyIsCurrent: deviceCopy?.draft === draft && deviceCopy.result === 'complete',
     replaceDraft,
     clearDraft,
     discardMissingImages,

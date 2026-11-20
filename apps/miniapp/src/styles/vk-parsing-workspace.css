@@ -21,6 +21,10 @@
     --vk-danger-soft: #fce9ed;
     --vk-review: #246a9b;
     --vk-radius: 8px;
+    --vk-studio-ink: #fff8f1;
+    --vk-studio-detail: #ffc5a4;
+    --vk-studio-bg: linear-gradient(115deg, #2a2221, #372822);
+    --vk-studio-control-shadow: 0 1px 4px rgb(30 20 15 / 14%);
     color: var(--vk-ink);
     color-scheme: light;
   }
@@ -804,24 +808,43 @@
     box-shadow: none;
   }
   .vk-workspace-dialog .vk-autopost-panel__heading {
-    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: clamp(16px, 4vw, 28px);
+    margin: 0 0 -10px;
+    border-radius: 18px 18px 0 0;
+    color: var(--vk-studio-ink);
+    background: var(--vk-studio-bg);
   }
   .vk-workspace-dialog .vk-autopost-panel__heading h2 {
-    font-size: 17px;
-    font-weight: 700;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+    color: inherit;
+    font-size: clamp(23px, 6vw, 34px);
+    letter-spacing: -0.035em;
+    font-weight: 800;
+    overflow-wrap: anywhere;
+  }
+  .vk-workspace-dialog .vk-autopost-panel__heading :is(button, span) {
+    color: var(--vk-studio-detail);
   }
   .vk-workspace-dialog .vk-autopost-panel__main {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
-    padding: 0 0 16px;
-  }
-  .vk-workspace-dialog .vk-autopost-status__icon {
-    display: none;
+    padding: clamp(12px, 4vw, 24px);
+    border: 1px solid var(--vk-line);
+    border-top: 0;
+    border-radius: 0 0 18px 18px;
+    background: var(--vk-surface);
   }
   .vk-workspace-dialog .vk-autopost-status {
-    display: block;
+    display: flex;
     min-width: 0;
+    align-items: flex-start;
   }
   .vk-workspace-dialog .vk-autopost-status__copy :is(strong, small) {
     overflow: visible;
@@ -831,59 +854,127 @@
   .vk-workspace-dialog .vk-autopost-status__copy strong {
     font-size: 15px;
   }
-  .vk-workspace-dialog .vk-autopost-status__copy small {
-    font-size: 12px;
+  .vk-workspace-dialog .vk-autopost-status__copy small,
+  .vk-workspace-dialog .vk-effective-interval {
+    display: block;
+    font-size: 13px;
     color: var(--vk-muted);
   }
-  .vk-workspace-dialog .vk-autopost-metrics {
-    gap: 14px;
-    padding: 0;
-  }
-  .vk-workspace-dialog .vk-autopost-metrics b {
-    font-size: 19px;
-  }
-  .vk-workspace-dialog .vk-autopost-metrics small {
-    font-size: 11px;
+  .vk-workspace-dialog .vk-autopost-next {
+    font-size: clamp(24px, 7vw, 36px);
+    line-height: 1.16;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.035em;
+    color: var(--vk-ink);
   }
   .vk-workspace-dialog .vk-autopost-mode {
-    grid-column: 1 / -1;
     min-width: 0;
-    border-radius: 8px;
+    border-radius: 12px;
     padding: 3px;
-    background: var(--vk-surface);
+    background: var(--vk-soft);
     border: 1px solid var(--vk-line);
   }
   .vk-workspace-dialog .vk-autopost-mode button {
-    min-height: 42px;
+    min-height: 44px;
     font-size: 14px;
-    border-radius: 5px;
+    border-radius: 9px;
   }
   .vk-workspace-dialog .vk-autopost-mode button.is-active {
-    background: var(--vk-accent-soft);
+    background: var(--vk-surface);
     color: var(--vk-accent-dark);
-    box-shadow: none;
+    box-shadow: var(--vk-studio-control-shadow);
   }
-  .vk-workspace-dialog .vk-autopost-panel__schedule {
+  .vk-workspace-dialog .vk-autopost-queue > button,
+  .vk-workspace-dialog .vk-autopost-protected button {
+    display: flex;
     gap: 8px;
-    font-size: 12px;
-    color: var(--vk-muted);
+    align-items: center;
+    min-height: 44px;
+    overflow-wrap: anywhere;
+  }
+  .vk-workspace-dialog :is(.vk-autopost-queue, .vk-autopost-protected) ul {
+    padding: 0;
     margin: 0;
-    padding: 12px 0;
+    list-style: none;
+  }
+  .vk-workspace-dialog .vk-autopost-queue li {
+    display: grid;
+    grid-template-columns: minmax(54px, max-content) minmax(0, 1fr);
+    align-items: baseline;
+    gap: 12px;
+    padding: 10px 0;
     border-top: 1px solid var(--vk-line);
   }
-  .vk-workspace-dialog .vk-autopost-advanced {
-    margin-top: 4px;
+  .vk-workspace-dialog .vk-autopost-queue time {
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 750;
+    color: var(--vk-accent-dark);
+  }
+  .vk-workspace-dialog .vk-autopost-queue li strong {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .vk-workspace-dialog .vk-autopost-queue li small {
+    color: var(--vk-muted);
+  }
+  .vk-workspace-dialog .vk-autopost-panel__schedule {
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--vk-muted);
+    margin: 0;
+    padding: 12px 0 0;
+  }
+  .vk-workspace-dialog
+    :is(.vk-autopost-advanced, .vk-autopost-protected, .vk-automation-appearance) {
+    margin-top: 10px;
     background: none;
     border: 0;
+    border-top: 1px solid var(--vk-line);
     border-radius: 0;
   }
-  .vk-workspace-dialog .vk-autopost-advanced > summary {
-    padding: 14px 0;
+  .vk-workspace-dialog
+    :is(.vk-autopost-advanced, .vk-autopost-protected, .vk-automation-appearance)
+    > summary {
+    min-height: 44px;
+    padding: 12px 0;
+    font-weight: 720;
     font-size: 14px;
     color: var(--vk-ink);
+    cursor: pointer;
+  }
+  .vk-workspace-dialog .vk-autopost-protected > summary {
+    color: var(--vk-warning);
   }
   .vk-workspace-dialog .vk-autopost-advanced__body {
     padding: 10px 0 0;
+  }
+  .vk-workspace-dialog .vk-custom-interval {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 10px;
+    margin: 10px 0;
+  }
+  .vk-workspace-dialog .vk-custom-interval > label {
+    flex: 1 1 10rem;
+    min-width: 0;
+  }
+  .vk-workspace-dialog :is(.vk-custom-interval, .vk-bulk-failure) button {
+    min-height: 44px;
+  }
+  .vk-workspace-dialog .vk-bulk-failure {
+    display: grid;
+    justify-items: start;
+    padding: 10px 12px;
+    border-radius: 10px;
+    color: var(--vk-danger);
+    background: var(--vk-danger-soft);
+    overflow-wrap: anywhere;
   }
   .vk-workspace-dialog .vk-scheduler-sections {
     display: grid;
@@ -985,18 +1076,56 @@
     font-size: 12px;
   }
   .vk-workspace-dialog .vk-queue-item {
-    padding: 16px;
-    border: 1px solid var(--vk-line);
-    border-radius: 8px;
-    background: var(--vk-surface);
+    display: block;
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid var(--vk-line);
+    border-radius: 0;
+    background: none;
     box-shadow: none;
   }
-  .vk-workspace-dialog .vk-queue-item__main {
-    flex-wrap: wrap;
-    gap: 6px;
+  .vk-workspace-dialog .vk-queue-details > summary {
+    display: grid;
+    grid-template-columns: minmax(62px, max-content) minmax(0, 1fr) 20px;
+    align-items: center;
+    gap: 10px;
+    min-height: 54px;
+    padding: 8px 2px;
+    list-style: none;
+    cursor: pointer;
   }
-  .vk-workspace-dialog .vk-queue-item__main strong {
+  .vk-workspace-dialog .vk-queue-details > summary::-webkit-details-marker {
+    display: none;
+  }
+  .vk-workspace-dialog .vk-queue-details[open] > summary > svg {
+    rotate: 180deg;
+  }
+  .vk-workspace-dialog .vk-queue-item__controls {
+    display: grid;
+    gap: 12px;
+    padding: 8px 0 16px;
+  }
+  .vk-workspace-dialog .vk-queue-item__slot {
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: var(--vk-accent-dark);
+    font-weight: 750;
+  }
+  .vk-workspace-dialog .vk-queue-item__caption {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .vk-workspace-dialog .vk-queue-item__caption > strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 15px;
+  }
+  .vk-workspace-dialog .vk-queue-item__caption > span {
+    color: var(--vk-muted);
+    overflow-wrap: anywhere;
+    font-size: 13px;
   }
   .vk-workspace-dialog .vk-queue-item__schedule {
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr));
@@ -1123,9 +1252,6 @@
     .vk-feed-toolbar {
       grid-template-columns: 1fr 220px;
     }
-    .vk-workspace-dialog .vk-autopost-panel__main {
-      grid-template-columns: 1fr auto;
-    }
   }
   @media (max-width: 380px) {
     .vk-workspace-dialog .settings-drilldown__body {
@@ -1142,12 +1268,6 @@
     }
     .vk-workspace-dialog .vk-parsing-post-card {
       padding: 12px;
-    }
-    .vk-workspace-dialog .vk-autopost-panel__main {
-      grid-template-columns: 1fr;
-    }
-    .vk-workspace-dialog .vk-autopost-metrics {
-      justify-content: flex-start;
     }
   }
   .vk-publication-options {

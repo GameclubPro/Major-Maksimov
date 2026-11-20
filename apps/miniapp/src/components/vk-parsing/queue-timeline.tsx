@@ -8,6 +8,7 @@ import { DateField } from '../ui/date-field';
 import { ActionConfirmSheet } from '../ui/action-confirm-sheet';
 import { parseVkQueueDate, resolveVkQueueQuickSlot } from './queue-time';
 import { formatTimezoneLabel } from '../../lib/timezone-label';
+import { getQueuePostTitle } from './queue-title';
 import { vkPostBlockedReason } from './workflow';
 
 type QueueTimelineProps = {
@@ -55,118 +56,131 @@ function QueueItem({
   }, [draft, editing, server]);
   return (
     <article className="vk-queue-item">
-      <div className="vk-queue-item__main">
-        <strong>{post.sourceTitle}</strong>
-        <span>
-          {at
-            ? DateTime.fromISO(at, { zone: timezone }).setLocale('ru').toFormat('d MMM, HH:mm')
-            : 'Время не задано'}
-        </span>
-      </div>
-      <div className="vk-queue-item__preview">
-        {post.text ||
-          (post.photoUrls.length
-            ? 'Пост с фото'
-            : post.videoUrls.length
-              ? 'Пост с видео'
-              : 'Пост без текста')}
-      </div>
-      <div className="vk-queue-item__schedule">
-        <DateField
-          label="Дата"
-          aria-label={`Дата публикации: ${post.sourceTitle}`}
-          placeholder="дд.мм.гггг"
-          value={date}
-          disabled={unavailable}
-          onChange={(value) => {
-            setEditing(true);
-            setDraft(`${value}T${time}`);
-          }}
-        />
-        <div className="vk-queue-item__time">
-          <span>Время</span>
-          <TimeField
-            label={`Время публикации: ${post.sourceTitle}`}
-            variant="compact"
-            value={time}
-            allowEmpty
-            disabled={unavailable}
-            onChange={(value) => {
-              setEditing(true);
-              setDraft(`${date}T${value}`);
-            }}
-          />
+      <details className="vk-queue-details">
+        <summary>
+          <span className="vk-queue-item__slot">
+            {at ? (
+              <time dateTime={at}>
+                {DateTime.fromISO(at, { zone: timezone }).setLocale('ru').toFormat('d MMM, HH:mm')}
+              </time>
+            ) : (
+              'Без времени'
+            )}
+          </span>
+          <span className="vk-queue-item__caption">
+            <strong>{getQueuePostTitle(post)}</strong>
+            <span>{post.sourceTitle}</span>
+          </span>
+          <IconoirSprite variant="iconoir" icon="NavArrowDown" aria-hidden />
+          <span className="sr-only">Действия с постом</span>
+        </summary>
+        <div className="vk-queue-item__controls">
+          <div className="vk-queue-item__schedule">
+            <DateField
+              label="Дата"
+              aria-label={`Дата публикации: ${post.sourceTitle}`}
+              placeholder="дд.мм.гггг"
+              value={date}
+              disabled={unavailable}
+              onChange={(value) => {
+                setEditing(true);
+                setDraft(`${value}T${time}`);
+              }}
+            />
+            <div className="vk-queue-item__time">
+              <span>Время</span>
+              <TimeField
+                label={`Время публикации: ${post.sourceTitle}`}
+                variant="compact"
+                value={time}
+                allowEmpty
+                disabled={unavailable}
+                onChange={(value) => {
+                  setEditing(true);
+                  setDraft(`${date}T${value}`);
+                }}
+              />
+            </div>
+          </div>
+          {dirty ? (
+            <div className="vk-queue-item__edit-actions">
+              {!parsed ? (
+                <span role="status">
+                  {!date || !time
+                    ? 'Укажите дату и время'
+                    : 'Выберите действительное время в будущем'}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                title="Отменить изменение времени"
+                aria-label="Отменить изменение времени"
+                disabled={unavailable}
+                onClick={() => {
+                  setEditing(false);
+                  setDraft(server);
+                }}
+              >
+                <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
+              </button>
+              <button
+                type="button"
+                disabled={unavailable || !parsed}
+                onClick={() => {
+                  if (parsed) onSchedule(parsed);
+                }}
+              >
+                <IconoirSprite variant="iconoir" icon="Check" aria-hidden />
+                <span>Сохранить время</span>
+              </button>
+            </div>
+          ) : null}
+          <div className="vk-queue-item__actions">
+            {(
+              [
+                { label: '+30 мин', minutes: 30 },
+                { label: '+2 часа', minutes: 120 },
+                { label: 'Завтра, 09:00', minutes: null },
+              ] as const
+            ).map((slot) => (
+              <button
+                key={slot.label}
+                type="button"
+                className="vk-source-preset"
+                disabled={unavailable}
+                onClick={() => {
+                  setEditing(false);
+                  onSchedule(resolveVkQueueQuickSlot(slot.minutes, timezone));
+                }}
+              >
+                {slot.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="vk-source-preset"
+              title="Опубликовать сейчас"
+              aria-label={`Опубликовать сейчас: ${post.sourceTitle}`}
+              disabled={unavailable}
+              onClick={() => onAction('publish')}
+            >
+              <IconoirSprite variant="iconoir" icon="Send" aria-hidden />
+              <span>Опубликовать сейчас</span>
+            </button>
+            <button
+              type="button"
+              className="vk-source-preset"
+              title="Снять с очереди"
+              aria-label={`Снять с очереди: ${post.sourceTitle}`}
+              disabled={unavailable}
+              onClick={() => onAction('cancel')}
+            >
+              <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
+              <span>Снять</span>
+            </button>
+          </div>
         </div>
-      </div>
-      {dirty ? (
-        <div className="vk-queue-item__edit-actions">
-          {!parsed ? <span role="status">Нужны будущая дата и время</span> : null}
-          <button
-            type="button"
-            title="Отменить изменение времени"
-            aria-label="Отменить изменение времени"
-            disabled={unavailable}
-            onClick={() => {
-              setEditing(false);
-              setDraft(server);
-            }}
-          >
-            <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-          </button>
-          <button
-            type="button"
-            disabled={unavailable || !parsed}
-            onClick={() => {
-              if (parsed) onSchedule(parsed);
-            }}
-          >
-            <IconoirSprite variant="iconoir" icon="Check" aria-hidden />
-            <span>Сохранить время</span>
-          </button>
-        </div>
-      ) : null}
-      <div className="vk-queue-item__actions">
-        {(
-          [
-            { label: '+30 мин', minutes: 30 },
-            { label: '+2 часа', minutes: 120 },
-            { label: 'Завтра, 09:00', minutes: null },
-          ] as const
-        ).map((slot) => (
-          <button
-            key={slot.label}
-            type="button"
-            className="vk-source-preset"
-            disabled={unavailable}
-            onClick={() => {
-              setEditing(false);
-              onSchedule(resolveVkQueueQuickSlot(slot.minutes, timezone));
-            }}
-          >
-            {slot.label}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="vk-source-preset"
-          title="Опубликовать сейчас"
-          aria-label={`Опубликовать сейчас: ${post.sourceTitle}`}
-          disabled={unavailable}
-          onClick={() => onAction('publish')}
-        >
-          <IconoirSprite variant="iconoir" icon="Send" aria-hidden />
-        </button>
-        <button
-          type="button"
-          className="vk-source-preset"
-          title="Снять с очереди"
-          aria-label={`Снять с очереди: ${post.sourceTitle}`}
-          disabled={unavailable}
-          onClick={() => onAction('cancel')}
-        >
-          <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-        </button>
-      </div>
+      </details>
       {quarantined || post.publishLockedAt ? (
         <p className="vk-inline-warning" role="status">
           {quarantined ?? 'Пост отправляется.'}

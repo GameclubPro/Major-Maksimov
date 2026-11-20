@@ -224,7 +224,7 @@ test('content-only future edits fingerprint the exact partial update separately 
   draft.timingMode = 'once';
   draft.onceDate = '2030-01-01';
   draft.onceTime = '13:00';
-  draft.scheduledSlots = ['2030-01-01T10:00:00Z'];
+  draft.onceAt = '2030-01-01T10:00:00Z';
   draft.scheduleTimezone = 'Europe/Moscow';
   const context = {
     kind: 'edit' as const,

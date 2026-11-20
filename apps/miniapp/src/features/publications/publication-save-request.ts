@@ -41,23 +41,36 @@ export function buildPublicationSaveRequest(
   context: PublicationSaveRequestContext,
   requestId: string,
   replaceConflicts: boolean,
+  conflictConfirmation?: string,
 ) {
+  function includeConfirmation<
+    T extends { schedule?: ReturnType<typeof buildCreatePublicationRequest>['schedule'] },
+  >(payload: T): T {
+    if (!conflictConfirmation || !payload.schedule || payload.schedule.mode === 'now')
+      return payload;
+    return { ...payload, schedule: { ...payload.schedule, conflictConfirmation } };
+  }
   if (context.kind === 'edit' || context.kind === 'import' || context.kind === 'draft') {
     return {
       operation: 'update' as const,
       publicationId: context.publicationId,
-      payload: buildUpdatePublicationRequest(
-        draft,
-        context.expectedRevision,
-        requestId,
-        replaceConflicts,
-        context.kind === 'edit' && (context.editScope === 'retry' || context.contentOnly === true),
+      payload: includeConfirmation(
+        buildUpdatePublicationRequest(
+          draft,
+          context.expectedRevision,
+          requestId,
+          replaceConflicts,
+          context.kind === 'edit' &&
+            (context.editScope === 'retry' || context.contentOnly === true),
+        ),
       ),
     };
   }
   return {
     operation: 'create' as const,
-    payload: buildCreatePublicationRequest(draft, requestId, { replaceConflicts }),
+    payload: includeConfirmation(
+      buildCreatePublicationRequest(draft, requestId, { replaceConflicts }),
+    ),
   };
 }
 
@@ -67,9 +80,16 @@ export function preparePublicationSave(
   context: PublicationSaveRequestContext,
   requestId: string,
   replaceConflicts: boolean,
+  conflictConfirmation?: string,
 ) {
   // FLAG: Access refresh retries must reuse the exact payload and request ID prepared here.
-  const request = buildPublicationSaveRequest(draft, context, requestId, replaceConflicts);
+  const request = buildPublicationSaveRequest(
+    draft,
+    context,
+    requestId,
+    replaceConflicts,
+    conflictConfirmation,
+  );
   return () =>
     request.operation === 'update'
       ? updatePublication(api, request.publicationId, request.payload)

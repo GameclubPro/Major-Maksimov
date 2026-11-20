@@ -4,7 +4,6 @@ import {
   requirePublicationAlbumEditor,
 } from './publication-album-write-compatibility';
 import {
-  readPublicationLatePolicy,
   snapshotPublicationDeliveryDeadline,
   withDefaultPublicationLatePolicy,
   withPreservedPublicationLatePolicy,
@@ -97,6 +96,7 @@ import {
 } from './publication-publisher-routing.service';
 import { publicationBackgroundAccess } from './publication-background-access';
 import { tryCancelAccessiblePublicationTargets } from './publication-target-cancellation';
+import { executePublicationOccurrenceSkip } from './publication-occurrence-skip';
 import {
   publicationAdminAccessWhere,
   publicationAdminScope,
@@ -110,10 +110,21 @@ import {
   releaseRetiredMajorCalendarSlots,
 } from './publication-calendar';
 import {
+  assertProjectedPublicationSlotsAvailable,
+  assertPublicationCalendarReplacementConfirmation,
   findPublicationCalendarConflicts,
   type PublicationCalendarConflictOccurrence,
-  type PublicationCalendarConflicts,
 } from './publication-calendar-conflicts';
+import {
+  countableCalendarOccurrenceWhere,
+  countRecurrenceRollupOccurrences,
+  getPublicationCalendarCheckSlots,
+  lockPublicationCalendar,
+  persistedPublicationScheduleRule,
+  planAudienceOnlyPublicationRebuild,
+  projectPublicationCalendar,
+  PUBLICATION_CALENDAR_SLOT_OCCUPIED,
+} from './publication-calendar-projection';
 import { cancelUntouchedScheduledPublicationOccurrences } from './publication-stale-occurrence-cleanup';
 import {
   buildUnsafePublicationExecutionDeliveryWhere,
@@ -151,7 +162,10 @@ import {
   resolveEffectivePublicationDeliveryStatus,
 } from './publication-legacy-automated-absence';
 import * as publicationManualRetrySafety from './publication-manual-retry-safety';
-import { expandPublicationSchedule } from './publication-recurrence';
+import {
+  expandPublicationSchedule,
+  findNextPublicationRecurrenceSlot,
+} from './publication-recurrence';
 import { normalizePublicationSchedule } from './publication-schedule-normalization';
 import {
   deferPublicationRecurrencePreparation,
@@ -159,7 +173,6 @@ import {
 } from './publication-recurrence-recovery';
 
 const PUBLICATION_RECURRENCE_HORIZON_MS = 14 * 24 * 60 * 60_000;
-const PUBLICATION_RECURRENCE_LOOKAHEAD_MS = 450 * 24 * 60 * 60_000;
 const PUBLICATION_RECURRENCE_REFRESH_MS = 12 * 60 * 60_000;
 const PUBLICATION_PAST_GRACE_MS = 5 * 60_000;
 const PUBLICATION_MATERIALIZE_BATCH = 50;
@@ -477,6 +490,15 @@ export class PublicationService {
       targets.map((target) => `${this.toPrismaEntityType(target.entityType)}:${target.chatId}`),
     );
     const targetPredicates = buildPublicationCalendarTargetPredicates(targets);
+    // FLAG: Read rules before their durable occurrences so materialization cannot
+    // make an occupied slot disappear between two committed snapshots.
+    const projected = await projectPublicationCalendar(this.prisma, {
+      targets,
+      from,
+      to,
+      now: new Date(),
+      excludePublicationId: request.excludePublicationId,
+    });
     const [reservations, occurrences] = await Promise.all([
       this.prisma.managedBroadcastCalendarReservation.findMany({
         where: {
@@ -570,6 +592,9 @@ export class PublicationService {
           addSlot(occurrence.scheduledAt, targetKey);
         }
       }
+    }
+    for (const slot of projected) {
+      addSlot(slot.scheduledAt, `${slot.entityType}:${slot.targetChatId}`);
     }
 
     return publicationCalendarAvailabilityResponseSchema.parse({
@@ -717,7 +742,7 @@ export class PublicationService {
         });
 
         if (schedule) {
-          if (request.intent === 'publish' && initialSlots.length > 0) {
+          if (request.intent === 'publish') {
             await this.reservePublicationCalendar(
               tx,
               targets,
@@ -732,7 +757,7 @@ export class PublicationService {
               publicationId: publication.id,
               mode: this.toPrismaScheduleMode(schedule.mode),
               timezone: schedule.timezone,
-              rule: schedule as Prisma.InputJsonValue,
+              rule: persistedPublicationScheduleRule(schedule),
               status:
                 request.intent === 'draft'
                   ? PublicationScheduleStatus.DRAFT
@@ -875,7 +900,7 @@ export class PublicationService {
       (existing.schedule?.status === PublicationScheduleStatus.DRAFT
         ? (publicationScheduleInputSchema.safeParse(existing.schedule.rule).data ?? null)
         : null);
-    const schedule =
+    let schedule =
       request.schedule === undefined
         ? existingSchedule
         : request.schedule === null
@@ -919,20 +944,28 @@ export class PublicationService {
       existing.lifecycle !== PublicationLifecycle.PAUSED &&
       schedule?.mode === 'recurrence' &&
       existing.schedule?.status === PublicationScheduleStatus.ERROR;
-    if (repairErroredSchedule && schedule.maxOccurrences !== null) {
+    if (
+      repairErroredSchedule &&
+      schedule?.mode === 'recurrence' &&
+      schedule.maxOccurrences !== null
+    ) {
       throw new BadRequestException('Для перезапуска серии с лимитом задайте новое расписание.');
     }
     const shouldRebuildSchedule = scheduleRebuildRequested || repairErroredSchedule;
+    const audienceOnly = audienceChanged && !scheduleChanged;
     PublicationPublisherRoutingService.assertRootUpdateAllowed(
       existing.dispatchProfile,
       shouldRebuildSchedule || request.content !== undefined,
     );
-    const initialSlots =
+    let initialSlots =
       desiredIntent === 'publish' && schedule && shouldRebuildSchedule
         ? this.expandInitialSchedule(schedule, now)
         : [];
-    const scheduleExhausted = this.isInitialRecurrenceExhausted(schedule, initialSlots, now);
-    if (desiredIntent === 'publish' && shouldRebuildSchedule) {
+    if (
+      desiredIntent === 'publish' &&
+      shouldRebuildSchedule &&
+      !(audienceOnly && schedule?.mode === 'recurrence')
+    ) {
       this.assertPublishableSchedule(schedule, initialSlots, now);
       await this.assertCalendarAvailability(
         targets,
@@ -942,12 +975,6 @@ export class PublicationService {
         publicationId,
       );
     }
-    const initialNextMaterializeAt =
-      desiredIntent === 'publish' &&
-      shouldRebuildSchedule &&
-      existing.lifecycle !== PublicationLifecycle.PAUSED
-        ? this.resolveInitialRecurrenceMaterializeAt(schedule, initialSlots, scheduleExhausted, now)
-        : null;
     const preparedContent = request.content
       ? await this.publicationContentService.prepareContentRevision(request.content)
       : null;
@@ -971,7 +998,7 @@ export class PublicationService {
           );
         const calendarAlreadyLocked = shouldRebuildSchedule || preparedContent !== null;
         if (calendarAlreadyLocked) {
-          await this.lockPublicationCalendar(tx);
+          await lockPublicationCalendar(tx);
         }
         const updated = await tx.publication.updateMany({
           where: {
@@ -1042,8 +1069,26 @@ export class PublicationService {
           });
         }
         if (shouldRebuildSchedule) {
+          const audiencePlan =
+            audienceOnly && schedule?.mode === 'recurrence' && existing.schedule
+              ? await planAudienceOnlyPublicationRebuild(tx, existing.schedule, schedule, now)
+              : null;
+          if (audiencePlan) {
+            schedule = audiencePlan.rule;
+            initialSlots = this.expandInitialSchedule(schedule, now);
+            this.assertPublishableSchedule(schedule, initialSlots, now);
+          }
+          const initialNextMaterializeAt =
+            desiredIntent === 'publish' && existing.lifecycle !== PublicationLifecycle.PAUSED
+              ? this.resolveInitialRecurrenceMaterializeAt(
+                  schedule,
+                  initialSlots,
+                  this.isInitialRecurrenceExhausted(schedule, initialSlots, now),
+                  now,
+                )
+              : null;
           await this.cancelFuturePublicationWork(tx, publicationId, now, initialSlots);
-          if (desiredIntent === 'publish' && schedule && initialSlots.length > 0) {
+          if (desiredIntent === 'publish' && schedule) {
             await this.reservePublicationCalendar(
               tx,
               targets,
@@ -1052,6 +1097,8 @@ export class PublicationService {
               publicationId,
               user.userId,
               calendarAlreadyLocked,
+              false,
+              audiencePlan?.skippedByAt,
             );
           }
           if (!schedule) {
@@ -1067,13 +1114,14 @@ export class PublicationService {
               });
             }
           } else if (existing.schedule) {
+            const persistedRule = schedule;
             const scheduleRevision = existing.schedule.revision + 1;
             const persistedSchedule = await tx.publicationSchedule.update({
               where: { publicationId },
               data: {
                 mode: this.toPrismaScheduleMode(schedule.mode),
                 timezone: schedule.timezone,
-                rule: schedule as Prisma.InputJsonValue,
+                rule: persistedPublicationScheduleRule(schedule),
                 revision: scheduleRevision,
                 status:
                   desiredIntent === 'draft'
@@ -1095,7 +1143,11 @@ export class PublicationService {
                   contentRevisionId,
                   scheduleRevision,
                   scheduledAt,
-                  deliveryDeadlineAt: snapshotPublicationDeliveryDeadline(scheduledAt, schedule),
+                  ...audiencePlan?.skippedByAt.get(scheduledAt.getTime()),
+                  deliveryDeadlineAt: snapshotPublicationDeliveryDeadline(
+                    scheduledAt,
+                    persistedRule,
+                  ),
                   dispatchProfile: existing.dispatchProfile,
                   requiredBotId: existing.requiredBotId,
                 })),
@@ -1103,12 +1155,13 @@ export class PublicationService {
               });
             }
           } else {
+            const persistedRule = schedule;
             const persistedSchedule = await tx.publicationSchedule.create({
               data: {
                 publicationId,
                 mode: this.toPrismaScheduleMode(schedule.mode),
                 timezone: schedule.timezone,
-                rule: schedule as Prisma.InputJsonValue,
+                rule: persistedPublicationScheduleRule(schedule),
                 status:
                   desiredIntent === 'draft'
                     ? PublicationScheduleStatus.DRAFT
@@ -1126,7 +1179,10 @@ export class PublicationService {
                   contentRevisionId,
                   scheduleRevision: persistedSchedule.revision,
                   scheduledAt,
-                  deliveryDeadlineAt: snapshotPublicationDeliveryDeadline(scheduledAt, schedule),
+                  deliveryDeadlineAt: snapshotPublicationDeliveryDeadline(
+                    scheduledAt,
+                    persistedRule,
+                  ),
                   dispatchProfile: existing.dispatchProfile,
                   requiredBotId: existing.requiredBotId,
                 })),
@@ -1290,6 +1346,43 @@ export class PublicationService {
       return this.get(publicationId, user, dispatchProfile);
     }
     return this.transitionPublication(publicationId, user, body, 'cancel', dispatchProfile);
+  }
+
+  async skipOccurrence(
+    publicationId: string,
+    occurrenceId: string,
+    user: AuthUser,
+    body: unknown,
+    profile: PublicationDispatchProfile,
+  ): Promise<PublicationDetails> {
+    this.assertNewPublicationProfile(profile);
+    const parsed = publicationActionRequestSchema.safeParse(body);
+    if (!parsed.success) throw new BadRequestException(parsed.error.format());
+    const request = parsed.data;
+    const hash = this.hashMutationRequest({
+      action: 'skip',
+      publicationId,
+      occurrenceId,
+      ...request,
+    });
+    await this.assertPublicationOwner(publicationId, user.userId, profile);
+    await executePublicationOccurrenceSkip(this.prisma, {
+      lock: (tx) => lockPublicationCalendar(tx),
+      publicationId,
+      occurrenceId,
+      access: this.publicationAccessWhere(user.userId, profile),
+      actorUserId: user.userId,
+      profile,
+      request,
+      hash,
+      replay: async () => {
+        const record = await this.findMutationReplay(user.userId, request.requestId, hash);
+        if (!record) return false;
+        this.assertReplayPublication(record.publicationId, publicationId);
+        return true;
+      },
+    });
+    return this.get(publicationId, user, profile);
   }
 
   async listDeliveries(
@@ -1490,7 +1583,7 @@ export class PublicationService {
         // targets. SENT and AMBIGUOUS deliveries retain their recorded content revision. A
         // missing-envelope retry is allowed only when both execution broadcasts and deliveries
         // are still absent under the transaction lock.
-        await this.lockPublicationCalendar(tx);
+        await lockPublicationCalendar(tx);
         const retryLockToken = `publication-retry:${randomUUID()}`;
         const retryLockedAt = new Date();
         let retryableBroadcastIds: string[] = [];
@@ -1803,7 +1896,7 @@ export class PublicationService {
     const resolutionAt = new Date();
     try {
       await this.prisma.$transaction(async (tx: any) => {
-        await this.lockPublicationCalendar(tx);
+        await lockPublicationCalendar(tx);
         const resolved = await tx.managedBroadcastDelivery.updateMany({
           where: manualReviewWhere,
           data:
@@ -1928,7 +2021,7 @@ export class PublicationService {
     if (!Number.isSafeInteger(limit) || limit <= 0) return;
     const now = new Date();
     await this.prisma.$transaction(async (tx) => {
-      await this.lockPublicationCalendar(tx);
+      await lockPublicationCalendar(tx);
       await cancelUntouchedScheduledPublicationOccurrences(tx, {
         now,
         limit: Math.min(limit, PUBLICATION_RECONCILE_BATCH),
@@ -1993,18 +2086,14 @@ export class PublicationService {
             where: {
               scheduleId: schedule.id,
               scheduleRevision: schedule.revision,
-              ...(readPublicationLatePolicy(rule)
-                ? {}
-                : { status: { not: PublicationOccurrenceStatus.CANCELED } }),
+              ...countableCalendarOccurrenceWhere(rule),
             },
           }),
           this.prisma.publicationOccurrence.findFirst({
             where: {
               scheduleId: schedule.id,
               scheduleRevision: schedule.revision,
-              ...(readPublicationLatePolicy(rule)
-                ? {}
-                : { status: { not: PublicationOccurrenceStatus.CANCELED } }),
+              ...countableCalendarOccurrenceWhere(rule),
             },
             orderBy: { scheduledAt: 'desc' },
             select: { scheduledAt: true },
@@ -2021,7 +2110,7 @@ export class PublicationService {
                 maxResults: 1,
               })
             : [];
-        const nextSlot = slots[0] ?? this.findNextRecurrenceSlot(rule, from, existingCount);
+        const nextSlot = slots[0] ?? findNextPublicationRecurrenceSlot(rule, from, existingCount);
         if (!nextSlot) {
           continue;
         }
@@ -2084,9 +2173,7 @@ export class PublicationService {
             where: {
               scheduleId: schedule.id,
               scheduleRevision: schedule.revision,
-              ...(readPublicationLatePolicy(rule)
-                ? {}
-                : { status: { not: PublicationOccurrenceStatus.CANCELED } }),
+              ...countableCalendarOccurrenceWhere(rule),
             },
             orderBy: { scheduledAt: 'desc' },
             select: { scheduledAt: true },
@@ -2095,21 +2182,22 @@ export class PublicationService {
             where: {
               scheduleId: schedule.id,
               scheduleRevision: schedule.revision,
-              ...(readPublicationLatePolicy(rule)
-                ? {}
-                : { status: { not: PublicationOccurrenceStatus.CANCELED } }),
+              ...countableCalendarOccurrenceWhere(rule),
             },
           }),
         ]);
         const from = resolvePublicationRecurrenceFrom(rule, schedule, latest, now);
         const horizon = new Date(now.getTime() + PUBLICATION_RECURRENCE_HORIZON_MS);
-        const slots = expandPublicationSchedule(rule, {
-          from,
-          to: horizon,
-          existingCount,
-          now,
-          maxResults: 300,
-        });
+        const slots =
+          from > horizon
+            ? []
+            : expandPublicationSchedule(rule, {
+                from,
+                to: horizon,
+                existingCount,
+                now,
+                maxResults: 300,
+              });
         const reachedMax =
           rule.maxOccurrences !== null && existingCount + slots.length >= rule.maxOccurrences;
         const reachedEnd =
@@ -2119,7 +2207,7 @@ export class PublicationService {
         }
         const nextSlot =
           slots.length === 0 && !reachedMax && !reachedEnd
-            ? this.findNextRecurrenceSlot(rule, from, existingCount)
+            ? findNextPublicationRecurrenceSlot(rule, from, existingCount)
             : null;
         if (slots.length === 0 && !reachedMax && !reachedEnd && !nextSlot) {
           throw new Error('Не удалось определить следующий запуск публикации.');
@@ -2146,14 +2234,14 @@ export class PublicationService {
             logger: this.logger,
             schedule,
             publicationVersion: schedule.publication.version,
-            lockCalendar: (tx) => this.lockPublicationCalendar(tx),
+            lockCalendar: (tx) => lockPublicationCalendar(tx),
           });
           if (!databaseAvailable) break;
           continue;
         }
         await this.prisma.$transaction(async (tx: any) => {
           if (slots.length > 0) {
-            await this.lockPublicationCalendar(tx);
+            await lockPublicationCalendar(tx);
           }
           const claimed = await tx.publicationSchedule.updateMany({
             where: {
@@ -2180,13 +2268,14 @@ export class PublicationService {
             if (!currentPublication?.canonicalContentRevisionId) {
               throw new Error('Содержимое повтора больше недоступно.');
             }
-            await this.reservePublicationCalendar(
+            const occupied = await this.reservePublicationCalendar(
               tx,
               targets,
               slots,
               rule,
               schedule.publicationId,
               schedule.publication.actorUserId,
+              true,
               true,
             );
             await tx.publicationOccurrence.createMany({
@@ -2196,6 +2285,13 @@ export class PublicationService {
                 contentRevisionId: currentPublication.canonicalContentRevisionId,
                 scheduleRevision: schedule.revision,
                 scheduledAt,
+                ...(occupied?.has(scheduledAt.getTime())
+                  ? {
+                      status: PublicationOccurrenceStatus.CANCELED,
+                      dispatchBlockerCode: PUBLICATION_CALENDAR_SLOT_OCCUPIED,
+                      dispatchBlockedAt: now,
+                    }
+                  : {}),
                 deliveryDeadlineAt: snapshotPublicationDeliveryDeadline(scheduledAt, rule),
                 dispatchProfile: schedule.publication.dispatchProfile,
                 requiredBotId: schedule.publication.requiredBotId,
@@ -2210,7 +2306,7 @@ export class PublicationService {
           logger: this.logger,
           schedule,
           publicationVersion: schedule.publication.version,
-          lockCalendar: (tx) => this.lockPublicationCalendar(tx),
+          lockCalendar: (tx) => lockPublicationCalendar(tx),
           error,
         });
         if (!databaseAvailable) break;
@@ -2231,7 +2327,7 @@ export class PublicationService {
         resolveTargets: (publication) => this.resolveOccurrenceTargets(publication),
         createExecution: (occurrence, targets, schedule) =>
           this.createOccurrenceExecution(occurrence, targets, schedule),
-        lockCalendar: (tx) => this.lockPublicationCalendar(tx),
+        lockCalendar: (tx) => lockPublicationCalendar(tx),
         cancelFutureWork: (tx, publicationId, now) =>
           this.cancelFuturePublicationWork(tx, publicationId, now),
       },
@@ -2263,14 +2359,18 @@ export class PublicationService {
         targets: targets.filter((target) => target.entityType === 'channel'),
       },
     ].filter((group) => group.targets.length > 0);
-    const replaceConflicts = 'replaceConflicts' in schedule && schedule.replaceConflicts;
+    // FLAG: Only the authoring transaction may replace a reviewed set of slots.
+    const replaceConflicts =
+      occurrence.dispatchProfile !== PublicationDispatchProfile.PUBLIK_V1 &&
+      'replaceConflicts' in schedule &&
+      schedule.replaceConflicts;
     const postClaimStatus =
       occurrence.scheduledAt > new Date()
         ? PublicationOccurrenceStatus.SCHEDULED
         : PublicationOccurrenceStatus.IN_PROGRESS;
 
     await this.prisma.$transaction(async (tx: any) => {
-      await this.lockPublicationCalendar(tx);
+      await lockPublicationCalendar(tx);
       const claimed = await tx.publicationOccurrence.updateMany({
         where: {
           id: occurrence.id,
@@ -2508,7 +2608,7 @@ export class PublicationService {
     }
     const currentSchedule = publication.schedule;
     const grouped = await this.prisma.publicationOccurrence.groupBy({
-      by: ['status'],
+      by: ['status', 'dispatchBlockerCode'],
       where: {
         publicationId,
         scheduleId: currentSchedule.id,
@@ -2535,24 +2635,16 @@ export class PublicationService {
         if (rule.mode !== 'recurrence') {
           throw new Error('Повтор публикации повреждён.');
         }
-        const nonCanceledCount = grouped.reduce(
-          (count, group) =>
-            !readPublicationLatePolicy(rule) &&
-            group.status === PublicationOccurrenceStatus.CANCELED
-              ? count
-              : count + group._count._all,
-          0,
-        );
+        const countedOccurrences = countRecurrenceRollupOccurrences(rule, grouped);
         const totalCount = grouped.reduce((count, group) => count + group._count._all, 0);
-        const reachedMax = rule.maxOccurrences !== null && nonCanceledCount >= rule.maxOccurrences;
+        const reachedMax =
+          rule.maxOccurrences !== null && countedOccurrences >= rule.maxOccurrences;
         const latest = await this.prisma.publicationOccurrence.findFirst({
           where: {
             publicationId,
             scheduleId: currentSchedule.id,
             scheduleRevision: currentSchedule.revision,
-            ...(readPublicationLatePolicy(rule)
-              ? {}
-              : { status: { not: PublicationOccurrenceStatus.CANCELED } }),
+            ...countableCalendarOccurrenceWhere(rule),
           },
           orderBy: { scheduledAt: 'desc' },
           select: { scheduledAt: true },
@@ -2561,7 +2653,7 @@ export class PublicationService {
         const from = resolvePublicationRecurrenceFrom(rule, currentSchedule, latest, now);
         const nextSlot = reachedMax
           ? null
-          : this.findNextRecurrenceSlot(rule, from, nonCanceledCount);
+          : findNextPublicationRecurrenceSlot(rule, from, countedOccurrences);
         if (nextSlot) {
           const nextMaterializeAt = this.resolveRecurrenceHorizonEntry(nextSlot, now);
           try {
@@ -2635,7 +2727,7 @@ export class PublicationService {
     }
     try {
       await this.prisma.$transaction(async (tx: any) => {
-        await this.lockPublicationCalendar(tx);
+        await lockPublicationCalendar(tx);
         const activeOccurrenceCount = await tx.publicationOccurrence.count({
           where: {
             publicationId,
@@ -2779,7 +2871,7 @@ export class PublicationService {
 
     try {
       await this.prisma.$transaction(async (tx: any) => {
-        await this.lockPublicationCalendar(tx);
+        await lockPublicationCalendar(tx);
         const updated = await tx.publication.updateMany({
           where: {
             id: publicationId,
@@ -3068,7 +3160,7 @@ export class PublicationService {
       schedule?.mode !== 'recurrence' ||
       initialSlots.length > 0 ||
       schedule.endsAt === null ||
-      this.findNextRecurrenceSlot(schedule, now, 0)
+      findNextPublicationRecurrenceSlot(schedule, now, 0)
     ) {
       return;
     }
@@ -3092,32 +3184,8 @@ export class PublicationService {
       return new Date(now.getTime() + PUBLICATION_RECURRENCE_REFRESH_MS);
     }
 
-    const nextSlot = this.findNextRecurrenceSlot(schedule, now, 0);
+    const nextSlot = findNextPublicationRecurrenceSlot(schedule, now, 0);
     return nextSlot ? this.resolveRecurrenceHorizonEntry(nextSlot, now) : now;
-  }
-
-  private findNextRecurrenceSlot(
-    schedule: Extract<PublicationScheduleInput, { mode: 'recurrence' }>,
-    from: Date,
-    existingCount: number,
-  ): Date | null {
-    const startsAt = schedule.startsAt ? new Date(schedule.startsAt) : from;
-    const searchFrom = startsAt > from ? startsAt : from;
-    const lookaheadEnd = new Date(searchFrom.getTime() + PUBLICATION_RECURRENCE_LOOKAHEAD_MS);
-    const endsAt = schedule.endsAt ? new Date(schedule.endsAt) : null;
-    const searchTo = endsAt && endsAt < lookaheadEnd ? endsAt : lookaheadEnd;
-    if (searchTo < searchFrom) {
-      return null;
-    }
-
-    return (
-      expandPublicationSchedule(schedule, {
-        from: searchFrom,
-        to: searchTo,
-        existingCount,
-        now: from,
-      })[0] ?? null
-    );
   }
 
   private resolveRecurrenceHorizonEntry(nextSlot: Date, now: Date): Date {
@@ -3133,22 +3201,24 @@ export class PublicationService {
     actorUserId: string,
     excludePublicationId?: string,
   ): Promise<void> {
-    if (!schedule || schedule.mode === 'now' || slots.length === 0) {
+    if (!schedule || schedule.mode === 'now') {
       return;
     }
+    const checkSlots = getPublicationCalendarCheckSlots(schedule, slots);
+    await assertProjectedPublicationSlotsAvailable(
+      this.prisma,
+      targets,
+      checkSlots,
+      excludePublicationId,
+    );
+    if (!checkSlots.length) return;
     const conflicts = await findPublicationCalendarConflicts(
       this.prisma,
       targets,
-      slots,
+      checkSlots,
       excludePublicationId,
     );
-    if (conflicts.reservations.length === 0 && conflicts.occurrences.length === 0) {
-      return;
-    }
-    const replaceConflicts = 'replaceConflicts' in schedule && schedule.replaceConflicts;
-    if (!replaceConflicts) {
-      this.throwPublicationCalendarConflict(conflicts, targets);
-    }
+    assertPublicationCalendarReplacementConfirmation(schedule, conflicts, targets);
     this.assertPublicationOccurrenceReplacementSafe(conflicts.occurrences, targets);
   }
 
@@ -3160,25 +3230,40 @@ export class PublicationService {
     excludePublicationId: string,
     actorUserId: string,
     calendarAlreadyLocked = false,
-  ): Promise<void> {
-    if (schedule.mode === 'now' || slots.length === 0) {
+    materializing = false,
+    skippedByAt?: ReadonlyMap<number, unknown>,
+  ): Promise<Set<number> | undefined> {
+    if (schedule.mode === 'now') {
       return;
     }
+    const checkSlots = materializing
+      ? slots
+      : getPublicationCalendarCheckSlots(schedule, slots, skippedByAt);
+    if (!checkSlots.length) return;
     if (!calendarAlreadyLocked) {
-      await this.lockPublicationCalendar(tx);
+      await lockPublicationCalendar(tx);
+    }
+    if (!materializing) {
+      await assertProjectedPublicationSlotsAvailable(tx, targets, checkSlots, excludePublicationId);
     }
     const conflicts = await findPublicationCalendarConflicts(
       tx,
       targets,
-      slots,
+      checkSlots,
       excludePublicationId,
     );
+    // FLAG: Only skip a never-created occurrence during materialization. A previous send
+    // receipt or lease still prevents a new SEND identity at the same exact slot.
+    if (materializing) {
+      return new Set(
+        [...conflicts.reservations, ...conflicts.occurrences].map((row) =>
+          row.scheduledAt.getTime(),
+        ),
+      );
+    }
+    assertPublicationCalendarReplacementConfirmation(schedule, conflicts, targets);
     if (conflicts.reservations.length === 0 && conflicts.occurrences.length === 0) {
       return;
-    }
-    const replaceConflicts = 'replaceConflicts' in schedule && schedule.replaceConflicts;
-    if (!replaceConflicts) {
-      this.throwPublicationCalendarConflict(conflicts, targets);
     }
     this.assertPublicationOccurrenceReplacementSafe(conflicts.occurrences, targets);
 
@@ -3232,40 +3317,6 @@ export class PublicationService {
     if (conflicts.occurrences.length > 0) {
       await this.cancelConflictingPublicationOccurrences(tx, conflicts.occurrences);
     }
-  }
-
-  private async lockPublicationCalendar(tx: any): Promise<void> {
-    await tx.$executeRaw(Prisma.sql`
-      SELECT pg_advisory_xact_lock(hashtext('publication-calendar'))
-    `);
-  }
-
-  private throwPublicationCalendarConflict(
-    conflicts: PublicationCalendarConflicts,
-    targets: ResolvedPublicationTarget[],
-  ): never {
-    const requestedTargets = new Set(
-      targets.map((target) => `${this.toPrismaEntityType(target.entityType)}:${target.chatId}`),
-    );
-    const details = [
-      ...conflicts.reservations.map((conflict) => ({
-        chatId: conflict.targetChatId,
-        scheduledAt: conflict.scheduledAt.toISOString(),
-      })),
-      ...conflicts.occurrences.flatMap((occurrence) =>
-        occurrence.publication.targets
-          .filter((target) => requestedTargets.has(`${target.entityType}:${target.targetChatId}`))
-          .map((target) => ({
-            chatId: target.targetChatId,
-            scheduledAt: occurrence.scheduledAt.toISOString(),
-          })),
-      ),
-    ];
-    throw new ConflictException({
-      code: 'PUBLICATION_SCHEDULE_CONFLICT',
-      message: 'В выбранное время уже запланирована публикация.',
-      conflicts: details.slice(0, 20),
-    });
   }
 
   private assertPublicationOccurrenceReplacementSafe(

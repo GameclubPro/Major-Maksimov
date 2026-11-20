@@ -91,7 +91,7 @@ test('unchanged imminent once timing can be preserved while new timing still fai
   const changed = { ...baseline, title: 'Новое название' };
   assert.equal(canPreservePublicationSchedule(context, baseline, changed), true);
   assert.equal(getPublicationTimingIssue(changed, nowMs)?.field, 'time');
-  const changedTime = { ...changed, onceTime: '10:00', scheduledSlots: ['2030-01-01T10:00:00Z'] };
+  const changedTime = { ...changed, onceTime: '10:00', onceAt: '2030-01-01T10:00:00Z' };
   assert.equal(canPreservePublicationSchedule(context, baseline, changedTime), false);
   assert.equal(getPublicationTimingIssue(changedTime, nowMs)?.field, 'time');
 });

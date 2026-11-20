@@ -44,8 +44,14 @@ export function usePublicationRequestIds() {
       draft: PublicationDraft,
       context: PublicationSaveRequestContext,
       replaceConflicts: boolean,
+      conflictConfirmation?: string,
     ): string {
-      const key = buildPublicationSaveRequestKey(draft, context, replaceConflicts);
+      const key = buildPublicationSaveRequestKey(
+        draft,
+        context,
+        replaceConflicts,
+        conflictConfirmation,
+      );
       saveKindRef.current = context.kind;
       if (context.kind !== 'create') {
         return resolveRequestId('save', key);

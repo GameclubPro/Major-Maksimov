@@ -158,11 +158,15 @@ try {
         await chooseTime(page, '14:37');
         await modes.getByRole('button', { name: 'Расписание', exact: true }).click();
         await page.locator('.broadcast-planner__compact-summary').click();
+        await page.locator('[data-broadcast-schedule-day="2030-01-02"]').click();
         await page
           .locator('.broadcast-planner__dock')
           .getByRole('button', { name: 'Время', exact: true })
           .click();
-        await page.getByRole('button', { name: 'Удалить время 14:37', exact: true }).click();
+        assert.equal(
+          await page.getByRole('button', { name: 'Удалить время 14:37', exact: true }).count(),
+          0,
+        );
         await page.locator('.broadcast-planner__custom-time .time-field__button').click();
         await page.getByRole('textbox', { name: 'Часы', exact: true }).fill('16');
         await page.getByRole('textbox', { name: 'Минуты', exact: true }).fill('11');
@@ -174,8 +178,8 @@ try {
         await primary.click();
         await review.waitFor();
         assert.match(
-          await review.locator('.publication-preview__facts').textContent(),
-          /2 янв., 14:37/u,
+          await review.locator('.publication-review-timing time').textContent(),
+          /2 января 2030 г\. в 14:37/u,
         );
         await assertReachable(review.getByRole('button', { name: 'Запланировать', exact: true }));
         await page.screenshot({ path: `${output}/${name}-${colorScheme}-review.png` });

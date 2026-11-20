@@ -1,6 +1,6 @@
 import { formatPublicationMediaSummary } from './publication-page-formatters';
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   PublicationDelivery,
   PublicationDetails,
@@ -9,19 +9,26 @@ import type {
   PublicationSummary,
 } from '@maxim/contracts/publication';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
 import { EntityAvatar } from '../../components/ui/entity-avatar';
 import { StatusState } from '../../components/ui/status-state';
+import { ActionConfirmSheet } from '../../components/ui/action-confirm-sheet';
+import { useToast } from '../../components/ui/toast';
 import { describeUserFacingError } from '../../lib/user-facing-error';
-import { getPublication, listPublicationDeliveries } from '../../lib/api/publication-client';
+import {
+  getPublication,
+  listPublicationDeliveries,
+  skipPublicationOccurrence,
+} from '../../lib/api/publication-client';
 import type { ApiTransport } from '../../lib/api/transport';
 import { formatRussianCountLabel } from '../../lib/broadcast-audience';
 import { cn } from '../../lib/cn';
 import { isTopmostModalDialog, useDialogFocusTrap } from '../../lib/dialog-focus';
 import { useNativeBackHandler } from '../../lib/native-back';
 import { formatPublicationDeliveryError } from './publication-delivery-error';
+import { createPublicationRequestId } from './publication-request-identity';
 import { PublicationDeliveryActions } from './publication-delivery-actions';
 import { getPublicationDeliveryPresentation } from './publication-delivery-presentation';
 import { getPublicationDeliveryResultPresentation } from './publication-delivery-result-presentation';
@@ -127,6 +134,20 @@ function resolvePublicationDetailsPortalTarget(): Element | null {
   return document.querySelector('.design-preview__device-screen') ?? document.body;
 }
 
+function orderPublicationOccurrences(details: PublicationDetails): PublicationOccurrenceSummary[] {
+  if (details.schedule?.mode !== 'recurrence') return details.occurrences;
+  const now = Date.now();
+  const upcoming: PublicationOccurrenceSummary[] = [];
+  const other: PublicationOccurrenceSummary[] = [];
+  for (const occurrence of details.occurrences) {
+    const isUpcoming =
+      occurrence.status === 'SCHEDULED' && Date.parse(occurrence.scheduledAt) > now;
+    (isUpcoming ? upcoming : other).push(occurrence);
+  }
+  upcoming.sort((first, second) => Date.parse(first.scheduledAt) - Date.parse(second.scheduledAt));
+  return [...upcoming, ...other];
+}
+
 export function PublicationDetailsSheet({
   api,
   publication,
@@ -143,9 +164,40 @@ export function PublicationDetailsSheet({
   onResolveAmbiguous,
 }: PublicationDetailsSheetProps) {
   const open = publication !== null;
+  const client = useQueryClient();
+  const { pushToast } = useToast();
+  const [skipTarget, setSkipTarget] = useState<{
+    occurrence: PublicationOccurrenceSummary;
+    publicationId: string;
+    version: number;
+    requestId: string;
+    timezone: string;
+  } | null>(null);
+  const skipMutation = useMutation({
+    mutationFn: (target: NonNullable<typeof skipTarget>) =>
+      skipPublicationOccurrence(api, target.publicationId, target.occurrence.id, {
+        expectedRevision: target.version,
+        requestId: target.requestId,
+      }),
+    onSuccess: (updated) => {
+      client.setQueryData(['publications', 'details', updated.id], updated);
+      void client.invalidateQueries({ queryKey: ['publications'] });
+      setSkipTarget(null);
+      pushToast({ tone: 'success', title: 'Выпуск пропущен' });
+    },
+    onError: (error: unknown) => {
+      void client.invalidateQueries({ queryKey: ['publications', 'details', publication?.id] });
+      pushToast({
+        tone: 'danger',
+        title: describeUserFacingError(error, 'Не удалось пропустить выпуск'),
+      });
+    },
+  });
+  const activeSkip = skipTarget?.publicationId === publication?.id ? skipTarget : null;
+  const sheetCovered = covered || activeSkip !== null;
   const panelRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  useDialogFocusTrap(open && !covered, panelRef, closeButtonRef);
+  useDialogFocusTrap(open && !sheetCovered, panelRef, closeButtonRef);
   const detailsQuery = useQuery({
     queryKey: ['publications', 'details', publication?.id],
     queryFn: () => getPublication(api, publication?.id ?? ''),
@@ -287,7 +339,7 @@ export function PublicationDetailsSheet({
       onClose();
       return true;
     },
-    { enabled: open && !covered, priority: 720 },
+    { enabled: open && !sheetCovered, priority: 720 },
   );
 
   useEffect(() => {
@@ -340,515 +392,572 @@ export function PublicationDetailsSheet({
         : 'Изменить расписание';
 
   return createPortal(
-    <div className="publication-details-sheet" aria-hidden={covered || undefined} inert={covered}>
-      <button
-        type="button"
-        className="publication-details-sheet__backdrop"
-        onClick={onClose}
-        aria-label="Закрыть детали"
-        disabled={busy}
-      />
-      <section
-        ref={panelRef}
-        className="publication-details-sheet__panel"
-        role="dialog"
-        aria-modal={covered ? undefined : true}
-        aria-labelledby="publication-details-title"
-        tabIndex={-1}
+    <>
+      <div
+        className="publication-details-sheet"
+        aria-hidden={sheetCovered || undefined}
+        inert={sheetCovered}
       >
-        <div className="publication-details-sheet__grabber" aria-hidden />
-        <header className="publication-details-sheet__header">
-          <span>
-            <strong id="publication-details-title">{publication.title || 'Публикация'}</strong>
-            <small>
-              {formatRussianCountLabel(
-                publication.targetCount,
-                'получатель',
-                'получателя',
-                'получателей',
-              )}
-            </small>
-          </span>
-          <button
-            ref={closeButtonRef}
-            type="button"
-            onClick={onClose}
-            aria-label="Закрыть"
-            disabled={busy}
-          >
-            <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-          </button>
-        </header>
-
-        <div className="publication-details-sheet__body">
-          {detailsQuery.isLoading ? (
-            <StatusState tone="neutral" title="Загружаю детали" />
-          ) : detailsQuery.isError && !details ? (
-            <StatusState
-              tone="danger"
-              title="Не удалось открыть"
-              description={describeUserFacingError(detailsQuery.error, 'Повторите ещё раз.')}
-            />
-          ) : details ? (
-            <>
-              <section
-                className={cn(
-                  'publication-details-result',
-                  resultPresentation.needsAttention && 'needs-attention',
+        <button
+          type="button"
+          className="publication-details-sheet__backdrop"
+          onClick={onClose}
+          aria-label="Закрыть детали"
+          disabled={busy}
+        />
+        <section
+          ref={panelRef}
+          className="publication-details-sheet__panel"
+          role="dialog"
+          aria-modal={sheetCovered ? undefined : true}
+          aria-labelledby="publication-details-title"
+          tabIndex={-1}
+        >
+          <div className="publication-details-sheet__grabber" aria-hidden />
+          <header className="publication-details-sheet__header">
+            <span>
+              <strong id="publication-details-title">{publication.title || 'Публикация'}</strong>
+              <small>
+                {formatRussianCountLabel(
+                  publication.targetCount,
+                  'получатель',
+                  'получателя',
+                  'получателей',
                 )}
-                aria-label="Результат доставки"
-              >
-                <span>Доставка · За всё время</span>
-                <strong>{resultPresentation.headline}</strong>
-                {resultPresentation.currentFacts.length > 0 ? (
-                  <div className="publication-details-result__current">
-                    <span>Сейчас</span>
-                    {resultPresentation.currentFacts.map((fact) => (
-                      <small key={fact}>{fact}</small>
-                    ))}
-                  </div>
-                ) : null}
-                {details.delivery.canceled > 0 ? (
-                  <small>Отменено: {details.delivery.canceled}</small>
-                ) : null}
-              </section>
-              {dispatchIssuePresentation ? (
-                <div
-                  className="publication-details-dispatch-notice"
-                  role="status"
-                  aria-atomic="true"
-                >
-                  <IconoirSprite variant="iconoir" icon="WarningCircle" aria-hidden />
-                  <span>
-                    <strong>
-                      {publisherAccessRechecking
-                        ? 'Проверяю подключения'
-                        : dispatchIssuePresentation.title}
-                    </strong>
-                    <small>{dispatchIssuePresentation.description}</small>
-                  </span>
-                  {dispatchIssuePresentation.canRecheck && onRecheckPublisherAccess ? (
-                    <button
-                      type="button"
-                      className={cn(publisherAccessRechecking && 'is-refreshing')}
-                      onClick={() => onRecheckPublisherAccess(publication.id)}
-                      disabled={busy || publisherAccessRecheckBusy || publisherAccessRechecking}
-                      aria-label={
-                        publisherAccessRechecking
-                          ? 'Проверяются подключения'
-                          : publisherAccessRecheckBusy
-                            ? 'Проверка уже выполняется'
-                            : 'Проверить подключения'
-                      }
-                      title={
-                        publisherAccessRechecking
-                          ? 'Проверяются подключения'
-                          : publisherAccessRecheckBusy
-                            ? 'Проверка уже выполняется'
-                            : 'Проверить подключения'
-                      }
-                    >
-                      <IconoirSprite variant="iconoir" icon="Refresh" aria-hidden />
-                    </button>
-                  ) : null}
-                </div>
-              ) : null}
-
-              <div className="publication-details-sheet__message">
-                {details.content.media.length > 0 ? (
-                  <span className="publication-details-sheet__media">
-                    {formatPublicationMediaSummary({
-                      ...details,
-                      videoCount:
-                        details.videoCount ??
-                        details.content.media.filter((item) => item.type === 'video').length,
-                    })}
-                  </span>
-                ) : null}
-                <MaxMarkdownPreview
-                  value={details.content.text}
-                  sourceFormat={details.content.textFormat}
-                  normalizeWhitespace
-                  fallback={null}
-                />
-              </div>
-
-              <section className="publication-details-section">
-                <strong>Получатели</strong>
-                <div className="publication-details-targets">
-                  {details.targets.map((target) => (
-                    <div key={`${target.entityType}:${target.chatId}`}>
-                      <EntityAvatar
-                        title={target.title}
-                        entityType={target.entityType}
-                        avatarUrl={target.avatarUrl}
-                      />
-                      <span className="publication-details-targets__copy">
-                        <strong>{target.title}</strong>
-                        <small>{target.entityType === 'channel' ? 'Канал' : 'Чат'}</small>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              {publicationPostPublishLabels(details.content.postPublish).length > 0 ? (
-                <section className="publication-details-section">
-                  <strong>После публикации</strong>
-                  {publicationPostPublishLabels(details.content.postPublish).map((label) => (
-                    <span key={label}>{label}</span>
-                  ))}
-                </section>
-              ) : null}
-
-              <section className="publication-details-section">
-                <strong>Отправки</strong>
-                <div className="publication-occurrences">
-                  {details.occurrences.length > 0 ? (
-                    details.occurrences.map((occurrence) => {
-                      const revisionLabel = formatOccurrenceRevision(
-                        occurrence,
-                        details.content.revision,
-                      );
-                      const staleContent = isPublicationOccurrenceContentStale(
-                        occurrence,
-                        details.content.revision,
-                      );
-                      return (
-                        <div
-                          key={occurrence.id}
-                          data-occurrence-id={occurrence.id}
-                          className={cn(
-                            `is-${occurrence.status.toLowerCase()}`,
-                            occurrence.dispatchIssue && 'has-dispatch-issue',
-                            occurrence.canRetry && 'has-retry-action',
-                          )}
-                        >
-                          <span className="publication-deliveries__copy">
-                            <strong>
-                              {formatDateTime(occurrence.scheduledAt, details.schedule?.timezone)}
-                            </strong>
-                            {occurrence.delivery.total > 0 ? (
-                              <small>
-                                Отправлено {occurrence.delivery.sent}/{occurrence.delivery.total}
-                              </small>
-                            ) : null}
-                            {revisionLabel ? (
-                              <small
-                                className={cn(
-                                  'publication-occurrences__revision',
-                                  staleContent && 'is-stale',
-                                )}
-                              >
-                                {revisionLabel}
-                              </small>
-                            ) : null}
-                            {occurrence.dispatchIssue && occurrence.dispatchBlockedSince ? (
-                              <small>
-                                {['SCHEDULED', 'IN_PROGRESS'].includes(occurrence.status)
-                                  ? 'Ожидает с'
-                                  : 'Причина отмечена'}{' '}
-                                {formatDateTime(
-                                  occurrence.dispatchBlockedSince,
-                                  details.schedule?.timezone,
-                                )}
-                              </small>
-                            ) : null}
-                            {occurrence.dispatchIssue && occurrence.dispatchCheckedAt ? (
-                              <small>
-                                Проверено{' '}
-                                {formatDateTime(
-                                  occurrence.dispatchCheckedAt,
-                                  details.schedule?.timezone,
-                                )}
-                              </small>
-                            ) : null}
-                          </span>
-                          <span className="publication-occurrences__actions">
-                            <span className="publication-occurrences__status">
-                              {getPublicationDispatchIssuePresentation(
-                                occurrence.dispatchIssue,
-                                occurrence.requiresScheduleDecision,
-                              )?.label ?? OCCURRENCE_STATUS_LABELS[occurrence.status]}
-                            </span>
-                            {occurrence.canRetry ? (
-                              <button
-                                type="button"
-                                onClick={() => onRetry(details, occurrence)}
-                                disabled={busy}
-                                aria-label={`${occurrence.requiresScheduleDecision ? 'Отправить пропущенный запуск' : 'Повторить запуск'}: ${formatDateTime(occurrence.scheduledAt, details.schedule?.timezone)}`}
-                              >
-                                <IconoirSprite variant="iconoir" icon="RefreshDouble" aria-hidden />
-                                <span className="publication-occurrences__retry-label">
-                                  <span>
-                                    {occurrence.requiresScheduleDecision
-                                      ? 'Отправить пропущенный запуск'
-                                      : 'Повторить запуск'}
-                                  </span>
-                                  <small>
-                                    {formatDateTime(
-                                      occurrence.scheduledAt,
-                                      details.schedule?.timezone,
-                                    )}
-                                  </small>
-                                </span>
-                              </button>
-                            ) : null}
-                          </span>
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <span className="publication-details-empty">Отправок пока нет</span>
-                  )}
-                </div>
-              </section>
-
-              <section className="publication-details-section">
-                <div className="publication-details-section__head">
-                  <strong>Доставка</strong>
-                  {details.delivery.total > 0 ? (
-                    <span
-                      className={cn(
-                        'publication-details-section__total',
-                        ambiguousDeliveries.length > 0 && 'is-danger',
-                      )}
-                    >
-                      Отправлено {details.delivery.sent}/{details.delivery.total}
-                      {ambiguousDeliveries.length > 0
-                        ? ` · проверить ${Math.max(ambiguousCount, ambiguousDeliveries.length)}`
-                        : ''}
-                    </span>
-                  ) : null}
-                </div>
-                {deliveries.length > 0 ? (
-                  <div className="publication-deliveries">
-                    {deliveries.map((delivery) => {
-                      const staleContentRevision = getStaleDeliveryContentRevision(
-                        delivery,
-                        details.content.revision,
-                      );
-                      const deliveryError = formatPublicationDeliveryError(delivery.lastError);
-                      const deliveryPresentation = getPublicationDeliveryPresentation(delivery);
-                      return (
-                        <div key={delivery.id}>
-                          <EntityAvatar
-                            title={delivery.target.title}
-                            entityType={delivery.target.entityType}
-                            avatarUrl={delivery.target.avatarUrl}
-                          />
-                          <span className="publication-deliveries__copy">
-                            <strong>{delivery.target.title}</strong>
-                            <small
-                              className={cn(
-                                'publication-deliveries__status',
-                                `is-${delivery.status.toLowerCase()}`,
-                              )}
-                            >
-                              {deliveryPresentation.label}
-                            </small>
-                            {deliveryPresentation.stopNotice ? (
-                              <small>{deliveryPresentation.stopNotice}</small>
-                            ) : null}
-                            {deliveryPresentation.showPendingTiming && delivery.waitReason ? (
-                              <small>
-                                {delivery.waitReason === 'max_rate_limit'
-                                  ? 'MAX ограничил частоту. Пост остаётся в очереди.'
-                                  : delivery.waitReason === 'circuit_open'
-                                    ? 'Ожидаем восстановления MAX. Пост остаётся в очереди.'
-                                    : 'Ожидаем доступного времени отправки.'}
-                              </small>
-                            ) : null}
-                            {deliveryPresentation.showPendingTiming && delivery.nextAttemptAt ? (
-                              <small>
-                                Следующая попытка не раньше{' '}
-                                {formatDateTime(
-                                  delivery.nextAttemptAt,
-                                  details.schedule?.timezone,
-                                  true,
-                                )}
-                              </small>
-                            ) : null}
-                            {deliveryPresentation.showPendingTiming && delivery.deadlineAt ? (
-                              <small>
-                                При задержке пост актуален до{' '}
-                                {formatDateTime(delivery.deadlineAt, details.schedule?.timezone)}
-                              </small>
-                            ) : null}
-                            {delivery.sentAt ? (
-                              <small>
-                                Отправлено{' '}
-                                {formatDateTime(delivery.sentAt, details.schedule?.timezone)}
-                              </small>
-                            ) : null}
-                            {publicationPostActionLabels(
-                              delivery.postActions,
-                              details.schedule?.timezone,
-                            ).map((label) => (
-                              <small key={label}>{label}</small>
-                            ))}
-                            {delivery.postActions?.pinError ? (
-                              <small className="publication-deliveries__error">
-                                {delivery.postActions.pinError}
-                              </small>
-                            ) : null}
-                            {delivery.postActions?.deleteError ? (
-                              <small className="publication-deliveries__error">
-                                {delivery.postActions.deleteError}
-                              </small>
-                            ) : null}
-                            <PublicationDeliveryActions
-                              api={api}
-                              publicationId={details.id}
-                              delivery={delivery}
-                              timezone={details.schedule?.timezone}
-                              disabled={busy}
-                            />
-                            {staleContentRevision ? (
-                              <small className="publication-deliveries__revision">
-                                Прежний вариант поста
-                              </small>
-                            ) : null}
-                            {deliveryError ? (
-                              <small className="publication-deliveries__error">
-                                {deliveryError}
-                              </small>
-                            ) : null}
-                          </span>
-                          {delivery.status === 'AMBIGUOUS' ? (
-                            <span className="publication-delivery-resolution">
-                              <button
-                                type="button"
-                                aria-label={`Подтвердить публикацию в ${delivery.target.title}`}
-                                onClick={() =>
-                                  onResolveAmbiguous(
-                                    details.id,
-                                    delivery.occurrenceId,
-                                    delivery.id,
-                                    'mark_sent',
-                                  )
-                                }
-                                disabled={busy}
-                              >
-                                Опубликовано
-                              </button>
-                              <button
-                                type="button"
-                                className="is-danger"
-                                aria-label={`Отметить неотправленной для ${delivery.target.title}`}
-                                onClick={() =>
-                                  onResolveAmbiguous(
-                                    details.id,
-                                    delivery.occurrenceId,
-                                    delivery.id,
-                                    'mark_failed',
-                                  )
-                                }
-                                disabled={busy}
-                              >
-                                Не отправлено
-                              </button>
-                            </span>
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : ambiguousInitialError ? (
-                  <span className="publication-details-empty">Не удалось загрузить проверку</span>
-                ) : ambiguousDeliveriesQuery.isLoading ||
-                  !ambiguousPhaseComplete ||
-                  deliveriesQuery.isLoading ? (
-                  <span className="publication-details-empty">Загрузка...</span>
-                ) : ambiguousDeliveriesQuery.isError || deliveriesQuery.isError ? (
-                  <span className="publication-details-empty">Детали доставки недоступны</span>
-                ) : (
-                  <span className="publication-details-empty">Доставок пока нет</span>
-                )}
-                {deliveries.length > 0 && (!ambiguousPhaseComplete || deliveriesQuery.isLoading) ? (
-                  <span className="publication-details-pagination-state">Загрузка...</span>
-                ) : null}
-                {ambiguousInitialError ? (
-                  <button
-                    type="button"
-                    className="publication-details-load-more"
-                    onClick={() => void ambiguousDeliveriesQuery.refetch()}
-                    disabled={ambiguousDeliveriesQuery.isFetching}
-                  >
-                    Повторить
-                  </button>
-                ) : ambiguousDeliveriesQuery.isFetchNextPageError ? (
-                  <button
-                    type="button"
-                    className="publication-details-load-more"
-                    onClick={() => void ambiguousDeliveriesQuery.fetchNextPage()}
-                    disabled={ambiguousDeliveriesQuery.isFetchingNextPage}
-                  >
-                    Повторить
-                  </button>
-                ) : null}
-                {ambiguousPhaseComplete && deliveriesQuery.hasNextPage ? (
-                  <button
-                    type="button"
-                    className="publication-details-load-more"
-                    onClick={() => void deliveriesQuery.fetchNextPage()}
-                    disabled={deliveriesQuery.isFetchingNextPage}
-                  >
-                    {deliveriesQuery.isFetchingNextPage
-                      ? 'Загрузка...'
-                      : deliveriesQuery.isFetchNextPageError
-                        ? 'Повторить'
-                        : 'Показать ещё'}
-                  </button>
-                ) : ambiguousPhaseComplete && deliveriesQuery.isError && !deliveriesQuery.data ? (
-                  <button
-                    type="button"
-                    className="publication-details-load-more"
-                    onClick={() => void deliveriesQuery.refetch()}
-                  >
-                    Повторить
-                  </button>
-                ) : null}
-              </section>
-            </>
-          ) : null}
-        </div>
-
-        <footer className="publication-details-sheet__footer">
-          {allowEdit && actionCapabilities.canEdit ? (
+              </small>
+            </span>
             <button
+              ref={closeButtonRef}
               type="button"
-              className="publications-primary"
-              onClick={() => onEdit(publication.id)}
-              disabled={busy}
-            >
-              <IconoirSprite variant="iconoir" icon="EditPencil" aria-hidden />
-              <span>{editLabel}</span>
-            </button>
-          ) : null}
-          {actionCapabilities.canCancel ? (
-            <button
-              type="button"
-              className="publication-details-sheet__cancel"
-              onClick={() => onCancel(details ?? publication)}
+              onClick={onClose}
+              aria-label="Закрыть"
               disabled={busy}
             >
               <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
-              <span>
-                {publication.access?.canManageAllTargets === false
-                  ? 'Отменить отправки'
-                  : actionCapabilities.hasFutureSends
-                    ? 'Отменить будущие отправки'
-                    : 'Отменить публикацию'}
-              </span>
             </button>
-          ) : null}
-          <button type="button" onClick={onClose} disabled={busy}>
-            Закрыть
-          </button>
-        </footer>
-      </section>
-    </div>,
+          </header>
+
+          <div className="publication-details-sheet__body">
+            {detailsQuery.isLoading ? (
+              <StatusState tone="neutral" title="Загружаю детали" />
+            ) : detailsQuery.isError && !details ? (
+              <StatusState
+                tone="danger"
+                title="Не удалось открыть"
+                description={describeUserFacingError(detailsQuery.error, 'Повторите ещё раз.')}
+              />
+            ) : details ? (
+              <>
+                <section
+                  className={cn(
+                    'publication-details-result',
+                    resultPresentation.needsAttention && 'needs-attention',
+                  )}
+                  aria-label="Результат доставки"
+                >
+                  <span>Доставка · За всё время</span>
+                  <strong>{resultPresentation.headline}</strong>
+                  {resultPresentation.currentFacts.length > 0 ? (
+                    <div className="publication-details-result__current">
+                      <span>Сейчас</span>
+                      {resultPresentation.currentFacts.map((fact) => (
+                        <small key={fact}>{fact}</small>
+                      ))}
+                    </div>
+                  ) : null}
+                  {details.delivery.canceled > 0 ? (
+                    <small>Отменено: {details.delivery.canceled}</small>
+                  ) : null}
+                </section>
+                {dispatchIssuePresentation ? (
+                  <div
+                    className="publication-details-dispatch-notice"
+                    role="status"
+                    aria-atomic="true"
+                  >
+                    <IconoirSprite variant="iconoir" icon="WarningCircle" aria-hidden />
+                    <span>
+                      <strong>
+                        {publisherAccessRechecking
+                          ? 'Проверяю подключения'
+                          : dispatchIssuePresentation.title}
+                      </strong>
+                      <small>{dispatchIssuePresentation.description}</small>
+                    </span>
+                    {dispatchIssuePresentation.canRecheck && onRecheckPublisherAccess ? (
+                      <button
+                        type="button"
+                        className={cn(publisherAccessRechecking && 'is-refreshing')}
+                        onClick={() => onRecheckPublisherAccess(publication.id)}
+                        disabled={busy || publisherAccessRecheckBusy || publisherAccessRechecking}
+                        aria-label={
+                          publisherAccessRechecking
+                            ? 'Проверяются подключения'
+                            : publisherAccessRecheckBusy
+                              ? 'Проверка уже выполняется'
+                              : 'Проверить подключения'
+                        }
+                        title={
+                          publisherAccessRechecking
+                            ? 'Проверяются подключения'
+                            : publisherAccessRecheckBusy
+                              ? 'Проверка уже выполняется'
+                              : 'Проверить подключения'
+                        }
+                      >
+                        <IconoirSprite variant="iconoir" icon="Refresh" aria-hidden />
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <div className="publication-details-sheet__message">
+                  {details.content.media.length > 0 ? (
+                    <span className="publication-details-sheet__media">
+                      {formatPublicationMediaSummary({
+                        ...details,
+                        videoCount:
+                          details.videoCount ??
+                          details.content.media.filter((item) => item.type === 'video').length,
+                      })}
+                    </span>
+                  ) : null}
+                  <MaxMarkdownPreview
+                    value={details.content.text}
+                    sourceFormat={details.content.textFormat}
+                    normalizeWhitespace
+                    fallback={null}
+                  />
+                </div>
+
+                <section className="publication-details-section">
+                  <strong>Получатели</strong>
+                  <div className="publication-details-targets">
+                    {details.targets.map((target) => (
+                      <div key={`${target.entityType}:${target.chatId}`}>
+                        <EntityAvatar
+                          title={target.title}
+                          entityType={target.entityType}
+                          avatarUrl={target.avatarUrl}
+                        />
+                        <span className="publication-details-targets__copy">
+                          <strong>{target.title}</strong>
+                          <small>{target.entityType === 'channel' ? 'Канал' : 'Чат'}</small>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                {publicationPostPublishLabels(details.content.postPublish).length > 0 ? (
+                  <section className="publication-details-section">
+                    <strong>После публикации</strong>
+                    {publicationPostPublishLabels(details.content.postPublish).map((label) => (
+                      <span key={label}>{label}</span>
+                    ))}
+                  </section>
+                ) : null}
+
+                <section className="publication-details-section">
+                  <strong>Отправки</strong>
+                  <div className="publication-occurrences">
+                    {details.occurrences.length > 0 ? (
+                      orderPublicationOccurrences(details).map((occurrence) => {
+                        const revisionLabel = formatOccurrenceRevision(
+                          occurrence,
+                          details.content.revision,
+                        );
+                        const staleContent = isPublicationOccurrenceContentStale(
+                          occurrence,
+                          details.content.revision,
+                        );
+                        return (
+                          <div
+                            key={occurrence.id}
+                            data-occurrence-id={occurrence.id}
+                            className={cn(
+                              `is-${occurrence.status.toLowerCase()}`,
+                              occurrence.dispatchIssue && 'has-dispatch-issue',
+                              occurrence.canRetry && 'has-retry-action',
+                            )}
+                          >
+                            <span className="publication-deliveries__copy">
+                              <strong>
+                                {formatDateTime(occurrence.scheduledAt, details.schedule?.timezone)}
+                              </strong>
+                              {occurrence.delivery.total > 0 ? (
+                                <small>
+                                  Отправлено {occurrence.delivery.sent}/{occurrence.delivery.total}
+                                </small>
+                              ) : null}
+                              {revisionLabel ? (
+                                <small
+                                  className={cn(
+                                    'publication-occurrences__revision',
+                                    staleContent && 'is-stale',
+                                  )}
+                                >
+                                  {revisionLabel}
+                                </small>
+                              ) : null}
+                              {occurrence.dispatchIssue && occurrence.dispatchBlockedSince ? (
+                                <small>
+                                  {['SCHEDULED', 'IN_PROGRESS'].includes(occurrence.status)
+                                    ? 'Ожидает с'
+                                    : 'Причина отмечена'}{' '}
+                                  {formatDateTime(
+                                    occurrence.dispatchBlockedSince,
+                                    details.schedule?.timezone,
+                                  )}
+                                </small>
+                              ) : null}
+                              {occurrence.dispatchIssue && occurrence.dispatchCheckedAt ? (
+                                <small>
+                                  Проверено{' '}
+                                  {formatDateTime(
+                                    occurrence.dispatchCheckedAt,
+                                    details.schedule?.timezone,
+                                  )}
+                                </small>
+                              ) : null}
+                            </span>
+                            <span className="publication-occurrences__actions">
+                              <span className="publication-occurrences__status">
+                                {occurrence.calendarConflict
+                                  ? 'Пропущено · время занято'
+                                  : occurrence.skippedByEditor
+                                    ? 'Пропущено'
+                                    : (getPublicationDispatchIssuePresentation(
+                                        occurrence.dispatchIssue,
+                                        occurrence.requiresScheduleDecision,
+                                      )?.label ?? OCCURRENCE_STATUS_LABELS[occurrence.status])}
+                              </span>
+                              {allowEdit &&
+                              details.access?.canManageAllTargets !== false &&
+                              details.lifecycle === 'ACTIVE' &&
+                              details.schedule?.mode === 'recurrence' &&
+                              occurrence.status === 'SCHEDULED' &&
+                              occurrence.delivery.total === 0 &&
+                              Date.parse(occurrence.scheduledAt) > Date.now() ? (
+                                <button
+                                  className="publication-occurrences__skip"
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    setSkipTarget({
+                                      occurrence,
+                                      publicationId: details.id,
+                                      version: details.version,
+                                      requestId: createPublicationRequestId(),
+                                      timezone: details.schedule?.timezone ?? 'Europe/Moscow',
+                                    })
+                                  }
+                                >
+                                  Пропустить
+                                </button>
+                              ) : null}
+                              {occurrence.canRetry ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onRetry(details, occurrence)}
+                                  disabled={busy}
+                                  aria-label={`${occurrence.requiresScheduleDecision ? 'Отправить пропущенный запуск' : 'Повторить запуск'}: ${formatDateTime(occurrence.scheduledAt, details.schedule?.timezone)}`}
+                                >
+                                  <IconoirSprite
+                                    variant="iconoir"
+                                    icon="RefreshDouble"
+                                    aria-hidden
+                                  />
+                                  <span className="publication-occurrences__retry-label">
+                                    <span>
+                                      {occurrence.requiresScheduleDecision
+                                        ? 'Отправить пропущенный запуск'
+                                        : 'Повторить запуск'}
+                                    </span>
+                                    <small>
+                                      {formatDateTime(
+                                        occurrence.scheduledAt,
+                                        details.schedule?.timezone,
+                                      )}
+                                    </small>
+                                  </span>
+                                </button>
+                              ) : null}
+                            </span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <span className="publication-details-empty">Отправок пока нет</span>
+                    )}
+                  </div>
+                </section>
+
+                <section className="publication-details-section">
+                  <div className="publication-details-section__head">
+                    <strong>Доставка</strong>
+                    {details.delivery.total > 0 ? (
+                      <span
+                        className={cn(
+                          'publication-details-section__total',
+                          ambiguousDeliveries.length > 0 && 'is-danger',
+                        )}
+                      >
+                        Отправлено {details.delivery.sent}/{details.delivery.total}
+                        {ambiguousDeliveries.length > 0
+                          ? ` · проверить ${Math.max(ambiguousCount, ambiguousDeliveries.length)}`
+                          : ''}
+                      </span>
+                    ) : null}
+                  </div>
+                  {deliveries.length > 0 ? (
+                    <div className="publication-deliveries">
+                      {deliveries.map((delivery) => {
+                        const staleContentRevision = getStaleDeliveryContentRevision(
+                          delivery,
+                          details.content.revision,
+                        );
+                        const deliveryError = formatPublicationDeliveryError(delivery.lastError);
+                        const deliveryPresentation = getPublicationDeliveryPresentation(delivery);
+                        return (
+                          <div key={delivery.id}>
+                            <EntityAvatar
+                              title={delivery.target.title}
+                              entityType={delivery.target.entityType}
+                              avatarUrl={delivery.target.avatarUrl}
+                            />
+                            <span className="publication-deliveries__copy">
+                              <strong>{delivery.target.title}</strong>
+                              <small
+                                className={cn(
+                                  'publication-deliveries__status',
+                                  `is-${delivery.status.toLowerCase()}`,
+                                )}
+                              >
+                                {deliveryPresentation.label}
+                              </small>
+                              {deliveryPresentation.stopNotice ? (
+                                <small>{deliveryPresentation.stopNotice}</small>
+                              ) : null}
+                              {deliveryPresentation.showPendingTiming && delivery.waitReason ? (
+                                <small>
+                                  {delivery.waitReason === 'max_rate_limit'
+                                    ? 'MAX ограничил частоту. Пост остаётся в очереди.'
+                                    : delivery.waitReason === 'circuit_open'
+                                      ? 'Ожидаем восстановления MAX. Пост остаётся в очереди.'
+                                      : 'Ожидаем доступного времени отправки.'}
+                                </small>
+                              ) : null}
+                              {deliveryPresentation.showPendingTiming && delivery.nextAttemptAt ? (
+                                <small>
+                                  Следующая попытка не раньше{' '}
+                                  {formatDateTime(
+                                    delivery.nextAttemptAt,
+                                    details.schedule?.timezone,
+                                    true,
+                                  )}
+                                </small>
+                              ) : null}
+                              {deliveryPresentation.showPendingTiming && delivery.deadlineAt ? (
+                                <small>
+                                  При задержке пост актуален до{' '}
+                                  {formatDateTime(delivery.deadlineAt, details.schedule?.timezone)}
+                                </small>
+                              ) : null}
+                              {delivery.sentAt ? (
+                                <small>
+                                  Отправлено{' '}
+                                  {formatDateTime(delivery.sentAt, details.schedule?.timezone)}
+                                </small>
+                              ) : null}
+                              {publicationPostActionLabels(
+                                delivery.postActions,
+                                details.schedule?.timezone,
+                              ).map((label) => (
+                                <small key={label}>{label}</small>
+                              ))}
+                              {delivery.postActions?.pinError ? (
+                                <small className="publication-deliveries__error">
+                                  {delivery.postActions.pinError}
+                                </small>
+                              ) : null}
+                              {delivery.postActions?.deleteError ? (
+                                <small className="publication-deliveries__error">
+                                  {delivery.postActions.deleteError}
+                                </small>
+                              ) : null}
+                              <PublicationDeliveryActions
+                                api={api}
+                                publicationId={details.id}
+                                delivery={delivery}
+                                timezone={details.schedule?.timezone}
+                                disabled={busy}
+                              />
+                              {staleContentRevision ? (
+                                <small className="publication-deliveries__revision">
+                                  Прежний вариант поста
+                                </small>
+                              ) : null}
+                              {deliveryError ? (
+                                <small className="publication-deliveries__error">
+                                  {deliveryError}
+                                </small>
+                              ) : null}
+                            </span>
+                            {delivery.status === 'AMBIGUOUS' ? (
+                              <span className="publication-delivery-resolution">
+                                <button
+                                  type="button"
+                                  aria-label={`Подтвердить публикацию в ${delivery.target.title}`}
+                                  onClick={() =>
+                                    onResolveAmbiguous(
+                                      details.id,
+                                      delivery.occurrenceId,
+                                      delivery.id,
+                                      'mark_sent',
+                                    )
+                                  }
+                                  disabled={busy}
+                                >
+                                  Опубликовано
+                                </button>
+                                <button
+                                  type="button"
+                                  className="is-danger"
+                                  aria-label={`Отметить неотправленной для ${delivery.target.title}`}
+                                  onClick={() =>
+                                    onResolveAmbiguous(
+                                      details.id,
+                                      delivery.occurrenceId,
+                                      delivery.id,
+                                      'mark_failed',
+                                    )
+                                  }
+                                  disabled={busy}
+                                >
+                                  Не отправлено
+                                </button>
+                              </span>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : ambiguousInitialError ? (
+                    <span className="publication-details-empty">Не удалось загрузить проверку</span>
+                  ) : ambiguousDeliveriesQuery.isLoading ||
+                    !ambiguousPhaseComplete ||
+                    deliveriesQuery.isLoading ? (
+                    <span className="publication-details-empty">Загрузка...</span>
+                  ) : ambiguousDeliveriesQuery.isError || deliveriesQuery.isError ? (
+                    <span className="publication-details-empty">Детали доставки недоступны</span>
+                  ) : (
+                    <span className="publication-details-empty">Доставок пока нет</span>
+                  )}
+                  {deliveries.length > 0 &&
+                  (!ambiguousPhaseComplete || deliveriesQuery.isLoading) ? (
+                    <span className="publication-details-pagination-state">Загрузка...</span>
+                  ) : null}
+                  {ambiguousInitialError ? (
+                    <button
+                      type="button"
+                      className="publication-details-load-more"
+                      onClick={() => void ambiguousDeliveriesQuery.refetch()}
+                      disabled={ambiguousDeliveriesQuery.isFetching}
+                    >
+                      Повторить
+                    </button>
+                  ) : ambiguousDeliveriesQuery.isFetchNextPageError ? (
+                    <button
+                      type="button"
+                      className="publication-details-load-more"
+                      onClick={() => void ambiguousDeliveriesQuery.fetchNextPage()}
+                      disabled={ambiguousDeliveriesQuery.isFetchingNextPage}
+                    >
+                      Повторить
+                    </button>
+                  ) : null}
+                  {ambiguousPhaseComplete && deliveriesQuery.hasNextPage ? (
+                    <button
+                      type="button"
+                      className="publication-details-load-more"
+                      onClick={() => void deliveriesQuery.fetchNextPage()}
+                      disabled={deliveriesQuery.isFetchingNextPage}
+                    >
+                      {deliveriesQuery.isFetchingNextPage
+                        ? 'Загрузка...'
+                        : deliveriesQuery.isFetchNextPageError
+                          ? 'Повторить'
+                          : 'Показать ещё'}
+                    </button>
+                  ) : ambiguousPhaseComplete && deliveriesQuery.isError && !deliveriesQuery.data ? (
+                    <button
+                      type="button"
+                      className="publication-details-load-more"
+                      onClick={() => void deliveriesQuery.refetch()}
+                    >
+                      Повторить
+                    </button>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+          </div>
+
+          <footer className="publication-details-sheet__footer">
+            {allowEdit && actionCapabilities.canEdit ? (
+              <button
+                type="button"
+                className="publications-primary"
+                onClick={() => onEdit(publication.id)}
+                disabled={busy}
+              >
+                <IconoirSprite variant="iconoir" icon="EditPencil" aria-hidden />
+                <span>{editLabel}</span>
+              </button>
+            ) : null}
+            {actionCapabilities.canCancel ? (
+              <button
+                type="button"
+                className="publication-details-sheet__cancel"
+                onClick={() => onCancel(details ?? publication)}
+                disabled={busy}
+              >
+                <IconoirSprite variant="iconoir" icon="Xmark" aria-hidden />
+                <span>
+                  {publication.access?.canManageAllTargets === false
+                    ? 'Отменить отправки'
+                    : actionCapabilities.hasFutureSends
+                      ? 'Отменить будущие отправки'
+                      : 'Отменить публикацию'}
+                </span>
+              </button>
+            ) : null}
+            <button type="button" onClick={onClose} disabled={busy}>
+              Закрыть
+            </button>
+          </footer>
+        </section>
+      </div>
+      <ActionConfirmSheet
+        id="publication-skip-occurrence"
+        open={activeSkip !== null}
+        title="Пропустить этот выпуск?"
+        previewTitle={
+          activeSkip
+            ? formatDateTime(activeSkip.occurrence.scheduledAt, activeSkip.timezone)
+            : undefined
+        }
+        summary="Остальные выпуски останутся по расписанию."
+        confirmLabel="Пропустить"
+        confirmBusyLabel="Снимаем с расписания…"
+        isBusy={skipMutation.isPending}
+        onClose={() => setSkipTarget(null)}
+        onConfirm={() => {
+          if (activeSkip) skipMutation.mutate(activeSkip);
+        }}
+      />
+    </>,
     portalTarget,
   );
 }

@@ -9,6 +9,25 @@ export const VK_PARSING_DEFAULT_CHANNEL_LINK_TEXT = 'Подписаться на
 export const VK_PARSING_MAX_DELETE_AFTER_MINUTES = 43_200;
 export const VK_PARSING_MAX_SOURCE_LINK_URL_LENGTH = 2048;
 
+export const VK_PARSING_MIN_SOURCE_SPACING_MINUTES = 5;
+
+export function resolveVkParsingSourceSpacingMinutes(
+  distributeEvenly: boolean,
+  source: { publishIntervalMinutes?: number | null; minPublishIntervalMinutes?: number | null },
+): number {
+  const interval = source.publishIntervalMinutes;
+  const minimum = source.minPublishIntervalMinutes;
+  return Math.max(
+    VK_PARSING_MIN_SOURCE_SPACING_MINUTES,
+    distributeEvenly
+      ? typeof interval === 'number' && Number.isFinite(interval) && interval > 0
+        ? interval
+        : 60
+      : 0,
+    typeof minimum === 'number' && Number.isFinite(minimum) && minimum >= 0 ? minimum : 30,
+  );
+}
+
 export function normalizeVkParsingSourceLink(value: string): string | null {
   if (
     [...value].some((character) => character.charCodeAt(0) <= 31 || character.charCodeAt(0) === 127)

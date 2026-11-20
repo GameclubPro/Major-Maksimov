@@ -62,11 +62,13 @@ test('all Publisher schedule payloads preserve exact user-selected minutes', () 
   draft.scheduleTimezone = 'Europe/Moscow';
   draft.onceDate = '2030-01-01';
   draft.onceTime = '09:17';
-  draft.scheduledSlots = [at];
+  draft.onceAt = at;
+  const calendarSlot = '2030-01-01T06:19:00.000Z';
+  draft.scheduledSlots = [calendarSlot];
   assert.equal((buildPublicationSchedule(draft) as { at: string }).at, at);
   draft.timingMode = 'schedule';
   draft.scheduleKind = 'slots';
-  assert.deepEqual((buildPublicationSchedule(draft) as { slots: string[] }).slots, [at]);
+  assert.deepEqual((buildPublicationSchedule(draft) as { slots: string[] }).slots, [calendarSlot]);
   draft.scheduleKind = 'recurrence';
   draft.recurrence.times = ['09:17', '23:59'];
   assert.deepEqual((buildPublicationSchedule(draft) as { times: string[] }).times, [
