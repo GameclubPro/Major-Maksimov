@@ -85,10 +85,10 @@ function privacyScan(value: string): { text: string; starts: number[]; ends: num
   const ends: number[] = [];
   let offset = 0;
   for (const character of value) {
-    const width = character.length;
+    const point = character.codePointAt(0)!;
+    const width = point > 0xffff ? 2 : 1;
     if (!/\p{Cf}/u.test(character)) {
       if (/\p{Nd}/u.test(character) && !/[0-9]/u.test(character)) {
-        const point = character.codePointAt(0)!;
         let zero = point;
         // Unicode Nd blocks can be adjacent. The longest contiguous run is 50
         // code points, so a bounded scan also covers its five adjacent alphabets.
@@ -101,9 +101,11 @@ function privacyScan(value: string): { text: string; starts: number[]; ends: num
         ends.push(offset + width);
       } else {
         text += character;
-        for (let unit = 0; unit < width; unit++) {
-          starts.push(offset + unit);
-          ends.push(offset + unit + 1);
+        starts.push(offset);
+        ends.push(offset + 1);
+        if (width === 2) {
+          starts.push(offset + 1);
+          ends.push(offset + 2);
         }
       }
     }

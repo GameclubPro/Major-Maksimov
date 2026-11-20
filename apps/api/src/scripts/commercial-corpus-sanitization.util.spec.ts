@@ -175,6 +175,12 @@ describe('commercial corpus sanitization', () => {
     },
   );
 
+  it('preserves UTF-16 spans around normalized contacts and emoji', () => {
+    expect(
+      sanitizeCommercialCorpusText('🧩 Телефон 𝟠𝟡𝟘𝟘𝟘𝟘𝟘𝟙𝟘𝟜𝟚 📦 | Почта a\u200bb@example.test'),
+    ).toBe('🧩 Телефон [phone] 📦 | Почта [email]');
+  });
+
   it('preserves non-contact Unicode text and masks entire obfuscated URLs first', () => {
     expect(sanitizeCommercialCorpusText('Текст\u200b без контактов, размер １２ см')).toBe(
       'Текст\u200b без контактов, размер １２ см',
