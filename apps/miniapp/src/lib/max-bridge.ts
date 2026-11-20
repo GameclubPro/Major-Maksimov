@@ -462,14 +462,6 @@ function isMaxDeepLink(url: URL): boolean {
   return url.protocol === 'https:' && (url.hostname === 'max.ru' || url.hostname === 'www.max.ru');
 }
 
-function isMaxSchemeUrl(url: URL): boolean {
-  return url.protocol === 'max:';
-}
-
-function isInlinePreviewUrl(url: URL): boolean {
-  return url.protocol === 'data:' || url.protocol === 'blob:';
-}
-
 function scheduleMiniAppClose(): void {
   window.setTimeout(() => {
     resolveBridge()?.close?.();
@@ -496,7 +488,7 @@ export function closeMaxMiniApp(fallback?: () => void): void {
   fallback?.();
 }
 
-type LinkOpenMethod = 'bridge-external' | 'bridge-max' | 'location' | 'popup' | 'noop';
+type LinkOpenMethod = 'bridge-external' | 'bridge-max' | 'location' | 'noop';
 
 export function openLink(url: string, maxOnly = false): LinkOpenMethod {
   const normalizedUrl = url.trim();
@@ -505,45 +497,31 @@ export function openLink(url: string, maxOnly = false): LinkOpenMethod {
   }
 
   const parsed = parseMaxUrl(normalizedUrl, maxOnly);
-  const isDeepLink = parsed !== null && isMaxDeepLink(parsed);
-  if (
-    maxOnly &&
-    (!isDeepLink || parsed.username || parsed.password || parsed.port || parsed.pathname === '/')
-  ) {
+  if (!parsed || parsed.username || parsed.password) {
+    return 'noop';
+  }
+  // FLAG: Validate the exact address passed to the browser or native bridge.
+  const href = parsed.href;
+  if (!href.startsWith('https://') && !href.startsWith('http://')) {
+    return 'noop';
+  }
+
+  const isDeepLink = isMaxDeepLink(parsed);
+  if (maxOnly && (!isDeepLink || parsed.port || parsed.pathname === '/')) {
     return 'noop';
   }
 
   const bridge = resolveBridge();
-
-  if (isDeepLink) {
-    if (typeof bridge?.openMaxLink === 'function') {
-      bridge.openMaxLink(normalizedUrl);
-      return 'bridge-max';
-    }
-    window.location.assign(normalizedUrl);
-    return 'location';
+  if (isDeepLink && typeof bridge?.openMaxLink === 'function') {
+    bridge.openMaxLink(href);
+    return 'bridge-max';
   }
-
-  if (parsed && isInlinePreviewUrl(parsed)) {
-    const openedWindow = window.open?.(normalizedUrl, '_blank', 'noopener,noreferrer');
-    if (openedWindow) {
-      return 'popup';
-    }
-
-    window.location.assign(normalizedUrl);
-    return 'location';
-  }
-
-  if (parsed && isMaxSchemeUrl(parsed)) {
-    return 'noop';
-  }
-
-  if (typeof bridge?.openLink === 'function') {
-    bridge.openLink(normalizedUrl);
+  if (!isDeepLink && typeof bridge?.openLink === 'function') {
+    bridge.openLink(href);
     return 'bridge-external';
   }
 
-  window.location.assign(normalizedUrl);
+  window.location.assign(href);
   return 'location';
 }
 
@@ -557,13 +535,11 @@ export function openPrivateBotHandoff(url: string): boolean {
 }
 
 export function openMaxBotLinkAndClose(url: string): boolean {
-  const normalizedUrl = url.trim();
-  if (!normalizedUrl) {
+  const method = openMaxBotLink(url);
+  if (method === 'noop') {
     return false;
   }
-
-  const openMethod = openMaxBotLink(normalizedUrl);
-  if (openMethod !== 'location' && openMethod !== 'noop') {
+  if (method !== 'location') {
     scheduleMiniAppClose();
   }
   return true;

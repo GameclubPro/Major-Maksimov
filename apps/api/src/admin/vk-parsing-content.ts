@@ -57,7 +57,7 @@ export const VK_POST_SKIP_REASON_NO_SUPPORTED_CONTENT: VkParsingSkipReason = 'NO
 
 const VK_INLINE_LINK_PATTERN =
   /(?:https?:\/\/|www\.|(?:vk\.cc|vk\.com|vk\.ru|t\.me|telegram\.me|wa\.me|max\.ru)\/)(?:\\[\\`*_[\]()~+]|[^\s<>()\]["'`{}])+/giu;
-const VK_MARKDOWN_LINK_PATTERN = /\[([^\]\n]+)\]\((?:https?:\/\/|max:\/\/)[^\s)]+\)/giu;
+const VK_MARKDOWN_LINK_SCHEME = /(?:https?|max):\/\//iuy;
 const VK_IMPORTED_STRONG_MARKUP_PATTERN =
   /(?<![\\*])\*\*(?!\*)[^\r\n\u2028\u2029*]*[^\s*][^\r\n\u2028\u2029*]*(?<!\\)\*\*(?!\*)/u;
 
@@ -108,16 +108,67 @@ export function prepareVkParsingPublishPayload(
 }
 
 export function stripVkParsingLinksFromText(text: string): string {
-  VK_MARKDOWN_LINK_PATTERN.lastIndex = 0;
   VK_INLINE_LINK_PATTERN.lastIndex = 0;
-  return text
-    .replace(VK_MARKDOWN_LINK_PATTERN, '$1')
+  return replaceVkMarkdownLinksWithLabels(text)
     .replace(VK_INLINE_LINK_PATTERN, '')
-    .replace(/[ \t]+\n/gu, '\n')
-    .replace(/\n[ \t]+/gu, '\n')
-    .replace(/[ \t]{2,}/gu, ' ')
+    .replace(/[ \t]+/gu, (spaces: string, offset: number, value: string) => {
+      if (value[offset - 1] === '\n' || value[offset + spaces.length] === '\n') {
+        return '';
+      }
+      return spaces.length === 1 ? spaces : ' ';
+    })
     .replace(/\n{3,}/gu, '\n\n')
     .trim();
+}
+
+function replaceVkMarkdownLinksWithLabels(text: string): string {
+  const parts: string[] = [];
+  let copiedThrough = 0;
+  let labelStart = -1;
+  let targetEnd = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '[' && labelStart === -1) {
+      labelStart = index;
+      continue;
+    }
+    if (character === '\n') {
+      labelStart = -1;
+      continue;
+    }
+    if (character !== ']' || labelStart === -1) {
+      continue;
+    }
+
+    const start = labelStart;
+    labelStart = -1;
+    if (index === start + 1 || text[index + 1] !== '(') {
+      continue;
+    }
+    VK_MARKDOWN_LINK_SCHEME.lastIndex = index + 2;
+    if (!VK_MARKDOWN_LINK_SCHEME.test(text)) {
+      continue;
+    }
+
+    const targetStart = VK_MARKDOWN_LINK_SCHEME.lastIndex;
+    // FLAG: Reuse the end of the run so overlapping failed targets take one pass.
+    if (targetStart > targetEnd) {
+      targetEnd = targetStart;
+      while (targetEnd < text.length && !/[\s)]/u.test(text[targetEnd]!)) {
+        targetEnd += 1;
+      }
+    }
+    if (targetEnd === targetStart || text[targetEnd] !== ')') {
+      continue;
+    }
+
+    parts.push(text.slice(copiedThrough, start), text.slice(start + 1, index));
+    copiedThrough = targetEnd + 1;
+    index = targetEnd;
+  }
+
+  return copiedThrough === 0 ? text : parts.join('') + text.slice(copiedThrough);
 }
 
 export function resolveVkParsingPostSkipReason(

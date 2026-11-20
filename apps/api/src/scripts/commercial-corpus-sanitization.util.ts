@@ -90,8 +90,12 @@ function privacyScan(value: string): { text: string; starts: number[]; ends: num
       if (/\p{Nd}/u.test(character) && !/[0-9]/u.test(character)) {
         const point = character.codePointAt(0)!;
         let zero = point;
-        // Unicode decimal digits form contiguous sets of ten (some sets are adjacent).
-        while (zero > 0 && /\p{Nd}/u.test(String.fromCodePoint(zero - 1))) zero--;
+        // Unicode Nd blocks can be adjacent. The longest contiguous run is 50
+        // code points, so a bounded scan also covers its five adjacent alphabets.
+        for (let step = 0; step < 64 && zero > 0; step++) {
+          if (!/\p{Nd}/u.test(String.fromCodePoint(zero - 1))) break;
+          zero--;
+        }
         text += String((point - zero) % 10);
         starts.push(offset);
         ends.push(offset + width);
@@ -298,6 +302,46 @@ export function isCommercialCorpusTextSanitized(value: string): boolean {
   );
 }
 
+const RESIDUAL_PHONE_LABEL =
+  /телефон[а-яё-]*|тел\.?|контакт[а-яё-]*|для\s+связи|[\u260E\u{1F4DE}\u{1F4F1}\u{1F4F2}]\uFE0F?/giu;
+const RESIDUAL_MARKED_PHONE =
+  /[^\p{L}\p{N}]{0,24}\d(?:[\p{Zs}\t().\u2010-\u2015/•|-]*\d){9}(?!\d)/uy;
+
+function hasResidualMarkedPhone(text: string): boolean {
+  for (const label of text.matchAll(RESIDUAL_PHONE_LABEL)) {
+    RESIDUAL_MARKED_PHONE.lastIndex = label.index + label[0].length;
+    if (RESIDUAL_MARKED_PHONE.test(text)) return true;
+  }
+  return false;
+}
+
+function hasResidualEmail(text: string): boolean {
+  let localPart = false;
+  let domainLength = 0;
+  let domainLetters = 0;
+  let domain = false;
+  for (const character of text) {
+    if (character === '@') {
+      domain = localPart;
+      domainLength = 0;
+      domainLetters = 0;
+    } else if (domain && /[\p{L}\p{N}.-]/u.test(character)) {
+      if (character === '.') {
+        domainLetters = domainLength ? 1 : 0;
+      } else if (domainLetters && /\p{L}/u.test(character)) {
+        if (++domainLetters === 3) return true;
+      } else {
+        domainLetters = 0;
+      }
+      domainLength++;
+    } else {
+      domain = false;
+    }
+    localPart = /[\p{L}\p{N}._%+-]/u.test(character);
+  }
+  return false;
+}
+
 // FLAG: Independent conservative privacy check, not evidence for a moderation decision.
 export function hasResidualCommercialContactCandidate(value: string): boolean {
   const scan = privacyScan(value).text;
@@ -319,9 +363,8 @@ export function hasResidualCommercialContactCandidate(value: string): boolean {
       String.raw`(?<![\d+])\+[1-9](?:${PRIVACY_PHONE_SEPARATOR}*\d){6,14}(?!\d)`,
       'u',
     ).test(phoneText) ||
-    /(?:телефон[а-яё-]*|тел\.?|контакт[а-яё-]*|для\s+связи|[\u260E\u{1F4DE}\u{1F4F1}\u{1F4F2}]\uFE0F?)[^\p{L}\p{N}]{0,24}\d(?:[\p{Zs}\t().\u2010-\u2015/•|-]*\d){9}(?!\d)/iu.test(
-      phoneText,
-    ) ||
-    /(?:https?:\/\/|max:\/\/|[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,})/iu.test(scan)
+    hasResidualMarkedPhone(phoneText) ||
+    /(?:https?:\/\/|max:\/\/)/iu.test(scan) ||
+    hasResidualEmail(scan)
   );
 }

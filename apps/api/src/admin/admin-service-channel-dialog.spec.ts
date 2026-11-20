@@ -7754,60 +7754,63 @@ describe('AdminService.publishChannelEngagementMessage', () => {
     ]);
   });
 
-  it('rejects channel comments with links when moderation blocks links', async () => {
-    const prisma = createPrismaMock();
-    prisma.chat.findUnique.mockResolvedValue({
-      entityType: 'CHANNEL',
-    });
-    prisma.channelSettings.findUnique.mockResolvedValue(
-      channelSettingsSchema.parse({
-        commentsEnabled: true,
-        commentsModerationEnabled: true,
-        commentsBlockLinksEnabled: true,
-        commentsAntiSpamEnabled: false,
-        commentsLimitTwoInRowEnabled: false,
-      }),
-    );
-    prisma.auditLog.create.mockResolvedValueOnce(undefined);
+  it.each(['https://example.com/path', 'Example.COM', 'm.sub.example.net'])(
+    'rejects channel comments with %s when moderation blocks links',
+    async (link) => {
+      const prisma = createPrismaMock();
+      prisma.chat.findUnique.mockResolvedValue({
+        entityType: 'CHANNEL',
+      });
+      prisma.channelSettings.findUnique.mockResolvedValue(
+        channelSettingsSchema.parse({
+          commentsEnabled: true,
+          commentsModerationEnabled: true,
+          commentsBlockLinksEnabled: true,
+          commentsAntiSpamEnabled: false,
+          commentsLimitTwoInRowEnabled: false,
+        }),
+      );
+      prisma.auditLog.create.mockResolvedValueOnce(undefined);
 
-    const maxClient = {
-      getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
-      sendMessageImmediateWithResolvedLink: jest
-        .fn()
-        .mockResolvedValue({ messageId: 'mid-channel-engagement-5', url: null }),
-    };
-    const chatContextCache = {
-      invalidate: jest.fn(),
-    };
+      const maxClient = {
+        getChatAdminIds: jest.fn().mockResolvedValue(['admin-1']),
+        sendMessageImmediateWithResolvedLink: jest
+          .fn()
+          .mockResolvedValue({ messageId: 'mid-channel-engagement-5', url: null }),
+      };
+      const chatContextCache = {
+        invalidate: jest.fn(),
+      };
 
-    const service = createAdminServiceFixture(
-      prisma as never,
-      maxClient as never,
-      chatContextCache as never,
-      createConfigMock() as never,
-    );
+      const service = createAdminServiceFixture(
+        prisma as never,
+        maxClient as never,
+        chatContextCache as never,
+        createConfigMock() as never,
+      );
 
-    const commentsToken = await publishCommentsDialogToken(service, maxClient);
+      const commentsToken = await publishCommentsDialogToken(service, maxClient);
 
-    await expect(
-      service.createChannelDialogMessage(
-        'channel-1',
-        {
-          userId: 'user-1',
-          username: 'user1',
-          displayName: 'Пользователь',
-          chatTitle: null,
-        },
-        'comments',
-        {
-          token: commentsToken,
-          text: 'Вот ссылка https://example.com',
-        },
-      ),
-    ).rejects.toThrow('Ссылки в комментариях отключены.');
+      await expect(
+        service.createChannelDialogMessage(
+          'channel-1',
+          {
+            userId: 'user-1',
+            username: 'user1',
+            displayName: 'Пользователь',
+            chatTitle: null,
+          },
+          'comments',
+          {
+            token: commentsToken,
+            text: `Вот ссылка ${link}`,
+          },
+        ),
+      ).rejects.toThrow('Ссылки в комментариях отключены.');
 
-    expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
-  });
+      expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('rejects a third consecutive comment when the limit is enabled', async () => {
     const prisma = createPrismaMock();

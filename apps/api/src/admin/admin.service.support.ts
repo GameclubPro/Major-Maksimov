@@ -1006,7 +1006,8 @@ export type ChannelStatsGraphMarker = ChannelStatsResponse['signals']['markers']
 export type ChannelStatsBestWindow = ChannelStatsResponse['signals']['bestWindows'][number];
 export const CHANNEL_COMMENT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 export const CHANNEL_COMMENT_MAX_CONSECUTIVE = 2;
-export const CHANNEL_COMMENT_LINK_PATTERN = /((https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,})(\/\S*)?/giu;
+// The comment check only needs the last label character, dot, and first two suffix letters.
+export const CHANNEL_COMMENT_LINK_PATTERN = /[a-z0-9-]\.[a-z]{2}/iu;
 export const PROFILE_MENTION_START_PREFIX = 'pmh-';
 export const RECENT_BOT_ADDED_BOOTSTRAP_LIMIT = 30;
 export const RECENT_BOT_ADDED_USER_SCOPED_WEBHOOK_SCAN_LIMIT = 100;

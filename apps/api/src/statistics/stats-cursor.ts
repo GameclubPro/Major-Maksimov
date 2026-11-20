@@ -5,7 +5,8 @@ export function encodeCursor(value: unknown, secret: string): string {
   return `${body}.${createHmac('sha256', secret).update(body).digest('base64url')}`;
 }
 export function decodeCursor<T>(cursor: string, secret: string): T {
-  if (cursor.length > 8192) throw new StatsFailure('INVALID_REQUEST', 400);
+  if (typeof cursor !== 'string' || cursor.length > 8192)
+    throw new StatsFailure('INVALID_REQUEST', 400);
   const [body, signature, ...rest] = cursor.split('.');
   const expected = createHmac('sha256', secret)
     .update(body ?? '')
@@ -15,6 +16,7 @@ export function decodeCursor<T>(cursor: string, secret: string): T {
     !signature ||
     rest.length ||
     signature.length !== expected.length ||
+    !/^[A-Za-z0-9_-]+$/u.test(signature) ||
     !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
   )
     throw new StatsFailure('INVALID_REQUEST', 400);

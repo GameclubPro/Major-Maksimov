@@ -584,28 +584,38 @@ test('openLink opens external links through bridge browser API', () => {
   assert.deepEqual(assignedUrls, []);
 });
 
-test('openMaxBotLink avoids bridge browser API for inline preview urls', () => {
-  const assignedUrls: string[] = [];
-  const opened: Array<{ kind: 'max' | 'external'; url: string }> = [];
-  const popupUrls: string[] = [];
+test('generic navigation rejects URLs outside the web scheme allowlist', () => {
+  const assigned: string[] = [];
+  const opened: string[] = [];
   setMockWindow(
-    {
-      openMaxLink: (url) => opened.push({ kind: 'max', url }),
-      openLink: (url) => opened.push({ kind: 'external', url }),
-    },
-    assignedUrls,
+    { openLink: (url) => opened.push(url), openMaxLink: (url) => opened.push(url) },
+    assigned,
   );
-
-  globalThis.window.open = (url) => {
-    popupUrls.push(url);
-    return {};
-  };
-
-  openMaxBotLink('data:image/webp;base64,YQ==');
-
+  for (const url of [
+    'data:image/webp;base64,YQ==',
+    'blob:https://major-maksimov.ru/preview',
+    'file:///preview.txt',
+    'about:blank',
+    'https://user@example.com/path',
+    'https://[',
+  ]) {
+    assert.equal(openLink(url), 'noop');
+    assert.equal(openMaxBotLinkAndClose(url), false);
+  }
   assert.deepEqual(opened, []);
-  assert.deepEqual(popupUrls, ['data:image/webp;base64,YQ==']);
-  assert.deepEqual(assignedUrls, []);
+  assert.deepEqual(assigned, []);
+});
+
+test('browser fallback uses the parsed HTTP address, including relative paths', () => {
+  const assigned: string[] = [];
+  setMockWindow(null, assigned);
+
+  assert.equal(openLink('https://EXAMPLE.COM/a b'), 'location');
+  assert.equal(openLink('/app/participants'), 'location');
+  assert.deepEqual(assigned, [
+    'https://example.com/a%20b',
+    'https://major-maksimov.ru/app/participants',
+  ]);
 });
 
 test('isLegacyAndroidSettingsDrilldownUserAgent gates old Android and WebView versions', () => {

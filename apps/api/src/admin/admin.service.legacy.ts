@@ -16326,7 +16326,6 @@ export class AdminService implements OnModuleDestroy {
   }
 
   private channelCommentContainsLink(value: string): boolean {
-    CHANNEL_COMMENT_LINK_PATTERN.lastIndex = 0;
     return CHANNEL_COMMENT_LINK_PATTERN.test(value);
   }
 
