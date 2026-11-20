@@ -168,6 +168,13 @@ describe('commercial corpus sanitization', () => {
     expect(isCommercialCorpusTextSanitized(sanitized)).toBe(true);
   });
 
+  it.each(['Почта бюро@пример.рф', 'Почта a@example.test', 'Для связи: 900.123.45.67'])(
+    'keeps finding residual contacts with Unicode or labelled separators: %s',
+    (text) => {
+      expect(hasResidualCommercialContactCandidate(text)).toBe(true);
+    },
+  );
+
   it('preserves non-contact Unicode text and masks entire obfuscated URLs first', () => {
     expect(sanitizeCommercialCorpusText('Текст\u200b без контактов, размер １２ см')).toBe(
       'Текст\u200b без контактов, размер １２ см',

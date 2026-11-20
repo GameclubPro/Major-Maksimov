@@ -17,8 +17,6 @@ export type PreparedMaxMarkdownText = {
 };
 
 const SAFE_LINK_PATTERN = /^(https?:\/\/|max:\/\/)/iu;
-const HEADING_LINE_PATTERN = /^(#{1,6})[ \t]+(.+)$/u;
-const QUOTE_LINE_PATTERN = /^>[ \t]+(.+)$/u;
 const SUPPORTED_MARKDOWN_PATTERN =
   /(?:^#{1,6}\s+\S.*$|^>\s+\S.*$|```[\s\S]+?```|\*\*\*[^*\n]+?\*\*\*|___[^_\n]+?___|\*\*[^*\n]+?\*\*|__[^_\n]+?__|\*[^*\n]+?\*|_[^_\n]+?_|~~[^~\n]+?~~|\+\+[^+\n]+?\+\+|\^\^[^^\n]+?\^\^|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/|max:\/\/)[^)]+\))/mu;
 const ESCAPABLE_MARKDOWN_CHARACTERS = new Set([
@@ -85,24 +83,16 @@ export function renderSupportedMarkdownAsHtml(
         continue;
       }
 
-      const headingMatch = HEADING_LINE_PATTERN.exec(rawLine.trimStart());
-      if (headingMatch) {
-        const content = renderInlineTokens(parseInlineTokens(headingMatch[2] ?? ''), options);
+      const line = rawLine.trimStart();
+      const block = readMarkdownBlockMarker(line);
+      if (block) {
+        const indentation = rawLine.slice(0, rawLine.length - line.length);
+        const content = renderInlineTokens(parseInlineTokens(block.content), options);
         renderedLines.push(
-          escapeHtmlPreservingWhitespace(
-            rawLine.slice(0, rawLine.length - rawLine.trimStart().length),
-          ) + renderHeadingHtml(content, headingMatch[1] ?? '#'),
-        );
-        continue;
-      }
-
-      const quoteMatch = QUOTE_LINE_PATTERN.exec(rawLine.trimStart());
-      if (quoteMatch) {
-        const content = renderInlineTokens(parseInlineTokens(quoteMatch[1] ?? ''), options);
-        renderedLines.push(
-          escapeHtmlPreservingWhitespace(
-            rawLine.slice(0, rawLine.length - rawLine.trimStart().length),
-          ) + renderQuoteHtml(content),
+          escapeHtmlPreservingWhitespace(indentation) +
+            (block.marker === '>'
+              ? renderQuoteHtml(content)
+              : renderHeadingHtml(content, block.marker)),
         );
         continue;
       }
@@ -146,19 +136,13 @@ export function renderSupportedMarkdownAsHtml(
       continue;
     }
 
-    const headingMatch = HEADING_LINE_PATTERN.exec(trimmedLine);
-    if (headingMatch) {
+    const block = readMarkdownBlockMarker(trimmedLine);
+    if (block) {
       flushParagraph();
-      const content = renderInlineTokens(parseInlineTokens(headingMatch[2] ?? ''), options);
-      blocks.push(renderHeadingHtml(content, headingMatch[1] ?? '#'));
-      continue;
-    }
-
-    const quoteMatch = QUOTE_LINE_PATTERN.exec(trimmedLine);
-    if (quoteMatch) {
-      flushParagraph();
-      const content = renderInlineTokens(parseInlineTokens(quoteMatch[1] ?? ''), options);
-      blocks.push(renderQuoteHtml(content));
+      const content = renderInlineTokens(parseInlineTokens(block.content), options);
+      blocks.push(
+        block.marker === '>' ? renderQuoteHtml(content) : renderHeadingHtml(content, block.marker),
+      );
       continue;
     }
 
@@ -234,17 +218,10 @@ export function stripSupportedMarkdownToPlainText(source: string): string {
       continue;
     }
 
-    const headingMatch = HEADING_LINE_PATTERN.exec(trimmedLine);
-    if (headingMatch) {
+    const block = readMarkdownBlockMarker(trimmedLine);
+    if (block) {
       flushParagraph();
-      blocks.push(renderInlineTokensAsPlainText(parseInlineTokens(headingMatch[2] ?? '')));
-      continue;
-    }
-
-    const quoteMatch = QUOTE_LINE_PATTERN.exec(trimmedLine);
-    if (quoteMatch) {
-      flushParagraph();
-      blocks.push(renderInlineTokensAsPlainText(parseInlineTokens(quoteMatch[1] ?? '')));
+      blocks.push(renderInlineTokensAsPlainText(parseInlineTokens(block.content)));
       continue;
     }
 
@@ -705,6 +682,30 @@ function isEscapedMarkdownPosition(source: string, index: number): boolean {
     precedingBackslashes += 1;
   }
   return precedingBackslashes % 2 === 1;
+}
+
+function readMarkdownBlockMarker(line: string): { marker: string; content: string } | null {
+  let markerEnd = 0;
+  if (line[0] === '>') {
+    markerEnd = 1;
+  } else {
+    while (markerEnd < 6 && line[markerEnd] === '#') {
+      markerEnd += 1;
+    }
+    if (markerEnd === 0) return null;
+  }
+
+  // FLAG: Scan the gap once. Overlapping whitespace and text regex groups can backtrack.
+  let contentStart = markerEnd;
+  while (line[contentStart] === ' ' || line[contentStart] === '\t') {
+    contentStart += 1;
+  }
+  // Raw delivery treats the last horizontal space as content on a whitespace-only line.
+  if (contentStart === line.length) contentStart -= 1;
+  if (contentStart <= markerEnd) return null;
+
+  const content = line.slice(contentStart);
+  return /[\r\n\u2028\u2029]/u.test(content) ? null : { marker: line.slice(0, markerEnd), content };
 }
 
 function renderHeadingHtml(content: string, marker: string): string {

@@ -1,3 +1,4 @@
+import { detectVkAdvertisingMarkers } from './vk-parsing-attachments';
 import {
   computeVkParsingPostContentHash,
   composeVkParsingPublishText,
@@ -95,6 +96,37 @@ describe('vk-parsing-content', () => {
     expect(stripVkParsingLinksFromText('Текст https://site.example/a\\_\\(b\\)\\+\\~c хвост')).toBe(
       'Текст хвост',
     );
+  });
+
+  it('preserves labels when stripping valid Markdown targets amid ordinary brackets', () => {
+    expect(
+      stripVkParsingLinksFromText(
+        '[заметка] [сайт](HTTPS://example.com/a) [ссылка](max://user/12) \n[ещё]',
+      ),
+    ).toBe('[заметка] сайт ссылка\n[ещё]');
+    expect(stripVkParsingLinksFromText('[журнал [открыть](max://user/12)')).toBe('журнал [открыть');
+    expect(stripVkParsingLinksFromText('один\tдва \t \n \t три  четыре')).toBe(
+      'один\tдва\nтри четыре',
+    );
+  });
+
+  it('detects ERID in attachment text with optional separators and whitespace', () => {
+    for (const title of ['ERID Z012', 'erid : Z012', 'erid= Z012']) {
+      expect(
+        detectVkAdvertisingMarkers({
+          text: '',
+          attachments: [{ type: 'link', link: { title } }],
+          rawPost: {},
+        }),
+      ).toContain(title);
+    }
+    expect(
+      detectVkAdvertisingMarkers({
+        text: 'erid: Z01',
+        attachments: [],
+        rawPost: {},
+      }),
+    ).toEqual([]);
   });
 
   it('preserves explicit fallback links when link stripping is enabled', () => {

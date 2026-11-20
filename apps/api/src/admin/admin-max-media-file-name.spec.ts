@@ -23,4 +23,11 @@ describe('canonicalizeAdminMaxMediaFileName', () => {
       'publication-video.webm',
     );
   });
+
+  it('keeps inner dots while removing the supplied extension and surrounding padding', () => {
+    expect(canonicalizeAdminMaxMediaFileName('album/part.one .png.... ', 'jpg', 'upload')).toBe(
+      'part.one.jpg',
+    );
+    expect(canonicalizeAdminMaxMediaFileName('album\\.hidden', 'jpg', 'upload')).toBe('upload.jpg');
+  });
 });

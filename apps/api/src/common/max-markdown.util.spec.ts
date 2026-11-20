@@ -60,6 +60,27 @@ describe('renderSupportedMarkdownAsHtml', () => {
     );
   });
 
+  it('keeps heading and quote markers consistent across preview, delivery and plain text', () => {
+    const source = '  ###### \t**Заголовок**  \n > \t_Цитата_\n####### Обычный текст\n>Без пробела';
+    expect(renderSupportedMarkdownAsHtml(source)).toBe(
+      '<h6><strong>Заголовок</strong></h6><blockquote><em>Цитата</em></blockquote><p>####### Обычный текст<br>&gt;Без пробела</p>',
+    );
+    expect(renderSupportedMarkdownAsHtml(source, { blockMode: 'raw' })).toBe(
+      '&nbsp;&nbsp;<h6><strong>Заголовок</strong>&nbsp;&nbsp;</h6>\n <blockquote><em>Цитата</em></blockquote>\n####### Обычный текст\n&gt;Без пробела',
+    );
+    expect(stripSupportedMarkdownToPlainText(source)).toBe(
+      'Заголовок\n\nЦитата\n\n####### Обычный текст\n>Без пробела',
+    );
+  });
+
+  it('retains the legacy raw output for blank block markers and Unicode line separators', () => {
+    const source = '# \n#  \n> \t\n# А\u2028Б\n> В\u2029Г';
+    expect(renderSupportedMarkdownAsHtml(source, { blockMode: 'raw' })).toBe(
+      '# \n<h1> </h1>\n<blockquote>&nbsp;&nbsp;&nbsp;&nbsp;</blockquote>\n# А\u2028Б\n&gt; В\u2029Г',
+    );
+    expect(stripSupportedMarkdownToPlainText(source)).toBe('#\n#\n>\n# А\u2028Б\n> В\u2029Г');
+  });
+
   it('renders links as underlined preview labels when requested', () => {
     expect(
       renderSupportedMarkdownAsHtml('**[MAX Docs](https://dev.max.ru/)**', {
