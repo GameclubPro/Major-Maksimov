@@ -1826,6 +1826,7 @@ export function PublicationsPage({
             publisherAccessRecheckBusy={scopedTargetRecheck.isBusy}
             publisherAccessRechecking={scopedTargetRecheck.isRechecking(detailsTarget.id)}
             onClose={() => setDetailsTarget(null)}
+            onOpenPublication={setDetailsTarget}
             onCancel={(publication) => {
               setDetailsTarget(null);
               setActionTarget({ publication, action: 'cancel' });

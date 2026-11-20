@@ -9,7 +9,7 @@ import type {
   PublicationSummary,
 } from '@maxim/contracts/publication';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MaxMarkdownPreview } from '../../components/max-markdown-preview';
 import { EntityAvatar } from '../../components/ui/entity-avatar';
@@ -57,6 +57,12 @@ import {
 } from './publication-pagination';
 import './publication-details-sheet.css';
 
+const LazyPublicationRescheduleSheet = lazy(() =>
+  import('./publication-reschedule-sheet').then((module) => ({
+    default: module.PublicationRescheduleSheet,
+  })),
+);
+
 type PublicationDetailsSheetProps = {
   api: ApiTransport;
   publication: PublicationSummary | null;
@@ -66,6 +72,7 @@ type PublicationDetailsSheetProps = {
   publisherAccessRecheckBusy?: boolean;
   publisherAccessRechecking?: boolean;
   onClose: () => void;
+  onOpenPublication?: (publication: PublicationDetails) => void;
   onCancel: (publication: PublicationSummary) => void;
   onEdit: (publicationId: string) => void;
   onRecheckPublisherAccess?: (publicationId: string) => void;
@@ -157,6 +164,7 @@ export function PublicationDetailsSheet({
   publisherAccessRecheckBusy = false,
   publisherAccessRechecking = false,
   onClose,
+  onOpenPublication,
   onCancel,
   onEdit,
   onRecheckPublisherAccess,
@@ -166,6 +174,10 @@ export function PublicationDetailsSheet({
   const open = publication !== null;
   const client = useQueryClient();
   const { pushToast } = useToast();
+  const [rescheduleTarget, setRescheduleTarget] = useState<{
+    publicationId: string;
+    occurrence: PublicationOccurrenceSummary;
+  } | null>(null);
   const [skipTarget, setSkipTarget] = useState<{
     occurrence: PublicationOccurrenceSummary;
     publicationId: string;
@@ -194,7 +206,9 @@ export function PublicationDetailsSheet({
     },
   });
   const activeSkip = skipTarget?.publicationId === publication?.id ? skipTarget : null;
-  const sheetCovered = covered || activeSkip !== null;
+  const activeReschedule =
+    rescheduleTarget?.publicationId === publication?.id ? rescheduleTarget : null;
+  const sheetCovered = covered || activeSkip !== null || activeReschedule !== null;
   const panelRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   useDialogFocusTrap(open && !sheetCovered, panelRef, closeButtonRef);
@@ -639,22 +653,40 @@ export function PublicationDetailsSheet({
                               occurrence.status === 'SCHEDULED' &&
                               occurrence.delivery.total === 0 &&
                               Date.parse(occurrence.scheduledAt) > Date.now() ? (
-                                <button
-                                  className="publication-occurrences__skip"
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() =>
-                                    setSkipTarget({
-                                      occurrence,
-                                      publicationId: details.id,
-                                      version: details.version,
-                                      requestId: createPublicationRequestId(),
-                                      timezone: details.schedule?.timezone ?? 'Europe/Moscow',
-                                    })
-                                  }
-                                >
-                                  Пропустить
-                                </button>
+                                <>
+                                  {onOpenPublication ? (
+                                    <button
+                                      className="publication-occurrences__skip"
+                                      type="button"
+                                      disabled={busy}
+                                      aria-label={`Перенести выпуск ${formatDateTime(occurrence.scheduledAt, details.schedule.timezone)}`}
+                                      onClick={() =>
+                                        setRescheduleTarget({
+                                          publicationId: details.id,
+                                          occurrence,
+                                        })
+                                      }
+                                    >
+                                      Перенести
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    className="publication-occurrences__skip"
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      setSkipTarget({
+                                        occurrence,
+                                        publicationId: details.id,
+                                        version: details.version,
+                                        requestId: createPublicationRequestId(),
+                                        timezone: details.schedule?.timezone ?? 'Europe/Moscow',
+                                      })
+                                    }
+                                  >
+                                    Пропустить
+                                  </button>
+                                </>
                               ) : null}
                               {occurrence.canRetry ? (
                                 <button
@@ -957,6 +989,20 @@ export function PublicationDetailsSheet({
           if (activeSkip) skipMutation.mutate(activeSkip);
         }}
       />
+      {activeReschedule && details && onOpenPublication ? (
+        <Suspense fallback={null}>
+          <LazyPublicationRescheduleSheet
+            api={api}
+            details={details}
+            occurrence={activeReschedule.occurrence}
+            onClose={() => setRescheduleTarget(null)}
+            onOpenPublication={(publication) => {
+              setRescheduleTarget(null);
+              onOpenPublication(publication);
+            }}
+          />
+        </Suspense>
+      ) : null}
     </>,
     portalTarget,
   );

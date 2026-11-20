@@ -878,6 +878,45 @@ export const publicationActionRequestSchema = z.object({
 });
 export type PublicationActionRequest = z.infer<typeof publicationActionRequestSchema>;
 
+export const publicationOccurrenceRescheduleRequestSchema = z
+  .discriminatedUnion('scope', [
+    publicationActionRequestSchema
+      .extend({
+        scope: z.literal('occurrence'),
+        at: publicationDateTimeSchema,
+      })
+      .strict(),
+    publicationActionRequestSchema
+      .extend({
+        scope: z.literal('following'),
+        schedule: publicationRecurrenceScheduleSchema,
+      })
+      .strict(),
+  ])
+  .superRefine((request, context) => {
+    if (
+      request.scope === 'following' &&
+      (request.schedule.replaceConflicts || request.schedule.conflictConfirmation !== undefined)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['schedule', 'replaceConflicts'],
+        message: 'Выберите время без пересечения с другой публикацией.',
+      });
+    }
+  });
+export type PublicationOccurrenceRescheduleRequest = z.infer<
+  typeof publicationOccurrenceRescheduleRequestSchema
+>;
+
+export const publicationOccurrenceRescheduleResponseSchema = z.object({
+  source: publicationDetailsSchema,
+  publication: publicationDetailsSchema,
+});
+export type PublicationOccurrenceRescheduleResponse = z.infer<
+  typeof publicationOccurrenceRescheduleResponseSchema
+>;
+
 export const publicationRetryContentModeSchema = z.enum(['original', 'latest']);
 export type PublicationRetryContentMode = z.infer<typeof publicationRetryContentModeSchema>;
 

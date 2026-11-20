@@ -1,7 +1,8 @@
 import type { PublicationScheduleInput } from '@maxim/contracts/publication';
 import { DateTime, IANAZone } from 'luxon';
 
-export const PUBLICATION_RECURRENCE_LOOKAHEAD_MS = 450 * 24 * 60 * 60_000;
+export const PUBLICATION_RECURRENCE_HORIZON_MS = 14 * 24 * 60 * 60_000;
+const PUBLICATION_RECURRENCE_LOOKAHEAD_MS = 450 * 24 * 60 * 60_000;
 
 export interface ExpandPublicationScheduleOptions {
   from: Date;
@@ -312,4 +313,27 @@ function localDateOrdinal(value: DateTime): number {
 
 function localDayIsOnOrBefore(left: DateTime, right: DateTime): boolean {
   return localDateOrdinal(left) <= localDateOrdinal(right);
+}
+
+export function expandInitialPublicationSchedule(
+  schedule: PublicationScheduleInput,
+  now: Date,
+): Date[] {
+  if (schedule.mode === 'once') {
+    return [new Date(schedule.at)];
+  }
+  if (schedule.mode === 'slots') {
+    return [...new Set(schedule.slots.map((slot) => new Date(slot).getTime()))]
+      .sort((left, right) => left - right)
+      .map((timestamp) => new Date(timestamp));
+  }
+  if (schedule.mode === 'now') {
+    return [now];
+  }
+  return expandPublicationSchedule(schedule, {
+    from: now,
+    to: new Date(now.getTime() + PUBLICATION_RECURRENCE_HORIZON_MS),
+    existingCount: 0,
+    now,
+  });
 }

@@ -97,6 +97,7 @@ import {
 import { publicationBackgroundAccess } from './publication-background-access';
 import { tryCancelAccessiblePublicationTargets } from './publication-target-cancellation';
 import { executePublicationOccurrenceSkip } from './publication-occurrence-skip';
+import { reschedulePublicationOccurrence } from './publication-occurrence-reschedule';
 import {
   publicationAdminAccessWhere,
   publicationAdminScope,
@@ -163,16 +164,20 @@ import {
 } from './publication-legacy-automated-absence';
 import * as publicationManualRetrySafety from './publication-manual-retry-safety';
 import {
+  expandInitialPublicationSchedule,
   expandPublicationSchedule,
   findNextPublicationRecurrenceSlot,
+  PUBLICATION_RECURRENCE_HORIZON_MS,
 } from './publication-recurrence';
-import { normalizePublicationSchedule } from './publication-schedule-normalization';
+import {
+  assertPublishableSchedule,
+  normalizePublicationSchedule,
+} from './publication-schedule-normalization';
 import {
   deferPublicationRecurrencePreparation,
   recoverPublicationRecurrencePreparationFailure,
 } from './publication-recurrence-recovery';
 
-const PUBLICATION_RECURRENCE_HORIZON_MS = 14 * 24 * 60 * 60_000;
 const PUBLICATION_RECURRENCE_REFRESH_MS = 12 * 60 * 60_000;
 const PUBLICATION_PAST_GRACE_MS = 5 * 60_000;
 const PUBLICATION_MATERIALIZE_BATCH = 50;
@@ -675,10 +680,10 @@ export class PublicationService {
     const schedule = request.schedule
       ? this.normalizeSchedule(withDefaultPublicationLatePolicy(request.schedule), now)
       : null;
-    const initialSlots = schedule ? this.expandInitialSchedule(schedule, now) : [];
+    const initialSlots = schedule ? expandInitialPublicationSchedule(schedule, now) : [];
     const initialScheduleExhausted = this.isInitialRecurrenceExhausted(schedule, initialSlots, now);
     if (request.intent === 'publish') {
-      this.assertPublishableSchedule(schedule, initialSlots, now);
+      assertPublishableSchedule(schedule, initialSlots, now);
       await this.assertCalendarAvailability(targets, initialSlots, schedule, user.userId);
     }
     const initialNextMaterializeAt =
@@ -959,14 +964,14 @@ export class PublicationService {
     );
     let initialSlots =
       desiredIntent === 'publish' && schedule && shouldRebuildSchedule
-        ? this.expandInitialSchedule(schedule, now)
+        ? expandInitialPublicationSchedule(schedule, now)
         : [];
     if (
       desiredIntent === 'publish' &&
       shouldRebuildSchedule &&
       !(audienceOnly && schedule?.mode === 'recurrence')
     ) {
-      this.assertPublishableSchedule(schedule, initialSlots, now);
+      assertPublishableSchedule(schedule, initialSlots, now);
       await this.assertCalendarAvailability(
         targets,
         initialSlots,
@@ -1075,8 +1080,8 @@ export class PublicationService {
               : null;
           if (audiencePlan) {
             schedule = audiencePlan.rule;
-            initialSlots = this.expandInitialSchedule(schedule, now);
-            this.assertPublishableSchedule(schedule, initialSlots, now);
+            initialSlots = expandInitialPublicationSchedule(schedule, now);
+            assertPublishableSchedule(schedule, initialSlots, now);
           }
           const initialNextMaterializeAt =
             desiredIntent === 'publish' && existing.lifecycle !== PublicationLifecycle.PAUSED
@@ -1383,6 +1388,34 @@ export class PublicationService {
       },
     });
     return this.get(publicationId, user, profile);
+  }
+
+  async rescheduleOccurrence(
+    publicationId: string,
+    occurrenceId: string,
+    user: AuthUser,
+    body: unknown,
+    profile: PublicationDispatchProfile,
+  ) {
+    this.assertNewPublicationProfile(profile);
+    return reschedulePublicationOccurrence(
+      {
+        prisma: this.prisma,
+        routing: this.publisherRouting,
+        access: this.publicationAccessWhere(user.userId, profile),
+        read: (id) => this.get(id, user, profile),
+        wake: (id, requestId) =>
+          this.publisherPublicationWakeupQueue.enqueueAfterCommittedMutation({
+            publicationId: id,
+            mutationRequestId: requestId,
+            reason: 'create',
+          }),
+      },
+      publicationId,
+      occurrenceId,
+      user,
+      body,
+    );
   }
 
   async listDeliveries(
@@ -2248,7 +2281,7 @@ export class PublicationService {
               id: schedule.id,
               revision: schedule.revision,
               status: PublicationScheduleStatus.ACTIVE,
-              nextMaterializeAt: { lte: now },
+              nextMaterializeAt: schedule.nextMaterializeAt,
               publication: { is: { lifecycle: PublicationLifecycle.ACTIVE } },
             },
             data: {
@@ -3116,26 +3149,6 @@ export class PublicationService {
     return normalizePublicationSchedule(schedule, now, PUBLICATION_PAST_GRACE_MS);
   }
 
-  private expandInitialSchedule(schedule: PublicationScheduleInput, now: Date): Date[] {
-    if (schedule.mode === 'once') {
-      return [new Date(schedule.at)];
-    }
-    if (schedule.mode === 'slots') {
-      return [...new Set(schedule.slots.map((slot) => new Date(slot).getTime()))]
-        .sort((left, right) => left - right)
-        .map((timestamp) => new Date(timestamp));
-    }
-    if (schedule.mode === 'now') {
-      return [now];
-    }
-    return expandPublicationSchedule(schedule, {
-      from: now,
-      to: new Date(now.getTime() + PUBLICATION_RECURRENCE_HORIZON_MS),
-      existingCount: 0,
-      now,
-    });
-  }
-
   private isInitialRecurrenceExhausted(
     schedule: PublicationScheduleInput | null,
     initialSlots: Date[],
@@ -3149,26 +3162,6 @@ export class PublicationService {
     }
     const horizon = new Date(now.getTime() + PUBLICATION_RECURRENCE_HORIZON_MS);
     return schedule.endsAt !== null && new Date(schedule.endsAt) <= horizon;
-  }
-
-  private assertPublishableSchedule(
-    schedule: PublicationScheduleInput | null,
-    initialSlots: Date[],
-    now: Date,
-  ): void {
-    if (
-      schedule?.mode !== 'recurrence' ||
-      initialSlots.length > 0 ||
-      schedule.endsAt === null ||
-      findNextPublicationRecurrenceSlot(schedule, now, 0)
-    ) {
-      return;
-    }
-
-    throw new BadRequestException({
-      code: 'PUBLICATION_SCHEDULE_EMPTY',
-      message: 'Расписание не содержит ни одного будущего запуска.',
-    });
   }
 
   private resolveInitialRecurrenceMaterializeAt(

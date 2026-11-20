@@ -193,6 +193,12 @@ and keeps skipped dates out of conflict checks for the new recipients. A skip co
 even a legacy series limit. Upcoming releases appear in chronological order before history.
 Check these cases with the [PostgreSQL calendar suite](../../apps/api/src/admin/publication-calendar-projection-postgres.spec.ts).
 
+A move of one release saves it as a separate post. The original date counts toward the series
+limit and its neighbors keep their dates. A move from a selected release keeps the earlier
+releases in the original series and places the remaining schedule in a continuation. Both
+moves keep the saved audience and delivery policy. A conflict or an already prepared release
+leaves the schedule intact. The same request can recover the result after a lost response.
+
 Switching between a single date, selected dates and recurring dates preserves the editor's
 working values. The publish request uses the active mode. Closing a draft without a saved
 server or device copy requires an explicit discard. The [calendar browser](../../apps/miniapp/test/publication-calendar-validation.browser.mjs)

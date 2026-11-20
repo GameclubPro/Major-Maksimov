@@ -16,11 +16,55 @@ import {
   pausePublication,
   refreshPublicationTargets,
   resolvePublicationAmbiguousDelivery,
+  reschedulePublicationOccurrence,
   resumePublication,
   retryPublicationOccurrence,
   testPublication,
   updatePublication,
 } from '../src/lib/api/publication-client';
+
+test('preview moves a single release once and creates a distinct continuation with its remaining count', async () => {
+  const api = createPreviewApiTransport({ search: '?profile=publisher' });
+  const source = await getPublication(api, 'publication-neighborhood-digest');
+  const [first, second, third] = source.occurrences;
+  assert.ok(first && second && third && source.schedule?.mode === 'recurrence');
+  const move = {
+    scope: 'occurrence' as const,
+    at: new Date(Date.parse(first.scheduledAt) + 60_000).toISOString(),
+    expectedRevision: source.version,
+    requestId: 'preview-single-move',
+  };
+  const single = await reschedulePublicationOccurrence(api, source.id, first.id, move);
+  assert.equal(single.publication.schedule?.mode, 'once');
+  assert.equal(single.publication.schedule.nextOccurrenceAt, move.at);
+  assert.equal(single.source.occurrences.find(({ id }) => id === first.id)?.status, 'CANCELED');
+  assert.equal(single.source.occurrences.find(({ id }) => id === second.id)?.status, 'SCHEDULED');
+  assert.deepEqual(await reschedulePublicationOccurrence(api, source.id, first.id, move), single);
+
+  const continuation = await reschedulePublicationOccurrence(api, source.id, third.id, {
+    scope: 'following',
+    schedule: {
+      ...source.schedule,
+      startsAt: new Date(Date.parse(third.scheduledAt) + 86_400_000).toISOString(),
+      times: ['13:37'],
+    },
+    expectedRevision: single.source.version,
+    requestId: 'preview-series-split',
+  });
+  assert.equal(continuation.publication.schedule?.mode, 'recurrence');
+  assert.equal(
+    continuation.publication.schedule.maxOccurrences,
+    source.schedule.maxOccurrences! - 2,
+  );
+  assert.equal(
+    continuation.source.occurrences.find(({ id }) => id === second.id)?.status,
+    'SCHEDULED',
+  );
+  assert.equal(
+    continuation.source.occurrences.find(({ id }) => id === third.id)?.status,
+    'CANCELED',
+  );
+});
 
 test('preview publications support list, CRUD, actions, and delivery review', async () => {
   const api = createPreviewApiTransport();

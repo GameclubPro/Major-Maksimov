@@ -1,0 +1,67 @@
+@layer pages {
+  .publication-reschedule .action-confirm-sheet__panel {
+    max-height: min(100%, 660px);
+    border-radius: 22px;
+  }
+
+  .publication-reschedule .action-confirm-sheet__head strong {
+    color: var(--color-ink);
+    font-size: 1.05rem;
+  }
+
+  .publication-reschedule .action-confirm-sheet__preview {
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .publication-reschedule .action-confirm-sheet__preview-title {
+    font-size: 0.9rem;
+  }
+
+  .publication-reschedule .action-confirm-sheet__actions {
+    position: sticky;
+    bottom: 0;
+    padding-top: 8px;
+    background: var(--color-surface-raised);
+  }
+
+  .publication-reschedule__context,
+  .publication-reschedule__zone,
+  .publication-reschedule__error,
+  .publication-reschedule__result {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .publication-reschedule__context,
+  .publication-reschedule__zone {
+    color: var(--color-ink-muted);
+  }
+
+  .publication-reschedule__options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    background: var(--color-surface-muted);
+  }
+
+  .publication-reschedule__options button {
+    min-height: 44px;
+  }
+
+  .publication-reschedule__options button.is-active {
+    background: var(--color-accent-soft);
+    color: var(--color-accent);
+  }
+
+  .publication-reschedule__error {
+    color: var(--publication-danger-ink, var(--color-danger));
+  }
+
+  .publication-reschedule__body {
+    display: grid;
+    align-content: start;
+    gap: 12px;
+  }
+}
