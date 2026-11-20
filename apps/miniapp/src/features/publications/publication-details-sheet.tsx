@@ -134,6 +134,20 @@ function resolvePublicationDetailsPortalTarget(): Element | null {
   return document.querySelector('.design-preview__device-screen') ?? document.body;
 }
 
+function orderPublicationOccurrences(details: PublicationDetails): PublicationOccurrenceSummary[] {
+  if (details.schedule?.mode !== 'recurrence') return details.occurrences;
+  const now = Date.now();
+  const upcoming: PublicationOccurrenceSummary[] = [];
+  const other: PublicationOccurrenceSummary[] = [];
+  for (const occurrence of details.occurrences) {
+    const isUpcoming =
+      occurrence.status === 'SCHEDULED' && Date.parse(occurrence.scheduledAt) > now;
+    (isUpcoming ? upcoming : other).push(occurrence);
+  }
+  upcoming.sort((first, second) => Date.parse(first.scheduledAt) - Date.parse(second.scheduledAt));
+  return [...upcoming, ...other];
+}
+
 export function PublicationDetailsSheet({
   api,
   publication,
@@ -548,7 +562,7 @@ export function PublicationDetailsSheet({
                   <strong>Отправки</strong>
                   <div className="publication-occurrences">
                     {details.occurrences.length > 0 ? (
-                      details.occurrences.map((occurrence) => {
+                      orderPublicationOccurrences(details).map((occurrence) => {
                         const revisionLabel = formatOccurrenceRevision(
                           occurrence,
                           details.content.revision,

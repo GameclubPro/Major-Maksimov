@@ -149,6 +149,7 @@ export async function projectPublicationCalendar(
 export function getPublicationCalendarCheckSlots(
   schedule: PublicationScheduleInput,
   slots: Date[],
+  skippedByAt?: ReadonlyMap<number, unknown>,
   now = new Date(),
 ): Date[] {
   if (schedule.mode !== 'recurrence') return slots;
@@ -156,9 +157,31 @@ export function getPublicationCalendarCheckSlots(
   const from = start > now ? start : now;
   const to = new Date(from.getTime() + MAX_PUBLICATION_CALENDAR_WINDOW_DAYS * 86_400_000);
   const projected = expandPublicationSchedule(schedule, { from, to });
-  return [...new Set([...slots, ...projected].map((slot) => slot.getTime()))].map(
-    (value) => new Date(value),
-  );
+  return [...new Set([...slots, ...projected].map((slot) => slot.getTime()))]
+    .filter((value) => !skippedByAt?.has(value))
+    .map((value) => new Date(value));
+}
+
+function isExplicitPublicationCalendarSkip(code: string | null | undefined): boolean {
+  return code === PUBLICATION_CALENDAR_SLOT_OCCUPIED || code === PUBLICATION_CALENDAR_SLOT_SKIPPED;
+}
+
+export function countRecurrenceRollupOccurrences(
+  rule: unknown,
+  groups: ReadonlyArray<{
+    status: PublicationOccurrenceStatus;
+    dispatchBlockerCode?: string | null;
+    _count: { _all: number };
+  }>,
+): number {
+  const countsCanceled = Boolean(readPublicationLatePolicy(rule));
+  return groups.reduce((count, group) => {
+    const counts =
+      countsCanceled ||
+      group.status !== PublicationOccurrenceStatus.CANCELED ||
+      isExplicitPublicationCalendarSkip(group.dispatchBlockerCode);
+    return count + (counts ? group._count._all : 0);
+  }, 0);
 }
 
 export function countableCalendarOccurrenceWhere(

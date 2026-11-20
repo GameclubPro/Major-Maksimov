@@ -64,6 +64,10 @@ postgres('Publication calendar with PostgreSQL', () => {
     (
       service as unknown as { materializeRecurringSchedules(limit: number): Promise<void> }
     ).materializeRecurringSchedules(10);
+  const finishSeries = (publicationId: string) =>
+    (
+      service as unknown as { rollupPublicationLifecycle(id: string): Promise<void> }
+    ).rollupPublicationLifecycle(publicationId);
 
   beforeAll(async () => {
     const url = new URL(databaseUrl);
@@ -361,6 +365,7 @@ postgres('Publication calendar with PostgreSQL', () => {
       status: 'SCHEDULED',
       scheduledAt: second.scheduledAt,
     });
+    const unrelated = await create(once(first.scheduledAt.toISOString()), secondChat);
     await service.update(
       series.id,
       user,
@@ -384,6 +389,39 @@ postgres('Publication calendar with PostgreSQL', () => {
       },
       { status: 'SCHEDULED', scheduledAt: second.scheduledAt, dispatchBlockerCode: null },
     ]);
+    expect(
+      await db.publicationOccurrence.findFirst({ where: { publicationId: unrelated.id } }),
+    ).toMatchObject({ status: 'SCHEDULED', scheduledAt: first.scheduledAt });
+  });
+
+  it('completes a previously saved finite recurrence after the only occurrence is skipped', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 1 });
+    const skipped = await db.publicationOccurrence.findFirstOrThrow({
+      where: { publicationId: series.id },
+    });
+    // A retained rule may predate the explicit late-delivery policy.
+    await db.publicationSchedule.update({
+      where: { publicationId: series.id },
+      data: { rule: { ...recurrence, maxOccurrences: 1 } },
+    });
+    await service.skipOccurrence(
+      series.id,
+      skipped.id,
+      user,
+      {
+        requestId: randomUUID(),
+        expectedRevision: 1,
+      },
+      profile,
+    );
+    jest.setSystemTime(new Date(skipped.scheduledAt.getTime() + 60_000));
+    await finishSeries(series.id);
+    await refreshSeries();
+    await finishSeries(series.id);
+    expect(
+      await db.publicationSchedule.findUnique({ where: { publicationId: series.id } }),
+    ).toMatchObject({ status: 'COMPLETED', nextMaterializeAt: null });
+    expect(await db.publicationOccurrence.count({ where: { publicationId: series.id } })).toBe(1);
   });
 
   it('rejects skip once an execution envelope exists and rolls back the version', async () => {

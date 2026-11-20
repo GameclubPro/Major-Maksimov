@@ -4,7 +4,6 @@ import {
   requirePublicationAlbumEditor,
 } from './publication-album-write-compatibility';
 import {
-  readPublicationLatePolicy,
   snapshotPublicationDeliveryDeadline,
   withDefaultPublicationLatePolicy,
   withPreservedPublicationLatePolicy,
@@ -118,6 +117,7 @@ import {
 } from './publication-calendar-conflicts';
 import {
   countableCalendarOccurrenceWhere,
+  countRecurrenceRollupOccurrences,
   getPublicationCalendarCheckSlots,
   lockPublicationCalendar,
   persistedPublicationScheduleRule,
@@ -1092,11 +1092,13 @@ export class PublicationService {
             await this.reservePublicationCalendar(
               tx,
               targets,
-              initialSlots.filter((slot) => !audiencePlan?.skippedByAt.has(slot.getTime())),
+              initialSlots,
               schedule,
               publicationId,
               user.userId,
               calendarAlreadyLocked,
+              false,
+              audiencePlan?.skippedByAt,
             );
           }
           if (!schedule) {
@@ -2606,7 +2608,7 @@ export class PublicationService {
     }
     const currentSchedule = publication.schedule;
     const grouped = await this.prisma.publicationOccurrence.groupBy({
-      by: ['status'],
+      by: ['status', 'dispatchBlockerCode'],
       where: {
         publicationId,
         scheduleId: currentSchedule.id,
@@ -2633,16 +2635,10 @@ export class PublicationService {
         if (rule.mode !== 'recurrence') {
           throw new Error('Повтор публикации повреждён.');
         }
-        const nonCanceledCount = grouped.reduce(
-          (count, group) =>
-            !readPublicationLatePolicy(rule) &&
-            group.status === PublicationOccurrenceStatus.CANCELED
-              ? count
-              : count + group._count._all,
-          0,
-        );
+        const countedOccurrences = countRecurrenceRollupOccurrences(rule, grouped);
         const totalCount = grouped.reduce((count, group) => count + group._count._all, 0);
-        const reachedMax = rule.maxOccurrences !== null && nonCanceledCount >= rule.maxOccurrences;
+        const reachedMax =
+          rule.maxOccurrences !== null && countedOccurrences >= rule.maxOccurrences;
         const latest = await this.prisma.publicationOccurrence.findFirst({
           where: {
             publicationId,
@@ -2657,7 +2653,7 @@ export class PublicationService {
         const from = resolvePublicationRecurrenceFrom(rule, currentSchedule, latest, now);
         const nextSlot = reachedMax
           ? null
-          : findNextPublicationRecurrenceSlot(rule, from, nonCanceledCount);
+          : findNextPublicationRecurrenceSlot(rule, from, countedOccurrences);
         if (nextSlot) {
           const nextMaterializeAt = this.resolveRecurrenceHorizonEntry(nextSlot, now);
           try {
@@ -3235,11 +3231,14 @@ export class PublicationService {
     actorUserId: string,
     calendarAlreadyLocked = false,
     materializing = false,
+    skippedByAt?: ReadonlyMap<number, unknown>,
   ): Promise<Set<number> | undefined> {
     if (schedule.mode === 'now') {
       return;
     }
-    const checkSlots = materializing ? slots : getPublicationCalendarCheckSlots(schedule, slots);
+    const checkSlots = materializing
+      ? slots
+      : getPublicationCalendarCheckSlots(schedule, slots, skippedByAt);
     if (!checkSlots.length) return;
     if (!calendarAlreadyLocked) {
       await lockPublicationCalendar(tx);

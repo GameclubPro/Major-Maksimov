@@ -88,6 +88,12 @@ export async function checkPublicationHistoryReview(browser, base) {
           ),
         );
         const panel = page.getByRole('dialog', { name: 'Изменённое расписание', exact: true });
+        assert.deepEqual(
+          await panel
+            .locator('.publication-occurrences > [data-occurrence-id]')
+            .evaluateAll((rows) => rows.map((row) => row.dataset.occurrenceId)),
+          ['next-occurrence', 'later-occurrence', 'old-occurrence'],
+        );
         const box = await panel.boundingBox();
         assert.ok(box && box.x >= 0 && box.x + box.width <= width + 1 && box.height <= height + 1);
         assert.equal(

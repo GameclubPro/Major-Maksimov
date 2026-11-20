@@ -188,7 +188,9 @@ diagnostics separate from the ordinary feed; do not return global aggregates to 
 The publication calendar includes recurring dates before they become dispatch rows. Confirming
 a replacement binds it to the occupied slots reviewed in the dialog. A materialized historical
 collision skips the affected occurrence. An editor can also skip a future occurrence before
-delivery preparation begins. Changing only the audience preserves the unused finite count.
+delivery preparation begins. Changing only the audience preserves the unused finite count
+and keeps skipped dates out of conflict checks for the new recipients. A skip counts toward
+even a legacy series limit. Upcoming releases appear in chronological order before history.
 Check these cases with the [PostgreSQL calendar suite](../../apps/api/src/admin/publication-calendar-projection-postgres.spec.ts).
 
 Switching between a single date, selected dates and recurring dates preserves the editor's
