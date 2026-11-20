@@ -10,6 +10,8 @@ import {
   publicationCalendarAvailabilityRequestSchema,
   publicationCalendarAvailabilityResponseSchema,
   publicationDetailsSchema,
+  publicationOccurrenceRescheduleRequestSchema,
+  publicationOccurrenceRescheduleResponseSchema,
   publicationTargetsRefreshResponseSchema,
   retryPublicationOccurrenceRequestSchema,
   resolvePublicationAmbiguousDeliveryRequestSchema,
@@ -26,6 +28,8 @@ import {
   type PublicationCalendarAvailabilityRequest,
   type PublicationCalendarAvailabilityResponse,
   type PublicationDetails,
+  type PublicationOccurrenceRescheduleRequest,
+  type PublicationOccurrenceRescheduleResponse,
   type PublicationTargetsRefreshResponse,
   type RetryPublicationOccurrenceRequest,
   type ResolvePublicationAmbiguousDeliveryRequest,
@@ -152,6 +156,22 @@ export async function skipPublicationOccurrence(
     { method: 'POST', body: JSON.stringify(publicationActionRequestSchema.parse(request)) },
   );
   return publicationDetailsSchema.parse(response);
+}
+
+export async function reschedulePublicationOccurrence(
+  api: ApiTransport,
+  publicationId: string,
+  occurrenceId: string,
+  request: PublicationOccurrenceRescheduleRequest,
+): Promise<PublicationOccurrenceRescheduleResponse> {
+  const response = await api.request(
+    `/publications/${encodeURIComponent(publicationId)}/occurrences/${encodeURIComponent(occurrenceId)}/reschedule`,
+    {
+      method: 'POST',
+      body: JSON.stringify(publicationOccurrenceRescheduleRequestSchema.parse(request)),
+    },
+  );
+  return publicationOccurrenceRescheduleResponseSchema.parse(response);
 }
 
 export async function refreshPublicationTargets(

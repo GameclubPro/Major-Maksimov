@@ -15,6 +15,7 @@ import {
   publicationCalendarAvailabilityRequestSchema,
   publicationCalendarAvailabilityResponseSchema,
   publicationDetailsSchema,
+  publicationOccurrenceRescheduleRequestSchema,
   type PublicationPostActions,
   publicationTargetsRefreshResponseSchema,
   resolvePublicationAmbiguousDeliveryRequestSchema,
@@ -33,6 +34,7 @@ import {
 } from '@maxim/contracts/publication';
 import { publicationPostActionRequestSchema } from '@maxim/contracts/publication-post-action-request';
 import { confirmPreviewCalendarReplacement } from './preview-publication-conflict';
+import { reschedulePreviewPublication } from './preview-publication-reschedule';
 import {
   PREVIEW_CHANNEL_ID,
   PREVIEW_CHANNEL_TITLE,
@@ -266,21 +268,22 @@ export function buildPreviewPublicationDetails(
     contentRevision: options.version ?? 1,
     usesLatestContent: true,
   }));
-  const deliveries = occurrences.flatMap((occurrence) =>
-    targets.map(
-      (target, targetIndex): PublicationDelivery => ({
-        id: `${occurrence.id}-delivery-${targetIndex + 1}`,
-        occurrenceId: occurrence.id,
-        target,
-        status: 'PENDING',
-        contentRevision: options.version ?? 1,
-        usesLatestContent: true,
-        attemptCount: 0,
-        remoteMessageId: null,
-        lastError: null,
-        sentAt: null,
-      }),
-    ),
+  const deliveries = (request.schedule?.mode === 'recurrence' ? [] : occurrences).flatMap(
+    (occurrence) =>
+      targets.map(
+        (target, targetIndex): PublicationDelivery => ({
+          id: `${occurrence.id}-delivery-${targetIndex + 1}`,
+          occurrenceId: occurrence.id,
+          target,
+          status: 'PENDING',
+          contentRevision: options.version ?? 1,
+          usesLatestContent: true,
+          attemptCount: 0,
+          remoteMessageId: null,
+          lastError: null,
+          sentAt: null,
+        }),
+      ),
   );
   const delivery = buildPreviewPublicationDeliveryStats(deliveries);
   const createdAt = options.createdAt ?? now.toISOString();
@@ -1279,6 +1282,17 @@ export function handlePublicationsRequest(
     publication.version += 1;
     publication.updatedAt = readPreviewClock(state.clock).toISOString();
     return cloneJson(syncPreviewPublication(state, publication.id));
+  }
+
+  if (segments[2] === 'occurrences' && segments[4] === 'reschedule' && method === 'POST') {
+    const request = publicationOccurrenceRescheduleRequestSchema.parse(parseJsonBody(init));
+    const occurrenceId = decodeURIComponent(segments[3] ?? '');
+    return reschedulePreviewPublication(state, publication, occurrenceId, request, {
+      buildPreviewPublicationContentInput,
+      buildPreviewPublicationDetails,
+      assertPreviewPublicationScheduleAvailability,
+      syncPreviewPublication,
+    });
   }
 
   if (segments[2] === 'deliveries' && segments.length === 3 && method === 'GET') {

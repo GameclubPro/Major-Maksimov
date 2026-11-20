@@ -1,6 +1,9 @@
 import type { PublicationScheduleInput } from '@maxim/contracts/publication';
 import { BadRequestException } from '@nestjs/common';
-import { assertPublicationTimezone } from './publication-recurrence';
+import {
+  assertPublicationTimezone,
+  findNextPublicationRecurrenceSlot,
+} from './publication-recurrence';
 
 export function normalizePublicationSchedule(
   schedule: PublicationScheduleInput,
@@ -32,4 +35,24 @@ export function normalizePublicationSchedule(
     throw new BadRequestException('Время публикации уже прошло.');
   }
   return normalized;
+}
+
+export function assertPublishableSchedule(
+  schedule: PublicationScheduleInput | null,
+  initialSlots: Date[],
+  now: Date,
+): void {
+  if (
+    schedule?.mode !== 'recurrence' ||
+    initialSlots.length > 0 ||
+    schedule.endsAt === null ||
+    findNextPublicationRecurrenceSlot(schedule, now, 0)
+  ) {
+    return;
+  }
+
+  throw new BadRequestException({
+    code: 'PUBLICATION_SCHEDULE_EMPTY',
+    message: 'Расписание не содержит ни одного будущего запуска.',
+  });
 }

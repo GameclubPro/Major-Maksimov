@@ -43,6 +43,7 @@ import {
   PublicationPublisherRoutingService,
 } from './publication-publisher-routing.service';
 import { PublicationService } from './publication.service';
+import { assertPublishableSchedule } from './publication-schedule-normalization';
 import { publicationAdminAccessWhere, publicationAdminScope } from './publication-admin-access';
 import {
   LEGACY_PUBLICATION_DISAPPEARANCE_LAST_ERROR,
@@ -931,7 +932,6 @@ describe('PublicationService', () => {
   });
 
   it('rejects a bounded recurrence with no possible future occurrence', () => {
-    const { service } = createService();
     const now = new Date('2026-07-10T09:00:00.000Z');
     const schedule = {
       mode: 'recurrence',
@@ -944,13 +944,11 @@ describe('PublicationService', () => {
       endsAt: '2026-07-10T10:00:00.000Z',
       maxOccurrences: null,
       replaceConflicts: false,
-    } as const;
+    } satisfies PublicationScheduleInput;
 
-    expect(() => (service as any).assertPublishableSchedule(schedule, [], now)).toThrow(
-      BadRequestException,
-    );
+    expect(() => assertPublishableSchedule(schedule, [], now)).toThrow(BadRequestException);
     try {
-      (service as any).assertPublishableSchedule(schedule, [], now);
+      assertPublishableSchedule(schedule, [], now);
     } catch (error: unknown) {
       expect((error as BadRequestException).getResponse()).toEqual({
         code: 'PUBLICATION_SCHEDULE_EMPTY',

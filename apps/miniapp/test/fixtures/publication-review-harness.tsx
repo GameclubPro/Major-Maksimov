@@ -1,4 +1,5 @@
 import { createRoot } from 'react-dom/client';
+import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { publicationDeliverySchema, publicationDetailsSchema } from '@maxim/contracts/publication';
 import { PublicationDetailsSheet } from '../../src/features/publications/publication-details-sheet';
@@ -6,9 +7,12 @@ import { PublicationDeliveryActionSheets } from '../../src/features/publications
 import { usePublicationActions } from '../../src/features/publications/use-publication-actions';
 import { usePublicationRequestIds } from '../../src/features/publications/use-publication-request-ids';
 import { ToastProvider } from '../../src/components/ui/toast';
+import { ApiRequestError } from '../../src/lib/api-request-error';
+import { runNativeBackHandlers } from '../../src/lib/native-back';
 import type { ApiTransport } from '../../src/lib/api/transport';
 import '../../src/styles.css';
 import '../../src/styles/publications-page.css';
+import '../../src/styles/publisher-workspace.css';
 import '../../src/styles/publisher-publications-workspace.css';
 
 const empty = { total: 0, pending: 0, sent: 0, failed: 0, ambiguous: 0, canceled: 0 };
@@ -91,12 +95,18 @@ const queryClient = new QueryClient({
 const api: ApiTransport = {
   async request(path, init) {
     const response = await fetch(`/review-api${path}`, init);
-    if (!response.ok) throw new Error('Review fixture request failed');
+    if (!response.ok)
+      throw new ApiRequestError(
+        response.status,
+        await response.text(),
+        'Review fixture request failed',
+      );
     return response.json();
   },
   requestKeepalive() {},
 };
 Object.assign(window, {
+  handlePublicationReviewBack: runNativeBackHandlers,
   publicationReviewFixture: { details, deliveries },
   refetchPublicationReview() {
     void Promise.all([
@@ -118,11 +128,13 @@ Object.assign(window, {
 
 function Harness() {
   const actions = usePublicationActions(api, usePublicationRequestIds());
+  const [selectedPublication, selectPublication] = useState(details);
   return (
     <>
       <PublicationDetailsSheet
         api={api}
-        publication={details}
+        publication={selectedPublication}
+        onOpenPublication={selectPublication}
         busy={actions.resolveAmbiguousMutation.isPending}
         covered={actions.ambiguousTarget !== null}
         onClose={() => {}}

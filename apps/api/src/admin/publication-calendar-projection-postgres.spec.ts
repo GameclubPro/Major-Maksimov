@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient, createPrismaAdapter } from '../prisma/prisma-client';
 import { PublicationContentService } from './publication-content.service';
@@ -60,6 +60,21 @@ postgres('Publication calendar with PostgreSQL', () => {
       schedule,
       audience: withAudience(destination),
     });
+  const slotsFor = (publicationId: string) =>
+    db.publicationOccurrence.findMany({
+      where: { publicationId },
+      orderBy: { scheduledAt: 'asc' },
+    });
+  const readSeries = (id: string) =>
+    db.publication.findUniqueOrThrow({
+      where: { id },
+      include: {
+        canonicalContentRevision: { include: { assets: { orderBy: { position: 'asc' } } } },
+        targets: { orderBy: { position: 'asc' } },
+        schedule: true,
+      },
+    });
+  const publicationCount = () => db.publication.count({ where: { actorUserId: user.userId } });
   const refreshSeries = () =>
     (
       service as unknown as { materializeRecurringSchedules(limit: number): Promise<void> }
@@ -131,6 +146,7 @@ postgres('Publication calendar with PostgreSQL', () => {
   afterEach(async () => {
     jest.useRealTimers();
     await db.publication.deleteMany({ where: { actorUserId: user.userId } });
+    await db.publicationAsset.deleteMany({ where: { actorUserId: user.userId } });
   });
   afterAll(async () => {
     if (!db) return;
@@ -392,6 +408,304 @@ postgres('Publication calendar with PostgreSQL', () => {
     expect(
       await db.publicationOccurrence.findFirst({ where: { publicationId: unrelated.id } }),
     ).toMatchObject({ status: 'SCHEDULED', scheduledAt: first.scheduledAt });
+  });
+
+  it('moves one occurrence to a separate post and replays without copying it again', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 3 });
+    const saved = await readSeries(series.id);
+    const assets = [];
+    for (const [index, mimeType] of ['image/png', 'video/mp4'].entries()) {
+      const bytes = Buffer.from([index]);
+      const asset = await db.publicationAsset.create({
+        data: {
+          actorUserId: user.userId,
+          sha256: createHash('sha256').update(bytes).digest('hex'),
+          mimeType,
+          fileName: `attachment-${index}`,
+          sizeBytes: 1,
+          bytes,
+        },
+      });
+      assets.push({ assetId: asset.id, position: index });
+    }
+    await db.publicationContentAsset.createMany({
+      data: assets.map((asset) => ({
+        ...asset,
+        contentRevisionId: saved.canonicalContentRevisionId!,
+      })),
+    });
+    const original = await readSeries(series.id);
+    const originalSlots = await slotsFor(series.id);
+    const [first, moved, last] = originalSlots;
+    const at = '2026-11-21T16:00:00.000Z';
+    const request = { expectedRevision: 1, requestId: randomUUID(), scope: 'occurrence', at };
+    const result = await service.rescheduleOccurrence(series.id, moved.id, user, request, profile);
+    expect(result.source.id).toBe(series.id);
+    expect(result.publication.id).not.toBe(series.id);
+
+    const [updated, replacement, oldSlots, newSlots] = await Promise.all([
+      readSeries(series.id),
+      readSeries(result.publication.id),
+      slotsFor(series.id),
+      slotsFor(result.publication.id),
+    ]);
+    expect(updated.version).toBe(original.version + 1);
+    expect(updated.schedule).toEqual(original.schedule);
+    expect(oldSlots).toEqual([
+      first,
+      expect.objectContaining({
+        id: moved.id,
+        status: 'CANCELED',
+        scheduledAt: moved.scheduledAt,
+        contentRevisionId: moved.contentRevisionId,
+      }),
+      last,
+    ]);
+    expect(replacement).toMatchObject({
+      actorUserId: original.actorUserId,
+      requiredBotId: original.requiredBotId,
+      dispatchProfile: original.dispatchProfile,
+      audienceSelection: original.audienceSelection,
+      audienceMode: original.audienceMode,
+      schedule: { mode: 'ONCE', timezone: 'UTC' },
+      targets: [{ targetChatId: firstChat, entityType: 'CHAT', position: 0 }],
+    });
+    expect(replacement.canonicalContentRevision).toMatchObject({
+      publicationId: replacement.id,
+      text: original.canonicalContentRevision?.text,
+      textFormat: original.canonicalContentRevision?.textFormat,
+      buttons: original.canonicalContentRevision?.buttons,
+      postPublish: original.canonicalContentRevision?.postPublish,
+    });
+    expect(replacement.canonicalContentRevision?.assets).toEqual(
+      assets.map((asset) => ({
+        ...asset,
+        contentRevisionId: replacement.canonicalContentRevisionId,
+      })),
+    );
+    expect(replacement.canonicalContentRevisionId).not.toBe(original.canonicalContentRevisionId);
+    expect(newSlots).toEqual([
+      expect.objectContaining({
+        status: 'SCHEDULED',
+        scheduledAt: new Date(at),
+        contentRevisionId: replacement.canonicalContentRevisionId,
+      }),
+    ]);
+
+    await expect(
+      service.rescheduleOccurrence(series.id, moved.id, user, request, profile),
+    ).resolves.toMatchObject({
+      source: { id: series.id },
+      publication: { id: replacement.id },
+    });
+    expect(await publicationCount()).toBe(2);
+    expect((await readSeries(series.id)).version).toBe(updated.version);
+    expect(await slotsFor(series.id)).toEqual(oldSlots);
+    expect(await slotsFor(replacement.id)).toEqual(newSlots);
+  });
+
+  it('commits at most one of two concurrent moves of the same occurrence', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 3 });
+    const [first, moved, last] = await slotsFor(series.id);
+    const requests = ['2026-11-21T16:00:00.000Z', '2026-11-21T17:00:00.000Z'].map((at) => ({
+      expectedRevision: 1,
+      requestId: randomUUID(),
+      scope: 'occurrence',
+      at,
+    }));
+
+    // Both requests finish the pre-transaction checks before either can write.
+    const originalReadiness = routing.assertTargetsReady;
+    let checked = 0;
+    let release!: () => void;
+    const bothChecked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const barrier = jest
+      .spyOn(routing, 'assertTargetsReady')
+      .mockImplementation(async (targets) => {
+        if (++checked === requests.length) release();
+        await bothChecked;
+        return originalReadiness(targets);
+      });
+    try {
+      const results = await Promise.allSettled(
+        requests.map((request) =>
+          service.rescheduleOccurrence(series.id, moved.id, user, request, profile),
+        ),
+      );
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      const winnerIndex = results.findIndex((result) => result.status === 'fulfilled');
+      const winner = results[winnerIndex];
+      const loser = results[1 - winnerIndex];
+      if (winner.status !== 'fulfilled') throw new Error('Expected one committed move');
+      expect(loser).toMatchObject({
+        status: 'rejected',
+        reason: { status: 409, response: { code: 'PUBLICATION_REVISION_CONFLICT' } },
+      });
+      expect(await publicationCount()).toBe(2);
+      expect((await readSeries(series.id)).version).toBe(2);
+      expect(await slotsFor(series.id)).toEqual([
+        first,
+        expect.objectContaining({ id: moved.id, status: 'CANCELED' }),
+        last,
+      ]);
+      expect(await slotsFor(winner.value.publication.id)).toEqual([
+        expect.objectContaining({
+          status: 'SCHEDULED',
+          scheduledAt: new Date(requests[winnerIndex].at),
+        }),
+      ]);
+      expect(
+        await db.publicationMutationRecord.findMany({
+          where: {
+            actorUserId: user.userId,
+            requestId: { in: requests.map(({ requestId }) => requestId) },
+          },
+          select: { requestId: true, publicationId: true },
+        }),
+      ).toEqual([
+        {
+          requestId: requests[winnerIndex].requestId,
+          publicationId: winner.value.publication.id,
+        },
+      ]);
+    } finally {
+      release();
+      barrier.mockRestore();
+    }
+  });
+
+  it('rolls back a move when another publication already has that recipient and instant', async () => {
+    const at = '2026-11-21T16:00:00.000Z';
+    const series = await create({ ...recurrence, maxOccurrences: 3 });
+    const booking = await create(once(at));
+    const original = await readSeries(series.id);
+    const originalSlots = await slotsFor(series.id);
+    const bookedSlots = await slotsFor(booking.id);
+    const request = { expectedRevision: 1, requestId: randomUUID(), scope: 'occurrence', at };
+    await expect(
+      service.rescheduleOccurrence(series.id, originalSlots[1].id, user, request, profile),
+    ).rejects.toMatchObject({
+      status: 409,
+      response: {
+        code: 'PUBLICATION_SCHEDULE_CONFLICT',
+        conflicts: [{ chatId: firstChat, scheduledAt: at }],
+      },
+    });
+    expect(await publicationCount()).toBe(2);
+    expect(await readSeries(series.id)).toEqual(original);
+    expect(await slotsFor(series.id)).toEqual(originalSlots);
+    expect(await slotsFor(booking.id)).toEqual(bookedSlots);
+    expect(
+      await db.publicationMutationRecord.count({
+        where: { actorUserId: user.userId, requestId: request.requestId },
+      }),
+    ).toBe(0);
+  });
+
+  it('rejects a stale revision and refuses a move after an execution envelope has been created', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 3 });
+    const original = await readSeries(series.id);
+    const [, slot] = await slotsFor(series.id);
+    const request = {
+      expectedRevision: original.version + 1,
+      requestId: randomUUID(),
+      scope: 'occurrence',
+      at: '2026-11-21T16:00:00.000Z',
+    };
+    await expect(
+      service.rescheduleOccurrence(series.id, slot.id, user, request, profile),
+    ).rejects.toMatchObject({ response: { code: 'PUBLICATION_REVISION_CONFLICT' } });
+
+    const execution = await db.managedBroadcast.create({
+      data: {
+        sourceChatId: firstChat,
+        actorUserId: user.userId,
+        targetChatIds: [firstChat],
+        buttons: [],
+        dispatchProfile: profile,
+        requiredBotId: botId,
+        publicationOccurrenceId: slot.id,
+        publicationContentRevisionId: slot.contentRevisionId,
+        nextSendAt: slot.scheduledAt,
+      },
+    });
+    await expect(
+      service.rescheduleOccurrence(
+        series.id,
+        slot.id,
+        user,
+        {
+          ...request,
+          expectedRevision: original.version,
+          requestId: randomUUID(),
+        },
+        profile,
+      ),
+    ).rejects.toMatchObject({ response: { code: 'PUBLICATION_CONFLICT_REQUIRES_MANUAL_REVIEW' } });
+    expect(await publicationCount()).toBe(1);
+    expect(await readSeries(series.id)).toEqual(original);
+    expect(await db.publicationOccurrence.findUnique({ where: { id: slot.id } })).toEqual(slot);
+    expect(await db.managedBroadcast.findUnique({ where: { id: execution.id } })).toEqual(
+      execution,
+    );
+  });
+
+  it('moves this and later slots to a finite continuation while keeping the accepted prefix', async () => {
+    const series = await create({ ...recurrence, maxOccurrences: 5 });
+    const original = await readSeries(series.id);
+    const [first, , split] = await slotsFor(series.id);
+    await db.publicationOccurrence.update({ where: { id: first.id }, data: { status: 'SENT' } });
+    const oldSlots = await slotsFor(series.id);
+    const request = {
+      expectedRevision: original.version,
+      requestId: randomUUID(),
+      scope: 'following',
+      schedule: {
+        ...recurrence,
+        startsAt: split.scheduledAt.toISOString(),
+        times: ['14:00'],
+        maxOccurrences: 5,
+      },
+    };
+    const moved = await service.rescheduleOccurrence(series.id, split.id, user, request, profile);
+    const kept = await readSeries(series.id);
+    const continuation = await readSeries(moved.publication.id);
+    const oldRows = await slotsFor(series.id);
+    const newRows = await slotsFor(continuation.id);
+    expect(moved.source.id).toBe(series.id);
+    expect(kept.version).toBe(original.version + 1);
+    expect(kept.schedule).toMatchObject({
+      mode: 'RECURRENCE',
+      rule: { endsAt: '2026-11-22T09:59:59.999Z' },
+    });
+    expect(oldRows.slice(0, 2)).toEqual(oldSlots.slice(0, 2));
+    expect(oldRows.slice(2)).toEqual(
+      oldSlots.slice(2).map((slot) =>
+        expect.objectContaining({
+          id: slot.id,
+          status: 'CANCELED',
+          scheduledAt: slot.scheduledAt,
+        }),
+      ),
+    );
+    expect(continuation.schedule).toMatchObject({
+      mode: 'RECURRENCE',
+      rule: { maxOccurrences: 3 },
+    });
+    expect(
+      newRows.map(({ scheduledAt, status }) => ({ at: scheduledAt.toISOString(), status })),
+    ).toEqual([
+      { at: '2026-11-22T14:00:00.000Z', status: 'SCHEDULED' },
+      { at: '2026-11-23T14:00:00.000Z', status: 'SCHEDULED' },
+      { at: '2026-11-24T14:00:00.000Z', status: 'SCHEDULED' },
+    ]);
+    // Subsequent scheduler runs may advance the horizon without adding either side's old suffix.
+    jest.setSystemTime(new Date('2026-11-25T09:00:00.000Z'));
+    await refreshSeries();
+    expect(await slotsFor(series.id)).toHaveLength(5);
+    expect(await slotsFor(continuation.id)).toHaveLength(3);
   });
 
   it('completes a previously saved finite recurrence after the only occurrence is skipped', async () => {

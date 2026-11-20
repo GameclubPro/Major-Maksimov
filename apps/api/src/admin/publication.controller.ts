@@ -221,6 +221,24 @@ export class PublicationController {
     );
   }
 
+  @Post(':publicationId/occurrences/:occurrenceId/reschedule')
+  @MiniappProfiles('publisher')
+  rescheduleOccurrence(
+    @Param('publicationId') publicationId: string,
+    @Param('occurrenceId') occurrenceId: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: unknown,
+    @CurrentMiniappProfile() profile: MiniappProfile = 'publisher',
+  ) {
+    return this.publicationService.rescheduleOccurrence(
+      publicationId,
+      occurrenceId,
+      user,
+      body,
+      this.toDispatchProfile(profile),
+    );
+  }
+
   @Post(':publicationId/occurrences/:occurrenceId/retry')
   @MiniappProfiles('publisher')
   retryOccurrence(

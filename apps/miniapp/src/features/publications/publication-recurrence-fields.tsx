@@ -24,11 +24,13 @@ export function PublicationRecurrenceFields({
   setDraft,
   isBusy,
   setFieldError,
+  showBoundaries = true,
 }: {
   draft: PublicationDraft;
   setDraft: Dispatch<SetStateAction<PublicationDraft>>;
   isBusy: boolean;
   setFieldError: (value: string) => void;
+  showBoundaries?: boolean;
 }) {
   function updateRecurrenceTime(index: number, value: string) {
     setDraft((current) => ({
@@ -160,35 +162,39 @@ export function PublicationRecurrenceFields({
         ) : null}
       </div>
 
-      <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
-        <LazyPublicationZonedDateField
-          label="Начать с"
-          value={draft.recurrence.startsAt}
-          timezone={draft.scheduleTimezone}
-          onChange={(startsAt) => {
-            setDraft((current) => ({
-              ...current,
-              recurrence: { ...current.recurrence, startsAt },
-            }));
-            setFieldError('');
-          }}
-          disabled={isBusy}
-        />
-      </Suspense>
+      {showBoundaries ? (
+        <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
+          <LazyPublicationZonedDateField
+            label="Начать с"
+            value={draft.recurrence.startsAt}
+            timezone={draft.scheduleTimezone}
+            onChange={(startsAt) => {
+              setDraft((current) => ({
+                ...current,
+                recurrence: { ...current.recurrence, startsAt },
+              }));
+              setFieldError('');
+            }}
+            disabled={isBusy}
+          />
+        </Suspense>
+      ) : null}
 
-      <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
-        <LazyPublicationRecurrenceLimit
-          recurrence={draft.recurrence}
-          timezone={draft.scheduleTimezone}
-          disabled={isBusy}
-          onChange={(patch) =>
-            setDraft((current) => ({
-              ...current,
-              recurrence: { ...current.recurrence, ...patch },
-            }))
-          }
-        />
-      </Suspense>
+      {showBoundaries ? (
+        <Suspense fallback={<div className="publication-date-loading" aria-busy="true" />}>
+          <LazyPublicationRecurrenceLimit
+            recurrence={draft.recurrence}
+            timezone={draft.scheduleTimezone}
+            disabled={isBusy}
+            onChange={(patch) =>
+              setDraft((current) => ({
+                ...current,
+                recurrence: { ...current.recurrence, ...patch },
+              }))
+            }
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

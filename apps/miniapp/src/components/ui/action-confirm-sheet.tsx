@@ -2,7 +2,11 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '../../lib/cn';
 import { isTopmostModalDialog, useDialogFocusTrap } from '../../lib/dialog-focus';
-import { NATIVE_BACK_MODAL_CONFIRM_PRIORITY, useNativeBackHandler } from '../../lib/native-back';
+import {
+  NATIVE_BACK_MODAL_CONFIRM_PRIORITY,
+  isElementInTopmostNativeBackModal,
+  useNativeBackHandler,
+} from '../../lib/native-back';
 import { useVisualViewportOverlayStyle } from '../../lib/use-visual-viewport-overlay-style';
 import './action-confirm-sheet.css';
 
@@ -81,6 +85,8 @@ export function ActionConfirmSheet({
   }, [isBusy, open]);
   useNativeBackHandler(
     () => {
+      const panel = panelRef.current;
+      if (panel && !isElementInTopmostNativeBackModal(panel)) return false;
       if (isBusy) {
         return true;
       }

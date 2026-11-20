@@ -210,7 +210,7 @@ try {
   console.log(
     'PASS: ambiguous resolution requires confirmation and preserves its independent identity until success',
   );
-  await checkPublicationHistoryReview(browser, base);
+  await checkPublicationHistoryReview(browser, base, process.env.MINIAPP_RESCHEDULE_SCREENSHOT);
   const footerScreenshots = await mkdtemp(join(tmpdir(), 'maxim-publication-delivery-cta-'));
   for (const width of [320, 412]) {
     for (const colorScheme of ['light', 'dark']) {

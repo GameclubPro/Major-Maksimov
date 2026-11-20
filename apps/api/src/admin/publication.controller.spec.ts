@@ -38,6 +38,8 @@ describe('PublicationController', () => {
       PublicationController.prototype.cancel,
       PublicationController.prototype.remove,
       PublicationController.prototype.deliveries,
+      PublicationController.prototype.skipOccurrence,
+      PublicationController.prototype.rescheduleOccurrence,
       PublicationController.prototype.retryOccurrence,
       PublicationController.prototype.resolveAmbiguous,
     ]) {
@@ -56,6 +58,7 @@ describe('PublicationController', () => {
       resume: jest.fn(),
       cancel: jest.fn(),
       listDeliveries: jest.fn(),
+      rescheduleOccurrence: jest.fn(),
       retryOccurrence: jest.fn(),
       resolveAmbiguousDelivery: jest.fn(),
       sendTest: jest.fn(),
@@ -79,6 +82,7 @@ describe('PublicationController', () => {
     controller.cancel('publication-1', user, body, 'publisher');
     controller.remove('publication-1', user, body, 'publisher');
     controller.deliveries('publication-1', user, query, 'publisher');
+    controller.rescheduleOccurrence('publication-1', 'occurrence-1', user, body, 'publisher');
     controller.retryOccurrence('publication-1', 'occurrence-1', user, body, 'publisher');
     controller.resolveAmbiguous('publication-1', 'occurrence-1', user, body, 'publisher');
 
@@ -139,6 +143,13 @@ describe('PublicationController', () => {
       'publication-1',
       user,
       query,
+      PublicationDispatchProfile.PUBLIK_V1,
+    );
+    expect(publicationService.rescheduleOccurrence).toHaveBeenCalledWith(
+      'publication-1',
+      'occurrence-1',
+      user,
+      body,
       PublicationDispatchProfile.PUBLIK_V1,
     );
     expect(publicationService.retryOccurrence).toHaveBeenCalledWith(
