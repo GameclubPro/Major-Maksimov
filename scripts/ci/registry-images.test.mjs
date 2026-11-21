@@ -752,18 +752,37 @@ test('workflow grants signing and registry permissions only after image smokes',
   );
 });
 
-test('CodeQL keeps analysis, alert gate and weekly database upload', () => {
-  const workflow = parse(
-    readFileSync(new URL('../../.github/workflows/codeql.yml', import.meta.url), 'utf8'),
-  );
-  const steps = workflow.jobs.analyze.steps;
-  assert.equal(
-    steps.find((step) => step.name === 'Analyze').with['upload-database'],
-    "${{ github.event_name == 'schedule' }}",
-  );
-  assert.equal(
-    steps.find((step) => step.name === 'Reject open high-severity alerts').if,
-    undefined,
-  );
-  assert.equal(workflow.permissions['security-events'], 'write');
+test('CodeQL keeps the required check on PRs and main with a separate full scan', () => {
+  const readWorkflow = (file) =>
+    parse(readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), 'utf8'));
+  const codeql = readWorkflow('codeql.yml');
+  const full = readWorkflow('codeql-full.yml');
+  assert.deepEqual(codeql.on, {
+    pull_request: null,
+    push: { branches: ['main'] },
+    workflow_dispatch: null,
+  });
+  assert.deepEqual(full.on, { workflow_dispatch: null, schedule: [{ cron: '17 2 * * 1' }] });
+  assert.equal(codeql.jobs.analyze.name, 'Analyze JavaScript and TypeScript');
+  assert.notEqual(full.jobs.analyze.name, codeql.jobs.analyze.name);
+  for (const [workflow, file, config, uploadDatabase] of [
+    [codeql, 'codeql.yml', { 'paths-ignore': ['**/*.test.*', '**/*.spec.*'] }, false],
+    [full, 'codeql-full.yml', null, true],
+  ]) {
+    assert.equal(workflow.permissions['security-events'], 'write');
+    const job = workflow.jobs.analyze;
+    assert.equal(job['continue-on-error'], undefined);
+    assert.equal(job.if, undefined);
+    const init = job.steps.find((step) => step.uses?.startsWith('github/codeql-action/init@'));
+    assert.equal(init.with['build-mode'], 'none');
+    assert.deepEqual(parse(init.with.config ?? ''), config);
+    const analyze = job.steps.find((step) =>
+      step.uses?.startsWith('github/codeql-action/analyze@'),
+    );
+    assert.equal(analyze.with['upload-database'], uploadDatabase);
+    assert.equal(analyze.with.category, undefined);
+    const gate = job.steps.find((step) => step.run === 'node scripts/ci/assert-codeql-alerts.mjs');
+    assert.equal(gate.if, undefined);
+    assert.equal(gate.env.CODEQL_ANALYSIS_CATEGORY, `.github/workflows/${file}:analyze`);
+  }
 });
