@@ -33,9 +33,17 @@ describe('participant report settings', () => {
     { reportsAliases: ['test'], adminBanCommandName: 'test' },
     { adminBanCommandName: 'report' },
     { reportsAliases: ['two words'] },
+    { reportsAliases: ['/супер-бан'] },
+    { reportsAliases: ['super--ban'] },
+    { adminBanCommandName: 'супер--бан' },
     { reportsAliases: ['a', 'b', 'c', 'd', 'e', 'f'] },
   ])('rejects unsafe input %j', (input) => {
     expect(updateSettingsRequestSchema.safeParse(input).success).toBe(false);
+  });
+  it('can still open settings with an old report alias', () => {
+    expect(chatSettingsSchema.parse({ reportsAliases: ['/супер-бан'] }).reportsAliases).toEqual([
+      '/супер-бан',
+    ]);
   });
   it('normalizes custom words without changing legacy mute defaults', () => {
     expect(

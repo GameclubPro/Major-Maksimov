@@ -4,9 +4,6 @@ import {
   SanctionAction,
   createDuplicateSanctionAuthorization,
   buildActiveMuteStateKey,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-  buildDeveloperForcedGlobalSpammerCacheKey,
-  buildDeveloperForcedGlobalSpammerWarmMarkerKey,
   ModerationService,
   resolveModerationDeleteIntentRollout,
   MODERATION_ACTION_DISPATCH_TIMEOUT_MS,
@@ -7073,7 +7070,9 @@ describe('ModerationService', () => {
         }),
       },
       globalSpammer: {
-        findUnique: jest.fn().mockResolvedValue({ userId: 'user-1' }),
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } }),
       },
       violation: {
         create: jest.fn(),
@@ -7135,313 +7134,6 @@ describe('ModerationService', () => {
         action: SanctionAction.KICK,
       }),
     });
-  });
-
-  it('does not read or enforce developer-forced blacklist when spammer deletion is disabled', async () => {
-    const expiresAt = new Date(Date.now() + 60_000);
-    const prisma = {
-      chat: {
-        upsert: jest.fn().mockResolvedValue({
-          id: 'chat-1',
-          title: 'Chat 1',
-          settings: createSettings({ deleteSpammersEnabled: false }),
-          domains: [],
-          admins: [{ userId: 'owner-1' }],
-        }),
-      },
-      globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([
-          {
-            userId: 'user-1',
-            expiresAt,
-            sourceBreakdown: {
-              DEVELOPER_FORCED: {
-                score: 1,
-                count: 1,
-                reasons: ['По решению разработчика бота за нарушение правил'],
-              },
-            },
-          },
-        ]),
-      },
-      violation: {
-        create: jest.fn(),
-      },
-      moderationEvent: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-      },
-      webhookEvent: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-    };
-    const ruleEngine = {
-      detect: jest.fn().mockResolvedValue({ violations: [] }),
-      hasCommercialSpamMarkers: jest.fn().mockReturnValue(false),
-    };
-    const sanctionService = {
-      resolveAction: jest.fn(),
-    };
-    const maxClient = {
-      deleteMessage: jest.fn(),
-      sendMessage: jest.fn(),
-      kickMember: jest.fn(),
-      banMember: jest.fn(),
-      notifyModerators: jest.fn(),
-    };
-    const redisCounter = {
-      getString: jest.fn().mockResolvedValue(null),
-      setStringWithTtl: jest.fn().mockResolvedValue(undefined),
-      addToSetWithTtl: jest.fn().mockResolvedValue({ added: true, size: 1 }),
-      incrementWithTtl: jest.fn().mockResolvedValue(1),
-    };
-
-    const service = new ModerationService(
-      prisma as never,
-      ruleEngine as never,
-      sanctionService as never,
-      maxClient as never,
-      undefined,
-      undefined,
-      undefined,
-      redisCounter as never,
-    );
-
-    await service.handleUpdate(createUpdate());
-
-    expect(redisCounter.getString).not.toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-    );
-    expect(redisCounter.getString).not.toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-    );
-    expect(prisma.globalSpammer.findMany).not.toHaveBeenCalled();
-    expect(redisCounter.setStringWithTtl).not.toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-      expect.any(String),
-      expect.any(Number),
-    );
-    expect(ruleEngine.detect).toHaveBeenCalledTimes(1);
-    expect(maxClient.deleteMessage).not.toHaveBeenCalled();
-    expect(maxClient.kickMember).not.toHaveBeenCalled();
-    expect(prisma.moderationEvent.create).not.toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        chatId: 'chat-1',
-        userId: 'user-1',
-        messageId: 'msg-1',
-        ruleCode: 'GLOBAL_SPAMMER_KICK',
-        action: SanctionAction.KICK,
-      }),
-    });
-  });
-
-  it('restores developer-forced blacklist cache from registry and enforces when spammer deletion is enabled', async () => {
-    const expiresAt = new Date(Date.now() + 60_000);
-    const prisma = {
-      chat: {
-        upsert: jest.fn().mockResolvedValue({
-          id: 'chat-1',
-          title: 'Chat 1',
-          settings: createSettings({ deleteSpammersEnabled: true }),
-          domains: [],
-          admins: [{ userId: 'owner-1' }],
-        }),
-      },
-      globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([
-          {
-            userId: 'user-1',
-            expiresAt,
-            sourceBreakdown: {
-              DEVELOPER_FORCED: {
-                score: 1,
-                count: 1,
-                reasons: ['По решению разработчика бота за нарушение правил'],
-              },
-            },
-          },
-        ]),
-      },
-      violation: {
-        create: jest.fn(),
-      },
-      moderationEvent: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-      },
-      webhookEvent: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-    };
-    const ruleEngine = {
-      detect: jest.fn(),
-    };
-    const sanctionService = {
-      resolveAction: jest.fn(),
-    };
-    const maxClient = {
-      deleteMessage: jest.fn(),
-      sendMessage: jest.fn(),
-      kickMember: jest.fn(),
-      banMember: jest.fn(),
-      notifyModerators: jest.fn(),
-    };
-    const redisCounter = {
-      getString: jest.fn().mockResolvedValue(null),
-      setStringWithTtl: jest.fn().mockResolvedValue(undefined),
-    };
-
-    const service = new ModerationService(
-      prisma as never,
-      ruleEngine as never,
-      sanctionService as never,
-      maxClient as never,
-      undefined,
-      undefined,
-      undefined,
-      redisCounter as never,
-    );
-    installStateDeleteExecutorFixture(service);
-    const ensureDeleteIntent = jest
-      .spyOn(service as any, 'ensureModerationDeleteIntent')
-      .mockResolvedValue(undefined);
-    const update = createUpdate();
-    update.message!.createdAt = new Date().toISOString();
-
-    await service.handleUpdate(update);
-
-    expect(redisCounter.getString).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-    );
-    expect(redisCounter.getString).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-    );
-    expect(prisma.globalSpammer.findMany).toHaveBeenCalledWith({
-      where: expect.objectContaining({
-        expiresAt: {
-          gt: expect.any(Date),
-        },
-        sourceBreakdown: expect.objectContaining({
-          path: ['DEVELOPER_FORCED'],
-        }),
-      }),
-      select: {
-        userId: true,
-        expiresAt: true,
-        sourceBreakdown: true,
-      },
-    });
-    expect(redisCounter.setStringWithTtl).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-      '1',
-      expect.any(Number),
-    );
-    expect(redisCounter.setStringWithTtl).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-      '1',
-      DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-    );
-    expect(ruleEngine.detect).not.toHaveBeenCalled();
-    expectImmediateDeleteMessage(maxClient.deleteMessage, 'chat-1', 'msg-1');
-    expectImmediateKickMember(maxClient.kickMember, 'chat-1', 'user-1');
-    expect(ensureDeleteIntent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ruleCode: 'GLOBAL_SPAMMER_MESSAGE_DELETE',
-        sourceMessageAt: update.message!.createdAt,
-      }),
-    );
-  });
-
-  it('negative-caches developer-forced registry misses after checking Redis when spammer deletion is enabled', async () => {
-    const createMessageUpdate = (messageId: string): MaxUpdate => ({
-      ...createUpdate(),
-      updateId: `upd-${messageId}`,
-      message: {
-        ...createUpdate().message!,
-        messageId,
-      },
-    });
-    const prisma = {
-      chat: {
-        upsert: jest.fn().mockResolvedValue({
-          id: 'chat-1',
-          title: 'Chat 1',
-          settings: createSettings({ deleteSpammersEnabled: true }),
-          domains: [],
-          admins: [{ userId: 'owner-1' }],
-        }),
-      },
-      globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([]),
-      },
-      violation: {
-        create: jest.fn(),
-      },
-      moderationEvent: {
-        findFirst: jest.fn().mockResolvedValue(null),
-        create: jest.fn(),
-      },
-      webhookEvent: {
-        findUnique: jest.fn(),
-        update: jest.fn(),
-      },
-    };
-    const ruleEngine = {
-      detect: jest.fn().mockResolvedValue({ violations: [] }),
-      hasCommercialSpamMarkers: jest.fn().mockReturnValue(false),
-    };
-    const sanctionService = {
-      resolveAction: jest.fn(),
-    };
-    const maxClient = {
-      deleteMessage: jest.fn(),
-      sendMessage: jest.fn(),
-      kickMember: jest.fn(),
-      banMember: jest.fn(),
-      notifyModerators: jest.fn(),
-    };
-    const redisCounter = {
-      getString: jest.fn().mockResolvedValue(null),
-      setStringWithTtl: jest.fn().mockResolvedValue(undefined),
-      addToSetWithTtl: jest.fn().mockResolvedValue({ added: true, size: 1 }),
-      incrementWithTtl: jest.fn().mockResolvedValue(1),
-    };
-
-    const service = new ModerationService(
-      prisma as never,
-      ruleEngine as never,
-      sanctionService as never,
-      maxClient as never,
-      undefined,
-      undefined,
-      undefined,
-      redisCounter as never,
-    );
-
-    await service.handleUpdate(createMessageUpdate('msg-1'));
-    await service.handleUpdate(createMessageUpdate('msg-2'));
-
-    expect(redisCounter.getString).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-    );
-    expect(redisCounter.getString).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-    );
-    expect(prisma.globalSpammer.findMany).toHaveBeenCalledTimes(1);
-    expect(ruleEngine.detect).toHaveBeenCalledTimes(2);
-    expect(maxClient.deleteMessage).not.toHaveBeenCalled();
-    expect(redisCounter.setStringWithTtl).toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerWarmMarkerKey(),
-      '1',
-      DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-    );
-    expect(redisCounter.setStringWithTtl).not.toHaveBeenCalledWith(
-      buildDeveloperForcedGlobalSpammerCacheKey('user-1'),
-      expect.any(String),
-      expect.any(Number),
-    );
   });
 
   it('ignores legacy global spammer rows without an active expiry window', async () => {
@@ -7501,9 +7193,7 @@ describe('ModerationService', () => {
           gt: expect.any(Date),
         },
       },
-      select: {
-        userId: true,
-      },
+      select: { sourceBreakdown: true },
     });
     expect(ruleEngine.detect).toHaveBeenCalledTimes(1);
     expect(maxClient.deleteMessage).not.toHaveBeenCalled();
@@ -7525,7 +7215,9 @@ describe('ModerationService', () => {
         findMany: jest.fn().mockResolvedValue([{ userId: 'user-1' }]),
       },
       globalSpammer: {
-        findUnique: jest.fn().mockResolvedValue({ userId: 'user-1' }),
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } }),
       },
       violation: {
         create: jest.fn(),
@@ -7580,7 +7272,11 @@ describe('ModerationService', () => {
         }),
       },
       globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([{ userId: 'user-black-2' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { userId: 'user-black-2', sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } },
+          ]),
       },
       violation: {
         create: jest.fn(),
@@ -7640,11 +7336,50 @@ describe('ModerationService', () => {
           gt: expect.any(Date),
         },
       },
-      select: {
-        userId: true,
-      },
+      select: { userId: true, sourceBreakdown: true },
     });
   });
+
+  it.each(['local', 'registry'])(
+    'still checks the independent chat ban after a duplicate %s kick claim',
+    async (scope) => {
+      const userId = 'user-black-2';
+      const rows =
+        scope === 'registry'
+          ? [{ userId, sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } }]
+          : [];
+      const prisma = { globalSpammer: { findMany: jest.fn().mockResolvedValue(rows) } };
+      const service = new ModerationService(prisma as never, {} as never, {} as never, {} as never);
+      const internal = service as any;
+      const update = {
+        ...createServiceUserJoinedUpdate(),
+        membership: { action: 'added', memberUserIds: [userId] },
+      };
+      jest
+        .spyOn(internal, 'resolveGlobalSpammerAdminDecisions')
+        .mockResolvedValue(new Map(scope === 'local' ? [[userId, 'BLOCK']] : []));
+      jest.spyOn(internal, 'claimServiceMemberActionDelivery').mockResolvedValue(false);
+      const kick = jest.spyOn(internal, 'kickAndLogKnownSpammerEvent');
+      const rejoin = jest.spyOn(internal, 'enforceLocalChatBanForUpdate').mockResolvedValue(false);
+      jest.spyOn(internal, 'handleInvitationAccessMembershipUpdate').mockResolvedValue(undefined);
+      await internal.handleServiceMembershipUpdate({
+        chatId: 'chat-1',
+        messageId: 'join-1',
+        text: '',
+        update,
+        adminUserIds: [],
+        settings: createSettings({
+          deleteSpammersEnabled: true,
+          removeBotsFromGroupEnabled: false,
+          greetingEnabled: false,
+        }),
+        rulesPublishedUrl: null,
+        rulesPublishedMessageId: null,
+      });
+      expect(kick).not.toHaveBeenCalled();
+      expect(rejoin).toHaveBeenCalledWith(update, userId);
+    },
+  );
 
   it('dedupes service join global spammer kicks across multiple bot deliveries', async () => {
     const claimedKeys = new Set<string>();
@@ -7659,7 +7394,11 @@ describe('ModerationService', () => {
         }),
       },
       globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([{ userId: 'user-black-2' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { userId: 'user-black-2', sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } },
+          ]),
       },
       violation: {
         create: jest.fn(),
@@ -7776,7 +7515,11 @@ describe('ModerationService', () => {
         }),
       },
       globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([{ userId: 'user-black-2' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { userId: 'user-black-2', sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } },
+          ]),
       },
       violation: {
         create: jest.fn(),
@@ -7855,10 +7598,18 @@ describe('ModerationService', () => {
         }),
       },
       adminGlobalSpammerExemption: {
-        findMany: jest.fn().mockResolvedValue([{ userId: 'user-black-2' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { userId: 'user-black-2', sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } },
+          ]),
       },
       globalSpammer: {
-        findMany: jest.fn().mockResolvedValue([{ userId: 'user-black-2' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { userId: 'user-black-2', sourceBreakdown: { REVIEW_APPROVED: { score: 1 } } },
+          ]),
       },
       violation: {
         create: jest.fn(),
@@ -8449,6 +8200,48 @@ describe('ModerationService', () => {
       }),
     });
   });
+
+  it.each([true, false])(
+    'revalidates old permanent manual mute cache against source (retired=%s)',
+    async (retired) => {
+      const issuedAt = new Date();
+      const event = {
+        id: 'old-event',
+        createdAt: issuedAt,
+        action: 'MUTE',
+        ruleCode: 'MANUAL_MUTE',
+        metadata: { mutePermanent: true, ...(retired ? { superBan: true } : {}) },
+      };
+      const findFirst = jest.fn().mockResolvedValueOnce(event).mockResolvedValueOnce(null);
+      let cached = JSON.stringify({
+        eventId: event.id,
+        issuedAt: issuedAt.toISOString(),
+        permanent: true,
+        ruleCode: 'MANUAL_MUTE',
+      });
+      const redis = {
+        getString: jest.fn(async () => cached),
+        setStringWithTtl: jest.fn(async (_key, value) => {
+          cached = value;
+        }),
+      };
+      const service = new ModerationService(
+        { moderationEvent: { findFirst } } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        undefined,
+        undefined,
+        undefined,
+        redis as never,
+      );
+      for (let i = 0; i < 2; i += 1) {
+        const active = await (service as any).getActiveMute('chat-1', 'user-2', 6);
+        expect(active?.eventId ?? null).toBe(retired ? null : event.id);
+      }
+      expect(findFirst).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('uses cached active mute state before hitting prisma', async () => {
     const issuedAt = new Date(Date.now() - 60 * 60 * 1000);

@@ -74,7 +74,7 @@ export function createGroupCommandAuthorityMock() {
       record.permit.result = result;
     }),
     prepareQueuedResult: jest.fn(
-      async (permit: GroupCommandPermit, action: 'BAN' | 'MUTE' | 'SUPER_BAN'): Promise<void> => {
+      async (permit: GroupCommandPermit, action: 'BAN' | 'MUTE'): Promise<void> => {
         const result: GroupCommandResult = {
           action,
           outcome: 'QUEUED',

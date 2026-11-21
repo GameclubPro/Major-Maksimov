@@ -247,13 +247,8 @@ import {
   type ModerationSanctionStateIntendedAction,
 } from '../moderation/moderation-sanction-state-fence.service';
 import {
-  formatManualModerationUserLabel,
   sendManualBanChatNotice,
 } from './manual-moderation-notice.util';
-import {
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC,
-  buildDeveloperForcedGlobalSpammerCacheKey,
-} from '../moderation/developer-forced-global-spammer-cache';
 import { RedisCounterService } from '../moderation/redis-counter.service';
 import {
   SystemModeService,
@@ -269,7 +264,6 @@ import {
 import { ADMIN_MANUAL_FANOUT_QUEUE, type AdminManualFanoutJob } from './admin-manual-fanout.queue';
 import { ADMIN_MANUAL_COMMAND_QUEUE } from './admin-manual-command.queue';
 import { AdminManualMessageCleanupService } from './admin-manual-message-cleanup.service';
-import { ADMIN_SUPER_BAN_QUEUE, type AdminSuperBanJob } from './admin-super-ban.queue';
 import {
   ADMIN_SUGGESTION_DELIVERY_QUEUE,
   type AdminSuggestionDeliveryJob,
@@ -541,7 +535,6 @@ import {
   MANAGED_ENTITIES_MASS_ACTION_FULL_SCAN_MAX_PASSES,
   ADMIN_FALLBACK_READ_FAILURE_METRIC_STATUSES,
   ADMIN_ACTION_HEALTH_LANE,
-  DEFAULT_SUPER_BAN_DEVELOPER_USER_IDS,
   APPLY_SETTINGS_TO_ALL_READINESS_REFRESH_CONCURRENCY,
   APPLY_SETTINGS_TO_ALL_READINESS_REFRESH_SPACING_MS,
   CHANNEL_DIALOG_MESSAGES_LIMIT,
@@ -745,19 +738,6 @@ type DialogNotificationRecipientCandidate = {
   mode: PrismaDialogNotificationMode;
   source: 'thread' | 'channel' | 'all_channels';
 };
-
-const DEVELOPER_SUPER_BAN_PRIVATE_DIALOG_ID_PREFIXES = [
-  '0',
-  '1',
-  '2',
-  '3',
-  '4',
-  '5',
-  '6',
-  '7',
-  '8',
-  '9',
-] as const;
 
 @Injectable()
 export class AdminService implements OnModuleDestroy {
@@ -1027,9 +1007,6 @@ export class AdminService implements OnModuleDestroy {
         get logger(): Logger {
           return owner.logger;
         },
-        get adminSuperBanQueue(): Queue<AdminSuperBanJob> | undefined {
-          return owner.adminSuperBanQueue;
-        },
         get adminManualFanoutQueue(): Queue<AdminManualFanoutJob> | undefined {
           return owner.adminManualFanoutQueue;
         },
@@ -1038,8 +1015,6 @@ export class AdminService implements OnModuleDestroy {
         },
         enqueueManualModerationFanout: (job) => owner.enqueueManualModerationFanout(job),
         isKnownRuntimeBotUserId: (userId) => owner.isKnownRuntimeBotUserId(userId),
-        isSuperBanDeveloperUserId: (userId) => owner.isSuperBanDeveloperUserId(userId),
-        processDeveloperSuperBanJob: (job) => owner.processDeveloperSuperBanJob(job),
         processManualSystemBan: (chatId, targetUserId, actor, source, options) =>
           owner.applyManualSystemBan(chatId, targetUserId, actor, source, options),
         processManualModerationAction: (chatId, targetUserId, actor, body, source, options) =>
@@ -1261,7 +1236,6 @@ export class AdminService implements OnModuleDestroy {
   private readonly dialogLinkHelper: AdminDialogLinkHelper;
   private readonly manualFanoutLookupSpacingMs: number;
   private readonly manualFanoutActionSpacingMs: number;
-  private readonly superBanDeveloperUserIds: ReadonlySet<string>;
   private readonly managedEntitiesPublishedSnapshotReadEnabled: boolean;
   private readonly managedEntitiesPublishedSnapshotWriteEnabled: boolean;
   private readonly managedEntitiesPublishedDiffReadEnabled: boolean;
@@ -1329,9 +1303,6 @@ export class AdminService implements OnModuleDestroy {
     @Optional()
     private readonly managedEntityAccessLossService?: ManagedEntityAccessLossService,
     @Optional()
-    @InjectQueue(ADMIN_SUPER_BAN_QUEUE)
-    private readonly adminSuperBanQueue?: Queue<AdminSuperBanJob>,
-    @Optional()
     private readonly managedEntityCandidateSyncService?: ManagedEntityCandidateSyncService,
     @Optional()
     private readonly maxRoutedPublicationService?: MaxRoutedPublicationService,
@@ -1385,9 +1356,6 @@ export class AdminService implements OnModuleDestroy {
       this.maxBotLinkService?.getValidationTokens?.() ??
       (configuredBotTokens.length > 0 ? configuredBotTokens : [this.maxBotToken]);
     this.appBaseUrl = normalizeAppBaseUrl(configService.get<string>('APP_BASE_URL'));
-    this.superBanDeveloperUserIds = this.parseSuperBanDeveloperUserIds(
-      configService.get<string>('SUPER_BAN_DEVELOPER_USER_IDS'),
-    );
     this.explicitBotContactId = normalizeBotContactId(
       configService.get<string>('MAX_BOT_CONTACT_ID'),
     );
@@ -10976,522 +10944,6 @@ export class AdminService implements OnModuleDestroy {
       message: result.noticeText ?? message,
       ...(!result.applied ? { skipped: true } : {}),
     };
-  }
-
-  isSuperBanDeveloperUserId(userId: string | null | undefined): boolean {
-    const normalized = this.readTrimmedString(userId);
-    return Boolean(normalized && this.superBanDeveloperUserIds.has(normalized));
-  }
-
-  private parseSuperBanDeveloperUserIds(raw: string | null | undefined): ReadonlySet<string> {
-    const values = new Set<string>(
-      DEFAULT_SUPER_BAN_DEVELOPER_USER_IDS.map((value) => value.trim()).filter(Boolean),
-    );
-    const configured = this.readTrimmedString(raw);
-    if (!configured) {
-      return values;
-    }
-
-    for (const value of configured.split(/[,\s;]+/u)) {
-      const normalized = value.trim();
-      if (normalized) {
-        values.add(normalized);
-      }
-    }
-
-    return values;
-  }
-
-  async enqueueDeveloperSuperBanCommand(params: {
-    sourceChatId: string;
-    commandBotId?: string | null;
-    targetUserId: string;
-    targetSenderName?: string | null;
-    targetMessageId?: string | null;
-    commandMessageId: string;
-    actor: AuthUser;
-    deleteBotMessagesEnabled: boolean;
-    deleteBotMessagesDelayMinutes: number;
-  }): Promise<boolean> {
-    return this.manualModerationRuntime.enqueueDeveloperSuperBanCommand(params);
-  }
-
-  async processDeveloperSuperBanJob(job: AdminSuperBanJob): Promise<void> {
-    if (job.kind !== 'developer_super_ban') {
-      return;
-    }
-
-    if (!this.isSuperBanDeveloperUserId(job.actor.userId)) {
-      this.logger.warn(
-        {
-          jobId: job.jobId,
-          sourceChatId: job.sourceChatId,
-          actorUserId: job.actor.userId,
-          targetUserId: job.targetUserId,
-        },
-        'Skipped developer super ban job from non-developer actor',
-      );
-      return;
-    }
-
-    if (this.isKnownRuntimeBotUserId(job.targetUserId)) {
-      const noticeBotId = await this.resolveManualGroupCommandNoticeBotId(
-        job.sourceChatId,
-        job.commandBotId,
-      );
-      await this.sendManualGroupCommandNotice({
-        chatId: job.sourceChatId,
-        botId: noticeBotId,
-        text: 'Команда `супер бан` отклонена: настроенные боты MAX защищены от блокировки.',
-        deleteBotMessagesEnabled: job.deleteBotMessagesEnabled,
-        deleteBotMessagesDelayMinutes: job.deleteBotMessagesDelayMinutes,
-      });
-      return;
-    }
-
-    const actor = this.buildManualFanoutActor(job.actor);
-    const targetDisplayName =
-      normalizeMaxUserDisplayName(job.targetSenderName, job.targetUserId) ??
-      (await this.resolveManualModerationTargetDisplayName(job.sourceChatId, job.targetUserId, {
-        botId: job.commandBotId ?? undefined,
-        allowRemoteLookup: false,
-      }));
-
-    // FLAG: Persist cleanup before any irreversible super-ban side effect. Once these intents
-    // exist, their retry loop owns deletion and a later cleanup failure must not replay the ban.
-    const cleanupBotId = await this.resolveManualGroupCommandCleanupBotId(
-      job.sourceChatId,
-      job.commandBotId,
-    );
-    await this.deleteManualGroupCommandTargetMessage(job, { botId: cleanupBotId });
-    await this.deleteManualGroupCommandMessage(job.sourceChatId, job.commandMessageId, {
-      botId: cleanupBotId,
-      originBotId: job.commandBotId,
-      actorUserId: job.actor.userId,
-    });
-
-    await this.recordDeveloperForcedGlobalBlacklistForJob(job, targetDisplayName);
-    await this.rememberDeveloperForcedGlobalSpammer(job.targetUserId);
-
-    const sourceResult = await this.applyDeveloperSuperBanSourceChat({
-      job,
-      actor,
-      targetDisplayName,
-    });
-    if (sourceResult.mode === 'removed') {
-      await this.runManualBanSourceCleanup(job.sourceChatId, job.targetUserId, actor.userId, {
-        logMessage: 'Failed to clean source chat messages after developer super ban',
-      });
-    }
-
-    const estimatedManagedChatCount = await this.estimateDeveloperSuperBanManagedChatCount({
-      sourceChatId: job.sourceChatId,
-      actorUserId: actor.userId,
-    });
-    const targetLabel = formatManualModerationUserLabel(targetDisplayName, job.targetUserId);
-    const estimatedChatCount = Math.max(1, estimatedManagedChatCount ?? 1);
-    const estimatedChatCountText =
-      estimatedChatCount === 1 ? `${estimatedChatCount} чате` : `${estimatedChatCount} чатах`;
-    const noticeBotId = await this.resolveManualGroupCommandNoticeBotId(
-      job.sourceChatId,
-      job.commandBotId,
-    );
-    await this.sendManualGroupCommandNotice({
-      chatId: job.sourceChatId,
-      botId: noticeBotId,
-      text: `Для пользователя ${targetLabel} включена блокировка в ${estimatedChatCountText} по решению разработчика бота.`,
-      deleteBotMessagesEnabled: job.deleteBotMessagesEnabled,
-      deleteBotMessagesDelayMinutes: job.deleteBotMessagesDelayMinutes,
-    });
-  }
-
-  private async recordDeveloperForcedGlobalBlacklistForJob(
-    job: AdminSuperBanJob,
-    targetDisplayName: string | null,
-  ): Promise<void> {
-    const reason = 'По решению разработчика бота за нарушение правил';
-    if (this.globalSpammerIntelligence) {
-      await this.globalSpammerIntelligence.recordDeveloperForcedGlobalBlacklist({
-        userId: job.targetUserId,
-        actorUserId: job.actor.userId,
-        chatId: job.sourceChatId,
-        messageId: job.targetMessageId ?? job.commandMessageId,
-        userLabel: targetDisplayName,
-        reason,
-      });
-      return;
-    }
-
-    const expiresAt = new Date(Date.now() + DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC * 1_000);
-    await this.prisma.globalSpammer.upsert({
-      where: {
-        userId: job.targetUserId,
-      },
-      create: {
-        userId: job.targetUserId,
-        lastReason: reason,
-        lastChatId: job.sourceChatId,
-        lastEvidence: {
-          actorUserId: job.actor.userId,
-          sourceChatId: job.sourceChatId,
-          messageId: job.targetMessageId ?? job.commandMessageId,
-          reason,
-        } as Prisma.InputJsonObject,
-        confidenceScore: 1,
-        expiresAt,
-        sourceBreakdown: {
-          DEVELOPER_FORCED: {
-            score: 1,
-            count: 1,
-            reasons: [reason],
-          },
-        } as Prisma.InputJsonObject,
-      },
-      update: {
-        detectionsCount: {
-          increment: 1,
-        },
-        lastReason: reason,
-        lastChatId: job.sourceChatId,
-        lastEvidence: {
-          actorUserId: job.actor.userId,
-          sourceChatId: job.sourceChatId,
-          messageId: job.targetMessageId ?? job.commandMessageId,
-          reason,
-        } as Prisma.InputJsonObject,
-        confidenceScore: 1,
-        expiresAt,
-        sourceBreakdown: {
-          DEVELOPER_FORCED: {
-            score: 1,
-            count: 1,
-            reasons: [reason],
-          },
-        } as Prisma.InputJsonObject,
-      },
-    });
-  }
-
-  private async rememberDeveloperForcedGlobalSpammer(targetUserId: string): Promise<void> {
-    const setStringWithTtl = (this.redisCounter as Partial<RedisCounterService> | undefined)
-      ?.setStringWithTtl;
-    if (typeof setStringWithTtl !== 'function') {
-      return;
-    }
-
-    try {
-      await setStringWithTtl.call(
-        this.redisCounter,
-        buildDeveloperForcedGlobalSpammerCacheKey(targetUserId),
-        '1',
-        DEVELOPER_FORCED_GLOBAL_SPAMMER_CACHE_TTL_SEC,
-      );
-    } catch (error: unknown) {
-      this.logger.warn(
-        {
-          targetUserId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to cache developer-forced global spammer state',
-      );
-    }
-  }
-
-  private async estimateDeveloperSuperBanManagedChatCount(params: {
-    sourceChatId: string;
-    actorUserId: string;
-  }): Promise<number | null> {
-    try {
-      const privateDialogFilter = DEVELOPER_SUPER_BAN_PRIVATE_DIALOG_ID_PREFIXES.length
-        ? Prisma.sql`AND NOT (${Prisma.join(
-            DEVELOPER_SUPER_BAN_PRIVATE_DIALOG_ID_PREFIXES.map(
-              (prefix) => Prisma.sql`c.id LIKE ${`${prefix}%`}`,
-            ),
-            ' OR ',
-          )})`
-        : Prisma.empty;
-      const rows = await this.prisma.$queryRaw<
-        Array<{ active_membership_count: bigint | number | string }>
-      >(
-        Prisma.sql`
-          SELECT COUNT(*) AS active_membership_count
-          FROM chat_bot_memberships membership
-          JOIN chats c ON c.id = membership.chat_id
-          WHERE membership.status = ${ChatBotMembershipStatus.ACTIVE}::"ChatBotMembershipStatus"
-            AND c.entity_type = ${ChatEntityType.CHAT}::"ChatEntityType"
-            ${privateDialogFilter}
-        `,
-      );
-      const count = Number(rows[0]?.active_membership_count ?? 0);
-
-      return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
-    } catch (error: unknown) {
-      this.logger.warn(
-        {
-          sourceChatId: params.sourceChatId,
-          actorUserId: params.actorUserId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to estimate managed chat count for developer super ban notice',
-      );
-      return null;
-    }
-  }
-
-  private async applyDeveloperSuperBanSourceChat(params: {
-    job: AdminSuperBanJob;
-    actor: AuthUser;
-    targetDisplayName: string | null;
-  }): Promise<{ affected: boolean; mode: 'removed' | 'muted' | 'skipped' | 'failed' }> {
-    const { job, actor, targetDisplayName } = params;
-    const commandOptions: ManualModerationExecutionOptions = {
-      actorAlreadyVerified: true,
-      preferredBotId: job.commandBotId ?? null,
-      targetDisplayNameHint: targetDisplayName,
-      allowTargetDisplayNameRemoteLookup: false,
-    };
-
-    try {
-      await this.applyManualModerationAction(
-        job.sourceChatId,
-        job.targetUserId,
-        actor,
-        { action: 'BAN' },
-        'group_command',
-        commandOptions,
-      );
-      return { affected: true, mode: 'removed' };
-    } catch (error: unknown) {
-      if (wasMaxMemberMutationConfirmed(error)) {
-        this.logger.warn(
-          {
-            jobId: job.jobId,
-            chatId: job.sourceChatId,
-            actorUserId: actor.userId,
-            targetUserId: job.targetUserId,
-            err: this.extractManualGroupCommandErrorMessage(error),
-          },
-          'Developer super ban source member removal was confirmed but local completion failed; skipping mute fallback',
-        );
-        return { affected: true, mode: 'removed' };
-      }
-      if (this.isAmbiguousAttemptedMaxMemberMutation(error)) {
-        this.logger.warn(
-          {
-            jobId: job.jobId,
-            chatId: job.sourceChatId,
-            actorUserId: actor.userId,
-            targetUserId: job.targetUserId,
-            err: this.extractManualGroupCommandErrorMessage(error),
-          },
-          'Developer super ban source member removal outcome is ambiguous; skipping mute fallback',
-        );
-        return { affected: false, mode: 'failed' };
-      }
-      this.logger.warn(
-        {
-          jobId: job.jobId,
-          chatId: job.sourceChatId,
-          actorUserId: actor.userId,
-          targetUserId: job.targetUserId,
-          err: this.extractManualGroupCommandErrorMessage(error),
-        },
-        'Developer super ban source chat system ban failed; trying permanent mute fallback',
-      );
-    }
-
-    return this.applyDeveloperSuperBanPermanentMuteFallback({
-      chatId: job.sourceChatId,
-      sourceChatId: job.sourceChatId,
-      targetUserId: job.targetUserId,
-      targetDisplayName,
-      actor,
-      preferredBotId: job.commandBotId ?? null,
-      fallbackReason: 'SOURCE_SYSTEM_BAN_FAILED',
-    });
-  }
-
-  private async applyDeveloperSuperBanPermanentMuteFallback(params: {
-    chatId: string;
-    sourceChatId: string;
-    targetUserId: string;
-    targetDisplayName: string | null;
-    actor: AuthUser;
-    preferredBotId?: string | null;
-    fallbackReason: string;
-  }): Promise<{ affected: boolean; mode: 'muted' | 'skipped' | 'failed' }> {
-    const { chatId, sourceChatId, targetUserId, targetDisplayName, actor, fallbackReason } = params;
-    let deleteBotId: string | undefined;
-    try {
-      deleteBotId = await this.resolveManualModerationActionBotAssignment(
-        chatId,
-        'delete_message',
-        {
-          preferredBotId: params.preferredBotId,
-        },
-      );
-      await this.assertBotCanDeleteMessages(chatId, deleteBotId);
-    } catch (error: unknown) {
-      const errorMessage = this.extractHttpErrorMessage(error) || String(error);
-      this.logger.warn(
-        {
-          chatId,
-          sourceChatId,
-          actorUserId: actor.userId,
-          targetUserId,
-          err: errorMessage,
-        },
-        'Developer super ban fallback skipped because the bot cannot delete messages',
-      );
-      await this.recordDeveloperSuperBanNoRightsChat({
-        chatId,
-        sourceChatId,
-        targetUserId,
-        targetDisplayName,
-        actor,
-        fallbackReason,
-        errorMessage,
-      });
-      return { affected: false, mode: 'failed' };
-    }
-
-    try {
-      const transition = await this.moderationSanctionStateLock.runExclusive(
-        { chatId, userId: targetUserId },
-        async (leaseGuard) => {
-          const targetState = await this.resolveManualFanoutTargetState(chatId, targetUserId, {
-            trafficClass: 'critical',
-            ...(deleteBotId ? { botId: deleteBotId } : {}),
-          });
-          if (targetState !== 'present') {
-            return 'skipped' as const;
-          }
-
-          const sanctionFence = await this.prepareManualSanctionStateFence({
-            chatId,
-            targetUserId,
-            intendedAction: 'MUTE',
-            source: 'developer_super_ban_fallback',
-            leaseGuard,
-          });
-          let moderationEventId: string;
-          try {
-            await leaseGuard.assertOwned();
-            moderationEventId = await this.recordManualModerationAction({
-              chatId,
-              targetUserId,
-              targetDisplayName,
-              actorUserId: actor.userId,
-              ruleCode: 'MANUAL_MUTE',
-              sanctionAction: SanctionAction.MUTE,
-              auditAction: 'MANUAL_MUTE_MEMBER',
-              metadata: {
-                source: 'group_command',
-                initiatedByUserId: actor.userId,
-                reason: 'Супер бан: постоянное удаление сообщений по решению разработчика бота',
-                ...this.buildManualMuteMetadataFields({
-                  muteDurationHours: null,
-                  muteExpiresAt: null,
-                  mutePermanent: true,
-                }),
-                sourceChatId,
-                fanout: chatId !== sourceChatId,
-                superBan: true,
-                fallbackReason,
-              },
-              auditPayload: {
-                userId: targetUserId,
-                source: 'group_command',
-                ...this.buildManualMuteMetadataFields({
-                  muteDurationHours: null,
-                  muteExpiresAt: null,
-                  mutePermanent: true,
-                }),
-                sourceChatId,
-                fanout: chatId !== sourceChatId,
-                superBan: true,
-                fallbackReason,
-              },
-            });
-          } catch (error: unknown) {
-            await this.abortManualSanctionStateFence(sanctionFence);
-            throw error;
-          }
-          await this.commitManualSanctionStateFence(sanctionFence, moderationEventId);
-          await leaseGuard.assertOwned();
-          await this.deleteRecentTrackedMessagesForManualAction(chatId, targetUserId, {
-            spacingMs: this.manualFanoutActionSpacingMs,
-            botId: deleteBotId,
-            leaseGuard,
-          });
-          return 'muted' as const;
-        },
-      );
-      if (transition === 'skipped') {
-        return { affected: false, mode: 'skipped' };
-      }
-
-      return { affected: true, mode: 'muted' };
-    } catch (error: unknown) {
-      this.logger.warn(
-        {
-          chatId,
-          sourceChatId,
-          actorUserId: actor.userId,
-          targetUserId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to apply developer super ban permanent mute fallback',
-      );
-      return { affected: false, mode: 'failed' };
-    }
-  }
-
-  private async recordDeveloperSuperBanNoRightsChat(params: {
-    chatId: string;
-    sourceChatId: string;
-    targetUserId: string;
-    targetDisplayName: string | null;
-    actor: AuthUser;
-    fallbackReason: string;
-    errorMessage: string;
-  }): Promise<void> {
-    const targetDisplayName = this.readTrimmedString(params.targetDisplayName);
-    try {
-      await this.prisma.moderationEvent.create({
-        data: {
-          chatId: params.chatId,
-          userId: params.targetUserId,
-          eventType: EventType.MEMBER_ACTION,
-          ruleCode: 'SUPER_BAN_NO_RIGHTS',
-          action: SanctionAction.NONE,
-          operator: Operator.ADMIN,
-          metadata: {
-            source: 'group_command',
-            initiatedByUserId: params.actor.userId,
-            reason: 'Супер бан: у бота нет прав исключать участника или удалять его сообщения',
-            sourceChatId: params.sourceChatId,
-            fanout: params.chatId !== params.sourceChatId,
-            superBan: true,
-            noRights: true,
-            fallbackReason: params.fallbackReason,
-            errorMessage: params.errorMessage,
-            ...(targetDisplayName ? { targetDisplayName } : {}),
-          } as Prisma.InputJsonValue,
-        },
-      });
-    } catch (error: unknown) {
-      this.logger.warn(
-        {
-          chatId: params.chatId,
-          sourceChatId: params.sourceChatId,
-          actorUserId: params.actor.userId,
-          targetUserId: params.targetUserId,
-          err: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to record developer super ban no-rights chat',
-      );
-    }
   }
 
   async processManualModerationFanoutJob(job: AdminManualFanoutJob): Promise<void> {

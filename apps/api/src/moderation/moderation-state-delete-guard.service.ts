@@ -270,7 +270,8 @@ export class ModerationStateDeleteGuardService {
       for (const reason of reasons) {
         if (
           reason.ruleCode === 'GLOBAL_SPAMMER_MESSAGE_DELETE' &&
-          (await this.legacyHolds?.isGlobalUserHeld(userId))
+          (this.metadata(reason.metadata).reason === 'Developer-forced global blacklist' ||
+            (await this.legacyHolds?.isGlobalUserHeld(userId)))
         )
           continue;
         let allowed = false;
@@ -294,6 +295,7 @@ export class ModerationStateDeleteGuardService {
           if (
             latest &&
             latest.id === metadata.muteEventId &&
+            this.metadata(latest.metadata).superBan !== true &&
             (latest.action === 'MUTE' || latest.action === 'BAN') &&
             (historyId !== undefined || sourceAtMs >= latest.createdAt.getTime())
           ) {
@@ -342,19 +344,9 @@ export class ModerationStateDeleteGuardService {
           (reason.ruleCode === 'GLOBAL_SPAMMER_MESSAGE_DELETE' ||
             reason.ruleCode === 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE')
         ) {
-          const decisions = await this.prisma.adminGlobalSpammerExemption.findMany({
-            where: {
-              adminUserId: { in: current.chat.admins.flatMap((a) => this.variants(a.userId)) },
-              userId: { in: this.variants(userId) },
-            },
-            select: { decision: true },
-            take: 129,
-          });
-          if (decisions.length > 128) throw new Error('Spammer admin decision limit exceeded');
-          const localBlock = decisions.some((d) => d.decision === 'BLOCK');
-          const localAllow = decisions.some((d) => d.decision !== 'BLOCK');
-          if (reason.ruleCode === 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE') allowed = localBlock;
-          else if (!localBlock && !localAllow) {
+          const local = await this.resolveSpammerAdminDecision(current.chat.admins, userId);
+          if (reason.ruleCode === 'LOCAL_ADMIN_BLOCK_MESSAGE_DELETE') allowed = local === 'BLOCK';
+          else if (local === null) {
             // FLAG: Bypass cached profile authority. Fresh policy/expiry/suppression reads are
             // shared with detection; a registry row alone cannot authorize this deletion.
             const policy = await this.globalPolicy.evaluatePolicy({
@@ -503,7 +495,9 @@ export class ModerationStateDeleteGuardService {
     if (!access || access.isAdmin === true || access.isOwner === true) this.reject();
     if (access.userId !== params.userId || access.isAdmin !== false || access.isOwner !== false)
       throw new Error('Spammer member access unavailable');
+    const deadline = await this.readSpammerMemberDeadline(params, settings.chat.admins);
     if (
+      Date.now() >= deadline ||
       (await this.immunity.consumeForMessage({
         chatId: params.chatId,
         userId: params.userId,
@@ -513,45 +507,68 @@ export class ModerationStateDeleteGuardService {
       })) === 'granted'
     )
       this.reject();
+
+    // FLAG: Check the current roster, policy and expiry after executor admission.
+    await params.beforeFinalAuthority?.();
+    const final = await this.prisma.chatSettings.findUnique({
+      where: { chatId: params.chatId },
+      include: { chat: { select: { entityType: true, admins: { select: { userId: true } } } } },
+    });
+    if (
+      !final ||
+      final.chat.entityType !== 'CHAT' ||
+      final.chat.admins.some((a) => a.userId === params.userId) ||
+      fingerprintModerationSettings(final) !== fingerprintModerationSettings(settings)
+    )
+      this.reject();
+    const finalDeadline = await this.readSpammerMemberDeadline(params, final.chat.admins);
+    if (Date.now() >= Math.min(deadline, finalDeadline)) this.reject();
+  }
+
+  private async readSpammerMemberDeadline(
+    params: { chatId: string; userId: string; messageId: string; localBlock: boolean },
+    admins: readonly { userId: string }[],
+  ): Promise<number> {
+    const local = await this.resolveSpammerAdminDecision(admins, params.userId);
+    if (params.localBlock) {
+      if (local !== 'BLOCK') this.reject();
+      return Number.POSITIVE_INFINITY;
+    }
+    if (local !== null) this.reject();
+    const policy = await this.globalPolicy.evaluatePolicy({
+      chatId: params.chatId,
+      userId: params.userId,
+      messageId: params.messageId,
+      trigger: 'member-final-guard',
+      deleteSpammersEnabled: true,
+      recordDecision: false,
+      skipRuntimeProfileWrite: true,
+      lookupContext: { now: new Date() },
+    });
+    const deadline = policy.expiresAt ? Date.parse(policy.expiresAt) : NaN;
+    if (policy.action !== 'DELETE_AND_KICK' || !Number.isFinite(deadline)) this.reject();
+    return deadline;
+  }
+
+  private async resolveSpammerAdminDecision(
+    admins: readonly { userId: string }[],
+    userId: string,
+  ): Promise<'ALLOW' | 'BLOCK' | null> {
     const decisions = await this.prisma.adminGlobalSpammerExemption.findMany({
       where: {
-        adminUserId: { in: settings.chat.admins.flatMap((a) => this.variants(a.userId)) },
-        userId: { in: this.variants(params.userId) },
+        adminUserId: { in: admins.flatMap((a) => this.variants(a.userId)) },
+        userId: { in: this.variants(userId) },
       },
       select: { decision: true },
       take: 129,
     });
     if (decisions.length > 128) throw new Error('Spammer admin decision limit exceeded');
-    let policyDeadlineAtMs = Number.POSITIVE_INFINITY;
-    const block = decisions.some((d) => d.decision === 'BLOCK');
-    if (params.localBlock) {
-      if (!block) this.reject();
-    } else {
-      if (decisions.length) this.reject();
-      const policy = await this.globalPolicy.evaluatePolicy({
-        chatId: params.chatId,
-        userId: params.userId,
-        messageId: params.messageId,
-        trigger: 'member-final-guard',
-        deleteSpammersEnabled: true,
-        recordDecision: false,
-        skipRuntimeProfileWrite: true,
-        lookupContext: { now: new Date() },
-      });
-      policyDeadlineAtMs = policy.expiresAt ? Date.parse(policy.expiresAt) : NaN;
-      if (policy.action !== 'DELETE_AND_KICK' || !Number.isFinite(policyDeadlineAtMs))
-        this.reject();
+    if (decisions.some(({ decision }) => decision.trim().toUpperCase() === 'ALLOW')) {
+      return 'ALLOW';
     }
-    // FLAG: The selected executor is rechecked after external author/policy work and
-    // before the final settings and synchronous expiry permit; no later await is allowed.
-    await params.beforeFinalAuthority?.();
-    const final = await this.prisma.chatSettings.findUnique({ where: { chatId: params.chatId } });
-    if (
-      Date.now() >= policyDeadlineAtMs ||
-      !final ||
-      fingerprintModerationSettings(final) !== fingerprintModerationSettings(settings)
-    )
-      this.reject();
+    return decisions.some(({ decision }) => decision.trim().toUpperCase() === 'BLOCK')
+      ? 'BLOCK'
+      : null;
   }
 
   private variants(value: string): string[] {

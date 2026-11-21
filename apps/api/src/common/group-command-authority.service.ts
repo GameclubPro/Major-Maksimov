@@ -483,10 +483,7 @@ export class GroupCommandAuthorityService {
     permit.leaseExpiresAt = leaseExpiresAt;
   }
 
-  async prepareQueuedResult(
-    permit: GroupCommandPermit,
-    action: 'BAN' | 'MUTE' | 'SUPER_BAN',
-  ): Promise<void> {
+  async prepareQueuedResult(permit: GroupCommandPermit, action: 'BAN' | 'MUTE'): Promise<void> {
     // FLAG: Queue acceptance is a durable handoff, not a confirmed remote sanction.
     // SQL failure must propagate outside enqueue catches and retain the whole-engine fence.
     const result: GroupCommandResult = {

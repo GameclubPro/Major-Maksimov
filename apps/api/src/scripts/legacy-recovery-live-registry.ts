@@ -1,4 +1,6 @@
-// FLAG: This literal catalog names review surfaces only. It grants no authority
+// FLAG: This literal catalog names review surfaces only.
+// Retired admin-super-ban jobs remain observable in original-source recovery inventories.
+// This catalog grants no authority
 // to install dispositions, suppress commands, start workers or replay effects.
 export const LEGACY_RECOVERY_LIVE_QUEUE_NAMES = Object.freeze([
   'moderation',

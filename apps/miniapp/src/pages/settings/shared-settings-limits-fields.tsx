@@ -373,7 +373,10 @@ export function SharedSettingsLimitsFields({
               <span
                 className={cn(
                   'settings-native-toggle__status',
-                  isEnabled('deleteSpammersEnabled') && 'is-active',
+                  isEnabled('deleteSpammersEnabled') &&
+                    (!context.limitsRuntime ||
+                      context.limitsRuntime.enforcementMode === 'enforce') &&
+                    'is-active',
                   context.limitsRuntime?.enforcementMode === 'shadow' &&
                     isEnabled('deleteSpammersEnabled') &&
                     'is-shadow',

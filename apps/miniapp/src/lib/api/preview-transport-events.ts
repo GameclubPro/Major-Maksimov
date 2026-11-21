@@ -5,7 +5,6 @@ import {
   chatParticipantsPageSchema,
   chatUnavailableParticipantsCleanupRequestSchema,
   chatUnavailableParticipantsCleanupResultSchema,
-  globalSpammerReviewQueueSchema,
   globalSpammerReviewRequestSchema,
   logsDashboardResponseSchema,
   manualModerationActionRequestSchema,
@@ -43,6 +42,7 @@ import {
   applyPreviewManualModeration,
   buildPreviewSpammerDiagnostics,
   buildPreviewSpammerReviewMetrics,
+  buildPreviewSpammerReviewPage,
   createModerationResult,
   createPreviewSpammerReviewResult,
   buildPreviewParticipantDetails,
@@ -1283,19 +1283,8 @@ function handleChatEventsPreviewRequest(
   }
 
   if (tail[0] === 'spammer-review' && tail.length === 1 && method === 'GET') {
-    const status = url.searchParams.get('status') ?? 'PENDING';
-    const limit = Math.max(
-      1,
-      Math.min(Number.parseInt(url.searchParams.get('limit') ?? '50', 10), 100),
-    );
-    const items = state.spammerReviewCandidates
-      .filter((candidate) => status === 'ALL' || candidate.status === status)
-      .slice(0, limit);
     return cloneJson(
-      globalSpammerReviewQueueSchema.parse({
-        items,
-        limit,
-      }),
+      buildPreviewSpammerReviewPage(state.spammerReviewCandidates, url.searchParams),
     );
   }
 

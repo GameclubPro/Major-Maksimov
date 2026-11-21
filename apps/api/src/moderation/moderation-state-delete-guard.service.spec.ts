@@ -373,6 +373,15 @@ describe('current moderation state delete authorization', () => {
       }),
     ).resolves.toMatchObject({ reasonKeys: ['bot'] });
   });
+  it('ignores a mute installed by the retired command', async () => {
+    const s = fixture();
+    Object.assign(s.event.metadata, { superBan: true, mutePermanent: true });
+    await expect(s.service.authorize(s.input)).rejects.toMatchObject({
+      code: 'moderation_state_delete_no_longer_authorized',
+    });
+    expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+
   it('checks active global policy with cache bypass and honors current local ALLOW', async () => {
     const s = fixture({ ruleCode: 'GLOBAL_SPAMMER_MESSAGE_DELETE' });
     await expect(s.service.authorize(s.input)).resolves.toMatchObject({ reasonKeys: ['state'] });
@@ -446,6 +455,39 @@ describe('current moderation state delete authorization', () => {
       expect(s.max.getChatMemberAccess).not.toHaveBeenCalled();
     },
   );
+  it('resolves local conflicts before spending immunity', async () => {
+    const s = fixture();
+    s.prisma.adminGlobalSpammerExemption.findMany.mockResolvedValue([
+      { decision: 'BLOCK' },
+      { decision: 'ALLOW' },
+    ]);
+    await expect(
+      s.service.assertSpammerMemberAllowed({
+        chatId: s.input.chatId,
+        messageId: s.input.messageId,
+        userId: s.input.subjectUserId,
+        localBlock: true,
+      }),
+    ).rejects.toMatchObject({ code: 'moderation_state_delete_no_longer_authorized' });
+    expect(s.immunity.consumeForMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects a withdrawn block after admitting the executor', async () => {
+    const s = fixture();
+    s.prisma.adminGlobalSpammerExemption.findMany.mockResolvedValue([{ decision: 'BLOCK' }]);
+    await expect(
+      s.service.assertSpammerMemberAllowed({
+        chatId: s.input.chatId,
+        messageId: s.input.messageId,
+        userId: s.input.subjectUserId,
+        localBlock: true,
+        beforeFinalAuthority: async () => {
+          s.prisma.adminGlobalSpammerExemption.findMany.mockResolvedValue([{ decision: 'ALLOW' }]);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'moderation_state_delete_no_longer_authorized' });
+  });
+
   it('expires a spammer member permit during selected executor revalidation', async () => {
     const s = fixture({ ruleCode: 'GLOBAL_SPAMMER_MESSAGE_DELETE' });
     const expiresAtMs = Date.now() + 1_000;

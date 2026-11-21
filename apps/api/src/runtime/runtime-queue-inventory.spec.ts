@@ -24,7 +24,6 @@ const QUEUE_EXPORTS = [
   ['max/max-chat-admin-roster-sync.queue.ts', 'MAX_CHAT_ADMIN_ROSTER_SYNC_QUEUE'],
   ['admin/admin-manual-fanout.queue.ts', 'ADMIN_MANUAL_FANOUT_QUEUE'],
   ['admin/admin-manual-command.queue.ts', 'ADMIN_MANUAL_COMMAND_QUEUE'],
-  ['admin/admin-super-ban.queue.ts', 'ADMIN_SUPER_BAN_QUEUE'],
   ['admin/admin-suggestion-delivery.queue.ts', 'ADMIN_SUGGESTION_DELIVERY_QUEUE'],
   ['moderation/moderation-delete-intent.queue.ts', 'MODERATION_DELETE_INTENT_QUEUE'],
   ['moderation/message-duplicate/message-duplicate.queue.ts', 'MESSAGE_DUPLICATE_QUEUE'],

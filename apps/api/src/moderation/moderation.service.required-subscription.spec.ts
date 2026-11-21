@@ -5384,7 +5384,7 @@ describe('ModerationService', () => {
           update: jest.fn(),
         },
         globalSpammer: {
-          findUnique: jest.fn().mockResolvedValue(null),
+          findFirst: jest.fn().mockResolvedValue(null),
         },
       };
       const ruleEngine = {
@@ -5443,7 +5443,7 @@ describe('ModerationService', () => {
       expect(systemModeService.getEffectiveSnapshot).toHaveBeenCalled();
       expect(redisCounter.addToSetWithTtl).not.toHaveBeenCalled();
       expect(trackingSpy).not.toHaveBeenCalled();
-      expect(prisma.globalSpammer.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.globalSpammer.findFirst).toHaveBeenCalledTimes(1);
       expect(prisma.moderationEvent.findFirst).toHaveBeenCalled();
       expect(ruleEngine.detect).toHaveBeenCalledWith(
         expect.objectContaining({ skipDuplicateState: false }),
@@ -5682,7 +5682,7 @@ describe('ModerationService', () => {
           update: jest.fn(),
         },
         globalSpammer: {
-          findUnique: jest.fn().mockResolvedValue(null),
+          findFirst: jest.fn().mockResolvedValue(null),
         },
       };
       const ruleEngine = {
@@ -5737,7 +5737,7 @@ describe('ModerationService', () => {
       await service.handleUpdate(createUpdate(), hotPathProfile);
 
       expect(redisCounter.addToSetWithTtl).toHaveBeenCalled();
-      expect(prisma.globalSpammer.findUnique).toHaveBeenCalledTimes(1);
+      expect(prisma.globalSpammer.findFirst).toHaveBeenCalledTimes(1);
       expect(ruleEngine.detect).toHaveBeenCalledWith(
         expect.objectContaining({ skipDuplicateState: false }),
       );

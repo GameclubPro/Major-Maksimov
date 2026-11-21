@@ -52,7 +52,6 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
     renderMuteStageToggle,
     setFieldValue,
     setOpenBotEditorKey,
-    spammerReviewMetricsQuery,
     toggleBotMessageEditor,
     toggleHint,
     updateDraftButtonGroup,
@@ -115,8 +114,10 @@ export function SettingsLimitsEditor(props: SettingsLimitsSectionProps) {
               <span
                 className={cn(
                   'settings-native-toggle__status',
-                  draft.deleteSpammersEnabled && 'is-active',
-                  spammerReviewMetricsQuery.data?.enforcementMode === 'shadow' &&
+                  draft.deleteSpammersEnabled &&
+                    deleteSpammersRuntimeStatus === 'Активно' &&
+                    'is-active',
+                  deleteSpammersRuntimeStatus === 'Наблюдение' &&
                     draft.deleteSpammersEnabled &&
                     'is-shadow',
                 )}

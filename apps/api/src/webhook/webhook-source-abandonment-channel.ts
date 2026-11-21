@@ -1,3 +1,4 @@
+import { isRetiredSuperBanCommandText } from '@maxim/contracts';
 import type { WebhookEvent } from '../prisma/prisma-client';
 import { isManagedEntityHandshakeStartCommand } from '../common/managed-entity-handshake-command.util';
 import {
@@ -250,6 +251,7 @@ export function inspectChannelAuthorlessSource(
       isManagedEntityHandshakeStartCommand(update) ||
       /^старт$/iu.test(body.text.trim()) ||
       /^[/$]/u.test(body.text.trim()) ||
+      isRetiredSuperBanCommandText(body.text) ||
       parseAdminForwardedModerationCommand(body.text) ||
       (settings && parseAdminForwardedModerationCommand(body.text, settings))
     )

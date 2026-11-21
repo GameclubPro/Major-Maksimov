@@ -267,7 +267,6 @@ describeStores('native multibot ingress → outbox → moderation → guarded si
     Object.assign(admin, {
       prisma: s.prisma,
       chatContextCache: s.cache,
-      superBanDeveloperUserIds: new Set(),
       assertChatAdmin: async () => undefined,
       ensureEntityType: async () => undefined,
       scheduleDestructiveModerationAdminRosterWarmup: () => undefined,

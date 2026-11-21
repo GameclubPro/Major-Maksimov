@@ -138,6 +138,10 @@ export class ManualModerationService {
     const queueStartedAtMs = Date.now();
     const response = await this.globalSpammerIntelligence.listReviewQueue({
       chatId,
+      reviewerUserId: user.userId,
+      ...(typeof queryRecord.cursor === 'string' && queryRecord.cursor.length <= 1024
+        ? { cursor: queryRecord.cursor }
+        : {}),
       status,
       limit,
       includeObservations,
@@ -191,10 +195,25 @@ export class ManualModerationService {
     const queryRecord =
       query && typeof query === 'object' ? (query as Record<string, unknown>) : {};
     const includeHeavy = this.parseBooleanQuery(queryRecord.includeHeavy, false);
+    if (queryRecord.mode === 'mode' && !includeHeavy) {
+      return globalSpammerReviewMetricsSchema.parse({
+        enforcementMode: this.globalSpammerIntelligence.getEnforcementMode(),
+        pending: 0,
+        approved: 0,
+        suppressed: 0,
+        reviewed: 0,
+        falsePositiveCount: 0,
+        falsePositiveRate: 0,
+        recentObservations: [],
+        suppressedObservations: [],
+        sourceAlerts: [],
+      });
+    }
     const mode = includeHeavy ? 'full' : this.parseGlobalSpammerReviewMetricsMode(queryRecord.mode);
     const metricsStartedAtMs = Date.now();
     const response = await this.globalSpammerIntelligence.getReviewMetrics({
       chatId,
+      reviewerUserId: user.userId,
       mode,
     });
     const metricsMs = Date.now() - metricsStartedAtMs;
@@ -254,6 +273,7 @@ export class ManualModerationService {
         includeHeavyDiagnosticsByDefault,
       ),
     };
+    await this.globalSpammerIntelligence.assertReviewSubjectInChat(chatId, targetUserId);
     const diagnosticsStartedAtMs = Date.now();
     const response = await this.globalSpammerIntelligence.getUserDiagnostics({
       chatId,
@@ -327,6 +347,7 @@ export class ManualModerationService {
       throw new BadRequestException(parsed.error.format());
     }
 
+    await this.globalSpammerIntelligence.assertReviewSubjectInChat(chatId, targetUserId);
     const response = await this.globalSpammerIntelligence.reviewCandidate({
       chatId,
       userId: targetUserId,
@@ -599,22 +620,10 @@ export class ManualModerationService {
     return this.legacyAdminService.applyManualOpenChatCommand(...args);
   }
 
-  isSuperBanDeveloperUserId(
-    ...args: Parameters<AdminService['isSuperBanDeveloperUserId']>
-  ): ReturnType<AdminService['isSuperBanDeveloperUserId']> {
-    return this.legacyAdminService.isSuperBanDeveloperUserId(...args);
-  }
-
   enqueueManualGroupModerationCommand(
     ...args: Parameters<AdminService['enqueueManualGroupModerationCommand']>
   ): ReturnType<AdminService['enqueueManualGroupModerationCommand']> {
     return this.legacyAdminService.enqueueManualGroupModerationCommand(...args);
-  }
-
-  enqueueDeveloperSuperBanCommand(
-    ...args: Parameters<AdminService['enqueueDeveloperSuperBanCommand']>
-  ): ReturnType<AdminService['enqueueDeveloperSuperBanCommand']> {
-    return this.legacyAdminService.enqueueDeveloperSuperBanCommand(...args);
   }
 
   addAdmin(...args: Parameters<AdminService['addAdmin']>): ReturnType<AdminService['addAdmin']> {
@@ -659,11 +668,5 @@ export class ManualModerationService {
     ...args: Parameters<AdminService['processManualModerationFanoutJob']>
   ): ReturnType<AdminService['processManualModerationFanoutJob']> {
     return this.legacyAdminService.processManualModerationFanoutJob(...args);
-  }
-
-  processDeveloperSuperBanJob(
-    ...args: Parameters<AdminService['processDeveloperSuperBanJob']>
-  ): ReturnType<AdminService['processDeveloperSuperBanJob']> {
-    return this.legacyAdminService.processDeveloperSuperBanJob(...args);
   }
 }

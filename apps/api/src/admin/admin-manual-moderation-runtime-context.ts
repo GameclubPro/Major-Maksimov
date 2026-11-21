@@ -14,7 +14,6 @@ import type {
   AdminManualFanoutJob,
   AdminManualGroupModerationCommandJob,
 } from './admin-manual-fanout.queue';
-import type { AdminSuperBanJob } from './admin-super-ban.queue';
 import type {
   AdminActionSource,
   ManualBanFollowUpSource,
@@ -195,13 +194,10 @@ export type ManualModerationActionBotAssignmentInput = {
 
 export type AdminManualModerationRuntimeContext = {
   readonly logger: Logger;
-  readonly adminSuperBanQueue?: Queue<AdminSuperBanJob>;
   readonly adminManualFanoutQueue?: Queue<AdminManualFanoutJob>;
   readonly adminManualCommandQueue?: Queue<AdminManualFanoutJob>;
   enqueueManualModerationFanout(job: AdminManualFanoutJob): Promise<boolean>;
   isKnownRuntimeBotUserId(userId: string | null | undefined): boolean;
-  isSuperBanDeveloperUserId(userId: string | null | undefined): boolean;
-  processDeveloperSuperBanJob(job: AdminSuperBanJob): Promise<void>;
   processManualSystemBan(
     chatId: string,
     targetUserId: string,

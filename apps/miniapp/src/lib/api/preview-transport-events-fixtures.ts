@@ -222,6 +222,26 @@ export function createPreviewSpammerReviewCandidates(now: Date): GlobalSpammerRe
   }).items;
 }
 
+export function buildPreviewSpammerReviewPage(
+  candidates: readonly GlobalSpammerReviewCandidate[],
+  query: URLSearchParams,
+) {
+  const status = query.get('status') ?? 'PENDING';
+  const limit = Math.max(1, Math.min(Number.parseInt(query.get('limit') ?? '50', 10), 100));
+  const matching = candidates.filter(
+    (candidate) => status === 'ALL' || candidate.status === status,
+  );
+  const cursor = query.get('cursor');
+  const cursorIndex = cursor ? matching.findIndex((candidate) => candidate.userId === cursor) : -1;
+  const start = cursor && cursorIndex < 0 ? matching.length : cursorIndex + 1;
+  const items = matching.slice(start, start + limit);
+  return globalSpammerReviewQueueSchema.parse({
+    items,
+    limit,
+    nextCursor: start + limit < matching.length ? (items.at(-1)?.userId ?? null) : null,
+  });
+}
+
 export function buildPreviewSpammerReviewMetrics(
   candidates: readonly GlobalSpammerReviewCandidate[],
   clock: PreviewClock,

@@ -173,9 +173,7 @@ describe('admin forwarded command util', () => {
       action: 'MUTE',
       mutePermanent: true,
     });
-    expect(parseAdminForwardedModerationCommand('super-ban.')).toEqual({
-      action: 'SUPER_BAN',
-    });
+    expect(parseAdminForwardedModerationCommand('super-ban.')).toBeNull();
     expect(
       parseAdminForwardedModerationCommand('регламент', { adminRulesCommandName: 'Регламент' }),
     ).toEqual({

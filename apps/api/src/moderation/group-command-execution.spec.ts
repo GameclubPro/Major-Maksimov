@@ -23,8 +23,6 @@ describe('mandatory GROUP command authority', () => {
         .mockResolvedValue({ ok: true, message: 'Чат открыт.' }),
       adoptChatRulesFromMessage: jest.fn().mockResolvedValue({ text: 'Правила' }),
       enqueueManualGroupModerationCommand: jest.fn().mockResolvedValue(true),
-      enqueueDeveloperSuperBanCommand: jest.fn().mockResolvedValue(true),
-      isSuperBanDeveloperUserId: jest.fn().mockReturnValue(false),
     };
     const maxClient = {
       sendMessage: jest.fn(
@@ -61,6 +59,18 @@ describe('mandatory GROUP command authority', () => {
       });
     return { manualBridge, maxClient, service, authority, cleanup, handle };
   }
+
+  it.each(['супер бан', 'СУПЕР-БАН!', 'super ban.', 'SUPER--BAN!'])(
+    'ignores the retired command %s before taking command authority or creating effects',
+    async (text) => {
+      const peer = fixture();
+      await expect(peer.handle(createAdminForwardedBanUpdate(text))).resolves.toBe(false);
+      expect(peer.authority.prepareResult).not.toHaveBeenCalled();
+      expect(peer.manualBridge.enqueueManualGroupModerationCommand).not.toHaveBeenCalled();
+      expect(peer.maxClient.sendMessage).not.toHaveBeenCalled();
+      expect(peer.cleanup).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['off', 'shadow'].flatMap((mode) => [1, 4, 9].map((bots) => ({ mode, bots }))))(
     'runs one settings mutation and one notice with $bots bots in canonical $mode',
@@ -267,11 +277,9 @@ describe('mandatory GROUP command authority', () => {
   it.each([
     { text: 'бан', action: 'BAN' },
     { text: 'мут 2', action: 'MUTE' },
-    { text: 'супер бан', action: 'SUPER_BAN' },
   ])('records one silent queued $action result for nine bot mirrors', async ({ text, action }) => {
     const authority = createGroupCommandAuthorityMock();
     const peers = Array.from({ length: 9 }, () => fixture(authority));
-    for (const peer of peers) peer.manualBridge.isSuperBanDeveloperUserId.mockReturnValue(true);
     const base = createAdminForwardedBanUpdate(text);
     await Promise.all(
       peers.map((peer, index) =>
@@ -281,9 +289,7 @@ describe('mandatory GROUP command authority', () => {
     expect(
       peers.reduce(
         (count, peer) =>
-          count +
-          peer.manualBridge.enqueueManualGroupModerationCommand.mock.calls.length +
-          peer.manualBridge.enqueueDeveloperSuperBanCommand.mock.calls.length,
+          count + peer.manualBridge.enqueueManualGroupModerationCommand.mock.calls.length,
         0,
       ),
     ).toBe(1);

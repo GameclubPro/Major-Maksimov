@@ -408,6 +408,7 @@ export async function getGlobalSpammerReviewQueue(
   chatId: string,
   query: Partial<{
     status: GlobalSpammerCandidateStatus | 'ALL';
+    cursor: string;
     limit: number;
     includeProfiles: boolean;
     includeObservations: boolean;
@@ -425,6 +426,7 @@ export async function getGlobalSpammerReviewQueue(
     status,
     limit: String(limit),
   });
+  if (query.cursor) params.set('cursor', query.cursor);
   if (query.includeProfiles === false) {
     params.set('includeProfiles', 'false');
   } else if (query.includeProfiles === true) {
@@ -452,14 +454,14 @@ export async function getGlobalSpammerReviewMetrics(
   chatId: string,
   queryOrRequest:
     | Partial<{
-        mode: 'summary' | 'full';
+        mode: 'mode' | 'summary' | 'full';
       }>
     | Pick<RequestInit, 'signal'> = {},
   request: Pick<RequestInit, 'signal'> = hasRequestSignal(queryOrRequest) ? queryOrRequest : {},
 ): Promise<GlobalSpammerReviewMetrics> {
   const query = hasRequestSignal(queryOrRequest) ? {} : queryOrRequest;
   const params = new URLSearchParams();
-  if (query.mode === 'summary' || query.mode === 'full') {
+  if (query.mode === 'mode' || query.mode === 'summary' || query.mode === 'full') {
     params.set('mode', query.mode);
   }
   const queryString = params.toString();

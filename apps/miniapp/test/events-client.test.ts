@@ -5,6 +5,7 @@ import {
   applyManualModerationAction,
   getChatParticipantsPage,
   getChatStatisticsIdentity,
+  getGlobalSpammerReviewQueue,
 } from '../src/lib/api/events-client';
 import type { ApiTransport } from '../src/lib/api/transport';
 
@@ -32,6 +33,20 @@ test('participant requests keep the selected period and role filter server-side'
   assert.equal(url.searchParams.get('search'), 'Иван');
 });
 
+test('spammer review loads the next page with the exact opaque cursor', async () => {
+  let requestedPath = '';
+  const api: ApiTransport = {
+    async request(path) {
+      requestedPath = path;
+      return { items: [], limit: 20, nextCursor: null };
+    },
+    requestKeepalive() {},
+  };
+  await getGlobalSpammerReviewQueue(api, 'chat-1', { limit: 20, cursor: 'a/b+c=' });
+  const url = new URL(requestedPath, 'https://miniapp.local');
+  assert.equal(url.pathname, '/chats/chat-1/spammer-review');
+  assert.equal(url.searchParams.get('cursor'), 'a/b+c=');
+});
 test('manual moderation sends one bounded non-replayable mutation', async () => {
   let requestedPath = '';
   let requestedInit: Parameters<ApiTransport['request']>[1];

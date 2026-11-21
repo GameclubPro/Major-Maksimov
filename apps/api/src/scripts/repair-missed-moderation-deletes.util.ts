@@ -106,7 +106,6 @@ const BOT_ACCOUNT_MESSAGE_DELETE_REASON =
 const LOCAL_ADMIN_BLOCK_MESSAGE_DELETE_REASON = 'Local admin block for this admin scope';
 const GLOBAL_SPAMMER_MESSAGE_DELETE_REASONS = new Set([
   'Sender exists in global spammer registry',
-  'Developer-forced global blacklist',
   'Detected in 6 unique chats within 2 minutes',
 ]);
 

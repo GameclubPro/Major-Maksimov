@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import {
+  isRetiredSuperBanCommandText,
   ADMIN_BAN_ALL_COMMAND_NAME_DEFAULT,
   ADMIN_BAN_COMMAND_NAME_DEFAULT,
   ADMIN_MUTE_COMMAND_NAME_DEFAULT,
@@ -62,7 +63,6 @@ export type ForwardedExtractionOptions = {
 export function recognizesAdminForwardedModerationCommand(
   update: MaxUpdate,
   settings: AdminForwardedCommandSettings,
-  superBanOnly = false,
 ): boolean {
   if (update.type !== 'message_created') return false;
   try {
@@ -70,7 +70,7 @@ export function recognizesAdminForwardedModerationCommand(
       extractDirectIncomingMessageText(update),
       settings,
     );
-    return parsed !== null && (!superBanOnly || parsed.action === 'SUPER_BAN');
+    return parsed !== null;
   } catch {
     // Recognized invalid commands still require one durable error notice.
     return true;
@@ -82,7 +82,7 @@ export function parseAdminForwardedModerationCommand(
   settings?: AdminForwardedCommandSettings,
 ): AdminForwardedModerationCommand | null {
   const normalized = readAdminCommandText(text);
-  if (!normalized) {
+  if (!normalized || isRetiredSuperBanCommandText(normalized)) {
     return null;
   }
   const normalizedLower = normalized.toLowerCase();
@@ -127,12 +127,6 @@ export function parseAdminForwardedModerationCommand(
     normalizedLower,
     silenceCommandName,
   );
-
-  if (/^(?:супер[\s-]+бан|super[\s-]+ban)[.!]?$/u.test(normalizedLower)) {
-    return {
-      action: 'SUPER_BAN',
-    };
-  }
 
   if (matchesAdminCommandName(normalizedLower, permanentMuteCommandName)) {
     return {

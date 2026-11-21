@@ -406,6 +406,7 @@ if [[ "$SELECT_API" -eq 1 ]]; then
   maxim_topology_require_legacy_dispositions "$API_SOURCE_SHA"
   maxim_topology_require_managed_entity_activation "$API_SOURCE_SHA"
   maxim_topology_require_fixed_moderator "$API_SOURCE_SHA"
+  maxim_topology_require_retired_super_ban "$API_SOURCE_SHA"
   maxim_topology_require_commercial_text_delete_guard "$API_SOURCE_SHA"
   maxim_topology_require_commercial_ai_delete_guard "$API_SOURCE_SHA"
   maxim_topology_require_commercial_ai_pool_delete_reader "$API_SOURCE_SHA"

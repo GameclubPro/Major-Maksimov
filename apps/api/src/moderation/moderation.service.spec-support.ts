@@ -17,11 +17,6 @@ import {
   INCIDENT_EXTERNAL_URL,
   INCIDENT_PROFILE_MENTION_FORWARD_FIXTURE,
 } from './navigation/navigation-evidence.fixtures';
-import {
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-  buildDeveloperForcedGlobalSpammerCacheKey,
-  buildDeveloperForcedGlobalSpammerWarmMarkerKey,
-} from './developer-forced-global-spammer-cache';
 import { ModerationService as RuntimeModerationService } from './moderation.service';
 import type { enforceLocalChatBan } from './local-chat-ban';
 import { resolveModerationDeleteIntentRollout } from './moderation-delete-intent-rollout.util';
@@ -39,7 +34,6 @@ import {
 import { RuleEngineService } from './rule-engine.service.impl';
 import {
   ADMIN_CONTACT_DISPLAY_NAME_LOOKUP_TIMEOUT_MS,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
   DUPLICATE_FOLLOW_UP_HOT_PATH_TIMEOUT_MS,
   GLOBAL_SPAMMER_CONFIRMED_FANOUT_EPISODE_THRESHOLD,
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_TIMEOUT_MS,
@@ -2515,9 +2509,6 @@ export {
   INCIDENT_EXTERNAL_FORWARD_FIXTURE,
   INCIDENT_EXTERNAL_URL,
   INCIDENT_PROFILE_MENTION_FORWARD_FIXTURE,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_WARM_MARKER_TTL_SEC,
-  buildDeveloperForcedGlobalSpammerCacheKey,
-  buildDeveloperForcedGlobalSpammerWarmMarkerKey,
   ModerationService,
   withAutomaticMutePersistenceFixture,
   resolveModerationDeleteIntentRollout,
@@ -2530,7 +2521,6 @@ export {
   WEBHOOK_HOT_PATH_TIMEOUT_TERMINAL_QUARANTINE_PREFIX,
   RuleEngineService,
   ADMIN_CONTACT_DISPLAY_NAME_LOOKUP_TIMEOUT_MS,
-  DEVELOPER_FORCED_GLOBAL_SPAMMER_HOT_PATH_TIMEOUT_MS,
   DUPLICATE_FOLLOW_UP_HOT_PATH_TIMEOUT_MS,
   GLOBAL_SPAMMER_CONFIRMED_FANOUT_EPISODE_THRESHOLD,
   GLOBAL_SPAMMER_EXEMPTION_HOT_PATH_TIMEOUT_MS,
