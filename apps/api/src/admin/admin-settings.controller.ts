@@ -35,6 +35,11 @@ export class AdminSettingsController {
     return this.settingsService.getSettings(chatId, user);
   }
 
+  @Get('chats/:chatId/closure-status')
+  getChatClosureSummary(@Param('chatId') chatId: string, @CurrentUser() user: AuthUser) {
+    return this.settingsService.getChatClosureSummary(chatId, user);
+  }
+
   @Get('chats/:chatId/settings-screen')
   getChatSettingsScreen(@Param('chatId') chatId: string, @CurrentUser() user: AuthUser) {
     return this.settingsService.getChatSettingsScreen(chatId, user);

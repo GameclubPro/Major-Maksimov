@@ -642,7 +642,14 @@ export class NightModeTransitionReconcileService implements OnModuleInit, OnModu
         LEFT JOIN "night_mode_transition_reconcile_requests" existing
           ON existing."chat_id" = registry."chat_id"
         WHERE registry."scheduled_for" <= ${now}
-          AND registry."updated_at" <= ${registryOverdueBefore}
+          AND CASE
+            WHEN registry."recovery_payload"->>'kind' = 'close_notice_cleanup'
+              AND jsonb_typeof(registry."recovery_payload"->'cleanupWakeAtMs') = 'number'
+              AND registry."recovery_payload"->'cleanupWakeAtMs' <= to_jsonb(
+                extract(epoch FROM registry."scheduled_for" + interval '3 days') * 1000)
+            THEN registry."recovery_payload"->'cleanupWakeAtMs' <= to_jsonb(${BigInt(now.getTime())}::bigint)
+            ELSE registry."updated_at" <= ${registryOverdueBefore}
+          END
           AND NOT (
             existing."manual_blocked_at" IS NOT NULL
             AND registry."job_id" = existing."manual_blocked_job_id"

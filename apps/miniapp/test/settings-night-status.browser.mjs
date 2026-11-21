@@ -89,6 +89,8 @@ try {
       await page.clock.install({ time: new Date(timestamp) });
       await page.clock.pauseAt(new Date(timestamp));
       let reads = 0;
+      let screenReads = 0;
+      let olderApi = false;
       let responseStatus = 200;
       let savedStart = 1260;
       let savedClosure = closure();
@@ -103,7 +105,7 @@ try {
       const errors = [];
       page.on('pageerror', (error) => errors.push(error.message));
       await context.route('**/api/chats/*/settings-screen', (route) => {
-        reads += 1;
+        screenReads += 1;
         return route.fulfill({
           status: responseStatus,
           json:
@@ -132,6 +134,34 @@ try {
               : { code: 'UPSTREAM_UNAVAILABLE' },
         });
       });
+      await context.route('**/api/chats/*/closure-status', async (route) => {
+        reads++;
+        const observedAt = await route
+          .request()
+          .frame()
+          .evaluate(() => new Date().toISOString());
+        const summary = {
+          ...Object.fromEntries(
+            [
+              'scheduleEnabled',
+              'restriction',
+              'timezone',
+              'opensAt',
+              'nextTransitionAt',
+              'deleteRoute',
+            ].map((key) => [key, savedClosure[key]]),
+          ),
+          observedAt,
+          nightActive: savedClosure.restriction === 'night',
+          manualMode: null,
+          notificationsEnabled: false,
+          sendRoute: 'available',
+        };
+        return route.fulfill({
+          status: olderApi ? 404 : responseStatus,
+          json: !olderApi && responseStatus === 200 ? summary : { code: 'UPSTREAM_UNAVAILABLE' },
+        });
+      });
       await context.route('**/api/chats/*/settings/section', async (route) => {
         const body = route.request().postDataJSON();
         patches.push(body);
@@ -158,15 +188,18 @@ try {
       };
       const focus = async () => {
         await page.clock.runFor(1000);
-        const response = page.waitForResponse('**/api/chats/*/settings-screen');
+        const response = page.waitForResponse('**/api/chats/*/closure-status');
         await page.evaluate(() => window.dispatchEvent(new Event('focus')));
         await response;
         await page.clock.runFor(10);
         await settle();
       };
       const initialResponse = page.waitForResponse('**/api/chats/*/settings-screen');
+      const initialSummary = page.waitForResponse('**/api/chats/*/closure-status');
       await page.goto(`${base}night-status-test`);
       await initialResponse;
+      await page.clock.runFor(100);
+      await initialSummary;
       await page.clock.runFor(100);
       await page.evaluate((theme) => {
         document.documentElement.dataset.maxTheme = theme;
@@ -255,9 +288,9 @@ try {
         document.dispatchEvent(new Event('visibilitychange'));
       });
       const beforeHidden = reads;
-      await page.clock.runFor(61_000);
+      await page.clock.runFor(301_000);
       assert.equal(reads, beforeHidden, 'Hidden page does not poll');
-      const visibleResponse = page.waitForResponse('**/api/chats/*/settings-screen');
+      const visibleResponse = page.waitForResponse('**/api/chats/*/closure-status');
       await page.evaluate(() => {
         Object.defineProperty(document, 'visibilityState', {
           configurable: true,
@@ -270,12 +303,12 @@ try {
       await settle();
       assert.ok(reads > beforeHidden, 'Returning to visible refreshes status');
       const beforePoll = reads;
-      await page.clock.runFor(61_000);
+      await page.clock.runFor(301_000);
       await settle();
       assert.ok(reads > beforePoll, 'Expanded visible section keeps bounded periodic refresh');
       await page.getByRole('button', { name: 'Закрыть раздел', exact: true }).click();
       const beforeCollapsed = reads;
-      await page.clock.runFor(61_000);
+      await page.clock.runFor(301_000);
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       assert.equal(
         reads,
@@ -293,10 +326,15 @@ try {
         })
         .waitFor();
       assert.match(await page.locator('.night-status__heading').innerText(), /Чат закрыт/);
+      assert.equal(screenReads, 1, 'Status refresh never reloads the full screen');
       responseStatus = 200;
+      olderApi = true;
+      const legacyRead = page.waitForResponse('**/api/chats/*/settings-screen');
       delete savedClosure.notices;
       savedClosure.notice = 'delivered';
       await focus();
+      await legacyRead;
+      olderApi = false;
       assert.match(await page.locator('.night-status__heading').innerText(), /Чат закрыт/);
       assert.equal(await page.getByLabel('Начало в минутах').inputValue(), '1234');
       assert.equal(
@@ -307,7 +345,7 @@ try {
       responseStatus = 403;
       await focus();
       const afterDenied = reads;
-      await page.clock.runFor(61_000);
+      await page.clock.runFor(301_000);
       await page.evaluate(() => window.dispatchEvent(new Event('focus')));
       assert.equal(reads, afterDenied, 'Access denial stops repeated status reads');
       assert.deepEqual(errors, [], `${name}: no browser errors`);
@@ -426,7 +464,7 @@ try {
         reason: 'ambiguous',
         sentAt: null,
       };
-      const realFocusResponse = screen.waitForResponse('**/api/chats/*/settings-screen');
+      const realFocusResponse = screen.waitForResponse('**/api/chats/*/closure-status');
       await screen.evaluate(() => window.dispatchEvent(new Event('focus')));
       await realFocusResponse;
       assert.doesNotMatch(
@@ -448,9 +486,11 @@ try {
         path: path.join(screenshots, `${name}-screen-dirty.png`),
         animations: 'disabled',
       });
+      const statusAfterSave = screen.waitForResponse('**/api/chats/*/closure-status');
       const saved = screen.waitForResponse('**/api/chats/*/settings/section');
       await panel.getByRole('button', { name: 'Сохранить в этом чате', exact: true }).click();
       await saved;
+      await statusAfterSave;
       assert.equal(patches.length, 1);
       assert.equal(patches[0].section, 'night');
       assert.equal(patches[0].expectedRevision, timestamp);

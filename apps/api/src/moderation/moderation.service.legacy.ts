@@ -8,6 +8,7 @@ import {
 } from './channel-marketplace-decoration';
 import { withMarketplaceModerationMessage } from '../max/marketplace-publication-button';
 import { needsAutomaticMuteCleanup, persistAutomaticMuteCleanup } from './automatic-mute-cleanup';
+import { readClosedChatMessageCreatedAt } from './closed-chat-message-source';
 import { runCanonicalWebhookHandler } from './canonical-webhook-handler';
 import { verifyFreshHeldCommandAccess } from '../webhook/webhook-legacy-fresh-command';
 import { bindVoiceSourceEvidence, captureVoiceSourceInput } from './voice-webhook-source';
@@ -807,6 +808,14 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ModerationService.name);
   private readonly closedChatMessageModeration = new ClosedChatMessageModerationService({
     ensureIntent: (input) => this.ensureModerationDeleteIntent(input),
+    ensureBothReasons: async (manual, night) => {
+      if (!this.moderationDeleteIntentService)
+        throw new Error('Closed-chat delete store unavailable');
+      await this.moderationDeleteIntentService.ensureClosedChatReasons(
+        this.prepareModerationDeleteIntentInput(manual),
+        this.prepareModerationDeleteIntentInput(night),
+      );
+    },
     claimAction: (input) => this.claimMessageScopedModerationAction(input),
     executeDelete: (input) => this.executeModerationDelete(input),
     createEvent: (input) => this.createBotModerationEvent(input),
@@ -1813,7 +1822,7 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       let settings = this.applyDegradeSettings(chat.settings, degradeMode);
       const closure = resolveEffectiveChatClosure(settings);
       const manualGroupCloseActiveNow = closure.manual.active;
-      const nightModeActiveNow = !manualGroupCloseActiveNow && closure.night?.status === 'closed';
+      const nightModeActiveNow = closure.night?.status === 'closed';
       const destructiveAccessGateActive = manualGroupCloseActiveNow || nightModeActiveNow;
       const forceSynchronousRemoteAdminLookup = this.shouldForceSynchronousRemoteAdminLookup(
         update,
@@ -1925,13 +1934,18 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
       )
         return;
 
-      await this.nightModeOpenNoticeCleanup?.observeHumanMessage(settings, {
-        isBot: senderIsBot,
-        type: updateType,
-        messageId,
-        userId: senderId,
-        createdAt,
-      });
+      const originalCreatedAt =
+        destructiveAccessGateActive || settings.nightModeOpenMessageDeleteOnFirstMessageEnabled
+          ? readClosedChatMessageCreatedAt(update)
+          : null;
+      if (originalCreatedAt && settings.nightModeOpenMessageDeleteOnFirstMessageEnabled)
+        await this.nightModeOpenNoticeCleanup?.observeHumanMessage(settings, {
+          isBot: senderIsBot,
+          type: updateType,
+          messageId,
+          userId: senderId,
+          createdAt: originalCreatedAt,
+        });
 
       const mediaFlags = detectMediaFlags(update);
       const requiredSubscriptionMediaNoticeScope = resolveRequiredSubscriptionMediaNoticeScope({
@@ -2208,40 +2222,41 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      if (manualGroupCloseActiveNow) {
-        if (!(await ensureDestructiveModerationAllowed('manual-group-close'))) {
+      if (destructiveAccessGateActive) {
+        if (
+          !(await ensureDestructiveModerationAllowed(
+            manualGroupCloseActiveNow ? 'manual-group-close' : 'night-mode',
+          ))
+        )
           return;
-        }
         await suppressDeferredPhotoAnalysisActions();
-        await this.handleNightModeForceCloseMessage({
+        if (!originalCreatedAt) return;
+        const source = {
           chatId,
           userId: senderId,
           messageId,
           text,
-          createdAt,
+          createdAt: originalCreatedAt,
           voiceSource,
-          nightModeForceCloseForever: settings.nightModeForceCloseForever,
-          nightModeForceCloseUntil: settings.nightModeForceCloseUntil,
-        });
-        return;
-      }
-
-      if (nightModeActiveNow) {
-        if (!(await ensureDestructiveModerationAllowed('night-mode'))) {
-          return;
-        }
-        await suppressDeferredPhotoAnalysisActions();
-        await this.handleNightModeMessage({
-          chatId,
-          userId: senderId,
-          messageId,
-          text,
-          createdAt,
-          voiceSource,
-          nightModeStartTimeMinutes: settings.nightModeStartTimeMinutes,
-          nightModeEndTimeMinutes: settings.nightModeEndTimeMinutes,
-          nightModeTimezone: settings.nightModeTimezone,
-        });
+        };
+        const night = nightModeActiveNow
+          ? {
+              ...source,
+              nightModeStartTimeMinutes: settings.nightModeStartTimeMinutes,
+              nightModeEndTimeMinutes: settings.nightModeEndTimeMinutes,
+              nightModeTimezone: settings.nightModeTimezone,
+            }
+          : undefined;
+        if (manualGroupCloseActiveNow) {
+          await this.handleNightModeForceCloseMessage(
+            {
+              ...source,
+              nightModeForceCloseForever: settings.nightModeForceCloseForever,
+              nightModeForceCloseUntil: settings.nightModeForceCloseUntil,
+            },
+            night,
+          );
+        } else if (night) await this.handleNightModeMessage(night);
         return;
       }
 
@@ -7164,57 +7179,33 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (command.action === 'SILENCE' || command.action === 'OPEN_CHAT') {
-      try {
-        const result =
-          command.action === 'SILENCE'
-            ? await manualBridge.applyManualChatSilenceCommand(
-                chatId,
-                actor,
-                {
-                  durationHours: command.silenceDurationHours,
-                },
-                'group_command',
-                params.permit,
-              )
-            : await manualBridge.applyManualOpenChatCommand(
-                chatId,
-                actor,
-                'group_command',
-                params.permit,
-              );
+      // FLAG: Propagate failures to the command owner. Only its committed result can authorize a notice.
+      const result =
+        command.action === 'SILENCE'
+          ? await manualBridge.applyManualChatSilenceCommand(
+              chatId,
+              actor,
+              {
+                durationHours: command.silenceDurationHours,
+              },
+              'group_command',
+              params.permit,
+            )
+          : await manualBridge.applyManualOpenChatCommand(
+              chatId,
+              actor,
+              'group_command',
+              params.permit,
+            );
 
-        if (result.skipped) return true;
-        if (!(await this.legacyHolds?.isUpdateHeld(update)))
-          await this.deleteAdminCommandMessage(
-            chatId,
-            messageId,
-            update.message?.createdAt ?? null,
-          );
-        await sendNotice({
-          chatId,
-          settings,
-          text: result.message,
-        });
-      } catch (error: unknown) {
-        if (error instanceof GroupCommandNoticeDeliveryError) throw error;
-        this.logger.warn(
-          {
-            chatId,
-            actorUserId: senderId,
-            action: command.action,
-            error: error instanceof Error ? error.message : 'Unknown error',
-          },
-          'Failed to apply manual chat silence command',
-        );
-
-        await sendNotice({
-          chatId,
-          settings,
-          text: `Команда не выполнена: ${this.escapeMaxMarkdownText(
-            this.extractGroupAdminCommandErrorMessage(error),
-          )}`,
-        });
-      }
+      if (result.skipped) return true;
+      if (!(await this.legacyHolds?.isUpdateHeld(update)))
+        await this.deleteAdminCommandMessage(chatId, messageId, update.message?.createdAt ?? null);
+      await sendNotice({
+        chatId,
+        settings,
+        text: result.message,
+      });
 
       return true;
     }
@@ -10200,8 +10191,11 @@ export class ModerationService implements OnModuleInit, OnModuleDestroy {
     return this.closedChatMessageModeration.handleNightModeMessage(params);
   }
 
-  private handleNightModeForceCloseMessage(params: ManuallyClosedChatMessage) {
-    return this.closedChatMessageModeration.handleNightModeForceCloseMessage(params);
+  private handleNightModeForceCloseMessage(
+    params: ManuallyClosedChatMessage,
+    night?: NightClosedChatMessage,
+  ) {
+    return this.closedChatMessageModeration.handleNightModeForceCloseMessage(params, night);
   }
 
   async executeRequiredSubscriptionCandidate(

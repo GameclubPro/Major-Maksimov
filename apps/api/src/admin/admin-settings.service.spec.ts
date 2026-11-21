@@ -696,6 +696,58 @@ describe('AdminSettingsService chat rules', () => {
     });
   });
 
+  it('checks group administrator access before the compact closure read and preserves its retry policy', async () => {
+    const { accessObservability, legacyAdminService, prisma, service } = createService();
+    const findUnique = jest.fn();
+    Object.assign(prisma.chat, { findUnique });
+    legacyAdminService.assertManagedEntityAdminAccess.mockRejectedValueOnce(
+      new ForbiddenException('Пользователь не является администратором чата.'),
+    );
+    const error = await service
+      .getChatClosureSummary('chat-1', user as never)
+      .catch((e: unknown) => e);
+    expect(legacyAdminService.assertManagedEntityAdminAccess).toHaveBeenCalledWith(
+      'chat-1',
+      user.userId,
+      'chat',
+    );
+    expect((error as ForbiddenException).getResponse()).toMatchObject({
+      code: 'SETTINGS_ACCESS_USER_DENIED',
+      retryable: false,
+      recovery: 'return_to_entities',
+    });
+    expect(accessObservability.recordRejection).toHaveBeenCalled();
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('reads just the saved group state after authorization without initializing settings', async () => {
+    const { service, prisma, legacyAdminService, managedEntitiesService } = createService();
+    const findUnique = jest.fn().mockResolvedValue({
+      id: 'chat-1',
+      entityType: 'CHAT',
+      botMemberships: [],
+      settings: createPersistedChatSettings({
+        nightModeEnabled: false,
+        nightModeForceCloseEnabled: true,
+        nightModeForceCloseForever: true,
+      }),
+    });
+    Object.assign(prisma.chat, { findUnique });
+    await expect(service.getChatClosureSummary('chat-1', user as never)).resolves.toMatchObject({
+      restriction: 'manual',
+      nightActive: false,
+      manualMode: 'forever',
+      opensAt: null,
+      nextTransitionAt: null,
+      notificationsEnabled: false,
+    });
+    expect(legacyAdminService.assertManagedEntityAdminAccess).toHaveBeenCalledTimes(1);
+    expect(findUnique).toHaveBeenCalledTimes(1);
+    expect(prisma.chat.upsert).not.toHaveBeenCalled();
+    expect(managedEntitiesService.getChatHeaderWithBotSpeechPreviewProfile).not.toHaveBeenCalled();
+    expect(prisma.chatRules.findUnique).not.toHaveBeenCalled();
+  });
+
   it('keeps channel settings screens strict when prefetch asks for cached access', async () => {
     const { accessObservability, legacyAdminService, service } = createService();
     const sourceError = new ForbiddenException('Пользователь не является администратором чата.');

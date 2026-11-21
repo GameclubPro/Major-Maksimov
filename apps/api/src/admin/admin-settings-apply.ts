@@ -22,6 +22,11 @@ import {
   stopWordsPolicySchema,
 } from '@maxim/contracts';
 import { BadRequestException, ConflictException, HttpException } from '@nestjs/common';
+import { advanceChatMutationOrder } from '../common/group-command-authority.service';
+import {
+  CHAT_CLOSURE_POLICY_SELECT,
+  isChatClosurePolicyChanged,
+} from '../common/chat-closure-policy-change';
 import { commercialAdsPolicySchema, linkRulesPolicySchema } from '@maxim/contracts/settings';
 import type { ChatContextCacheService } from '../chat-context/chat-context-cache.service';
 import { ChatCatalogKind, ChatEntityType, Prisma } from '../prisma/prisma-client';
@@ -298,6 +303,9 @@ export async function applySettingsToAllChats(params: {
           return acc;
         }, {})
       : normalizedSettings;
+  const writesClosurePolicy = Object.keys(CHAT_CLOSURE_POLICY_SELECT).some((key) =>
+    Object.hasOwn(settingsUpdatePayload, key),
+  );
   const settingsCreatePayload =
     filteredSettingKeys.length > 0
       ? {
@@ -669,6 +677,24 @@ export async function applySettingsToAllChats(params: {
               };
             }
             const baselineUpdatedAt = writeBaselineByChatId.get(chatId);
+            if (writesClosurePolicy) {
+              // FLAG: Read the previous policy under the same parent lock as GROUP commands.
+              // The target revision check below rolls back the order change on a conflict.
+              const before =
+                (baselineUpdatedAt &&
+                  (await tx.chatSettings.findUnique({
+                    where: { chatId },
+                    select: CHAT_CLOSURE_POLICY_SELECT,
+                  }))) ||
+                DEFAULT_CHAT_SETTINGS;
+              const candidate = {
+                ...before,
+                ...(baselineUpdatedAt ? majorSettingsUpdatePayload : majorSettingsCreatePayload),
+              };
+              if (isChatClosurePolicyChanged(before, candidate)) {
+                await advanceChatMutationOrder(tx, chatId, 'CHAT_CONTROL');
+              }
+            }
             if (baselineUpdatedAt) {
               const changed = await tx.chatSettings.updateMany({
                 where: {
@@ -983,8 +1009,12 @@ export async function applySettingsSectionToAllChats(params: {
   ) {
     throw settingsApplyRevisionConflict(params.sourceChatId, []);
   }
+  const requiresSourceRevision =
+    section === 'night' ||
+    section === 'reports' ||
+    (section === 'links' && sourceSettings.linkRulesPolicy != null);
   if (
-    (section === 'reports' || (section === 'links' && sourceSettings.linkRulesPolicy != null)) &&
+    requiresSourceRevision &&
     sourceSettings.settingsRevision !== parsed.data.expectedSourceSettingsRevision
   ) {
     throw settingsApplyRevisionConflict(params.sourceChatId, []);
@@ -1000,9 +1030,7 @@ export async function applySettingsSectionToAllChats(params: {
     ],
     SETTINGS_SECTION_BOT_SPEECH_MEDIA_KEYS[section],
     parsed.data.confirmedTargetChatIds,
-    section === 'reports' || (section === 'links' && sourceSettings.linkRulesPolicy != null)
-      ? parsed.data.expectedSourceSettingsRevision
-      : undefined,
+    requiresSourceRevision ? parsed.data.expectedSourceSettingsRevision : undefined,
   );
 
   if (section === 'links' && sourceSettings.linkRulesPolicy == null) {

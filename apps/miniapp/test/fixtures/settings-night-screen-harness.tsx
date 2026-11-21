@@ -17,6 +17,7 @@ const api: ApiTransport = {
   async request(path, init) {
     if (
       !path.startsWith('/chats/chat-a/settings-screen') &&
+      !path.startsWith('/chats/chat-a/closure-status') &&
       !path.startsWith('/chats/chat-a/settings/section')
     )
       return preview.request(path, init);

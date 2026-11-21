@@ -1,7 +1,11 @@
 import { AppIcon as IconoirSprite } from '../../components/ui/app-icon';
 import { getNetworkSettingsSectionPresentation } from './settings-workspace-sections';
 
-import type { ChatSettings, ChatClosureStatus } from '@maxim/contracts/settings';
+import type {
+  ChatSettings,
+  ChatClosureStatus,
+  ChatClosureSummary,
+} from '@maxim/contracts/settings';
 import { Suspense } from 'react';
 import SettingsChatClosureStatus from './settings-chat-closure-status';
 import { getNightTimezoneOptions } from './settings-timezones';
@@ -62,7 +66,7 @@ export type SettingsNightSectionProps = SettingsSectionShellProps &
     | 'updateDraftButtonGroup'
   > & {
     api: ApiTransport;
-    closureStatus?: ChatClosureStatus;
+    closureStatus?: ChatClosureStatus | ChatClosureSummary;
     closureRefreshFailed?: boolean;
     hasNightBotButtonError: boolean;
     hasNightForceCloseDurationError: boolean;

@@ -4,23 +4,26 @@ import { applySectionToAllRequestSchema, settingsApplyPartialErrorSchema } from 
 const sourceRevision = '2026-10-01T10:00:00.000Z';
 
 describe('confirmed report policy application', () => {
-  it('requires the saved source revision and exact confirmed targets for reports', () => {
-    expect(applySectionToAllRequestSchema.safeParse({ section: 'reports' }).success).toBe(false);
-    expect(
-      applySectionToAllRequestSchema.safeParse({
-        section: 'reports',
-        expectedSourceRevision: 1,
-        confirmedTargetChatIds: ['source'],
-      }).success,
-    ).toBe(false);
-    expect(
-      applySectionToAllRequestSchema.parse({
-        section: 'reports',
-        expectedSourceSettingsRevision: sourceRevision,
-        confirmedTargetChatIds: ['source'],
-      }).target.mode,
-    ).toBe('current');
-  });
+  it.each(['reports', 'night'] as const)(
+    'requires the saved source revision and exact confirmed targets for %s',
+    (section) => {
+      expect(applySectionToAllRequestSchema.safeParse({ section }).success).toBe(false);
+      expect(
+        applySectionToAllRequestSchema.safeParse({
+          section,
+          expectedSourceRevision: 1,
+          confirmedTargetChatIds: ['source'],
+        }).success,
+      ).toBe(false);
+      expect(
+        applySectionToAllRequestSchema.parse({
+          section,
+          expectedSourceSettingsRevision: sourceRevision,
+          confirmedTargetChatIds: ['source'],
+        }).target.mode,
+      ).toBe('current');
+    },
+  );
 
   it('retains numeric stop-list revisions and rejects silently truncated confirmations', () => {
     expect(

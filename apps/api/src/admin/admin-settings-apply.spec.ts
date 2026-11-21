@@ -75,30 +75,36 @@ describe('admin settings section apply', () => {
     );
     expect(syncDomainAllowlistToChats).not.toHaveBeenCalled();
   });
-  it('rejects an intervening administrator edit before copying a report policy', async () => {
-    const applySettings = jest.fn();
-    await expect(
-      applySettingsSectionToAllChats({
-        sourceChatId: 'source',
-        source: 'miniapp',
-        body: {
-          section: 'reports',
-          expectedSourceSettingsRevision: '2026-10-01T10:00:00.000Z',
-          confirmedTargetChatIds: ['target'],
-          target: { mode: 'selectedChats', chatIds: ['target'] },
-        },
-        getSourceSettings: async () =>
-          chatSettingsSchema.parse({
-            settingsRevision: '2026-10-01T10:01:00.000Z',
-            reportsDeleteMode: 'HISTORY_24H',
-            reportsMuteEnabled: true,
-          }),
-        applySettings,
-        syncDomainAllowlistToChats: jest.fn(),
-      }),
-    ).rejects.toMatchObject({ status: 409, response: { partialApplied: false, appliedCount: 0 } });
-    expect(applySettings).not.toHaveBeenCalled();
-  });
+  it.each(['reports', 'night'] as const)(
+    'rejects an intervening administrator edit before copying %s settings',
+    async (section) => {
+      const applySettings = jest.fn();
+      await expect(
+        applySettingsSectionToAllChats({
+          sourceChatId: 'source',
+          source: 'miniapp',
+          body: {
+            section,
+            expectedSourceSettingsRevision: '2026-10-01T10:00:00.000Z',
+            confirmedTargetChatIds: ['target'],
+            target: { mode: 'selectedChats', chatIds: ['target'] },
+          },
+          getSourceSettings: async () =>
+            chatSettingsSchema.parse({
+              settingsRevision: '2026-10-01T10:01:00.000Z',
+              reportsDeleteMode: 'HISTORY_24H',
+              reportsMuteEnabled: true,
+            }),
+          applySettings,
+          syncDomainAllowlistToChats: jest.fn(),
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        response: { partialApplied: false, appliedCount: 0 },
+      });
+      expect(applySettings).not.toHaveBeenCalled();
+    },
+  );
 
   it('passes one confirmed immutable report snapshot and the exact target set to the writer', async () => {
     const revision = '2026-10-01T10:00:00.000Z';

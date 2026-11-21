@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createPrismaClient, Prisma, type PrismaClient } from '../prisma/prisma-client';
 import { WebhookParser } from '../webhook/webhook.parser';
 import { WebhookService } from '../webhook/webhook.service';
+import { bindStateVoiceSource, readStateVoiceReasonKeys } from './state-voice-delete-source';
 import {
   persistVoiceSource,
   purgeExpiredVoiceSources,
@@ -133,6 +134,7 @@ describePostgres('durable native voice creation and revocation', () => {
   });
   it('captures the real webhook receipt atomically and observes an unprocessed unknown-time edit', async () => {
     const input = source();
+    const original = new Date(input.sourceAtMs - 30_000);
     const service = new WebhookService(
       db as never,
       new ConfigService({ RAW_PAYLOAD_SAMPLE_RATE: 0 }),
@@ -144,7 +146,7 @@ describePostgres('durable native voice creation and revocation', () => {
       message: {
         sender: { user_id: '42', is_bot: false },
         recipient: { chat_id: chatId, chat_type: 'chat' },
-        timestamp: input.sourceAtMs,
+        timestamp: original.getTime(),
         body: {
           mid: input.messageId,
           text: '',
@@ -159,6 +161,30 @@ describePostgres('durable native voice creation and revocation', () => {
       );
       receiptIds.push(created.webhookEventId!);
       expect((await read(input)).receiptId).toBe(created.webhookEventId);
+      const identity = {
+        chatId,
+        messageId: input.messageId,
+        subjectUserId: input.userId,
+        sourceMessageAt: original,
+      };
+      const bound = bindStateVoiceSource(
+        { ...identity, ruleCode: 'NIGHT_MODE_DELETE', reasonKey: 'night' },
+        input,
+      );
+      const reasons = [
+        { ruleCode: 'NIGHT_MODE_DELETE', reasonKey: 'night', metadata: bound.event!.metadata },
+      ];
+      expect(await readStateVoiceReasonKeys(db, identity, reasons)).toEqual(['night']);
+      const legacyIdentity = { ...identity, sourceMessageAt: new Date(input.sourceAtMs) };
+      const legacy = bindStateVoiceSource(
+        { ...legacyIdentity, ruleCode: 'NIGHT_MODE_DELETE', reasonKey: 'night' },
+        input,
+      );
+      expect(
+        await readStateVoiceReasonKeys(db, legacyIdentity, [
+          { ...reasons[0]!, metadata: legacy.event!.metadata },
+        ]),
+      ).toEqual([]);
       const duplicate = await service.storeReceipt(
         new WebhookParser().parse(raw, { botId: 'bot' }),
         null,
@@ -173,6 +199,7 @@ describePostgres('durable native voice creation and revocation', () => {
       );
       receiptIds.push(edited.webhookEventId!);
       expect((await read(input)).invalidatedAt).toBeInstanceOf(Date);
+      expect(await readStateVoiceReasonKeys(db, identity, reasons)).toEqual([]);
       expect(
         (await db.webhookEvent.findUniqueOrThrow({ where: { id: edited.webhookEventId! } })).status,
       ).toBe('RECEIVED');

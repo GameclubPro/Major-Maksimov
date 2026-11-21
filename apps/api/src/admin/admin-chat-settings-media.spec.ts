@@ -127,6 +127,14 @@ describe('Chat settings media write boundaries', () => {
       expectedMedia: canonicalMedia,
     },
     {
+      name: 'invalid media alongside a valid night image',
+      storedMedia: {
+        nightModeBotMessageText: image,
+        greetingBotMessageText: { ...image, mimeType: 'text/plain' },
+      },
+      expectedMedia: { nightModeBotMessageText: image },
+    },
+    {
       name: 'invalid media',
       storedMedia: { greetingBotMessageText: { ...image, mimeType: 'text/plain' } },
       expectedMedia: {},

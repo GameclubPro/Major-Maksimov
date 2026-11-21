@@ -1869,6 +1869,9 @@ describe('AdminService required subscription settings', () => {
 
   it('applies the full night section to every cached chat', async () => {
     const prisma = createPrismaMock();
+    const revisedAt = new Date('2026-11-21T00:00:00.000Z');
+    prisma.chatSettings.findUnique.mockResolvedValue({ updatedAt: revisedAt });
+    prisma.chatSettings.findMany.mockResolvedValue([{ chatId: 'chat-1', updatedAt: revisedAt }]);
     prisma.chat.upsert.mockResolvedValue({
       id: 'chat-2',
       title: 'Клуб соседей',
@@ -1897,6 +1900,7 @@ describe('AdminService required subscription settings', () => {
     jest.spyOn(service, 'assertChatSettingsBotCapabilities').mockResolvedValue(undefined);
     jest.spyOn(service, 'getSettings').mockResolvedValue(
       chatSettingsSchema.parse({
+        settingsRevision: revisedAt.toISOString(),
         nightModeEnabled: true,
         nightModeStartTimeMinutes: 23 * 60,
         nightModeEndTimeMinutes: 6 * 60,
@@ -1920,6 +1924,8 @@ describe('AdminService required subscription settings', () => {
 
     const result = await service.applySettingsSectionToAllChats('chat-1', actor, {
       section: 'night',
+      expectedSourceSettingsRevision: revisedAt.toISOString(),
+      confirmedTargetChatIds: ['chat-1', 'chat-2'],
       target: { mode: 'all', favoriteTypes: [], chatIds: [] },
     });
 

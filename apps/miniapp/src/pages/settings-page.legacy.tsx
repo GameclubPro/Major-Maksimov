@@ -61,7 +61,12 @@ import '../styles/broadcast-studio-base.css';
 import './settings/settings-rules-publication.css';
 import './settings/settings-section-save-footer.css';
 import '../styles/settings-link-allowlist.css';
-import { useSettingsScreenQuery } from './settings/use-settings-screen-query';
+import { getApiErrorStatus } from '../lib/api-retry';
+import {
+  chatClosureQueryKey,
+  useChatClosureSummary,
+  useSettingsScreenQuery,
+} from './settings/use-settings-screen-query';
 import { formatTimezoneLabel } from '../lib/timezone-label';
 import '../styles/settings-drilldown-polish.css';
 import '../styles/settings-duration-editor.css';
@@ -771,6 +776,18 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     handoffRequested,
     expandedSections,
   });
+  const closureQuery = useChatClosureSummary({
+    api,
+    chatId,
+    principal: meQuery.data?.userId,
+    enabled:
+      expandedSections.night &&
+      settingsScreenQuery.isFetchedAfterMount &&
+      settingsScreenQuery.isSuccess,
+  });
+  const closureAccessError = [401, 403].includes(getApiErrorStatus(closureQuery.error) ?? 0)
+    ? closureQuery.error
+    : null;
   const {
     draft,
     setDraft,
@@ -810,6 +827,10 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
     onHydrated: () => setDuplicateWindowInputValue(null),
     onStopWordsSaved() {},
     onSaved: (section) => {
+      if (section === 'night')
+        void queryClient.invalidateQueries({
+          queryKey: chatClosureQueryKey(chatId, meQuery.data?.userId),
+        });
       pushToast({
         replaceKey: `settings-save:${chatId}:${section}`,
         tone: 'success',
@@ -1034,7 +1055,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const settingsQuery = {
     data: settingsScreenQuery.data?.settings,
     isLoading: settingsScreenQuery.isLoading,
-    error: settingsScreenQuery.error,
+    error: settingsScreenQuery.error ?? closureAccessError,
     refetch: settingsScreenQuery.refetch,
   };
   const rulesQuery = {
@@ -1424,7 +1445,13 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const applySectionToAllMutation = useMutation({
     mutationFn: (variables: SettingsApplySubmission) =>
       applySettingsSectionWithConfirmedSource(api, variables, (saved) => {
-        if (variables.isCurrentScope?.() !== false) applyTargetSavedSourceRef.current = saved;
+        if (variables.isCurrentScope?.() !== false) {
+          applyTargetSavedSourceRef.current = saved;
+          if (saved?.section === 'night')
+            void queryClient.invalidateQueries({
+              queryKey: chatClosureQueryKey(saved.sourceChatId, meQuery.data?.userId),
+            });
+        }
       }),
     onSuccess: async (result, variables) => {
       if (variables.isCurrentScope?.() === false) return;
@@ -3780,6 +3807,7 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
   const managedChatsRoute = buildManagedEntitiesRoute('chat');
   const refetchSettings = () => {
     void settingsQuery.refetch();
+    if (closureAccessError) void closureQuery.refetch();
     if (handoffRequested) {
       void broadcastHandoffStateQuery.refetch();
     }
@@ -4485,9 +4513,11 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       setApplyTargetSheet((current) => (current ? { ...current } : current));
       return;
     }
+    const needsConfirmedTargets =
+      applyTargetSheet.section === 'reports' || applyTargetSheet.section === 'night';
     try {
       if (
-        applyTargetSheet.section === 'reports' &&
+        needsConfirmedTargets &&
         (!applyTargetPreview ||
           applyTargetPreviewLoading ||
           applyTargetPreview.appliedChatIds.length > 500)
@@ -4496,8 +4526,9 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
       await applySectionToAllMutation.mutateAsync({
         ...applyTargetSheet,
         sourceChatId: applyTargetSheet.sourceChatId,
-        confirmedTargetChatIds:
-          applyTargetSheet.section === 'reports' ? applyTargetPreview?.appliedChatIds : undefined,
+        confirmedTargetChatIds: needsConfirmedTargets
+          ? applyTargetPreview.appliedChatIds
+          : undefined,
         reviewedTargetTitles: Object.fromEntries(
           applyTargetPreview.sampleChats
             .filter((chat) => applyTargetPreview.appliedChatIds.includes(chat.id))
@@ -5982,8 +6013,8 @@ export function SettingsPage({ api }: { api: ApiTransport }) {
                 <SettingsNightSection
                   sharedContent={renderSharedChatSection('night')}
                   api={api}
-                  closureStatus={settingsScreenQuery.data?.closure}
-                  closureRefreshFailed={settingsScreenQuery.isError}
+                  closureStatus={closureQuery.data ?? settingsScreenQuery.data?.closure}
+                  closureRefreshFailed={closureQuery.isError}
                   botSpeechEditorProps={botSpeechEditorProps!}
                   botSpeechPreviewContext={botSpeechPreviewContext}
                   clearButtonGroupErrors={clearButtonGroupErrors}

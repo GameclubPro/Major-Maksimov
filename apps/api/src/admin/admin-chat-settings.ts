@@ -58,6 +58,7 @@ import {
   CHAT_SETTINGS_BUTTON_GROUPS,
   DEFAULT_CHAT_SETTINGS,
   REQUIRED_SUBSCRIPTION_SETTING_KEYS,
+  SETTINGS_SECTION_KEYS,
   type AdminActionSource,
 } from './admin.service.support';
 import { buildStoredLinkButtonState } from './admin-chat-rules';
@@ -71,6 +72,7 @@ import {
   type ChatSettingsBotCapabilityRequirement,
 } from './chat-settings-bot-capability';
 import { assertReportsActivationAvailable } from './report-settings-availability';
+import { isChatClosurePolicyChanged } from '../common/chat-closure-policy-change';
 import { advanceChatMutationOrder } from '../common/group-command-authority.service';
 import { assertCommercialPersonalSalePolicyAvailable } from './commercial-ads-settings-policy';
 import {
@@ -108,6 +110,10 @@ export type ResolvedBotAssignmentData = {
   botId?: string;
   primaryBotId?: string;
 };
+
+const NIGHT_SETTINGS_SELECT = Object.fromEntries(
+  SETTINGS_SECTION_KEYS.night.map((key) => [key, true]),
+) as Record<(typeof SETTINGS_SECTION_KEYS.night)[number], true>;
 
 export const UPDATE_SETTINGS_AUDIT_PAYLOAD_MAX_SERIALIZED_BYTES = 16 * 1024;
 
@@ -399,8 +405,12 @@ function normalizeNightModeForceCloseSettings(
     !currentState?.nightModeForceCloseEnabled ||
     currentState.nightModeForceCloseForever ||
     currentState.nightModeForceCloseHours !== settings.nightModeForceCloseHours ||
-    currentState.nightModeForceCloseDays !== settings.nightModeForceCloseDays ||
-    !isFutureIsoTimestamp(currentUntil);
+    currentState.nightModeForceCloseDays !== settings.nightModeForceCloseDays;
+
+  // FLAG: An echoed expired timer cannot start a new closure on an unrelated full-form save.
+  if (!shouldRefreshUntil && !isFutureIsoTimestamp(currentUntil)) {
+    return { ...settings, nightModeForceCloseEnabled: false, nightModeForceCloseUntil: '' };
+  }
 
   const nextUntil = shouldRefreshUntil
     ? new Date(Date.now() + totalHours * 60 * 60 * 1_000).toISOString()
@@ -897,6 +907,19 @@ function buildChatSettingsReadSnapshot(params: {
   };
 }
 
+function recoverValidBotSpeechMedia(value: unknown): ChatSettings['botSpeechMedia'] {
+  const all = botSpeechMediaSchema.safeParse(value);
+  if (all.success) return all.data;
+
+  const valid: ChatSettings['botSpeechMedia'] = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return valid;
+  for (const [key, image] of Object.entries(value)) {
+    const item = botSpeechMediaSchema.safeParse({ [key]: image });
+    if (item.success) Object.assign(valid, item.data);
+  }
+  return valid;
+}
+
 export async function readChatSettingsSnapshot(params: {
   prisma: PrismaService;
   chatContextCache: Pick<ChatContextCacheService, 'invalidate'>;
@@ -991,6 +1014,14 @@ export async function readChatSettingsSnapshot(params: {
 
   const fallback = DEFAULT_CHAT_SETTINGS;
   const fallbackRepair = preservePoliciesOnSettingsRead(fallback, chat.settings);
+  // FLAG: A malformed unrelated field cannot clear a moderator's closure, notices or their media.
+  for (const key of SETTINGS_SECTION_KEYS.night) delete fallbackRepair[key];
+  if (Object.hasOwn(fallbackRepair, 'botSpeechMedia')) {
+    const media = recoverValidBotSpeechMedia(chat.settings.botSpeechMedia);
+    if (areBotSpeechMediaEqual(chat.settings.botSpeechMedia, media))
+      delete fallbackRepair.botSpeechMedia;
+    else fallbackRepair.botSpeechMedia = media;
+  }
   const repaired = await params.prisma.chatSettings.updateMany({
     where: { chatId: params.chatId, updatedAt: chat.settings.updatedAt },
     data: fallbackRepair,
@@ -1012,9 +1043,24 @@ export async function readChatSettingsSnapshot(params: {
       chatId: params.chatId,
     });
   }
+  const stored = refreshed ?? chat.settings;
+  // FLAG: Even when a repair loses its CAS or another field is still invalid, present the
+  // saved night policy from the exact row used for the revision. Invalid night data is not writable.
+  const sanitized = sanitizeStoredChatSettings(stored) as Record<string, unknown>;
+  const night = Object.fromEntries(SETTINGS_SECTION_KEYS.night.map((key) => [key, sanitized[key]]));
+  const safeNight = chatSettingsSchema.safeParse({ ...fallback, ...night });
+  if (!safeNight.success)
+    throw new ConflictException('Не удалось прочитать настройки ночного режима.');
   return buildChatSettingsReadSnapshot({
-    normalizedSettings: fallback,
-    storedSettings: refreshed ?? chat.settings,
+    normalizedSettings: normalizeChatSettings(
+      {
+        ...safeNight.data,
+        botSpeechMedia: recoverValidBotSpeechMedia(sanitized.botSpeechMedia),
+      },
+      undefined,
+      params.chatId,
+    ),
+    storedSettings: stored,
     logger: params.logger,
     chatId: params.chatId,
   });
@@ -1075,10 +1121,7 @@ export async function saveChatSettings(params: {
       duplicateIgnorePhonesEnabled: true,
       duplicateNearMatchEnabled: true,
       profanitySensitivity: true,
-      nightModeForceCloseForever: true,
-      nightModeForceCloseHours: true,
-      nightModeForceCloseDays: true,
-      nightModeForceCloseUntil: true,
+      ...NIGHT_SETTINGS_SELECT,
       karavanStorefrontEnabled: true,
       karavanStorefrontAdminsOnly: true,
       karavanStorefrontMessageText: true,
@@ -1245,6 +1288,11 @@ export async function saveChatSettings(params: {
       : (currentSettings?.messageLimitsImageTextScanEnabled ??
         parsed.data.messageLimitsImageTextScanEnabled),
   };
+  // FLAG: A partial settings write cannot replace an existing night policy with schema defaults.
+  for (const key of SETTINGS_SECTION_KEYS.night) {
+    if (currentSettings && !hasOwnSetting(params.body, key) && key in currentSettings)
+      Object.assign(settingsInput, { [key]: currentSettings[key] });
+  }
   assertLegacyStopWordsWrite(currentSettings ?? {}, params.body);
   // FLAG: Omitted subscription fields preserve the saved policy, including during unrelated saves.
   for (const key of REQUIRED_SUBSCRIPTION_SETTING_KEYS) {
@@ -1329,6 +1377,10 @@ export async function saveChatSettings(params: {
       // FLAG: Raw media is only the write-comparison baseline; capability checks
       // retain their previous typed default and never receive unsanitized JSONB.
       botSpeechMedia: DEFAULT_CHAT_SETTINGS.botSpeechMedia,
+      nightModeBotButtons: buildStoredLinkButtonState(currentSettings?.nightModeBotButtons, {
+        buttonUrl: currentSettings?.nightModeBotButtonUrl,
+        buttonText: currentSettings?.nightModeBotButtonText,
+      }).buttons,
       reportsDeleteMode:
         currentSettings?.reportsDeleteMode === 'HISTORY_24H' ? 'HISTORY_24H' : 'MESSAGE',
       stopWordsPolicy: currentSettings
@@ -1448,25 +1500,10 @@ export async function saveChatSettings(params: {
         lockedChat,
         chatSettingsCapabilityPurposes(capabilityRequirements),
       );
-      if (
-        [
-          // FLAG: Restoring an earlier schedule must not revive deletes prepared
-          // before a later disable/open/schedule change.
-          'nightModeEnabled',
-          'nightModeStartTimeMinutes',
-          'nightModeEndTimeMinutes',
-          'nightModeTimezone',
-          'nightModeForceCloseEnabled',
-          'nightModeForceCloseForever',
-          'nightModeForceCloseHours',
-          'nightModeForceCloseDays',
-          'nightModeForceCloseUntil',
-        ].some((key) =>
-          params.networkWrite?.authoredKeys
-            ? params.networkWrite.authoredKeys.includes(key as keyof ChatSettings)
-            : hasOwnSetting(params.body, key as keyof ChatSettings),
-        )
-      ) {
+      // FLAG: The CAS below binds this saved baseline to the locked write. A real change
+      // fences old commands and prepared deletes, including a later restoration of the same policy.
+      const previousClosure = currentSettings ?? DEFAULT_CHAT_SETTINGS;
+      if (isChatClosurePolicyChanged(previousClosure, { ...previousClosure, ...updateSettings })) {
         await advanceChatMutationOrder(tx, params.chatId, 'CHAT_CONTROL');
       }
       if (

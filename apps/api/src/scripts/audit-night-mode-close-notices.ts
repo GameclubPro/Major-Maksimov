@@ -1103,9 +1103,9 @@ export async function runNightModeCloseNoticeFleetAudit(
   return audit;
 }
 
-async function main(): Promise<void> {
+async function main(argv: readonly string[]): Promise<void> {
   assertNightModeCloseNoticeAuditRuntime();
-  const options = readNightModeCloseNoticeAuditOptions(process.argv.slice(2));
+  const options = readNightModeCloseNoticeAuditOptions(argv);
   const [{ NightModeCloseNoticeAuditModule }, { PrismaService }, { MaxBotRegistryService }] =
     await Promise.all([
       import('./night-mode-close-notice-audit.module'),
@@ -1127,10 +1127,12 @@ async function main(): Promise<void> {
   }
 }
 
-if (require.main === module) {
-  void main().catch((error: unknown) => {
+export function runNightModeNoticeAuditCli(argv: readonly string[]): void {
+  void main(argv).catch((error: unknown) => {
     const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;
   });
 }
+
+if (require.main === module) runNightModeNoticeAuditCli(process.argv.slice(2));

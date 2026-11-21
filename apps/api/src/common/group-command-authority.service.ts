@@ -1,3 +1,4 @@
+import { groupClosureNoticeDeadline } from './group-command-closure-notice';
 import { verifyFreshHeldCommandAccess } from '../webhook/webhook-legacy-fresh-command';
 import type { MaxClientService } from '../max/max-client.service';
 import { buildGroupCommandKey } from './group-command-key';
@@ -465,6 +466,10 @@ export class GroupCommandAuthorityService {
       data: { status: 'READY', commandResult: result, preparedAt: new Date() },
     });
     if (changed.count !== 1) throw new Error('Group command result authority lost');
+  }
+
+  closureNoticeDeadline(permit: GroupCommandPermit, tx: CommandDatabase = this.prisma) {
+    return groupClosureNoticeDeadline(tx, permit);
   }
 
   async assertOwned(permit: GroupCommandPermit, tx: CommandDatabase = this.prisma): Promise<void> {

@@ -11,6 +11,8 @@ import {
 import { ChatBotMembershipStatus, Prisma } from '../prisma/prisma-client';
 import { PrismaService } from '../prisma/prisma.service';
 import { NightModeTransitionSchedulerService } from './night-mode-transition-scheduler.service';
+import { NIGHT_MODE_CLOSE_NOTICE_CLEANUP_RULE_CODE } from './night-mode-close-notice-cleanup-binding';
+import { resolveNightModeTransitionSessionOpenAt } from './night-mode-transition-time.util';
 import type {
   NightModeRouteVerification,
   NightModeRouteVerificationProof,
@@ -137,14 +139,17 @@ export class NightModeRouteVerificationService {
 
     const absentCount = Math.min(REQUIRED_ABSENT_OBSERVATIONS, verification.absentCount + 1);
     if (absentCount >= REQUIRED_ABSENT_OBSERVATIONS && now.getTime() >= stableAtMs) {
-      await this.recordDisappearedRoute({
+      const route = await this.recordDisappearedRoute({
         chatId,
         botId: verification.botId,
+        messageId: verification.messageId,
+        sessionKey: verification.sessionKey,
         sentAt,
         observedAt: now,
         claimedUntil: pendingClaim.claimedUntil,
         allowStickyRoute: ledgerProof.stickyRouteHalfOpenProbe,
       });
+      if (!route) return { kind: 'complete', routeHealthChanged: false };
       this.logger.warn(
         {
           chatId,
@@ -220,6 +225,8 @@ export class NightModeRouteVerificationService {
   private async recordDisappearedRoute(params: {
     chatId: string;
     botId: string;
+    messageId: string;
+    sessionKey: string;
     sentAt: Date;
     observedAt: Date;
     claimedUntil: Date;
@@ -229,6 +236,43 @@ export class NightModeRouteVerificationService {
       await tx.$executeRaw(
         Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${buildPublicationRouteAdvisoryLockKey(params.chatId)}))`,
       );
+      // FLAG: Deletion or a probe carried past normal opening makes absence inconclusive.
+      // The time boundary also covers legacy/shadow cleanup without a durable DELETE receipt.
+      const opensAt = resolveNightModeTransitionSessionOpenAt(params.sessionKey);
+      if (opensAt && params.observedAt >= opensAt) return false;
+      const cleanup = await tx.moderationDeleteIntent.findFirst({
+        where: {
+          chatId: params.chatId,
+          messageId: params.messageId,
+          originBotId: params.botId,
+          reasons: {
+            some: {
+              ruleCode: NIGHT_MODE_CLOSE_NOTICE_CLEANUP_RULE_CODE,
+              metadata: {
+                path: ['nightModeCloseNoticeCleanup', 'sessionKey'],
+                equals: params.sessionKey,
+              },
+            },
+          },
+          OR: [
+            {
+              deleteDispatchStartedBotId: params.botId,
+              deleteDispatchStartedAt: { gte: params.sentAt },
+            },
+            {
+              remoteDeleteSucceededBotId: params.botId,
+              remoteDeleteSucceededAt: { gte: params.sentAt },
+            },
+            {
+              succeededBotId: params.botId,
+              status: 'SUCCEEDED',
+              completedAt: { gte: params.sentAt },
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (cleanup) return false;
       const updated = await tx.chatBotMembership.updateMany({
         where: {
           chatId: params.chatId,

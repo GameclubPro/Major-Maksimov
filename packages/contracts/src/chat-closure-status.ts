@@ -77,6 +77,24 @@ export const chatClosureStatusSchema = z.object({
   notices: nightModeNoticeDiagnosticsSchema.optional(),
   nextTransitionAt: z.string().datetime().nullable().optional(),
 });
+export const chatClosureSummarySchema = chatClosureStatusSchema
+  .pick({
+    observedAt: true,
+    scheduleEnabled: true,
+    restriction: true,
+    timezone: true,
+    opensAt: true,
+    deleteRoute: true,
+  })
+  .extend({
+    nextTransitionAt: z.string().datetime().nullable(),
+    nightActive: z.boolean(),
+    manualMode: z.enum(['timed', 'forever']).nullable(),
+    notificationsEnabled: z.boolean(),
+    sendRoute: z.enum(['available', 'unavailable', 'unknown']),
+  });
+export type ChatClosureSummary = z.infer<typeof chatClosureSummarySchema>;
+
 export type ChatClosureStatus = z.infer<typeof chatClosureStatusSchema>;
 export type NightModeNoticeEvidenceReason = z.infer<typeof nightModeNoticeEvidenceReasonSchema>;
 export type NightModeNoticeDeliveryEvidence = z.infer<typeof nightModeNoticeDeliveryEvidenceSchema>;

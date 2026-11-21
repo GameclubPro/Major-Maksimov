@@ -1,8 +1,10 @@
-import { chatSettingsSchema, type MaxUpdate } from '@maxim/contracts';
+import { chatSettingsSchema, chatSummarySchema, type MaxUpdate } from '@maxim/contracts';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { AdminService } from '../admin/admin.service';
 import { saveChatSettings } from '../admin/admin-chat-settings';
+import { applySettingsToAllChats } from '../admin/admin-settings-apply';
+import type { PrismaService } from '../prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import { ClosedChatDeleteGuardService } from '../moderation/closed-chat-delete-guard.service';
 import { formatMinutesAsTime } from '../moderation/night-mode-transition-time.util';
@@ -704,6 +706,92 @@ describePostgresRace('PostgreSQL durable GROUP command races', () => {
     },
   );
 
+  it('does not revive a pending OPEN confirmation after a whole intervening night interval', async () => {
+    const now = new Date();
+    const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+    const original = await fixture(1, new Date(now.getTime() - 4 * 60_000));
+    await prisma.chatSettings.update({
+      where: { chatId: original.chatId },
+      data: {
+        nightModeEnabled: true,
+        nightModeStartTimeMinutes: (minutes + 1438) % 1440,
+        nightModeEndTimeMinutes: (minutes + 1439) % 1440,
+        nightModeTimezone: 'UTC',
+      },
+    });
+    const permit = await claim(original.updates[0]!);
+    await admin().applyManualOpenChatCommand(original.chatId, actor, 'group_command', permit);
+    // The original and present instants are both open, separated by a full scheduled restriction.
+    await prisma.webhookExecutionClaim.update({
+      where: { id: permit.claimId },
+      data: { preparedAt: permit.sourceAt },
+    });
+    expect(
+      await new GroupCommandAuthorityService(prisma as never).closureNoticeDeadline(permit),
+    ).toBeLessThanOrEqual(Date.now());
+  });
+
+  it.each(['SILENCE', 'OPEN_CHAT'] as const)(
+    'suppresses the original %s confirmation when another command commits during transport wait',
+    async (action) => {
+      const original = await fixture(1, new Date(Date.now() - 120_000));
+      await prisma.webhookEvent.update({
+        where: { id: receiptIds[receiptIds.length - 1]! },
+        data: { executionDeadlineAt: new Date(Date.now() + 120_000) },
+      });
+      const first = await claim(original.updates[0]!);
+      const later = await fixture(1, new Date(Date.now() - 60_000), original.chatId);
+      const next = await claim(later.updates[0]!, peerPrisma);
+      const apply = (permit: GroupCommandPermit, open: boolean, client: PrismaClient) =>
+        open
+          ? admin(client).applyManualOpenChatCommand(
+              original.chatId,
+              actor,
+              'group_command',
+              permit,
+            )
+          : admin(client).applyManualChatSilenceCommand(
+              original.chatId,
+              actor,
+              { durationHours: 2 },
+              'group_command',
+              permit,
+            );
+      await apply(first, action === 'OPEN_CHAT', prisma);
+      const authority = new GroupCommandAuthorityService(prisma as never);
+      expect(await authority.closureNoticeDeadline(first)).toBeGreaterThan(Date.now());
+      const transport = jest.fn();
+      const sendMessage: MaxClientService['sendMessage'] = async (
+        _chat,
+        _text,
+        _options,
+        dispatch,
+      ) => {
+        await dispatch?.beforeImmediateSendMutation?.(async () => {
+          await apply(next, action === 'SILENCE', peerPrisma);
+        });
+        transport();
+      };
+      await expect(
+        deliverGroupCommandNotice({
+          max: { sendMessage } as MaxClientService,
+          authority,
+          permit: first,
+          settings: { deleteBotMessagesEnabled: false, deleteBotMessagesDelayMinutes: 1 },
+        }),
+      ).rejects.toMatchObject({
+        cause: expect.objectContaining({
+          message: 'Saved group closure notice is no longer current',
+        }),
+      });
+      expect(transport).not.toHaveBeenCalled();
+      expect(
+        (await prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: first.claimId } }))
+          .commandResult,
+      ).toEqual(first.result);
+    },
+  );
+
   it.each([1, 3, 4, 6, 9, 12])(
     'applies one SILENCE and notice result across %i mirrored bot receipts',
     async (botCount) => {
@@ -940,6 +1028,55 @@ describePostgresRace('PostgreSQL durable GROUP command races', () => {
         where: { chatId: data.chatId, action: 'ADOPT_CHAT_RULES_MESSAGE' },
       }),
     ).toBe(1);
+  });
+
+  it('does not let a delayed OPEN undo a confirmed bulk close', async () => {
+    const source = await fixture(1);
+    const target = await fixture(1);
+    const closing = await prisma.chatSettings.update({
+      where: { chatId: source.chatId },
+      data: { nightModeForceCloseEnabled: true, nightModeForceCloseForever: true },
+    });
+    const confirmedRevision = closing.updatedAt.toISOString();
+    await expect(
+      applySettingsToAllChats({
+        prisma: prisma as PrismaService,
+        chatContextCache: { invalidate: async () => {} },
+        sourceChatId: source.chatId,
+        actorUserId: actor.userId,
+        body: chatSettingsSchema.parse(closing),
+        source: 'miniapp',
+        targetOrSettingKeys: { mode: 'selectedChats', favoriteTypes: [], chatIds: [target.chatId] },
+        settingKeys: ['nightModeForceCloseEnabled', 'nightModeForceCloseForever'],
+        confirmedTargetChatIds: [target.chatId],
+        expectedSourceSettingsRevision: confirmedRevision,
+        normalizeSettings: (settings) => settings,
+        resolveTargetChats: async () => [
+          chatSummarySchema.parse({
+            id: target.chatId,
+            title: 'Target',
+            createdAt: confirmedRevision,
+          }),
+        ],
+        resolveBotAssignmentData: async () => ({}),
+        assertRequiredSubscriptionSettings: async () => {},
+        assertBotCapabilities: async () => {},
+        recordConcurrentWriteConflict: jest.fn(),
+        onPartialApplied: async () => {},
+        isRequiredSubscriptionCurrentlyActive: () => false,
+        scheduleReadinessRefresh: jest.fn(),
+      }),
+    ).resolves.toMatchObject({ appliedChatIds: [target.chatId] });
+    const open = await claim(target.updates[0]!);
+    await expect(
+      admin().applyManualOpenChatCommand(target.chatId, actor, 'group_command', open),
+    ).resolves.toMatchObject({ skipped: true });
+    await expect(
+      prisma.chatSettings.findUniqueOrThrow({ where: { chatId: target.chatId } }),
+    ).resolves.toMatchObject({
+      nightModeForceCloseEnabled: true,
+      nightModeForceCloseForever: true,
+    });
   });
 
   it.each(['disable/enable', 'schedule/restore', 'timezone/restore'])(

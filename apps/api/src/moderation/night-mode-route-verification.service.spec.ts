@@ -42,6 +42,7 @@ function createFixture(
     routeUpdateCount?: number;
     halfOpenRoute?: boolean;
     stickyRoute?: boolean;
+    cleanup?: { id: string };
     queue?: { add: jest.Mock; getJob?: jest.Mock };
   } = {},
 ) {
@@ -59,7 +60,9 @@ function createFixture(
   const executeRaw = jest.fn().mockResolvedValue(1);
   const updateBroadcasts = jest.fn().mockResolvedValue({ count: 1 });
   const updateDeliveries = jest.fn().mockResolvedValue({ count: 1 });
+  const findCleanup = jest.fn().mockResolvedValue(params.cleanup ?? null);
   const transactionClient = {
+    moderationDeleteIntent: { findFirst: findCleanup },
     $executeRaw: executeRaw,
     chatBotMembership: { updateMany },
     managedBroadcast: { updateMany: updateBroadcasts },
@@ -103,6 +106,7 @@ function createFixture(
   return {
     service,
     getExactMessagePresence,
+    findCleanup,
     getExactCompletedNightModeCloseNoticeDispatch,
     findFirst,
     executeRaw,
@@ -608,6 +612,35 @@ describe('NightModeRouteVerificationService', () => {
       },
     });
   });
+
+  it.each(['recorded cleanup', 'scheduled opening'] as const)(
+    'leaves the route unchanged when probe absence follows %s',
+    async (reason) => {
+      const fixture = createFixture({
+        presence: 'absent',
+        ...(reason === 'recorded cleanup' ? { cleanup: { id: 'close-cleanup' } } : {}),
+      });
+      const now = reason === 'scheduled opening' ? new Date('2026-05-31T05:05:00Z') : STABLE_AT;
+      await expect(
+        fixture.service.process(
+          CHAT_ID,
+          createVerification({ attemptCount: 2, absentCount: 2 }),
+          now,
+        ),
+      ).resolves.toEqual({ kind: 'complete', routeHealthChanged: false });
+      expect(fixture.updateMany).not.toHaveBeenCalled();
+      if (reason === 'recorded cleanup')
+        expect(fixture.findCleanup).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              chatId: CHAT_ID,
+              messageId: MESSAGE_ID,
+              originBotId: BOT_ID,
+            }),
+          }),
+        );
+    },
+  );
 
   it('keeps a future-night sticky route closed when the exact probe disappears', async () => {
     const fixture = createFixture({ presence: 'absent', stickyRoute: true });

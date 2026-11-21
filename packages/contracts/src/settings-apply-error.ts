@@ -66,19 +66,22 @@ export function addSettingsSectionApplyIssues(
       message: 'Обновите раздел стоп-слов перед копированием.',
     });
   }
-  if (value.section === 'reports') {
+  if (value.section === 'reports' || value.section === 'night') {
     if (value.expectedSourceSettingsRevision === undefined) {
       ctx.addIssue({
         code: 'custom',
         path: ['expectedSourceSettingsRevision'],
-        message: 'Обновите систему жалоб перед копированием.',
+        message:
+          value.section === 'night'
+            ? 'Обновите ночной режим перед копированием.'
+            : 'Обновите систему жалоб перед копированием.',
       });
     }
     if (value.confirmedTargetChatIds === undefined) {
       ctx.addIssue({
         code: 'custom',
         path: ['confirmedTargetChatIds'],
-        message: 'Подтвердите список чатов перед копированием системы жалоб.',
+        message: 'Подтвердите список чатов перед копированием настроек.',
       });
     }
   }

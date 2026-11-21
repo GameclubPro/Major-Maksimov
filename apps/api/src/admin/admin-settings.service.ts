@@ -1,4 +1,4 @@
-import { readChatClosureStatus } from './chat-closure-status';
+import { readChatClosureStatus, readChatClosureSummary } from './chat-closure-status';
 import type { NetworkSettingsWriteOptions } from './network-settings-write';
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import {
@@ -179,6 +179,17 @@ export class AdminSettingsService {
       );
     }
     return snapshot;
+  }
+
+  async getChatClosureSummary(chatId: string, user: AuthUser) {
+    await this.assertSettingsScreenAccess(() =>
+      this.legacyAdminService.assertManagedEntityAdminAccess(chatId, user.userId, 'chat'),
+    );
+    return readChatClosureSummary(
+      this.prisma,
+      chatId,
+      this.botRegistry?.getActionableBots().map((bot) => bot.id),
+    );
   }
 
   async getChatSettingsScreen(

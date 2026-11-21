@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { validateEnv } from '../config/env.schema';
 import { MaxBotRegistryService } from '../max/max-bot-registry.service';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -13,6 +13,12 @@ import { PrismaModule } from '../prisma/prisma.module';
     }),
     PrismaModule,
   ],
-  providers: [MaxBotRegistryService],
+  providers: [
+    {
+      provide: MaxBotRegistryService,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => new MaxBotRegistryService(config),
+    },
+  ],
 })
 export class NightModeCloseNoticeAuditModule {}

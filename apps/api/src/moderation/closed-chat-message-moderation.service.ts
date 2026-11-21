@@ -34,6 +34,10 @@ export type ManuallyClosedChatMessage = {
 
 export interface ClosedChatMessageDependencies {
   ensureIntent(input: EnsureModerationDeleteIntentInput): Promise<void>;
+  ensureBothReasons(
+    manual: EnsureModerationDeleteIntentInput,
+    night: EnsureModerationDeleteIntentInput,
+  ): Promise<void>;
   claimAction(input: {
     chatId: string;
     userId: string;
@@ -54,44 +58,8 @@ export class ClosedChatMessageModerationService {
 
   // FLAG: Persist intent before claiming; append an event only if the executor did not own it.
   async handleNightModeMessage(params: NightClosedChatMessage) {
-    const {
-      chatId,
-      userId,
-      messageId,
-      text,
-      createdAt,
-      nightModeStartTimeMinutes,
-      nightModeEndTimeMinutes,
-      nightModeTimezone,
-    } = params;
-    const startMinutes = normalizeDayMinutes(nightModeStartTimeMinutes, 23 * 60);
-    const endMinutes = normalizeDayMinutes(nightModeEndTimeMinutes, 8 * 60);
-    const timezone = normalizeNightModeTimezone(nightModeTimezone);
-    const deleteIntent = bindStateVoiceSource(
-      {
-        chatId,
-        messageId,
-        reasonKey: 'NIGHT_MODE_DELETE',
-        ruleCode: 'NIGHT_MODE_DELETE',
-        subjectUserId: userId,
-        sourceMessageAt: createdAt,
-        entityType: 'CHAT',
-        messageAuthorKind: 'user',
-        event: {
-          userId,
-          eventType: 'MESSAGE',
-          maskedExcerpt: maskText(text),
-          score: 0.6,
-          metadata: {
-            reason: 'Message removed while chat is closed for the night',
-            nightModeTimezone: timezone,
-            nightModeStartTime: formatMinutesAsTime(startMinutes),
-            nightModeEndTime: formatMinutesAsTime(endMinutes),
-          },
-        },
-      },
-      params.voiceSource,
-    );
+    const deleteIntent = this.buildNightReason(params);
+    const { chatId, userId, messageId, text } = params;
     await this.dependencies.ensureIntent(deleteIntent);
     const claimed = await this.dependencies.claimAction({
       chatId,
@@ -117,12 +85,7 @@ export class ClosedChatMessageModerationService {
             maskedExcerpt: maskText(text),
             score: 0.6,
             operator: Operator.BOT,
-            metadata: {
-              reason: 'Message removed while chat is closed for the night',
-              nightModeTimezone: timezone,
-              nightModeStartTime: formatMinutesAsTime(startMinutes),
-              nightModeEndTime: formatMinutesAsTime(endMinutes),
-            },
+            metadata: deleteIntent.event!.metadata as Prisma.InputJsonObject,
           },
         });
       }
@@ -139,7 +102,51 @@ export class ClosedChatMessageModerationService {
     }
   }
 
-  async handleNightModeForceCloseMessage(params: ManuallyClosedChatMessage) {
+  private buildNightReason(params: NightClosedChatMessage): EnsureModerationDeleteIntentInput {
+    const {
+      chatId,
+      userId,
+      messageId,
+      text,
+      createdAt,
+      nightModeStartTimeMinutes,
+      nightModeEndTimeMinutes,
+      nightModeTimezone,
+    } = params;
+    const startMinutes = normalizeDayMinutes(nightModeStartTimeMinutes, 23 * 60);
+    const endMinutes = normalizeDayMinutes(nightModeEndTimeMinutes, 8 * 60);
+    const timezone = normalizeNightModeTimezone(nightModeTimezone);
+    return bindStateVoiceSource(
+      {
+        chatId,
+        messageId,
+        reasonKey: 'NIGHT_MODE_DELETE',
+        ruleCode: 'NIGHT_MODE_DELETE',
+        subjectUserId: userId,
+        sourceMessageAt: createdAt,
+        entityType: 'CHAT',
+        messageAuthorKind: 'user',
+        event: {
+          userId,
+          eventType: 'MESSAGE',
+          maskedExcerpt: maskText(text),
+          score: 0.6,
+          metadata: {
+            reason: 'Message removed while chat is closed for the night',
+            nightModeTimezone: timezone,
+            nightModeStartTime: formatMinutesAsTime(startMinutes),
+            nightModeEndTime: formatMinutesAsTime(endMinutes),
+          },
+        },
+      },
+      params.voiceSource,
+    );
+  }
+
+  async handleNightModeForceCloseMessage(
+    params: ManuallyClosedChatMessage,
+    night?: NightClosedChatMessage,
+  ) {
     const { chatId, userId, messageId, text, createdAt } = params;
     const deleteIntent = bindStateVoiceSource(
       {
@@ -165,7 +172,11 @@ export class ClosedChatMessageModerationService {
       },
       params.voiceSource,
     );
-    await this.dependencies.ensureIntent(deleteIntent);
+    // FLAG: The worker may run as soon as the first pending row is visible.
+    // Both restrictions must be durable before either wakes that same DELETE.
+    if (night)
+      await this.dependencies.ensureBothReasons(deleteIntent, this.buildNightReason(night));
+    else await this.dependencies.ensureIntent(deleteIntent);
     const claimed = await this.dependencies.claimAction({
       chatId,
       userId,

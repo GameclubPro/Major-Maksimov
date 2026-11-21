@@ -1,3 +1,7 @@
+import {
+  MANUAL_OPEN_CHAT_NOTICE,
+  manualOpenChatNotice,
+} from '../common/group-command-closure-notice';
 import { suggestionRevision } from './suggestion-review-content';
 import { buildSuggestionReviewButtons } from './suggestion-review-links';
 import { resolveModerationSanctionExpiry } from '../moderation/moderation-sanction-expiry.util';
@@ -10950,7 +10954,7 @@ export class AdminService implements OnModuleDestroy {
     if (!command) throw new BadRequestException('Group command identity is required');
     await this.assertChatAdmin(chatId, user.userId, 'chat');
     await this.ensureEntityType(chatId, user.userId, 'chat');
-    const message = 'Чат открыт. Для сообщений снова действуют обычные правила.';
+    const message = MANUAL_OPEN_CHAT_NOTICE;
     const result = await applyGroupChatControlCommand(this.prisma, command, {
       chatId,
       actorUserId: user.userId,
@@ -10958,9 +10962,7 @@ export class AdminService implements OnModuleDestroy {
       action: 'OPEN_CHAT',
       message,
       resolveMessage: (settings) =>
-        resolveEffectiveChatClosure(settings).closed
-          ? 'Ручное закрытие снято. Чат остаётся закрыт по ночному расписанию.'
-          : message,
+        manualOpenChatNotice(resolveEffectiveChatClosure(settings).closed),
       settings: {
         nightModeForceCloseEnabled: false,
         nightModeForceCloseForever: false,

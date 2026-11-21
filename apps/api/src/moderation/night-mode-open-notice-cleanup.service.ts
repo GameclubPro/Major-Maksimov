@@ -7,10 +7,14 @@ import {
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE,
   NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE,
   NIGHT_MODE_OPEN_NOTICE_TRIGGER_MAX_AGE_MS,
+  parseNightModeOpenNoticeCleanupBinding,
   resolveNightModeOpenNoticeCleanupSession,
   type NightModeOpenNoticeCleanupBinding,
   type NightModeOpenNoticeCleanupSettings,
 } from './night-mode-open-notice-cleanup-binding';
+
+const VERIFIED_CLEANUP_CACHE_LIMIT = 4_096;
+const VERIFIED_CLEANUP_CACHE_TTL_MS = 5 * 60_000;
 
 export type NightModeOpeningHumanMessage = {
   type: string | null;
@@ -23,6 +27,8 @@ export type NightModeOpeningHumanMessage = {
 @Injectable()
 export class NightModeOpenNoticeCleanupService {
   private readonly logger = new Logger(NightModeOpenNoticeCleanupService.name);
+  private readonly verifiedCleanups = new Map<string, { sessionKey: string; expiresAt: number }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly ledger: MaxActionLedgerService,
@@ -71,6 +77,10 @@ export class NightModeOpenNoticeCleanupService {
     )
       return;
 
+    const cached = this.verifiedCleanups.get(settings.chatId);
+    if (cached?.sessionKey === sessionKey && cached.expiresAt > now.getTime()) return;
+    if (cached) this.verifiedCleanups.delete(settings.chatId);
+
     const proof = await this.ledger.inspectCompletedNightModeOpenNoticeDispatch({
       chatId: settings.chatId,
       sessionKey,
@@ -84,14 +94,35 @@ export class NightModeOpenNoticeCleanupService {
         id: true,
         status: true,
         lastErrorCode: true,
+        succeededBotId: true,
         reasons: {
           where: { ruleCode: NIGHT_MODE_OPEN_NOTICE_CLEANUP_RULE_CODE },
-          select: { id: true },
+          select: { metadata: true },
           take: 1,
         },
       },
     });
     if (owned?.reasons.length) {
+      // FLAG: Cache an exact completed cleanup, never a policy refusal, pending job or guessed SEND.
+      const binding = parseNightModeOpenNoticeCleanupBinding(
+        (owned.reasons[0]?.metadata as Record<string, unknown> | null)?.nightModeOpenNoticeCleanup,
+      );
+      if (
+        owned.status === 'SUCCEEDED' &&
+        owned.succeededBotId === proof.dispatchBotId &&
+        binding?.sessionKey === sessionKey &&
+        binding.messageId === proof.remoteMessageId &&
+        binding.botId === proof.dispatchBotId &&
+        Date.parse(binding.sendCompletedAt) === proof.completedAt.getTime()
+      ) {
+        if (this.verifiedCleanups.size >= VERIFIED_CLEANUP_CACHE_LIMIT) {
+          this.verifiedCleanups.delete(this.verifiedCleanups.keys().next().value!);
+        }
+        this.verifiedCleanups.set(settings.chatId, {
+          sessionKey,
+          expiresAt: now.getTime() + VERIFIED_CLEANUP_CACHE_TTL_MS,
+        });
+      }
       if (
         owned.status === 'FAILED_TERMINAL' &&
         owned.lastErrorCode === NIGHT_MODE_OPEN_NOTICE_CLEANUP_STALE_CODE

@@ -194,6 +194,34 @@ describe('opening notice cleanup admission', () => {
     expect(f.deletes.ensureIntent).not.toHaveBeenCalled();
   });
 
+  it('performs no extra SQL lookups for 1,000 later messages after exact cleanup succeeds', async () => {
+    const f = fixture();
+    await f.service.observeHumanMessage(settings, message);
+    const metadata = f.deletes.ensureIntent.mock.calls[0]![0].event?.metadata;
+    f.ledger.inspectCompletedNightModeOpenNoticeDispatch.mockClear();
+    f.prisma.moderationDeleteIntent.findUnique.mockClear().mockResolvedValue({
+      status: 'SUCCEEDED',
+      succeededBotId: 'origin-bot',
+      reasons: [{ metadata }],
+    });
+
+    await f.service.observeHumanMessage(settings, message);
+    for (let sequence = 0; sequence < 1_000; sequence += 1) {
+      await f.service.observeHumanMessage(settings, { ...message, messageId: `later-${sequence}` });
+    }
+    expect(f.ledger.inspectCompletedNightModeOpenNoticeDispatch).toHaveBeenCalledTimes(1);
+    expect(f.prisma.moderationDeleteIntent.findUnique).toHaveBeenCalledTimes(1);
+    expect(f.deletes.ensureIntent).toHaveBeenCalledTimes(1);
+
+    jest.setSystemTime(now.getTime() + 300_001);
+    await f.service.observeHumanMessage(settings, {
+      ...message,
+      messageId: 'after-cache-expiry',
+      createdAt: new Date(now.getTime() + 299_900).toISOString(),
+    });
+    expect(f.ledger.inspectCompletedNightModeOpenNoticeDispatch).toHaveBeenCalledTimes(2);
+  });
+
   it('rearms only a stale policy refusal from a fresh eligible human source', async () => {
     const f = fixture();
     f.prisma.moderationDeleteIntent.findUnique.mockResolvedValue({
@@ -358,7 +386,7 @@ describe('opening notice final DELETE authority', () => {
 });
 
 describe('opening cleanup human handler composition', () => {
-  it.each(['human', 'bot'] as const)(
+  it.each(['human', 'bot', 'missing-original'] as const)(
     'passes only a %s source to cleanup before admin bypass',
     async (kind) => {
       const cleanup = {
@@ -390,7 +418,13 @@ describe('opening cleanup human handler composition', () => {
           .mockResolvedValue({ isAdmin: true, source: 'local' }),
         handleChatAdminModerationBypass: jest.fn().mockResolvedValue(undefined),
       });
-      const update = kind === 'human' ? createUpdate() : createBotAuthoredUpdate();
+      const update = kind === 'bot' ? createBotAuthoredUpdate() : createUpdate();
+      const original = new Date(Date.parse(update.message!.createdAt) - 2_000).toISOString();
+      if (kind !== 'bot') {
+        const direct = update.raw!.message as Record<string, unknown>;
+        if (kind === 'missing-original') delete direct.timestamp;
+        else direct.timestamp = Date.parse(original);
+      }
       await service.handleUpdate(update);
       if (kind === 'human')
         expect(cleanup.observeHumanMessage).toHaveBeenCalledWith(config, {
@@ -398,7 +432,7 @@ describe('opening cleanup human handler composition', () => {
           type: 'message_created',
           messageId: update.message!.messageId,
           userId: update.message!.senderId,
-          createdAt: update.message!.createdAt,
+          createdAt: original,
         });
       else expect(cleanup.observeHumanMessage).not.toHaveBeenCalled();
     },

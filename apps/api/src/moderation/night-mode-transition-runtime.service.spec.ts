@@ -280,16 +280,32 @@ describe('NightModeTransitionRuntimeService', () => {
     'does not announce opening or remove its close notice during manual closure: %j',
     async (manual) => {
       const settings = createSettings({ nightModeForceCloseEnabled: true, ...manual });
-      const prisma = createPrisma();
+      const prisma = createPrisma({ findFirst: createCloseEventLookup() });
       prisma.chatSettings.findUnique.mockResolvedValue(settings);
       const hooks = createHooks();
       const service = new NightModeTransitionRuntimeService(prisma as never);
       await service.processNightModeTransitionJob(OPEN_JOB, hooks);
+      await expect(
+        service.processNightModeTransitionJob(createCleanupJob(), hooks),
+      ).resolves.toMatchObject({ waitForManualOpening: true });
+      expect(hooks.sendOpenedNotice).not.toHaveBeenCalled();
+      expect(hooks.scheduleRecoveryObligation).toHaveBeenCalledWith(
+        settings.chatId,
+        createCleanupJob().recoveryOnly,
+      );
+      expect(hooks.deleteClosedNotice).not.toHaveBeenCalled();
+
+      jest.setSystemTime(new Date('2026-05-31T10:00:00Z'));
+      if (manual.nightModeForceCloseForever) settings.nightModeForceCloseEnabled = false;
       await service.processNightModeTransitionJob(createCleanupJob(), hooks);
       expect(hooks.sendOpenedNotice).not.toHaveBeenCalled();
-      expect(hooks.scheduleRecoveryObligation).not.toHaveBeenCalled();
-      expect(hooks.recoverClosedNoticeEventFromLedger).not.toHaveBeenCalled();
-      expect(hooks.deleteClosedNotice).not.toHaveBeenCalled();
+      expect(hooks.deleteClosedNotice).toHaveBeenCalledWith(
+        settings.chatId,
+        'night-close-1',
+        'bot-1',
+        expect.any(Object),
+        expect.any(Function),
+      );
     },
   );
 
@@ -716,17 +732,15 @@ describe('NightModeTransitionRuntimeService', () => {
     expect(persistedState).not.toContain('closeNoticeEventRecovery');
 
     jest.setSystemTime(new Date('2026-05-31T05:00:00.000Z'));
-    prisma.moderationEvent.findFirst
-      .mockReset()
-      .mockImplementation(async ({ where }) =>
-        where.ruleCode === 'NIGHT_MODE_OPEN_NOTICE'
-          ? null
-          : {
-              id: 'night-close-event-recovered-1',
-              messageId: 'night-close-recovered-1',
-              botId: 'bot-1',
-            },
-      );
+    prisma.moderationEvent.findFirst.mockReset().mockImplementation(async ({ where }) =>
+      where.ruleCode === 'NIGHT_MODE_OPEN_NOTICE'
+        ? null
+        : {
+            id: 'night-close-event-recovered-1',
+            messageId: 'night-close-recovered-1',
+            botId: 'bot-1',
+          },
+    );
     await expect(service.processNightModeTransitionJob(OPEN_JOB, hooks)).resolves.toEqual(
       NIGHT_MODE_TRANSITION_PROCESS_CONTINUE,
     );
@@ -1477,6 +1491,31 @@ describe('NightModeTransitionRuntimeService', () => {
       expect(hooks.sendClosedNotice).not.toHaveBeenCalled();
       expect(hooks.deleteClosedNotice).not.toHaveBeenCalled();
       expect(hooks.sendOpenedNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['2026-05-31T07:00:00.000Z', true],
+    ['2026-05-31T07:00:00.001Z', false],
+  ] as const)(
+    'rechecks the opening send lifetime immediately before transport at %s',
+    async (at, allowed) => {
+      jest.setSystemTime(new Date('2026-05-31T06:59:59.000Z'));
+      const maxSend = jest.fn();
+      const hooks = createHooks({
+        sendOpenedNotice: jest.fn(async (_settings, _snapshot, validateBeforeDispatch) => {
+          jest.setSystemTime(new Date(at));
+          if (await validateBeforeDispatch?.()) maxSend();
+          return NIGHT_MODE_TRANSITION_PROCESS_CONTINUE;
+        }),
+      });
+      const service = new NightModeTransitionRuntimeService(
+        createPrisma() as unknown as PrismaService,
+        createRedisCounterMock() as never,
+      );
+      await service.processNightModeTransitionJob(createVersionedJob(), hooks);
+      expect(maxSend).toHaveBeenCalledTimes(allowed ? 1 : 0);
+      expect(hooks.scheduleRecoveryObligation).toHaveBeenCalled();
     },
   );
 

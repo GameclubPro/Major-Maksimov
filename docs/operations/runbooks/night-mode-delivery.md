@@ -40,6 +40,11 @@ can rearm only that unattempted policy refusal. Preserve its original binding an
 successful or potentially attempted DELETEs remain fenced. Cleanup handoff failures are logged
 internally and must not prevent ordinary participant moderation.
 
+The worker remembers only a verified completed cleanup for the exact chat and opening session.
+This bounded, short-lived cache skips repeated reads for later participant messages. An expired
+cache entry or a worker restart falls back to the durable receipt. Pending and refused cleanup
+continues through the normal authority checks.
+
 ## Durable obligations
 
 - An ordinary stale transition persists reconciliation before completing and removing its SQL
@@ -68,6 +73,27 @@ internally and must not prevent ordinary participant moderation.
 - A scheduled opening checks the effective manual restriction immediately before dispatch.
   A manual opening command stores its truthful response from the post-update settings under
   the same command-order lock; it does not disable the night schedule.
+  Before sending the saved response, check that the same command still owns the state and that
+  the relevant night boundary has not passed. Superseding an unattempted notice preserves the
+  applied command and its independent receipt history.
+- An exact closing-notice cleanup can wait across a manual restriction during the same daylight
+  session. Its existing SQL obligation records the next inspection time, bounded by the manual
+  expiry and the next night. A settings change wakes it early. Cleanup rechecks the original
+  session, settings, bot and message before deletion. Waking cleanup never publishes a notice.
+
+## Settings and enforcement
+
+A timed manual restriction renews when explicitly enabled or its duration changes. Saving a
+different section after expiry does not restart it. Ordinary and bulk writes advance command
+order only when the actual schedule or manual restriction changes. Bulk application uses the
+confirmed source revision and receiver list. After upgrading the API, an older open mini app
+must reload before it can copy night settings to other chats.
+
+Record both active restrictions before handing off deletion of an overlapping message. Each
+reason validates the original message time and still needs its own current policy before MAX
+dispatch. Preserve the single DELETE and the existing policy-change fence in both roles.
+Continuous closure has no midnight boundary. Verify a voice message against the authenticated
+original and recheck any edit or revocation at dispatch.
 
 ## Investigation
 
@@ -82,6 +108,11 @@ whose notification switches are both off. `notices.close` and `notices.open` eac
 expected boundary under the current saved schedule and the next boundary. Latest evidence remains
 visible after the night or the two-hour opening window ends. Equal start/end means continuously
 closed, with no daily boundary; no notice is invented for that state.
+
+The former `night-mode:repair-close-notices` command now runs this same read-only audit.
+It defaults to 100 scanned settings and no identifying samples. Its legacy `--limit` option caps
+scanned settings, and `--dry-run` remains accepted. Use `scan.nextAfter` to resume an incomplete scan.
+Normal scheduling and receipt recovery own any subsequent work.
 
 Use `--page-size 100 --max-chats 5000 --sample-limit 0 --json` for a bounded aggregate read.
 `--max-chats` now limits **all scanned settings rows**, before filtering enabled schedules;

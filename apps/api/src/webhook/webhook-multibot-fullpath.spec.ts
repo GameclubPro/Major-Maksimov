@@ -2627,6 +2627,53 @@ describeStores('native multibot ingress → outbox → moderation → guarded si
     ]);
   });
 
+  it('settles a superseded, never-dispatched closure notice without replay or another SEND', async () => {
+    const { s, chatId, receipts, handler, started } = await adminCommandFixture();
+    const command = await s.prisma.webhookExecutionClaim.findFirstOrThrow({
+      where: { kind: 'COMMAND', webhookEventId: receipts[0] },
+    });
+    // FLAG: Model a newer committed control command while the original SEND is fenced
+    // before dispatch. The applied historical result and its digest must survive settlement.
+    await s.prisma.$transaction(async (tx) => {
+      await tx.chat.update({
+        where: { id: chatId },
+        data: { chatControlOrderAt: new Date(), chatControlOrderKey: 'api:fixture-open' },
+      });
+      await tx.chatSettings.update({
+        where: { chatId },
+        data: { nightModeForceCloseEnabled: false, nightModeForceCloseUntil: '' },
+      });
+    });
+    await s.moderation.processWebhookEvent(receipts[0]!);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(s.effects.filter((effect) => effect.method === 'post')).toEqual([]);
+    expect(
+      await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: command.id } }),
+    ).toMatchObject({
+      status: 'COMPLETED',
+      commandResult: command.commandResult,
+    });
+    expect(
+      await s.prisma.webhookExecutionClaim.findUniqueOrThrow({ where: { id: started.id } }),
+    ).toMatchObject({
+      status: 'COMPLETED',
+      commandResult: { kind: 'EXECUTION_FINISHED', noticeOutcome: 'superseded_before_dispatch' },
+    });
+    expect(
+      await s.prisma.maxActionLedgerEntry.findMany({
+        where: { chatId, actionType: 'SEND_MESSAGE' },
+      }),
+    ).toMatchObject([
+      {
+        status: 'FAILED_TERMINAL',
+        ambiguous: false,
+        remoteMessageId: null,
+        dispatchStartedAt: null,
+        lastErrorCode: 'COMMAND_NOTICE_SUPERSEDED',
+      },
+    ]);
+  });
+
   it('does not send a saved notice beyond its immutable saved deadline', async () => {
     const { s, receipts, handler, started } = await adminCommandFixture(Date.now(), 1_000);
     const journal = started.commandResult as { deadlineAt: string };
